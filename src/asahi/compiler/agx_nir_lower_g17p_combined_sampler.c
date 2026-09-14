@@ -648,11 +648,12 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
     * maps both cube forms onto AGX_DIM_2D_ARRAY. They therefore use the same
     * qualified fetch as an ordinary array image; rejecting the original NIR
     * dimension here only leaves its unencodable software descriptor handle in
-    * place. Multisample remains excluded by the constant-zero sample index
-    * below. */
+    * place. Multisample uses the emitter's native sample/layer packing and
+    * may have a nonzero or dynamic sample index. */
    const enum glsl_sampler_dim image_dim = nir_intrinsic_image_dim(intr);
+   const bool ms = image_dim == GLSL_SAMPLER_DIM_MS;
    if (intr->intrinsic != nir_intrinsic_bindless_image_load ||
-       !(image_dim == GLSL_SAMPLER_DIM_2D ||
+       !(ms || image_dim == GLSL_SAMPLER_DIM_2D ||
          image_dim == GLSL_SAMPLER_DIM_CUBE ||
          (image_dim == GLSL_SAMPLER_DIM_3D &&
           !nir_intrinsic_image_array(intr))) ||
@@ -660,8 +661,8 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
        intr->def.bit_size != 32 ||
        nir_src_num_components(intr->src[1]) != 4 ||
        nir_src_bit_size(intr->src[1]) != 32 ||
-       !nir_src_is_const(intr->src[2]) ||
-       nir_src_as_uint(intr->src[2]) != 0 ||
+       (!ms && (!nir_src_is_const(intr->src[2]) ||
+                nir_src_as_uint(intr->src[2]) != 0)) ||
        !nir_src_is_const(intr->src[3]) ||
        nir_src_as_uint(intr->src[3]) != 0 ||
        (nir_intrinsic_access(intr) & ACCESS_NON_READABLE))

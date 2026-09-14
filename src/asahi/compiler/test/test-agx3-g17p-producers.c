@@ -284,6 +284,7 @@ static const struct sa_v sa_vs[] = {
    {"shl7 first, dead source",      "9f115400030000401414", 0, true, true, 0, false, 0, true, 3, 1},
    {"shl7 first, live source",      "9f115401030000401014", 1, true, true, 0, false, 0, false, 3, 1},
    {"shl7 second",                  "9f015400030000001404", 0, true, true, 0, false, 0, true, 4, 0},
+   {"ushort shift1 native",         "9f015602020008401404", 2, false, true, 0, false, 2, true, 1, 0x20},
 };
 
 static void

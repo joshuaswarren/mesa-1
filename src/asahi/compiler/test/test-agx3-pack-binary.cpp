@@ -108,6 +108,28 @@ class AGX3PackBinary : public testing::Test {
    }
 };
 
+TEST_F(AGX3PackBinary, MultisampleTileBankCountsPartitionsNotStores)
+{
+   for (unsigned targets : {2u, 3u, 6u}) {
+      for (unsigned samples : {1u, 4u}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         key.secondary = true;
+         key.fs.nr_samples = samples;
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         for (unsigned sample = 0; sample < samples; ++sample) {
+            for (unsigned target = 0; target < targets; ++target) {
+               agx_index value = agx_register(0, AGX_SIZE_16);
+               value.channels_m1 = 3;
+               agx_st_tile(b, value, agx_register(12, AGX_SIZE_16), agx_null(),
+                           AGX_FORMAT_F16, 15, 8 * target, false, target);
+            }
+         }
+         EXPECT_EQ(agx3_tile_store_bank(b->shader),
+                   targets == 2 ? 16u : targets == 3 ? 32u : 64u);
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, SparseMrtAttachmentClassesMatchNative)
 {
    for (const auto &witness : g17p_sparse_mrt_oracles) {
@@ -139,6 +161,40 @@ TEST_F(AGX3PackBinary, SparseMrtAttachmentClassesMatchNative)
       }
       EXPECT_EQ(gates, std::vector<uint8_t>(witness.gates,
                                            witness.gates + witness.gate_size));
+   }
+}
+
+TEST_F(AGX3PackBinary, SingleSparseMultisampleBlendKeepsPartitionClass)
+{
+   for (unsigned target : {1u, 2u}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      key.secondary = true;
+      key.fs.nr_samples = 4;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->agx3_mrt_tile_ops_ordered = true;
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 3;
+      agx_index mask = agx_register(12, AGX_SIZE_16);
+      for (unsigned sample = 0; sample < 4; ++sample) {
+         agx_mov_imm_to(b, mask, 1u << sample);
+         agx_ld_tile_to(b, value, mask, agx_null(), AGX_FORMAT_F16, 15, 0,
+                        false, target);
+         agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_F16, 15, 0,
+                     false, target);
+      }
+      agx_stop(b);
+      const auto bytes = pack(b);
+      uint8_t wait[AGX3_PIXEL_MAX_LENGTH], release[AGX3_PIXEL_MAX_LENGTH];
+      uint8_t wait_length, release_length;
+      const unsigned classes = 12u << (target * 2);
+      ASSERT_TRUE(agx3_pixel_wait(AGX_ISA_ENCODING_AGX3B, classes, 0,
+                                  wait, &wait_length));
+      ASSERT_TRUE(agx3_pixel_release(AGX_ISA_ENCODING_AGX3B, classes, true, 0,
+                                     release, &release_length));
+      EXPECT_NE(std::search(bytes.begin(), bytes.end(), wait,
+                            wait + wait_length), bytes.end());
+      EXPECT_NE(std::search(bytes.begin(), bytes.end(), release,
+                            release + release_length), bytes.end());
    }
 }
 

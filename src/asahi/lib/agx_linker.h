@@ -308,6 +308,9 @@ struct agx_fs_epilog_key {
    bool force_small_tile;
    bool preserve_zero_mask;
    bool lower_srgb;
+   bool native_spills;
+   /* Absolute uniform-half address of the private native spill table. */
+   uint16_t emrt_heap_base;
 
    /* G17P's pre-main MOVMSK also runs depth/stencil tests. For late-tests
     * shaders, defer the API sample mask to the epilog so it can be combined

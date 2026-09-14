@@ -253,7 +253,11 @@ store_memory(nir_builder *b, unsigned bindless_base, unsigned nr_samples,
    {
       nir_bindless_image_store(b, image, coords, sample, value, lod,
                                .image_dim = dim, .image_array = true,
-                               .format = format);
+                               .format = format,
+                               .src_type =
+                                  (util_format_is_pure_sint(format) ? nir_type_int :
+                                   util_format_is_pure_uint(format) ? nir_type_uint :
+                                   nir_type_float) | value->bit_size);
    }
    nir_pop_if(b, NULL);
 }

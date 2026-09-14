@@ -1346,7 +1346,7 @@ agx_nir_lower_texture(nir_shader *s)
 
 static bool
 lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
-                         UNUSED void *data)
+                         void *data)
 {
    b->cursor = nir_before_instr(&intr->instr);
 
@@ -1356,8 +1356,17 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
    if (nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_MS)
       return false;
 
-   nir_def *index_px =
-      nir_u2u32(b, image_texel_address(b, intr, true, false));
+   nir_def *index_px;
+   if (*(unsigned *)data == 9) {
+      nir_def *pbe = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
+      index_px = libagx_emrt_ms_index_gen9(b,
+         nir_iadd_imm(b, pbe, AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE),
+         nir_iadd_imm(b, pbe, AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET - 32),
+         intr->src[1].ssa, nir_u2u32(b, intr->src[2].ssa),
+         nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr))));
+   } else {
+      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false));
+   }
    nir_def *coord2d = coords_for_buffer_texture(b, index_px);
 
    nir_src_rewrite(&intr->src[1], nir_pad_vector(b, coord2d, 4));
@@ -1370,8 +1379,15 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
 bool
 agx_nir_lower_multisampled_image_store(nir_shader *s)
 {
+   return agx_nir_lower_multisampled_image_store_for_generation(s, 0);
+}
+
+bool
+agx_nir_lower_multisampled_image_store_for_generation(nir_shader *s,
+                                                     unsigned generation)
+{
    return nir_shader_intrinsics_pass(s, lower_multisampled_store,
-                                     nir_metadata_control_flow, NULL);
+                                     nir_metadata_control_flow, &generation);
 }
 
 /*

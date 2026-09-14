@@ -6298,6 +6298,69 @@ agx3_sink_vertex_outputs(agx_context *ctx)
 static bool
 agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 {
+   if (ctx->key->g17p_emrt && ctx->key->secondary &&
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ctx->stage == MESA_SHADER_FRAGMENT && ctx->key->fs.nr_samples > 1 &&
+       list_length(&ctx->blocks) > 1) {
+      /* Keep each sample within its block. Sorting stores before that
+       * group's final anchor preserves SSA dominance and never moves a
+       * value across conditional image accesses in another block. */
+      const unsigned partitions = __bitset_count(
+         ctx->key->g17p_tile_partitions,
+         BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE));
+      if (partitions >= 2) {
+         agx_foreach_block(ctx, block) {
+            agx_instr *group[AGX_MAX_RTS * 4];
+            unsigned count = 0;
+            agx_foreach_instr_in_block(block, I) {
+               if (I->op != AGX_OPCODE_ST_TILE)
+                  continue;
+               if (count == ARRAY_SIZE(group))
+                  return false;
+               group[count++] = I;
+            }
+            if (count % partitions)
+               return false;
+            for (unsigned base = 0; base < count; base += partitions) {
+               struct list_head *anchor = group[base + partitions - 1]->link.next;
+               for (unsigned i = base; i < base + partitions; ++i) {
+                  for (unsigned j = i + 1; j < base + partitions; ++j) {
+                     if (group[j]->pixel_offset > group[i]->pixel_offset)
+                        SWAP(group[i], group[j]);
+                  }
+               }
+               for (unsigned i = base; i < base + partitions; ++i) {
+                  list_del(&group[i]->link);
+                  list_addtail(&group[i]->link, anchor);
+               }
+            }
+         }
+      }
+
+      /* The packer independently checks counts, formats and every group. */
+      unsigned previous = UINT_MAX, stores = 0;
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op != AGX_OPCODE_ST_TILE)
+            continue;
+         if (I->pixel_offset >= previous) {
+            if (agx_compiler_debug & AGX_DBG_REFUSE)
+               fprintf(stderr, "G17P eMRT store order refused: offset=%u previous=%u\n",
+                       I->pixel_offset, previous);
+            return false;
+         }
+         previous = I->pixel_offset ? I->pixel_offset : UINT_MAX;
+         stores++;
+      }
+      if (stores < 2 || previous != UINT_MAX) {
+         if (agx_compiler_debug & AGX_DBG_REFUSE)
+            fprintf(stderr, "G17P eMRT group refused: stores=%u last=%u\n",
+                    stores, previous);
+         return false;
+      }
+      ctx->agx3_mrt_tile_ops_ordered = true;
+      return true;
+   }
+
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
@@ -6479,13 +6542,32 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          load_anchor = loads[i];
       }
    } else if (load_count) {
-      const unsigned samples = ctx->key->fs.nr_samples;
+      const unsigned partition_count =
+         __bitset_count(written, ARRAY_SIZE(written));
+      const unsigned samples =
+         store_count == partition_count * ctx->key->fs.nr_samples
+            ? ctx->key->fs.nr_samples : 1;
       if (load_count % samples)
          return false;
 
       const unsigned group_size = load_count / samples;
       for (unsigned group = 0; group < samples; ++group) {
          agx_instr **group_loads = &loads[group * group_size];
+         bool ordered = true;
+         for (unsigned i = 1; i < group_size; ++i)
+            ordered &= group_loads[i - 1]->pixel_offset >
+                       group_loads[i]->pixel_offset;
+
+         /* A tile load may have its own ordered coverage read immediately
+          * before it. Keep an already ordered group in place instead of
+          * hoisting the later loads above their mask definitions. */
+         if (ordered) {
+            for (unsigned i = 0; group > 0 && i < group_size; ++i) {
+               if (group_loads[i]->pixel_offset != loads[i]->pixel_offset)
+                  return false;
+            }
+            continue;
+         }
          struct list_head *anchor = group_loads[0]->link.prev;
 
          for (unsigned i = 0; i < group_size; ++i) {
@@ -6717,43 +6799,44 @@ agx3_tile_store_payloads_fit(agx_context *ctx)
       return true;
 
    const unsigned bank = agx3_tile_store_bank(ctx);
-   BITSET_WORD *pending = BITSET_CALLOC(ctx->alloc);
-   BITSET_WORD *defined = BITSET_CALLOC(ctx->alloc);
-   if (!pending || !defined) {
-      free(pending);
-      free(defined);
+   unsigned *uses = calloc(ctx->alloc, sizeof(*uses));
+   unsigned *widths = calloc(ctx->alloc, sizeof(*widths));
+   if (!uses || !widths) {
+      free(uses);
+      free(widths);
       return false;
    }
 
    agx_foreach_instr_global(ctx, I) {
-      if (I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
-         BITSET_SET(pending, I->src[0].value);
+      if (I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL) {
+         uses[I->src[0].value]++;
+         widths[I->src[0].value] = agx_index_size_16(I->src[0]);
+      }
    }
 
    bool fits = true;
+   unsigned halves = 0;
    agx_foreach_instr_global(ctx, I) {
-      agx_foreach_ssa_dest(I, d)
-         BITSET_SET(defined, I->dest[d].value);
+      agx_foreach_ssa_dest(I, d) {
+         unsigned ssa = I->dest[d].value;
+         if (uses[ssa])
+            halves += widths[ssa];
+      }
 
       if (I->op != AGX_OPCODE_ST_TILE)
          continue;
 
-      unsigned halves = 0;
-      agx_foreach_instr_global(ctx, J) {
-         if (J->op == AGX_OPCODE_ST_TILE &&
-             J->src[0].type == AGX_INDEX_NORMAL &&
-             BITSET_TEST(pending, J->src[0].value) &&
-             BITSET_TEST(defined, J->src[0].value))
-            halves += agx_index_size_16(J->src[0]);
-      }
+      /* A CSE'd payload used by several samples occupies one register
+       * vector, kept live until its final store, not one vector per store. */
       fits &= halves <= bank;
 
-      if (I->src[0].type == AGX_INDEX_NORMAL)
-         BITSET_CLEAR(pending, I->src[0].value);
+      if (I->src[0].type == AGX_INDEX_NORMAL &&
+          --uses[I->src[0].value] == 0)
+         halves -= widths[I->src[0].value];
    }
 
-   free(pending);
-   free(defined);
+   free(uses);
+   free(widths);
    return fits;
 }
 
@@ -6776,24 +6859,15 @@ agx3_bank_scalar_tile_store_inputs(agx_context *ctx)
       return false;
 
    agx_instr *first_store = NULL;
-   unsigned store_count = 0;
-   bool loads = false;
    agx_foreach_instr_global(ctx, I) {
       if (I->op == AGX_OPCODE_ST_TILE) {
          first_store = first_store ? first_store : I;
-         store_count++;
-      } else if (I->op == AGX_OPCODE_LD_TILE) {
-         loads = true;
       }
    }
    if (!first_store)
       return false;
 
-   const bool wide_bank =
-      !loads && store_count <= AGX_MAX_RTS &&
-      store_count >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
-      (ctx->key->secondary || ctx->key->g17p_mrt_bg);
-   const unsigned bank = !wide_bank ? 16 : store_count > 4 ? 64 : 32;
+   const unsigned bank = agx3_tile_store_bank(ctx);
 
    bool progress = false;
    agx_builder b = agx_init_builder(ctx, agx_before_instr(first_store));

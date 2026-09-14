@@ -6235,6 +6235,14 @@ agx3_g17p_mrt_partition(const struct agx3_g17p_mrt_protocol *p,
 }
 
 static struct agx3_g17p_mrt_protocol
+agx3_g17p_mrt_refused(unsigned line)
+{
+   if (agx_compiler_debug & AGX_DBG_REFUSE)
+      fprintf(stderr, "G17P MRT protocol refused at %u\n", line);
+   return (struct agx3_g17p_mrt_protocol){0};
+}
+
+static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_protocol(agx_context *ctx)
 {
    struct agx3_g17p_mrt_protocol p = {0};
@@ -6242,7 +6250,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->agx3_mrt_tile_ops_ordered ||
        (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
-       list_length(&ctx->blocks) != 1)
+       (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1))
       return p;
 
    const bool partitions =
@@ -6262,21 +6270,23 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
    }
 
-   bool depth_written = false, tile_ops = false;
+   bool depth_written = false, tile_ops = false, tile_loads = false;
    agx_foreach_instr_global(ctx, I) {
       /* A depth export may finish its own class-1 transaction first. */
       if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !tile_ops)
          depth_written = true;
-      if (agx3_is_cf_op(I) ||
+      if ((!ctx->key->g17p_emrt && agx3_is_cf_op(I)) ||
           (I->op == AGX_OPCODE_SIGNAL_PIX &&
-           (!depth_written || I->writeout != 1 || tile_ops)))
-         return (struct agx3_g17p_mrt_protocol){0};
+           (!depth_written || I->writeout != 1 ||
+            (tile_ops && !ctx->key->g17p_emrt))))
+         return agx3_g17p_mrt_refused(__LINE__);
       if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
          continue;
       if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
-         return (struct agx3_g17p_mrt_protocol){0};
+         return agx3_g17p_mrt_refused(__LINE__);
 
       tile_ops = true;
+      tile_loads |= I->op == AGX_OPCODE_LD_TILE;
       unsigned i;
       for (i = 0; i < p.count; ++i) {
          if (p.offsets[i] == I->pixel_offset)
@@ -6284,23 +6294,29 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
       if (i == p.count) {
          if (partitions || p.count == ARRAY_SIZE(p.offsets))
-            return (struct agx3_g17p_mrt_protocol){0};
+            return agx3_g17p_mrt_refused(__LINE__);
          p.targets[p.count] = I->colour_target;
          p.offsets[p.count++] = I->pixel_offset;
       } else if (!partitions && p.targets[i] != I->colour_target) {
-         return (struct agx3_g17p_mrt_protocol){0};
+         return agx3_g17p_mrt_refused(__LINE__);
       }
    }
    /* A lone attachment that is not attachment zero is still a multi-target
     * layout: it owns its own class, not class pair zero.
     * g17p-sparse-mrt.h's fragment-8-active-mask04 is exactly that shape. */
-   if (!p.count || (p.count == 1 && p.targets[0] == 0))
-      return (struct agx3_g17p_mrt_protocol){0};
+   /* Native id_blend_2x/4x uses the same class-12 lifetime for a single
+    * target's unrolled sample loads/stores, acquiring read class 8 once
+    * and write class 4 once. Keep the ordinary one-store path unchanged. */
+   if (!p.count ||
+       (p.count == 1 && p.targets[0] == 0 &&
+        !(ctx->key->fs.nr_samples > 1 && tile_loads &&
+          !ctx->key->g17p_emrt)))
+      return agx3_g17p_mrt_refused(__LINE__);
 
    /* A background of four or more targets keeps the constructors' ascending,
     * transaction-free shape; see the note in agx_compile.c. */
    if (p.count >= 4 && ctx->key->fs.ignore_tib_dependencies)
-      return (struct agx3_g17p_mrt_protocol){0};
+      return agx3_g17p_mrt_refused(__LINE__);
 
    for (unsigned i = 0; i < p.count; ++i) {
       for (unsigned j = i + 1; j < p.count; ++j) {
@@ -6315,7 +6331,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
    }
    if (p.offsets[0] != 0)
-      return (struct agx3_g17p_mrt_protocol){0};
+      return agx3_g17p_mrt_refused(__LINE__);
 
    p.multisample = ctx->key->fs.nr_samples > 1 &&
                    !ctx->key->fs.ignore_tib_dependencies;
@@ -6328,7 +6344,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    bool stopped = false;
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
-         return (struct agx3_g17p_mrt_protocol){0};
+         return agx3_g17p_mrt_refused(__LINE__);
 
       if (I->op == AGX_OPCODE_STOP) {
          stopped = true;
@@ -6336,9 +6352,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
 
       if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE) {
-         if (stores_started &&
+         if (stores_started && !ctx->key->g17p_emrt &&
              (!p.multisample || !agx_opcodes_info[I->op].can_eliminate))
-            return (struct agx3_g17p_mrt_protocol){0};
+            return agx3_g17p_mrt_refused(__LINE__);
          continue;
       }
 
@@ -6349,13 +6365,20 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       if (p.count >= 4 &&
           (I->nr_srcs != (load ? 2 : 3) || I->nr_dests != (load ? 1 : 0) ||
            !agx_is_null(I->src[load ? 1 : 2]) || partition < 0))
-         return (struct agx3_g17p_mrt_protocol){0};
+         return agx3_g17p_mrt_refused(__LINE__);
       struct agx3_tile_sample sample;
       if (partition < 0 || I->nr_srcs < 2 ||
           !agx3_tile_sample_operand(
              I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1], &sample) ||
-          sample.reg != p.multisample)
-         return (struct agx3_g17p_mrt_protocol){0};
+          sample.reg != p.multisample) {
+         if (agx_compiler_debug & AGX_DBG_REFUSE) {
+            agx_index mask = I->src[load ? 0 : 1];
+            fprintf(stderr, "G17P MRT sample: part=%d load=%u offset=%u type=%u value=%u size=%u ms=%u\n",
+                    partition, load, I->pixel_offset, mask.type, mask.value,
+                    mask.size, p.multisample);
+         }
+         return agx3_g17p_mrt_refused(__LINE__);
+      }
 
       if (I->op == AGX_OPCODE_LD_TILE) {
          const unsigned max_loads =
@@ -6364,13 +6387,13 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
              (!p.multisample &&
               (stores_started || (unsigned)partition > previous_load)) ||
              load_instr_count >= ARRAY_SIZE(load_order))
-            return (struct agx3_g17p_mrt_protocol){0};
+            return agx3_g17p_mrt_refused(__LINE__);
          previous_load = partition;
          load_order[load_instr_count++] = partition;
       } else {
          stores_started = true;
          if (store_instr_count >= ARRAY_SIZE(store_order))
-            return (struct agx3_g17p_mrt_protocol){0};
+            return agx3_g17p_mrt_refused(__LINE__);
          p.stores[partition]++;
          store_order[store_instr_count++] = partition;
       }
@@ -6386,7 +6409,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       if (!stores_per_partition)
          stores_per_partition = p.stores[i];
       else if (p.stores[i] != stores_per_partition)
-         return (struct agx3_g17p_mrt_protocol){0};
+         return agx3_g17p_mrt_refused(__LINE__);
    }
 
    if (!stored_partitions ||
@@ -6394,26 +6417,24 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
         !(p.multisample &&
           stores_per_partition == ctx->key->fs.nr_samples)) ||
        store_instr_count != stored_partitions * stores_per_partition)
-      return (struct agx3_g17p_mrt_protocol){0};
+      return agx3_g17p_mrt_refused(__LINE__);
 
    unsigned loaded_partitions = 0;
    for (unsigned i = 0; i < p.count; ++i) {
-      if (p.loads[i] &&
-          p.loads[i] != (p.multisample ? ctx->key->fs.nr_samples : 1))
-         return (struct agx3_g17p_mrt_protocol){0};
+      if (p.loads[i] && p.loads[i] != stores_per_partition)
+         return agx3_g17p_mrt_refused(__LINE__);
       loaded_partitions += p.loads[i] != 0;
    }
 
-   if (load_instr_count !=
-       loaded_partitions * (p.multisample ? ctx->key->fs.nr_samples : 1))
-      return (struct agx3_g17p_mrt_protocol){0};
+   if (load_instr_count != loaded_partitions * stores_per_partition)
+      return agx3_g17p_mrt_refused(__LINE__);
 
    if (p.multisample) {
-      for (unsigned sample = 0; sample < ctx->key->fs.nr_samples; ++sample) {
+      for (unsigned sample = 0; sample < stores_per_partition; ++sample) {
          unsigned at = sample * loaded_partitions;
          for (int partition = p.count - 1; partition >= 0; --partition) {
             if (p.loads[partition] && load_order[at++] != partition)
-               return (struct agx3_g17p_mrt_protocol){0};
+               return agx3_g17p_mrt_refused(__LINE__);
          }
       }
    }
@@ -6427,7 +6448,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          if (!p.stores[partition])
             continue;
          if (store_order[at++] != partition)
-            return (struct agx3_g17p_mrt_protocol){0};
+            return agx3_g17p_mrt_refused(__LINE__);
       }
    }
 
@@ -6446,7 +6467,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
            !(partitions && !p.stores[i] && !p.loads[i])) ||
           !agx3_pixel_colour_partition_classes(
              pair, &read_class, &write_class, &combined_class))
-         return (struct agx3_g17p_mrt_protocol){0};
+         return agx3_g17p_mrt_refused(__LINE__);
       p.has_loads |= p.loads[i];
       if (pair == 0 && p.loads[i] && !p.shared_loaded) {
          p.shared_loaded = true;
@@ -7452,6 +7473,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
    unsigned g17p_link_packs_seen = 0;
    unsigned g17p_mrt_stores_seen = 0;
+   bool g17p_mrt_acquired = false;
    bool g17p_colour_open = false;
    unsigned texture_samples_remaining = texture_samples_left;
    unsigned sample_group_members_remaining = sample_group_members_left;
@@ -8606,7 +8628,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * its LLDCol/LSTCol below. */
             if (g17p_mrt.valid && I->op == AGX_OPCODE_WAIT_PIX &&
                 I->writeout != 1) {
-               if (g17p_mrt.has_loads && !g17p_colour_open) {
+               if ((g17p_mrt.has_loads || ctx->key->g17p_emrt) &&
+                   !g17p_colour_open) {
                   uint8_t entry[AGX3_PIXEL_MAX_LENGTH];
                   uint8_t entry_len = 0;
                   if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
@@ -8619,6 +8642,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                }
                if (!agx3_retire_slots_noop(emission, enc, wait))
                   AGX3_REFUSE(I);
+               if (ctx->key->g17p_emrt && !g17p_mrt_acquired) {
+                  uint8_t bytes[AGX3_PIXEL_MAX_LENGTH], len;
+                  if (!g17p_mrt.multisample_combined ||
+                      !agx3_pixel_wait(enc, g17p_mrt.combined_classes, 0,
+                                       bytes, &len) ||
+                      !agx3_append(emission, bytes, len))
+                     AGX3_REFUSE(I);
+                  g17p_mrt_acquired = true;
+               }
                continue;
             }
             if (I == g17p_deferred_write) {
@@ -8709,9 +8741,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
                uint8_t len = 0;
                const bool load = I->op == AGX_OPCODE_LD_TILE;
-               const bool acquire = load ? first
-                                          : (!g17p_mrt.has_loads &&
-                                             g17p_mrt_stores_seen == 0);
+               /* A lone active sparse attachment retains its own classes;
+                * only logical target zero owns the class-8/class-4 pair. */
+               const bool single_blend =
+                  g17p_mrt.count == 1 && g17p_mrt.targets[0] == 0 &&
+                  g17p_mrt.has_loads;
+               const bool acquire = single_blend
+                  ? (load ? first : g17p_mrt_stores_seen == 0)
+                  : !g17p_mrt_acquired &&
+                     (load ? first : (!g17p_mrt.has_loads &&
+                                      g17p_mrt_stores_seen == 0));
+               const uint32_t acquire_classes = single_blend
+                  ? (load ? 8 : 4) : g17p_mrt.combined_classes;
                if (!g17p_colour_open) {
                   if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
                       !agx3_append(emission, bytes, len))
@@ -8722,18 +8763,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   g17p_colour_open = true;
                }
                if ((acquire &&
-                    (!agx3_pixel_wait(enc, g17p_mrt.combined_classes, 0,
+                    (!agx3_pixel_wait(enc, acquire_classes, 0,
                                       bytes, &len) ||
                      !agx3_append(emission, bytes, len))) ||
                    !agx3_emit_tile(emission, enc, I, slot, wait, false, false,
                                    g17p_mrt.raw32_store,
-                                   g17p_mrt.count >= 3, false) ||
+                                   g17p_mrt.count >= 3 || ctx->key->g17p_emrt,
+                                   ctx->key->g17p_emrt && !load &&
+                                      I->src[0].value >= 16) ||
                    (!load && last &&
                     (!agx3_pixel_release(enc, g17p_mrt.combined_classes, true,
                                          0, bytes, &len) ||
                      !agx3_append(emission, bytes, len))))
                   AGX3_REFUSE(I);
                g17p_mrt_stores_seen += !load;
+               g17p_mrt_acquired |= acquire;
                continue;
             }
             if (g17p_mrt.valid) {
@@ -10802,7 +10846,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
-             I->shift == 4 && I->dest[0].size == AGX_SIZE_16 &&
+             I->shift >= 1 && I->shift <= 4 && I->dest[0].size == AGX_SIZE_16 &&
              I->src[0].size == AGX_SIZE_16 &&
              I->src[1].size == AGX_SIZE_16 &&
              agx_channels(I->dest[0]) == 1 &&
@@ -10821,7 +10865,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                .src0 = I->src[0].value,
                .src1 = I->src[1].value,
                .src1_kill = I->src[1].discard,
-               .shift = 4,
+               .shift = I->shift,
                .wait_mask = wait,
             };
             uint8_t bytes[AGX3_WRITEOUT_MAX_LENGTH], len;

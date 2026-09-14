@@ -103,6 +103,16 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     */
    struct agx_tilebuffer_layout physical = *tib;
    physical.layered = false;
+   /* Spilled attachments are accessed by the fragment epilog in memory.
+    * Validate only the in-tile targets here, retaining allocation and offsets. */
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      if (!physical.spilled[rt])
+         continue;
+      if (physical.logical_format[rt] == PIPE_FORMAT_NONE)
+         return false;
+      physical.logical_format[rt] = PIPE_FORMAT_NONE;
+      physical.spilled[rt] = false;
+   }
 
    /* Attachmentless rendering learns its sample count at draw time. An empty
     * pass may end before that happens. Validate its physical layout as 1x,

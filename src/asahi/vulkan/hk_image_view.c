@@ -572,14 +572,9 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
       }
    }
 
-   /* PBEStateEncoderGen9 keeps a one-layer array at dimension 3 only for a
-    * texture's own write descriptor; a one-layer framebuffer target is
-    * dimension 2. The spilled-MRT store has no Gen9 witness for its array
-    * form, so keep refusing a one-layer one. */
-   if (generation == 9 && usage == HK_DESC_USAGE_EMRT && layers == 1) {
-      memset(out, 0, sizeof(*out));
-      return false;
-   }
+   /* eMRT uses the ordinary native array-store path, not the non-array
+    * end-of-tile builtin. Multisample stores instead address the linear
+    * buffer descriptor constructed above. */
 
    return hk_pack_native_pbe(generation, out, &cfg);
 }
@@ -666,7 +661,23 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
          pack_pbe(dev, view, p, HK_DESC_USAGE_BG_EOT, &view->planes[p].eot,
                   NULL);
       view->planes[p].emrt_pbe_valid = pack_pbe(
-         dev, view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_pbe, NULL);
+         dev, view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_pbe,
+         &view->planes[p].emrt_atomic_sw);
+      if (dev->dev.chip == AGX_CHIP_G17P &&
+          (view->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+          view->planes[p].emrt_pbe_valid) {
+         const struct ail_layout *layout =
+            &image->planes[view->planes[p].image_plane].layout;
+         const unsigned level = view->vk.base_mip_level;
+         view->planes[p].emrt_aligned_width =
+            align(u_minify(layout->width_px, level),
+                  layout->tilesize_el[level].width_el);
+         VkResult result = hk_descriptor_table_add(
+            dev, &dev->sampled_images, &view->planes[p].emrt_texture, 32,
+            &view->planes[p].emrt_read_heap_index);
+         if (result != VK_SUCCESS)
+            return result;
+      }
       view->planes[p].layered_eot_pbe_valid =
          pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
                   &view->planes[p].layered_eot, NULL);
@@ -687,6 +698,9 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       for (unsigned p = 0; p < view->plane_count; ++p) {
+         if (view->planes[p].emrt_read_heap_index)
+            hk_descriptor_table_remove(dev, &dev->sampled_images,
+                                        view->planes[p].emrt_read_heap_index);
          if (view->planes[p].storage_heap_index)
             hk_descriptor_table_remove(dev, &dev->sampled_images,
                                         view->planes[p].storage_heap_index);

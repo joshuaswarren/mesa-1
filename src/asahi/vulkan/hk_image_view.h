@@ -26,12 +26,15 @@ struct hk_image_view {
       uint32_t sampled_heap_index;
       uint32_t storage_heap_index;
       uint32_t input_heap_index;
+      uint32_t emrt_read_heap_index;
 
       struct hk_native_texture_descriptor ia, sampled, ro_storage, background,
          layered_background, emrt_texture;
 
       struct hk_native_pbe_descriptor storage, eot, layered_eot, emrt_pbe;
       uint64_t storage_atomic_sw;
+      uint64_t emrt_atomic_sw;
+      uint32_t emrt_aligned_width;
       bool storage_pbe_valid, eot_pbe_valid, layered_eot_pbe_valid,
          emrt_pbe_valid;
    } planes[3];

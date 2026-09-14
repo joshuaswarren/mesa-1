@@ -729,7 +729,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                      bool partial_render)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (agx_g17p_classify_mrt(&key->tib) == AGX_G17P_MRT_MIXED)
+   if (agx_tilebuffer_spills(&key->tib) ||
+       agx_g17p_classify_mrt(&key->tib) == AGX_G17P_MRT_MIXED)
       return hk_build_g17p_mixed_bg_eot(cmd, key, info, store);
 
    /* Vulkan keeps unused colour attachments as holes in the logical array.
@@ -1297,7 +1298,8 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
        * main memory. When render targets are already spilled to main memory,
        * there's nothing to do.
        */
-      if (key.tib.spilled[i] && (partial_render || store))
+      if (key.tib.spilled[i] &&
+          (partial_render || store || dev->dev.chip == AGX_CHIP_G17P))
          continue;
 
       if (store) {
@@ -1973,7 +1975,19 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    if (clear_att[clear_count].aspectMask != 0)
       clear_count++;
 
-   if (clear_count > 0 && incomplete_render_area) {
+   const bool clear_spills = dev->dev.chip == AGX_CHIP_G17P &&
+      agx_tilebuffer_spills(&render->tilebuffer);
+   if (clear_spills && !incomplete_render_area) {
+      unsigned selected = 0;
+      for (unsigned i = 0; i < clear_count; ++i) {
+         if (clear_att[i].aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+             render->tilebuffer.spilled[clear_att[i].colorAttachment])
+            clear_att[selected++] = clear_att[i];
+      }
+      clear_count = selected;
+   }
+   cs->cr.process_empty_tiles = resolved_clear;
+   if (clear_count > 0 && (incomplete_render_area || clear_spills)) {
       const VkClearRect clear_rect = {
          .rect = render->area,
          .baseArrayLayer = 0,
@@ -3069,6 +3083,8 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
       hk_upload_constant_data(cmd, hk_only_variant(fs));
 }
 
+static void build_g17p_fs_epilog(nir_builder *b, const void *key_);
+
 static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
                             hk_internal_builder_t builder, bool preprocess_nir,
@@ -3093,6 +3109,30 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       .secondary = true,
       .no_stop = !stop,
    };
+   if (builder == build_g17p_fs_epilog)
+      backend_key.g17p_emrt =
+         ((const struct agx_fs_epilog_key *)key->key)->native_spills;
+   if (backend_key.g17p_emrt) {
+      /* Unrolling replaces the loop induction mask with a constant sample.
+       * Materialize native register masks after that optimization as well. */
+      NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, nr_samples);
+      /* Only the image accesses may be conditional. Every resident tile
+       * operation must execute on every path through the epilog. */
+      nir_metadata_require(b.impl, nir_metadata_dominance);
+      nir_foreach_block(block, b.impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+            if ((op == nir_intrinsic_store_local_pixel_agx ||
+                 op == nir_intrinsic_load_local_pixel_agx) &&
+                !nir_block_dominates(block, nir_impl_last_block(b.impl))) {
+               backend_key.g17p_emrt = false;
+               mesa_loge("G17P eMRT has conditional resident tile access");
+            }
+         }
+      }
+   }
    if (g17p_tile_partitions) {
       memcpy(backend_key.g17p_tile_partitions, g17p_tile_partitions,
              sizeof(backend_key.g17p_tile_partitions));
@@ -3351,6 +3391,7 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
    }
 
    linked->g17p_blend_constant_base = key->epilog.blend_constant_base;
+   linked->g17p_emrt_heap_base = key->epilog.emrt_heap_base;
    linked->g17p_prolog_uses_root = key->prolog.statistics;
 
    _mesa_hash_table_insert(shader->linked.ht, key_clone, linked);
@@ -5293,7 +5334,21 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       };
       agx_fs_epilog_apply_device_policy(dev->dev.chip, &key.epilog);
 
-      if (dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
+      key.epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&
+         agx_tilebuffer_spills(&render->tilebuffer);
+      if (key.epilog.native_spills) {
+         uint16_t base;
+         if (!hk_g17p_relocated_blend_constant_base(fs, &base) ||
+             ALIGN_POT(base, 4) > 512 - 12) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            cs->current = out;
+            return;
+         }
+         key.epilog.emrt_heap_base = ALIGN_POT(base, 4);
+         key.epilog.blend_constant_base = key.epilog.emrt_heap_base + 4;
+      }
+
+      if (!key.epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
           (fs->info.agx3_combined_sampler_valid ||
            fs->info.agx3_indexed_sampler_valid) &&
           !hk_g17p_relocated_blend_constant_base(

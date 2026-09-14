@@ -303,6 +303,25 @@ libagx_image_texel_address_gen9(
           (uint64_t)total_sa * bytes_per_sample_B;
 }
 
+/* eMRT writes MS images through a linear PBE view. Its native descriptor
+ * therefore cannot describe the source image's tile geometry. The private
+ * eMRT sideband carries the original geometry and aligned pixel width. */
+uint
+libagx_emrt_ms_index_gen9(constant const uint64_t *sw_ptr,
+                         constant const uint *width_ptr, uint4 coord,
+                         uint sample, uint bytes_per_sample)
+{
+   const uint64_t sw = *sw_ptr;
+   const uint tile_width = 1u << ((sw >> 27) & 0xfu);
+   const uint tile_height = 1u << ((sw >> 31) & 0xfu);
+   const uint layer_stride = (uint)((sw >> 35) & 0x7ffffffu) << 7;
+   const uint samples_log2 = (uint)(sw >> 62);
+   const uint pixel = libagx_twiddle_coordinates_gen9(
+      convert_ushort2(coord.xy), tile_width, tile_height, *width_ptr);
+   return (pixel << samples_log2) + sample +
+          coord.z * (layer_stride / bytes_per_sample);
+}
+
 uint64_t
 libagx_buffer_texel_address(constant const struct agx_pbe_packed *ptr,
                             uint4 coord, uint bytes_per_pixel_B)

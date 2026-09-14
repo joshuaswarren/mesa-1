@@ -412,6 +412,9 @@ struct agx_shader_key {
     * builtin for such layouts stores each target without pixel transactions,
     * at f13=0 even from high registers, and in no required partition order. */
    bool g17p_mrt_bg;
+   /* Generated native eMRT epilog. Memory writes may split its sample groups
+    * into blocks, but tile operations retain the per-sample partition order. */
+   bool g17p_emrt;
 
    /* A Honeykrisp hardware vertex binary adjacent to software geometry or
     * transform feedback. The API VS hardware variant may expose only values

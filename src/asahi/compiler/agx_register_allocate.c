@@ -1256,7 +1256,8 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
     *
     * To ensure that, the region must be aligned and cover the destination.
     */
-   if (region_base == region_end || dest_end > dest_limit(rctx, I, 0) ||
+   if (region_base == region_end || region_base < dest_minimum(rctx, I, 0) ||
+       dest_end > dest_limit(rctx, I, 0) ||
        (rctx->ssa_to_reg[I->src[first_source].value] & (dest_size - 1)) ||
        ((region_end < dest_end) &&
         BITSET_TEST_RANGE(rctx->used_regs[RA_GPR], region_end, dest_end)))
@@ -1644,10 +1645,16 @@ agx_lower_agx3b_atomic_returns(agx_context *ctx)
 unsigned
 agx3_tile_store_bank(agx_context *ctx)
 {
+   /* Native G17P conditional image-write plus two-target MRT uses half24
+    * for its F16 tile payload. Its memory epilog owns the high-bank form. */
+   if (ctx->key->g17p_emrt && ctx->agx3_mrt_tile_ops_ordered &&
+       list_length(&ctx->blocks) > 1)
+      return 32;
    /* Native raw32 stores need simultaneously live payloads. Their
     * exact ordinary/BG witnesses use GPR halves0..31 with f13=0. This expands
     * only the admitted two-to-four RGBA32 or four R32 payload bank. */
    unsigned quad_stores = 0, quad_width = 0, quad_mask = 0;
+   BITSET_DECLARE(tile_offsets, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
    bool tile_loads = false;
    bool quad_tile =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
@@ -1656,6 +1663,8 @@ agx3_tile_store_bank(agx_context *ctx)
       list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, I) {
       if (I->op == AGX_OPCODE_ST_TILE) {
+         if (I->pixel_offset < AGX_G17P_MAX_BYTES_PER_SAMPLE)
+            BITSET_SET(tile_offsets, I->pixel_offset);
          unsigned width = I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
          quad_tile &= width && (!quad_width || quad_width == width) &&
             I->format == AGX_FORMAT_I32 && !I->explicit_coords &&
@@ -1682,14 +1691,15 @@ agx3_tile_store_bank(agx_context *ctx)
     * halves 0..31 for up to four targets and 0..63 for more. Its blending
     * fragments of four or more targets do too: eight RGBA16Float targets
     * store from halves 0..31, five from 0..19. */
+   const unsigned targets = BITSET_COUNT(tile_offsets);
    const bool mrt_bank =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
       ctx->stage == MESA_SHADER_FRAGMENT &&
-      (!tile_loads || quad_stores >= 4) &&
-      quad_stores >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
-      quad_stores <= AGX_MAX_RTS &&
+      (!tile_loads || targets >= 4) &&
+      targets >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
+      targets <= AGX_MAX_RTS &&
       (ctx->key->secondary || ctx->key->g17p_mrt_bg);
-   return mrt_bank && quad_stores > 4 ? 64 : raw32_bank || mrt_bank ? 32 : 16;
+   return mrt_bank && targets > 4 ? 64 : raw32_bank || mrt_bank ? 32 : 16;
 }
 
 void

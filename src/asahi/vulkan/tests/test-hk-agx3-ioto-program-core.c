@@ -2598,6 +2598,20 @@ test_g17p_single_layer_rt0_layout(void)
       CHECK(hk_agx3_g17p_multisample_store_supported(&tib, 1, true, samples));
    }
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(NULL));
+   const enum pipe_format spill_formats[] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R32G32B32A32_UINT,
+   };
+   tib = agx_build_tilebuffer_layout_bounded(
+      spill_formats, 3, 4, false, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+   CHECK(tib.spilled[0] && !tib.spilled[1] && !tib.spilled[2]);
+   CHECK(agx_tilebuffer_total_size(&tib) < 32768);
+   const struct agx_tilebuffer_layout spilled = tib;
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(memcmp(&tib, &spilled, sizeof(tib)) == 0);
+   tib.logical_format[0] = PIPE_FORMAT_NONE;
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    return 0;
 }
 

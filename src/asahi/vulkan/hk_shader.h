@@ -337,6 +337,7 @@ struct hk_linked_shader {
    /* Absolute uniform-half base selected by the fragment epilog key for its
     * dynamic blend constants. Zero means the standard half4 ABI. */
    uint16_t g17p_blend_constant_base;
+   uint16_t g17p_emrt_heap_base;
 
    /* The pipeline-statistics fragment prolog loads its counter address from
     * the descriptor root even when the application fragment shader does not. */

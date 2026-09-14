@@ -89,7 +89,7 @@ check_samples(unsigned nr_samples)
    agx_nir_lower_g17p_tile_samples(b.shader, nr_samples);
 
    const unsigned coverage_reads =
-      count_intrinsic(b.shader, nir_intrinsic_load_active_samples_agx);
+      count_intrinsic(b.shader, nir_intrinsic_load_sample_mask);
    const unsigned want_reads = nr_samples == 1 ? 0 : 1;
    if (coverage_reads != want_reads) {
       fprintf(stderr,
@@ -216,14 +216,150 @@ check_alpha_coverage_blend(unsigned nr_samples)
    return true;
 }
 
-int
-main(void)
+static bool
+check_unrolled_single_blend(unsigned samples)
 {
+   struct agx_fs_epilog_key key = {
+      .nr_samples = samples,
+      .link.loc_written = 1,
+      .link.size_32 = 1,
+      .rt_formats = {PIPE_FORMAT_R8G8B8A8_UNORM},
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.blend.rt[0].colormask = 15;
+   key.blend.rt[0].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ONE,
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ONE);
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P unrolled single blend");
+   agx_nir_fs_epilog(&b, &key);
+   agx_preprocess_nir(b.shader);
+   agx_nir_lower_g17p_tile_samples(b.shader, samples);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key backend = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = samples,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(b.shader, &backend, &part);
+   unsigned loads = 0, stores = 0, read_waits = 0, write_waits = 0, releases = 0;
+   const uint8_t *bytes = part.binary;
+   for (unsigned i = 0; ok && i + 6 <= part.info.binary_size; ++i) {
+      loads += is_lldcol(bytes + i, part.info.binary_size - i);
+      stores += is_lstcol(bytes + i, part.info.binary_size - i);
+      read_waits += !memcmp(bytes + i, "\x87\x02\x54\x08\x08\x00", 6);
+      write_waits += !memcmp(bytes + i, "\x87\x02\x54\x04\x08\x00", 6);
+      releases += !memcmp(bytes + i, "\x07\x02\x54\x0c\x02\x00", 6);
+   }
+   ok &= loads == samples && stores == samples && read_waits == 1 &&
+         write_waits == 1 && releases == 1;
+   if (!ok)
+      fprintf(stderr, "%ux single blend: loads=%u stores=%u waits=%u/%u releases=%u\n",
+              samples, loads, stores, read_waits, write_waits, releases);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+check_coverage_after_depth(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P ordered tile coverage");
+   for (unsigned sample = 0; sample < 4; ++sample) {
+      nir_def *mask = nir_imm_intN_t(&b, 1u << sample, 16);
+      nir_store_zs_agx(&b, mask, nir_imm_float(&b, 0.25),
+                       nir_imm_intN_t(&b, 0, 16), .base = 1);
+      nir_def *value = nir_imm_vec4(&b, 0.1, 0.2, 0.3, 0.4);
+      for (unsigned rt = 0; rt < 2; ++rt)
+         nir_store_local_pixel_agx(&b, value, mask, nir_undef(&b, 2, 16),
+                                   .base = 8 * rt, .write_mask = 15,
+                                   .format = PIPE_FORMAT_R16G16B16A16_FLOAT,
+                                   .target = rt);
+   }
+   agx_nir_lower_g17p_tile_samples(b.shader, 4);
+   agx_preprocess_nir(b.shader);
+   unsigned reads = count_intrinsic(b.shader, nir_intrinsic_load_sample_mask);
+   unsigned stale = count_intrinsic(b.shader,
+                                   nir_intrinsic_load_active_samples_agx);
+   bool ok = reads == 4 && stale == 0;
+   if (!ok)
+      fprintf(stderr, "depth coverage: %u ordered reads, %u reusable reads\n",
+              reads, stale);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+check_native_spill(unsigned write_mask, bool blend)
+{
+   struct agx_fs_epilog_key key = {
+      .nr_samples = 4,
+      .native_spills = true,
+      .emrt_heap_base = 28,
+      .link.loc_written = 7,
+      .link.size_32 = 7,
+      .rt_formats = {PIPE_FORMAT_R8G8B8A8_UNORM,
+                     PIPE_FORMAT_R16G16B16A16_FLOAT,
+                     PIPE_FORMAT_R32G32B32A32_UINT},
+   };
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &key);
+   memset(key.remap, -1, sizeof(key.remap));
+   for (unsigned i = 0; i < 3; ++i) {
+      key.remap[i] = i;
+      key.blend.rt[i].colormask = write_mask & BITFIELD_BIT(i) ? 15 : 0;
+      key.blend.rt[i].mode = agx_pack_blend_standard(
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+         blend && i < 2 ? PIPE_BLENDFACTOR_ONE : PIPE_BLENDFACTOR_ZERO,
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+         blend && i < 2 ? PIPE_BLENDFACTOR_ONE : PIPE_BLENDFACTOR_ZERO);
+   }
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P native spill epilog");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_g17p_tile_samples(b.shader, 4);
+   agx_preprocess_nir(b.shader);
+   agx_nir_lower_g17p_tile_samples(b.shader, 4);
+   struct agx_shader_key backend = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .g17p_emrt = true,
+      .fs.nr_samples = 4,
+   };
+   BITSET_SET(backend.g17p_tile_partitions, 0);
+   BITSET_SET(backend.g17p_tile_partitions, 16);
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &backend, &part);
+   if (!compiled)
+      fprintf(stderr, "native spill epilog mask=%u blend=%u did not compile\n",
+              write_mask, blend);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return compiled;
+}
+
+int
+main(int argc, char **argv)
+{
+   if (argc == 3)
+      return check_native_spill(atoi(argv[1]), atoi(argv[2])) ? 0 : 1;
+
    bool ok = true;
    for (unsigned samples = 1; samples <= 4; samples *= 2)
       ok &= check_samples(samples);
    for (unsigned samples = 2; samples <= 4; samples *= 2)
       ok &= check_alpha_coverage_blend(samples);
+   for (unsigned samples = 2; samples <= 4; samples *= 2)
+      ok &= check_unrolled_single_blend(samples);
+   ok &= check_coverage_after_depth();
+   for (unsigned mask = 1; mask < 8; ++mask) {
+      ok &= check_native_spill(mask, false);
+      ok &= check_native_spill(mask, true);
+   }
 
    printf("%s\n", ok ? "PASS" : "FAIL");
    return ok ? 0 : 1;

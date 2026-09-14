@@ -1235,6 +1235,35 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    return root_ptr.gpu;
 }
 
+static uint64_t
+hk_upload_native_spilled_rt_descs(struct hk_cmd_buffer *cmd)
+{
+   const struct hk_rendering_state *render = &cmd->state.gfx.render;
+   uint8_t entries[HK_MAX_RTS][AGX_G17P_EMRT_DESCRIPTOR_SIZE] = {0};
+   for (unsigned rt = 0; rt < render->color_att_count; ++rt) {
+      if (!render->tilebuffer.spilled[rt])
+         continue;
+      const struct hk_image_view *view = render->color_att[rt].iview;
+      if (!view || !view->planes[0].emrt_pbe_valid ||
+          !view->planes[0].emrt_read_heap_index) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
+         return 0;
+      }
+      memcpy(entries[rt], &view->planes[0].emrt_texture, 32);
+      memcpy(entries[rt] + 32, &view->planes[0].emrt_pbe, 32);
+      memcpy(entries[rt] + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET,
+             &view->planes[0].emrt_read_heap_index, 4);
+      memcpy(entries[rt] + AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET,
+             &view->planes[0].emrt_read_heap_index, 4);
+      memcpy(entries[rt] + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET,
+             &view->planes[0].emrt_atomic_sw, 8);
+      memcpy(entries[rt] + AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET,
+             &view->planes[0].emrt_aligned_width, 4);
+   }
+   return hk_pool_upload(cmd, entries,
+                         render->color_att_count * sizeof(entries[0]), 32);
+}
+
 void
 hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
                                struct hk_cmd_buffer *cmd)
@@ -1445,6 +1474,8 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
                                          struct hk_shader *s,
                                          struct hk_linked_shader *linked)
 {
+   const bool native_spills = s->info.stage == MESA_SHADER_FRAGMENT &&
+      agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer);
    if (!linked || !linked->b.bo || !linked->b.bo->va || linked->b.size == 0 ||
        linked->b.size > UINT32_MAX || s->b.info.has_preamble ||
        s->b.info.scratch_size > AGX3_G17P_MAX_SPILL_B ||
@@ -1455,7 +1486,7 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
         !(s->info.agx3_indexed_sampler_valid &&
           s->b.info.sampler_state_count == 1)) ||
        s->b.info.uses_sampler_heap ||
-       (linked->b.uses_txf && !s->info.agx3_indexed_sampler_valid) ||
+       (linked->b.uses_txf && !s->info.agx3_indexed_sampler_valid && !native_spills) ||
        s->info.set_count > HK_AGX3_G17P_MAX_ROOT_SETS) {
       mesa_loge_once(
          "G17P graphics program refused: linked=%u bo=%u va=%u size=%zu "
@@ -1556,7 +1587,8 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
 
 #define HK_G17P_FRAGMENT_RANGES                                                \
    (1 /* blend constants */ + 1 /* combined sampler heap */ +                  \
-    1 /* indexed sampler heap */ + 1 /* root */ + 1 /* promoted constants */)
+    1 /* indexed sampler heap */ + 1 /* root */ + 1 /* promoted constants */ + \
+    1 /* native spill table */)
 
 static_assert(HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_VERTEX_RANGES &&
                  HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_FRAGMENT_RANGES,
@@ -1589,6 +1621,8 @@ hk_g17p_graphics_uniform_ranges(
    const uint64_t root_ptr = cmd->state.gfx.root;
    size_t count = 0;
    const unsigned root_uniform = s->info.agx3_root_uniform;
+   const bool native_spills = s->info.stage == MESA_SHADER_FRAGMENT &&
+      agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer);
 
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
@@ -1653,6 +1687,16 @@ hk_g17p_graphics_uniform_ranges(
       /* The compiled geometry/tessellation raster variant owns its root
        * layout. Do not infer it from the original API stage. */
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
+      if (native_spills) {
+         const uint64_t table = hk_upload_native_spilled_rt_descs(cmd);
+         const uint64_t pointer = table ? hk_pool_upload(cmd, &table, 8, 8) : 0;
+         if (!pointer || !linked->g17p_emrt_heap_base)
+            return hk_g17p_graphics_ranges_refused(range_count, count);
+         ranges[count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = linked->g17p_emrt_heap_base,
+            .size_halfs = 4, .address = pointer,
+         };
+      }
       if (cmd->state.gfx.uses_blend_constant) {
          /* The non-monolithic blend epilog reads the four constants from
           * the base selected by its linked key. It is half4 for the standard
@@ -1761,7 +1805,10 @@ hk_g17p_graphics_uniform_ranges(
       };
    }
 
-   if (s->info.agx3_indexed_sampler_valid) {
+   if (native_spills && s->info.agx3_combined_sampler_valid)
+      return hk_g17p_graphics_ranges_refused(range_count, count);
+
+   if (s->info.agx3_indexed_sampler_valid || native_spills) {
       if ((s->b.info.stage != MESA_SHADER_FRAGMENT &&
            s->b.info.stage != MESA_SHADER_VERTEX) ||
           !dev->sampled_images.bo || !dev->samplers.table.bo)

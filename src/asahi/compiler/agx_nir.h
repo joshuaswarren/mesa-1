@@ -45,6 +45,8 @@ bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
                                                unsigned generation,
                                                bool robust_formatless_images);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
+bool agx_nir_lower_multisampled_image_store_for_generation(struct nir_shader *s,
+                                                         unsigned generation);
 bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 
 /* Local arrays larger than this many bytes are lowered to scratch memory by
@@ -62,6 +64,9 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
  * handle seen by agx_nir_lower_texture_for_generation(). */
 #define AGX_G17P_IMAGE_ATOMIC_SW_OFFSET 72
 #define AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE 40
+/* Native texture/PBE pair, heap indices, address sideband, then padding. */
+#define AGX_G17P_EMRT_DESCRIPTOR_SIZE 96
+#define AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET 80
 /* Software sampler indices carry AGX2's reservation of the first 28 entries;
  * the native G17P heap is zero-based. Must match the runtime's
  * HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX. */
