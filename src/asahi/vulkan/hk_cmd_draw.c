@@ -6226,6 +6226,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    draw_.index_size = cmd->state.gfx.index.size;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
+   /* A tessellated draw with fewer vertices than one patch draws nothing.
+    * G17P hands the tessellator whole patches, so filter it with the other
+    * trivial draws before any state is published. */
+   if (dev->dev.chip == AGX_CHIP_G17P && !agx_is_indirect(draw_.b) &&
+       cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
+       draw_.b.count[0] < dyn->ts.patch_control_points)
+      return;
+
    /* Null index bindings execute the requested vertices, all with index zero.
     * Normalize before native admission and conditional draw lowering, as the
     * older path does in hk_needs_index_robustness. The one-dword range bounds
