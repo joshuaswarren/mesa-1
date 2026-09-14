@@ -928,6 +928,36 @@ main(void)
       CHECK(one.extent.width == 37 && one.extent.height == 29);
    }
 
+   /* Vulkan permits copies between 1D and 2D images when height and depth
+    * are one. Both endpoints are ordinary single-layer EOT views on G17P. */
+   const VkImageCopy2 one_d_two_d = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 2, 1},
+      .srcOffset = {7, 0, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 5, 1},
+      .dstOffset = {11, 0, 0},
+      .extent = {37, 1, 1},
+   };
+   VkImageCopy2 one_d_out;
+   CHECK(hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_2D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(one_d_out.srcSubresource.baseArrayLayer == 2);
+   CHECK(one_d_out.dstSubresource.baseArrayLayer == 5);
+   CHECK(one_d_out.srcSubresource.layerCount == 1);
+   CHECK(one_d_out.dstSubresource.layerCount == 1);
+   CHECK(one_d_out.extent.width == 37 && one_d_out.extent.height == 1 &&
+         one_d_out.extent.depth == 1);
+   CHECK(hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 2, 2,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
+
    VkImageCopy2 volume_array = volume_copy;
    volume_array.dstSubresource.baseArrayLayer = 7;
    volume_array.dstOffset.z = 0;

@@ -531,14 +531,22 @@ hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
 
    const bool src_3d = src_type == VK_IMAGE_TYPE_3D;
    const bool dst_3d = dst_type == VK_IMAGE_TYPE_3D;
-   const bool valid_types =
-      (src_type == VK_IMAGE_TYPE_2D || src_3d) &&
-      (dst_type == VK_IMAGE_TYPE_2D || dst_3d);
+   const bool src_1d_or_2d = src_type == VK_IMAGE_TYPE_1D ||
+                             src_type == VK_IMAGE_TYPE_2D;
+   const bool dst_1d_or_2d = dst_type == VK_IMAGE_TYPE_1D ||
+                             dst_type == VK_IMAGE_TYPE_2D;
+   const bool valid_types = (src_1d_or_2d || src_3d) &&
+                            (dst_1d_or_2d || dst_3d);
    const bool same_type = src_type == dst_type;
+   const bool one_d_two_d =
+      ((src_type == VK_IMAGE_TYPE_1D && dst_type == VK_IMAGE_TYPE_2D) ||
+       (dst_type == VK_IMAGE_TYPE_1D && src_type == VK_IMAGE_TYPE_2D)) &&
+      src_layers == 1 && dst_layers == 1;
    const bool two_d_three_d = (src_type == VK_IMAGE_TYPE_2D && dst_3d) ||
                               (dst_type == VK_IMAGE_TYPE_2D && src_3d);
+   const bool valid_pair = same_type || one_d_two_d || two_d_three_d;
    if (chip != AGX_CHIP_G17P || !region || !out || !valid_types ||
-       (!same_type && !two_d_three_d) || src_layers == 0 ||
+       !valid_pair || src_layers == 0 ||
        src_layers != dst_layers || slice >= src_layers ||
        ((src_3d || dst_3d) && region->extent.depth != src_layers) ||
        (!src_3d && !dst_3d && region->extent.depth != 1) ||
