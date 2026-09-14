@@ -206,7 +206,7 @@ validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
 
    size_t offset = 0;
    bool valid = false;
-   while (offset < available && offset < 16384) {
+   while (offset < available) {
       uint8_t bytes[64] = {0};
       const size_t readable =
          available - offset < sizeof(bytes) ? available - offset
