@@ -759,13 +759,6 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       features->geometryShader = false;
       features->tessellationShader = false;
-      /* Per-sample fragment execution unrolls the samples inside the
-       * fragment (hk_compile_nir) for pipelines that fix 2x or 4x
-       * rasterization samples. A dynamic count or a shader object still
-       * collapses to one sample and is refused at a multisample draw, so keep
-       * the feature behind its hardware qualification. */
-      features->sampleRateShading =
-         hk_g17p_unverified_feature("sample_rate_shading");
       /* IA vertex/primitive recording, including reset/reuse/unavailable
        * handling, has passed its exact hardware oracle twice. Every applicable
        * graphics/compute counter now has a strict native helper or fragment-
