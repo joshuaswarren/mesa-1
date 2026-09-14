@@ -481,6 +481,8 @@ canonical_format(VkFormat fmt)
       canonical_format_pipe(hk_format_to_pipe_format(fmt)));
 }
 
+static inline VkFormat hk_meta_bitwise_copy_format(VkFormat format);
+
 enum copy_type {
    BUF2IMG,
    IMG2BUF,
@@ -957,7 +959,13 @@ hk_meta_copy_image_to_buffer2(struct vk_command_buffer *cmd,
 
          VkImageAspectFlags aspect = region->imageSubresource.aspectMask;
          VkFormat aspect_fmt = aspect_format(image->format, aspect);
-         VkFormat canonical = canonical_format(aspect_fmt);
+         const bool g17p_color =
+            container_of(device, struct hk_device, vk)->dev.chip ==
+               AGX_CHIP_G17P &&
+            !vk_format_is_depth_or_stencil(image->format);
+         VkFormat canonical = g17p_color
+                                 ? hk_meta_bitwise_copy_format(aspect_fmt)
+                                 : canonical_format(aspect_fmt);
 
          uint32_t blocksize_B =
             util_format_get_blocksize(hk_format_to_pipe_format(canonical));
@@ -2366,7 +2374,6 @@ hk_g17p_raw_image_copy_supported(struct hk_device *dev,
                                  const VkCopyImageInfo2 *info)
 {
    if (dev->dev.chip != AGX_CHIP_G17P || info->regionCount == 0 ||
-       !hk_g17p_block_copy_format(dev, src->vk.format) ||
        src->plane_count != 1 || dst->plane_count != 1 ||
        src->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
        dst->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
@@ -2662,6 +2669,11 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_image, src_image, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(hk_image, dst_image, pCopyImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   /* VkCmdCopyImage preserves the source bits; compatible source and
+    * destination formats do not imply a format conversion.  The element
+    * planner checks their block sizes, so prefer the raw tiled copier for
+    * every eligible G17P single-sample colour copy, not only block-compressed
+    * formats. */
    if (hk_g17p_raw_image_copy_supported(
           dev, src_image, dst_image, pCopyImageInfo)) {
       struct hk_meta_save save;

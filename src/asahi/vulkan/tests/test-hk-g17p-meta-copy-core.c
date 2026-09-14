@@ -626,11 +626,13 @@ main(void)
          raw_plan.buffer_slice_stride_B == 46080 &&
          raw_plan.buffer_span_B == 64296);
    raw_upload.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
+   CHECK(raw_plan.block_size_B == 8);
    raw_upload.format = VK_FORMAT_R32G32B32A32_UINT;
-   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
+   CHECK(raw_plan.block_size_B == 16);
    raw_upload.format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
