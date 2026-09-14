@@ -1195,8 +1195,9 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * have its coordinates killed under it. Apple stages consecutive reads in
     * disjoint banks instead: two texture2d::read calls at different
     * coordinates, metal-nt -arch applegpu_g17p, publish halves 0/2 and 4/6
-    * and issue smp f19=0 then smp f19=4. That witness is a compute kernel,
-    * so only compute callers pass `banks`. Halves 4..7 carry this path's
+    * and issue smp f19=0 then smp f19=4. A fragment function reading two
+    * indexed textures at different coordinates does the same. Callers that
+    * pass no `banks` keep one bank. Halves 4..7 carry this path's
     * PACK_SMPIR operands, so the second plain bank starts at half 8. A read
     * with PACK_SMPIR operands keeps the base bank and also occupies halves
     * 0..7; any outstanding read sharing its halves is retired first. */
@@ -7151,6 +7152,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  I->op == AGX_OPCODE_TEXTURE_LOAD) ||
                 I->op == AGX_OPCODE_IMAGE_LOAD) &&
                I->dim == AGX_DIM_2D;
+            /* Compute kernels and API fragment functions stage outstanding
+             * reads in disjoint banks (see agx3_emit_texture_fetch()).
+             * Background and clear programs keep their single bank. */
+            const bool staged_bank_reads =
+               ctx->stage == MESA_SHADER_COMPUTE ||
+               (ctx->stage == MESA_SHADER_FRAGMENT &&
+                !ctx->key->fs.ignore_tib_dependencies);
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
             const uint16_t fetch_wait =
@@ -7162,9 +7170,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_emit_texture_fetch(emission, enc, I, slot, fetch_wait,
                                          final, staged, separate_write_coords,
                                          ms_array_scratch,
-                                         ctx->stage == MESA_SHADER_COMPUTE
-                                            ? &fetch_banks
-                                            : NULL,
+                                         staged_bank_reads ? &fetch_banks
+                                                           : NULL,
                                          outstanding_here, &staged_end))
                AGX3_REFUSE(I);
             if (staged) {
