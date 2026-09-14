@@ -5169,28 +5169,27 @@ test_g17p_eot_block_store(void)
    return ok;
 }
 
+/* Apple's builtin end-of-tile factory (metal-nt -arch applegpu_g17p, BTNF
+ * texture type 3) emits the same 84-byte program for a 2D-array attachment of
+ * every format, with the IMGWBLK lane-class selector at byte 77. Texture type
+ * 8, a 2D multisample array, clears the selector's low nibble. */
 static bool
 test_g17p_layered_eot_block_store(void)
 {
-   nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P layered RT0 EOT");
-   nir_def *xy =
-      nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
-   nir_def *coords =
-      nir_vec3(&b, nir_channel(&b, xy, 0), nir_channel(&b, xy, 1),
-               nir_u2u32(&b, nir_load_layer_id(&b)));
-   nir_image_store_block_agx(
-      &b, nir_imm_intN_t(&b, 0, 16), nir_imm_int(&b, 0), coords,
-      .format = PIPE_FORMAT_R8_UNORM, .image_dim = GLSL_SAMPLER_DIM_2D,
-      .image_array = true, .explicit_coord = true);
-   agx_preprocess_nir(b.shader);
-
-   struct agx_shader_key key = {
-      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
-      .no_preamble = true,
+   static const struct {
+      enum pipe_format physical;
+      uint8_t words;
+      bool i32;
+      bool multisample;
+      uint8_t selector;
+   } cases[] = {
+      {PIPE_FORMAT_R8_UNORM, 0, false, false, 0x75},
+      {PIPE_FORMAT_R8_UNORM, 0, false, true, 0x70},
+      {PIPE_FORMAT_R8_UINT, 1, false, false, 0x55},
+      {PIPE_FORMAT_R16_FLOAT, 2, false, false, 0x15},
+      {PIPE_FORMAT_R16_UNORM, 1, false, true, 0x90},
+      {PIPE_FORMAT_R32_UINT, 1, true, false, 0x35},
    };
-   struct agx_shader_part part = {0};
-   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
    static const uint8_t expected[] = {
       0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,
       0x0c,0x9d,0x10,0x26,0x24,0xa9,0x14,0x26,
@@ -5202,29 +5201,60 @@ test_g17p_layered_eot_block_store(void)
       0x57,0x10,0x54,0x00,0x00,0x00,0x00,0x80,0x28,0x75,0x00,0x00,
       0x0e,0x00,0x00,0x00,
    };
+   bool ok = sizeof(expected) == 84;
 
-   bool ok = compiled && part.info.binary_size == sizeof(expected) &&
-             part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
-             part.info.agx3_staging_halfs == 8 &&
-             memcmp(part.binary, expected, sizeof(expected)) == 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P layered RT0 EOT");
+      nir_def *xy =
+         nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
+      nir_def *coords =
+         nir_vec3(&b, nir_channel(&b, xy, 0), nir_channel(&b, xy, 1),
+                  nir_u2u32(&b, nir_load_layer_id(&b)));
+      nir_image_store_block_agx(
+         &b, nir_imm_intN_t(&b, 0, 16), nir_imm_int(&b, 0), coords,
+         .format = cases[i].physical, .image_dim = GLSL_SAMPLER_DIM_2D,
+         .image_array = true, .explicit_coord = true);
+      agx_preprocess_nir(b.shader);
 
-   ok &= sizeof(expected) == 84 && part.info.main_offset == 0 &&
-         part.info.main_size == 84;
-   if (!ok) {
-      fprintf(stderr,
-              "AGX3b layered EOT block-store compiler mismatch: "
-              "compiled=%u size=%u gprs=%u\n",
-              compiled, compiled ? part.info.binary_size : 0,
-              compiled ? part.info.nr_gprs : 0);
-      if (compiled) {
-         for (unsigned i = 0; i < part.info.binary_size; ++i)
-            fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[i]);
-         fputc('\n', stderr);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+         .g17p_rt0_eot_words = cases[i].words,
+         .g17p_rt0_eot_i32 = cases[i].i32,
+         .g17p_rt0_eot_multisample = cases[i].multisample,
+      };
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+      uint8_t want[sizeof(expected)];
+      memcpy(want, expected, sizeof(want));
+      want[77] = cases[i].selector;
+
+      const bool case_ok =
+         compiled && part.info.binary_size == sizeof(want) &&
+         part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 8 && part.info.main_offset == 0 &&
+         part.info.main_size == 84 &&
+         memcmp(part.binary, want, sizeof(want)) == 0;
+      if (!case_ok) {
+         fprintf(stderr,
+                 "AGX3b layered EOT block-store compiler mismatch: format=%u "
+                 "compiled=%u size=%u gprs=%u\n",
+                 cases[i].physical, compiled,
+                 compiled ? part.info.binary_size : 0,
+                 compiled ? part.info.nr_gprs : 0);
+         if (compiled) {
+            for (unsigned j = 0; j < part.info.binary_size; ++j)
+               fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[j]);
+            fputc('\n', stderr);
+         }
       }
-   }
+      ok &= case_ok;
 
-   free(part.binary);
-   ralloc_free(b.shader);
+      if (compiled)
+         free(part.binary);
+      ralloc_free(b.shader);
+   }
    return ok;
 }
 

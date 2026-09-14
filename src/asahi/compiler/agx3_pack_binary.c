@@ -4785,6 +4785,40 @@ enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_NORM16,
 };
 
+/* The IMGWBLK lane class the RT0 end-of-tile key admits for a store of this
+ * format. The 2D, 2D-array and multisample builtins share it. */
+static enum agx3_g17p_rt0_eot_kind
+agx3_g17p_rt0_eot_store_kind(const struct agx_shader_key *key,
+                             enum agx_format store_format)
+{
+   const unsigned words = key->g17p_rt0_eot_words;
+   switch (store_format) {
+   case AGX_FORMAT_I8:
+      return words == 1 ? AGX3_G17P_RT0_EOT_SELECTOR_55
+                        : AGX3_G17P_RT0_EOT_NONE;
+   case AGX_FORMAT_U16NORM:
+   case AGX_FORMAT_S16NORM:
+      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_NORM16
+                                      : AGX3_G17P_RT0_EOT_NONE;
+   case AGX_FORMAT_I16:
+   case AGX_FORMAT_F16:
+      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_SELECTOR_15
+                                      : AGX3_G17P_RT0_EOT_NONE;
+   case AGX_FORMAT_I32:
+      if (key->g17p_rt0_eot_i32_four_words &&
+          key->g17p_rt0_eot_i32_signed_four_words)
+         return AGX3_G17P_RT0_EOT_NONE;
+      if (key->g17p_rt0_eot_i32_four_words ||
+          key->g17p_rt0_eot_i32_signed_four_words)
+         return words == 4 ? AGX3_G17P_RT0_EOT_SELECTOR_35
+                           : AGX3_G17P_RT0_EOT_NONE;
+      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_SELECTOR_35
+                                      : AGX3_G17P_RT0_EOT_NONE;
+   default:
+      return AGX3_G17P_RT0_EOT_SELECTOR_75;
+   }
+}
+
 static enum agx3_g17p_rt0_eot_kind
 agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 {
@@ -4882,32 +4916,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
         ctx->key->g17p_rt0_eot_words != 4))
       return AGX3_G17P_RT0_EOT_NONE;
 
-   const unsigned words = ctx->key->g17p_rt0_eot_words;
-   switch (store_format) {
-   case AGX_FORMAT_I8:
-      return words == 1 ? AGX3_G17P_RT0_EOT_SELECTOR_55
-                        : AGX3_G17P_RT0_EOT_NONE;
-   case AGX_FORMAT_U16NORM:
-   case AGX_FORMAT_S16NORM:
-      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_NORM16
-                                      : AGX3_G17P_RT0_EOT_NONE;
-   case AGX_FORMAT_I16:
-   case AGX_FORMAT_F16:
-      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_SELECTOR_15
-                                      : AGX3_G17P_RT0_EOT_NONE;
-   case AGX_FORMAT_I32:
-      if (ctx->key->g17p_rt0_eot_i32_four_words &&
-          ctx->key->g17p_rt0_eot_i32_signed_four_words)
-         return AGX3_G17P_RT0_EOT_NONE;
-      if (ctx->key->g17p_rt0_eot_i32_four_words ||
-          ctx->key->g17p_rt0_eot_i32_signed_four_words)
-         return words == 4 ? AGX3_G17P_RT0_EOT_SELECTOR_35
-                           : AGX3_G17P_RT0_EOT_NONE;
-      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_SELECTOR_35
-                                      : AGX3_G17P_RT0_EOT_NONE;
-   default:
-      return AGX3_G17P_RT0_EOT_SELECTOR_75;
-   }
+   return agx3_g17p_rt0_eot_store_kind(ctx->key, store_format);
 }
 
 /* Apple's genuine builtin EOT factory, configured for a 2D-array attachment,
@@ -4915,15 +4924,14 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
  * size before publishing the layer and XY image wires. Match the complete
  * allocated Mesa EOT graph and its registers before substituting that exact
  * 84-byte program; no general array block-store shape is implied. */
-static bool
-agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
-                                enum agx_isa_encoding enc)
+static enum agx3_g17p_rt0_eot_kind
+agx3_g17p_layered_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_COMPUTE ||
-       ctx->is_preamble || ctx->key->no_stop ||
-       ctx->key->g17p_rt0_eot_words != 0 || ctx->key->g17p_rt0_eot_i32 ||
-       ctx->key->g17p_rt0_eot_multisample)
-      return false;
+       ctx->is_preamble || ctx->key->no_stop)
+      return AGX3_G17P_RT0_EOT_NONE;
+
+   enum agx_format store_format = AGX_FORMAT_U8NORM;
 
    unsigned instruction = 0;
    agx_foreach_instr_global(ctx, I) {
@@ -4945,7 +4953,7 @@ agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
              I->dest[0].size != AGX_SIZE_32 || I->dest[0].memory ||
              agx_channels(I->dest[0]) != 1 ||
              I->dest[0].value != 2 * (instruction - 1))
-            return false;
+            return AGX3_G17P_RT0_EOT_NONE;
          break;
       }
       case 3:
@@ -4954,7 +4962,7 @@ agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
              I->dest[0].type != AGX_INDEX_REGISTER ||
              I->dest[0].size != AGX_SIZE_32 || I->dest[0].memory ||
              agx_channels(I->dest[0]) != 1 || I->dest[0].value != 6)
-            return false;
+            return AGX3_G17P_RT0_EOT_NONE;
          break;
       case 4:
       case 5:
@@ -4974,12 +4982,13 @@ agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
              I->src[0].value != 2 * lane ||
              I->src[1].type != AGX_INDEX_IMMEDIATE ||
              I->src[1].value != 0)
-            return false;
+            return AGX3_G17P_RT0_EOT_NONE;
          break;
       }
       case 7:
          if (I->op != AGX_OPCODE_BLOCK_IMAGE_STORE || I->nr_dests != 0 ||
-             I->nr_srcs != 4 || I->format != AGX_FORMAT_U8NORM ||
+             I->nr_srcs != 4 ||
+             (I->format == AGX_FORMAT_I32) != ctx->key->g17p_rt0_eot_i32 ||
              I->dim != AGX_DIM_2D_ARRAY || !I->explicit_coords ||
              I->src[0].type != AGX_INDEX_IMMEDIATE ||
              I->src[0].value != 0 || I->src[0].size != AGX_SIZE_16 ||
@@ -4993,14 +5002,20 @@ agx3_is_g17p_layered_u8norm_eot(const agx_context *ctx,
              I->src[3].size != AGX_SIZE_32 || I->src[3].memory ||
              !I->src[3].discard || I->src[3].abs || I->src[3].neg ||
              agx_channels(I->src[3]) != 3 || I->src[3].value != 8)
-            return false;
+            return AGX3_G17P_RT0_EOT_NONE;
+         store_format = I->format;
          break;
       default:
-         return false;
+         return AGX3_G17P_RT0_EOT_NONE;
       }
    }
 
-   return instruction == 8;
+   if (instruction != 8 ||
+       (ctx->key->g17p_rt0_eot_multisample &&
+        ctx->key->g17p_rt0_eot_i32_signed_four_words))
+      return AGX3_G17P_RT0_EOT_NONE;
+
+   return agx3_g17p_rt0_eot_store_kind(ctx->key, store_format);
 }
 
 /* Native EOT key {RGBA16F RT0 at partition 0, R8 RT1 at a nonzero partition}
@@ -6010,8 +6025,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                          sizeof(g17p_wboit_mrt_eot));
    }
 
-   if (agx3_is_g17p_layered_u8norm_eot(ctx, enc)) {
-      static const uint8_t g17p_layered_u8norm_eot[] = {
+   const enum agx3_g17p_rt0_eot_kind layered_eot =
+      agx3_g17p_layered_eot_kind(ctx, enc);
+   if (layered_eot != AGX3_G17P_RT0_EOT_NONE) {
+      /* Apple's builtin end-of-tile factory emits one 84-byte program for a
+       * 2D-array attachment of every format (metal-nt -arch applegpu_g17p,
+       * BTNF texture type 3), differing only in the IMGWBLK lane-class
+       * selector at byte 77. The 2D multisample-array builtin (texture type
+       * 8) clears the selector's dimension nibble there and changes nothing
+       * else. */
+      uint8_t program[] = {
          0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,
          0x0c,0x9d,0x10,0x26,0x24,0xa9,0x14,0x26,
          0x24,0xc3,0x10,0x46,
@@ -6023,14 +6046,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0x57,0x10,0x54,0x00,0x00,0x00,0x00,0x80,0x28,0x75,0x00,0x00,
          0x0e,0x00,0x00,0x00,
       };
-      static_assert(sizeof(g17p_layered_u8norm_eot) == 84,
-                    "layered EOT native length");
+      static_assert(sizeof(program) == 84, "layered EOT native length");
+      static const uint8_t selectors[] = {
+         [AGX3_G17P_RT0_EOT_SELECTOR_75] = 0x75,
+         [AGX3_G17P_RT0_EOT_SELECTOR_15] = 0x15,
+         [AGX3_G17P_RT0_EOT_SELECTOR_35] = 0x35,
+         [AGX3_G17P_RT0_EOT_SELECTOR_55] = 0x55,
+         [AGX3_G17P_RT0_EOT_NORM16] = 0x95,
+      };
+      program[77] = ctx->key->g17p_rt0_eot_multisample
+                       ? selectors[layered_eot] & 0xf0
+                       : selectors[layered_eot];
       /* The matched synthetic graph used registers that are absent from the
        * replacement. The native metadata requires four GPR dwords. */
       ctx->max_reg = 7;
       ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
-      return agx3_append(emission, g17p_layered_u8norm_eot,
-                         sizeof(g17p_layered_u8norm_eot));
+      return agx3_append(emission, program, sizeof(program));
    }
 
    const enum agx3_g17p_rt0_eot_kind rt0_eot =
