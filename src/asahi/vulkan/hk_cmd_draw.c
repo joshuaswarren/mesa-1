@@ -6513,6 +6513,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          }
       }
 
+      /* Geometry, tessellation and adjacency lowering can turn a nonempty API
+       * draw into a direct raster draw with no complete output primitives.
+       * There is no draw packet to encode in that case. The pre-raster work,
+       * including any shader side effects, has already been recorded above. */
+      if (!agx_is_indirect(draw.b) &&
+          (draw.b.count[0] == 0 || draw.b.count[1] == 0))
+         continue;
+
       enum agx_primitive topology = cmd->state.gfx.topology;
       const bool native_tess = tess && dev->g17p_native_tess;
       if (!native_tess &&

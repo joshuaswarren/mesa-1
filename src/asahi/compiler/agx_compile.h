@@ -412,6 +412,13 @@ struct agx_shader_key {
     * at f13=0 even from high registers, and in no required partition order. */
    bool g17p_mrt_bg;
 
+   /* A Honeykrisp hardware vertex binary adjacent to software geometry or
+    * transform feedback. The API VS hardware variant may expose only values
+    * consumed by GS/XFB, while the generated post-GS raster VS may expose only
+    * values GS produced. Both may therefore have a sparse terminal UVS
+    * suffix. */
+   bool g17p_sparse_vertex_outputs;
+
    /* G17P multi-target epilog: bit n is set when a colour target of the
     * framebuffer starts at tile byte n. Apple's fragments select a written
     * target's pixel classes from its position among all targets, so an epilog

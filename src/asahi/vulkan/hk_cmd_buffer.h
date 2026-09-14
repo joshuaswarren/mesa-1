@@ -402,6 +402,11 @@ struct hk_cs {
     * flush requested with nothing recorded since it can be elided. */
    void *strong_flush_end;
 
+   /* Likewise for the weak ordering barrier attached to a native launch. A
+    * later cache-flush request upgrades this record in place instead of
+    * emitting two adjacent barriers. */
+   void *weak_barrier_end;
+
    /* Whether there is more than just the root chunk */
    bool stream_linked;
 
@@ -527,6 +532,8 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    const bool linked = link_end != a->current;
    a->current = b->current;
    a->stream_linked |= linked || b->stream_linked;
+   a->strong_flush_end = b->strong_flush_end;
+   a->weak_barrier_end = b->weak_barrier_end;
 
    a->uses_sampler_heap |= b->uses_sampler_heap;
    a->scratch.cs.main |= b->scratch.cs.main;

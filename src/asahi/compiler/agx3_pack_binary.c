@@ -5034,13 +5034,20 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
 
 /* Native 11/16/32/36/52/68-output VSs and the opt-in 72-output qualification
  * shape use a dense set of scalar UVSW indices and distinct staging addresses.
- * The stores may be grouped by varying rather than sorted by scalar index.
- * Recycle the six scoreboard slots after waiting for earlier writes; keep the
- * four-position golden independent. Instructions before the terminal output
- * suffix are encoded and validated normally. In particular, real WebRender
- * vertex shaders perform texture reads before a dense 51-scalar suffix;
- * requiring every preceding producer to be DCE-safe incorrectly excluded that
- * native-shaped stream even though no instruction crosses a writeout.
+ * Honeykrisp's geometry and XFB vertex variants can also have a sparse suffix,
+ * such as point size alone at component 4. The same component-addressed COPY
+ * and high-index UVSW protocol covers that suffix without inventing an ISA
+ * form. A pure producer may appear between sparse stores (the XFB raster-
+ * discard path materializes default point size this way); the nonterminal
+ * protocol retires each staged value before its GPR can be reused. The stores
+ * may be grouped by varying rather than sorted by scalar index. Recycle the six
+ * scoreboard slots after waiting for earlier writes; keep the four-position
+ * golden independent. Instructions before the output suffix are encoded and
+ * validated normally. In particular, real
+ * WebRender vertex shaders perform texture reads before a dense 51-scalar
+ * suffix; requiring every preceding producer to be DCE-safe incorrectly
+ * excluded that native-shaped stream even though no instruction crosses a
+ * writeout.
  */
 static unsigned
 agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
@@ -5102,8 +5109,11 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
          }
       }
    }
-   return stopped && output_count >= 5 && maximum_output + 1 == output_count
-             ? output_count : 0;
+   const bool dense_wide = output_count >= 5 &&
+                           maximum_output + 1 == output_count;
+   const bool sparse_high = ctx->key->g17p_sparse_vertex_outputs &&
+                            output_count > 0 && maximum_output >= 4;
+   return stopped && (dense_wide || sparse_high) ? output_count : 0;
 }
 
 /* The sources of a dense terminal store bundle cannot be overwritten before
@@ -7149,9 +7159,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * a later pure producer may reuse its physical GPR. */
    const bool g17p_firefox_dense_outputs =
       agx3_is_firefox_dense_output_suffix(ctx, g17p_output_count);
-   const bool g17p_user_output_protocol = g17p_output_count == 6 ||
+   const bool g17p_user_output_protocol = g17p_terminal_outputs ||
+      g17p_output_count == 6 ||
       (g17p_output_count >= 5 &&
        (g17p_terminal_outputs || agx3_outputs_leave_staging_alone(ctx))) ||
+      (ctx->key->g17p_sparse_vertex_outputs && g17p_output_count > 0 &&
+       agx3_outputs_leave_staging_alone(ctx)) ||
       g17p_firefox_dense_outputs;
    unsigned g17p_outputs_staged = 0;
    /* User-output graphs outside the qualified scalar shapes must not
@@ -10158,8 +10171,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * normal) > 0.0` is the shape that reaches this. */
             /* An absolute comparison source moves the instruction to the
              * longer ep28..35 endpoint. It is a different form, not a bit on
-             * the short one, so it gets its own encoder and never mixes with
-             * the negate path (which stays on the short endpoint). */
+             * the short one, so it gets its own encoder. Mixed absolute and
+             * negate modifiers also use that endpoint, but are handled by the
+             * general descriptor below. */
             const bool any_abs = I->src[0].abs || I->src[1].abs;
             const bool any_neg = I->src[0].neg || I->src[1].neg;
             const bool negated = !any_abs && any_neg;
@@ -10169,60 +10183,63 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool src_16[] = {I->src[0].size == AGX_SIZE_16,
                                    I->src[1].size == AGX_SIZE_16};
             const bool src_neg[] = {I->src[0].neg, I->src[1].neg};
-            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            unsigned condition = I->fcond;
-            bool swap = I->invert_cond;
-            if (condition == AGX_FCOND_LTN) {
-               condition = AGX_FCOND_GE;
-               swap = !swap;
-            } else if (condition == AGX_FCOND_GTN) {
-               condition = AGX_FCOND_LE;
-               swap = !swap;
-            }
-            uint16_t fsel_wait = wait;
-            if (fsel_wait != 0 && fsel_wait != 32) {
-               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
+            if (!(any_abs && any_neg)) {
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+               unsigned condition = I->fcond;
+               bool swap = I->invert_cond;
+               if (condition == AGX_FCOND_LTN) {
+                  condition = AGX_FCOND_GE;
+                  swap = !swap;
+               } else if (condition == AGX_FCOND_GTN) {
+                  condition = AGX_FCOND_LE;
+                  swap = !swap;
+               }
+               uint16_t fsel_wait = wait;
+               if (fsel_wait != 0 && fsel_wait != 32) {
+                  if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
+                     AGX3_REFUSE(I);
+                  fsel_wait = 0;
+               }
+               const bool src_abs[] = {I->src[0].abs, I->src[1].abs};
+               if (I->saturate || I->src[0].kill || I->src[1].kill ||
+                   (I->src[0].cache && I->src[0].discard) ||
+                   (I->src[1].cache && I->src[1].discard) ||
+                   I->src[2].abs || I->src[2].neg ||
+                   I->src[3].abs || I->src[3].neg ||
+                   !(any_abs
+                        ? agx3_alu_fcmp_select_imm_width_abs(
+                             enc, I->dest[0].value, src, src_16, hints,
+                             condition, I->src[swap ? 3 : 2].value,
+                             I->src[swap ? 2 : 3].value,
+                             I->dest[0].size == AGX_SIZE_16,
+                             I->dest[0].cache, fsel_wait, src_abs, bytes, &len)
+                     : negated
+                        ? agx3_alu_fcmp_select_imm_width_neg(
+                             enc, I->dest[0].value, src, src_16, hints, src_neg,
+                             condition, I->src[swap ? 3 : 2].value,
+                             I->src[swap ? 2 : 3].value,
+                             I->dest[0].size == AGX_SIZE_16,
+                             I->dest[0].cache, fsel_wait, bytes, &len)
+                        : agx3_alu_fcmp_select_imm_width(
+                             enc, I->dest[0].value, src, src_16, hints,
+                             condition, I->src[swap ? 3 : 2].value,
+                             I->src[swap ? 2 : 3].value,
+                             I->dest[0].size == AGX_SIZE_16,
+                             I->dest[0].cache, fsel_wait, bytes, &len)) ||
+                   !agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
-               fsel_wait = 0;
+               continue;
             }
-            const bool src_abs[] = {I->src[0].abs, I->src[1].abs};
-            if (I->saturate || I->src[0].kill || I->src[1].kill ||
-                (I->src[0].cache && I->src[0].discard) ||
-                (I->src[1].cache && I->src[1].discard) ||
-                (any_abs && any_neg) ||
-                I->src[2].abs || I->src[2].neg ||
-                I->src[3].abs || I->src[3].neg ||
-                !(any_abs
-                     ? agx3_alu_fcmp_select_imm_width_abs(
-                          enc, I->dest[0].value, src, src_16, hints,
-                          condition, I->src[swap ? 3 : 2].value,
-                          I->src[swap ? 2 : 3].value,
-                          I->dest[0].size == AGX_SIZE_16,
-                          I->dest[0].cache, fsel_wait, src_abs, bytes, &len)
-                  : negated
-                     ? agx3_alu_fcmp_select_imm_width_neg(
-                          enc, I->dest[0].value, src, src_16, hints, src_neg,
-                          condition, I->src[swap ? 3 : 2].value,
-                          I->src[swap ? 2 : 3].value,
-                          I->dest[0].size == AGX_SIZE_16,
-                          I->dest[0].cache, fsel_wait, bytes, &len)
-                     : agx3_alu_fcmp_select_imm_width(
-                          enc, I->dest[0].value, src, src_16, hints,
-                          condition, I->src[swap ? 3 : 2].value,
-                          I->src[swap ? 2 : 3].value,
-                          I->dest[0].size == AGX_SIZE_16,
-                          I->dest[0].cache, fsel_wait, bytes, &len)) ||
-                !agx3_append(emission, bytes, len))
-               AGX3_REFUSE(I);
-            continue;
          }
 
          /*
           * The general compare-select: a REGISTER in a select slot, or an
           * IMMEDIATE in a compare slot. The block above requires both selects
           * to be immediates and both compare sources to be registers, so it
-          * skips these shapes entirely rather than refusing them, and nothing
-          * it already encodes can reach here.
+          * skips these shapes entirely rather than refusing them. The one
+          * overlap is a register/register comparison mixing absolute and
+          * negate modifiers, which needs this endpoint's independent modifier
+          * fields.
           *
           * Both are ordinary GLSL. dEQP's isOk() written to a mediump output
           * gives the first (a 16-bit destination selecting between a register

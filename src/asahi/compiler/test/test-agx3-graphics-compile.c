@@ -1910,10 +1910,10 @@ test_combined_sampler_root(void)
 }
 
 static bool
-test_indexed_sampler_sets(void)
+test_indexed_sampler_sets_stage(mesa_shader_stage stage)
 {
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_FRAGMENT, &agx_nir_options, "indexed sample sets");
+      stage, &agx_nir_options, "indexed sample sets");
    nir_def *root = nir_load_root_agx(&b);
    nir_def *element = nir_load_global_constant(&b, 1, 32, root, .align_mul=4);
    nir_def *offset = nir_imul_imm(&b, element, 72);
@@ -1978,6 +1978,17 @@ test_indexed_sampler_sets(void)
          sampler_loads==3 && set_mask==((1u<<0)|(1u<<3)|(1u<<7));
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+test_indexed_sampler_sets(void)
+{
+   /* Geometry runs through the same compute texture heap ABI as compute
+    * shaders. A fresh indexed vertex Metal witness grounds the explicit-level
+    * register texture/sampler instruction used after this NIR rewrite; Metal
+    * has no geometry stage to target directly. */
+   return test_indexed_sampler_sets_stage(MESA_SHADER_FRAGMENT) &&
+          test_indexed_sampler_sets_stage(MESA_SHADER_GEOMETRY);
 }
 
 static bool

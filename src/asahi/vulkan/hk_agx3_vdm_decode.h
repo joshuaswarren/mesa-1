@@ -61,9 +61,9 @@ struct hk_agx3_g17p_vertex_compile_info {
 };
 
 /* Build the exact G17P VertexProgramVariant fields for a hardware vertex
- * shader with position and up to the opt-in candidate's seventeen ordinary
- * float4 user locations. System outputs and preambles are separate state
- * shapes. */
+ * shader with position, ordinary user locations, and the Vulkan-bounded
+ * eight-word combined clip/cull-distance tail. System outputs and preambles
+ * are separate state shapes. */
 bool hk_agx3_g17p_vertex_program_info(
    enum agx_chip chip,
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,

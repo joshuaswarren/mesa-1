@@ -101,7 +101,9 @@ agx_lower_spill(agx_context *ctx)
  * spills and agx_emit_{load,store}_scratch()'s NIR scratch access.
  *
  * Restricted to 16-bit and 32-bit components with an immediate offset -- the
- * domain the scalar TPS forms are witnessed at. Anything else is left exactly
+ * domain the scalar TPS forms are witnessed at. A spilled 64-bit scalar is
+ * represented as an I32 mask of two consecutive words, so reinterpret those
+ * two halves as independent W32 copies as well. Anything else is left exactly
  * as it was and still refuses, rather than being split into something
  * unwitnessed. AGX2 never reaches here, so none of its bytes change.
  */
@@ -126,8 +128,11 @@ agx3_split_vector_stack_access(agx_context *ctx)
       const enum agx_size size = I->format == AGX_FORMAT_I32   ? AGX_SIZE_32
                                  : I->format == AGX_FORMAT_I16 ? AGX_SIZE_16
                                                                : AGX_SIZE_64;
+      const bool split_64_as_32 =
+         size == AGX_SIZE_32 && data.size == AGX_SIZE_64 &&
+         nr == 2 * agx_channels(data);
       if (size == AGX_SIZE_64 || offset.type != AGX_INDEX_IMMEDIATE ||
-          data.size != size)
+          (data.size != size && !split_64_as_32))
          continue;
 
       /* IR register values are 16-bit halves: a 32-bit component is two of
@@ -138,6 +143,7 @@ agx3_split_vector_stack_access(agx_context *ctx)
          agx_index comp = data;
          comp.value += c * halves;
          comp.channels_m1 = 0;
+         comp.size = size;
 
          const agx_index off = agx_immediate(offset.value + (c * halves * 2));
          if (is_store)

@@ -1627,9 +1627,9 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 
-   /* Mixing the negate with an absolute source still has no witness: ABS is
-    * a longer endpoint that carries no f65, so it fails closed rather than
-    * dropping one of the two modifiers. */
+   /* The long endpoint has independent absolute and negate fields. The fresh
+    * mixed_abs_neg Metal witness confirms this combination rather than
+    * forcing it through the short f65-only form. */
    b = builder(enc);
    a = agx_register(8, AGX_SIZE_32);
    a.abs = true;
@@ -1638,7 +1638,7 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
                   agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_FALSE(pack(b).empty());
 }
 
 TEST_F(AGX3PackBinary, MinifloatSpecializationDeclinesOtherGroundedForms)
@@ -4899,6 +4899,31 @@ TEST_F(AGX3PackBinary, StaticSpillCopyReloadHalf)
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
    }
+}
+
+TEST_F(AGX3PackBinary, SplitScalar64SpillIntoGroundedWordStores)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_stack_store(b, agx_register(12, AGX_SIZE_64), agx_immediate(16),
+                   AGX_FORMAT_I32, 3);
+   agx_stop(b);
+
+   agx3_split_vector_stack_access(b->shader);
+   EXPECT_FALSE(pack(b).empty());
+
+   unsigned stores = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_STACK_STORE)
+         continue;
+      EXPECT_EQ(I->format, AGX_FORMAT_I32);
+      EXPECT_EQ(I->mask, 1u);
+      EXPECT_EQ(I->src[0].size, AGX_SIZE_32);
+      EXPECT_EQ(I->src[0].value, 12u + 2u * stores);
+      EXPECT_EQ(I->src[1].value, 16u + 4u * stores);
+      ++stores;
+   }
+   EXPECT_EQ(stores, 2u);
 }
 
 TEST_F(AGX3PackBinary, StaticSpillReloadKeepsARereadCellLive)
@@ -9061,6 +9086,47 @@ TEST_F(AGX3PackBinary, NativeHighVertexOutputIndices)
    }
 }
 
+TEST_F(AGX3PackBinary, SparseTerminalVertexOutputUsesComponentStaging)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   key.g17p_sparse_vertex_outputs = true;
+   agx_index value = agx_register(0, AGX_SIZE_32);
+   value.discard = true;
+   agx_st_vary(b, agx_immediate(4), value);
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_stage_copy_source(enc, 8, 0, false, 5, 0, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_vary_uvsw(enc, 8, 4, 5, true, 1u << 4, bytes, &len));
+   append(want, bytes, len);
+   want.insert(want.end(), {0x0e, 0, 0, 0});
+
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 10u);
+}
+
+TEST_F(AGX3PackBinary, SparseVertexOutputsPermitPureProducerBetweenStores)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   key.g17p_sparse_vertex_outputs = true;
+
+   agx_index value = agx_register(0, AGX_SIZE_32);
+   value.discard = true;
+   agx_st_vary(b, agx_immediate(4), value);
+   agx_mov_imm_to(b, agx_register(0, AGX_SIZE_32), 0x3f800000);
+   agx_st_vary(b, agx_immediate(5), value);
+   agx_stop(b);
+
+   EXPECT_FALSE(pack(b).empty());
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 12u);
+}
+
 TEST_F(AGX3PackBinary, WideVertexOutputsPreserveValuesAndRecycleSlotsAfterWrites)
 {
    for (unsigned count : {5u, 7u, 8u, 9u, 11u, 16u, 32u, 52u}) {
@@ -10463,6 +10529,45 @@ TEST_F(AGX3PackBinary, NativeHalfComparisonSelectsIntegerImmediate)
       2, 0, false, false, 0, expected, &length));
    ASSERT_GE(code.size(), length);
    EXPECT_EQ(memcmp(code.data(), expected, length), 0);
+}
+
+TEST_F(AGX3PackBinary, MixedAbsoluteNegatedCompareUsesGeneralLongForm)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(0, AGX_SIZE_32);
+   agx_index c = agx_register(2, AGX_SIZE_32);
+   a.abs = true;
+   c.neg = true;
+   a.cache = c.cache = true;
+   agx_fcmpsel_to(b, agx_register(4, AGX_SIZE_16), a, c,
+                  agx_immediate(0), agx_immediate(255), AGX_FCOND_LT);
+   agx_stop(b);
+
+   struct agx3_fsel_desc d = {
+      .dest = 4,
+      .dest_16 = true,
+      .cmp0 = 0,
+      .cmp0_hint = AGX3_ALU_HINT_CACHE,
+      .cmp0_abs = true,
+      .cmp1 = 2,
+      .cmp1_hint = AGX3_ALU_HINT_CACHE,
+      .cmp1_neg = true,
+      .sel0_kind = AGX3_FSEL_SEL_IMMEDIATE,
+      .sel1_kind = AGX3_FSEL_SEL_IMMEDIATE,
+      .sel0 = 0,
+      .sel1 = 255,
+      .sel_16 = true,
+      .condition = AGX_FCOND_LT,
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
+   ASSERT_TRUE(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                    &length));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   std::vector<uint8_t> expected;
+   append(expected, bytes, length);
+   append(expected, end.bytes, end.length);
+   EXPECT_EQ(pack(b), expected);
 }
 
 TEST_F(AGX3PackBinary, NativeIselRetainsLiveRegisterComparands)

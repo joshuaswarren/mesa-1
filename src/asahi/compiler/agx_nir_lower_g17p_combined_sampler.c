@@ -679,6 +679,7 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 {
    if (!shader || (shader->info.stage != MESA_SHADER_VERTEX &&
                    shader->info.stage != MESA_SHADER_FRAGMENT &&
+                   shader->info.stage != MESA_SHADER_GEOMETRY &&
                    shader->info.stage != MESA_SHADER_COMPUTE))
       return false;
 

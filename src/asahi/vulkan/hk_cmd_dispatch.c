@@ -240,9 +240,24 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
          return;
       }
 
+      /* Native AGX3 launches carry a weak ordering barrier in their tail.
+       * When an API operation immediately needs a cache flush, strengthen
+       * that record in place. Apple's emitter does not produce adjacent weak
+       * and strong barriers, and retaining the weak record buys no ordering
+       * while making the control stream larger. */
+      if (cs->current == cs->weak_barrier_end) {
+         memcpy((uint8_t *)cs->current - sizeof(packed), packed,
+                sizeof(packed));
+         cs->strong_flush_end = cs->current;
+         cs->weak_barrier_end = NULL;
+         cs->stats.flushes++;
+         return;
+      }
+
       memcpy(cs->current, packed, sizeof(packed));
       cs->current = (uint32_t *)((uint8_t *)cs->current + sizeof(packed));
       cs->strong_flush_end = cs->current;
+      cs->weak_barrier_end = NULL;
       break;
    }
 
@@ -370,13 +385,14 @@ static bool
 hk_g17p_internal_graphics_uniform_ranges(
    struct hk_cmd_buffer *cmd, struct hk_shader *s,
    struct hk_linked_shader *linked, uint64_t root_ptr,
+   uint64_t texture_pointers,
    struct agx3_ioto_uniform_range
       ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
    size_t *range_count)
 {
    if (s->info.stage != MESA_SHADER_VERTEX)
-      return hk_g17p_compute_uniform_ranges(s, root_ptr, 0, ranges,
-                                             range_count);
+      return hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
+                                             ranges, range_count);
 
    const unsigned nr_vbos = DIV_ROUND_UP(
       BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
@@ -666,8 +682,8 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 {
    size_t range_count;
    const bool ranges_ok = internal_graphics
-      ? hk_g17p_internal_graphics_uniform_ranges(cmd, s, linked, root_ptr,
-                                                  ranges, &range_count)
+      ? hk_g17p_internal_graphics_uniform_ranges(
+           cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
       : hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,
                                         &range_count);
    if (!ranges_ok) {
@@ -980,8 +996,12 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
-   if (barrier_flags == 0x5)
+   if (barrier_flags == 0x5) {
       cs->strong_flush_end = cs->current;
+      cs->weak_barrier_end = NULL;
+   } else {
+      cs->weak_barrier_end = cs->current;
+   }
    cs->stats.cmds++;
 }
 
@@ -1038,11 +1058,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    uint64_t texture_pointers = 0;
+   /* Poly geometry kernels use graphics descriptor roots but execute through
+    * CDM. Their indexed samples consume the same device-global texture and
+    * sampler heap pair as compute. Other internal-graphics resource profiles
+    * still need their own root contracts. */
    if (internal_graphics &&
        (s->info.agx3_txf_texture_valid || s->info.agx3_storage_image_valid ||
         s->info.agx3_sampled_storage_valid ||
-        s->info.agx3_indexed_storage_valid ||
-        s->info.agx3_indexed_sampler_valid)) {
+        s->info.agx3_indexed_storage_valid)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -1050,7 +1073,9 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        s->info.agx3_sampled_storage_valid ||
        s->info.agx3_indexed_storage_valid ||
        s->info.agx3_indexed_sampler_valid) {
-      const struct hk_descriptor_state *descriptors = &cmd->state.cs.descriptors;
+      const struct hk_descriptor_state *descriptors = internal_graphics
+         ? &cmd->state.gfx.descriptors
+         : &cmd->state.cs.descriptors;
 
       if (s->info.agx3_indexed_sampler_valid) {
          if (!dev->sampled_images.bo || !dev->sampled_images.bo->va ||
@@ -1460,8 +1485,12 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
-   if (barrier_flags == 0x5)
+   if (barrier_flags == 0x5) {
       cs->strong_flush_end = cs->current;
+      cs->weak_barrier_end = NULL;
+   } else {
+      cs->weak_barrier_end = cs->current;
+   }
    cs->stats.cmds++;
 }
 

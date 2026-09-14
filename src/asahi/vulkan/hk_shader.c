@@ -1541,6 +1541,20 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          ralloc_free(candidate);
       }
    } else if (dev->dev.chip == AGX_CHIP_G17P &&
+              nir->info.stage == MESA_SHADER_GEOMETRY) {
+      /* Poly executes geometry variants through CDM, so they use the native
+       * indexed texture/sampler heaps just like compute shaders. Metal has no
+       * geometry stage, but its indexed explicit-level vertex witness emits
+       * the same register-operand SMP form selected after this rewrite. */
+      nir_shader *candidate = nir_shader_clone(NULL, nir);
+      if (candidate && agx_nir_lower_g17p_indexed_samplers(candidate)) {
+         ralloc_free(nir);
+         nir = candidate;
+         shader->info.agx3_indexed_sampler_valid = true;
+      } else {
+         ralloc_free(candidate);
+      }
+   } else if (dev->dev.chip == AGX_CHIP_G17P &&
               nir->info.stage == MESA_SHADER_FRAGMENT) {
       nir_shader *candidate = nir_shader_clone(NULL, nir);
       struct agx_g17p_combined_sampler_binding binding;
@@ -1824,6 +1838,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       .has_scratch = !nir->info.internal,
       .promote_constants = true,
       .promote_textures = true,
+      .g17p_sparse_vertex_outputs =
+         dev->dev.chip == AGX_CHIP_G17P && hw &&
+         nir->info.stage == MESA_SHADER_VERTEX &&
+         (nir->info.has_transform_feedback_varyings ||
+          (xfb_info && xfb_info->output_count) ||
+          sw_stage == MESA_SHADER_GEOMETRY ||
+          nir->info.next_stage == MESA_SHADER_GEOMETRY),
       /* G17P's Ioto resource program populates CProg before the main shader;
        * it does not execute AGX2's tex_state_store/sampler_state_store shader
        * preamble.  The bounded G17P descriptor lowerings above convert the

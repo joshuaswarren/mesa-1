@@ -807,7 +807,11 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
           !agx_ppp_hal200_graphics_core_unpack(
              AGX_CHIP_G17P, AGX_PPP_HAL200_GRAPHICS_OUTPUT, bytes, size,
              &graphics) ||
-          (graphics.words[0] & ~UINT32_C(0x003d0000)) ||
+          /* The low sixteen bits are the eight clip-distance enables and
+           * their companion select bits. agx_ppp_hal200_output_select_pack()
+           * bounds the live producer to this same field; rejecting it here
+           * made valid XFB clip/cull streams look malformed. */
+          (graphics.words[0] & ~UINT32_C(0x003dffff)) ||
           !!(graphics.words[0] & UINT32_C(0x00080000)) !=
              !!(graphics.words[0] & UINT32_C(0x00100000)) ||
           graphics.words[1] ||

@@ -1364,11 +1364,18 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
          }
       } else {
          /* A fragment gl_ViewportIndex read is an ordinary flat varying
-          * that the vertex shader also writes out as a user word. */
+          * that the vertex shader also writes out as a user word. Cull
+          * distance emulation similarly links the VS-generated
+          * CULL_PRIMITIVE words into its FS prolog as noperspective
+          * coefficients. */
+         const bool cull_slot =
+            b->slot == VARYING_SLOT_CULL_PRIMITIVE ||
+            b->slot == VARYING_SLOT_CULL_PRIMITIVE + 1;
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
-                                b->slot == VARYING_SLOT_VIEWPORT;
-         if (!user_slot || (b->perspective && !has_rhw) ||
+                                b->slot == VARYING_SLOT_VIEWPORT || cull_slot;
+         if (!user_slot || (cull_slot && (b->perspective || !b->smooth)) ||
+             (b->perspective && !has_rhw) ||
              b->offset + b->count > vs->info.uvs.components[b->slot])
             return false;
          ++user_bindings;
@@ -1595,8 +1602,12 @@ hk_g17p_graphics_uniform_ranges(
               s->b.info.stage == MESA_SHADER_VERTEX) {
       /* poly's raster variant lowers its geometry parameter loads, and the
        * post-tessellation vertex program its control-shader output loads,
-       * against the compute-style root at uniform zero. */
-      root_uniform = 0;
+       * against the compute-style root. Indexed texture heaps occupy the
+       * first eight halves, so the root follows them as it does for every
+       * other native indexed-sampler stage. */
+      root_uniform = s->info.agx3_indexed_sampler_valid
+                        ? AGX_G17P_TXF_ROOT_HALFS
+                        : 0;
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       if (cmd->state.gfx.uses_blend_constant) {
          /* The non-monolithic blend epilog reads the four constants from
@@ -1709,7 +1720,9 @@ hk_g17p_graphics_uniform_ranges(
 
    if (s->info.agx3_indexed_sampler_valid) {
       if ((s->info.stage != MESA_SHADER_FRAGMENT &&
-           s->info.stage != MESA_SHADER_VERTEX) ||
+           s->info.stage != MESA_SHADER_VERTEX &&
+           !(s->info.stage == MESA_SHADER_GEOMETRY &&
+             s->b.info.stage == MESA_SHADER_VERTEX)) ||
           !dev->sampled_images.bo || !dev->samplers.table.bo)
          return hk_g17p_graphics_ranges_refused(range_count, count);
       const uint64_t pointers[2] = {
