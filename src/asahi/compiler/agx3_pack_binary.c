@@ -7545,6 +7545,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
 
+         /* AGX2 marks a vertex shader that writes no varying with its own
+          * instruction. G17P has none: applegpu_g17p compiles a vertex
+          * function that writes nothing to a bare `end` (0e000000). */
+         if (I->op == AGX_OPCODE_NO_VARYINGS) {
+            if (ctx->stage != MESA_SHADER_VERTEX)
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          if (I->agx3_tex_coord_stage) {
             if (enc != AGX_ISA_ENCODING_AGX3B || native_coord_slot == 0 ||
                 I->nr_dests != 1 || I->dest[0].size != AGX_SIZE_32 ||

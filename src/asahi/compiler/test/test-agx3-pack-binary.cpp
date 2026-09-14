@@ -4942,6 +4942,29 @@ TEST_F(AGX3PackBinary, StaticSpillReloadKeepsARereadCellLive)
    EXPECT_EQ(got, want);
 }
 
+TEST_F(AGX3PackBinary, VertexWithoutVaryingsIsABareEnd)
+{
+   /* applegpu_g17p compiles `vertex void f(uint vid [[vertex_id]]) {}` to
+    * 0e000000: there is no marker for a vertex program that writes nothing. */
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   agx_no_varyings(b);
+   agx_stop(b);
+
+   std::vector<uint8_t> want;
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+
+   agx_builder *fragment = builder(enc);
+   fragment->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_no_varyings(fragment);
+   agx_stop(fragment);
+   pack(fragment, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, StaticSpillRefusesNonScalarOrMisalignedShapes)
 {
    {
