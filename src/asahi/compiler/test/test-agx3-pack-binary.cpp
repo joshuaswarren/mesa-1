@@ -6365,11 +6365,13 @@ TEST_F(AGX3PackBinary, TileStoreSingleSampleFormats)
          e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
       for (const auto &f : formats) {
          agx_builder *b = builder(enc);
-         const bool rgb10 = f.format == AGX_FORMAT_RGB10A2;
-         const unsigned mask = rgb10 ? 1 : 15;
+         /* The packed formats store one converted word. */
+         const bool packed = f.format == AGX_FORMAT_RGB10A2 ||
+                             f.format == AGX_FORMAT_RGB9E5;
+         const unsigned mask = packed ? 1 : 15;
          agx_index value = agx_register(0, f.width == AGX3_TILE_W8 ?
                                           AGX_SIZE_16 : AGX_SIZE_32);
-         value.channels_m1 = f.width == AGX3_TILE_W8 ? 1 : rgb10 ? 0 : 3;
+         value.channels_m1 = f.width == AGX3_TILE_W8 ? 1 : packed ? 0 : 3;
          agx_st_tile(b, value, agx_immediate(AGX_ALL_SAMPLES), agx_null(),
                      f.format, mask, 24, false);
          agx_stop(b);
@@ -10326,6 +10328,61 @@ TEST(AGX3NativeRgb10A2, RegisterModifiers)
    constant.neg[1] = true;
    uint8_t out[14], length = 0;
    EXPECT_FALSE(agx3_rgb10a2_encode(&constant, out, &length));
+}
+
+/* rgb9e5/native/rgb9e5.py: float4 into RGB9E5Float and RG11B10Float, from
+ * registers and from constants, and float4 [[color(0)]] reads of them. */
+TEST(AGX3NativeRgb10A2, PackedFloatLayouts)
+{
+   const struct {
+      uint8_t layout;
+      bool constant;
+      uint8_t want[14];
+   } packs[] = {
+      {AGX3_PACKED_RGB9E5, false,
+       {0xa7,0x06,0x54,0,2,0,8,0x20,0x10,0xa0,0xca,0x89,0x24,0x00}},
+      {AGX3_PACKED_RG11B10, false,
+       {0xa7,0x06,0x54,0,2,0,8,0x20,0x10,0xa0,0xca,0x89,0x24,0x08}},
+      {AGX3_PACKED_RGB9E5, true,
+       {0xa7,0x0e,0x54,0,2,0x20,0x80,0,0x12,0xa0,0x0a,0x08,0,0}},
+      {AGX3_PACKED_RG11B10, true,
+       {0xa7,0x0e,0x54,0,2,0x20,0x80,0,0x12,0xa0,0x0a,0x08,0,0x08}},
+   };
+   for (const auto &p : packs) {
+      struct agx3_rgb10a2_desc d = {.layout = p.layout};
+      for (unsigned i = 0; i < 3; ++i) {
+         d.kind[i] = p.constant ? AGX3_FLTNORM_SRC_IMMEDIATE
+                                : AGX3_FLTNORM_SRC_REGISTER;
+         d.source[i] = p.constant ? 16u << i : 2 * i;
+         d.discard[i] = !p.constant;
+      }
+      d.first_instruction = p.constant;
+      uint8_t out[14], length = 0;
+      ASSERT_TRUE(agx3_rgb10a2_encode(&d, out, &length));
+      ASSERT_EQ(length, 14);
+      EXPECT_EQ(memcmp(out, p.want, 14), 0);
+
+      d.kind[3] = AGX3_FLTNORM_SRC_REGISTER;
+      d.source[3] = 6;
+      EXPECT_FALSE(agx3_rgb10a2_encode(&d, out, &length));
+   }
+
+   const struct {
+      uint8_t layout, want[8];
+   } unpacks[] = {
+      {AGX3_PACKED_RGB9E5, {0x27,6,0x56,0,1,0,0x5c,8}},
+      {AGX3_PACKED_RG11B10, {0x27,6,0x56,0,1,0,0x5e,8}},
+   };
+   for (const auto &u : unpacks) {
+      struct agx3_rgb10a2_unpack_desc d = {
+         .dest = 0, .source = 0, .wait_mask = 32, .discard = true,
+         .layout = u.layout,
+      };
+      uint8_t out[8], length = 0;
+      ASSERT_TRUE(agx3_rgb10a2_unpack_encode(&d, out, &length));
+      ASSERT_EQ(length, 8);
+      EXPECT_EQ(memcmp(out, u.want, 8), 0);
+   }
 }
 
 TEST(AGX3NativeRgb10A2, NativeUnpackAndTextureDependency)

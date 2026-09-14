@@ -172,9 +172,19 @@ struct agx3_fltnorm_src {
    bool abs, neg;
 };
 
+/* The packed word `pack` builds and `unpack` reads: pack's f92 and unpack's
+ * f40. The float layouts take three lanes, and pack marks them with f93
+ * (rgb9e5/native/rgb9e5.py: RGB9E5Float and RG11B10Float attachments). */
+enum agx3_packed_layout {
+   AGX3_PACKED_RGB10A2 = 0,
+   AGX3_PACKED_RGB9E5 = 1,
+   AGX3_PACKED_RG11B10 = 2,
+};
+
 /* Native RGB10A2 conversion packs four f32 registers into one32-bit word.
  * A register lane may take abs (f28 + 17i) and neg (f29 + 17i), as abs(x),
- * -x and -abs(x) into RGB10A2Unorm do (blend/native/negpack*.py). */
+ * -x and -abs(x) into RGB10A2Unorm do (blend/native/negpack*.py). The
+ * packed float layouts pack the first three lanes the same way. */
 struct agx3_rgb10a2_desc {
    uint16_t dest;
    uint16_t source[4];
@@ -185,6 +195,7 @@ struct agx3_rgb10a2_desc {
    bool cache[4];
    bool abs[4];
    bool neg[4];
+   uint8_t layout; /* enum agx3_packed_layout */
 };
 bool agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *desc,
                         uint8_t out[14], uint8_t *length);
@@ -193,6 +204,7 @@ struct agx3_rgb10a2_unpack_desc {
    uint16_t dest, source; /* half indices: four f32 outputs, one u32 input */
    uint16_t wait_mask;
    bool discard;
+   uint8_t layout; /* enum agx3_packed_layout */
 };
 bool agx3_rgb10a2_unpack_encode(const struct agx3_rgb10a2_unpack_desc *desc,
                                uint8_t out[8], uint8_t *length);

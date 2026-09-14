@@ -2513,7 +2513,8 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
               sample.value, I->format, I->mask,
               agx3_trace_shader_name ? agx3_trace_shader_name : "?");
    }
-   if ((I->format == AGX_FORMAT_RGB10A2 &&
+   if (((I->format == AGX_FORMAT_RGB10A2 ||
+         I->format == AGX_FORMAT_RGB9E5) &&
         (I->mask != 1 || value.size != AGX_SIZE_32)) ||
        width < 0 || !agx3_tile_value_ok(value, I->mask, width) ||
        !agx3_tile_sample_operand(sample, &sample_op) || !agx_is_null(coords))
@@ -2661,11 +2662,15 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
                  uint16_t wait, bool first)
 {
    const bool unpack = I->op == AGX_OPCODE_UNPACK_RGB10A2_AGX3;
+   const uint8_t layout = I->format == AGX_FORMAT_RGB9E5
+                             ? AGX3_PACKED_RGB9E5
+                             : AGX3_PACKED_RGB10A2;
+   const unsigned lanes = layout == AGX3_PACKED_RGB10A2 ? 4 : 3;
    if (I->nr_dests != 1 || I->nr_srcs != (unpack ? 1 : 4))
       return false;
    const agx_index dest = I->dest[0];
    if (!agx3_src_is_register(dest) || dest.memory || dest.size != AGX_SIZE_32 ||
-       agx_channels(dest) != (unpack ? 4 : 1))
+       agx_channels(dest) != (unpack ? lanes : 1))
       return false;
    uint8_t bytes[14], length = 0;
    if (unpack) {
@@ -2675,15 +2680,20 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
          return false;
       const struct agx3_rgb10a2_unpack_desc d = {
          .dest = dest.value, .source = src.value,
-         .wait_mask = wait, .discard = src.discard,
+         .wait_mask = wait, .discard = src.discard, .layout = layout,
       };
       if (!agx3_rgb10a2_unpack_encode(&d, bytes, &length))
          return false;
    } else {
-      struct agx3_rgb10a2_desc d = {.dest = dest.value,
+      struct agx3_rgb10a2_desc d = {.dest = dest.value, .layout = layout,
                                    .first_instruction = first, .wait_mask = wait};
       for (unsigned i = 0; i < 4; ++i) {
          const agx_index src = I->src[i];
+         if (i >= lanes) {
+            if (!agx_is_null(src))
+               return false;
+            continue;
+         }
          if (src.memory || agx_channels(src) != 1 ||
              (agx3_src_is_register(src) && src.size != AGX_SIZE_32))
             return false;
@@ -5770,7 +5780,8 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
             const bool load = I->op == AGX_OPCODE_LD_TILE;
             if (phase != (load ? 1 : 3) ||
                 !((agx3_g17p_8norm_format(I->format) && I->mask == 15) ||
-                  (I->format == AGX_FORMAT_RGB10A2 && I->mask == 1)) ||
+                  ((I->format == AGX_FORMAT_RGB10A2 ||
+                    I->format == AGX_FORMAT_RGB9E5) && I->mask == 1)) ||
                 I->pixel_offset || I->explicit_coords)
                return NULL;
             phase = load ? 2 : 4;
@@ -7119,7 +7130,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (phase != (load ? 1 : 3) ||
                    !((agx3_g17p_8norm_format(P->format) &&
                       (P->mask == 3 || P->mask == 15)) ||
-                     (P->format == AGX_FORMAT_RGB10A2 && P->mask == 1)) || P->pixel_offset || P->explicit_coords)
+                     ((P->format == AGX_FORMAT_RGB10A2 ||
+                       P->format == AGX_FORMAT_RGB9E5) && P->mask == 1)) ||
+                    P->pixel_offset || P->explicit_coords)
                   g17p_blend_protocol = false;
                phase = load ? 2 : 4;
             } else if (P->op == AGX_OPCODE_SIGNAL_PIX) {

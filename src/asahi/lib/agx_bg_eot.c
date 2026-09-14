@@ -409,7 +409,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       enum pipe_format physical =
          agx_tilebuffer_physical_format(&key->tib, rt);
       if (cache->dev->chip == AGX_CHIP_G17P &&
-          key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT) {
+          (key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT ||
+           key->tib.logical_format[rt] == PIPE_FORMAT_R9G9B9E5_FLOAT)) {
          /* G17P keeps packed-float tiles as one raw 32-bit word. The matching
           * PBE descriptor also uses R32_UINT to preserve those exact bits. */
          physical = PIPE_FORMAT_R32_UINT;
