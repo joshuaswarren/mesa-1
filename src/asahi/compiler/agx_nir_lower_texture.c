@@ -278,28 +278,48 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
 
    /* Apply txf workaround, see libagx_lower_txf_robustness */
    bool is_txf = ((tex->op == nir_texop_txf) || (tex->op == nir_texop_txf_ms));
-   nir_def *g17p_plain_txf_oob = NULL;
+   nir_def *g17p_txf_oob = NULL;
 
-   /* G17P's raw 2D integer fetch is memory-safe but does not return the
-    * Vulkan robustness value for every out-of-view coordinate.  The older
-    * workaround below only runs when LOD/layer state needs rewriting, leaving
-    * the overwhelmingly common 2D LOD0 case exposed.  Predicate that case
-    * explicitly, fetch texel (0,0) for an invalid coordinate so the hardware
-    * access itself stays inside the view, and select the required zero result
-    * after the fetch. */
+   /* G17P's raw integer fetch is memory-safe but does not return the Vulkan
+    * robustness value for every out-of-view coordinate. The older workaround
+    * below relies on that value: it moves an invalid layer or level to an
+    * out-of-range coordinate and keeps the level itself, which the G17P
+    * indexed fetch cannot even take as an immediate. Predicate the whole
+    * access explicitly, fetch texel (0,0) of level 0 for an invalid one so the
+    * hardware access itself stays inside the view, and select the required
+    * zero result after the fetch. */
    if (gen9 && tex->op == nir_texop_txf &&
-       tex->sampler_dim == GLSL_SAMPLER_DIM_2D && !tex->is_array &&
+       (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
+        tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
+       nir_tex_instr_src_index(tex, nir_tex_src_min_lod) < 0 &&
        !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP)) {
-      nir_def *size = nir_trim_vector(b, nir_get_texture_size(b, tex), 2);
-      nir_def *checked = nir_trim_vector(b, coord, 2);
-      g17p_plain_txf_oob = nir_bany(b, nir_uge(b, checked, size));
-      coord = nir_bcsel(b, g17p_plain_txf_oob,
+      /* The size at the fetched level also counts array layers. */
+      const unsigned n = tex->coord_components;
+      nir_def *size = nir_trim_vector(b, nir_get_texture_size(b, tex), n);
+      nir_def *checked = nir_trim_vector(b, coord, n);
+      g17p_txf_oob = nir_bany(b, nir_uge(b, checked, size));
+
+      if (has_nonzero_lod(tex)) {
+         /* The fetch consumes a 32-bit level, see the end of lower_texture().
+          * Select it at that width. */
+         nir_src *lod_src =
+            &tex->src[nir_tex_instr_src_index(tex, nir_tex_src_lod)].src;
+         nir_def *lod = nir_u2u32(b, lod_src->ssa);
+         nir_def *levels = nir_build_texture_query(
+            b, tex, nir_texop_query_levels, 1, nir_type_int32, false, false);
+         g17p_txf_oob =
+            nir_ior(b, g17p_txf_oob, nir_uge(b, lod, levels));
+         nir_src_rewrite(lod_src,
+                         nir_bcsel(b, g17p_txf_oob, nir_imm_int(b, 0), lod));
+      }
+
+      coord = nir_bcsel(b, g17p_txf_oob,
                         nir_imm_zero(b, coord->num_components,
                                      coord->bit_size),
                         coord);
    }
 
-   if (is_txf &&
+   if (is_txf && !g17p_txf_oob &&
        (has_nonzero_lod(tex) || tex->is_array ||
         nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0) &&
        !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP)) {
@@ -521,10 +541,10 @@ offset_lowered:
       nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, native_sampler);
    }
 
-   if (g17p_plain_txf_oob) {
+   if (g17p_txf_oob) {
       b->cursor = nir_after_instr(instr);
       nir_def *robust = nir_bcsel(
-         b, g17p_plain_txf_oob,
+         b, g17p_txf_oob,
          nir_imm_zero(b, tex->def.num_components, tex->def.bit_size),
          &tex->def);
       nir_def_rewrite_uses_after(&tex->def, robust);
