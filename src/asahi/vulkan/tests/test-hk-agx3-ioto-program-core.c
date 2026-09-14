@@ -2545,6 +2545,15 @@ test_g17p_single_layer_rt0_layout(void)
       &tib, 1, true, true, false));
    CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
       NULL, 1, true, true, false));
+
+   /* Raw 32-bit float lanes keep their samples for the resolve after the
+    * pass, while the store of those samples stays admitted. */
+   enum pipe_format r32f[AGX_MAX_RENDER_TARGETS] = {PIPE_FORMAT_R32_FLOAT};
+   tib = agx_build_tilebuffer_layout(r32f, 1, 4, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, true, true, false));
+   CHECK(hk_agx3_g17p_multisample_store_supported(&tib, 1, true, 4));
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(NULL));
    return 0;
 }
