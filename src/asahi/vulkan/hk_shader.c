@@ -392,11 +392,15 @@ hk_hash_graphics_state(struct vk_physical_device *device,
 {
    struct mesa_blake3 blake3_ctx;
    _mesa_blake3_init(&blake3_ctx);
+   /* A monolithic pipeline compiles every stage in one partition, so the
+    * fragment key must be hashed alongside the vertex key. */
    if (state && (stages & VK_SHADER_STAGE_VERTEX_BIT)) {
       struct hk_vs_key key;
       hk_populate_vs_key(&key, state);
       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
-   } else if (state && (stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
+   }
+
+   if (state && (stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
       struct hk_fs_key key;
       hk_populate_fs_key(&key, state,
                          container_of(device, struct hk_physical_device, vk)
