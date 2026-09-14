@@ -85,3 +85,40 @@ per iteration.
 
 Reproduce with `ASAHI_MSAA_DEPTH_BLIT=1` under the drm-shim
 (`asahi-g17p-blit`), which builds the blit's programs without a GPU.
+
+## The witnessed store sequence, byte for byte
+
+`capture-g17p-per-sample-depth.py` emits programs whose depth stores are easy
+to find: six bytes each, beginning `d7`.
+
+```
+depth-pixel-2x    one store   @280  d7 14 54 00 00 02
+depth-sample-2x   two stores  @354  d7 14 54 00 00 03
+                              @438  d7 24 54 04 20 03
+depth-sample-4x   four        @454  d7 14 54 00 00 03
+                              @538  d7 24 54 04 20 03
+                              @624  d7 44 54 08 40 03
+                              @708  d7 84 54 0c 60 03
+```
+
+A regular 84-byte stride: six bytes of store and a 78-byte block between. Note
+the last byte -- `02` for the per-pixel program, `03` for every per-sample one.
+
+The 78 bytes between the first two stores, which is the sequence the packer has
+to learn to repeat:
+
+```
+2x: 34c21046a7405407030c1200c010010033062f830002000000009f015406030e18
+    00160522052f01010003409f015400031e1800140432053f038302420080040004
+    10002b012f00420000041000
+4x: 34c21086a7005507030c1200c010010033062f830002000000009f015406030e18
+    001605520b2f01010003409f015406031e18001404320b2f0303024200800a0004
+    10002b072f00420000041000
+```
+
+The two differ only where the sample count appears, which is what makes this a
+sequence to reproduce rather than four unrelated stores. `AGX3b.xml` does not
+cover enough of these encodings to disassemble the block automatically -- the
+generated decoder mis-decodes the program's prologue -- so identifying each
+instruction means the same targeted probe ladder used elsewhere in this
+directory: vary one thing, diff the bytes.
