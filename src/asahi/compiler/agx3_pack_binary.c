@@ -12761,32 +12761,56 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* a & ~b (truth table 0x2) and ~(a | b) (0x1) are their own
-          * two-register instructions. */
+         /* ~(a | b) (truth table 0x1), a & ~b (0x2), ~a & b (0x4),
+          * ~(a & b) (0x7), ~(a ^ b) (0x9), a | ~b (0xB) and ~a | b (0xD) are
+          * their own two-register instructions; the one-sided forms take
+          * their operands in order. */
+         const unsigned bit_tt = I->truth_table & 0xfu;
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
-             ((I->truth_table & 0xfu) == 0x2u ||
-              (I->truth_table & 0xfu) == 0x1u) && I->nr_dests == 1 &&
-             I->nr_srcs == 2) {
+             (bit_tt == 0x1u || bit_tt == 0x2u || bit_tt == 0x4u ||
+              bit_tt == 0x7u || bit_tt == 0x9u || bit_tt == 0xbu ||
+              bit_tt == 0xdu) &&
+             I->nr_dests == 1 && I->nr_srcs == 2) {
             const agx_index dest = I->dest[0];
             if (!agx3_vary_reg32(dest) || agx_channels(dest) != 1)
                AGX3_REFUSE(I);
+            const bool swap = bit_tt == 0x4u || bit_tt == 0xdu;
             uint16_t src[2];
             enum agx3_alu_hint hints[2];
             for (unsigned i = 0; i < 2; ++i) {
-               if (!agx3_vary_reg32(I->src[i]) ||
-                   agx_channels(I->src[i]) != 1 || I->src[i].abs ||
-                   I->src[i].neg)
+               const agx_index x = I->src[swap ? 1 - i : i];
+               if (!agx3_vary_reg32(x) || agx_channels(x) != 1 || x.abs ||
+                   x.neg)
                   AGX3_REFUSE(I);
-               src[i] = I->src[i].value;
-               hints[i] = agx3_post_ra_hint(I->src[i]);
+               src[i] = x.value;
+               hints[i] = agx3_post_ra_hint(x);
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
-            const bool nor = (I->truth_table & 0xfu) == 0x1u;
-            if (!(nor ? agx3_alu_bit_nor(enc, dest.value, src, hints,
-                                         dest.cache, wait, bytes, &length)
-                      : agx3_alu_bit_andc(enc, dest.value, src, hints,
-                                          dest.cache, wait, bytes, &length)) ||
-                !agx3_append(emission, bytes, length))
+            bool encoded;
+            switch (bit_tt) {
+            case 0x1u:
+               encoded = agx3_alu_bit_nor(enc, dest.value, src, hints,
+                                          dest.cache, wait, bytes, &length);
+               break;
+            case 0x2u:
+            case 0x4u:
+               encoded = agx3_alu_bit_andc(enc, dest.value, src, hints,
+                                           dest.cache, wait, bytes, &length);
+               break;
+            case 0x7u:
+               encoded = agx3_alu_bit_nand(enc, dest.value, src, hints,
+                                           dest.cache, wait, bytes, &length);
+               break;
+            case 0x9u:
+               encoded = agx3_alu_bit_xnor(enc, dest.value, src, hints,
+                                           dest.cache, wait, bytes, &length);
+               break;
+            default:
+               encoded = agx3_alu_bit_orc(enc, dest.value, src, hints,
+                                          dest.cache, wait, bytes, &length);
+               break;
+            }
+            if (!encoded || !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;
          }

@@ -462,6 +462,47 @@ test_native_bit_nor(void)
    puts("Native bit_nor: three exact live/dead witnesses PASS");
 }
 
+/* blend/native/bitops.py, R32Uint and RGBA32Uint logic ops. */
+static void
+test_native_bit_nand_xnor_orc(void)
+{
+   const enum agx3_alu_hint dead[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+   const struct {
+      bool (*encode)(enum agx_isa_encoding, uint16_t, const uint16_t[2],
+                     const enum agx3_alu_hint[2], bool, uint16_t,
+                     uint8_t[AGX3_ALU_MAX_LENGTH], uint8_t *);
+      uint16_t dest, src[2], wait;
+      uint8_t bytes[10];
+   } cases[] = {
+      {agx3_alu_bit_nand, 0, {2, 0}, 32,
+       {0x0b, 0x03, 0x1e, 0x01, 0x03, 0x08, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_nand, 2, {2, 10}, 0,
+       {0x1b, 0x03, 0x1e, 0x0b, 0x03, 0x08, 0x00, 0x00, 0x00, 0x00}},
+      {agx3_alu_bit_xnor, 0, {2, 0}, 32,
+       {0x0b, 0x03, 0x1f, 0x01, 0x01, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_xnor, 6, {6, 8}, 0,
+       {0x3b, 0x07, 0x1f, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00}},
+      {agx3_alu_bit_orc, 0, {0, 2}, 32,
+       {0x0b, 0x01, 0x1f, 0x03, 0x03, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_orc, 0, {2, 0}, 32,
+       {0x0b, 0x03, 0x1f, 0x01, 0x03, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_orc, 4, {12, 4}, 0,
+       {0x2b, 0x0d, 0x1f, 0x05, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00}},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      assert(cases[i].encode(AGX_ISA_ENCODING_AGX3B, cases[i].dest,
+                             cases[i].src, dead, false, cases[i].wait, bytes,
+                             &len));
+      assert(len == 10 && !memcmp(bytes, cases[i].bytes, 10));
+   }
+   assert(!agx3_alu_bit_orc(AGX_ISA_ENCODING_AGX3C, 0, cases[4].src, dead,
+                            false, 32, bytes, &len));
+   puts("Native bit_nand/bit_xnor/bit_orc: seven exact witnesses PASS");
+}
+
 static void
 test_band_identity_wait(void)
 {
@@ -5347,6 +5388,7 @@ int main(void){
    test_native_bit_andc();
    test_band_identity_wait();
    test_form_lifetime_baselines();
+   test_native_bit_nand_xnor_orc();
    test_native_bit_nor();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();

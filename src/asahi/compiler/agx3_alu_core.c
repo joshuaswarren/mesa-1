@@ -1420,6 +1420,43 @@ agx3_alu_bit_nor(enum agx_isa_encoding enc, uint16_t dest,
                              wait_mask, out, len);
 }
 
+/* Apple's two-register logic ops of uint attachments (blend/native/bitops.py),
+ * r2 = a, r0 = b, both dead, slot-6 wait:
+ *   ~(a & b)   0b031e01030800800000  bit_nand
+ *   ~(a ^ b)   0b031f01010000800000  bit_xnor
+ *   a | ~b     0b011f03030000800000  bit_orc r0, ^r0, ^r2 (a = r0, b = r2)
+ *   ~a | b     0b031f01030000800000  bit_orc r0, ^r2, ^r0
+ * bit_orc keeps its operand order, like bit_andc. */
+bool
+agx3_alu_bit_nand(enum agx_isa_encoding enc, uint16_t dest,
+                  const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_bit_named(enc, "bit_nand", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
+}
+
+bool
+agx3_alu_bit_xnor(enum agx_isa_encoding enc, uint16_t dest,
+                  const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_bit_named(enc, "bit_xnor", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
+}
+
+bool
+agx3_alu_bit_orc(enum agx_isa_encoding enc, uint16_t dest,
+                 const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                 bool dest_cache, uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_bit_named(enc, "bit_orc", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
+}
+
 /* Native iadd_live/isub_live retain both inputs, while their dead variants
  * set f27/f42. Keep the same canonical opcode/register fields. */
 bool
