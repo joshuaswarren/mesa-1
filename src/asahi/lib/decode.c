@@ -777,6 +777,10 @@ agxdecode_cdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
               "AGX3 Barrier\n  Flags = 0x%x\n", record.data.barrier.flags);
       return record.length;
 
+   case AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE:
+      agxdecode_log("AGX3 SSTT Flush Invalidate\n");
+      return record.length;
+
    case AGX3_CDM_RECORD_SUBSTREAM_BARRIER:
       fprintf(agxdecode_dump_stream,
               "AGX3 Substream Barrier\n  Flags = 0x%x\n  Substream = %u\n",

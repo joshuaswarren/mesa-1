@@ -628,8 +628,17 @@ asahi_g17p_compute_validate(
          need_barrier = false;
          break;
 
+      case AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE:
+         /* HAL200 emits SSTT maintenance in a command encoder of its own.
+          * Combining it with shader launches would leave ordering ambiguous. */
+         if (need_barrier || local.launches || local.sstt_flushes)
+            return fail_at(cursor, "SSTT flush-invalidate ordering is invalid");
+
+         local.sstt_flushes++;
+         break;
+
       case AGX3_CDM_RECORD_STREAM_TERMINATE:
-         if (need_barrier || !local.launches ||
+         if (need_barrier || (!local.launches && !local.sstt_flushes) ||
              (!followed_link &&
               cursor + record.length != compute->cdm_ctrl_stream_end))
             return fail_at(cursor, "compute terminator is not final");

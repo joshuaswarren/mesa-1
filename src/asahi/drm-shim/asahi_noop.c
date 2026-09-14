@@ -1492,13 +1492,14 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          compute_stats.barriers += stats.barriers;
          compute_stats.prologue_barriers += stats.prologue_barriers;
          compute_stats.strong_barriers += stats.strong_barriers;
+         compute_stats.sstt_flushes += stats.sstt_flushes;
          compute_stats.terminated |= stats.terminated;
          fprintf(stderr,
                  "shim: G17P CDM validated: %u launches (%u 2D), %u barriers, "
-                 "%u prologue (%u strong)\n",
+                 "%u prologue (%u strong), %u SSTT flushes\n",
                  stats.launches, stats.two_dimensional_launches,
                  stats.barriers, stats.prologue_barriers,
-                 stats.strong_barriers);
+                 stats.strong_barriers, stats.sstt_flushes);
       }
 
       cursor += command_size;
