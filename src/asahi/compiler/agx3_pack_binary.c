@@ -3535,23 +3535,31 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
    if (!agx3_map_shuffle(I->op, &quad, &op))
       return false;
 
-   /* 16-bit data: the SIMD broadcast only, from an immediate lane or from
-    * the low half of a lane register. */
-   if (I->op == AGX_OPCODE_SHUFFLE && I->nr_dests == 1 && I->nr_srcs == 2 &&
-       !I->saturate && I->dest[0].size == AGX_SIZE_16 &&
-       enc == AGX_ISA_ENCODING_AGX3B) {
-      const agx_index dest = I->dest[0], src = I->src[0], lane = I->src[1];
-      const bool register_lane =
-         lane.type == AGX_INDEX_REGISTER && !lane.memory &&
-         (lane.size == AGX_SIZE_16 || lane.size == AGX_SIZE_32) &&
-         agx_channels(lane) == 1 && !lane.abs && !lane.neg && !lane.kill &&
-         !(lane.cache && lane.discard) && lane.value < 192;
-      if (!agx3_subgroup_plain_half(dest) || !agx3_subgroup_plain_half(src) ||
+   /* The SIMD shuffles from a register lane at either data width, and the
+    * 16-bit broadcast from an immediate lane, carry the operands' lifetime
+    * hints and the source wait. The lane is read from the low half of its
+    * register. */
+   const agx_index lane = I->nr_srcs == 2 ? I->src[1] : agx_null();
+   const bool register_lane =
+      lane.type == AGX_INDEX_REGISTER && !lane.memory &&
+      (lane.size == AGX_SIZE_16 || lane.size == AGX_SIZE_32) &&
+      agx_channels(lane) == 1 && !lane.abs && !lane.neg && !lane.kill &&
+      !(lane.cache && lane.discard) && lane.value < 192;
+   if (enc == AGX_ISA_ENCODING_AGX3B && !quad && I->nr_dests == 1 &&
+       I->nr_srcs == 2 && !I->saturate &&
+       (register_lane ||
+        (I->op == AGX_OPCODE_SHUFFLE && I->dest[0].size == AGX_SIZE_16))) {
+      const agx_index dest = I->dest[0], src = I->src[0];
+      const bool half = dest.size == AGX_SIZE_16;
+      if (!(half ? agx3_subgroup_plain_half(dest) &&
+                      agx3_subgroup_plain_half(src)
+                 : agx3_subgroup_plain(dest, AGX_INDEX_REGISTER) &&
+                      agx3_subgroup_plain(src, AGX_INDEX_REGISTER)) ||
           !(register_lane || agx3_subgroup_imm_lane(lane)))
          return false;
 
       const struct agx3_subgroup_shuffle_desc d = {
-         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .op = op,
          .lane_kind = register_lane ? AGX3_SUBGROUP_LANE_REGISTER
                                     : AGX3_SUBGROUP_LANE_IMMEDIATE,
          .dest = dest.value,
@@ -3560,7 +3568,7 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
          .wait_mask = wait_mask,
          .dest_hint = dest.cache,
          .src_live = !src.discard,
-         .half = true,
+         .half = half,
          .src_cache = src.cache,
          .src_discard = src.discard,
          .lane_cache = register_lane && lane.cache,

@@ -3892,12 +3892,14 @@ TEST_F(AGX3PackBinary, RegisterSubgroupShufflesWaitForDeviceLoad)
          std::vector<uint8_t> want;
          uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
          /* The slot allocator selects slot6 for this AGX3b register-lane
-          * graph and slot1 for the corresponding AGX3c graph. */
-         const uint16_t wait =
-            enc == AGX_ISA_ENCODING_AGX3B ? 1u << 5 : 1u;
-         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                      wait, bytes, &length));
-         append(want, bytes, length);
+          * graph, whose shuffle carries the wait itself, and slot1 for the
+          * corresponding AGX3c graph, which retires it first. */
+         const bool agx3b = enc == AGX_ISA_ENCODING_AGX3B;
+         if (!agx3b) {
+            ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
+                                         1u, bytes, &length));
+            append(want, bytes, length);
+         }
 
          const struct agx3_subgroup_shuffle_desc shuffle = {
             .op = (enum agx3_subgroup_shuffle_op)op,
@@ -3905,6 +3907,7 @@ TEST_F(AGX3PackBinary, RegisterSubgroupShufflesWaitForDeviceLoad)
             .dest = 6,
             .src = 4,
             .lane = 8,
+            .wait_mask = agx3b ? 1u << 5 : 0u,
          };
          ASSERT_TRUE(agx3_subgroup_encode_shuffle(enc, &shuffle, bytes,
                                                    &length));

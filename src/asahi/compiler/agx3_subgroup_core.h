@@ -53,11 +53,13 @@ struct agx3_subgroup_shuffle_desc {
     * f27 on its final read.  This is ignored by the older SIMD witnesses. */
    bool src_live;
 
-   /* 16-bit data (f10 = f24 = 1), dest and src in half units. Grounded for the
-    * SIMD broadcast with an immediate lane, and with a register lane read as
-    * 16 bits from the half in `lane`, where the register form takes its
-    * lifetime hints from the fields below. */
+   /* 16-bit data (f10 = f24 = 1), dest and src in half units. Grounded for
+    * the SIMD broadcast with an immediate lane and for every SIMD shuffle with
+    * a register lane. */
    bool half;
+
+   /* Lifetime hints of the G17P SIMD register-lane forms, at either width;
+    * the lane is read as 16 bits from the half in `lane`. */
    bool src_cache;
    bool src_discard;
    bool lane_cache;

@@ -56,7 +56,8 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
    if (d == NULL || out == NULL || length == NULL)
       return false;
    if (d->half ? enc != AGX_ISA_ENCODING_AGX3B || d->quad ||
-                    d->op != AGX3_SUBGROUP_SHUFFLE_BROADCAST ||
+                    (d->lane_kind != AGX3_SUBGROUP_LANE_REGISTER &&
+                     d->op != AGX3_SUBGROUP_SHUFFLE_BROADCAST) ||
                     d->dest >= 192 || d->src >= 192
                : !valid_reg(enc, d->dest) || !valid_reg(enc, d->src))
       return false;
@@ -66,33 +67,40 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
       return false;
 
    /*
-    * 16-bit data with a register lane. metal-nt -arch applegpu_g17p,
-    * `simd_broadcast(ushort d, ushort lane)` with d and lane each either
-    * read again later or not:
+    * The SIMD shuffles from a register lane on G17P. metal-nt -arch
+    * applegpu_g17p, `simd_broadcast(ushort d, ushort lane)` with d and lane
+    * each either read again later or not:
     *
     *   d dead, lane dead    47145402020604201c00   f27 f41
     *   d live, lane live    4714540702100c201000
     *   d dead, lane live    47145405020008201400   f27
     *   d live, lane dead    47145405020800201800   f41
     *
-    * and simd_shuffle(), whose broadcasts reuse both soon, adds f25 (source)
-    * and f39 (lane) next to f11 (destination). So f25/f27 are the source
-    * cache/discard hints and f39/f41 the lane's; the lane sits in f30 and a
-    * slot-1 source wait in f44, as on the immediate form.
+    * simd_shuffle(), whose broadcasts reuse both soon, adds f25 (source) and
+    * f39 (lane) next to f11 (destination). So f25/f27 are the source's
+    * cache/discard hints and f39/f41 the lane's, with the lane in f30 and the
+    * source wait in the f44 bank. The same topology holds for 32-bit data
+    * (f10 = f24 = 2; a broadcast reading its lane twice is 471454040204142e1400
+    * then 472454000200142c1c00) and for simd_shuffle_xor/_up/_down at both
+    * widths, so the lifetime bits follow the operands rather than being
+    * pinned: a pinned f41 claimed the lane was dead even when the vote and
+    * shuffle lowerings read it again for the next component.
     */
-   if (d->half && d->lane_kind == AGX3_SUBGROUP_LANE_REGISTER) {
+   if (enc == AGX_ISA_ENCODING_AGX3B && !d->quad &&
+       d->lane_kind == AGX3_SUBGROUP_LANE_REGISTER) {
       const unsigned slots = 6;
       if (d->lane >= 192 || (d->wait_mask >> slots) != 0 ||
           (d->src_cache && d->src_discard) ||
           (d->lane_cache && d->lane_discard))
          return false;
 
+      const unsigned width = d->half ? 1 : 2;
       struct agx3_field_kv hbase[6];
       unsigned hnb = 0;
       hbase[hnb++] = (struct agx3_field_kv){9, 2};
-      hbase[hnb++] = (struct agx3_field_kv){10, 1};
+      hbase[hnb++] = (struct agx3_field_kv){10, width};
       hbase[hnb++] = (struct agx3_field_kv){23, 2};
-      hbase[hnb++] = (struct agx3_field_kv){24, 1};
+      hbase[hnb++] = (struct agx3_field_kv){24, width};
       hbase[hnb++] = (struct agx3_field_kv){37, 2};
       hbase[hnb++] = (struct agx3_field_kv){38, 1};
 

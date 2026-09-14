@@ -67,12 +67,17 @@ test_shuffle_vectors(void)
    };
    uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
 
+   /* G15G and G16G independently produce this AGX3b word, whose destination
+    * and source stay cached while the lane is read for the last time. */
    struct agx3_subgroup_shuffle_desc d = {
       .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
       .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
       .dest = 4,
       .src = 0,
       .lane = 4,
+      .dest_hint = true,
+      .src_cache = true,
+      .lane_discard = true,
    };
    CHECK(
       agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
@@ -213,6 +218,85 @@ test_shuffle_vectors(void)
 }
 
 static int
+test_register_lane_hint_vectors(void)
+{
+   /* metal-nt -arch applegpu_g17p, every SIMD shuffle from a register lane,
+    * with the data and lane read again or not; sources on slot 1. */
+   static const struct {
+      enum agx3_subgroup_shuffle_op op;
+      bool half;
+      uint16_t dest, src, lane, wait_mask;
+      bool dest_hint, src_cache, src_discard, lane_cache, lane_discard;
+      uint8_t bytes[10];
+   } vec[] = {
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 0, 0, 4, 0x1,
+       false, false, true, false, true,
+       {0x47, 0x14, 0x54, 0x00, 0x02, 0x00, 0x08, 0x2c, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 8, 0, 3, 0x1,
+       false, false, false, false, true,
+       {0x47, 0x14, 0x54, 0x08, 0x02, 0x00, 0x06, 0x2c, 0x18, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 4, 2, 10, 0x1,
+       false, false, true, true, false,
+       {0x47, 0x14, 0x54, 0x04, 0x02, 0x04, 0x14, 0x2e, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 0, 0, 10, 0x2,
+       false, false, true, false, true,
+       {0x47, 0x24, 0x54, 0x00, 0x02, 0x00, 0x14, 0x2c, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 6, 0, 9, 0x0,
+       true, true, false, true, false,
+       {0x47, 0x04, 0x54, 0x06, 0x03, 0x00, 0x12, 0x2e, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 0, 0, 9, 0x0,
+       true, false, true, true, false,
+       {0x47, 0x04, 0x54, 0x00, 0x03, 0x00, 0x12, 0x2e, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, false, 0, 0, 4, 0x1,
+       false, false, true, false, true,
+       {0xc7, 0x14, 0x54, 0x00, 0x02, 0x00, 0x08, 0x2c, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, false, 4, 0, 2, 0x1,
+       true, false, true, true, false,
+       {0xc7, 0x14, 0x54, 0x04, 0x03, 0x00, 0x04, 0x2e, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_UP, false, 4, 0, 8, 0x1,
+       true, true, false, true, false,
+       {0x47, 0x15, 0x54, 0x04, 0x03, 0x00, 0x10, 0x2e, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_DOWN, false, 2, 0, 8, 0x1,
+       true, true, false, true, false,
+       {0xc7, 0x15, 0x54, 0x02, 0x03, 0x00, 0x10, 0x2e, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, true, 2, 3, 2, 0x1,
+       false, false, true, false, true,
+       {0xc7, 0x14, 0x54, 0x02, 0x02, 0x06, 0x04, 0x20, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, true, 5, 1, 0, 0x1,
+       true, false, true, true, false,
+       {0xc7, 0x14, 0x54, 0x05, 0x03, 0x02, 0x00, 0x22, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_UP, true, 4, 3, 2, 0x1,
+       true, true, false, true, false,
+       {0x47, 0x15, 0x54, 0x04, 0x03, 0x06, 0x04, 0x22, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_DOWN, true, 4, 1, 0, 0x1,
+       true, true, false, true, false,
+       {0xc7, 0x15, 0x54, 0x04, 0x03, 0x02, 0x00, 0x22, 0x12, 0x00}},
+   };
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(vec); ++i) {
+      const struct agx3_subgroup_shuffle_desc d = {
+         .op = vec[i].op,
+         .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
+         .dest = vec[i].dest,
+         .src = vec[i].src,
+         .lane = vec[i].lane,
+         .wait_mask = vec[i].wait_mask,
+         .dest_hint = vec[i].dest_hint,
+         .half = vec[i].half,
+         .src_cache = vec[i].src_cache,
+         .src_discard = vec[i].src_discard,
+         .lane_cache = vec[i].lane_cache,
+         .lane_discard = vec[i].lane_discard,
+      };
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, vec[i].bytes, sizeof(vec[i].bytes)));
+   }
+   return 0;
+}
+
+static int
 test_half_broadcast_vectors(void)
 {
    /* metal-nt -arch applegpu_g17p, simd_broadcast() of 16-bit data. */
@@ -271,7 +355,8 @@ test_half_broadcast_vectors(void)
                                       &length));
    CHECK(bytes_equal(out, length, immediate_lane5, sizeof(immediate_lane5)));
 
-   /* Only the SIMD broadcast is witnessed for 16-bit data. */
+   /* Only the SIMD broadcast is witnessed for 16-bit data from an immediate
+    * lane. */
    d.op = AGX3_SUBGROUP_SHUFFLE_XOR;
    CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
                                        &length));
@@ -789,7 +874,14 @@ test_rejection(void)
    };
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX2, &s, out, &length));
+   /* The G17P register-lane forms carry waits for the six witnessed slots;
+    * AGX3c's do not. */
    s.wait_mask = 1;
+   CHECK(
+      agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3C, &s, out, &length));
+   s.wait_mask = 1u << 6;
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    s.wait_mask = 0;
@@ -812,9 +904,13 @@ test_rejection(void)
    s.wait_mask = 0;
    s.quad = false;
    s.lane_kind = AGX3_SUBGROUP_LANE_REGISTER;
+   /* G17P reads the lane as 16 bits, from any half; AGX3c only from a full
+    * register. */
    s.lane = 3;
    CHECK(
-      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+      agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3C, &s, out, &length));
    s.lane = 4;
    s.op = (enum agx3_subgroup_shuffle_op)-1;
    CHECK(
@@ -999,6 +1095,7 @@ main(void)
 {
    CHECK(test_shuffle_vectors() == 0);
    CHECK(test_half_broadcast_vectors() == 0);
+   CHECK(test_register_lane_hint_vectors() == 0);
    CHECK(test_ballot_vectors() == 0);
    CHECK(test_reduce_vectors() == 0);
    CHECK(test_half_reduce_vectors() == 0);
