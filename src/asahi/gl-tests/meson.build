@@ -309,6 +309,7 @@ gl_default_framebuffer = executable(
   dependencies : [
     cc.find_library('EGL'),
     cc.find_library('GL'),
+    cc.find_library('X11'),
   ],
   build_by_default : false,
 )

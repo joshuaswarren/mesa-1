@@ -35,6 +35,7 @@
 
 #define GL_GLEXT_PROTOTYPES
 #include <EGL/egl.h>
+#include <X11/Xlib.h>
 #include <GL/gl.h>
 #include <GL/glext.h>
 
@@ -310,7 +311,21 @@ check_rgb10_a2_blit(void)
 int
 main(void)
 {
-   EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+   /* The conformance failure needs the window itself as the blit source, not a
+    * texture of the same format, so ASAHI_EGL_WINDOW asks for a real one. */
+   const bool want_window = getenv("ASAHI_EGL_WINDOW") != NULL;
+   Display *xdisplay = NULL;
+   if (want_window) {
+      xdisplay = XOpenDisplay(NULL);
+      if (!xdisplay) {
+         fprintf(stderr, "no X display for a window surface\n");
+         return 1;
+      }
+   }
+
+   EGLDisplay display = xdisplay
+                           ? eglGetDisplay((EGLNativeDisplayType)xdisplay)
+                           : eglGetDisplay(EGL_DEFAULT_DISPLAY);
    EGLint major, minor;
    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor) ||
        !eglBindAPI(EGL_OPENGL_API))
@@ -318,12 +333,20 @@ main(void)
 
    /* No alpha is requested, which is the configuration the conformance run
     * fails on: the default framebuffer must still read alpha as one. */
-   const EGLint config_attributes[] = {
+   const EGLint *config_attributes = (const EGLint[]){
       EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
       EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
       EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
       EGL_ALPHA_SIZE, 0, EGL_NONE,
    };
+   const EGLint window_config_attributes[] = {
+      EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
+      EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT,
+      EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8,
+      EGL_DEPTH_SIZE, 16, EGL_NONE,
+   };
+   if (want_window)
+      config_attributes = window_config_attributes;
    /* The conformance runner names an EGL config by id, and the failure is
     * config dependent, so allow the same selection here. */
    EGLConfig config;
@@ -374,10 +397,22 @@ main(void)
       }
       printf("\n");
    }
-   const EGLint surface_attributes[] = {EGL_WIDTH, SIZE, EGL_HEIGHT, SIZE,
-                                        EGL_NONE};
-   EGLSurface surface =
-      eglCreatePbufferSurface(display, config, surface_attributes);
+   EGLSurface surface;
+   if (want_window) {
+      EGLint visual = 0;
+      eglGetConfigAttrib(display, config, EGL_NATIVE_VISUAL_ID, &visual);
+      const Window root = DefaultRootWindow(xdisplay);
+      const Window window =
+         XCreateSimpleWindow(xdisplay, root, 0, 0, SIZE, SIZE, 0, 0, 0);
+      XMapWindow(xdisplay, window);
+      XSync(xdisplay, False);
+      surface = eglCreateWindowSurface(display, config,
+                                       (EGLNativeWindowType)window, NULL);
+   } else {
+      const EGLint surface_attributes[] = {EGL_WIDTH, SIZE, EGL_HEIGHT, SIZE,
+                                           EGL_NONE};
+      surface = eglCreatePbufferSurface(display, config, surface_attributes);
+   }
    const EGLint context_attributes[] = {
       EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3, EGL_NONE};
    EGLContext context =
