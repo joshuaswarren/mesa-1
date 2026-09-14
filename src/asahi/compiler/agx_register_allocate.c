@@ -1782,6 +1782,7 @@ agx_ra(agx_context *ctx)
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *low_gpr = BITSET_CALLOC(ctx->alloc);
+   unsigned *split_source = calloc(ctx->alloc, sizeof(unsigned));
    BITSET_WORD *texture_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *log2_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
@@ -1844,9 +1845,20 @@ agx_ra(agx_context *ctx)
             BITSET_SET(texture_gpr, I->dest[d].value);
       }
 
+      /* A split channel takes its vector's register, so a tile store of one
+       * channel constrains the whole vector: a per-sample reload of a scalar
+       * target stores channel 0 of each texel fetch. */
+      if (I->op == AGX_OPCODE_SPLIT && I->src[0].type == AGX_INDEX_NORMAL) {
+         agx_foreach_ssa_dest(I, d)
+            split_source[I->dest[d].value] = I->src[0].value + 1;
+      }
+
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
+          I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL) {
          BITSET_SET(low_gpr, I->src[0].value);
+         if (split_source[I->src[0].value])
+            BITSET_SET(low_gpr, split_source[I->src[0].value] - 1);
+      }
 
       /* G17P publishes sampled coordinates through COPY, whose source field
        * has seven bits and no high-bit extension. CEM has the same source
@@ -2133,6 +2145,7 @@ agx_ra(agx_context *ctx)
 
    free(phi_web);
    free(low_gpr);
+   free(split_source);
    free(texture_gpr);
    free(log2_gpr);
    free(high_gpr);
