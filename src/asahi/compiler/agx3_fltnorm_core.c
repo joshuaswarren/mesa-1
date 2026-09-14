@@ -38,9 +38,10 @@ wait_limit(enum agx_isa_encoding enc)
 }
 
 /* Per-source field triple: the class selector, the value field for that class,
- * and the two liveness bits a register source picks between. */
+ * the two liveness bits a register source picks between, and its modifiers. */
 struct src_fields {
-   uint8_t f_kind, f_imm, f_reg, f_uniform, f_width, f_live, f_kill;
+   uint8_t f_kind, f_imm, f_reg, f_uniform, f_width, f_live, f_kill, f_abs,
+      f_neg;
 };
 
 static bool
@@ -73,11 +74,15 @@ append_src(struct agx3_field_kv *ov, unsigned *n,
    ov[(*n)++] = (struct agx3_field_kv)KV(f->f_width, 2); /* 32-bit */
    ov[(*n)++] = (struct agx3_field_kv)KV(value_field, s->value);
 
-   /* Only a register source carries liveness; the composer refuses the bits
-    * on the immediate and uniform alternatives. */
+   /* Only a register source carries liveness and modifiers; the composer
+    * refuses the bits on the immediate and uniform alternatives. */
    if (s->kind == AGX3_FLTNORM_SRC_REGISTER) {
       ov[(*n)++] =
          (struct agx3_field_kv)KV(s->kill ? f->f_kill : f->f_live, 1);
+      ov[(*n)++] = (struct agx3_field_kv)KV(f->f_abs, s->abs);
+      ov[(*n)++] = (struct agx3_field_kv)KV(f->f_neg, s->neg);
+   } else if (s->abs || s->neg) {
+      return false;
    }
    return true;
 }
@@ -140,11 +145,11 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
 
    static const struct src_fields s0 = {
       .f_kind = 23, .f_imm = 15, .f_reg = 16, .f_uniform = 17,
-      .f_width = 24, .f_live = 25, .f_kill = 27,
+      .f_width = 24, .f_live = 25, .f_kill = 27, .f_abs = 28, .f_neg = 29,
    };
    static const struct src_fields s1 = {
       .f_kind = 40, .f_imm = 32, .f_reg = 33, .f_uniform = 34,
-      .f_width = 41, .f_live = 42, .f_kill = 44,
+      .f_width = 41, .f_live = 42, .f_kill = 44, .f_abs = 45, .f_neg = 46,
    };
 
    /* AGX3c carries the same operand map plus this form's sub-opcode pair. */
@@ -157,7 +162,7 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
       base[nbase++] = (struct agx3_field_kv)KV(49, 72);
    }
 
-   struct agx3_field_kv ov[20];
+   struct agx3_field_kv ov[24];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_hint ? 1 : 0);
@@ -470,13 +475,14 @@ agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *d,
        (d->wait_mask & ~0x3f))
       return false;
    const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 2)};
-   struct agx3_field_kv fields[36];
+   struct agx3_field_kv fields[44];
    unsigned n = 0;
    fields[n++] = (struct agx3_field_kv)KV(2, d->dest);
    for (unsigned i = 0; i < 4; ++i) {
       const bool reg = d->kind[i] == AGX3_FLTNORM_SRC_REGISTER;
       const bool imm = d->kind[i] == AGX3_FLTNORM_SRC_IMMEDIATE;
-      if ((!reg && !imm) || d->source[i] >= 256 || (reg && (d->source[i] & 1)))
+      if ((!reg && !imm) || d->source[i] >= 256 ||
+          (reg && (d->source[i] & 1)) || (!reg && (d->abs[i] || d->neg[i])))
          return false;
       fields[n++] = (struct agx3_field_kv)KV(23 + 17 * i, d->kind[i]);
       fields[n++] = (struct agx3_field_kv)KV(24 + 17 * i, 2);
@@ -484,6 +490,8 @@ agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *d,
       if (reg) {
          fields[n++] = (struct agx3_field_kv)KV(25 + 17 * i, d->cache[i]);
          fields[n++] = (struct agx3_field_kv)KV(27 + 17 * i, d->discard[i]);
+         fields[n++] = (struct agx3_field_kv)KV(28 + 17 * i, d->abs[i]);
+         fields[n++] = (struct agx3_field_kv)KV(29 + 17 * i, d->neg[i]);
       }
    }
    /* Fresh texture-to-RGB10 native main waits for smp slot1 at field84. */

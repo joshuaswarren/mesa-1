@@ -2610,17 +2610,20 @@ agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
       if (i == 1 && !d.two_lanes)
          break;
       const agx_index src = I->src[i];
-      if (src.memory || src.abs || src.neg || agx_channels(src) != 1)
+      if (src.memory || agx_channels(src) != 1)
          return false;
 
       /* All three operand classes are witnessed: a register (every
        * interpolated shader), an 8-bit AGX minifloat immediate (a constant
        * colour, which the optimizer folds straight into this source), and a
-       * uniform (a colour read from a buffer). */
+       * uniform (a colour read from a buffer). A register may also carry the
+       * abs and neg modifiers. */
       if (agx3_src_is_register(src)) {
          if (src.size != AGX_SIZE_32)
             return false;
          d.src[i].kind = AGX3_FLTNORM_SRC_REGISTER;
+         d.src[i].abs = src.abs;
+         d.src[i].neg = src.neg;
       } else if (src.type == AGX_INDEX_IMMEDIATE) {
          if (src.value > 0xff)
             return false;
@@ -2675,7 +2678,7 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
                                    .first_instruction = first, .wait_mask = wait};
       for (unsigned i = 0; i < 4; ++i) {
          const agx_index src = I->src[i];
-         if (src.memory || src.abs || src.neg || agx_channels(src) != 1 ||
+         if (src.memory || agx_channels(src) != 1 ||
              (agx3_src_is_register(src) && src.size != AGX_SIZE_32))
             return false;
          d.kind[i] = agx3_src_is_register(src) ? AGX3_FLTNORM_SRC_REGISTER :
@@ -2683,6 +2686,8 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
          d.source[i] = src.value;
          d.discard[i] = src.discard;
          d.cache[i] = src.cache;
+         d.abs[i] = src.abs;
+         d.neg[i] = src.neg;
       }
       if (!agx3_rgb10a2_encode(&d, bytes, &length))
          return false;
@@ -11235,7 +11240,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool swap = I->src[0].type == AGX_INDEX_IMMEDIATE;
             const agx_index src = I->src[swap ? 1 : 0];
             const agx_index zero = I->src[swap ? 0 : 1];
-            if (agx3_src_is_register(src) && !src.memory && !src.abs && !src.neg &&
+            if (agx3_src_is_register(src) && !src.memory && !src.abs &&
+                (!src.neg || !I->saturate) &&
                 (!src.kill || src.discard) && src.size == AGX_SIZE_32 &&
                 agx_channels(src) == 1 &&
                 zero.type == AGX_INDEX_IMMEDIATE && zero.value == 0x80 &&
@@ -11245,9 +11251,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .dest_cache = I->dest[0].cache, .wait_mask = wait,
                };
                uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], len;
-               if (!agx3_falu_narrow_f32(enc, I->dest[0].value, src.value,
-                                         I->saturate, &runtime, bytes, &len) ||
-                   !agx3_append(emission, bytes, len))
+               /* -x is exactly -0.0 - x. */
+               const bool encoded =
+                  src.neg ? agx3_falu_narrow_imm_sub_f32(
+                               enc, I->dest[0].value, 0x80, src.value,
+                               &runtime, bytes, &len)
+                          : agx3_falu_narrow_f32(enc, I->dest[0].value,
+                                                 src.value, I->saturate,
+                                                 &runtime, bytes, &len);
+               if (!encoded || !agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
                continue;
             }

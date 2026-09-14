@@ -10289,6 +10289,45 @@ TEST(AGX3NativeRgb10A2, NativeDeadLiveAndConstantOperands)
  }
 }
 
+/* blend/native/negpack.py and negpack2.py: -x, (-x.r, x.g, -x.b, -x.a),
+ * abs(x) and -abs(x) into RGB10A2Unorm. */
+TEST(AGX3NativeRgb10A2, RegisterModifiers)
+{
+   struct variant {
+      bool abs[4], neg[4];
+      uint8_t want[14];
+   };
+   const struct variant v[] = {
+      {{0}, {1,1,1,1},
+       {0xa7,0x06,0x54,0,2,0,8,0x20,0x60,0xa0,0xea,0x8b,0xb6,0x15}},
+      {{0}, {1,0,1,1},
+       {0xa7,0x06,0x54,0,2,0,8,0x20,0x60,0xa0,0xea,0x8b,0xa6,0x15}},
+      {{1,1,1,1}, {0},
+       {0xa7,0x06,0x54,0,2,0,8,0x20,0x60,0xa0,0xea,0x8b,0x6d,0x13}},
+      {{1,1,1,1}, {1,1,1,1},
+       {0xa7,0x06,0x54,0,2,0,8,0x20,0x60,0xa0,0xea,0x8b,0xff,0x17}},
+   };
+   for (const struct variant &x : v) {
+      struct agx3_rgb10a2_desc d = {
+         .source = {0, 2, 4, 6}, .kind = {2, 2, 2, 2},
+         .discard = {true, true, true, true},
+      };
+      memcpy(d.abs, x.abs, sizeof(d.abs));
+      memcpy(d.neg, x.neg, sizeof(d.neg));
+      uint8_t out[14], length = 0;
+      ASSERT_TRUE(agx3_rgb10a2_encode(&d, out, &length));
+      ASSERT_EQ(length, 14);
+      EXPECT_EQ(memcmp(out, x.want, 14), 0);
+   }
+
+   struct agx3_rgb10a2_desc constant = {
+      .source = {48, 32, 16, 48}, .kind = {1, 1, 1, 1},
+   };
+   constant.neg[1] = true;
+   uint8_t out[14], length = 0;
+   EXPECT_FALSE(agx3_rgb10a2_encode(&constant, out, &length));
+}
+
 TEST(AGX3NativeRgb10A2, NativeUnpackAndTextureDependency)
 {
    const uint8_t expected[3][8] = {
