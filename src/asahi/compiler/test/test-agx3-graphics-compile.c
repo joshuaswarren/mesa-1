@@ -5117,9 +5117,14 @@ test_g17p_eot_block_store(void)
    key.g17p_rt0_eot_words = 0;
 
    /* Native mixed RGBA16F/R8 EOT at offsets0/8 and sample stride16.
-    * Both physical partition quotients are zero. This independent native
+    * Both physical partition quotients are zero; the partitions0/1 input
+    * that produced the longer cross-partition program was an input error,
+    * not a second layout (README-g17p-wide-mrt.md). This independent native
     * oracle is reproduced by test/probes/capture-g17p-mrt-eot.py;
-    * SHA256 b3191cbbd673db5fb00d3e744f60ed59befad9bc19a2bf30aa9420effa63df12. */
+    * SHA256 b3191cbbd673db5fb00d3e744f60ed59befad9bc19a2bf30aa9420effa63df12.
+    * The driver reaches it the same way, naming each target's selector by
+    * its logical format (agx_bg_eot.c), because a physical store format does
+    * not name one selector: I32 alone is derived for three. */
    nir_builder mrt = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P WBOIT MRT EOT");
    coords = nir_trim_vector(&mrt, nir_load_global_invocation_id(&mrt, 32), 2);
@@ -5133,6 +5138,9 @@ test_g17p_eot_block_store(void)
       .explicit_coord = true);
    agx_preprocess_nir(mrt.shader);
    memset(&part, 0, sizeof(part));
+   key.g17p_mrt_eot_count = 2;
+   key.g17p_mrt_eot_selectors[0] = 0x15;
+   key.g17p_mrt_eot_selectors[1] = 0x75;
    const bool mrt_compiled = agx_compile_shader_nir(mrt.shader, &key, &part);
    static const uint8_t expected_mrt[] = {
       0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,0x0c,0x9d,0x10,0x26,
@@ -5169,6 +5177,7 @@ test_g17p_eot_block_store(void)
       .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
    agx_preprocess_nir(rgba8_mrt.shader);
    memset(&part, 0, sizeof(part));
+   key.g17p_mrt_eot_selectors[0] = 0x75;
    const bool rgba8_mrt_compiled =
       agx_compile_shader_nir(rgba8_mrt.shader, &key, &part);
    static const uint8_t expected_rgba8_mrt[] = {
@@ -5199,6 +5208,12 @@ test_g17p_eot_block_store(void)
    if (rgba8_mrt_compiled)
       free(part.binary);
    ralloc_free(rgba8_mrt.shader);
+
+   /* The key-selected mixed builtin ends here: the raw32 shapes below select
+    * their program by format, and an unselected one must stay refused. */
+   key.g17p_mrt_eot_count = 0;
+   key.g17p_mrt_eot_selectors[0] = 0;
+   key.g17p_mrt_eot_selectors[1] = 0;
 
    /* SuperTuxKart's deferred targets are two packed B10G11R11 images. The
     * tilebuffer carries each as one raw I32 word in partitions 0 and 4. */

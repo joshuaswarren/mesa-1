@@ -1739,7 +1739,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          bool pixel_entry, uint32_t *pixel_entry_offset,
                          uint8_t native_coord_slot,
                          const uint16_t cem_scratch[3], bool vertex_stage,
-                         bool compute_stage, uint16_t array_scratch)
+                         bool compute_stage, uint16_t array_scratch,
+                         uint16_t bank_base)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
@@ -2018,11 +2019,28 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
     * witness copies r4/r5 to staging[0]/[2], reports ShaderInfo D=8, and
     * samples bank 0.  The staging address is an ABI location, not the source
     * GPR number.  AGX3c retains its independently decoded coordinate field. */
+   /* Sampler-private staging groups. SMP consumes its staged coordinates
+    * and comparison reference asynchronously, after issue: a later sample
+    * that restages the same bank before the earlier one retires replays the
+    * newest operands into every older sample. Apple's own three-reference
+    * depth2d fragment (native-quick-textures/2d-three-references) therefore
+    * copies consecutive samples' coordinates into banks 0, 8 and 16 and
+    * names that bank in each SMP's f19; the comparison reference follows at
+    * bank + 4. The stream packer chooses the group from the in-flight
+    * samples; only the plain 2D coordinate ABI relocates, every other shape
+    * keeps its witnessed fixed banks (gradients 8..18, PACK_SMPIR bank 6,
+    * CEM scratch). */
+   if (bank_base != 0 &&
+       (enc != AGX_ISA_ENCODING_AGX3B || native_staged_coords || array ||
+        three_d || cube || gradient_lod || bias_min || gradient_min ||
+        query_lod || (explicit_lod && !immediate_lod) || register_bias ||
+        register_offset || (bank_base & 7) || bank_base > 16))
+      return false;
    const uint16_t coord = (enc == AGX_ISA_ENCODING_AGX3B ||
                            native_staged_coords || explicit_lod ||
                            register_bias || array || three_d || cube ||
                            gradient_lod || shadow)
-                             ? 0
+                             ? bank_base
                              : I->src[0].value;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
    uint8_t len = 0;
@@ -4651,6 +4669,39 @@ agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc
           agx3_append(emission, bytes, len);
 }
 
+/* Sampler-private staging groups 0/8/16 (see the note in
+ * agx3_emit_texture_sample). Take the lowest group whose previous user has
+ * retired; when all three still hold in-flight operations, retire group 0's
+ * user first. `slot` is the result slot of the operation about to stage into
+ * the chosen group, and `outstanding` is updated for any retirement. */
+static bool
+agx3_take_staging_group(struct util_dynarray *emission,
+                        enum agx_isa_encoding enc, uint8_t stage_group_slot[3],
+                        uint16_t *outstanding, uint16_t outstanding_here,
+                        uint8_t slot, uint16_t *bank_base)
+{
+   uint16_t busy[3];
+   for (unsigned g = 0; g < 3; ++g)
+      busy[g] = stage_group_slot[g]
+                   ? (uint16_t)(1u << (stage_group_slot[g] - 1))
+                   : 0;
+
+   int chosen = -1;
+   for (unsigned g = 0; g < 3 && chosen < 0; ++g)
+      if (!(outstanding_here & busy[g]))
+         chosen = (int)g;
+   if (chosen < 0) {
+      if (!agx3_retire_slots_noop(emission, enc, busy[0]))
+         return false;
+      *outstanding &= (uint16_t)~busy[0];
+      *outstanding |= (uint16_t)(1u << (slot - 1));
+      chosen = 0;
+   }
+   *bank_base = (uint16_t)(chosen * 8);
+   stage_group_slot[chosen] = slot;
+   return true;
+}
+
 /* An operand wait covers the instruction's inputs and overwritten destination,
  * not an arbitrary r0. An r0 identity can race an unrelated load still
  * writing r0. Carry the exact dependency mask on one scalar operand,
@@ -6906,6 +6957,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    struct util_dynarray fixups;
    uint16_t outstanding = 0;
+   /* Result slot of the sample currently occupying each sampler-private
+    * staging group (half-registers 0, 8 and 16). A group is free once a
+    * wait has retired that slot; see agx3_emit_texture_sample. */
+   uint8_t stage_group_slot[3] = {0, 0, 0};
    uint8_t next_uvs_slot = 1;
    unsigned texture_ops_left = 0;
    unsigned tile_loads_left = 0;
@@ -8132,6 +8187,48 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool vertex_explicit_lod = ctx->stage == MESA_SHADER_VERTEX &&
                (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                 I->lod_mode == AGX_LOD_MODE_LOD_GRAD);
+            /* Sampler-private staging groups 0/8/16 (see the note in
+             * agx3_emit_texture_sample). A plain 2D sample takes the lowest
+             * group whose previous sample has retired; when all three still
+             * hold in-flight samples, group 0's is retired first. Every other
+             * G17P sample shape keeps its witnessed fixed banks, so it drains
+             * the in-flight staged samples and then owns every group. */
+            const bool rotatable_staging =
+               enc == AGX_ISA_ENCODING_AGX3B && slot != 0 &&
+               !native_staged_coords && I->dim == AGX_DIM_2D &&
+               !I->query_lod && !(I->offset && !I->offset_xyz) &&
+               (I->lod_mode == AGX_LOD_MODE_AUTO_LOD ||
+                ((I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS ||
+                  I->lod_mode == AGX_LOD_MODE_LOD_MIN) &&
+                 I->src[1].type == AGX_INDEX_IMMEDIATE));
+            uint16_t bank_base = 0;
+            if (enc == AGX_ISA_ENCODING_AGX3B) {
+               uint16_t busy[3];
+               for (unsigned g = 0; g < 3; ++g)
+                  busy[g] = stage_group_slot[g]
+                               ? (uint16_t)(1u << (stage_group_slot[g] - 1))
+                               : 0;
+               if (rotatable_staging) {
+                  if (!agx3_take_staging_group(emission, enc,
+                                               stage_group_slot, &outstanding,
+                                               outstanding_here, slot,
+                                               &bank_base))
+                     AGX3_REFUSE(I);
+               } else {
+                  uint16_t retire = 0;
+                  for (unsigned g = 0; g < 3; ++g)
+                     retire |= (uint16_t)(outstanding_here & busy[g]);
+                  if (retire) {
+                     if (!agx3_retire_slots_noop(emission, enc, retire))
+                        AGX3_REFUSE(I);
+                     outstanding &= (uint16_t)~retire;
+                     if (slot)
+                        outstanding |= (uint16_t)(1u << (slot - 1));
+                  }
+                  for (unsigned g = 0; g < 3; ++g)
+                     stage_group_slot[g] = slot;
+               }
+            }
             uint16_t sample_wait = wait;
             if (native_staged_coords) {
                if (!native_coord_slot)
@@ -8193,7 +8290,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                           native_coord_slot, cem_scratch,
                                           ctx->stage == MESA_SHADER_VERTEX,
                                           ctx->stage == MESA_SHADER_COMPUTE,
-                                          ms_array_scratch))
+                                          ms_array_scratch, bank_base))
                AGX3_REFUSE(I);
             if (open_pixel) {
                ctx->agx3_colour_link.entry_emitted = true;
@@ -8220,7 +8317,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool staged_sample_offset = I->offset && I->offset_xyz == 0;
             ctx->agx3_staging_halfs =
                MAX2(ctx->agx3_staging_halfs,
-                    (I->dim == AGX_DIM_CUBE ||
+                    bank_base + ((I->dim == AGX_DIM_CUBE ||
                      I->dim == AGX_DIM_CUBE_ARRAY) ? 8
                     : native_staged_coords ? 4
                     : vertex_explicit_lod
@@ -8236,7 +8333,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        ? 8
                     : staged_compare ? 6
                     : enc == AGX_ISA_ENCODING_AGX3B ? 4
-                                                   : I->src[0].value + 4);
+                                                   : I->src[0].value + 4));
             continue;
          }
 

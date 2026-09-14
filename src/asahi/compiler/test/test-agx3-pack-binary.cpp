@@ -8443,8 +8443,7 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
    d.register_lod = true;
    ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_TRUE(b->shader->agx3_staging_known);
