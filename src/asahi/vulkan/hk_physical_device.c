@@ -848,9 +848,31 @@ hk_get_device_features(
    }
 }
 
+/* Stages a pipeline or shader object may contain on this device. Every
+ * shader-stage mask reported in the properties must stay inside this set.
+ */
+static VkShaderStageFlags
+hk_supported_shader_stages(const struct vk_features *features)
+{
+   VkShaderStageFlags stages = VK_SHADER_STAGE_VERTEX_BIT |
+                               VK_SHADER_STAGE_FRAGMENT_BIT |
+                               VK_SHADER_STAGE_COMPUTE_BIT;
+
+   if (features->tessellationShader) {
+      stages |= VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+                VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT;
+   }
+
+   if (features->geometryShader)
+      stages |= VK_SHADER_STAGE_GEOMETRY_BIT;
+
+   return stages;
+}
+
 static void
 hk_get_device_properties(const struct agx_device *dev,
                          const struct hk_instance *instance,
+                         const struct vk_features *features,
                          struct vk_properties *properties)
 {
    const unsigned descriptor_generation =
@@ -1057,8 +1079,7 @@ hk_get_device_properties(const struct agx_device *dev,
 
       /* Vulkan 1.1 properties */
       .subgroupSize = 32,
-      .subgroupSupportedStages =
-         VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_ALL_GRAPHICS,
+      .subgroupSupportedStages = hk_supported_shader_stages(features),
       .subgroupSupportedOperations =
          VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_BALLOT_BIT |
          VK_SUBGROUP_FEATURE_VOTE_BIT | VK_SUBGROUP_FEATURE_QUAD_BIT |
@@ -1568,7 +1589,8 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
                           &supported_features);
 
    struct vk_properties properties;
-   hk_get_device_properties(&pdev->dev, instance, &properties);
+   hk_get_device_properties(&pdev->dev, instance, &supported_features,
+                            &properties);
 
    properties.drmHasRender = true;
    properties.drmRenderMajor = major(render_dev);
