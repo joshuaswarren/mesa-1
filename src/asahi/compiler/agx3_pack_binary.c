@@ -1834,7 +1834,6 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    uint8_t len = 0;
 
    const bool combined_array_lod = array && !cube && !staged_offset &&
-      (offset || vertex_stage || compute_stage) &&
       ((explicit_lod && !immediate_lod) || register_bias);
    const uint16_t offset_base = I->src[5].value + (shadow ? 2 : 0);
    if (bias_min) {
@@ -1969,7 +1968,6 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    if (array && !cube && !query_lod && !combined_array_lod &&
        !register_offset &&
        !staged_offset &&
-       (vertex_stage || compute_stage || shadow || implicit_lod || offset) &&
        (!agx3_tex_stage_array_layer(
            enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
            I->src[0].discard, bytes, &len) ||

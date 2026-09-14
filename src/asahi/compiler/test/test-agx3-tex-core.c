@@ -695,13 +695,16 @@ test_sample_witnesses(void)
    bad.lod_x64 = 0x1000;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
+   /* A driver array's GPR layer is staged, so the bias moves to f29/f37=1
+    * beside f77=2, as in Apple's texture2d_array bias(1.0) fragment
+    * function with a runtime layer: 05800cb8b0000701010010040100. */
    bad.lod_x64 = 32;
    bad.array = true;
    bad.array_layer = 22;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b00005b7010010000102"));
+         hex_eq(bytes, length, "05800cb8b0000701010010020100"));
 
    bad = (struct agx3_tex_sample_desc){
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
@@ -1064,6 +1067,8 @@ test_gradient_and_register_bias(void)
    bad.lod_x64 = 32;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
+   /* A driver array's GPR layer is staged with f77=2: exactly Apple's
+    * texture2d_array gradient2d() fragment function with a runtime layer. */
    bad = grad;
    bad.array = true;
    bad.array_layer = 22;
@@ -1071,11 +1076,13 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0000fb5000010000100"));
+         hex_eq(bytes, length, "05800cb8b0000c01000010000100"));
    bad = bias_reg;
    bad.lod_x64 = 32;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
+   /* Likewise Apple's texture2d_array bias(b) fragment function with a
+    * runtime layer, which publishes layer and bias with one PACK_SMPIR. */
    bad = bias_reg;
    bad.array = true;
    bad.array_layer = 22;
@@ -1083,8 +1090,11 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0000db5010010000100"));
+         hex_eq(bytes, length, "05800cb8b0000800010010000100"));
 
+   /* Apple's texture2d_array fragment functions with a runtime layer, at
+    * level(2.0) and at level(b): the staged layer (f77=2) carries the level
+    * in f29/f37 or the packed bank. */
    struct agx3_tex_sample_desc array_level = grad_apple;
    array_level.array = true;
    array_level.array_layer = 22;
@@ -1093,13 +1103,13 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0008db6010010000108"));
+         hex_eq(bytes, length, "05800cb8b0000901010010080100"));
    array_level.lod = AGX3_TEX_LOD_REGISTER;
    array_level.lod_x64 = 0;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0008fb4010010000100"));
+         hex_eq(bytes, length, "05800cb8b0000801010010000100"));
 
    bad = grad_apple;
    bad.array = true;

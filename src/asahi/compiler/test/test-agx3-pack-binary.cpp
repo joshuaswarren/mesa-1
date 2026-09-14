@@ -12787,7 +12787,12 @@ TEST_F(AGX3PackBinary, Gradient3DSampleUsesNativeFragmentStagingFootprint)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 32);
 }
 
-TEST_F(AGX3PackBinary, ArrayGradientNamesLayerDirectly)
+/* SMP's direct f31/f37=3 layer names a uniform half, so a driver array
+ * gradient, whose layer is a GPR, stages it with PACK_SMPIR and reads it with
+ * f77=2, as Apple's texture2d_array gradient2d() fragment function with a
+ * runtime layer does: 17055406000c0000f0c00400 05800cb8b0000c01000010000100.
+ */
+TEST_F(AGX3PackBinary, ArrayGradientStagesLayer)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
@@ -12814,6 +12819,9 @@ TEST_F(AGX3PackBinary, ArrayGradientNamesLayerDirectly)
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 22, 1, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 24, 1, 0, false, false, bytes,
+                                          &len));
+   append(want, bytes, len);
    const uint16_t bank[4] = {8, 10, 12, 14};
    for (unsigned i = 0; i < 4; ++i) {
       ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, bank[i], 32 + 2 * i, 1, 0,
@@ -12829,7 +12837,6 @@ TEST_F(AGX3PackBinary, ArrayGradientNamesLayerDirectly)
    d.wait_mask = 1;
    d.final = true;
    d.array = true;
-   d.array_layer = 24;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,

@@ -532,13 +532,13 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool direct_offset_array =
       apple_fragment_abi && d->array && d->offset_staged &&
       !d->offset_staged_array;
-   /* SMP's direct f31/f37=3 layer names a uniform half, so a driver cube
-    * array, whose layer is a GPR, reads the layer staged with CEM's face. */
+   /* SMP's direct f31/f37=3 layer names a uniform half. A driver array's
+    * layer is a GPR, so every driver array reads a staged layer (f77=2): a
+    * cube array stages it with CEM's face, any other array with PACK_SMPIR,
+    * whatever the stage and LOD form. */
    const bool staged_driver_array =
       d->array && d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
-      !direct_offset_array &&
-      (d->cube || d->vertex_stage || d->compute_stage || d->shadow ||
-       d->lod == AGX3_TEX_LOD_AUTO || d->offset);
+      !direct_offset_array;
    unsigned operand_profile = apple_fragment_abi ? 3 : 0;
    struct agx3_field_kv base[20];
    unsigned nb = 0;
