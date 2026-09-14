@@ -106,6 +106,11 @@ hk_agx3_g17p_direct_color_resolve_supported(
           32)
       return false;
 
+   /* An RGB9E5 tile keeps each sample's packed word, which averages no
+    * better. */
+   if (format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+      return false;
+
    return (tib->nr_samples == 2 || tib->nr_samples == 4) &&
           color_attachment_count == 1 && has_resolve_target &&
           average_resolve && !store_source &&

@@ -2554,6 +2554,18 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
       &tib, 1, true, true, false));
    CHECK(hk_agx3_g17p_multisample_store_supported(&tib, 1, true, 4));
+
+   /* So do RGB9E5 samples, each one packed word. */
+   enum pipe_format rgb9e5[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R9G9B9E5_FLOAT,
+   };
+   for (unsigned samples = 2; samples <= 4; samples += 2) {
+      tib = agx_build_tilebuffer_layout(rgb9e5, 1, samples, false);
+      CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+      CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+         &tib, 1, true, true, false));
+      CHECK(hk_agx3_g17p_multisample_store_supported(&tib, 1, true, samples));
+   }
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(NULL));
    return 0;
 }

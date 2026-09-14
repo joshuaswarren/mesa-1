@@ -436,7 +436,9 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
    EXPECT_TRUE(key.g17p_rt0_eot_i32);
    EXPECT_EQ(agx_g17p_rt0_pbe_format(PIPE_FORMAT_R9G9B9E5_FLOAT),
              PIPE_FORMAT_R32_UINT);
-   tib = agx_build_tilebuffer_layout(rgb9e5, 1, 2, false);
+   tib = agx_build_tilebuffer_layout(rgb9e5, 1, 4, false);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+   tib = agx_build_tilebuffer_layout(rgb9e5, 1, 1, true);
    EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
 }
 
