@@ -8254,6 +8254,37 @@ TEST_F(AGX3PackBinary, G17PNormalized16MatchesNativeColourPrograms)
          : std::vector<uint8_t>{0x17,0x04,0x56,0x02,0x01,0x04,0x14,0x4a};
       EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len), native);
    }
+
+   /* A pair of 16-bit lanes spans two source registers: applegpu_g17p
+    * RGBA16Unorm and RGBA16Snorm blending unpacks the destination with these
+    * two reads. */
+   for (bool snorm : {false, true}) {
+      struct agx3_normflt_desc first = {};
+      first.dest = 4;
+      first.dest_hint = true;
+      first.src = 0;
+      first.two_lanes = true;
+      first.is_16bit = true;
+      first.snorm = snorm;
+      first.wait_mask = 1u << 5;
+      uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_normflt_encode(enc, &first, bytes, &len));
+      const std::vector<uint8_t> first_native = snorm
+         ? std::vector<uint8_t>{0x17,0x04,0x56,0x04,0x01,0x00,0x1c,0xaa}
+         : std::vector<uint8_t>{0x17,0x04,0x56,0x04,0x01,0x00,0x1c,0xca};
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len), first_native);
+
+      struct agx3_normflt_desc second = first;
+      second.dest = 0;
+      second.dest_hint = false;
+      second.src = 2;
+      second.wait_mask = 0;
+      ASSERT_TRUE(agx3_normflt_encode(enc, &second, bytes, &len));
+      const std::vector<uint8_t> second_native = snorm
+         ? std::vector<uint8_t>{0x17,0x04,0x54,0x00,0x00,0x04,0x1c,0xaa}
+         : std::vector<uint8_t>{0x17,0x04,0x54,0x00,0x00,0x04,0x1c,0xca};
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len), second_native);
+   }
 }
 
 TEST_F(AGX3PackBinary, G17PFltnormStartIsPositionNotFirstUniformRead)
