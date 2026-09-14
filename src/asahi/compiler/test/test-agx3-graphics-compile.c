@@ -5756,6 +5756,91 @@ build_fs_texture_imm(void)
  * second atlas/decoration texture with the same interpolated UV. Keep that
  * real two-AUTO fragment shape in the compiler oracle: native G17P clears the
  * sample-group marker on the first SMP and emits it only on the final SMP. */
+/*
+ * One mediump sampler2DShadow sampled three times at the same coordinates
+ * with three references, which is KHR-GL30.texture_repeat_mode's depth
+ * shader. Each sample owns a staging group, and its comparison reference
+ * belongs to that group at bank + 4. Staged at a fixed half 4 instead, all
+ * three samples read whichever reference was written last and every depth
+ * repeat-mode case fails on hardware while the shader still compiles.
+ */
+static bool
+test_g17p_three_shadow_sample_references(void)
+{
+   nir_builder b =
+      nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &agx_nir_options,
+                                     "G17P three shadow references");
+   nir_def *bary =
+      nir_load_barycentric_pixel(&b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *uv = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   static const float refs[3] = {0.3f, 0.5f, 0.8f};
+   nir_def *chan[3];
+   for (unsigned i = 0; i < 3; ++i) {
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+      tex->op = nir_texop_tex;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->is_shadow = true;
+      tex->is_new_style_shadow = true;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1, uv);
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator,
+                                        nir_imm_float(&b, refs[i]));
+      nir_def_init(&tex->instr, &tex->def, 1, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      chan[i] = &tex->def;
+   }
+   fs_store_colour(&b, nir_vec4(&b, chan[0], chan[1], chan[2],
+                                nir_imm_float(&b, 1.0f)));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   b.shader->info.fs.needs_coarse_quad_helper_invocations = true;
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(b.shader, &key, &part) && part.binary;
+
+   /* Three distinct reference COPYs, one per staging group. Byte 0 carries
+    * the destination half as (half / 2) << 4, so halves 4, 12 and 20 are
+    * 0x2b, 0x6b and 0xab. Byte 2 is the COPY's operand form -- 0x29 compact
+    * or 0x2f register-source, both of which the references use depending on
+    * where the allocator put each value. Coordinates occupy the even halves
+    * of each group and never carry these destination bytes. Before the fix
+    * the second and third samples both wrote 0x2b, so one reference served
+    * all three compares. */
+   unsigned found = 0;
+   for (unsigned group = 0; ok && group < 3; ++group) {
+      const uint8_t dest_byte = (uint8_t)(((8 * group + 4) / 2) << 4 | 0x0b);
+      for (unsigned i = 0; part.binary && i + 3 <= part.info.binary_size; ++i) {
+         const uint8_t *at = (const uint8_t *)part.binary + i;
+         if (at[0] == dest_byte && (at[2] == 0x29 || at[2] == 0x2f)) {
+            found++;
+            break;
+         }
+      }
+   }
+   ok &= found == 3 && part.info.agx3_staging_known &&
+         part.info.agx3_staging_halfs == 22;
+   if (!ok) {
+      fprintf(stderr,
+              "G17P shadow references not per-group: found %u of 3, "
+              "staging %u halfs\n",
+              found, part.info.agx3_staging_halfs);
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static nir_shader *
 build_fs_two_texture_samples(void)
 {
@@ -8146,6 +8231,7 @@ main(int argc, char **argv)
    RUN(test_g17p_background_f16_clear_narrowing);
    RUN(test_g17p_half_norm8_epilog);
    RUN(test_g17p_half_rgb10_epilog);
+   RUN(test_g17p_three_shadow_sample_references);
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_frag_sidefx_late_test_once);

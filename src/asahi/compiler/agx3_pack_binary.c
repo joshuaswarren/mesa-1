@@ -2312,9 +2312,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          return false;
    }
 
+   /* The comparison reference belongs to this sample's own staging group,
+    * at bank + 4 (see the sampler-private note above). Staged at a literal
+    * half 4, three sampler2DShadow samples in one fragment all read
+    * whichever reference was written last:
+    * KHR-GL30.texture_repeat_mode's depth cases are exactly that shader. */
    if (shadow && !cube &&
        (!agx3_tex_stage_copy_hints(
-           enc, 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
+           enc, coord + 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
            staged_offset ? false : I->src[5].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
       return false;
