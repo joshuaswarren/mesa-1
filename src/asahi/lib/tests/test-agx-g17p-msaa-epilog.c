@@ -17,6 +17,7 @@
 #include "agx_compile.h"
 #include "agx_linker.h"
 #include "agx_nir.h"
+#include "agx_tilebuffer.h"
 #include "nir_builder.h"
 #include "util/format/u_formats.h"
 #include <stdio.h>
@@ -294,14 +295,67 @@ check_coverage_after_depth(void)
 }
 
 static bool
-check_native_spill(unsigned write_mask, bool blend)
+check_half2_sample_exports(void)
+{
+   struct agx_fs_epilog_key key = {
+      .nr_samples = 4,
+      .defer_monolithic_msaa = true,
+      .link.loc_written = 12,
+      .link.size_32 = 12,
+      .rt_formats = {PIPE_FORMAT_R16G16B16A16_SINT,
+                     PIPE_FORMAT_R16G16B16A16_FLOAT},
+   };
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &key);
+   memset(key.remap, -1, sizeof(key.remap));
+   for (unsigned i = 0; i < 2; ++i) {
+      key.remap[i] = i + 2;
+      key.blend.rt[i].colormask = 15;
+      key.blend.rt[i].mode = agx_pack_blend_standard(
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+   }
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P distinct half2 sample exports");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_to_per_sample(b.shader);
+   agx_nir_unroll_g17p_samples(b.shader, 4, key.link.loc_written);
+   bool progress;
+   do {
+      progress = nir_opt_constant_folding(b.shader);
+      progress |= nir_opt_algebraic(b.shader);
+   } while (progress);
+   agx_nir_hoist_g17p_zs_writes(b.shader);
+   agx_nir_lower_g17p_tile_samples(b.shader, 4);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key backend = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = 4,
+   };
+   BITSET_SET(backend.g17p_tile_partitions, 0);
+   BITSET_SET(backend.g17p_tile_partitions, 8);
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(b.shader, &backend, &part);
+   if (!ok)
+      fprintf(stderr, "distinct half2 per-sample epilog did not compile\n");
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+check_native_spill(unsigned write_mask, bool blend, bool depth, bool resident)
 {
    struct agx_fs_epilog_key key = {
       .nr_samples = 4,
       .native_spills = true,
+      .max_bytes_per_tile = resident ? 32768 : 0,
+      .max_samples_per_tile = resident ? 2048 : 0,
       .emrt_heap_base = 28,
       .link.loc_written = 7,
       .link.size_32 = 7,
+      .link.write_z = depth,
       .rt_formats = {PIPE_FORMAT_R8G8B8A8_UNORM,
                      PIPE_FORMAT_R16G16B16A16_FLOAT,
                      PIPE_FORMAT_R32G32B32A32_UINT},
@@ -332,21 +386,32 @@ check_native_spill(unsigned write_mask, bool blend)
    };
    BITSET_SET(backend.g17p_tile_partitions, 0);
    BITSET_SET(backend.g17p_tile_partitions, 16);
+   if (resident)
+      BITSET_SET(backend.g17p_tile_partitions, 24);
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &backend, &part);
+   const bool staging_ok = !depth || resident || part.info.agx3_staging_halfs >= 32;
+   if (compiled && !staging_ok)
+      fprintf(stderr, "four depth exports and image write share %u staging halves\n",
+              part.info.agx3_staging_halfs);
    if (!compiled)
       fprintf(stderr, "native spill epilog mask=%u blend=%u did not compile\n",
               write_mask, blend);
    free(part.binary);
    ralloc_free(b.shader);
-   return compiled;
+   return compiled && staging_ok;
 }
 
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "half2"))
+      return check_half2_sample_exports() ? 0 : 1;
    if (argc == 3)
-      return check_native_spill(atoi(argv[1]), atoi(argv[2])) ? 0 : 1;
+      return check_native_spill(atoi(argv[1]), atoi(argv[2]), false, false) ? 0 : 1;
+   if (argc == 4)
+      return check_native_spill(atoi(argv[1]), atoi(argv[2]), false,
+                                atoi(argv[3])) ? 0 : 1;
 
    bool ok = true;
    for (unsigned samples = 1; samples <= 4; samples *= 2)
@@ -356,10 +421,17 @@ main(int argc, char **argv)
    for (unsigned samples = 2; samples <= 4; samples *= 2)
       ok &= check_unrolled_single_blend(samples);
    ok &= check_coverage_after_depth();
+   ok &= check_half2_sample_exports();
    for (unsigned mask = 1; mask < 8; ++mask) {
-      ok &= check_native_spill(mask, false);
-      ok &= check_native_spill(mask, true);
+      ok &= check_native_spill(mask, false, false, false);
+      ok &= check_native_spill(mask, true, false, false);
    }
+   ok &= check_native_spill(7, true, true, false);
+   for (unsigned mask = 1; mask < 8; ++mask) {
+      ok &= check_native_spill(mask, false, false, true);
+      ok &= check_native_spill(mask, true, false, true);
+   }
+   ok &= check_native_spill(7, true, true, true);
 
    printf("%s\n", ok ? "PASS" : "FAIL");
    return ok ? 0 : 1;

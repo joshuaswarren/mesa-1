@@ -534,9 +534,9 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    b->shader->info.stage = MESA_SHADER_FRAGMENT;
    b->shader->info.name = "FS epilog";
 
-   struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_bounded(
+   struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_with_limits(
       key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples, true,
-      key->max_sample_size_B);
+      key->max_sample_size_B, key->max_bytes_per_tile, key->max_samples_per_tile);
 
    unsigned rt_order[AGX_MAX_RENDER_TARGETS];
    for (unsigned rt = 0; rt < ARRAY_SIZE(rt_order); ++rt)

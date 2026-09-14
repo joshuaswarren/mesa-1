@@ -7192,6 +7192,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * colour store, coverage update, acquisition or branch follows it. */
    const agx_instr *g17p_final_release = NULL;
    bool has_zs_emit = false;
+   unsigned zs_staging_halfs = 0;
    bool g17p_fragment_helper_protocol =
       enc == AGX_ISA_ENCODING_AGX3B &&
       ctx->stage == MESA_SHADER_FRAGMENT && ctx->nir &&
@@ -7244,6 +7245,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (scan_I->op == AGX_OPCODE_ZS_EMIT ||
              scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             has_zs_emit = true;
+         if (scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
+            zs_staging_halfs += (scan_I->zs & 1) ? 4 : 2;
          if (scan_I->op == AGX_OPCODE_ATOMIC ||
              scan_I->op == AGX_OPCODE_DEVICE_STORE ||
              scan_I->op == AGX_OPCODE_IMAGE_WRITE)
@@ -7883,14 +7886,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * unmarked; restarting here corrupts the coefficient-fetch protocol. */
    bool fragment_input_started = false;
    struct agx3_staging_banks staging_banks = {0};
-   /* Samples stage fixed halves 0..19 and a fragment's late depth test and
-    * coverage update stage halves 0..3, all without a bank allocator. Keep
-    * image-write banks clear of both. */
-   const uint16_t image_write_bank_floor =
+   /* Samples stage fixed halves 0..19. Per-sample DEPTHF exports reserve
+    * successive four-half payloads (two for stencil-only), not just the
+    * first sample's 0..3. Image writes must not claim any of those halves,
+    * including payloads that later unrolled samples have yet to publish. */
+   const uint16_t fixed_staging_floor =
       texture_samples_left ? 24
       : (ctx->stage == MESA_SHADER_FRAGMENT &&
          (has_coverage_write || has_zs_emit)) ? 8
                                               : 0;
+   const uint16_t image_write_bank_floor =
+      MAX2(fixed_staging_floor, ALIGN_POT(zs_staging_halfs, 8));
    if ((has_coverage_write || (has_memory_write && !ctx->key->secondary)) &&
        enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -8768,7 +8774,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      !agx3_append(emission, bytes, len))) ||
                    !agx3_emit_tile(emission, enc, I, slot, wait, false, false,
                                    g17p_mrt.raw32_store,
-                                   g17p_mrt.count >= 3 || ctx->key->g17p_emrt,
+                                   /* Native per-sample exports use halves
+                                    * 0..31 even for one/two targets. */
+                                   true,
                                    ctx->key->g17p_emrt && !load &&
                                       I->src[0].value >= 16) ||
                    (!load && last &&

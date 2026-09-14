@@ -6395,7 +6395,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
                depth_ops = 1;
                break;
             }
-            if (depth_ops == 1 || depth_ops == 2)
+            /* Native sample loops keep the depth transaction across each
+             * sample's colour accesses. The generated eMRT epilog has the
+             * same lifetime even when its whole layout fits in the tile. */
+            if (depth_ops == 1 ||
+                (depth_ops == 2 && !(ctx->key->g17p_emrt && multisample_stores)))
                return false;
             if (!first_wait)
                first_wait = I;
@@ -6403,7 +6407,8 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          case AGX_OPCODE_ZS_EMIT_AGX3:
             /* A sample-shaded epilog writes depth/stencil once per unrolled
              * sample inside the same class-1 transaction. */
-            if (depth_ops != 1 && depth_ops != 2)
+            if (depth_ops != 1 && depth_ops != 2 &&
+                !(ctx->key->g17p_emrt && multisample_stores && depth_ops == 3))
                return false;
             depth_ops = 2;
             break;

@@ -1642,9 +1642,14 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    const bool layered =
       dev->dev.chip != AGX_CHIP_G17P ||
       !hk_agx3_g17p_single_layer_rendering(render->view_mask, layer_count);
-   render->tilebuffer = agx_build_tilebuffer_layout_bounded(
+   /* Storage capacity and raster samples are independent limits. In
+    * particular 16x16 at 4x may occupy the full32KiB, while 32x32 at 4x
+    * exceeds the sample budget even for an eight-byte sample. */
+   const bool native_tile_limits = dev->dev.chip == AGX_CHIP_G17P;
+   render->tilebuffer = agx_build_tilebuffer_layout_with_limits(
       formats, render->color_att_count, render->tilebuffer.nr_samples, layered,
-      dev->dev.chip == AGX_CHIP_G17P ? AGX_G17P_MAX_BYTES_PER_SAMPLE : 0);
+      dev->dev.chip == AGX_CHIP_G17P ? AGX_G17P_MAX_BYTES_PER_SAMPLE : 0,
+      native_tile_limits ? 32768 : 0, native_tile_limits ? 2048 : 0);
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        !hk_agx3_g17p_rt0_tile_layout_supported(&render->tilebuffer)) {
@@ -3333,9 +3338,10 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
    BITSET_DECLARE(g17p_tile_partitions, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
    if (dev->dev.chip == AGX_CHIP_G17P) {
       const struct agx_tilebuffer_layout tib =
-         agx_build_tilebuffer_layout_bounded(
+         agx_build_tilebuffer_layout_with_limits(
             key->epilog.rt_formats, ARRAY_SIZE(key->epilog.rt_formats),
-            key->epilog.nr_samples, true, key->epilog.max_sample_size_B);
+            key->epilog.nr_samples, true, key->epilog.max_sample_size_B,
+            key->epilog.max_bytes_per_tile, key->epilog.max_samples_per_tile);
       for (unsigned rt = 0; rt < ARRAY_SIZE(tib.logical_format); ++rt) {
          if (tib.logical_format[rt] != PIPE_FORMAT_NONE && !tib.spilled[rt])
             BITSET_SET(g17p_tile_partitions, tib._offset_B[rt]);
@@ -5378,6 +5384,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
       struct hk_rendering_state *render = &cmd->state.gfx.render;
       key.epilog.max_sample_size_B = render->tilebuffer.max_sample_size_B;
+      key.epilog.max_bytes_per_tile = render->tilebuffer.max_bytes_per_tile;
+      key.epilog.max_samples_per_tile = render->tilebuffer.max_samples_per_tile;
       for (uint32_t i = 0; i < render->color_att_count; i++) {
          key.epilog.rt_formats[i] =
             hk_format_to_pipe_format(render->color_att[i].vk_format);

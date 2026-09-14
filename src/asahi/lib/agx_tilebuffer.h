@@ -58,6 +58,11 @@ struct agx_tilebuffer_layout {
     * the 64-byte AGX2 bound. The tile size bounds it separately. */
    uint8_t max_sample_size_B;
 
+   /* Independent storage and raster-sample budgets. Zero retains the legacy
+    * byte capacity or imposes no additional sample budget, respectively. */
+   uint16_t max_bytes_per_tile;
+   uint16_t max_samples_per_tile;
+
    /* Selected tile size in pixels. Either 32*32, 32*16, or 16*16. */
    uint16_t tile_size;
 
@@ -87,7 +92,7 @@ agx_tilebuffer_offset_B(struct agx_tilebuffer_layout *layout, unsigned rt)
 }
 
 static inline bool
-agx_tilebuffer_spills(struct agx_tilebuffer_layout *layout)
+agx_tilebuffer_spills(const struct agx_tilebuffer_layout *layout)
 {
    for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (layout->spilled[rt])
@@ -107,6 +112,13 @@ struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
                                     uint8_t nr_cbufs, uint8_t nr_samples,
                                     bool layered, uint8_t max_sample_size_B);
+
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
+                                      uint8_t nr_cbufs, uint8_t nr_samples,
+                                      bool layered, uint8_t max_sample_size_B,
+                                      uint16_t max_bytes_per_tile,
+                                      uint16_t max_samples_per_tile);
 
 /* Compact attachment slots for internal programs without moving tile data.
  * map[dense slot] identifies the original logical attachment. */

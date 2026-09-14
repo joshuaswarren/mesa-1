@@ -305,6 +305,8 @@ struct agx_fs_epilog_key {
    uint8_t nr_samples;
    /* agx_tilebuffer_layout::max_sample_size_B of the render pass. */
    uint8_t max_sample_size_B;
+   uint16_t max_bytes_per_tile;
+   uint16_t max_samples_per_tile;
    bool force_small_tile;
    bool preserve_zero_mask;
    bool lower_srgb;

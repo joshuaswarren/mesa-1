@@ -636,3 +636,57 @@ TEST(Tilebuffer, G17PRGB32EOTKey)
    EXPECT_EQ(key.g17p_rt0_eot_words, 0);
    EXPECT_FALSE(key.g17p_rt0_eot_i32);
 }
+
+TEST(Tilebuffer, IndependentNativeStorageAndSampleLimits)
+{
+   enum pipe_format mixed[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R32G32B32A32_UINT,
+   };
+   const auto legacy = agx_build_tilebuffer_layout_bounded(
+      mixed, 3, 4, false, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+   EXPECT_TRUE(legacy.spilled[0]);
+
+   const auto native = agx_build_tilebuffer_layout_with_limits(
+      mixed, 3, 4, false, AGX_G17P_MAX_BYTES_PER_SAMPLE, 32768, 2048);
+   EXPECT_FALSE(agx_tilebuffer_spills(&native));
+   EXPECT_EQ(native.sample_size_B, 32u);
+   EXPECT_EQ(native.tile_size, 16u * 16u);
+   EXPECT_EQ(native.sample_size_B * native.nr_samples * native.tile_size, 32768u);
+   EXPECT_EQ(native._offset_B[2], 0u);
+   EXPECT_EQ(native._offset_B[1], 16u);
+   EXPECT_EQ(native._offset_B[0], 24u);
+
+   enum pipe_format rgba8[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   for (unsigned samples : {1u, 2u, 4u}) {
+      const auto tib = agx_build_tilebuffer_layout_with_limits(
+         rgba8, 1, samples, false, AGX_G17P_MAX_BYTES_PER_SAMPLE, 32768, 2048);
+      EXPECT_EQ(tib.tile_size, samples == 4 ? 32u * 16u : 32u * 32u);
+      EXPECT_LE(tib.nr_samples * tib.tile_size, 2048u);
+   }
+
+   /* Limits must survive attachmentless rendering's deferred sample count. */
+   auto deferred = agx_build_tilebuffer_layout_with_limits(
+      mixed, 3, 0, false, AGX_G17P_MAX_BYTES_PER_SAMPLE, 32768, 2048);
+   agx_tilebuffer_set_samples(&deferred, 4);
+   EXPECT_EQ(deferred.max_bytes_per_tile, 32768u);
+   EXPECT_EQ(deferred.max_samples_per_tile, 2048u);
+   EXPECT_EQ(deferred.tile_size, native.tile_size);
+   EXPECT_EQ(deferred.sample_size_B, native.sample_size_B);
+   EXPECT_FALSE(agx_tilebuffer_spills(&deferred));
+
+   /* True over-capacity layouts still spill. */
+   enum pipe_format wide[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R32G32B32A32_UINT,
+      PIPE_FORMAT_R32G32B32A32_UINT,
+      PIPE_FORMAT_R32G32B32A32_UINT,
+   };
+   const auto spilling = agx_build_tilebuffer_layout_with_limits(
+      wide, 3, 4, false, AGX_G17P_MAX_BYTES_PER_SAMPLE, 32768, 2048);
+   EXPECT_TRUE(spilling.spilled[2]);
+   EXPECT_FALSE(spilling.spilled[0]);
+   EXPECT_FALSE(spilling.spilled[1]);
+}

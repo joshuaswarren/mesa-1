@@ -14,13 +14,10 @@
 /* Maximum number of bytes per tile on G13G. This may change in future versions
  * of the architecture.
  *
- * Do not "fix" the minus one for G17P. Four 8-byte samples of RGBA8 at 32x32
- * need exactly 32768 bytes, so 4x colour misses this bound by a single byte
- * and falls to a 32x16 tile, which looks like an off-by-one worth testing. It
- * was tested: admitting exactly 32768 and letting 4x keep a 32x32 tile loses
- * the device outright (vkWaitForFences -> VK_ERROR_DEVICE_LOST on A18 Pro,
- * 2026-09-10). The bound is real; a 32x32 tile at 4x is not something this
- * hardware will do.
+ * The 2026-09-10 G17P experiment admitting 32768 bytes with 32x32 pixels at
+ * 4x lost the device. That configuration also uses 4096 raster samples, so
+ * it does not isolate storage capacity from the raster-sample budget. Keep
+ * this legacy default; callers must supply independently qualified limits.
  */
 #define MAX_BYTES_PER_TILE (32768 - 1)
 
@@ -32,22 +29,9 @@
 /* Minimum tile size in pixels, architectural. */
 #define MIN_TILE_SIZE_PX (16 * 16)
 
-/* Diagnostic: admit a tile of exactly 32768 bytes rather than one byte less.
- *
- * This exists for one specific question. Four 8-byte samples of RGBA8 at 32x32
- * need exactly 32768 bytes, so 4x colour misses the 32x32 tile by a single
- * byte and falls to 32x16 -- and 32x16 is a tile geometry that essentially
- * nothing else on G17P reaches, because at one sample you would need more than
- * 31 bytes per pixel to get there and the G17P tile gate admits almost no such
- * configuration. The hardware symptom of 4x (A01b: rows 0-15 exact, rows 16-31
- * absent) is the tile height, not a sample count.
- *
- * So either the limit really is 32767 and the 32x16 path is broken, or the
- * limit is 32768 on this part and 4x should never have left 32x32. Setting
- * AGX_TILE_32K=1 picks the second and changes exactly that one comparison;
- * the matching SPECLM bound in agx_ioto_state_core.c moves with it. Off by
- * default: the value here is inherited from G13G and has no G17P witness in
- * either direction.
+/* Legacy opt-in capacity-only diagnostic. Explicit device limits take
+ * precedence. This does not supply a raster-sample budget and must not be
+ * used as the G17P device policy: 32x32 at4x lost the device in that test.
  */
 static bool
 agx_tile_allows_full_32k(void)
@@ -58,18 +42,21 @@ agx_tile_allows_full_32k(void)
    return enabled != 0;
 }
 
-/* Select the largest tile size that fits */
+/* Select the largest tile size satisfying both independent budgets. */
 static uint16_t
-agx_select_tile_size(unsigned px_size_B)
+agx_select_tile_size(unsigned sample_size_B, unsigned nr_samples,
+                     unsigned max_bytes_per_tile, unsigned max_samples_per_tile)
 {
-   const unsigned limit =
-      agx_tile_allows_full_32k() ? 32768 : MAX_BYTES_PER_TILE;
+   const unsigned px_size_B = sample_size_B * nr_samples;
+   const unsigned sizes[] = {32 * 32, 32 * 16, 16 * 16};
+   for (unsigned i = 0; i < ARRAY_SIZE(sizes); ++i) {
+      if (px_size_B * sizes[i] <= max_bytes_per_tile &&
+          (!max_samples_per_tile ||
+           nr_samples * sizes[i] <= max_samples_per_tile))
+         return sizes[i];
+   }
 
-   assert(px_size_B <= (limit / MIN_TILE_SIZE_PX));
-
-   return ((px_size_B * 32 * 32) <= limit)   ? (32 * 32)
-          : ((px_size_B * 32 * 16) <= limit) ? (32 * 16)
-                                             : MIN_TILE_SIZE_PX;
+   UNREACHABLE("No tile fits the device allocation limits");
 }
 
 static inline unsigned
@@ -105,13 +92,28 @@ agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
                                     uint8_t nr_cbufs, uint8_t nr_samples,
                                     bool layered, uint8_t max_sample_size_B)
 {
+   return agx_build_tilebuffer_layout_with_limits(
+      formats, nr_cbufs, nr_samples, layered, max_sample_size_B, 0, 0);
+}
+
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
+                                      uint8_t nr_cbufs, uint8_t nr_samples,
+                                      bool layered, uint8_t max_sample_size_B,
+                                      uint16_t max_bytes_per_tile,
+                                      uint16_t max_samples_per_tile)
+{
    struct agx_tilebuffer_layout tib = {
       .nr_samples = nr_samples,
       .layered = layered,
       .max_sample_size_B = max_sample_size_B,
+      .max_bytes_per_tile = max_bytes_per_tile,
+      .max_samples_per_tile = max_samples_per_tile,
    };
    const unsigned max_bytes_per_sample =
       max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE;
+   const unsigned tile_capacity =
+      max_bytes_per_tile ? max_bytes_per_tile : MAX_BYTES_PER_TILE;
 
    uint32_t offset_B = 0;
    uint8_t order[] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -144,7 +146,7 @@ agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
       unsigned new_offset_B = offset_B + size_B;
       bool fits = (new_offset_B <= max_bytes_per_sample) &&
                   (ALIGN_POT(new_offset_B, 8) * MIN_TILE_SIZE_PX *
-                   nr_samples) <= MAX_BYTES_PER_TILE;
+                   nr_samples) <= tile_capacity;
       if (fits) {
          tib._offset_B[rt] = offset_B;
          offset_B = new_offset_B;
@@ -162,7 +164,11 @@ agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
       offset_B = MAX2(offset_B, 1);
 
    tib.sample_size_B = align(offset_B, 8);
-   tib.tile_size = agx_select_tile_size(tib.sample_size_B * nr_samples);
+   tib.tile_size = agx_select_tile_size(
+      tib.sample_size_B, nr_samples,
+      max_bytes_per_tile ? max_bytes_per_tile
+                        : (agx_tile_allows_full_32k() ? 32768 : MAX_BYTES_PER_TILE),
+      max_samples_per_tile);
 
    agx_tilebuffer_pack_usc(&tib);
    return tib;
@@ -182,9 +188,10 @@ agx_tilebuffer_set_samples(struct agx_tilebuffer_layout *tib,
 {
    assert(tib->nr_samples == 0 && "must not be initialized");
 
-   *tib = agx_build_tilebuffer_layout_bounded(
+   *tib = agx_build_tilebuffer_layout_with_limits(
       tib->logical_format, ARRAY_SIZE(tib->logical_format), nr_samples,
-      tib->layered, tib->max_sample_size_B);
+      tib->layered, tib->max_sample_size_B, tib->max_bytes_per_tile,
+      tib->max_samples_per_tile);
 }
 
 enum pipe_format

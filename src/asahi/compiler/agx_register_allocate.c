@@ -1690,7 +1690,9 @@ agx3_tile_store_bank(agx_context *ctx)
     * BG builtins of other formats store every width from the same bank:
     * halves 0..31 for up to four targets and 0..63 for more. Its blending
     * fragments of four or more targets do too: eight RGBA16Float targets
-    * store from halves 0..31, five from 0..19. */
+    * store from halves0..31, five from0..19. Per-sample native witnesses
+    * use that bank even with fewer targets: id_blend_4x stores RGBA8 from
+    * half28, and half2_sample4 stores SINT16/F16 from halves28..0. */
    const unsigned targets = BITSET_COUNT(tile_offsets);
    const bool mrt_bank =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
@@ -1699,7 +1701,13 @@ agx3_tile_store_bank(agx_context *ctx)
       targets >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
       targets <= AGX_MAX_RTS &&
       (ctx->key->secondary || ctx->key->g17p_mrt_bg);
-   return mrt_bank && targets > 4 ? 64 : raw32_bank || mrt_bank ? 32 : 16;
+   const bool sample_bank =
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      ctx->stage == MESA_SHADER_FRAGMENT && ctx->key->secondary &&
+      ctx->agx3_mrt_tile_ops_ordered && ctx->key->fs.nr_samples > 1 &&
+      targets >= 2;
+   return mrt_bank && targets > 4 ? 64
+          : raw32_bank || mrt_bank || sample_bank ? 32 : 16;
 }
 
 void
