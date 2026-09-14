@@ -4943,10 +4943,12 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             maximum_output = MAX2(maximum_output, I->src[0].value);
             break;
          case AGX_OPCODE_GET_SR:
-            /* Native vertex programs use both IDs as ordinary scalar
-             * producers ahead of their terminal UVS bundle. The SR encoder
-             * independently validates the witnessed hardware number/width. */
-            if (I->sr != AGX_SR_VERTEX_ID && I->sr != AGX_SR_INSTANCE_ID)
+            /* A system-value read is a pure producer, validated by the SR
+             * encoder. Inside the bundle only the two IDs native vertex
+             * programs read there are admitted; before it any SR is, such
+             * as the subgroup invocation a ballot reads. */
+            if (output_count && I->sr != AGX_SR_VERTEX_ID &&
+                I->sr != AGX_SR_INSTANCE_ID)
                return 0;
             break;
          default:
