@@ -1912,9 +1912,11 @@ test_indexed_storage_image_read(void)
     * component type is in the descriptor.  3D and 2D array are dimensions the
     * same encoder already takes. Storage cube and cube-array descriptors are
     * also 2D arrays, matching agx_emit_image_load()'s existing dimension
-    * transform. Mode 2 keeps the negative coverage on coherent access. */
-   for (unsigned mode = 0; mode < 7; ++mode) {
-      const bool expect_lowered = mode != 2;
+    * transform. Mode 2 is a coherent, volatile read, which takes the same
+    * native fetch; mode 7 keeps the negative coverage on non-readable
+    * access. */
+   for (unsigned mode = 0; mode < 8; ++mode) {
+      const bool expect_lowered = mode != 7;
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_COMPUTE, &agx_nir_options,
          "indexed read-only storage image");
@@ -1941,8 +1943,10 @@ test_indexed_storage_image_read(void)
          .image_array = mode == 4 || mode == 6,
          .format = mode == 1 ? PIPE_FORMAT_R8G8B8A8_UINT
                              : PIPE_FORMAT_R8G8B8A8_UNORM,
-         .access = ACCESS_RESTRICT | ACCESS_NON_WRITEABLE |
-                   (mode == 2 ? ACCESS_COHERENT : 0));
+         .access = ACCESS_RESTRICT |
+                   (mode == 2 ? ACCESS_COHERENT | ACCESS_VOLATILE
+                    : mode == 7 ? ACCESS_NON_READABLE
+                                : ACCESS_NON_WRITEABLE));
       nir_export_agx(&b, nir_channel(&b, value, 0), .base = 0);
 
       const bool lowered = agx_nir_lower_g17p_indexed_samplers(b.shader);

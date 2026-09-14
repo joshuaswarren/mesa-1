@@ -617,9 +617,20 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
        nir_src_as_uint(intr->src[2]) != 0 ||
        !nir_src_is_const(intr->src[3]) ||
        nir_src_as_uint(intr->src[3]) != 0 ||
-       (nir_intrinsic_access(intr) &
-        (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_NON_READABLE)))
+       (nir_intrinsic_access(intr) & ACCESS_NON_READABLE))
       return false;
+
+   /* Coherent and volatile reads take the same fetch.  G17P's texture read
+    * has no coherency field: metal-nt -arch applegpu_g17p compiles a
+    * read_write texture's read() after a write() to the same smp form as an
+    * access::read texture's read(), differing only in the staged coordinate
+    * halves and the result register,
+    *
+    *   texture2d<int, access::read>        05800cb8b0001701000000000100
+    *   texture2d<int, access::read_write>  05800cb9b0001701000000000200
+    *
+    * and the preceding store's fence already retires the write before any
+    * later texture instruction is issued. */
 
    /* The descriptor offset does not have to be a constant.  The rewrite below
     * is pure SSA arithmetic -- nir_iadd_imm() onto the offset, then one
