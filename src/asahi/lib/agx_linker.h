@@ -309,6 +309,11 @@ struct agx_fs_epilog_key {
    bool preserve_zero_mask;
    bool lower_srgb;
 
+   /* Leave pixel-shaded MSAA lowering to a caller that will unroll the
+    * per-sample epilog itself. Used by the G17P sample-shaded path.
+    */
+   bool defer_monolithic_msaa;
+
    /* Absolute uniform-half base for dynamic blend constants. Zero selects
     * the standard fragment ABI at AGX_ABI_FUNI_BLEND_R. HAL200 resource
     * pointers occupy that standard range, so a linked G17P epilog may place

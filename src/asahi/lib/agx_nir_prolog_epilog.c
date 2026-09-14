@@ -654,7 +654,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
        */
       b->cursor = nir_after_impl(b->impl);
       nir_export_agx(b, sample_id, .base = AGX_ABI_FIN_SAMPLE_MASK);
-   } else {
+   } else if (!key->defer_monolithic_msaa) {
       NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
    }
 

@@ -5933,8 +5933,8 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
     * register (agx_nir_lower_g17p_tile_samples). */
    const bool multisample_stores =
       ctx->key->fs.nr_samples > 1 && !ctx->key->fs.ignore_tib_dependencies;
-   agx_instr *loads[AGX_MAX_RTS] = {0};
-   agx_instr *stores[AGX_MAX_RTS] = {0};
+   agx_instr *loads[AGX_MAX_RTS * 4] = {0};
+   agx_instr *stores[AGX_MAX_RTS * 4] = {0};
    agx_instr *stop = NULL;
    agx_instr *first_wait = NULL;
    unsigned load_count = 0, store_count = 0;
@@ -5963,7 +5963,9 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
                first_wait = I;
             break;
          case AGX_OPCODE_ZS_EMIT_AGX3:
-            if (depth_ops != 1)
+            /* A sample-shaded epilog writes depth/stencil once per unrolled
+             * sample inside the same class-1 transaction. */
+            if (depth_ops != 1 && depth_ops != 2)
                return false;
             depth_ops = 2;
             break;
@@ -5985,21 +5987,29 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
                           I->src[1].value == 0xff) ||
                 !agx_is_null(I->src[2]))
                return false;
-            for (unsigned i = 0; i < store_count; ++i) {
-               if (stores[i]->pixel_offset == I->pixel_offset)
-                  return false;
+            if (!multisample_stores) {
+               for (unsigned i = 0; i < store_count; ++i) {
+                  if (stores[i]->pixel_offset == I->pixel_offset)
+                     return false;
+               }
             }
             stores[store_count++] = I;
             break;
          case AGX_OPCODE_LD_TILE:
             if (load_count >= ARRAY_SIZE(loads) || I->nr_dests != 1 ||
                 I->nr_srcs != 2 || I->explicit_coords ||
-                I->src[0].type != AGX_INDEX_IMMEDIATE ||
-                I->src[0].value != 0xff || !agx_is_null(I->src[1]))
+                !(multisample_stores
+                     ? I->src[0].type == AGX_INDEX_NORMAL &&
+                          I->src[0].size == AGX_SIZE_16
+                     : I->src[0].type == AGX_INDEX_IMMEDIATE &&
+                          I->src[0].value == 0xff) ||
+                !agx_is_null(I->src[1]))
                return false;
-            for (unsigned i = 0; i < load_count; ++i) {
-               if (loads[i]->pixel_offset == I->pixel_offset)
-                  return false;
+            if (!multisample_stores) {
+               for (unsigned i = 0; i < load_count; ++i) {
+                  if (loads[i]->pixel_offset == I->pixel_offset)
+                     return false;
+               }
             }
             loads[load_count++] = I;
             break;
@@ -6038,8 +6048,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       BITSET_TEST(written, 0);
    if (!stop || (keyed && unkeyed_store) ||
        store_count < (subset && !only_partition0 ? 1 : 2) ||
-       ((subset || multisample_stores) && load_count) ||
-       (depth_ops && (depth_ops != 3 || load_count)))
+       (subset && load_count) || (depth_ops && depth_ops != 3))
       return false;
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
@@ -6074,29 +6083,70 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          }
       }
    }
-   agx_instr *load_anchor = first_wait;
-   for (unsigned i = 0; i < load_count; ++i) {
-      list_del(&loads[i]->link);
-      list_add(&loads[i]->link, &load_anchor->link);
-      load_anchor = loads[i];
+   if (!multisample_stores) {
+      agx_instr *load_anchor = first_wait;
+      for (unsigned i = 0; i < load_count; ++i) {
+         list_del(&loads[i]->link);
+         list_add(&loads[i]->link, &load_anchor->link);
+         load_anchor = loads[i];
+      }
    }
 
-   /* Sort physical tile partitions by byte offset, highest first. */
-   for (unsigned i = 0; i < store_count; ++i) {
-      for (unsigned j = i + 1; j < store_count; ++j) {
-         if (stores[j]->pixel_offset > stores[i]->pixel_offset) {
-            agx_instr *tmp = stores[i];
-            stores[i] = stores[j];
-            stores[j] = tmp;
+   /* Sort physical tile partitions by byte offset, highest first. A G17P
+    * sample-shaded epilog is unrolled into one complete target set per
+    * sample. Keep those sample sets separate while giving each the native
+    * descending partition order. */
+   const unsigned partition_count =
+      __bitset_count(written, ARRAY_SIZE(written));
+   const bool unrolled_samples = multisample_stores && partition_count &&
+      store_count == partition_count * ctx->key->fs.nr_samples;
+   if (multisample_stores && store_count != partition_count &&
+       !unrolled_samples)
+      return false;
+
+   const unsigned group_count = unrolled_samples
+                                   ? ctx->key->fs.nr_samples : 1;
+   const unsigned group_size = store_count / group_count;
+   struct list_head *group_anchor[4] = {0};
+   for (unsigned group = 0; group < group_count; ++group) {
+      agx_instr **group_stores = &stores[group * group_size];
+      if (unrolled_samples)
+         group_anchor[group] = group_stores[group_size - 1]->link.next;
+
+      for (unsigned i = 0; i < group_size; ++i) {
+         for (unsigned j = i + 1; j < group_size; ++j) {
+            if (group_stores[j]->pixel_offset >
+                group_stores[i]->pixel_offset) {
+               agx_instr *tmp = group_stores[i];
+               group_stores[i] = group_stores[j];
+               group_stores[j] = tmp;
+            }
          }
+
+         if (unrolled_samples && group > 0 &&
+             group_stores[i]->pixel_offset != stores[i]->pixel_offset)
+            return false;
       }
    }
    if (stores[store_count - 1]->pixel_offset != 0 && !subset)
       return false;
 
-   for (unsigned i = 0; i < store_count; ++i) {
-      list_del(&stores[i]->link);
-      list_addtail(&stores[i]->link, &stop->link);
+   if (unrolled_samples) {
+      /* Keep each sample's payload calculation and stores together. Moving
+       * every sample's stores to STOP would make all exported colours live at
+       * once and exceed the grounded tile-store register bank at 4x. */
+      for (unsigned group = 0; group < group_count; ++group) {
+         for (unsigned i = 0; i < group_size; ++i) {
+            agx_instr *store = stores[group * group_size + i];
+            list_del(&store->link);
+            list_addtail(&store->link, group_anchor[group]);
+         }
+      }
+   } else {
+      for (unsigned i = 0; i < store_count; ++i) {
+         list_del(&stores[i]->link);
+         list_addtail(&stores[i]->link, &stop->link);
+      }
    }
    ctx->agx3_mrt_tile_ops_ordered = true;
    return true;
