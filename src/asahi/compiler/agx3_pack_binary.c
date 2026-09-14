@@ -6254,6 +6254,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
    bool has_zs_emit = false;
+   /* A fragment unrolled over its samples stores depth once per sample, and
+    * Apple wraps the whole run in one pixel transaction rather than one per
+    * store; count them so the release lands after the last. */
+   unsigned zs_emits_left = 0;
    bool g17p_fragment_helper_protocol =
       enc == AGX_ISA_ENCODING_AGX3B &&
       ctx->stage == MESA_SHADER_FRAGMENT && ctx->nir &&
@@ -6297,6 +6301,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (scan_I->op == AGX_OPCODE_ZS_EMIT ||
              scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             has_zs_emit = true;
+         if (scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
+            zs_emits_left++;
          if (scan_I->op == AGX_OPCODE_DEVICE_LOAD)
             device_loads_left++;
          if (scan_I->op == AGX_OPCODE_IMAGE_WRITE)
@@ -6497,6 +6503,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned texture_samples_remaining = texture_samples_left;
    unsigned sample_group_members_remaining = sample_group_members_left;
    const agx_instr *g17p_deferred_zs_wait = NULL;
+   bool g17p_zs_pixel_open = false;
    const bool g17p_position_protocol =
       agx3_is_g17p_float2_position_vs(ctx, enc);
    unsigned g17p_positions_staged = 0;
@@ -7615,8 +7622,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ctx->agx3_colour_link.entry_offset = emission->size - entry_len - initial_size;
                g17p_colour_open = true;
             }
+            /* An unrolled per-sample depth fragment signals after every
+             * store, but the run is one transaction: hold the release until
+             * the last store has been written, which is what Apple's
+             * four-sample program does. */
+            if (I->op == AGX_OPCODE_SIGNAL_PIX && g17p_zs_pixel_open &&
+                zs_emits_left > 0) {
+               if (!agx3_retire_slots_noop(emission, enc, wait))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+
             if (!agx3_emit_pixel(emission, enc, I, wait))
                AGX3_REFUSE(I);
+            if (I->op == AGX_OPCODE_SIGNAL_PIX)
+               g17p_zs_pixel_open = false;
             continue;
          }
 
@@ -7852,7 +7872,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ctx->stage != MESA_SHADER_FRAGMENT || I->nr_dests ||
                 I->nr_srcs != 1 || I->zs != 1 ||
                 !agx3_vary_reg32(I->src[0]) ||
-                agx_channels(I->src[0]) != 2 || !g17p_deferred_zs_wait)
+                agx_channels(I->src[0]) != 2 ||
+                !(g17p_deferred_zs_wait || g17p_zs_pixel_open))
                AGX3_REFUSE(I);
 
             uint8_t bytes[AGX3_STAGE_MAX_LENGTH];
@@ -7878,9 +7899,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                         bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
-            if (!agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
-               AGX3_REFUSE(I);
-            g17p_deferred_zs_wait = NULL;
+            /* One pixwait opens the run, whatever its length: Apple's
+             * unrolled four-sample depth fragment carries a single pixwait
+             * before the first depthf and a single final pixrel after the
+             * fourth, with nothing but each sample's own staging between
+             * (probes/README-g17p-per-sample-fragment.md). */
+            if (g17p_deferred_zs_wait) {
+               if (!agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
+                  AGX3_REFUSE(I);
+               g17p_deferred_zs_wait = NULL;
+               g17p_zs_pixel_open = true;
+            }
+            assert(zs_emits_left > 0);
+            zs_emits_left--;
 
             const struct agx3_zs_desc zs = {
                .value = 0,

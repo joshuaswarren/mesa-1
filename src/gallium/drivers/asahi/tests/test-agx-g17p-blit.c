@@ -523,8 +523,11 @@ check_direct_resolve_shapes(void)
  * is what fails
  * KHR-GL30.framebuffer_blit.multisampled_to_singlesampled_blit_depth_config_test.
  *
- * Run the blit through the shim, which builds the same programs without a GPU,
- * and hold it to producing one.
+ * The body is unrolled over the samples instead, which is what Apple's own
+ * compiler does, and the whole run of depth stores shares one pixel
+ * transaction (probes/README-g17p-per-sample-fragment.md). Run the blit
+ * through the shim, which builds the same programs without a GPU, and hold it
+ * to producing one.
  */
 static bool
 check_msaa_depth_blit(struct pipe_context *pctx, unsigned samples)
@@ -1101,13 +1104,7 @@ main(void)
    if (!check_stencil_blit_shapes())
       return 1;
 
-   /* The reproduction for the remaining per-sample gap: the sample loop and
-    * the variant key are solved, but the depth store the unrolled body emits
-    * has no grounded AGX3 encoding yet
-    * (probes/README-g17p-per-sample-fragment.md). Opt in while that lands, so
-    * this does not sit in the suite as a standing red. */
-   if (getenv("ASAHI_MSAA_DEPTH_BLIT") != NULL &&
-       (!check_msaa_depth_blit(pctx, 2) || !check_msaa_depth_blit(pctx, 4)))
+   if (!check_msaa_depth_blit(pctx, 2) || !check_msaa_depth_blit(pctx, 4))
       return 1;
 
    if (!check_staged_resolve_shapes())
