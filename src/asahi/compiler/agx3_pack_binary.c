@@ -1808,8 +1808,16 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool array = I->dim == AGX_DIM_2D_ARRAY || cube_array;
    const bool three_d = I->dim == AGX_DIM_3D;
    const bool cube = I->dim == AGX_DIM_CUBE || cube_array;
-   const bool shadow_level_zero = shadow && !cube_array &&
-      valid_immediate_lod && immediate_level == 0.0f;
+   /* A vertex stage has no derivatives, so a GLSL `texture()` depth
+    * comparison arrives as an explicit level zero. The cube form of that is
+    * already grounded (KHR-GL30.ext_texture_shadow_lod
+    * texturelod.samplercubeshadow_vertex), and the cube array adds only its
+    * layer, staged through the same witnessed face+layer word the implicit
+    * cube-array comparison uses (texture.samplercubearrayshadow_fragment).
+    * Excluding the cube array refuses texture.samplercubearrayshadow_vertex.
+    */
+   const bool shadow_level_zero =
+      shadow && valid_immediate_lod && immediate_level == 0.0f;
    /* A per-lane level and a per-lane bias share one staging form, so they
     * share one operand test: a live single-channel 16-bit register. */
    const bool scalar_lod_reg = agx3_tex_plain_reg(I->src[1]) &&
