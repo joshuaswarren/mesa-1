@@ -117,8 +117,9 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
-   /* This could be optimized but it doesn't matter */
-   return pdev->dev.debug;
+   /* This could be optimized but it doesn't matter. The hardware tessellator
+    * compiles evaluation shaders differently, so key its binaries apart. */
+   return pdev->dev.debug | ((uint64_t)pdev->g17p_native_tess << 32);
 }
 
 const nir_shader_compiler_options *
@@ -1752,7 +1753,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          shader->info.tess.tcs_nr_patch_outputs =
             util_last_bit(nir->info.patch_outputs_written);
          shader->info.tess.tcs_output_stride = poly_tcs_output_stride(nir);
-      } else if (dev->dev.chip == AGX_CHIP_G17P && hw) {
+      } else if (dev->g17p_native_tess && hw) {
          /* G17P tessellates in hardware and runs the evaluation shader as the
           * post-tessellation vertex program, which reads the patch and the
           * coordinate from the tessellator. This destroys info so it needs to

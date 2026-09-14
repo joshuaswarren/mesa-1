@@ -603,14 +603,10 @@ hk_get_device_features(
       /* VK_EXT_extended_dynamic_state2 */
       .extendedDynamicState2 = true,
       .extendedDynamicState2LogicOp = true,
-      .extendedDynamicState2PatchControlPoints =
-         dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState2PatchControlPoints = true,
 
       /* VK_EXT_extended_dynamic_state3 */
-      /* Keep G17P states behind their actual native path: no tessellation
-       * domain origin or rasterization streams. */
-      .extendedDynamicState3TessellationDomainOrigin =
-         dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState3TessellationDomainOrigin = true,
       .extendedDynamicState3DepthClampEnable = true,
       .extendedDynamicState3PolygonMode = true,
       .extendedDynamicState3RasterizationSamples = true,
@@ -621,8 +617,7 @@ hk_get_device_features(
       .extendedDynamicState3ColorBlendEnable = true,
       .extendedDynamicState3ColorBlendEquation = true,
       .extendedDynamicState3ColorWriteMask = true,
-      .extendedDynamicState3RasterizationStream =
-         dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState3RasterizationStream = true,
       .extendedDynamicState3ConservativeRasterizationMode = false,
       .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
       .extendedDynamicState3DepthClipEnable = true,
@@ -755,13 +750,20 @@ hk_get_device_features(
       /* The first HAL200 path is intentionally one ordinary, single-sample
        * graphics pipeline. Keep optional feature reporting within that path
        * until the corresponding joined Ioto programs are implemented. */
-      features->geometryShader = false;
-      /* Hardware tessellation: the vertex and control shaders run as
-       * compute, and a native Tessellate command runs the evaluation shader
-       * as the post-tessellation vertex program. Isolines and point mode
-       * have no native tessellator output yet. */
+      /* Geometry and tessellation shaders run in compute and draw through
+       * their raster and evaluation vertex programs, as on AGX2. */
+      features->geometryShader = hk_g17p_unverified_feature("geometry_shader");
       features->tessellationShader =
          hk_g17p_unverified_feature("tessellation_shader");
+      features->shaderTessellationAndGeometryPointSize =
+         features->geometryShader || features->tessellationShader;
+      features->geometryStreams = features->geometryShader;
+      features->extendedDynamicState3RasterizationStream =
+         features->geometryShader;
+      features->extendedDynamicState2PatchControlPoints =
+         features->tessellationShader;
+      features->extendedDynamicState3TessellationDomainOrigin =
+         features->tessellationShader;
       /* IA vertex/primitive recording, including reset/reuse/unavailable
        * handling, has passed its exact hardware oracle twice. Every applicable
        * graphics/compute counter now has a strict native helper or fragment-
@@ -793,7 +795,6 @@ hk_get_device_features(
        * Dawn requires this feature; without it Chromium's WebGPU silently
        * falls back to SwiftShader. */
       features->fragmentStoresAndAtomics = true;
-      features->shaderTessellationAndGeometryPointSize = false;
       features->shaderResourceResidency = false;
       features->advancedBlendCoherentOperations = true;
       features->sparseBinding = false;
@@ -808,7 +809,6 @@ hk_get_device_features(
       /* The direct triangle path uses the native geometry pipeline plus the
        * G17P-compiled libagx XFB counter-copy kernel. */
       features->transformFeedback = true;
-      features->geometryStreams = false;
       /* Precompiled predicate kernels use the same direct HAL200 Ioto launch
        * as the public compute path, followed by native indirect Index Lists.
        * Both indexed and non-indexed count/clamp/stride paths are qualified. */
@@ -1517,6 +1517,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       result = VK_ERROR_INCOMPATIBLE_DRIVER;
       goto fail_pdev_alloc;
    }
+
+   pdev->g17p_native_tess = pdev->dev.chip == AGX_CHIP_G17P &&
+                            debug_get_bool_option("HK_G17P_NATIVE_TESS", false);
 
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(

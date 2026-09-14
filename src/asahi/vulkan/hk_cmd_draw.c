@@ -2945,14 +2945,23 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    hk_reserve_scratch(cmd, cs, vs);
    hk_reserve_scratch(cmd, cs, tcs);
 
-   hk_dispatch_with_usc(
-      dev, cs, &vs->b.info,
-      hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]), grid_vs,
-      agx_workgroup(64, 1, 1));
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      hk_dispatch_with_local_size(cmd, cs, vs, grid_vs,
+                                  agx_workgroup(64, 1, 1));
+      hk_dispatch_with_local_size(
+         cmd, cs, tcs, grid_tcs,
+         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+   } else {
+      hk_dispatch_with_usc(
+         dev, cs, &vs->b.info,
+         hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]),
+         grid_vs, agx_workgroup(64, 1, 1));
 
-   hk_dispatch_with_usc(
-      dev, cs, &tcs->b.info, hk_upload_usc_words(cmd, tcs, tcs->only_linked),
-      grid_tcs, agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+      hk_dispatch_with_usc(
+         dev, cs, &tcs->b.info,
+         hk_upload_usc_words(cmd, tcs, tcs->only_linked), grid_tcs,
+         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+   }
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
@@ -6063,16 +6072,12 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    const bool ordinary_draw_path =
       !geom && !tess && !adj &&
       (!*needs_idx_robust || g17p_robust_index_path);
-   const bool xfb_passthrough_path =
-      dev->dev.chip == AGX_CHIP_G17P && geom && !tess && !adj &&
-      !*needs_idx_robust && gfx->xfb_enabled &&
-      gfx->shaders[MESA_SHADER_GEOMETRY]->is_passthrough;
-   /* G17P tessellates in hardware: the evaluation shader is the bound
-    * hardware vertex program and its render state publishes exactly like an
-    * ordinary draw's. The vertex shader fetches the API indices in compute. */
-   const bool g17p_tessellation_path =
-      dev->dev.chip == AGX_CHIP_G17P && tess && !geom && !adj;
-   *needs_idx_robust &= !g17p_tessellation_path;
+   /* Geometry and tessellation draw their compute-generated vertices through
+    * the bound hardware vertex program: poly's geometry raster variant, or
+    * the evaluation shader after the software or hardware tessellator. It
+    * publishes its render state exactly like an ordinary draw's. */
+   const bool g17p_transformed_path =
+      dev->dev.chip == AGX_CHIP_G17P && (geom || tess) && !adj;
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 
@@ -6137,8 +6142,7 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    }
 
    hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
-                          ordinary_draw_path || xfb_passthrough_path ||
-                             g17p_tessellation_path,
+                          ordinary_draw_path || g17p_transformed_path,
                           g17p_native_bind_tail_emitted);
    return cs;
 }
@@ -6237,27 +6241,27 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    bool geom = cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY];
    bool tess = cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
 
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
    /* Clipper counters depend on geom/tess outputs and must be written with the
     * geom/tess output. They are updated as IA counters only when geom/tess is
-    * not used.
+    * not used. G17P represents a counter that is not written by the writable
+    * scratch page, like a disabled one.
     */
    if (geom || tess) {
-      c_prims = 0;
-      c_inv = 0;
+      c_prims = dev->dev.chip == AGX_CHIP_G17P ? AGX_SCRATCH_PAGE_ADDRESS : 0;
+      c_inv = c_prims;
    }
 
    uint32_t patch_size = dyn->ts.patch_control_points;
 
    if (draw.restart) {
       uint32_t index_size_B = agx_index_size_to_B(draw.index_size);
-      struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
-         /* G17P does not expose geometry or tessellation, so disabled
-          * statistics are represented by the writable scratch page and all
-          * five addresses are valid. Use the native specialization that does
-          * not need to reduce nullable 64-bit pointers. */
-         assert(!geom && !tess);
+         /* Disabled statistics are represented by the writable scratch page,
+          * so all five addresses are valid. Use the native specialization
+          * that does not need to reduce nullable 64-bit pointers. */
          libagx_increment_ia_restart_nonnull(
             cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX, ia_vertices,
             ia_prims, vs_invocations, c_prims, c_inv, draw_ptr,
@@ -6293,9 +6297,9 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    /* A tessellated draw with fewer vertices than one patch draws nothing.
-    * G17P hands the tessellator whole patches, so filter it with the other
-    * trivial draws before any state is published. */
-   if (dev->dev.chip == AGX_CHIP_G17P && !agx_is_indirect(draw_.b) &&
+    * The hardware tessellator takes whole patches, so filter it with the
+    * other trivial draws before any state is published. */
+   if (dev->g17p_native_tess && !agx_is_indirect(draw_.b) &&
        cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
        draw_.b.count[0] < dyn->ts.patch_control_points)
       return;
@@ -6373,7 +6377,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
     * in-range indices and pads the overread with zero indices; only draws
     * that reach the native Index List unmodified prove their complete span
     * here. */
-   if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed) {
+   /* Geometry and software tessellation run the vertex shader in compute,
+    * which fetches indices robustly like on every other generation. */
+   const bool software_index_fetch =
+      cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
+      (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
+       !dev->g17p_native_tess);
+   if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed &&
+       !software_index_fetch) {
       uint64_t address;
       uint32_t size_word;
       const bool valid_index_size =
@@ -6393,7 +6404,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       /* A tessellated draw's vertex shader fetches its indices in compute,
        * but they still have to be in range. */
       if (!valid_index_size ||
-          cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
           (agx_is_indirect(draw_.b)
               ? (!draw_.b.ptr || !draw_.index_buffer ||
                  draw_.index_buffer_range_B == 0 ||
@@ -6405,7 +6415,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                       agx_index_size_to_B(draw_.index_size), &address,
                       &size_word))) {
          mesa_loge("native G17P indexed draw requires a valid "
-                   "uint8/uint16/uint32 range without geometry");
+                   "uint8/uint16/uint32 range");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -6456,7 +6466,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                       stat_c_prims, stat_c_inv);
       }
 
-      if (tess && dev->dev.chip == AGX_CHIP_G17P) {
+      if (tess && dev->g17p_native_tess) {
          hk_launch_tess_g17p(cmd, ccs, draw);
          if (vk_command_buffer_has_error(&cmd->vk))
             return;
@@ -6504,8 +6514,8 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       }
 
       enum agx_primitive topology = cmd->state.gfx.topology;
-      const bool g17p_tess = tess && dev->dev.chip == AGX_CHIP_G17P;
-      if (!g17p_tess &&
+      const bool native_tess = tess && dev->g17p_native_tess;
+      if (!native_tess &&
           !agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
@@ -6609,7 +6619,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                            VK_ERROR_FEATURE_NOT_PRESENT);
                return;
             }
-            if (tess) {
+            if (native_tess) {
                if (!hk_g17p_emit_tessellate(cmd, cs, out, draw_state_offset,
                                             g17p_native_bind_tail_emitted))
                   return;
