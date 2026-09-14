@@ -85,6 +85,28 @@ has_nonzero_lod(nir_tex_instr *tex)
    return !(nir_src_is_const(src) && nir_src_as_uint(src) == 0);
 }
 
+/*
+ * The robustImageAccess2 value of an invalid read on G17P: zero, with a one
+ * alpha when the bound view's format has none, which its Gen9 texture
+ * descriptor records as a constant-one alpha swizzle.
+ */
+static nir_def *
+g17p_robust_oob_value(nir_builder *b, nir_def *texture_descriptor,
+                      nir_alu_type dest_type, unsigned num_components,
+                      unsigned bit_size)
+{
+   nir_def *zero = nir_imm_zero(b, num_components, bit_size);
+   if (num_components != 4)
+      return zero;
+
+   nir_def *one = nir_alu_type_get_base_type(dest_type) == nir_type_float
+                     ? nir_imm_floatN_t(b, 1.0, bit_size)
+                     : nir_imm_intN_t(b, 1, bit_size);
+   nir_def *alpha_one = libagx_image_oob_alpha_one_gen9(b, texture_descriptor);
+   return nir_vector_insert_imm(
+      b, zero, nir_bcsel(b, alpha_one, one, nir_channel(b, zero, 3)), 3);
+}
+
 static bool
 lower_tex_crawl(nir_builder *b, nir_instr *instr, void *data)
 {
@@ -288,8 +310,8 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
     * out-of-range coordinate and keeps the level itself, which the G17P
     * indexed fetch cannot even take as an immediate. Predicate the whole
     * access explicitly, fetch texel (0,0) of level 0 for an invalid one so the
-    * hardware access itself stays inside the view, and select the required
-    * zero result after the fetch. */
+    * hardware access itself stays inside the view, and select the
+    * robustImageAccess2 value after the fetch. */
    if (gen9 && tex->op == nir_texop_txf &&
        (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
         tex->sampler_dim == GLSL_SAMPLER_DIM_3D) &&
@@ -544,11 +566,12 @@ offset_lowered:
    }
 
    if (g17p_txf_oob) {
+      b->cursor = nir_before_instr(instr);
+      nir_def *oob_value = g17p_robust_oob_value(
+         b, texture_descriptor_ptr(b, tex), tex->dest_type,
+         tex->def.num_components, tex->def.bit_size);
       b->cursor = nir_after_instr(instr);
-      nir_def *robust = nir_bcsel(
-         b, g17p_txf_oob,
-         nir_imm_zero(b, tex->def.num_components, tex->def.bit_size),
-         &tex->def);
+      nir_def *robust = nir_bcsel(b, g17p_txf_oob, oob_value, &tex->def);
       nir_def_rewrite_uses_after(&tex->def, robust);
    }
 
@@ -787,19 +810,12 @@ lower_g17p_formatless_image_load(nir_builder *b, nir_intrinsic_instr *intr)
                                           coord->bit_size),
                              coord));
 
-   nir_def *alpha_one = libagx_image_oob_alpha_one_gen9(
-      b, nir_load_from_texture_handle_agx(b, intr->src[0].ssa));
+   nir_def *oob_value = g17p_robust_oob_value(
+      b, nir_load_from_texture_handle_agx(b, intr->src[0].ssa),
+      nir_intrinsic_dest_type(intr), intr->def.num_components,
+      intr->def.bit_size);
 
    b->cursor = nir_after_instr(&intr->instr);
-   const unsigned bit_size = intr->def.bit_size;
-   nir_def *zero = nir_imm_zero(b, 1, bit_size);
-   nir_def *one =
-      nir_alu_type_get_base_type(nir_intrinsic_dest_type(intr)) ==
-            nir_type_float
-         ? nir_imm_floatN_t(b, 1.0, bit_size)
-         : nir_imm_intN_t(b, 1, bit_size);
-   nir_def *oob_value =
-      nir_vec4(b, zero, zero, zero, nir_bcsel(b, alpha_one, one, zero));
    nir_def_rewrite_uses_after(&intr->def,
                               nir_bcsel(b, oob, oob_value, &intr->def));
 }

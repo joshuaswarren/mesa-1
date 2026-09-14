@@ -2343,6 +2343,77 @@ test_g17p_formatless_robust_image_load(void)
    return true;
 }
 
+/* An invalid texelFetch on G17P likewise returns zero with the view's
+ * missing-alpha one, not zero alone. */
+static bool
+test_g17p_robust_texel_fetch_value(void)
+{
+   for (unsigned alpha_one = 0; alpha_one < 2; ++alpha_one) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P robust texel fetch");
+      nir_def *handle =
+         nir_bindless_image_agx(&b, nir_imm_int(&b, 0), .desc_set = 0);
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+      tex->op = nir_texop_txf;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_int32;
+      tex->coord_components = 2;
+      /* x = 7 is outside the 4x4 texture below. */
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                      nir_imm_ivec2(&b, 7, 3));
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, handle);
+      tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(&b, 0));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                     .write_mask = 15, .align_mul = 16);
+      b.shader->info.num_ssbos = 1;
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, true);
+
+      struct formatless_load_fixture f = {0};
+      const uint64_t word0 = 2 | (2 << 4) |
+                             ((alpha_one ? 4ull : 3ull) << 25) |
+                             (3ull << 28) | (3ull << 42);
+      const uint64_t word1 = UINT64_C(0x123456780) >> 4;
+      memcpy(f.texture, &word0, 8);
+      memcpy(f.texture + 8, &word1, 8);
+      bool progress;
+      do {
+         progress = nir_shader_intrinsics_pass(
+            b.shader, fold_formatless_descriptor, nir_metadata_control_flow,
+            &f);
+         progress |= nir_opt_constant_folding(b.shader);
+         progress |= nir_opt_algebraic(b.shader);
+         progress |= nir_opt_dead_cf(b.shader);
+         progress |= nir_opt_remove_phis(b.shader);
+         progress |= nir_opt_dce(b.shader);
+         progress |= nir_opt_copy_prop(b.shader);
+      } while (progress);
+
+      bool ok = false;
+      nir_foreach_function_impl(impl, b.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_store_ssbo ||
+                   !nir_src_is_const(intr->src[0]))
+                  continue;
+               ok = nir_src_comp_as_uint(intr->src[0], 0) == 0 &&
+                    nir_src_comp_as_uint(intr->src[0], 1) == 0 &&
+                    nir_src_comp_as_uint(intr->src[0], 2) == 0 &&
+                    nir_src_comp_as_uint(intr->src[0], 3) == alpha_one;
+            }
+         }
+      }
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
+   return true;
+}
+
 struct buffer_metadata_fixture {
    uint32_t elements, tail, coord;
    bool rgb32, saw_data;
@@ -7342,6 +7413,11 @@ main(int argc, char **argv)
 
    if (!test_g17p_formatless_robust_image_load()) {
       fputs("formatless robust image load lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_g17p_robust_texel_fetch_value()) {
+      fputs("robust texel fetch value mismatch\n", stderr);
       all_ok = false;
    }
 
