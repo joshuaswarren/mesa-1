@@ -12391,6 +12391,64 @@ TEST_F(AGX3PackBinary, ComputeSampleStagesRegisterLevelWithoutGroupEnd)
    }
 }
 
+/* A compute texture2d_array sample stages its GPR layer with PACK_SMPIR and
+ * selects it with SMP f77=2, at an immediate or a runtime level, as vertex
+ * samples do. SMP's direct f31/f37=3 layer would name a uniform half.
+ * metal-nt -arch applegpu_g17p compute kernels, t.sample(s, uv, layer, ...):
+ *
+ *   level(2.0) 1705540600040000f0c00400 05800cb8b0000901000010080100
+ *   level(l)   1705540600040c00f0c02500 05800cb8b0000801000010000100
+ */
+TEST_F(AGX3PackBinary, ComputeArraySampleStagesLayer)
+{
+   for (unsigned dynamic = 0; dynamic < 2; ++dynamic) {
+      const auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 2;
+      coord.discard = true;
+      coord.kill = true;
+      agx_index lod = dynamic ? agx_register(20, AGX_SIZE_16)
+                              : agx_immediate_f(2.0f);
+      lod.discard = dynamic;
+      agx_instr *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D_ARRAY,
+         AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE,
+         false);
+      I->mask = 15;
+      agx_stop(b);
+
+      const std::vector<uint8_t> stream = pack(b);
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+      if (dynamic) {
+         ASSERT_TRUE(agx3_tex_stage_array_lod(enc, 12, 20, 1, 0, false, true,
+                                              false, true, bytes, &len));
+      } else {
+         ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 12, 1, 0, false, true,
+                                                bytes, &len));
+      }
+      EXPECT_NE(std::search(stream.begin(), stream.end(), bytes, bytes + len),
+                stream.end());
+
+      static const uint8_t smp_level[] = {
+         0x05, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x09,
+         0x01, 0x00, 0x00, 0x10, 0x08, 0x01, 0x00,
+      };
+      static const uint8_t smp_register[] = {
+         0x05, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x08,
+         0x01, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
+      };
+      const uint8_t *smp = dynamic ? smp_register : smp_level;
+      EXPECT_NE(std::search(stream.begin(), stream.end(), smp,
+                            smp + sizeof(smp_level)),
+                stream.end());
+   }
+}
+
 TEST_F(AGX3PackBinary, ArraySampleStagesDriverLayerAndLifetime)
 {
    for (unsigned hint = 0; hint < 3; ++hint) {

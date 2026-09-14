@@ -537,7 +537,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool staged_driver_array =
       d->array && d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
       !direct_offset_array &&
-      (d->cube || d->vertex_stage || d->shadow ||
+      (d->cube || d->vertex_stage || d->compute_stage || d->shadow ||
        d->lod == AGX3_TEX_LOD_AUTO || d->offset);
    unsigned operand_profile = apple_fragment_abi ? 3 : 0;
    struct agx3_field_kv base[20];
