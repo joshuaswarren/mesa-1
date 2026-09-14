@@ -2753,11 +2753,11 @@ hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    const bool quads = info.mode == TESS_PRIMITIVE_QUADS;
    const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
 
-   /* Vulkan orders a tessellated triangle in a domain whose origin is the
-    * upper left unless the pipeline says otherwise; the tessellator's
-    * clockwise output is that default clockwise order. */
+   /* The tessellator orders its output in a lower-left domain: a clockwise
+    * triangle there is counter-clockwise in Vulkan's default upper-left
+    * domain, so only a lower-left pipeline keeps the shader's winding. */
    const bool ccw =
-      info.ccw ^
+      info.ccw ==
       (dyn->ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT);
    const struct agx_vdm_tessellation_state_info state = {
       .partition = info.spacing == TESS_SPACING_EQUAL
