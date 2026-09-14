@@ -185,6 +185,28 @@ TEST(AGX3SrCore, G17PActiveThreadIndexInSubgroup)
    EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
 }
 
+TEST(AGX3SrCore, G17PTotalActiveThreadsInSubgroup)
+{
+   /* metal-nt -arch applegpu_g17p: a uniform-address
+    * atomic_fetch_add_explicit(c, 7) reads SR36 into h0 on slot 1 and adds
+    * imadd(SR36, #7) from the lane where SR34 == 0. */
+   static const uint8_t count[] = {0x04, 0x97, 0x10, 0x06};
+   struct agx3_sr_desc d = {};
+   d.dest = 0;
+   d.width = AGX3_SR_W16;
+   d.sr = 36;
+   d.slot = 1;
+   uint8_t out[AGX3_SR_MAX_LENGTH];
+   uint8_t len = 0;
+
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(count));
+   EXPECT_EQ(0, memcmp(out, count, len));
+
+   d.width = AGX3_SR_W32;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+}
+
 TEST(AGX3SrCore, WaitEscalatesToLongForm)
 {
    /* A wait bit cannot ride the compact form; Apple's own at_dev_nr witness

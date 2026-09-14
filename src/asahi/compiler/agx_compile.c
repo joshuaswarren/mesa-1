@@ -2487,6 +2487,16 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
                                     AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP);
 
    case nir_intrinsic_load_active_subgroup_count_agx:
+      /* AGX3 reads the count as a 16-bit value, as Apple's uniform atomics
+       * do; zero-extend it for the 32-bit consumers NIR expects. */
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+          dst.size == AGX_SIZE_32) {
+         agx_index native = agx_temp(b->shader, AGX_SIZE_16);
+         agx_get_sr_coverage_to(b, native,
+                                AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP);
+         return agx_mov_to(b, dst, native);
+      }
+
       return agx_get_sr_coverage_to(b, dst,
                                     AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP);
 

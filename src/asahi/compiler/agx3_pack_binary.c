@@ -8197,25 +8197,37 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * simd_is_first() reads SR34, the active thread index in the
              * subgroup, as W16 in compute, vertex and fragment shaders. Apple
              * sets f48 on a fragment read only when helper invocations never
-             * need the result, so leave it clear. Other coverage
+             * need the result, so leave it clear.
+             *
+             * A uniform-address atomic_fetch_add_explicit(c, 7) in a compute
+             * or fragment shader performs the whole update from lane SR34 ==
+             * 0 as `imadd(SR36, #7)`, so SR36 is the total number of active
+             * threads in the subgroup, also W16. Other coverage
              * pseudo-registers remain closed until separately witnessed. */
             const bool active_thread =
                I->sr == AGX_SR_IS_ACTIVE_THREAD &&
                ctx->stage == MESA_SHADER_FRAGMENT;
+            const bool subgroup_stage =
+               ctx->stage == MESA_SHADER_COMPUTE ||
+               ctx->stage == MESA_SHADER_VERTEX ||
+               ctx->stage == MESA_SHADER_FRAGMENT;
             const bool active_index =
                I->sr == AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP &&
-               (ctx->stage == MESA_SHADER_COMPUTE ||
-                ctx->stage == MESA_SHADER_VERTEX ||
-                ctx->stage == MESA_SHADER_FRAGMENT);
+               subgroup_stage;
+            const bool active_count =
+               I->sr == AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP &&
+               subgroup_stage;
             if (enc != AGX_ISA_ENCODING_AGX3B ||
-                !(active_thread || active_index) || I->nr_dests != 1 ||
+                !(active_thread || active_index || active_count) ||
+                I->nr_dests != 1 ||
                 I->nr_srcs != 0 || !agx3_src_is_register(I->dest[0]) ||
                 I->dest[0].memory || I->dest[0].size != AGX_SIZE_16 ||
                 agx_channels(I->dest[0]) != 1)
                AGX3_REFUSE(I);
             const struct agx3_sr_desc d = {
                .dest = I->dest[0].value, .width = AGX3_SR_W16,
-               .sr = active_index ? 34 : 2, .slot = slot, .wait_mask = wait,
+               .sr = active_index ? 34 : active_count ? 36 : 2, .slot = slot,
+               .wait_mask = wait,
             };
             uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;
             if (!agx3_sr_encode(enc, &d, bytes, &len) ||
