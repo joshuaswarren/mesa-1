@@ -8,14 +8,17 @@
 #include "vulkan/vulkan_core.h"
 #include "agx_abi.h"
 #include "agx_nir_texture.h"
+#include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_native_descriptor.h"
 #include "hk_shader.h"
+#include "layout/layout.h"
 
 #include "nir.h"
 #include "nir_builder.h"
+#include "nir_deref.h"
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
 #include "nir_intrinsics_indices.h"
@@ -26,8 +29,10 @@ struct lower_descriptors_ctx {
    const struct hk_descriptor_set_layout *set_layouts[HK_MAX_SETS];
 
    bool clamp_desc_array_bounds;
+   bool sparse_buffer_residency;
    nir_address_format ubo_addr_format;
    nir_address_format ssbo_addr_format;
+   uint64_t sparse_ro_offset;
    unsigned descriptor_generation;
    mesa_shader_stage stage;
 };
@@ -156,7 +161,11 @@ load_descriptor(nir_builder *b, unsigned num_components, unsigned bit_size,
       assert(num_components == 4 && bit_size == 32);
       nir_def *desc = load_root(b, 4, 32, root_desc_offset, 16);
 
-      /* We know a priori that the the .w compnent (offset) is zero */
+      if (binding_layout->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC &&
+          ctx->sparse_buffer_residency && ctx->descriptor_generation == 9)
+         return desc;
+
+      /* We know a priori that the .w component (offset) is zero. */
       return nir_vector_insert_imm(b, desc, nir_imm_int(b, 0), 3);
    }
 
@@ -194,9 +203,13 @@ load_descriptor(nir_builder *b, unsigned num_components, unsigned bit_size,
 
       if (binding_layout->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
           binding_layout->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) {
-         /* We know a priori that the the .w compnent (offset) is zero */
          assert(num_components == 4 && bit_size == 32);
-         desc = nir_vector_insert_imm(b, desc, nir_imm_int(b, 0), 3);
+         if (!(binding_layout->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER &&
+               ctx->sparse_buffer_residency &&
+               ctx->descriptor_generation == 9)) {
+            /* We know a priori that the .w component (offset) is zero. */
+            desc = nir_vector_insert_imm(b, desc, nir_imm_int(b, 0), 3);
+         }
       }
       return desc;
    }
@@ -953,14 +966,174 @@ lower_ssbo_descriptor(nir_builder *b, nir_intrinsic_instr *intr, void *_data)
    }
 }
 
+static bool
+is_buffer_deref_access(nir_intrinsic_op op)
+{
+   switch (op) {
+   case nir_intrinsic_load_deref:
+   case nir_intrinsic_load_deref_block_intel:
+   case nir_intrinsic_store_deref:
+   case nir_intrinsic_store_deref_block_intel:
+   case nir_intrinsic_deref_atomic:
+   case nir_intrinsic_deref_atomic_swap:
+   case nir_intrinsic_deref_buffer_array_length:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+is_buffer_deref_atomic(nir_intrinsic_op op)
+{
+   return op == nir_intrinsic_deref_atomic ||
+          op == nir_intrinsic_deref_atomic_swap;
+}
+
+static bool
+lower_sparse_buffer_deref(nir_builder *b, nir_intrinsic_instr *intr,
+                          void *_data)
+{
+   const struct lower_descriptors_ctx *ctx = _data;
+   if (!is_buffer_deref_access(intr->intrinsic))
+      return false;
+
+   nir_deref_instr *leaf = nir_src_as_deref(intr->src[0]);
+   if (!leaf || !(leaf->modes & nir_var_mem_ssbo))
+      return false;
+
+   nir_deref_path path;
+   nir_deref_path_init(&path, leaf, NULL);
+   nir_deref_instr *root = path.path[0];
+   if (root->deref_type != nir_deref_type_cast ||
+       root->parent.ssa->num_components != 4 ||
+       root->parent.ssa->bit_size != 32) {
+      nir_deref_path_finish(&path);
+      return false;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+
+   nir_def *addr = root->parent.ssa;
+   nir_def *base = nir_pack_64_2x32(b, nir_trim_vector(b, addr, 2));
+   nir_def *resident = NULL;
+
+   if (intr->intrinsic == nir_intrinsic_load_deref ||
+       intr->intrinsic == nir_intrinsic_load_deref_block_intel ||
+       is_buffer_deref_atomic(intr->intrinsic)) {
+      static_assert(AIL_PAGESIZE == (1u << 14), "update shader lookup");
+
+      nir_def *map_page = nir_channel(b, addr, 3);
+      nir_def *has_map = nir_ine_imm(b, map_page, 0);
+      nir_def *map_base =
+         nir_ishl_imm(b, nir_u2u64(b, map_page), 14);
+      nir_def *safe_map_base = nir_bcsel(
+         b, has_map, map_base, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+      nir_def *resource_base = nir_load_global_constant(
+         b, 1, 64,
+         nir_iadd_imm(b, safe_map_base,
+                      offsetof(struct hk_sparse_buffer_map_header,
+                               resource_base)),
+         .align_mul = alignof(uint64_t),
+         .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
+      nir_def *page_count = nir_load_global_constant(
+         b, 1, 32,
+         nir_iadd_imm(b, safe_map_base,
+                      offsetof(struct hk_sparse_buffer_map_header,
+                               page_count)),
+         .align_mul = alignof(uint32_t),
+         .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
+      nir_def *byte_offset =
+         nir_build_deref_offset(b, leaf, glsl_get_natural_size_align_bytes);
+      nir_def *rw_base = nir_iand_imm(b, base, ~ctx->sparse_ro_offset);
+      nir_def *access_addr =
+         nir_iadd(b, rw_base, nir_u2u64(b, byte_offset));
+      nir_def *resource_offset = nir_isub(b, access_addr, resource_base);
+      nir_def *page = nir_ushr_imm(b, resource_offset, 14);
+      nir_def *page_in_range = nir_ult(b, page, nir_u2u64(b, page_count));
+      nir_def *valid_map = nir_iand(b, has_map, page_in_range);
+      nir_def *word = nir_ushr_imm(b, page, 5);
+      nir_def *map_addr = nir_iadd_imm(
+         b, nir_iadd(b, map_base,
+                     nir_imul_imm(b, word, sizeof(uint32_t))),
+         sizeof(struct hk_sparse_buffer_map_header));
+      nir_def *safe_map_addr = nir_bcsel(
+         b, valid_map, map_addr, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+      nir_def *resident_word = nir_load_global_constant(
+         b, 1, 32, safe_map_addr, .align_mul = sizeof(uint32_t),
+         .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
+      nir_def *resident_bit = nir_iand_imm(
+         b, nir_ushr(b, resident_word,
+                     nir_iand_imm(b, nir_u2u32(b, page), 31)),
+         1);
+      resident = nir_ior(
+         b, nir_inot(b, has_map),
+         nir_iand(b, page_in_range, nir_ine_imm(b, resident_bit, 0)));
+
+      if (!is_buffer_deref_atomic(intr->intrinsic)) {
+         nir_def *zero_base = nir_ior_imm(b, base, ctx->sparse_ro_offset);
+         base = nir_bcsel(b, resident, base, zero_base);
+      }
+   }
+
+   nir_def *lowered_addr =
+      nir_vec4(b, nir_unpack_64_2x32_split_x(b, base),
+               nir_unpack_64_2x32_split_y(b, base), nir_channel(b, addr, 2),
+               nir_imm_int(b, 0));
+   nir_deref_instr *lowered = nir_build_deref_cast_with_alignment(
+      b, lowered_addr, root->modes, root->type, root->cast.ptr_stride,
+      root->cast.align_mul, root->cast.align_offset);
+
+   for (unsigned i = 1; path.path[i] != NULL; ++i)
+      lowered = nir_build_deref_follower(b, lowered, path.path[i]);
+
+   nir_src_rewrite(&intr->src[0], &lowered->def);
+   nir_deref_path_finish(&path);
+
+   if (is_buffer_deref_atomic(intr->intrinsic)) {
+      assert(resident != NULL);
+      const bool return_value = !nir_def_is_unused(&intr->def);
+      nir_def old_result;
+
+      if (return_value) {
+         old_result = intr->def;
+         list_replace(&intr->def.uses, &old_result.uses);
+         nir_def_init(&intr->instr, &intr->def, old_result.num_components,
+                      old_result.bit_size);
+      }
+
+      nir_if *nif = nir_push_if(b, resident);
+      nir_instr_remove(&intr->instr);
+      nir_builder_instr_insert(b, &intr->instr);
+
+      if (return_value) {
+         nir_push_else(b, nif);
+         nir_def *zero =
+            nir_imm_zero(b, old_result.num_components, old_result.bit_size);
+         nir_pop_if(b, nif);
+         nir_def *result = nir_if_phi(b, &intr->def, zero);
+         result->divergent = old_result.divergent;
+         nir_def_rewrite_uses(&old_result, result);
+      } else {
+         nir_pop_if(b, nif);
+      }
+   }
+
+   return true;
+}
+
 bool
 hk_nir_lower_descriptors(nir_shader *nir,
                          const struct vk_pipeline_robustness_state *rs,
                          uint32_t set_layout_count,
-                         struct vk_descriptor_set_layout *const *set_layouts)
+                         struct vk_descriptor_set_layout *const *set_layouts,
+                         bool sparse_buffer_residency,
+                         uint64_t sparse_ro_offset)
 {
    struct lower_descriptors_ctx ctx = {
       .stage = nir->info.stage,
+      .sparse_buffer_residency = sparse_buffer_residency,
+      .sparse_ro_offset = sparse_ro_offset,
       .clamp_desc_array_bounds =
          rs->storage_buffers !=
             VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT ||
@@ -999,5 +1172,11 @@ hk_nir_lower_descriptors(nir_shader *nir,
    bool pass_lower_ssbo = nir_shader_intrinsics_pass(
       nir, lower_ssbo_descriptor, nir_metadata_control_flow, &ctx);
 
-   return pass_lower_descriptors || pass_lower_ssbo;
+   bool pass_sparse_buffers = false;
+   if (ctx.sparse_buffer_residency && ctx.descriptor_generation == 9) {
+      pass_sparse_buffers = nir_shader_intrinsics_pass(
+         nir, lower_sparse_buffer_deref, nir_metadata_control_flow, &ctx);
+   }
+
+   return pass_lower_descriptors || pass_lower_ssbo || pass_sparse_buffers;
 }

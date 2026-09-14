@@ -57,7 +57,7 @@ main(void)
       .vertex_inputs = VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
       .images = VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT,
    };
-   assert(hk_nir_lower_descriptors(b.shader, &robustness, 0, NULL));
+   assert(hk_nir_lower_descriptors(b.shader, &robustness, 0, NULL, false, 0));
 
    const uint32_t expected = hk_root_descriptor_offset(printf_buffer_address);
    bool saw_root = false;

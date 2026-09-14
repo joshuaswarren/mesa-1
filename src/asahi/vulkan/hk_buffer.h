@@ -20,7 +20,20 @@ struct hk_buffer {
 
    /** Reserved VA for sparse buffers, NULL otherwise. */
    struct agx_va *va;
+
+   /** One residency bit per sparse-buffer page, G17P only. */
+   struct agx_bo *sparse_map;
+   uint32_t sparse_map_entries;
 };
+
+struct hk_sparse_buffer_map_header {
+   uint64_t resource_base;
+   uint32_t page_count;
+   uint32_t reserved;
+};
+
+static_assert(sizeof(struct hk_sparse_buffer_map_header) == 16,
+              "sparse buffer map header must be 16 bytes");
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_buffer, vk.base, VkBuffer,
                                VK_OBJECT_TYPE_BUFFER)

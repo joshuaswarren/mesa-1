@@ -2901,6 +2901,28 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
    agx_foreach_instr_global_safe(ctx, I) {
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
 
+      /* G17P's grounded 32-bit saturating IADD encoding takes two registers.
+       * Robust buffer bounds checks naturally produce uadd_sat(offset, #size),
+       * where an immediate is implicitly unsigned and therefore lacks the ABS
+       * modifier carried by the register operand. Materialize the immediate
+       * before RA and copy the operation's signedness onto the new register so
+       * the existing register/register iadd_sat/uadd_sat encoding applies. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IADD && I->saturate && I->nr_dests == 1 &&
+          I->nr_srcs == 2 && I->dest[0].size == AGX_SIZE_32) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE)
+               continue;
+
+            const bool negate = I->src[s].neg;
+            const bool absolute = I->src[s].abs || I->src[s ^ 1].abs;
+            agx_index value = agx_mov_imm(&b, 32, I->src[s].value);
+            value.abs = absolute;
+            value.neg = negate;
+            I->src[s] = value;
+         }
+      }
+
       /* A half fabs is initially represented as fadd(abs(x), -0.0h).  The
        * G17P half-add form has no absolute-source field, and leaving this
        * pseudo operation intact until after register allocation makes the

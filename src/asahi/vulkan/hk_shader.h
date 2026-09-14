@@ -388,7 +388,9 @@ bool
 hk_nir_lower_descriptors(nir_shader *nir,
                          const struct vk_pipeline_robustness_state *rs,
                          uint32_t set_layout_count,
-                         struct vk_descriptor_set_layout *const *set_layouts);
+                         struct vk_descriptor_set_layout *const *set_layouts,
+                         bool sparse_buffer_residency,
+                         uint64_t sparse_ro_offset);
 
 VkResult hk_compile_shader(struct hk_device *dev,
                            struct vk_shader_compile_info *info,
