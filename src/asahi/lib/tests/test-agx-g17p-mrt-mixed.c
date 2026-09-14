@@ -621,8 +621,25 @@ static const struct {
    {4, 0xe, {W12, R12, W192, R192, W48, R560}},
 };
 
+/* Layouts whose one-channel 32-bit targets reach the epilog in their fixed
+ * export registers, GPR half 8 + 8n, beyond a lone store's register bank:
+ * dEQP-VK.renderpasses attachment.3.286, 4.430 and 4.420. */
+static const struct layout scalar_layouts[] = {
+   {"3.286", 3,
+    {PIPE_FORMAT_R16_SINT, PIPE_FORMAT_R16_UINT, PIPE_FORMAT_R32_UINT},
+    {4, 6, 0}, 8},
+   {"4.430", 4,
+    {PIPE_FORMAT_R8G8_SINT, PIPE_FORMAT_R32_FLOAT, PIPE_FORMAT_R32G32_UINT,
+     PIPE_FORMAT_R8G8B8A8_UNORM},
+    {12, 0, 4, 14}, 24},
+   {"4.420", 4,
+    {PIPE_FORMAT_R16G16B16A16_SINT, PIPE_FORMAT_R8G8B8A8_UNORM,
+     PIPE_FORMAT_B10G10R10A2_UNORM, PIPE_FORMAT_R32_UINT},
+    {8, 16, 0, 4}, 24},
+};
+
 static int
-test_subset_epilogs(void)
+check_subset_epilogs(const struct layout *l)
 {
    static const uint8_t *const bytes[] = {
       [W12] = wait_12,     [W48] = wait_48,     [W192] = wait_192,
@@ -630,39 +647,58 @@ test_subset_epilogs(void)
       [R524] = release_524, [R560] = release_560, [R704] = release_704,
    };
 
-   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
-      const struct layout *l = &layouts[i];
-      uint64_t partitions = 0;
-      for (unsigned rt = 0; rt < l->count; ++rt)
-         partitions |= BITFIELD64_BIT(l->offsets[rt]);
+   uint64_t partitions = 0;
+   for (unsigned rt = 0; rt < l->count; ++rt)
+      partitions |= BITFIELD64_BIT(l->offsets[rt]);
 
-      for (unsigned written = 1; written < BITFIELD_MASK(l->count);
-           ++written) {
-         unsigned ranks = 0;
-         u_foreach_bit(rt, written) {
-            ranks |= BITFIELD_BIT(
-               util_bitcount64(partitions & BITFIELD64_MASK(l->offsets[rt])));
-         }
-
-         unsigned w = 0;
-         while (subset_witnesses[w].count != l->count ||
-                subset_witnesses[w].written != ranks)
-            w++;
-
-         unsigned classes = 0, n = 0;
-         u_foreach_bit(rank, ranks)
-            classes |= BITFIELD_BIT(rank % 3);
-         uint8_t sequence[8][6];
-         for (; n < 8 && subset_witnesses[w].ops[n] != END; ++n)
-            memcpy(sequence[n], bytes[subset_witnesses[w].ops[n]], 6);
-
-         struct agx_shader_part part = {0};
-         CHECK(compile_epilog_written(l->count, l->formats, written,
-                                      partitions, false, false, &part));
-         CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
-         CHECK(part.info.agx3_colour_link.colour_classes == classes);
-         free(part.binary);
+   for (unsigned written = 1; written < BITFIELD_MASK(l->count); ++written) {
+      unsigned ranks = 0;
+      u_foreach_bit(rt, written) {
+         ranks |= BITFIELD_BIT(
+            util_bitcount64(partitions & BITFIELD64_MASK(l->offsets[rt])));
       }
+
+      unsigned w = 0;
+      while (subset_witnesses[w].count != l->count ||
+             subset_witnesses[w].written != ranks)
+         w++;
+
+      unsigned classes = 0, n = 0;
+      u_foreach_bit(rank, ranks)
+         classes |= BITFIELD_BIT(rank % 3);
+      uint8_t sequence[8][6];
+      for (; n < 8 && subset_witnesses[w].ops[n] != END; ++n)
+         memcpy(sequence[n], bytes[subset_witnesses[w].ops[n]], 6);
+
+      struct agx_shader_part part = {0};
+      CHECK(compile_epilog_written(l->count, l->formats, written, partitions,
+                                   false, false, &part));
+      CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
+      CHECK(part.info.agx3_colour_link.colour_classes == classes);
+      free(part.binary);
+   }
+   return 0;
+}
+
+static int
+test_subset_epilogs(void)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
+      if (check_subset_epilogs(&layouts[i]))
+         return 1;
+   }
+
+   for (unsigned i = 0; i < ARRAY_SIZE(scalar_layouts); ++i) {
+      const struct layout *l = &scalar_layouts[i];
+      enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+      memcpy(formats, l->formats, sizeof(l->formats));
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(formats, l->count, 1, false);
+      CHECK(tib.sample_size_B == l->sample_size_B);
+      for (unsigned rt = 0; rt < l->count; ++rt)
+         CHECK(agx_tilebuffer_offset_B(&tib, rt) == l->offsets[rt]);
+      if (check_subset_epilogs(l))
+         return 1;
    }
    return 0;
 }

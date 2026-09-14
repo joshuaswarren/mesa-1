@@ -5898,30 +5898,70 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       list_del(&stores[i]->link);
       list_addtail(&stores[i]->link, &stop->link);
    }
-   if (store_count == 4 && !load_count) {
-      /* Scalar epilog inputs retain their fixed export ABI. Unlike a collect,
-       * a direct PRELOAD cannot be assigned into the quad's witnessed store
-       * bank by RA. Materialize only out-of-bank scalar inputs before the
-       * terminal store group, then let RA choose a legal free register. */
-      agx_builder b = agx_init_builder(ctx, agx_before_instr(stores[0]));
-      for (unsigned i = 0; i < store_count; ++i) {
-         agx_index source = stores[i]->src[0];
-         if (source.type != AGX_INDEX_NORMAL || agx_channels(source) != 1)
-            continue;
-         agx_foreach_instr_global(ctx, I) {
-            if (I->op == AGX_OPCODE_PRELOAD && I->nr_dests == 1 &&
-                agx_is_equiv(I->dest[0], source) &&
-                I->src[0].type == AGX_INDEX_REGISTER && I->src[0].value >= 32) {
+   ctx->agx3_mrt_tile_ops_ordered = true;
+   return true;
+}
+
+/* Scalar epilog inputs retain their fixed export ABI, and unlike a collect a
+ * direct PRELOAD cannot be assigned into a tile store's register bank by RA:
+ * the output of colour target n arrives at GPR half 8 + 8n. The grounded
+ * stores read halves 0..31 in store-only fragments of three and four targets
+ * (and multi-target BG programs), and halves 0..15 otherwise, so a store of
+ * the second target alone found its input out of bank and was refused.
+ * Materialize only out-of-bank scalar inputs, immediately before the first
+ * store, and let RA choose a legal free register. The bank mirrors RA's
+ * tile_gpr_limit.
+ */
+static bool
+agx3_bank_scalar_tile_store_inputs(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble)
+      return false;
+
+   agx_instr *first_store = NULL;
+   unsigned store_count = 0;
+   bool loads = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_ST_TILE) {
+         first_store = first_store ? first_store : I;
+         store_count++;
+      } else if (I->op == AGX_OPCODE_LD_TILE) {
+         loads = true;
+      }
+   }
+   if (!first_store)
+      return false;
+
+   const bool wide_bank =
+      !loads && store_count <= 4 &&
+      store_count >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
+      (ctx->key->secondary || ctx->key->g17p_mrt_bg);
+   const unsigned bank = wide_bank ? 32 : 16;
+
+   bool progress = false;
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(first_store));
+   agx_foreach_instr_global(ctx, store) {
+      agx_index source = store->src[0];
+      if (store->op != AGX_OPCODE_ST_TILE || source.type != AGX_INDEX_NORMAL ||
+          agx_channels(source) != 1)
+         continue;
+
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_PRELOAD && I->nr_dests == 1 &&
+             agx_is_equiv(I->dest[0], source)) {
+            if (I->src[0].type == AGX_INDEX_REGISTER &&
+                I->src[0].value >= bank) {
                agx_index copy = agx_temp(ctx, source.size);
                agx_mov_to(&b, copy, source);
-               stores[i]->src[0] = copy;
-               break;
+               store->src[0] = copy;
+               progress = true;
             }
+            break;
          }
       }
    }
-   ctx->agx3_mrt_tile_ops_ordered = true;
-   return true;
+   return progress;
 }
 
 static bool
@@ -6161,6 +6201,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    AGX_PASS(ctx, agx3_sink_vertex_outputs);
    AGX_PASS(ctx, agx3_order_g17p_mrt_tile_ops);
+   AGX_PASS(ctx, agx3_bank_scalar_tile_store_inputs);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
    AGX_PASS(ctx, agx_ra);
