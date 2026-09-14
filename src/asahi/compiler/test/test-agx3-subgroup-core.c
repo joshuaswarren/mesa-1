@@ -213,6 +213,81 @@ test_shuffle_vectors(void)
 }
 
 static int
+test_half_broadcast_vectors(void)
+{
+   /* metal-nt -arch applegpu_g17p, simd_broadcast() of 16-bit data. */
+   static const struct {
+      uint16_t dest, src, lane, wait_mask;
+      bool dest_hint, src_cache, src_discard, lane_cache, lane_discard;
+      uint8_t bytes[10];
+   } reg[] = {
+      {2, 3, 2, 0x1, false, false, true, false, true,
+       {0x47, 0x14, 0x54, 0x02, 0x02, 0x06, 0x04, 0x20, 0x1c, 0x00}},
+      {7, 8, 6, 0x1, false, false, false, false, false,
+       {0x47, 0x14, 0x54, 0x07, 0x02, 0x10, 0x0c, 0x20, 0x10, 0x00}},
+      {5, 0, 4, 0x1, false, false, true, false, false,
+       {0x47, 0x14, 0x54, 0x05, 0x02, 0x00, 0x08, 0x20, 0x14, 0x00}},
+      {5, 4, 0, 0x1, false, false, false, false, true,
+       {0x47, 0x14, 0x54, 0x05, 0x02, 0x08, 0x00, 0x20, 0x18, 0x00}},
+      {6, 3, 5, 0x1, true, true, false, false, true,
+       {0x47, 0x14, 0x54, 0x06, 0x03, 0x06, 0x0a, 0x20, 0x1a, 0x00}},
+      {7, 3, 4, 0x0, true, true, false, true, false,
+       {0x47, 0x04, 0x54, 0x07, 0x03, 0x06, 0x08, 0x22, 0x12, 0x00}},
+   };
+   static const uint8_t immediate_lane5[] = {0x47, 0x04, 0x56, 0x02, 0x02,
+                                             0x04, 0x0a, 0x20, 0x04, 0x00};
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(reg); ++i) {
+      const struct agx3_subgroup_shuffle_desc d = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
+         .dest = reg[i].dest,
+         .src = reg[i].src,
+         .lane = reg[i].lane,
+         .wait_mask = reg[i].wait_mask,
+         .dest_hint = reg[i].dest_hint,
+         .half = true,
+         .src_cache = reg[i].src_cache,
+         .src_discard = reg[i].src_discard,
+         .lane_cache = reg[i].lane_cache,
+         .lane_discard = reg[i].lane_discard,
+      };
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, reg[i].bytes, sizeof(reg[i].bytes)));
+   }
+
+   struct agx3_subgroup_shuffle_desc d = {
+      .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+      .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+      .dest = 2,
+      .src = 2,
+      .lane = 5,
+      .wait_mask = 1u << 5,
+      .half = true,
+   };
+   CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, immediate_lane5, sizeof(immediate_lane5)));
+
+   /* Only the SIMD broadcast is witnessed for 16-bit data. */
+   d.op = AGX3_SUBGROUP_SHUFFLE_XOR;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   d.op = AGX3_SUBGROUP_SHUFFLE_BROADCAST;
+   d.quad = true;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   d.quad = false;
+   d.lane_kind = AGX3_SUBGROUP_LANE_UNIFORM;
+   d.lane = 8;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   return 0;
+}
+
+static int
 test_ballot_vectors(void)
 {
    static const uint8_t int_b[] = {
@@ -743,6 +818,7 @@ int
 main(void)
 {
    CHECK(test_shuffle_vectors() == 0);
+   CHECK(test_half_broadcast_vectors() == 0);
    CHECK(test_ballot_vectors() == 0);
    CHECK(test_reduce_vectors() == 0);
    CHECK(test_rejection() == 0);

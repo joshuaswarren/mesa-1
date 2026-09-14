@@ -52,6 +52,16 @@ struct agx3_subgroup_shuffle_desc {
    /* The G17P immediate quad form uses f25 while the source remains live and
     * f27 on its final read.  This is ignored by the older SIMD witnesses. */
    bool src_live;
+
+   /* 16-bit data (f10 = f24 = 1), dest and src in half units. Grounded for the
+    * SIMD broadcast with an immediate lane, and with a register lane read as
+    * 16 bits from the half in `lane`, where the register form takes its
+    * lifetime hints from the fields below. */
+   bool half;
+   bool src_cache;
+   bool src_discard;
+   bool lane_cache;
+   bool lane_discard;
 };
 
 enum agx3_subgroup_ballot_type {

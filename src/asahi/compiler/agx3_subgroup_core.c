@@ -53,13 +53,66 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
                              uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
                              uint8_t *length)
 {
-   if (d == NULL || out == NULL || length == NULL || !valid_reg(enc, d->dest) ||
-       !valid_reg(enc, d->src))
+   if (d == NULL || out == NULL || length == NULL)
+      return false;
+   if (d->half ? enc != AGX_ISA_ENCODING_AGX3B || d->quad ||
+                    d->op != AGX3_SUBGROUP_SHUFFLE_BROADCAST ||
+                    d->dest >= 192 || d->src >= 192
+               : !valid_reg(enc, d->dest) || !valid_reg(enc, d->src))
       return false;
 
    const char *mnemonic = shuffle_mnemonic(d->quad, d->op);
    if (mnemonic == NULL)
       return false;
+
+   /*
+    * 16-bit data with a register lane. metal-nt -arch applegpu_g17p,
+    * `simd_broadcast(ushort d, ushort lane)` with d and lane each either
+    * read again later or not:
+    *
+    *   d dead, lane dead    47145402020604201c00   f27 f41
+    *   d live, lane live    4714540702100c201000
+    *   d dead, lane live    47145405020008201400   f27
+    *   d live, lane dead    47145405020800201800   f41
+    *
+    * and simd_shuffle(), whose broadcasts reuse both soon, adds f25 (source)
+    * and f39 (lane) next to f11 (destination). So f25/f27 are the source
+    * cache/discard hints and f39/f41 the lane's; the lane sits in f30 and a
+    * slot-1 source wait in f44, as on the immediate form.
+    */
+   if (d->half && d->lane_kind == AGX3_SUBGROUP_LANE_REGISTER) {
+      const unsigned slots = 6;
+      if (d->lane >= 192 || (d->wait_mask >> slots) != 0 ||
+          (d->src_cache && d->src_discard) ||
+          (d->lane_cache && d->lane_discard))
+         return false;
+
+      struct agx3_field_kv hbase[6];
+      unsigned hnb = 0;
+      hbase[hnb++] = (struct agx3_field_kv){9, 2};
+      hbase[hnb++] = (struct agx3_field_kv){10, 1};
+      hbase[hnb++] = (struct agx3_field_kv){23, 2};
+      hbase[hnb++] = (struct agx3_field_kv){24, 1};
+      hbase[hnb++] = (struct agx3_field_kv){37, 2};
+      hbase[hnb++] = (struct agx3_field_kv){38, 1};
+
+      struct agx3_field_kv hov[16];
+      unsigned hnv = 0;
+      hov[hnv++] = (struct agx3_field_kv){2, d->dest};
+      hov[hnv++] = (struct agx3_field_kv){11, d->dest_hint ? 1u : 0u};
+      hov[hnv++] = (struct agx3_field_kv){16, d->src};
+      hov[hnv++] = (struct agx3_field_kv){25, d->src_cache ? 1u : 0u};
+      hov[hnv++] = (struct agx3_field_kv){27, d->src_discard ? 1u : 0u};
+      hov[hnv++] = (struct agx3_field_kv){30, d->lane};
+      hov[hnv++] = (struct agx3_field_kv){39, d->lane_cache ? 1u : 0u};
+      hov[hnv++] = (struct agx3_field_kv){41, d->lane_discard ? 1u : 0u};
+      for (unsigned i = 0; i < slots; ++i)
+         if (d->wait_mask & (1u << i))
+            hov[hnv++] = (struct agx3_field_kv){(uint16_t)(44 + i), 1};
+
+      return agx3_bind_compose(enc, mnemonic, 0, hbase, hnb, hov, hnv, out,
+                               length);
+   }
 
    /*
     * The immediate-lane form: f37 = 1 selects it and the lane index sits in
@@ -107,10 +160,12 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
 
       struct agx3_field_kv ibase[8];
       unsigned inb = 0;
+      /* 16-bit data only narrows the width pair: simd_broadcast(ushort, 5)
+       * is 4704560202040a200400 next to the 32-bit words above. */
       ibase[inb++] = (struct agx3_field_kv){9, 2};
-      ibase[inb++] = (struct agx3_field_kv){10, 2};
+      ibase[inb++] = (struct agx3_field_kv){10, d->half ? 1u : 2u};
       ibase[inb++] = (struct agx3_field_kv){23, 2};
-      ibase[inb++] = (struct agx3_field_kv){24, 2};
+      ibase[inb++] = (struct agx3_field_kv){24, d->half ? 1u : 2u};
       /* One liveness selector for the whole family: f25 while the source
        * stays live, f27 on its final read.  Apple's simd shift witnesses
        * carry f25 (the shifted result lands in a different register and the
@@ -133,7 +188,7 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
                                length);
    }
 
-   if (d->wait_mask != 0 ||
+   if (d->half || d->wait_mask != 0 ||
        (d->lane_kind != AGX3_SUBGROUP_LANE_REGISTER &&
         d->lane_kind != AGX3_SUBGROUP_LANE_UNIFORM) ||
        (d->lane & 1) != 0 ||

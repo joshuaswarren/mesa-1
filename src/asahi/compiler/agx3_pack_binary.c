@@ -3423,6 +3423,16 @@ agx3_subgroup_plain(agx_index index, enum agx_index_type type)
           !(index.cache && index.discard) && (index.value & 1) == 0;
 }
 
+/* The 16-bit counterpart of agx3_subgroup_plain(), in half units. */
+static bool
+agx3_subgroup_plain_half(agx_index index)
+{
+   return index.type == AGX_INDEX_REGISTER && !index.memory &&
+          index.size == AGX_SIZE_16 && agx_channels(index) == 1 &&
+          !index.abs && !index.neg && !index.kill &&
+          !(index.cache && index.discard) && index.value < 192;
+}
+
 /* A plain immediate operand: an unmodified single-channel constant. */
 static bool
 agx3_subgroup_imm_lane(agx_index x)
@@ -3521,6 +3531,42 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
    enum agx3_subgroup_shuffle_op op;
    if (!agx3_map_shuffle(I->op, &quad, &op))
       return false;
+
+   /* 16-bit data: the SIMD broadcast only, from an immediate lane or from
+    * the low half of a lane register. */
+   if (I->op == AGX_OPCODE_SHUFFLE && I->nr_dests == 1 && I->nr_srcs == 2 &&
+       !I->saturate && I->dest[0].size == AGX_SIZE_16 &&
+       enc == AGX_ISA_ENCODING_AGX3B) {
+      const agx_index dest = I->dest[0], src = I->src[0], lane = I->src[1];
+      const bool register_lane =
+         lane.type == AGX_INDEX_REGISTER && !lane.memory &&
+         (lane.size == AGX_SIZE_16 || lane.size == AGX_SIZE_32) &&
+         agx_channels(lane) == 1 && !lane.abs && !lane.neg && !lane.kill &&
+         !(lane.cache && lane.discard) && lane.value < 192;
+      if (!agx3_subgroup_plain_half(dest) || !agx3_subgroup_plain_half(src) ||
+          !(register_lane || agx3_subgroup_imm_lane(lane)))
+         return false;
+
+      const struct agx3_subgroup_shuffle_desc d = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = register_lane ? AGX3_SUBGROUP_LANE_REGISTER
+                                    : AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = dest.value,
+         .src = src.value,
+         .lane = lane.value,
+         .wait_mask = wait_mask,
+         .dest_hint = dest.cache,
+         .src_live = !src.discard,
+         .half = true,
+         .src_cache = src.cache,
+         .src_discard = src.discard,
+         .lane_cache = register_lane && lane.cache,
+         .lane_discard = register_lane && lane.discard,
+      };
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&
+             agx3_append(emission, bytes, length);
+   }
 
    if (I->op == AGX_OPCODE_SHUFFLE && I->nr_srcs == 2 &&
        I->src[1].type == AGX_INDEX_IMMEDIATE)
