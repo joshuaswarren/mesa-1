@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "drm-uapi/asahi_drm.h"
+#include "util/bitscan.h"
 #include "util/format/u_formats.h"
 #include "agx_pack.h"
 
@@ -114,6 +115,17 @@ bool agx_nir_lower_to_per_sample(struct nir_shader *shader);
 
 bool agx_nir_lower_monolithic_msaa(struct nir_shader *shader,
                                    uint8_t nr_samples);
+
+/* Export registers of one sample's colours in a G17P fragment unrolled per
+ * sample: eight halves for each location up to the last one written. */
+static inline unsigned
+agx_g17p_sample_colour_stride(uint8_t loc_written)
+{
+   return 8 * util_last_bit(loc_written);
+}
+
+bool agx_nir_unroll_g17p_samples(struct nir_shader *shader,
+                                 unsigned nr_samples, uint8_t loc_written);
 
 bool agx_nir_lower_sample_intrinsics(struct nir_shader *shader,
                                      bool ignore_sample_mask_without_msaa);

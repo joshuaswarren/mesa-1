@@ -763,17 +763,12 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       features->geometryShader = false;
       features->tessellationShader = false;
-      /* The native 2x/4x BG/EOT tile selectors are implemented, but per-sample
-       * FRAGMENT execution is not: hk_shader.c unconditionally runs
-       * agx_nir_lower_g17p_1x_sample_shading() on every G17P fragment shader
-       * that sets uses_sample_shading, and agx_linker.c fails closed on a
-       * nonzero nr_samples_shaded because the AGX2 external sample loop is not
-       * AGX3 machine code.  At the default one rasterization sample that
-       * collapse is exact, so the promise is keepable there; at 2x/4x
-       * gl_SampleID would silently read 0.
-       *
-       * So do NOT run the 4x SampleID oracle expecting a pass: it is blocked on
-       * a grounded AGX3 per-sample fragment path, not on hardware time. */
+      /* Per-sample fragment execution unrolls the samples inside the
+       * fragment (hk_compile_nir) for pipelines that fix 2x or 4x
+       * rasterization samples. A dynamic count, a shader object, or a
+       * per-sample depth/stencil export still collapses to one sample and is
+       * refused at a multisample draw, so keep the feature behind its
+       * hardware qualification. */
       features->sampleRateShading =
          hk_g17p_unverified_feature("sample_rate_shading");
       /* IA vertex/primitive recording, including reset/reuse/unavailable

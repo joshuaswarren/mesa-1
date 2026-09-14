@@ -5473,10 +5473,16 @@ agx3_g17p_mrt_class_pair(unsigned partition)
  * unrolled per-sample fragments use), while every store retains the same RT
  * byte offset and format.
  *
- * Keep this admission as narrow as the native evidence.  Ordinary fragment
- * shaders still require the colour transaction protocol below; only an
- * ignore-TIB-dependencies auxiliary shader may emit one two- or four-store
- * set to partition zero, and each store's mask must be computed by its own
+ * A fragment unrolled per sample stores the same way inside the ordinary
+ * colour transaction. Apple's fs_sample_id_2x/4x (applegpu_g17p, one RGBA8
+ * target, reading [[sample_id]]) acquire class 12 once after the 0x200 entry,
+ * emit one LSTCOL per sample with that sample's mask register, and release
+ * 524 once, exactly as the one-sample fragment brackets its single LSTCOL.
+ *
+ * Keep this admission as narrow as the native evidence.  A background may
+ * emit one two- or four-store set to partition zero with no pixel
+ * transaction; a colour epilog the same set, one per framebuffer sample,
+ * after its one class-12 wait.  Each store's mask must be computed by its own
  * instruction so a repeated one cannot masquerade as a complete sample
  * domain.
  *
@@ -5491,11 +5497,11 @@ agx3_g17p_mrt_class_pair(unsigned partition)
  * what is checked.
  */
 static bool
-agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
+agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
-       !ctx->key->fs.ignore_tib_dependencies ||
+       ctx->key->fs.ignore_tib_dependencies == colour ||
        list_length(&ctx->blocks) != 1)
       return false;
 
@@ -5509,7 +5515,7 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
    const agx_instr *mask_defs[4];
    enum agx_format format = 0;
    unsigned component_mask = 0;
-   bool stopped = false;
+   bool stopped = false, waited = false;
 
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
@@ -5517,6 +5523,12 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
 
       if (I->op == AGX_OPCODE_STOP) {
          stopped = true;
+         continue;
+      }
+
+      if (I->op == AGX_OPCODE_WAIT_PIX && colour && !waited && !stores &&
+          I->writeout == 12) {
+         waited = true;
          continue;
       }
 
@@ -5570,7 +5582,9 @@ agx3_g17p_msaa_background_store_protocol(agx_context *ctx)
       mask_defs[stores++] = def;
    }
 
-   return stopped && (stores == 2 || stores == 4);
+   return stopped && waited == colour &&
+          (colour ? stores == ctx->key->fs.nr_samples
+                  : stores == 2 || stores == 4);
 }
 
 static int
@@ -6549,11 +6563,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       agx3_g17p_mrt_protocol(ctx);
    const bool g17p_multi_background = agx3_g17p_multi_background_protocol(ctx);
    const bool g17p_msaa_background_stores =
-      agx3_g17p_msaa_background_store_protocol(ctx);
+      agx3_g17p_sample_store_protocol(ctx, false);
+   const bool g17p_sample_colour_stores =
+      tile_stores_left > 1 && agx3_g17p_sample_store_protocol(ctx, true);
    const bool g17p_colour_protocol =
       (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
-       !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 1 &&
+       !ctx->key->fs.ignore_tib_dependencies &&
+       (tile_stores_left == 1 || g17p_sample_colour_stores) &&
        tile_loads_left == 0) || g17p_mrt.valid;
 
    /* Multiple colour stores need an attachment-specific pixel transaction.
@@ -6562,7 +6579,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        tile_stores_left > 1 && !g17p_mrt.valid && !g17p_multi_background &&
-       !g17p_msaa_background_stores)
+       !g17p_msaa_background_stores && !g17p_sample_colour_stores)
       goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
     * by one class-4 write wait/store, under the same class-12 entry/release.
@@ -7802,8 +7819,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!agx3_emit_pixel(emission, enc, g17p_deferred_write, 0))
                   AGX3_REFUSE(I);
             }
+            /* Apple's per-sample RGBA32 fragments store from halves 24 and
+             * 16 with f13 clear, as the multi-target backgrounds do. */
             if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last,
-                                g17p_multi_background,
+                                g17p_multi_background ||
+                                   g17p_sample_colour_stores,
                                 g17p_multi_background &&
                                    ctx->key->g17p_mrt_bg,
                                 false))

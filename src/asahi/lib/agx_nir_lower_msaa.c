@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "agx_abi.h"
 #include "agx_compile.h"
 #include "agx_tilebuffer.h"
 #include "nir.h"
@@ -108,6 +109,95 @@ agx_nir_wrap_per_sample_loop(nir_shader *shader, uint8_t nr_samples)
    nir_shader_intrinsics_pass(shader, lower_active_samples,
                               nir_metadata_control_flow, bit);
    return true;
+}
+
+struct g17p_sample_copy {
+   nir_def *active_samples;
+   nir_def *samples_log2;
+   unsigned colour_offset;
+};
+
+static void
+specialize_g17p_sample_copy(nir_cf_list *copy,
+                            const struct g17p_sample_copy *sample)
+{
+   foreach_list_typed(nir_cf_node, node, node, &copy->list) {
+      nir_foreach_block_in_cf_node(block, node) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            switch (intr->intrinsic) {
+            case nir_intrinsic_load_active_samples_agx:
+               nir_def_rewrite_uses(&intr->def, sample->active_samples);
+               nir_instr_remove(instr);
+               break;
+
+            case nir_intrinsic_load_samples_log2_agx:
+               nir_def_rewrite_uses(&intr->def, sample->samples_log2);
+               nir_instr_remove(instr);
+               break;
+
+            case nir_intrinsic_export_agx:
+            case nir_intrinsic_load_exported_agx:
+               if (nir_intrinsic_base(intr) >= AGX_ABI_FOUT_COLOUR(0)) {
+                  nir_intrinsic_set_base(intr, nir_intrinsic_base(intr) +
+                                                  sample->colour_offset);
+               }
+               break;
+
+            default:
+               break;
+            }
+         }
+      }
+   }
+}
+
+/*
+ * G17P has no external sample loop around linked fragment parts. Apple's
+ * applegpu_g17p fragments that read [[sample_id]] instead repeat the shader
+ * body once per sample, with the sample folded in, and store each sample
+ * separately. Do the same for one shader part already lowered to per-sample
+ * form (agx_nir_lower_to_per_sample): clone the body per sample with that
+ * sample active.
+ *
+ * Colours cross from the main fragment to its epilog in export registers, so
+ * each sample gets its own: sample i of every location follows all locations
+ * of the samples before it. Both parts must be unrolled with the same count
+ * and written locations.
+ */
+bool
+agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
+                            uint8_t loc_written)
+{
+   assert(shader->info.stage == MESA_SHADER_FRAGMENT);
+   assert(nr_samples == 2 || nr_samples == 4);
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_cf_list body;
+   nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   nir_def *samples_log2 =
+      nir_imm_intN_t(&b, util_logbase2(nr_samples), 16);
+
+   for (unsigned i = 0; i < nr_samples; ++i) {
+      const struct g17p_sample_copy sample = {
+         .active_samples = nir_imm_intN_t(&b, BITFIELD_BIT(i), 16),
+         .samples_log2 = samples_log2,
+         .colour_offset = i * agx_g17p_sample_colour_stride(loc_written),
+      };
+
+      nir_cf_list copy;
+      nir_cf_list_clone(&copy, &body, &impl->cf_node, NULL);
+      specialize_g17p_sample_copy(&copy, &sample);
+      nir_cf_reinsert(&copy, nir_after_impl(impl));
+   }
+
+   nir_cf_delete(&body);
+   return nir_progress(true, impl, nir_metadata_none);
 }
 
 /*

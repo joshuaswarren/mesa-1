@@ -3,8 +3,10 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "agx_abi.h"
 #include "agx_compile.h"
 #include "agx_linker.h"
+#include "agx_tilebuffer.h"
 #include "nir_builder.h"
 #include "util/format/u_formats.h"
 
@@ -145,11 +147,128 @@ count_dynamic_tile_samples(nir_shader *s)
    return count;
 }
 
+static bool
+exported_bases(nir_shader *s, nir_intrinsic_op op, unsigned count,
+               const unsigned *bases)
+{
+   unsigned seen = 0;
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic ||
+                nir_instr_as_intrinsic(instr)->intrinsic != op)
+               continue;
+
+            if (seen == count ||
+                nir_intrinsic_base(nir_instr_as_intrinsic(instr)) !=
+                   bases[seen])
+               return false;
+            seen++;
+         }
+      }
+   }
+   return seen == count;
+}
+
+static unsigned
+count_bytes(const struct agx_shader_part *part, const uint8_t *pattern,
+            unsigned len)
+{
+   unsigned count = 0;
+   const uint8_t *binary = part->binary;
+   for (unsigned i = 0; binary && i + len <= part->info.binary_size; ++i)
+      count += memcmp(binary + i, pattern, len) == 0;
+   return count;
+}
+
+/* A sample-shaded G17P fragment runs its body once per sample inside the
+ * program, exporting each sample's colours to their own registers, and its
+ * epilog stores each sample from those registers in one class-12 transaction:
+ * Apple's fs_sample_id_4x brackets four masked LSTCOLs with one PIXWAIT 12 and
+ * one PIXREL 524. */
+static bool
+test_unrolled_sample_shading(void)
+{
+   static const unsigned colour_bases[] = {
+      AGX_ABI_FOUT_COLOUR(0),
+      AGX_ABI_FOUT_COLOUR(0) + 8,
+      AGX_ABI_FOUT_COLOUR(0) + 16,
+      AGX_ABI_FOUT_COLOUR(0) + 24,
+   };
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P unrolled main FS");
+   nir_def *active = nir_u2f32(&b, nir_load_active_samples_agx(&b));
+   nir_def *log2 = nir_u2f32(&b, nir_load_samples_log2_agx(&b));
+   nir_export_agx(&b, nir_vec4(&b, active, log2, active, log2),
+                  .base = AGX_ABI_FOUT_COLOUR(0));
+   nir_export_agx(&b, nir_imm_intN_t(&b, 0, 32), .base = AGX_ABI_FOUT_Z);
+
+   bool ok = agx_nir_unroll_g17p_samples(b.shader, 4, BITFIELD_BIT(0));
+   nir_validate_shader(b.shader, "after unrolling samples");
+   ok &= count_intrinsic(b.shader, nir_intrinsic_load_active_samples_agx) ==
+            0 &&
+         count_intrinsic(b.shader, nir_intrinsic_load_samples_log2_agx) == 0;
+   ok &= count_intrinsic(b.shader, nir_intrinsic_export_agx) == 8;
+   ralloc_free(b.shader);
+   if (!ok)
+      return false;
+
+   struct agx_fs_epilog_key key = {
+      .link.loc_written = BITFIELD_BIT(0),
+      .link.size_32 = BITFIELD_BIT(0),
+      .link.already_ran_zs = true,
+      .nr_samples = 4,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode =
+      agx_pack_blend_standard(PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+                              PIPE_BLENDFACTOR_ZERO, PIPE_BLEND_ADD,
+                              PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+
+   b = nir_builder_init_simple_shader(0, &agx_nir_options,
+                                      "G17P unrolled FS epilog");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_to_per_sample(b.shader);
+   ok &= agx_nir_unroll_g17p_samples(b.shader, 4, key.link.loc_written);
+   nir_opt_constant_folding(b.shader);
+   agx_nir_lower_g17p_tile_samples(b.shader, 4);
+   ok &= exported_bases(b.shader, nir_intrinsic_load_exported_agx, 4,
+                        colour_bases) &&
+         count_dynamic_tile_samples(b.shader) == 4;
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = 4,
+   };
+   struct agx_shader_part part = {0};
+   static const uint8_t wait12[] = {0x87, 0x02, 0x54, 0x0c, 0x08, 0x00};
+   static const uint8_t release524[] = {0x07, 0x02, 0x54, 0x0c, 0x02, 0x00};
+   static const uint8_t lstcol[] = {0xe7, 0x06, 0x54};
+   ok &= agx_compile_shader_nir(b.shader, &backend_key, &part) &&
+         count_bytes(&part, wait12, sizeof(wait12)) == 1 &&
+         count_bytes(&part, release524, sizeof(release524)) == 1 &&
+         count_bytes(&part, lstcol, sizeof(lstcol)) == 4;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
    if (!test_single_sample_shading()) {
       fprintf(stderr, "G17P 1x sample shading was not folded to pixel shading\n");
+      return 1;
+   }
+   if (!test_unrolled_sample_shading()) {
+      fprintf(stderr, "G17P samples were not unrolled into one transaction\n");
       return 1;
    }
    if (!test_epilog_discard_policy()) {

@@ -2986,7 +2986,20 @@ static void
 build_g17p_fs_epilog(nir_builder *b, const void *key_)
 {
    const struct agx_fs_epilog_key *key = key_;
-   agx_nir_fs_epilog(b, key);
+   if (key->link.sample_shading) {
+      /* The main fragment exported every sample's colours. Build the per-pixel
+       * epilog, then store and blend each sample from its own colours. */
+      struct agx_fs_epilog_key pixel = *key;
+      pixel.link.sample_shading = false;
+      agx_nir_fs_epilog(b, &pixel);
+
+      NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
+      NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples, key->nr_samples,
+               key->link.loc_written);
+      NIR_PASS(_, b->shader, nir_opt_constant_folding);
+   } else {
+      agx_nir_fs_epilog(b, key);
+   }
 
    NIR_PASS(_, b->shader, agx_nir_lower_g17p_tile_samples, key->nr_samples);
 }
@@ -4921,18 +4934,31 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          perf_debug(cmd, "Emulating sample mask");
       }
 
-      /* G17P has no AGX3 per-sample fragment path: hk_compile_shader()
-       * canonicalized this shader's sample builtins to single-sample, which is
-       * exact at one rasterization sample and wrong at more.  Now that the real
-       * count is known, refuse rather than shade once and hand the application
-       * gl_SampleID == 0 as if it were the answer.  A refusal is recoverable;
-       * a plausible wrong pixel is not.
+      /* hk_compile_shader() canonicalized this shader's sample builtins to
+       * single-sample because its pipeline did not fix the sample count, or
+       * it exports depth or stencil. That is exact at one rasterization sample
+       * and wrong at more.  Now that the real count is known, refuse rather
+       * than shade once and hand the application gl_SampleID == 0 as if it
+       * were the answer.  A refusal is recoverable; a plausible wrong pixel is
+       * not.
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
           dyn->ms.rasterization_samples > 1) {
-         mesa_loge("G17P: per-sample fragment execution is not implemented; "
-                   "refusing a %u-sample draw that requests it",
+         mesa_loge("G17P: per-sample fragment execution needs a fixed sample "
+                   "count and no depth/stencil export; refusing a %u-sample "
+                   "draw that requests it",
                    dyn->ms.rasterization_samples);
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+
+      /* A fragment unrolled per sample shades exactly its pipeline's count. */
+      if (dev->dev.chip == AGX_CHIP_G17P &&
+          fs->info.fs.epilog_key.sample_shading &&
+          fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
+         mesa_loge("G17P: fragment unrolled for %u samples cannot run a "
+                   "%u-sample draw",
+                   fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -4949,8 +4975,10 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          return;
       }
 
+      /* G17P shades every sample inside the fragment rather than looping. */
       unsigned samples_shaded = 0;
-      if (fs->info.fs.epilog_key.sample_shading)
+      if (fs->info.fs.epilog_key.sample_shading &&
+          dev->dev.chip != AGX_CHIP_G17P)
          samples_shaded = dyn->ms.rasterization_samples;
 
       struct hk_fast_link_key_fs key = {

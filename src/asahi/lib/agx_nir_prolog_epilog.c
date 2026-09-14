@@ -858,13 +858,11 @@ agx_nir_lower_fs_output_to_epilog_for_device(
  * fragment covers"), ANDed with a one-hot bit for each iteration of an
  * unrolled per-sample shader. Reproduce exactly those two shapes.
  *
- * A non-constant mask is already an expression in a register (the per-sample
- * lowerings build `mask & active_samples`), so it is left alone and reaches
- * the packer as the register form by itself. Note that in a fast-linked
- * sample-shading epilog `active_samples` is the ABI loop-bit register rather
- * than the hardware coverage word, so such a store is not additionally masked
- * by coverage; sample-rate shading is its own unverified feature and is not
- * claimed here.
+ * A non-constant mask is already an expression in a register, so it is left
+ * alone and reaches the packer as the register form by itself. An epilog
+ * unrolled per sample (agx_nir_unroll_g17p_samples) has folded each sample's
+ * `mask & active_samples` to that sample's one-hot constant beforehand, so it
+ * too becomes coverage ANDed with the sample's bit.
  */
 static bool
 lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)

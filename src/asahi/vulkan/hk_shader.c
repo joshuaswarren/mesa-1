@@ -13,6 +13,7 @@
 #include "hk_entrypoints.h"
 
 #include "poly/nir/poly_nir.h"
+#include "agx_compiler.h"
 #include "agx_debug.h"
 #include "agx_device.h"
 #include "agx_helpers.h"
@@ -1451,6 +1452,28 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
    NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs, chip);
 }
 
+/* G17P unrolls per-sample fragment execution for a pipeline that fixes two or
+ * four samples. Depth and stencil exports remain per pixel, and every sample's
+ * colours need their own export registers inside the register file.
+ */
+static bool
+hk_g17p_unrolls_sample_shading(const nir_shader *nir,
+                               const struct hk_fs_key *key)
+{
+   const uint64_t zs = BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+                       BITFIELD64_BIT(FRAG_RESULT_STENCIL);
+   uint8_t locations =
+      (nir->info.outputs_written >> FRAG_RESULT_DATA0) & BITFIELD_MASK(8);
+   if (nir->info.fs.color_is_dual_source)
+      locations |= BITFIELD_BIT(1);
+
+   return (key->g17p_samples == 2 || key->g17p_samples == 4) &&
+          !(nir->info.outputs_written & zs) &&
+          AGX_ABI_FOUT_COLOUR(0) +
+                key->g17p_samples * agx_g17p_sample_colour_stride(locations) <=
+             AGX3B_NUM_REGS;
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
@@ -1597,7 +1620,17 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                dev->dev.chip, &shader->info.fs.epilog_key);
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
 
-      if (nir->info.fs.uses_sample_shading) {
+      if (nir->info.fs.uses_sample_shading &&
+          dev->dev.chip == AGX_CHIP_G17P) {
+         /* hk_compile_shader() kept sample shading only for a fixed count.
+          * The linked epilog unrolls the same samples. */
+         assert(key && (key->fs.g17p_samples == 2 ||
+                        key->fs.g17p_samples == 4));
+         NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
+         NIR_PASS(_, nir, agx_nir_unroll_g17p_samples, key->fs.g17p_samples,
+                  shader->info.fs.epilog_key.loc_written);
+         nir->info.fs.uses_sample_shading = false;
+      } else if (nir->info.fs.uses_sample_shading) {
          /* Ensure the sample mask is preserved in register */
          nir_builder b =
             nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
@@ -1980,19 +2013,21 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
       nir->info.fs.uses_sample_shading |= key->fs.force_sample_shading;
 
-      /* Canonicalize sample builtins and qualifiers now, before split FS
-       * lowering observes uses_sample_shading and selects the legacy external
-       * sample loop, which is AGX2 machine code (agx_linker.c).
+      /* G17P has no external sample loop: agx_linker.c's is AGX2 machine
+       * code. A pipeline that fixes two or four samples unrolls the samples
+       * inside the fragment instead (hk_compile_nir). Otherwise canonicalize
+       * sample builtins and qualifiers now, before split FS lowering observes
+       * uses_sample_shading.
        *
-       * This is exact only at ONE rasterization sample, where per-sample and
-       * per-pixel invocation coincide.  We cannot condition it on the sample
-       * count here: rasterizationSamples is dynamic state (and shader objects
-       * may compile with no pipeline state at all), so the count is not known
-       * until the draw.  Record the intent instead; hk_flush_dynamic_state()
+       * That is exact only at ONE rasterization sample, where per-sample and
+       * per-pixel invocation coincide.  With a dynamic count, or a shader
+       * object compiled with no pipeline state, the count is not known until
+       * the draw.  Record the intent instead; hk_flush_dynamic_state()
        * refuses the draw if the count turns out to be greater than one.
        */
       if (dev->dev.chip == AGX_CHIP_G17P &&
-          nir->info.fs.uses_sample_shading) {
+          nir->info.fs.uses_sample_shading &&
+          !hk_g17p_unrolls_sample_shading(nir, &key->fs)) {
          g17p_collapsed_sample_shading = true;
          NIR_PASS(_, nir, agx_nir_lower_g17p_1x_sample_shading);
       }
