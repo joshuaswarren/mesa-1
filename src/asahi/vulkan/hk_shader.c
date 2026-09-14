@@ -1141,6 +1141,21 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
             lower_indirect_modes, UINT32_MAX);
 
+   /* SPIR-V represents a fragment gl_Layer read as load_layer_id, and the
+    * generic AGX options deliberately keep that system-value form for AGX2.
+    * G17P has no fragment layer system register: Apple's shaders consume the
+    * raster layer through a flat coefficient. Convert the sysval back to a
+    * shader input here, after the generic system-value lowering but before IO
+    * lowering, so the regular varying linker builds the coefficient binding. */
+   if (nir->info.stage == MESA_SHADER_FRAGMENT &&
+       dev->dev.chip == AGX_CHIP_G17P) {
+      const nir_lower_sysvals_to_varyings_options sysvals_to_varyings = {
+         .layer_id = true,
+      };
+      NIR_PASS(_, nir, nir_lower_sysvals_to_varyings,
+               &sysvals_to_varyings);
+   }
+
    NIR_PASS(_, nir, nir_lower_io, nir_var_shader_in | nir_var_shader_out,
             glsl_type_size,
             nir_lower_io_lower_64bit_to_32 |
@@ -1468,7 +1483,8 @@ hk_g17p_saturate_layer_viewport(nir_builder *b, nir_intrinsic_instr *intr,
 }
 
 static void
-hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz)
+hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
+               bool layer_as_varying)
 {
    /* Point size must be clamped, excessively large points don't render
     * properly on G13.
@@ -1485,7 +1501,8 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz)
    NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL, NULL);
    NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
 
-   NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs);
+   NIR_PASS(_, nir, agx_nir_lower_uvs, &shader->info.uvs,
+            layer_as_varying);
 }
 
 /* G17P unrolls per-sample fragment execution for a pipeline that fixes two or
@@ -1690,7 +1707,11 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       }
 
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
-      NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      /* G17P exposes the raster layer through the flat coefficient table.
+       * SR28 is the compute grid-Z register and does not hold a fragment
+       * layer on this generation. */
+      NIR_PASS(_, nir, agx_nir_lower_interpolation,
+               dev->dev.chip == AGX_CHIP_G17P);
       if (dev->dev.chip == AGX_CHIP_G17P) {
          NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                   hk_g17p_lower_flat_nonfan_triangles,
@@ -1740,7 +1761,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                      hk_g17p_saturate_layer_viewport,
                      nir_metadata_control_flow, NULL);
          }
-         hk_lower_hw_vs(nir, shader, kill_psiz);
+         hk_lower_hw_vs(nir, shader, kill_psiz,
+                        dev->dev.chip == AGX_CHIP_G17P);
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
          nir->info.stage = MESA_SHADER_COMPUTE;
@@ -2137,7 +2159,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   hk_g17p_saturate_layer_viewport, nir_metadata_control_flow,
                   NULL);
       }
-      hk_lower_hw_vs(rast, shader, false);
+      hk_lower_hw_vs(rast, shader, false,
+                     dev->dev.chip == AGX_CHIP_G17P);
       shader->info.gs = count_variant->info.gs;
       main_variant->info.gs = count_variant->info.gs;
 

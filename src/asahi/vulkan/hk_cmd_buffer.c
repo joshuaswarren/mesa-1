@@ -1363,8 +1363,8 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             return false;
          }
       } else {
-         /* A fragment gl_ViewportIndex read is an ordinary flat varying
-          * that the vertex shader also writes out as a user word. Cull
+         /* Fragment layer and gl_ViewportIndex are ordinary flat varyings
+          * that the vertex shader also writes out as user words. Cull
           * distance emulation similarly links the VS-generated
           * CULL_PRIMITIVE words into its FS prolog as noperspective
           * coefficients. */
@@ -1373,6 +1373,7 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             b->slot == VARYING_SLOT_CULL_PRIMITIVE + 1;
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
+                                b->slot == VARYING_SLOT_LAYER ||
                                 b->slot == VARYING_SLOT_VIEWPORT || cull_slot;
          if (!user_slot || (cull_slot && (b->perspective || !b->smooth)) ||
              (b->perspective && !has_rhw) ||

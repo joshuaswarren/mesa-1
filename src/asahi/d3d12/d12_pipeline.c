@@ -2416,7 +2416,7 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, false);
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
-      NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      NIR_PASS(_, nir, agx_nir_lower_interpolation, false);
 
       /* The passes above may introduce driver-owned sysvals. */
       NIR_PASS(_, nir, d12_dxil_lower_root_mask, api_sample_mask);
@@ -2436,7 +2436,7 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
       NIR_PASS(_, nir, agx_nir_lower_monolithic_msaa,
                MAX2(tib->nr_samples, 1));
-      NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      NIR_PASS(_, nir, agx_nir_lower_interpolation, false);
       /* The passes above can introduce driver-owned sysvals
        * (api_sample_mask, shader_part_tests_zs); rerun the lowering that
        * resolves them. No-op when none appeared.

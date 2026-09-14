@@ -699,7 +699,7 @@ fs_lower(nir_shader *s)
 {
    NIR_PASS(_, s, agx_nir_lower_discard_zs_emit);
    NIR_PASS(_, s, agx_nir_lower_sample_mask);
-   NIR_PASS(_, s, agx_nir_lower_interpolation);
+   NIR_PASS(_, s, agx_nir_lower_interpolation, false);
    NIR_PASS(_, s, nir_shader_intrinsics_pass, lower_driver_sysvals,
             nir_metadata_control_flow, NULL);
 }

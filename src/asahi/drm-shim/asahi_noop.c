@@ -734,11 +734,13 @@ check_stencil_blit_coverage(void)
    /* Without fragment stencil export, common meta emits one bit-selective
     * graphics pass for each stencil bit. Require all eight fixed-function
     * stencil updates plus the stencil-plane readback draw so merely accepting
-    * the API command cannot pass. The two clears and final transfer also have
-    * an exact three-launch compute envelope. */
+    * the API command cannot pass. G17P's fragment layer input is an ordinary
+    * flat varying, while the observer remains a no-varying draw, so this
+    * sequence must exercise both paths. The two clears and final transfer also
+    * have an exact three-launch compute envelope. */
    if (matrix_stats.draws != 9 || matrix_stats.state_updates != 9 ||
        matrix_stats.stencil_state_updates != 9 ||
-       !matrix_stats.stencil_enabled || matrix_stats.varying_fs ||
+       !matrix_stats.stencil_enabled || !matrix_stats.varying_fs ||
        !matrix_stats.no_varying_fs || compute_stats.launches != 3 ||
        compute_stats.barriers != 3 || compute_stats.strong_barriers != 2) {
       fprintf(stderr,
