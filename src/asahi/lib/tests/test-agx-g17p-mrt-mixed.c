@@ -150,8 +150,14 @@ test_selectors_match_single_target_programs(void)
       admitted++;
    }
 
-   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R16G16B16A16_SINT) == 0);
-   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R5G6B5_UNORM) == 0);
+   /* The selector names the lane class Apple's own fragment stores the
+    * format in (metal-nt render pipelines per MTLPixelFormat, matched to the
+    * builtin background clears of each internal format). */
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R32G32_UINT) == 0x35);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R32G32_SINT) == 0x35);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R16G16B16A16_UNORM) == 0x95);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R16G16B16A16_SINT) == 0x15);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B5G6R5_UNORM) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R11G11B10_FLOAT) == 0);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R9G9B9E5_FLOAT) == 0);
    CHECK(admitted > 40);

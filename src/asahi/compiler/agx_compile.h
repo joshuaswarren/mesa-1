@@ -371,19 +371,6 @@ struct agx_shader_key {
     * every path except VK_ATTACHMENT_STORE_OP_STORE. */
    bool g17p_rt0_eot_multisample;
 
-   /* Select the native R5G6B5 imgwblk tail (0x35). RGB565 has three logical
-    * F16 imageblock lanes spanning two words and lowers to a raw I16 block
-    * store, but it does not share RGBA16F's selector. */
-   bool g17p_rt0_eot_rgb565;
-
-   /* Select the native normalized-16 imgwblk tail (0x95). Scalar R16 and
-    * RG16 are both one imageblock word, so word count alone is insufficient. */
-   bool g17p_rt0_eot_norm16_selector_95;
-
-   /* Select the separately grounded 84-byte signed two-word I16 builtin.
-    * RGBA16_SINT is not byte-compatible with the unsigned I16 EOT. */
-   bool g17p_rt0_eot_i16_signed_two_words;
-
    /* Authorize the exact I32 G17P EOT builtin. Set only for logical formats
     * whose I32 store shape and PBE descriptor are both grounded. */
    bool g17p_rt0_eot_i32;
@@ -393,16 +380,8 @@ struct agx_shader_key {
     * pair. */
    bool g17p_rt0_eot_i32_four_words;
 
-   /* Select the distinct 84-byte signed four-word I32 builtin. */
+   /* Authorize the signed four-word I32 builtin, which stays single-sample. */
    bool g17p_rt0_eot_i32_signed_four_words;
-
-   /* Select the native 0x15 imgwblk variant for an I32 store. This is
-    * independently grounded only for the two-word R32G32 SINT layout. */
-   bool g17p_rt0_eot_i32_selector_15;
-
-   /* Select the native 0x75 imgwblk variant for an I32 store. This is
-    * independently grounded only for the two-word R32G32 UINT layout. */
-   bool g17p_rt0_eot_i32_selector_75;
 
    /* Authorize the exact two-partition packed R11G11B10 EOT. Its post-RA
     * graph is otherwise indistinguishable from unsupported dual-I32 layouts. */

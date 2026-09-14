@@ -4623,51 +4623,22 @@ agx3_vertex_outputs_share_source(agx_context *ctx)
  * per-thread coordinates from the older compute-wrapper probe.
  * The AGX3 imgwblk is not a standalone translation of AGX2's block store: the
  * preceding pack_imgwir and coordinate-select sequence is part of its ABI.
- * Fresh native RGB10A2 key0x10021300 emits the identical physical program:
- * its normalized conversion happens before W32 tile storage; PBE describes
- * A2B10G10R10 versus A2R10G10B10 channel order. RG16 UNORM is likewise one
- * 32-bit imageblock word,
- * with its two U16-normalized lanes described by PBE. Fresh Apple G17P
- * imgwblk compilations for U16NORM and S16NORM are byte-identical, grounding
- * the same one-word program for signed RG16 while PBE describes signedness.
- * Scalar I32 key0x04021100 uses selector 0x35. R16G16_UINT key0x08020900
- * and R16G16_SINT key0x08020800 use selector 0x15. Fresh G17P
- * R16G16B16A16_UINT key0x10020900 uses the same selector with exactly two
- * imageblock words. R16G16B16A16_SINT key0x10020800 instead has a distinct
- * complete 84-byte builtin. R32G32_SINT key0x08021200 also uses the
- * 0x15 selector, while R32G32_UINT key0x08021300 uses the 0x75 selector,
- * despite both lowering to the same I32 store as scalar R32. Fresh
- * R32G32B32A32_UINT key0x10020b00 has four I32 imageblock words and returns
- * to the scalar 0x35 selector. R32G32B32A32_SINT key0x10020a00 uses the same
- * 68-byte 2D program. The old 84-byte signed fixture was a texture-type3
- * array program, not a signedness variant. Fresh format10/11/17 crossed
- * with texture-type2/3 witnesses distinguish these independently; see
- * test/probes/README-g17p-native-rt0-eot.md.
- * Fresh R32G32B32A32_SFLOAT key0x10021100 has four I32 imageblock words and
- * is byte-identical to the 68-byte UINT/scalar 0x35 program; its PBE carries
- * FLOAT conversion.
- * Scalar R8_UINT key0x04020500, scalar R8_SINT key0x04020400,
- * R8G8_UINT key0x08020500 and R8G8_SINT
- * key0x08020400 use one I8
- * imageblock word and selector 0x55. R8G8B8A8_UINT/SINT use the same I8
- * builtin with four attachment components. R8_UNORM uses format3/layout2
- * with one component. R8_SNORM, R8G8_SNORM, R8G8B8A8_SNORM and
- * B8G8R8A8_SNORM attachment fields use format2/layout2 with one, two or four
- * components. They emit the normalized program below, matching the exact
- * U8NORM bytes; RGBA/BGRA memory ordering is encoded only in the PBE.
- * R16_UNORM format7 and R16_SNORM/R16G16B16A16_SNORM format6 attachment
- * fields use layout2 with one or four components. All emit a distinct
- * normalized-16 program with selector tail a895.
- * Scalar and paired R16 UINT/SINT formats use one I16 imageblock word and
- * the grounded selector-15 program; wider signed variants remain distinct.
- * R16_SFLOAT, R16G16_SFLOAT and R16G16B16A16_SFLOAT format12 with one,
- * two or four components use that same grounded program.
- * R5G6B5_UNORM key0x0c020b00 has three F16 lanes spanning two imageblock
- * words, but uses selector 0x35. Its fresh 68-byte applegpu_g17p text has
- * SHA-256 60beeb253d8f81af993e93617ed3fca4559e0f614c8465f4cd2bb42c0f1f5fb6.
- * A2B10G10R10_UINT_PACK32 key0x10021200 uses one I16 word and selector0x15.
- * Recognize the exact post-RA semantic graph and replace it atomically, so no
- * partially grounded imgwblk ever escapes for a different format or shape. */
+ *
+ * The program differs between formats only in its IMGWBLK selector, which
+ * names the class of imageblock lanes the store reads. Sweeping the factory
+ * over internal formats 0..22 with one to four components shows the selector
+ * depends on the format alone, and Apple's background clears for the same
+ * formats store exactly one lane class per selector: 8-bit integer 0x55,
+ * 8-bit normalized or packed 32-bit 0x75, 16-bit normalized 0x95, 16-bit
+ * integer or float 0x15, and raw 32-bit 0x35. Apple's render pipelines store
+ * every MTLPixelFormat in the class the tilebuffer lowering uses for it, so
+ * the selector follows the store format: RGB565 and the packed 5551/4444
+ * formats keep 16-bit float lanes, RG32 integer formats raw 32-bit lanes,
+ * and RGBA16 UNORM normalized lanes. Each witness is a 68-byte 2D program;
+ * the 84-byte programs are 2D-array builtins. The word count still tells
+ * the admitted RG and RGBA shapes apart after lowering. Recognize the exact
+ * post-RA semantic graph and replace it atomically, so no partially grounded
+ * imgwblk ever escapes for a different format or shape. */
 enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_NONE,
    AGX3_G17P_RT0_EOT_SELECTOR_75,
@@ -4675,7 +4646,6 @@ enum agx3_g17p_rt0_eot_kind {
    AGX3_G17P_RT0_EOT_SELECTOR_35,
    AGX3_G17P_RT0_EOT_SELECTOR_55,
    AGX3_G17P_RT0_EOT_NORM16,
-   AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS,
 };
 
 static enum agx3_g17p_rt0_eot_kind
@@ -4765,13 +4735,7 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
    /* Keep the existing signed-format multisample admission unchanged. The
     * RGBA32 signed correction below is qualified for texture-type2 only. */
    if (ctx->key->g17p_rt0_eot_multisample &&
-       (ctx->key->g17p_rt0_eot_i16_signed_two_words ||
-        ctx->key->g17p_rt0_eot_i32_signed_four_words))
-      return AGX3_G17P_RT0_EOT_NONE;
-
-   if (ctx->key->g17p_rt0_eot_i16_signed_two_words &&
-       (store_format != AGX_FORMAT_I16 ||
-        ctx->key->g17p_rt0_eot_words != 2))
+       ctx->key->g17p_rt0_eot_i32_signed_four_words)
       return AGX3_G17P_RT0_EOT_NONE;
 
    if (ctx->key->g17p_rt0_eot_i32_signed_four_words &&
@@ -4779,115 +4743,32 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
         ctx->key->g17p_rt0_eot_words != 4))
       return AGX3_G17P_RT0_EOT_NONE;
 
-   if (ctx->key->g17p_rt0_eot_rgb565) {
-      if (store_format != AGX_FORMAT_I16 ||
-          ctx->key->g17p_rt0_eot_words != 2 ||
-          ctx->key->g17p_rt0_eot_norm16_selector_95 ||
-          ctx->key->g17p_rt0_eot_i16_signed_two_words ||
-          ctx->key->g17p_rt0_eot_i32 ||
-          ctx->key->g17p_rt0_eot_i32_four_words ||
-          ctx->key->g17p_rt0_eot_i32_signed_four_words ||
-          ctx->key->g17p_rt0_eot_i32_selector_15 ||
-          ctx->key->g17p_rt0_eot_i32_selector_75)
+   const unsigned words = ctx->key->g17p_rt0_eot_words;
+   switch (store_format) {
+   case AGX_FORMAT_I8:
+      return words == 1 ? AGX3_G17P_RT0_EOT_SELECTOR_55
+                        : AGX3_G17P_RT0_EOT_NONE;
+   case AGX_FORMAT_U16NORM:
+   case AGX_FORMAT_S16NORM:
+      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_NORM16
+                                      : AGX3_G17P_RT0_EOT_NONE;
+   case AGX_FORMAT_I16:
+   case AGX_FORMAT_F16:
+      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_SELECTOR_15
+                                      : AGX3_G17P_RT0_EOT_NONE;
+   case AGX_FORMAT_I32:
+      if (ctx->key->g17p_rt0_eot_i32_four_words &&
+          ctx->key->g17p_rt0_eot_i32_signed_four_words)
          return AGX3_G17P_RT0_EOT_NONE;
-
-      return AGX3_G17P_RT0_EOT_SELECTOR_35;
+      if (ctx->key->g17p_rt0_eot_i32_four_words ||
+          ctx->key->g17p_rt0_eot_i32_signed_four_words)
+         return words == 4 ? AGX3_G17P_RT0_EOT_SELECTOR_35
+                           : AGX3_G17P_RT0_EOT_NONE;
+      return words == 1 || words == 2 ? AGX3_G17P_RT0_EOT_SELECTOR_35
+                                      : AGX3_G17P_RT0_EOT_NONE;
+   default:
+      return AGX3_G17P_RT0_EOT_SELECTOR_75;
    }
-
-   if (store_format == AGX_FORMAT_S16NORM) {
-      if (ctx->key->g17p_rt0_eot_norm16_selector_95 &&
-          (ctx->key->g17p_rt0_eot_words == 1 ||
-           ctx->key->g17p_rt0_eot_words == 2))
-         return AGX3_G17P_RT0_EOT_NORM16;
-      if (ctx->key->g17p_rt0_eot_words == 1)
-         return AGX3_G17P_RT0_EOT_SELECTOR_75;
-
-      return AGX3_G17P_RT0_EOT_NONE;
-   }
-
-   if (store_format == AGX_FORMAT_U16NORM) {
-      if (ctx->key->g17p_rt0_eot_norm16_selector_95)
-         return ctx->key->g17p_rt0_eot_words == 1
-                   ? AGX3_G17P_RT0_EOT_NORM16
-                   : AGX3_G17P_RT0_EOT_NONE;
-      if (ctx->key->g17p_rt0_eot_words == 1)
-         return AGX3_G17P_RT0_EOT_SELECTOR_75;
-      if (ctx->key->g17p_rt0_eot_words == 2)
-         return AGX3_G17P_RT0_EOT_SELECTOR_15;
-
-      /* RG16 and RGBA16 lower to the same final instruction shape. Refuse an
-       * ambiguous selector instead of silently emitting the wrong store. */
-      return AGX3_G17P_RT0_EOT_NONE;
-   }
-
-   if (store_format == AGX_FORMAT_I32) {
-      if ((ctx->key->g17p_rt0_eot_i32_selector_15 &&
-           ctx->key->g17p_rt0_eot_i32_selector_75) ||
-          ((ctx->key->g17p_rt0_eot_i32_four_words ||
-            ctx->key->g17p_rt0_eot_i32_signed_four_words) &&
-           (ctx->key->g17p_rt0_eot_i32_selector_15 ||
-            ctx->key->g17p_rt0_eot_i32_selector_75)) ||
-          (ctx->key->g17p_rt0_eot_i32_four_words &&
-           ctx->key->g17p_rt0_eot_i32_signed_four_words))
-         return AGX3_G17P_RT0_EOT_NONE;
-
-      if (ctx->key->g17p_rt0_eot_i32_signed_four_words)
-         return AGX3_G17P_RT0_EOT_SELECTOR_35;
-
-      if (ctx->key->g17p_rt0_eot_i32_four_words)
-         return ctx->key->g17p_rt0_eot_words == 4
-                   ? AGX3_G17P_RT0_EOT_SELECTOR_35
-                   : AGX3_G17P_RT0_EOT_NONE;
-
-      if (ctx->key->g17p_rt0_eot_i32_selector_15) {
-         /* Only the exact two-word signed pair has native evidence for this
-          * I32 selector. Reject an ambiguous or scalar shape. */
-         return ctx->key->g17p_rt0_eot_words == 2
-                   ? AGX3_G17P_RT0_EOT_SELECTOR_15
-                   : AGX3_G17P_RT0_EOT_NONE;
-      }
-
-      if (ctx->key->g17p_rt0_eot_i32_selector_75) {
-         /* Only the exact two-word unsigned pair has native evidence for
-          * this I32 selector. Reject an ambiguous or scalar shape. */
-         return ctx->key->g17p_rt0_eot_words == 2
-                   ? AGX3_G17P_RT0_EOT_SELECTOR_75
-                   : AGX3_G17P_RT0_EOT_NONE;
-      }
-
-      return (ctx->key->g17p_rt0_eot_words == 1 ||
-              ctx->key->g17p_rt0_eot_words == 2)
-                ? AGX3_G17P_RT0_EOT_SELECTOR_35
-                : AGX3_G17P_RT0_EOT_NONE;
-   }
-
-   if (store_format == AGX_FORMAT_I8)
-      return ctx->key->g17p_rt0_eot_words == 1
-                ? AGX3_G17P_RT0_EOT_SELECTOR_55
-                : AGX3_G17P_RT0_EOT_NONE;
-
-   if (store_format == AGX_FORMAT_F16)
-      return (ctx->key->g17p_rt0_eot_words == 1 ||
-              ctx->key->g17p_rt0_eot_words == 2)
-                ? AGX3_G17P_RT0_EOT_SELECTOR_15
-                : AGX3_G17P_RT0_EOT_NONE;
-
-   if (ctx->key->g17p_rt0_eot_i32_selector_15 ||
-       ctx->key->g17p_rt0_eot_i32_selector_75)
-      return AGX3_G17P_RT0_EOT_NONE;
-   if (store_format == AGX_FORMAT_I16) {
-      if (ctx->key->g17p_rt0_eot_i16_signed_two_words)
-         return AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS;
-
-      /* RG16 and RGBA16 integer stores use the same native selector, but only
-       * the exact one- and two-word shapes have Apple builtin evidence. */
-      return (ctx->key->g17p_rt0_eot_words == 1 ||
-              ctx->key->g17p_rt0_eot_words == 2)
-                ? AGX3_G17P_RT0_EOT_SELECTOR_15
-                : AGX3_G17P_RT0_EOT_NONE;
-   }
-
-   return AGX3_G17P_RT0_EOT_SELECTOR_75;
 }
 
 /* Apple's genuine builtin EOT factory, configured for a 2D-array attachment,
@@ -5949,23 +5830,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const enum agx3_g17p_rt0_eot_kind rt0_eot =
       agx3_g17p_rt0_eot_kind(ctx, enc);
    if (rt0_eot != AGX3_G17P_RT0_EOT_NONE) {
-      static const uint8_t g17p_rgba16_sint_eot[] = {
-         0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,
-         0x24,0xa9,0x14,0x26,0x24,0xc3,0x10,0x46,0x9f,0x10,0x54,0x00,
-         0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,
-         0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,0x97,0x45,0x54,0x04,
-         0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,0x97,0x05,0x54,0x06,
-         0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
-         0x00,0x00,0x00,0x80,0x28,0x15,0x00,0x00,0x0e,0x00,0x00,0x00,
-      };
-
-      if (rt0_eot == AGX3_G17P_RT0_EOT_I16_SIGNED_TWO_WORDS) {
-         ctx->max_reg = MAX2(ctx->max_reg, 7);
-         ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8);
-         return agx3_append(emission, g17p_rgba16_sint_eot,
-                            sizeof(g17p_rgba16_sint_eot));
-      }
-
       static const uint8_t g17p_rt0_eot[][68] = {{
          0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
          0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
@@ -6049,7 +5913,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0x00, 0x00, 0x00, 0x80, 0x28, 0x72, 0x00, 0x00,
          0x0e, 0x00, 0x00, 0x00,
       }, {
-         /* 0x15 -> 0x12: I16/F16 and the U16NORM two-word pair. */
+         /* 0x15 -> 0x12: I16/F16, including RGB565. */
          0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
          0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
          0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
@@ -6060,7 +5924,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          0x00, 0x00, 0x00, 0x80, 0x28, 0x12, 0x00, 0x00,
          0x0e, 0x00, 0x00, 0x00,
       }, {
-         /* 0x35 -> 0x32: I32, R5G6B5 and the four-word I32 keys. */
+         /* 0x35 -> 0x32: I32, including the four-word keys. */
          0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06,
          0x0c, 0x9d, 0x10, 0x26, 0x24, 0xa9, 0x10, 0x26,
          0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,

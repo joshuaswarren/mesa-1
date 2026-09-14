@@ -320,31 +320,23 @@ TEST(Tilebuffer, G17PRGB565EOTKey)
    struct agx_shader_key key = {};
 
    /* Seed an unrelated format first: configuring a new EOT format must clear
-    * mutually exclusive selectors rather than inheriting a stale cache key. */
+    * the I32 admission rather than inheriting a stale cache key. */
    agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R32G32_UINT, &key);
    EXPECT_EQ(key.g17p_rt0_eot_words, 2);
    EXPECT_TRUE(key.g17p_rt0_eot_i32);
-   EXPECT_TRUE(key.g17p_rt0_eot_i32_selector_75);
 
+   /* RGB565 keeps RGBA16F's two 16-bit float words and its selector. */
    for (enum pipe_format format : {PIPE_FORMAT_R5G6B5_UNORM,
-                                   PIPE_FORMAT_B5G6R5_UNORM}) {
+                                   PIPE_FORMAT_B5G6R5_UNORM,
+                                   PIPE_FORMAT_R16G16B16A16_FLOAT}) {
       agx_g17p_configure_rt0_eot_key(format, &key);
       EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-      EXPECT_TRUE(key.g17p_rt0_eot_rgb565);
       EXPECT_FALSE(key.g17p_rt0_eot_i32);
-      EXPECT_FALSE(key.g17p_rt0_eot_i32_selector_75);
-      EXPECT_FALSE(key.g17p_rt0_eot_norm16_selector_95);
+      EXPECT_EQ(agx_g17p_mrt_eot_selector(format), 0x15);
    }
-
-   /* RGBA16F has the same physical format and word count, but Apple's native
-    * builtin gives it selector 0x15 rather than RGB565's selector 0x35. */
-   agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R16G16B16A16_FLOAT, &key);
-   EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-   EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
 
    agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R8G8B8A8_UNORM, &key);
    EXPECT_EQ(key.g17p_rt0_eot_words, 0);
-   EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
 }
 
 TEST(Tilebuffer, G17PPacked16EOTKey)
@@ -372,9 +364,7 @@ TEST(Tilebuffer, G17PPacked16EOTKey)
 
       agx_g17p_configure_rt0_eot_key(format, &key);
       EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-      EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
       EXPECT_FALSE(key.g17p_rt0_eot_i32);
-      EXPECT_FALSE(key.g17p_rt0_eot_norm16_selector_95);
    }
 }
 
@@ -383,11 +373,10 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
    static const struct {
       enum pipe_format logical;
       enum pipe_format physical;
-      bool signed_two_words;
    } formats[] = {
-      {PIPE_FORMAT_R16G16B16X16_FLOAT, PIPE_FORMAT_R16_FLOAT, false},
-      {PIPE_FORMAT_R16G16B16X16_UINT, PIPE_FORMAT_R16_UINT, false},
-      {PIPE_FORMAT_R16G16B16X16_SINT, PIPE_FORMAT_R16_UINT, true},
+      {PIPE_FORMAT_R16G16B16X16_FLOAT, PIPE_FORMAT_R16_FLOAT},
+      {PIPE_FORMAT_R16G16B16X16_UINT, PIPE_FORMAT_R16_UINT},
+      {PIPE_FORMAT_R16G16B16X16_SINT, PIPE_FORMAT_R16_UINT},
    };
 
    for (const auto &format : formats) {
@@ -401,8 +390,7 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
       struct agx_shader_key key = {};
       agx_g17p_configure_rt0_eot_key(format.logical, &key);
       EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-      EXPECT_EQ(key.g17p_rt0_eot_i16_signed_two_words,
-                format.signed_two_words);
+      EXPECT_EQ(agx_g17p_mrt_eot_selector(format.logical), 0x15);
 
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));

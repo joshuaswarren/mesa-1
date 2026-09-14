@@ -4402,8 +4402,9 @@ test_g17p_eot_block_store(void)
    free(part.binary);
    ralloc_free(b.shader);
 
-   /* Fresh applegpu_g17p R5G6B5 EOT key0x0c020b00. The tilebuffer stores
-    * three F16 lanes (two 32-bit words), while PBE owns 5:6:5 conversion. */
+   /* R5G6B5 keeps three 16-bit float lanes (two 32-bit words), as Apple's
+    * B5G6R5Unorm fragment does, so the store selects the 16-bit lane class
+    * 0x15. PBE owns the 5:6:5 conversion. */
    nir_builder rgb565 = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGB565 RT0 EOT");
    coords = nir_trim_vector(
@@ -4415,7 +4416,6 @@ test_g17p_eot_block_store(void)
    agx_preprocess_nir(rgb565.shader);
    memset(&part, 0, sizeof(part));
    key.g17p_rt0_eot_words = 2;
-   key.g17p_rt0_eot_rgb565 = true;
    const bool rgb565_compiled =
       agx_compile_shader_nir(rgb565.shader, &key, &part);
    static const uint8_t expected_rgb565[] = {
@@ -4428,7 +4428,7 @@ test_g17p_eot_block_store(void)
       0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
       0xd0, 0x40, 0x10, 0x00,
       0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
-      0xa8, 0x35, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+      0xa8, 0x15, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
    ok &= rgb565_compiled &&
          part.info.binary_size == sizeof(expected_rgb565) &&
@@ -4443,7 +4443,6 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(rgb565.shader);
    key.g17p_rt0_eot_words = 0;
-   key.g17p_rt0_eot_rgb565 = false;
 
    /* Exact Quake WBOIT tile layout: native builtin EOT mask3 stores an
     * RGBA16F block at byte0 and scalar R8 in a distinct tile partition at
@@ -4813,8 +4812,8 @@ test_g17p_eot_block_store(void)
    ralloc_free(i16_one.shader);
    key.g17p_rt0_eot_words = 2;
 
-   /* Signed RGBA16 has a distinct complete native program, not merely the
-    * unsigned program with a different PBE descriptor. */
+   /* Signed RGBA16 uses the unsigned two-word program. Apple's 84-byte
+    * program for 16-bit internal formats is the 2D-array builtin. */
    nir_builder i16_signed = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "G17P RGBA16 SINT RT0 EOT");
    coords = nir_trim_vector(
@@ -4825,26 +4824,15 @@ test_g17p_eot_block_store(void)
       .image_dim = GLSL_SAMPLER_DIM_2D, .explicit_coord = true);
    agx_preprocess_nir(i16_signed.shader);
    memset(&part, 0, sizeof(part));
-   key.g17p_rt0_eot_i16_signed_two_words = true;
    const bool i16_signed_compiled =
       agx_compile_shader_nir(i16_signed.shader, &key, &part);
-   static const uint8_t expected_i16_signed[] = {
-      0x1c,0x9c,0x10,0x06,0x34,0xa8,0x10,0x06,0x0c,0x9d,0x10,0x26,
-      0x24,0xa9,0x14,0x26,0x24,0xc3,0x10,0x46,0x9f,0x10,0x54,0x00,
-      0x00,0x04,0x18,0x00,0x50,0x06,0x0b,0x00,0x9f,0x20,0x54,0x02,
-      0x00,0x00,0x14,0x00,0x50,0x06,0x0b,0x00,0x97,0x45,0x54,0x04,
-      0x00,0x08,0x10,0x00,0xf0,0xc0,0x00,0x00,0x97,0x05,0x54,0x06,
-      0x00,0x08,0x00,0x00,0xd0,0x40,0x10,0x00,0x57,0x10,0x54,0x00,
-      0x00,0x00,0x00,0x80,0x28,0x15,0x00,0x00,0x0e,0x00,0x00,0x00,
-   };
    ok &= i16_signed_compiled &&
-         part.info.binary_size == sizeof(expected_i16_signed) &&
+         part.info.binary_size == sizeof(expected_i16) &&
          part.info.main_offset == 0 &&
-         part.info.main_size == sizeof(expected_i16_signed) &&
+         part.info.main_size == sizeof(expected_i16) &&
          part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
          part.info.agx3_staging_halfs == 8 &&
-         memcmp(part.binary, expected_i16_signed,
-                sizeof(expected_i16_signed)) == 0;
+         memcmp(part.binary, expected_i16, sizeof(expected_i16)) == 0;
    if (i16_signed_compiled)
       free(part.binary);
    ralloc_free(i16_signed.shader);
@@ -4873,7 +4861,6 @@ test_g17p_eot_block_store(void)
       free(part.binary);
    ralloc_free(bad_i16.shader);
    key.g17p_rt0_eot_words = 0;
-   key.g17p_rt0_eot_i16_signed_two_words = false;
 
    /* A different store format must not inherit RT0's byte string. */
    nir_builder bad = nir_builder_init_simple_shader(
