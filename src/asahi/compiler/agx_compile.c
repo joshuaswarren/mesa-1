@@ -5783,7 +5783,9 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return false;
 
-   agx_instr *loads[4] = {0}, *stores[4] = {0}, *stop = NULL;
+   agx_instr *loads[AGX_MAX_RTS] = {0};
+   agx_instr *stores[AGX_MAX_RTS] = {0};
+   agx_instr *stop = NULL;
    agx_instr *first_wait = NULL;
    unsigned load_count = 0, store_count = 0;
    /* Apple's store-only MRT fragments that export depth complete the class-1
@@ -5891,7 +5893,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       for (unsigned i = 0; i < store_count; ++i)
          rgba8 &= stores[i]->format == AGX_FORMAT_U8NORM &&
                   stores[i]->mask == 15 && stores[i]->pixel_offset == 4 * i;
-      if (ctx->key->g17p_mrt_bg || store_count == 4 || rgba32 || rgba8)
+      if (ctx->key->g17p_mrt_bg || store_count >= 4 || rgba32 || rgba8)
          return false;
    }
 
@@ -5942,8 +5944,9 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
  * direct PRELOAD cannot be assigned into a tile store's register bank by RA:
  * the output of colour target n arrives at GPR half 8 + 8n. The grounded
  * stores read halves 0..31 in store-only fragments of three and four targets
- * (and multi-target BG programs), and halves 0..15 otherwise, so a store of
- * the second target alone found its input out of bank and was refused.
+ * (and multi-target BG programs), halves 0..63 with more targets, and halves
+ * 0..15 otherwise, so a store of the second target alone found its input out
+ * of bank and was refused.
  * Materialize only out-of-bank scalar inputs, immediately before the first
  * store, and let RA choose a legal free register. The bank mirrors RA's
  * tile_gpr_limit.
@@ -5970,10 +5973,10 @@ agx3_bank_scalar_tile_store_inputs(agx_context *ctx)
       return false;
 
    const bool wide_bank =
-      !loads && store_count <= 4 &&
+      !loads && store_count <= AGX_MAX_RTS &&
       store_count >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
       (ctx->key->secondary || ctx->key->g17p_mrt_bg);
-   const unsigned bank = wide_bank ? 32 : 16;
+   const unsigned bank = !wide_bank ? 16 : store_count > 4 ? 64 : 32;
 
    bool progress = false;
    agx_builder b = agx_init_builder(ctx, agx_before_instr(first_store));

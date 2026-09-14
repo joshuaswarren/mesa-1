@@ -42,10 +42,12 @@ agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
    const bool wboit_mrt = bin && bin->info.binary_size == 238 &&
                           bin->info.nr_gprs == 8 &&
                           bin->info.agx3_staging_halfs == 16;
-   const bool raw32_mrt = bin &&
-                         (bin->info.agx3_staging_halfs == 16 ||
-                          bin->info.agx3_staging_halfs == 24 ||
-                          bin->info.agx3_staging_halfs == 32) &&
+   /* The multi-target program of two to eight targets, eight staging halves
+    * and one 44-byte tail each. */
+   const bool raw32_mrt = bin && bin->info.agx3_staging_halfs >= 16 &&
+                         bin->info.agx3_staging_halfs <=
+                            8 * AGX_MAX_RENDER_TARGETS &&
+                         bin->info.agx3_staging_halfs % 8 == 0 &&
                          bin->info.binary_size ==
                             32 + 44 * (bin->info.agx3_staging_halfs / 8) &&
                          bin->info.nr_gprs == 8 &&

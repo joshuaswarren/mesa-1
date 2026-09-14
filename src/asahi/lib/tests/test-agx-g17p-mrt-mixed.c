@@ -2,16 +2,17 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * G17P render passes with three or four colour targets of arbitrary formats.
+ * G17P render passes with three to eight colour targets of arbitrary formats.
  *
  * Apple's builtin end-of-tile factory (metal-nt -arch applegpu_g17p, BTNF
- * root field 2 = 5) emits the same program for two, three and four
- * same-partition 2D targets whatever their formats: the raw32 text in
+ * root field 2 = 5) emits the same program for two to eight same-partition 2D
+ * targets whatever their formats: the raw32 text for that target count in
  * agx3_g17p_quad_eot.h with each target's IMGWBLK selector byte replaced.
  * Sweeping internal formats 0..23 and components 1..4 shows the selector is
  * a function of the target's own format alone, and 42 mixed combinations of
  * two to four targets reproduce template-plus-selectors byte for byte. The
- * layouts below are the nine dEQP-VK renderpasses attachment.{3,4}.* cases.
+ * layouts below are the nine dEQP-VK renderpasses attachment.{3,4}.* cases,
+ * followed by layouts of five to eight targets.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,8 +42,8 @@ static unsigned checks;
 struct layout {
    const char *name;
    unsigned count;
-   enum pipe_format formats[4];
-   uint8_t offsets[4];
+   enum pipe_format formats[AGX_MAX_RENDER_TARGETS];
+   uint8_t offsets[AGX_MAX_RENDER_TARGETS];
    uint8_t sample_size_B;
 };
 
@@ -81,6 +82,32 @@ static const struct layout layouts[] = {
     {PIPE_FORMAT_R8G8B8A8_SRGB, PIPE_FORMAT_B10G10R10A2_UNORM,
      PIPE_FORMAT_B8G8R8A8_UNORM, PIPE_FORMAT_R16G16_UINT},
     {0, 4, 12, 8}, 16},
+};
+
+#define RGBA8 PIPE_FORMAT_R8G8B8A8_UNORM
+
+/* Five to eight targets, all admitted by the mixed-format programs. The
+ * homogeneous RGBA8 layouts match Apple's fragment witnesses. */
+static const struct layout wide_layouts[] = {
+   {"rgba8x5", 5, {RGBA8, RGBA8, RGBA8, RGBA8, RGBA8}, {0, 4, 8, 12, 16}, 24},
+   {"mixed6", 6,
+    {RGBA8, PIPE_FORMAT_R16G16B16A16_FLOAT, PIPE_FORMAT_R8_UNORM,
+     PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R8G8_UNORM,
+     PIPE_FORMAT_R32G32B32A32_FLOAT},
+    {24, 16, 28, 29, 33, 0}, 40},
+   {"rgba16x7", 7,
+    {PIPE_FORMAT_R16G16B16A16_UNORM, PIPE_FORMAT_R16G16B16A16_UNORM,
+     PIPE_FORMAT_R16G16B16A16_UNORM, PIPE_FORMAT_R16G16B16A16_UNORM,
+     PIPE_FORMAT_R16G16B16A16_UNORM, PIPE_FORMAT_R16G16B16A16_UNORM,
+     PIPE_FORMAT_R16G16B16A16_UNORM},
+    {0, 8, 16, 24, 32, 40, 48}, 56},
+   {"rgba8x8", 8, {RGBA8, RGBA8, RGBA8, RGBA8, RGBA8, RGBA8, RGBA8, RGBA8},
+    {0, 4, 8, 12, 16, 20, 24, 28}, 32},
+   {"mixed8", 8,
+    {PIPE_FORMAT_R32G32B32A32_FLOAT, RGBA8, PIPE_FORMAT_R16G16B16A16_FLOAT,
+     PIPE_FORMAT_R8G8B8A8_UINT, PIPE_FORMAT_R16G16_SNORM, PIPE_FORMAT_R8_UNORM,
+     PIPE_FORMAT_R8G8_UNORM, PIPE_FORMAT_R32_FLOAT},
+    {0, 32, 20, 36, 28, 40, 41, 16}, 48},
 };
 
 /* The store format the end-of-tile builder hands IMGWBLK. */
@@ -165,10 +192,9 @@ test_selectors_match_single_target_programs(void)
 }
 
 static int
-test_layout_classification(void)
+check_layout_classification(const struct layout *l)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
-      const struct layout *l = &layouts[i];
+   {
       enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
       memcpy(formats, l->formats, sizeof(l->formats));
       struct agx_tilebuffer_layout tib =
@@ -203,15 +229,31 @@ test_layout_classification(void)
       bad = tib;
       bad.layered = true;
       CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE);
-
-      /* A fifth target has no native program. */
-      formats[l->count] = PIPE_FORMAT_R8_UNORM;
-      if (l->count == 4) {
-         tib = agx_build_tilebuffer_layout(formats, 5, 1, false);
-         CHECK(agx_g17p_classify_mrt(&tib) == AGX_G17P_MRT_NONE);
-         CHECK(!agx_g17p_rt0_tile_layout_supported(&tib));
-      }
    }
+   return 0;
+}
+
+static int
+test_layout_classification(void)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
+      if (check_layout_classification(&layouts[i]))
+         return 1;
+   }
+   for (unsigned i = 0; i < ARRAY_SIZE(wide_layouts); ++i) {
+      if (check_layout_classification(&wide_layouts[i]))
+         return 1;
+   }
+
+   /* Targets that no longer fit one 64-byte sample spill, which G17P does not
+    * support: eight RGBA32 targets. */
+   enum pipe_format spill[AGX_MAX_RENDER_TARGETS];
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt)
+      spill[rt] = PIPE_FORMAT_R32G32B32A32_UINT;
+   struct agx_tilebuffer_layout spilled =
+      agx_build_tilebuffer_layout(spill, AGX_MAX_RENDER_TARGETS, 1, false);
+   CHECK(agx_g17p_classify_mrt(&spilled) == AGX_G17P_MRT_NONE);
+   CHECK(!agx_g17p_rt0_tile_layout_supported(&spilled));
 
    /* Homogeneous layouts keep their own programs. */
    enum pipe_format rgba8[AGX_MAX_RENDER_TARGETS] = {
@@ -257,15 +299,22 @@ test_layout_classification(void)
 static const uint8_t *
 expected_eot(unsigned count, const uint8_t *selectors, uint8_t *out)
 {
-   static const unsigned selector_offsets[][4] = {
+   static const unsigned selector_offsets[][AGX_MAX_RENDER_TARGETS] = {
       [2] = {101, 113},
       [3] = {133, 145, 157},
       [4] = {165, 177, 189, 201},
+      [5] = {197, 209, 221, 233, 245},
+      [6] = {229, 241, 253, 265, 277, 289},
+      [7] = {69, 273, 285, 297, 309, 321, 333},
+      [8] = {101, 113, 317, 329, 341, 353, 365, 377},
    };
-   const uint8_t *text = count == 2   ? agx3_g17p_dual_raw32_eot
-                         : count == 3 ? agx3_g17p_triple_raw32_eot
-                                      : agx3_g17p_quad_eot;
-   memcpy(out, text, 32 + 44 * count);
+   static const uint8_t *const texts[] = {
+      [2] = agx3_g17p_dual_raw32_eot,  [3] = agx3_g17p_triple_raw32_eot,
+      [4] = agx3_g17p_quad_eot,        [5] = agx3_g17p_penta_raw32_eot,
+      [6] = agx3_g17p_hexa_raw32_eot,  [7] = agx3_g17p_hepta_raw32_eot,
+      [8] = agx3_g17p_octa_raw32_eot,
+   };
+   memcpy(out, texts[count], 32 + 44 * count);
    for (unsigned rt = 0; rt < count; ++rt)
       out[selector_offsets[count][rt]] = selectors[rt];
    return out;
@@ -286,7 +335,7 @@ check_eot_subset(unsigned count, const enum pipe_format *formats,
 
    struct agx_shader_part part = {0};
    CHECK(compile_eot(count, formats, offsets, &key, &part));
-   uint8_t expected[sizeof(agx3_g17p_quad_eot)];
+   uint8_t expected[sizeof(agx3_g17p_octa_raw32_eot)];
    CHECK(part.info.binary_size == 32 + 44 * count);
    CHECK(part.info.nr_gprs == 8);
    CHECK(part.info.agx3_staging_known &&
@@ -314,10 +363,9 @@ check_eot_subset(unsigned count, const enum pipe_format *formats,
 }
 
 static int
-test_eot_programs(void)
+check_eot_programs(const struct layout *l, bool every_subset)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
-      const struct layout *l = &layouts[i];
+   {
 
       /* One stored target keeps its format's single-target program at its
        * own offset. */
@@ -336,10 +384,11 @@ test_eot_programs(void)
       }
 
       for (unsigned mask = 1; mask < BITFIELD_MASK(l->count); ++mask) {
-         if (util_bitcount(mask) < 2)
+         if (util_bitcount(mask) < 2 ||
+             (!every_subset && util_bitcount(mask) != l->count - 1))
             continue;
-         enum pipe_format formats[4];
-         uint8_t offsets[4];
+         enum pipe_format formats[AGX_MAX_RENDER_TARGETS];
+         uint8_t offsets[AGX_MAX_RENDER_TARGETS];
          unsigned count = 0;
          u_foreach_bit(rt, mask) {
             formats[count] = l->formats[rt];
@@ -351,10 +400,25 @@ test_eot_programs(void)
       if (check_eot_subset(l->count, l->formats, l->offsets))
          return 1;
    }
+   return 0;
+}
+
+static int
+test_eot_programs(void)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
+      if (check_eot_programs(&layouts[i], true))
+         return 1;
+   }
+   /* Wider layouts: every target count through eight, without each subset. */
+   for (unsigned i = 0; i < ARRAY_SIZE(wide_layouts); ++i) {
+      if (check_eot_programs(&wide_layouts[i], false))
+         return 1;
+   }
 
    /* Homogeneous RGBA8 targets reproduce the separately captured programs. */
    const uint8_t rgba8[] = {0x75, 0x75, 0x75, 0x75};
-   uint8_t expected[sizeof(agx3_g17p_quad_eot)];
+   uint8_t expected[sizeof(agx3_g17p_octa_raw32_eot)];
    CHECK(!memcmp(expected_eot(3, rgba8, expected), agx3_g17p_rgba8_3_eot,
                  sizeof(agx3_g17p_rgba8_3_eot)));
    CHECK(!memcmp(expected_eot(4, rgba8, expected), agx3_g17p_rgba8_4_eot,
@@ -439,8 +503,11 @@ compile_background(const struct agx_tilebuffer_layout *layout,
 static int
 test_background_programs(void)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
-      const struct layout *l = &layouts[i];
+   for (unsigned i = 0; i < ARRAY_SIZE(layouts) + ARRAY_SIZE(wide_layouts);
+        ++i) {
+      const struct layout *l = i < ARRAY_SIZE(layouts)
+                                  ? &layouts[i]
+                                  : &wide_layouts[i - ARRAY_SIZE(layouts)];
       enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
       memcpy(formats, l->formats, sizeof(l->formats));
       const struct agx_tilebuffer_layout tib =
@@ -544,11 +611,33 @@ static const uint8_t release_524[6] = {0x07, 0x02, 0x54, 0x0c, 0x02, 0x00};
 static const uint8_t release_560[6] = {0x07, 0x02, 0x54, 0x30, 0x02, 0x00};
 static const uint8_t release_704[6] = {0x07, 0x02, 0x54, 0xc0, 0x02, 0x00};
 
+/* lstcol f13 of each colour store, in store order. */
+static unsigned
+store_f13_mask(const struct agx_shader_part *part, unsigned *stores)
+{
+   const uint8_t *text = part->binary;
+   unsigned mask = 0, n = 0;
+   for (size_t at = 0; at + 12 <= part->info.binary_size;) {
+      if (text[at] == 0xe7 && (text[at + 1] & 0x07) == 0x06 &&
+          (text[at + 2] & 0xfc) == 0x54) {
+         mask |= ((text[at + 7] >> 7) & 1) << n++;
+         at += 12;
+      } else {
+         at++;
+      }
+   }
+   *stores = n;
+   return mask;
+}
+
 static int
 test_epilogs(void)
 {
-   for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
-      const struct layout *l = &layouts[i];
+   for (unsigned i = 0; i < ARRAY_SIZE(layouts) + ARRAY_SIZE(wide_layouts);
+        ++i) {
+      const struct layout *l = i < ARRAY_SIZE(layouts)
+                                  ? &layouts[i]
+                                  : &wide_layouts[i - ARRAY_SIZE(layouts)];
       for (unsigned write_z = 0; write_z < 2; ++write_z) {
          struct agx_shader_part part = {0};
          CHECK(compile_epilog(l->count, l->formats, false, write_z, &part));
@@ -579,6 +668,12 @@ test_epilogs(void)
             memcpy(sequence[n++], release_524, 6);
          }
          CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
+
+         /* Wider than five targets, the leading stores set f13. */
+         unsigned stores;
+         const unsigned f13 = store_f13_mask(&part, &stores);
+         CHECK(stores == l->count);
+         CHECK(f13 == BITFIELD_MASK(MAX2(l->count, 5) - 5));
          free(part.binary);
       }
    }
@@ -619,6 +714,46 @@ static const struct {
    {4, 0xb, {W12, W48, R48, R524}},
    {4, 0xd, {W12, W192, R192, R524}},
    {4, 0xe, {W12, R12, W192, R192, W48, R560}},
+};
+
+/* The same for eight RGBA8 targets, from metal-nt -arch applegpu_g17p render
+ * pipelines writing these subsets, with the number of leading stores that set
+ * lstcol f13: every partition from 3 on shares class 12 with partition 0, and
+ * a transaction storing more than five targets including 1 and 2 sets f13 on
+ * all but its last five stores. */
+static const struct {
+   unsigned written, f13;
+   enum pixel_op ops[12];
+} octa_subset_witnesses[] = {
+   {0x01, 0, {W12, R524}},
+   {0x02, 0, {W48, R560}},
+   {0x08, 0, {W12, R524}},
+   {0x80, 0, {W12, R524}},
+   {0x0c, 0, {W12, R12, W192, R704}},
+   {0x19, 0, {W12, R524}},
+   {0x21, 0, {W12, R524}},
+   {0x46, 0, {W12, R12, W192, R192, W48, R560}},
+   {0x88, 0, {W12, R524}},
+   {0x8e, 0, {W12, R12, W192, R192, W48, R560}},
+   {0x87, 0, {W12, W192, R192, W48, R48, R524}},
+   {0xc7, 0, {W12, W192, R192, W48, R48, R524}},
+   {0xf0, 0, {W12, R524}},
+   {0x1f, 0, {W12, W192, R192, W48, R48, R524}},
+   {0x3e, 0, {W12, R12, W192, R192, W48, R560}},
+   {0xe6, 0, {W12, R12, W192, R192, W48, R560}},
+   {0xf1, 0, {W12, R524}},
+   {0xf8, 0, {W12, R524}},
+   {0xf9, 0, {W12, R524}},
+   {0xfa, 0, {W12, R12, W48, R560}},
+   {0xfb, 0, {W12, W48, R48, R524}},
+   {0xfc, 0, {W12, R12, W192, R704}},
+   {0xfd, 0, {W12, W192, R192, R524}},
+   {0x3f, 1, {W12, W192, R192, W48, R48, R524}},
+   {0xe7, 1, {W12, W192, R192, W48, R48, R524}},
+   {0xf6, 1, {W12, R12, W192, R192, W48, R560}},
+   {0xf7, 2, {W12, W192, R192, W48, R48, R524}},
+   {0xfe, 2, {W12, R12, W192, R192, W48, R560}},
+   {0xff, 3, {W12, W192, R192, W48, R48, R524}},
 };
 
 /* Layouts whose one-channel 32-bit targets reach the epilog in their fixed
@@ -675,6 +810,45 @@ check_subset_epilogs(const struct layout *l)
                                    false, false, &part));
       CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
       CHECK(part.info.agx3_colour_link.colour_classes == classes);
+      free(part.binary);
+   }
+   return 0;
+}
+
+static int
+test_octa_subset_epilogs(void)
+{
+   static const uint8_t *const bytes[] = {
+      [W12] = wait_12,     [W48] = wait_48,     [W192] = wait_192,
+      [R12] = release_12,  [R48] = release_48,  [R192] = release_192,
+      [R524] = release_524, [R560] = release_560, [R704] = release_704,
+   };
+   const struct layout *l = &wide_layouts[3];
+   CHECK(l->count == 8 && l->formats[7] == RGBA8);
+
+   uint64_t partitions = 0;
+   for (unsigned rt = 0; rt < l->count; ++rt)
+      partitions |= BITFIELD64_BIT(l->offsets[rt]);
+
+   for (unsigned w = 0; w < ARRAY_SIZE(octa_subset_witnesses); ++w) {
+      const unsigned written = octa_subset_witnesses[w].written;
+      unsigned classes = 0, n = 0;
+      u_foreach_bit(rt, written)
+         classes |= BITFIELD_BIT(rt < 3 ? rt : 0);
+      uint8_t sequence[12][6];
+      for (; n < 12 && octa_subset_witnesses[w].ops[n] != END; ++n)
+         memcpy(sequence[n], bytes[octa_subset_witnesses[w].ops[n]], 6);
+
+      struct agx_shader_part part = {0};
+      CHECK(compile_epilog_written(l->count, l->formats, written,
+                                   written == 0xff ? 0 : partitions, false,
+                                   false, &part));
+      CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
+      CHECK(part.info.agx3_colour_link.colour_classes == classes);
+      unsigned stores;
+      CHECK(store_f13_mask(&part, &stores) ==
+            BITFIELD_MASK(octa_subset_witnesses[w].f13));
+      CHECK(stores == util_bitcount(written));
       free(part.binary);
    }
    return 0;
@@ -862,7 +1036,7 @@ main(void)
    if (test_selectors_match_single_target_programs() ||
        test_layout_classification() || test_eot_programs() ||
        test_background_programs() || test_epilogs() ||
-       test_subset_epilogs() ||
+       test_subset_epilogs() || test_octa_subset_epilogs() ||
        test_homogeneous_programs_unchanged())
       return 1;
 

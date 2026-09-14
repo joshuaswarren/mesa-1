@@ -492,8 +492,8 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
    memset(key.op, 0, sizeof(key.op));
    key.mixed_mrt = true;
 
-   const VkRenderingAttachmentInfo *atts[4];
-   struct hk_image_view *views[4];
+   const VkRenderingAttachmentInfo *atts[HK_MAX_RTS];
+   struct hk_image_view *views[HK_MAX_RTS];
    static const enum agx_bg_eot_op order[] = {AGX_BG_LOAD, AGX_BG_CLEAR,
                                               AGX_EOT_STORE};
    unsigned count = 0, reloads = 0;
@@ -549,8 +549,10 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
       : reloads          ? AGX3_G17P_RT0_BG_CLEAR_RELOAD
                          : AGX3_G17P_RT0_BG_CLEAR;
    const size_t program_capacity =
-      count == 0 ? AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE
-      : store    ? AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE
+      count == 0  ? AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE
+      : store     ? (count > 4 ? AGX_IOTO_G17P_OCTA_EOT_PROGRAM_MAX_SIZE
+                               : AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE)
+      : count > 4 ? AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE
       : bg_op == AGX3_G17P_RT0_BG_CLEAR_RELOAD
          ? AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE
          : AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
@@ -596,7 +598,7 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
       static_assert(sizeof(struct hk_native_pbe_descriptor) ==
                        AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE,
                     "native PBE table stride");
-      struct hk_native_pbe_descriptor pbe_arguments[4] = {0};
+      struct hk_native_pbe_descriptor pbe_arguments[HK_MAX_RTS] = {0};
       for (unsigned rt = 0; rt < count; ++rt) {
          if (!views[rt]->planes[0].eot_pbe_valid) {
             vk_command_buffer_set_error(&cmd->vk,
@@ -620,6 +622,10 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
          .imageblock_offset1_B = key.tib._offset_B[1],
          .imageblock_offset2_B = key.tib._offset_B[2],
          .imageblock_offset3_B = key.tib._offset_B[3],
+         .imageblock_offset4_B = key.tib._offset_B[4],
+         .imageblock_offset5_B = key.tib._offset_B[5],
+         .imageblock_offset6_B = key.tib._offset_B[6],
+         .imageblock_offset7_B = key.tib._offset_B[7],
          .mixed_mrt = count > 1,
          .shader_binary_size = shader->info.binary_size,
          .scratch_size = shader->info.scratch_size,
@@ -654,7 +660,7 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
 
       if (clears) {
          static_assert(sizeof(atts[0]->clearValue.color) == 16, "fixed ABI");
-         VkClearColorValue clear_values[4];
+         VkClearColorValue clear_values[HK_MAX_RTS];
          for (unsigned rt = reloads; rt < count; ++rt)
             clear_values[rt - reloads] = atts[rt]->clearValue.color;
          desc.clear_value_va = hk_pool_upload(
@@ -669,7 +675,7 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
          static_assert(sizeof(struct hk_native_texture_descriptor) ==
                           AGX_TEXTURE_GEN9_LENGTH,
                        "native texture table stride");
-         struct hk_native_texture_descriptor textures[7] = {0};
+         struct hk_native_texture_descriptor textures[2 * HK_MAX_RTS - 1] = {0};
          for (unsigned rt = 0; rt < reloads; ++rt)
             textures[2 * rt] = views[rt]->planes[0].background;
          const uint64_t texture_va = hk_pool_upload(

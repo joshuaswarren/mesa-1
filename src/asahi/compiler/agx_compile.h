@@ -406,11 +406,11 @@ struct agx_shader_key {
     * the partitions from the tile operations. */
    uint64_t g17p_tile_partitions;
 
-   /* Number of targets, two to four, stored by a G17P multi-target EOT for
+   /* Number of targets, two to eight, stored by a G17P multi-target EOT for
     * arbitrary target formats, and the IMGWBLK selector of each target in
     * store order. Zero selects the format-specific EOT recognizers. */
    uint8_t g17p_mrt_eot_count;
-   uint8_t g17p_mrt_eot_selectors[4];
+   uint8_t g17p_mrt_eot_selectors[AGX_MAX_RTS];
 
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns

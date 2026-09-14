@@ -289,9 +289,9 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
        tib->logical_format[0] != PIPE_FORMAT_B8G8R8X8_UNORM)
       return false;
 
-   for (unsigned rt = raw32 || mrt == AGX_G17P_MRT_RGBA8 ||
-                              mrt == AGX_G17P_MRT_MIXED ? 4
-                           : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
+   for (unsigned rt = mrt == AGX_G17P_MRT_MIXED ? AGX_MAX_RENDER_TARGETS
+                      : raw32 || mrt == AGX_G17P_MRT_RGBA8 ? 4
+                      : mrt != AGX_G17P_MRT_NONE ? 2 : 1;
         rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (tib->logical_format[rt] != PIPE_FORMAT_NONE)
          return false;
@@ -386,15 +386,17 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
             rgba16i_or_x));
 }
 
-/* Other two- to four-target layouts share Apple's multi-target EOT builtin,
- * whose targets differ only in a per-format IMGWBLK selector, and a background
- * program without pixel transactions. Each target keeps its own tile offset,
- * so admit any unspilled layout whose formats all have a grounded selector. */
+/* Other layouts of two to eight targets share Apple's multi-target EOT
+ * builtin, whose targets differ only in a per-format IMGWBLK selector, and a
+ * background program without pixel transactions. Each target keeps its own
+ * tile offset, so admit any unspilled layout whose formats all have a grounded
+ * selector. */
 static enum agx_g17p_mrt_layout
 agx_g17p_classify_mixed_mrt(const struct agx_tilebuffer_layout *tib,
                             unsigned active_count)
 {
-   bool mixed = !tib->layered && active_count >= 2 && active_count <= 4;
+   bool mixed = !tib->layered && active_count >= 2 &&
+                active_count <= AGX_MAX_RENDER_TARGETS;
    uint64_t occupied_B = 0;
    for (unsigned rt = 0; rt < active_count; ++rt) {
       const unsigned offset_B = tib->_offset_B[rt];

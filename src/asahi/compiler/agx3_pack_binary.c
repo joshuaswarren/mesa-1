@@ -2245,7 +2245,7 @@ static bool
 agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
                const agx_instr *I, uint8_t slot, uint16_t wait_mask,
                bool first_load, bool last_load, bool quad_store,
-               bool mrt_store)
+               bool mrt_store, bool store_f13)
 {
    const bool load = I->op == AGX_OPCODE_LD_TILE;
    if ((!load && I->op != AGX_OPCODE_ST_TILE) ||
@@ -2280,15 +2280,18 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
     * low-register, single-sample subset is the only one with a stable zero
     * selection that production IR can infer today. */
    /* Fresh two-to-four-target BG and ordinary fragments ground f13=0 for full
-    * raw32 payloads starting at half16/24 too. Apple's store-only three- and
-    * four-target fragments and multi-target BG builtins of other formats
-    * ground it for every width and mask. Other high-bank shapes retain the
-    * existing refusal. The caller proves the complete store graph. */
-   const bool quad_high = !load && value.value < 32 &&
-      ((quad_store &&
+    * raw32 payloads starting at half16/24 too. Apple's store-only fragments of
+    * three to eight targets and multi-target BG builtins of other formats
+    * ground it for every width and mask, reading halves up to 63 once more
+    * than four targets are stored; in those fragments f13 follows the store
+    * order, not the register (agx3_g17p_mrt_protocol). Other high-bank shapes
+    * retain the existing refusal. The caller proves the complete store
+    * graph. */
+   const bool quad_high = !load &&
+      ((value.value < 32 && quad_store &&
         ((I->format == AGX_FORMAT_I32 && (I->mask == 1 || I->mask == 15)) ||
          (I->format == AGX_FORMAT_U8NORM && I->mask == 15))) ||
-       mrt_store);
+       (mrt_store && value.value < 64));
    if (!load && enc == AGX_ISA_ENCODING_AGX3B && value.value >= 16 && !quad_high)
       return false;
 
@@ -2298,10 +2301,10 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
       load ? agx3_tile_load(enc, value.value, (enum agx3_tile_width)width,
                             slot, I->mask, I->pixel_offset, sample_op,
                             wait_mask, first_load, last_load, bytes, &length)
-           : agx3_tile_store(enc, value.value,
-                             (enum agx3_tile_width)width, I->mask,
-                             I->pixel_offset, sample_op, wait_mask,
-                             bytes, &length);
+           : agx3_tile_store_f13(enc, value.value,
+                                 (enum agx3_tile_width)width, I->mask,
+                                 I->pixel_offset, sample_op, wait_mask,
+                                 store_f13, bytes, &length);
    return ok && agx3_append(emission, bytes, length);
 }
 
@@ -5247,28 +5250,47 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
  * Derive partition identity from the sorted physical tile offsets rather than
  * a format or workload name.  Every partition must have one terminal store;
  * loads are optional, and the pre-RA sink guarantees stores descend to the
- * zero-offset final release. The third class pair uses 128/64/192. Four
- * targets reuse class 12 across targets 3 and 0, with one shared lifetime.
- * Wider layouts and four-target blending stay refused.
+ * zero-offset final release. The third class pair uses 128/64/192. Every
+ * partition from the fourth on reuses partition 0's class pair: Apple's
+ * store-only fragments of four to eight targets acquire class 12 before the
+ * first store using it and release it after the last, holding it across
+ * partitions 2 and 1 when partition 0 is written. Blending more than three
+ * targets stays refused.
+ *
+ * Those fragments also set lstcol f13 on their leading stores when they store
+ * more than five targets including targets 1 and 2: on all but the last five
+ * stores, whatever the formats and registers. metal-nt applegpu_g17p
+ * witnesses: five to eight RGBA8 targets, six and eight RGBA32F targets, eight
+ * mixed targets, and 34 written subsets of eight RGBA8 targets.
  *
  * An epilog writing only some of the framebuffer's targets takes the
  * partitions from the key instead. Apple's store-only fragments for such
  * pipelines keep every written target's classes from its position among all
- * targets, store in descending partition order, and share class 12 only when
- * targets 3 and 0 are both written.
+ * targets and store in descending partition order.
  */
 struct agx3_g17p_mrt_protocol {
    bool valid;
    bool raw32_store;
-   bool shared_class;
+   bool has_loads;
    uint8_t count;
-   /* Colour classes of the stored partitions, bit n for partitions n % 3. */
+   /* Colour classes of the stored partitions, bit n for class pair n. */
    uint8_t classes;
-   /* Four targets share three colour classes. Target 3 reuses class 0. */
-   uint16_t offsets[4];
-   uint8_t loads[4];
-   uint8_t stores[4];
+   /* The first and last stored partitions of class pair 0, in store order. */
+   uint8_t shared_first, shared_last;
+   /* Number of leading stores carrying lstcol f13. */
+   uint8_t f13_stores;
+   uint16_t offsets[AGX_MAX_RTS];
+   uint8_t loads[AGX_MAX_RTS];
+   uint8_t stores[AGX_MAX_RTS];
 };
+
+/* Partitions 1 and 2 own class pairs 1 and 2; every other partition shares
+ * partition 0's. */
+static unsigned
+agx3_g17p_mrt_class_pair(unsigned partition)
+{
+   return partition < 3 ? partition : 0;
+}
 
 /* A multisample background reload writes every sample of one tilebuffer
  * partition explicitly after fetching it from the multisample attachment.
@@ -5437,7 +5459,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (p.count < 2)
       return (struct agx3_g17p_mrt_protocol){0};
 
-   if (p.count == 4 && ctx->key->fs.ignore_tib_dependencies)
+   if (p.count >= 4 && ctx->key->fs.ignore_tib_dependencies)
       return (struct agx3_g17p_mrt_protocol){0};
 
    for (unsigned i = 0; i < p.count; ++i) {
@@ -5472,9 +5494,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
 
       const int partition = agx3_g17p_mrt_partition(&p, I->pixel_offset);
-      /* Four targets of any formats share the store-only class-12 lifetime;
-       * see the mixed-format witnesses in test-agx-g17p-mrt-mixed.c. */
-      if (p.count == 4 &&
+      /* Four to eight targets of any formats share the store-only class-12
+       * lifetime; see the witnesses in test-agx-g17p-mrt-mixed.c. */
+      if (p.count >= 4 &&
           (I->op != AGX_OPCODE_ST_TILE || I->nr_srcs != 3 || I->nr_dests ||
            !agx_is_null(I->src[2]) || partition < 0))
          return (struct agx3_g17p_mrt_protocol){0};
@@ -5498,18 +5520,28 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
    }
 
-   for (unsigned i = 0; i < p.count; ++i) {
+   unsigned store_count = 0;
+   for (int i = p.count - 1; i >= 0; --i) {
+      const unsigned pair = agx3_g17p_mrt_class_pair(i);
       uint32_t read_class, write_class, combined_class;
-      /* Four-target blending is not inferred from the store-only witness. */
+      /* Blending four targets is not inferred from the store-only witness. */
       if ((p.stores[i] != 1 && !(partitions && !p.stores[i] && !p.loads[i])) ||
-          (p.count == 4 && p.loads[i]) ||
+          (p.count >= 4 && p.loads[i]) ||
           !agx3_pixel_colour_partition_classes(
-             i % 3, &read_class, &write_class, &combined_class))
+             pair, &read_class, &write_class, &combined_class))
          return (struct agx3_g17p_mrt_protocol){0};
-      if (p.stores[i])
-         p.classes |= BITFIELD_BIT(i % 3);
+      p.has_loads |= p.loads[i];
+      if (!p.stores[i])
+         continue;
+      if (pair == 0 && !(p.classes & BITFIELD_BIT(0)))
+         p.shared_first = i;
+      if (pair == 0)
+         p.shared_last = i;
+      p.classes |= BITFIELD_BIT(pair);
+      store_count++;
    }
-   p.shared_class = p.count == 4 && p.stores[0] && p.stores[3];
+   if (p.stores[1] && p.stores[2] && store_count > 5)
+      p.f13_stores = store_count - 5;
 
    p.raw32_store = true;
    agx_foreach_instr_global(ctx, I) {
@@ -5556,7 +5588,8 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
             width < 0 ? 0 : util_last_bit(I->mask) << width;
          const uint64_t bytes =
             BITFIELD64_MASK(size_B) << MIN2(I->pixel_offset, 63);
-         if (!size_B || stores >= 4 || I->pixel_offset + size_B > 64 ||
+         if (!size_B || stores >= AGX_MAX_RTS ||
+             I->pixel_offset + size_B > 64 ||
              (written_B & bytes) || I->nr_srcs != 3 || I->nr_dests != 0 ||
              I->explicit_coords || I->src[1].type != AGX_INDEX_IMMEDIATE ||
              I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
@@ -5717,7 +5750,7 @@ agx3_g17p_mrt_eot_store_format_ok(enum agx_format format, uint8_t selector)
 }
 
 /* Recognize EOT shaders with two to four raw32 targets, three to four RGBA8
- * targets, or two to four targets with key-selected formats. The native
+ * targets, or two to eight targets with key-selected formats. The native
  * constructors use one store per dense attachment. Homogeneous targets have a
  * four-byte or sixteen-byte imageblock stride; key-selected targets take any
  * offset, which reaches the program through its offset uniform. */
@@ -5731,7 +5764,7 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
       return false;
 
    const unsigned mixed_count = ctx->key->g17p_mrt_eot_count;
-   if (mixed_count == 1 || mixed_count > 4)
+   if (mixed_count == 1 || mixed_count > AGX_MAX_RTS)
       return false;
 
    unsigned values[256];
@@ -5769,7 +5802,8 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
             return false;
          }
       } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
-         if (stores >= 4 || I->nr_dests || I->nr_srcs != 4 ||
+         if (stores >= (mixed_count ? mixed_count : 4) || I->nr_dests ||
+             I->nr_srcs != 4 ||
              (mixed_count
                  ? !agx3_g17p_mrt_eot_store_format_ok(
                       I->format, ctx->key->g17p_mrt_eot_selectors[stores])
@@ -5840,18 +5874,33 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * each target's IMGWBLK selector replaced. Apple's factory derives
           * each selector from that target's format alone and changes no
           * other byte. */
-         const uint8_t *text = multi_eot_count == 2 ? agx3_g17p_dual_raw32_eot
-                               : multi_eot_count == 3
-                                  ? agx3_g17p_triple_raw32_eot
-                                  : agx3_g17p_quad_eot;
+         static const struct {
+            const uint8_t *text;
+            uint16_t imgwblk[AGX_MAX_RTS];
+         } templates[] = {
+            [2] = {agx3_g17p_dual_raw32_eot, {92, 104}},
+            [3] = {agx3_g17p_triple_raw32_eot, {124, 136, 148}},
+            [4] = {agx3_g17p_quad_eot, {156, 168, 180, 192}},
+            [5] = {agx3_g17p_penta_raw32_eot, {188, 200, 212, 224, 236}},
+            [6] = {agx3_g17p_hexa_raw32_eot, {220, 232, 244, 256, 268, 280}},
+            [7] = {agx3_g17p_hepta_raw32_eot,
+                   {60, 264, 276, 288, 300, 312, 324}},
+            [8] = {agx3_g17p_octa_raw32_eot,
+                   {92, 104, 308, 320, 332, 344, 356, 368}},
+         };
+         static_assert(sizeof(agx3_g17p_octa_raw32_eot) == 32 + 44 * 8,
+                       "native octa EOT");
          const size_t size = 32 + 44 * multi_eot_count;
-         uint8_t program[sizeof(agx3_g17p_quad_eot)];
-         memcpy(program, text, size);
+         uint8_t program[sizeof(agx3_g17p_octa_raw32_eot)];
+         memcpy(program, templates[multi_eot_count].text, size);
          for (unsigned rt = 0; rt < multi_eot_count; ++rt) {
-            program[37 + 32 * multi_eot_count + 12 * rt] =
+            /* Byte 9 of the target's 12-byte IMGWBLK. */
+            program[templates[multi_eot_count].imgwblk[rt] + 9] =
                ctx->key->g17p_mrt_eot_selectors[rt];
          }
-         return agx3_append(emission, program, size);
+         /* Six or more targets exceed agx3_append's 8-bit length. */
+         memcpy(util_dynarray_grow_bytes(emission, 1, size), program, size);
+         return true;
       }
       if (!ctx->key->g17p_rt0_eot_i32) {
          return multi_eot_count == 3
@@ -6382,6 +6431,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          ctx->agx3_colour_link.straight_line = false;
    }
    unsigned g17p_link_packs_seen = 0;
+   unsigned g17p_mrt_stores_seen = 0;
    bool g17p_colour_open = false;
    unsigned texture_samples_remaining = texture_samples_left;
    unsigned sample_group_members_remaining = sample_group_members_left;
@@ -7400,9 +7450,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * its LLDCol/LSTCol below. */
             if (g17p_mrt.valid && I->op == AGX_OPCODE_WAIT_PIX &&
                 I->writeout != 1) {
-               const bool mrt_has_loads = g17p_mrt.loads[0] ||
-                  g17p_mrt.loads[1] || g17p_mrt.loads[2];
-               if (mrt_has_loads && !g17p_colour_open) {
+               if (g17p_mrt.has_loads && !g17p_colour_open) {
                   uint8_t entry[AGX3_PIXEL_MAX_LENGTH];
                   uint8_t entry_len = 0;
                   if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
@@ -7491,12 +7539,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (g17p_mrt.valid) {
                const int partition =
                   agx3_g17p_mrt_partition(&g17p_mrt, I->pixel_offset);
-               const bool mrt_has_loads = g17p_mrt.loads[0] ||
-                  g17p_mrt.loads[1] || g17p_mrt.loads[2] || g17p_mrt.loads[3];
                uint32_t read_class, write_class, combined_class;
                if (partition < 0 ||
                    !agx3_pixel_colour_partition_classes(
-                      partition % 3, &read_class, &write_class, &combined_class))
+                      agx3_g17p_mrt_class_pair(partition), &read_class,
+                      &write_class, &combined_class))
                   AGX3_REFUSE(I);
 
                uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
@@ -7516,18 +7563,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   load ? read_class
                        : g17p_mrt.loads[partition] ? write_class
                                                   : combined_class;
-               /* Target3 opens class12 and leaves it held until target0.
-                * Do not reacquire it or release it between those stores. */
-               const bool shared_class = g17p_mrt.shared_class;
-               const bool acquire_class = !shared_class || partition != 0;
-               const bool release_class = !shared_class || partition != 3;
+               /* Class 12 opens before the first store using it and stays
+                * held until the last; the other pairs bracket their store. */
+               const bool shared = agx3_g17p_mrt_class_pair(partition) == 0;
+               const bool acquire_class =
+                  !shared || partition == g17p_mrt.shared_first;
+               const bool release_class =
+                  !shared || partition == g17p_mrt.shared_last;
+               const bool store_f13 =
+                  !load && g17p_mrt_stores_seen++ < g17p_mrt.f13_stores;
                if ((acquire_class &&
                     (!agx3_pixel_wait(enc, acquire, wait, bytes, &len) ||
                      !agx3_append(emission, bytes, len))) ||
                    !agx3_emit_tile(emission, enc, I, slot,
                                    acquire_class ? 0 : wait, false, false,
-                                   shared_class || g17p_mrt.raw32_store,
-                                   g17p_mrt.count >= 3 && !mrt_has_loads) ||
+                                   g17p_mrt.raw32_store,
+                                   g17p_mrt.count >= 3 && !g17p_mrt.has_loads,
+                                   store_f13) ||
                    (!load && release_class &&
                     (!agx3_pixel_release(enc, combined_class, last, 0, bytes,
                                         &len) ||
@@ -7551,7 +7603,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last,
                                 g17p_multi_background,
                                 g17p_multi_background &&
-                                   ctx->key->g17p_mrt_bg))
+                                   ctx->key->g17p_mrt_bg,
+                                false))
                AGX3_REFUSE(I);
 
             if (g17p_pixel_protocol && I->op == AGX_OPCODE_ST_TILE && last) {

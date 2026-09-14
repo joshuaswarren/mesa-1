@@ -90,6 +90,17 @@ agx3_tile_store(enum agx_isa_encoding enc, uint16_t data,
                 uint16_t wait_mask, uint8_t out[AGX3_TILE_MAX_LENGTH],
                 uint8_t *len)
 {
+   return agx3_tile_store_f13(enc, data, width, chan_mask, tile_off, sample,
+                              wait_mask, false, out, len);
+}
+
+bool
+agx3_tile_store_f13(enum agx_isa_encoding enc, uint16_t data,
+                    enum agx3_tile_width width, uint8_t chan_mask,
+                    uint16_t tile_off, struct agx3_tile_sample sample,
+                    uint16_t wait_mask, bool f13,
+                    uint8_t out[AGX3_TILE_MAX_LENGTH], uint8_t *len)
+{
    if (out == NULL || len == NULL)
       return false;
    memset(out, 0, AGX3_TILE_MAX_LENGTH);
@@ -106,7 +117,7 @@ agx3_tile_store(enum agx_isa_encoding enc, uint16_t data,
    struct agx3_field_kv ov[16];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, data);
-   if (!is_b(enc))
+   if (!is_b(enc) || f13)
       ov[n++] = (struct agx3_field_kv)KV(13, 1);
    ov[n++] = (struct agx3_field_kv)KV(10, width);
    ov[n++] = (struct agx3_field_kv)KV(26, chan_mask);

@@ -17,6 +17,18 @@
       }                                                                        \
    } while (0)
 
+static uint8_t *
+eot_offset(struct agx3_g17p_rt0_eot_program_desc *desc, unsigned rt)
+{
+   uint8_t *const offsets[AGX3_G17P_MRT_MAX_TARGETS] = {
+      &desc->imageblock_offset_B,  &desc->imageblock_offset1_B,
+      &desc->imageblock_offset2_B, &desc->imageblock_offset3_B,
+      &desc->imageblock_offset4_B, &desc->imageblock_offset5_B,
+      &desc->imageblock_offset6_B, &desc->imageblock_offset7_B,
+   };
+   return offsets[rt];
+}
+
 int
 main(void)
 {
@@ -198,6 +210,17 @@ main(void)
                                            &bg_program));
    CHECK(bg_program.length > 0 &&
          bg_program.length <= AGX_IOTO_G17P_QUAD_CLEAR_PROGRAM_MAX_SIZE);
+   for (unsigned count = 5; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
+      bg.clear_push_halfs = 4 + 8 * count;
+      CHECK(agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                              &bg_program));
+      CHECK(bg_program.length > 0 &&
+            bg_program.length <=
+               AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE);
+   }
+   bg.clear_push_halfs = AGX3_G17P_OCTA_CLEAR_PUSH_HALFS + 8;
+   CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                            &bg_program));
    bg.clear_push_halfs = AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS - 1;
    CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
                                             &bg_program));
@@ -230,10 +253,19 @@ main(void)
       AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_QUAD_CLEAR_PUSH_HALFS, false));
    CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
       AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_RT0_CLEAR_PUSH_HALFS, true));
+   /* Five to eight mixed-format targets: eight halves per clear value. */
+   for (unsigned count = 5; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
+      CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+         AGX3_G17P_RT0_BG_CLEAR, 4 + 8 * count, false));
+      CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+         AGX3_G17P_RT0_BG_CLEAR_RELOAD, 4 + 8 * count, true));
+   }
+   CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR, AGX3_G17P_OCTA_CLEAR_PUSH_HALFS + 8, false));
    bg.sampler_pointer_va = UINT64_C(0x4000020008);
    bg.clear_value_va = UINT64_C(0x4000010000);
    bg.op = AGX3_G17P_RT0_BG_CLEAR_RELOAD;
-   for (unsigned count = 2; count <= 4; ++count) {
+   for (unsigned count = 2; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
       bg.clear_push_halfs = 4 + 8 * count;
       for (unsigned reloads = 1; reloads < count; ++reloads) {
          bg.clear_start_halfs = 4 + 8 * reloads;
@@ -241,7 +273,8 @@ main(void)
                                                  &bg_program));
          CHECK(bg_program.length > 0 &&
                bg_program.length <=
-                  AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE);
+                  (count > 4 ? AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE
+                             : AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE));
       }
       bg.clear_start_halfs = 4;
       CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
@@ -390,32 +423,35 @@ main(void)
 
    /* Targets of arbitrary formats keep the multi-target program and offset
     * uniforms, but each target may sit at any offset inside the sample. */
-   for (unsigned count = 2; count <= 4; ++count) {
+   for (unsigned count = 2; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
       struct agx3_g17p_rt0_eot_program_desc mixed = eot;
-      static const uint8_t offsets[] = {16, 24, 0, 8};
+      static const uint8_t offsets[AGX3_G17P_MRT_MAX_TARGETS] = {
+         16, 24, 0, 8, 32, 40, 48, 56};
       mixed.shader_binary_size = 32 + 44 * count;
       mixed.staging_halfs = 8 * count;
       mixed.attachment_count = count;
-      mixed.imageblock_offset_B = offsets[0];
-      mixed.imageblock_offset1_B = offsets[1];
-      mixed.imageblock_offset2_B = count > 2 ? offsets[2] : 0;
-      mixed.imageblock_offset3_B = count > 3 ? offsets[3] : 0;
-      mixed.imageblock.sample_size_B = 32;
-      mixed.imageblock.tile_size_px = 32 * 16;
+      for (unsigned rt = 0; rt < AGX3_G17P_MRT_MAX_TARGETS; ++rt)
+         *eot_offset(&mixed, rt) = rt < count ? offsets[rt] : 0;
+      mixed.imageblock.sample_size_B = count > 4 ? 64 : 32;
+      mixed.imageblock.tile_size_px = count > 4 ? 16 * 16 : 32 * 16;
       CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mixed,
                                               &eot_program));
       mixed.mixed_mrt = true;
       CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mixed,
                                              &eot_program));
-      CHECK(eot_program.length > 0 && eot_program.length <= 144);
+      /* Each target beyond the second adds one offset LDIMM and two COPYs. */
+      CHECK(eot_program.length > 0 &&
+            eot_program.length <= (count > 4
+                                      ? AGX_IOTO_G17P_OCTA_EOT_PROGRAM_MAX_SIZE
+                                      : 144));
 
       struct agx3_g17p_rt0_eot_program_desc bad = mixed;
-      bad.imageblock_offset1_B = 32;
+      bad.imageblock_offset1_B = mixed.imageblock.sample_size_B;
       CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
                                               &eot_program));
       bad = mixed;
-      if (count < 4) {
-         bad.imageblock_offset3_B = 4;
+      if (count < AGX3_G17P_MRT_MAX_TARGETS) {
+         *eot_offset(&bad, count) = 4;
          CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
                                                  &eot_program));
       }

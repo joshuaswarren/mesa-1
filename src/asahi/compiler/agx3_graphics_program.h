@@ -57,6 +57,10 @@ enum agx3_g17p_rt0_bg_op {
 #define AGX3_G17P_RGBA8_MRT_CLEAR_PUSH_HALFS 20u
 #define AGX3_G17P_TRIPLE_CLEAR_PUSH_HALFS 28u
 #define AGX3_G17P_QUAD_CLEAR_PUSH_HALFS 36u
+/* Colour targets a mixed-format program stores. */
+#define AGX3_G17P_MRT_MAX_TARGETS 8u
+/* Eight mixed-format targets, each clear value in its own eight halves. */
+#define AGX3_G17P_OCTA_CLEAR_PUSH_HALFS 68u
 
 bool agx3_g17p_rt0_bg_resource_spec(enum agx_chip chip,
                                     enum agx3_g17p_rt0_bg_op op,
@@ -86,7 +90,7 @@ struct agx3_g17p_rt0_bg_program_desc {
 };
 
 struct agx3_g17p_rt0_bg_program {
-   uint8_t bytes[AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE];
+   uint8_t bytes[AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
 
@@ -103,7 +107,11 @@ struct agx3_g17p_rt0_eot_program_desc {
    uint8_t imageblock_offset1_B;
    uint8_t imageblock_offset2_B;
    uint8_t imageblock_offset3_B;
-   /* Two to four targets of arbitrary formats, each at its own offset. */
+   uint8_t imageblock_offset4_B;
+   uint8_t imageblock_offset5_B;
+   uint8_t imageblock_offset6_B;
+   uint8_t imageblock_offset7_B;
+   /* Two to eight targets of arbitrary formats, each at its own offset. */
    bool mixed_mrt;
    uint32_t shader_binary_size;
    uint32_t scratch_size;
@@ -113,7 +121,7 @@ struct agx3_g17p_rt0_eot_program_desc {
 };
 
 struct agx3_g17p_rt0_eot_program {
-   uint8_t bytes[AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE];
+   uint8_t bytes[AGX_IOTO_G17P_OCTA_EOT_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
 

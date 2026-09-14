@@ -1820,15 +1820,17 @@ agx_ra(agx_context *ctx)
    const bool raw32_bank = quad_tile && quad_stores >= 2 && quad_stores <= 4 &&
       (quad_width == 16 || quad_stores == 4) &&
       quad_mask == BITFIELD_MASK(quad_stores);
-   /* Apple's store-only three- and four-target fragments and multi-target
-    * BG builtins of other formats store every width from the same bank, again
-    * with f13=0. */
+   /* Apple's store-only fragments of three or more targets and multi-target
+    * BG builtins of other formats store every width from the same bank:
+    * halves 0..31 for up to four targets and 0..63 for more. */
    const bool mrt_bank =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
       ctx->stage == MESA_SHADER_FRAGMENT && !tile_loads &&
-      quad_stores >= (ctx->key->g17p_mrt_bg ? 2 : 3) && quad_stores <= 4 &&
+      quad_stores >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
+      quad_stores <= AGX_MAX_RTS &&
       (ctx->key->secondary || ctx->key->g17p_mrt_bg);
-   const unsigned tile_gpr_limit = raw32_bank || mrt_bank ? 32 : 16;
+   const unsigned tile_gpr_limit =
+      mrt_bank && quad_stores > 4 ? 64 : raw32_bank || mrt_bank ? 32 : 16;
 
    agx_foreach_instr_global(ctx, I) {
       /* Native G17P sinc and its fused quadrant selects use the bounded
