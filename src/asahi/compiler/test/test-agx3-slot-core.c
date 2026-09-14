@@ -27,6 +27,40 @@ int main(void)
 {
    struct agx3_slot_result r[64];
 
+   /* Release ordering includes a load used only after the fence. Drain only
+    * issued slots, and start a fresh generation for subsequent loads. */
+   {
+      struct agx3_slot_instr fence = {.drain = true};
+      struct agx3_slot_instr p[] = {
+         fence, ld(0), ld(2), st(2), fence, st(0), ld(4), fence, fence,
+      };
+      CHECK(agx3_slot_assign(p, 9, 6, r));
+      CHECK(r[0].wait_mask == 0);
+      CHECK(r[3].wait_mask == 2);
+      CHECK(r[4].wait_mask == 1);
+      CHECK(r[5].wait_mask == 0);
+      CHECK(r[7].wait_mask == 4);
+      CHECK(r[8].wait_mask == 0);
+   }
+
+   /* A resultless store is still ordered, and its old payload generations
+    * must not create waits after the fence or after transient slot reuse. */
+   {
+      struct agx3_slot_instr fence = {.drain = true};
+      struct agx3_slot_instr texture = ld(8);
+      texture.preferred_slot = 3;
+      texture.transient_slots = 2;
+      struct agx3_slot_instr p[] = {
+         stdev(0), fence, mov(0), stdev(4), texture, fence, fence,
+      };
+      CHECK(agx3_slot_assign(p, 7, 6, r));
+      CHECK(r[1].wait_mask == 1);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[4].wait_mask == 2);
+      CHECK(r[5].wait_mask == 4);
+      CHECK(r[6].wait_mask == 0);
+   }
+
    /* Two loads then an add consuming both: each load gets a distinct slot, the
     * add waits both. */
    {

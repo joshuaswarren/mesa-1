@@ -50,6 +50,7 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
    bool slot_reissuable[9] = {false};
 
    unsigned next = 0; /* round-robin cursor into 0..nslots-1 */
+   uint16_t pending = 0;
 
    for (unsigned i = 0; i < n; ++i) {
       const struct agx3_slot_instr *I = &instrs[i];
@@ -64,6 +65,12 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
          return false;
 
       uint16_t wait_mask = 0;
+      if (I->drain) {
+         wait_mask = pending;
+         for (unsigned slot = 1; slot <= nslots; ++slot)
+            if (pending & (1u << (slot - 1)))
+               slot_waited[slot] = true;
+      }
       for (unsigned s = 0; s < I->nr_srcs; ++s) {
          const uint16_t r = I->src[s];
          if (r >= AGX3_SLOT_NUM_TOKENS)
@@ -133,6 +140,7 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
          if (live && !slot_waited[slot])
             wait_mask |= bit;
          slot_waited[slot] = true;
+         pending &= (uint16_t)~bit;
       }
 
       /* Every slot this instruction waited is now retired, so the registers
@@ -180,6 +188,8 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
 
          out[i].wait_mask = wait_mask;
          out[i].slot = slot;
+         pending &= (uint16_t)~wait_mask;
+         pending |= (uint16_t)(1u << (slot - 1));
 
          /* Allocation can add a wait when every generation is occupied.
           * Retire its payload readers before recording this instruction. */
@@ -214,6 +224,7 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
       } else {
          out[i].wait_mask = wait_mask;
          out[i].slot = 0;
+         pending &= (uint16_t)~wait_mask;
          for (unsigned d = 0; d < I->nr_dsts; ++d) {
             if (I->dst[d] >= AGX3_SLOT_NUM_TOKENS)
                return false;

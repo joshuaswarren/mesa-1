@@ -4220,13 +4220,14 @@ agx3_emit_scoped_barrier(struct util_dynarray *emission,
                          enum agx_isa_encoding enc, const agx_instr *I,
                          uint16_t wait_mask)
 {
-   if (wait_mask != 0 || I->op != AGX_OPCODE_SCOPED_BARRIER_AGX3 ||
+   if (I->op != AGX_OPCODE_SCOPED_BARRIER_AGX3 ||
        I->nr_dests != 0 || I->nr_srcs != 0 ||
        I->imm > AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT)
       return false;
 
    struct agx3_encoded_scoped_barrier encoded;
-   return agx3_pack_scoped_barrier(enc, I->imm, &encoded) &&
+   return (!wait_mask || agx3_retire_slots_noop(emission, enc, wait_mask)) &&
+          agx3_pack_scoped_barrier(enc, I->imm, &encoded) &&
           agx3_append(emission, encoded.bytes, encoded.length);
 }
 
@@ -7563,6 +7564,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I) || I->agx3_tex_coord_start;
+         /* Release ordering includes reads whose results are used after the
+          * fence. Register dependencies alone do not order those reads. */
+         e->drain = I->op == AGX_OPCODE_SCOPED_BARRIER_AGX3 &&
+            (I->imm == AGX3_BARRIER_SCOPE_DEVICE ||
+             I->imm == AGX3_BARRIER_SCOPE_DEVICE_FENCE);
          e->reissues_live_slot = I->op == AGX_OPCODE_LDCF;
          if (I->agx3_tex_coord_start)
             e->preferred_slot = native_coord_preferred_slot;

@@ -47,6 +47,7 @@ extern "C" {
 
 struct agx3_slot_instr {
    bool is_async;   /* produces a scoreboard-tracked result */
+   bool drain;      /* retire preceding async operations before a fence */
    /* This asynchronous instruction reads its sources when it retires rather
     * than when it issues, so redefining one of them first changes what it
     * transfers. Set it for device stores, whose payload nothing else tracks:
