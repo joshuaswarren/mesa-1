@@ -6259,6 +6259,13 @@ typedef struct nir_lower_tex_options {
     */
    bool lower_sampler_lod_bias;
 
+   /**
+    * Leave depth comparisons alone when folding the sampler's bias above. A
+    * driver whose comparison lookup has no per-lane level form keeps their
+    * bias in the sampler descriptor, where the hardware applies it.
+    */
+   bool keep_sampler_lod_bias_for_shadow;
+
    /* Turns nir_op_tex and other ops with an implicit derivative, in stages
     * without implicit derivatives (like the vertex shader) to have an explicit
     * LOD with a value of 0.

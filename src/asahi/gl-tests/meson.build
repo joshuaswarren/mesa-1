@@ -303,6 +303,27 @@ test(
   suite : ['asahi'],
 )
 
+gl_lod_bias = executable(
+  'asahi-g17p-gl-lod-bias',
+  files('test-g17p-gl-lod-bias.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-lod-bias-software-control',
+  gl_lod_bias,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
 gl_msaa_resolve = executable(
   'asahi-g17p-gl-msaa-resolve',
   files('test-g17p-gl-msaa-resolve.c'),

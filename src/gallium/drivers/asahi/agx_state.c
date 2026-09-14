@@ -3559,7 +3559,12 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
                cfg.compare_func = agx_compare_funcs[state->compare_func];
                cfg.compare_enable =
                   state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE;
-               cfg.lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
+               /* An ordinary sample takes the bias as a shader operand,
+                * summed with the shader's own in floating point; only a depth
+                * comparison, whose level has no per-lane form here, keeps it
+                * in the descriptor. See agx_create_context(). */
+               if (cfg.compare_enable)
+                  cfg.lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
                cfg.seamful_cube_maps = !state->seamless_cube_map;
                cfg.border_colour = sampler->uses_custom_border
                                       ? AGX_BORDER_COLOUR_OPAQUE_WHITE
@@ -3591,7 +3596,8 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
                   cfg.compare_func = agx_compare_funcs[state->compare_func];
                   cfg.compare_enable =
                      state->compare_mode == PIPE_TEX_COMPARE_R_TO_TEXTURE;
-                  cfg.lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
+                  if (cfg.compare_enable)
+                     cfg.lod_bias = CLAMP(state->lod_bias, -16.0, 16.0);
                   cfg.seamful_cube_maps = !state->seamless_cube_map;
                   cfg.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
                }

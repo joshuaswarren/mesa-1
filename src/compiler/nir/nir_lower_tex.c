@@ -1756,7 +1756,8 @@ nir_lower_tex_block(nir_block *block, nir_builder *b,
 
       /* Although tg4 takes a sampler, it ignores the LOD bias. */
       if (options->lower_sampler_lod_bias &&
-          nir_tex_instr_need_sampler(tex) && tex->op != nir_texop_tg4) {
+          nir_tex_instr_need_sampler(tex) && tex->op != nir_texop_tg4 &&
+          !(options->keep_sampler_lod_bias_for_shadow && tex->is_shadow)) {
          lower_sampler_lod_bias(b, tex);
          progress = true;
       }
