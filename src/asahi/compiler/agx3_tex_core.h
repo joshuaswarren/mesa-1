@@ -281,6 +281,11 @@ struct agx3_tex_sample_desc {
    /* G17P f140=2 consumes a native bank-6 minimum, combined with the
     * half-float bias or published beside explicit gradients. */
    bool min_lod;
+   /* A 2D-array comparison with a bias reads its minimum from the GPR
+    * agx3_tex_pack_minimum() fills instead (f37=2, f30, f41). */
+   bool min_lod_register;
+   uint16_t min_lod_value;
+   bool min_lod_kill;
    uint16_t lod_x64;    /* level * 64 when LEVEL, bias * 64 when BIAS */
    uint8_t slot;
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
@@ -388,6 +393,21 @@ bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
                               bool lod_cache, bool lod_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+/* Publish a 2D-array bias sample's minimum LOD at half 4, beside the layer and
+ * bias staged in bank 6. */
+bool agx3_tex_stage_array_minimum_lod(enum agx_isa_encoding enc, uint16_t src,
+                                      uint8_t slot, uint16_t wait_mask,
+                                      bool src_cache, bool src_discard,
+                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                      uint8_t *len);
+
+/* Publish a 2D-array gradient sample's layer and minimum LOD into bank 6. */
+bool agx3_tex_stage_array_minimum_gradient(
+   enum agx_isa_encoding enc, uint16_t layer, uint16_t minimum, uint8_t slot,
+   uint16_t wait_mask, bool layer_cache, bool layer_discard,
+   bool minimum_cache, bool minimum_discard,
+   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 /* The texel-fetch variant packs a full uint LOD beside the array layer. */
 bool agx3_tex_stage_array_integer_lod(
    enum agx_isa_encoding enc, uint16_t layer, uint16_t lod, uint8_t slot,
@@ -472,6 +492,27 @@ bool agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                               uint16_t wait_mask, bool src_cache,
                               bool src_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Pack CEM's face alone into the 32-bit GPR `dest` for a biased cube sample
+ * with a minimum LOD. The face half is always consumed. */
+bool agx3_tex_pack_cube_face(enum agx_isa_encoding enc, uint16_t face,
+                             uint16_t dest, uint8_t out[AGX3_TEX_MAX_LENGTH],
+                             uint8_t *len);
+
+/* Publish a cube sample's minimum LOD and bias into bank 6 beside the face
+ * agx3_tex_pack_cube_face() packed into `packed_face`. */
+bool agx3_tex_stage_cube_bias_min(enum agx_isa_encoding enc, uint16_t bias,
+                                  uint16_t minimum, uint16_t packed_face,
+                                  uint8_t slot, uint16_t wait_mask,
+                                  bool src_cache, bool src_discard,
+                                  uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                  uint8_t *len);
+
+/* Pack a 16-bit float minimum LOD into the 32-bit GPR `dest` for a 2D-array
+ * comparison sample, which stages its reference in half 4. */
+bool agx3_tex_pack_minimum(enum agx_isa_encoding enc, uint16_t src,
+                           uint16_t dest, bool cache, bool discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 bool agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                  uint16_t dest, bool cache, bool discard,

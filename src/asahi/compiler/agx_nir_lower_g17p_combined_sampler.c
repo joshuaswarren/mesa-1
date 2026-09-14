@@ -101,8 +101,13 @@ g17p_sample_shape(const nir_tex_instr *tex)
         * does, SuperTuxKart's IBL.frag included. */
        (cube &&
         (tex->op != nir_texop_tex && tex->op != nir_texop_tg4 && !query_lod &&
-         !((!tex->is_shadow || shadow_level_zero) &&
-            tex->op == nir_texop_txl))) ||
+         !((!tex->is_shadow || shadow_level_zero ||
+            (!cube_array && level_src >= 0 &&
+             !nir_src_is_const(tex->src[level_src].src))) &&
+            tex->op == nir_texop_txl) &&
+         !(tex->op == nir_texop_txb &&
+           nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0 &&
+           !(tex->is_shadow && cube_array)))) ||
        tex->is_sparse ||
        tex->coord_components != (query_lod ? (three_d || cube ? 3 : 2) :
                                 cube_array ? 4 :
@@ -120,6 +125,10 @@ g17p_sample_shape(const nir_tex_instr *tex)
        tex->def.bit_size != 32)
       return false;
 
+   const int packed_bias_min =
+      nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx);
+   const int minimum = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+
    if (tex->is_shadow && !query_lod) {
       /* The depth comparison is orthogonal to the LOD shape: Apple's
        * depth2d sample_compare with level(k), level(reg), bias(k), bias(reg)
@@ -127,7 +136,9 @@ g17p_sample_shape(const nir_tex_instr *tex)
        * f143 alone, and gather_compare is the ordinary gather plus f143.
        * See the witness table in agx3_tex_core.c. The array and cube
        * comparisons use separately packed layer / CEM operands and admit
-       * only implicit LOD or the native explicit-zero form above. */
+       * only implicit LOD, the native explicit-zero form above, or a
+       * clamped bias or gradient, which publish their minimum beside the
+       * layer or in a packed register. */
       const int comparator =
          nir_tex_instr_src_index(tex, nir_tex_src_comparator);
       if (comparator < 0 ||
@@ -135,13 +146,12 @@ g17p_sample_shape(const nir_tex_instr *tex)
           nir_src_bit_size(tex->src[comparator].src) != 32 ||
           (tex->is_array && !offset_array && tex->op != nir_texop_tex &&
            tex->op != nir_texop_tg4 &&
+           !(tex->op == nir_texop_txd && minimum >= 0) &&
+           !(tex->op == nir_texop_txb && packed_bias_min >= 0) &&
            !shadow_level_zero))
          return false;
    }
 
-   const int packed_bias_min =
-      nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx);
-   const int minimum = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
    const bool has_minimum = packed_bias_min >= 0 || minimum >= 0;
    const bool has_bias = packed_bias_min >= 0 ||
       nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0;
@@ -164,12 +174,14 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const bool staged_packed_offset =
       packed_offset && !nir_src_is_const(tex->src[offset_src].src) &&
       (tex->is_array || has_lod || has_bias);
-   /* Native bank-6 minimum operands are grounded for non-array 2D/3D
-    * fragment samples. The shared texture lowering has already combined a
+   /* Native bank-6 minimum operands are grounded for 2D, 2D-array and 3D
+    * fragment samples, and for biased cube samples. The shared texture lowering has already combined a
     * bias/minimum pair into one f16x2 source, or left the gradient minimum
-    * as a scalar half. Preserve that source while selecting native handles. */
+    * as a scalar half. Preserve that source while selecting native handles.
+    * A 2D-array runtime offset carries the bias or gradient minimum in its
+    * packed bank-6 word. */
    if (has_minimum &&
-       (tex->is_array || cube || (three_d && has_offset) ||
+       ((cube && packed_bias_min < 0) || (three_d && has_offset) ||
         (packed_bias_min >= 0 &&
          (tex->op != nir_texop_txb || minimum >= 0 ||
           nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0 ||

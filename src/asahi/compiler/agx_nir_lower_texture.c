@@ -460,16 +460,28 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
           *
           * Explicit levels are nonnegative; biases retain the full signed
           * 12-bit range.  These are the same bounds and truncation used by
-          * the immediate SMP field. */
+          * the immediate SMP field.
+          *
+          * A 2D-array sample with a minimum LOD keeps the same word: a bias
+          * still fills bits 16..27 beside its separately staged minimum, and
+          * a gradient's minimum takes them, as Apple's layer | minimum
+          * register pack does. */
          const int level_idx =
             nir_tex_instr_src_index(tex, nir_tex_src_lod);
          const int bias_idx =
             nir_tex_instr_src_index(tex, nir_tex_src_bias);
-         const bool has_min_lod =
-            nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0;
-         const int packed_level_idx = level_idx >= 0 ? level_idx : bias_idx;
-         const bool pack_level = packed_level_idx >= 0 && !has_min_lod &&
-            !nir_src_is_const(tex->src[packed_level_idx].src) &&
+         const int min_lod_idx =
+            nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+         const bool has_min_lod = min_lod_idx >= 0;
+         const bool pack_minimum = has_min_lod && tex->is_array &&
+            tex->op == nir_texop_txd &&
+            nir_src_bit_size(tex->src[min_lod_idx].src) == 16;
+         const int packed_level_idx = pack_minimum ? min_lod_idx
+                                      : level_idx >= 0 ? level_idx
+                                                       : bias_idx;
+         const bool pack_level = packed_level_idx >= 0 &&
+            (has_min_lod ? tex->is_array
+                         : !nir_src_is_const(tex->src[packed_level_idx].src)) &&
             nir_src_bit_size(tex->src[packed_level_idx].src) == 16;
          const bool pack_array_layer = tex->is_array && layer != NULL;
 

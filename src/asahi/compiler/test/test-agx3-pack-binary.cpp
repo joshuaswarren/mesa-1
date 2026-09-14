@@ -171,6 +171,81 @@ TEST_F(AGX3PackBinary, MinimumLodGradientStagesAppendedHalfWithoutGroupEntry)
    }
 }
 
+/* A 2D-array sample publishes its layer beside the bias or the gradient
+ * minimum, so the bias pair's minimum moves to half 4, or for a comparison to
+ * a packed register, and no separate layer publication follows. */
+TEST_F(AGX3PackBinary, ArrayMinimumLodSharesTheLayerBank)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool gradient : {false, true}) {
+      for (bool shadow : {false, true}) {
+         agx_builder *b = builder(enc);
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         agx_index dest = agx_register(16, AGX_SIZE_32);
+         dest.channels_m1 = 3;
+         agx_index coord = agx_register(8, AGX_SIZE_32);
+         coord.channels_m1 = 2;
+         coord.discard = true;
+         agx_index lod = agx_register(32, AGX_SIZE_32);
+         lod.channels_m1 = gradient ? 4 : 0;
+         lod.discard = true;
+         agx_index reference = shadow ? agx_register(48, AGX_SIZE_32)
+                                      : agx_null();
+         auto *I = agx_texture_sample_to(
+            b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+            agx_immediate(0), reference, AGX_DIM_2D_ARRAY,
+            gradient ? AGX_LOD_MODE_LOD_GRAD_MIN
+                     : AGX_LOD_MODE_AUTO_LOD_BIAS_MIN,
+            0, false, shadow, false, AGX_GATHER_NONE, false);
+         I->mask = shadow ? 1 : 15;
+         agx_stop(b);
+         agx_validate(b->shader, "array minimum LOD");
+         const auto code = pack(b);
+
+         uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+         std::vector<uint8_t> want;
+         if (shadow && !gradient) {
+            ASSERT_TRUE(agx3_tex_stage_array_lod(
+               enc, 12, 32, 1, 0, false, true, false, false, bytes, &len));
+            append(want, bytes, len);
+            ASSERT_EQ(std::search(code.begin(), code.end(), want.begin(),
+                                  want.end()),
+                      code.begin());
+            /* The minimum lands in the transient word reserved above every
+             * live register, the one SMP then names. */
+            bool packed = false;
+            for (uint16_t dest = 50; dest <= 190 && !packed; dest += 2) {
+               ASSERT_TRUE(agx3_tex_pack_minimum(enc, 33, dest, false, true,
+                                                 bytes, &len));
+               packed = std::equal(bytes, bytes + len,
+                                   code.begin() + want.size());
+            }
+            EXPECT_TRUE(packed);
+            continue;
+         }
+         if (gradient) {
+            ASSERT_TRUE(agx3_tex_stage_array_minimum_gradient(
+               enc, 12, 40, 1, 0, false, true, false, true, bytes, &len));
+            append(want, bytes, len);
+         } else {
+            ASSERT_TRUE(agx3_tex_stage_array_minimum_lod(
+               enc, 33, 1, 0, false, false, bytes, &len));
+            append(want, bytes, len);
+            ASSERT_TRUE(agx3_tex_stage_array_lod(
+               enc, 12, 32, 1, 0, false, true, false, true, bytes, &len));
+            append(want, bytes, len);
+         }
+         EXPECT_EQ(std::search(code.begin(), code.end(), want.begin(),
+                               want.end()),
+                   code.begin());
+         ASSERT_TRUE(agx3_tex_stage_array_layer(enc, 12, 1, 0, false, true,
+                                                bytes, &len));
+         EXPECT_EQ(std::search(code.begin(), code.end(), bytes, bytes + len),
+                   code.end());
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, LargeGradientOperandsKeepLateDescriptorWait)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -12297,8 +12372,12 @@ TEST_F(AGX3PackBinary, IndexedShadowLevelZeroKeepsNativeHandles)
          nir_builder_instr_insert(&b, &tex->instr);
          nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000),
                            .align_mul = 4);
-         EXPECT_EQ(agx_nir_lower_g17p_indexed_samplers(b.shader), level == 0);
-         if (level == 0) {
+         /* A comparison cube also stages a register level beside its face
+          * (depthcube sample_compare(level(reg))); an immediate nonzero level
+          * and a comparison array's register level have no native form. */
+         const bool native = level == 0 || (cube && level == 2);
+         EXPECT_EQ(agx_nir_lower_g17p_indexed_samplers(b.shader), native);
+         if (native) {
             const int texture = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
             const int sampler = nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle);
             ASSERT_GE(texture, 0);

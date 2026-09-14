@@ -1882,10 +1882,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
          (!implicit_lod && !explicit_lod && !biased_lod &&
-          !register_bias))) ||
+          !register_bias && !bias_min))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->sparse ||
-       (min_lod && (array || cube || vertex_stage ||
+       (min_lod && ((cube && !bias_min) || vertex_stage ||
                     (three_d && offset))) ||
        (query_lod &&
         (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || shadow || offset ||
@@ -1900,8 +1900,12 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        (shadow && (three_d || enc != AGX_ISA_ENCODING_AGX3B ||
                    I->mask != (gather ? 15u : 1u) ||
                    ((cube || (array && !offset && !vertex_stage)) &&
-                    !implicit_lod &&
-                    !shadow_level_zero))) ||
+                    !implicit_lod && !shadow_level_zero &&
+                    !(array && !cube && min_lod) &&
+                    /* A comparison cube stages a register level or a
+                     * bias and minimum exactly as the colour cube does. */
+                    !(cube && !cube_array &&
+                      ((explicit_lod && !immediate_lod) || bias_min))))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
@@ -1917,7 +1921,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    /* A cube register level or bias is published with CEM's face, after CEM
     * has run, so CEM must not overwrite it. */
    const bool cube_register_lod =
-      cube && ((explicit_lod && !immediate_lod) || register_bias);
+      cube && ((explicit_lod && !immediate_lod) || register_bias || bias_min);
 
    /* The immediate cube corpus uses fixed r0/r7/r2 CEM destinations. Dynamic
     * descriptor forms, and any cube whose staged LOD must survive CEM, use
@@ -1960,9 +1964,58 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    uint8_t len = 0;
 
    const bool combined_array_lod = array && !cube && !staged_offset &&
-      ((explicit_lod && !immediate_lod) || register_bias);
+      ((explicit_lod && !immediate_lod) || register_bias || min_lod);
    const uint16_t offset_base = I->src[5].value + (shadow ? 2 : 0);
-   if (bias_min) {
+   /* A 2D-array runtime offset arrives as one NIR-packed bank-6 word that
+    * already carries the layer and the bias or gradient minimum. */
+   const bool packed_array_word = array && staged_packed_offset;
+   if (bias_min && array && !cube) {
+      /* The minimum moves out of bank 6 so the bias can join the layer
+       * there: to half 4 as Apple publishes it, or for a comparison, whose
+       * reference owns half 4, to a packed register SMP names. The register
+       * pack carries no wait, so it follows the staging that does. The bias
+       * and minimum halves belong to one register, so only its last read
+       * may discard it. */
+      const bool minimum_last = shadow || packed_array_word;
+      if (!shadow &&
+          (!agx3_tex_stage_array_minimum_lod(
+              enc, I->src[1].value + 1, stage_slot, wait_mask,
+              I->src[1].cache, minimum_last && I->src[1].discard, bytes,
+              &len) ||
+           !agx3_append(emission, bytes, len)))
+         return false;
+      const bool bank6 = packed_array_word
+         ? agx3_tex_stage_copy_hints(
+              enc, 6, offset_base, stage_slot, shadow ? wait_mask : 0,
+              I->src[5].cache, I->src[5].discard, bytes, &len)
+         : agx3_tex_stage_array_lod(
+              enc, I->src[0].value + 4, I->src[1].value, stage_slot,
+              shadow ? wait_mask : 0, I->src[0].cache, I->src[0].discard,
+              I->src[1].cache, !minimum_last && I->src[1].discard, bytes,
+              &len);
+      if (!bank6 || !agx3_append(emission, bytes, len))
+         return false;
+      if (shadow &&
+          (!agx3_tex_pack_minimum(enc, I->src[1].value + 1, array_scratch,
+                                  I->src[1].cache, I->src[1].discard, bytes,
+                                  &len) ||
+           !agx3_append(emission, bytes, len)))
+         return false;
+      wait_mask = 0;
+   } else if (gradient_min && array && !cube) {
+      if (!(packed_array_word
+               ? agx3_tex_stage_copy_hints(
+                    enc, 6, offset_base, stage_slot, wait_mask,
+                    I->src[5].cache, I->src[5].discard, bytes, &len)
+               : agx3_tex_stage_array_minimum_gradient(
+                    enc, I->src[0].value + 4,
+                    I->src[1].value + 2 * gradient_channels, stage_slot,
+                    wait_mask, I->src[0].cache, I->src[0].discard,
+                    I->src[1].cache, I->src[1].discard, bytes, &len)) ||
+          !agx3_append(emission, bytes, len))
+         return false;
+      wait_mask = 0;
+   } else if (bias_min && !cube) {
       if (!agx3_tex_stage_bias_min(
              enc, I->src[1].value, I->src[1].value + 1, stage_slot, wait_mask,
              I->src[1].cache, I->src[1].discard, bytes, &len) ||
@@ -2105,13 +2158,29 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       const uint16_t layer = I->src[0].value + 6;
       bool packed;
       if (cube_array && cube_register_lod) {
+         /* A bias and minimum publish the minimum at half 4, then the bias
+          * beside the face. Both halves belong to one register, so only the
+          * second read may discard it. */
          packed = agx3_tex_pack_ms_array_layer(
                      enc, layer, array_scratch, I->src[0].cache,
                      I->src[0].discard, bytes, &len) &&
                   agx3_append(emission, bytes, len) &&
+                  (!bias_min ||
+                   (agx3_tex_stage_array_minimum_lod(
+                       enc, I->src[1].value + 1, stage_slot, 0,
+                       I->src[1].cache, false, bytes, &len) &&
+                    agx3_append(emission, bytes, len))) &&
                   agx3_tex_stage_cube_array_lod(
                      enc, face, I->src[1].value, array_scratch, stage_slot, 0,
                      I->src[1].cache, I->src[1].discard, bytes, &len);
+      } else if (bias_min) {
+         packed = agx3_tex_pack_cube_face(enc, face, array_scratch, bytes,
+                                          &len) &&
+                  agx3_append(emission, bytes, len) &&
+                  agx3_tex_stage_cube_bias_min(
+                     enc, I->src[1].value, I->src[1].value + 1,
+                     array_scratch, stage_slot, 0, I->src[1].cache,
+                     I->src[1].discard, bytes, &len);
       } else if (cube_array) {
          packed = agx3_tex_stage_cube_array_layer(
             enc, face, layer, stage_slot, 0, I->src[0].cache,
@@ -2213,6 +2282,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .offset_xyz = offset ? I->offset_xyz : 0,
       .offset_register = register_offset,
       .min_lod = min_lod,
+      .min_lod_register = bias_min && array && shadow,
+      .min_lod_value = bias_min && array && shadow ? array_scratch : 0,
+      .min_lod_kill = bias_min && array && shadow,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER
@@ -6704,8 +6776,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              scan_I->dim == AGX_DIM_2D_MS_ARRAY)
             has_packed_array_layer = true;
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
-             scan_I->dim == AGX_DIM_2D_ARRAY && scan_I->offset &&
-             !scan_I->offset_xyz)
+             scan_I->dim == AGX_DIM_2D_ARRAY &&
+             ((scan_I->offset && !scan_I->offset_xyz) ||
+              (scan_I->shadow &&
+               scan_I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN)))
             has_packed_array_layer = true;
          if (scan_I->op == AGX_OPCODE_ST_TILE)
             tile_stores_left++;
@@ -6735,15 +6809,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* A register level or bias outlives CEM, so it cannot share the
              * fixed immediate-corpus scratch. A cube-array layer is prepacked
              * beside it. */
-            const bool register_lod =
-               (scan_I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
-                scan_I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
-               scan_I->src[1].type != AGX_INDEX_IMMEDIATE;
+            const bool bias_min =
+               scan_I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
+            const bool register_lod = bias_min ||
+               ((scan_I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+                 scan_I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+                scan_I->src[1].type != AGX_INDEX_IMMEDIATE);
             if (register_lod ||
                 scan_I->src[3].type != AGX_INDEX_IMMEDIATE ||
                 scan_I->src[4].type != AGX_INDEX_IMMEDIATE)
                has_dynamic_cube_sample = true;
-            if (register_lod && scan_I->dim == AGX_DIM_CUBE_ARRAY)
+            /* So is a cube face packed beside a bias and minimum. */
+            if (register_lod &&
+                (scan_I->dim == AGX_DIM_CUBE_ARRAY || bias_min))
                has_packed_array_layer = true;
          }
          agx_foreach_reg_dest(scan_I, d) {
@@ -7136,10 +7214,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (I->dim == AGX_DIM_CUBE ||
               I->dim == AGX_DIM_CUBE_ARRAY)) {
-            const bool register_lod =
-               (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
-                I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
-               I->src[1].type != AGX_INDEX_IMMEDIATE;
+            const bool bias_min =
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
+            const bool register_lod = bias_min ||
+               ((I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+                 I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+                I->src[1].type != AGX_INDEX_IMMEDIATE);
             const bool dynamic_cem = register_lod ||
                I->src[3].type != AGX_INDEX_IMMEDIATE ||
                I->src[4].type != AGX_INDEX_IMMEDIATE;
@@ -7151,9 +7231,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             e->dst[nd++] = scratch[0] + 2;
             e->dst[nd++] = scratch[1];
             e->dst[nd++] = scratch[2];
-            /* The cube-array layer prepacked beside a register LOD. */
-            if (register_lod && I->dim == AGX_DIM_CUBE_ARRAY)
+            /* The cube-array layer prepacked beside a register LOD, or the
+             * cube face packed beside a bias and minimum. */
+            if (register_lod && (I->dim == AGX_DIM_CUBE_ARRAY || bias_min))
                e->dst[nd++] = ms_array_scratch;
+         }
+         /* A 2D-array comparison packs its minimum LOD into the same word,
+          * which SMP reads after its staging completes. */
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+             I->dim == AGX_DIM_2D_ARRAY && I->shadow &&
+             I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN) {
+            assert(nd < AGX3_SLOT_MAX_REGS);
+            e->dst[nd++] = ms_array_scratch;
          }
          e->nr_dsts = (uint8_t)nd;
          e->nr_srcs = (uint8_t)ns;

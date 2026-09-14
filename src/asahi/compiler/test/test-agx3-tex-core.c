@@ -3325,10 +3325,120 @@ test_minimum_lod_witnesses(void)
    CHECK(!agx3_tex_stage_bias_min(enc, 0, 1, 1, 0, true, true, bytes, &len));
    CHECK(!agx3_tex_stage_bias_min(AGX_ISA_ENCODING_AGX3C, 0, 1, 1, 0,
                                  false, true, bytes, &len));
+   /* texture2d_array and texturecube_array bias + min_lod_clamp. */
+   CHECK(agx3_tex_stage_array_minimum_lod(enc, 0, 1, 0, false, true, bytes,
+                                          &len));
+   CHECK(hex_eq(bytes, len, "1705540400001004f0c00800"));
+   CHECK(agx3_tex_stage_array_minimum_lod(enc, 4, 1, 0, false, true, bytes,
+                                          &len));
+   CHECK(hex_eq(bytes, len, "1705540400081004f0c00800"));
+   CHECK(agx3_tex_stage_array_lod(enc, 2, 3, 1, 0, false, true, false, true,
+                                  bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600040c00f0c02500"));
+   CHECK(!agx3_tex_stage_array_minimum_lod(enc, 256, 1, 0, false, true, bytes,
+                                           &len));
+   CHECK(!agx3_tex_stage_array_minimum_lod(enc, 0, 1, 0, true, true, bytes,
+                                           &len));
+   /* depth2d_array sample_compare bias + min_lod_clamp, two in one fragment. */
+   CHECK(agx3_tex_pack_minimum(enc, 0, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540002000000d0886000"));
+   CHECK(agx3_tex_pack_minimum(enc, 2, 2, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540202040000d0886000"));
+   CHECK(!agx3_tex_pack_minimum(enc, 128, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_minimum(enc, 0, 1, false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_minimum(enc, 0, 192, false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_minimum(enc, 0, 0, true, true, bytes, &len));
+   for (unsigned offset = 0; offset < 2; ++offset) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1, .slot = 1,
+         .wait_mask = 1, .coord_kill = true, .final = true, .min_lod = true,
+         .min_lod_register = true, .min_lod_value = 0, .min_lod_kill = true,
+         .lod = AGX3_TEX_LOD_BIAS_REGISTER, .offset = offset,
+         .offset_xyz = offset ? 0xf1 : 0, .shadow = true, .array = true,
+         .array_layer = 4, .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, offset ? "05800ca09000020101880008010e"
+                                      : "05800ca090004200010000080100"));
+      d.min_lod_value = 1;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      d.min_lod_value = 0;
+      d.cube = true;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+   }
+   /* texturecube and depthcube bias + min_lod_clamp: the face packed alone,
+    * then minimum and bias beside it. */
+   CHECK(agx3_tex_pack_cube_face(enc, 8, 0, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540003100004f0880400"));
+   CHECK(agx3_tex_pack_cube_face(enc, 10, 0, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540003140004f0880400"));
+   CHECK(!agx3_tex_pack_cube_face(enc, 9, 0, bytes, &len));
+   CHECK(!agx3_tex_pack_cube_face(enc, 8, 1, bytes, &len));
+   CHECK(agx3_tex_stage_cube_bias_min(enc, 9, 16, 0, 1, 0, false, true, bytes,
+                                      &len));
+   CHECK(hex_eq(bytes, len, "1705540600202400f0c22300"));
+   CHECK(agx3_tex_stage_cube_bias_min(enc, 2, 3, 0, 1, 0, false, true, bytes,
+                                      &len));
+   CHECK(hex_eq(bytes, len, "1705540600060800f0c22300"));
+   CHECK(!agx3_tex_stage_cube_bias_min(enc, 2, 3, 1, 1, 0, false, true, bytes,
+                                       &len));
+   CHECK(!agx3_tex_stage_cube_bias_min(enc, 2, 3, 0, 1, 3, false, true, bytes,
+                                       &len));
+   /* texturecube_array bias + min_lod_clamp: layer pack, minimum at half 4
+    * (above), then face and bias beside the packed layer. */
+   CHECK(agx3_tex_pack_ms_array_layer(enc, 11, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540003160000f0880400"));
+   CHECK(agx3_tex_stage_cube_array_lod(enc, 10, 2, 0, 1, 0, false, true, bytes,
+                                       &len));
+   CHECK(hex_eq(bytes, len, "1705540600140800f0c21700"));
+   /* depthcube sample_compare(level(reg)): face and level in bank 6. */
+   CHECK(agx3_tex_stage_cube_lod(enc, 10, 8, 1, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600142000f0c01100"));
+   static const struct {
+      bool array, shadow, min_lod;
+      enum agx3_tex_lod lod;
+      const char *hex;
+   } cubes[] = {
+      {false, false, true, AGX3_TEX_LOD_BIAS_REGISTER, "05800cb8b0001408010010000100"},
+      {true, false, true, AGX3_TEX_LOD_BIAS_REGISTER, "05800cb8b0001c00010010000100"},
+      {false, true, true, AGX3_TEX_LOD_BIAS_REGISTER, "05800ca090003408010000000100"},
+      {false, true, false, AGX3_TEX_LOD_REGISTER, "05800ca090002003010000000100"},
+   };
+   for (unsigned i = 0; i < sizeof(cubes) / sizeof(cubes[0]); ++i) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = cubes[i].shadow ? 1 : 15, .slot = 1, .wait_mask = 1,
+         .coord_kill = true, .final = true, .min_lod = cubes[i].min_lod,
+         .lod = cubes[i].lod, .shadow = cubes[i].shadow, .cube = true,
+         .array = cubes[i].array, .array_layer = cubes[i].array ? 6 : 0,
+         .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, cubes[i].hex));
+      d.lod = AGX3_TEX_LOD_GRADIENT;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      if (cubes[i].shadow) {
+         /* No comparison cube-array witness takes a register LOD. */
+         d.lod = cubes[i].lod;
+         d.array = true;
+         d.array_layer = 6;
+         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      }
+   }
+   /* texture2d_array gradient2d + min_lod_clamp. */
+   CHECK(agx3_tex_stage_array_minimum_gradient(enc, 14, 15, 1, 0, false, true,
+                                               false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055406001c3c00f0c02d00"));
+   CHECK(!agx3_tex_stage_array_minimum_gradient(enc, 15, 14, 1, 0, false,
+                                                true, false, true, bytes,
+                                                &len));
    static const struct {
       bool gradient, offset, shadow, three_d, indexed;
       uint16_t texture, sampler;
       const char *hex;
+      bool array;
    } rows[] = {
       {false, false, false, false, false, 0, 0, "05800cb8b0000408010010000100"},
       {true, false, false, false, false, 0, 0, "05800cb8b0001401000010000100"},
@@ -3340,6 +3450,12 @@ test_minimum_lod_witnesses(void)
       {true, false, false, true, false, 0, 0, "05800cb8b0009c21000010000100"},
       {false, false, false, false, true, 0, 4, "05800cb8b4000408010290010100a02800000000"},
       {true, false, false, false, true, 8, 12, "05c00cb8bc001401000290010100a02800000000"},
+      {false, false, false, false, false, 0, 0, "05800cb8b0000c00010010000100", true},
+      {true, false, false, false, false, 0, 0, "05800cb8b0001c01000010000100", true},
+      {false, true, false, false, false, 0, 0, "05800cb8b000c10301881000010e", true},
+      {true, true, false, false, false, 0, 0, "05800cb8b000490300881000010e", true},
+      {true, false, true, false, false, 0, 0, "05800ca090003c01000000000100", true},
+      {true, true, true, false, false, 0, 0, "05800ca09000690300880000010e", true},
    };
    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
       struct agx3_tex_sample_desc d = {
@@ -3356,6 +3472,7 @@ test_minimum_lod_witnesses(void)
                                          : AGX3_TEX_OPERAND_IMMEDIATE,
          .texture_value = rows[i].texture, .sampler_value = rows[i].sampler,
          .texture_kill = rows[i].indexed, .sampler_kill = rows[i].indexed,
+         .array = rows[i].array, .array_layer = rows[i].array ? 4 : 0,
       };
       CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
       if (!hex_eq(bytes, len, rows[i].hex)) {
@@ -3363,9 +3480,24 @@ test_minimum_lod_witnesses(void)
          return 1;
       }
       checks++;
-      d.array = true;
+      /* Only the biased cube forms are witnessed. */
+      const enum agx3_tex_lod lod = d.lod;
+      d.cube = true;
+      d.lod = AGX3_TEX_LOD_GRADIENT;
       CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
-      d.array = false;
+      d.cube = false;
+      d.lod = lod;
+      if (rows[i].array && rows[i].shadow && !rows[i].offset) {
+         /* The comparison bias reads its minimum from a register pack. */
+         d.lod = AGX3_TEX_LOD_BIAS_REGISTER;
+         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+         d.lod = AGX3_TEX_LOD_GRADIENT;
+      }
+      if (!rows[i].array || rows[i].shadow) {
+         d.min_lod_register = true;
+         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+         d.min_lod_register = false;
+      }
       d.vertex_stage = true;
       CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
       d.vertex_stage = false;
