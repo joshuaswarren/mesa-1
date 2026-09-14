@@ -13804,6 +13804,50 @@ TEST_F(AGX3PackBinary, IntegerIndexedStorageWriteUsesResolvedPbe)
    EXPECT_EQ(code.size(), 6 * 4 + sizeof(expected) + 4);
 }
 
+TEST_F(AGX3PackBinary, OverlappingComputeReadsStageDisjointBanks)
+{
+   for (unsigned retired = 0; retired < 2; ++retired) {
+      const auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index coord = agx_register(0, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      const agx_index heap = agx_uniform(6, AGX_SIZE_64);
+      for (unsigned i = 0; i < 2; ++i) {
+         agx_index data = agx_register(8 + 8 * i, AGX_SIZE_32);
+         data.channels_m1 = 3;
+         agx_image_load_to(b, data, coord, agx_immediate(0), heap,
+                           agx_register(40 + 8 * i, AGX_SIZE_64),
+                           agx_immediate(0), agx_null(), AGX_DIM_2D,
+                           AGX_LOD_MODE_AUTO_LOD, 15, false, false, false);
+         /* Consuming the first result retires its generation. */
+         if (i == 0 && retired)
+            agx_fadd_to(b, agx_register(32, AGX_SIZE_32),
+                        agx_register(8, AGX_SIZE_32),
+                        agx_register(10, AGX_SIZE_32));
+      }
+      agx_stop(b);
+
+      const std::vector<uint8_t> code = pack(b);
+      ASSERT_FALSE(code.empty());
+
+      /* metal-nt -arch applegpu_g17p: two texture2d reads in flight at once
+       * stage their coordinates in disjoint banks. */
+      std::vector<uint8_t> second;
+      uint8_t copy[AGX3_TEX_MAX_LENGTH], len = 0;
+      const uint16_t bank = retired ? 0 : 8;
+      for (unsigned c = 0; c < 2; ++c) {
+         ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, bank + 2 * c, 2 * c, 1, 0,
+                                               false, false, copy, &len));
+         append(second, copy, len);
+      }
+      EXPECT_NE(std::search(code.begin(), code.end(), second.begin(),
+                            second.end()),
+                code.end()) << "retired=" << retired;
+      EXPECT_EQ(b->shader->agx3_staging_halfs, retired ? 4u : 12u);
+   }
+}
+
 TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
 {
    static const uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH] = {

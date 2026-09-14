@@ -1082,12 +1082,23 @@ agx3_tex_plain_uniform64(agx_index index)
  * and 3D fetches keep the independently witnessed staging slot 2/result slot
  * 1 pair. G17P 3D reads publish their third integer coordinate in the next
  * staging word; every other texture axis remains a deliberate refusal. */
+/* Coordinate banks published by earlier staged reads in the current
+ * scoreboard window, with the result slot of the read that consumes each. */
+struct agx3_fetch_banks {
+   struct {
+      uint16_t coord, span;
+      uint8_t slot;
+   } live[2];
+};
+
 static bool
 agx3_emit_texture_fetch(struct util_dynarray *emission,
                         enum agx_isa_encoding enc, const agx_instr *I,
                         uint8_t slot, uint16_t wait_mask, bool final,
                         bool stage_coordinates, bool separate_write_coords,
-                        uint16_t ms_array_scratch)
+                        uint16_t ms_array_scratch,
+                        struct agx3_fetch_banks *banks, uint16_t outstanding,
+                        uint16_t *staged_end)
 {
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE;
@@ -1161,13 +1172,67 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    /* A read/write image stages its read coordinates at halves16/18, keeping
     * them disjoint from imgwci's halves0/2. Native read-only indexed images,
     * like ordinary texture loads, use the bank0 coordinate ABI. */
-   const uint16_t staging_coord =
+   const uint16_t staging_base =
       (I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image && !ms_array) ||
             separate_write_coords ? 16 : 0;
    if (register_lod && slot != 1)
       return false;
+
+   /* A staged read consumes, and kills, its coordinate bank asynchronously.
+    * A later read restaging the same bank while that read is outstanding can
+    * have its coordinates killed under it. Apple stages consecutive reads in
+    * disjoint banks instead: two texture2d::read calls at different
+    * coordinates, metal-nt -arch applegpu_g17p, publish halves 0/2 and 4/6
+    * and issue smp f19=0 then smp f19=4. That witness is a compute kernel,
+    * so only compute callers pass `banks`. Halves 4..7 carry this path's
+    * PACK_SMPIR operands, so the second plain bank starts at half 8. A read
+    * with PACK_SMPIR operands keeps the base bank and also occupies halves
+    * 0..7; any outstanding read sharing its halves is retired first. */
+   const bool plain_bank = !ms_2d && !ms_array && !array && !register_lod;
+   const uint16_t bank_span =
+      plain_bank ? 2 * agx_channels(I->src[0]) : MAX2(staging_base + 4, 8);
+   uint16_t staging_coord = staging_base;
+   uint16_t bank_retire = 0;
+   if (stage_coordinates && banks) {
+      for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
+         if (banks->live[i].slot &&
+             !(outstanding & (1u << (banks->live[i].slot - 1))))
+            banks->live[i].slot = 0;
+      }
+
+      /* A read with PACK_SMPIR operands occupies halves 0..bank_span. */
+      const uint16_t first = plain_bank ? staging_base : 0;
+      bool placed = false;
+      for (unsigned c = 0; c < (plain_bank ? 2u : 1u) && !placed; ++c) {
+         const uint16_t start = first + 8 * c;
+         uint16_t conflict = 0;
+         for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
+            if (banks->live[i].slot &&
+                banks->live[i].coord < start + bank_span &&
+                start < banks->live[i].coord + banks->live[i].span)
+               conflict |= (uint16_t)(1u << (banks->live[i].slot - 1));
+         }
+         if (c == 0)
+            bank_retire = conflict;
+         if (!conflict) {
+            staging_coord = plain_bank ? start : staging_base;
+            placed = true;
+         }
+      }
+      if (placed) {
+         bank_retire = 0;
+      } else {
+         for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i)
+            banks->live[i].slot = 0;
+      }
+   }
+   if (bank_retire && !agx3_retire_slots_noop(emission, enc, bank_retire))
+      return false;
+   if (staged_end)
+      *staged_end = plain_bank ? staging_coord + bank_span : bank_span;
+
    if (stage_coordinates) {
-      uint16_t staging_wait = wait_mask;
+      uint16_t staging_wait = wait_mask & (uint16_t)~bank_retire;
       /* COPY carries one wait bit, while the image coordinates and heap
        * index may have several independent producers. A runtime LOD's
        * PACK_SMPIR can consume their combined mask; an immediate-level
@@ -1253,6 +1318,17 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
                 I->src[0].cache, I->src[0].discard, packed, &packed_len) ||
              !agx3_append(emission, packed, packed_len))
             return false;
+      }
+   }
+
+   if (stage_coordinates && banks) {
+      for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
+         if (!banks->live[i].slot) {
+            banks->live[i].coord = plain_bank ? staging_coord : 0;
+            banks->live[i].span = bank_span;
+            banks->live[i].slot = slot;
+            break;
+         }
       }
    }
 
@@ -6665,6 +6741,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * whichever family comes first and leaves the other family's first op
     * unmarked; restarting here corrupts the coefficient-fetch protocol. */
    bool fragment_input_started = false;
+   struct agx3_fetch_banks fetch_banks = {0};
    if (has_coverage_write && enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies) {
@@ -7060,32 +7137,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->op == AGX_OPCODE_TEXTURE_LOAD &&
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                I->src[1].type == AGX_INDEX_REGISTER;
-            if (staged) {
-               const unsigned coord_base =
-                  (I->op == AGX_OPCODE_IMAGE_LOAD &&
-                   I->src[2].type == AGX_INDEX_IMMEDIATE &&
-                   I->dim != AGX_DIM_2D_MS_ARRAY) || separate_write_coords
-                     ? 16
-                     : 0;
-               const unsigned coord_count =
-                  (I->dim == AGX_DIM_2D_MS ||
-                   I->dim == AGX_DIM_2D_MS_ARRAY ||
-                   I->dim == AGX_DIM_2D_ARRAY)
-                     ? 2
-                     : agx_channels(I->src[0]);
-               ctx->agx3_staging_halfs = MAX2(
-                  ctx->agx3_staging_halfs,
-                  coord_base + 2 * coord_count);
-               /* PACK_SMPIR publishes the non-array MS sample at half4.
-                * Native MS fragments reserve eight halves, not just the
-                * four occupied by the x/y coordinate COPYs. */
-               if (I->dim == AGX_DIM_2D_ARRAY || I->dim == AGX_DIM_2D_MS ||
-                   I->dim == AGX_DIM_2D_MS_ARRAY || register_fetch_lod)
-                  ctx->agx3_staging_halfs =
-                     MAX2(ctx->agx3_staging_halfs, 8);
-            }
-            else
-               ctx->agx3_staging_known = false;
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
             const uint16_t fetch_wait =
@@ -7093,10 +7144,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                          I->dim == AGX_DIM_2D_MS_ARRAY)
                           ? (outstanding_here & 1u)
                           : 0);
+            uint16_t staged_end = 0;
             if (!agx3_emit_texture_fetch(emission, enc, I, slot, fetch_wait,
                                          final, staged, separate_write_coords,
-                                         ms_array_scratch))
+                                         ms_array_scratch,
+                                         ctx->stage == MESA_SHADER_COMPUTE
+                                            ? &fetch_banks
+                                            : NULL,
+                                         outstanding_here, &staged_end))
                AGX3_REFUSE(I);
+            if (staged) {
+               /* The coordinate bank, or the eight halves of a read with
+                * PACK_SMPIR operands: native MS fragments reserve eight
+                * halves, not just the four occupied by the x/y COPYs. */
+               ctx->agx3_staging_halfs =
+                  MAX2(ctx->agx3_staging_halfs, staged_end);
+            } else {
+               ctx->agx3_staging_known = false;
+            }
             continue;
          }
 
