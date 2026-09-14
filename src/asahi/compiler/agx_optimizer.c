@@ -745,6 +745,30 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
    /* Replace with a fused instruction since the # of sources changes */
    agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
 
+   /* Every G17P SIMD ballot Apple's compiler emits compares one register
+    * against a constant, so a ballot of two registers has no witnessed
+    * encoding. Keep the comparison, with the opposite sense, as a boolean and
+    * ballot the lanes where it is zero: the witnessed simd_broadcast_first()
+    * form.
+    */
+   if (!quad && ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       def->src[1].type != AGX_INDEX_IMMEDIATE) {
+      agx_index opposite = agx_temp(ctx, AGX_SIZE_16);
+
+      if (def->op == AGX_OPCODE_ICMP) {
+         agx_icmp_to(&b, opposite, def->src[0], def->src[1], def->icond,
+                     !def->invert_cond);
+      } else {
+         agx_fcmp_to(&b, opposite, def->src[0], def->src[1], def->fcond,
+                     !def->invert_cond);
+      }
+
+      agx_icmp_ballot_to(&b, I->dest[0], opposite, agx_zero(), AGX_ICOND_UEQ,
+                         false);
+      agx_remove_instruction(I);
+      return;
+   }
+
    agx_instr *fused = agx_icmp_ballot_to(
       &b, I->dest[0], def->src[0], def->src[1], def->icond, def->invert_cond);
 
