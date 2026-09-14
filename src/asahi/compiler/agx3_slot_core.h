@@ -48,6 +48,10 @@ extern "C" {
 struct agx3_slot_instr {
    bool is_async;   /* produces a scoreboard-tracked result */
    uint8_t preferred_slot; /* 0=round-robin, otherwise required slot */
+   /* The round-robin slot may be reissued while an earlier generation of the
+    * same kind is still live there, since the instruction cannot wait for it:
+    * Apple reissues fragment coefficient-load slots without any wait. */
+   bool reissues_live_slot;
    /* Slots used and fully consumed by this instruction's multi-op encoding.
     * A live prior generation is waited before the internal producer reuses
     * the slot; its register aliases are then synchronously complete. */

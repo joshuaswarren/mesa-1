@@ -7238,6 +7238,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I) || I->agx3_tex_coord_start;
+         e->reissues_live_slot = I->op == AGX_OPCODE_LDCF;
          if (I->agx3_tex_coord_start)
             e->preferred_slot = native_coord_preferred_slot;
          /* Plain 2D and 3D register-LOD fetches have two independent
