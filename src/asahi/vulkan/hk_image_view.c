@@ -479,8 +479,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
             cfg.level = level;
          }
 
+         /* A single-layer BG/EOT descriptor is 2D even when the API view
+          * is an array. It does not need the linear array-stride extension. */
          if (layout->tiling == AIL_TILING_LINEAR &&
-             (hk_image_view_type_is_array(view->vk.view_type))) {
+             hk_image_view_type_is_array(view->vk.view_type) &&
+             (layers > 1 || cfg.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY)) {
 
             cfg.depth_linear = layers;
             cfg.layer_stride_linear = (layout->layer_stride_B - 0x80);
