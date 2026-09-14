@@ -8169,9 +8169,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * helper invocations.
              *
              * simd_is_first() reads SR34, the active thread index in the
-             * subgroup, as W16 in compute, vertex and fragment shaders; the
-             * fragment read also sets f48. Other coverage pseudo-registers
-             * remain closed until separately witnessed. */
+             * subgroup, as W16 in compute, vertex and fragment shaders. Apple
+             * sets f48 on a fragment read only when helper invocations never
+             * need the result, so leave it clear. Other coverage
+             * pseudo-registers remain closed until separately witnessed. */
             const bool active_thread =
                I->sr == AGX_SR_IS_ACTIVE_THREAD &&
                ctx->stage == MESA_SHADER_FRAGMENT;
@@ -8189,8 +8190,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const struct agx3_sr_desc d = {
                .dest = I->dest[0].value, .width = AGX3_SR_W16,
                .sr = active_index ? 34 : 2, .slot = slot, .wait_mask = wait,
-               .fragment_active_index =
-                  active_index && ctx->stage == MESA_SHADER_FRAGMENT,
             };
             uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;
             if (!agx3_sr_encode(enc, &d, bytes, &len) ||

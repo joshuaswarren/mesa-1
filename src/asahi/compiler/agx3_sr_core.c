@@ -45,8 +45,10 @@
  * SR 34 is the active thread index in the subgroup. Apple's G17P compiler reads
  * it for simd_is_first() in compute, vertex and fragment shaders as
  * `rld SR34 == 0`, and compiles simd_broadcast_first(x) to
- * `simdiballot(SR34 == 0)`, find-first-set, `simdbcast`. A fragment read also
- * sets f48 (agx3_sr_desc::fragment_active_index).
+ * `simdiballot(SR34 == 0)`, find-first-set, `simdbcast`. A fragment read
+ * whose result only reaches the colour output also sets f48; the same read
+ * feeding a derivative or a quad reduction, or inside a helper-invocation
+ * guard, leaves it clear (agx3_sr_desc::fragment_active_index).
  */
 bool
 agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width)

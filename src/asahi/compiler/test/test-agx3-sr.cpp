@@ -158,8 +158,9 @@ TEST(AGX3SrCore, G17PBackFacingInput)
 TEST(AGX3SrCore, G17PActiveThreadIndexInSubgroup)
 {
    /* metal-nt -arch applegpu_g17p: simd_is_first() reads SR34 into h0 on slot
-    * 1 with these bytes in compute and vertex shaders, and with f48 set in the
-    * long form in fragment shaders. */
+    * 1 with these bytes in compute, vertex and fragment shaders whose result
+    * feeds a derivative or quad reduction, and with f48 set in the long form
+    * in a fragment shader whose result only reaches the colour output. */
    static const uint8_t compute[] = {0x04, 0x95, 0x10, 0x06};
    static const uint8_t fragment[] = {0x04, 0x95, 0x11, 0x06,
                                       0x01, 0x00, 0x00, 0x00};
