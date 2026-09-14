@@ -708,7 +708,12 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
    struct agx_precompiled_shader *prog =
       agx_get_precompiled(&dev->bg_eot, idx);
-   if (dev->dev.chip != AGX_CHIP_G17P || !prog || !prog->bo ||
+   if (!prog) {
+      mesa_loge("no G17P precompiled program %u", (unsigned)idx);
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   if (dev->dev.chip != AGX_CHIP_G17P || !prog->bo ||
        !prog->info.main_size || !prog->info.nr_gprs ||
        prog->info.nr_preamble_gprs || prog->info.rodata.size_16 ||
        !prog->info.agx3_staging_known ||
