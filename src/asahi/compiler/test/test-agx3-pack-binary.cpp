@@ -2043,14 +2043,32 @@ TEST_F(AGX3PackBinary, FirefoxWideningHalfMultiplyMatchesNative)
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 
-   for (unsigned variant = 0; variant < 5; ++variant) {
+   /* Each half widens by its own sign bit, so an unsigned multiplier is
+    * f43 clear with f28 still set. A 32-bit multiplicand keeps its slot. */
+   for (unsigned variant = 0; variant < 2; ++variant) {
+      agx_builder *mixed = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index mixed_a = variant == 0 ? agx_register(24, AGX_SIZE_32) : a;
+      agx_index mixed_m = m;
+      mixed_m.abs = variant == 1;
+      agx_imad_to(mixed, dest, mixed_a, mixed_m, agx_zero(), 0);
+      agx_stop(mixed);
+
+      struct agx3_imad_desc md = d;
+      md.src_a = mixed_a.value;
+      md.src_a_16 = variant == 1;
+      md.src_a_sign_extend = variant == 1;
+      md.multiplier_sign_extend = variant == 0;
+      len = 0;
+      ASSERT_TRUE(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &md, bytes, &len));
+      std::vector<uint8_t> mixed_want(bytes, bytes + len);
+      append(mixed_want, end.bytes, end.length);
+      EXPECT_EQ(pack(mixed), mixed_want) << variant;
+   }
+
+   for (unsigned variant = 1; variant < 4; ++variant) {
       agx_builder *bad = builder(AGX_ISA_ENCODING_AGX3B);
-      agx_index bad_a = variant == 0 ? agx_register(24, AGX_SIZE_32) : a;
-      agx_index bad_m = m;
-      if (variant == 4)
-         bad_m.abs = true;
       agx_index bad_c = variant == 1 ? agx_immediate(1) : agx_zero();
-      agx_instr *I = agx_imad_to(bad, dest, bad_a, bad_m, bad_c,
+      agx_instr *I = agx_imad_to(bad, dest, a, m, bad_c,
                                  variant == 2 ? 1 : 0);
       I->saturate = variant == 3;
       agx_stop(bad);
@@ -9492,12 +9510,17 @@ TEST_F(AGX3PackBinary, FirefoxFragmentSignedHalfAccumulatorUsesNativeIadd)
    agx_stop(bad);
    EXPECT_EQ(pack(bad), want);
 
-   bad = builder(AGX_ISA_ENCODING_AGX3B);
-   agx_iadd_to(bad, agx_register(30, AGX_SIZE_32),
+   /* A shifted signed half is the same instruction with f54 set. */
+   agx_builder *shifted = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_iadd_to(shifted, agx_register(30, AGX_SIZE_32),
                agx_register(30, AGX_SIZE_32),
                agx_register(22, AGX_SIZE_16), 1);
-   agx_stop(bad);
-   EXPECT_TRUE(pack(bad, false).empty());
+   agx_stop(shifted);
+   d.shift = 1;
+   ASSERT_TRUE(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+   std::vector<uint8_t> want_shifted(bytes, bytes + len);
+   append(want_shifted, end.bytes, end.length);
+   EXPECT_EQ(pack(shifted), want_shifted);
 
    bad = builder(AGX_ISA_ENCODING_AGX3B);
    agx_instr *sat = agx_iadd_to(bad, agx_register(30, AGX_SIZE_32),

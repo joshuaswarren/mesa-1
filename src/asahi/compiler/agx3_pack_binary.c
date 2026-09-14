@@ -8578,7 +8578,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               I->dest[0].size == AGX_SIZE_32 ||
               I->dest[0].size == AGX_SIZE_64) &&
              agx_channels(I->dest[0]) == 1) {
-            const agx_index a = I->src[0], m = I->src[1], c = I->src[2];
+            agx_index a = I->src[0], m = I->src[1];
+            const agx_index c = I->src[2];
+
+            /* Multiplication commutes. Apple keeps the 32-bit operand of a
+             * mixed-width 32-bit product in slot A and the half in slot B. */
+            if (I->dest[0].size == AGX_SIZE_32 && a.size == AGX_SIZE_16 &&
+                agx3_src_is_register(m) && m.size == AGX_SIZE_32) {
+               const agx_index half = a;
+               a = m;
+               m = half;
+            }
 
             /*
              * 32x32 -> 64. This is how `umul_high`, `imul_high` and NIR's
@@ -8659,17 +8669,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                (narrow ? (a.size == AGX_SIZE_16 && !a.abs && !a.neg)
                        : (((wide || !a.abs) && !a.neg &&
                            a.size == AGX_SIZE_32) || widening_half_a));
-            const bool widening_half_product =
-               widening_half_a && widening_half_multiplier && a.abs == m.abs;
-            const bool widening_half_operand =
-               widening &&
-               (a.size == AGX_SIZE_16 ||
-                (mult_reg && m.size == AGX_SIZE_16));
+            /* Each half operand of a 32-bit product widens by its own sign.
+             * Apple pairs a half register multiplier only with no addend or
+             * a 32-bit register addend, and a half multiplicand times a
+             * constant with any register addend. */
+            const bool half_a = widening && a.size == AGX_SIZE_16;
+            const bool half_m = widening && mult_reg && m.size == AGX_SIZE_16;
+            const bool half_operands_ok =
+               (!half_a && !half_m) ||
+               (!addend_imm &&
+                (no_addend || c.size == AGX_SIZE_32 ||
+                 (!half_m && c.size == AGX_SIZE_16)));
 
-            if (a_ok &&
-                (mult_imm || mult_reg) && addend_ok &&
-                (!widening_half_operand ||
-                 (widening_half_product && no_addend))) {
+            if (a_ok && (mult_imm || mult_reg) && addend_ok &&
+                half_operands_ok) {
                const struct agx3_imad_desc d = {
                   .dest = I->dest[0].value,
                   .dest_16 = narrow,
@@ -8677,8 +8690,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .dest_cache = I->dest[0].cache,
                   .src_a = a.value,
                   .src_a_16 = a.size == AGX_SIZE_16,
-                  .src_a_sign_extend =
-                     (wide || widening_half_product) && !a.abs,
+                  .src_a_sign_extend = (wide || half_a) && !a.abs,
                   .multiplier = mult_imm ? (uint8_t)m.value : 0,
                   .multiplier_is_register = mult_reg,
                   .multiplier_reg = mult_reg ? m.value : 0,
@@ -8686,7 +8698,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .multiplier_kill = mult_reg && m.discard,
                   .multiplier_cache = mult_reg && m.cache,
                   .multiplier_sign_extend =
-                     (wide || widening_half_product) && mult_reg && !m.abs,
+                     (wide || half_m) && mult_reg && !m.abs,
                   .src_a_kill = a.discard,
                   .src_a_cache = a.cache,
                   .src_c_kill = addend_reg && c.discard,
@@ -9968,11 +9980,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * probes on hardware. New encodings belong on shapes that were
              * previously refused, not on shapes that already worked.
              */
+            /* A 16-bit struct index scales into an address the same way:
+             * the half addend is sign-extended when bare and zero-extended
+             * under ABS, through slot B's own width and sign fields. */
+            const bool shifted_half =
+               enc == AGX_ISA_ENCODING_AGX3B && bsrc.size == AGX_SIZE_16 &&
+               !bsrc.neg;
             if (I->shift != 0 &&
                 agx3_src_is_register(a) && !a.memory && !a.abs && !a.neg &&
                 a.size == AGX_SIZE_32 && agx_channels(a) == 1 &&
-                agx3_src_is_register(bsrc) && !bsrc.memory && !bsrc.abs &&
-                !bsrc.neg && bsrc.size == AGX_SIZE_32 &&
+                agx3_src_is_register(bsrc) && !bsrc.memory &&
+                (shifted_half ||
+                 (!bsrc.abs && !bsrc.neg && bsrc.size == AGX_SIZE_32)) &&
                 agx_channels(bsrc) == 1) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
@@ -9981,6 +10000,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .src_a_kill = a.discard,
                   .src = bsrc.value,
                   .src_kill = bsrc.discard,
+                  .src_16 = shifted_half,
+                  .sign_extend = shifted_half && !bsrc.abs,
                   .shift = I->shift,
                   .wait_mask = wait,
                };

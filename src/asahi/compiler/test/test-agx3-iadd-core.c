@@ -201,6 +201,50 @@ test_apple_shift_witnesses(void)
       }
    }
 
+   /* A shifted half addend, as in a 16-bit struct index scaled into an
+    * address: `a + (int(short b) << N)` and `a + (uint(ushort b) << N)` over
+    * a 32-bit a, applegpu_g17p. f39 = 1 narrows slot B and f43 sign-extends. */
+   {
+      static const struct {
+         uint8_t dest, src_a, src, shift;
+         bool sign, kill;
+         uint8_t bytes[10];
+      } adds[] = {
+         {0, 0, 4, 4, true, true,
+          {0x9f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0x28, 0x16, 0x0d}},
+         {0, 0, 4, 4, false, true,
+          {0x9f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0x28, 0x16, 0x05}},
+         {0, 0, 4, 3, true, true,
+          {0x9f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0x68, 0x16, 0x1d}},
+         {0, 0, 4, 2, true, true,
+          {0x9f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0x28, 0x16, 0x1d}},
+         {0, 0, 4, 2, false, true,
+          {0x9f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0x28, 0x16, 0x15}},
+         {0, 0, 4, 1, true, true,
+          {0x9f, 0x01, 0x56, 0x00, 0x02, 0x00, 0x10, 0x68, 0x16, 0x0d}},
+         {4, 2, 10, 4, true, false,
+          {0x9f, 0x01, 0x56, 0x04, 0x02, 0x04, 0x28, 0x28, 0x10, 0x0d}},
+      };
+
+      for (unsigned i = 0; i < sizeof(adds) / sizeof(adds[0]); ++i) {
+         struct agx3_iadd_desc d = {
+            .dest = adds[i].dest,
+            .src_a_is_register = true,
+            .src_a_reg = adds[i].src_a,
+            .src_a_kill = adds[i].kill,
+            .src = adds[i].src,
+            .src_16 = true,
+            .sign_extend = adds[i].sign,
+            .src_kill = adds[i].kill,
+            .shift = adds[i].shift,
+            .wait_mask = 1u << 5,
+         };
+         len = 0;
+         CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+         CHECK(len == 10 && memcmp(out, adds[i].bytes, 10) == 0);
+      }
+   }
+
    /*
     * Narrow register operands. f24 is slot A's width and f39 is slot B's, on
     * both encodings -- the register slot-A form used to pin both to 32-bit,
@@ -483,9 +527,6 @@ test_native_imad_immediate_addend(void)
    narrow_bad = narrow[8].d;
    narrow_bad.multiplier_16 = false;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
-   narrow_bad = narrow[8].d;
-   narrow_bad.multiplier_sign_extend = false;
-   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B,&narrow_bad,out,&len));
 }
 
 /*
@@ -568,8 +609,118 @@ test_native_imad_narrow_operands(void)
       CHECK(len == sizeof(want_u) && memcmp(out, want_u, len) == 0);
    }
 
-   /* Still closed: a 32-bit multiplicand widens nothing, and a narrow
-    * REGISTER multiplier with a 32-bit result has no witness. */
+   /* Half register operands of a 32-bit product, from dot-product style
+    * `int(a) * int(b) [+ c]` kernels over short/ushort and int inputs.
+    * Each half widens by its own bit, so mixed signedness is two fields. */
+   {
+      const struct {
+         struct agx3_imad_desc d;
+         const char *apple;
+      } half[] = {
+         /* int(short a) * int(ushort b); int(ushort a) * int(short b) */
+         {{.src_a = 0, .src_a_16 = true, .src_a_kill = true,
+           .multiplier_is_register = true, .multiplier_reg = 1,
+           .multiplier_16 = true, .multiplier_kill = true,
+           .multiplier_sign_extend = true, .no_addend = true,
+           .wait_mask = 1u << 5}, "9f0056000200040010261a00"},
+         {{.src_a = 0, .src_a_16 = true, .src_a_sign_extend = true,
+           .src_a_kill = true, .multiplier_is_register = true,
+           .multiplier_reg = 1, .multiplier_16 = true,
+           .multiplier_kill = true, .no_addend = true,
+           .wait_mask = 1u << 5}, "9f0056000200040010260e00"},
+         /* int(short a) * int(short b) + int c, and ushort/uint */
+         {{.src_a = 4, .src_a_16 = true, .src_a_sign_extend = true,
+           .src_a_kill = true, .multiplier_is_register = true,
+           .multiplier_reg = 5, .multiplier_16 = true,
+           .multiplier_kill = true, .multiplier_sign_extend = true,
+           .src_c = 0, .src_c_kill = true, .wait_mask = 1u << 5},
+          "9f00560002081400102f3e00"},
+         {{.src_a = 4, .src_a_16 = true, .src_a_kill = true,
+           .multiplier_is_register = true, .multiplier_reg = 5,
+           .multiplier_16 = true, .multiplier_kill = true,
+           .src_c = 0, .src_c_kill = true, .wait_mask = 1u << 5},
+          "9f00560002081400102f2a00"},
+         /* int(short a) * int(ushort b) + int c */
+         {{.src_a = 4, .src_a_16 = true, .src_a_kill = true,
+           .multiplier_is_register = true, .multiplier_reg = 5,
+           .multiplier_16 = true, .multiplier_kill = true,
+           .multiplier_sign_extend = true,
+           .src_c = 0, .src_c_kill = true, .wait_mask = 1u << 5},
+          "9f00560002081400102f3a00"},
+         /* Cached inputs, wait slot 1. */
+         {{.src_a = 2, .src_a_16 = true, .src_a_sign_extend = true,
+           .src_a_cache = true, .multiplier_is_register = true,
+           .multiplier_reg = 6, .multiplier_16 = true,
+           .multiplier_cache = true, .multiplier_sign_extend = true,
+           .src_c = 4, .src_c_cache = true, .wait_mask = 1u << 0},
+          "9f10540002041a2418213e00"},
+         /* An accumulated dot product: cached result, no wait. */
+         {{.dest = 4, .dest_cache = true, .src_a = 1, .src_a_16 = true,
+           .src_a_sign_extend = true, .src_a_kill = true,
+           .multiplier_is_register = true, .multiplier_reg = 5,
+           .multiplier_16 = true, .multiplier_kill = true,
+           .multiplier_sign_extend = true, .src_c = 14, .src_c_kill = true},
+          "9f00540403021470102f3e00"},
+         /* int a * int(short b), uint a * uint(ushort b) */
+         {{.src_a = 0, .src_a_kill = true, .multiplier_is_register = true,
+           .multiplier_reg = 4, .multiplier_16 = true,
+           .multiplier_kill = true, .multiplier_sign_extend = true,
+           .no_addend = true, .wait_mask = 1u << 5},
+          "9f0056000200100050261a00"},
+         {{.src_a = 0, .src_a_kill = true, .multiplier_is_register = true,
+           .multiplier_reg = 4, .multiplier_16 = true,
+           .multiplier_kill = true, .no_addend = true,
+           .wait_mask = 1u << 5}, "9f0056000200100050260a00"},
+         {{.src_a = 2, .src_a_cache = true, .multiplier_is_register = true,
+           .multiplier_reg = 4, .multiplier_16 = true,
+           .multiplier_cache = true, .multiplier_sign_extend = true,
+           .no_addend = true, .wait_mask = 1u << 0},
+          "9f1054000204120450201a00"},
+         /* int a * int(short b) + int c */
+         {{.src_a = 0, .src_a_kill = true, .multiplier_is_register = true,
+           .multiplier_reg = 8, .multiplier_16 = true,
+           .multiplier_kill = true, .multiplier_sign_extend = true,
+           .src_c = 4, .src_c_kill = true, .wait_mask = 1u << 5},
+          "9f00560002002020502f3a00"},
+         /* int(short a) * 129 [+ int c], and ushort/uint */
+         {{.src_a = 4, .src_a_16 = true, .src_a_sign_extend = true,
+           .src_a_kill = true, .multiplier = 129, .src_c = 0,
+           .src_c_kill = true, .wait_mask = 1u << 5},
+          "9f00560002080402102b2600"},
+         {{.src_a = 4, .src_a_16 = true, .src_a_kill = true,
+           .multiplier = 129, .src_c = 0, .src_c_kill = true,
+           .wait_mask = 1u << 5}, "9f00560002080402102b2200"},
+         {{.src_a = 0, .src_a_16 = true, .src_a_sign_extend = true,
+           .src_a_kill = true, .multiplier = 129, .no_addend = true,
+           .wait_mask = 1u << 5}, "9f0056000200040210220600"},
+      };
+      for (unsigned i = 0; i < sizeof(half) / sizeof(half[0]); ++i) {
+         uint8_t want[AGX3_IADD_MAX_LENGTH];
+         for (unsigned k = 0; k < 12; ++k) {
+            unsigned v;
+            sscanf(half[i].apple + 2 * k, "%2x", &v);
+            want[k] = v;
+         }
+         len = 0;
+         CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &half[i].d, out,
+                                &len));
+         CHECK(len == 12 && memcmp(out, want, 12) == 0);
+      }
+
+      /* No half operand appears with an immediate addend, and a half
+       * multiplier never with a narrow register addend. */
+      struct agx3_imad_desc d = half[2].d;
+      d.addend_is_immediate = true;
+      d.addend_immediate = 1;
+      d.src_c_kill = false;
+      len = 0;
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+      d = half[2].d;
+      d.src_c_16 = true;
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   }
+
+   /* Still closed: a 32-bit multiplicand or multiplier widens nothing. */
    {
       struct agx3_imad_desc d = {
          .dest = 0, .src_a = 0, .src_a_sign_extend = true, .multiplier = 3,
@@ -581,8 +732,8 @@ test_native_imad_narrow_operands(void)
    {
       struct agx3_imad_desc d = {
          .dest = 0, .src_a = 0, .multiplier_is_register = true,
-         .multiplier_reg = 2, .multiplier_16 = true,
-         .multiplier_sign_extend = true, .no_addend = true,
+         .multiplier_reg = 2, .multiplier_sign_extend = true,
+         .no_addend = true,
       };
       len = 0;
       CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
