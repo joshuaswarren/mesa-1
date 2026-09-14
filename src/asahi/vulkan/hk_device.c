@@ -465,12 +465,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    struct hk_device *dev;
    struct hk_instance *instance = (struct hk_instance *)pdev->vk.instance;
 
-   /* The SPECLM sample selector is only witnessed at one sample; this lets a
-    * boot decide the multisample value. Read here because agx_ioto_state_core
-    * deliberately links without util. -1 keeps the standing guess. */
-   agx_ioto_g17p_set_speclm_sample_code(
-      debug_get_num_option("AGX_SPECLM_SAMPLE_CODE", -1));
-
    dev = vk_zalloc2(&instance->vk.alloc, pAllocator, sizeof(*dev), 8,
                     VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
    if (!dev)
