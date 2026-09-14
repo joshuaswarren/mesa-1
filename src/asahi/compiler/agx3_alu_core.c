@@ -1252,6 +1252,33 @@ agx3_alu_bit_reg16(enum agx_isa_encoding enc, enum agx3_alu_op op,
 }
 
 bool
+agx3_alu_bit_not_reg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                       enum agx3_alu_hint hint, uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       src >= 256 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {11, 1}, {23, 2}, {24, 1},
+   };
+   struct agx3_field_kv fields[10] = {
+      {2, dest}, {16, src},
+      {25, hint == AGX3_ALU_HINT_CACHE},
+      {27, hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 4;
+   for (unsigned slot = 0; slot < 6; ++slot)
+      fields[n++] = (struct agx3_field_kv){30 + slot,
+                                          !!(wait_mask & (1u << slot))};
+   return agx3_bind_compose(enc, "inv", 0, base,
+                            sizeof(base) / sizeof(base[0]), fields, n, out,
+                            len);
+}
+
+bool
 agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
                   const uint16_t src[2],
                   const enum agx3_alu_hint hints[2], bool dest_cache,

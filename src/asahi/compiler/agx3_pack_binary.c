@@ -10815,6 +10815,27 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* A narrow NOT is Apple's unary 16-bit `inv`; the bitop's second
+          * source is ignored by the truth table. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
+             (I->truth_table & 0xfu) == AGX3_SEL_TT_NOT &&
+             I->nr_dests == 1 && I->nr_srcs >= 1 && !I->saturate &&
+             I->dest[0].size == AGX_SIZE_16 && I->src[0].size == AGX_SIZE_16 &&
+             agx_channels(I->dest[0]) == 1 && agx_channels(I->src[0]) == 1 &&
+             agx3_src_is_register(I->dest[0]) &&
+             agx3_src_is_register(I->src[0]) && !I->src[0].abs &&
+             !I->src[0].neg) {
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (I->src[0].kill ||
+                !agx3_alu_bit_not_reg16(enc, I->dest[0].value,
+                                        I->src[0].value,
+                                        agx3_post_ra_hint(I->src[0]), wait,
+                                        bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              I->dest[0].size == AGX_SIZE_16 &&

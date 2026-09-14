@@ -80,6 +80,21 @@ bool agx3_alu_bit_imm(enum agx_isa_encoding enc, enum agx3_alu_op op,
                       uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* G17P 16-bit ~a, Apple's unary `inv` at width 1. The source is f16 with its
+ * cache/discard hints in f25/f27, and f30..f35 wait on producer slots 1..6.
+ * Witnessed with metal-nt -arch applegpu_g17p on `ushort m = ~s` fragments:
+ *
+ *   03002e00010800000000   inv h0, ^h0
+ *   03002e00012800000000   inv h0, ^h0   waiting on slot 1
+ *   03802600052800000000   inv h1, $h0   waiting on slot 1
+ *   03822600050800000000   inv h1, $h2
+ *   13802600050800000000   inv h3, $h0
+ */
+bool agx3_alu_bit_not_reg16(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src, enum agx3_alu_hint hint,
+                            uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P 32-bit a & ~b.  Apple exposes this truth-table shape as bit_andc;
  * unlike AND it is not commutative, so the source order is preserved. */
 bool agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,

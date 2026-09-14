@@ -401,6 +401,37 @@ test_native_f32_floor_ceil(void)
 }
 
 static void
+test_native_bit_not16(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const struct {
+      uint16_t dest, src;
+      enum agx3_alu_hint hint;
+      uint16_t wait;
+      uint8_t expected[10];
+   } witnesses[] = {
+      {0, 0, AGX3_ALU_HINT_DISCARD, 0,
+       {0x03, 0x00, 0x2e, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00}},
+      {0, 0, AGX3_ALU_HINT_DISCARD, 1,
+       {0x03, 0x00, 0x2e, 0x00, 0x01, 0x28, 0x00, 0x00, 0x00, 0x00}},
+      {1, 0, AGX3_ALU_HINT_CACHE, 1,
+       {0x03, 0x80, 0x26, 0x00, 0x05, 0x28, 0x00, 0x00, 0x00, 0x00}},
+      {1, 2, AGX3_ALU_HINT_CACHE, 0,
+       {0x03, 0x82, 0x26, 0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00}},
+      {3, 0, AGX3_ALU_HINT_CACHE, 0,
+       {0x13, 0x80, 0x26, 0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00}},
+   };
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      assert(agx3_alu_bit_not_reg16(AGX_ISA_ENCODING_AGX3B, witnesses[i].dest,
+                                    witnesses[i].src, witnesses[i].hint,
+                                    witnesses[i].wait, bytes, &len));
+      assert(len == 10 && !memcmp(bytes, witnesses[i].expected, 10));
+   }
+   assert(!agx3_alu_bit_not_reg16(AGX_ISA_ENCODING_AGX3C, 0, 0,
+                                  AGX3_ALU_HINT_NONE, 0, bytes, &len));
+}
+
+static void
 test_native_bit_andc(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -4964,6 +4995,7 @@ static void test_threejs_width_kind_modifier_axes(void)
 int main(void){
    test_native_popcount();
    test_native_minifloat_half_select();
+   test_native_bit_not16();
    test_native_bit_andc();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();
