@@ -259,8 +259,55 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
                             uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
                             uint8_t *length)
 {
-   if (d == NULL || out == NULL || length == NULL || d->wait_mask != 0 ||
-       !valid_reg(enc, d->dest) ||
+   if (d == NULL || out == NULL || length == NULL)
+      return false;
+
+   /*
+    * The 16-bit quad ballot of a register against zero. metal-nt -arch
+    * applegpu_g17p, quad_any(x != 0) and quad_all(x == 0) of a buffer-loaded
+    * ushort, with the result fed on to dfdx():
+    *
+    *   x != 0, x dead   17025600030000402212
+    *   x == 0, x dead   17025601030200402202
+    *   x != 0, x live   17025600030202002212
+    *
+    * f25/f27 carry the source's liveness, f11 the destination hint and f46
+    * the source wait. Apple adds f64 when the result goes nowhere but the
+    * colour output; like f62 on the quad reductions, that stays clear.
+    */
+   if (d->quad && d->dest_half) {
+      const unsigned slots = 6;
+      if (enc != AGX_ISA_ENCODING_AGX3B || !d->src_half ||
+          d->type != AGX3_SUBGROUP_BALLOT_INTEGER || d->compare_immediate ||
+          d->condition != 4 || d->dest >= 192 || d->src >= 192 ||
+          (d->wait_mask >> slots) != 0)
+         return false;
+
+      struct agx3_field_kv qbase[16];
+      unsigned qnb = 0;
+      qbase[qnb++] = (struct agx3_field_kv){9, 2};
+      qbase[qnb++] = (struct agx3_field_kv){10, 1};
+      qbase[qnb++] = (struct agx3_field_kv){23, 2};
+      qbase[qnb++] = (struct agx3_field_kv){24, 1};
+      qbase[qnb++] = (struct agx3_field_kv){d->src_live ? 25 : 27, 1};
+      qbase[qnb++] = (struct agx3_field_kv){38, 1};
+      qbase[qnb++] = (struct agx3_field_kv){39, 1};
+      for (unsigned i = 0; i < slots; ++i)
+         if (d->wait_mask & (1u << i))
+            qbase[qnb++] = (struct agx3_field_kv){(uint16_t)(46 + i), 1};
+
+      const struct agx3_field_kv qov[] = {
+         {2, d->dest},
+         {11, d->dest_cache ? 1u : 0u},
+         {16, d->src},
+         {54, d->condition},
+         {55, d->invert},
+      };
+      return agx3_bind_compose(enc, "quadiballot", 0, qbase, qnb, qov,
+                               sizeof(qov) / sizeof(qov[0]), out, length);
+   }
+
+   if (d->wait_mask != 0 || d->dest_half || !valid_reg(enc, d->dest) ||
        (unsigned)d->type > AGX3_SUBGROUP_BALLOT_FLOAT)
       return false;
 

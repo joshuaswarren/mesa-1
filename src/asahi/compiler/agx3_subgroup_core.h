@@ -81,6 +81,10 @@ struct agx3_subgroup_ballot_desc {
     * (f24 = 1), as Apple's simd_broadcast_first() compares the 16-bit active
     * thread index against zero. */
    bool src_half;
+   /* A 16-bit destination (f10 = 1). With a 16-bit source this is the quad
+    * ballot of a register against zero, the only such form witnessed; it
+    * carries its source wait in the f46 bank. */
+   bool dest_half;
    bool dest_cache;
    bool src_live;
    uint8_t condition;

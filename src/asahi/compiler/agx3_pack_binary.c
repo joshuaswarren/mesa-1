@@ -3743,11 +3743,37 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       src.size == AGX_SIZE_16 && agx_channels(src) == 1 && !src.abs &&
       !src.neg && !src.kill && !(src.cache && src.discard);
    if (I->nr_dests != 1 || I->nr_srcs != 2 || I->saturate ||
-       !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
-       !(src_half || agx3_subgroup_plain(src, AGX_INDEX_REGISTER)) ||
        I->src[1].type != AGX_INDEX_IMMEDIATE ||
        I->src[1].memory || I->src[1].abs || I->src[1].neg ||
        I->src[1].cache || I->src[1].discard || I->src[1].kill)
+      return false;
+
+   /* The 16-bit quad ballot against zero carries its own wait. */
+   if (quad && !is_float && src_half && I->dest[0].size == AGX_SIZE_16) {
+      if (!agx3_subgroup_plain_half(I->dest[0]) || I->src[1].value != 0 ||
+          (I->icond != AGX_ICOND_UEQ && I->icond != AGX_ICOND_SEQ))
+         return false;
+
+      const struct agx3_subgroup_ballot_desc d = {
+         .quad = true,
+         .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+         .dest = I->dest[0].value,
+         .src = src.value,
+         .src_half = true,
+         .dest_half = true,
+         .dest_cache = I->dest[0].cache,
+         .src_live = !src.discard,
+         .condition = 4,
+         .invert = I->invert_cond,
+         .wait_mask = wait_mask,
+      };
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      return agx3_subgroup_encode_ballot(enc, &d, bytes, &length) &&
+             agx3_append(emission, bytes, length);
+   }
+
+   if (!agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
+       !(src_half || agx3_subgroup_plain(src, AGX_INDEX_REGISTER)))
       return false;
 
    bool compare_immediate = false;
