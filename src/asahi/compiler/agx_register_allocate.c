@@ -140,14 +140,7 @@ struct ra_ctx {
 static unsigned
 reserved_size(agx_context *ctx)
 {
-   if (ctx->has_spill_pcopy_reserved)
-      return 8;
-   else if (ctx->any_quad_divergent_shuffle)
-      return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
-   else if (ctx->any_cf)
-      return 1;
-   else
-      return 0;
+   return agx_reserved_registers(ctx);
 }
 
 UNUSED static void

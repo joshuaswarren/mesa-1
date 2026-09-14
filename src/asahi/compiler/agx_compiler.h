@@ -1093,6 +1093,22 @@ bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 /* Materialize nonzero minifloats used by G17P structured f32 control flow so
  * the compare uses the already grounded register/register form. */
 void agx_materialize_agx3_cf_constants(agx_context *ctx);
+/* Number of 16-bit registers RA keeps reserved at the bottom of the register
+ * file for the whole shader.
+ */
+static inline unsigned
+agx_reserved_registers(const agx_context *ctx)
+{
+   if (ctx->has_spill_pcopy_reserved)
+      return 8;
+   else if (ctx->any_quad_divergent_shuffle)
+      return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
+   else if (ctx->any_cf)
+      return 1;
+   else
+      return 0;
+}
+
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);
