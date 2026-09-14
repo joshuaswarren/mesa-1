@@ -1672,6 +1672,16 @@ agx_ra(agx_context *ctx)
          agx_max_registers_for_occupancy(threads_per_workgroup);
    }
 
+   /* G17P's register file is 192 halves. Halves 192..255 still fit its
+    * 8-bit register fields but are not general registers: a copy into half
+    * 204 crashed the GPU co-processor. applegpu_g17p holding 60 live float4
+    * or uint4 temporaries never names a register above half 191 and spills
+    * the rest to thread-private storage, so bound the file there and spill
+    * the same way.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      max_possible_regs = MIN2(max_possible_regs, AGX3B_NUM_REGS);
+
    if (force_spilling) {
       /* Even when testing spilling, we need enough room for preloaded/exported
        * regs.
@@ -1732,7 +1742,7 @@ agx_ra(agx_context *ctx)
          /* Only rematerialize if it actually lets us save a wave */
          if (l < agx_round_registers(effective_demand)) {
             remat = true;
-            max_possible_regs = l;
+            max_possible_regs = MIN2(l, max_possible_regs);
          }
       }
    }
@@ -1946,6 +1956,9 @@ agx_ra(agx_context *ctx)
    unsigned max_regs = agx_occupancy_for_register_count(demand).max_registers;
    if (ctx->key->is_helper || force_spilling)
       max_regs = max_possible_regs;
+
+   /* Occupancy rounding must not reach past a smaller register file. */
+   max_regs = MIN2(max_regs, max_possible_regs);
 
    max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
 
