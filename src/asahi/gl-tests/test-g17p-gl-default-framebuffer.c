@@ -24,6 +24,13 @@
  * runner does, because scissor_blit fails exactly on the configurations whose
  * default framebuffer carries depth (2, 3, 4) and passes on the one that does
  * not (1).
+ *
+ * The failing blit copies b10g10r10a2_unorm into r8g8b8a8_unorm under a
+ * scissor, as the driver's resource log names the pair. That pair is checked
+ * here between two framebuffer objects and is correct, with and without the
+ * scissor, on hardware and on llvmpipe. So what is left of that failure is the
+ * source being the **window** itself -- a window-system image rather than a
+ * texture of the same format -- which this cannot build from a pbuffer.
  */
 
 #define GL_GLEXT_PROTOTYPES
@@ -220,6 +227,86 @@ check_alpha(void)
    return ok;
 }
 
+/* The failing conformance blit copies the window -- b10g10r10a2_unorm, as the
+ * driver's resource log names it -- into an r8g8b8a8_unorm texture under a
+ * scissor. Build that pair directly, so no window is needed. */
+static bool
+check_rgb10_a2_blit(void)
+{
+   GLuint source_texture, source_fbo;
+   glGenTextures(1, &source_texture);
+   glBindTexture(GL_TEXTURE_2D, source_texture);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2, SIZE, SIZE, 0, GL_RGBA,
+                GL_UNSIGNED_INT_2_10_10_10_REV, NULL);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glGenFramebuffers(1, &source_fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, source_fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          source_texture, 0);
+   if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+      fprintf(stderr, "rgb10a2 blit: no RGB10_A2 render target\n");
+      return true;
+   }
+   glDisable(GL_SCISSOR_TEST);
+   glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+   glClear(GL_COLOR_BUFFER_BIT);
+
+   GLuint destination_texture, destination_fbo;
+   glGenTextures(1, &destination_texture);
+   glBindTexture(GL_TEXTURE_2D, destination_texture);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, SIZE, SIZE, 0, GL_RGBA,
+                GL_UNSIGNED_BYTE, NULL);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+   glGenFramebuffers(1, &destination_fbo);
+   glBindFramebuffer(GL_FRAMEBUFFER, destination_fbo);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D,
+                          destination_texture, 0);
+
+   bool ok = true;
+   for (unsigned scissored = 0; scissored < 2; ++scissored) {
+      glBindFramebuffer(GL_FRAMEBUFFER, destination_fbo);
+      glDisable(GL_SCISSOR_TEST);
+      glClearColor(0.5f, 0.5f, 0.5f, 0.5f);
+      glClear(GL_COLOR_BUFFER_BIT);
+
+      if (scissored) {
+         glEnable(GL_SCISSOR_TEST);
+         glScissor(0, 0, SIZE / 2, SIZE / 2);
+      }
+
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fbo);
+      glReadBuffer(GL_COLOR_ATTACHMENT0);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, destination_fbo);
+      glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
+                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      glDisable(GL_SCISSOR_TEST);
+
+      float inside[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, destination_fbo);
+      glReadBuffer(GL_COLOR_ATTACHMENT0);
+      glReadPixels(SIZE / 4, SIZE / 4, 1, 1, GL_RGBA, GL_FLOAT, inside);
+
+      if (glGetError() != GL_NO_ERROR) {
+         fprintf(stderr, "rgb10a2 blit: raised a GL error\n");
+         return false;
+      }
+
+      const bool match = inside[3] == 1.0f;
+      ok &= match;
+      printf("rgb10a2 -> rgba8%-12s alpha %.3f  %s\n",
+             scissored ? " (scissored)" : "", inside[3],
+             match ? "" : "MISMATCH, wanted 1.000");
+   }
+
+   glDeleteFramebuffers(1, &source_fbo);
+   glDeleteFramebuffers(1, &destination_fbo);
+   glDeleteTextures(1, &source_texture);
+   glDeleteTextures(1, &destination_texture);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -305,7 +392,8 @@ main(void)
    glViewport(0, 0, SIZE, SIZE);
    describe_default();
    walk_read_buffers();
-   const bool ok = check_alpha();
+   bool ok = check_alpha();
+   ok &= check_rgb10_a2_blit();
 
    printf("default framebuffer: %s\n", ok ? "match" : "MISMATCH");
    return ok ? 0 : 1;
