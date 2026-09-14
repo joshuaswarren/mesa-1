@@ -362,6 +362,44 @@ test_ballot_vectors(void)
    CHECK(bytes_equal(out, length, uint_eq0_live_b,
                      sizeof(uint_eq0_live_b)));
 
+   /* metal-nt applegpu_g17p simd_broadcast_first(): the 16-bit active thread
+    * index in h4 compared equal to zero, discarded, into a cached r2
+    * (half 4). */
+   static const uint8_t half_eq0_b[] = {0x17, 0x17, 0x54, 0x04, 0x03,
+                                        0x08, 0x00, 0x48, 0x22, 0x02};
+   d = (struct agx3_subgroup_ballot_desc) {
+      .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+      .dest = 4,
+      .src = 4,
+      .condition = 4,
+      .compare_immediate = true,
+      .src_half = true,
+      .dest_cache = true,
+   };
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                     &length));
+   CHECK(bytes_equal(out, length, half_eq0_b, sizeof(half_eq0_b)));
+   d.compare_value = 1;
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   d.compare_value = 0;
+   d.condition = 1;
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   d.condition = 4;
+   d.compare_immediate = false;
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+
+   d = (struct agx3_subgroup_ballot_desc) {
+      .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+      .src = 2,
+      .condition = 2,
+      .compare_immediate = true,
+      .compare_value = 15,
+      .src_live = true,
+   };
+
    /* No immediate signed, inverted, quad, or AGX3c form was witnessed. */
    d.condition = 5;
    CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,

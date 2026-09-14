@@ -205,8 +205,14 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
                             uint8_t *length)
 {
    if (d == NULL || out == NULL || length == NULL || d->wait_mask != 0 ||
-       !valid_reg(enc, d->dest) || !valid_reg(enc, d->src) ||
+       !valid_reg(enc, d->dest) ||
        (unsigned)d->type > AGX3_SUBGROUP_BALLOT_FLOAT)
+      return false;
+
+   /* Only the witnessed 16-bit source shape: equal to zero. */
+   if (d->src_half ? !d->compare_immediate || d->condition != 4 ||
+                        d->compare_value != 0 || d->src >= 192
+                   : !valid_reg(enc, d->src))
       return false;
 
    if (d->compare_immediate) {
@@ -233,7 +239,7 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
    if (d->quad || d->dest_cache)
       ADD_FIELD(11, 1);
    ADD_FIELD(23, 2);
-   ADD_FIELD(24, 2);
+   ADD_FIELD(24, d->src_half ? 1 : 2);
    if (!d->compare_immediate || !d->src_live)
       ADD_FIELD(27, 1);
 

@@ -67,6 +67,10 @@ struct agx3_subgroup_ballot_desc {
    /* The G17P SIMD integer form can compare against a 16-bit immediate. */
    bool compare_immediate;
    uint16_t compare_value;
+   /* The immediate equal-to-zero form also takes a 16-bit source register
+    * (f24 = 1), as Apple's simd_broadcast_first() compares the 16-bit active
+    * thread index against zero. */
+   bool src_half;
    bool dest_cache;
    bool src_live;
    uint8_t condition;

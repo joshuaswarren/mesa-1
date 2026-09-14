@@ -3679,9 +3679,16 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
                          I->op == AGX_OPCODE_FCMP_QUAD_BALLOT;
    const bool quad = I->op == AGX_OPCODE_ICMP_QUAD_BALLOT ||
                      I->op == AGX_OPCODE_FCMP_QUAD_BALLOT;
+   /* A 16-bit source is grounded for the immediate integer form only; the
+    * encoder refuses every other shape. */
+   const agx_index src = I->src[0];
+   const bool src_half =
+      !is_float && src.type == AGX_INDEX_REGISTER && !src.memory &&
+      src.size == AGX_SIZE_16 && agx_channels(src) == 1 && !src.abs &&
+      !src.neg && !src.kill && !(src.cache && src.discard);
    if (I->nr_dests != 1 || I->nr_srcs != 2 || I->saturate ||
        !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
-       !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER) ||
+       !(src_half || agx3_subgroup_plain(src, AGX_INDEX_REGISTER)) ||
        I->src[1].type != AGX_INDEX_IMMEDIATE ||
        I->src[1].memory || I->src[1].abs || I->src[1].neg ||
        I->src[1].cache || I->src[1].discard || I->src[1].kill)
@@ -3763,9 +3770,10 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       .type = is_float ? AGX3_SUBGROUP_BALLOT_FLOAT
                        : AGX3_SUBGROUP_BALLOT_INTEGER,
       .dest = I->dest[0].value,
-      .src = I->src[0].value,
+      .src = src.value,
       .compare_immediate = compare_immediate,
       .compare_value = compare_value,
+      .src_half = src_half,
       .dest_cache = I->dest[0].cache,
       .src_live = !I->src[0].discard,
       .condition = condition,
