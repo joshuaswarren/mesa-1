@@ -557,6 +557,15 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
       }
    }
 
+   /* PBEStateEncoderGen9 keeps a one-layer array at dimension 3 only for a
+    * texture's own write descriptor; a one-layer framebuffer target is
+    * dimension 2. The spilled-MRT store has no Gen9 witness for its array
+    * form, so keep refusing a one-layer one. */
+   if (generation == 9 && usage == HK_DESC_USAGE_EMRT && layers == 1) {
+      memset(out, 0, sizeof(*out));
+      return false;
+   }
+
    return hk_pack_native_pbe(generation, out, &cfg);
 }
 

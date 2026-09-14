@@ -1326,7 +1326,29 @@ main(void)
    assert(memcmp(&native_pbe, gen9_array_pbe,
                  sizeof(gen9_array_pbe)) == 0);
    assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
+   /* A one-layer array keeps dimension 3 with a zero layer field. */
    pbe.layers = 1;
+   uint8_t expected_layered[32];
+   memcpy(expected_layered, gen9_array_pbe, sizeof(expected_layered));
+   expected_layered[13] = 0x00;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_layered,
+                 sizeof(expected_layered)) == 0);
+   /* A 3D target is the same packet with dimension 5 and depth - 1. */
+   pbe.dimension = AGX_TEXTURE_DIMENSION_3D;
+   pbe.layers = 4;
+   expected_layered[0] = 0x25;
+   expected_layered[13] = 0x30;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_layered,
+                 sizeof(expected_layered)) == 0);
+   assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
+   CHECK_PBE_REJECT(pbe.level = 1);
+   pbe.level = 0;
+   CHECK_PBE_REJECT(pbe.layout = AGX_LAYOUT_LINEAR);
+   pbe.layout = AGX_LAYOUT_GPU;
+   pbe.layers = 1;
+   pbe.dimension = AGX_TEXTURE_DIMENSION_CUBE;
    CHECK_PBE_REJECT((void)0);
    pbe.dimension = AGX_TEXTURE_DIMENSION_2D;
    CHECK_PBE_REJECT(pbe.compressed = true);

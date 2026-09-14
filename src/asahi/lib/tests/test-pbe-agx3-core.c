@@ -159,8 +159,30 @@ check_exact_gen9_array_vector(void)
    bad.stride_B = 1024;
    CHECK(!agx_pbe_agx3_2d_array_pack(9, &bad, 2, &packed));
    CHECK(!agx_pbe_agx3_2d_array_pack(10, &fields, 2, &packed));
-   CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 1, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 0, &packed));
    CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 65537, &packed));
+
+   /* A one-layer array texture keeps the array dimension; StateFields'
+    * layers-1 deposit is simply zero. */
+   uint8_t one_layer[32];
+   memcpy(one_layer, expected, sizeof(one_layer));
+   one_layer[13] = 0x01;
+   CHECK(agx_pbe_agx3_2d_array_pack(9, &fields, 1, &packed));
+   CHECK(memcmp(packed.bytes, one_layer, sizeof(one_layer)) == 0);
+
+   /* A 3D texture is the same packet with dimension 5 and depth-1 in the
+    * layer field. */
+   uint8_t three_d[32];
+   memcpy(three_d, expected, sizeof(three_d));
+   three_d[0] = 0x25;
+   three_d[13] = 0x71;
+   CHECK(agx_pbe_agx3_3d_pack(9, &fields, 8, &packed));
+   CHECK(packed.length == sizeof(three_d));
+   CHECK(memcmp(packed.bytes, three_d, sizeof(three_d)) == 0);
+   CHECK(!agx_pbe_agx3_3d_pack(9, &bad, 8, &packed));
+   CHECK(!agx_pbe_agx3_3d_pack(10, &fields, 8, &packed));
+   CHECK(!agx_pbe_agx3_3d_pack(9, &fields, 0, &packed));
+   CHECK(!agx_pbe_agx3_3d_pack(9, &fields, 65537, &packed));
    return 0;
 }
 

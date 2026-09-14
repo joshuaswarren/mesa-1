@@ -219,17 +219,19 @@ hk_pack_native_pbe(unsigned generation,
 
    /* The recovered subset deliberately excludes every field whose Gen9/10
     * semantic placement is incomplete: compression, sparse mode, gamma and
-    * the software-addressing sideband. HAL200's exact tiled 2D-array packet
-    * is the one bounded layered exception. */
+    * the software-addressing sideband. HAL200's exact tiled 2D-array and 3D
+    * packets are the bounded layered exceptions. */
    const bool array = generation == 9 &&
-                      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
-                      legacy->layers > 1;
+                      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   const bool three_d = generation == 9 &&
+                        legacy->dimension == AGX_TEXTURE_DIMENSION_3D;
+   const bool layered = array || three_d;
    /* The end-of-tile store is the only producer of a multisample write
     * target, and it only ever addresses one non-array layer. */
    const bool multisample =
       generation == 9 &&
       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
-   if ((!array && !multisample &&
+   if ((!layered && !multisample &&
         legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
         (generation != 9 || legacy->level != 0 || legacy->levels != 1 ||
@@ -242,7 +244,7 @@ hk_pack_native_pbe(unsigned generation,
                        legacy->samples != AGX_SAMPLE_COUNT_4)
                     : legacy->samples != AGX_SAMPLE_COUNT_2) ||
        legacy->compressed || legacy->mode != AGX_IMAGE_MODE_NORMAL ||
-       (!array && legacy->layers != 1) ||
+       (!layered && legacy->layers != 1) ||
        (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
                         legacy->level != 0 || legacy->levels != 1 ||
                         legacy->unk_mipmapped || legacy->compressed)) ||
@@ -281,11 +283,13 @@ hk_pack_native_pbe(unsigned generation,
       ? agx_pbe_agx3_2d_multisample_pack(
            generation, &fields,
            legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
-      : array
+      : layered
       ? (legacy->level == 0 && legacy->levels == 1 &&
          !legacy->unk_mipmapped &&
-         agx_pbe_agx3_2d_array_pack(generation, &fields, legacy->layers,
-                                    &packed))
+         (array ? agx_pbe_agx3_2d_array_pack(generation, &fields,
+                                             legacy->layers, &packed)
+                : agx_pbe_agx3_3d_pack(generation, &fields, legacy->layers,
+                                       &packed)))
       : generation == 9
          ? agx_pbe_agx3_2d_mip_pack(generation, &fields, legacy->level,
                                     legacy->levels, &packed)

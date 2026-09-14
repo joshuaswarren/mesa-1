@@ -10,6 +10,7 @@
 #define AGX_PBE_DIMENSION_2D 2u
 #define AGX_PBE_DIMENSION_2D_ARRAY 3u
 #define AGX_PBE_DIMENSION_2D_MULTISAMPLE 4u
+#define AGX_PBE_DIMENSION_3D 5u
 #define AGX_PBE_SAMPLE_SELECTOR_SHIFT 56u
 #define AGX_PBE_LAYOUT_LINEAR 0u
 #define AGX_PBE_LAYOUT_TWIDDLED 1u
@@ -150,31 +151,56 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
    return true;
 }
 
-bool
-agx_pbe_agx3_2d_array_pack(
-   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
-   uint32_t layers, struct agx_pbe_agx3_descriptor *out)
+/* PBEStateEncoderGen9<kAGXRevHAL200>::StateFields (AGXMetalG17P, macOS 27)
+ * deposits a layer count at word1[59:44] and page-aligned layers at bit60 for
+ * every layered write target, keeping the 2D geometry. A texture's own write
+ * descriptor (WriteType 1, from TextureGen4::texBaseAddressesUpdated) takes
+ * arrayLength - 1 for an array dimension whatever the length (+0x32c..+0x374),
+ * so a one-layer array is still dimension 3, and depth - 1 for a 3D texture
+ * (+0x4ac, reached from the kind-3 dimension select at +0x4a4).
+ */
+static bool
+pack_layered(uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+             unsigned dimension, uint32_t layers,
+             struct agx_pbe_agx3_descriptor *out)
 {
    if (out)
       memset(out, 0, sizeof(*out));
 
-   /* The exact HAL200 producer keeps arrays tiled and non-mipmapped in this
-    * packet. Linear array stride and Gen10's shifted mode fields remain
+   /* The exact HAL200 producer keeps layered targets tiled and non-mipmapped
+    * in this packet. Linear stride and Gen10's shifted mode fields remain
     * independently gated. */
    if (generation != AGX_PBE_AGX3_GENERATION_9 || !fields ||
-       fields->layout == AGX_PBE_LAYOUT_LINEAR || layers < 2 ||
+       fields->layout == AGX_PBE_LAYOUT_LINEAR || layers < 1 ||
        layers > UINT16_MAX + 1u ||
        !agx_pbe_agx3_2d_pack(generation, fields, out))
       return false;
 
    uint64_t word0 = load_le64(&out->bytes[0]);
    uint64_t word1 = load_le64(&out->bytes[8]);
-   word0 = (word0 & ~UINT64_C(0xf)) | AGX_PBE_DIMENSION_2D_ARRAY;
+   word0 = (word0 & ~UINT64_C(0xf)) | dimension;
    word1 |= (uint64_t)(layers - 1) << 44;
    word1 |= (uint64_t)fields->page_aligned_layers << 60;
    store_le64(&out->bytes[0], word0);
    store_le64(&out->bytes[8], word1);
    return true;
+}
+
+bool
+agx_pbe_agx3_2d_array_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t layers, struct agx_pbe_agx3_descriptor *out)
+{
+   return pack_layered(generation, fields, AGX_PBE_DIMENSION_2D_ARRAY, layers,
+                       out);
+}
+
+bool
+agx_pbe_agx3_3d_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t depth, struct agx_pbe_agx3_descriptor *out)
+{
+   return pack_layered(generation, fields, AGX_PBE_DIMENSION_3D, depth, out);
 }
 
 bool
