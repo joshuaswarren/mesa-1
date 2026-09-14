@@ -770,7 +770,7 @@ hk_get_device_features(
        * nonzero nr_samples_shaded because the AGX2 external sample loop is not
        * AGX3 machine code.  At the default one rasterization sample that
        * collapse is exact, so the promise is keepable there; at 2x/4x
-       * (HK_G17P_MSAA=1) gl_SampleID would silently read 0.
+       * gl_SampleID would silently read 0.
        *
        * So do NOT run the 4x SampleID oracle expecting a pass: it is blocked on
        * a grounded AGX3 per-sample fragment path, not on hardware time. */
@@ -861,74 +861,16 @@ hk_get_device_properties(const struct agx_device *dev,
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
       VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_2_BIT | VK_SAMPLE_COUNT_4_BIT;
-   const bool g17p_msaa = dev->chip == AGX_CHIP_G17P &&
-                          debug_get_bool_option("HK_G17P_MSAA", false);
-   const VkSampleCountFlagBits color_sample_counts =
-      dev->chip == AGX_CHIP_G17P
-         ? (g17p_msaa ? sample_counts : VK_SAMPLE_COUNT_1_BIT)
-         : sample_counts;
+
+   /* G17P renders, resolves and stores multisample colour and depth: on an
+    * A18 Pro the g17p-vulkan-msaa-resolve2/4, -store-fetch4 and -depth4
+    * probes read back exact resolved values, per-sample colour and per-sample
+    * depth coverage. Integer and storage images stay single-sample there:
+    * multisample tiles are built only for 8-bit UNORM colour, and storage
+    * images have no multisample descriptor.
+    */
    const VkSampleCountFlagBits other_sample_counts =
       dev->chip == AGX_CHIP_G17P ? VK_SAMPLE_COUNT_1_BIT : sample_counts;
-
-   /* Multisample depth and stencil ATTACHMENTS. Unlike colour, these never go
-    * through the tilebuffer or an end-of-tile program: the ISP owns them and
-    * the ZLS loads and stores them from addresses and strides the AIL layout
-    * already computes per sample. Nothing in the G17P path is written against
-    * one sample -- ISP_ZLS_PIXELS is logical width and height, the Z stride is
-    * layer_stride_B / AIL_PAGESIZE straight out of the layout, and
-    * ppp_multisamplectl is shared with colour, which 2x already exercises on
-    * hardware. So this is a verification gap, not an implementation one, and
-    * it gets a probe rather than a rewrite.
-    *
-    * It is also what makes the colour advertisement COHERENT. ES 3.0 requires
-    * DEPTH_COMPONENT16/24, DEPTH24_STENCIL8 and STENCIL_INDEX8 renderbuffers
-    * to support up to MAX_SAMPLES, and MAX_SAMPLES is a single global value
-    * derived from colour. Advertising colour 2x/4x while depth stays 1x
-    * therefore describes an implementation that cannot be ES 3.0 conformant,
-    * which is consistent with WebGL2 context creation failing under
-    * HK_G17P_MSAA=1 alone while WebGL1 keeps working. Moving the two together
-    * is the single-variable experiment for that.
-    */
-   const VkSampleCountFlagBits ds_sample_counts =
-      dev->chip == AGX_CHIP_G17P
-         ? (g17p_msaa && hk_g17p_unverified_feature("msaa_depth")
-               ? sample_counts
-               : VK_SAMPLE_COUNT_1_BIT)
-         : sample_counts;
-
-   /* Sampling a multisample DEPTH image is a different data path again: the
-    * ZLS already stores the surface, and the AGX3 texture descriptor already
-    * carries a sample count, but nothing has read one back. This name exists
-    * so a consumer that walks the sample-count limits one at a time -- Dawn
-    * does -- can be pushed through the whole list in one boot to find out
-    * what it asks for next. It has NO oracle behind it, so it is a question,
-    * not a promotion: do not flip this default on a passing Dawn start-up.
-    */
-   const VkSampleCountFlagBits sampled_ds_sample_counts =
-      dev->chip == AGX_CHIP_G17P
-         ? (g17p_msaa && hk_g17p_unverified_feature("msaa_depth_sampled")
-               ? sample_counts
-               : VK_SAMPLE_COUNT_1_BIT)
-         : sample_counts;
-
-   /* A multisample colour image is only sampleable if it can first be stored
-    * unresolved, which needs the native multisample end-of-tile program and
-    * the multisample PBE descriptor. Both are byte-witnessed from Apple's own
-    * encoders, but the pair has never executed, so the promise stays behind
-    * the named one-boot probe -- run g17p-vulkan-msaa-store-fetch4 (and its
-    * 2x sibling) and flip the default only if they pass.
-    *
-    * Storage and integer colour do NOT move with either. The G17P tilebuffer
-    * gate (agx_g17p_rt0_tile_layout_supported) still admits more than one
-    * sample only for RGBA8/BGRA8 UNORM colour, so a multisample integer
-    * render target cannot be built at all.
-    */
-   const VkSampleCountFlagBits sampled_color_sample_counts =
-      dev->chip == AGX_CHIP_G17P
-         ? (g17p_msaa && hk_g17p_unverified_feature("msaa_store")
-               ? sample_counts
-               : VK_SAMPLE_COUNT_1_BIT)
-         : sample_counts;
 
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
@@ -1070,15 +1012,15 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxFramebufferHeight = 16384,
       .maxFramebufferWidth = 16384,
       .maxFramebufferLayers = 2048,
-      .framebufferColorSampleCounts = color_sample_counts,
-      .framebufferDepthSampleCounts = ds_sample_counts,
-      .framebufferNoAttachmentsSampleCounts = other_sample_counts,
-      .framebufferStencilSampleCounts = ds_sample_counts,
+      .framebufferColorSampleCounts = sample_counts,
+      .framebufferDepthSampleCounts = sample_counts,
+      .framebufferNoAttachmentsSampleCounts = sample_counts,
+      .framebufferStencilSampleCounts = sample_counts,
       .maxColorAttachments = HK_MAX_RTS,
-      .sampledImageColorSampleCounts = sampled_color_sample_counts,
+      .sampledImageColorSampleCounts = sample_counts,
       .sampledImageIntegerSampleCounts = other_sample_counts,
-      .sampledImageDepthSampleCounts = sampled_ds_sample_counts,
-      .sampledImageStencilSampleCounts = sampled_ds_sample_counts,
+      .sampledImageDepthSampleCounts = sample_counts,
+      .sampledImageStencilSampleCounts = sample_counts,
       .storageImageSampleCounts = other_sample_counts,
       .maxSampleMaskWords = 1,
       .timestampComputeAndGraphics = true,

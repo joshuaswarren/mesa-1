@@ -1238,31 +1238,11 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    key.single_sample_reload = false;
 
    /* Keeping the samples in the stored surface is what makes a reload
-    * possible, and two different things ask for it.
-    *
-    * storeOp = STORE is the application asking, and it is what makes a
-    * multisample VkImage readable after the pass.
-    *
-    * A partial render asks for it structurally: a mid-frame flush exists only
-    * to be reloaded by the draws that follow it, inside the same render pass,
-    * so it must write the samples whatever the pass finally does with them.
-    *
-    * Only storeOp is the application's, so only storeOp is gated on the probe
-    * that promises a multisample VkImage is readable. The partial render is
-    * the driver's own, and gating it would refuse the wrong thing: every
-    * render pass builds its partial programs at BeginRendering, long before
-    * anyone knows whether a stream boundary will arrive, so a refusal there
-    * fails passes that never split at all -- measured, it takes out the
-    * single-draw resolve probes too.
-    *
-    * That leaves the mid-frame store selecting a path hardware has not yet
-    * honoured. With this store recordable at last,
-    * g17p-vulkan-msaa-store-fetch2 and -fetch4 run on an A18 Pro and every
-    * fetched sample of the stored surface reads zero, while the direct
-    * resolve of the very same draw is exact -- so the samples do not survive
-    * the store, and a multisample tile still cannot cross a stream boundary.
-    * What changes here is which of those two is the blocker: the mid-frame
-    * store now asks to keep the samples instead of resolving them away.
+    * possible, and two different things ask for it: storeOp = STORE, which
+    * makes a multisample VkImage readable after the pass, and a partial
+    * render, whose mid-frame flush exists only to be reloaded by the draws
+    * that follow it. On an A18 Pro the g17p-vulkan-msaa-store-fetch4 probe
+    * reads back the per-sample values of such a stored surface.
     */
    if (dev->dev.chip == AGX_CHIP_G17P && store &&
        info->colorAttachmentCount >= 1) {
@@ -1270,9 +1250,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
       const struct hk_image_view *iview0 =
          hk_image_view_from_handle(att0->imageView);
       const bool keeps_samples =
-         partial_render ||
-         (att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE &&
-          hk_g17p_unverified_feature("msaa_store"));
+         partial_render || att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
 
       key.multisample_store = hk_agx3_g17p_multisample_store_supported(
          &key.tib, info->colorAttachmentCount, keeps_samples,

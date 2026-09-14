@@ -1616,8 +1616,6 @@ if with_tests
     )
 
     # Unresolved multisample colour store, then a per-sample texelFetch back.
-    # Needs HK_G17P_MSAA=1 and HK_G17P_UNVERIFIED_FEATURES=msaa_store; the
-    # binary says so and exits non-zero rather than skipping.
     executable(
       'g17p-vulkan-msaa-store-fetch2',
       files('tests/g17p_vulkan_msaa_store_fetch.c'),
@@ -1637,8 +1635,7 @@ if with_tests
     )
 
     # Multisample depth attachment: per-sample depth testing, and the ZLS
-    # store/load round trip across two render passes. Needs HK_G17P_MSAA=1 and
-    # HK_G17P_UNVERIFIED_FEATURES=msaa_depth.
+    # store/load round trip across two render passes.
     executable(
       'g17p-vulkan-msaa-depth2',
       files('tests/g17p_vulkan_msaa_depth_test.c'),
@@ -1658,8 +1655,7 @@ if with_tests
     )
 
     # Isolates the multisample resolve: a clear-only pass with no draw at all,
-    # plus full-screen quads at 1x and Nx. Needs HK_G17P_MSAA=1. Pair it with
-    # AGX_SPECLM_SAMPLE_CODE.
+    # plus full-screen quads at 1x and Nx.
     executable(
       'g17p-vulkan-msaa-resolve2',
       files('tests/g17p_vulkan_msaa_resolve_probe.c'),

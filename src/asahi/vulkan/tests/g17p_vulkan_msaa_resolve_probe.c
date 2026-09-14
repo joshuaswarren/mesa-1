@@ -341,8 +341,7 @@ main(void)
    if ((properties.limits.framebufferColorSampleCounts &
         (VkSampleCountFlags)G17P_MSAA_SAMPLES) == 0) {
       fprintf(stderr,
-              TEST_NAME ": framebufferColorSampleCounts lacks %ux "
-                        "(set HK_G17P_MSAA=1)\n",
+              TEST_NAME ": framebufferColorSampleCounts lacks %ux\n",
               G17P_MSAA_SAMPLES);
       return EXIT_FAILURE;
    }

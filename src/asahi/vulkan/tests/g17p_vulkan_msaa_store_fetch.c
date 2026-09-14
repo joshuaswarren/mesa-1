@@ -25,9 +25,8 @@
  *      these the first two checks would pass vacuously on a 1x render.
  *   4. Guard bytes around both readbacks are untouched.
  *
- * Needs HK_G17P_MSAA=1 (colour sample counts) and
- * HK_G17P_UNVERIFIED_FEATURES=msaa_store (the store and the sampled multisample
- * image). The test says so and exits non-zero rather than silently skipping.
+ * A device without multisample colour attachments and sampled images fails
+ * the test rather than silently skipping it.
  */
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -307,8 +306,7 @@ main(void)
    if ((properties.limits.framebufferColorSampleCounts &
         (VkSampleCountFlags)G17P_MSAA_SAMPLES) == 0) {
       fprintf(stderr,
-              TEST_NAME ": framebufferColorSampleCounts lacks %ux "
-                        "(set HK_G17P_MSAA=1)\n",
+              TEST_NAME ": framebufferColorSampleCounts lacks %ux\n",
               G17P_MSAA_SAMPLES);
       return EXIT_FAILURE;
    }
