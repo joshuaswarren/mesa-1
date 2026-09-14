@@ -791,9 +791,9 @@ agx3_tex_encode_image_write_2d(
           !((d->image_value == 0 && !d->normalized) ||
             d->image_value == 1))) ||
        /* f70 is the float-vs-integer bit and the state operand's form is a
-        * different field family (f91 immediate, f92/f93 register); they are
-        * orthogonal, so a register state does not imply normalized data.
-        * metal-nt -arch applegpu_g17p on a dynamically indexed
+        * different field family (f91 immediate, f92 GPR, f93 uniform); they
+        * are orthogonal, so an indexed state does not imply normalized data.
+        * metal-nt -arch applegpu_g17p on a uniform-indexed
         * `array<texture2d<T, access::write>, 4>`, one variable per kernel:
         *
         *   texture2d<float>  d72054000040001020040000883a0901
@@ -810,9 +810,16 @@ agx3_tex_encode_image_write_2d(
     * would silently discard an explicit nonzero PBE base. */
    /* Nonzero field values recovered from native imgwci.ep0 instructions.
     * Every omitted field is intentionally zero. The immediate descriptor index
-    * is f91. Native argument-buffer indexing instead uses f92 for a killed GPR
-    * or f93 for a retained GPR, with f99/f100 selecting that operand family.
-    * The composer validates the complete selected form. */
+    * is f91. A GPR index is f92 with f99=2, and f103 kills it. metal-nt -arch
+    * applegpu_g17p writing array<texture2d<int, access::write>, 4> ts at a
+    * computed index emits
+    *
+    *   ts[gid.x & 3], index dead   d71054000040000021040000881a8900  f103
+    *   same index read afterwards  d71054000040000020040000881a8900
+    *
+    * f93 with f99=3 instead names a uniform half: ts[i] with i a constant
+    * buffer scalar, or an argument-buffer entry, is d71054000040000c20040000881a0901
+    * (f93 12). The composer validates the complete selected form. */
    struct agx3_field_kv fields[24] = {
       KV(9, 5),   KV(12, 1),  KV(13, 1),   KV(24, 1), KV(38, 1),
       KV(51, 1),  KV(52, 1),  KV(58 + staging_slot, 1), KV(71, 2), KV(72, 1),
@@ -831,8 +838,8 @@ agx3_tex_encode_image_write_2d(
       fields[n++] = (struct agx3_field_kv)KV(100, 2);
       fields[n++] = (struct agx3_field_kv)KV(103, 1);
    } else {
-      fields[n++] = (struct agx3_field_kv)KV(93, d->image_value);
-      fields[n++] = (struct agx3_field_kv)KV(99, 3);
+      fields[n++] = (struct agx3_field_kv)KV(92, d->image_value);
+      fields[n++] = (struct agx3_field_kv)KV(99, 2);
       fields[n++] = (struct agx3_field_kv)KV(100, 2);
    }
 

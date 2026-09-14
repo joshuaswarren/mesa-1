@@ -13611,11 +13611,12 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
    EXPECT_FALSE(agx3_tex_encode_image_write_rgba8_2d(
       AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
 
-   /* applegpu-nt 32023.917 / apple-g17p, dynamic argument-buffer image
-    * selection. The retained index at r10 is a byte-exact native witness. */
+   /* A retained GPR index is f92/f99=2 without the f103 kill bit. The native
+    * argument-buffer witness 0xd7205400...883a0901 decodes as f93 20/f99=3:
+    * that is uniform half 20, not a retained r10. */
    static const uint8_t indexed_live[AGX3_IMAGE_WRITE_LENGTH] = {
       0xd7, 0x20, 0x54, 0x00, 0x00, 0x40, 0x00, 0x14,
-      0x20, 0x04, 0x00, 0x00, 0x88, 0x3a, 0x09, 0x01,
+      0x20, 0x04, 0x00, 0x00, 0x88, 0x3a, 0x89, 0x00,
    };
    d = {
       .wait_mask = 1,
@@ -13648,6 +13649,37 @@ TEST_F(AGX3PackBinary, StorageImageWriteMatchesNativeWithReadyOrSlot1Data)
    d.image_kind = AGX3_TEX_OPERAND_UNIFORM;
    EXPECT_FALSE(agx3_tex_encode_image_write_rgba8_2d(
       AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
+}
+
+TEST_F(AGX3PackBinary, StorageImageGprIndexMatchesNative)
+{
+   /* metal-nt -arch applegpu_g17p, array<texture2d<int, access::write>, 4> ts
+    * written at a computed GPR index r0: dead after the write, then read
+    * again afterwards. */
+   static const uint8_t killed[AGX3_IMAGE_WRITE_LENGTH] = {
+      0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
+      0x21, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x89, 0x00,
+   };
+   static const uint8_t live[AGX3_IMAGE_WRITE_LENGTH] = {
+      0xd7, 0x10, 0x54, 0x00, 0x00, 0x40, 0x00, 0x00,
+      0x20, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x89, 0x00,
+   };
+   struct agx3_image_write_desc d = {
+      .image_kind = AGX3_TEX_OPERAND_REGISTER,
+      .image_value = 0,
+      .image_kill = true,
+   };
+   uint8_t bytes[AGX3_IMAGE_WRITE_LENGTH], len = 0;
+   ASSERT_TRUE(agx3_tex_encode_image_write_2d(
+      AGX_ISA_ENCODING_AGX3B, &d, 0, 1, bytes, &len));
+   ASSERT_EQ(len, sizeof(killed));
+   EXPECT_EQ(memcmp(bytes, killed, sizeof(killed)), 0);
+
+   d.image_kill = false;
+   ASSERT_TRUE(agx3_tex_encode_image_write_2d(
+      AGX_ISA_ENCODING_AGX3B, &d, 0, 1, bytes, &len));
+   ASSERT_EQ(len, sizeof(live));
+   EXPECT_EQ(memcmp(bytes, live, sizeof(live)), 0);
 }
 
 TEST_F(AGX3PackBinary, StorageImageExplicitBaseAndSlotMatchHardware)
@@ -13892,7 +13924,10 @@ TEST_F(AGX3PackBinary, VertexIndexedImageReadPublishesCoordinates)
    }
 }
 
-TEST_F(AGX3PackBinary, BindlessStorageImageWriteMatchesNativeIndexForm)
+/* A bindless store's descriptor set uniform is its PBE heap and a GPR holds
+ * the PBE record index. The write addresses that heap through f79 and
+ * consumes the slot1 data COPYs. */
+TEST_F(AGX3PackBinary, BindlessStorageImageWriteAddressesSetHeap)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->stage = MESA_SHADER_COMPUTE;
@@ -13912,7 +13947,7 @@ TEST_F(AGX3PackBinary, BindlessStorageImageWriteMatchesNativeIndexForm)
 
    const std::vector<uint8_t> code = pack(b);
    static const uint8_t imgwci[] = {
-      0xd7, 0x20, 0x54, 0x00, 0x00, 0x40, 0x00, 0x02,
+      0xd7, 0x10, 0x54, 0x00, 0x20, 0x40, 0x00, 0x02,
       0x21, 0x04, 0x00, 0x00, 0x88, 0x3a, 0x89, 0x00,
    };
    EXPECT_NE(std::search(code.begin(), code.end(), imgwci,

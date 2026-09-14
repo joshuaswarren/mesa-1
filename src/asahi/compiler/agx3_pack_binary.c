@@ -1310,10 +1310,17 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       ((I->src[4].value == 0 && I->format == AGX_FORMAT_I8) ||
        (I->src[4].value == 1 &&
         (normalized || I->format == AGX_FORMAT_I8)));
-   /* The state operand's form and f70 are ORTHOGONAL, so a register state does
-    * not imply normalized data.  metal-nt -arch applegpu_g17p, dynamically
-    * indexed `array<texture2d<T, access::write>, 4>` so the state is a
-    * register, one variable per kernel:
+   /* A bindless store names its descriptor set's uniform halves as the PBE
+    * heap (f79) and carries the PBE record index in a GPR (f92).
+    * hk_g17p_lower_storage_records() converts the byte offset to that index.
+    * The heap and the index are independent operands: metal-nt -arch
+    * applegpu_g17p writing texture(1) of two direct uint write textures emits
+    * d74054000040000100040000881a0900, f79 0 with f91 1.
+    *
+    * The state operand's form and f70 are ORTHOGONAL, so an indexed state
+    * does not imply normalized data.  metal-nt -arch applegpu_g17p, indexed
+    * `array<texture2d<T, access::write>, 4>` (a uniform index, f93), one
+    * variable per kernel:
     *
     *   texture2d<float>  d72054000040001020040000883a0901
     *   texture2d<uint>   d72054000040001020040000881a0901
@@ -1321,12 +1328,9 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
     *
     * against the immediate-state controls that are already recorded in
     * agx_compile.c (`...0000 0400 0088 3a09 00` / `...881a0900`): the state
-    * operand moves and f70 does not, and int and uint stay byte-identical.
-    * Requiring `normalized` here refused every dynamically indexed INTEGER
-    * storage image store -- 796 of 3,986 refused instructions in the
-    * 2026-09-11 census, and the bulk of binding_model's. */
-   const bool register_state =
-      agx3_tex_plain_uniform64(I->src[3]) &&
+    * operand moves and f70 does not, and int and uint stay byte-identical. */
+   const bool heap_state =
+      agx3_tex_plain_uniform64(I->src[3]) && !(I->src[3].value & 3) &&
       agx3_tex_plain_reg(I->src[4]) &&
       I->src[4].size == AGX_SIZE_32 && agx_channels(I->src[4]) == 1 &&
       !(I->src[4].value & 1) && I->src[4].value <= 126 &&
@@ -1341,7 +1345,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
        I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != 2 ||
        (I->src[1].value & 1) || I->src[1].value > 252 ||
        !agx3_tex_imm(I->src[2], 0) ||
-       (!immediate_state && !register_state)) {
+       (!immediate_state && !heap_state)) {
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci shape refusal: wait=0x%x data=%u/%u/%u coord=%u/%u/%u dim=%u coherent=%u\n",
                  wait_mask, I->src[0].value, I->src[0].size,
@@ -1386,15 +1390,18 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH], imgwci_len = 0;
    const struct agx3_image_write_desc d = {
       .wait_mask = wait_mask,
-      .image_kind = register_state ? AGX3_TEX_OPERAND_REGISTER :
-                                     AGX3_TEX_OPERAND_IMMEDIATE,
+      .image_kind = heap_state ? AGX3_TEX_OPERAND_REGISTER :
+                                 AGX3_TEX_OPERAND_IMMEDIATE,
       .image_value = I->src[4].value,
-      .image_kill = register_state &&
-                    (I->src[4].discard || I->src[4].kill),
+      .image_kill = heap_state && (I->src[4].discard || I->src[4].kill),
       .normalized = normalized,
    };
    bool encoded;
-   if (immediate_state && I->src[4].value == 1 && !normalized) {
+   if (heap_state) {
+      /* Consume the slot1 COPYs, as the resolved PBE form below does. */
+      encoded = agx3_tex_encode_image_write_2d(
+         enc, &d, I->src[3].value, 1, imgwci, &imgwci_len);
+   } else if (immediate_state && I->src[4].value == 1 && !normalized) {
       /* Hk's mixed indexed-read/R32-write table contains texture and sampler
        * heap pointers followed by one resolved PBE pointer at uniform half8.
        * Apple's read/write witness instead used a PBE heap at half4 with
