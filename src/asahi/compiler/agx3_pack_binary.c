@@ -4655,8 +4655,8 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
        ctx->is_preamble || ctx->key->no_stop)
       return AGX3_G17P_RT0_EOT_NONE;
 
-   unsigned instructions = 0, get_x = 0, get_y = 0, zeros = 0, stores = 0;
-   unsigned x_reg = UINT_MAX, y_reg = UINT_MAX, zero_reg = UINT_MAX;
+   unsigned instructions = 0, get_x = 0, get_y = 0, offsets = 0, stores = 0;
+   unsigned x_reg = UINT_MAX, y_reg = UINT_MAX, offset_imm_reg = UINT_MAX;
    unsigned coord_reg = UINT_MAX, offset_reg = UINT_MAX;
    enum agx_format store_format = AGX_FORMAT_I8;
 
@@ -4683,13 +4683,15 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
                return false;
             }
          } else if (I->op == AGX_OPCODE_MOV_IMM) {
-            if (I->nr_dests != 1 || I->nr_srcs != 0 || I->imm != 0 ||
+            /* The imageblock offset reaches the program through its offset
+             * uniform, so a target need not start at byte zero. */
+            if (I->nr_dests != 1 || I->nr_srcs != 0 || I->imm >= 64 ||
                 !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
                 I->dest[0].size != AGX_SIZE_32 ||
                 agx_channels(I->dest[0]) != 1)
                return false;
-            zeros++;
-            zero_reg = I->dest[0].value;
+            offsets++;
+            offset_imm_reg = I->dest[0].value;
          } else if (I->op == AGX_OPCODE_BLOCK_IMAGE_STORE) {
             if (I->nr_dests != 0 || I->nr_srcs != 4 ||
                 (I->format != AGX_FORMAT_U8NORM &&
@@ -4727,9 +4729,9 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
       }
    }
 
-   if (instructions != 4 || get_x != 1 || get_y != 1 || zeros != 1 ||
+   if (instructions != 4 || get_x != 1 || get_y != 1 || offsets != 1 ||
        stores != 1 || x_reg != coord_reg || y_reg != coord_reg + 2 ||
-       zero_reg != offset_reg)
+       offset_imm_reg != offset_reg)
       return AGX3_G17P_RT0_EOT_NONE;
 
    /* Keep the existing signed-format multisample admission unchanged. The

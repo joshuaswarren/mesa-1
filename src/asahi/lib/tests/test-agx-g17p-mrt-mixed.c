@@ -318,6 +318,23 @@ test_eot_programs(void)
 {
    for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
       const struct layout *l = &layouts[i];
+
+      /* One stored target keeps its format's single-target program at its
+       * own offset. */
+      for (unsigned rt = 0; rt < l->count; ++rt) {
+         struct agx_shader_key key = {
+            .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+            .no_preamble = true,
+         };
+         agx_g17p_configure_rt0_eot_key(l->formats[rt], &key);
+         struct agx_shader_part part = {0};
+         CHECK(compile_eot(1, &l->formats[rt], &l->offsets[rt], &key, &part));
+         CHECK(part.info.binary_size == 68);
+         CHECK(((uint8_t *)part.binary)[61] ==
+               agx_g17p_mrt_eot_selector(l->formats[rt]));
+         free(part.binary);
+      }
+
       for (unsigned mask = 1; mask < BITFIELD_MASK(l->count); ++mask) {
          if (util_bitcount(mask) < 2)
             continue;
