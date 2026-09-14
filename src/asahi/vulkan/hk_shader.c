@@ -321,14 +321,36 @@ hk_populate_fs_key(struct hk_fs_key *key,
       key->force_sample_shading = true;
 }
 
+/* Every enabled device feature that changes a shader's code must be in this
+ * key, since it is part of the cached shader's hash.
+ */
 enum hk_feature_key {
    HK_FEAT_CUSTOM_BORDER = BITFIELD_BIT(0),
+
+   /* G17P only lowers sampled images to its native heaps when they cannot be
+    * updated after bind. */
+   HK_FEAT_SAMPLED_IMAGE_UPDATE_AFTER_BIND = BITFIELD_BIT(1),
+
+   /* Select the vertex fetch robustness level of a monolithic vertex shader.
+    */
+   HK_FEAT_ROBUST_BUFFER_ACCESS = BITFIELD_BIT(2),
+   HK_FEAT_ROBUST_BUFFER_ACCESS_2 = BITFIELD_BIT(3),
+   HK_FEAT_PIPELINE_ROBUSTNESS = BITFIELD_BIT(4),
 };
 
 static enum hk_feature_key
 hk_make_feature_key(const struct vk_features *feats)
 {
-   return (!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0;
+   if (!feats)
+      return HK_FEAT_CUSTOM_BORDER;
+
+   return (feats->customBorderColors ? HK_FEAT_CUSTOM_BORDER : 0) |
+          (feats->descriptorBindingSampledImageUpdateAfterBind
+              ? HK_FEAT_SAMPLED_IMAGE_UPDATE_AFTER_BIND
+              : 0) |
+          (feats->robustBufferAccess ? HK_FEAT_ROBUST_BUFFER_ACCESS : 0) |
+          (feats->robustBufferAccess2 ? HK_FEAT_ROBUST_BUFFER_ACCESS_2 : 0) |
+          (feats->pipelineRobustness ? HK_FEAT_PIPELINE_ROBUSTNESS : 0);
 }
 
 static void
