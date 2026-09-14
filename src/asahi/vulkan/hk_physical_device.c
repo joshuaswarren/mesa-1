@@ -1290,10 +1290,6 @@ hk_get_device_properties(const struct agx_device *dev,
        * fragment stages.  Keep subgroupQuadOperationsInAllStages false until
        * every other advertised graphics stage is independently witnessed. */
       properties->subgroupQuadOperationsInAllStages = false;
-      /* G17P qualification covers one advanced-blend render target.
-       * Multiple attachments still need compiler and hardware coverage. */
-      properties->advancedBlendMaxColorAttachments = 1;
-      properties->advancedBlendIndependentBlend = false;
    }
 
    strncpy(properties->deviceName, dev->name, sizeof(properties->deviceName));
