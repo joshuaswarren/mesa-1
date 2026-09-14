@@ -242,7 +242,7 @@ agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
       KV(9, 2), KV(10, 2), KV(26, 2), KV(27, 2), KV(38, 1)};
    const struct agx3_field_kv ov[] = {
       KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
-      KV(19, src[1]), KV(28, hints[1].discard), KV(30, hints[1].cache),
+      KV(19, src[1]), KV(28, hints[1].cache), KV(30, hints[1].discard),
       KV(32, 1), KV(35, slot), KV(46, cond)};
    return agx3_bind_compose(enc, "fcmp", 0, base, 5, ov, 9, out, len);
 }
@@ -297,7 +297,7 @@ agx3_cf_fcmp_reg_abs(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
    struct agx3_field_kv ov[16] = {
       KV(2, src[0]), KV(11, hints[0].cache), KV(13, hints[0].discard),
       KV(14, abs[0]),
-      KV(19, src[1]), KV(28, hints[1].discard), KV(30, hints[1].cache),
+      KV(19, src[1]), KV(28, hints[1].cache), KV(30, hints[1].discard),
       KV(31, abs[1]),
       KV(35, slot), KV(46, cond),
    };

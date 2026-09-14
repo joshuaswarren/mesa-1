@@ -9,6 +9,7 @@
  */
 
 #include "agx3_cf_core.h"
+#include "agx3_binder.h"
 #include "agx3_cf_core_vectors.c"
 
 #include "util/macros.h"
@@ -220,16 +221,52 @@ test_float_zero_compare(void)
    }
 }
 
+/* metal-nt -arch applegpu_g17p: `if (x < y)` over two loaded floats. */
+static void
+test_float_second_source_lifetime(void)
+{
+   /* The second source's cache is f28 and its discard f30: y live, then y
+    * dead. */
+   static const struct {
+      bool live1;
+      uint16_t src[2];
+      const char *bytes;
+   } f32_rows[] = {
+      {true,  {4, 2}, "0a052a8303c0"},
+      {false, {2, 4}, "0a033a0503c0"},
+   };
+   for (unsigned i = 0; i < 2; ++i) {
+      const struct agx3_field_kv base[] = {
+         {9, 2}, {10, 2}, {26, 2}, {27, 2}};
+      const struct agx3_field_kv ov[] = {
+         {2, f32_rows[i].src[0]}, {13, 1}, {19, f32_rows[i].src[1]},
+         {28, f32_rows[i].live1}, {30, !f32_rows[i].live1}, {43, 1},
+         {46, AGX3_CF_FCOND_LT}};
+      uint8_t out[AGX3_CF_MAX_LENGTH];
+      uint8_t len = 0;
+      const bool ok = agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "fcmp", 0,
+                                        base, 4, ov, 7, out, &len);
+      checks++;
+      if (!ok || !hex_is(out, len, f32_rows[i].bytes)) {
+         fprintf(stderr, "FAIL f32 second-source lifetime %u\n", i);
+         failures++;
+      }
+   }
+}
+
 static void
 test_float_negated_register_compare(void)
 {
    const uint16_t src[] = {0, 2};
    const bool left[] = {true, false};
    const bool right[] = {false, true};
+   /* The second source's cache is f28 and its discard f30. Both specimens
+    * keep the compare's left operand live and let its right operand die; the
+    * negated-left one swaps the operands, and their lifetimes, first. */
    const struct agx3_cf_source_hints discard[] = {
-      {false,true},{false,true}};
+      {true,false},{false,true}};
    const struct agx3_cf_source_hints cache[] = {
-      {true,false},{true,false}};
+      {true,false},{false,true}};
    const uint8_t native_left[] = {0x0a,0x03,0x2a,0x81,0x02,0x28};
    const uint8_t native_right[] = {0x0a,0x81,0x32,0x03,0x03,0x28};
    uint8_t out[AGX3_CF_MAX_LENGTH];
@@ -280,7 +317,7 @@ test_float_absolute_register_compare(void)
    };
 
    const uint16_t src[] = {0, 2};
-   const struct agx3_cf_source_hints hints[] = {{false, true}, {true, false}};
+   const struct agx3_cf_source_hints hints[] = {{false, true}, {false, true}};
    for (unsigned i = 0; i < sizeof(rows)/sizeof(rows[0]); ++i) {
       const bool abs[] = {rows[i].abs0, rows[i].abs1};
       uint8_t out[AGX3_CF_MAX_LENGTH];
@@ -490,6 +527,7 @@ main(void)
 {
    test_float_minifloat_compare();
    test_float_zero_compare();
+   test_float_second_source_lifetime();
    test_float_negated_register_compare();
    test_float_absolute_register_compare();
    test_half_float_zero_compare();
