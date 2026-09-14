@@ -69,8 +69,18 @@ main(void)
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1 ||
           i == LIBAGX_CONDITIONAL_RENDER ||
+          i == LIBAGX_DRAW_WITHOUT_ADJ ||
+          (i >= LIBAGX_UNROLL_RESTART_0 &&
+           i <= LIBAGX_UNROLL_RESTART_10) ||
+          i == LIBAGX_GS_SETUP_INDIRECT ||
+          i == LIBAGX_PREFIX_SUM_GEOM ||
+          (i >= LIBAGX_PREFIX_SUM_TESS_0 &&
+           i <= LIBAGX_PREFIX_SUM_TESS_1) ||
+          i == LIBAGX_INCREMENT_STATISTIC ||
+          i == LIBAGX_TESS_SETUP_INDIRECT ||
           i == LIBAGX_TESS_SETUP_INDIRECT_HW ||
-          i == LIBAGX_TESS_FACTORS_HALF)
+          i == LIBAGX_TESS_FACTORS_HALF ||
+          (i >= LIBAGX_TESS_ISOLINE_0 && i <= LIBAGX_TESS_QUAD_1))
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
