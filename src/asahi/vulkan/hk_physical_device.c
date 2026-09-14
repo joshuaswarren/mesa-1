@@ -607,9 +607,8 @@ hk_get_device_features(
          dev->chip != AGX_CHIP_G17P,
 
       /* VK_EXT_extended_dynamic_state3 */
-      /* Keep G17P states behind their actual native path: no tessellation or
-       * rasterization streams, no multisample locations, and polygon-point
-       * fill remains unproven. */
+      /* Keep G17P states behind their actual native path: no tessellation
+       * domain origin or rasterization streams. */
       .extendedDynamicState3TessellationDomainOrigin =
          dev->chip != AGX_CHIP_G17P,
       .extendedDynamicState3DepthClampEnable = true,
@@ -627,8 +626,7 @@ hk_get_device_features(
       .extendedDynamicState3ConservativeRasterizationMode = false,
       .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
       .extendedDynamicState3DepthClipEnable = true,
-      .extendedDynamicState3SampleLocationsEnable =
-         dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState3SampleLocationsEnable = true,
       .extendedDynamicState3ColorBlendAdvanced = false,
       .extendedDynamicState3ProvokingVertexMode = true,
       .extendedDynamicState3LineRasterizationMode = true,
