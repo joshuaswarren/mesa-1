@@ -5929,6 +5929,12 @@ struct agx3_g17p_mrt_protocol {
    /* Number of leading stores carrying lstcol f13. */
    uint8_t f13_stores;
    uint16_t offsets[AGX_MAX_RTS];
+   /* The logical colour attachment occupying each offset. An inactive
+    * attachment compacts the physical layout but keeps every other
+    * attachment's identity, and a fragment selects its synchronization
+    * classes from that identity rather than from its position among the
+    * written targets. */
+   uint8_t targets[AGX_MAX_RTS];
    uint8_t loads[AGX_MAX_RTS];
    uint8_t stores[AGX_MAX_RTS];
 };
@@ -6175,10 +6181,16 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       if (i == p.count) {
          if (partitions || p.count == ARRAY_SIZE(p.offsets))
             return (struct agx3_g17p_mrt_protocol){0};
+         p.targets[p.count] = I->colour_target;
          p.offsets[p.count++] = I->pixel_offset;
+      } else if (p.targets[i] != I->colour_target) {
+         return (struct agx3_g17p_mrt_protocol){0};
       }
    }
-   if (p.count < 2)
+   /* A lone attachment that is not attachment zero is still a multi-target
+    * layout: it owns its own class, not class pair zero.
+    * g17p-sparse-mrt.h's fragment-8-active-mask04 is exactly that shape. */
+   if (!p.count || (p.count == 1 && p.targets[0] == 0))
       return (struct agx3_g17p_mrt_protocol){0};
 
    for (unsigned i = 0; i < p.count; ++i) {
@@ -6187,6 +6199,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
             const uint16_t tmp = p.offsets[i];
             p.offsets[i] = p.offsets[j];
             p.offsets[j] = tmp;
+            const uint8_t target = p.targets[i];
+            p.targets[i] = p.targets[j];
+            p.targets[j] = target;
          }
       }
    }
@@ -6247,7 +6262,13 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    p.multisample_combined = p.multisample;
    for (int i = p.count - 1; i >= 0; --i) {
       p.multisample_combined &= p.stores[i] != 0;
-      const unsigned pair = agx3_g17p_mrt_class_pair(i);
+      /* `partitions` already enumerates every framebuffer attachment, so its
+       * ordinal is the identity; otherwise the attachment names itself.
+       * g17p-sparse-mrt.h's six native oracles all disagree with the ordinal:
+       * an eight-slot fragment writing only targets 1 and 3 uses classes
+       * {1, 3}, not {0, 1}. */
+      const unsigned pair = agx3_g17p_mrt_class_pair(
+         partitions ? i : p.targets[i]);
       uint32_t read_class, write_class, combined_class;
       if ((p.stores[i] != 1 && !(partitions && !p.stores[i] && !p.loads[i])) ||
           !agx3_pixel_colour_partition_classes(

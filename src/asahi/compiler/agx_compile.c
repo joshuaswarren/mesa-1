@@ -996,7 +996,8 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
    return agx_st_tile(b, collected, agx_src_index(&instr->src[1]), coords,
                       format, (nr_packed && format == AGX_FORMAT_RGB10A2) ? 1 :
                          nir_intrinsic_write_mask(instr),
-                      nir_intrinsic_base(instr), explicit);
+                      nir_intrinsic_base(instr), explicit,
+                      nir_intrinsic_target(instr));
 }
 
 /* Stage one G17P depth/stencil word, whose low nibble selects every sample
@@ -1188,7 +1189,8 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
          return false;
       agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
       agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
-                    format, 1, nir_intrinsic_base(instr), false);
+                    format, 1, nir_intrinsic_base(instr), false,
+                    nir_intrinsic_target(instr));
       agx_unpack_rgb10a2_agx3_to(b, dest, packed);
       agx_emit_cached_split(b, dest, 4);
       return true;
@@ -1210,7 +1212,8 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
    agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
    packed.channels_m1 = loaded_channels - 1;
    agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(), format,
-                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
+                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false,
+                  nir_intrinsic_target(instr));
 
    agx_index halves[4] = {agx_null()};
    agx_emit_split(b, halves, packed, loaded_channels);
@@ -1233,7 +1236,8 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
       return;
 
    agx_ld_tile_to(b, dest, agx_src_index(&instr->src[0]), agx_null(), format,
-                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
+                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false,
+                  nir_intrinsic_target(instr));
    agx_emit_cached_split(b, dest, nr_comps);
 }
 
@@ -6072,8 +6076,15 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       written |= BITFIELD64_BIT(stores[i]->pixel_offset);
    }
    const bool subset = partitions && written != partitions;
+   /* Without a partition key the attachment names itself, and a lone store to
+    * an attachment other than zero is still a multi-target layout: it owns
+    * its own class rather than class pair zero
+    * (g17p-sparse-mrt.h, fragment-8-active-mask04). */
+   const bool lone_sparse_store =
+      !partitions && store_count == 1 && stores[0]->colour_target != 0;
    if (!stop || (partitions && (written & ~partitions)) ||
-       store_count < (subset && written != BITFIELD64_BIT(0) ? 1 : 2) ||
+       (!lone_sparse_store &&
+        store_count < (subset && written != BITFIELD64_BIT(0) ? 1 : 2)) ||
        ((subset || multisample_stores) && load_count) ||
        (depth_ops && (depth_ops != 3 || load_count)))
       return false;
