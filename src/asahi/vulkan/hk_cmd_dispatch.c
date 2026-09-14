@@ -712,10 +712,18 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
        !prog->info.main_size || !prog->info.nr_gprs ||
        prog->info.nr_preamble_gprs || prog->info.rodata.size_16 ||
        !prog->info.agx3_staging_known ||
-       !data || !data_size || data_size > UINT16_MAX * 2u ||
+       !data || !data_size ||
        prog->entry_offset > UINT64_MAX - prog->ptr ||
        prog->b.workgroup.x == 0 || prog->b.workgroup.y == 0 ||
        prog->b.workgroup.z == 0 || agx_is_indirect(grid)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+
+   uint32_t uploaded_size;
+   uint16_t uniform_size_halfs;
+   if (!hk_agx3_g17p_precompiled_data_layout(
+          data_size, &uploaded_size, &uniform_size_halfs)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -729,15 +737,21 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    if (!cs)
       return;
 
-   const uint64_t uploaded_data = hk_pool_upload(cmd, data, data_size, 4);
-   if (!uploaded_data) {
+   /* G17P Ioto resource loads operate on whole dwords.  Precompiled argument
+    * structs are packed and may end in a 16-bit member (copy-query is 50
+    * bytes), so give the final load a zeroed padding half instead of refusing
+    * an otherwise valid dispatch.  The shader never addresses the padding. */
+   struct agx_ptr uploaded = hk_pool_alloc(cmd, uploaded_size, 4);
+   if (!uploaded.cpu) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
       return;
    }
+   memcpy(uploaded.cpu, data, data_size);
+   memset((uint8_t *)uploaded.cpu + data_size, 0, uploaded_size - data_size);
    const struct agx3_ioto_uniform_range range = {
       .start_halfs = 0,
-      .size_halfs = DIV_ROUND_UP(data_size, 2),
-      .address = uploaded_data,
+      .size_halfs = uniform_size_halfs,
+      .address = uploaded.gpu,
    };
    struct agx3_cdm_direct_template_sources launch_sources;
    if (!agx3_cdm_direct_template_sources_compute(false, false, false,
@@ -749,7 +763,7 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    uint64_t program_va;
    struct hk_agx3_g17p_compute_program program;
    if (!hk_g17p_build_compute_program_raw(
-          cmd, (uint32_t)idx, (uint32_t)data_size,
+          cmd, (uint32_t)idx, uploaded_size,
           prog->ptr + prog->entry_offset,
           prog->info.main_size, 0,
           prog->info.nr_gprs, true,

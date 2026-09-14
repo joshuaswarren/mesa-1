@@ -28,6 +28,34 @@ static unsigned checks;
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
+static int
+test_g17p_precompiled_data_layout(void)
+{
+   uint32_t upload = 0;
+   uint16_t halfs = 0;
+
+   CHECK(hk_agx3_g17p_precompiled_data_layout(1, &upload, &halfs));
+   CHECK(upload == 4 && halfs == 2);
+   CHECK(hk_agx3_g17p_precompiled_data_layout(4, &upload, &halfs));
+   CHECK(upload == 4 && halfs == 2);
+   CHECK(hk_agx3_g17p_precompiled_data_layout(50, &upload, &halfs));
+   CHECK(upload == 52 && halfs == 26);
+   CHECK(hk_agx3_g17p_precompiled_data_layout(
+      (UINT16_MAX - 1u) * 2u, &upload, &halfs));
+   CHECK(upload == (UINT16_MAX - 1u) * 2u && halfs == UINT16_MAX - 1u);
+
+   upload = 17;
+   halfs = 19;
+   CHECK(!hk_agx3_g17p_precompiled_data_layout(0, &upload, &halfs));
+   CHECK(upload == 17 && halfs == 19);
+   CHECK(!hk_agx3_g17p_precompiled_data_layout(
+      (UINT16_MAX - 1u) * 2u + 1u, &upload, &halfs));
+   CHECK(upload == 17 && halfs == 19);
+   CHECK(!hk_agx3_g17p_precompiled_data_layout(4, NULL, &halfs));
+   CHECK(!hk_agx3_g17p_precompiled_data_layout(4, &upload, NULL));
+   return 0;
+}
+
 static const enum agx_chip targets[] = {
    AGX_CHIP_G15G, AGX_CHIP_G15S, AGX_CHIP_G15C, AGX_CHIP_G15D,
    AGX_CHIP_G16G, AGX_CHIP_G16S, AGX_CHIP_G16C, AGX_CHIP_G17P,
@@ -2954,7 +2982,8 @@ test_stk_advanced_pipeline_framebuffers(void)
 int
 main(void)
 {
-   if (test_coverage_initial_pixel_dependencies() ||
+   if (test_g17p_precompiled_data_layout() ||
+       test_coverage_initial_pixel_dependencies() ||
        test_g17p_precompiled_fill_program() || test_exact_target_order() || test_terminal_suffix_modes() ||
        test_fail_closed() || test_g17s_minimal_compute_admission() ||
        test_g17p_dynamic_compute_program() ||

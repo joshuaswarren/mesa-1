@@ -704,6 +704,24 @@ hk_agx3_g17p_compute_program_generate(
 }
 
 bool
+hk_agx3_g17p_precompiled_data_layout(size_t data_size_B,
+                                     uint32_t *upload_size_B,
+                                     uint16_t *uniform_size_halfs)
+{
+   /* The uniform-range ABI counts 16-bit halves, but G17P can only load an
+    * even number of them.  Leave one even half below UINT16_MAX so rounding
+    * a packed argument block up to a dword cannot wrap the field. */
+   if (!upload_size_B || !uniform_size_halfs || data_size_B == 0 ||
+       data_size_B > (UINT16_MAX - 1u) * 2u)
+      return false;
+
+   const uint32_t aligned = ((uint32_t)data_size_B + 3u) & ~3u;
+   *upload_size_B = aligned;
+   *uniform_size_halfs = aligned / 2u;
+   return true;
+}
+
+bool
 hk_agx3_g17p_compute_program_relocate_single_range_to(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    const struct agx3_ioto_uniform_range *template_range,
