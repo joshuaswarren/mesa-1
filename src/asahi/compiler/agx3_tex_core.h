@@ -360,9 +360,11 @@ bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
                                    uint8_t slot, bool cache, bool discard,
                                    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
-/* PACK_IMGWIR publishes an image write's layer register to staging half 6,
- * with the same operand fields as PACK_SMPIR's array layer. */
+/* PACK_IMGWIR publishes an image write's layer register to staging half
+ * `dest` (6 in bank 0), with the same operand fields as PACK_SMPIR's array
+ * layer. */
 bool agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
+                                      uint16_t dest,
                                       uint8_t slot, uint16_t wait_mask,
                                       bool src_cache, bool src_discard,
                                       uint8_t out[AGX3_TEX_MAX_LENGTH],
@@ -514,6 +516,10 @@ enum agx3_image_write_dim {
 
 struct agx3_image_write_desc {
    uint16_t wait_mask;
+   /* Staging half of the first coordinate (f5), a multiple of 8, and the
+    * slot this imgwci signals when done (f12); a zero slot means slot 1. */
+   uint16_t staging_bank;
+   uint8_t result_slot;
    enum agx3_tex_operand_kind image_kind;
    uint16_t image_value;
    bool image_kill;

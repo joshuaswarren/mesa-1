@@ -1094,14 +1094,77 @@ agx3_tex_plain_uniform64(agx_index index)
  * and 3D fetches keep the independently witnessed staging slot 2/result slot
  * 1 pair. G17P 3D reads publish their third integer coordinate in the next
  * staging word; every other texture axis remains a deliberate refusal. */
-/* Coordinate banks published by earlier staged reads in the current
- * scoreboard window, with the result slot of the read that consumes each. */
-struct agx3_fetch_banks {
+/* Image-write banks stay below this staging half, which also keeps every
+ * staged half within the COPY destination field. */
+#define AGX3_STAGED_WRITE_LIMIT 128u
+
+/* Staging banks held by asynchronous consumers still in flight: staged reads
+ * and image writes. A bank stays held until the slot its consumer signals is
+ * synchronised. */
+struct agx3_staging_banks {
    struct {
       uint16_t coord, span;
       uint8_t slot;
-   } live[2];
+   } live[8];
+   uint16_t end;
+   uint8_t next_write_slot;
 };
+
+static void
+agx3_staging_release(struct agx3_staging_banks *banks, uint16_t outstanding)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
+      if (banks->live[i].slot &&
+          !(outstanding & (1u << (banks->live[i].slot - 1))))
+         banks->live[i].slot = 0;
+   }
+}
+
+/* The slots of held banks overlapping [start, start + span). */
+static uint16_t
+agx3_staging_conflicts(const struct agx3_staging_banks *banks, unsigned start,
+                       unsigned span)
+{
+   uint16_t conflict = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
+      if (banks->live[i].slot && banks->live[i].coord < start + span &&
+          start < banks->live[i].coord + banks->live[i].span)
+         conflict |= (uint16_t)(1u << (banks->live[i].slot - 1));
+   }
+   return conflict;
+}
+
+/* Every slot holding a bank. */
+static uint16_t
+agx3_staging_held(const struct agx3_staging_banks *banks)
+{
+   return agx3_staging_conflicts(banks, 0, UINT16_MAX);
+}
+
+static void
+agx3_staging_forget(struct agx3_staging_banks *banks, uint16_t slots)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
+      if (banks->live[i].slot && (slots & (1u << (banks->live[i].slot - 1))))
+         banks->live[i].slot = 0;
+   }
+}
+
+static bool
+agx3_staging_hold(struct agx3_staging_banks *banks, uint16_t coord,
+                  uint16_t span, uint8_t slot)
+{
+   banks->end = MAX2(banks->end, coord + span);
+   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
+      if (!banks->live[i].slot) {
+         banks->live[i].coord = coord;
+         banks->live[i].span = span;
+         banks->live[i].slot = slot;
+         return true;
+      }
+   }
+   return false;
+}
 
 static bool
 agx3_emit_texture_fetch(struct util_dynarray *emission,
@@ -1109,7 +1172,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
                         uint8_t slot, uint16_t wait_mask, bool final,
                         bool stage_coordinates, bool separate_write_coords,
                         uint16_t ms_array_scratch,
-                        struct agx3_fetch_banks *banks, uint16_t outstanding,
+                        struct agx3_staging_banks *banks,
+                        uint16_t outstanding,
                         uint16_t *staged_end)
 {
    const bool immediate = I->nr_srcs == 6 &&
@@ -1209,24 +1273,15 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    uint16_t staging_coord = staging_base;
    uint16_t bank_retire = 0;
    if (stage_coordinates && banks) {
-      for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-         if (banks->live[i].slot &&
-             !(outstanding & (1u << (banks->live[i].slot - 1))))
-            banks->live[i].slot = 0;
-      }
+      agx3_staging_release(banks, outstanding);
 
       /* A read with PACK_SMPIR operands occupies halves 0..bank_span. */
       const uint16_t first = plain_bank ? staging_base : 0;
       bool placed = false;
       for (unsigned c = 0; c < (plain_bank ? 2u : 1u) && !placed; ++c) {
          const uint16_t start = first + 8 * c;
-         uint16_t conflict = 0;
-         for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-            if (banks->live[i].slot &&
-                banks->live[i].coord < start + bank_span &&
-                start < banks->live[i].coord + banks->live[i].span)
-               conflict |= (uint16_t)(1u << (banks->live[i].slot - 1));
-         }
+         const uint16_t conflict = agx3_staging_conflicts(
+            banks, plain_bank ? start : 0, bank_span);
          if (c == 0)
             bank_retire = conflict;
          if (!conflict) {
@@ -1234,12 +1289,10 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
             placed = true;
          }
       }
-      if (placed) {
+      if (placed)
          bank_retire = 0;
-      } else {
-         for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i)
-            banks->live[i].slot = 0;
-      }
+      else
+         agx3_staging_forget(banks, bank_retire);
    }
    if (bank_retire && !agx3_retire_slots_noop(emission, enc, bank_retire))
       return false;
@@ -1337,16 +1390,10 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       }
    }
 
-   if (stage_coordinates && banks) {
-      for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-         if (!banks->live[i].slot) {
-            banks->live[i].coord = plain_bank ? staging_coord : 0;
-            banks->live[i].span = bank_span;
-            banks->live[i].slot = slot;
-            break;
-         }
-      }
-   }
+   if (stage_coordinates && banks &&
+       !agx3_staging_hold(banks, plain_bank ? staging_coord : 0, bank_span,
+                          slot))
+      return false;
 
    const struct agx3_tex_fetch_desc d = {
       .dest = I->dest[0].value,
@@ -1392,7 +1439,9 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
 static bool
 agx3_emit_storage_image_write(struct util_dynarray *emission,
                               enum agx_isa_encoding enc, const agx_instr *I,
-                              uint16_t wait_mask)
+                              uint16_t wait_mask,
+                              struct agx3_staging_banks *banks,
+                              uint16_t bank_floor, uint16_t *outstanding)
 {
    const bool normalized = I->format == AGX_FORMAT_U8NORM ||
                            I->format == AGX_FORMAT_RGB10A2;
@@ -1451,6 +1500,74 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       return false;
    }
 
+   /* imgwci consumes its staging bank asynchronously and signals its f12
+    * slot when done, like any producer. A later COPY into a bank whose write
+    * is still in flight can replace that write's coordinates or data first,
+    * so a bank stays held until its write's slot is synchronised.
+    *
+    * metal-nt -arch applegpu_g17p, writes to array<texture2d<int,
+    * access::write>, N> with no wait between them: six conditional scalar
+    * writes stage f5 0/8/16/24/32/40 on slots 1..6, three unconditional RGBA
+    * writes f5 0/16/32, and two computed-index writes f5 0 on slot 1 and f5
+    * 16 on slot 2. After a texture read, two conditional writes stage f5 16
+    * and 24, clear of the read's bank. Forty unconditional writes reuse a
+    * bank only once its imgwci's slot has been waited.
+    *
+    * The resolved-PBE forms below keep their witnessed bank 0 and slot 1. */
+   const unsigned bank_span = 16;
+   uint16_t bank = 0;
+   uint8_t slot = 1;
+   if (banks) {
+      agx3_staging_release(banks, *outstanding);
+
+      uint16_t retire = 0;
+      bool placed = false;
+      for (unsigned start = heap_state ? bank_floor : 0;
+           start + bank_span <= AGX3_STAGED_WRITE_LIMIT && !placed &&
+           (heap_state || start == 0);
+           start += 8) {
+         if (!agx3_staging_conflicts(banks, start, bank_span)) {
+            bank = start;
+            placed = true;
+         }
+      }
+      if (!placed) {
+         bank = heap_state ? bank_floor : 0;
+         retire |= agx3_staging_conflicts(banks, bank, bank_span);
+      }
+
+      /* Stage on a slot no unrelated producer holds, rotating so writes in
+       * flight together use different slots. */
+      const uint16_t busy = *outstanding & (uint16_t)~(wait_mask | retire);
+      if (heap_state) {
+         slot = 0;
+         for (unsigned i = 0; i < 6 && !slot; ++i) {
+            const uint8_t s = (uint8_t)((banks->next_write_slot + i) % 6 + 1);
+            if (!(busy & (1u << (s - 1))))
+               slot = s;
+         }
+         if (!slot) {
+            slot = (uint8_t)(banks->next_write_slot % 6 + 1);
+            retire |= 1u << (slot - 1);
+         }
+         banks->next_write_slot = slot % 6;
+      } else if (busy & 1u) {
+         retire |= 1u;
+      }
+
+      if (retire) {
+         if (!agx3_retire_slots_noop(emission, enc, retire))
+            return false;
+         *outstanding &= (uint16_t)~retire;
+         agx3_staging_forget(banks, retire);
+      }
+      /* The write's own slot also names the bank it now holds. */
+      agx3_staging_forget(banks, 1u << (slot - 1));
+      if (!agx3_staging_hold(banks, bank, bank_span, slot))
+         return false;
+      *outstanding |= 1u << (slot - 1);
+   }
+
    struct util_dynarray staged;
    util_dynarray_init(&staged, NULL);
    uint8_t coord_bytes[AGX3_STAGE_MAX_LENGTH], coord_len = 0;
@@ -1458,28 +1575,32 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    /* A 3D write stages z at half 4 and an array write packs its layer at
     * half 6, moving the data lanes out of the way: metal-nt -arch
     * applegpu_g17p COPYs texture3d data to halves 8/10/12/14 and
-    * texture2d_array data to halves 4/10/12/14. */
+    * texture2d_array data to halves 4/10/12/14. A bank offsets every half:
+    * the second of two texture2d_array writes stages data at 20/26/28/30
+    * with f5=16. */
    const uint16_t data_dest[4] = {
-      three_d ? 8 : 4, array || three_d ? 10 : 6, 12, 14,
+      bank + (three_d ? 8 : 4), bank + (array || three_d ? 10 : 6),
+      bank + 12, bank + 14,
    };
-   /* imgwci consumes integer coordinates from staging halves 0 and 2. Native
-    * texture/image kernels publish ordinary GPR coordinates with COPY on the
-    * same slot the instruction waits for. Keeping the source retained also
-    * matches the native write kernel, whose address calculation may reuse it. */
-   if (!agx3_stage_copy_source(enc, 0, I->src[1].value, false, 1, 0,
+   /* imgwci consumes integer coordinates from the first two halves of its
+    * bank. Native texture/image kernels publish ordinary GPR coordinates
+    * with COPY on the same slot the instruction waits for. Keeping the source
+    * retained also matches the native write kernel, whose address
+    * calculation may reuse it. */
+   if (!agx3_stage_copy_source(enc, bank, I->src[1].value, false, slot, 0,
                                coord_bytes, &coord_len) ||
        !agx3_append(&staged, coord_bytes, coord_len) ||
-       !agx3_stage_copy_source(enc, 2, I->src[1].value + 2, false, 1, 0,
-                               coord_bytes, &coord_len) ||
+       !agx3_stage_copy_source(enc, bank + 2, I->src[1].value + 2, false,
+                               slot, 0, coord_bytes, &coord_len) ||
        !agx3_append(&staged, coord_bytes, coord_len) ||
        (three_d &&
-        (!agx3_stage_copy_source(enc, 4, I->src[1].value + 4, false, 1, 0,
-                                 coord_bytes, &coord_len) ||
+        (!agx3_stage_copy_source(enc, bank + 4, I->src[1].value + 4, false,
+                                 slot, 0, coord_bytes, &coord_len) ||
          !agx3_append(&staged, coord_bytes, coord_len))) ||
        (array &&
-        (!agx3_tex_stage_image_write_layer(enc, I->src[1].value + 4, 1, 0,
-                                           false, false, layer_bytes,
-                                           &layer_len) ||
+        (!agx3_tex_stage_image_write_layer(enc, I->src[1].value + 4,
+                                           bank + 6, slot, 0, false, false,
+                                           layer_bytes, &layer_len) ||
          !agx3_append(&staged, layer_bytes, layer_len)))) {
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G17P imgwci coordinate compose refusal\n");
@@ -1490,7 +1611,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
       if (!agx3_stage_copy_source(enc, data_dest[c],
                                   I->src[0].value + 2 * c,
-                                  I->src[0].discard, 1,
+                                  I->src[0].discard, slot,
                                   c == 0 ? wait_mask : 0,
                                   bytes, &len) ||
           !agx3_append(&staged, bytes, len)) {
@@ -1503,6 +1624,8 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH], imgwci_len = 0;
    const struct agx3_image_write_desc d = {
       .wait_mask = wait_mask,
+      .staging_bank = bank,
+      .result_slot = slot,
       .image_kind = heap_state ? AGX3_TEX_OPERAND_REGISTER :
                                  AGX3_TEX_OPERAND_IMMEDIATE,
       .image_value = I->src[4].value,
@@ -1514,9 +1637,9 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
    };
    bool encoded;
    if (heap_state) {
-      /* Consume the slot1 COPYs, as the resolved PBE form below does. */
+      /* Consume this write's COPYs, as the resolved PBE form below does. */
       encoded = agx3_tex_encode_image_write_2d(
-         enc, &d, I->src[3].value, 1, imgwci, &imgwci_len);
+         enc, &d, I->src[3].value, slot, imgwci, &imgwci_len);
    } else if (immediate_state && I->src[4].value == 1 && !normalized) {
       /* Hk's mixed indexed-read/R32-write table contains texture and sampler
        * heap pointers followed by one resolved PBE pointer at uniform half8.
@@ -6842,7 +6965,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * whichever family comes first and leaves the other family's first op
     * unmarked; restarting here corrupts the coefficient-fetch protocol. */
    bool fragment_input_started = false;
-   struct agx3_fetch_banks fetch_banks = {0};
+   struct agx3_staging_banks staging_banks = {0};
+   /* Samples stage fixed halves 0..19 and a fragment's late depth test and
+    * coverage update stage halves 0..3, all without a bank allocator. Keep
+    * image-write banks clear of both. */
+   const uint16_t image_write_bank_floor =
+      texture_samples_left ? 24
+      : (ctx->stage == MESA_SHADER_FRAGMENT &&
+         (has_coverage_write || has_zs_emit)) ? 8
+                                              : 0;
    if (has_coverage_write && enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies) {
@@ -7253,7 +7384,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_emit_texture_fetch(emission, enc, I, slot, fetch_wait,
                                          final, staged, separate_write_coords,
                                          ms_array_scratch,
-                                         staged_bank_reads ? &fetch_banks
+                                         staged_bank_reads ? &staging_banks
                                                            : NULL,
                                          outstanding_here, &staged_end))
                AGX3_REFUSE(I);
@@ -7270,9 +7401,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_IMAGE_WRITE) {
-            if (!agx3_emit_storage_image_write(emission, enc, I, wait))
+            if (!agx3_emit_storage_image_write(emission, enc, I, wait,
+                                               &staging_banks,
+                                               image_write_bank_floor,
+                                               &outstanding))
                AGX3_REFUSE(I);
-            ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 16);
+            ctx->agx3_staging_halfs =
+               MAX2(ctx->agx3_staging_halfs, MAX2(staging_banks.end, 16));
             continue;
          }
 

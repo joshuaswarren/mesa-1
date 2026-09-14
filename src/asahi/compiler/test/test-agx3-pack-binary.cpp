@@ -13982,6 +13982,96 @@ TEST_F(AGX3PackBinary, StorageImageGprIndexMatchesNative)
    EXPECT_EQ(memcmp(bytes, live, sizeof(live)), 0);
 }
 
+TEST_F(AGX3PackBinary, StorageImageBankAndSlotMatchNative)
+{
+   /* metal-nt -arch applegpu_g17p, two writes to array<texture2d<int,
+    * access::write>, 4> at computed GPR indices: the first stages bank 0,
+    * waits for its COPYs on slot 2 and signals slot 1; the second stages
+    * bank 16, waits slot 4 and signals slot 2. */
+   struct agx3_image_write_desc d = {
+      .staging_bank = 0,
+      .result_slot = 1,
+      .image_kind = AGX3_TEX_OPERAND_REGISTER,
+      .image_value = 2,
+      .image_kill = true,
+   };
+   uint8_t bytes[AGX3_IMAGE_WRITE_LENGTH], len = 0;
+   static const uint8_t first[AGX3_IMAGE_WRITE_LENGTH] = {
+      0xd7, 0x20, 0x54, 0x00, 0x00, 0x40, 0x00, 0x02,
+      0x21, 0x04, 0x00, 0x00, 0x88, 0x1a, 0x89, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_encode_image_write_2d(
+      AGX_ISA_ENCODING_AGX3B, &d, 0, 2, bytes, &len));
+   ASSERT_EQ(len, sizeof(first));
+   EXPECT_EQ(memcmp(bytes, first, sizeof(first)), 0);
+
+   static const uint8_t second[AGX3_IMAGE_WRITE_LENGTH] = {
+      0xd7, 0x80, 0x54, 0x10, 0x00, 0x40, 0x00, 0x00,
+      0x21, 0x04, 0x00, 0x00, 0x89, 0x1a, 0x89, 0x00,
+   };
+   d.staging_bank = 16;
+   d.result_slot = 2;
+   d.image_value = 0;
+   ASSERT_TRUE(agx3_tex_encode_image_write_2d(
+      AGX_ISA_ENCODING_AGX3B, &d, 0, 4, bytes, &len));
+   ASSERT_EQ(len, sizeof(second));
+   EXPECT_EQ(memcmp(bytes, second, sizeof(second)), 0);
+}
+
+TEST_F(AGX3PackBinary, InFlightStorageImageWritesUseDisjointBanks)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   const agx_index heap = agx_uniform(20, AGX_SIZE_64);
+   for (unsigned i = 0; i < 2; ++i) {
+      agx_index data = agx_register(8, AGX_SIZE_32);
+      data.channels_m1 = 3;
+      agx_index coord = agx_register(0, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      agx_image_write(b, data, coord, agx_immediate(0), heap,
+                      agx_register(4 + 2 * i, AGX_SIZE_32), AGX_DIM_2D,
+                      false);
+   }
+   agx_stop(b);
+
+   /* The first imgwci is still in flight, so the second stages bank 16 on
+    * slot 2 rather than restaging bank 0. */
+   std::vector<uint8_t> want;
+   for (unsigned i = 0; i < 2; ++i) {
+      const uint16_t bank = 16 * i;
+      const uint8_t slot = 1 + i;
+      uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
+      for (unsigned c = 0; c < 2; ++c) {
+         ASSERT_TRUE(agx3_stage_copy_source(enc, bank + 2 * c, 2 * c, false,
+                                            slot, 0, bytes, &len));
+         append(want, bytes, len);
+      }
+      const uint16_t data_dest[4] = {4, 6, 12, 14};
+      for (unsigned c = 0; c < 4; ++c) {
+         ASSERT_TRUE(agx3_stage_copy_source(enc, bank + data_dest[c],
+                                            8 + 2 * c, false, slot, 0,
+                                            bytes, &len));
+         append(want, bytes, len);
+      }
+      const struct agx3_image_write_desc d = {
+         .staging_bank = bank,
+         .result_slot = slot,
+         .image_kind = AGX3_TEX_OPERAND_REGISTER,
+         .image_value = (uint16_t)(4 + 2 * i),
+      };
+      uint8_t imgwci[AGX3_IMAGE_WRITE_LENGTH], imgwci_len = 0;
+      ASSERT_TRUE(agx3_tex_encode_image_write_2d(enc, &d, 20, slot, imgwci,
+                                                 &imgwci_len));
+      append(want, imgwci, imgwci_len);
+   }
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 32u);
+}
+
 TEST_F(AGX3PackBinary, StorageImageExplicitBaseAndSlotMatchHardware)
 {
    const struct agx3_image_write_desc d = {
@@ -14040,7 +14130,7 @@ TEST_F(AGX3PackBinary, LayeredStorageImageWriteMatchesNative)
       0xf0, 0xc0, 0x00, 0x00,
    };
    ASSERT_TRUE(agx3_tex_stage_image_write_layer(
-      AGX_ISA_ENCODING_AGX3B, 4, 1, 0, false, true, bytes, &len));
+      AGX_ISA_ENCODING_AGX3B, 4, 6, 1, 0, false, true, bytes, &len));
    ASSERT_EQ(len, sizeof(layer_r2));
    EXPECT_EQ(memcmp(bytes, layer_r2, sizeof(layer_r2)), 0);
 
@@ -14049,7 +14139,7 @@ TEST_F(AGX3PackBinary, LayeredStorageImageWriteMatchesNative)
       0xf0, 0xc0, 0x00, 0x00,
    };
    ASSERT_TRUE(agx3_tex_stage_image_write_layer(
-      AGX_ISA_ENCODING_AGX3B, 0, 1, 0, false, true, bytes, &len));
+      AGX_ISA_ENCODING_AGX3B, 0, 6, 1, 0, false, true, bytes, &len));
    ASSERT_EQ(len, sizeof(layer_r0));
    EXPECT_EQ(memcmp(bytes, layer_r0, sizeof(layer_r0)), 0);
 
@@ -14059,16 +14149,16 @@ TEST_F(AGX3PackBinary, LayeredStorageImageWriteMatchesNative)
       0xf0, 0xc0, 0x00, 0x00,
    };
    ASSERT_TRUE(agx3_tex_stage_image_write_layer(
-      AGX_ISA_ENCODING_AGX3B, 184, 1, 0, false, true, bytes, &len));
+      AGX_ISA_ENCODING_AGX3B, 184, 6, 1, 0, false, true, bytes, &len));
    ASSERT_EQ(len, sizeof(layer_half184));
    EXPECT_EQ(memcmp(bytes, layer_half184, sizeof(layer_half184)), 0);
 
    EXPECT_FALSE(agx3_tex_stage_image_write_layer(
-      AGX_ISA_ENCODING_AGX3B, 1, 1, 0, false, true, bytes, &len));
+      AGX_ISA_ENCODING_AGX3B, 1, 6, 1, 0, false, true, bytes, &len));
    EXPECT_FALSE(agx3_tex_stage_image_write_layer(
-      AGX_ISA_ENCODING_AGX3B, 256, 1, 0, false, true, bytes, &len));
+      AGX_ISA_ENCODING_AGX3B, 256, 6, 1, 0, false, true, bytes, &len));
    EXPECT_FALSE(agx3_tex_stage_image_write_layer(
-      AGX_ISA_ENCODING_AGX3C, 4, 1, 0, false, true, bytes, &len));
+      AGX_ISA_ENCODING_AGX3C, 4, 6, 1, 0, false, true, bytes, &len));
 
    const struct {
       enum agx3_image_write_dim dim;

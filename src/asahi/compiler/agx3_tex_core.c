@@ -810,6 +810,8 @@ agx3_tex_encode_image_write_2d(
         * the state operand moves against the immediate-state controls and f70
         * does not, and int and uint are byte-identical. */
        (reg && ((d->image_value & 1) || d->image_value > 126)) ||
+       (d->staging_bank & 7) || d->staging_bank > 8176 ||
+       d->result_slot > 6 ||
        d->dim > AGX3_IMAGE_WRITE_3D)
       return false;
 
@@ -835,8 +837,16 @@ agx3_tex_encode_image_write_2d(
     *   texture2d_array  d71054002000000000040000881a0900  (f79=4, f73=2)
     *   texture3d        d71054000040000000080000881a0900  (f72=3)
     */
-   struct agx3_field_kv fields[24] = {
-      KV(9, 5),   KV(12, 1),  KV(13, 1),   KV(24, 1), KV(38, 1),
+   /* f5 names the staging bank holding the coordinates and data, and f12
+    * the slot the write signals. metal-nt -arch applegpu_g17p gives each of
+    * six conditional writes to array<texture2d<int, access::write>, 8> its
+    * own bank and slot, f5 0/8/16/24/32/40 with f12 1..6. Forty
+    * unconditional writes stage the first three at f5 0/256/304 on slots
+    * 1/2/3 and issue all three imgwci with f12 1, each waiting its own
+    * staging slot. */
+   struct agx3_field_kv fields[25] = {
+      KV(9, 5),   KV(12, d->result_slot ? d->result_slot : 1),
+      KV(13, 1),  KV(24, 1),  KV(38, 1),
       KV(51, 1),  KV(52, 1),  KV(58 + staging_slot, 1), KV(71, 2),
       KV(72, d->dim == AGX3_IMAGE_WRITE_3D ? 3 : 1),
       KV(74, 1),  KV(85, 3),  KV(86, 3),   KV(113, 1),
@@ -844,6 +854,8 @@ agx3_tex_encode_image_write_2d(
    };
    unsigned n = 15;
    fields[n++] = (struct agx3_field_kv)KV(79, uniform_base);
+   if (d->staging_bank)
+      fields[n++] = (struct agx3_field_kv)KV(5, d->staging_bank);
    if (d->dim == AGX3_IMAGE_WRITE_2D_ARRAY)
       fields[n++] = (struct agx3_field_kv)KV(73, 2);
    if (immediate) {
@@ -1255,7 +1267,8 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
  */
 bool
 agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
-                                 uint8_t slot, uint16_t wait_mask,
+                                 uint16_t dest, uint8_t slot,
+                                 uint16_t wait_mask,
                                  bool src_cache, bool src_discard,
                                  uint8_t out[AGX3_TEX_MAX_LENGTH],
                                  uint8_t *len)
@@ -1264,16 +1277,18 @@ agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 254 || slot < 1 ||
-       slot > 6 || (wait_mask & ~0x3f) || (src_cache && src_discard))
+   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 254 ||
+       (dest & 1) || dest > 8190 || slot < 1 || slot > 6 ||
+       (wait_mask & ~0x3f) || (src_cache && src_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
    };
-   struct agx3_field_kv ov[10];
+   struct agx3_field_kv ov[11];
    unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(5, dest);
    ov[n++] = (struct agx3_field_kv)KV(16, src & 0x7f);
    ov[n++] = (struct agx3_field_kv)KV(12, slot);
    ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
