@@ -1119,6 +1119,7 @@ void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);
 void agx_ra(agx_context *ctx);
+unsigned agx3_tile_store_bank(agx_context *ctx);
 
 /* AGX3b device atomics return through their value register.  Legalize the
  * SSA three-address form before RA so the allocator can enforce that physical

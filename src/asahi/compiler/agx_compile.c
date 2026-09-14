@@ -6226,6 +6226,59 @@ agx3_merge_unread_pixel_waits(agx_context *ctx)
    return progress;
 }
 
+/* Tile stores read their payloads from a bank of GPR halves
+ * (agx3_tile_store_bank). Payloads that must be live together beyond it, such
+ * as three blended RGBA32 targets, have no register assignment: refuse the
+ * shader rather than let register allocation find none.
+ */
+static bool
+agx3_tile_store_payloads_fit(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble)
+      return true;
+
+   const unsigned bank = agx3_tile_store_bank(ctx);
+   BITSET_WORD *pending = BITSET_CALLOC(ctx->alloc);
+   BITSET_WORD *defined = BITSET_CALLOC(ctx->alloc);
+   if (!pending || !defined) {
+      free(pending);
+      free(defined);
+      return false;
+   }
+
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
+         BITSET_SET(pending, I->src[0].value);
+   }
+
+   bool fits = true;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         BITSET_SET(defined, I->dest[d].value);
+
+      if (I->op != AGX_OPCODE_ST_TILE)
+         continue;
+
+      unsigned halves = 0;
+      agx_foreach_instr_global(ctx, J) {
+         if (J->op == AGX_OPCODE_ST_TILE &&
+             J->src[0].type == AGX_INDEX_NORMAL &&
+             BITSET_TEST(pending, J->src[0].value) &&
+             BITSET_TEST(defined, J->src[0].value))
+            halves += agx_index_size_16(J->src[0]);
+      }
+      fits &= halves <= bank;
+
+      if (I->src[0].type == AGX_INDEX_NORMAL)
+         BITSET_CLEAR(pending, I->src[0].value);
+   }
+
+   free(pending);
+   free(defined);
+   return fits;
+}
+
 /* Scalar epilog inputs retain their fixed export ABI, and unlike a collect a
  * direct PRELOAD cannot be assigned into a tile store's register bank by RA:
  * the output of colour target n arrives at GPR half 8 + 8n. The grounded
@@ -6540,6 +6593,11 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx3_order_g17p_mrt_tile_ops);
    AGX_PASS(ctx, agx3_bank_scalar_tile_store_inputs);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
+
+   if (!agx3_tile_store_payloads_fit(ctx)) {
+      ralloc_free(ctx);
+      return false;
+   }
 
    AGX_PASS(ctx, agx_ra);
 

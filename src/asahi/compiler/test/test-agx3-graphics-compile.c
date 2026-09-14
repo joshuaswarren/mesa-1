@@ -1758,6 +1758,44 @@ test_g17p_unread_colour_waits(void)
    return ok;
 }
 
+/* Three blended RGBA32 targets need 24 payload halves live at their stores,
+ * but a fragment reading the tile stores from halves 0..15 only. The shader
+ * must be refused, not abort register allocation. */
+static bool
+test_g17p_blended_payloads_beyond_bank(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P three blended RGBA32 FS");
+   nir_def *values[3];
+   for (unsigned rt = 0; rt < 3; ++rt) {
+      nir_def *old = nir_load_local_pixel_agx(
+         &b, 4, 32, nir_imm_intN_t(&b, 0xff, 16), .base = 16 * rt,
+         .format = PIPE_FORMAT_R32_UINT);
+      values[rt] = nir_inot(&b, old);
+   }
+   for (unsigned rt = 0; rt < 3; ++rt) {
+      nir_store_local_pixel_agx(
+         &b, values[rt], nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+         .base = 16 * rt, .write_mask = 0xf, .format = PIPE_FORMAT_R32_UINT);
+   }
+   nir_shader *nir = fs_finish(&b);
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+      .secondary = true,
+   };
+   struct agx_shader_part part;
+   memset(&part, 0xa5, sizeof(part));
+   const struct agx_shader_part cleared = {0};
+   const bool ok = !agx_compile_shader_nir(nir, &key, &part) &&
+                   !memcmp(&part, &cleared, sizeof(part));
+   if (!ok)
+      fprintf(stderr, "G17P blend beyond the tile store bank was not refused\n");
+   ralloc_free(nir);
+   return ok;
+}
+
 static bool
 test_g17p_fragment_io_matrix(void)
 {
@@ -7699,6 +7737,7 @@ main(int argc, char **argv)
    RUN(test_g17p_half_norm8_epilog);
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_unread_colour_waits);
+   RUN(test_g17p_blended_payloads_beyond_bank);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_frag_sidefx_late_test_once);
    RUN(test_g17p_frag_sidefx_late_depth_once);
