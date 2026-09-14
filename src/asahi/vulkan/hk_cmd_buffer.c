@@ -1438,8 +1438,11 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
    /* The raster variant produced by poly_nir_lower_gs is a hardware vertex
     * program while retaining the API geometry stage in hk_shader_info.  It
     * pulls generated vertices through the root ABI rather than vertex
-    * attributes, then performs the XFB stores before rasterization. */
-   if (s->info.stage == MESA_SHADER_GEOMETRY &&
+    * attributes, then performs the XFB stores before rasterization.  The
+    * post-tessellation vertex program likewise keeps the evaluation stage and
+    * reads the control shader's outputs through the root ABI. */
+   if ((s->info.stage == MESA_SHADER_GEOMETRY ||
+        s->info.stage == MESA_SHADER_TESS_EVAL) &&
        s->b.info.stage == MESA_SHADER_VERTEX) {
       const bool ok =
          !linked->sw_indexing &&
@@ -1587,10 +1590,12 @@ hk_g17p_graphics_uniform_ranges(
       }
 
       root_uniform = uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_attribs);
-   } else if (s->info.stage == MESA_SHADER_GEOMETRY &&
+   } else if ((s->info.stage == MESA_SHADER_GEOMETRY ||
+               s->info.stage == MESA_SHADER_TESS_EVAL) &&
               s->b.info.stage == MESA_SHADER_VERTEX) {
-      /* poly's raster variant lowers its geometry parameter loads against the
-       * compute-style root at uniform zero. */
+      /* poly's raster variant lowers its geometry parameter loads, and the
+       * post-tessellation vertex program its control-shader output loads,
+       * against the compute-style root at uniform zero. */
       root_uniform = 0;
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
       if (cmd->state.gfx.uses_blend_constant) {

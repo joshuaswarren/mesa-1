@@ -323,7 +323,8 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
     * even though Honeykrisp has always launched that binary through CDM. */
    return s && linked &&
           (s->b.info.stage == MESA_SHADER_COMPUTE ||
-           s->info.stage == MESA_SHADER_GEOMETRY) &&
+           s->info.stage == MESA_SHADER_GEOMETRY ||
+           s->info.stage == MESA_SHADER_TESS_CTRL) &&
           linked->b.bo && linked->b.bo->va && linked->b.size != 0 &&
           linked->b.size <= UINT32_MAX && linked->b.nr_gprs != 0 &&
           !s->b.info.has_preamble && s->b.info.preamble_scratch_size == 0 &&

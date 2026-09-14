@@ -26,6 +26,7 @@
 #include "agx_vdm_barrier_core.h"
 #include "agx_vdm_hal200_bind_tail_core.h"
 #include "agx_vdm_hal200_direct_draw_core.h"
+#include "agx_vdm_tessellate_core.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
@@ -2675,6 +2676,141 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 }
 
+/*
+ * G17P tessellates in hardware. The vertex and tessellation control shaders
+ * still run as compute kernels, writing the control points and levels, and a
+ * kernel turns each patch's levels into the factor record the tessellator
+ * reads. The draw itself is then a native Tessellate command that runs the
+ * evaluation shader as the post-tessellation vertex program.
+ */
+static void
+hk_launch_tess_g17p(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                    struct agx_draw draw)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   struct hk_shader *vs = hk_bound_sw_vs(gfx);
+   struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
+   const struct poly_tess_params *p = gfx->tess.params;
+
+   if (agx_is_indirect(draw.b) || !p ||
+       gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES ||
+       gfx->tess.info.points) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+
+   const uint32_t patches = draw.b.count[0] / dyn->ts.patch_control_points;
+   const uint32_t unrolled = patches * draw.b.count[1];
+
+   uint64_t tcs_stat = hk_pipeline_stat_addr(
+      cmd, VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT);
+   if (hk_stat_enabled(tcs_stat)) {
+      libagx_increment_statistic(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
+                                 tcs_stat, patches);
+   }
+
+   struct agx_grid grid_tcs = draw.b;
+   grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
+
+   hk_dispatch_with_local_size(cmd, cs, vs, draw.b, agx_workgroup(64, 1, 1));
+   hk_dispatch_with_local_size(
+      cmd, cs, tcs, grid_tcs,
+      agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+
+   const bool quads = gfx->tess.info.mode == TESS_PRIMITIVE_QUADS;
+   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
+   struct agx_ptr factors = hk_pool_alloc(cmd, unrolled * record_B, 4);
+   if (!factors.cpu) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return;
+   }
+
+   libagx_tess_factors_half(cmd, agx_1d(unrolled),
+                            AGX_BARRIER_ALL | AGX_PREGFX, p->tcs_buffer,
+                            factors.gpu, p->tcs_stride_el, quads);
+
+   gfx->tess.factor_buffer = factors.gpu;
+   gfx->tess.factor_buffer_size_B = unrolled * record_B;
+   gfx->tess.patches = patches;
+   gfx->tess.instances = draw.b.count[1];
+}
+
+/*
+ * Draw the patches the pre-pass prepared: the draw-state selector when the
+ * render state was just published, the tessellator's state record, and a
+ * native Tessellate command over the factor records.
+ */
+static bool
+hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                        uint8_t *out, uint32_t draw_state_offset,
+                        bool render_state_emitted)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
+   const struct hk_tess_info info = gfx->tess.info;
+   const bool quads = info.mode == TESS_PRIMITIVE_QUADS;
+   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
+
+   /* Vulkan orders a tessellated triangle in a domain whose origin is the
+    * upper left unless the pipeline says otherwise; the tessellator's
+    * clockwise output is that default clockwise order. */
+   const bool ccw =
+      info.ccw ^
+      (dyn->ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT);
+   const struct agx_vdm_tessellation_state_info state = {
+      .partition = info.spacing == TESS_SPACING_EQUAL
+                      ? AGX_VDM_TESSELLATION_PARTITION_INTEGER
+                   : info.spacing == TESS_SPACING_FRACTIONAL_ODD
+                      ? AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD
+                      : AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN,
+      .counterclockwise = ccw,
+      .max_factor = 64,
+      .quads = quads,
+      .float_factors = false,
+      /* The factor records are unrolled per instance, instance by instance. */
+      .step = gfx->tess.instances > 1
+                 ? AGX_VDM_TESSELLATION_STEP_PER_PATCH_AND_PER_INSTANCE
+                 : AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+      .scale_half = 0x3c00,
+   };
+   const struct agx_vdm_tessellate_direct_info direct = {
+      .factor_buffer = gfx->tess.factor_buffer,
+      .patch_count = gfx->tess.patches,
+      .instance_count = gfx->tess.instances,
+      .instance_stride_word =
+         gfx->tess.instances > 1 ? (gfx->tess.patches * record_B) >> 2 : 0,
+      .factor_buffer_size_minus_one =
+         DIV_ROUND_UP(gfx->tess.factor_buffer_size_B, 4) - 1,
+   };
+
+   uint8_t state_bytes[AGX_VDM_TESSELLATION_STATE_LENGTH];
+   struct agx_vdm_tessellate_direct encoded;
+   const size_t selector_B = render_state_emitted ? sizeof(uint32_t) : 0;
+   const size_t total_B =
+      selector_B + sizeof(state_bytes) + AGX_VDM_TESSELLATE_DIRECT_LENGTH;
+   if (!gfx->tess.factor_buffer || !gfx->tess.patches ||
+       !agx_vdm_tessellation_state_pack(dev->dev.chip, &state, state_bytes) ||
+       !agx_vdm_tessellate_direct_pack(dev->dev.chip, &direct, &encoded) ||
+       (size_t)((uint8_t *)cs->end - out) < total_B) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+   }
+
+   uint8_t *cursor = out;
+   if (render_state_emitted) {
+      memcpy(cursor, &draw_state_offset, sizeof(draw_state_offset));
+      cursor += sizeof(draw_state_offset);
+   }
+   memcpy(cursor, state_bytes, sizeof(state_bytes));
+   cursor += sizeof(state_bytes);
+   memcpy(cursor, encoded.bytes, encoded.length);
+   cursor += encoded.length;
+   cs->current = cursor;
+   return true;
+}
+
 static struct agx_draw
 hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                struct agx_draw draw, uint64_t c_prims, uint64_t c_inv)
@@ -5306,6 +5442,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        */
       if (tess_args.cpu) {
          hk_upload_tess_params(cmd, tess_args.cpu, draw);
+         gfx->tess.params = tess_args.cpu;
       }
    }
 
@@ -5864,6 +6001,12 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       dev->dev.chip == AGX_CHIP_G17P && geom && !tess && !adj &&
       !*needs_idx_robust && gfx->xfb_enabled &&
       gfx->shaders[MESA_SHADER_GEOMETRY]->is_passthrough;
+   /* G17P tessellates in hardware: the evaluation shader is the bound
+    * hardware vertex program and its render state publishes exactly like an
+    * ordinary draw's. The vertex shader fetches the API indices in compute. */
+   const bool g17p_tessellation_path =
+      dev->dev.chip == AGX_CHIP_G17P && tess && !geom && !adj;
+   *needs_idx_robust &= !g17p_tessellation_path;
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 
@@ -5928,7 +6071,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    }
 
    hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
-                          ordinary_draw_path || xfb_passthrough_path,
+                          ordinary_draw_path || xfb_passthrough_path ||
+                             g17p_tessellation_path,
                           g17p_native_bind_tail_emitted);
    return cs;
 }
@@ -6172,9 +6316,10 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
              api_draw.index_buffer, api_draw.index_buffer_range_B,
              api_draw.start, api_draw.b.count[0],
              agx_index_size_to_B(api_draw.index_size), &address, &size_word));
+      /* A tessellated draw's vertex shader fetches its indices in compute,
+       * but they still have to be in range. */
       if (!valid_index_size ||
           cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
-          cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] ||
           (agx_is_indirect(draw_.b)
               ? (!draw_.b.ptr || !draw_.index_buffer ||
                  draw_.index_buffer_range_B == 0 ||
@@ -6237,7 +6382,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                       stat_c_prims, stat_c_inv);
       }
 
-      if (tess) {
+      if (tess && dev->dev.chip == AGX_CHIP_G17P) {
+         hk_launch_tess_g17p(cmd, ccs, draw);
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return;
+      } else if (tess) {
          draw = hk_launch_tess(cmd, ccs, draw, geom ? 0 : stat_c_prims,
                                geom ? 0 : stat_c_inv);
       }
@@ -6281,7 +6430,9 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       }
 
       enum agx_primitive topology = cmd->state.gfx.topology;
-      if (!agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
+      const bool g17p_tess = tess && dev->dev.chip == AGX_CHIP_G17P;
+      if (!g17p_tess &&
+          !agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -6384,7 +6535,11 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                            VK_ERROR_FEATURE_NOT_PRESENT);
                return;
             }
-            if (agx_is_indirect(draw.b)) {
+            if (tess) {
+               if (!hk_g17p_emit_tessellate(cmd, cs, out, draw_state_offset,
+                                            g17p_native_bind_tail_emitted))
+                  return;
+            } else if (agx_is_indirect(draw.b)) {
                const struct agx_vdm_hal200_indirect_draw_fields fields = {
                   .draw_state_context_offset = draw_state_offset,
                   .primitive = (uint8_t)topology,

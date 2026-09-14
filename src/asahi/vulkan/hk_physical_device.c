@@ -758,7 +758,12 @@ hk_get_device_features(
        * graphics pipeline. Keep optional feature reporting within that path
        * until the corresponding joined Ioto programs are implemented. */
       features->geometryShader = false;
-      features->tessellationShader = false;
+      /* Hardware tessellation: the vertex and control shaders run as
+       * compute, and a native Tessellate command runs the evaluation shader
+       * as the post-tessellation vertex program. Isolines and point mode
+       * have no native tessellator output yet. */
+      features->tessellationShader =
+         hk_g17p_unverified_feature("tessellation_shader");
       /* IA vertex/primitive recording, including reset/reuse/unavailable
        * handling, has passed its exact hardware oracle twice. Every applicable
        * graphics/compute counter now has a strict native helper or fragment-
