@@ -1210,10 +1210,12 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
 }
 
 /* metal-nt -arch applegpu_g17p (AIR-NT 32023.917) stages a texture2d_array
- * write's layer with PACK_IMGWIR, whose operand fields are PACK_SMPIR's:
+ * write's layer with PACK_IMGWIR, whose operand fields are PACK_SMPIR's,
+ * including the eighth source bit in bit 48:
  *
  *   t.write(v, gid.xy, gid.z), discarded r2:  9705540600081000f0c00000
  *   t.write(v, gid.xy, l), discarded r0:      9705540600001000f0c00000
+ *   layer at half 184 (90 live values):       9705540600701100f0c00000
  */
 bool
 agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
@@ -1226,7 +1228,7 @@ agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 126 || slot < 1 ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 254 || slot < 1 ||
        slot > 6 || (wait_mask & ~0x3f) || (src_cache && src_discard))
       return false;
 
@@ -1236,15 +1238,19 @@ agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
    };
    struct agx3_field_kv ov[10];
    unsigned n = 0;
-   ov[n++] = (struct agx3_field_kv)KV(16, src);
+   ov[n++] = (struct agx3_field_kv)KV(16, src & 0x7f);
    ov[n++] = (struct agx3_field_kv)KV(12, slot);
    ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
    ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
    for (unsigned i = 0; i < 6; ++i)
       if (wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
-   return agx3_bind_compose(enc, "pack_imgwir", 0, base,
-                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
+   if (!agx3_bind_compose(enc, "pack_imgwir", 0, base,
+                          sizeof(base) / sizeof(base[0]), ov, n, out, len))
+      return false;
+
+   out[6] |= (src >> 7) & 1;
+   return true;
 }
 
 /* Runtime-indexed texture2d_array and depth2d_array sample witnesses publish

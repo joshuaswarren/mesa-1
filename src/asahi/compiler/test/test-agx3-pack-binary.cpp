@@ -13717,8 +13717,20 @@ TEST_F(AGX3PackBinary, LayeredStorageImageWriteMatchesNative)
    ASSERT_EQ(len, sizeof(layer_r0));
    EXPECT_EQ(memcmp(bytes, layer_r0, sizeof(layer_r0)), 0);
 
+   /* The eighth source bit rides in bit 48, as in PACK_SMPIR. */
+   static const uint8_t layer_half184[] = {
+      0x97, 0x05, 0x54, 0x06, 0x00, 0x70, 0x11, 0x00,
+      0xf0, 0xc0, 0x00, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_stage_image_write_layer(
+      AGX_ISA_ENCODING_AGX3B, 184, 1, 0, false, true, bytes, &len));
+   ASSERT_EQ(len, sizeof(layer_half184));
+   EXPECT_EQ(memcmp(bytes, layer_half184, sizeof(layer_half184)), 0);
+
    EXPECT_FALSE(agx3_tex_stage_image_write_layer(
       AGX_ISA_ENCODING_AGX3B, 1, 1, 0, false, true, bytes, &len));
+   EXPECT_FALSE(agx3_tex_stage_image_write_layer(
+      AGX_ISA_ENCODING_AGX3B, 256, 1, 0, false, true, bytes, &len));
    EXPECT_FALSE(agx3_tex_stage_image_write_layer(
       AGX_ISA_ENCODING_AGX3C, 4, 1, 0, false, true, bytes, &len));
 
