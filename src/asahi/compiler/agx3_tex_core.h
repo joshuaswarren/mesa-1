@@ -297,6 +297,9 @@ struct agx3_tex_sample_desc {
    /* Vertex explicit-LOD samples use the same SMP fields and operand staging
     * as fragment samples, but never carry fragment group terminator f156. */
    bool vertex_stage;
+   /* Compute samples likewise stage exactly as fragment samples do, and
+    * likewise never carry f156. */
+   bool compute_stage;
    bool array;           /* array sample; shadow layers use PACK_SMPIR */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
    bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */

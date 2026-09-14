@@ -1544,7 +1544,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                          bool pixel_entry, uint32_t *pixel_entry_offset,
                          uint8_t native_coord_slot,
                          const uint16_t cem_scratch[3], bool vertex_stage,
-                         uint16_t array_scratch)
+                         bool compute_stage, uint16_t array_scratch)
 {
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
@@ -2103,6 +2103,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .sample_group_nonterminal = sample_group_nonterminal,
       .sample_group_end = sample_group_end,
       .vertex_stage = vertex_stage,
+      .compute_stage = compute_stage,
       .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
    };
    return agx3_tex_encode_sample(enc, &d, bytes, &len) &&
@@ -7222,10 +7223,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* The implicit-LOD form needs the 2x2 quad's derivatives; every
              * witness is a fragment shader and the hardware has no quad
              * outside one. Apple's compute and vertex explicit-level forms
-             * are byte-identical and do not consume derivatives. */
+             * are byte-identical and do not consume derivatives. A compute
+             * kernel also stages a runtime level exactly as a fragment
+             * function does (metal-nt -arch applegpu_g17p, level(l) with l
+             * computed in the kernel):
+             *
+             *   texture2d         1705540600080004f0c00800
+             *                     05800cb8b0000001000010000100
+             *   texture2d_array   1705540600040c00f0c02500
+             *                     05800cb8b0000801000010000100
+             *   texturecube       1705540600040c00f0c01100
+             *                     05800cb8b0000003000010000100
+             *   texturecube_array 1705540003140000f0880400
+             *                     1705540600040c00f0c21700
+             *                     05800cb8b0000803000010000100
+             */
             const bool explicit_level = ctx->stage != MESA_SHADER_FRAGMENT &&
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
-               I->src[1].type == AGX_INDEX_IMMEDIATE;
+               (I->src[1].type == AGX_INDEX_IMMEDIATE ||
+                ctx->stage == MESA_SHADER_COMPUTE);
             /* An explicit gradient carries its own derivative, so it needs no
              * quad either; Apple's own witness for the form is a compute
              * kernel. */
@@ -7297,6 +7313,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                           &ctx->agx3_colour_link.entry_offset,
                                           native_coord_slot, cem_scratch,
                                           ctx->stage == MESA_SHADER_VERTEX,
+                                          ctx->stage == MESA_SHADER_COMPUTE,
                                           ms_array_scratch))
                AGX3_REFUSE(I);
             if (open_pixel) {

@@ -493,6 +493,22 @@ test_sample_witnesses(void)
         .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .cube = true},
        "05800cb8b0000003010010000100", NULL},
+      /* metal-nt -arch applegpu_g17p compute kernels close no sample group:
+       * the same samples in texturecube kernels at level(2.0) and at a
+       * kernel-computed level(l), and a texture2d_array kernel at level(l),
+       * leave f156 clear. */
+      {"compute cube level(2.0)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 128, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true, .cube = true,
+        .compute_stage = true},
+       "05800cb8b0001300000010080100", NULL},
+      {"compute cube register level",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true,
+        .compute_stage = true},
+       "05800cb8b0000003000010000100", NULL},
       /* metal-nt -arch applegpu_g17p fragment texturecube and
        * texturecube_array samples at bias(b[i]) and bias(0.5). */
       {"native cube register bias",

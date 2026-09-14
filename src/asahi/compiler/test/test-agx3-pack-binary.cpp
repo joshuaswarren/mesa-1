@@ -12271,7 +12271,7 @@ TEST_F(AGX3PackBinary, TextureCubeRefusesModesButAcceptsRetainedCoordinates)
 
 TEST_F(AGX3PackBinary, ComputeSampleRefusesUnqualifiedLod)
 {
-   for (unsigned shape = 0; shape < 3; ++shape) {
+   for (unsigned shape = 0; shape < 2; ++shape) {
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_COMPUTE;
       agx_index dest = agx_register(8, AGX_SIZE_32);
@@ -12279,8 +12279,7 @@ TEST_F(AGX3PackBinary, ComputeSampleRefusesUnqualifiedLod)
       agx_index coord = agx_register(4, AGX_SIZE_32);
       coord.channels_m1 = 1;
       const bool implicit = shape == 0;
-      agx_index lod = shape == 1 ? agx_register(0, AGX_SIZE_16)
-                                 : agx_immediate_f(-1.0f);
+      agx_index lod = agx_immediate_f(-1.0f);
       auto *I = agx_texture_sample_to(
          b, dest, coord, implicit ? agx_immediate(0) : lod,
          agx_immediate(0), agx_immediate(0), agx_immediate(0), agx_null(),
@@ -12290,6 +12289,58 @@ TEST_F(AGX3PackBinary, ComputeSampleRefusesUnqualifiedLod)
       I->mask = 15;
       agx_stop(b);
       pack(b, /*expect_ok=*/false);
+   }
+}
+
+/* metal-nt -arch applegpu_g17p compute kernels sampling at level(l), with l
+ * computed in the kernel, stage the level exactly as fragment functions do
+ * and never set the fragment group terminator f156. */
+TEST_F(AGX3PackBinary, ComputeSampleStagesRegisterLevelWithoutGroupEnd)
+{
+   for (unsigned cube = 0; cube < 2; ++cube) {
+      const auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = cube ? 2 : 1;
+      coord.discard = true;
+      coord.kill = true;
+      agx_index lod = agx_register(cube ? 20 : 4, AGX_SIZE_16);
+      lod.discard = true;
+      agx_instr *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), cube ? AGX_DIM_CUBE : AGX_DIM_2D,
+         AGX_LOD_MODE_LOD_MIN, 0, false, false, false, AGX_GATHER_NONE,
+         false);
+      I->mask = 15;
+      agx_stop(b);
+
+      const std::vector<uint8_t> stream = pack(b);
+      /* texture2d: 1705540600080004f0c00800 05800cb8b0000001000010000100
+       * texturecube:                        05800cb8b0000003000010000100 */
+      static const uint8_t level_2d[] = {
+         0x17, 0x05, 0x54, 0x06, 0x00, 0x08, 0x00, 0x04,
+         0xf0, 0xc0, 0x08, 0x00,
+      };
+      static const uint8_t smp_2d[] = {
+         0x05, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x00,
+         0x01, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
+      };
+      static const uint8_t smp_cube[] = {
+         0x05, 0x80, 0x0c, 0xb8, 0xb0, 0x00, 0x00,
+         0x03, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00,
+      };
+      if (!cube) {
+         EXPECT_NE(std::search(stream.begin(), stream.end(), level_2d,
+                               level_2d + sizeof(level_2d)),
+                   stream.end());
+      }
+      const uint8_t *smp = cube ? smp_cube : smp_2d;
+      EXPECT_NE(std::search(stream.begin(), stream.end(), smp,
+                            smp + sizeof(smp_2d)),
+                stream.end());
    }
 }
 

@@ -596,7 +596,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
     * sample_group_end when a multi-op group ends on a shape (including an
     * immediate LEVEL) that would not infer it in isolation. Explicit-gradient
     * samples are outside these groups. */
-   const bool intrinsic_group = !d->vertex_stage &&
+   const bool intrinsic_group = !d->vertex_stage && !d->compute_stage &&
       (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_BIAS ||
        d->lod == AGX3_TEX_LOD_REGISTER ||
        d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
