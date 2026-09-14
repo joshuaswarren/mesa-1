@@ -17,7 +17,7 @@ agx3_g17p_compute_state_tail(
     * device atomic's 16-byte TPS word is one such frame; register spills
     * publish theirs the same way, as Apple's kernel metadata does. */
    if (!desc || !tail || !desc->shader_binary_size || !desc->nr_gprs ||
-       desc->scratch_size > AGX3_G17P_COMPUTE_MAX_SPILL_B ||
+       desc->scratch_size > AGX3_G17P_MAX_SPILL_B ||
        (desc->scratch_size & 3))
       return false;
 

@@ -13,6 +13,7 @@
 #include "agx_tilebuffer.h"
 #include "agx_usc.h"
 #include "hk_agx3_ioto_program_core.h"
+#include "asahi/compiler/agx3_compute_program.h"
 #include "hk_agx3_vdm_decode.h"
 #include "hk_buffer.h"
 #include "hk_cmd_pool.h"
@@ -1257,7 +1258,12 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    /* Not scratch but this is the most convenient place for this... */
    cs->uses_sampler_heap |= s->b.info.uses_sampler_heap;
 
-   if (max_scratch_size == 0)
+   /* G17P publishes a shader's spill frame as thread-private storage in its
+    * SPECTPR. There is no helper-program stack, and the kernel rejects a
+    * command that names one. */
+   if (max_scratch_size == 0 ||
+       agx_chip_command_stream_generation(dev->dev.chip) ==
+          AGX_CS_GENERATION_HAL200)
       return;
 
    unsigned preamble_size = (s->b.info.preamble_scratch_size > 0) ? 1 : 0;
@@ -1379,8 +1385,9 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
 {
    if (!linked || !linked->b.bo || !linked->b.bo->va || linked->b.size == 0 ||
        linked->b.size > UINT32_MAX || s->b.info.has_preamble ||
-       s->b.info.scratch_size != 0 ||
-       s->b.info.preamble_scratch_size != 0 || linked->b.scratch_size != 0 ||
+       s->b.info.scratch_size > AGX3_G17P_MAX_SPILL_B ||
+       s->b.info.preamble_scratch_size != 0 ||
+       linked->b.scratch_size > AGX3_G17P_MAX_SPILL_B ||
        s->b.info.texture_state_count != 0 ||
        (s->b.info.sampler_state_count != 0 &&
         !(s->info.agx3_indexed_sampler_valid &&

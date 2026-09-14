@@ -3165,11 +3165,12 @@ agx3_translate_local_atomic(const agx_instr *I, uint8_t slot,
    return true;
 }
 
-/* Mesa's scalar 32-bit stack operation is an exact match for Apple's static
- * copy/rld family: the immediate byte offset names a TPS half-register and the
- * single data operand names one aligned GPR pair.  Vector masks, 16-bit values,
- * dynamic offsets and modifiers stay on the existing fail-closed path because
- * they do not uniquely determine the witnessed structural fields/forms. */
+/* Mesa's scalar 16-bit or 32-bit stack operation is an exact match for
+ * Apple's static copy/rld family: the immediate byte offset names a TPS
+ * half-register and the single data operand names one half or one aligned GPR
+ * pair, at W16 or W32.  Vector masks, dynamic offsets and modifiers stay on the
+ * existing fail-closed path because they do not uniquely determine the
+ * witnessed structural fields/forms. */
 static bool
 agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
                             uint16_t wait_mask,
@@ -3178,9 +3179,12 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
 {
    if (I->op != (is_store ? AGX_OPCODE_STACK_STORE : AGX_OPCODE_STACK_LOAD) ||
        I->nr_dests != (is_store ? 0 : 1) ||
-       I->nr_srcs != (is_store ? 2 : 1) || I->format != AGX_FORMAT_I32 ||
+       I->nr_srcs != (is_store ? 2 : 1) ||
+       (I->format != AGX_FORMAT_I16 && I->format != AGX_FORMAT_I32) ||
        I->mask != 1)
       return false;
+
+   const bool wide = I->format == AGX_FORMAT_I32;
 
    const agx_index data = is_store ? I->src[0] : I->dest[0];
    const agx_index offset = I->src[is_store ? 1 : 0];
@@ -3199,16 +3203,17 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
     */
    if (!agx3_src_is_register(data) || data.memory || data.abs || data.neg ||
        (data.cache && data.discard) || (!is_store && data.discard) ||
-       data.size != AGX_SIZE_32 ||
-       agx_channels(data) != 1 || (data.value & 1) || data.value > 254 ||
+       data.size != (wide ? AGX_SIZE_32 : AGX_SIZE_16) ||
+       agx_channels(data) != 1 || (wide && (data.value & 1)) ||
+       data.value > (wide ? 254 : 255) ||
        (!is_store && data.kill) || offset.type != AGX_INDEX_IMMEDIATE ||
        offset.memory || offset.abs || offset.neg || offset.cache ||
        offset.discard || offset.kill || offset.size != AGX_SIZE_16 ||
-       agx_channels(offset) != 1 || (offset.value & 3))
+       agx_channels(offset) != 1 || (offset.value & (wide ? 3 : 1)))
       return false;
 
    const uint32_t tps_half = offset.value >> 1;
-   if (tps_half + 2 > AGX3_SLOT_TPS_HALF_TOKENS)
+   if (tps_half + (wide ? 2 : 1) > AGX3_SLOT_TPS_HALF_TOKENS)
       return false;
 
    if (is_store) {
@@ -3217,7 +3222,7 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
       *store = (struct agx3_static_spill_store_desc){
          .tps_half = tps_half,
          .src = data.value,
-         .width = AGX3_MEM_W32,
+         .width = wide ? AGX3_MEM_W32 : AGX3_MEM_W16,
          /* Both spellings of "dead after this use" drive the same f27. */
          .src_kill = data.kill || data.discard,
          .slot = slot,
@@ -3229,7 +3234,7 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
       *load = (struct agx3_static_spill_load_desc){
          .dest = data.value,
          .tps_half = tps_half,
-         .width = AGX3_MEM_W32,
+         .width = wide ? AGX3_MEM_W32 : AGX3_MEM_W16,
          .slot = slot,
          .slot_mirror = slot,
          .wait_mask = wait_mask,
@@ -3250,7 +3255,8 @@ agx3_append_static_spill_tokens(const agx_instr *I,
       return false;
 
    const uint32_t tps_half = is_store ? store.tps_half : load.tps_half;
-   for (unsigned i = 0; i < 2; ++i) {
+   const enum agx3_mem_width width = is_store ? store.width : load.width;
+   for (unsigned i = 0; i < (width == AGX3_MEM_W32 ? 2 : 1); ++i) {
       if (slot_instr->nr_srcs >= AGX3_SLOT_MAX_REGS ||
           slot_instr->nr_dsts >= AGX3_SLOT_MAX_REGS)
          return false;

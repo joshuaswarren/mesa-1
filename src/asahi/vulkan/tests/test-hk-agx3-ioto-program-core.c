@@ -674,7 +674,7 @@ test_g17p_dynamic_compute_program(void)
    CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
                                                 &program));
    CHECK(memcmp(&program, &before, sizeof(program)) == 0);
-   invalid.scratch_size = AGX3_G17P_COMPUTE_MAX_SPILL_B + 4;
+   invalid.scratch_size = AGX3_G17P_MAX_SPILL_B + 4;
    CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
                                                 &program));
    CHECK(memcmp(&program, &before, sizeof(program)) == 0);

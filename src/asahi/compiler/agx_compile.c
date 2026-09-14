@@ -6434,7 +6434,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    agx_lower_pseudo(ctx);
 
-   /* AGX3's thread-private storage moves one 32-bit component per
+   /* AGX3's thread-private storage moves one 16-bit or 32-bit component per
     * instruction, so a vector spill or scratch access has to become a run of
     * scalar ones. Do it before the last-use pass, so each component's hints
     * are computed against the instructions that actually survive. */
