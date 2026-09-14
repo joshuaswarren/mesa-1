@@ -1133,7 +1133,10 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    if (agx_chip_command_stream_generation(dev->dev.chip) ==
        AGX_CS_GENERATION_HAL200) {
-      hk_reserve_scratch(cmd, cs, s);
+      /* G17P publishes a kernel's spill frame as thread-private storage in
+       * its SPECTPR. There is no helper-program stack, and the kernel rejects
+       * a compute command that names one. */
+      cs->uses_sampler_heap |= s->b.info.uses_sampler_heap;
       hk_dispatch_g17p_native(cmd, cs, s, grid, local_size);
       return;
    }

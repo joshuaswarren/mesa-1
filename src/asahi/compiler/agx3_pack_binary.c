@@ -3188,11 +3188,14 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
     * `src_kill` drives, is exactly that last-use bit: the same field the ALU
     * forms set for AGX3_ALU_HINT_DISCARD. Carry it rather than refuse it.
     *
-    * `.cache` stays refused: this form has no modelled cache hint, and
-    * claiming a live register is dead is a silent miscompile.
+    * Neither form has a cache field. Apple's reloads never set f11 even when
+    * an ALU consumes the value next (60 live float4 temporaries under
+    * applegpu_g17p), so a cached reload destination is the same instruction.
+    * A cached spill source is still live after the copy, which the clear
+    * last-use bit already preserves.
     */
    if (!agx3_src_is_register(data) || data.memory || data.abs || data.neg ||
-       data.cache || (!is_store && data.discard) ||
+       (data.cache && data.discard) || (!is_store && data.discard) ||
        data.size != AGX_SIZE_32 ||
        agx_channels(data) != 1 || (data.value & 1) || data.value > 254 ||
        (!is_store && data.kill) || offset.type != AGX_INDEX_IMMEDIATE ||

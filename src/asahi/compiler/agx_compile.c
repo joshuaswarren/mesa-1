@@ -6295,7 +6295,14 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
        * frame. The pinned G15/G16/G17 compute spill corpus emits no incStk;
        * that distinct instruction belongs to the ray-traversal stack. Keep
        * publishing the frame size below, but never inject an AGX2 stack
-       * instruction into an AGX3 shader. */
+       * instruction into an AGX3 shader.
+       *
+       * G17P publishes that frame in bytes: applegpu_g17p's metadata for
+       * kernels whose highest reloaded TPS half is 470 and 790 records 944
+       * and 1584 bytes, the halves up to and including that 32-bit word.
+       * SPECTPR's spill fields are those bytes in quads. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         stack_size = align(ctx->scratch_size_B, 4);
 
       if (ctx->is_preamble)
          out->preamble_scratch_size = stack_size;

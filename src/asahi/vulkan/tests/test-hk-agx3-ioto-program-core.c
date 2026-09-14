@@ -2,6 +2,7 @@
 /* SPDX-License-Identifier: MIT */
 
 #include "hk_agx3_ioto_program_core.h"
+#include "asahi/compiler/agx3_compute_program.h"
 
 #include "asahi/lib/agx3_g17p_grid_helper_core.h"
 #include "asahi/lib/agx_ioto_core.h"
@@ -656,8 +657,24 @@ test_g17p_dynamic_compute_program(void)
    CHECK(scratch_differences > 0);
    CHECK(scratch_differences <= AGX_IOTO_SPECTPR_SIZE);
 
+   /* A register spill frame publishes its bytes the same way. */
+   struct hk_agx3_g17p_compute_program_desc spill = desc;
+   spill.scratch_size = 56;
+   struct hk_agx3_g17p_compute_program spill_program;
+   CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &spill,
+                                               &spill_program));
+   struct agx_ioto_state spill_spectpr;
+   CHECK(agx_ioto_g17p_compiler_spectpr_build(56, desc.compiler_d,
+                                              &spill_spectpr));
+   CHECK(spill_spectpr.f[20] == 14 && spill_spectpr.f[21] == 14);
+
+   /* A frame must be whole quads and within the published bound. */
    struct hk_agx3_g17p_compute_program_desc invalid = desc;
-   invalid.scratch_size = 32;
+   invalid.scratch_size = 18;
+   CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
+                                                &program));
+   CHECK(memcmp(&program, &before, sizeof(program)) == 0);
+   invalid.scratch_size = AGX3_G17P_COMPUTE_MAX_SPILL_B + 4;
    CHECK(!hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &invalid,
                                                 &program));
    CHECK(memcmp(&program, &before, sizeof(program)) == 0);
