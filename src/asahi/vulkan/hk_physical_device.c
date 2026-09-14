@@ -845,22 +845,6 @@ hk_get_device_features(
        * exposed below do not establish that stronger execution guarantee. */
       features->shaderQuadControl =
          hk_g17p_unverified_feature("shader_quad_control");
-      /* HAL200's native storage-image fetch is memory-safe, but its TEX
-       * descriptor does not bounds-check against the Vulkan image view.
-       * Hardware qualification returned adjacent in-image texels for both
-       * X- and Y-out-of-range coordinates, violating the zero RGB guarantee
-       * shared by robustImageAccess and robustImageAccess2.
-       *
-       * That failure has since been addressed in software: the explicit
-       * view-bounds lowering in hk_nir_lower_robust_image.c (and the matching
-       * combined-sampler bounds in agx_nir_lower_g17p_combined_sampler.c)
-       * clamp against the view rather than the allocation.  The bit stays
-       * opt-in only because g17p-vulkan-robust-image2 has not been re-run on
-       * hardware since; this is a pending re-probe, not an unfixed defect. */
-      features->robustImageAccess =
-         hk_g17p_unverified_feature("robust_images");
-      features->robustImageAccess2 =
-         hk_g17p_unverified_feature("robust_images");
    }
 }
 
@@ -1304,10 +1288,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .defaultRobustnessVertexInputs =
          VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED_EXT,
       .defaultRobustnessImages =
-         dev->chip == AGX_CHIP_G17P &&
-               !hk_g17p_unverified_feature("robust_images")
-            ? VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT
-            : VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2_EXT,
+         VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2_EXT,
 
       /* VK_EXT_physical_device_drm gets populated later */
 
