@@ -9715,6 +9715,78 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* Narrow iadd_sat and uadd_sat. ABS marks both halves unsigned;
+          * Apple's saturating iadd instead marks signed halves, so the
+          * signedness is a property of the whole instruction. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && I->saturate &&
+             I->shift == 0 && I->dest[0].size == AGX_SIZE_16 &&
+             agx3_src_is_register(I->src[0]) &&
+             agx3_src_is_register(I->src[1]) &&
+             I->src[0].size == AGX_SIZE_16 && !I->src[0].neg &&
+             I->src[1].size == AGX_SIZE_16 && !I->src[1].neg) {
+            const agx_index dest = I->dest[0];
+            const agx_index a = I->src[0], b = I->src[1];
+            if (!agx3_src_is_register(dest) || dest.memory ||
+                agx_channels(dest) != 1 || a.memory || b.memory ||
+                a.abs != b.abs || a.kill || b.kill ||
+                agx_channels(a) != 1 || agx_channels(b) != 1 ||
+                (a.cache && a.discard) || (b.cache && b.discard))
+               AGX3_REFUSE(I);
+
+            const uint16_t src[2] = {a.value, b.value};
+            const enum agx3_alu_hint hints[2] = {
+               agx3_post_ra_hint(a), agx3_post_ra_hint(b)};
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (!agx3_alu_add_sat16(enc, dest.value, src, hints, !a.abs,
+                                    dest.cache, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         /* NIR's narrow isub is iadd(a, -b), and ineg is iadd(#0, -a). Apple
+          * emits both as the scalar-half isub, the negation with an
+          * immediate-zero minuend, so neither needs a widened temporary. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IADD &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             I->shift == 0 && I->dest[0].size == AGX_SIZE_16 &&
+             agx3_src_is_register(I->src[1]) &&
+             I->src[1].size == AGX_SIZE_16 && I->src[1].neg &&
+             (agx3_src_is_zero_imm(I->src[0]) ||
+              (agx3_src_is_register(I->src[0]) &&
+               I->src[0].size == AGX_SIZE_16))) {
+            const agx_index dest = I->dest[0];
+            const agx_index minuend = I->src[0], subtrahend = I->src[1];
+            const bool negate = minuend.type == AGX_INDEX_IMMEDIATE;
+            if (!agx3_src_is_register(dest) || dest.memory ||
+                agx_channels(dest) != 1 || minuend.memory || minuend.abs ||
+                minuend.neg || minuend.kill ||
+                (minuend.cache && minuend.discard) ||
+                (!negate && agx_channels(minuend) != 1) ||
+                subtrahend.memory || subtrahend.abs || subtrahend.kill ||
+                agx_channels(subtrahend) != 1 ||
+                (subtrahend.cache && subtrahend.discard))
+               AGX3_REFUSE(I);
+
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            bool encoded;
+            if (negate) {
+               encoded = agx3_alu_neg16(enc, dest.value, subtrahend.value,
+                                        agx3_post_ra_hint(subtrahend),
+                                        dest.cache, wait, bytes, &len);
+            } else {
+               const uint16_t src[2] = {minuend.value, subtrahend.value};
+               const enum agx3_alu_hint hints[2] = {
+                  agx3_post_ra_hint(minuend), agx3_post_ra_hint(subtrahend)};
+               encoded = agx3_alu_sub16(enc, dest.value, src, hints,
+                                        dest.cache, wait, bytes, &len);
+            }
+            if (!encoded || !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* Register arithmetic shares the original canonical form, but its
           * native source hints come from post-RA lifetime.
           *
@@ -10829,6 +10901,58 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* int8/int16 conversions keep their input in a half register. The
+          * int2flt byte selector reads only the low eight bits, so a byte
+          * converts without an extension. Apple has no unsigned byte to half
+          * form: `half(uchar)` masks the byte in place and converts the
+          * resulting ushort, so that sequence is emitted here too. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_CONVERT &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             I->round == AGX_ROUND_RTE &&
+             I->src[0].type == AGX_INDEX_IMMEDIATE &&
+             I->src[1].size == AGX_SIZE_16 &&
+             (((I->src[0].value == AGX_CONVERT_S8_TO_F ||
+                I->src[0].value == AGX_CONVERT_U8_TO_F) &&
+               (I->dest[0].size == AGX_SIZE_16 ||
+                I->dest[0].size == AGX_SIZE_32)) ||
+              ((I->src[0].value == AGX_CONVERT_S16_TO_F ||
+                I->src[0].value == AGX_CONVERT_U16_TO_F) &&
+               I->dest[0].size == AGX_SIZE_16))) {
+            const agx_index dest = I->dest[0], src = I->src[1];
+            if (!agx3_src_is_register(dest) || dest.memory ||
+                agx_channels(dest) != 1 || !agx3_src_is_register(src) ||
+                src.memory || src.abs || src.neg || src.kill ||
+                agx_channels(src) != 1 || (src.cache && src.discard))
+               AGX3_REFUSE(I);
+
+            const enum agx_convert mode = I->src[0].value;
+            const bool byte =
+               mode == AGX_CONVERT_S8_TO_F || mode == AGX_CONVERT_U8_TO_F;
+            const bool is_signed =
+               mode == AGX_CONVERT_S8_TO_F || mode == AGX_CONVERT_S16_TO_F;
+            const bool dest_16 = dest.size == AGX_SIZE_16;
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+            if (byte && !is_signed && dest_16) {
+               if (!agx3_alu_bit_imm(enc, AGX3_ALU_BAND, true, dest.value,
+                                     src.value, 0xff, agx3_post_ra_hint(src),
+                                     wait, bytes, &len) ||
+                   !agx3_append(emission, bytes, len) ||
+                   !agx3_alu_narrow_int_to_float(
+                      enc, dest.value, true, dest.value, false, false,
+                      AGX3_ALU_HINT_DISCARD, dest.cache, 0, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
+
+            if (!agx3_alu_narrow_int_to_float(
+                   enc, dest.value, dest_16, src.value, byte, is_signed,
+                   agx3_post_ra_hint(src), dest.cache, wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* GTK's turbulence fragment keeps its octave arithmetic in scalar
           * halves, then indexes the permutation table with a direct f16-to-
          * i32 cast. flt2int has a native half-source selector; widening the
@@ -11078,8 +11202,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->src[0].kill ||
                 !agx3_alu_bit_not_reg16(enc, I->dest[0].value,
                                         I->src[0].value,
-                                        agx3_post_ra_hint(I->src[0]), wait,
-                                        bytes, &len) ||
+                                        agx3_post_ra_hint(I->src[0]),
+                                        I->dest[0].cache, wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;

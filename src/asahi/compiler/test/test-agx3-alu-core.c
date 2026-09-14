@@ -401,37 +401,6 @@ test_native_f32_floor_ceil(void)
 }
 
 static void
-test_native_bit_not16(void)
-{
-   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-   const struct {
-      uint16_t dest, src;
-      enum agx3_alu_hint hint;
-      uint16_t wait;
-      uint8_t expected[10];
-   } witnesses[] = {
-      {0, 0, AGX3_ALU_HINT_DISCARD, 0,
-       {0x03, 0x00, 0x2e, 0x00, 0x01, 0x08, 0x00, 0x00, 0x00, 0x00}},
-      {0, 0, AGX3_ALU_HINT_DISCARD, 1,
-       {0x03, 0x00, 0x2e, 0x00, 0x01, 0x28, 0x00, 0x00, 0x00, 0x00}},
-      {1, 0, AGX3_ALU_HINT_CACHE, 1,
-       {0x03, 0x80, 0x26, 0x00, 0x05, 0x28, 0x00, 0x00, 0x00, 0x00}},
-      {1, 2, AGX3_ALU_HINT_CACHE, 0,
-       {0x03, 0x82, 0x26, 0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00}},
-      {3, 0, AGX3_ALU_HINT_CACHE, 0,
-       {0x13, 0x80, 0x26, 0x00, 0x05, 0x08, 0x00, 0x00, 0x00, 0x00}},
-   };
-   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
-      assert(agx3_alu_bit_not_reg16(AGX_ISA_ENCODING_AGX3B, witnesses[i].dest,
-                                    witnesses[i].src, witnesses[i].hint,
-                                    witnesses[i].wait, bytes, &len));
-      assert(len == 10 && !memcmp(bytes, witnesses[i].expected, 10));
-   }
-   assert(!agx3_alu_bit_not_reg16(AGX_ISA_ENCODING_AGX3C, 0, 0,
-                                  AGX3_ALU_HINT_NONE, 0, bytes, &len));
-}
-
-static void
 test_native_bit_andc(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -1940,6 +1909,218 @@ static void test_native_u16_arithmetic(void)
       2, 255, 0, false, false, 32, out, &len));
    exact(out, len, "02091f01a2ff02c82080");
    puts("Native u16 ALU and mixed-width FSEL: six native byte vectors PASS");
+}
+
+/* applegpu_g17p `~ushort` and `~short` in fragments and kernels whose result
+ * is stored once or read again, whose input is dead, cached or retained, and
+ * which wait on slots 1, 2 and 6. */
+static void
+test_native_bit_not16(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   const enum agx3_alu_hint D = AGX3_ALU_HINT_DISCARD;
+   const enum agx3_alu_hint C = AGX3_ALU_HINT_CACHE;
+   const enum agx3_alu_hint N = AGX3_ALU_HINT_NONE;
+   const struct {
+      uint16_t dest, src;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      const char *expected;
+   } witnesses[] = {
+      {0, 0, D, true, 0, "03002e00010800000000"},
+      {0, 0, D, true, 1u << 0, "03002e00012800000000"},
+      {1, 0, C, true, 1u << 0, "03802600052800000000"},
+      {1, 2, C, true, 0, "03822600050800000000"},
+      {3, 0, C, true, 0, "13802600050800000000"},
+      {2, 2, D, true, 1u << 5, "13022e00010800800000"},
+      {2, 2, D, false, 1u << 5, "13020e00010800800000"},
+      {3, 3, D, false, 0, "13020e000d0800000000"},
+      {2, 2, D, false, 0, "13020e00010800000000"},
+      {3, 2, C, true, 1u << 5, "13822600050800800000"},
+      {0, 2, C, false, 1u << 5, "03820600010800800000"},
+      {3, 2, N, false, 1u << 5, "13020600050800800000"},
+      {1, 1, D, false, 1u << 0, "03000e000d2800000000"},
+      {2, 2, D, false, 1u << 1, "13020e00014800000000"},
+   };
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      assert(agx3_alu_bit_not_reg16(AGX_ISA_ENCODING_AGX3B, witnesses[i].dest,
+                                    witnesses[i].src, witnesses[i].hint,
+                                    witnesses[i].dest_cache,
+                                    witnesses[i].wait, bytes, &len));
+      exact(bytes, len, witnesses[i].expected);
+   }
+   assert(!agx3_alu_bit_not_reg16(AGX_ISA_ENCODING_AGX3B, 2, 2, D, false,
+                                  1u << 6, bytes, &len));
+   assert(!agx3_alu_bit_not_reg16(AGX_ISA_ENCODING_AGX3C, 0, 0, N, false, 0,
+                                  bytes, &len));
+}
+
+/* applegpu_g17p `short(a - b)` and `short(-a)` with dead, cached and retained
+ * inputs, a cached result, and wait slots 1, 2 and 6. */
+static void
+test_native_sub16(void)
+{
+   const enum agx_isa_encoding B = AGX_ISA_ENCODING_AGX3B;
+   const enum agx3_alu_hint D = AGX3_ALU_HINT_DISCARD;
+   const enum agx3_alu_hint C = AGX3_ALU_HINT_CACHE;
+   const enum agx3_alu_hint N = AGX3_ALU_HINT_NONE;
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+
+   assert(agx3_alu_sub16(B, 2, (uint16_t[]){2, 3},
+                         (enum agx3_alu_hint[]){D, D}, false, 1u << 5,
+                         out, &len));
+   exact(out, len, "1f01560202040c001705");
+   assert(agx3_alu_sub16(B, 0, (uint16_t[]){2, 3},
+                         (enum agx3_alu_hint[]){C, C}, false, 1u << 5,
+                         out, &len));
+   exact(out, len, "1f01560002040e041105");
+   assert(agx3_alu_sub16(B, 4, (uint16_t[]){3, 2},
+                         (enum agx3_alu_hint[]){N, N}, false, 1u << 5,
+                         out, &len));
+   exact(out, len, "1f015604020608001105");
+   assert(agx3_alu_sub16(B, 0, (uint16_t[]){3, 1},
+                         (enum agx3_alu_hint[]){C, C}, false, 1u << 5,
+                         out, &len));
+   exact(out, len, "1f015600020606041105");
+   assert(agx3_alu_sub16(B, 1, (uint16_t[]){1, 2},
+                         (enum agx3_alu_hint[]){D, C}, false, 1u << 0,
+                         out, &len));
+   exact(out, len, "1f115401020208041305");
+   assert(agx3_alu_sub16(B, 2, (uint16_t[]){2, 3},
+                         (enum agx3_alu_hint[]){D, D}, false, 0, out, &len));
+   exact(out, len, "1f01540202040c001705");
+   assert(agx3_alu_sub16(B, 3, (uint16_t[]){2, 3},
+                         (enum agx3_alu_hint[]){D, D}, true, 1u << 5,
+                         out, &len));
+   exact(out, len, "1f01560303040c001705");
+   assert(!agx3_alu_sub16(B, 192, (uint16_t[]){2, 3},
+                          (enum agx3_alu_hint[]){D, D}, false, 0, out, &len));
+   assert(!agx3_alu_sub16(B, 2, (uint16_t[]){2, 192},
+                          (enum agx3_alu_hint[]){D, D}, false, 0, out, &len));
+
+   assert(agx3_alu_neg16(B, 2, 2, D, false, 1u << 5, out, &len));
+   exact(out, len, "1f015602020008001504");
+   assert(agx3_alu_neg16(B, 2, 3, C, false, 1u << 5, out, &len));
+   exact(out, len, "1f01560202000c041104");
+   assert(agx3_alu_neg16(B, 3, 2, N, false, 1u << 5, out, &len));
+   exact(out, len, "1f015603020008001104");
+   assert(agx3_alu_neg16(B, 0, 0, D, false, 1u << 5, out, &len));
+   exact(out, len, "1f015600020000001504");
+   assert(agx3_alu_neg16(B, 1, 1, D, false, 1u << 0, out, &len));
+   exact(out, len, "1f115401020004001504");
+   assert(agx3_alu_neg16(B, 2, 2, D, false, 1u << 1, out, &len));
+   exact(out, len, "1f215402020008001504");
+   assert(agx3_alu_neg16(B, 3, 2, D, true, 1u << 5, out, &len));
+   exact(out, len, "1f015603030008001504");
+   assert(!agx3_alu_neg16(AGX_ISA_ENCODING_AGX3C, 2, 2, D, false, 0,
+                          out, &len));
+}
+
+/* applegpu_g17p `addsat` of shorts and ushorts with dead, cached and
+ * retained inputs, a cached result, and wait slots 1 and 6. */
+static void
+test_native_add_sat16(void)
+{
+   const enum agx3_alu_hint D = AGX3_ALU_HINT_DISCARD;
+   const enum agx3_alu_hint C = AGX3_ALU_HINT_CACHE;
+   const enum agx3_alu_hint N = AGX3_ALU_HINT_NONE;
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   const struct {
+      uint16_t dest, src[2];
+      enum agx3_alu_hint hints[2];
+      bool is_signed, dest_cache;
+      uint16_t wait;
+      const char *apple;
+   } vectors[] = {
+      {2, {2, 3}, {D, D}, true, false, 1u << 5, "9f01560202040c40170f"},
+      {2, {3, 2}, {D, D}, true, false, 0, "9f01540202060840170f"},
+      {0, {2, 3}, {C, C}, true, false, 1u << 5, "9f01560002040e44110f"},
+      {4, {3, 2}, {N, N}, true, false, 1u << 5, "9f01560402060840110f"},
+      {3, {2, 3}, {D, D}, true, true, 1u << 5, "9f01560303040c40170f"},
+      {0, {3, 1}, {C, C}, true, false, 1u << 5, "9f01560002060644110f"},
+      {1, {1, 2}, {D, C}, true, false, 1u << 0, "9f11540102020844130f"},
+      {2, {2, 3}, {D, D}, false, false, 1u << 5, "9f01560202040c401705"},
+      {0, {2, 3}, {C, C}, false, false, 1u << 5, "9f01560002040e441105"},
+      {4, {3, 2}, {N, N}, false, false, 1u << 5, "9f015604020608401105"},
+      {3, {2, 3}, {D, D}, false, true, 1u << 5, "9f01560303040c401705"},
+      {0, {3, 1}, {C, C}, false, false, 1u << 5, "9f015600020606441105"},
+      {1, {1, 2}, {D, C}, false, false, 1u << 0, "9f115401020208441305"},
+      {2, {2, 3}, {D, D}, false, false, 0, "9f01540202040c401705"},
+   };
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_add_sat16(AGX_ISA_ENCODING_AGX3B, vectors[i].dest,
+                                vectors[i].src, vectors[i].hints,
+                                vectors[i].is_signed, vectors[i].dest_cache,
+                                vectors[i].wait, out, &len));
+      exact(out, len, vectors[i].apple);
+   }
+   assert(!agx3_alu_add_sat16(AGX_ISA_ENCODING_AGX3B, 192, (uint16_t[]){2, 3},
+                              (enum agx3_alu_hint[]){D, D}, true, false, 0,
+                              out, &len));
+   assert(!agx3_alu_add_sat16(AGX_ISA_ENCODING_AGX3C, 2, (uint16_t[]){2, 3},
+                              (enum agx3_alu_hint[]){D, D}, true, false, 0,
+                              out, &len));
+}
+
+/* applegpu_g17p `half(char)`, `float(char)`, `float(uchar)`, `half(short)`
+ * and `half(ushort)`, including a byte read from a wider half register. */
+static void
+test_native_narrow_int_to_float(void)
+{
+   const enum agx_isa_encoding B = AGX_ISA_ENCODING_AGX3B;
+   const enum agx3_alu_hint D = AGX3_ALU_HINT_DISCARD;
+   const enum agx3_alu_hint C = AGX3_ALU_HINT_CACHE;
+   const enum agx3_alu_hint N = AGX3_ALU_HINT_NONE;
+   uint8_t out[AGX3_ALU_MAX_LENGTH], len;
+   const struct {
+      uint16_t dest;
+      bool dest_16;
+      uint16_t src;
+      bool src_8, is_signed;
+      enum agx3_alu_hint hint;
+      bool dest_cache;
+      uint16_t wait;
+      const char *apple;
+   } vectors[] = {
+      {2, true, 2, true, true, D, false, 1u << 5, "a70756020204b070"},
+      {2, true, 2, true, true, D, false, 0, "a70754020204b070"},
+      {2, true, 4, true, true, C, false, 0, "a707540202089270"},
+      {3, true, 2, true, true, N, false, 0, "a707540302049070"},
+      {3, true, 2, true, true, D, true, 0, "a70754030304b070"},
+      {0, true, 0, true, true, D, false, 1u << 5, "a70756000200b070"},
+      {1, true, 1, true, true, D, false, 1u << 0, "a71754010202b070"},
+      {2, true, 2, true, true, D, false, 1u << 1, "a72754020204b070"},
+      {0, false, 0, true, true, D, false, 1u << 5, "a70756000200b470"},
+      {0, false, 0, true, true, D, false, 0, "a70754000200b470"},
+      {2, false, 7, true, true, C, true, 0, "a7075402030e9670"},
+      {2, true, 2, false, true, D, false, 1u << 5, "a70756020204a060"},
+      {3, true, 3, false, true, D, false, 0, "a70754030206a060"},
+      {3, true, 2, false, true, D, true, 1u << 5, "a70756030304a060"},
+      {1, true, 1, false, true, D, false, 1u << 0, "a71754010202a060"},
+      {2, true, 2, false, false, D, false, 1u << 5, "a70756020204a020"},
+      {2, true, 3, false, false, C, false, 1u << 5, "a707560202068220"},
+      {3, true, 3, false, false, D, false, 0, "a70754030206a020"},
+      {0, false, 0, true, false, D, false, 0, "a70754000200b430"},
+      {2, false, 4, true, false, N, false, 0, "a707540202089430"},
+   };
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_narrow_int_to_float(
+         B, vectors[i].dest, vectors[i].dest_16, vectors[i].src,
+         vectors[i].src_8, vectors[i].is_signed, vectors[i].hint,
+         vectors[i].dest_cache, vectors[i].wait, out, &len));
+      exact(out, len, vectors[i].apple);
+   }
+   /* No unsigned byte to half form, odd float32 destination, or high
+    * register. */
+   assert(!agx3_alu_narrow_int_to_float(B, 2, true, 2, true, false, D, false,
+                                        0, out, &len));
+   assert(!agx3_alu_narrow_int_to_float(B, 3, false, 2, true, true, D, false,
+                                        0, out, &len));
+   assert(!agx3_alu_narrow_int_to_float(B, 2, true, 192, false, true, D,
+                                        false, 0, out, &len));
+   assert(!agx3_alu_narrow_int_to_float(AGX_ISA_ENCODING_AGX3C, 2, true, 2,
+                                        true, true, D, false, 0, out, &len));
 }
 
 static void
@@ -5059,6 +5240,9 @@ int main(void){
    test_native_extract32();
    test_blur_half_arithmetic();
    test_native_u16_arithmetic();
+   test_native_sub16();
+   test_native_add_sat16();
+   test_native_narrow_int_to_float();
    test_native_select_negated_comparator();
    test_native_float_to_int16();
    test_native_u16_shift_right_immediate();

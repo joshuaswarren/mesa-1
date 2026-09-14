@@ -1253,7 +1253,8 @@ agx3_alu_bit_reg16(enum agx_isa_encoding enc, enum agx3_alu_op op,
 
 bool
 agx3_alu_bit_not_reg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
-                       enum agx3_alu_hint hint, uint16_t wait_mask,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
@@ -1262,14 +1263,14 @@ agx3_alu_bit_not_reg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
       return false;
 
    const struct agx3_field_kv base[] = {
-      {9, 2}, {10, 1}, {11, 1}, {23, 2}, {24, 1},
+      {9, 2}, {10, 1}, {23, 2}, {24, 1},
    };
-   struct agx3_field_kv fields[10] = {
-      {2, dest}, {16, src},
+   struct agx3_field_kv fields[11] = {
+      {2, dest}, {11, dest_cache}, {16, src},
       {25, hint == AGX3_ALU_HINT_CACHE},
       {27, hint == AGX3_ALU_HINT_DISCARD},
    };
-   unsigned n = 4;
+   unsigned n = 5;
    for (unsigned slot = 0; slot < 6; ++slot)
       fields[n++] = (struct agx3_field_kv){30 + slot,
                                           !!(wait_mask & (1u << slot))};
@@ -2162,6 +2163,47 @@ agx3_alu_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
+agx3_alu_narrow_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
+                             bool dest_16, uint16_t src, bool src_8,
+                             bool is_signed, enum agx3_alu_hint hint,
+                             bool dest_cache, uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 192 ||
+       (!dest_16 && (dest & 1)) || src >= 192 ||
+       (src_8 && !is_signed && dest_16) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+      return false;
+
+   /* applegpu_g17p `half(char)`, `float(char)`, `half(short)` and
+    * `half(ushort)` share the int2flt point used for 32-bit inputs. f10 is
+    * the result width; f15 selects a signed byte, even when the half holds
+    * a wider sum (`half(char(a + b))`), and f26 = 1 a half input. Only the
+    * float32 result has an unsigned byte form; `half(uchar)` masks with 0xff
+    * and converts a ushort instead.
+    *   a70756020204b070  h2 <- char(^h2), wait slot 6
+    *   a707540202089270  h2 <- char($h4)
+    *   a707540302049070  h3 <- char(h2)
+    *   a70754030304b070  $h3 <- char(^h2)
+    *   a7075402030e9670  $r1 <- char($h7)
+    *   a72754020204b070  h2 <- char(^h2), wait slot 2
+    *   a707560202068220  h2 <- ushort($h3), wait slot 6
+    *   a707540202089430  r1 <- uchar(h4) */
+   const struct agx3_field_kv base[] = {{9, 2}, {10, dest_16 ? 1 : 2}, {25, 2}};
+   struct agx3_field_kv fields[14] = {
+      {2, dest}, {11, dest_cache}, {18, src},
+      {15, src_8}, {26, src_8 ? 0 : 1},
+      {27, hint == AGX3_ALU_HINT_CACHE},
+      {29, hint == AGX3_ALU_HINT_DISCARD}, {30, is_signed},
+   };
+   unsigned n = 8;
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         fields[n++] = (struct agx3_field_kv){33 + i, 1};
+   return agx3_bind_compose(enc, "int2flt", 0, base, 3, fields, n, out, len);
+}
+
+bool
 agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     bool is_signed, enum agx3_alu_hint hint,
                     bool dest_cache, uint16_t wait_mask,
@@ -2312,6 +2354,114 @@ agx3_alu_shift_add16(enum agx_isa_encoding enc, uint16_t dest,
       if (wait_mask & (1u << i))
          fields[n++] = (struct agx3_field_kv){45 + i, 1};
    return agx3_bind_compose(enc, "iadd", 0, base, 6, fields, n, out, len);
+}
+
+bool
+agx3_alu_add_sat16(enum agx_isa_encoding enc, uint16_t dest,
+                   const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                   bool is_signed, bool dest_cache, uint16_t wait_mask,
+                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
+       dest >= 192 || src[0] >= 192 || src[1] >= 192 ||
+       (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
+       (unsigned)hints[1] > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+      return false;
+
+   /* applegpu_g17p `addsat(short, short)` and `addsat(ushort, ushort)` are
+    * the iadd point above with f53 set; the signed form also marks both
+    * half sources signed (f28/f43):
+    *   9f01560202040c40170f  h2 <- ^h2 +sat ^h3, signed, wait slot 6
+    *   9f01560002040e44110f  h0 <- $h2 +sat $h3, signed, wait slot 6
+    *   9f01560402060840110f  h4 <- h3 +sat h2, signed, wait slot 6
+    *   9f115401020208441305  h1 <- ^h1 +sat $h2, unsigned, wait slot 1
+    *   9f01560303040c401705  $h3 <- ^h2 +sat ^h3, unsigned, wait slot 6 */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {23, 2}, {24, 1}, {38, 2}, {39, 1}, {53, 1},
+   };
+   struct agx3_field_kv fields[16] = {
+      {2, dest}, {11, dest_cache}, {16, src[0]}, {31, src[1]},
+      {25, hints[0] == AGX3_ALU_HINT_CACHE},
+      {27, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {40, hints[1] == AGX3_ALU_HINT_CACHE},
+      {42, hints[1] == AGX3_ALU_HINT_DISCARD},
+      {28, is_signed}, {43, is_signed},
+   };
+   unsigned n = 10;
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         fields[n++] = (struct agx3_field_kv){45 + i, 1};
+   return agx3_bind_compose(enc, "iadd", 0, base, 7, fields, n, out, len);
+}
+
+/* The scalar-half isub point is the iadd layout above: slot A at f16 with
+ * cache/discard f25/f27, slot B at f31 with f40/f42, destination cache f11
+ * and waits f45..f50. Both register slots end below half 192. */
+static bool
+agx3_alu_isub16(enum agx_isa_encoding enc, uint16_t dest, bool zero_minuend,
+                const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                bool dest_cache, uint16_t wait_mask,
+                uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 192 ||
+       (!zero_minuend && src[0] >= 192) || src[1] >= 192 ||
+       (unsigned)hints[0] > AGX3_ALU_HINT_CACHE ||
+       (unsigned)hints[1] > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {23, zero_minuend ? 1 : 2}, {24, 1}, {38, 2}, {39, 1},
+   };
+   struct agx3_field_kv fields[14] = {
+      {2, dest}, {11, dest_cache}, {31, src[1]},
+      {40, hints[1] == AGX3_ALU_HINT_CACHE},
+      {42, hints[1] == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned n = 5;
+   if (!zero_minuend) {
+      fields[n++] = (struct agx3_field_kv){16, src[0]};
+      fields[n++] = (struct agx3_field_kv){25, hints[0] == AGX3_ALU_HINT_CACHE};
+      fields[n++] =
+         (struct agx3_field_kv){27, hints[0] == AGX3_ALU_HINT_DISCARD};
+   }
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         fields[n++] = (struct agx3_field_kv){45 + i, 1};
+   return agx3_bind_compose(enc, "isub", 0, base, 6, fields, n, out, len);
+}
+
+bool
+agx3_alu_sub16(enum agx_isa_encoding enc, uint16_t dest,
+               const uint16_t src[2], const enum agx3_alu_hint hints[2],
+               bool dest_cache, uint16_t wait_mask,
+               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   /* applegpu_g17p `short(a - b)`:
+    *   1f01560202040c001705  isub h2, ^h2, ^h3, wait slot 6
+    *   1f01560002040e041105  isub h0, $h2, $h3, wait slot 6
+    *   1f015604020608001105  isub h4, h3, h2, wait slot 6
+    *   1f115401020208041305  isub h1, ^h1, $h2, wait slot 1
+    *   1f01560303040c001705  isub $h3, ^h2, ^h3, wait slot 6 */
+   return src && hints &&
+          agx3_alu_isub16(enc, dest, false, src, hints, dest_cache, wait_mask,
+                          out, len);
+}
+
+bool
+agx3_alu_neg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+               enum agx3_alu_hint hint, bool dest_cache, uint16_t wait_mask,
+               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   /* applegpu_g17p `short(-a)` is isub with an immediate-zero slot A:
+    *   1f015602020008001504  isub h2, #0, ^h2, wait slot 6
+    *   1f01560202000c041104  isub h2, #0, $h3, wait slot 6
+    *   1f015603020008001104  isub h3, #0, h2, wait slot 6
+    *   1f215402020008001504  isub h2, #0, ^h2, wait slot 2
+    *   1f015603030008001504  isub $h3, #0, ^h2, wait slot 6 */
+   const uint16_t src_pair[2] = {0, src};
+   const enum agx3_alu_hint hint_pair[2] = {AGX3_ALU_HINT_NONE, hint};
+   return agx3_alu_isub16(enc, dest, true, src_pair, hint_pair, dest_cache,
+                          wait_mask, out, len);
 }
 
 static bool

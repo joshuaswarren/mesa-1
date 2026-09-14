@@ -1690,8 +1690,9 @@ TEST_F(AGX3PackBinary, U16ToF32RejectsRemainingUnwitnessedDomains)
 {
    for (unsigned variant = 0; variant < 6; ++variant) {
       SCOPED_TRACE(variant);
-      /* S16-to-f32 is now independently witnessed alongside U16-to-f32. */
-      if (variant == 4)
+      /* S16-to-f32 is now independently witnessed alongside U16-to-f32,
+       * and U16-to-half has its own native int2flt point. */
+      if (variant == 1 || variant == 4)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);
@@ -1705,6 +1706,66 @@ TEST_F(AGX3PackBinary, U16ToF32RejectsRemainingUnwitnessedDomains)
          src, variant == 5 ? AGX_ROUND_RTZ : AGX_ROUND_RTE);
       EXPECT_TRUE(pack(b, false).empty());
    }
+}
+
+TEST_F(AGX3PackBinary, G17PNarrowIntToFloatUsesNativeInt2flt)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+
+   /* int16 to half, and a signed byte to half or float32, are one int2flt
+    * reading the source half directly. */
+   const struct {
+      enum agx_convert mode;
+      enum agx_size dest_size;
+   } direct[] = {
+      {AGX_CONVERT_S16_TO_F, AGX_SIZE_16},
+      {AGX_CONVERT_U16_TO_F, AGX_SIZE_16},
+      {AGX_CONVERT_S8_TO_F, AGX_SIZE_16},
+      {AGX_CONVERT_S8_TO_F, AGX_SIZE_32},
+      {AGX_CONVERT_U8_TO_F, AGX_SIZE_32},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(direct); ++i) {
+      const bool half = direct[i].dest_size == AGX_SIZE_16;
+      agx_builder *b = builder(enc);
+      agx_index src = agx_register(3, AGX_SIZE_16);
+      src.discard = true;
+      agx_convert_to(b, agx_register(half ? 5 : 4, direct[i].dest_size),
+                     agx_immediate(direct[i].mode), src, AGX_ROUND_RTE);
+      agx_stop(b);
+
+      const bool byte = direct[i].mode == AGX_CONVERT_S8_TO_F ||
+                        direct[i].mode == AGX_CONVERT_U8_TO_F;
+      const bool is_signed = direct[i].mode == AGX_CONVERT_S8_TO_F ||
+                             direct[i].mode == AGX_CONVERT_S16_TO_F;
+      ASSERT_TRUE(agx3_alu_narrow_int_to_float(
+         enc, half ? 5 : 4, half, 3, byte, is_signed, AGX3_ALU_HINT_DISCARD,
+         false, 0, bytes, &len));
+      std::vector<uint8_t> want(bytes, bytes + len);
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want) << i;
+   }
+
+   /* Apple has no unsigned byte to half form: `half(uchar)` masks the byte
+    * into the destination and converts that ushort in place. */
+   agx_builder *b = builder(enc);
+   agx_index dest = agx_register(5, AGX_SIZE_16);
+   dest.cache = true;
+   agx_convert_to(b, dest, agx_immediate(AGX_CONVERT_U8_TO_F),
+                  agx_register(3, AGX_SIZE_16), AGX_ROUND_RTE);
+   agx_stop(b);
+   std::vector<uint8_t> want;
+   ASSERT_TRUE(agx3_alu_bit_imm(enc, AGX3_ALU_BAND, true, 5, 3, 0xff,
+                                AGX3_ALU_HINT_NONE, 0, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_alu_narrow_int_to_float(enc, 5, true, 5, false, false,
+                                            AGX3_ALU_HINT_DISCARD, true, 0,
+                                            bytes, &len));
+   append(want, bytes, len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
 }
 
 TEST_F(AGX3PackBinary, FaddMinifloatPreservesWaitLivenessAndCommutativity)
