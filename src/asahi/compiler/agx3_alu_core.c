@@ -14,7 +14,7 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                   uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 128 || (!half && ((dest | src) & 1)) ||
+       src >= 256 || (!half && ((dest | src) & 1)) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
       return false;
 
@@ -28,7 +28,11 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     *   2705560302044004  h3 <- popcount(h2), h2 stored later, slot 6
     *   2705560402004c04  r2 <- popcount(r0), r0 stored later, slot 6
     *   2715540202045c04  r1 <- popcount(^r1), wait slot 1
-    *   2705540403004e04  $r2 <- popcount($r0) */
+    *   2705540403004e04  $r2 <- popcount($r0)
+    * and, with enough 64-bit values live that the source lands high:
+    *   2705548003005d04  $r64 <- popcount(^r64)
+    *   2705549803305d04  $r76 <- popcount(^r76)
+    *   2705549003005c04  $r72 <- popcount(^r0) */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, half ? 1 : 2}, {23, 2}, {24, half ? 1 : 2},
    };
