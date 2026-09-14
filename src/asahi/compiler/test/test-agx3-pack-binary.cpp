@@ -6638,6 +6638,32 @@ TEST_F(AGX3PackBinary, TextureFetchWaitSurvivesFallthroughBlock)
    }
 }
 
+TEST_F(AGX3PackBinary, StoreOnlySplitColourWaitAcquiresFirst)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned first_wait : {8u, 4u}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_wait_pix(b, first_wait);
+      agx_wait_pix(b, 12u ^ first_wait);
+      agx_index value = agx_register(0, AGX_SIZE_32);
+      value.channels_m1 = 3;
+      agx_st_tile(b, value, agx_immediate(AGX_ALL_SAMPLES), agx_null(),
+                  AGX_FORMAT_I32, 15, 0, false, 0);
+      agx_signal_pix(b, 12);
+      agx_stop(b);
+
+      const auto binary = pack(b);
+      uint8_t entry[AGX3_PIXEL_MAX_LENGTH];
+      uint8_t len = 0;
+      ASSERT_TRUE(agx3_pixel_colour_entry(enc, entry, &len));
+      ASSERT_GE(binary.size(), len);
+      EXPECT_TRUE(std::equal(entry, entry + len, binary.begin()));
+      EXPECT_TRUE(b->shader->agx3_colour_link.entry_emitted);
+      EXPECT_EQ(b->shader->agx3_colour_link.entry_offset, 0);
+   }
+}
+
 TEST_F(AGX3PackBinary, TileStoreSingleSampleFormats)
 {
    const struct {
