@@ -2133,17 +2133,19 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
       for (unsigned v = 0; v < ARRAY_SIZE(variants); ++v) {
          if (variants[v].in) {
+            /* hk_compile_nir() takes ownership, including on failure. */
+            nir_shader *variant_nir = variants[v].in;
+            variants[v].in = NULL;
             result =
-               hk_compile_nir(dev, pAllocator, variants[v].in, info->flags,
+               hk_compile_nir(dev, pAllocator, variant_nir, info->flags,
                               info->robustness, NULL, features, variants[v].out,
                               sw_stage, true, NULL, info->set_layout_count);
 
             if (result != VK_SUCCESS) {
                hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
-               ralloc_free(nir);
-               ralloc_free(pre_gs);
-               ralloc_free(count);
-               ralloc_free(rast);
+               for (unsigned remaining = v + 1;
+                    remaining < ARRAY_SIZE(variants); ++remaining)
+                  ralloc_free(variants[remaining].in);
                return result;
             }
          }
