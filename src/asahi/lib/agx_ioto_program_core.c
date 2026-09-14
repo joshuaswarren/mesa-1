@@ -72,23 +72,25 @@ enum {
  * which the shader does not consume.  Fresh applegpu_g17p one-target programs
  * carry 0x2f3, while both the two-RGBA8 and mixed RGBA16F+R8 native programs
  * carry 0x2c3: active partition 1's combined class 0x30 is no longer released
- * by the loader.  Partition 2 analogously owns class 0xc0.  Coverage shaders
- * additionally keep class 0 acquired, producing the witnessed 0x2f2 form for
- * one partition. Sparse attachment captures retain logical class identity:
- * target 2 alone releases 0x23f; targets 0+2 release 0x233. */
+ * by the loader.  Partition 2 analogously owns class 0xc0.  A multi-target
+ * fragment writing only some targets releases the classes of the others,
+ * class 0x0c included: native fragments writing each subset of two to four
+ * targets carry 0x2cf with only partition 1, 0x23f with only partition 2,
+ * 0x233 for partitions 0 and 2, and 0x20f for partitions 1 and 2.  Coverage
+ * shaders additionally keep class 0 acquired, clearing bit 0 of each form. */
 static bool
-g17p_fragment_pixrel_compose(unsigned colour_partition_mask,
+g17p_fragment_pixrel_compose(unsigned colour_classes,
                              bool writes_sample_mask,
                              uint8_t out[G17P_FRAGMENT_PIXREL_SIZE])
 {
-   if (!out || colour_partition_mask == 0 ||
-       colour_partition_mask >= (1u << G17P_MAX_COLOUR_PARTITIONS))
+   if (!out || colour_classes == 0 ||
+       colour_classes >= (1u << G17P_MAX_COLOUR_PARTITIONS))
       return false;
 
    uint16_t descriptor = UINT16_C(0x2ff);
-   for (unsigned partition = 0; partition < G17P_MAX_COLOUR_PARTITIONS; ++partition) {
-      if (colour_partition_mask & (1u << partition))
-         descriptor &= ~(UINT16_C(12) << (2 * partition));
+   for (unsigned c = 0; c < G17P_MAX_COLOUR_PARTITIONS; ++c) {
+      if (colour_classes & (1u << c))
+         descriptor &= ~(UINT16_C(12) << (2 * c));
    }
    if (writes_sample_mask)
       descriptor &= ~UINT16_C(1);
@@ -563,10 +565,10 @@ agx_ioto_g17p_no_resource_program_compose(
 bool
 agx_ioto_g17p_fragment_no_resource_program_compose(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_partition_mask, void *output, size_t capacity, size_t *written)
+   unsigned colour_classes, void *output, size_t capacity, size_t *written)
 {
    uint8_t pixrel[G17P_FRAGMENT_PIXREL_SIZE];
-   if (!g17p_fragment_pixrel_compose(colour_partition_mask, false, pixrel) ||
+   if (!g17p_fragment_pixrel_compose(colour_classes, false, pixrel) ||
        !output || !written || !g17p_type0_tail_valid(packed_tail) ||
        program_va == 0 || program_va > UINT64_C(0xffffffffffff) ||
        (program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
@@ -673,10 +675,10 @@ agx_ioto_g17p_fragment_resource_program_compose(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_partition_mask, void *output, size_t capacity, size_t *written)
+   unsigned colour_classes, void *output, size_t capacity, size_t *written)
 {
    uint8_t pixrel[G17P_FRAGMENT_PIXREL_SIZE];
-   if (!g17p_fragment_pixrel_compose(colour_partition_mask, false, pixrel))
+   if (!g17p_fragment_pixrel_compose(colour_classes, false, pixrel))
       return false;
 
    return g17p_resource_program_compose(
@@ -689,10 +691,10 @@ agx_ioto_g17p_coverage_fragment_program_compose(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail,
-   unsigned colour_partition_mask, void *output, size_t capacity, size_t *written)
+   unsigned colour_classes, void *output, size_t capacity, size_t *written)
 {
    uint8_t pixrel[G17P_FRAGMENT_PIXREL_SIZE];
-   if (!g17p_fragment_pixrel_compose(colour_partition_mask, true, pixrel))
+   if (!g17p_fragment_pixrel_compose(colour_classes, true, pixrel))
       return false;
 
    return g17p_resource_program_compose(

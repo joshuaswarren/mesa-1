@@ -60,6 +60,9 @@ struct agx_bg_eot_key {
     * tib.nr_samples > 1; the caller decides, because storeOp = STORE is the
     * only Vulkan path that wants the unresolved surface. */
    bool multisample_store;
+   /* The framebuffer is an AGX_G17P_MRT_MIXED layout. The tile layout keeps
+    * only the targets this program touches, at their framebuffer offsets. */
+   bool mixed_mrt;
 };
 
 struct agx_bg_eot_shader {

@@ -77,6 +77,16 @@ struct hk_g17p_tile_address_config {
    uint32_t tile_height_log2;
 };
 
+struct hk_g17p_image_copy_element_plan {
+   uint32_t block_size_B;
+   uint32_t src_x_el;
+   uint32_t src_y_el;
+   uint32_t dst_x_el;
+   uint32_t dst_y_el;
+   uint32_t width_el;
+   uint32_t height_el;
+};
+
 /* Reduce AIL's power-of-two tile geometry once on the CPU. G17P transfer tiles
  * are at most 128 elements per axis. Raw copy and mip kernels consume this
  * form so every element uses shifts and a seven-bit Morton encoder instead of
@@ -84,6 +94,13 @@ struct hk_g17p_tile_address_config {
 bool hk_g17p_tile_address_config_init(
    uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,
    struct hk_g17p_tile_address_config *config);
+
+/* Convert one Vulkan image-copy region to raw source-format elements. Vulkan
+ * defines compressed/uncompressed compatible copies in the source format's
+ * block geometry, while each endpoint keeps its own offset geometry. */
+bool hk_g17p_image_copy_element_plan(
+   VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
+   struct hk_g17p_image_copy_element_plan *plan);
 
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and

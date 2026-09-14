@@ -312,9 +312,11 @@ struct agx3_tex_sample_desc {
    /* G17P f146 queries LOD, with f74 clear. X is clamped, Y unclamped.
     * Array queries take no layer and encode immediate layer zero. */
    bool query_lod;
-   bool offset;                 /* signed nibble-packed 2D texel offset */
-   uint16_t offset_xyz;           /* signed x/y/z nibbles, z only for 3D */
-   bool offset_register;         /* runtime gather offset staged in bank 6 */
+   bool offset;                 /* coordinate offset is present */
+   bool offset_staged;          /* f141=2 reads PACK_SMPIR offset banks */
+   bool offset_staged_array;    /* staged word also contains array layer */
+   uint16_t offset_xyz;         /* immediate signed x/y/z nibbles */
+   bool offset_register;        /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
 };
 
@@ -356,6 +358,14 @@ bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
                                    uint8_t slot, bool cache, bool discard,
                                    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+/* PACK_IMGWIR publishes an image write's layer register to staging half 6,
+ * with the same operand fields as PACK_SMPIR's array layer. */
+bool agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
+                                      uint8_t slot, uint16_t wait_mask,
+                                      bool src_cache, bool src_discard,
+                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                      uint8_t *len);
+
 bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
@@ -366,6 +376,18 @@ bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
                               uint16_t lod, uint8_t slot, uint16_t wait_mask,
                               bool layer_cache, bool layer_discard,
                               bool lod_cache, bool lod_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* The texel-fetch variant packs a full uint LOD beside the array layer. */
+bool agx3_tex_stage_array_integer_lod(
+   enum agx_isa_encoding enc, uint16_t layer, uint16_t lod, uint8_t slot,
+   uint16_t wait_mask, bool layer_cache, bool layer_discard, bool lod_cache,
+   bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish a runtime signed 2D coordinate offset into operand bank 6. */
+bool agx3_tex_stage_offset_2d(enum agx_isa_encoding enc, uint16_t x,
+                              uint16_t y, uint8_t slot, uint16_t wait_mask,
+                              bool source_cache, bool source_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Run one axis of the native cube-coordinate calculation.  Three axes with
@@ -434,13 +456,32 @@ bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
                            bool src_cache, bool src_discard,
                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
-/* Publish CEM's face together with a 32-bit cube-array comparison layer. */
-bool agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc,
-                                      uint16_t layer, uint8_t slot,
-                                      uint16_t wait_mask, bool layer_cache,
-                                      bool layer_discard,
-                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
-                                      uint8_t *len);
+/* Publish CEM's face at half `face` together with the 16-bit cube-array
+ * layer at half `layer`. */
+bool agx3_tex_stage_cube_array_layer(enum agx_isa_encoding enc, uint16_t face,
+                                     uint16_t layer, uint8_t slot,
+                                     uint16_t wait_mask, bool layer_cache,
+                                     bool layer_discard,
+                                     uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                     uint8_t *len);
+
+/* Publish CEM's face with a 16-bit float register level or bias. The face
+ * half is always consumed. */
+bool agx3_tex_stage_cube_lod(enum agx_isa_encoding enc, uint16_t face,
+                             uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                             bool lod_cache, bool lod_discard,
+                             uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish CEM's face, a 16-bit float register level or bias and a cube-array
+ * layer already packed into the 32-bit GPR `packed_layer` by
+ * agx3_tex_pack_ms_array_layer(). The face and the packed word are always
+ * consumed. */
+bool agx3_tex_stage_cube_array_lod(enum agx_isa_encoding enc, uint16_t face,
+                                   uint16_t lod, uint16_t packed_layer,
+                                   uint8_t slot, uint16_t wait_mask,
+                                   bool lod_cache, bool lod_discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
 
 /* Publish a register-valued integer 2D-MS sample index into the sampler
  * operand bank. The following MS fetch uses the sample-0 instruction form;
@@ -482,12 +523,22 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
  * The existing native-witness wrapper retains its fixed base/slot choices. */
 #define AGX3_IMAGE_WRITE_LENGTH 16u
 
+/* The texture type an image write addresses. A layered write stages its
+ * layer through agx3_tex_stage_image_write_layer(); a 3D write stages z as a
+ * third coordinate. */
+enum agx3_image_write_dim {
+   AGX3_IMAGE_WRITE_2D = 0,
+   AGX3_IMAGE_WRITE_2D_ARRAY,
+   AGX3_IMAGE_WRITE_3D,
+};
+
 struct agx3_image_write_desc {
    uint16_t wait_mask;
    enum agx3_tex_operand_kind image_kind;
    uint16_t image_value;
    bool image_kill;
    bool normalized;
+   enum agx3_image_write_dim dim;
 };
 
 /* Explicit PBE heap base in uniform halves, native descriptor index in

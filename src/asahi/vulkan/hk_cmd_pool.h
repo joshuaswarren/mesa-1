@@ -14,6 +14,13 @@
 #define HK_CMD_BO_SIZE     1024 * 128
 #define HK_CMD_POOL_BO_MAX 32
 
+enum hk_cmd_bo_type {
+   HK_CMD_BO_MAIN,
+   HK_CMD_BO_USC,
+   HK_CMD_BO_ROOT,
+   HK_CMD_BO_TYPE_COUNT,
+};
+
 /* Recyclable command buffer BO, used for both push buffers and upload */
 struct hk_cmd_bo {
    struct agx_bo *bo;
@@ -23,7 +30,7 @@ struct hk_cmd_bo {
    /* Full VA of the G17P VDM alias in the architectural user window. */
    uint64_t g17p_vdm_alias;
 
-   /** Link in hk_cmd_pool::free_bos or hk_cmd_buffer::bos */
+   /** Link in a matching command-pool or command-buffer BO list. */
    struct list_head link;
 };
 
@@ -46,11 +53,9 @@ bool hk_g17p_vdm_low_window_enabled(const struct agx_device *dev);
 struct hk_cmd_pool {
    struct vk_command_pool vk;
 
-   /** List of hk_cmd_bo */
-   struct list_head free_bos;
-   struct list_head free_usc_bos;
-   uint32_t num_free_bos;
-   uint32_t num_free_usc_bos;
+   /** Recyclable hk_cmd_bo lists, kept separate by mapping and VA policy. */
+   struct list_head free_bos[HK_CMD_BO_TYPE_COUNT];
+   uint32_t num_free_bos[HK_CMD_BO_TYPE_COUNT];
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_cmd_pool, vk.base, VkCommandPool,
@@ -62,16 +67,18 @@ hk_cmd_pool_device(struct hk_cmd_pool *pool)
    return (struct hk_device *)pool->vk.base.device;
 }
 
-VkResult hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool, bool force_usc,
+VkResult hk_cmd_pool_alloc_bo(struct hk_cmd_pool *pool,
+                              enum hk_cmd_bo_type type,
                               struct hk_cmd_bo **bo_out);
 
-void hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, struct list_head *bos);
-void hk_cmd_pool_free_usc_bo_list(struct hk_cmd_pool *pool,
-                                  struct list_head *bos);
+void hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool,
+                              enum hk_cmd_bo_type type,
+                              struct list_head *bos);
 bool hk_g17p_upload_quarantine_enabled(const struct hk_device *dev);
 void hk_g17p_quarantine_command_uploads(
    struct hk_device *dev, struct list_head *main_bos,
-   struct list_head *usc_bos, struct list_head *vdm_allocations);
+   struct list_head *usc_bos, struct list_head *root_bos,
+   struct list_head *vdm_allocations);
 VkResult hk_cmd_bo_ensure_vdm_alias(struct hk_cmd_pool *pool,
                                     struct hk_cmd_bo *bo);
 

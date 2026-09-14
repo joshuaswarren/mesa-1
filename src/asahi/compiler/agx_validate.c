@@ -396,14 +396,12 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          } else {
             return 1;
          }
-      } else if (s == 5) {
-         /* G17P immediate offsets live in I->offset_xyz, leaving src[5]
-          * to the comparator. Runtime gather offsets instead occupy a full
-          * 32-bit value, appended after the comparator when present. */
-         const bool offset_in_src =
-            I->offset && !(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-                           I->shadow && I->offset_xyz);
-         return 2 * ((!!I->shadow) + (!!offset_in_src));
+       } else if (s == 5) {
+         /* Compare/offset. Immediate G17P offsets ride in SMP, while runtime
+          * offsets remain a two-component vector for PACK_SMPIR. AGX2 keeps
+          * its existing compare/offset collect. */
+         return agx_is_null(I->src[s]) ? 0
+                                      : 2 * agx_channels(I->src[s]);
       } else {
          return size;
       }

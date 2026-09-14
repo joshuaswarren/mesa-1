@@ -3813,7 +3813,7 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       .fragment = cs->stage == MESA_SHADER_FRAGMENT,
       .writes_sample_mask = pass_type == AGX_PASS_TYPE_PUNCH_THROUGH ||
                             pass_type == AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH,
-      .colour_partition_mask = linked->g17p_colour_partition_mask,
+      .colour_classes = linked->g17p_colour_classes,
       .imageblock = {
          .sample_size_B = batch->tilebuffer_layout.sample_size_B,
          .nr_samples = batch->tilebuffer_layout.nr_samples,

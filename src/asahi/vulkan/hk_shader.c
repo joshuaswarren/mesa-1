@@ -29,6 +29,7 @@
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
 #include "hk_image.h"
+#include "hk_native_descriptor.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
 #include "hk_shader.h"
@@ -137,6 +138,22 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
    };
 }
 
+/* Whether agx_preprocess_nir() would lower a local array to scratch. */
+static bool
+hk_has_scratch_sized_array(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_function_temp_variable(var, impl) {
+         unsigned size, align;
+         glsl_get_natural_size_align_bytes(var->type, &size, &align);
+         if (size > AGX_SCRATCH_ARRAY_THRESHOLD_B)
+            return true;
+      }
+   }
+
+   return false;
+}
+
 void
 hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 {
@@ -186,11 +203,15 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
 
-   /* G17P has no legacy USC constant-data upload.  Lower compute constants to
-    * load_constant so the private native path can address the immutable blob
-    * through its root descriptor (hk_nir_lower_descriptors.c
-    * lower_load_constant, and hk_cmd_dispatch.c uploads the blob per
-    * dispatch).
+   /* G17P has no legacy USC constant-data upload.  Lower compute, vertex and
+    * fragment constants to load_constant so the private native path can
+    * address the immutable blob through its root descriptor
+    * (hk_nir_lower_descriptors.c lower_load_constant).  hk_cmd_dispatch.c
+    * uploads a compute blob per dispatch and hk_flush_shaders() publishes the
+    * bound vertex and fragment blobs.  This is also Apple's shape: metal-nt
+    * -arch applegpu_g17p compiles a fragment function's static constant
+    * table lookup to an lddev from a uniform-supplied base, not to thread
+    * private storage.
     *
     * This MUST run before agx_preprocess_nir.  That helper's first act is
     * nir_lower_vars_to_scratch with a 256-byte threshold (agx_compile.c:3852),
@@ -201,9 +222,20 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
     * move, and nir_opt_large_constants only ever looks at function_temp
     * (nir_opt_large_constants.c:545-561).
     */
-   if (nir->info.stage == MESA_SHADER_COMPUTE &&
-       ((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P)
-      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+   if (((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P) {
+      if (nir->info.stage == MESA_SHADER_COMPUTE) {
+         NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+      } else if ((nir->info.stage == MESA_SHADER_VERTEX ||
+                  nir->info.stage == MESA_SHADER_FRAGMENT) &&
+                 hk_has_scratch_sized_array(nir)) {
+         /* Vertex and fragment arrays within the scratch threshold keep their
+          * csel ladders, so leave shaders without a larger array untouched.
+          * nir_opt_large_constants cannot lower a whole-array copy_deref. */
+         NIR_PASS(_, nir, nir_lower_var_copies);
+         NIR_PASS(_, nir, nir_opt_large_constants, NULL,
+                  AGX_SCRATCH_ARRAY_THRESHOLD_B);
+      }
+   }
 
    /* Optimize but allow copies because we haven't lowered them yet */
    if (((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P)
@@ -289,14 +321,36 @@ hk_populate_fs_key(struct hk_fs_key *key,
       key->force_sample_shading = true;
 }
 
+/* Every enabled device feature that changes a shader's code must be in this
+ * key, since it is part of the cached shader's hash.
+ */
 enum hk_feature_key {
    HK_FEAT_CUSTOM_BORDER = BITFIELD_BIT(0),
+
+   /* G17P only lowers sampled images to its native heaps when they cannot be
+    * updated after bind. */
+   HK_FEAT_SAMPLED_IMAGE_UPDATE_AFTER_BIND = BITFIELD_BIT(1),
+
+   /* Select the vertex fetch robustness level of a monolithic vertex shader.
+    */
+   HK_FEAT_ROBUST_BUFFER_ACCESS = BITFIELD_BIT(2),
+   HK_FEAT_ROBUST_BUFFER_ACCESS_2 = BITFIELD_BIT(3),
+   HK_FEAT_PIPELINE_ROBUSTNESS = BITFIELD_BIT(4),
 };
 
 static enum hk_feature_key
 hk_make_feature_key(const struct vk_features *feats)
 {
-   return (!feats || feats->customBorderColors) ? HK_FEAT_CUSTOM_BORDER : 0;
+   if (!feats)
+      return HK_FEAT_CUSTOM_BORDER;
+
+   return (feats->customBorderColors ? HK_FEAT_CUSTOM_BORDER : 0) |
+          (feats->descriptorBindingSampledImageUpdateAfterBind
+              ? HK_FEAT_SAMPLED_IMAGE_UPDATE_AFTER_BIND
+              : 0) |
+          (feats->robustBufferAccess ? HK_FEAT_ROBUST_BUFFER_ACCESS : 0) |
+          (feats->robustBufferAccess2 ? HK_FEAT_ROBUST_BUFFER_ACCESS_2 : 0) |
+          (feats->pipelineRobustness ? HK_FEAT_PIPELINE_ROBUSTNESS : 0);
 }
 
 static void
@@ -1178,6 +1232,89 @@ lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
+/* Divide a descriptor byte offset by the G17P PBE record size. Descriptor
+ * layouts keep every storage PBE on a record boundary, and the offset is built
+ * from the binding offset and stride, so it divides term by term. Rebuilding
+ * the expression keeps an ordinary array index on the multiply-add the backend
+ * already encodes instead of adding a run-time shift.
+ */
+static nir_def *
+hk_g17p_pbe_record(nir_builder *b, nir_scalar s)
+{
+   const unsigned record_log2 = util_logbase2(HK_G17P_PBE_RECORD_SIZE);
+
+   if (nir_scalar_is_const(s)) {
+      const uint64_t v = nir_scalar_as_uint(s);
+      return (v % HK_G17P_PBE_RECORD_SIZE) == 0
+                ? nir_imm_int(b, v >> record_log2)
+                : NULL;
+   }
+
+   if (!nir_scalar_is_alu(s))
+      return NULL;
+
+   nir_op op = nir_scalar_alu_op(s);
+   nir_scalar x = nir_scalar_chase_alu_src(s, 0);
+   nir_scalar y = nir_scalar_chase_alu_src(s, 1);
+
+   switch (op) {
+   case nir_op_iadd: {
+      nir_def *x_record = hk_g17p_pbe_record(b, x);
+      nir_def *y_record = x_record ? hk_g17p_pbe_record(b, y) : NULL;
+      return y_record ? nir_iadd(b, x_record, y_record) : NULL;
+   }
+
+   case nir_op_imul:
+   case nir_op_amul:
+      if (nir_scalar_is_const(x))
+         SWAP(x, y);
+      if (!nir_scalar_is_const(y) ||
+          (nir_scalar_as_uint(y) % HK_G17P_PBE_RECORD_SIZE) != 0)
+         return NULL;
+      return nir_build_alu2(b, op, nir_mov_scalar(b, x),
+                            nir_imm_int(b, nir_scalar_as_uint(y) >>
+                                           record_log2));
+
+   case nir_op_ishl:
+      if (!nir_scalar_is_const(y) || nir_scalar_as_uint(y) < record_log2)
+         return NULL;
+      return nir_ishl_imm(b, nir_mov_scalar(b, x),
+                          nir_scalar_as_uint(y) - record_log2);
+
+   default:
+      return NULL;
+   }
+}
+
+/* Honeykrisp names a storage image by the byte offset of its PBE in the
+ * descriptor set. G17P's imgwci instead takes a PBE heap from a uniform and
+ * the index of a PBE record in that heap, so the set itself is the heap and
+ * the store carries its record index.
+ */
+static bool
+hk_g17p_lower_storage_records(nir_builder *b, nir_intrinsic_instr *intr,
+                              UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_bindless_image_store)
+      return false;
+
+   nir_intrinsic_instr *handle = nir_src_as_intrinsic(intr->src[0]);
+   assert(handle->intrinsic == nir_intrinsic_bindless_image_agx);
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *record =
+      hk_g17p_pbe_record(b, nir_get_scalar(handle->src[0].ssa, 0));
+   if (!record) {
+      record = nir_ushr_imm(b, handle->src[0].ssa,
+                            util_logbase2(HK_G17P_PBE_RECORD_SIZE));
+   }
+
+   nir_src_rewrite(&intr->src[0],
+                   nir_bindless_image_agx(
+                      b, record, .desc_set = nir_intrinsic_desc_set(handle)));
+   return true;
+}
+
 /* The native G17P flat path takes the C coefficient directly. Its launch
  * admission currently permits only non-fan triangle primitives, so the
  * first-fan B/C selection is unreachable. Keep that topology restriction
@@ -1505,6 +1642,12 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_uniforms,
             nir_metadata_control_flow, &root);
+
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass,
+               hk_g17p_lower_storage_records, nir_metadata_control_flow,
+               NULL);
+   }
 
    /* Report every uniform half this shader actually reads.
     *

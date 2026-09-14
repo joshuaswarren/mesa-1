@@ -122,6 +122,46 @@ tile_offset_shifted(uint32_t x, uint32_t y,
 int
 main(void)
 {
+   VkImageCopy2 element_region = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .srcOffset = {12, 3, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .dstOffset = {2, 1, 0},
+      .extent = {4, 4, 1},
+   };
+   struct hk_g17p_image_copy_element_plan elements;
+   CHECK(hk_g17p_image_copy_element_plan(
+      VK_FORMAT_BC1_RGB_UNORM_BLOCK, VK_FORMAT_R16G16B16A16_UINT,
+      &element_region, &elements));
+   CHECK(elements.block_size_B == 8);
+   CHECK(elements.src_x_el == 3 && elements.src_y_el == 0);
+   CHECK(elements.dst_x_el == 2 && elements.dst_y_el == 1);
+   CHECK(elements.width_el == 1 && elements.height_el == 1);
+
+   element_region.srcOffset = (VkOffset3D){3, 5, 0};
+   element_region.dstOffset = (VkOffset3D){7, 11, 0};
+   element_region.extent = (VkExtent3D){13, 17, 1};
+   CHECK(hk_g17p_image_copy_element_plan(
+      VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+      &element_region, &elements));
+   CHECK(elements.block_size_B == 4);
+   CHECK(elements.src_x_el == 3 && elements.src_y_el == 5);
+   CHECK(elements.dst_x_el == 7 && elements.dst_y_el == 11);
+   CHECK(elements.width_el == 13 && elements.height_el == 17);
+
+   elements.block_size_B = 19;
+   CHECK(!hk_g17p_image_copy_element_plan(
+      VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, &element_region, &elements));
+   CHECK(elements.block_size_B == 0);
+   element_region.srcOffset.x = -1;
+   CHECK(!hk_g17p_image_copy_element_plan(
+      VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, &element_region, &elements));
+   element_region.srcOffset.x = 0;
+   element_region.extent.width = 0;
+   CHECK(!hk_g17p_image_copy_element_plan(
+      VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, &element_region, &elements));
+
    struct hk_g17p_tile_address_config tile_config;
    CHECK(!hk_g17p_tile_address_config_init(0, 64, 64, &tile_config));
    CHECK(!hk_g17p_tile_address_config_init(64, 0, 64, &tile_config));
@@ -927,6 +967,36 @@ main(void)
             one.dstSubresource.layerCount == 1 && one.extent.depth == 1);
       CHECK(one.extent.width == 37 && one.extent.height == 29);
    }
+
+   /* Vulkan permits copies between 1D and 2D images when height and depth
+    * are one. Both endpoints are ordinary single-layer EOT views on G17P. */
+   const VkImageCopy2 one_d_two_d = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 2, 1},
+      .srcOffset = {7, 0, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 5, 1},
+      .dstOffset = {11, 0, 0},
+      .extent = {37, 1, 1},
+   };
+   VkImageCopy2 one_d_out;
+   CHECK(hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_2D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(one_d_out.srcSubresource.baseArrayLayer == 2);
+   CHECK(one_d_out.dstSubresource.baseArrayLayer == 5);
+   CHECK(one_d_out.srcSubresource.layerCount == 1);
+   CHECK(one_d_out.dstSubresource.layerCount == 1);
+   CHECK(one_d_out.extent.width == 37 && one_d_out.extent.height == 1 &&
+         one_d_out.extent.depth == 1);
+   CHECK(hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 2, 2,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
 
    VkImageCopy2 volume_array = volume_copy;
    volume_array.dstSubresource.baseArrayLayer = 7;

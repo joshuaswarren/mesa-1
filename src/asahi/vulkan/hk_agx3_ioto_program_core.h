@@ -77,7 +77,7 @@ struct hk_agx3_g17p_graphics_program_desc {
    uint32_t compiler_d;
    bool fragment;
    bool writes_sample_mask;
-   uint8_t colour_partition_mask;
+   uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
 };
 
@@ -310,6 +310,12 @@ bool hk_agx3_g17p_direct_add3_dispatch_append(
 #define HK_AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE 6144u
 #define HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS  128u
 #define HK_AGX3_G17P_MAX_ROOT_SETS            8u
+
+/* Resolve a packed precompiled-kernel argument block to the dword-granular
+ * upload and uniform-range sizes required by G17P's Ioto loader. */
+bool hk_agx3_g17p_precompiled_data_layout(size_t data_size_B,
+                                          uint32_t *upload_size_B,
+                                          uint16_t *uniform_size_halfs);
 
 struct hk_agx3_g17p_compute_program_desc {
    uint64_t program_va;

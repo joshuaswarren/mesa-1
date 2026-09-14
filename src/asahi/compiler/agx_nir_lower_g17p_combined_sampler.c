@@ -149,14 +149,21 @@ g17p_sample_shape(const nir_tex_instr *tex)
    const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
    const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
    const bool has_grad = ddx >= 0 && ddy >= 0;
-   /* Ordinary samples use immediate offsets. Gathers also accept runtime
-    * offsets through PACK_SMPIR, so their descriptor rewrite must preserve
-    * both constant and dynamic operands. */
+   /* Constant coordinate offsets use one immediate nibble per coordinate in
+    * SMP (f43/f51/f141=1). Runtime offsets keep their component vector for
+    * PACK_SMPIR and select the staged form with f141=2; this includes native
+    * gathers as well as ordinary 2D samples. */
    int offset_src = nir_tex_instr_src_index(tex, nir_tex_src_offset);
-   const bool packed_offset = offset_src < 0;
-   if (packed_offset)
+   const bool backend_offset = offset_src < 0;
+   if (backend_offset)
       offset_src = nir_tex_instr_src_index(tex, nir_tex_src_backend2);
    const bool has_offset = offset_src >= 0;
+   const bool packed_offset =
+      has_offset && backend_offset &&
+      nir_src_num_components(tex->src[offset_src].src) == 1;
+   const bool staged_packed_offset =
+      packed_offset && !nir_src_is_const(tex->src[offset_src].src) &&
+      (tex->is_array || has_lod || has_bias);
    /* Native bank-6 minimum operands are grounded for non-array 2D/3D
     * fragment samples. The shared texture lowering has already combined a
     * bias/minimum pair into one f16x2 source, or left the gradient minimum
@@ -176,13 +183,14 @@ g17p_sample_shape(const nir_tex_instr *tex)
    if (query_lod && has_offset)
       return false;
    if (has_offset &&
-       ((tex->op != nir_texop_tg4 &&
-         !nir_src_is_const(tex->src[offset_src].src)) ||
-        nir_src_num_components(tex->src[offset_src].src) !=
+       (nir_src_num_components(tex->src[offset_src].src) !=
            (packed_offset ? 1u : three_d ? 3u : 2u) ||
-        (packed_offset && tex->op != nir_texop_tg4 &&
-         nir_src_as_uint(tex->src[offset_src].src) >
-                             (three_d ? 0xfffu : 0xffu)) || cube))
+        (!packed_offset && three_d) ||
+        (packed_offset && !staged_packed_offset &&
+         (!nir_src_is_const(tex->src[offset_src].src) ||
+           nir_src_as_uint(tex->src[offset_src].src) >
+              (three_d ? 0xfffu : 0xffu))) ||
+         cube))
       return false;
 
    const unsigned expected_srcs =
@@ -516,17 +524,19 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
    const int sample =
       nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
    /* The backend stages a dynamic uint level independently of the texture
-    * result for 2D and array fetches. Keep that SSA value through descriptor
+    * result for 2D, array, and 3D fetches. Keep that SSA value through descriptor
     * lowering; leaving the old base/byte-offset handle in place is not an
-    * encoding of the native texture heap index. 3D register LOD remains
-    * outside the backend's supported fetch forms. */
+    * encoding of the native texture heap index. The fetch instruction's 3D
+    * selector is orthogonal to the integer-LOD PACK_SMPIR transaction. */
    const bool valid_lod = lod >= 0 &&
       nir_src_num_components(tex->src[lod].src) == 1 &&
       (nir_src_bit_size(tex->src[lod].src) == 16 ||
        nir_src_bit_size(tex->src[lod].src) == 32) &&
       (nir_src_is_const(tex->src[lod].src)
          ? nir_src_as_uint(tex->src[lod].src) <= 63
-         : !three_d);
+         : (nir_src_num_components(tex->src[lod].src) == 1 &&
+            (nir_src_bit_size(tex->src[lod].src) == 16 ||
+             nir_src_bit_size(tex->src[lod].src) == 32)));
    const unsigned lowered_coord_components =
       coord >= 0 ? nir_src_num_components(tex->src[coord].src) : 0;
    return handle >= 0 && coord >= 0 &&
@@ -610,9 +620,20 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
        nir_src_as_uint(intr->src[2]) != 0 ||
        !nir_src_is_const(intr->src[3]) ||
        nir_src_as_uint(intr->src[3]) != 0 ||
-       (nir_intrinsic_access(intr) &
-        (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_NON_READABLE)))
+       (nir_intrinsic_access(intr) & ACCESS_NON_READABLE))
       return false;
+
+   /* Coherent and volatile reads take the same fetch.  G17P's texture read
+    * has no coherency field: metal-nt -arch applegpu_g17p compiles a
+    * read_write texture's read() after a write() to the same smp form as an
+    * access::read texture's read(), differing only in the staged coordinate
+    * halves and the result register,
+    *
+    *   texture2d<int, access::read>        05800cb8b0001701000000000100
+    *   texture2d<int, access::read_write>  05800cb9b0001701000000000200
+    *
+    * and the preceding store's fence already retires the write before any
+    * later texture instruction is issued. */
 
    /* The descriptor offset does not have to be a constant.  The rewrite below
     * is pure SSA arithmetic -- nir_iadd_imm() onto the offset, then one

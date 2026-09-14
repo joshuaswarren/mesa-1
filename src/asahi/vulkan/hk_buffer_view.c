@@ -150,40 +150,51 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       return vk_error(device, VK_ERROR_FORMAT_NOT_SUPPORTED);
    }
 
-   if (hk_native_pbe_supported(generation)) {
-      struct agx_pbe_packed packed;
-      agx_pack(&packed, PBE, cfg) {
-      cfg.dimension = AGX_TEXTURE_DIMENSION_2D;
-      cfg.layout = AGX_LAYOUT_LINEAR;
-      cfg.channels = ail_pixel_format[format].channels;
-      cfg.type = ail_pixel_format[format].type;
-      cfg.srgb = util_format_is_srgb(format);
+   struct AGX_PBE pbe = {AGX_PBE_header};
+   {
+      pbe.dimension = AGX_TEXTURE_DIMENSION_2D;
+      pbe.layout = AGX_LAYOUT_LINEAR;
+      pbe.channels = ail_pixel_format[format].channels;
+      pbe.type = ail_pixel_format[format].type;
+      pbe.srgb = util_format_is_srgb(format);
 
       assert(desc->nr_channels >= 1 && desc->nr_channels <= 4);
 
       for (unsigned i = 0; i < desc->nr_channels; ++i) {
          if (desc->swizzle[i] == 0)
-            cfg.swizzle_r = i;
+            pbe.swizzle_r = i;
          else if (desc->swizzle[i] == 1)
-            cfg.swizzle_g = i;
+            pbe.swizzle_g = i;
          else if (desc->swizzle[i] == 2)
-            cfg.swizzle_b = i;
+            pbe.swizzle_b = i;
          else if (desc->swizzle[i] == 3)
-            cfg.swizzle_a = i;
+            pbe.swizzle_a = i;
       }
 
-      cfg.buffer = rw_base;
-      cfg.buffer_offset_sw = tail_offset_el;
+      pbe.buffer = rw_base;
+      pbe.buffer_offset_sw = tail_offset_el;
 
-      cfg.width = AGX_TEXTURE_BUFFER_WIDTH;
-      cfg.height = DIV_ROUND_UP(view->vk.elements, cfg.width);
-      cfg.level = 0;
-      cfg.stride = (cfg.width * util_format_get_blocksize(format)) - 4;
-      cfg.layers = 1;
-      cfg.levels = 1;
-      };
+      pbe.width = AGX_TEXTURE_BUFFER_WIDTH;
+      pbe.height = DIV_ROUND_UP(view->vk.elements, pbe.width);
+      pbe.level = 0;
+      pbe.stride = (pbe.width * util_format_get_blocksize(format)) - 4;
+      pbe.layers = 1;
+      pbe.levels = 1;
+   }
 
-      memcpy(&view->pbe, &packed, sizeof(packed));
+   if (hk_native_pbe_supported(generation)) {
+      hk_pack_native_pbe(generation, &view->pbe, &pbe);
+   } else if (device->dev.chip == AGX_CHIP_G17P) {
+      /* Gen9's linear PBE is architectural and has no software tail field,
+       * exactly like the texture above: the store lowering adds the tail from
+       * the buffer metadata. A format the Gen9 packer cannot represent (sRGB,
+       * or the emulated RGB32 layout) has no storage usage, so its view keeps
+       * the null PBE.
+       */
+      pbe.buffer_offset_sw = 0;
+      pbe.height = DIV_ROUND_UP(view->vk.elements + tail_offset_el, pbe.width);
+      if (!hk_pack_native_pbe(generation, &view->pbe, &pbe))
+         hk_set_null_native_pbe(generation, &view->pbe);
    } else {
       memset(&view->pbe, 0, sizeof(view->pbe));
    }

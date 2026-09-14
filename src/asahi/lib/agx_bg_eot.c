@@ -78,8 +78,15 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
        (main_offset != 0 &&
         main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
        main_offset > bin->info.binary_size ||
-       bin->info.main_size > bin->info.binary_size - main_offset)
+       bin->info.main_size > bin->info.binary_size - main_offset) {
+      mesa_loge("asahi: G17P %s program geometry is unproven: binary=%u "
+                "main=%u@%u preamble=%u rodata=%u",
+                bin->info.stage == MESA_SHADER_COMPUTE ? "end-of-tile"
+                                                       : "background",
+                bin->info.binary_size, bin->info.main_size, main_offset,
+                bin->info.has_preamble, bin->info.rodata.size_16);
       return false;
+   }
 
    const size_t size = lead_size + block_size;
    uint8_t *image = malloc(size);
@@ -220,6 +227,9 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
    struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);
    struct agx_shader_part bin;
    if (!agx_compile_shader_nir(shader, key, &bin)) {
+      mesa_loge("asahi: the %s shader did not compile for this chip",
+                shader->info.stage == MESA_SHADER_COMPUTE ? "end-of-tile"
+                                                          : "background");
       ralloc_free(shader);
       ralloc_free(res);
       return NULL;
@@ -305,6 +315,7 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
       .fs.ignore_tib_dependencies = true,
+      .g17p_mrt_bg = key->mixed_mrt,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
    };
@@ -470,6 +481,24 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
                                     &compiler_key);
       compiler_key.g17p_rt0_eot_multisample = store_multisample;
+
+      /* A mixed layout storing several targets uses the multi-target
+       * builtin, selecting each target's IMGWBLK tail by its format. A
+       * single stored target keeps its format's own program. */
+      unsigned stores = 0;
+      for (unsigned rt = 0; key->mixed_mrt && rt < ARRAY_SIZE(key->op); ++rt)
+         stores += key->op[rt] == AGX_EOT_STORE;
+
+      if (stores > 1 &&
+          stores <= ARRAY_SIZE(compiler_key.g17p_mrt_eot_selectors)) {
+         for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+            if (key->op[rt] == AGX_EOT_STORE) {
+               compiler_key.g17p_mrt_eot_selectors
+                  [compiler_key.g17p_mrt_eot_count++] =
+                  agx_g17p_mrt_eot_selector(key->tib.logical_format[rt]);
+            }
+         }
+      }
    }
 
    compiler_key.g17p_r11g11b10_mrt_eot =

@@ -51,12 +51,12 @@ hk_descriptor_stride_align_for_type(
                    agx_chip_descriptor_generation(pdev->dev.chip)).stride;
       if (pdev->dev.chip == AGX_CHIP_G17P) {
          *stride += HK_G17P_STORAGE_SW_SIZE;
-         /* imgwci's native argument ABI requires a 32-byte-aligned PBE
-          * pointer. The PBE descriptor starts 32 bytes into the combined
-          * texture/PBE record, so both the binding offset and every array
-          * stride must preserve that alignment. Without this, an SSBO
-          * followed by a storage image places the PBE at +48 and compute
-          * stores silently target the wrong block. */
+         /* imgwci addresses PBE records in a heap, and stores treat the
+          * descriptor set as that heap. The PBE descriptor starts 32 bytes
+          * into the combined texture/PBE record, so both the binding offset
+          * and every array stride must keep it on a record boundary. Without
+          * this, an SSBO followed by a storage image places the PBE at +48
+          * and stores silently target the wrong block. */
          *alignment = HK_G17P_STORAGE_ALIGNMENT;
          *stride = HK_G17P_STORAGE_STRIDE;
       } else {
@@ -72,9 +72,14 @@ hk_descriptor_stride_align_for_type(
        * heap indices and 24 bytes of buffer size/offset/address metadata.
        * The shader must never decode AGX2 software fields from Gen9 bytes.
        */
-      if (pdev->dev.chip == AGX_CHIP_G17P)
+      if (pdev->dev.chip == AGX_CHIP_G17P) {
          *stride = AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE;
-      *alignment = 8;
+         /* Texel-buffer stores address the PBE through the set's PBE heap,
+          * like storage images. */
+         *alignment = HK_G17P_STORAGE_ALIGNMENT;
+      } else {
+         *alignment = 8;
+      }
       break;
 
    case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
@@ -103,7 +108,9 @@ hk_descriptor_stride_align_for_type(
       *stride = *alignment = 0;
       if (type_list == NULL) {
          *stride = HK_MAX_DESCRIPTOR_SIZE;
-         *alignment = 8;
+         *alignment = pdev->dev.chip == AGX_CHIP_G17P
+                         ? HK_G17P_STORAGE_ALIGNMENT
+                         : 8;
       }
       for (unsigned i = 0; type_list && i < type_list->descriptorTypeCount;
            i++) {

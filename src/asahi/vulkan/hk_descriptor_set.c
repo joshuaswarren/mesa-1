@@ -228,11 +228,13 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
        * fallback is built for.  Whether such a store LANDS is a hardware
        * question that no offline check can answer; it is queued as a probe.
        */
+      /* Layered views carry the native array PBE that PACK_IMGWIR-staged
+       * writes address (1D and 2D arrays, and cubes, which storage packs as
+       * 2D arrays), and 3D views the native 3D PBE. */
       const bool native_basic =
          hk_native_pbe_hardware_supported(generation) &&
          view->plane_count == 1 &&
          view->vk.image->samples == VK_SAMPLE_COUNT_1_BIT &&
-         view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D &&
          view->planes[0].storage_pbe_valid;
       supported = hk_native_pbe_supported(generation) || native_basic;
       /* A readable native texture does not require a writable PBE. In
@@ -339,17 +341,15 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       hk_storage_image_descriptor_layout(generation);
    uint32_t heap_index = 0;
 
-   /* G17P imageBuffer reads use the native texture heap even though buffer
-    * writes cannot use the legacy PBE software descriptor. */
+   /* G17P buffer views carry a Gen9 linear PBE; imageBuffer reads still use
+    * the native texture heap. */
    if ((!storage || generation == 9 || hk_native_pbe_supported(generation)) &&
        bufferView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
 
       desc.tex = view->tex;
-      if (storage && hk_native_pbe_supported(generation))
+      if (storage)
          desc.pbe = view->pbe;
-      else if (storage)
-         hk_set_null_native_pbe(generation, &desc.pbe);
       heap_index = view->sampled_heap_index;
    } else {
       hk_set_null_native_texture(generation, &desc.tex);

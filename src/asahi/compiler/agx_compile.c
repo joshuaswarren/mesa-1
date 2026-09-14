@@ -4413,7 +4413,10 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
 
    agx_index dst = agx_def_index(&instr->def);
 
-   /* Pack shadow reference value (compare) and packed offset together */
+   /* Pack the shadow reference and offset sources into the one texture IR
+    * operand. G17P constants leave only the comparator here because their
+    * offset rides in SMP. Runtime G17P offsets remain a two-component vector
+    * for PACK_SMPIR; a comparison, when present, is its leading component. */
    agx_index compare_offset = agx_null();
 
    /* G17P constant offsets live in the instruction, leaving src[5] to
@@ -4438,7 +4441,25 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
       if (packed_offset.type == AGX_INDEX_IMMEDIATE)
          packed_offset = agx_mov_imm(b, 32, packed_offset.value);
 
-      compare_offset = agx_vec2(b, compare, packed_offset);
+      const unsigned offset_channels = agx_channels(packed_offset);
+      agx_index sources[4] = {compare};
+      assert(offset_channels <= 3);
+      if (offset_channels == 1) {
+         sources[1] = packed_offset;
+      } else {
+         agx_index offset_components[3] = {
+            agx_null(), agx_null(), agx_null()
+         };
+         /* Vector loads are contiguous but do not necessarily have an entry
+          * in allocated_vec. Split this texture operand explicitly instead
+          * of assuming its producer was an agx_emit_collect_to(). The split
+          * remains a pseudo instruction and coalesces with a preceding
+          * collect when one exists. */
+         agx_emit_split(b, offset_components, packed_offset, offset_channels);
+         for (unsigned c = 0; c < offset_channels; ++c)
+            sources[c + 1] = offset_components[c];
+      }
+      compare_offset = agx_emit_collect(b, offset_channels + 1, sources);
    }
    else if (!agx_is_null(packed_offset))
       compare_offset = packed_offset;
@@ -6015,6 +6036,68 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    return true;
 }
 
+/* Scalar epilog inputs retain their fixed export ABI, and unlike a collect a
+ * direct PRELOAD cannot be assigned into a tile store's register bank by RA:
+ * the output of colour target n arrives at GPR half 8 + 8n. The grounded
+ * stores read halves 0..31 in store-only fragments of three and four targets
+ * (and multi-target BG programs), and halves 0..15 otherwise, so a store of
+ * the second target alone found its input out of bank and was refused.
+ * Materialize only out-of-bank scalar inputs, immediately before the first
+ * store, and let RA choose a legal free register. The bank mirrors RA's
+ * tile_gpr_limit.
+ */
+static bool
+agx3_bank_scalar_tile_store_inputs(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble)
+      return false;
+
+   agx_instr *first_store = NULL;
+   unsigned store_count = 0;
+   bool loads = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_ST_TILE) {
+         first_store = first_store ? first_store : I;
+         store_count++;
+      } else if (I->op == AGX_OPCODE_LD_TILE) {
+         loads = true;
+      }
+   }
+   if (!first_store)
+      return false;
+
+   const bool wide_bank =
+      !loads && store_count <= 4 &&
+      store_count >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
+      (ctx->key->secondary || ctx->key->g17p_mrt_bg);
+   const unsigned bank = wide_bank ? 32 : 16;
+
+   bool progress = false;
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(first_store));
+   agx_foreach_instr_global(ctx, store) {
+      agx_index source = store->src[0];
+      if (store->op != AGX_OPCODE_ST_TILE || source.type != AGX_INDEX_NORMAL ||
+          agx_channels(source) != 1)
+         continue;
+
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_PRELOAD && I->nr_dests == 1 &&
+             agx_is_equiv(I->dest[0], source)) {
+            if (I->src[0].type == AGX_INDEX_REGISTER &&
+                I->src[0].value >= bank) {
+               agx_index copy = agx_temp(ctx, source.size);
+               agx_mov_to(&b, copy, source);
+               store->src[0] = copy;
+               progress = true;
+            }
+            break;
+         }
+      }
+   }
+   return progress;
+}
+
 static bool
 agx3_implicit_coord_stage_producer(const agx_instr *I)
 {
@@ -6253,6 +6336,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    AGX_PASS(ctx, agx3_sink_vertex_outputs);
    AGX_PASS(ctx, agx3_order_g17p_mrt_tile_ops);
+   AGX_PASS(ctx, agx3_bank_scalar_tile_store_inputs);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
    AGX_PASS(ctx, agx_ra);
@@ -6598,7 +6682,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
    /* Lower large arrays to scratch and small arrays to csel */
-   NIR_PASS(_, nir, nir_lower_vars_to_scratch, 256,
+   NIR_PASS(_, nir, nir_lower_vars_to_scratch, AGX_SCRATCH_ARRAY_THRESHOLD_B,
             glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
             nir_var_function_temp, ~0);

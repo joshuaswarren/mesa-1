@@ -17,6 +17,86 @@ agx_g17p_rt0_pbe_format(enum pipe_format format)
              : util_format_linear(format);
 }
 
+uint8_t
+agx_g17p_mrt_eot_selector(enum pipe_format format)
+{
+   switch (format) {
+   case PIPE_FORMAT_R8_UNORM:
+   case PIPE_FORMAT_R8G8_UNORM:
+   case PIPE_FORMAT_R8G8B8A8_UNORM:
+   case PIPE_FORMAT_R8G8B8X8_UNORM:
+   case PIPE_FORMAT_B8G8R8A8_UNORM:
+   case PIPE_FORMAT_B8G8R8X8_UNORM:
+   case PIPE_FORMAT_R8_SNORM:
+   case PIPE_FORMAT_R8G8_SNORM:
+   case PIPE_FORMAT_R8G8B8A8_SNORM:
+   case PIPE_FORMAT_R8G8B8X8_SNORM:
+   case PIPE_FORMAT_R8_SRGB:
+   case PIPE_FORMAT_R8G8_SRGB:
+   case PIPE_FORMAT_R8G8B8A8_SRGB:
+   case PIPE_FORMAT_R8G8B8X8_SRGB:
+   case PIPE_FORMAT_B8G8R8A8_SRGB:
+   case PIPE_FORMAT_B8G8R8X8_SRGB:
+   case PIPE_FORMAT_R10G10B10A2_UNORM:
+   case PIPE_FORMAT_B10G10R10A2_UNORM:
+      return 0x75;
+
+   case PIPE_FORMAT_R8_UINT:
+   case PIPE_FORMAT_R8G8_UINT:
+   case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_R8G8B8X8_UINT:
+   case PIPE_FORMAT_B8G8R8A8_UINT:
+   case PIPE_FORMAT_R8_SINT:
+   case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_R8G8B8X8_SINT:
+   case PIPE_FORMAT_B8G8R8A8_SINT:
+      return 0x55;
+
+   case PIPE_FORMAT_R16_UNORM:
+   case PIPE_FORMAT_R16G16_UNORM:
+   case PIPE_FORMAT_R16G16B16A16_UNORM:
+   case PIPE_FORMAT_R16_SNORM:
+   case PIPE_FORMAT_R16G16_SNORM:
+   case PIPE_FORMAT_R16G16B16A16_SNORM:
+      return 0x95;
+
+   case PIPE_FORMAT_R16_UINT:
+   case PIPE_FORMAT_R16G16_UINT:
+   case PIPE_FORMAT_R16G16B16A16_UINT:
+   case PIPE_FORMAT_R16G16B16X16_UINT:
+   case PIPE_FORMAT_R16_SINT:
+   case PIPE_FORMAT_R16G16_SINT:
+   case PIPE_FORMAT_R16G16B16A16_SINT:
+   case PIPE_FORMAT_R16G16B16X16_SINT:
+   case PIPE_FORMAT_R16_FLOAT:
+   case PIPE_FORMAT_R16G16_FLOAT:
+   case PIPE_FORMAT_R16G16B16A16_FLOAT:
+   case PIPE_FORMAT_R16G16B16X16_FLOAT:
+   case PIPE_FORMAT_R10G10B10A2_UINT:
+   case PIPE_FORMAT_R5G6B5_UNORM:
+   case PIPE_FORMAT_B5G6R5_UNORM:
+      return 0x15;
+
+   case PIPE_FORMAT_R32_UINT:
+   case PIPE_FORMAT_R32G32_UINT:
+   case PIPE_FORMAT_R32G32B32A32_UINT:
+   case PIPE_FORMAT_R32G32B32X32_UINT:
+   case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R32G32_SINT:
+   case PIPE_FORMAT_R32G32B32A32_SINT:
+   case PIPE_FORMAT_R32G32B32X32_SINT:
+   case PIPE_FORMAT_R32_FLOAT:
+   case PIPE_FORMAT_R32G32_FLOAT:
+   case PIPE_FORMAT_R32G32B32A32_FLOAT:
+   case PIPE_FORMAT_R32G32B32X32_FLOAT:
+      return 0x35;
+
+   default:
+      return 0;
+   }
+}
+
 void
 agx_g17p_configure_rt0_eot_key(enum pipe_format format,
                                struct agx_shader_key *key)
@@ -25,17 +105,6 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
       return;
 
    key->g17p_rt0_eot_words = 0;
-   key->g17p_rt0_eot_rgb565 = false;
-   key->g17p_rt0_eot_norm16_selector_95 = false;
-   key->g17p_rt0_eot_i16_signed_two_words = false;
-   key->g17p_rt0_eot_i32 = false;
-   key->g17p_rt0_eot_i32_four_words = false;
-   key->g17p_rt0_eot_i32_signed_four_words = false;
-   key->g17p_rt0_eot_i32_selector_15 = false;
-   key->g17p_rt0_eot_i32_selector_75 = false;
-
-   key->g17p_rt0_eot_rgb565 = format == PIPE_FORMAT_R5G6B5_UNORM ||
-                              format == PIPE_FORMAT_B5G6R5_UNORM;
    key->g17p_rt0_eot_i32 =
       format == PIPE_FORMAT_R32_FLOAT ||
       format == PIPE_FORMAT_R32G32_FLOAT || format == PIPE_FORMAT_R32_UINT ||
@@ -56,18 +125,6 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
    key->g17p_rt0_eot_i32_signed_four_words =
       format == PIPE_FORMAT_R32G32B32A32_SINT ||
       format == PIPE_FORMAT_R32G32B32X32_SINT;
-   key->g17p_rt0_eot_i32_selector_15 =
-      format == PIPE_FORMAT_R32G32_SINT;
-   key->g17p_rt0_eot_i32_selector_75 =
-      format == PIPE_FORMAT_R32G32_UINT;
-   key->g17p_rt0_eot_norm16_selector_95 =
-      format == PIPE_FORMAT_R16_UNORM || format == PIPE_FORMAT_R16_SNORM ||
-      format == PIPE_FORMAT_R16G16_UNORM ||
-      format == PIPE_FORMAT_R16G16_SNORM ||
-      format == PIPE_FORMAT_R16G16B16A16_SNORM;
-   key->g17p_rt0_eot_i16_signed_two_words =
-      format == PIPE_FORMAT_R16G16B16A16_SINT ||
-      format == PIPE_FORMAT_R16G16B16X16_SINT;
 
    switch (format) {
    case PIPE_FORMAT_R32_FLOAT:

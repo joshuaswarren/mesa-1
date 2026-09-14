@@ -313,7 +313,7 @@ test_wide_rgba8_background(unsigned count, bool reload,
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
    bool ok = compiled && part.binary &&
-             part.info.agx3_colour_link.colour_partition_mask == partition_mask &&
+             part.info.agx3_colour_link.colour_classes == partition_mask &&
              part.info.agx3_colour_link.entry_emitted &&
              part.info.push_count ==
                 (reload ? 0 : 4 + 8 * util_last_bit(target_mask));
@@ -369,7 +369,7 @@ test_wide_rgba8_epilog(unsigned count, unsigned target_mask,
    struct agx_shader_part part = {0};
    fprintf(stderr, "Compiling RGBA8 epilog target mask 0x%x\n", target_mask);
    bool ok = agx_compile_shader_nir(b.shader, &backend, &part) && part.binary &&
-             part.info.agx3_colour_link.colour_partition_mask == partition_mask;
+             part.info.agx3_colour_link.colour_classes == partition_mask;
    const unsigned active = util_bitcount(target_mask);
    if (ok) {
       const uint8_t *code = (uint8_t *)part.binary + part.info.main_offset;
@@ -460,7 +460,7 @@ main(void)
       vkquake_part.info.main_size == vkquake_part.info.binary_size &&
       vkquake_part.info.agx3_colour_link.entry_emitted &&
       vkquake_part.info.agx3_colour_link.straight_line &&
-      vkquake_part.info.agx3_colour_link.colour_partition_mask == 3 &&
+      vkquake_part.info.agx3_colour_link.colour_classes == 3 &&
       vkquake_part.info.agx3_colour_link.entry_offset == 0;
    if (!vkquake_ok) {
       fprintf(stderr,
@@ -519,7 +519,7 @@ main(void)
                                   true, &part) &&
                    part.info.agx3_colour_link.entry_emitted &&
                    part.info.agx3_colour_link.straight_line &&
-                   part.info.agx3_colour_link.colour_partition_mask == 3 &&
+                   part.info.agx3_colour_link.colour_classes == 3 &&
                    part.info.agx3_colour_link.entry_offset == 0 &&
                    part.info.main_offset == 0 &&
                    part.info.main_size == part.info.binary_size;
@@ -605,7 +605,7 @@ main(void)
               sizeof(expected_rgba8_mrt)) ||
        !part.info.agx3_colour_link.entry_emitted ||
        !part.info.agx3_colour_link.straight_line ||
-       part.info.agx3_colour_link.colour_partition_mask != 3 ||
+       part.info.agx3_colour_link.colour_classes != 3 ||
        part.info.agx3_colour_link.entry_offset != 40 ||
        memcmp(rgba8_code + 40, apple_transaction,
               sizeof(apple_transaction))) {

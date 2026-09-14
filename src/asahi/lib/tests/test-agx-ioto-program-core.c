@@ -583,35 +583,37 @@ test_g17p_fragment_no_resource_program(void)
    CHECK(memcmp(output, expected, sizeof(expected)) == 0);
    CHECK(output[sizeof(expected)] == 0xa5);
 
-   /* applegpu_g17p metadata makes the active partition count observable in
-    * exactly one PIXREL descriptor: p0=0x2f3, p0+p1=0x2c3, and
-    * p0+p1+p2=0x203.  Coverage holds class0 as well.  Compare each complete
-    * composed program so the record position and terminal framing are also
-    * part of the oracle. */
-   static const uint8_t native_pixrel[3][2][6] = {
-      {{0x07,0x02,0x54,0xf3,0x02,0x00},
-       {0x07,0x02,0x54,0xf2,0x02,0x00}},
-      {{0x07,0x02,0x54,0xc3,0x02,0x00},
-       {0x07,0x02,0x54,0xc2,0x02,0x00}},
-      {{0x07,0x02,0x54,0x03,0x02,0x00},
-       {0x07,0x02,0x54,0x02,0x02,0x00}},
+   /* applegpu_g17p metadata makes the consumed colour classes observable in
+    * exactly one PIXREL descriptor: p0=0x2f3, p0+p1=0x2c3, p0+p1+p2=0x203,
+    * and for fragments writing only some targets p1+p2=0x20f and p2=0x23f.
+    * Coverage holds class0 as well.  Compare each complete composed program
+    * so the record position and terminal framing are also part of the
+    * oracle. */
+   static const struct {
+      uint8_t classes;
+      uint8_t pixrel[2][6];
+   } native_pixrel[] = {
+      {1, {{0x07,0x02,0x54,0xf3,0x02,0x00}, {0x07,0x02,0x54,0xf2,0x02,0x00}}},
+      {3, {{0x07,0x02,0x54,0xc3,0x02,0x00}, {0x07,0x02,0x54,0xc2,0x02,0x00}}},
+      {7, {{0x07,0x02,0x54,0x03,0x02,0x00}, {0x07,0x02,0x54,0x02,0x02,0x00}}},
+      {6, {{0x07,0x02,0x54,0x0f,0x02,0x00}, {0x07,0x02,0x54,0x0e,0x02,0x00}}},
+      {4, {{0x07,0x02,0x54,0x3f,0x02,0x00}, {0x07,0x02,0x54,0x3e,0x02,0x00}}},
    };
    const size_t pixrel_offset = sizeof(expected) - 10;
-   for (unsigned partitions = 1; partitions <= 3; ++partitions) {
+   for (unsigned i = 0; i < ARRAY_SIZE(native_pixrel); ++i) {
+      const unsigned classes = native_pixrel[i].classes;
       uint8_t expected_variant[sizeof(expected)];
       memcpy(expected_variant, expected, sizeof(expected_variant));
-      memcpy(expected_variant + pixrel_offset,
-             native_pixrel[partitions - 1][0], 6);
+      memcpy(expected_variant + pixrel_offset, native_pixrel[i].pixrel[0], 6);
       CHECK(agx_ioto_g17p_fragment_no_resource_program_compose(
-         UINT64_C(0x10000130640), &tail, (1u << partitions) - 1, output,
+         UINT64_C(0x10000130640), &tail, classes, output,
          sizeof(expected), &written));
       CHECK(written == sizeof(expected));
       CHECK(memcmp(output, expected_variant, sizeof(expected_variant)) == 0);
 
-      memcpy(expected_variant + pixrel_offset,
-             native_pixrel[partitions - 1][1], 6);
+      memcpy(expected_variant + pixrel_offset, native_pixrel[i].pixrel[1], 6);
       CHECK(agx_ioto_g17p_coverage_fragment_program_compose(
-         UINT64_C(0x10000130640), NULL, 0, NULL, 0, &tail, (1u << partitions) - 1,
+         UINT64_C(0x10000130640), NULL, 0, NULL, 0, &tail, classes,
          output, sizeof(expected), &written));
       CHECK(written == sizeof(expected));
       CHECK(memcmp(output, expected_variant, sizeof(expected_variant)) == 0);

@@ -95,6 +95,39 @@ hk_g17p_tile_address_config_init(
 }
 
 bool
+hk_g17p_image_copy_element_plan(
+   VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
+   struct hk_g17p_image_copy_element_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+
+   const uint32_t src_block_B = vk_format_get_blocksize(src_format);
+   const uint32_t dst_block_B = vk_format_get_blocksize(dst_format);
+   const uint32_t src_block_w = vk_format_get_blockwidth(src_format);
+   const uint32_t src_block_h = vk_format_get_blockheight(src_format);
+   const uint32_t dst_block_w = vk_format_get_blockwidth(dst_format);
+   const uint32_t dst_block_h = vk_format_get_blockheight(dst_format);
+   if (!plan || !region || !src_block_B || src_block_B != dst_block_B ||
+       !src_block_w || !src_block_h || !dst_block_w || !dst_block_h ||
+       region->srcOffset.x < 0 || region->srcOffset.y < 0 ||
+       region->dstOffset.x < 0 || region->dstOffset.y < 0 ||
+       !region->extent.width || !region->extent.height)
+      return false;
+
+   *plan = (struct hk_g17p_image_copy_element_plan){
+      .block_size_B = src_block_B,
+      .src_x_el = (uint32_t)region->srcOffset.x / src_block_w,
+      .src_y_el = (uint32_t)region->srcOffset.y / src_block_h,
+      .dst_x_el = (uint32_t)region->dstOffset.x / dst_block_w,
+      .dst_y_el = (uint32_t)region->dstOffset.y / dst_block_h,
+      .width_el = DIV_ROUND_UP(region->extent.width, src_block_w),
+      .height_el = DIV_ROUND_UP(region->extent.height, src_block_h),
+   };
+   return true;
+}
+
+bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
 {
    return layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
@@ -531,14 +564,22 @@ hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
 
    const bool src_3d = src_type == VK_IMAGE_TYPE_3D;
    const bool dst_3d = dst_type == VK_IMAGE_TYPE_3D;
-   const bool valid_types =
-      (src_type == VK_IMAGE_TYPE_2D || src_3d) &&
-      (dst_type == VK_IMAGE_TYPE_2D || dst_3d);
+   const bool src_1d_or_2d = src_type == VK_IMAGE_TYPE_1D ||
+                             src_type == VK_IMAGE_TYPE_2D;
+   const bool dst_1d_or_2d = dst_type == VK_IMAGE_TYPE_1D ||
+                             dst_type == VK_IMAGE_TYPE_2D;
+   const bool valid_types = (src_1d_or_2d || src_3d) &&
+                            (dst_1d_or_2d || dst_3d);
    const bool same_type = src_type == dst_type;
+   const bool one_d_two_d =
+      ((src_type == VK_IMAGE_TYPE_1D && dst_type == VK_IMAGE_TYPE_2D) ||
+       (dst_type == VK_IMAGE_TYPE_1D && src_type == VK_IMAGE_TYPE_2D)) &&
+      src_layers == 1 && dst_layers == 1;
    const bool two_d_three_d = (src_type == VK_IMAGE_TYPE_2D && dst_3d) ||
                               (dst_type == VK_IMAGE_TYPE_2D && src_3d);
+   const bool valid_pair = same_type || one_d_two_d || two_d_three_d;
    if (chip != AGX_CHIP_G17P || !region || !out || !valid_types ||
-       (!same_type && !two_d_three_d) || src_layers == 0 ||
+       !valid_pair || src_layers == 0 ||
        src_layers != dst_layers || slice >= src_layers ||
        ((src_3d || dst_3d) && region->extent.depth != src_layers) ||
        (!src_3d && !dst_3d && region->extent.depth != 1) ||

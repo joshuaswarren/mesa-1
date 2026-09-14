@@ -256,16 +256,59 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
    EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
 
+   /* A third target of another format uses the mixed-format layout. */
    enum pipe_format three_targets[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16B16A16_FLOAT,
       PIPE_FORMAT_R8_UNORM,
       PIPE_FORMAT_R8_UNORM,
    };
    tib = agx_build_tilebuffer_layout(three_targets, 3, 1, false);
-   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
-   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_MIXED);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
 
    EXPECT_EQ(agx_g17p_classify_mrt(nullptr), AGX_G17P_MRT_NONE);
+}
+
+TEST(Tilebuffer, G17PCompactsSparseRGBA8Attachments)
+{
+   enum pipe_format sparse[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_NONE,
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_NONE,
+      PIPE_FORMAT_B8G8R8A8_UNORM,
+   };
+   const struct agx_tilebuffer_layout source =
+      agx_build_tilebuffer_layout(sparse, 4, 1, false);
+   struct agx_tilebuffer_layout compact;
+   uint8_t map[AGX_MAX_RENDER_TARGETS] = {0};
+   ASSERT_EQ(agx_tilebuffer_compact(&source, &compact, map), 2u);
+   EXPECT_EQ(map[0], 1u);
+   EXPECT_EQ(map[1], 3u);
+   EXPECT_EQ(compact.logical_format[0], PIPE_FORMAT_R8G8B8A8_UNORM);
+   EXPECT_EQ(compact.logical_format[1], PIPE_FORMAT_B8G8R8A8_UNORM);
+   EXPECT_EQ(compact._offset_B[0], 0u);
+   EXPECT_EQ(compact._offset_B[1], 4u);
+   EXPECT_EQ(agx_g17p_classify_mrt(&source), AGX_G17P_MRT_RGBA8);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&source));
+
+   for (unsigned count : {3u, 4u}) {
+      enum pipe_format rgba8[AGX_MAX_RENDER_TARGETS] = {
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+         PIPE_FORMAT_R8G8B8A8_UNORM,
+      };
+      struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(rgba8, count, 1, false);
+      EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_RGBA8);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+   }
+
+   enum pipe_format none[AGX_MAX_RENDER_TARGETS] = {PIPE_FORMAT_NONE};
+   struct agx_tilebuffer_layout attachmentless =
+      agx_build_tilebuffer_layout(none, 1, 0, false);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&attachmentless));
+   EXPECT_EQ(attachmentless.nr_samples, 0u);
 }
 
 TEST(Tilebuffer, G17PNarrowSRGB)
@@ -296,7 +339,8 @@ TEST(Tilebuffer, G17PNarrowSRGB)
 
       formats[1] = format;
       tib = agx_build_tilebuffer_layout(formats, 2, 1, false);
-      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_MIXED);
+      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    }
 }
 
@@ -365,31 +409,23 @@ TEST(Tilebuffer, G17PRGB565EOTKey)
    struct agx_shader_key key = {};
 
    /* Seed an unrelated format first: configuring a new EOT format must clear
-    * mutually exclusive selectors rather than inheriting a stale cache key. */
+    * the I32 admission rather than inheriting a stale cache key. */
    agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R32G32_UINT, &key);
    EXPECT_EQ(key.g17p_rt0_eot_words, 2);
    EXPECT_TRUE(key.g17p_rt0_eot_i32);
-   EXPECT_TRUE(key.g17p_rt0_eot_i32_selector_75);
 
+   /* RGB565 keeps RGBA16F's two 16-bit float words and its selector. */
    for (enum pipe_format format : {PIPE_FORMAT_R5G6B5_UNORM,
-                                   PIPE_FORMAT_B5G6R5_UNORM}) {
+                                   PIPE_FORMAT_B5G6R5_UNORM,
+                                   PIPE_FORMAT_R16G16B16A16_FLOAT}) {
       agx_g17p_configure_rt0_eot_key(format, &key);
       EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-      EXPECT_TRUE(key.g17p_rt0_eot_rgb565);
       EXPECT_FALSE(key.g17p_rt0_eot_i32);
-      EXPECT_FALSE(key.g17p_rt0_eot_i32_selector_75);
-      EXPECT_FALSE(key.g17p_rt0_eot_norm16_selector_95);
+      EXPECT_EQ(agx_g17p_mrt_eot_selector(format), 0x15);
    }
-
-   /* RGBA16F has the same physical format and word count, but Apple's native
-    * builtin gives it selector 0x15 rather than RGB565's selector 0x35. */
-   agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R16G16B16A16_FLOAT, &key);
-   EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-   EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
 
    agx_g17p_configure_rt0_eot_key(PIPE_FORMAT_R8G8B8A8_UNORM, &key);
    EXPECT_EQ(key.g17p_rt0_eot_words, 0);
-   EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
 }
 
 TEST(Tilebuffer, G17PPacked16EOTKey)
@@ -417,9 +453,7 @@ TEST(Tilebuffer, G17PPacked16EOTKey)
 
       agx_g17p_configure_rt0_eot_key(format, &key);
       EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-      EXPECT_FALSE(key.g17p_rt0_eot_rgb565);
       EXPECT_FALSE(key.g17p_rt0_eot_i32);
-      EXPECT_FALSE(key.g17p_rt0_eot_norm16_selector_95);
    }
 }
 
@@ -428,11 +462,10 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
    static const struct {
       enum pipe_format logical;
       enum pipe_format physical;
-      bool signed_two_words;
    } formats[] = {
-      {PIPE_FORMAT_R16G16B16X16_FLOAT, PIPE_FORMAT_R16_FLOAT, false},
-      {PIPE_FORMAT_R16G16B16X16_UINT, PIPE_FORMAT_R16_UINT, false},
-      {PIPE_FORMAT_R16G16B16X16_SINT, PIPE_FORMAT_R16_UINT, true},
+      {PIPE_FORMAT_R16G16B16X16_FLOAT, PIPE_FORMAT_R16_FLOAT},
+      {PIPE_FORMAT_R16G16B16X16_UINT, PIPE_FORMAT_R16_UINT},
+      {PIPE_FORMAT_R16G16B16X16_SINT, PIPE_FORMAT_R16_UINT},
    };
 
    for (const auto &format : formats) {
@@ -446,8 +479,7 @@ TEST(Tilebuffer, G17PSpecialFormatEOTKey)
       struct agx_shader_key key = {};
       agx_g17p_configure_rt0_eot_key(format.logical, &key);
       EXPECT_EQ(key.g17p_rt0_eot_words, 2);
-      EXPECT_EQ(key.g17p_rt0_eot_i16_signed_two_words,
-                format.signed_two_words);
+      EXPECT_EQ(agx_g17p_mrt_eot_selector(format.logical), 0x15);
 
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));

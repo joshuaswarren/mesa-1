@@ -110,6 +110,11 @@ struct hk_root_descriptor_table {
           * indices. This mapping must be compatible with the fragment shader.
           */
          uint8_t uvs_index[VARYING_SLOT_MAX];
+
+         /* GPU addresses of the immutable NIR constant-data blobs of the
+          * bound vertex and fragment shaders, or zero if they have none. */
+         uint64_t vs_constant_data_addr;
+         uint64_t fs_constant_data_addr;
       } draw;
       struct {
          /* GPU address of the immutable NIR constant-data blob for the
@@ -571,7 +576,7 @@ struct hk_cmd_buffer {
    } state;
 
    struct {
-      struct hk_uploader main, usc, vdm;
+      struct hk_uploader main, usc, root, vdm;
    } uploader;
 
    /* Command-pool slab spans leased by this command buffer's VDM uploader. */

@@ -68,15 +68,26 @@ lower_load_constant(nir_builder *b, nir_intrinsic_instr *load,
                     const struct lower_descriptors_ctx *ctx)
 {
    assert(load->intrinsic == nir_intrinsic_load_constant);
-   if (ctx->stage != MESA_SHADER_COMPUTE)
+
+   unsigned root_offset;
+   switch (ctx->stage) {
+   case MESA_SHADER_COMPUTE:
+      root_offset = hk_root_descriptor_offset(cs.constant_data_addr);
+      break;
+   case MESA_SHADER_VERTEX:
+      root_offset = hk_root_descriptor_offset(draw.vs_constant_data_addr);
+      break;
+   case MESA_SHADER_FRAGMENT:
+      root_offset = hk_root_descriptor_offset(draw.fs_constant_data_addr);
+      break;
+   default:
       return false;
+   }
 
    uint32_t base = nir_intrinsic_base(load);
 
    b->cursor = nir_before_instr(&load->instr);
 
-   const unsigned root_offset =
-      hk_root_descriptor_offset(cs.constant_data_addr);
    nir_def *constant_data =
       load_root(b, 1, 64, nir_imm_int(b, root_offset), 8);
    nir_def *offset = nir_iadd_imm(b, load->src[0].ssa, base);

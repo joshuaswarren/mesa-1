@@ -224,12 +224,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3286,
-       UINT64_C(0x65f2e3931125c0e5)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3358,
-       UINT64_C(0xe0f6486882dbf4ce)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3356,
-       UINT64_C(0x8ac2f745459caef4)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
+       UINT64_C(0x9495c21420219b7c)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
+       UINT64_C(0x32fd5fedbd7e68f3)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
+       UINT64_C(0x014acefc06e693bd)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -306,8 +306,8 @@ main(void)
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(xfb_info->preamble_offset == 0);
    CHECK(xfb_info->main_offset == 0);
-   CHECK(xfb_info->main_size == 176);
-   CHECK(xfb_info->binary_size == 176);
+   CHECK(xfb_info->main_size == 172);
+   CHECK(xfb_info->binary_size == 172);
    CHECK(xfb_info->nr_gprs == 12);
    CHECK(xfb_info->push_count == 4);
    CHECK(xfb_info->workgroup_size[0] == 4);
@@ -348,7 +348,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0x53a133a878a678f4));
+         UINT64_C(0xfd5dc1120f8ca104));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -367,14 +367,13 @@ main(void)
       uint16_t local_size;
       uint64_t hash;
    } statistics[] = {
-      /* The top-level loop now has the native guard/entry/exit scopes.
-       * Relative to that topology, the CNDCF fix changes only byte +0x2db
-       * from 09 to 01: the unconditional break must consume true directly.
-       * Size, registers and every other helper byte are unchanged. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2962, 3090, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0x6360c3db2cff4712)},
+      /* The top-level loop has the native guard/entry/exit scopes. Native
+       * descriptor scheduling assigns independent slots and uses per-slot
+       * dependent wait carriers while keeping adjacent producers overlapped. */
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0xc1fe4bfe34d9b10e)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
-       UINT64_C(0x810469359ef8a715)},
+       UINT64_C(0xd16bb0ba90732f74)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
        UINT64_C(0xd292b1db166dd1e9)},
    };
@@ -425,8 +424,8 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } predicate[] = {
-      {LIBAGX_PREDICATE_INDIRECT_0, 668, UINT64_C(0xf2b66d8d7f84647b)},
-      {LIBAGX_PREDICATE_INDIRECT_1, 814, UINT64_C(0x8d8bd8fca36d1b3f)},
+      {LIBAGX_PREDICATE_INDIRECT_0, 642, UINT64_C(0xc148746179c7c9c7)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 784, UINT64_C(0xeb154f009be4021a)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
       const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
@@ -475,8 +474,8 @@ main(void)
       (const uint8_t *)conditional_blob + sizeof(*conditional_info);
    CHECK(conditional_info->preamble_offset == 0);
    CHECK(conditional_info->main_offset == 0);
-   CHECK(conditional_info->main_size == 184);
-   CHECK(conditional_info->binary_size == 184);
+   CHECK(conditional_info->main_size == 180);
+   CHECK(conditional_info->binary_size == 180);
    CHECK(conditional_info->nr_gprs == 6);
    CHECK(conditional_info->nr_preamble_gprs == 0);
    CHECK(conditional_info->push_count == 16);
@@ -489,7 +488,7 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0x215a4d602b5de34e));
+         UINT64_C(0x3000109950dfd0cb));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);

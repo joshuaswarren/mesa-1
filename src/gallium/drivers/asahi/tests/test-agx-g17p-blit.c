@@ -849,9 +849,14 @@ static bool
 check_vertex_output_shapes(struct pipe_context *pctx)
 {
    bool ok = true;
-   for (unsigned shape = 0; shape < 11; ++shape) {
+   for (unsigned shape = 0; shape < 12; ++shape) {
       const unsigned clip_count = shape < 8 ? shape + 1 : shape == 8 ? 8 : 0;
-      const bool two_varyings = shape == 9;
+      const bool two_varyings = shape == 9 || shape == 11;
+      /* KHR-GL30.transform_feedback3.multiple_streams links no fragment
+       * shader. Its geometry copy program writes position, two captured user
+       * varyings and a point size; with no consumer the interpolation
+       * qualifiers are known, so every UVS index is inlined. */
+      const bool point_size = shape == 11;
       /* KHR-GL30.transform_feedback.capture_vertex_interleaved_test (and the
        * query and discard variants that reuse its program) write
        * min(MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS, MAX_VARYING_COMPONENTS)
@@ -907,6 +912,12 @@ check_vertex_output_shapes(struct pipe_context *pctx)
                           nir_imm_int(&vs, 0), .base = 2, .write_mask = 0xf,
                           .io_semantics.location = VARYING_SLOT_VAR1);
       }
+      if (point_size) {
+         nir_store_output(&vs, nir_imm_float(&vs, 1.0f), nir_imm_int(&vs, 0),
+                          .base = 3, .write_mask = 1,
+                          .io_semantics.location = VARYING_SLOT_PSIZ,
+                          .src_type = nir_type_float32);
+      }
       vs.shader->info.clip_distance_array_size = clip_count;
       nir_shader_gather_info(vs.shader, nir_shader_get_entrypoint(vs.shader));
 
@@ -922,8 +933,9 @@ check_vertex_output_shapes(struct pipe_context *pctx)
       };
       void *vs_cso = pctx->create_vs_state(pctx, &vs_state);
       const bool encoded = vs_cso && vertex_state_encoded(vs_cso);
-      fprintf(stderr, "vertex output shape %u (clip=%u varyings=%u %s): %s\n",
+      fprintf(stderr, "vertex output shape %u (clip=%u varyings=%u%s %s): %s\n",
               shape, clip_count, two_varyings ? 2 : interleaved,
+              point_size ? " psiz" : "",
               linked ? "linked" : "separable",
               encoded ? "encoded" : "REFUSED");
       ok &= encoded;

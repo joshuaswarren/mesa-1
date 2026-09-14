@@ -218,6 +218,50 @@ main(void)
    CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
                                             &bg_program));
 
+   /* Reloaded targets precede cleared ones. Each clear value keeps its
+    * target's eight halves, which start after the texture/sampler pointers
+    * only when at least one target reloads. */
+   CHECK(agx3_g17p_rt0_bg_resource_spec(
+      AGX_CHIP_G17P, AGX3_G17P_RT0_BG_CLEAR_RELOAD, &clear_spec));
+   CHECK(clear_spec == reload_spec);
+   CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_QUAD_CLEAR_PUSH_HALFS, true));
+   CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_QUAD_CLEAR_PUSH_HALFS, false));
+   CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_RT0_CLEAR_PUSH_HALFS, true));
+   bg.sampler_pointer_va = UINT64_C(0x4000020008);
+   bg.clear_value_va = UINT64_C(0x4000010000);
+   bg.op = AGX3_G17P_RT0_BG_CLEAR_RELOAD;
+   for (unsigned count = 2; count <= 4; ++count) {
+      bg.clear_push_halfs = 4 + 8 * count;
+      for (unsigned reloads = 1; reloads < count; ++reloads) {
+         bg.clear_start_halfs = 4 + 8 * reloads;
+         CHECK(agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                                 &bg_program));
+         CHECK(bg_program.length > 0 &&
+               bg_program.length <=
+                  AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE);
+      }
+      bg.clear_start_halfs = 4;
+      CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                               &bg_program));
+      bg.clear_start_halfs = 4 + 8 * count;
+      CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                               &bg_program));
+      bg.clear_start_halfs = 13;
+      CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                               &bg_program));
+   }
+   bg.clear_start_halfs = 12;
+   bg.clear_value_va = 0;
+   CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                            &bg_program));
+   bg.clear_value_va = UINT64_C(0x4000010000);
+   bg.texture_pointer_va = 0;
+   CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                            &bg_program));
+
    struct agx3_g17p_rt0_eot_program_desc eot = {
       .program_va = UINT64_C(0x10000300000),
       .shader_va = UINT64_C(0x100004003c0),
@@ -298,6 +342,26 @@ main(void)
                                               &eot_program));
    }
 
+   /* Three RGBA8 attachments occupy twelve bytes but the tilebuffer rounds
+    * the sample stride to sixteen. The native EOT still publishes offsets
+    * 0, 4 and 8, with no fourth offset operand. */
+   struct agx3_g17p_rt0_eot_program_desc rgba8_three = eot;
+   rgba8_three.shader_binary_size = 164;
+   rgba8_three.staging_halfs = 24;
+   rgba8_three.attachment_count = 3;
+   rgba8_three.imageblock_offset1_B = 4;
+   rgba8_three.imageblock_offset2_B = 8;
+   rgba8_three.imageblock_offset3_B = 0;
+   rgba8_three.imageblock.sample_size_B = 16;
+   rgba8_three.imageblock.tile_size_px = 32 * 32;
+   CHECK(agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &rgba8_three, &eot_program));
+   CHECK(eot_program.length > 0 &&
+         eot_program.length <= AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE);
+   rgba8_three.imageblock.sample_size_B = 12;
+   CHECK(!agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &rgba8_three, &eot_program));
+
    /* Two and three RGBA32 targets retain the same sparse per-attachment
     * offset ABI, with only their actual descriptor and staging counts. */
    for (unsigned count = 2; count <= 3; ++count) {
@@ -327,6 +391,51 @@ main(void)
       raw.attachment_count--;
       raw.pbe_argument_va = UINT64_C(0xffffffffffe0);
       CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &raw,
+                                              &eot_program));
+   }
+
+   /* Targets of arbitrary formats keep the multi-target program and offset
+    * uniforms, but each target may sit at any offset inside the sample. */
+   for (unsigned count = 2; count <= 4; ++count) {
+      struct agx3_g17p_rt0_eot_program_desc mixed = eot;
+      static const uint8_t offsets[] = {16, 24, 0, 8};
+      mixed.shader_binary_size = 32 + 44 * count;
+      mixed.staging_halfs = 8 * count;
+      mixed.attachment_count = count;
+      mixed.imageblock_offset_B = offsets[0];
+      mixed.imageblock_offset1_B = offsets[1];
+      mixed.imageblock_offset2_B = count > 2 ? offsets[2] : 0;
+      mixed.imageblock_offset3_B = count > 3 ? offsets[3] : 0;
+      mixed.imageblock.sample_size_B = 32;
+      mixed.imageblock.tile_size_px = 32 * 16;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mixed,
+                                              &eot_program));
+      mixed.mixed_mrt = true;
+      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mixed,
+                                             &eot_program));
+      CHECK(eot_program.length > 0 && eot_program.length <= 144);
+
+      struct agx3_g17p_rt0_eot_program_desc bad = mixed;
+      bad.imageblock_offset1_B = 32;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                              &eot_program));
+      bad = mixed;
+      if (count < 4) {
+         bad.imageblock_offset3_B = 4;
+         CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                                 &eot_program));
+      }
+      bad = mixed;
+      bad.staging_halfs -= 8;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                              &eot_program));
+      bad = mixed;
+      bad.imageblock.nr_samples = 2;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                              &eot_program));
+      bad = mixed;
+      bad.pbe_argument_va = UINT64_C(0xffffffffffe0);
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
                                               &eot_program));
    }
 
