@@ -285,12 +285,12 @@ hk_pack_native_pbe(unsigned generation,
            generation, &fields,
            legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
       : layered
-      ? (legacy->level == 0 && legacy->levels == 1 &&
-         !legacy->unk_mipmapped &&
-         (array ? agx_pbe_agx3_2d_array_pack(generation, &fields,
-                                             legacy->layers, &packed)
-                : agx_pbe_agx3_3d_pack(generation, &fields, legacy->layers,
-                                       &packed)))
+      ? (array ? agx_pbe_agx3_2d_array_mip_pack(
+                    generation, &fields, legacy->layers, legacy->level,
+                    legacy->levels, &packed)
+               : agx_pbe_agx3_3d_mip_pack(generation, &fields, legacy->layers,
+                                          legacy->level, legacy->levels,
+                                          &packed))
       : generation == 9
          ? agx_pbe_agx3_2d_mip_pack(generation, &fields, legacy->level,
                                     legacy->levels, &packed)

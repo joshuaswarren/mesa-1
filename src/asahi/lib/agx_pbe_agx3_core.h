@@ -70,6 +70,19 @@ bool agx_pbe_agx3_3d_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
    uint32_t depth, struct agx_pbe_agx3_descriptor *out);
 
+/* The layered packets with the native mip extension of
+ * agx_pbe_agx3_2d_mip_pack(). Layers or depth, width, height and buffer
+ * describe the whole chain; level selects the addressed level. */
+bool agx_pbe_agx3_2d_array_mip_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t layers, uint32_t level, uint32_t levels,
+   struct agx_pbe_agx3_descriptor *out);
+
+bool agx_pbe_agx3_3d_mip_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t depth, uint32_t level, uint32_t levels,
+   struct agx_pbe_agx3_descriptor *out);
+
 /* Multisample colour target. PBEStateEncoderGen9<kAGXRevHAL200>::StateFields
  * derives the dimension nibble as `2 + ((flags >> 16) & 2)`, so an ordinary
  * non-array multisample write target selects dimension 4, and deposits the

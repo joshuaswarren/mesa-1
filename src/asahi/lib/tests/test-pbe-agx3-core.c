@@ -213,6 +213,40 @@ check_exact_gen9_array_vector(void)
    CHECK(!agx_pbe_agx3_3d_pack(10, &fields, 8, &packed));
    CHECK(!agx_pbe_agx3_3d_pack(9, &fields, 0, &packed));
    CHECK(!agx_pbe_agx3_3d_pack(9, &fields, 65537, &packed));
+
+   /* Mipmapped layered targets add the 2D mip extension unchanged. */
+   struct agx_pbe_agx3_descriptor plain;
+   CHECK(agx_pbe_agx3_3d_mip_pack(9, &fields, 8, 0, 1, &plain));
+   CHECK(memcmp(plain.bytes, three_d, sizeof(three_d)) == 0);
+   for (unsigned levels = 1; levels <= 16; ++levels) {
+      for (unsigned level = 0; level < levels; ++level) {
+         for (unsigned array = 0; array < 2; ++array) {
+            const uint8_t *base = array ? expected : three_d;
+            CHECK(array ? agx_pbe_agx3_2d_array_mip_pack(9, &fields, 2, level,
+                                                         levels, &packed)
+                        : agx_pbe_agx3_3d_mip_pack(9, &fields, 8, level,
+                                                   levels, &packed));
+            for (unsigned i = 0; i < 32; ++i) {
+               uint8_t expect = base[i];
+               if (levels > 1) {
+                  if (i == 7)
+                     expect |= 4;
+                  if (i == 15)
+                     expect |= 128;
+                  if (i == 21)
+                     expect = level * 16;
+                  if (i == 22)
+                     expect = levels - 1;
+               }
+               CHECK(packed.bytes[i] == expect);
+            }
+         }
+      }
+   }
+   CHECK(!agx_pbe_agx3_3d_mip_pack(9, &fields, 8, 1, 1, &packed));
+   CHECK(!agx_pbe_agx3_3d_mip_pack(9, &fields, 8, 0, 17, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_mip_pack(9, &fields, 2, 0, 0, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_mip_pack(9, &bad, 2, 0, 2, &packed));
    return 0;
 }
 
