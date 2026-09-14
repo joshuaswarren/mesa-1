@@ -43,6 +43,8 @@ struct agx_pbe_agx3_2d_fields {
    uint32_t stride_B;
    /* Legacy layout metadata: encoded only for Gen10, not ordinary Gen9 2D. */
    bool page_aligned_layers;
+   /* Gen9 only: convert stores to sRGB, word1 bit 61. */
+   bool srgb;
 };
 
 struct agx_pbe_agx3_descriptor {

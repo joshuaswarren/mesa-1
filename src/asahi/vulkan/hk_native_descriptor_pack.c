@@ -218,8 +218,8 @@ hk_pack_native_pbe(unsigned generation,
       return false;
 
    /* The recovered subset deliberately excludes every field whose Gen9/10
-    * semantic placement is incomplete: compression, sparse mode, gamma and
-    * the software-addressing sideband. HAL200's exact tiled 2D-array and 3D
+    * semantic placement is incomplete: compression, sparse mode, Gen10 gamma
+    * and the software-addressing sideband. HAL200's exact tiled 2D-array and 3D
     * packets are the bounded layered exceptions. */
    const bool array = generation == 9 &&
                       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY;
@@ -250,7 +250,7 @@ hk_pack_native_pbe(unsigned generation,
                         legacy->unk_mipmapped || legacy->compressed)) ||
        (generation != 9 && (legacy->level != 0 || legacy->levels != 1 ||
                             legacy->unk_mipmapped)) ||
-       legacy->srgb || legacy->extended ||
+       (generation != 9 && legacy->srgb) || legacy->extended ||
        (legacy->layout == AGX_LAYOUT_LINEAR
            ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
                                              : legacy->stride != 0) ||
@@ -277,6 +277,7 @@ hk_pack_native_pbe(unsigned generation,
                      ? legacy->stride + 4
                      : 0,
       .page_aligned_layers = legacy->page_aligned_layers,
+      .srgb = legacy->srgb,
    };
    struct agx_pbe_agx3_descriptor packed;
    const bool valid = multisample

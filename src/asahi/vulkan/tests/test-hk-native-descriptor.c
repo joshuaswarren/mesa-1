@@ -1357,7 +1357,12 @@ main(void)
    pbe.level = 0;
    CHECK_PBE_REJECT(pbe.levels = 17);
    pbe.levels = 1;
-   CHECK_PBE_REJECT(pbe.srgb = true);
+   /* Gen9 converts stores to sRGB with word1 bit 61; Gen10's field is not
+    * recovered. */
+   pbe.srgb = true;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(((const uint8_t *)&native_pbe)[15] & 0x20);
+   assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
    pbe.srgb = false;
    CHECK_PBE_REJECT(pbe.mode = AGX_IMAGE_MODE_SPARSE);
    pbe.mode = AGX_IMAGE_MODE_NORMAL;

@@ -97,6 +97,7 @@ fields_valid(uint32_t generation,
       fields->buffer && !(fields->buffer & 0xf) &&
       !(fields->buffer >> (linear ? 44 : 48));
    return (!linear || generation == AGX_PBE_AGX3_GENERATION_9) &&
+          (!fields->srgb || generation == AGX_PBE_AGX3_GENERATION_9) &&
           (linear || fields->layout == AGX_PBE_LAYOUT_TWIDDLED ||
            fields->layout == AGX_PBE_LAYOUT_GPU) &&
           channel_is_uncompressed(fields->channels) && fields->type <= 5 &&
@@ -145,6 +146,14 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
       word1 |= (uint64_t)(fields->stride_B - 16) << 40;
    else
       word1 |= (uint64_t)layer_flag << 60;
+
+   /* PBEStateEncoderGen9<kAGXRevHAL200>::StateFields sets word1 bit 61 in
+    * every layout whenever the texture format's gamma encoding (format
+    * descriptor +0x54) is nonzero, except for a few extended pixel formats
+    * that select bit 62 as well (+0x22c..+0x2dc). TextureGen4's
+    * encodeImageReadState turns the same field into the texture descriptor's
+    * sRGB bits, and AGX2's PBE keeps its sRGB store conversion at this bit. */
+   word1 |= (uint64_t)fields->srgb << 61;
    store_le64(&out->bytes[0], word0);
    store_le64(&out->bytes[8], word1);
    out->length = AGX_PBE_AGX3_DESCRIPTOR_LENGTH;
@@ -287,9 +296,11 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
          : (UINT64_C(1) << 54) - 1;
 
    const uint8_t layout = (word0 >> 4) & 0x3;
+   const uint64_t srgb_bit = generation == AGX_PBE_AGX3_GENERATION_9
+      ? UINT64_C(1) << 61 : 0;
    const uint64_t word1_mask = layout == AGX_PBE_LAYOUT_LINEAR
-      ? (UINT64_C(1) << 61) - 1
-      : ((UINT64_C(1) << 44) - 1) |
+      ? ((UINT64_C(1) << 61) - 1) | srgb_bit
+      : ((UINT64_C(1) << 44) - 1) | srgb_bit |
            (generation == AGX_PBE_AGX3_GENERATION_10 ? UINT64_C(1) << 60 : 0);
    if ((word0 & 0xf) != AGX_PBE_DIMENSION_2D ||
        (word0 & ~word0_mask) || (word1 & ~word1_mask) || word2 || word3)
@@ -305,6 +316,7 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
    fields->width = ((word0 >> 24) & ((UINT64_C(1) << dimension_bits) - 1)) + 1;
    fields->height =
       ((word0 >> height_shift) & ((UINT64_C(1) << dimension_bits) - 1)) + 1;
+   fields->srgb = (word1 & srgb_bit) != 0;
    if (layout == AGX_PBE_LAYOUT_LINEAR) {
       fields->buffer = (word1 & ((UINT64_C(1) << 40) - 1)) << 4;
       fields->stride_B = ((word1 >> 40) & ((UINT64_C(1) << 21) - 1)) + 16;
