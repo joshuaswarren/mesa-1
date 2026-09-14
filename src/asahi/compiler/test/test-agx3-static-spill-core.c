@@ -93,7 +93,7 @@ hex_bytes(const char *hex, uint8_t *out, uint8_t *length)
  * half. Every one of the 842 static copies and reloads in those kernels that
  * carries no source-cache (copy f25) or live-TPS (rld f27 clear) bit
  * re-encodes byte for byte through the automatic form choice; these are one of
- * each shape.
+ * each shape, plus two of the reloads that keep their cell live.
  */
 static void
 check_g17p_half_spills(void)
@@ -133,6 +133,13 @@ check_g17p_half_spills(void)
       {"0ca8192102000000",
        {.dest = 0, .tps_half = 168, .width = AGX3_MEM_W32, .slot = 2,
         .slot_mirror = 2}, 1},
+      /* Reloads of a cell that is reloaded again before it is written. */
+      {"14901420",
+       {.dest = 3, .tps_half = 16, .width = AGX3_MEM_W16, .slot = 2,
+        .slot_mirror = 2, .tps_live = true}, 0},
+      {"148c112000200000",
+       {.dest = 2, .tps_half = 12, .width = AGX3_MEM_W16, .slot = 2,
+        .slot_mirror = 2, .wait_mask = 1, .tps_live = true}, 1},
    };
 
    uint8_t bytes[AGX3_STATIC_SPILL_MAX_LENGTH], length;
@@ -354,7 +361,7 @@ main(void)
       return 1;
    }
 
-   printf("agx3_static_spill_core: 20 Apple copy/rld vectors and all %u "
+   printf("agx3_static_spill_core: 22 Apple copy/rld vectors and all %u "
           "checks passed\n",
           checks);
    return 0;

@@ -4748,6 +4748,47 @@ TEST_F(AGX3PackBinary, StaticSpillCopyReloadHalf)
    }
 }
 
+TEST_F(AGX3PackBinary, StaticSpillReloadKeepsARereadCellLive)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   agx_stack_store(b, agx_register(0, AGX_SIZE_32), agx_immediate(32),
+                   AGX_FORMAT_I32, 1);
+   agx_stack_load_to(b, agx_register(2, AGX_SIZE_32), agx_immediate(32),
+                     AGX_FORMAT_I32, 1);
+   agx_stack_load_to(b, agx_register(4, AGX_SIZE_32), agx_immediate(32),
+                     AGX_FORMAT_I32, 1);
+   agx_stop(b);
+   const std::vector<uint8_t> got = pack(b);
+
+   /* The first reload is followed by another read of the same cell, so only
+    * the second may end its lifetime. */
+   uint8_t bytes[AGX3_STATIC_SPILL_MAX_LENGTH], length = 0;
+   std::vector<uint8_t> want;
+   const struct agx3_static_spill_store_desc store = {
+      .tps_half = 16, .src = 0, .width = AGX3_MEM_W32, .slot = 1,
+   };
+   ASSERT_TRUE(agx3_static_spill_encode_store(enc, &store, bytes, &length));
+   append(want, bytes, length);
+   for (unsigned i = 0; i < 2; ++i) {
+      const struct agx3_static_spill_load_desc load = {
+         .dest = (uint16_t)(2 + 2 * i),
+         .tps_half = 16,
+         .width = AGX3_MEM_W32,
+         .slot = (uint8_t)(2 + i),
+         .slot_mirror = (uint8_t)(2 + i),
+         .wait_mask = (uint16_t)(1u << i),
+         .tps_live = i == 0,
+      };
+      ASSERT_TRUE(agx3_static_spill_encode_load(enc, &load, bytes, &length));
+      append(want, bytes, length);
+   }
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(enc, &end));
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(got, want);
+}
+
 TEST_F(AGX3PackBinary, StaticSpillRefusesNonScalarOrMisalignedShapes)
 {
    {

@@ -3173,7 +3173,7 @@ agx3_translate_local_atomic(const agx_instr *I, uint8_t slot,
  * witnessed structural fields/forms. */
 static bool
 agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
-                            uint16_t wait_mask,
+                            uint16_t wait_mask, bool tps_live,
                             struct agx3_static_spill_store_desc *store,
                             struct agx3_static_spill_load_desc *load)
 {
@@ -3238,10 +3238,88 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
          .slot = slot,
          .slot_mirror = slot,
          .wait_mask = wait_mask,
+         .tps_live = tps_live,
       };
    }
 
    return true;
+}
+
+/*
+ * Mark the static reloads whose TPS cell may be read again.
+ *
+ * A reload's f27 ends the lifetime of the cell it reads. applegpu_g17p sets it
+ * only when the cell is written, or never touched, before its next read:
+ * across kernels of live ushort3, ushort and half temporaries, each of the 18
+ * reloads followed by another reload of the same cell clears it, and all 530
+ * other reloads set it. Mesa's spiller can reload one spilled value several times, so a reload
+ * keeps its cell live whenever another reload of any of its halves comes
+ * later in the linearized program, or when it sits in a loop, whose next
+ * iteration may read the cell again. Later stores are not taken as ending
+ * the lifetime: on another path the value may still be read.
+ */
+static bool *
+agx3_static_reload_rereads(agx_context *ctx, agx_instr **ordered,
+                           unsigned count)
+{
+   unsigned blocks = 1;
+   agx_foreach_block(ctx, block)
+      blocks = MAX2(blocks, block->index + 1);
+
+   bool *live = rzalloc_array(ctx, bool, count ? count : 1);
+   bool *in_loop = rzalloc_array(ctx, bool, blocks);
+   if (!live || !in_loop)
+      return NULL;
+
+   /* Structured loops are contiguous: a header and every block up to its
+    * last backedge predecessor. */
+   agx_foreach_block(ctx, header) {
+      if (!header->loop_header)
+         continue;
+      unsigned last = header->index;
+      agx_foreach_predecessor(header, pred)
+         last = MAX2(last, (*pred)->index);
+      agx_foreach_block(ctx, block) {
+         if (block->index >= header->index && block->index <= last)
+            in_loop[block->index] = true;
+      }
+   }
+
+   uint32_t halves = 0;
+   for (unsigned i = 0; i < count; ++i) {
+      const agx_instr *I = ordered[i];
+      if (I->op == AGX_OPCODE_STACK_LOAD &&
+          I->src[0].type == AGX_INDEX_IMMEDIATE)
+         halves = MAX2(halves, (I->src[0].value >> 1) + 2);
+   }
+
+   BITSET_WORD *read_later =
+      rzalloc_array(ctx, BITSET_WORD, BITSET_WORDS(halves ? halves : 1));
+   if (!read_later)
+      return NULL;
+
+   unsigned k = count;
+   agx_foreach_block_rev(ctx, block) {
+      agx_foreach_instr_in_block_rev(block, I) {
+         if (I->op == AGX_OPCODE_STOP)
+            continue;
+         --k;
+         if (I->op != AGX_OPCODE_STACK_LOAD ||
+             I->src[0].type != AGX_INDEX_IMMEDIATE)
+            continue;
+
+         const unsigned first = I->src[0].value >> 1;
+         const unsigned n = I->format == AGX_FORMAT_I32 ? 2 : 1;
+         bool reread = in_loop[block->index];
+         for (unsigned h = first; h < first + n; ++h) {
+            reread |= BITSET_TEST(read_later, h);
+            BITSET_SET(read_later, h);
+         }
+         live[k] = reread;
+      }
+   }
+   assert(k == 0);
+   return live;
 }
 
 static bool
@@ -3251,7 +3329,7 @@ agx3_append_static_spill_tokens(const agx_instr *I,
    const bool is_store = I->op == AGX_OPCODE_STACK_STORE;
    struct agx3_static_spill_store_desc store;
    struct agx3_static_spill_load_desc load;
-   if (!agx3_translate_static_spill(I, is_store, 1, 0, &store, &load))
+   if (!agx3_translate_static_spill(I, is_store, 1, 0, false, &store, &load))
       return false;
 
    const uint32_t tps_half = is_store ? store.tps_half : load.tps_half;
@@ -7209,6 +7287,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if (active_coord_slot)
       goto fail;
 
+   const bool *tps_rereads = agx3_static_reload_rereads(ctx, ordered, count);
+   if (!tps_rereads)
+      goto fail;
+
    k = 0;
    unsigned vertex_loads_seen = 0;
    unsigned loop_depth = 0;
@@ -8533,7 +8615,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             struct agx3_static_spill_load_desc load;
             uint8_t bytes[AGX3_STATIC_SPILL_MAX_LENGTH];
             uint8_t len = 0;
-            if (!agx3_translate_static_spill(I, is_store, slot, wait, &store,
+            if (!agx3_translate_static_spill(I, is_store, slot, wait,
+                                             tps_rereads[instr_index], &store,
                                              &load))
                AGX3_REFUSE(I);
             const bool ok =
