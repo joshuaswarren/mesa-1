@@ -4264,6 +4264,33 @@ TEST_F(AGX3PackBinary, G17PClusteredFloatReductions)
    EXPECT_EQ(tail, want);
 }
 
+TEST_F(AGX3PackBinary, G17PWidensHalfBeforeFloatCompare)
+{
+   /* metal-nt -arch applegpu_g17p, `float x; half y; if (x < y)` with y
+    * loaded from a buffer: the half is widened into its own f32 register,
+    * waiting on the load's slot 6 (f57), before the f32 compare. */
+   static const uint8_t widen[] = {0x29, 0x04, 0x3c, 0x81, 0x00, 0xc2};
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index src = agx_register(4, AGX_SIZE_16);
+   agx_device_load_to(b, src, agx_register(8, AGX_SIZE_64),
+                      agx_register(12, AGX_SIZE_32), AGX_FORMAT_F16, 1, 1,
+                      false);
+   agx_index dest = agx_register(4, AGX_SIZE_32);
+   dest.cache = true;
+   src.discard = true;
+   agx_fmov_to(b, dest, src);
+   agx_stop(b);
+
+   std::vector<uint8_t> want(widen, widen + sizeof(widen));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   append(want, end.bytes, end.length);
+   const std::vector<uint8_t> got = pack(b);
+   ASSERT_GE(got.size(), want.size());
+   const std::vector<uint8_t> tail(got.end() - want.size(), got.end());
+   EXPECT_EQ(tail, want);
+}
+
 TEST_F(AGX3PackBinary, SubgroupUnknownAxesFailClosed)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);

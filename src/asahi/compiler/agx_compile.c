@@ -3539,6 +3539,24 @@ agx_materialize_agx3_cf_constants(agx_context *ctx)
           I->nr_srcs != 2)
          continue;
 
+      /* A half operand compared against a float one reaches here once the
+       * optimizer has propagated the widening into the comparison. Apple's
+       * G17P compiler has no mixed-width control-flow compare: for
+       * `if (f < h)` it widens h with an explicit conversion first, then
+       * compares the f32 pair. Do the same.
+       */
+      for (unsigned s = 0; s < 2; ++s) {
+         if (I->src[s].type != AGX_INDEX_NORMAL ||
+             I->src[s].size != AGX_SIZE_16 ||
+             I->src[s ^ 1].size != AGX_SIZE_32)
+            continue;
+
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+         agx_fmov_to(&b, wide, I->src[s]);
+         I->src[s] = wide;
+      }
+
       /* G17P's structured float-CF path is grounded for f32 register pairs
        * and for literal zero. Firefox's WebRender fragment compares a live
        * f32 against 1.0 (and later -10.0), which reaches AIR as a nonzero
