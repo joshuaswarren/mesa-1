@@ -1901,6 +1901,17 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
 
+      /* At one rasterization sample, per-sample and per-pixel invocation are
+       * the same thing, so collapsing sample shading to per-pixel is exact --
+       * and it is what has to happen here, because G17P has no sample loop
+       * for the linker to splice and asking for one would drop the draw
+       * outright. hk_shader.c does the same on the Vulkan side. Do it before
+       * the epilog split, so the link key records the collapse too. */
+      if (dev->chip == AGX_CHIP_G17P && key->nr_samples == 1 &&
+          nir->info.fs.uses_sample_shading) {
+         NIR_PASS(_, nir, agx_nir_lower_g17p_1x_sample_shading);
+      }
+
       /* AGX3 has no equivalent of the AGX2 machine code agx_fast_link()
        * splices around a linked fragment program to run it once per sample.
        * Apple's own compiler unrolls the body instead, once per sample, in one
