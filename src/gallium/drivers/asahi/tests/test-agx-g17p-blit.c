@@ -660,7 +660,7 @@ check_staged_resolve_shapes(void)
  * execute shaders. */
 static bool
 check_xfb_copy_program(struct pipe_context *pctx, bool clip_distances,
-                       unsigned interleaved)
+                       unsigned interleaved, enum mesa_prim prim)
 {
    struct pipe_screen *screen = pctx->screen;
    nir_builder vs = nir_builder_init_simple_shader(
@@ -683,20 +683,29 @@ check_xfb_copy_program(struct pipe_context *pctx, bool clip_distances,
                        nir_imm_vec4(&vs, i * 4, i * 4 + 1, i * 4 + 2, i * 4 + 3),
                        0xf);
       }
-      nir_xfb_info *xfb = rzalloc_size(vs.shader, nir_xfb_info_size(interleaved));
+      /* Capture the position alongside every varying, as an interleaved
+       * capture of a whole vertex does: the copy program then holds one more
+       * vec4 live across its stores than there are user varyings. */
+      nir_xfb_info *xfb =
+         rzalloc_size(vs.shader, nir_xfb_info_size(interleaved + 1));
       xfb->buffers_written = 1;
       xfb->streams_written = 1;
       xfb->buffers[0].stride = 16 * (interleaved + 1);
       xfb->buffers[0].varying_count = interleaved + 1;
-      xfb->output_count = interleaved;
+      xfb->output_count = interleaved + 1;
+      xfb->outputs[0].buffer = 0;
+      xfb->outputs[0].offset = 0;
+      xfb->outputs[0].location = VARYING_SLOT_POS;
+      xfb->outputs[0].component_mask = 0xf;
       for (unsigned i = 0; i < interleaved; ++i) {
-         xfb->outputs[i].buffer = 0;
-         xfb->outputs[i].offset = 16 * i;
-         xfb->outputs[i].location = VARYING_SLOT_VAR0 + i;
-         xfb->outputs[i].component_mask = 0xf;
+         xfb->outputs[i + 1].buffer = 0;
+         xfb->outputs[i + 1].offset = 16 * (i + 1);
+         xfb->outputs[i + 1].location = VARYING_SLOT_VAR0 + i;
+         xfb->outputs[i + 1].component_mask = 0xf;
       }
       vs.shader->xfb_info = xfb;
       vs.shader->info.xfb_stride[0] = 4 * (interleaved + 1);
+      vs.shader->info.has_transform_feedback_varyings = true;
       vs.shader->info.known_interpolation_qualifiers = true;
       nir_shader_gather_info(vs.shader, nir_shader_get_entrypoint(vs.shader));
       goto vs_built;
@@ -783,29 +792,44 @@ vs_built:;
    if (!target)
       return false;
    unsigned offset = 0;
-   pctx->set_stream_output_targets(pctx, 1, &target, &offset, MESA_PRIM_POINTS);
+   pctx->set_stream_output_targets(pctx, 1, &target, &offset, prim);
    const struct pipe_draw_info info = {
-      .mode = MESA_PRIM_POINTS, .instance_count = 1,
+      .mode = prim, .instance_count = 1,
    };
-   const struct pipe_draw_start_count_bias draw = {.count = 1};
+   const struct pipe_draw_start_count_bias draw = {
+      .count = mesa_vertices_per_prim(prim),
+   };
    struct agx_context *ctx = agx_context(pctx);
    bool ok = true;
    for (unsigned i = 0; i < 2; ++i) {
       pctx->draw_vbo(pctx, &info, 0, NULL, &draw, 1);
       ok &= ctx->gs && ctx->gs->gs_copy && !ctx->gs->gs_copy->failed &&
             ctx->skipped_no_program == 0 && ctx->batch && ctx->batch->draws;
+
+      /* G17P has no helper program, so a shader that spills reads its reloads
+       * back as zero with no refusal anywhere. The copy program of a wide
+       * interleaved capture is the one that gets close to the register file,
+       * so hold it to using no scratch at all.
+       */
+      ok &= ctx->gs && ctx->gs->gs_copy &&
+            ctx->gs->gs_copy->b.info.scratch_size == 0;
    }
    if (!ok)
-      fprintf(stderr, "XFB copy program%s%s: skipped=%u draws=%u\n",
+      fprintf(stderr, "XFB copy program%s%s%s: skipped=%u draws=%u scratch=%u\n",
               clip_distances ? " with clip distances" : "",
               interleaved ? " with interleaved varyings" : "",
-              ctx->skipped_no_program, ctx->batch ? ctx->batch->draws : 0);
+              prim == MESA_PRIM_TRIANGLES ? " from triangles" : "",
+              ctx->skipped_no_program, ctx->batch ? ctx->batch->draws : 0,
+              ctx->gs && ctx->gs->gs_copy ? ctx->gs->gs_copy->b.info.scratch_size
+                                          : 0);
    else
-      printf("two transform-feedback draws%s%s built without a missing program\n",
+      printf("two transform-feedback draws%s%s%s built without a missing "
+             "program or spill\n",
              clip_distances ? " with clip distances" : "",
-             interleaved ? " with interleaved varyings" : "");
+             interleaved ? " with interleaved varyings" : "",
+             prim == MESA_PRIM_TRIANGLES ? " from triangles" : "");
 
-   pctx->set_stream_output_targets(pctx, 0, NULL, NULL, MESA_PRIM_POINTS);
+   pctx->set_stream_output_targets(pctx, 0, NULL, NULL, prim);
    pipe_so_target_reference(&target, NULL);
    pipe_resource_reference(&buffer, NULL);
    pctx->bind_vs_state(pctx, NULL);
@@ -989,9 +1013,13 @@ main(void)
 
    if (getenv("AGX_TEST_XFB_COPY_PROGRAM")) {
       glsl_type_singleton_init_or_ref();
-      const bool ok = check_xfb_copy_program(pctx, false, 0) &&
-                      check_xfb_copy_program(pctx, true, 0) &&
-                      check_xfb_copy_program(pctx, false, 15);
+      /* A triangle capture shades one of three candidate vertices, so its
+       * copy program selects between three loads per varying. That is the
+       * shape that runs out of registers, not the one-vertex point case. */
+      const bool ok = check_xfb_copy_program(pctx, false, 0, MESA_PRIM_POINTS) &&
+                      check_xfb_copy_program(pctx, true, 0, MESA_PRIM_POINTS) &&
+                      check_xfb_copy_program(pctx, false, 15, MESA_PRIM_POINTS) &&
+                      check_xfb_copy_program(pctx, false, 15, MESA_PRIM_TRIANGLES);
       glsl_type_singleton_decref();
       pctx->destroy(pctx);
       screen->destroy(screen);

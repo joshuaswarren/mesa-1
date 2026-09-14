@@ -8,6 +8,7 @@ libasahi_agx_files = files(
   'agx_liveness.c',
   'agx_insert_waits.c',
   'agx_nir_lower_address.c',
+  'agx_nir_opt_select_load.c',
   'agx_nir_lower_cull_distance.c',
   'agx_nir_lower_fminmax.c',
   'agx_nir_lower_frag_sidefx.c',
@@ -652,6 +653,19 @@ if with_tests
     executable(
       'agx3_wide_imad_test',
       files('test/test-agx3-wide-imad.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx-select-load',
+    executable(
+      'agx_select_load_test',
+      files('test/test-agx-select-load.c'),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],

@@ -5191,6 +5191,14 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       NIR_PASS(_, nir, nir_opt_dce);
    }
 
+   /* Now that loads carry an index, a select between two of them can choose
+    * the index instead of the loaded data. Run it to a fixed point with the
+    * cleanup below, so a chain of candidate selects collapses to one load.
+    */
+   NIR_PASS(_, nir, agx_nir_opt_select_load);
+   NIR_PASS(_, nir, nir_opt_cse);
+   NIR_PASS(_, nir, nir_opt_dce);
+
    /* Only lower int64 after optimizing address arithmetic, so that u2u64/i2i64
     * conversions remain.
     */
