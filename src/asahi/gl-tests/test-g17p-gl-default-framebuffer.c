@@ -25,12 +25,22 @@
  * default framebuffer carries depth (2, 3, 4) and passes on the one that does
  * not (1).
  *
- * The failing blit copies b10g10r10a2_unorm into r8g8b8a8_unorm under a
- * scissor, as the driver's resource log names the pair. That pair is checked
- * here between two framebuffer objects and is correct, with and without the
- * scissor, on hardware and on llvmpipe. So what is left of that failure is the
- * source being the **window** itself -- a window-system image rather than a
- * texture of the same format -- which this cannot build from a pbuffer.
+ * The failing blit is, in the driver's own terms:
+ *
+ *   b10g10r10a2_unorm -> r8g8b8a8_unorm  mask=0xf  scissor=1[0,0,32,32]
+ *   src[0,64 64x-64]  dst[0,0 64x64]  filter=0
+ *
+ * -- vertically flipped, because its source is the window and its destination
+ * a texture. This oracle issues a blit with **byte-identical** parameters,
+ * from a real window of the same configuration, and it comes out right. So the
+ * failure is not in the parameters; it depends on what the context did before.
+ *
+ * Each knob below was added to chase that, and each one passes on hardware:
+ * ASAHI_EGL_CONFIG_ID picks the conformance runner's configuration by id,
+ * ASAHI_EGL_WINDOW takes a real window rather than a pbuffer, ASAHI_EGL_SWAPS
+ * presents first so the context blits out of a freshly acquired buffer, and
+ * ASAHI_DEPTH_BLIT_FIRST issues the flipped scissored depth blit that the
+ * conformance case performs immediately before its colour one.
  */
 
 #define GL_GLEXT_PROTOTYPES
@@ -196,6 +206,19 @@ check_alpha(void)
          glDisable(GL_SCISSOR_TEST);
       }
 
+      /* The conformance case blits depth out of the same window into the same
+       * framebuffer immediately before the colour blit, flipped and scissored
+       * exactly as this one is. Reproduce that order: the colour blit is only
+       * wrong when it follows it. */
+      if (getenv("ASAHI_DEPTH_BLIT_FIRST") != NULL) {
+         glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+         glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
+                           GL_DEPTH_BUFFER_BIT, GL_NEAREST);
+      }
+
+      glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+      glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
       glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
                         GL_COLOR_BUFFER_BIT, GL_NEAREST);
       glDisable(GL_SCISSOR_TEST);
@@ -266,7 +289,10 @@ check_rgb10_a2_blit(void)
                           destination_texture, 0);
 
    bool ok = true;
-   for (unsigned scissored = 0; scissored < 2; ++scissored) {
+   for (unsigned combination = 0; combination < 4; ++combination) {
+      const bool scissored = combination & 1;
+      const bool flipped = combination & 2;
+
       glBindFramebuffer(GL_FRAMEBUFFER, destination_fbo);
       glDisable(GL_SCISSOR_TEST);
       glClearColor(0.5f, 0.5f, 0.5f, 0.5f);
@@ -280,8 +306,16 @@ check_rgb10_a2_blit(void)
       glBindFramebuffer(GL_READ_FRAMEBUFFER, source_fbo);
       glReadBuffer(GL_COLOR_ATTACHMENT0);
       glBindFramebuffer(GL_DRAW_FRAMEBUFFER, destination_fbo);
-      glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
-                        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      /* The conformance blit that fails is vertically flipped -- the driver
+       * sees src[0,64 64x-64] -- because its source is the window and its
+       * destination a texture. Flip here too. */
+      if (flipped) {
+         glBlitFramebuffer(0, 0, SIZE, SIZE, 0, SIZE, SIZE, 0,
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      } else {
+         glBlitFramebuffer(0, 0, SIZE, SIZE, 0, 0, SIZE, SIZE,
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+      }
       glDisable(GL_SCISSOR_TEST);
 
       float inside[4] = {-1.0f, -1.0f, -1.0f, -1.0f};
@@ -296,8 +330,8 @@ check_rgb10_a2_blit(void)
 
       const bool match = inside[3] == 1.0f;
       ok &= match;
-      printf("rgb10a2 -> rgba8%-12s alpha %.3f  %s\n",
-             scissored ? " (scissored)" : "", inside[3],
+      printf("rgb10a2 -> rgba8 %-9s%-9s alpha %.3f  %s\n",
+             scissored ? "scissored" : "", flipped ? "flipped" : "", inside[3],
              match ? "" : "MISMATCH, wanted 1.000");
    }
 
@@ -425,6 +459,18 @@ main(void)
       return 0;
 
    glViewport(0, 0, SIZE, SIZE);
+
+   /* A window that has been presented hands the next frame a different buffer,
+    * so a blit that samples the default framebuffer afterwards is reading a
+    * buffer the context has only just acquired. ASAHI_EGL_SWAPS asks for that
+    * shape, which a pbuffer never reaches. */
+   const char *swaps = getenv("ASAHI_EGL_SWAPS");
+   for (int i = 0, n = swaps ? atoi(swaps) : 0; i < n; ++i) {
+      glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+      glClear(GL_COLOR_BUFFER_BIT);
+      eglSwapBuffers(display, surface);
+   }
+
    describe_default();
    walk_read_buffers();
    bool ok = check_alpha();
