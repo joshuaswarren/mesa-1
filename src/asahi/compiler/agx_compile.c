@@ -7487,6 +7487,28 @@ agx_preprocess_nir_g17p(nir_shader *nir)
 }
 
 static bool
+lower_g17p_halfword_tile_load(nir_builder *b, nir_intrinsic_instr *intr,
+                             UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_local_pixel_agx ||
+       nir_intrinsic_format(intr) != PIPE_FORMAT_R16_UINT ||
+       intr->def.bit_size != 32)
+      return false;
+
+   /* Native LLDCOL transfers tightly packed halfword lanes. AGX2 can
+    * widen while loading, so its NIR may request W32 results from I16
+    * storage. Load the physical lanes before zero-extending each one;
+    * signed logical formats already extend in the tilebuffer lowering. */
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *raw = nir_load_local_pixel_agx(
+      b, intr->def.num_components, 16, intr->src[0].ssa,
+      .base = nir_intrinsic_base(intr), .format = PIPE_FORMAT_R16_UINT,
+      .target = nir_intrinsic_target(intr));
+   nir_def_replace(&intr->def, nir_u2u32(b, raw));
+   return true;
+}
+
+static bool
 lower_printf_buffer(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
    const struct agx_device_key *dev = data;
@@ -7582,6 +7604,11 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       .callback = mem_access_size_align_cb,
    };
    NIR_PASS(_, nir, nir_lower_mem_access_bit_sizes, &lower_mem_access_options);
+
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_g17p_halfword_tile_load,
+               nir_metadata_control_flow, NULL);
+   }
 
    /* Optimize scratch access for silly internal CL shaders */
    if (nir->info.internal) {

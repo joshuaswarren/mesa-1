@@ -1852,6 +1852,51 @@ test_g17p_unread_colour_waits(void)
    return ok;
 }
 
+/* A logical 32-bit integer tile read must agree with explicitly loading the
+ * physical halfwords and widening them. LLDCOL itself does not widen. */
+static bool
+test_g17p_halfword_tile_widening(void)
+{
+   for (unsigned channels = 1; channels <= 4; ++channels) {
+      struct agx_shader_part parts[2] = {0};
+      bool ok = true;
+      for (unsigned explicit_widen = 0; explicit_widen < 2; ++explicit_widen) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "halfword tile widening");
+         nir_def *value = nir_load_local_pixel_agx(
+            &b, channels, explicit_widen ? 16 : 32,
+            nir_imm_intN_t(&b, 0xff, 16), .base = 0,
+            .format = PIPE_FORMAT_R16_UINT);
+         value = nir_u2u32(&b, value);
+         nir_store_local_pixel_agx(
+            &b, nir_inot(&b, value), nir_imm_intN_t(&b, 0xff, 16),
+            nir_undef(&b, 2, 16), .base = 0,
+            .write_mask = BITFIELD_MASK(channels),
+            .format = PIPE_FORMAT_R32_UINT);
+         /* Tile I/O is already lowered, as in a specialized blend epilog. */
+         nir_shader *nir = b.shader;
+         nir->info.io_lowered = true;
+         nir->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+         struct agx_shader_key key = {
+            .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+            .no_preamble = true,
+         };
+         ok &= agx_compile_shader_nir(nir, &key, &parts[explicit_widen]);
+         ralloc_free(nir);
+      }
+      ok = ok && parts[0].info.binary_size == parts[1].info.binary_size &&
+           !memcmp(parts[0].binary, parts[1].binary, parts[0].info.binary_size);
+      free(parts[0].binary);
+      free(parts[1].binary);
+      if (!ok) {
+         fprintf(stderr, "halfword tile widening mismatch: %u channels\n",
+                 channels);
+         return false;
+      }
+   }
+   return true;
+}
+
 /* Three blended RGBA32 targets need 24 payload halves live at their stores,
  * but a fragment reading the tile stores from halves 0..15 only. The shader
  * must be refused, not abort register allocation. */
@@ -8759,6 +8804,7 @@ main(int argc, char **argv)
    }
    RUN(test_g17p_fragment_io_matrix);
    RUN(test_g17p_unread_colour_waits);
+   RUN(test_g17p_halfword_tile_widening);
    RUN(test_g17p_blended_payloads_beyond_bank);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_g17p_pbe_to_texture_fence);
