@@ -349,6 +349,12 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
        * and rgba16_snorm all reach every sample and resolve. */
       case PIPE_FORMAT_R8_SNORM:
       case PIPE_FORMAT_R16_SNORM:
+      /* The integer families the same case renders to. The sweep draws these
+       * through an integer fragment output and reads them back with an
+       * integer sampler: r8i and rgba8i share the eight-bit tile, rgb10a2ui
+       * the sixteen-bit one, and all three reach every sample. */
+      case PIPE_FORMAT_R8_UINT:
+      case PIPE_FORMAT_R16_UINT:
       /* The remaining two colour formats the conformance blit walks. Their
        * tiles are the same eight bytes per sample as the families above. */
       case PIPE_FORMAT_R8G8B8A8_SRGB:
@@ -401,9 +407,12 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
       (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT ||
        tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_FLOAT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
+   /* At any sample count: the sweep draws this one through an integer
+    * fragment output and reads every sample back with an integer sampler, and
+    * all four are the drawn value. KHR-GL33.texture_size_promotion renders to
+    * it multisampled. */
    const bool rgb10a2u = tib->sample_size_B == 8 &&
-      (tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT ||
-       tib->logical_format[0] == PIPE_FORMAT_B10G10R10A2_UINT) &&
+      tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
    /* The packed float tile is eight bytes per sample at any sample count, and
     * KHR-GL30.framebuffer_blit.multisampled_to_singlesampled_blit_color_config
