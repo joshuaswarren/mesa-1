@@ -814,13 +814,6 @@ hk_get_device_features(
        * layer/viewport UVS scalar.  The public bit is backed by the exact
        * two-instance/two-layer image qualification. */
       features->shaderOutputLayer = true;
-      /* The HAL300 bind tail now emits the complete viewport/region-clip and
-       * consecutive scissor/depth arrays, and the vertex compiler writes the
-       * native packed layer/viewport UVS sysval. Keep public exposure opt-in
-       * until the four-region static/dynamic image oracle confirms routing on
-       * hardware. */
-      features->multiViewport =
-         hk_g17p_unverified_feature("multi_viewport");
       /* VK_KHR_shader_quad_control permits quad operations and derivatives
        * inside divergent control flow.  The ordinary subgroup quad shuffles
        * exposed below do not establish that stronger execution guarantee. */
@@ -1275,10 +1268,6 @@ hk_get_device_properties(const struct agx_device *dev,
    };
 
    if (dev->chip == AGX_CHIP_G17P) {
-      /* Pair the limit with the qualification gate above. */
-      if (!hk_g17p_unverified_feature("multi_viewport"))
-         properties->maxViewports = 1;
-
       /* Measured per operation under the G17P drm-shim with
        * g17p-vulkan-feature-probe (src/asahi/isa/probes/game):
        *
