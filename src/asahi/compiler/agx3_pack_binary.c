@@ -3696,9 +3696,12 @@ agx3_emit_subgroup_reduce(struct util_dynarray *emission,
                      I->op == AGX_OPCODE_QUAD_PREFIX;
    const bool prefix = I->op == AGX_OPCODE_SIMD_PREFIX ||
                        I->op == AGX_OPCODE_QUAD_PREFIX;
+   const bool half = I->nr_dests == 1 && I->dest[0].size == AGX_SIZE_16;
    if (I->nr_dests != 1 || I->nr_srcs != 1 || I->saturate ||
-       !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
-       !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER))
+       !(half ? agx3_subgroup_plain_half(I->dest[0]) &&
+                   agx3_subgroup_plain_half(I->src[0])
+              : agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) &&
+                   agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER)))
       return false;
 
    enum agx3_subgroup_reduce_op op;
@@ -3713,6 +3716,7 @@ agx3_emit_subgroup_reduce(struct util_dynarray *emission,
       .wait_mask = wait_mask,
       .dest_hint = I->dest[0].cache,
       .src_live = !I->src[0].discard,
+      .half = half,
    };
    uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    return agx3_subgroup_encode_reduce(enc, &d, bytes, &length) &&

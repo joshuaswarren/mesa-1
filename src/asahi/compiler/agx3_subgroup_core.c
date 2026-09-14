@@ -377,13 +377,32 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
                             uint8_t *length)
 {
    if (d == NULL || out == NULL || length == NULL ||
-       (unsigned)d->op >= AGX3_SUBGROUP_REDUCE_NUM ||
-       !valid_reg(enc, d->dest) ||
-       !valid_reg(enc, d->src))
+       (unsigned)d->op >= AGX3_SUBGROUP_REDUCE_NUM)
+      return false;
+   if (d->half ? is_c(enc) || d->dest >= 192 || d->src >= 192
+               : !valid_reg(enc, d->dest) || !valid_reg(enc, d->src))
       return false;
 
    const struct reduce_form *f = &reduce_forms[d->op];
-   const char *mnemonic = d->quad ? f->quad : f->simd;
+   /*
+    * Half-precision add and multiply are their own instructions, laid out
+    * like the f32 forms with every field from the source on shifted down by
+    * one. metal-nt -arch applegpu_g17p:
+    *
+    *   quad_sum(half), result reduced again  3704560003008808  qRedf16add
+    *   simd_prefix_exclusive_product(half)   bf04560202048818  sRedf16mul
+    *   simd_prefix_inclusive_product(half)   bf04560303048a10  sRedf16mul
+    */
+   const bool f16_arith = d->half && (d->op == AGX3_SUBGROUP_REDUCE_FADD ||
+                                      d->op == AGX3_SUBGROUP_REDUCE_FMUL);
+   const char *mnemonic;
+   if (f16_arith) {
+      const bool add = d->op == AGX3_SUBGROUP_REDUCE_FADD;
+      mnemonic = d->quad ? (add ? "qRedf16add" : "qRedf16mul")
+                         : (add ? "sRedf16add" : "sRedf16mul");
+   } else {
+      mnemonic = d->quad ? f->quad : f->simd;
+   }
    if (mnemonic == NULL || mnemonic[0] == '\0')
       return false;
    /* The newly recovered integer min/max and bitwise quad words are
@@ -395,18 +414,45 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
         d->op == AGX3_SUBGROUP_REDUCE_XOR ||
         d->op >= AGX3_SUBGROUP_REDUCE_SMIN))
       return false;
-   if (d->prefix && (d->quad || (d->op != AGX3_SUBGROUP_REDUCE_FADD &&
-                                 d->op != AGX3_SUBGROUP_REDUCE_FMUL &&
-                                 d->op != AGX3_SUBGROUP_REDUCE_IADD)))
+   /*
+    * Metal has scans for sums and products only, so those are the witnessed
+    * prefix forms: f53 on the integer add, f57 on the f32 and f56 on the f16
+    * instructions. The bitwise and min/max instructions carry the same
+    * operand in Apple's encoder tables -- f53 on signed min/max, whose fields
+    * are numbered like the integer add, and f52 on the bitwise and unsigned
+    * forms, which lack the signedness field f28 and number everything above
+    * it one lower -- exactly as the AGX2 SIMD instructions take every
+    * reduction as a scan. Apple's compiler has no source-level scan to emit
+    * them from (it reports air.simd_prefix_*_min and friends as unlowered on
+    * every applegpu target), so those follow the tables.
+    */
+   if (d->prefix && d->quad)
+      return false;
+   if (d->prefix && is_c(enc) && d->op != AGX3_SUBGROUP_REDUCE_FADD &&
+       d->op != AGX3_SUBGROUP_REDUCE_FMUL && d->op != AGX3_SUBGROUP_REDUCE_IADD)
+      return false;
+   if (d->prefix && f->is_float && d->op != AGX3_SUBGROUP_REDUCE_FADD &&
+       d->op != AGX3_SUBGROUP_REDUCE_FMUL)
       return false;
 
    struct agx3_field_kv base[16];
    unsigned nb = 0;
    ADD_FIELD(9, 2);
-   ADD_FIELD(10, 2);
-   if (f->is_float) {
+   ADD_FIELD(10, d->half ? 1 : 2);
+   uint16_t src_field, prefix_field, wait_base;
+   if (f16_arith) {
+      ADD_FIELD(24, 2);
+      ADD_FIELD(25, 1);
+      ADD_FIELD(d->src_live ? 26 : 28, 1);
+      ADD_FIELD(33, 1);
+      ADD_FIELD(41, 1);
+      ADD_FIELD(42, 1);
+      src_field = 17;
+      prefix_field = 56;
+      wait_base = 48;
+   } else if (f->is_float) {
       ADD_FIELD(25, 2);
-      ADD_FIELD(26, 2);
+      ADD_FIELD(26, d->half ? 1 : 2);
       if (!d->src_live)
          ADD_FIELD(29, 1);
       if (is_c(enc)) {
@@ -417,10 +463,17 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
          ADD_FIELD(42, 1);
          ADD_FIELD(43, 1);
       }
+      src_field = 18;
+      prefix_field = 57;
+      wait_base = 49;
    } else {
       ADD_FIELD(23, 2);
-      ADD_FIELD(24, 2);
-      ADD_FIELD(!is_c(enc) && d->quad && d->src_live ? 25 : 27, 1);
+      ADD_FIELD(24, d->half ? 1 : 2);
+      /* G17P picks f25 while the source stays live and f27 on its final
+       * read, for SIMD and quad forms alike: simd_prefix_inclusive_sum(),
+       * which adds the source back afterwards, is bf01560403001609 (f25)
+       * next to the exclusive bf0156020204100b (f27). */
+      ADD_FIELD(!is_c(enc) && d->src_live ? 25 : 27, 1);
       if (f->integer_class == 1)
          ADD_FIELD(28, 1);
       if (is_c(enc)) {
@@ -440,15 +493,19 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
          ADD_FIELD(38, 1);
          ADD_FIELD(39, 1);
       }
+      src_field = 16;
+      prefix_field = f->integer_class == 2 ? 52 : 53;
+      wait_base = f->integer_class == 2 ? 44 : 45;
    }
 
    if (d->prefix)
-      ADD_FIELD(f->is_float ? 57 : 53, 1);
+      ADD_FIELD(prefix_field, 1);
 
    /*
     * Per-slot wait bits. Their base differs by operand family, each pinned by
     * a g17p probe whose source arrives on scoreboard slot 6:
     *   float reductions            f49 + (slot - 1)   (sRedf32add, sRedfmax)
+    *   half add / multiply         f48 + (slot - 1)   (qRedf16add, sRedf16mul)
     *   integer add / signed min-max
     *                               f45 + (slot - 1)   (sRediadd, sRedimin,
     *                                                   sRedimax; also catomic
@@ -461,15 +518,6 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
    if (d->wait_mask != 0) {
       if (is_c(enc) || (d->wait_mask >> slots) != 0)
          return false;
-      uint16_t wait_base;
-      if (f->is_float)
-         wait_base = 49;
-      else if (f->integer_class == 2)
-         wait_base = 44;
-      else if (f->integer_class == 0 || f->integer_class == 1)
-         wait_base = 45;
-      else
-         return false;
       for (unsigned i = 0; i < slots; ++i)
          if (d->wait_mask & (1u << i))
             ADD_FIELD((uint16_t)(wait_base + i), 1);
@@ -478,11 +526,9 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
    struct agx3_field_kv ov[4];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv){2, d->dest};
-   ov[n++] = (struct agx3_field_kv){f->is_float ? 18u : 16u, d->src};
+   ov[n++] = (struct agx3_field_kv){src_field, d->src};
    ov[n++] = (struct agx3_field_kv){11, d->dest_hint ? 1u : 0u};
-   /* Float and G17P quad integer reductions pick between their witnessed
-    * source-liveness bits. Other integer families retain the pinned f27. */
-   if (f->is_float && d->src_live)
+   if (f->is_float && !f16_arith && d->src_live)
       ov[n++] = (struct agx3_field_kv){27, 1};
    return agx3_bind_compose(enc, mnemonic, 0, base, nb, ov, n, out, length);
 }

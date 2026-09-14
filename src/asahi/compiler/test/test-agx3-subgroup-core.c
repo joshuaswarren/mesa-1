@@ -806,11 +806,151 @@ test_rejection(void)
       !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &r, out, &length));
    r.quad = false;
    CHECK(
-      !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &r, out, &length));
+      !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &r, out, &length));
    r.prefix = false;
    r.op = (enum agx3_subgroup_reduce_op)-1;
    CHECK(
       !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &r, out, &length));
+   return 0;
+}
+
+static int
+test_half_reduce_vectors(void)
+{
+   /* metal-nt -arch applegpu_g17p. Every source arrives from a device load on
+    * scoreboard slot 6. The unsigned quad words come from o = quad_op(x16),
+    * whose result escapes the quad and so also sets f62 (byte 1, bit 3);
+    * Apple leaves that bit clear when the result feeds another quad
+    * reduction, and so does this encoder, as the signed pair shows:
+    * quad_min(short) is 370a560003001007 escaping and 3702560003001007
+    * chained. */
+   static const struct {
+      bool quad, prefix, dest_hint, src_live;
+      enum agx3_subgroup_reduce_op op;
+      uint16_t dest, src;
+      uint8_t bytes[8];
+   } vec[] = {
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_IADD, 2, 2,
+       {0xbf, 0x01, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, true, true, true, AGX3_SUBGROUP_REDUCE_IADD, 2, 3,
+       {0xbf, 0x01, 0x56, 0x02, 0x03, 0x06, 0x12, 0x09}},
+      {false, true, false, false, AGX3_SUBGROUP_REDUCE_IADD, 2, 2,
+       {0xbf, 0x01, 0x56, 0x02, 0x02, 0x04, 0x10, 0x0b}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_UMIN, 2, 2,
+       {0x3f, 0x03, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_SMIN, 2, 2,
+       {0x3f, 0x02, 0x56, 0x02, 0x02, 0x04, 0x10, 0x07}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_SMAX, 2, 2,
+       {0xbf, 0x02, 0x56, 0x02, 0x02, 0x04, 0x10, 0x07}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_AND, 2, 2,
+       {0x3f, 0x00, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_OR, 2, 2,
+       {0xbf, 0x00, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_XOR, 2, 2,
+       {0x3f, 0x01, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, true, true, true, AGX3_SUBGROUP_REDUCE_FMUL, 3, 2,
+       {0xbf, 0x04, 0x56, 0x03, 0x03, 0x04, 0x8a, 0x10}},
+      {false, true, false, false, AGX3_SUBGROUP_REDUCE_FMUL, 2, 2,
+       {0xbf, 0x04, 0x56, 0x02, 0x02, 0x04, 0x88, 0x18}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_SMAX, 0, 0,
+       {0xb7, 0x02, 0x56, 0x00, 0x03, 0x00, 0x10, 0x07}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_SMIN, 0, 0,
+       {0x37, 0x02, 0x56, 0x00, 0x03, 0x00, 0x10, 0x07}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_FADD, 0, 0,
+       {0x37, 0x04, 0x56, 0x00, 0x03, 0x00, 0x88, 0x08}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_FMIN, 0, 0,
+       {0xb7, 0x05, 0x56, 0x00, 0x03, 0x00, 0x08, 0x13}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_FMAX, 0, 0,
+       {0xb7, 0x07, 0x56, 0x00, 0x03, 0x00, 0x08, 0x13}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_IADD, 0, 0,
+       {0xb7, 0x01, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_AND, 0, 0,
+       {0x37, 0x00, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_UMIN, 0, 0,
+       {0x37, 0x03, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_UMAX, 0, 0,
+       {0xb7, 0x03, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+   };
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(vec); ++i) {
+      const struct agx3_subgroup_reduce_desc d = {
+         .quad = vec[i].quad,
+         .prefix = vec[i].prefix,
+         .op = vec[i].op,
+         .dest = vec[i].dest,
+         .src = vec[i].src,
+         .wait_mask = 1u << 5,
+         .dest_hint = vec[i].dest_hint,
+         .src_live = vec[i].src_live,
+         .half = true,
+      };
+      CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                        &length));
+      CHECK(bytes_equal(out, length, vec[i].bytes, sizeof(vec[i].bytes)));
+   }
+
+   /* simd_prefix_inclusive_sum(uint) keeps its source live: f25, not f27. */
+   static const uint8_t psum32[] = {0xbf, 0x01, 0x56, 0x04,
+                                    0x03, 0x00, 0x16, 0x09};
+   struct agx3_subgroup_reduce_desc d = {
+      .prefix = true,
+      .op = AGX3_SUBGROUP_REDUCE_IADD,
+      .dest = 4,
+      .src = 0,
+      .wait_mask = 1u << 5,
+      .dest_hint = true,
+      .src_live = true,
+   };
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                     &length));
+   CHECK(bytes_equal(out, length, psum32, sizeof(psum32)));
+
+   /* The remaining integer scans set their table prefix operand: word 3 bit
+    * 11 (f53) on signed min/max, bit 10 (f52) on the bitwise and unsigned
+    * forms, and nothing else changes. */
+   static const struct {
+      enum agx3_subgroup_reduce_op op;
+      uint8_t bit;
+   } scan[] = {
+      {AGX3_SUBGROUP_REDUCE_SMIN, 0x08}, {AGX3_SUBGROUP_REDUCE_SMAX, 0x08},
+      {AGX3_SUBGROUP_REDUCE_AND, 0x04},  {AGX3_SUBGROUP_REDUCE_OR, 0x04},
+      {AGX3_SUBGROUP_REDUCE_XOR, 0x04},  {AGX3_SUBGROUP_REDUCE_UMIN, 0x04},
+      {AGX3_SUBGROUP_REDUCE_UMAX, 0x04},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(scan); ++i) {
+      for (unsigned half = 0; half < 2; ++half) {
+         uint8_t reduce[AGX3_SUBGROUP_MAX_LENGTH], reduce_length = 0;
+         d = (struct agx3_subgroup_reduce_desc){
+            .op = scan[i].op,
+            .dest = 2,
+            .src = 4,
+            .half = half,
+         };
+         CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, reduce,
+                                           &reduce_length));
+         d.prefix = true;
+         CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                           &length));
+         CHECK(length == reduce_length && length == 8);
+         reduce[7] |= scan[i].bit;
+         CHECK(bytes_equal(out, length, reduce, reduce_length));
+         CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &d, out,
+                                            &length));
+      }
+   }
+
+   /* No float min/max scan and no quad scan exist. */
+   d = (struct agx3_subgroup_reduce_desc){
+      .prefix = true,
+      .op = AGX3_SUBGROUP_REDUCE_FMIN,
+   };
+   CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   d.op = AGX3_SUBGROUP_REDUCE_IADD;
+   d.quad = true;
+   CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
    return 0;
 }
 
@@ -821,6 +961,7 @@ main(void)
    CHECK(test_half_broadcast_vectors() == 0);
    CHECK(test_ballot_vectors() == 0);
    CHECK(test_reduce_vectors() == 0);
+   CHECK(test_half_reduce_vectors() == 0);
    CHECK(test_rejection() == 0);
    return 0;
 }

@@ -122,6 +122,9 @@ struct agx3_subgroup_reduce_desc {
     * corpus expects.
     */
    bool src_live;
+
+   /* 16-bit destination and source, in half units (AGX3b only). */
+   bool half;
 };
 
 bool agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,

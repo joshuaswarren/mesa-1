@@ -3742,6 +3742,8 @@ TEST_F(AGX3PackBinary, SignedReduceWaitsForDeviceLoad)
          .src = 4,
          /* G17P device loads use the native preferred slot 6. */
          .wait_mask = 1u << 5,
+         /* The source carries no discard hint, so it is live. */
+         .src_live = true,
       };
       ASSERT_TRUE(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B,
                                                &reduce, bytes, &length));
@@ -3776,6 +3778,8 @@ TEST_F(AGX3PackBinary, SignedAddPrefixWaitsForDeviceLoad)
       .src = 4,
       /* G17P device loads use the native preferred slot 6. */
       .wait_mask = 1u << 5,
+      /* The source carries no discard hint, so it is live. */
+      .src_live = true,
    };
    ASSERT_TRUE(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &prefix,
                                              bytes, &length));
@@ -4269,7 +4273,7 @@ TEST_F(AGX3PackBinary, SubgroupUnknownAxesFailClosed)
    agx_stop(b);
    pack(b, /*expect_ok=*/false);
 
-   b = builder(AGX_ISA_ENCODING_AGX3B);
+   b = builder(AGX_ISA_ENCODING_AGX3C);
    agx_simd_reduce_to(b, agx_register(4, AGX_SIZE_16),
                       agx_register(2, AGX_SIZE_16), AGX_SIMD_OP_IADD);
    agx_stop(b);
