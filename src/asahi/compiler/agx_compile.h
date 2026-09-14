@@ -290,6 +290,13 @@ struct agx_fs_shader_key {
 
    /* Base coefficient register. 0 for API shaders but nonzero for FS prolog */
    uint8_t cf_base;
+
+   /* G17P rasterization sample count that coverage updates (sample mask
+    * writes and discards) are compiled for. Apple's fragments build the
+    * coverage word from different system values, and with a different
+    * all-samples constant, at one and at several samples. 0 is one sample.
+    */
+   uint8_t nr_samples;
 };
 
 struct agx_device_key {

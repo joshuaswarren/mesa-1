@@ -2849,7 +2849,7 @@ static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
                             hk_internal_builder_t builder, bool preprocess_nir,
                             bool stop, unsigned cf_base,
-                            uint64_t g17p_tile_partitions)
+                            uint64_t g17p_tile_partitions, unsigned nr_samples)
 {
    /* Try to get the cached shader */
    struct hash_entry *ent = _mesa_hash_table_search(dev->prolog_epilog.ht, key);
@@ -2864,6 +2864,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 
    struct agx_shader_key backend_key = {
       .dev = agx_gather_device_key(&dev->dev),
+      .fs.nr_samples = nr_samples,
       .g17p_tile_partitions = g17p_tile_partitions,
       .secondary = true,
       .no_stop = !stop,
@@ -2913,7 +2914,8 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 static struct agx_shader_part *
 hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
                      hk_internal_builder_t builder, bool preprocess_nir,
-                     bool stop, unsigned cf_base, uint64_t g17p_tile_partitions)
+                     bool stop, unsigned cf_base, uint64_t g17p_tile_partitions,
+                     unsigned nr_samples)
 {
    /* Build the meta shader key */
    size_t total_key_size = sizeof(struct hk_internal_key) + data_size;
@@ -2927,8 +2929,9 @@ hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
 
    simple_mtx_lock(&dev->prolog_epilog.lock);
 
-   struct agx_shader_part *part = hk_get_prolog_epilog_locked(
-      dev, key, builder, preprocess_nir, stop, cf_base, g17p_tile_partitions);
+   struct agx_shader_part *part =
+      hk_get_prolog_epilog_locked(dev, key, builder, preprocess_nir, stop,
+                                  cf_base, g17p_tile_partitions, nr_samples);
 
    simple_mtx_unlock(&dev->prolog_epilog.lock);
    return part;
@@ -2942,7 +2945,7 @@ hk_get_fast_linked_locked_vs(struct hk_device *dev, struct hk_shader *shader,
       hk_get_prolog_epilog(dev, &key->prolog, sizeof(key->prolog),
                            dev->dev.chip == AGX_CHIP_G17P
                               ? agx_nir_vs_prolog_raw : agx_nir_vs_prolog,
-                           false, false, 0, 0);
+                           false, false, 0, 0, 0);
    if (!prolog)
       return NULL;
 
@@ -3011,7 +3014,8 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
    if (needs_prolog) {
       prolog = hk_get_prolog_epilog(dev, &key->prolog, sizeof(key->prolog),
                                     build_fs_prolog, false, false,
-                                    key->prolog.cf_base, 0);
+                                    key->prolog.cf_base, 0,
+                                    key->prolog.nr_samples);
       if (!prolog) {
          mesa_loge("fragment prolog compilation failed: stats=%u cull=%u "
                    "api-mask=%#x run-zs=%u cf-base=%u",
@@ -3047,7 +3051,10 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
                            dev->dev.chip == AGX_CHIP_G17P
                               ? build_g17p_fs_epilog
                               : agx_nir_fs_epilog,
-                           true, epilog_stop, 0, g17p_tile_partitions);
+                           true, epilog_stop, 0, g17p_tile_partitions,
+                           dev->dev.chip == AGX_CHIP_G17P
+                              ? key->epilog.nr_samples
+                              : 0);
    if (!epilog) {
       uint32_t link = 0;
       memcpy(&link, &key->epilog.link, sizeof(link));
@@ -4940,6 +4947,18 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          return;
       }
 
+      /* A G17P fragment's coverage updates are compiled for the sample count
+       * of its pipeline; a dynamic count other than that cannot reuse them.
+       */
+      if (dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
+          fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
+         mesa_loge("G17P: fragment coverage updates compiled for %u samples "
+                   "cannot run a %u-sample draw",
+                   fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return;
+      }
+
       unsigned samples_shaded = 0;
       if (fs->info.fs.epilog_key.sample_shading)
          samples_shaded = dyn->ms.rasterization_samples;
@@ -4950,6 +4969,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
          .prolog.cull_distance_size = hw_vs->info.cull_distance_array_size,
          .prolog.api_sample_mask = has_sample_mask ? api_sample_mask : 0xff,
+         .prolog.nr_samples = dev->dev.chip == AGX_CHIP_G17P
+                                 ? MAX2(dyn->ms.rasterization_samples, 1)
+                                 : 0,
          .nr_samples_shaded = samples_shaded,
       };
 

@@ -2124,17 +2124,47 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           !b->shader->key->fs.inside_sample_loop) {
-         /* Native early-fragment-tests code uses MOVMSK word zero for a
-          * no-op. Keep TARGET dynamic and select that word without changing
-          * EXEC around a coverage operation. */
-         agx_index target = agx_and(b, agx_src_index(&instr->src[0]),
-                                    agx_immediate(1));
-         agx_index live = agx_and(b, agx_src_index(&instr->src[1]),
-                                  agx_immediate(1));
-         agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
-         agx_get_coverage_1x_agx3_to(b, t16);
-         agx_index mid = agx_iadd(b, t16, t16, 4);
-         agx_index word = agx_iadd(b, live, mid, 4);
+         /* MOVMSK takes one coverage word: the samples that stay alive in
+          * nibble 0, above the pixel's coverage and API input mask. Native
+          * early-fragment-tests code uses word zero for a no-op. Keep TARGET
+          * dynamic and select that word without changing EXEC around a
+          * coverage operation. */
+         const unsigned samples = MAX2(b->shader->key->fs.nr_samples, 1);
+         const unsigned all = BITFIELD_MASK(samples);
+         agx_index target_in = agx_src_index(&instr->src[0]);
+         agx_index live_in = agx_src_index(&instr->src[1]);
+         agx_index target, keep, mid;
+
+         if (samples == 1) {
+            /* Apple's one-sample fragments read SR2 and repeat it in both
+             * coverage nibbles. */
+            target = agx_and(b, target_in, agx_immediate(1));
+            keep = agx_and(b, live_in, agx_immediate(1));
+            agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
+            agx_get_coverage_1x_agx3_to(b, t16);
+            mid = agx_iadd(b, t16, t16, 4);
+         } else {
+            /* At two and four samples Apple reads SR39, whose low byte holds
+             * the covered samples and the API input mask, masks the coverage
+             * nibble and recombines them (metal-nt -arch applegpu_g17p,
+             * [[sample_mask]] fragments at raster_sample_count 2 and 4).
+             * Untargeted samples keep their state, and a word targeting no
+             * sample is the no-op, selected by (target + all) >> samples. */
+            agx_index masked = agx_and(b, target_in, agx_immediate(all));
+            agx_index untargeted =
+               agx_xor(b, masked, agx_immediate(all));
+            keep = agx_and(b, agx_or(b, untargeted, live_in),
+                           agx_immediate(all));
+            target = agx_ushr(b, agx_iadd(b, masked, agx_immediate(all), 0),
+                              agx_immediate(samples));
+            agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
+            agx_get_sr_to(b, t16, AGX_SR_INPUT_SAMPLE_MASK);
+            agx_index upper = agx_ushr(b, t16, agx_immediate(4));
+            agx_index covered = agx_and(b, t16, agx_immediate(15));
+            mid = agx_iadd(b, covered, upper, 4);
+         }
+
+         agx_index word = agx_iadd(b, keep, mid, 4);
          agx_index zero = agx_mov_imm(b, 16, 0);
          agx_index target32 = agx_temp(b->shader, AGX_SIZE_32);
          agx_index word32 = agx_temp(b->shader, AGX_SIZE_32);
@@ -2142,7 +2172,7 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          agx_emit_collect_to(b, word32, 2, (agx_index[]){word, zero});
          agx_index selected = agx_temp(b->shader, AGX_SIZE_32);
          agx_imad_to(b, selected, target32, word32, agx_zero(), 0);
-         return agx_sample_mask_1x_agx3(b, target, selected, !no_tests ? 2 : 0);
+         return agx_sample_mask_agx3(b, target, selected, !no_tests ? 2 : 0);
       }
 
       if (!no_tests)

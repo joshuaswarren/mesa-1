@@ -1327,6 +1327,21 @@ build_fs_discard_then_tests(void)
    return fs_finish(&b);
 }
 
+/* gl_SampleMask = mask, as lowered: the samples outside the mask are demoted
+ * without tests, then the remainder runs the depth/stencil tests. */
+static nir_shader *
+build_fs_sample_mask_write(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P sample mask write FS");
+   nir_def *mask = nir_load_preamble(&b, 1, 16, .base = 0);
+   nir_sample_mask_agx(&b, nir_inot(&b, mask), nir_imm_intN_t(&b, 0, 16));
+   nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
+                       nir_imm_intN_t(&b, 0xff, 16));
+   fs_store_colour(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f));
+   return fs_finish(&b);
+}
+
 /* Fragment shader with a discard: lowered to a sample_mask write. */
 static nir_shader *
 build_fs_discard(void)
@@ -6297,6 +6312,7 @@ struct agx3_graphics_case {
    bool expected_g17p_sample_group;
    bool expected_g17p_balanced_coverage;
    uint8_t expected_g17p_sincs;
+   uint8_t nr_samples;
 };
 
 static bool
@@ -6759,6 +6775,15 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-discard", build_fs_discard, true, .g17p_only = true},
    {"fs-discard-then-tests", build_fs_discard_then_tests, true,
     .g17p_only = true, .expected_g17p_balanced_coverage = true},
+   /* At several samples the coverage word is built from SR39's low byte. */
+   {"fs-discard-then-tests-2x", build_fs_discard_then_tests, true,
+    .g17p_only = true, .expected_g17p_sample_mask_input = true,
+    .expected_g17p_balanced_coverage = true, .nr_samples = 2},
+   {"fs-sample-mask-write", build_fs_sample_mask_write, true,
+    .g17p_only = true, .expected_g17p_balanced_coverage = true},
+   {"fs-sample-mask-write-4x", build_fs_sample_mask_write, true,
+    .g17p_only = true, .expected_g17p_sample_mask_input = true,
+    .expected_g17p_balanced_coverage = true, .nr_samples = 4},
    {"fs-sample-mask-in", build_fs_sample_mask_in, true, .g17p_only = true,
     .expected_g17p_sample_mask_input = true},
    {"fs-front-facing", build_fs_front_facing, true, .g17p_only = true,
@@ -6775,6 +6800,9 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_stencil = 1},
    {"fs-depth-stencil-write", build_fs_depth_stencil, true,
     .g17p_only = true, .expected_g17p_stencil = 2},
+   /* A multisample depth export writes each sample's depth separately. */
+   {"fs-depth-write-4x", build_fs_depth, false, .g17p_only = true,
+    .nr_samples = 4},
 };
 
 static bool
@@ -6799,6 +6827,7 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
    key.dev.encoding = enc;
    key.no_preamble = true;
    key.reserved_preamble = c->reserved_preamble;
+   key.fs.nr_samples = c->nr_samples;
 
    struct agx_shader_part part;
    memset(&part, 0xa5, sizeof(part));

@@ -78,7 +78,12 @@ struct hk_fs_key {
     */
    bool force_sample_shading;
 
-   uint8_t pad[2];
+   /** G17P: static rasterization samples the fragment's coverage updates
+    * are compiled for, or 0 when the count is dynamic or unknown.
+    */
+   uint8_t g17p_samples;
+
+   uint8_t pad;
 };
 static_assert(sizeof(struct hk_fs_key) == 4, "packed");
 
@@ -288,12 +293,19 @@ hk_populate_vs_key(struct hk_vs_key *key,
 
 static void
 hk_populate_fs_key(struct hk_fs_key *key,
-                   const struct vk_graphics_pipeline_state *state)
+                   const struct vk_graphics_pipeline_state *state,
+                   enum agx_chip chip)
 {
    memset(key, 0, sizeof(*key));
 
    if (state == NULL)
       return;
+
+   /* AGX2 coverage updates are sample-count independent. G17P fragments build
+    * their coverage word differently at one and at several samples. */
+   if (chip == AGX_CHIP_G17P && state->ms != NULL &&
+       !BITSET_TEST(state->dynamic, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES))
+      key->g17p_samples = state->ms->rasterization_samples;
 
    if (state->pipeline_flags &
        VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT)
@@ -386,7 +398,9 @@ hk_hash_graphics_state(struct vk_physical_device *device,
       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
    } else if (state && (stages & VK_SHADER_STAGE_FRAGMENT_BIT)) {
       struct hk_fs_key key;
-      hk_populate_fs_key(&key, state);
+      hk_populate_fs_key(&key, state,
+                         container_of(device, struct hk_physical_device, vk)
+                            ->dev.chip);
       _mesa_blake3_update(&blake3_ctx, &key, sizeof(key));
    }
 
@@ -1741,6 +1755,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        nir->info.fs.uses_sample_shading)
       backend_key.fs.inside_sample_loop = true;
 
+   if (nir->info.stage == MESA_SHADER_FRAGMENT && key)
+      backend_key.fs.nr_samples = key->fs.g17p_samples;
+
    simple_mtx_t *lock = NULL;
    if (agx_get_compiler_debug())
       lock = &hk_device_physical(dev)->debug_compile_lock;
@@ -1787,6 +1804,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    shader->code_ptr = shader->b.binary;
    shader->code_size = shader->b.info.binary_size;
+
+   if (sw_stage == MESA_SHADER_FRAGMENT)
+      shader->info.fs.g17p_samples = MAX2(backend_key.fs.nr_samples, 1);
 
    shader->info.stage = sw_stage;
    shader->info.clip_distance_array_size = nir->info.clip_distance_array_size;
@@ -1951,7 +1971,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
    union hk_key key_tmp, *key = NULL;
    if (sw_stage == MESA_SHADER_FRAGMENT) {
-      hk_populate_fs_key(&key_tmp.fs, state);
+      hk_populate_fs_key(&key_tmp.fs, state, dev->dev.chip);
       key = &key_tmp;
 
       nir->info.fs.uses_sample_shading |= key->fs.force_sample_shading;

@@ -6178,7 +6178,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             has_packed_array_layer = true;
          if (scan_I->op == AGX_OPCODE_ST_TILE)
             tile_stores_left++;
-         if (scan_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3 ||
+         if (scan_I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 ||
              scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3 ||
              scan_I->op == AGX_OPCODE_ZS_EMIT)
             has_coverage_write = true;
@@ -6376,7 +6376,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, entry_I) {
       if (agx3_is_cf_op(entry_I) ||
-          entry_I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3 ||
+          entry_I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 ||
           entry_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
          ctx->agx3_colour_link.straight_line = false;
    }
@@ -7633,7 +7633,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_GET_COVERAGE_1X_AGX3) {
+            /* SR2 is the one-sample coverage word. A multisample depth
+             * export writes each sample's depth separately in Apple's
+             * fragments, which this single update does not do. */
             if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_FRAGMENT ||
+                ctx->key->fs.nr_samples > 1 ||
                 I->nr_dests != 1 || I->nr_srcs ||
                 !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
                 I->dest[0].size != AGX_SIZE_16 || agx_channels(I->dest[0]) != 1)
@@ -7777,7 +7781,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (I->op == AGX_OPCODE_SAMPLE_MASK_1X_AGX3) {
+         if (I->op == AGX_OPCODE_SAMPLE_MASK_AGX3) {
             if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_FRAGMENT ||
                 I->nr_dests || I->nr_srcs != 2 ||
                 !agx3_src_is_register(I->src[0]) || I->src[0].memory ||

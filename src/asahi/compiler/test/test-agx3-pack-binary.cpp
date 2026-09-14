@@ -9074,7 +9074,7 @@ TEST_F(AGX3PackBinary, G17PDiscardDoesNotReleaseUnacquiredPixelClass)
       agx_builder *b = builder(enc);
       b->shader->stage = MESA_SHADER_FRAGMENT;
       for (unsigned flags : masks)
-         agx_sample_mask_1x_agx3(b, agx_register(0, AGX_SIZE_16),
+         agx_sample_mask_agx3(b, agx_register(0, AGX_SIZE_16),
                                  agx_register(4, AGX_SIZE_32), flags);
       agx_stop(b);
 
