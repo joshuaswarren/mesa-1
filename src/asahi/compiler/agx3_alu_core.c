@@ -1207,6 +1207,32 @@ agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
    return agx3_alu_bit_width(enc, op, false, dest, src, hints, wait_mask, out, len);
 }
 
+/*
+ * The carrier must not end its source's lifetime. The composer table's
+ * bit_and baseline is Apple's `bit_and r0, ^r0, r0` specimen, whose f27 marks
+ * the first source's last use. Emitted as a no-op, that tells the G17P the
+ * register is dead wherever it still holds a live value:
+ * reconvergence.terminate_invocation.terminate_helpers keeps its
+ * helper-invocation predicate in r0h across the retire in front of its first
+ * branch, and fails in whole quads. G17P therefore takes the explicit-hint
+ * form with no lifetime hint on either operand. The specimen's own slot-6
+ * wait (f49) stays with the carrier, so the slots it retires are unchanged.
+ */
+bool
+agx3_alu_band_identity_wait(enum agx_isa_encoding enc, uint16_t reg,
+                            uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B)
+      return agx3_alu_compose(enc, AGX3_ALU_BAND, reg, reg, reg, 0, 0,
+                              wait_mask, out, len);
+
+   const uint16_t src[] = {reg, reg};
+   const enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
+   return agx3_alu_bit_reg(enc, AGX3_ALU_BAND, reg, src, hints,
+                           wait_mask | (UINT16_C(1) << 5), out, len);
+}
+
 bool
 agx3_alu_bit_imm(enum agx_isa_encoding enc, enum agx3_alu_op op, bool narrow,
                  uint16_t dest, uint16_t src, uint8_t immediate,

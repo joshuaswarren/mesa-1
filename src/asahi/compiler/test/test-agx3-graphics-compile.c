@@ -1482,7 +1482,7 @@ test_g17p_pipeline_statistics_fs_prolog(void)
                    !part.info.has_preamble && part.info.push_count == 0 &&
                    part.info.agx3_staging_known &&
                    part.info.agx3_staging_halfs == 0 &&
-                   hash == UINT64_C(0xd6c6d95f9cef63ba) &&
+                   hash == UINT64_C(0x9f43540ee7e24af2) &&
                    g17p_sample_mask_input_protocol(&part);
 
    if (!ok || getenv("AGX3_DUMP_BINARY")) {

@@ -451,6 +451,35 @@ test_native_bit_nor(void)
 }
 
 static void
+test_band_identity_wait(void)
+{
+   /* The r0 identity that retires scoreboard slots, waiting on slot 1. The
+    * composer table's bit_and specimen spells the same instruction with f27,
+    * its first source's last use, set; the carrier keeps r0 live instead and
+    * keeps the specimen's slot-6 wait. */
+   static const uint8_t live[] = {0x0b, 0x01, 0x07, 0x01, 0x00,
+                                  0x20, 0x00, 0x80, 0x00, 0x00};
+   static const uint8_t dead[] = {0x0b, 0x01, 0x0f, 0x01, 0x00,
+                                  0x20, 0x00, 0x80, 0x00, 0x00};
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   assert(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B, 0, 1, bytes,
+                                      &len));
+   assert(len == sizeof(live) && !memcmp(bytes, live, sizeof(live)));
+
+   const uint16_t src[] = {0, 0};
+   const enum agx3_alu_hint last_use[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+   };
+   assert(agx3_alu_bit_reg(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 0, src,
+                           last_use, 1 | (1u << 5), bytes, &len));
+   assert(len == sizeof(dead) && !memcmp(bytes, dead, sizeof(dead)));
+   assert(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND, 0, 0, 0, 0,
+                           0, 1, bytes, &len));
+   assert(len == sizeof(dead) && !memcmp(bytes, dead, sizeof(dead)));
+   puts("BAND identity wait: keeps its register live PASS");
+}
+
+static void
 test_native_bit_andc(void)
 {
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
@@ -5282,6 +5311,7 @@ int main(void){
    test_native_minifloat_half_select();
    test_native_bit_not16();
    test_native_bit_andc();
+   test_band_identity_wait();
    test_native_bit_nor();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();

@@ -48,6 +48,13 @@ bool agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* `reg & reg` into reg: a no-op carrying a scoreboard wait mask, which keeps
+ * the register live whatever it holds. */
+bool agx3_alu_band_identity_wait(enum agx_isa_encoding enc, uint16_t reg,
+                                 uint16_t wait_mask,
+                                 uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                 uint8_t *len);
+
 bool agx3_alu_bit_reg16(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           uint16_t dest, const uint16_t src[2],
                           const enum agx3_alu_hint hints[2], uint16_t wait_mask,

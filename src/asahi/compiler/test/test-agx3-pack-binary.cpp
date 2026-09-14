@@ -1674,8 +1674,7 @@ TEST_F(AGX3PackBinary, G17PHalfImmediateRetiresOverwriteWait)
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_sr_encode(enc, &sr, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_alu_mov16(enc, 15, 0x1972, 0, bytes, &len));
    append(want, bytes, len);
@@ -1831,8 +1830,7 @@ TEST_F(AGX3PackBinary, FaddMinifloatRetiresExcessWaitAndKeepsBothCaches)
    std::vector<uint8_t> expected;
    /* Slot 5 is retired first by the byte-grounded x&x identity. Slot 4 stays
     * fused on the ADD, which preserves both source and destination CACHE. */
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                1u << 4, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1u << 4, bytes, &len));
    append(expected, bytes, len);
    ASSERT_TRUE(agx3_alu_fadd_minifloat(
       enc, 14, 2, 0xa0, true, AGX3_ALU_HINT_CACHE, 1u << 3, bytes, &len));
@@ -3896,8 +3894,8 @@ TEST_F(AGX3PackBinary, RegisterSubgroupShufflesWaitForDeviceLoad)
           * corresponding AGX3c graph, which retires it first. */
          const bool agx3b = enc == AGX_ISA_ENCODING_AGX3B;
          if (!agx3b) {
-            ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                         1u, bytes, &length));
+            ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1u, bytes,
+                                                    &length));
             append(want, bytes, length);
          }
 
@@ -3995,8 +3993,8 @@ TEST_F(AGX3PackBinary, BallotWaitsForDeviceLoad)
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
    /* Device loads use slot6. Retire it through the byte-grounded identity
     * prelude because the native ballot has no scoreboard field. */
-   ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND,
-                                0, 0, 0, 0, 0, 1u << 5, bytes, &length));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B, 0, 1u << 5,
+                                           bytes, &length));
    append(want, bytes, length);
 
    const struct agx3_subgroup_ballot_desc ballot = {
@@ -5704,8 +5702,7 @@ TEST_F(AGX3PackBinary, TextureExportRetiresAtPartBoundary)
       /* Four zero-byte exports are one outstanding texture result. The
        * independently compiled epilog cannot inherit this slot implicitly. */
       uint8_t wait[AGX3_ALU_MAX_LENGTH];
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                   1, wait, &len));
+      ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, wait, &len));
       append(want, wait, len);
       EXPECT_EQ(pack(b), want);
    }
@@ -5757,8 +5754,7 @@ TEST_F(AGX3PackBinary, Implicit2DRebasesMaterializedCoordinates)
    };
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
 
    EXPECT_EQ(pack(b), want);
@@ -5818,8 +5814,7 @@ TEST_F(AGX3PackBinary, Implicit2DCoordinateCopySourceBank)
       };
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                   bytes, &len));
+      ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
       append(want, bytes, len);
       EXPECT_EQ(pack(b), want);
    }
@@ -6002,8 +5997,7 @@ TEST_F(AGX3PackBinary, DeviceLoadExportsRetireEveryOutstandingSlot)
          append(want, bytes, len);
       }
       /* One r0 identity waits on both slots before reading r0. */
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 0x3,
-                                  bytes, &len));
+      ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 0x3, bytes, &len));
       append(want, bytes, len);
       EXPECT_EQ(pack(b), want);
    }
@@ -7253,8 +7247,8 @@ TEST_F(AGX3PackBinary, MemoryDependentControlFlowRetiresOutstandingLoad)
    uint8_t wait[AGX3_ALU_MAX_LENGTH], len = 0;
    bool found_wait = false;
    for (unsigned slot = 0; slot < 6; ++slot) {
-      ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND,
-                                   0, 0, 0, 0, 0, 1u << slot, wait, &len));
+      ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B, 0,
+                                              1u << slot, wait, &len));
       found_wait |=
          std::search(bin.begin(), bin.end(), wait, wait + len) != bin.end();
    }
@@ -7646,8 +7640,8 @@ TEST_F(AGX3PackBinary, SixVertexOutputsRetireSourcesBeforeReuseAndWriteInOrder)
       ASSERT_TRUE(agx3_stage_copy_source(AGX_ISA_ENCODING_AGX3B,
                      component * 2, 0, false, component + 1, 0, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND,
-                     0, 0, 0, 0, 0, 1u << component, bytes, &len));
+      ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B, 0,
+                                              1u << component, bytes, &len));
       append(want, bytes, len);
    }
    for (unsigned component = 0; component < 6; ++component) {
@@ -7688,8 +7682,8 @@ TEST_F(AGX3PackBinary, SixVertexOutputsDrainUnrelatedSlotsBeforeInjectedCopy)
    const auto at = std::search(got.begin(), got.end(), bytes, bytes + len);
    ASSERT_NE(at, got.end());
    uint8_t wait_bytes[AGX3_ALU_MAX_LENGTH], wait_len = 0;
-   ASSERT_TRUE(agx3_alu_compose(AGX_ISA_ENCODING_AGX3B, AGX3_ALU_BAND,
-                  0, 0, 0, 0, 0, 8, wait_bytes, &wait_len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B, 0, 8,
+                                           wait_bytes, &wait_len));
    ASSERT_GE(got.end() - at, len + wait_len);
    EXPECT_EQ(memcmp(&*(at + len), wait_bytes, wait_len), 0);
 }
@@ -8183,8 +8177,7 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
    d.register_lod = true;
    ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_TRUE(b->shader->agx3_staging_known);
@@ -8243,8 +8236,7 @@ TEST_F(AGX3PackBinary, TextureFetchArrayPacksLayerWithRegisterLod)
    };
    ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_TRUE(b->shader->agx3_staging_known);
@@ -8287,8 +8279,7 @@ TEST_F(AGX3PackBinary, TextureFetch3DRegisterLodIsFullUint)
    };
    ASSERT_TRUE(agx3_tex_encode_fetch(enc, &fetch, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
 }
@@ -9115,8 +9106,7 @@ TEST_F(AGX3PackBinary, GradientRetiresAsyncSourceBeforeNativeDfdx)
     * clear so helper lanes survive into the quad operation. */
    ASSERT_TRUE(agx3_vary_ldcf_at_start(enc, 8, 0, 1, false, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
-                                bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_funop_encode(enc, AGX3_FUNOP_DFDX, 2, 8, false, false,
                                  false, 0, bytes, &len));
@@ -9178,8 +9168,7 @@ TEST_F(AGX3PackBinary, FloatSelectWaitPreservesUnrelatedPendingLoads)
                                   mask, correct, &length)
             : agx3_alu_bit_reg(enc, AGX3_ALU_BAND, 8, operands, hints,
                                 mask, correct, &length));
-         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                     2, old, &old_length));
+         ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 2, old, &old_length));
          EXPECT_NE(std::search(code.begin(), code.end(), correct,
                                correct + length), code.end());
          EXPECT_EQ(std::search(code.begin(), code.end(), old,
@@ -9211,8 +9200,8 @@ TEST_F(AGX3PackBinary, InterpolationWaitDoesNotReadPendingRegisters)
    uint8_t correct_len = 0, corrupting_len = 0;
    ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_LDIMM, 8, 0, 0, 0, 0, 2,
                               correct, &correct_len));
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 2,
-                              corrupting, &corrupting_len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 2, corrupting,
+                                           &corrupting_len));
    static const uint8_t source_free[] = {
       0x4c, 0x80, 0x02, 0x00, 0x00, 0x40, 0x00, 0x00,
    };
@@ -11827,8 +11816,7 @@ TEST_F(AGX3PackBinary, ExplicitLodStagingAndLifetime)
          d.lod=AGX3_TEX_LOD_REGISTER; d.slot=1; d.wait_mask=1; d.final=true;
          ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
          append(want, bytes, len);
-         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                      1, bytes, &len));
+         ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
          append(want, bytes, len);
          EXPECT_EQ(pack(b), want);
          EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
@@ -12177,8 +12165,7 @@ TEST_F(AGX3PackBinary, SampleStagingWaitsOnlyForItsOwnProducers)
    const auto binary = pack(b);
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
    std::vector<uint8_t> staging;
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                2, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 2, bytes, &len));
    append(staging, bytes, len);
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 4, 1, false, false,
                                          bytes, &len));
@@ -12189,8 +12176,7 @@ TEST_F(AGX3PackBinary, SampleStagingWaitsOnlyForItsOwnProducers)
    const auto found = std::search(binary.begin(), binary.end(),
                                    staging.begin(), staging.end());
    ASSERT_NE(found, binary.end());
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                4, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 4, bytes, &len));
    EXPECT_EQ(std::search(binary.begin(), found, bytes, bytes + len), found);
 }
 
@@ -12533,8 +12519,7 @@ TEST_F(AGX3PackBinary, ConsecutiveCubeSamplesRetireCEMScratchGeneration)
    for (unsigned i = 0; i < 2; ++i) {
       const uint8_t slot = i + 1;
       if (i != 0) {
-         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                      1, bytes, &len));
+         ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
          append(want, bytes, len);
       }
       for (unsigned axis = 0; axis < 3; ++axis) {
@@ -12791,8 +12776,7 @@ TEST_F(AGX3PackBinary, ArraySampleStagesDriverLayerAndLifetime)
       d.array_layer = 4;
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                   1, bytes, &len));
+      ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
       append(want, bytes, len);
       EXPECT_EQ(pack(b), want);
       EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
@@ -12858,8 +12842,7 @@ TEST_F(AGX3PackBinary, GradientSampleStagesFourScalarsIntoTheirOwnBanks)
              (std::vector<uint8_t>{0x25, 0x80, 0x0c, 0x98, 0xb0, 0x00, 0x04,
                                    0x01, 0x00, 0x00, 0x10, 0x00, 0x01, 0x00}));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                1, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 16);
@@ -12957,8 +12940,7 @@ TEST_F(AGX3PackBinary, ArrayGradientStagesLayer)
    d.array = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                1, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 16);
@@ -13064,8 +13046,7 @@ TEST_F(AGX3PackBinary, RegisterLodBiasStagesLikeRegisterLevel)
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    std::vector<uint8_t> bias(bytes, bytes + len);
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                1, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
@@ -13139,8 +13120,7 @@ TEST_F(AGX3PackBinary, GatherComponentMapsOntoTheNativeField)
       d.gather = native[c];
       ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
       append(want, bytes, len);
-      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                   1, bytes, &len));
+      ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
       append(want, bytes, len);
       EXPECT_EQ(pack(b), want);
       EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
@@ -13684,8 +13664,7 @@ TEST_F(AGX3PackBinary, ShadowArrayStagesPackedLayer)
    d.shadow = true;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                1, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
 
    EXPECT_EQ(pack(b), want);
@@ -13874,8 +13853,7 @@ TEST_F(AGX3PackBinary, ArrayRegisterDescriptorsStageDriverLayer)
    d.sampler_value = 16;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                1, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
@@ -13927,8 +13905,7 @@ TEST_F(AGX3PackBinary, ArrayDriverLayerAcceptsHighRegistersWithoutWrap)
    d.sampler_value = 16;
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                1, bytes, &len));
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
 

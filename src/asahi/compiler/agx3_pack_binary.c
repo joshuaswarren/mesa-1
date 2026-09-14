@@ -3399,11 +3399,13 @@ agx3_emit_alu(struct util_dynarray *emission, enum agx_isa_encoding enc,
       const uint16_t prewait = wait_mask & -wait_mask;
       uint8_t prelude[AGX3_ALU_MAX_LENGTH];
       uint8_t prelude_len = 0;
-      const enum agx3_alu_op prelude_op =
-         exact_in_place ? AGX3_ALU_BAND : AGX3_ALU_LDIMM;
-      if (!agx3_alu_compose(enc, prelude_op, S->dest, S->dest, S->dest, 0, 0,
-                            prewait, prelude, &prelude_len) ||
-          !agx3_append(emission, prelude, prelude_len))
+      const bool ok =
+         exact_in_place
+            ? agx3_alu_band_identity_wait(enc, S->dest, prewait, prelude,
+                                      &prelude_len)
+            : agx3_alu_compose(enc, AGX3_ALU_LDIMM, S->dest, S->dest, S->dest,
+                               0, 0, prewait, prelude, &prelude_len);
+      if (!ok || !agx3_append(emission, prelude, prelude_len))
          return false;
       wait_mask &= ~prewait;
    }
@@ -4375,8 +4377,7 @@ agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc
     * in the mask may still be producing it, which loses that result. */
    uint8_t bytes[AGX3_ALU_MAX_LENGTH];
    uint8_t len = 0;
-   return agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, mask, bytes,
-                           &len) &&
+   return agx3_alu_band_identity_wait(enc, 0, mask, bytes, &len) &&
           agx3_append(emission, bytes, len);
 }
 
