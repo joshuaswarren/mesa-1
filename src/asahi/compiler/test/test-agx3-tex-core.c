@@ -493,18 +493,53 @@ test_sample_witnesses(void)
         .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .cube = true},
        "05800cb8b0000003010010000100", NULL},
-      {"native cube-array dynamic layer implicit LOD",
+      /* metal-nt -arch applegpu_g17p fragment texturecube and
+       * texturecube_array samples at bias(b[i]) and bias(0.5). */
+      {"native cube register bias",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true},
+       "05800cb8b0001400010010000100", NULL},
+      {"native cube bias(0.5)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true},
+       "05800cb8b0001101010010020100", NULL},
+      /* metal-nt -arch applegpu_g17p, fragment texturecube_array::sample
+       * with the layer read from a device buffer into a GPR: the layer is
+       * staged with CEM's face (f77=2), with no direct f31/f37 operand. */
+      {"native cube-array GPR layer implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true, .cube = true,
         .array_layer = 22},
-       "05800cb8b00013b5010010000100", NULL},
-      {"native cube-array dynamic layer level zero",
+       "05800cb8b0001004010010000100", NULL},
+      {"native cube-array GPR layer level zero",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_LEVEL, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true, .cube = true,
         .array_layer = 22},
-       "05800cb8b00007b7010010000100", NULL},
+       "05800cb8b0005300010010000100", NULL},
+      /* metal-nt -arch applegpu_g17p fragment texturecube_array samples at
+       * l[i] with level(b[j]), bias(b[j]) and bias(0.5). */
+      {"native cube-array GPR layer register level",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b0000803010010000100", NULL},
+      {"native cube-array GPR layer register bias",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b0001800010010000100", NULL},
+      {"native cube-array GPR layer bias(0.5)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b0009101010010020100", NULL},
       {"native cube comparison",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
@@ -2132,27 +2167,92 @@ test_cube_coordinate_stage(void)
                                false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
    /* applegpu-nt 32023.917 depthcube_array::sample_compare combines CEM's
-    * face and discarded 32-bit layer r3 in one distinct PACK_SMPIR. */
+    * face and discarded layer half3 in one distinct PACK_SMPIR. */
    static const uint8_t native_shadow_array[] = {
       0x17,0x05,0x54,0x06,0x00,0x06,
       0x08,0x00,0xf0,0xc0,0x29,0x00,
    };
-   CHECK(agx3_tex_stage_cube_array_shadow(
-      AGX_ISA_ENCODING_AGX3B, 6, 1, 0, false, true, bytes, &len));
+   CHECK(agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 2, 3, 1, 0, false, true, bytes, &len));
    CHECK(len == sizeof(native_shadow_array) &&
          !memcmp(bytes, native_shadow_array, len));
+   /* metal-nt -arch applegpu_g17p, texturecube_array::sample in a kernel at
+    * uint(c.w): flt2int writes the 16-bit layer to half11 (2707540b030cb0080300)
+    * and PACK_SMPIR names that half beside CEM's face half10. */
+   static const uint8_t native_array_face10[] = {
+      0x17,0x05,0x54,0x06,0x00,0x16,
+      0x28,0x00,0xf0,0xc0,0x29,0x00,
+   };
+   CHECK(agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 10, 11, 1, 0, false, true, bytes, &len));
+   CHECK(len == sizeof(native_array_face10) &&
+         !memcmp(bytes, native_array_face10, len));
+
+   /* metal-nt -arch applegpu_g17p register level and bias. A cube publishes
+    * its face and LOD together; a cube array first packs its layer into r0
+    * and publishes that word as the third operand. */
+   static const struct {
+      const char *name;
+      uint16_t face, lod;
+      int packed_layer;
+      const char *hex;
+   } cube_lods[] = {
+      {"kernel texturecube level(c.w)", 10, 11, -1,
+       "1705540600142c00f0c01100"},
+      {"fragment texturecube level/bias(b[i])", 2, 3, -1,
+       "1705540600040c00f0c01100"},
+      {"kernel texturecube_array level(c.x)", 10, 11, 0,
+       "1705540600142c00f0c21700"},
+      {"kernel texturecube_array level(lod[i])", 8, 9, 0,
+       "1705540600102400f0c21700"},
+      {"fragment texturecube_array level/bias(b[j])", 2, 3, 0,
+       "1705540600040c00f0c21700"},
+   };
+   for (unsigned i = 0; i < sizeof(cube_lods) / sizeof(cube_lods[0]); ++i) {
+      const bool packed = cube_lods[i].packed_layer < 0
+         ? agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3B, cube_lods[i].face,
+                                   cube_lods[i].lod, 1, 0, false, true,
+                                   bytes, &len)
+         : agx3_tex_stage_cube_array_lod(
+              AGX_ISA_ENCODING_AGX3B, cube_lods[i].face, cube_lods[i].lod,
+              cube_lods[i].packed_layer, 1, 0, false, true, bytes, &len);
+      if (!packed || !hex_eq(bytes, len, cube_lods[i].hex)) {
+         fprintf(stderr, "cube LOD staging mismatch: %s\n", cube_lods[i].name);
+         return false;
+      }
+   }
+   static const uint8_t native_layer14_r0[] = {
+      0x17,0x05,0x54,0x00,0x03,0x1c,
+      0x00,0x00,0xf0,0x88,0x04,0x00,
+   };
+   CHECK(agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3B, 14, 0, false,
+                                      true, bytes, &len));
+   CHECK(len == sizeof(native_layer14_r0) &&
+         !memcmp(bytes, native_layer14_r0, len));
+   CHECK(!agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3C, 2, 3, 1, 0,
+                                  false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3B, 3, 3, 1, 0,
+                                  false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3B, 2, 3, 1, 0,
+                                  true, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_lod(AGX_ISA_ENCODING_AGX3B, 2, 3, 1, 1,
+                                        0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_lod(AGX_ISA_ENCODING_AGX3B, 2, 128, 0,
+                                        1, 0, false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3C, 2, 1, 0,
                                 false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 3, 1, 0,
                                 false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                 true, true, bytes, &len));
-   CHECK(!agx3_tex_stage_cube_array_shadow(
-      AGX_ISA_ENCODING_AGX3C, 6, 1, 0, false, true, bytes, &len));
-   CHECK(!agx3_tex_stage_cube_array_shadow(
-      AGX_ISA_ENCODING_AGX3B, 7, 1, 0, false, true, bytes, &len));
-   CHECK(!agx3_tex_stage_cube_array_shadow(
-      AGX_ISA_ENCODING_AGX3B, 6, 1, 0, true, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3C, 2, 6, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 2, 128, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 3, 6, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 2, 6, 1, 0, true, true, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3C, 4, 6, 20, 0,
                                  false, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 4, 6, 20, 0,

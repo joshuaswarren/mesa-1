@@ -2595,14 +2595,15 @@ test_g17p_native_cube_array_sample(void)
    ok &= compiled;
 
    bool native_smp = false;
-   /* The combined HK ABI keeps the descriptor pointers in r8:r11 and the
-    * post-RA layer in r15. This is the exact SMP tail produced from that ABI;
-    * its cube/array/layer selectors match Apple's dynamic cube-array witness,
-    * while f83/f112 retain the driver's independently qualified 0/4 profile.
+   /* The combined HK ABI keeps the descriptor pointers in r8:r11 and stages
+    * the post-RA layer with CEM's face. This is the exact SMP tail produced
+    * from that ABI; its cube/array selectors match Apple's GPR-layer
+    * cube-array witness (f77=2, no direct layer), while f83/f112 retain the
+    * driver's independently qualified 0/4 profile.
     */
    static const uint8_t hk_native_smp[] = {
-      0x05,0x80,0x0c,0xb8,0x30,0x25,0x13,
-      0xb5,0x01,0x00,0x10,0x00,0x01,0x00,
+      0x05,0x80,0x0c,0xb8,0x30,0x25,0x10,
+      0x04,0x01,0x00,0x10,0x00,0x01,0x00,
    };
    for (unsigned off = 0;
         part.binary && off + sizeof(hk_native_smp) <= part.info.binary_size;

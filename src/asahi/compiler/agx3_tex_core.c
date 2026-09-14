@@ -317,15 +317,21 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
 
    /* Native cube sampling is a distinct dimension (SMP f76=4). Apple
     * publishes its third f32 coordinate with PACK_SMPIR f74=10, then samples
-    * fixed coordinate bank 0. Implicit LOD and the ordinary immediate and
-    * register explicit-LOD selectors are independently witnessed. Cube and
-    * cube-array comparisons reuse that CEM path with their own packed face /
-    * layer operands. */
+    * fixed coordinate bank 0. Implicit LOD and the immediate and register
+    * level and bias selectors are independently witnessed, each with the same
+    * f139/f29/f37 operands as a 2D sample:
+    *
+    *   texturecube       bias(0.5)  05800cb8b0001101010010020100
+    *   texturecube_array bias(0.5)  05800cb8b0009101010010020100
+    *
+    * Cube and cube-array comparisons reuse that CEM path with their own
+    * packed face / layer operands. */
    if (d->cube &&
        (enc != AGX_ISA_ENCODING_AGX3B || d->three_d ||
         d->coord != 0 ||
         (d->lod != AGX3_TEX_LOD_AUTO && d->lod != AGX3_TEX_LOD_LEVEL &&
-         d->lod != AGX3_TEX_LOD_REGISTER)))
+         d->lod != AGX3_TEX_LOD_REGISTER && d->lod != AGX3_TEX_LOD_BIAS &&
+         d->lod != AGX3_TEX_LOD_BIAS_REGISTER)))
       return false;
 
    const unsigned tk = d->texture_kind ? d->texture_kind : 1;
@@ -526,12 +532,13 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
    const bool direct_offset_array =
       apple_fragment_abi && d->array && d->offset_staged &&
       !d->offset_staged_array;
+   /* SMP's direct f31/f37=3 layer names a uniform half, so a driver cube
+    * array, whose layer is a GPR, reads the layer staged with CEM's face. */
    const bool staged_driver_array =
-      d->array && !d->cube &&
-      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
+      d->array && d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
       !direct_offset_array &&
-      (d->vertex_stage || d->shadow || d->lod == AGX3_TEX_LOD_AUTO ||
-       d->offset);
+      (d->cube || d->vertex_stage || d->shadow ||
+       d->lod == AGX3_TEX_LOD_AUTO || d->offset);
    unsigned operand_profile = apple_fragment_abi ? 3 : 0;
    struct agx3_field_kv base[20];
    unsigned nb = 0;
@@ -598,10 +605,10 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
        (intrinsic_group && !d->sample_group_nonterminal))
       ov[n++] = (struct agx3_field_kv)KV(156, 1);
    if (d->array) {
-      /* Honeykrisp's driver descriptor ABI pairs noncube arrays with the
+      /* Honeykrisp's driver descriptor ABI pairs arrays with the
        * sampler-private layer staged by PACK_SMPIR.  Native Apple fragment
        * witnesses use the direct f31/f37 path as part of their complete 4/8
-       * ABI; cube arrays retain their independently witnessed direct path.
+       * ABI, where f31 is a uniform half.
        */
       if (d->query_lod) {
          /* No layer coordinate participates in the LOD derivative. */
@@ -1490,41 +1497,161 @@ agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
    return true;
 }
 
-/* depthcube_array::sample_compare combines CEM's selected face and the
- * integer array layer in one PACK_SMPIR form. applegpu-nt 32023.917 emits
- * exactly 1705540600060800f0c02900 for discarded 32-bit r3 on slot 1.
+/* A cube-array sample with a GPR layer publishes the integer layer and CEM's
+ * face in one PACK_SMPIR form: operand 1 (f16) is the 16-bit layer half with
+ * type f74=4 at bit 0, operand 2 (f30) the face half with type f76=10 at bit
+ * 12. Both name half-registers, as every PACK_SMPIR operand does. metal-nt
+ * -arch applegpu_g17p texturecube_array::sample at a buffer-loaded layer:
  *
- * Unlike the ordinary scalar PACK forms, f16 names a full 32-bit register,
- * not a half-register. The five additional selectors below are the exact
- * delta which selects the combined face/layer operand in Apple's table.
+ *   compute, flt2int to 16-bit half11   1705540600162800f0c02900
+ *   fragment, layer in r0, face half2   1705540600000800f0c02900
+ *
+ * applegpu-nt depthcube_array::sample_compare emits the same form for layer
+ * half3, 1705540600060800f0c02900.
  */
 bool
-agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
-                                 uint8_t slot, uint16_t wait_mask,
-                                 bool layer_cache, bool layer_discard,
-                                 uint8_t out[AGX3_TEX_MAX_LENGTH],
-                                 uint8_t *len)
+agx3_tex_stage_cube_array_layer(enum agx_isa_encoding enc, uint16_t face,
+                                uint16_t layer, uint8_t slot,
+                                uint16_t wait_mask, bool layer_cache,
+                                bool layer_discard,
+                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len)
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || layer >= 256 || (layer & 1) ||
-       slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
-       !one_or_zero(wait_mask) || (layer_cache && layer_discard))
+   if (enc != AGX_ISA_ENCODING_AGX3B || face >= 128 || (face & 1) ||
+       layer >= 128 || slot < 1 || slot > 6 ||
+       (wait_mask & ~0x3f) || !one_or_zero(wait_mask) ||
+       (layer_cache && layer_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
       KV(5, 6),  KV(9, 5),  KV(10, 2), KV(23, 2), KV(24, 1),
-      KV(30, 2), KV(37, 2), KV(38, 1), KV(41, 1), KV(51, 1),
-      KV(52, 2), KV(74, 4), KV(76, 10), KV(77, 12),
+      KV(37, 2), KV(38, 1), KV(41, 1), KV(51, 1), KV(52, 2),
+      KV(74, 4), KV(76, 10), KV(77, 12),
    };
-   struct agx3_field_kv ov[10];
+   struct agx3_field_kv ov[11];
    unsigned n = 0;
-   ov[n++] = (struct agx3_field_kv)KV(16, layer >> 1);
+   ov[n++] = (struct agx3_field_kv)KV(30, face);
+   ov[n++] = (struct agx3_field_kv)KV(16, layer);
    ov[n++] = (struct agx3_field_kv)KV(12, slot);
    ov[n++] = (struct agx3_field_kv)KV(25, layer_cache);
    ov[n++] = (struct agx3_field_kv)KV(27, layer_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov, n, out, len);
+}
+
+/* A cube sample with a register level or bias publishes CEM's face and the
+ * 16-bit float LOD in one PACK_SMPIR: the face as operand 1 (type f74=10 at
+ * bit 0) and the LOD as operand 2 (type f76=2 at bit 16). SMP f139 alone
+ * distinguishes level from bias. metal-nt -arch applegpu_g17p texturecube:
+ *
+ *   compute  sample(s, c.xyz, level(c.w))  face half10, LOD half11
+ *            1705540600142c00f0c01100      05800cb8b0000003000010000100
+ *   fragment sample(s, dir, level(b[i]))   face half2, LOD half3
+ *            1705540600040c00f0c01100      05800cb8b0000003010010000100
+ *   fragment sample(s, dir, bias(b[i]))    same PACK_SMPIR
+ *                                          05800cb8b0001400010010000100
+ *
+ * Publishing the face and the LOD with two PACK_SMPIRs would replace the
+ * first bank word with the second.
+ */
+bool
+agx3_tex_stage_cube_lod(enum agx_isa_encoding enc, uint16_t face,
+                        uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                        bool lod_cache, bool lod_discard,
+                        uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || face >= 256 || (face & 1) ||
+       lod >= 128 || slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
+       !one_or_zero(wait_mask) || (lod_cache && lod_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6),  KV(9, 5),  KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(27, 1), KV(37, 2), KV(38, 1), KV(51, 1), KV(52, 2),
+      KV(74, 10), KV(76, (unsigned)AGX3_TEX_LEVEL_FLOAT), KV(77, 16),
+   };
+   struct agx3_field_kv ov[11];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, face & 0x7f);
+   ov[n++] = (struct agx3_field_kv)KV(30, lod);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(39, lod_cache);
+   ov[n++] = (struct agx3_field_kv)KV(41, lod_discard);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+   if (!agx3_bind_compose(enc, "pack_smpir", 0, base,
+                         sizeof(base) / sizeof(base[0]), ov, n, out, len))
+      return false;
+
+   /* f16 bit 7, as for the face-only form. */
+   out[6] |= (face >> 7) & 1;
+   return true;
+}
+
+/* A cube-array sample with a register level or bias needs three typed
+ * operands, but PACK_SMPIR types only the first two. Apple first packs the
+ * layer alone into a 32-bit GPR (agx3_tex_pack_ms_array_layer) and then
+ * publishes the face (f74=10 at bit 12), the float LOD (f76=2 at bit 16) and
+ * that prepacked word as untyped operand 3 (f44, f51=2, f52=2). metal-nt
+ * -arch applegpu_g17p texturecube_array:
+ *
+ *   compute  sample(s, c.xyz, uint(c.w), level(c.x))
+ *            17055400031c0000f0880400  layer half14 -> r0
+ *            1705540600142c00f0c21700  face half10, LOD half11, r0
+ *   compute  sample(s, c.xyz, l[i], level(lod[i]))
+ *            1705540003000000f0880400  layer half0 -> r0
+ *            1705540600102400f0c21700  face half8, LOD half9, r0
+ *   fragment sample(s, dir, l[i], level(b[j]))
+ *            1705540003000000f0880400  layer half0 -> r0
+ *            1705540600040c00f0c21700  face half2, LOD half3, r0
+ *
+ * SMP selects the staged layer with f77=2 and the LOD mode with f139=4 for a
+ * level (05800cb8b0000803010010000100) or 3 for a bias
+ * (05800cb8b0001800010010000100), as for 2D samples.
+ */
+bool
+agx3_tex_stage_cube_array_lod(enum agx_isa_encoding enc, uint16_t face,
+                              uint16_t lod, uint16_t packed_layer,
+                              uint8_t slot, uint16_t wait_mask,
+                              bool lod_cache, bool lod_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B || face >= 128 || (face & 1) ||
+       lod >= 128 || packed_layer > 190 || (packed_layer & 1) || slot < 1 ||
+       slot > 6 || (wait_mask & ~0x3f) || !one_or_zero(wait_mask) ||
+       (lod_cache && lod_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 6),   KV(9, 5),   KV(10, 2),  KV(23, 2),  KV(24, 1),
+      KV(27, 1),  KV(37, 2),  KV(38, 1),  KV(51, 2),  KV(52, 2),
+      KV(55, 1),  KV(74, 10), KV(75, 12),
+      KV(76, (unsigned)AGX3_TEX_LEVEL_FLOAT), KV(77, 16),
+   };
+   struct agx3_field_kv ov[12];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, face);
+   ov[n++] = (struct agx3_field_kv)KV(30, lod);
+   ov[n++] = (struct agx3_field_kv)KV(44, packed_layer);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(39, lod_cache);
+   ov[n++] = (struct agx3_field_kv)KV(41, lod_discard);
    for (unsigned i = 0; i < 6; ++i)
       if (wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);

@@ -1642,7 +1642,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
           !register_bias && !explicit_lod && !gradient_lod && !bias_min))) ||
        (cube &&
         (enc != AGX_ISA_ENCODING_AGX3B ||
-         (!implicit_lod && !explicit_lod))) ||
+         (!implicit_lod && !explicit_lod && !biased_lod &&
+          !register_bias))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->sparse ||
        (min_lod && (array || cube || vertex_stage ||
@@ -1674,9 +1675,16 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       (I->src[3].type == AGX_INDEX_REGISTER ||
        I->src[4].type == AGX_INDEX_REGISTER);
 
+   /* A cube register level or bias is published with CEM's face, after CEM
+    * has run, so CEM must not overwrite it. */
+   const bool cube_register_lod =
+      cube && ((explicit_lod && !immediate_lod) || register_bias);
+
    /* The immediate cube corpus uses fixed r0/r7/r2 CEM destinations. Dynamic
-    * descriptor forms use the allocator-owned bank supplied below. */
-   if (cube && immediate) {
+    * descriptor forms, and any cube whose staged LOD must survive CEM, use
+    * the allocator-owned bank supplied below. */
+   const bool fixed_cem = immediate && !cube_register_lod;
+   if (cube && fixed_cem) {
       const unsigned coord_first = I->src[0].value;
       const unsigned coord_last = coord_first + (cube_array && !query_lod ? 8 : 6);
       if (coord_first < 2 || (coord_first < 16 && coord_last > 14))
@@ -1746,7 +1754,8 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
           !agx3_append(emission, bytes, len))
          return false;
       wait_mask = 0;
-   } else if ((explicit_lod && !immediate_lod) || register_bias) {
+   } else if (((explicit_lod && !immediate_lod) || register_bias) &&
+              !cube_register_lod) {
       if (!agx3_tex_stage_lod(enc, I->src[1].value, stage_slot, wait_mask,
                              I->src[1].cache, I->src[1].discard,
                              bytes, &len) ||
@@ -1777,9 +1786,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          return false;
 
       const uint16_t fixed_scratch[3] = {0, 14, 4};
-      const uint16_t *scratch = immediate ? fixed_scratch : cem_scratch;
+      const uint16_t *scratch = fixed_cem ? fixed_scratch : cem_scratch;
       for (unsigned axis = 0; axis < 3; ++axis) {
-         const bool packed = immediate
+         const bool packed = fixed_cem
             ? agx3_tex_cube_cem_calc(
                  enc, I->src[0].value, I->src[0].value + 2,
                  I->src[0].value + 4, axis,
@@ -1793,7 +1802,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
             return false;
 
          if (axis == 0 &&
-             (!(immediate
+             (!(fixed_cem
                    ? agx3_tex_cube_cem_rcp(enc, bytes, &len)
                    : agx3_tex_cube_cem_rcp_to(enc, scratch[0], bytes, &len)) ||
               !agx3_append(emission, bytes, len)))
@@ -1801,7 +1810,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       }
 
       for (unsigned component = 0; component < 2; ++component) {
-         const bool packed = immediate
+         const bool packed = fixed_cem
             ? agx3_tex_cube_cem_finalize(enc, component, component == 1,
                                          bytes, &len)
             : agx3_tex_cube_cem_finalize_to(
@@ -1855,13 +1864,29 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       return false;
 
    if (cube) {
-      const bool packed = shadow && cube_array
-         ? agx3_tex_stage_cube_array_shadow(
-              enc, I->src[0].value + 6, stage_slot, 0,
-              I->src[0].cache, I->src[0].discard, bytes, &len)
-         : agx3_tex_stage_cube_z(enc, immediate ? 2 : cem_scratch[0] + 2,
-                                 stage_slot, 0, false, true,
-                                 bytes, &len);
+      const uint16_t face = fixed_cem ? 2 : cem_scratch[0] + 2;
+      const uint16_t layer = I->src[0].value + 6;
+      bool packed;
+      if (cube_array && cube_register_lod) {
+         packed = agx3_tex_pack_ms_array_layer(
+                     enc, layer, array_scratch, I->src[0].cache,
+                     I->src[0].discard, bytes, &len) &&
+                  agx3_append(emission, bytes, len) &&
+                  agx3_tex_stage_cube_array_lod(
+                     enc, face, I->src[1].value, array_scratch, stage_slot, 0,
+                     I->src[1].cache, I->src[1].discard, bytes, &len);
+      } else if (cube_array) {
+         packed = agx3_tex_stage_cube_array_layer(
+            enc, face, layer, stage_slot, 0, I->src[0].cache,
+            I->src[0].discard, bytes, &len);
+      } else if (cube_register_lod) {
+         packed = agx3_tex_stage_cube_lod(
+            enc, face, I->src[1].value, stage_slot, 0, I->src[1].cache,
+            I->src[1].discard, bytes, &len);
+      } else {
+         packed = agx3_tex_stage_cube_z(enc, face, stage_slot, 0, false, true,
+                                        bytes, &len);
+      }
       if (!packed || !agx3_append(emission, bytes, len))
          return false;
    }
@@ -6068,10 +6093,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (scan_I->dim == AGX_DIM_CUBE ||
-              scan_I->dim == AGX_DIM_CUBE_ARRAY) &&
-             (scan_I->src[3].type != AGX_INDEX_IMMEDIATE ||
-              scan_I->src[4].type != AGX_INDEX_IMMEDIATE))
-            has_dynamic_cube_sample = true;
+              scan_I->dim == AGX_DIM_CUBE_ARRAY)) {
+            /* A register level or bias outlives CEM, so it cannot share the
+             * fixed immediate-corpus scratch. A cube-array layer is prepacked
+             * beside it. */
+            const bool register_lod =
+               (scan_I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+                scan_I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+               scan_I->src[1].type != AGX_INDEX_IMMEDIATE;
+            if (register_lod ||
+                scan_I->src[3].type != AGX_INDEX_IMMEDIATE ||
+                scan_I->src[4].type != AGX_INDEX_IMMEDIATE)
+               has_dynamic_cube_sample = true;
+            if (register_lod && scan_I->dim == AGX_DIM_CUBE_ARRAY)
+               has_packed_array_layer = true;
+         }
          agx_foreach_reg_dest(scan_I, d) {
             observed_max_reg = MAX2(
                observed_max_reg,
@@ -6444,17 +6480,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (I->dim == AGX_DIM_CUBE ||
               I->dim == AGX_DIM_CUBE_ARRAY)) {
-            const bool dynamic_cem =
+            const bool register_lod =
+               (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+                I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+               I->src[1].type != AGX_INDEX_IMMEDIATE;
+            const bool dynamic_cem = register_lod ||
                I->src[3].type != AGX_INDEX_IMMEDIATE ||
                I->src[4].type != AGX_INDEX_IMMEDIATE;
             const uint16_t fixed_scratch[3] = {0, 14, 4};
             const uint16_t *scratch = dynamic_cem ? cem_scratch
                                                    : fixed_scratch;
-            assert(nd + 4 <= AGX3_SLOT_MAX_REGS);
+            assert(nd + 5 <= AGX3_SLOT_MAX_REGS);
             e->dst[nd++] = scratch[0];
             e->dst[nd++] = scratch[0] + 2;
             e->dst[nd++] = scratch[1];
             e->dst[nd++] = scratch[2];
+            /* The cube-array layer prepacked beside a register LOD. */
+            if (register_lod && I->dim == AGX_DIM_CUBE_ARRAY)
+               e->dst[nd++] = ms_array_scratch;
          }
          e->nr_dsts = (uint8_t)nd;
          e->nr_srcs = (uint8_t)ns;

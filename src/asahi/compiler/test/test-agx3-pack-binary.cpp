@@ -11928,7 +11928,7 @@ TEST_F(AGX3PackBinary, TextureCubeRefusesEarlyCEMScratchAlias)
    }
 }
 
-TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
+TEST_F(AGX3PackBinary, TextureCubeArrayStagesGprLayerWithFace)
 {
    auto enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
@@ -11961,8 +11961,8 @@ TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
                                              component == 1, bytes, &len));
       append(want, bytes, len);
    }
-   ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
-                                    bytes, &len));
+   ASSERT_TRUE(agx3_tex_stage_cube_array_layer(enc, 2, 22, 1, 0, false, true,
+                                              bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
@@ -11974,9 +11974,13 @@ TEST_F(AGX3PackBinary, TextureCubeArrayUsesCEMAndDirectLayer)
       .array_layer = 22, .cube = true,
    };
    ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+   /* metal-nt -arch applegpu_g17p, texturecube_array::sample in a fragment
+    * at a buffer-loaded layer, 05800cb8b0001004010010000100: the staged
+    * layer (f77=2) with no direct f31/f37 operand. Only the destination
+    * differs. */
    static const uint8_t native_sample[] = {
-      0x25,0x80,0x0c,0xb8,0xb0,0x00,0x13,
-      0xb5,0x01,0x00,0x10,0x00,0x01,0x00,
+      0x25,0x80,0x0c,0xb8,0xb0,0x00,0x10,
+      0x04,0x01,0x00,0x10,0x00,0x01,0x00,
    };
    EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
              std::vector<uint8_t>(native_sample,
@@ -12009,30 +12013,43 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
       I->mask = 15;
       agx_stop(b);
 
+      /* A register level is published with CEM's face after CEM runs, so
+       * CEM moves off the fixed r0/r7/r2 corpus scratch onto the bank above
+       * every operand, here above the level at half20. */
+      const uint16_t scratch[3] = {22, 26, 28};
       std::vector<uint8_t> want;
       uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
-      if (dynamic) {
-         ASSERT_TRUE(agx3_tex_stage_lod(enc, 20, 1, 0, false, false,
-                                        bytes, &len));
-         append(want, bytes, len);
-      }
       for (unsigned axis = 0; axis < 3; ++axis) {
-         ASSERT_TRUE(agx3_tex_cube_cem_calc(enc, 4, 6, 8, axis, axis == 2,
-                                            bytes, &len));
+         ASSERT_TRUE(dynamic
+                        ? agx3_tex_cube_cem_calc_to(enc, 4, 6, 8,
+                                                    scratch[axis], axis,
+                                                    axis == 2, bytes, &len)
+                        : agx3_tex_cube_cem_calc(enc, 4, 6, 8, axis,
+                                                 axis == 2, bytes, &len));
          append(want, bytes, len);
          if (axis == 0) {
-            ASSERT_TRUE(agx3_tex_cube_cem_rcp(enc, bytes, &len));
+            ASSERT_TRUE(dynamic
+                           ? agx3_tex_cube_cem_rcp_to(enc, scratch[0], bytes,
+                                                      &len)
+                           : agx3_tex_cube_cem_rcp(enc, bytes, &len));
             append(want, bytes, len);
          }
       }
       for (unsigned component = 0; component < 2; ++component) {
-         ASSERT_TRUE(agx3_tex_cube_cem_finalize(enc, component,
-                                                component == 1, bytes,
-                                                &len));
+         ASSERT_TRUE(dynamic
+                        ? agx3_tex_cube_cem_finalize_to(
+                             enc, component, scratch[0],
+                             scratch[component + 1], 1, bytes, &len)
+                        : agx3_tex_cube_cem_finalize(enc, component,
+                                                     component == 1, bytes,
+                                                     &len));
          append(want, bytes, len);
       }
-      ASSERT_TRUE(agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
-                                        bytes, &len));
+      ASSERT_TRUE(dynamic
+                     ? agx3_tex_stage_cube_lod(enc, scratch[0] + 2, 20, 1, 0,
+                                               false, false, bytes, &len)
+                     : agx3_tex_stage_cube_z(enc, 2, 1, 0, false, true,
+                                             bytes, &len));
       append(want, bytes, len);
 
       struct agx3_tex_sample_desc d = {};
@@ -12063,6 +12080,91 @@ TEST_F(AGX3PackBinary, TextureCubeExplicitLodMatchesNativeSelectors)
       ASSERT_TRUE(agx3_pack_end(enc, &end));
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+   }
+}
+
+TEST_F(AGX3PackBinary, TextureCubeArrayRegisterLodPrepacksLayer)
+{
+   for (unsigned bias = 0; bias < 2; ++bias) {
+      const auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index dest = agx_register(0, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_index coord = agx_register(16, AGX_SIZE_32);
+      coord.channels_m1 = 3;
+      coord.discard = true;
+      agx_index lod = agx_register(24, AGX_SIZE_16);
+      lod.discard = true;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_CUBE_ARRAY,
+         bias ? AGX_LOD_MODE_AUTO_LOD_BIAS : AGX_LOD_MODE_LOD_MIN, 0, false,
+         false, false, AGX_GATHER_NONE, false);
+      I->mask = 15;
+      agx_stop(b);
+
+      /* CEM's bank sits above the level at half24; the prepacked layer word
+       * sits above that bank. */
+      const uint16_t scratch[3] = {26, 30, 32};
+      const uint16_t packed_layer = 34;
+      std::vector<uint8_t> want;
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      for (unsigned axis = 0; axis < 3; ++axis) {
+         ASSERT_TRUE(agx3_tex_cube_cem_calc_to(enc, 16, 18, 20, scratch[axis],
+                                               axis, axis == 2, bytes, &len));
+         append(want, bytes, len);
+         if (axis == 0) {
+            ASSERT_TRUE(agx3_tex_cube_cem_rcp_to(enc, scratch[0], bytes,
+                                                 &len));
+            append(want, bytes, len);
+         }
+      }
+      for (unsigned component = 0; component < 2; ++component) {
+         ASSERT_TRUE(agx3_tex_cube_cem_finalize_to(
+            enc, component, scratch[0], scratch[component + 1], 1, bytes,
+            &len));
+         append(want, bytes, len);
+      }
+      ASSERT_TRUE(agx3_tex_pack_ms_array_layer(enc, 22, packed_layer, false,
+                                               true, bytes, &len));
+      append(want, bytes, len);
+      ASSERT_TRUE(agx3_tex_stage_cube_array_lod(enc, scratch[0] + 2, 24,
+                                                packed_layer, 1, 0, false,
+                                                true, bytes, &len));
+      append(want, bytes, len);
+      if (bias) {
+         ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+         append(want, bytes, len);
+      }
+
+      const struct agx3_tex_sample_desc sample = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+         .lod = bias ? AGX3_TEX_LOD_BIAS_REGISTER : AGX3_TEX_LOD_REGISTER,
+         .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+         .array = true, .array_layer = 22, .cube = true,
+      };
+      ASSERT_TRUE(agx3_tex_encode_sample(enc, &sample, bytes, &len));
+      /* metal-nt -arch applegpu_g17p fragment texturecube_array::sample at
+       * l[i] with level(b[j]) and bias(b[j]). */
+      static const uint8_t native_level[] = {
+         0x05,0x80,0x0c,0xb8,0xb0,0x00,0x08,
+         0x03,0x01,0x00,0x10,0x00,0x01,0x00,
+      };
+      static const uint8_t native_bias[] = {
+         0x05,0x80,0x0c,0xb8,0xb0,0x00,0x18,
+         0x00,0x01,0x00,0x10,0x00,0x01,0x00,
+      };
+      const uint8_t *native = bias ? native_bias : native_level;
+      EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+                std::vector<uint8_t>(native, native + sizeof(native_level)));
+      append(want, bytes, len);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+      EXPECT_EQ(b->shader->max_reg, 35u);
       EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
    }
 }
@@ -13243,8 +13345,8 @@ TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
                                              component == 1, bytes, &len));
       append(want, bytes, len);
    }
-   ASSERT_TRUE(agx3_tex_stage_cube_array_shadow(
-      enc, 22, 1, 0, false, true, bytes, &len));
+   ASSERT_TRUE(agx3_tex_stage_cube_array_layer(
+      enc, 2, 22, 1, 0, false, true, bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
