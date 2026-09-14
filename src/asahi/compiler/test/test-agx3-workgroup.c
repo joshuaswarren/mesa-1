@@ -4,6 +4,7 @@
  */
 
 #include "agx_compile.h"
+#include "agx3_local_tps_core.h"
 #include "nir_builder.h"
 
 #include <stdio.h>
@@ -18,6 +19,52 @@ count_pattern(const uint8_t *bytes, size_t size, const uint8_t *pattern,
    for (size_t i = 0; i + pattern_size <= size; ++i)
       count += memcmp(bytes + i, pattern, pattern_size) == 0;
    return count;
+}
+
+static bool
+check_shared_base(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P shared base versus argument 3");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   b.shader->info.shared_size = 4;
+   nir_store_shared(&b, nir_imm_int(&b, 12), nir_imm_int(&b, 0), .align_mul = 4);
+   nir_barrier(&b, .execution_scope = SCOPE_WORKGROUP,
+               .memory_scope = SCOPE_WORKGROUP,
+               .memory_semantics = NIR_MEMORY_ACQ_REL,
+               .memory_modes = nir_var_mem_shared);
+   nir_def *value = nir_load_shared(&b, 1, 32, nir_imm_int(&b, 0), .align_mul = 4);
+   nir_store_global(&b, value, nir_load_preamble(&b, 1, 64, .base = 8),
+                    .align_mul = 4);
+   agx_preprocess_nir_g17p(b.shader);
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .reserved_preamble = 12,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   bool found = false;
+   if (agx_compile_shader_nir(b.shader, &key, &part)) {
+      /* Register allocation may move the stored constant, but the shared
+       * address must remain literal zero, never uniform half 8. */
+      for (unsigned reg = 0; reg < 256; reg += 2) {
+         const struct agx3_local_desc d = {
+            .data = reg, .width = AGX3_MEM_W32, .mask = 1, .shift = 2,
+            .base_kind = AGX3_LOCAL_BASE_IMMEDIATE,
+         };
+         uint8_t bytes[AGX3_LOCAL_TPS_MAX_LENGTH], length = 0;
+         if (agx3_local_encode_store(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length))
+            found |= count_pattern(part.binary, part.info.binary_size,
+                                    bytes, length) == 1;
+      }
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   if (!found)
+      fprintf(stderr, "G17P shared store did not use allocation-relative base\n");
+   return found;
 }
 
 int
@@ -72,7 +119,7 @@ main(void)
 
    free(part.binary);
    ralloc_free(b.shader);
-   if (!valid)
+   if (!valid || !check_shared_base())
       return 1;
 
    puts("agx3_workgroup: shared exchange, local index and barrier emitted");

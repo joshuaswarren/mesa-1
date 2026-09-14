@@ -86,6 +86,30 @@ main(void)
          CHECK(libagx_g17p[i] == NULL);
    }
 
+   /* Every primitive-restart variant is one 1024-thread workgroup and uses
+    * the same 128-byte local ballot array.  The G17P precompiled dispatcher
+    * consumes this metadata to allocate threadgroup memory in its Ioto
+    * program, so pin it independently of the generated machine code. */
+   for (unsigned i = LIBAGX_UNROLL_RESTART_0;
+        i <= LIBAGX_UNROLL_RESTART_10; ++i) {
+      const struct agx_precompiled_kernel_info *unroll_info =
+         (const void *)libagx_g17p[i];
+      CHECK(unroll_info->workgroup_size[0] == 1024);
+      CHECK(unroll_info->workgroup_size[1] == 1);
+      CHECK(unroll_info->workgroup_size[2] == 1);
+      CHECK(unroll_info->local_size == 128);
+   }
+
+   /* Tessellation's two prefix variants exchange 32 subgroup totals through
+    * the same shared allocation before generating the indirect draw. */
+   for (unsigned i = LIBAGX_PREFIX_SUM_TESS_0;
+        i <= LIBAGX_PREFIX_SUM_TESS_1; ++i) {
+      const struct agx_precompiled_kernel_info *info =
+         (const void *)libagx_g17p[i];
+      CHECK(info->workgroup_size[0] == 1024);
+      CHECK(info->local_size == 128);
+   }
+
    /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
     * copy-image launch per slice. Its native 2D grid and CPU-reduced tile
     * geometry eliminate per-element division, trimming the binary from 4,056
@@ -238,11 +262,11 @@ main(void)
       uint64_t hash;
    } robust_index[] = {
       {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
-       UINT64_C(0x0b9b4afcfff889cc)},
+       UINT64_C(0x4d6a2a534eb147d2)},
       {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
-       UINT64_C(0xbfe2ca3f22a5575b)},
+       UINT64_C(0x35d000696c7b7865)},
       {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
-       UINT64_C(0xc64c99e36e9c9b95)},
+       UINT64_C(0xa8a7f8b341b3355f)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -384,7 +408,7 @@ main(void)
        * descriptor scheduling assigns independent slots and uses per-slot
        * dependent wait carriers while keeping adjacent producers overlapped. */
       {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0x7798f979bfc20f26)},
+       {1024, 1, 1}, 4, UINT64_C(0xf620f3d617876470)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
        UINT64_C(0x28b92f478b1714d4)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,

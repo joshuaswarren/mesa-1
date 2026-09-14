@@ -942,6 +942,21 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
 
+   /* Precompiled kernels carry static workgroup memory in the same compiler
+    * field as runtime shaders.  G17P allocates it in 64-byte units with a
+    * witnessed 256-byte floor.  In particular, the restart unroller needs
+    * its 128-byte ballot array for cross-subgroup barriers. */
+   const uint32_t threadgroup_memory_size_B =
+      prog->info.local_size
+         ? MAX2(256u, ALIGN_POT(prog->info.local_size, 64u))
+         : 0;
+
+   if (hk_g17p_launch_trace_enabled())
+      fprintf(stderr,
+              "G17P precompiled resources: program=%u local=%u allocated=%u\n",
+              (unsigned)idx, (unsigned)prog->info.local_size,
+              threadgroup_memory_size_B);
+
    uint64_t program_va;
    struct hk_agx3_g17p_compute_program program;
    if (!hk_g17p_build_compute_program_raw(
@@ -949,7 +964,9 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
           prog->ptr + prog->entry_offset,
           prog->info.main_size, prog->info.agx3_tps_size,
           prog->info.nr_gprs, true,
-          (uint32_t)prog->info.agx3_staging_halfs * 2, 0, &launch_sources,
+          (uint32_t)prog->info.agx3_staging_halfs * 2,
+          threadgroup_memory_size_B,
+          &launch_sources,
           indirect ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1
                    : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
           "precompiled", &range, 1, &program_va, &program))

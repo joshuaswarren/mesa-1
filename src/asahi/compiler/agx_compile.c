@@ -1675,7 +1675,13 @@ agx_emit_local_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr)
 {
    agx_index address = agx_local_base(instr->src[0]);
    const bool agx3 = b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
-   agx_index base = agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
+   /* NIR shared addresses are offsets into the statically allocated
+    * workgroup storage. Uniform half 8 is ordinary argument storage on
+    * G17P (for example the tessellation prefix kernel's third pointer),
+    * so it cannot serve as an implicit shared-memory base. */
+   agx_index base = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
+                      ? agx_zero()
+                      : agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
    agx_index index = agx3 ? address : agx_zero();
    assert(address.size == AGX_SIZE_16);
 
@@ -1693,7 +1699,9 @@ agx_emit_local_store(agx_builder *b, nir_intrinsic_instr *instr)
    agx_index value = agx_src_index(&instr->src[0]);
    agx_index address = agx_local_base(instr->src[1]);
    const bool agx3 = b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2;
-   agx_index base = agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
+   agx_index base = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
+                      ? agx_zero()
+                      : agx3 ? agx_uniform(8, AGX_SIZE_16) : address;
    agx_index index = agx3 ? address : agx_zero();
    assert(address.size == AGX_SIZE_16);
 
