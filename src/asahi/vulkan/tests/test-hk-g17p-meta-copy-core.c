@@ -305,6 +305,16 @@ main(void)
    CHECK(plan.buffer_row_stride_B == 24 &&
          plan.buffer_slice_stride_B == 48 && plan.buffer_span_B == 80);
 
+   /* A partial block short of the level edge still copies the whole block,
+    * matching the AGX2 compute copy. */
+   struct hk_g17p_buffer_to_image_copy partial = volume;
+   partial.image_offset.x = 0;
+   partial.copy_extent.width = 3;
+   partial.copy_extent.height = 5;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &partial, 64, 144, &plan));
+   CHECK(plan.base_x_el == 0 && plan.blocks_x == 1 && plan.blocks_y == 2);
+
    struct hk_g17p_buffer_to_image_copy readback = volume;
    readback.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
@@ -445,7 +455,7 @@ main(void)
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
       &malformed, 64, 144, &plan));
    malformed = volume;
-   malformed.copy_extent.width = 3;
+   malformed.copy_extent.width = 5;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
       &malformed, 64, 144, &plan));
    malformed = volume;

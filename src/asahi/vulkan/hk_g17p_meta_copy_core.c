@@ -274,10 +274,13 @@ hk_g17p_compressed_copy_plan(
       return false;
    }
 
+   /* A copy covers whole blocks. As on AGX2, whose compute copy converts
+    * the region with util_format_get_nblocks{x,y}, an extent that is not a
+    * multiple of the block and does not reach the level edge still copies
+    * every block it touches. The offset is block-aligned and the extent stays
+    * inside the level, so the rounded-up blocks stay inside it too. */
    if (x >= mip_w || y >= mip_h || width > mip_w - x ||
        height > mip_h - y || (x % block_w) || (y % block_h) ||
-       ((width % block_w) && x + width != mip_w) ||
-       ((height % block_h) && y + height != mip_h) ||
        (copy->buffer_row_length &&
         (copy->buffer_row_length < width ||
          copy->buffer_row_length % block_w)) ||
