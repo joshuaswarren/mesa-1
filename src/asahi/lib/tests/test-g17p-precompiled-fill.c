@@ -68,7 +68,8 @@ main(void)
           i == LIBAGX_COPY_TIMESTAMP ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1 ||
-          i == LIBAGX_CONDITIONAL_RENDER)
+          i == LIBAGX_CONDITIONAL_RENDER ||
+          i == LIBAGX_TESS_FACTORS_HALF)
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
@@ -530,6 +531,37 @@ main(void)
    CHECK(timestamp_info->agx3_staging_halfs == 0);
    CHECK(memcmp((const uint8_t *)timestamp_blob + sizeof(*timestamp_info),
                 timestamp_expected, sizeof(timestamp_expected)) == 0);
+
+   /* Hardware tessellation factor records: one KERNEL(32) invocation per
+    * patch reading the TCS levels as floats and as bits, and writing IEEE
+    * halves. Pin the whole generated program and its launch ABI. */
+   const uint32_t *factors_blob = libagx_g17p[LIBAGX_TESS_FACTORS_HALF];
+   CHECK(factors_blob != NULL);
+   if (!factors_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *factors_info =
+      (const void *)factors_blob;
+   const uint8_t *factors_binary =
+      (const uint8_t *)factors_blob + sizeof(*factors_info);
+   CHECK(factors_info->preamble_offset == 0);
+   CHECK(factors_info->main_offset == 0);
+   CHECK(factors_info->main_size == 1496);
+   CHECK(factors_info->binary_size == 1496);
+   CHECK(factors_info->nr_gprs == 24);
+   CHECK(factors_info->nr_preamble_gprs == 0);
+   CHECK(factors_info->push_count == 12);
+   CHECK(factors_info->workgroup_size[0] == 32);
+   CHECK(factors_info->workgroup_size[1] == 1);
+   CHECK(factors_info->workgroup_size[2] == 1);
+   CHECK(factors_info->local_size == 0);
+   CHECK(factors_info->imageblock_stride == 0);
+   CHECK(!factors_info->uses_txf);
+   CHECK(factors_info->agx3_staging_known);
+   CHECK(factors_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
+         UINT64_C(0x0d3d3701f282d673));
+   CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
+                end, sizeof(end)) == 0);
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",

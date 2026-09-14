@@ -251,7 +251,8 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_increment_ia_restart_nonnull") ||
           !strcmp(func->name, "libagx_copy_query") ||
           !strcmp(func->name, "libagx_increment_cs_invocations") ||
-          !strcmp(func->name, "libagx_copy_timestamp");
+          !strcmp(func->name, "libagx_copy_timestamp") ||
+          !strcmp(func->name, "libagx_tess_factors_half");
 }
 
 static nir_def *
@@ -454,6 +455,8 @@ main(int argc, char **argv)
                  "libagx_increment_cs_invocations_0_g17p,\n"
                  "    [LIBAGX_COPY_TIMESTAMP] = "
                  "libagx_copy_timestamp_0_g17p,\n"
+                 "    [LIBAGX_TESS_FACTORS_HALF] = "
+                 "libagx_tess_factors_half_0_g17p,\n"
                  "};\n\n");
       }
    }

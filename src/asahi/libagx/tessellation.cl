@@ -105,3 +105,64 @@ libagx_tess_setup_indirect(
    grids[16] = 1;
    grids[17] = 1;
 }
+
+/*
+ * An IEEE half with the value of a float tessellation level, rounded to
+ * nearest. Anything not positive, or too small for a normal half, becomes the
+ * smallest positive half, since a zero culls the patch; an overflow saturates
+ * to the largest finite half. The tessellator clamps both to its own range.
+ */
+static inline uint16_t
+libagx_tess_level_half(float level, uint32_t bits)
+{
+   const uint32_t mantissa = bits & 0x7fffff;
+   const int exponent = (int)((bits >> 23) & 0xff) - 127 + 15;
+
+   if (!(level > 0.0f))
+      return 1;
+   if (exponent >= 31)
+      return 0x7bff;
+   if (exponent <= 0)
+      return 1;
+
+   uint32_t value = ((uint32_t)exponent << 10) | (mantissa >> 13);
+   if (mantissa & (1u << 12))
+      value++;
+
+   return min(value, (uint32_t)0x7bff);
+}
+
+/*
+ * Fill the per-patch factor records of a hardware tessellator from the levels
+ * a tessellation control shader wrote.
+ *
+ * Each patch's levels sit at the start of its TCS output record: outer levels
+ * at elements 0-3 and inner levels at 4-5. The tessellator reads a triangle
+ * patch as {edge[3], inside} and a quad patch as {edge[4], inside[2]}, all
+ * IEEE halves, and edge i subdivides the same edge as outer level i. Vulkan
+ * discards a patch any of whose used outer levels is not positive; the
+ * tessellator culls a patch whose edge factors are zero.
+ */
+KERNEL(32)
+libagx_tess_factors_half(global float *tcs_buffer, global uint16_t *factors,
+                         uint32_t tcs_stride_el, uint32_t quads)
+{
+   uint patch = cl_global_id.x;
+   global float *levels = tcs_buffer + (patch * tcs_stride_el);
+   global uint32_t *bits = (global uint32_t *)levels;
+   const uint edges = quads ? 4 : 3;
+   const uint insides = quads ? 2 : 1;
+   global uint16_t *out = factors + (patch * (edges + insides));
+
+   bool culled = false;
+   for (uint i = 0; i < edges; ++i)
+      culled |= !(levels[i] > 0.0f);
+
+   for (uint i = 0; i < edges; ++i)
+      out[i] = culled ? 0 : libagx_tess_level_half(levels[i], bits[i]);
+
+   for (uint i = 0; i < insides; ++i) {
+      out[edges + i] =
+         culled ? 0 : libagx_tess_level_half(levels[4 + i], bits[4 + i]);
+   }
+}
