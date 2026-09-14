@@ -13585,6 +13585,32 @@ TEST_F(AGX3PackBinary, ShadowCubeStagesCompareBeforeCEM)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 }
 
+/* A vertex stage has no derivatives, so GLSL `texture(samplerCubeArrayShadow,
+ * coord, compare)` arrives as an explicit level zero rather than the implicit
+ * form above. KHR-GL30.ext_texture_shadow_lod.texture.samplercubearrayshadow_vertex
+ * is exactly this shape.
+ */
+TEST_F(AGX3PackBinary, ShadowCubeArrayVertexLevelZero)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   agx_index dest = agx_register(0, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(24, AGX_SIZE_32);
+   coord.channels_m1 = 3;
+   coord.discard = true;
+   agx_index compare = agx_register(34, AGX_SIZE_32);
+   compare.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+      agx_immediate(1), compare, AGX_DIM_CUBE_ARRAY,
+      AGX_LOD_MODE_LOD_MIN, 0, false, true, false, AGX_GATHER_NONE, false);
+   I->mask = 1;
+   agx_stop(b);
+   EXPECT_FALSE(pack(b).empty());
+}
+
 TEST_F(AGX3PackBinary, ShadowCubeArrayUsesCombinedFaceLayerPack)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

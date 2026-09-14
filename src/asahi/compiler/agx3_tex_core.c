@@ -507,8 +507,11 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
           (d->array && !d->offset && !d->vertex_stage &&
            !staged_register_lod)) &&
          d->lod != AGX3_TEX_LOD_AUTO &&
-         !(d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0 &&
-           !(d->array && d->cube)))))
+         /* An explicit level zero is what a vertex stage produces for a GLSL
+          * `texture()` comparison, having no derivatives. It carries no LOD
+          * operand at all, so it composes with the cube array's witnessed
+          * face+layer word exactly as it already does with a plain cube. */
+         !(d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0))))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
