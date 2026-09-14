@@ -5217,6 +5217,46 @@ agx3_is_firefox_dense_output_suffix(agx_context *ctx, unsigned count)
    return next == count && saw_one && stopped;
 }
 
+static int
+agx3_cmp_u8(const void *a, const void *b)
+{
+   return (int)*(const uint8_t *)a - (int)*(const uint8_t *)b;
+}
+
+/* A dense store bundle whose writes interleave with other work can still be
+ * batched when nothing between the first store and STOP stages its own
+ * operands: each staged scalar then keeps its component-addressed staging
+ * word until its batch's UVSW. Stores retire their staging producer
+ * immediately, as the six-output fallback does, so intervening producers may
+ * reuse the slots. Texture and image operations and depth/coverage exports
+ * publish to the same staging bank and keep refusing the bundle. */
+static bool
+agx3_outputs_leave_staging_alone(agx_context *ctx)
+{
+   bool started = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_ST_VARY) {
+         started = true;
+         continue;
+      }
+      if (!started)
+         continue;
+      switch (I->op) {
+      case AGX_OPCODE_TEXTURE_SAMPLE:
+      case AGX_OPCODE_TEXTURE_LOAD:
+      case AGX_OPCODE_IMAGE_LOAD:
+      case AGX_OPCODE_IMAGE_WRITE:
+      case AGX_OPCODE_ZS_EMIT:
+      case AGX_OPCODE_ZS_EMIT_AGX3:
+      case AGX_OPCODE_SAMPLE_MASK_AGX3:
+         return false;
+      default:
+         break;
+      }
+   }
+   return started;
+}
+
 static bool
 agx3_vertex_outputs_share_source(agx_context *ctx)
 {
@@ -7092,7 +7132,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const bool g17p_firefox_dense_outputs =
       agx3_is_firefox_dense_output_suffix(ctx, g17p_output_count);
    const bool g17p_user_output_protocol = g17p_output_count == 6 ||
-      (g17p_output_count >= 5 && g17p_terminal_outputs) ||
+      (g17p_output_count >= 5 &&
+       (g17p_terminal_outputs || agx3_outputs_leave_staging_alone(ctx))) ||
       g17p_firefox_dense_outputs;
    unsigned g17p_outputs_staged = 0;
    /* User-output graphs outside the qualified scalar shapes must not
@@ -7801,15 +7842,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (!g17p_terminal_outputs &&
                    !agx3_retire_slots_noop(emission, enc, staging_bit))
                   AGX3_REFUSE(I);
+               /* Each batch writes the components it staged: a terminal
+                * bundle in store order, other stores in component order. */
+               g17p_output_order[g17p_outputs_staged] = I->src[0].value;
                ++g17p_outputs_staged;
                if (g17p_outputs_staged % nslots == 0 ||
                    g17p_outputs_staged == g17p_output_count) {
                   const unsigned first =
                      ((g17p_outputs_staged - 1) / nslots) * nslots;
+                  if (!g17p_terminal_outputs) {
+                     qsort(g17p_output_order + first,
+                           g17p_outputs_staged - first,
+                           sizeof(g17p_output_order[0]), agx3_cmp_u8);
+                  }
                   for (unsigned position = first;
                        position < g17p_outputs_staged; ++position) {
-                     const unsigned component = g17p_terminal_outputs
-                        ? g17p_output_order[position] : position;
+                     const unsigned component = g17p_output_order[position];
                      uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
                      if (!agx3_vary_uvsw(enc, component * 2, component,
                                           component % nslots + 1, true,

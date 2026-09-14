@@ -9265,22 +9265,39 @@ TEST_F(AGX3PackBinary, FirefoxDenseOutputsAcceptAnyGroundedWidth)
    EXPECT_TRUE(pack(too_wide, false).empty());
 }
 
-TEST_F(AGX3PackBinary, FirefoxDenseOutputsKeepOtherLateProducersClosed)
+/* Late producers other than the Firefox suffix's 1.0 no longer need that
+ * exact shape: the interleaved protocol stages every store where it happens,
+ * so each of these writes every component exactly once. */
+TEST_F(AGX3PackBinary, FirefoxDenseOutputsVariantsStageEveryStore)
 {
+   const auto uvsw_components = [](const std::vector<uint8_t> &code) {
+      std::vector<unsigned> seen;
+      for (size_t i = 0; i + 8 <= code.size(); ++i) {
+         for (unsigned c = 0; c < 51; ++c) {
+            uint8_t bytes[AGX3_VARY_MAX_LENGTH];
+            uint8_t len = 0;
+            if (agx3_vary_uvsw(AGX_ISA_ENCODING_AGX3B, c * 2, c, c % 6 + 1,
+                               true, 1u << (c % 6), bytes, &len) &&
+                std::equal(bytes, bytes + len, code.begin() + i))
+               seen.push_back(c);
+         }
+      }
+      std::sort(seen.begin(), seen.end());
+      return seen;
+   };
+   std::vector<unsigned> all(51);
+   for (unsigned c = 0; c < 51; ++c)
+      all[c] = c;
+
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->stage = MESA_SHADER_VERTEX;
-
    for (unsigned c = 0; c < 50; ++c)
       agx_st_vary(b, agx_immediate(c), agx_register(24, AGX_SIZE_32));
    agx_mov_imm_to(b, agx_register(24, AGX_SIZE_32), 0x3f000000);
    agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
    agx_stop(b);
+   EXPECT_EQ(uvsw_components(pack(b)), all);
 
-   EXPECT_TRUE(pack(b, false).empty());
-
-   /* The late producer must be the exclusive source of the final store.  If
-    * the last store reads some other register the staged value it publishes is
-    * unrelated to the producer, so the suffix is not the grounded shape. */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->stage = MESA_SHADER_VERTEX;
    for (unsigned c = 0; c < 50; ++c)
@@ -9288,10 +9305,8 @@ TEST_F(AGX3PackBinary, FirefoxDenseOutputsKeepOtherLateProducersClosed)
    agx_mov_imm_to(b, agx_register(26, AGX_SIZE_32), 0x3f800000);
    agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_EQ(uvsw_components(pack(b)), all);
 
-   /* A late producer that lands before the final store's predecessors, rather
-    * than immediately ahead of the final store, is likewise not the shape. */
    b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->stage = MESA_SHADER_VERTEX;
    for (unsigned c = 0; c < 49; ++c)
@@ -9300,7 +9315,7 @@ TEST_F(AGX3PackBinary, FirefoxDenseOutputsKeepOtherLateProducersClosed)
    agx_st_vary(b, agx_immediate(49), agx_register(24, AGX_SIZE_32));
    agx_st_vary(b, agx_immediate(50), agx_register(24, AGX_SIZE_32));
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   EXPECT_EQ(uvsw_components(pack(b)), all);
 }
 
 TEST_F(AGX3PackBinary, ReorderedWideVertexOutputsMatchNativeStagingProtocol)
@@ -9636,17 +9651,94 @@ TEST_F(AGX3PackBinary, FragmentSideEffectLateDepthMatchesNativeProtocol)
    EXPECT_EQ(pack(b), want);
 }
 
-TEST_F(AGX3PackBinary, WideVertexOutputsRefuseNonterminalAndOutOfRange)
+/* Stores interleaved with producers that reuse their sources follow the
+ * six-output protocol at any width: each staging COPY reads its source at the
+ * store and retires immediately, and every six staged components (and the
+ * tail) are written in component order. dEQP-VK.subgroups.basic.framebuffer
+ * *barrier_vertex interleaves its stores with device loads this way. */
+TEST_F(AGX3PackBinary, WideVertexOutputsInterleaveWithProducers)
 {
-   for (unsigned count : {7u, 8u, 9u, 33u}) {
-      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned count : {7u, 9u, 33u}) {
+      agx_builder *b = builder(enc);
       b->shader->stage = MESA_SHADER_VERTEX;
-      for (unsigned c = 0; c < count; ++c) {
-         agx_mov_imm_to(b, agx_register(0, AGX_SIZE_32), 0x3f000000 + c);
-         agx_st_vary(b, agx_immediate(c), agx_register(0, AGX_SIZE_32));
+      /* Store the upper half first, as the barrier shaders do. */
+      std::vector<unsigned> order;
+      for (unsigned c = count / 2; c < count; ++c)
+         order.push_back(c);
+      for (unsigned c = 0; c < count / 2; ++c)
+         order.push_back(c);
+
+      std::vector<uint8_t> want;
+      std::vector<unsigned> batch;
+      for (unsigned component : order) {
+         agx_mov_imm_to(b, agx_register(0, AGX_SIZE_32), 0x3f000000 + component);
+         agx_st_vary(b, agx_immediate(component), agx_register(0, AGX_SIZE_32));
+         struct agx3_encoded_ldimm ld;
+         ASSERT_TRUE(agx3_pack_ldimm_u32(enc, 0, 0x3f000000 + component, &ld));
+         append(want, ld.bytes, ld.length);
+         uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+         uint8_t len = 0;
+         ASSERT_TRUE(agx3_stage_copy_source(enc, component * 2, 0, false,
+                                            component % 6 + 1, 0, bytes, &len));
+         append(want, bytes, len);
+         ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1u << (component % 6),
+                                                 bytes, &len));
+         append(want, bytes, len);
+         batch.push_back(component);
+         if (batch.size() == 6 || component == order.back()) {
+            std::sort(batch.begin(), batch.end());
+            for (unsigned c : batch) {
+               uint8_t uvsw[AGX3_VARY_MAX_LENGTH];
+               uint8_t uvsw_len = 0;
+               ASSERT_TRUE(agx3_vary_uvsw(enc, c * 2, c, c % 6 + 1, true,
+                                          1u << (c % 6), uvsw, &uvsw_len));
+               append(want, uvsw, uvsw_len);
+            }
+            batch.clear();
+         }
       }
       agx_stop(b);
-      EXPECT_TRUE(pack(b, false).empty());
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want) << count;
+   }
+}
+
+/* A texture sample between the stores stages its own operands into the same
+ * bank, so that bundle keeps refusing; the same sample ahead of the stores
+ * does not. */
+TEST_F(AGX3PackBinary, WideVertexOutputsRefuseStagingBetweenStores)
+{
+   for (bool between : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      b->shader->stage = MESA_SHADER_VERTEX;
+      const auto sample = [&]() {
+         agx_index dest = agx_register(32, AGX_SIZE_32);
+         dest.channels_m1 = 3;
+         agx_index coord = agx_register(8, AGX_SIZE_32);
+         coord.channels_m1 = 2;
+         agx_index gradient = agx_register(16, AGX_SIZE_32);
+         gradient.channels_m1 = 5;
+         auto *I = agx_texture_sample_to(
+            b, dest, coord, gradient, agx_immediate(0),
+            agx_register(0, AGX_SIZE_64), agx_register(4, AGX_SIZE_64),
+            agx_null(), AGX_DIM_3D, AGX_LOD_MODE_LOD_GRAD, 0, false, false,
+            false, AGX_GATHER_NONE, false);
+         I->mask = 15;
+      };
+      if (!between)
+         sample();
+      for (unsigned c = 0; c < 9; ++c) {
+         if (between && c == 4)
+            sample();
+         agx_st_vary(b, agx_immediate(c), agx_register(40, AGX_SIZE_32));
+      }
+      agx_mov_imm_to(b, agx_register(40, AGX_SIZE_32), 0x3f800000);
+      agx_st_vary(b, agx_immediate(9), agx_register(40, AGX_SIZE_32));
+      agx_stop(b);
+      EXPECT_EQ(pack(b, !between).empty(), between);
    }
 }
 
