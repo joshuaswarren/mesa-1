@@ -1248,19 +1248,30 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    key.single_sample_reload = false;
 
    /* Keeping the samples in the stored surface is what makes a reload
-    * possible, and two different things ask for it: storeOp = STORE, which
-    * makes a multisample VkImage readable after the pass, and a partial
-    * render, whose mid-frame flush exists only to be reloaded by the draws
-    * that follow it. On an A18 Pro the g17p-vulkan-msaa-store-fetch4 probe
-    * reads back the per-sample values of such a stored surface.
+    * possible, and three different things ask for it: storeOp = STORE, which
+    * makes a multisample VkImage readable after the pass, a partial render,
+    * whose mid-frame flush exists only to be reloaded by the draws that
+    * follow it, and a resolve the end-of-tile program cannot perform itself,
+    * such as the sample-zero resolve of an integer attachment, which the
+    * resolve after the pass reads from the stored samples. On an A18 Pro the
+    * g17p-vulkan-msaa-store-fetch4 probe reads back the per-sample values of
+    * such a stored surface.
     */
    if (dev->dev.chip == AGX_CHIP_G17P && store &&
        info->colorAttachmentCount >= 1) {
       const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
       const struct hk_image_view *iview0 =
          hk_image_view_from_handle(att0->imageView);
+      const bool store_source = att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
+      const bool has_resolve = att0->resolveImageView != VK_NULL_HANDLE &&
+                               att0->resolveMode != VK_RESOLVE_MODE_NONE;
+      const bool resolved_after_pass =
+         has_resolve &&
+         !hk_agx3_g17p_direct_color_resolve_supported(
+            &key.tib, info->colorAttachmentCount, has_resolve,
+            att0->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT, store_source);
       const bool keeps_samples =
-         partial_render || att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
+         partial_render || store_source || resolved_after_pass;
 
       key.multisample_store = hk_agx3_g17p_multisample_store_supported(
          &key.tib, info->colorAttachmentCount, keeps_samples,
