@@ -874,10 +874,17 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
 
+   /* A kernel that can printf reads the buffer address after its arguments */
+   const size_t printf_offset_B = (size_t)prog->info.printf_uniform * 2;
+   const size_t uniform_data_size =
+      prog->info.printf_uniform
+         ? MAX2(data_size, printf_offset_B + sizeof(uint64_t))
+         : data_size;
+
    uint32_t uploaded_size;
    uint16_t uniform_size_halfs;
    if (!hk_agx3_g17p_precompiled_data_layout(
-          data_size, &uploaded_size, &uniform_size_halfs)) {
+          uniform_data_size, &uploaded_size, &uniform_size_halfs)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -903,6 +910,10 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
    memcpy(uploaded.cpu, data, data_size);
    memset((uint8_t *)uploaded.cpu + data_size, 0, uploaded_size - data_size);
+   if (prog->info.printf_uniform) {
+      memcpy((uint8_t *)uploaded.cpu + printf_offset_B,
+             &dev->dev.printf_buffer_address, sizeof(uint64_t));
+   }
    const struct agx3_ioto_uniform_range range = {
       .start_halfs = 0,
       .size_halfs = uniform_size_halfs,
@@ -920,7 +931,7 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    if (!hk_g17p_build_compute_program_raw(
           cmd, (uint32_t)idx, uploaded_size,
           prog->ptr + prog->entry_offset,
-          prog->info.main_size, 0,
+          prog->info.main_size, prog->info.agx3_tps_size,
           prog->info.nr_gprs, true,
           (uint32_t)prog->info.agx3_staging_halfs * 2, 0, &launch_sources,
           indirect ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1

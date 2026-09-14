@@ -183,9 +183,10 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
 
 static void
 print_shader(FILE *fp, const char *name, const char *suffix, uint32_t variant,
-             struct agx_shader_part *p)
+             struct agx_shader_part *p, uint16_t printf_uniform)
 {
    struct agx_precompiled_kernel_info info = agx_compact_kernel_info(&p->info);
+   info.printf_uniform = printf_uniform;
    size_t sz_B = sizeof(info) + p->info.binary_size;
    size_t sz_el = DIV_ROUND_UP(sz_B, 4);
    uint32_t *mem = calloc(sz_el, 4);
@@ -195,6 +196,31 @@ print_shader(FILE *fp, const char *name, const char *suffix, uint32_t variant,
 
    nir_precomp_print_blob(fp, name, suffix, variant, mem, sz_B, true);
    free(mem);
+}
+
+static bool
+uses_printf_address(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic == nir_intrinsic_load_printf_buffer_address)
+      *(bool *)data = true;
+
+   return false;
+}
+
+/* AGX3 has no fixed printf buffer address, so a kernel reads it from a 64-bit
+ * uniform after its arguments, which the driver fills in at dispatch.
+ */
+static bool
+lower_printf_address_to_uniform(nir_builder *b, nir_intrinsic_instr *intr,
+                                void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_printf_buffer_address)
+      return false;
+
+   const unsigned *base_halfs = data;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_load_preamble(b, 1, 64, .base = *base_halfs));
+   return true;
 }
 
 static bool
@@ -253,7 +279,42 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_increment_cs_invocations") ||
           !strcmp(func->name, "libagx_copy_timestamp") ||
           !strcmp(func->name, "libagx_tess_setup_indirect_hw") ||
-          !strcmp(func->name, "libagx_tess_factors_half");
+          !strcmp(func->name, "libagx_tess_factors_half") ||
+          !strcmp(func->name, "libagx_increment_statistic") ||
+          /* Software tessellation */
+          !strcmp(func->name, "libagx_tess_setup_indirect") ||
+          !strcmp(func->name, "libagx_tess_isoline") ||
+          !strcmp(func->name, "libagx_tess_tri") ||
+          !strcmp(func->name, "libagx_tess_quad") ||
+          !strcmp(func->name, "libagx_prefix_sum_tess") ||
+          /* Geometry shaders */
+          !strcmp(func->name, "libagx_gs_setup_indirect") ||
+          !strcmp(func->name, "libagx_prefix_sum_geom") ||
+          !strcmp(func->name, "libagx_unroll_restart") ||
+          !strcmp(func->name, "libagx_draw_without_adj");
+}
+
+/* Like nir_precomp_print_binary_map, but programs the target does not support
+ * are left NULL, as they have no binary.
+ */
+static void
+print_supported_binary_map(FILE *fp, const nir_shader *nir, const char *target)
+{
+   fprintf(fp, "const uint32_t *libagx_%s[LIBAGX_NUM_PROGRAMS] = {\n", target);
+
+   nir_foreach_entrypoint(func, nir) {
+      if (!target_supports_program(target, func))
+         continue;
+
+      for (unsigned v = 0; v < nir_precomp_nr_variants(func); ++v) {
+         fprintf(fp, "    [");
+         nir_precomp_print_enum_variant_value(fp, func, v);
+         fprintf(fp, "] = %s_%u_%s,\n", func->name, v,
+                 remap_variant(func, v, target));
+      }
+   }
+
+   fprintf(fp, "};\n\n");
 }
 
 static nir_def *
@@ -378,6 +439,11 @@ main(int argc, char **argv)
                .reserved_preamble = layout.size_B / 2,
                .is_helper = is_helper,
                .no_preamble = !strcmp(*target, "g17p"),
+
+               /* G17P has a smaller register file than AGX2, so the largest
+                * kernels spill to thread-private storage like API shaders.
+                */
+               .has_scratch = !strcmp(*target, "g17p"),
             };
 
             key.dev.encoding = !strcmp(*target, "g17p")
@@ -390,18 +456,41 @@ main(int argc, char **argv)
             }
 
             nir_shader *clone = nir_shader_clone(NULL, s);
+
+            uint16_t printf_uniform = 0;
+            if (!strcmp(*target, "g17p")) {
+               bool uses_printf = false;
+               nir_shader_intrinsics_pass(clone, uses_printf_address,
+                                          nir_metadata_all, &uses_printf);
+
+               if (uses_printf) {
+                  /* A 64-bit uniform address must start on a whole dword
+                   * of halves.
+                   */
+                  unsigned base_halfs = ALIGN_POT(layout.size_B, 8) / 2;
+                  printf_uniform = base_halfs;
+                  key.reserved_preamble = base_halfs + 4;
+
+                  NIR_PASS(_, clone, nir_shader_intrinsics_pass,
+                           lower_printf_address_to_uniform,
+                           nir_metadata_control_flow, &base_halfs);
+               }
+            }
+
             if (!agx_compile_shader_nir(clone, &key, &compiled)) {
                fprintf(stderr, "Failed to compile %s for %s\n",
                        libfunc->name, *target);
                ralloc_free(clone);
                return 1;
             }
-            print_shader(fp_c, libfunc->name, *target, v, &compiled);
+            print_shader(fp_c, libfunc->name, *target, v, &compiled,
+                         printf_uniform);
             free(compiled.binary);
             ralloc_free(clone);
 
-            assert(compiled.info.scratch_size == 0 &&
-                   "internal shaders do not spill");
+            assert((compiled.info.scratch_size == 0 ||
+                    !strcmp(*target, "g17p")) &&
+                   "only G17P internal shaders spill");
 
             assert(compiled.info.preamble_scratch_size == 0 &&
                    "internal shader preambles do not spill");
@@ -418,50 +507,7 @@ main(int argc, char **argv)
    foreach_target(target)
    {
       nir_precomp_print_extern_binary_map(fp_h, "libagx", *target);
-      if (strcmp(*target, "g17p")) {
-         nir_precomp_print_binary_map(fp_c, nir, "libagx", *target,
-                                      remap_variant);
-      } else {
-         fprintf(fp_c,
-                 "const uint32_t *libagx_g17p[LIBAGX_NUM_PROGRAMS] = {\n"
-                 "    [LIBAGX_FILL_UINT4] = libagx_fill_uint4_0_g17p,\n"
-                 "    [LIBAGX_COPY_IMAGE] = libagx_copy_image_0_g17p,\n"
-                 "    [LIBAGX_MIPMAP_UNORM8X4] = "
-                 "libagx_mipmap_unorm8x4_0_g17p,\n"
-                 "    [LIBAGX_MIPMAP_UNORM8X4_ODD] = "
-                 "libagx_mipmap_unorm8x4_odd_0_g17p,\n"
-                 "    [LIBAGX_PREDICATE_INDIRECT_0] = "
-                 "libagx_predicate_indirect_0_g17p,\n"
-                 "    [LIBAGX_PREDICATE_INDIRECT_1] = "
-                 "libagx_predicate_indirect_1_g17p,\n"
-                 "    [LIBAGX_DRAW_INDIRECT_BYTE_COUNT] = "
-                 "libagx_draw_indirect_byte_count_0_g17p,\n"
-                 "    [LIBAGX_CONDITIONAL_RENDER] = "
-                 "libagx_conditional_render_0_g17p,\n"
-                 "    [LIBAGX_DRAW_ROBUST_INDEX_0] = "
-                 "libagx_draw_robust_index_0_g17p,\n"
-                 "    [LIBAGX_DRAW_ROBUST_INDEX_1] = "
-                 "libagx_draw_robust_index_1_g17p,\n"
-                 "    [LIBAGX_DRAW_ROBUST_INDEX_2] = "
-                 "libagx_draw_robust_index_2_g17p,\n"
-                 "    [LIBAGX_COPY_XFB_COUNTERS] = "
-                 "libagx_copy_xfb_counters_0_g17p,\n"
-                 "    [LIBAGX_INCREMENT_IA] = "
-                 "libagx_increment_ia_0_g17p,\n"
-                 "    [LIBAGX_INCREMENT_IA_RESTART_NONNULL] = "
-                 "libagx_increment_ia_restart_nonnull_0_g17p,\n"
-                 "    [LIBAGX_COPY_QUERY] = "
-                 "libagx_copy_query_0_g17p,\n"
-                 "    [LIBAGX_INCREMENT_CS_INVOCATIONS] = "
-                 "libagx_increment_cs_invocations_0_g17p,\n"
-                 "    [LIBAGX_COPY_TIMESTAMP] = "
-                 "libagx_copy_timestamp_0_g17p,\n"
-                 "    [LIBAGX_TESS_SETUP_INDIRECT_HW] = "
-                 "libagx_tess_setup_indirect_hw_0_g17p,\n"
-                 "    [LIBAGX_TESS_FACTORS_HALF] = "
-                 "libagx_tess_factors_half_0_g17p,\n"
-                 "};\n\n");
-      }
+      print_supported_binary_map(fp_c, nir, *target);
    }
 
    glsl_type_singleton_decref();

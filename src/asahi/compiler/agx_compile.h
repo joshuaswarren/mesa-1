@@ -207,6 +207,17 @@ struct agx_precompiled_kernel_info {
    bool uses_txf;
    bool agx3_staging_known;
    uint16_t agx3_staging_halfs;
+
+   /* AGX3 kernels read the printf buffer address from a 64-bit uniform at this
+    * half, the first multiple of 4 after their arguments, or 0 if they do not
+    * use it. AGX2 kernels use the fixed LIBAGX_PRINTF_BUFFER_ADDRESS.
+    */
+   uint16_t printf_uniform;
+
+   /* AGX3 thread-private storage frame in bytes: spills and returned atomic
+    * words. AGX2 kernels do not spill.
+    */
+   uint16_t agx3_tps_size;
 };
 
 static inline struct agx_precompiled_kernel_info
@@ -231,6 +242,8 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .uses_txf = info->uses_txf,
       .agx3_staging_known = info->agx3_staging_known,
       .agx3_staging_halfs = info->agx3_staging_halfs,
+      .agx3_tps_size =
+         MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
    };
 }
 

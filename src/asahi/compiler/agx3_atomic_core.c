@@ -79,7 +79,10 @@ agx3_atomic_encode_device(enum agx_isa_encoding enc,
          return false;
       if (enc == AGX_ISA_ENCODING_AGX3B && d->result != d->value)
          return false;
-   } else if (d->slot != 0) {
+      if ((d->result_tps_half & 1) || d->result_tps_half > 0x1fffe ||
+          (enc != AGX_ISA_ENCODING_AGX3B && d->result_tps_half))
+         return false;
+   } else if (d->slot != 0 || d->result_tps_half) {
       return false;
    }
 
@@ -156,6 +159,8 @@ agx3_atomic_encode_device(enum agx_isa_encoding enc,
       f[n++] = (struct agx3_field_kv)KV(9,
          enc == AGX_ISA_ENCODING_AGX3C ? 2 : 4);
       f[n++] = (struct agx3_field_kv)KV(12, d->slot);
+      if (enc == AGX_ISA_ENCODING_AGX3B)
+         f[n++] = (struct agx3_field_kv)KV(4, d->result_tps_half);
       f[n++] = (struct agx3_field_kv)KV(89, 1);
       if (enc == AGX_ISA_ENCODING_AGX3C) {
          f[n++] = (struct agx3_field_kv)KV(2, d->result);

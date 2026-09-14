@@ -240,6 +240,23 @@ main(void)
    check_load(AGX_ISA_ENCODING_AGX3B, &b_atomic_return_rld_d, 1,
               b_atomic_return_rld, sizeof(b_atomic_return_rld), true);
 
+   /* The same return in a kernel that also spills a thread-private array:
+    * the old value sits above the spill frame at TPS half 130, and this
+    * reload is scheduled on slot 1. */
+   static const uint8_t b_atomic_return_rld_130[] = {
+      0x0c, 0x82, 0x19, 0x05, 0x02, 0x20, 0x00, 0x00,
+   };
+   const struct agx3_static_spill_load_desc b_atomic_return_rld_130_d = {
+      .dest = 0,
+      .tps_half = 130,
+      .width = AGX3_MEM_W32,
+      .slot = 1,
+      .slot_mirror = 6,
+      .wait_mask = 1,
+   };
+   check_load(AGX_ISA_ENCODING_AGX3B, &b_atomic_return_rld_130_d, 1,
+              b_atomic_return_rld_130, sizeof(b_atomic_return_rld_130), true);
+
    static const uint8_t c_copy_h[] = {
       0x2b, 0x00, 0x07, 0x10, 0x26, 0x00, 0xa0, 0x02,
    };

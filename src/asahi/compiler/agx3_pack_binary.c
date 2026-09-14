@@ -7319,13 +7319,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             e->src[ns++] = AGX3_SLOT_TEX_COORD_TOKEN;
 
          /* rld's asynchronous read of the hidden atomic-return words must
-          * complete before a later stack access may reuse them. Existing
-          * compiler scratch still starts at TPS half 0, so refuse that mixed
-          * case below until its offsets are rebased around this native ABI. */
+          * complete before a later stack access may reuse them. */
          if (g17p_returned_atomic) {
+            const unsigned tps_half = ctx->agx3_atomic_return_tps_half;
             assert(nd + 2 <= AGX3_SLOT_MAX_REGS);
-            e->dst[nd++] = AGX3_SLOT_TPS_TOKEN_BASE;
-            e->dst[nd++] = AGX3_SLOT_TPS_TOKEN_BASE + 1;
+            assert(tps_half + 1 < AGX3_SLOT_TPS_HALF_TOKENS);
+            e->dst[nd++] = AGX3_SLOT_TPS_TOKEN_BASE + tps_half;
+            e->dst[nd++] = AGX3_SLOT_TPS_TOKEN_BASE + tps_half + 1;
          }
 
          /* CEM is a compound cube-coordinate pipeline, not a single opaque
@@ -8763,10 +8763,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool g17p_returned =
                enc == AGX_ISA_ENCODING_AGX3B && returned;
             const uint8_t atomic_slot = g17p_returned ? 1 : slot;
-            if ((g17p_returned && (slot != 6 || ctx->scratch_size_B != 0)) ||
+            /* The old value must be published above the spill frame */
+            const unsigned return_tps_half =
+               g17p_returned ? ctx->agx3_atomic_return_tps_half : 0;
+            if ((g17p_returned &&
+                 (slot != 6 || return_tps_half * 2 < ctx->scratch_size_B)) ||
                 !agx3_translate_device_atomic(I, enc, block->divergent,
-                                              atomic_slot, wait, &d) ||
-                !agx3_atomic_encode_device(enc, &d, bytes, &len) ||
+                                              atomic_slot, wait, &d))
+               AGX3_REFUSE(I);
+            d.result_tps_half = return_tps_half;
+            if (!agx3_atomic_encode_device(enc, &d, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
 
@@ -8776,7 +8782,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * rld immediately following atomicdev. */
                const struct agx3_static_spill_load_desc reload = {
                   .dest = I->dest[0].value,
-                  .tps_half = 0,
+                  .tps_half = return_tps_half,
                   .width = AGX3_MEM_W32,
                   .slot = 6,
                   .slot_mirror = 6,

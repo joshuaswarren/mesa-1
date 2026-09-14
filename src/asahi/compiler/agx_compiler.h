@@ -529,6 +529,11 @@ typedef struct {
    bool is_preamble;
    unsigned scratch_size_B;
 
+   /* AGX3b: thread-private storage half a returned device atomic publishes
+    * its old value to, above the spill frame.
+    */
+   unsigned agx3_atomic_return_tps_half;
+
    struct list_head blocks; /* list of agx_block */
    struct agx_shader_info *out;
    struct agx_shader_key *key;
