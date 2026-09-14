@@ -8414,16 +8414,23 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
    I->op = AGX_OPCODE_TEXTURE_LOAD;
    I->mask = 15;
 
+   /* The coordinates and the full-uint level are published on staging
+    * slot 2, in Apple's order (coordinates, then PACK_SMPIR bank 6); the
+    * fragment enters the pixel transaction and fetches on slot 1 while
+    * waiting for that staging generation, as the second in-flight read of
+    * Apple's `t.read(c, l0) + t.read(c + 3, l1)` fragment does. */
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
-   ASSERT_TRUE(agx3_tex_stage_typed_lod(
-      enc, 4, 2, 0, false, false, AGX3_TEX_LEVEL_INTEGER, bytes, &len));
-   append(want, bytes, len);
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 12, 2, 0, false, false,
                                          bytes, &len));
    append(want, bytes, len);
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 14, 2, 0, false, false,
                                          bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_typed_lod(
+      enc, 4, 2, 0, false, false, AGX3_TEX_LEVEL_INTEGER, bytes, &len));
+   append(want, bytes, len);
+   ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
    append(want, bytes, len);
    struct agx3_tex_fetch_desc d = {};
    d.dest = 8;
@@ -8436,11 +8443,18 @@ TEST_F(AGX3PackBinary, TextureFetchRegisterLodIsFullUint)
    d.register_lod = true;
    ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
+   ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 1,
+                                bytes, &len));
    append(want, bytes, len);
    EXPECT_EQ(pack(b), want);
    EXPECT_TRUE(b->shader->agx3_staging_known);
    EXPECT_EQ(b->shader->agx3_staging_halfs, 8u);
+
+   /* The level bank lies at halves 6/7. Declaring only the four coordinate
+    * halves left it outside the sampler-private allocation, and every
+    * fragment register-LOD fetch then returned zero on G17P hardware. */
+   EXPECT_TRUE(b->shader->agx3_staging_known);
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
 
    agx_builder *bad = builder(enc);
    bad->shader->stage = MESA_SHADER_FRAGMENT;

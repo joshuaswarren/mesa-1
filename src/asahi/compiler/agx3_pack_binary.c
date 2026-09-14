@@ -1181,7 +1181,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
                         uint16_t ms_array_scratch,
                         struct agx3_staging_banks *banks,
                         uint16_t outstanding,
-                        uint16_t *staged_end)
+                        uint16_t *staged_end, bool pixel_entry,
+                        uint32_t *pixel_entry_offset)
 {
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE;
@@ -1306,6 +1307,11 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    if (staged_end)
       *staged_end = plain_bank ? staging_coord + bank_span : bank_span;
 
+   /* The plain 2D fetch publishes its per-lane level after the coordinates,
+    * so no PACK_SMPIR leads the group to absorb a combined producer mask. */
+   const bool plain_2d_lod =
+      register_lod && !combined_array_lod && I->dim == AGX_DIM_2D;
+
    if (stage_coordinates) {
       uint16_t staging_wait = wait_mask & (uint16_t)~bank_retire;
       /* COPY carries one wait bit, while the image coordinates and heap
@@ -1314,8 +1320,10 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        * read has no such instruction. Retire only those operand producers
        * before publishing its coordinates.
        */
-      if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_IMAGE_LOAD &&
-          !register_lod && util_bitcount(staging_wait) > 1) {
+      if (enc == AGX_ISA_ENCODING_AGX3B &&
+          ((I->op == AGX_OPCODE_IMAGE_LOAD && !register_lod) ||
+           plain_2d_lod) &&
+          util_bitcount(staging_wait) > 1) {
          if (!agx3_retire_slots_noop(emission, enc, staging_wait))
             return false;
          staging_wait = 0;
@@ -1330,7 +1338,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
              !agx3_append(emission, packed, packed_len))
             return false;
          staging_wait = 0;
-      } else if (register_lod) {
+      } else if (register_lod && !plain_2d_lod) {
          uint8_t lod[AGX3_TEX_MAX_LENGTH], lod_len = 0;
          if (!agx3_tex_stage_typed_lod_at(
                 enc, staging_base, I->src[1].value, staging_slot,
@@ -1353,6 +1361,23 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
                                   copy, &copy_len) ||
              !agx3_append(emission, copy, copy_len))
             return false;
+      }
+
+      /* Apple stages a plain 2D fragment texel fetch's level after its
+       * coordinates -- metal-nt's `t.read(uint2(uv), uint(lod))` emits the
+       * coordinate staging, then PACK_SMPIR, then SMP -- and into this
+       * fetch's own operand bank. A level published outside the
+       * sampler-private staging allocation read back as zero for every
+       * fragment texel fetch on G17P hardware. */
+      if (plain_2d_lod) {
+         uint8_t lod[AGX3_TEX_MAX_LENGTH], lod_len = 0;
+         if (!agx3_tex_stage_typed_lod_bank(
+                enc, staging_coord + 6, I->src[1].value, staging_slot,
+                staging_wait, I->src[1].cache, I->src[1].discard,
+                AGX3_TEX_LEVEL_INTEGER, lod, &lod_len) ||
+             !agx3_append(emission, lod, lod_len))
+            return false;
+         staging_wait = 0;
       }
 
       /* Native array fetches consume the layer through PACK_SMPIR's bank6
@@ -1428,6 +1453,21 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    };
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
    uint8_t len = 0;
+   /* Apple's fragment texel fetches enter the pixel transaction after all
+    * operand staging and immediately before SMP, exactly as its implicit
+    * derivative samples do.
+    */
+   if (pixel_entry) {
+      uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len = 0;
+      if (pixel_entry_offset == NULL ||
+          !agx3_pixel_colour_entry(enc, entry, &entry_len))
+         return false;
+
+      *pixel_entry_offset = emission->size;
+      if (!agx3_append(emission, entry, entry_len))
+         return false;
+   }
+
    return agx3_tex_encode_fetch(enc, &d, bytes, &len) &&
           agx3_append(emission, bytes, len);
 }
@@ -1922,9 +1962,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                     !implicit_lod && !shadow_level_zero &&
                     !(array && !cube && min_lod) &&
                     /* A comparison cube stages a register level or a
-                     * bias and minimum exactly as the colour cube does. */
-                    !(cube && !cube_array &&
-                      ((explicit_lod && !immediate_lod) || bias_min))))) ||
+                     * bias and minimum exactly as the colour cube does, and
+                     * the cube array the same way with its layer beside the
+                     * face+level word -- which is what
+                     * KHR-GL30.ext_texture_shadow_lod
+                     * texturelod/bias.samplercubearrayshadow_fragment
+                     * compiles to. */
+                    !(cube && ((explicit_lod && !immediate_lod) ||
+                               register_bias || bias_min))))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return false;
@@ -7942,6 +7987,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* Compute kernels and API fragment functions stage outstanding
              * reads in disjoint banks (see agx3_emit_texture_fetch()).
              * Background and clear programs keep their single bank. */
+            /* A fetch whose level is a live register, which is the shape
+             * whose level stages into the sampler-private bank. */
+            const bool register_fetch_lod =
+               I->op == AGX_OPCODE_TEXTURE_LOAD &&
+               I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
+               I->src[1].type == AGX_INDEX_REGISTER;
             const bool staged_bank_reads =
                ctx->stage == MESA_SHADER_COMPUTE ||
                (ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -7953,14 +8004,31 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                          I->dim == AGX_DIM_2D_MS_ARRAY)
                           ? (outstanding_here & 1u)
                           : 0);
+            /* A fragment texel fetch with a per-lane level stages that level
+             * into the sampler-private bank; Apple enters the pixel
+             * transaction before such an SMP. Keep the same straight-line
+             * gate placement rule as the implicit-derivative samples. */
+            const bool open_pixel_fetch =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
+               !ctx->key->fs.ignore_tib_dependencies &&
+               ctx->agx3_colour_link.straight_line &&
+               register_fetch_lod && I->dim == AGX_DIM_2D && !g17p_colour_open;
             uint16_t staged_end = 0;
             if (!agx3_emit_texture_fetch(emission, enc, I, slot, fetch_wait,
                                          final, staged, separate_write_coords,
                                          ms_array_scratch,
                                          staged_bank_reads ? &staging_banks
                                                            : NULL,
-                                         outstanding_here, &staged_end))
+                                         outstanding_here, &staged_end,
+                                         open_pixel_fetch,
+                                         &ctx->agx3_colour_link.entry_offset))
                AGX3_REFUSE(I);
+            if (open_pixel_fetch) {
+               ctx->agx3_colour_link.entry_emitted = true;
+               ctx->agx3_colour_link.entry_offset -= initial_size;
+               g17p_colour_open = true;
+            }
             if (staged) {
                /* The coordinate bank, or the eight halves of a read with
                 * PACK_SMPIR operands: native MS fragments reserve eight
