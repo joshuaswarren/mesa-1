@@ -986,6 +986,44 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
                       nir_intrinsic_base(instr), explicit);
 }
 
+/* Stage one G17P depth/stencil word, whose low nibble selects every sample
+ * and whose next two nibbles come from `mid`, and write it under the class-1
+ * transaction the first write of the shader opens and the last releases. */
+static agx_instr *
+agx_emit_zs_word_agx3(agx_builder *b, nir_intrinsic_instr *instr,
+                      agx_index z, agx_index s, unsigned base, agx_index mid)
+{
+   const bool write_z = base & 1;
+   const bool write_s = base & 2;
+   agx_index coverage = agx_iadd(b, agx_immediate(15), mid, 4);
+
+   agx_index word = agx_temp(b->shader, AGX_SIZE_32);
+   if (write_s)
+      agx_emit_collect_to(b, word, 2, (agx_index[]){coverage, s});
+   else
+      agx_mov_to(b, word, coverage);
+
+   if (write_z) {
+      agx_index depth;
+      if (nir_src_is_const(instr->src[1])) {
+         const float value = nir_src_as_float(instr->src[1]);
+         depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
+      } else {
+         depth = agx_temp(b->shader, AGX_SIZE_32);
+         agx_fmov_to(b, depth, z)->saturate = true;
+      }
+      word = agx_vec2(b, word, depth);
+   }
+
+   b->shader->out->writes_sample_mask = true;
+   agx_wait_pixel_mask(b, 0x1);
+   agx_instr *I = agx_zs_emit_agx3(b, word, base);
+   assert(b->shader->zs_writes_left > 0);
+   if (--b->shader->zs_writes_left == 0)
+      agx_signal_pix(b, 0x1);
+   return I;
+}
+
 static agx_instr *
 agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
 {
@@ -1010,35 +1048,50 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
     * the register holding the coverage, then stage the whole dword; with
     * [[depth(any)]] as well, depth still follows at half 2.
     */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+   const unsigned samples = MAX2(b->shader->key->fs.nr_samples, 1);
+   const unsigned mask =
+      nir_src_is_const(instr->src[0]) ? nir_src_as_uint(instr->src[0]) : 0;
+   const bool sample_words =
+      samples > 1 &&
+      (mask == 0xff || util_bitcount(mask & BITFIELD_MASK(samples)) == 1);
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       !sample_words) {
+      /* At several samples, only a mask known at compile time has a
+       * witnessed word; any other reads the one-sample coverage, which the
+       * packer refuses there. */
       agx_index sr2 = agx_temp(b->shader, AGX_SIZE_16);
       agx_get_coverage_1x_agx3_to(b, sr2);
-      agx_index mid = agx_iadd(b, sr2, sr2, 4);
-      agx_index coverage = agx_iadd(b, agx_immediate(15), mid, 4);
+      return agx_emit_zs_word_agx3(b, instr, z, s, base,
+                                   agx_iadd(b, sr2, sr2, 4));
+   } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      /* Apple's 2x/4x fragments writing [[depth(any)]] or [[stencil]] per
+       * [[sample_id]] write one DEPTHF per sample, each word built from SR39:
+       * the API mask nibble, above the covered samples ANDed with that
+       * sample's bit. A whole-pixel depth or stencil alone is written the
+       * same way for every sample, but a whole-pixel depth and stencil is
+       * written once, with all covered samples (metal-nt -arch applegpu_g17p,
+       * msaa/native/zexp2 fs_id_{2,4}x and fs_var_4x, msaa/native/zmrt/zsten
+       * fs_id_s_4x, fs_s_4x and fs_ds_4x).
+       */
+      const bool whole = mask == 0xff;
+      const bool combined = whole && write_z && write_s;
+      agx_instr *last = NULL;
+      if (whole && !combined)
+         b->shader->zs_writes_left += samples - 1;
+      for (unsigned i = 0; i < (combined ? 1 : samples); ++i) {
+         if (!whole && !(mask & BITFIELD_BIT(i)))
+            continue;
 
-      agx_index word = agx_temp(b->shader, AGX_SIZE_32);
-      if (write_s)
-         agx_emit_collect_to(b, word, 2, (agx_index[]){coverage, s});
-      else
-         agx_mov_to(b, word, coverage);
-
-      if (write_z) {
-         agx_index depth;
-         if (nir_src_is_const(instr->src[1])) {
-            const float value = nir_src_as_float(instr->src[1]);
-            depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
-         } else {
-            depth = agx_temp(b->shader, AGX_SIZE_32);
-            agx_fmov_to(b, depth, z)->saturate = true;
-         }
-         word = agx_vec2(b, word, depth);
+         agx_index sr39 = agx_temp(b->shader, AGX_SIZE_16);
+         agx_get_sr_to(b, sr39, AGX_SR_INPUT_SAMPLE_MASK);
+         agx_index upper = agx_ushr(b, sr39, agx_immediate(4));
+         agx_index covered = agx_and(
+            b, sr39,
+            agx_immediate(combined ? BITFIELD_MASK(4) : BITFIELD_BIT(i)));
+         last = agx_emit_zs_word_agx3(b, instr, z, s, base,
+                                      agx_iadd(b, upper, covered, 4));
       }
-
-      b->shader->out->writes_sample_mask = true;
-      agx_wait_pixel_mask(b, 0x1);
-      agx_instr *I = agx_zs_emit_agx3(b, word, base);
-      agx_signal_pix(b, 0x1);
-      return I;
+      return last;
    }
 
    if (write_z && write_s) {
@@ -2202,6 +2255,14 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return agx_get_sr_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
 
    case nir_intrinsic_load_sample_mask:
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+         /* G17P's covered samples are bits 0..3 of native W16 SR39, the word
+          * Apple's multisample fragments AND with each sample's bit before
+          * that sample's tile store. */
+         agx_index native = agx_temp(b->shader, AGX_SIZE_16);
+         agx_get_sr_to(b, native, AGX_SR_INPUT_SAMPLE_MASK);
+         return agx_mov_to(b, dst, agx_and(b, native, agx_immediate(15)));
+      }
       return agx_get_sr_coverage_to(b, dst, AGX_SR_COVERAGE_MASK);
 
    case nir_intrinsic_load_active_samples_agx:
@@ -6188,6 +6249,15 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    if (ctx->stage == MESA_SHADER_FRAGMENT && !ctx->is_preamble) {
       ctx->any_cf = key->fs.inside_sample_loop;
+
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            ctx->zs_writes_left +=
+               instr->type == nir_instr_type_intrinsic &&
+               nir_instr_as_intrinsic(instr)->intrinsic ==
+                  nir_intrinsic_store_zs_agx;
+         }
+      }
    }
 
    ctx->alloc = impl->ssa_alloc;

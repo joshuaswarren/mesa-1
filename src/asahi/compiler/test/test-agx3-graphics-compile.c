@@ -1541,6 +1541,24 @@ build_fs_depth(void)
    return b.shader;
 }
 
+/* A depth write to samples known only when the fragment runs. */
+static nir_shader *
+build_fs_depth_dynamic_samples(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 dynamic-sample depth FS");
+
+   fs_store_colour(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f));
+   nir_store_zs_agx(&b, nir_load_preamble(&b, 1, 16, .base = 0),
+                    nir_imm_float(&b, 0.5f), nir_undef(&b, 1, 16), .base = 1);
+
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0) |
+                                    BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   return b.shader;
+}
+
 static nir_shader *
 build_fs_depth_only_value(float depth)
 {
@@ -6343,6 +6361,7 @@ struct agx3_graphics_case {
    bool expected_g17p_sample_group;
    bool expected_g17p_balanced_coverage;
    uint8_t expected_g17p_sincs;
+   uint8_t expected_g17p_sample_zs_writes;
    uint8_t nr_samples;
 };
 
@@ -6636,6 +6655,70 @@ g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
 }
 
 /*
+ * Apple's 2x/4x fragments writing [[depth(any)]] or [[stencil]] per
+ * [[sample_id]] (metal-nt applegpu_g17p) take the class-1 wait once, write
+ * each sample's word, and its depth, staged after the previous sample's, and
+ * release after the last write. A whole-pixel depth or stencil alone is
+ * written the same way for every sample; a whole-pixel depth and stencil is
+ * written once.
+ */
+static bool
+g17p_sample_zs_protocol(const struct agx_shader_part *part, unsigned writes,
+                        bool depth, bool stencil)
+{
+   static const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0, 0};
+   static const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0, 0};
+   const uint8_t *text = part->binary;
+   const unsigned step = depth ? 4 : 2;
+
+   if (!part->info.agx3_staging_known ||
+       part->info.agx3_staging_halfs < step * writes)
+      return false;
+
+   unsigned acquires = 0, releases = 0, acquire_at = 0, release_at = 0;
+   for (unsigned off = 0; off + sizeof(acquire) <= part->info.binary_size;
+        ++off) {
+      if (!memcmp(text + off, acquire, sizeof(acquire))) {
+         acquires++;
+         acquire_at = off;
+      }
+      if (!memcmp(text + off, release, sizeof(release))) {
+         releases++;
+         release_at = off;
+      }
+   }
+   if (acquires != 1 || releases != 1)
+      return false;
+
+   unsigned last = acquire_at, found_writes = 0;
+   for (unsigned off = acquire_at; off < release_at; ++off) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         for (unsigned kill = 0; kill < 2; ++kill) {
+            for (unsigned staging = 0; staging <= step * 4; staging += 2) {
+               struct agx3_zs_desc desc = {
+                  .value = staging, .value_kill = kill, .slot = slot,
+                  .wait_mask = 1u << (slot - 1),
+               };
+               uint8_t exact[AGX3_ZS_MAX_LENGTH], length;
+               if (!agx3_zs_encode_depth_stencil(AGX_ISA_ENCODING_AGX3B,
+                                                &desc, depth, stencil, exact,
+                                                &length) ||
+                   off + length > release_at ||
+                   memcmp(text + off, exact, length))
+                  continue;
+               if (off < last || staging != step * found_writes)
+                  return false;
+               last = off + length;
+               found_writes++;
+            }
+         }
+      }
+   }
+
+   return found_writes == writes;
+}
+
+/*
  * Apple's G17P [[stencil]] fragments (metal-nt applegpu_g17p, render
  * pipelines with stencil8 and depth32float_stencil8 attachments) copy the
  * 16-bit reference into the upper half of the coverage register, stage that
@@ -6831,9 +6914,19 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_stencil = 1},
    {"fs-depth-stencil-write", build_fs_depth_stencil, true,
     .g17p_only = true, .expected_g17p_stencil = 2},
-   /* A multisample depth export writes each sample's depth separately. */
-   {"fs-depth-write-4x", build_fs_depth, false, .g17p_only = true,
-    .nr_samples = 4},
+   /* A multisample depth or stencil export writes each sample separately;
+    * both together are written once for every covered sample. */
+   {"fs-depth-write-4x", build_fs_depth, true, .g17p_only = true,
+    .expected_g17p_sample_mask_input = true,
+    .expected_g17p_sample_zs_writes = 4, .nr_samples = 4},
+   {"fs-stencil-write-2x", build_fs_stencil, true, .g17p_only = true,
+    .expected_g17p_sample_mask_input = true,
+    .expected_g17p_sample_zs_writes = 2, .nr_samples = 2},
+   {"fs-depth-stencil-write-4x", build_fs_depth_stencil, true,
+    .g17p_only = true, .expected_g17p_sample_zs_writes = 1, .nr_samples = 4},
+   /* Such a write to samples known only at run time has no witnessed word. */
+   {"fs-depth-dynamic-samples-4x", build_fs_depth_dynamic_samples, false,
+    .g17p_only = true, .nr_samples = 4},
 };
 
 static bool
@@ -6971,6 +7064,17 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
             found += match;
          }
          result = found == c->expected_g17p_sincs;
+      }
+
+      if (result && enc == AGX_ISA_ENCODING_AGX3B && c->nr_samples > 1 &&
+          c->expected_g17p_sample_zs_writes) {
+         result = g17p_sample_zs_protocol(
+            &part, c->expected_g17p_sample_zs_writes,
+            c->build != build_fs_stencil, c->build != build_fs_depth);
+         if (!result)
+            fprintf(stderr, "%s %s: per-sample depth/stencil protocol "
+                            "mismatch\n",
+                    enc_name(enc), c->name);
       }
 
       if (result && enc == AGX_ISA_ENCODING_AGX3B &&

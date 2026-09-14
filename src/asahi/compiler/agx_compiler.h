@@ -545,6 +545,10 @@ typedef struct {
    /* Mask of pixel fences we've definitely already waited for. */
    uint16_t already_pixel_waited;
 
+   /* G17P depth/stencil writes not yet emitted. Every sample's write shares
+    * one class-1 transaction, released after the last. */
+   unsigned zs_writes_left;
+
    /* Has r0l been zeroed yet due to control flow? */
    bool any_cf;
 

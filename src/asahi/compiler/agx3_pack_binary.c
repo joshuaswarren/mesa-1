@@ -5620,6 +5620,11 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
    unsigned target_count = 0;
    uint64_t written_B = 0;
    bool stopped = false, waited = false;
+   /* A colour epilog may first complete one class-1 depth/stencil
+    * transaction of every sample's write, as Apple's per-sample depth
+    * fragments do before their colour stores: 1 waited, 2 written,
+    * 3 released. */
+   unsigned depth = 0;
 
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
@@ -5630,8 +5635,24 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
          continue;
       }
 
+      if (colour && !waited && I->op == AGX_OPCODE_WAIT_PIX &&
+          I->writeout == 1 && depth == 0) {
+         depth = 1;
+         continue;
+      }
+      if (colour && I->op == AGX_OPCODE_ZS_EMIT_AGX3 &&
+          (depth == 1 || depth == 2)) {
+         depth = 2;
+         continue;
+      }
+      if (colour && I->op == AGX_OPCODE_SIGNAL_PIX && I->writeout == 1 &&
+          depth == 2) {
+         depth = 3;
+         continue;
+      }
+
       if (I->op == AGX_OPCODE_WAIT_PIX && colour && !waited &&
-          !target_count && I->writeout == 12) {
+          !target_count && I->writeout == 12 && (depth == 0 || depth == 3)) {
          waited = true;
          continue;
       }
@@ -5717,6 +5738,7 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
    const bool complete = colour ? samples == ctx->key->fs.nr_samples
                                 : samples == 2 || samples == 4;
    return stopped && waited == colour && complete &&
+                (depth == 0 || depth == 3) &&
                 (target_count == 1 || ctx->key->g17p_mrt_bg)
              ? target_count : 0;
 }
@@ -6812,6 +6834,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned texture_samples_remaining = texture_samples_left;
    unsigned sample_group_members_remaining = sample_group_members_left;
    const agx_instr *g17p_deferred_zs_wait = NULL;
+   /* Depth/stencil writes in the open class-1 transaction. */
+   unsigned g17p_zs_writes = 0, g17p_zs_staging = 0;
    const bool g17p_position_protocol =
       agx3_is_g17p_float2_position_vs(ctx, enc);
    unsigned g17p_positions_staged = 0;
@@ -8141,12 +8165,18 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_ZS_EMIT_AGX3) {
             const bool depth = I->zs & 1, stencil = I->zs & 2;
+            /* Apple's 2x/4x per-sample depth/stencil writes stage each word,
+             * and its depth, after the previous sample's, all under the one
+             * class-1 wait taken before the first DEPTHF (msaa/native/zexp2
+             * fs_id_{2,4}x, msaa/native/zmrt/zsten fs_id_s_4x). */
+            const unsigned staging = g17p_zs_staging;
             if (enc != AGX_ISA_ENCODING_AGX3B ||
                 ctx->stage != MESA_SHADER_FRAGMENT || I->nr_dests ||
                 I->nr_srcs != 1 || I->zs < 1 || I->zs > 3 ||
                 !agx3_vary_reg32(I->src[0]) ||
                 agx_channels(I->src[0]) != (depth ? 2 : 1) ||
-                !g17p_deferred_zs_wait)
+                (g17p_zs_writes == 0) != (g17p_deferred_zs_wait != NULL) ||
+                g17p_zs_writes >= 4)
                AGX3_REFUSE(I);
 
             uint8_t bytes[AGX3_STAGE_MAX_LENGTH];
@@ -8164,23 +8194,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * Keep that flag independent of the allocator's GPR last-use.
              * Apple's stencil-only [[stencil]] fragment publishes its single
              * coverage/stencil dword without it. */
-            if (!agx3_stage_copy_liveness(enc, 0, I->src[0].value,
+            if (!agx3_stage_copy_liveness(enc, staging, I->src[0].value,
                                         depth, I->src[0].discard, slot,
                                         wait | outstanding_here, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             if (depth &&
-                (!agx3_stage_copy_liveness(enc, 2, I->src[0].value + 2,
-                                           true, I->src[0].discard, slot, 0,
+                (!agx3_stage_copy_liveness(enc, staging + 2,
+                                           I->src[0].value + 2, true,
+                                           I->src[0].discard, slot, 0,
                                            bytes, &len) ||
                  !agx3_append(emission, bytes, len)))
                AGX3_REFUSE(I);
-            if (!agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
+            if (g17p_deferred_zs_wait &&
+                !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
                AGX3_REFUSE(I);
             g17p_deferred_zs_wait = NULL;
 
             const struct agx3_zs_desc zs = {
-               .value = 0,
+               .value = staging,
                .value_kill = true,
                .slot = slot,
                .wait_mask = (uint16_t)(1u << (slot - 1)),
@@ -8191,8 +8223,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
 
             outstanding = 0;
+            g17p_zs_writes++;
+            g17p_zs_staging += depth ? 4 : 2;
             ctx->agx3_staging_halfs =
-               MAX2(ctx->agx3_staging_halfs, depth ? 4 : 2);
+               MAX2(ctx->agx3_staging_halfs, staging + (depth ? 4 : 2));
             continue;
          }
 

@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "drm-uapi/asahi_drm.h"
+#include "agx_abi.h"
 #include "util/bitscan.h"
 #include "util/format/u_formats.h"
 #include "agx_pack.h"
@@ -124,8 +125,22 @@ agx_g17p_sample_colour_stride(uint8_t loc_written)
    return 8 * util_last_bit(loc_written);
 }
 
+/* Export base of sample `sample`'s depth (stencil two halves later) in such
+ * a fragment, for every sample after the first: four halves per sample after
+ * every sample's colours. */
+static inline unsigned
+agx_g17p_sample_zs_base(unsigned nr_samples, uint8_t loc_written,
+                        unsigned sample)
+{
+   return AGX_ABI_FOUT_COLOUR(0) +
+          nr_samples * agx_g17p_sample_colour_stride(loc_written) +
+          4 * (sample - 1);
+}
+
 bool agx_nir_unroll_g17p_samples(struct nir_shader *shader,
                                  unsigned nr_samples, uint8_t loc_written);
+
+bool agx_nir_hoist_g17p_zs_writes(struct nir_shader *shader);
 
 bool agx_nir_lower_sample_intrinsics(struct nir_shader *shader,
                                      bool ignore_sample_mask_without_msaa);

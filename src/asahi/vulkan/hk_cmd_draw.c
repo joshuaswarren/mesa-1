@@ -3001,6 +3001,7 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples, key->nr_samples,
                key->link.loc_written);
       NIR_PASS(_, b->shader, nir_opt_constant_folding);
+      NIR_PASS(_, b->shader, agx_nir_hoist_g17p_zs_writes);
    } else {
       agx_nir_fs_epilog(b, key);
    }
@@ -4939,18 +4940,16 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
 
       /* hk_compile_shader() canonicalized this shader's sample builtins to
-       * single-sample because its pipeline did not fix the sample count, or
-       * it exports depth or stencil. That is exact at one rasterization sample
-       * and wrong at more.  Now that the real count is known, refuse rather
-       * than shade once and hand the application gl_SampleID == 0 as if it
-       * were the answer.  A refusal is recoverable; a plausible wrong pixel is
-       * not.
+       * single-sample because its pipeline did not fix the sample count. That
+       * is exact at one rasterization sample and wrong at more.  Now that the
+       * real count is known, refuse rather than shade once and hand the
+       * application gl_SampleID == 0 as if it were the answer.  A refusal is
+       * recoverable; a plausible wrong pixel is not.
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
           dyn->ms.rasterization_samples > 1) {
          mesa_loge("G17P: per-sample fragment execution needs a fixed sample "
-                   "count and no depth/stencil export; refusing a %u-sample "
-                   "draw that requests it",
+                   "count; refusing a %u-sample draw that requests it",
                    dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;

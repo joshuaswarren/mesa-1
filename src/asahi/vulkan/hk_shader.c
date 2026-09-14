@@ -1515,25 +1515,21 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz)
 }
 
 /* G17P unrolls per-sample fragment execution for a pipeline that fixes two or
- * four samples. Depth and stencil exports remain per pixel, and every sample's
- * colours need their own export registers inside the register file.
+ * four samples. Every sample's colours, depth and stencil need their own
+ * export registers inside the register file.
  */
 static bool
 hk_g17p_unrolls_sample_shading(const nir_shader *nir,
                                const struct hk_fs_key *key)
 {
-   const uint64_t zs = BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
-                       BITFIELD64_BIT(FRAG_RESULT_STENCIL);
    uint8_t locations =
       (nir->info.outputs_written >> FRAG_RESULT_DATA0) & BITFIELD_MASK(8);
    if (nir->info.fs.color_is_dual_source)
       locations |= BITFIELD_BIT(1);
 
    return (key->g17p_samples == 2 || key->g17p_samples == 4) &&
-          !(nir->info.outputs_written & zs) &&
-          AGX_ABI_FOUT_COLOUR(0) +
-                key->g17p_samples * agx_g17p_sample_colour_stride(locations) <=
-             AGX3B_NUM_REGS;
+          agx_g17p_sample_zs_base(key->g17p_samples, locations,
+                                  key->g17p_samples) <= AGX3B_NUM_REGS;
 }
 
 static VkResult

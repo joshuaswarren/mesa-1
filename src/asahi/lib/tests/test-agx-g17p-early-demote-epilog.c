@@ -210,6 +210,27 @@ test_unrolled_sample_shading(void)
             0 &&
          count_intrinsic(b.shader, nir_intrinsic_load_samples_log2_agx) == 0;
    ok &= count_intrinsic(b.shader, nir_intrinsic_export_agx) == 8;
+
+   /* Every export gathers after the last copy; sample i's depth follows all
+    * four samples' colours for i > 0. */
+   static const unsigned main_bases[] = {
+      AGX_ABI_FOUT_COLOUR(0),     AGX_ABI_FOUT_Z,
+      AGX_ABI_FOUT_COLOUR(0) + 8, AGX_ABI_FOUT_COLOUR(0) + 32,
+      AGX_ABI_FOUT_COLOUR(0) + 16, AGX_ABI_FOUT_COLOUR(0) + 36,
+      AGX_ABI_FOUT_COLOUR(0) + 24, AGX_ABI_FOUT_COLOUR(0) + 40,
+   };
+   ok &= exported_bases(b.shader, nir_intrinsic_export_agx, 8, main_bases) &&
+         agx_g17p_sample_zs_base(4, BITFIELD_BIT(0), 1) ==
+            AGX_ABI_FOUT_COLOUR(0) + 32;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         ok &= instr->type != nir_instr_type_intrinsic ||
+               nir_instr_as_intrinsic(instr)->intrinsic !=
+                  nir_intrinsic_export_agx ||
+               block == nir_impl_last_block(nir_shader_get_entrypoint(
+                           b.shader));
+      }
+   }
    ralloc_free(b.shader);
    if (!ok)
       return false;
@@ -260,6 +281,74 @@ test_unrolled_sample_shading(void)
    return ok;
 }
 
+/* Per-sample depth: Apple's fs_id_4x (applegpu_g17p, [[depth(any)]] per
+ * [[sample_id]]) stages sample i's word and depth at staging halves 4i and
+ * 4i + 2 and writes all four DEPTHFs under one class-1 transaction. The
+ * unrolled epilog completes that transaction before its colour stores. */
+static bool
+test_unrolled_sample_depth(void)
+{
+   struct agx_fs_epilog_key key = {
+      .link.loc_written = BITFIELD_BIT(0),
+      .link.size_32 = BITFIELD_BIT(0),
+      .link.write_z = true,
+      .nr_samples = 4,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode =
+      agx_pack_blend_standard(PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+                              PIPE_BLENDFACTOR_ZERO, PIPE_BLEND_ADD,
+                              PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P unrolled depth FS epilog");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_to_per_sample(b.shader);
+   bool ok = agx_nir_unroll_g17p_samples(b.shader, 4, key.link.loc_written);
+   nir_opt_constant_folding(b.shader);
+   ok &= agx_nir_hoist_g17p_zs_writes(b.shader);
+   agx_nir_lower_g17p_tile_samples(b.shader, 4);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = 4,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &backend_key, &part);
+
+   static const uint8_t wait1[] = {0x87, 0x02, 0x54, 0x01, 0x00, 0x00};
+   static const uint8_t release1[] = {0x07, 0x02, 0x54, 0x01, 0x00, 0x00};
+   static const uint8_t wait12[] = {0x87, 0x02, 0x54, 0x0c, 0x08, 0x00};
+   ok &= count_bytes(&part, wait1, sizeof(wait1)) == 1 &&
+         count_bytes(&part, release1, sizeof(release1)) == 1 &&
+         count_bytes(&part, wait12, sizeof(wait12)) == 1;
+
+   /* DEPTHF f5, the staging half, is byte 3 of the six-byte form. */
+   const uint8_t *text = part.binary;
+   unsigned depth_writes = 0;
+   size_t first_depthf = 0, colour_wait = 0;
+   for (size_t at = 0; text && at + 6 <= part.info.binary_size; ++at) {
+      if (text[at] == 0xd7 && (text[at + 1] & 0x0f) == 0x04 &&
+          text[at + 2] == 0x54 && text[at + 5] == 0x03) {
+         ok &= text[at + 3] == 4 * depth_writes;
+         first_depthf = depth_writes++ ? first_depthf : at;
+      }
+      if (!memcmp(text + at, wait12, sizeof(wait12)))
+         colour_wait = at;
+   }
+   ok &= depth_writes == 4 && first_depthf < colour_wait;
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -269,6 +358,10 @@ main(void)
    }
    if (!test_unrolled_sample_shading()) {
       fprintf(stderr, "G17P samples were not unrolled into one transaction\n");
+      return 1;
+   }
+   if (!test_unrolled_sample_depth()) {
+      fprintf(stderr, "G17P per-sample depth writes were not staged per sample\n");
       return 1;
    }
    if (!test_epilog_discard_policy()) {
