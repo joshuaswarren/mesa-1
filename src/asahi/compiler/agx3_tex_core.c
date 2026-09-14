@@ -224,12 +224,14 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
 
    /* The native clamp corpus covers fragment 2D, 2D-array and 3D samples,
     * including comparison/offset and indexed descriptor operands, and
-    * biased cube, cube-array and comparison cube samples. */
+    * biased cube, cube-array and comparison cube samples. A staged 3D offset
+    * is witnessed only beside a bias. */
    if (d->min_lod &&
        (enc != AGX_ISA_ENCODING_AGX3B ||
         (d->cube && d->lod != AGX3_TEX_LOD_BIAS_REGISTER) ||
         d->vertex_stage || d->query_lod ||
-        (d->three_d && d->offset) ||
+        (d->three_d && d->offset_staged &&
+         d->lod != AGX3_TEX_LOD_BIAS_REGISTER) ||
         d->gather != AGX3_TEX_GATHER_NONE ||
         d->sample_abi != AGX3_TEX_SAMPLE_ABI_DRIVER ||
         (d->lod != AGX3_TEX_LOD_BIAS_REGISTER &&
@@ -423,11 +425,16 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    const bool direct_array_immediate_lod =
       d->array && d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT &&
       (d->lod == AGX3_TEX_LOD_BIAS || d->lod == AGX3_TEX_LOD_LEVEL);
+   /* A staged 3D offset is witnessed beside a bias and a minimum: Apple packs
+    * the X/Y nibbles and the bias into one word, adds the Z nibble at bank-6
+    * bit 0, and names the minimum's packed register in SMP. */
+   const bool staged_3d_bias_min =
+      d->three_d && d->offset_staged && d->min_lod_register;
    const bool any_staged_offset = d->offset_staged || d->offset_register;
    if (d->offset &&
        (enc != AGX_ISA_ENCODING_AGX3B ||
         (any_staged_offset
-            ? d->offset_xyz != 0 || d->three_d
+            ? d->offset_xyz != 0 || (d->three_d && !staged_3d_bias_min)
             : d->offset_xyz == 0 ||
                  d->offset_xyz > (d->three_d ? 0xfffu : 0xffu)) ||
         d->cube || (direct_array_immediate_lod && !any_staged_offset)))
@@ -507,9 +514,9 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       return false;
 
    if (d->min_lod_register &&
-       (!d->min_lod || !d->shadow || !d->array || d->cube ||
-        d->lod != AGX3_TEX_LOD_BIAS_REGISTER || d->min_lod_value > 190 ||
-        (d->min_lod_value & 1)))
+       (!d->min_lod || d->cube || d->lod != AGX3_TEX_LOD_BIAS_REGISTER ||
+        !((d->shadow && d->array) || (d->three_d && d->offset_staged)) ||
+        d->min_lod_value > 190 || (d->min_lod_value & 1)))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;

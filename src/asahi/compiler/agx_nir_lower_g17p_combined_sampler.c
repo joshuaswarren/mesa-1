@@ -173,15 +173,20 @@ g17p_sample_shape(const nir_tex_instr *tex)
       nir_src_num_components(tex->src[offset_src].src) == 1;
    const bool staged_packed_offset =
       packed_offset && !nir_src_is_const(tex->src[offset_src].src) &&
-      (tex->is_array || has_lod || has_bias);
+      (tex->is_array || has_lod || has_bias || has_minimum);
    /* Native bank-6 minimum operands are grounded for 2D, 2D-array and 3D
     * fragment samples, and for biased cube samples. The shared texture lowering has already combined a
     * bias/minimum pair into one f16x2 source, or left the gradient minimum
     * as a scalar half. Preserve that source while selecting native handles.
-    * A 2D-array runtime offset carries the bias or gradient minimum in its
-    * packed bank-6 word. */
+    * A 2D runtime offset carries the bias or gradient minimum in its packed
+    * bank-6 word; an unpacked component offset would overwrite it. A runtime
+    * 3D offset is witnessed beside a bias only. */
    if (has_minimum &&
-       ((cube && packed_bias_min < 0) || (three_d && has_offset) ||
+       ((cube && packed_bias_min < 0) ||
+        (three_d && has_offset && packed_bias_min < 0 &&
+         !nir_src_is_const(tex->src[offset_src].src)) ||
+        (has_offset && !three_d && !packed_offset &&
+         !nir_src_is_const(tex->src[offset_src].src)) ||
         (packed_bias_min >= 0 &&
          (tex->op != nir_texop_txb || minimum >= 0 ||
           nir_tex_instr_src_index(tex, nir_tex_src_bias) >= 0 ||

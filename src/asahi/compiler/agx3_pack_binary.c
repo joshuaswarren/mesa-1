@@ -1669,6 +1669,15 @@ fail:
    return false;
 }
 
+/* A 3D sample with a bias, a minimum LOD and a runtime offset. */
+static bool
+agx3_is_staged_3d_bias_min(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->dim == AGX_DIM_3D &&
+          I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN && I->offset &&
+          !I->offset_xyz;
+}
+
 /* Filtered 2D samples use scoreboard-signalling native staging producers.
  * Plain implicit 2D keeps its coordinate layout. Explicit per-lane LOD and
  * 2D-array samples stage coordinates into bank 0; their auxiliary scalar is
@@ -1817,7 +1826,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       I->src[5].value + 2 * staged_offset_components <= 256;
    const unsigned packed_offset_components = 1 + (shadow ? 1 : 0);
    const bool staged_packed_offset = offset && !gather && I->offset_xyz == 0 &&
-      (array || explicit_lod || register_bias) &&
+      (array || explicit_lod || register_bias || min_lod) &&
       agx3_tex_plain_reg(I->src[5]) && I->src[5].size == AGX_SIZE_32 &&
       agx_channels(I->src[5]) == packed_offset_components &&
       (I->src[5].value & 1) == 0 &&
@@ -1885,8 +1894,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
           !register_bias && !bias_min))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
        I->sparse ||
+       /* A minimum LOD and a runtime offset share bank 6 only through the
+        * packed word. */
        (min_lod && ((cube && !bias_min) || vertex_stage ||
-                    (three_d && offset))) ||
+                    (three_d && offset && !bias_min && !immediate_offset) ||
+                    staged_component_offset)) ||
        (query_lod &&
         (enc != AGX_ISA_ENCODING_AGX3B || !implicit_lod || shadow || offset ||
          gather || I->dest[0].size != AGX_SIZE_32 || (I->mask & ~3u))) ||
@@ -1966,8 +1978,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    const bool combined_array_lod = array && !cube && !staged_offset &&
       ((explicit_lod && !immediate_lod) || register_bias || min_lod);
    const uint16_t offset_base = I->src[5].value + (shadow ? 2 : 0);
-   /* A 2D-array runtime offset arrives as one NIR-packed bank-6 word that
-    * already carries the layer and the bias or gradient minimum. */
+   /* The comparison 2D-array bias and the staged 3D bias read their minimum
+    * from a packed register. */
+   const bool register_minimum = bias_min &&
+      ((array && shadow) || (three_d && staged_packed_offset));
+   /* A runtime offset arrives as one NIR-packed bank-6 word that already
+    * carries the layer and the bias, or the minimum: a gradient's, or a
+    * non-array bias's. Only the 2D-array bias still stages its minimum. */
    const bool packed_array_word = array && staged_packed_offset;
    if (bias_min && array && !cube) {
       /* The minimum moves out of bank 6 so the bias can join the layer
@@ -2015,14 +2032,28 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
           !agx3_append(emission, bytes, len))
          return false;
       wait_mask = 0;
-   } else if (bias_min && !cube) {
+   } else if (bias_min && three_d && staged_packed_offset) {
+      /* A 3D word carries the Z nibble where a 2D one carries the minimum,
+       * so the minimum goes to the packed register SMP names. The register
+       * pack carries no wait, so it follows the staging that does. */
+      if (!agx3_tex_stage_copy_hints(
+             enc, 6, offset_base, stage_slot, wait_mask, I->src[5].cache,
+             I->src[5].discard, bytes, &len) ||
+          !agx3_append(emission, bytes, len) ||
+          !agx3_tex_pack_minimum(enc, I->src[1].value + 1, array_scratch,
+                                 I->src[1].cache, I->src[1].discard, bytes,
+                                 &len) ||
+          !agx3_append(emission, bytes, len))
+         return false;
+      wait_mask = 0;
+   } else if (bias_min && !cube && !staged_packed_offset) {
       if (!agx3_tex_stage_bias_min(
              enc, I->src[1].value, I->src[1].value + 1, stage_slot, wait_mask,
              I->src[1].cache, I->src[1].discard, bytes, &len) ||
           !agx3_append(emission, bytes, len))
          return false;
       wait_mask = 0;
-   } else if (gradient_min) {
+   } else if (gradient_min && !staged_packed_offset) {
       if (!agx3_tex_stage_typed_lod(
              enc, I->src[1].value + 2 * gradient_channels, stage_slot,
              wait_mask, I->src[1].cache, I->src[1].discard,
@@ -2282,9 +2313,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .offset_xyz = offset ? I->offset_xyz : 0,
       .offset_register = register_offset,
       .min_lod = min_lod,
-      .min_lod_register = bias_min && array && shadow,
-      .min_lod_value = bias_min && array && shadow ? array_scratch : 0,
-      .min_lod_kill = bias_min && array && shadow,
+      .min_lod_register = register_minimum,
+      .min_lod_value = register_minimum ? array_scratch : 0,
+      .min_lod_kill = register_minimum,
       .lod = biased_lod       ? AGX3_TEX_LOD_BIAS
              : immediate_lod  ? AGX3_TEX_LOD_LEVEL
              : explicit_lod   ? AGX3_TEX_LOD_REGISTER
@@ -6776,10 +6807,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              scan_I->dim == AGX_DIM_2D_MS_ARRAY)
             has_packed_array_layer = true;
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
-             scan_I->dim == AGX_DIM_2D_ARRAY &&
-             ((scan_I->offset && !scan_I->offset_xyz) ||
-              (scan_I->shadow &&
-               scan_I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN)))
+             ((scan_I->dim == AGX_DIM_2D_ARRAY &&
+               ((scan_I->offset && !scan_I->offset_xyz) ||
+                (scan_I->shadow &&
+                 scan_I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN))) ||
+              agx3_is_staged_3d_bias_min(scan_I)))
             has_packed_array_layer = true;
          if (scan_I->op == AGX_OPCODE_ST_TILE)
             tile_stores_left++;
@@ -7236,12 +7268,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (register_lod && (I->dim == AGX_DIM_CUBE_ARRAY || bias_min))
                e->dst[nd++] = ms_array_scratch;
          }
-         /* A 2D-array comparison packs its minimum LOD into the same word,
-          * which SMP reads after its staging completes. */
+         /* A 2D-array comparison and a staged 3D bias pack their minimum
+          * LOD into the same word, which SMP reads after its staging
+          * completes. */
          if (enc == AGX_ISA_ENCODING_AGX3B &&
              I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
-             I->dim == AGX_DIM_2D_ARRAY && I->shadow &&
-             I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN) {
+             ((I->dim == AGX_DIM_2D_ARRAY && I->shadow &&
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN) ||
+              agx3_is_staged_3d_bias_min(I))) {
             assert(nd < AGX3_SLOT_MAX_REGS);
             e->dst[nd++] = ms_array_scratch;
          }

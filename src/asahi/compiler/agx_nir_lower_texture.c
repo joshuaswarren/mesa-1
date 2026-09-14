@@ -270,6 +270,31 @@ lower_buffer_texture(nir_builder *b, nir_tex_instr *tex, bool buffer_metadata)
    return true;
 }
 
+/* A texel offset counts as immediate when every component resolves to a
+ * constant, including the per-component vector nir_lower_load_const_to_scalar
+ * leaves behind. */
+static bool
+g17p_offset_is_constant(nir_def *offset)
+{
+   for (unsigned c = 0; c < offset->num_components; ++c) {
+      if (!nir_scalar_is_const(nir_scalar_resolved(offset, c)))
+         return false;
+   }
+   return true;
+}
+
+/* A signed x64 LOD in the 12-bit field of a G17P sampler bank-6 word, the
+ * same bounds and truncation the immediate SMP LOD field uses. */
+static nir_def *
+pack_g17p_lod_field(nir_builder *b, nir_def *lod, float minimum, unsigned shift)
+{
+   nir_def *lod32 = nir_f2f32(b, lod);
+   lod32 = nir_fmax(b, lod32, nir_imm_float(b, minimum));
+   lod32 = nir_fmin(b, lod32, nir_imm_float(b, 2047.0f / 64.0f));
+   nir_def *x64 = nir_f2i32(b, nir_fmul_imm(b, lod32, 64.0f));
+   return nir_ishl_imm(b, nir_iand_imm(b, x64, 0xfff), shift);
+}
+
 /*
  * NIR indexes into array textures with unclamped floats (integer for txf). AGX
  * requires the index to be a clamped integer. Lower tex_src_coord into
@@ -450,7 +475,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_def *offset = nir_steal_tex_src(tex, nir_tex_src_offset);
 
    if (offset != NULL) {
-      if (gen9 && !nir_def_is_const(offset)) {
+      if (gen9 && !g17p_offset_is_constant(offset)) {
          /* Array layer, register LOD/bias, and a runtime 2D offset occupy
           * complementary fields of sampler bank 6. Multiple PACK_SMPIR
           * instructions replace that word instead of composing it, so publish
@@ -462,47 +487,66 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
           * 12-bit range.  These are the same bounds and truncation used by
           * the immediate SMP field.
           *
-          * A 2D-array sample with a minimum LOD keeps the same word: a bias
-          * still fills bits 16..27 beside its separately staged minimum, and
-          * a gradient's minimum takes them, as Apple's layer | minimum
-          * register pack does. */
+          * A sample with a minimum LOD keeps the same word, as Apple's
+          * register packs do. A gradient's minimum takes bits 16..27. A bias
+          * keeps them, and its minimum takes bits 0..11 unless an array
+          * layer owns them; the 2D-array minimum is staged separately. */
          const int level_idx =
             nir_tex_instr_src_index(tex, nir_tex_src_lod);
          const int bias_idx =
             nir_tex_instr_src_index(tex, nir_tex_src_bias);
          const int min_lod_idx =
             nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
-         const bool has_min_lod = min_lod_idx >= 0;
-         const bool pack_minimum = has_min_lod && tex->is_array &&
-            tex->op == nir_texop_txd &&
+         const bool has_min_lod = min_lod_idx >= 0 &&
             nir_src_bit_size(tex->src[min_lod_idx].src) == 16;
-         const int packed_level_idx = pack_minimum ? min_lod_idx
-                                      : level_idx >= 0 ? level_idx
-                                                       : bias_idx;
+         const int packed_level_idx =
+            has_min_lod && tex->op == nir_texop_txd ? min_lod_idx
+            : level_idx >= 0                        ? level_idx
+                                                    : bias_idx;
          const bool pack_level = packed_level_idx >= 0 &&
-            (has_min_lod ? tex->is_array
-                         : !nir_src_is_const(tex->src[packed_level_idx].src)) &&
+            (has_min_lod ||
+             !nir_src_is_const(tex->src[packed_level_idx].src)) &&
             nir_src_bit_size(tex->src[packed_level_idx].src) == 16;
          const bool pack_array_layer = tex->is_array && layer != NULL;
+         const bool bias_minimum = has_min_lod && !tex->is_array &&
+            tex->op == nir_texop_txb;
+
+         /* A 3D bias with a minimum publishes the Z nibble in bits 0..3 of
+          * the same word; its minimum goes to a packed register SMP names.
+          * Apple's texture3d bias + min_lod_clamp + runtime offset packs the
+          * X/Y nibbles and bias into one word (17055402030c1c10f08a0300),
+          * then adds Z at bank-6 bit 0 (1705540600020010f0c20200). */
+         if (offset->num_components == 3 && bias_minimum &&
+             tex->sampler_dim == GLSL_SAMPLER_DIM_3D && pack_level) {
+            nir_def *z = nir_iand_imm(b, nir_channel(b, offset, 2), 0xf);
+            nir_def *x = nir_ishl_imm(
+               b, nir_iand_imm(b, nir_channel(b, offset, 0), 0xf), 12);
+            nir_def *y = nir_ishl_imm(
+               b, nir_iand_imm(b, nir_channel(b, offset, 1), 0xf), 28);
+            nir_def *packed = nir_ior(
+               b, pack_g17p_lod_field(b, tex->src[bias_idx].src.ssa, -32.0f, 16),
+               nir_ior(b, z, nir_ior(b, x, y)));
+            nir_tex_instr_add_src(tex, nir_tex_src_backend2, packed);
+            goto offset_lowered;
+         }
 
          if (offset->num_components == 2 &&
              (pack_level || pack_array_layer)) {
-            nir_def *packed = pack_array_layer
-               ? nir_iand_imm(b, nir_u2u32(b, layer), 0xfff)
-               : nir_imm_int(b, 0);
+            nir_def *packed =
+               pack_array_layer
+                  ? nir_iand_imm(b, nir_u2u32(b, layer), 0xfff)
+               : bias_minimum
+                  ? pack_g17p_lod_field(b, tex->src[min_lod_idx].src.ssa,
+                                        0.0f, 0)
+                  : nir_imm_int(b, 0);
 
             if (pack_level) {
-               nir_def *level = tex->src[packed_level_idx].src.ssa;
-               nir_def *level32 = nir_f2f32(b, level);
-               const float minimum = bias_idx >= 0 ? -32.0f : 0.0f;
-               level32 = nir_fmax(b, level32, nir_imm_float(b, minimum));
-               level32 = nir_fmin(b, level32,
-                                  nir_imm_float(b, 2047.0f / 64.0f));
-               nir_def *level_x64 =
-                  nir_f2i32(b, nir_fmul_imm(b, level32, 64.0f));
-               nir_def *level_bits =
-                  nir_ishl_imm(b, nir_iand_imm(b, level_x64, 0xfff), 16);
-               packed = nir_ior(b, packed, level_bits);
+               const bool signed_bias =
+                  bias_idx >= 0 && packed_level_idx == bias_idx;
+               packed = nir_ior(
+                  b, packed,
+                  pack_g17p_lod_field(b, tex->src[packed_level_idx].src.ssa,
+                                      signed_bias ? -32.0f : 0.0f, 16));
             }
 
             nir_def *x =
@@ -1026,8 +1070,15 @@ lower_g17p_3d_runtime_offset(const nir_instr *instr, UNUSED const void *data)
    const nir_tex_instr *tex = nir_instr_as_tex(instr);
    const int offset =
       nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   /* Coordinate addition scales the offset by the base level, which is only
+    * right when the base level is sampled. A bias with a minimum LOD, which
+    * selects other levels, keeps its native staged offset; an immediate
+    * offset keeps SMP's. */
    return tex->sampler_dim == GLSL_SAMPLER_DIM_3D && offset >= 0 &&
-          !nir_src_is_const(tex->src[offset].src);
+          !g17p_offset_is_constant(tex->src[offset].src.ssa) &&
+          !(tex->op == nir_texop_txb &&
+            nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0 &&
+            nir_tex_instr_src_index(tex, nir_tex_src_projector) < 0);
 }
 
 enum g17p_3d_runtime_offset_mode {
@@ -1081,7 +1132,7 @@ lower_g17p_projected_3d_runtime_offset(nir_builder *b, nir_instr *instr,
    const int offset_idx = nir_tex_instr_src_index(tex, nir_tex_src_offset);
    if (tex->sampler_dim != GLSL_SAMPLER_DIM_3D || coord_idx < 0 ||
        projector_idx < 0 || offset_idx < 0 ||
-       nir_src_is_const(tex->src[offset_idx].src))
+       g17p_offset_is_constant(tex->src[offset_idx].src.ssa))
       return false;
 
    b->cursor = nir_before_instr(instr);

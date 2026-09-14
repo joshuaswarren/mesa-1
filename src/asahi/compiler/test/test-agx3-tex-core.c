@@ -3367,6 +3367,61 @@ test_minimum_lod_witnesses(void)
       d.cube = true;
       CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
    }
+   /* texture3d bias and gradient3d + min_lod_clamp with an immediate offset
+    * (1, -1, 2), and the bias with a runtime offset, whose minimum SMP reads
+    * from a packed register;
+    * texture2d with a runtime offset, whose bank-6 word carries the minimum.
+    * metal-nt -arch applegpu_g17p. */
+   static const struct {
+      bool three_d, staged, registered, gradient, shadow;
+      const char *hex;
+   } offsets[] = {
+      {true, false, false, false, false, "05800cb8b000d90201881000012e"},
+      {true, false, false, true, false, "05800cb8b000590300881000012e"},
+      {true, true, true, false, false, "05800cb8b0008200010010080100"},
+      {false, true, false, false, false, "05800cb8b0004408010010000100"},
+      {false, true, false, true, false, "05800cb8b0005401000010000100"},
+      {false, true, false, false, true, "05800ca090006408010000000100"},
+      {false, true, false, true, true, "05800ca090007401000000000100"},
+   };
+   for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = offsets[i].shadow ? 1 : 15, .slot = 1, .wait_mask = 1,
+         .coord_kill = true, .final = true, .min_lod = true,
+         .min_lod_register = offsets[i].registered,
+         .min_lod_kill = offsets[i].registered,
+         .lod = offsets[i].gradient ? AGX3_TEX_LOD_GRADIENT
+                                    : AGX3_TEX_LOD_BIAS_REGISTER,
+         .offset = true, .offset_staged = offsets[i].staged,
+         .offset_xyz = offsets[i].staged ? 0 : 0x2f1,
+         .three_d = offsets[i].three_d, .shadow = offsets[i].shadow,
+         .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, offsets[i].hex));
+      if (offsets[i].three_d && offsets[i].staged) {
+         /* Only the bias is witnessed beside a staged 3D offset. */
+         d.lod = AGX3_TEX_LOD_GRADIENT;
+         d.min_lod_register = false;
+         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      }
+   }
+   /* A staged 3D offset without the register minimum has no witness. */
+   {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15, .slot = 1,
+         .wait_mask = 1, .coord_kill = true, .final = true, .min_lod = true,
+         .lod = AGX3_TEX_LOD_BIAS_REGISTER, .offset = true,
+         .offset_staged = true, .three_d = true,
+         .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      d.min_lod = false;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+   }
    /* texturecube and depthcube bias + min_lod_clamp: the face packed alone,
     * then minimum and bias beside it. */
    CHECK(agx3_tex_pack_cube_face(enc, 8, 0, bytes, &len));

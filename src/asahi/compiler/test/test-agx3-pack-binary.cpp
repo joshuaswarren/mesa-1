@@ -246,6 +246,84 @@ TEST_F(AGX3PackBinary, ArrayMinimumLodSharesTheLayerBank)
    }
 }
 
+/* A non-array runtime offset carries the minimum LOD in its NIR-packed word
+ * with the bias (bits 0..11 and 16..27) or alone (a gradient's, bits 16..27),
+ * so the sample publishes that one word to bank 6 and nothing else there. */
+TEST_F(AGX3PackBinary, RuntimeOffsetMinimumLodPublishesThePackedWord)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool gradient : {false, true}) {
+      for (bool shadow : {false, true}) {
+         agx_builder *b = builder(enc);
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         agx_index dest = agx_register(16, AGX_SIZE_32);
+         dest.channels_m1 = 3;
+         agx_index coord = agx_register(8, AGX_SIZE_32);
+         coord.channels_m1 = 1;
+         agx_index lod = agx_register(32, AGX_SIZE_32);
+         lod.channels_m1 = gradient ? 4 : 0;
+         agx_index word = agx_register(48, AGX_SIZE_32);
+         word.channels_m1 = shadow ? 1 : 0;
+         word.discard = true;
+         auto *I = agx_texture_sample_to(
+            b, dest, coord, lod, agx_immediate(0), agx_immediate(0),
+            agx_immediate(0), word, AGX_DIM_2D,
+            gradient ? AGX_LOD_MODE_LOD_GRAD_MIN
+                     : AGX_LOD_MODE_AUTO_LOD_BIAS_MIN,
+            0, true, shadow, false, AGX_GATHER_NONE, false);
+         I->mask = shadow ? 1 : 15;
+         agx_stop(b);
+         const auto code = pack(b);
+
+         uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+         ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 6, shadow ? 50 : 48, 1, 0,
+                                               false, true, bytes, &len));
+         EXPECT_EQ(std::search(code.begin(), code.end(), bytes, bytes + len),
+                   code.begin());
+         unsigned publications = 0;
+         for (size_t i = 0; i + 4 <= code.size(); i += 2) {
+            if (code[i] == 0x17 && code[i + 1] == 0x05 &&
+                code[i + 2] == 0x54 && code[i + 3] == 0x06)
+               publications++;
+         }
+         EXPECT_EQ(publications, 0u);
+      }
+   }
+
+   /* A 3D word carries the Z nibble instead, so the minimum is packed into
+    * a register after the word. */
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_index dest = agx_register(16, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   agx_index coord = agx_register(8, AGX_SIZE_32);
+   coord.channels_m1 = 2;
+   agx_index pair = agx_register(32, AGX_SIZE_32);
+   pair.discard = true;
+   agx_index word = agx_register(48, AGX_SIZE_32);
+   word.discard = true;
+   auto *I = agx_texture_sample_to(
+      b, dest, coord, pair, agx_immediate(0), agx_immediate(0),
+      agx_immediate(0), word, AGX_DIM_3D, AGX_LOD_MODE_AUTO_LOD_BIAS_MIN, 0,
+      true, false, false, AGX_GATHER_NONE, false);
+   I->mask = 15;
+   agx_stop(b);
+   const auto code = pack(b);
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 6, 48, 1, 0, false, true, bytes,
+                                         &len));
+   std::vector<uint8_t> want(bytes, bytes + len);
+   ASSERT_EQ(std::search(code.begin(), code.end(), want.begin(), want.end()),
+             code.begin());
+   bool packed = false;
+   for (uint16_t scratch = 50; scratch <= 190 && !packed; scratch += 2) {
+      ASSERT_TRUE(agx3_tex_pack_minimum(enc, 33, scratch, false, true, bytes,
+                                        &len));
+      packed = std::equal(bytes, bytes + len, code.begin() + want.size());
+   }
+   EXPECT_TRUE(packed);
+}
+
 TEST_F(AGX3PackBinary, LargeGradientOperandsKeepLateDescriptorWait)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
