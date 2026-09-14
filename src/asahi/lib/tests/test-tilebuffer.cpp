@@ -605,8 +605,14 @@ TEST(Tilebuffer, G17PRGB32EOTKey)
       EXPECT_EQ(key.g17p_rt0_eot_i32_signed_four_words,
                 format.signed_format);
 
+      /* The 32-bit tile is the one family the multisample sweep does not
+       * reach: agx3_emit_tile() has no witnessed multisample store above
+       * sixteen halves, and admitting the layout only defers the refusal to
+       * a draw. capture-g17p-r32-multisample-store.py holds Apple's own
+       * single-target store for it; the remaining field is not yet
+       * identified, so this stays refused rather than guessed. */
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
-      EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
+      EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
       tib = agx_build_tilebuffer_layout(rt, 1, 1, true);
       EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
    }
