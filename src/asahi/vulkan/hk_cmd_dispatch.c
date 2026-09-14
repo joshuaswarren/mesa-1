@@ -217,6 +217,12 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    case AGX_CS_GENERATION_G15:
    case AGX_CS_GENERATION_HAL200:
    case AGX_CS_GENERATION_HAL300: {
+      /* A strong flush already ends the stream: every launch has one in its
+       * tail, and a second barrier with no launch between them is not a
+       * shape Apple's CDM emitter produces. */
+      if (cs->current == cs->strong_flush_end)
+         return;
+
       /* Apple's CommandEncodingNext emitter uses flags=5 for its strong
        * post-dispatch cache flush on every grounded G15--G17 identity.  Keep
        * Honeykrisp's deliberately conservative flush-after-every-launch
@@ -236,6 +242,7 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
 
       memcpy(cs->current, packed, sizeof(packed));
       cs->current = (uint32_t *)((uint8_t *)cs->current + sizeof(packed));
+      cs->strong_flush_end = cs->current;
       break;
    }
 
@@ -806,6 +813,8 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+   if (barrier_flags == 0x5)
+      cs->strong_flush_end = cs->current;
    cs->stats.cmds++;
 }
 
@@ -1374,6 +1383,8 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+   if (barrier_flags == 0x5)
+      cs->strong_flush_end = cs->current;
    cs->stats.cmds++;
 }
 

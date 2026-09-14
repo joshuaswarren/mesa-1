@@ -395,6 +395,10 @@ struct hk_cs {
    /* End pointer of the current chunk of the control stream */
    void *end;
 
+   /* AGX3 CDM: the value of current just after a strong cache flush, so a
+    * flush requested with nothing recorded since it can be elided. */
+   void *strong_flush_end;
+
    /* Whether there is more than just the root chunk */
    bool stream_linked;
 
