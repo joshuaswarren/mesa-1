@@ -4223,6 +4223,8 @@ TEST_F(AGX3PackBinary, RegisterAndUniformSubgroupShuffles)
                   .dest = 4,
                   .src = 2,
                   .lane = 8,
+                  .src_live = true,
+                  .lane_live = true,
                };
                uint8_t subgroup[AGX3_SUBGROUP_MAX_LENGTH], subgroup_len = 0;
                ASSERT_TRUE(agx3_subgroup_encode_shuffle(enc, &d, subgroup,
@@ -4236,6 +4238,39 @@ TEST_F(AGX3PackBinary, RegisterAndUniformSubgroupShuffles)
             }
          }
       }
+   }
+}
+
+TEST_F(AGX3PackBinary, RegisterQuadBroadcastPreservesBothOperandLifetimes)
+{
+   for (unsigned dead = 0; dead < 4; ++dead) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index value = agx_register(2, AGX_SIZE_32);
+      agx_index lane = agx_register(8, AGX_SIZE_32);
+      agx_index dest = agx_register(4, AGX_SIZE_32);
+      value.discard = dead & 1;
+      lane.discard = dead & 2;
+      dest.cache = true;
+      agx_quad_shuffle_to(b, dest, value, lane);
+      agx_stop(b);
+      const struct agx3_subgroup_shuffle_desc d = {
+         .quad = true,
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
+         .dest = 4, .src = 2, .lane = 8,
+         .dest_hint = true,
+         .src_live = !(dead & 1),
+         .lane_live = !(dead & 2),
+      };
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d,
+                                               bytes, &length));
+      std::vector<uint8_t> want;
+      append(want, bytes, length);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
    }
 }
 

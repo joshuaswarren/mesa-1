@@ -4011,6 +4011,9 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
       .src = I->src[0].value,
       .lane = I->src[1].value,
       .wait_mask = 0,
+      .dest_hint = I->dest[0].cache,
+      .src_live = !I->src[0].discard,
+      .lane_live = !I->src[1].discard,
    };
    uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
    return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&

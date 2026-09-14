@@ -215,10 +215,10 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
 
    if (!is_c(enc)) {
       if (d->lane_kind == AGX3_SUBGROUP_LANE_REGISTER) {
-         if (!d->quad && d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST) {
-            ADD_FIELD(11, 1);
-            ADD_FIELD(25, 1);
-            ADD_FIELD(41, 1);
+         if (d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST) {
+            ADD_FIELD(11, d->dest_hint);
+            ADD_FIELD(d->src_live ? 25 : 27, 1);
+            ADD_FIELD(d->lane_live ? 39 : 41, 1);
          } else if (d->op == AGX3_SUBGROUP_SHUFFLE_UP ||
                     d->op == AGX3_SUBGROUP_SHUFFLE_DOWN) {
             ADD_FIELD(11, 1);
