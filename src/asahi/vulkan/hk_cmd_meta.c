@@ -2338,6 +2338,159 @@ hk_g17p_copy_compressed_image_to_buffer(
 }
 
 static bool
+hk_g17p_raw_image_copy_supported(struct hk_device *dev,
+                                 const struct hk_image *src,
+                                 const struct hk_image *dst,
+                                 const VkCopyImageInfo2 *info)
+{
+   if (dev->dev.chip != AGX_CHIP_G17P || info->regionCount == 0 ||
+       !hk_g17p_block_copy_format(dev, src->vk.format) ||
+       src->plane_count != 1 || dst->plane_count != 1 ||
+       src->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+       dst->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+       !hk_g17p_transfer_src_layout_supported(info->srcImageLayout) ||
+       !hk_g17p_transfer_dst_layout_supported(info->dstImageLayout))
+      return false;
+
+   const struct ail_layout *src_layout = &src->planes[0].layout;
+   const struct ail_layout *dst_layout = &dst->planes[0].layout;
+   if (src_layout->tiling != AIL_TILING_GPU ||
+       dst_layout->tiling != AIL_TILING_GPU || src_layout->compressed ||
+       dst_layout->compressed)
+      return false;
+
+   for (uint32_t r = 0; r < info->regionCount; ++r) {
+      const VkImageCopy2 *region = &info->pRegions[r];
+      if (region->srcSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+          region->dstSubresource.aspectMask != VK_IMAGE_ASPECT_COLOR_BIT ||
+          region->srcSubresource.mipLevel >= src->vk.mip_levels ||
+          region->dstSubresource.mipLevel >= dst->vk.mip_levels)
+         return false;
+
+      struct hk_g17p_image_copy_element_plan plan;
+      if (!hk_g17p_image_copy_element_plan(
+             src->vk.format, dst->vk.format, region, &plan) ||
+          plan.block_size_B > 16)
+         return false;
+
+      const uint32_t src_slices =
+         src->vk.image_type == VK_IMAGE_TYPE_3D
+            ? region->extent.depth
+            : vk_image_subresource_layer_count(&src->vk,
+                                                &region->srcSubresource);
+      const uint32_t dst_slices =
+         dst->vk.image_type == VK_IMAGE_TYPE_3D
+            ? region->extent.depth
+            : vk_image_subresource_layer_count(&dst->vk,
+                                                &region->dstSubresource);
+      VkImageCopy2 last;
+      if (!src_slices || !hk_g17p_image_copy_slice(
+            dev->dev.chip, src->vk.image_type, dst->vk.image_type,
+            src_slices, dst_slices, region, src_slices - 1, &last))
+         return false;
+
+      const uint32_t src_level = region->srcSubresource.mipLevel;
+      const uint32_t dst_level = region->dstSubresource.mipLevel;
+      const struct ail_tile src_tile = src_layout->tilesize_el[src_level];
+      const struct ail_tile dst_tile = dst_layout->tilesize_el[dst_level];
+      struct hk_g17p_tile_address_config src_tile_config;
+      struct hk_g17p_tile_address_config dst_tile_config;
+      if (!hk_g17p_tile_address_config_init(
+             src_layout->stride_el[src_level], src_tile.width_el,
+             src_tile.height_el, &src_tile_config) ||
+          !hk_g17p_tile_address_config_init(
+             dst_layout->stride_el[dst_level], dst_tile.width_el,
+             dst_tile.height_el, &dst_tile_config))
+         return false;
+   }
+
+   return true;
+}
+
+static void
+hk_g17p_copy_raw_image(struct hk_cmd_buffer *cmd, struct hk_image *src,
+                       struct hk_image *dst, const VkCopyImageInfo2 *info)
+{
+   const struct ail_layout *src_layout = &src->planes[0].layout;
+   const struct ail_layout *dst_layout = &dst->planes[0].layout;
+
+   for (uint32_t r = 0; r < info->regionCount; ++r) {
+      const VkImageCopy2 *region = &info->pRegions[r];
+      const uint32_t src_level = region->srcSubresource.mipLevel;
+      const uint32_t dst_level = region->dstSubresource.mipLevel;
+      const uint32_t src_slices =
+         src->vk.image_type == VK_IMAGE_TYPE_3D
+            ? region->extent.depth
+            : vk_image_subresource_layer_count(&src->vk,
+                                                &region->srcSubresource);
+      const uint32_t dst_slices =
+         dst->vk.image_type == VK_IMAGE_TYPE_3D
+            ? region->extent.depth
+            : vk_image_subresource_layer_count(&dst->vk,
+                                                &region->dstSubresource);
+      struct hk_g17p_image_copy_element_plan plan;
+      const bool planned = hk_g17p_image_copy_element_plan(
+         src->vk.format, dst->vk.format, region, &plan);
+      assert(planned);
+
+      const struct ail_tile src_tile = src_layout->tilesize_el[src_level];
+      const struct ail_tile dst_tile = dst_layout->tilesize_el[dst_level];
+      struct hk_g17p_tile_address_config src_tile_config;
+      struct hk_g17p_tile_address_config dst_tile_config;
+      const bool tiled = hk_g17p_tile_address_config_init(
+         src_layout->stride_el[src_level], src_tile.width_el,
+         src_tile.height_el, &src_tile_config) &&
+         hk_g17p_tile_address_config_init(
+            dst_layout->stride_el[dst_level], dst_tile.width_el,
+            dst_tile.height_el, &dst_tile_config);
+      assert(tiled);
+
+      for (uint32_t slice = 0; slice < src_slices; ++slice) {
+         VkImageCopy2 one;
+         const bool sliced = hk_g17p_image_copy_slice(
+            AGX_CHIP_G17P, src->vk.image_type, dst->vk.image_type,
+            src_slices, dst_slices, region, slice, &one);
+         assert(sliced);
+         const uint32_t src_slice =
+            src->vk.image_type == VK_IMAGE_TYPE_3D
+               ? one.srcOffset.z
+               : one.srcSubresource.baseArrayLayer;
+         const uint32_t dst_slice =
+            dst->vk.image_type == VK_IMAGE_TYPE_3D
+               ? one.dstOffset.z
+               : one.dstSubresource.baseArrayLayer;
+         const struct libagx_copy_image_args args = {
+            .dest = hk_image_base_address(dst, 0) +
+                    ail_get_layer_level_B(dst_layout, dst_slice, dst_level),
+            .src = hk_image_base_address(src, 0) +
+                   ail_get_layer_level_B(src_layout, src_slice, src_level),
+            .width_el = plan.width_el,
+            .height_el = plan.height_el,
+            .dest_x_el = plan.dst_x_el,
+            .dest_y_el = plan.dst_y_el,
+            .src_x_el = plan.src_x_el,
+            .src_y_el = plan.src_y_el,
+            .dest_tiles_per_row = dst_tile_config.tiles_per_row,
+            .src_tiles_per_row = src_tile_config.tiles_per_row,
+            .dest_tile_width_log2 = dst_tile_config.tile_width_log2,
+            .dest_tile_height_log2 = dst_tile_config.tile_height_log2,
+            .src_tile_width_log2 = src_tile_config.tile_width_log2,
+            .src_tile_height_log2 = src_tile_config.tile_height_log2,
+            .blocksize_B = plan.block_size_B,
+            .dest_tiled = true,
+            .src_tiled = true,
+         };
+
+         libagx_copy_image_struct(
+            cmd, agx_2d(plan.width_el, plan.height_el), AGX_BARRIER_NONE,
+            args);
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return;
+      }
+   }
+}
+
+static bool
 hk_bind_point(bool gfx)
 {
    return gfx ? VK_PIPELINE_BIND_POINT_GRAPHICS
@@ -2487,6 +2640,14 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_image, src_image, pCopyImageInfo->srcImage);
    VK_FROM_HANDLE(hk_image, dst_image, pCopyImageInfo->dstImage);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (hk_g17p_raw_image_copy_supported(
+          dev, src_image, dst_image, pCopyImageInfo)) {
+      struct hk_meta_save save;
+      hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+      hk_g17p_copy_raw_image(cmd, src_image, dst_image, pCopyImageInfo);
+      hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+      return;
+   }
    /* G17P copies through its native tile renderer, as buffer uploads do.
     * The common meta path preserves partial rectangles, layers and format
     * reinterpretation without the AGX2 compute imageblock protocol. */

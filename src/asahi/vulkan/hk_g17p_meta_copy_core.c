@@ -95,6 +95,39 @@ hk_g17p_tile_address_config_init(
 }
 
 bool
+hk_g17p_image_copy_element_plan(
+   VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
+   struct hk_g17p_image_copy_element_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+
+   const uint32_t src_block_B = vk_format_get_blocksize(src_format);
+   const uint32_t dst_block_B = vk_format_get_blocksize(dst_format);
+   const uint32_t src_block_w = vk_format_get_blockwidth(src_format);
+   const uint32_t src_block_h = vk_format_get_blockheight(src_format);
+   const uint32_t dst_block_w = vk_format_get_blockwidth(dst_format);
+   const uint32_t dst_block_h = vk_format_get_blockheight(dst_format);
+   if (!plan || !region || !src_block_B || src_block_B != dst_block_B ||
+       !src_block_w || !src_block_h || !dst_block_w || !dst_block_h ||
+       region->srcOffset.x < 0 || region->srcOffset.y < 0 ||
+       region->dstOffset.x < 0 || region->dstOffset.y < 0 ||
+       !region->extent.width || !region->extent.height)
+      return false;
+
+   *plan = (struct hk_g17p_image_copy_element_plan){
+      .block_size_B = src_block_B,
+      .src_x_el = (uint32_t)region->srcOffset.x / src_block_w,
+      .src_y_el = (uint32_t)region->srcOffset.y / src_block_h,
+      .dst_x_el = (uint32_t)region->dstOffset.x / dst_block_w,
+      .dst_y_el = (uint32_t)region->dstOffset.y / dst_block_h,
+      .width_el = DIV_ROUND_UP(region->extent.width, src_block_w),
+      .height_el = DIV_ROUND_UP(region->extent.height, src_block_h),
+   };
+   return true;
+}
+
+bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
 {
    return layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
