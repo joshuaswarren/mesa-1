@@ -538,7 +538,9 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
       coord >= 0 ? nir_src_num_components(tex->src[coord].src) : 0;
    return handle >= 0 && coord >= 0 &&
       (multisample
-          ? (tex->num_srcs == 2 && sample < 0 && lod < 0 &&
+          ? (tex->num_srcs == (lod >= 0 ? 3 : 2) && sample < 0 &&
+             (lod < 0 || (nir_src_is_const(tex->src[lod].src) &&
+                          nir_src_as_uint(tex->src[lod].src) == 0)) &&
              /* agx_nir_lower_texture packs sample and optional array layer
               * into the third 32-bit backend coordinate. */
              lowered_coord_components == 3)
