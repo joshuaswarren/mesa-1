@@ -4058,7 +4058,7 @@ TEST_F(AGX3PackBinary, RegisterSubgroupShufflesWaitForDeviceLoad)
             .dest = 6,
             .src = 4,
             .lane = 8,
-            .wait_mask = agx3b ? 1u << 5 : 0u,
+            .wait_mask = (uint16_t)(agx3b ? 1u << 5 : 0u),
          };
          ASSERT_TRUE(agx3_subgroup_encode_shuffle(enc, &shuffle, bytes,
                                                    &length));

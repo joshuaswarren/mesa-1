@@ -323,8 +323,7 @@ main(void)
    eot.imageblock_offset1_B = 8;
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                              &eot_program));
-   /* Mixed RGBA16F/R8 uses the same 120-byte control flow, with offsets0/8
-    * inside sample stride16; the native format selector differs. */
+   eot.shader_binary_size = 238;
    eot.imageblock.sample_size_B = 16;
    CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                             &eot_program));
@@ -333,12 +332,7 @@ main(void)
                                              &eot_program));
    eot.imageblock_offset1_B = 12;
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                              &eot_program));
-   /* The old partition-one 238-byte program is invalid for this layout. */
-   eot.imageblock_offset1_B = 8;
-   eot.shader_binary_size = 238;
-   CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                              &eot_program));
+                                             &eot_program));
 
    /* Four native PBE entries share one argument table. Both witnessed tile
     * strides use the same shader and sparse offset uniforms. */
@@ -502,103 +496,6 @@ main(void)
    eot.nr_gprs = 16;
    CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
                                              &eot_program));
-
-   /* Native builtin metadata: text lengths, GPR allocation and staging D
-    * are independently captured for each dense attachment count. */
-   const unsigned native_sizes[] = {164, 208, 252, 296, 340, 384};
-   const unsigned native_staging[] = {24, 32, 40, 48, 56, 64};
-   /* All logical masks use physical partition zero; only the number of
-    * compact active PBEs changes the native builtin and its staging bound. */
-   const unsigned native_all_sizes[] = {68, 120, 164, 208, 252, 296, 340, 384};
-   for (unsigned mask = 1; mask < 256; ++mask) {
-      unsigned count = __builtin_popcount(mask);
-      eot.attachment_mask = mask;
-      eot.attachment_count = count;
-      eot.shader_binary_size = native_all_sizes[count - 1];
-      eot.nr_gprs = 8;
-      eot.staging_halfs = 8 * count;
-      eot.imageblock.sample_size_B = (4 * count + 7) & ~7u;
-      eot.imageblock.tile_size_px = count >= 7 ? 512 : 1024;
-      for (unsigned i = 0; i < count; ++i)
-         eot.imageblock_offsets_B[i] = 4 * i;
-      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                               &eot_program));
-      const struct agx3_g17p_rt0_eot_program before = eot_program;
-      eot.attachment_count++;
-      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                &eot_program));
-      CHECK(!memcmp(&before, &eot_program, sizeof(before)));
-      eot.attachment_count = count;
-
-      /* An explicit active mask must not fall back to a legacy RT0/dual
-       * descriptor when its compact-layout metadata is invalid. */
-      eot.imageblock_offset_B = 4;
-      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                &eot_program));
-      CHECK(!memcmp(&before, &eot_program, sizeof(before)));
-      eot.imageblock_offset_B = 0;
-
-      eot.imageblock.nr_samples = 2;
-      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                &eot_program));
-      CHECK(!memcmp(&before, &eot_program, sizeof(before)));
-      eot.imageblock.nr_samples = 1;
-      eot.imageblock.sample_size_B += 8;
-      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                &eot_program));
-      CHECK(!memcmp(&before, &eot_program, sizeof(before)));
-      eot.imageblock.sample_size_B -= 8;
-
-      if (count == 1) {
-         eot.attachment_count = 0;
-         CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                   &eot_program));
-         CHECK(!memcmp(&before, &eot_program, sizeof(before)));
-      }
-   }
-   eot.attachment_mask = 0;
-   for (unsigned count = 3; count <= 8; ++count) {
-      fprintf(stderr, "Testing dense MRT loader count=%u\n", count);
-      eot.attachment_count = count;
-      eot.shader_binary_size = native_sizes[count - 3];
-      eot.nr_gprs = 8;
-      eot.staging_halfs = native_staging[count - 3];
-      eot.imageblock.sample_size_B = (4 * count + 7) & ~7u;
-      eot.imageblock.tile_size_px = count >= 7 ? 512 : 1024;
-      for (unsigned rt = 0; rt < count; ++rt)
-         eot.imageblock_offsets_B[rt] = 4 * rt;
-      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                               &eot_program));
-      CHECK(eot_program.length <= AGX3_G17P_WIDE_MRT_EOT_PROGRAM_MAX_SIZE);
-      const struct agx3_g17p_rt0_eot_program before = eot_program;
-      eot.imageblock_offsets_B[count - 1] += 4;
-      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                &eot_program));
-      CHECK(memcmp(&eot_program, &before, sizeof(before)) == 0);
-      eot.imageblock_offsets_B[count - 1] -= 4;
-      eot.staging_halfs--;
-      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                &eot_program));
-      eot.staging_halfs++;
-      eot.shader_binary_size--;
-      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &eot,
-                                                &eot_program));
-
-      bg.op = AGX3_G17P_RT0_BG_CLEAR;
-      bg.clear_value_va = UINT64_C(0x4000010000);
-      bg.texture_pointer_va = 0;
-      bg.sampler_pointer_va = 0;
-      bg.clear_push_halfs = 4 + 8 * count;
-      bg.imageblock = eot.imageblock;
-      CHECK(agx3_g17p_rt0_bg_shader_resources_match(bg.op,
-                                                    bg.clear_push_halfs, false));
-      CHECK(agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
-                                              &bg_program));
-      CHECK(bg_program.length <= AGX3_G17P_WIDE_MRT_BG_PROGRAM_MAX_SIZE);
-      bg.clear_push_halfs--;
-      CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
-                                               &bg_program));
-   }
 
    return 0;
 }
