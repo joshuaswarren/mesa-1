@@ -3997,23 +3997,24 @@ agx3_emit_cnd(struct util_dynarray *emission, enum agx_isa_encoding enc,
  * or its pending producer to be included in the mask. A partial wait for an
  * unrelated destination must use a carrier whose accesses it covers.
  *
- * Emits one instruction per slot, matching the witnessed prelude usage.
+ * bit_and carries a six-bit wait mask, so one instruction waits on the whole
+ * mask before it reads r0.
  */
 static bool
 agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc,
                        uint16_t mask)
 {
-   while (mask != 0) {
-      const uint16_t one = mask & (uint16_t)-(int16_t)mask;
-      uint8_t bytes[AGX3_ALU_MAX_LENGTH];
-      uint8_t len = 0;
-      if (!agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, one, bytes,
-                            &len) ||
-          !agx3_append(emission, bytes, len))
-         return false;
-      mask &= (uint16_t)~one;
-   }
-   return true;
+   if (mask == 0)
+      return true;
+
+   /* Wait on every slot in the one instruction that reads r0. Retiring the
+    * slots one instruction at a time reads and writes r0 while a later slot
+    * in the mask may still be producing it, which loses that result. */
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH];
+   uint8_t len = 0;
+   return agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, mask, bytes,
+                           &len) &&
+          agx3_append(emission, bytes, len);
 }
 
 /* An operand wait covers the instruction's inputs and overwritten destination,

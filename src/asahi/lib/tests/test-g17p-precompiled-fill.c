@@ -370,8 +370,8 @@ main(void)
       /* The top-level loop has the native guard/entry/exit scopes. Native
        * descriptor scheduling assigns independent slots and uses per-slot
        * dependent wait carriers while keeping adjacent producers overlapped. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2904, 3032, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xbb92bb3c63e8286e)},
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0xc1fe4bfe34d9b10e)},
       {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
        UINT64_C(0xd16bb0ba90732f74)},
       {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,

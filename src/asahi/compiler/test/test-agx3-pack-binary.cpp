@@ -5921,11 +5921,10 @@ TEST_F(AGX3PackBinary, DeviceLoadExportsRetireEveryOutstandingSlot)
          ASSERT_TRUE(agx3_mem_encode_load(enc, &ld, bytes, &len));
          append(want, bytes, len);
       }
-      for (unsigned i = 0; i < 2; ++i) {
-         ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0,
-                                     1u << i, bytes, &len));
-         append(want, bytes, len);
-      }
+      /* One r0 identity waits on both slots before reading r0. */
+      ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_BAND, 0, 0, 0, 0, 0, 0x3,
+                                  bytes, &len));
+      append(want, bytes, len);
       EXPECT_EQ(pack(b), want);
    }
 }
