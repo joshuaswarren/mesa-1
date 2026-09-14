@@ -3329,6 +3329,7 @@ TEST_F(AGX3PackBinary, SimdBroadcastImmediateWitnesses)
                .dest = 4,
                .src = 0,
                .lane = lane,
+               .src_live = true,
             };
             ASSERT_TRUE(agx3_subgroup_encode_shuffle(
                enc, &desc, broadcast, &broadcast_length));
@@ -3368,6 +3369,7 @@ TEST_F(AGX3PackBinary, SimdBroadcastEncodesEveryLane)
          .dest = 4,
          .src = 0,
          .lane = (uint16_t)lane,
+         .src_live = true,
       };
       ASSERT_TRUE(
          agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &desc, bytes,
@@ -3408,6 +3410,7 @@ TEST_F(AGX3PackBinary, SimdBroadcastWaitsForDeviceLoad)
       .lane = 3,
       /* G17P device loads use the native preferred slot 6. */
       .wait_mask = 1u << 5,
+      .src_live = true,
    };
    ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &shuffle,
                                              bytes, &length));
@@ -3419,6 +3422,35 @@ TEST_F(AGX3PackBinary, SimdBroadcastWaitsForDeviceLoad)
    ASSERT_GE(got.size(), want.size());
    const std::vector<uint8_t> tail(got.end() - want.size(), got.end());
    EXPECT_EQ(tail, want);
+}
+
+TEST_F(AGX3PackBinary, SimdBroadcastLastLanePreservesLivePrefix)
+{
+   /* Tessellation reads the inclusive prefix again after broadcasting lane
+    * 31. Marking that source discarded destroys the later per-lane sum. */
+   for (bool last_use : {false, true}) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index prefix = agx_register(18, AGX_SIZE_32);
+      prefix.discard = last_use;
+      agx_shuffle_to(b, agx_register(20, AGX_SIZE_32), prefix,
+                     agx_immediate(31));
+      agx_stop(b);
+
+      const struct agx3_subgroup_shuffle_desc desc = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = 20,
+         .src = 18,
+         .lane = 31,
+         .src_live = !last_use,
+      };
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B,
+                                               &desc, bytes, &length));
+      const auto got = pack(b);
+      ASSERT_GE(got.size(), length);
+      EXPECT_EQ(memcmp(got.data(), bytes, length), 0);
+   }
 }
 
 TEST_F(AGX3PackBinary, G17PScalarByteLoadRequiresAlignedHalf)

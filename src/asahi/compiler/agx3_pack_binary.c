@@ -3672,6 +3672,7 @@ agx3_emit_simd_broadcast(struct util_dynarray *emission,
          .lane = I->src[1].value,
          .wait_mask = wait_mask,
          .dest_hint = I->dest[0].cache,
+         .src_live = !I->src[0].discard,
       };
       uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
       return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&
