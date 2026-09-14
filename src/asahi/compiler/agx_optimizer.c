@@ -732,10 +732,39 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
       return;
    }
 
+   /* Likewise for a quad ballot, whose witnessed register form takes a 16-bit
+    * predicate. */
+   if (I->op == AGX_OPCODE_QUAD_BALLOT && ctx->key &&
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      I->src[0].type == AGX_INDEX_IMMEDIATE) {
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index predicate = agx_temp(ctx, AGX_SIZE_16);
+      agx_mov_imm_to(&b, predicate, I->src[0].value);
+      I->src[0] = predicate;
+      return;
+   }
+
    if (I->src[0].type != AGX_INDEX_NORMAL)
       return;
 
    agx_instr *def = defs[I->src[0].value];
+
+   /* The same register-against-zero ballot is witnessed on G17P for a 16-bit
+    * source only in its equal-to-zero form, while an unfused ballot counts
+    * the lanes where its predicate is nonzero. Widen a half predicate so it
+    * reaches the 32-bit form instead.
+    */
+   if (I->op == AGX_OPCODE_BALLOT && ctx->key &&
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->src[0].size == AGX_SIZE_16 &&
+       !(def && (def->op == AGX_OPCODE_ICMP || def->op == AGX_OPCODE_FCMP))) {
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+      agx_mov_to(&b, wide, I->src[0]);
+      I->src[0] = wide;
+      return;
+   }
+
    if (!def || (def->op != AGX_OPCODE_ICMP && def->op != AGX_OPCODE_FCMP))
       return;
 

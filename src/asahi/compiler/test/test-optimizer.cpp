@@ -714,6 +714,56 @@ TEST_F(Optimizer, G17PBallotOfTwoRegistersKeepsTheComparison)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
+TEST_F(Optimizer, G17PBallotOfHalfPredicateWidens)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_index active = agx_temp(actual->shader, AGX_SIZE_16);
+   agx_get_sr_coverage_to(actual, active, AGX_SR_IS_ACTIVE_THREAD);
+   agx_ballot_to(actual, out, active);
+   agx_unit_test(actual, out);
+
+   out = agx_temp(expected->shader, AGX_SIZE_32);
+   active = agx_temp(expected->shader, AGX_SIZE_16);
+   agx_get_sr_coverage_to(expected, active, AGX_SR_IS_ACTIVE_THREAD);
+   agx_index wide = agx_temp(expected->shader, AGX_SIZE_32);
+   agx_mov_to(expected, wide, active);
+   agx_ballot_to(expected, out, wide);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
+TEST_F(Optimizer, G17PQuadBallotOfConstantIsARegister)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_16);
+   agx_quad_ballot_to(actual, out, agx_immediate(1));
+   agx_unit_test(actual, out);
+
+   out = agx_temp(expected->shader, AGX_SIZE_16);
+   agx_index predicate = agx_temp(expected->shader, AGX_SIZE_16);
+   agx_mov_imm_to(expected, predicate, 1);
+   agx_quad_ballot_to(expected, out, predicate);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 TEST_F(Optimizer, BallotMultipleUses)
 {
    CASE32(
