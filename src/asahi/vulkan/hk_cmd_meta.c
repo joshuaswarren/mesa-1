@@ -55,6 +55,25 @@ hk_cmd_bind_map_buffer(struct vk_command_buffer *vk_cmd,
    return VK_SUCCESS;
 }
 
+static void
+hk_cmd_draw_volume(struct vk_command_buffer *vk_cmd,
+                   struct vk_meta_device *meta,
+                   const struct vk_meta_rect *rect,
+                   uint32_t layer_count)
+{
+   struct hk_cmd_buffer *cmd = container_of(vk_cmd, struct hk_cmd_buffer, vk);
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* G17P executes a layered meta volume in four-instance groups.  A one- or
+    * two-layer draw otherwise produces no fragments.  The rendering
+    * layerCount clips the extra instances, so they cannot address the image
+    * outside the requested volume. */
+   if (dev->dev.chip == AGX_CHIP_G17P)
+      layer_count = MAX2(layer_count, 4);
+
+   vk_meta_draw_volume(vk_cmd, meta, rect, layer_count);
+}
+
 VkResult
 hk_device_init_meta(struct hk_device *dev)
 {
@@ -74,6 +93,7 @@ hk_device_init_meta(struct hk_device *dev)
       dev->dev.chip == AGX_CHIP_G17P;
    dev->meta.use_rect_list_pipeline = true;
    dev->meta.cmd_bind_map_buffer = hk_cmd_bind_map_buffer;
+   dev->meta.cmd_draw_volume = hk_cmd_draw_volume;
    dev->meta.max_bind_map_buffer_size_B = 64 * 1024;
    dev->meta.buffer_access.max_fill_chunk_size =
       dev->dev.chip == AGX_CHIP_G17P ? 16 : 0;
