@@ -116,12 +116,25 @@ bool agx3_alu_sll_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native scalar-half `1 << uint_register` form. */
+bool agx3_alu_sll_one_reg32(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t shift, enum agx3_alu_hint shift_hint,
+                            bool dest_cache, uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P logical shift-right with register value and signed boundary. */
 bool agx3_alu_srl_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
                       bool dest_cache, const uint16_t src[2],
                       const bool src_16[2],
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native signed 16-bit arithmetic shift-right by a 32-bit register count. */
+bool agx3_alu_asr_reg16(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t source, uint16_t shift,
+                        const enum agx3_alu_hint hints[2], bool dest_cache,
+                        uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native 16-bit logical shift-right by an immediate bit count. */
 bool agx3_alu_srl_imm16(enum agx_isa_encoding enc, uint16_t dest,

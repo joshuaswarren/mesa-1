@@ -2362,6 +2362,41 @@ agx3_alu_sll_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
 }
 
 bool
+agx3_alu_sll_one_reg32(enum agx_isa_encoding enc, uint16_t dest,
+                       uint16_t shift, enum agx3_alu_hint shift_hint,
+                       bool dest_cache, uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
+       shift >= 256 || (shift & 1) ||
+       (unsigned)shift_hint > AGX3_ALU_HINT_DISCARD ||
+       (wait_mask & ~0x3fu))
+      return false;
+
+   /* Two applegpu_g17p controls establish independent fields on the same SLL
+    * endpoint: scalar `1u << uint` selects immediate-one/full shift, while a
+    * ushort2 result selects the scalar-half destination. Compose that exact
+    * cross-product instead of materializing a temporary register for one. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {15, 1}, {23, 1}, {24, 1},
+      {38, 2}, {39, 2}, {52, 1}, {53, 2},
+   };
+   struct agx3_field_kv fields[12] = {
+      {2, dest},
+      {11, dest_cache},
+      {31, shift},
+      {42, shift_hint == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned count = 4;
+   for (unsigned slot = 0; slot < 6; ++slot) {
+      if (wait_mask & (1u << slot))
+         fields[count++] = (struct agx3_field_kv){60 + slot, 1};
+   }
+
+   return agx3_bind_compose(enc, "sll", 0, base, 9, fields, count, out, len);
+}
+
+bool
 agx3_alu_srl_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
                  bool dest_cache, const uint16_t src[2],
                  const bool src_16[2], const enum agx3_alu_hint hints[2],
@@ -2370,6 +2405,41 @@ agx3_alu_srl_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
 {
    return agx3_alu_shift_reg("srl", enc, dest, dest_16, dest_cache, src,
                              src_16, hints, wait_mask, out, len);
+}
+
+bool
+agx3_alu_asr_reg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
+                   uint16_t shift, const enum agx3_alu_hint hints[2],
+                   bool dest_cache, uint16_t wait_mask,
+                   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !hints || !out || !len ||
+       dest >= 256 || source >= 256 || shift >= 256 || (shift & 1) ||
+       (unsigned)hints[0] > AGX3_ALU_HINT_DISCARD ||
+       (unsigned)hints[1] > AGX3_ALU_HINT_DISCARD || (wait_mask & ~0x3fu))
+      return false;
+
+   /* applegpu_g17p `short(a) >> uint(n)`: the signed value and destination
+    * remain scalar halves, while the register shift count retains its full
+    * width. f28 selects signed fill and f45..f50 carry producer waits. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {23, 2}, {24, 1}, {28, 1}, {38, 2}, {39, 2},
+   };
+   struct agx3_field_kv fields[14] = {
+      {2, dest},
+      {11, dest_cache},
+      {16, source},
+      {27, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {31, shift},
+      {42, hints[1] == AGX3_ALU_HINT_DISCARD},
+   };
+   unsigned count = 6;
+   for (unsigned slot = 0; slot < 6; ++slot) {
+      if (wait_mask & (1u << slot))
+         fields[count++] = (struct agx3_field_kv){45 + slot, 1};
+   }
+
+   return agx3_bind_compose(enc, "sra", 0, base, 7, fields, count, out, len);
 }
 
 bool

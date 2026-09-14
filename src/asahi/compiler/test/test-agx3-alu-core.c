@@ -1885,6 +1885,13 @@ static void test_native_u16_arithmetic(void)
    assert(!agx3_alu_sll_reg(AGX_ISA_ENCODING_AGX3B, 0, true, false,
                             sll_mixed_src, sll_mixed_width, sll_bad_hints,
                             0, out, &len));
+   assert(agx3_alu_sll_one_reg32(AGX_ISA_ENCODING_AGX3B, 0, 2,
+                                 AGX3_ALU_HINT_DISCARD, false, 1,
+                                 out, &len));
+   exact(out, len, "2710540002020800c0120400");
+   assert(!agx3_alu_sll_one_reg32(AGX_ISA_ENCODING_AGX3B, 0, 3,
+                                  AGX3_ALU_HINT_DISCARD, false, 1,
+                                  out, &len));
    assert(agx3_alu_srl_reg(AGX_ISA_ENCODING_AGX3B, 0, false, false,
                            sll_mixed_src, sll_mixed_width, sll_mixed_hints,
                            2, out, &len));
@@ -1892,6 +1899,14 @@ static void test_native_u16_arithmetic(void)
    assert(!agx3_alu_srl_reg(AGX_ISA_ENCODING_AGX3B, 0, true, false,
                             sll_mixed_src, sll_mixed_width, sll_bad_hints,
                             0, out, &len));
+   const uint16_t asr_src[] = {4, 2};
+   assert(agx3_alu_asr_reg16(AGX_ISA_ENCODING_AGX3B, 2, asr_src[0],
+                             asr_src[1], dead, false, 1, out, &len));
+   exact(out, len, "a7115402020808e0e200");
+   assert(!agx3_alu_asr_reg16(AGX_ISA_ENCODING_AGX3B, 2, asr_src[0], 3,
+                              dead, false, 1, out, &len));
+   assert(!agx3_alu_asr_reg16(AGX_ISA_ENCODING_AGX3C, 2, asr_src[0],
+                              asr_src[1], dead, false, 1, out, &len));
    const uint16_t mixed_src[] = {2, 4};
    const bool mixed_width[] = {false, true};
    assert(agx3_alu_fcmp_select_imm_width(AGX_ISA_ENCODING_AGX3B,2,mixed_src,mixed_width,dead,1,255,0,true,false,32,out,&len));

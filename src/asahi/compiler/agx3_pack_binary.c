@@ -11506,6 +11506,75 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* A dynamic signed-short shift stays narrow on G17P. Apple emits a
+          * single mixed-width SRA: half value/result and a full register
+          * count. Preserve the two source lifetimes and producer waits. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_ASR &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             I->src[0].size == AGX_SIZE_16 &&
+             I->src[1].size == AGX_SIZE_32) {
+            const agx_index dest = I->dest[0];
+            const agx_index value = I->src[0];
+            const agx_index shift = I->src[1];
+            if (!agx3_src_is_register(dest) || dest.memory ||
+                agx_channels(dest) != 1 ||
+                !agx3_src_is_register(value) || value.memory || value.abs ||
+                value.neg || value.kill || agx_channels(value) != 1 ||
+                !agx3_src_is_register(shift) || shift.memory || shift.abs ||
+                shift.neg || shift.kill || agx_channels(shift) != 1 ||
+                (value.cache && value.discard) ||
+                (shift.cache && shift.discard))
+               AGX3_REFUSE(I);
+
+            const enum agx3_alu_hint hints[2] = {
+               value.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(value),
+               shift.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(shift),
+            };
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
+            if (!agx3_alu_asr_reg16(enc, dest.value, value.value, shift.value,
+                                    hints, dest.cache, wait, bytes, &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         /* A scalar-half `1 << count` needs no register holding the one: the
+          * native `sll` takes an immediate value. Keep the half result and
+          * the full-width uint count. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BFI &&
+             I->nr_dests == 1 && I->nr_srcs == 3 && I->bfi_mask == 0 &&
+             agx3_src_is_zero_imm(I->src[0]) &&
+             I->src[1].type == AGX_INDEX_IMMEDIATE &&
+             I->src[1].value == 1 && agx3_src_is_register(I->src[2]) &&
+             I->dest[0].size == AGX_SIZE_16 &&
+             I->src[1].size == AGX_SIZE_16 &&
+             I->src[2].size == AGX_SIZE_32) {
+            const agx_index dest = I->dest[0];
+            const agx_index one = I->src[1];
+            const agx_index shift = I->src[2];
+            const agx_index base = I->src[0];
+            if (I->saturate || base.memory || base.abs || base.neg ||
+                base.kill || base.cache || base.discard || one.memory ||
+                one.abs || one.neg || one.kill || one.cache || one.discard ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                agx_channels(dest) != 1 ||
+                !agx3_src_is_register(shift) || shift.memory ||
+                agx_channels(shift) != 1 || shift.abs || shift.neg ||
+                shift.kill || (shift.cache && shift.discard))
+               AGX3_REFUSE(I);
+
+            const enum agx3_alu_hint shift_hint =
+               shift.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(shift);
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
+            if (!agx3_alu_sll_one_reg32(enc, dest.value, shift.value,
+                                        shift_hint, dest.cache, wait, bytes,
+                                        &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* A register-count ushort shift is one native `sll`. The shift
           * operand remains uint in NIR; Apple's mixed-width witness pins
           * source A at width 1 and source B at width 2. */
@@ -11530,12 +11599,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 value.abs || value.neg || value.kill ||
                 shift.abs || shift.neg || shift.kill ||
                 (value.cache && value.discard) ||
-                (shift.cache && shift.discard) || shift.cache)
+                (shift.cache && shift.discard))
                AGX3_REFUSE(I);
             const uint16_t src[2] = {value.value, shift.value};
             const bool src_16[2] = {true, false};
             const enum agx3_alu_hint hints[2] = {
-               agx3_post_ra_hint(value), agx3_post_ra_hint(shift),
+               agx3_post_ra_hint(value),
+               /* This endpoint has a discard bit but no measured cache bit
+                * for the count. NONE retains the physical register. */
+               shift.cache ? AGX3_ALU_HINT_NONE : agx3_post_ra_hint(shift),
             };
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
             if (!agx3_alu_sll_reg(enc, dest.value, true, dest.cache, src,
@@ -11567,9 +11639,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 dest.size != AGX_SIZE_16 || agx_channels(dest) != 1 ||
                 !agx3_src_is_register(value) || value.memory ||
                 value.size != AGX_SIZE_16 || agx_channels(value) != 1 ||
-                value.abs || value.neg || value.kill || value.cache)
+                value.abs || value.neg || value.kill ||
+                (value.cache && value.discard))
                AGX3_REFUSE(I);
 
+            /* The shift-add descriptor has no source cache bit. A cached
+             * value is still live, which the clear last-use bit preserves. */
             const bool split = I->src[2].value > 4;
             const struct agx3_shift_add_desc first = {
                .dest = dest.value,
