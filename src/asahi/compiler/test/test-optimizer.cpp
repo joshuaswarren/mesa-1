@@ -4,6 +4,7 @@
  */
 
 #include "agx_builder.h"
+#include "agx3_select_core.h"
 #include "agx_compiler.h"
 #include "agx_test.h"
 
@@ -107,6 +108,24 @@ TEST_F(Optimizer, FloatConversion)
          agx_fmov_to(b, out, sum);
       },
       { agx_fadd_to(b, out, wx, wy); });
+}
+
+TEST_F(Optimizer, G17PPreservesHalfNotAfterBitwise)
+{
+   for (unsigned table : {AGX3_SEL_TT_AND, AGX3_SEL_TT_OR, AGX3_SEL_TT_XOR}) {
+      agx_builder *actual = agx_test_builder(mem_ctx);
+      agx_builder *expected = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      for (agx_builder *b : {actual, expected}) {
+         b->shader->key = &key;
+         agx_index value = agx_bitop(b, hx, hy, table);
+         agx_index inverted = agx_not(b, value);
+         agx_unit_test(b, inverted);
+      }
+      agx_optimize_and_dce(actual->shader);
+      ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+   }
 }
 
 TEST_F(Optimizer, G17PPreservesNarrowingAfterAdd)

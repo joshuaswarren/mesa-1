@@ -341,10 +341,20 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
  *    not(xor(x, y) -> xnor(x, y)
  */
 static bool
-agx_optimizer_not(agx_instr *I, agx_instr *use)
+agx_optimizer_not(agx_context *ctx, agx_instr *I, agx_instr *use)
 {
    /* Check for bit op and use of not op */
    if (I->op != AGX_OPCODE_BITOP || use->op != AGX_OPCODE_NOT)
+      return false;
+
+   /* G17P has native word-wide NAND/NOR/XNOR, but the half-width forms
+    * still need the separate complement. Do not create an unencodable
+    * truth table or disable the supported word-wide fusion. */
+   const unsigned truth_table = I->truth_table ^ 0xf;
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->dest[0].size != AGX_SIZE_32 &&
+       truth_table != AGX3_SEL_TT_AND && truth_table != AGX3_SEL_TT_OR &&
+       truth_table != AGX3_SEL_TT_XOR && truth_table != AGX3_SEL_TT_NOT)
       return false;
 
    /* Remap operation to the appropriate one */
@@ -988,7 +998,7 @@ agx_optimizer_backward(agx_context *ctx)
          if (!use || BITSET_TEST(multiple, I->dest[0].value))
             continue;
 
-         if (agx_optimizer_not(I, use)) {
+         if (agx_optimizer_not(ctx, I, use)) {
             agx_remove_instruction(use);
             continue;
          }
