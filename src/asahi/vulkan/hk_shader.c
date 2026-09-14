@@ -138,6 +138,22 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
    };
 }
 
+/* Whether agx_preprocess_nir() would lower a local array to scratch. */
+static bool
+hk_has_scratch_sized_array(nir_shader *nir)
+{
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_function_temp_variable(var, impl) {
+         unsigned size, align;
+         glsl_get_natural_size_align_bytes(var->type, &size, &align);
+         if (size > AGX_SCRATCH_ARRAY_THRESHOLD_B)
+            return true;
+      }
+   }
+
+   return false;
+}
+
 void
 hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 {
@@ -187,11 +203,15 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
    NIR_PASS(_, nir, nir_split_var_copies);
    NIR_PASS(_, nir, nir_split_struct_vars, nir_var_function_temp);
 
-   /* G17P has no legacy USC constant-data upload.  Lower compute constants to
-    * load_constant so the private native path can address the immutable blob
-    * through its root descriptor (hk_nir_lower_descriptors.c
-    * lower_load_constant, and hk_cmd_dispatch.c uploads the blob per
-    * dispatch).
+   /* G17P has no legacy USC constant-data upload.  Lower compute, vertex and
+    * fragment constants to load_constant so the private native path can
+    * address the immutable blob through its root descriptor
+    * (hk_nir_lower_descriptors.c lower_load_constant).  hk_cmd_dispatch.c
+    * uploads a compute blob per dispatch and hk_flush_shaders() publishes the
+    * bound vertex and fragment blobs.  This is also Apple's shape: metal-nt
+    * -arch applegpu_g17p compiles a fragment function's static constant
+    * table lookup to an lddev from a uniform-supplied base, not to thread
+    * private storage.
     *
     * This MUST run before agx_preprocess_nir.  That helper's first act is
     * nir_lower_vars_to_scratch with a 256-byte threshold (agx_compile.c:3852),
@@ -202,9 +222,20 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
     * move, and nir_opt_large_constants only ever looks at function_temp
     * (nir_opt_large_constants.c:545-561).
     */
-   if (nir->info.stage == MESA_SHADER_COMPUTE &&
-       ((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P)
-      NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+   if (((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P) {
+      if (nir->info.stage == MESA_SHADER_COMPUTE) {
+         NIR_PASS(_, nir, nir_opt_large_constants, NULL, 32);
+      } else if ((nir->info.stage == MESA_SHADER_VERTEX ||
+                  nir->info.stage == MESA_SHADER_FRAGMENT) &&
+                 hk_has_scratch_sized_array(nir)) {
+         /* Vertex and fragment arrays within the scratch threshold keep their
+          * csel ladders, so leave shaders without a larger array untouched.
+          * nir_opt_large_constants cannot lower a whole-array copy_deref. */
+         NIR_PASS(_, nir, nir_lower_var_copies);
+         NIR_PASS(_, nir, nir_opt_large_constants, NULL,
+                  AGX_SCRATCH_ARRAY_THRESHOLD_B);
+      }
+   }
 
    /* Optimize but allow copies because we haven't lowered them yet */
    if (((struct hk_physical_device *)vk_pdev)->dev.chip == AGX_CHIP_G17P)

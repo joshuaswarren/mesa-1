@@ -2784,6 +2784,20 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
    }
 }
 
+static uint64_t
+hk_upload_constant_data(struct hk_cmd_buffer *cmd, struct hk_shader *s)
+{
+   if (!s || s->data_size == 0)
+      return 0;
+
+   uint64_t addr =
+      hk_pool_upload(cmd, s->data_ptr, s->data_size, HK_MIN_UBO_ALIGNMENT);
+   if (!addr)
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+
+   return addr;
+}
+
 static void
 hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
@@ -2817,6 +2831,12 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    for (unsigned i = 0; i < VARYING_SLOT_MAX; ++i) {
       desc->root.draw.uvs_index[i] = gfx->linked_varyings.slots[i];
    }
+
+   /* Every variant of an API shader carries the same constant data. */
+   desc->root.draw.vs_constant_data_addr = hk_upload_constant_data(
+      cmd, hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]));
+   desc->root.draw.fs_constant_data_addr =
+      hk_upload_constant_data(cmd, hk_only_variant(fs));
 }
 
 static struct agx_shader_part *

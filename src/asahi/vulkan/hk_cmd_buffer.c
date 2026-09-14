@@ -1387,11 +1387,11 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
           s->b.info.sampler_state_count == 1)) ||
        s->b.info.uses_sampler_heap ||
        (linked->b.uses_txf && !s->info.agx3_indexed_sampler_valid) ||
-       s->data_size != 0 || s->info.set_count > HK_AGX3_G17P_MAX_ROOT_SETS) {
+       s->info.set_count > HK_AGX3_G17P_MAX_ROOT_SETS) {
       mesa_loge_once(
          "G17P graphics program refused: linked=%u bo=%u va=%u size=%zu "
          "preamble=%u scratch=%u/%u/%u textures=%u samplers=%u "
-         "indexed_sampler=%u sampler_heap=%u txf=%u data=%u sets=%u",
+         "indexed_sampler=%u sampler_heap=%u txf=%u sets=%u",
          linked != NULL, linked && linked->b.bo != NULL,
          linked && linked->b.bo && linked->b.bo->va != NULL,
          linked ? linked->b.size : 0, s->b.info.has_preamble,
@@ -1399,7 +1399,7 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
          linked ? linked->b.scratch_size : 0,
          s->b.info.texture_state_count, s->b.info.sampler_state_count,
          s->info.agx3_indexed_sampler_valid, s->b.info.uses_sampler_heap,
-         linked ? linked->b.uses_txf : 0, s->data_size, s->info.set_count);
+         linked ? linked->b.uses_txf : 0, s->info.set_count);
       return false;
    }
 

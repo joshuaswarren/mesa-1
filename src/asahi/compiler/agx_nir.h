@@ -43,6 +43,10 @@ bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
 bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 
+/* Local arrays larger than this many bytes are lowered to scratch memory by
+ * agx_preprocess_nir(); smaller ones become csel ladders. */
+#define AGX_SCRATCH_ARRAY_THRESHOLD_B 256
+
 /* Existing reserved software tail, relative to a Gen9 sampled texture. */
 #define AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET 68
 /* G17P appends one native texture-heap index after the 64-byte texture/PBE
