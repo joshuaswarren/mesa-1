@@ -412,6 +412,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    unsigned layers = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D
                         ? image->vk.extent.depth
                         : view->vk.layer_count;
+   /* A non-layered auxiliary program addresses only layer zero, even when
+    * the attachment view spans more layers. Keep the linear extension and
+    * native layer count consistent with its 2D descriptor dimension. */
+   if (usage == HK_DESC_USAGE_BG_EOT)
+      layers = 1;
 
    struct AGX_PBE cfg = {AGX_PBE_header};
    if (atomic_sw_out)
