@@ -6093,6 +6093,139 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    return true;
 }
 
+/* The tile load whose value a store writes back unchanged, or NULL. The value
+ * is the load's result or the collect of its split channels in order. */
+static const agx_instr *
+agx3_unchanged_tile_load(agx_instr **defs, const agx_instr *store)
+{
+   const agx_index value = store->src[0];
+   if (value.type != AGX_INDEX_NORMAL || !defs[value.value])
+      return NULL;
+
+   const agx_instr *def = defs[value.value];
+   if (def->op == AGX_OPCODE_COLLECT) {
+      const agx_instr *split = NULL;
+      agx_foreach_src(def, s) {
+         const agx_index c = def->src[s];
+         const agx_instr *c_def =
+            c.type == AGX_INDEX_NORMAL ? defs[c.value] : NULL;
+         if (!c_def || c_def->op != AGX_OPCODE_SPLIT ||
+             (split && c_def != split) || c_def->nr_dests != def->nr_srcs ||
+             !agx_is_equiv(c_def->dest[s], c))
+            return NULL;
+         split = c_def;
+      }
+      if (!split || split->src[0].type != AGX_INDEX_NORMAL)
+         return NULL;
+      def = defs[split->src[0].value];
+   }
+
+   return def && def->op == AGX_OPCODE_LD_TILE ? def : NULL;
+}
+
+/* A colour write disabled on a format without masked stores reaches the
+ * epilog as a load of the target stored back unchanged. Apple's G17P
+ * fragments store nothing to a channel their write mask excludes
+ * (blend/native/tilemask.py wm_*), so drop such stores; the loads then die.
+ */
+static bool
+agx3_drop_unchanged_tile_stores(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       list_length(&ctx->blocks) != 1)
+      return false;
+
+   agx_instr **defs = calloc(ctx->alloc, sizeof(*defs));
+   if (!defs)
+      return false;
+
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         defs[I->dest[d].value] = I;
+   }
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_ST_TILE || I->explicit_coords ||
+          I->src[1].type != AGX_INDEX_IMMEDIATE)
+         continue;
+
+      const agx_instr *load = agx3_unchanged_tile_load(defs, I);
+      if (!load || load->pixel_offset != I->pixel_offset ||
+          load->format != I->format || load->mask != I->mask ||
+          load->explicit_coords || !agx_is_equiv(load->src[0], I->src[1]))
+         continue;
+
+      /* No other store to the target may come between the two. */
+      bool clobbered = false;
+      for (const agx_instr *J = list_entry(load->link.next, agx_instr, link);
+           J != I; J = list_entry(J->link.next, agx_instr, link)) {
+         clobbered |= J->op == AGX_OPCODE_ST_TILE &&
+                      J->pixel_offset == I->pixel_offset;
+      }
+      if (clobbered)
+         continue;
+
+      agx_remove_instruction(I);
+      progress = true;
+   }
+
+   free(defs);
+   return progress;
+}
+
+/* A read of a target whose value turns out to be dead still leaves the
+ * class-8 read wait emitted before it, and the store that follows waits only
+ * for the remaining class 4. Apple's store-only G17P fragments, including
+ * those writing only some channels, take class 12 at once, and those writing
+ * no channel take no colour class at all (blend/native/tilemask.py wm_*,
+ * blend/native/wm/none.py). With no tile read left, fold each read wait into
+ * the next write wait of its block, or drop the colour waits when nothing is
+ * stored either.
+ */
+static bool
+agx3_merge_unread_pixel_waits(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
+       ctx->key->fs.ignore_tib_dependencies)
+      return false;
+
+   bool stores = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_LD_TILE)
+         return false;
+      stores |= I->op == AGX_OPCODE_ST_TILE;
+   }
+
+   bool progress = false;
+   agx_foreach_block(ctx, block) {
+      agx_instr *read_wait = NULL;
+      agx_foreach_instr_in_block_safe(block, I) {
+         if (I->op != AGX_OPCODE_WAIT_PIX)
+            continue;
+
+         if (!stores) {
+            if (I->writeout == 0x4 || I->writeout == 0x8 ||
+                I->writeout == 0xc) {
+               agx_remove_instruction(I);
+               progress = true;
+            }
+         } else if (I->writeout == 0x8 && !read_wait) {
+            read_wait = I;
+         } else if (I->writeout == 0x4 && read_wait) {
+            I->writeout = 0xc;
+            agx_remove_instruction(read_wait);
+            read_wait = NULL;
+            progress = true;
+         }
+      }
+   }
+
+   return progress;
+}
+
 /* Scalar epilog inputs retain their fixed export ABI, and unlike a collect a
  * direct PRELOAD cannot be assigned into a tile store's register bank by RA:
  * the output of colour target n arrives at GPR half 8 + 8n. The grounded
@@ -6382,9 +6515,12 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx_lower_uniform_sources);
 
    AGX_PASS(ctx, agx3_coalesce_uniform_half_stores);
+   AGX_PASS(ctx, agx3_drop_unchanged_tile_stores);
 
    /* RA correctness depends on DCE */
    AGX_PASS(ctx, agx_dce, true);
+
+   AGX_PASS(ctx, agx3_merge_unread_pixel_waits);
 
    AGX_PASS(ctx, agx_lower_agx3_device_atomic_sources);
 

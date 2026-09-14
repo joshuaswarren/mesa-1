@@ -1688,6 +1688,76 @@ build_fs_tilebuffer_load(void)
  * those encoders with the right register width and channel packing instead of
  * merely testing hand-built backend IR.
  */
+static unsigned
+g17p_count_bytes(const struct agx_shader_part *part, const uint8_t *needle,
+                 unsigned length)
+{
+   unsigned count = 0;
+   for (unsigned off = 0; part->binary && off + length <= part->info.binary_size;
+        ++off)
+      count += !memcmp((const uint8_t *)part->binary + off, needle, length);
+   return count;
+}
+
+/* An epilog that reads a target only for channels it does not store, and one
+ * that stores a target back unchanged. Apple's store-only fragments take
+ * class 12 at once, and a fragment writing no channel takes no colour class
+ * (blend/native/tilemask.py wm_*, blend/native/wm/none.py). */
+static bool
+test_g17p_unread_colour_waits(void)
+{
+   static const uint8_t wait8[] = {0x87, 0x02, 0x54, 0x08, 0x08, 0x00};
+   static const uint8_t wait12[] = {0x87, 0x02, 0x54, 0x0c, 0x08, 0x00};
+   static const uint8_t release12[] = {0x07, 0x02, 0x54, 0x0c, 0x02, 0x00};
+   bool ok = true;
+
+   for (unsigned unchanged = 0; unchanged < 2; ++unchanged) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P unread colour FS");
+      nir_def *old = nir_load_local_pixel_agx(
+         &b, 4, 16, nir_imm_intN_t(&b, 0xff, 16), .base = 0,
+         .format = PIPE_FORMAT_R16_UINT);
+      nir_def *value =
+         unchanged ? old
+                   : nir_vec4(&b, nir_channel(&b, old, 0),
+                              nir_imm_intN_t(&b, 1, 16),
+                              nir_imm_intN_t(&b, 2, 16),
+                              nir_channel(&b, old, 3));
+      nir_store_local_pixel_agx(
+         &b, value, nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+         .base = 0, .write_mask = unchanged ? 0xf : 0x6,
+         .format = PIPE_FORMAT_R16_UINT);
+      nir_shader *nir = fs_finish(&b);
+
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+         .secondary = true,
+      };
+      struct agx_shader_part part = {0};
+      bool compiled = agx_compile_shader_nir(nir, &key, &part);
+      compiled = compiled && g17p_count_bytes(&part, wait8, sizeof(wait8)) == 0;
+      if (unchanged) {
+         compiled = compiled &&
+                    g17p_count_bytes(&part, wait12, sizeof(wait12)) == 0 &&
+                    g17p_count_bytes(&part, release12, sizeof(release12)) == 0;
+      } else {
+         compiled = compiled &&
+                    g17p_count_bytes(&part, wait12, sizeof(wait12)) == 1 &&
+                    g17p_count_bytes(&part, release12, sizeof(release12)) == 1;
+      }
+      if (!compiled) {
+         fprintf(stderr, "G17P %s colour epilog waits mismatch\n",
+                 unchanged ? "unchanged" : "partial");
+         ok = false;
+      }
+      free(part.binary);
+      ralloc_free(nir);
+   }
+
+   return ok;
+}
+
 static bool
 test_g17p_fragment_io_matrix(void)
 {
@@ -1738,8 +1808,12 @@ test_g17p_fragment_io_matrix(void)
       nir_def *old = nir_load_local_pixel_agx(
          &b, cases[i].components, 32, nir_imm_intN_t(&b, 0xff, 16),
          .base = 0, .format = cases[i].format);
+      /* Write back a new value: storing the loaded one is no store at all. */
+      nir_def *value = util_format_is_pure_integer(cases[i].format)
+                          ? nir_inot(&b, old)
+                          : nir_fneg(&b, old);
       nir_store_local_pixel_agx(
-         &b, old, nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
+         &b, value, nir_imm_intN_t(&b, 0xff, 16), nir_undef(&b, 2, 16),
          .base = 0, .write_mask = BITFIELD_MASK(cases[i].components),
          .format = cases[i].format);
       nir_shader *nir = fs_finish(&b);
@@ -7624,6 +7698,7 @@ main(int argc, char **argv)
    RUN(test_g17p_background_f16_clear_narrowing);
    RUN(test_g17p_half_norm8_epilog);
    RUN(test_g17p_fragment_io_matrix);
+   RUN(test_g17p_unread_colour_waits);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_frag_sidefx_late_test_once);
    RUN(test_g17p_frag_sidefx_late_depth_once);
