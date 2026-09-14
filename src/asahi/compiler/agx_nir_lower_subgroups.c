@@ -19,6 +19,11 @@ nir_udiv_round_up(nir_builder *b, nir_def *n, nir_def *d)
    return nir_udiv(b, nir_iadd(b, n, nir_iadd_imm(b, d, -1)), d);
 }
 
+struct agx_subgroup_lower_options {
+   bool g17p;
+   bool g17p_clustered_float;
+};
+
 static bool
 lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -143,8 +148,16 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    case nir_intrinsic_ballot: {
-      /* Optimize popcount(ballot(true)) to load_active_subgroup_count_agx() */
-      if (!nir_src_is_const(intr->src[0]) || !nir_src_as_bool(intr->src[0]) ||
+      /* Optimize popcount(ballot(true)) to load_active_subgroup_count_agx().
+       *
+       * Not on G17P: Apple's compiler reads its active-count register (SR36)
+       * only inside the helper-guarded region of a uniform atomic, and
+       * compiles simd_sum(1u) to a reduction instead, so keep the ballot whose
+       * lane membership every other subgroup operation shares.
+       */
+      const struct agx_subgroup_lower_options *agx_options = data;
+      if (agx_options->g17p || !nir_src_is_const(intr->src[0]) ||
+          !nir_src_as_bool(intr->src[0]) ||
           !list_is_singular(&intr->def.uses))
          return false;
 
@@ -167,9 +180,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 }
 
-struct agx_subgroup_lower_options {
-   bool g17p_clustered_float;
-};
+
 
 static bool
 lower_subgroup_filter(const nir_intrinsic_instr *intr, const void *data)
@@ -225,6 +236,7 @@ static bool
 agx_nir_lower_subgroups_internal(nir_shader *s, bool g17p_clustered_float)
 {
    const struct agx_subgroup_lower_options agx_options = {
+      .g17p = g17p_clustered_float,
       .g17p_clustered_float = g17p_clustered_float,
    };
 
@@ -248,8 +260,8 @@ agx_nir_lower_subgroups_internal(nir_shader *s, bool g17p_clustered_float)
    bool progress = nir_lower_subgroups(s, &opts);
 
    /* Then do AGX-only lowerings on top */
-   progress |=
-      nir_shader_intrinsics_pass(s, lower, nir_metadata_control_flow, NULL);
+   progress |= nir_shader_intrinsics_pass(s, lower, nir_metadata_control_flow,
+                                          (void *)&agx_options);
 
    return progress;
 }
