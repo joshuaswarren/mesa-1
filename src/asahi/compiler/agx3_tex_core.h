@@ -334,6 +334,16 @@ bool agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src,
                               enum agx3_tex_level_kind kind,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+/* The `_at` stagers publish the operands of a read whose coordinates are
+ * staged at half `bank` (0 or 16) into bank + 6 instead of bank 6. */
+bool agx3_tex_stage_typed_lod_at(enum agx_isa_encoding enc, uint16_t bank,
+                                 uint16_t src, uint8_t slot,
+                                 uint16_t wait_mask, bool src_cache,
+                                 bool src_discard,
+                                 enum agx3_tex_level_kind kind,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                 uint8_t *len);
+
 bool agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
                             uint16_t minimum, uint8_t slot, uint16_t wait_mask,
                             bool src_cache, bool src_discard,
@@ -362,6 +372,12 @@ bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+bool agx3_tex_stage_array_layer_at(enum agx_isa_encoding enc, uint16_t bank,
+                                   uint16_t src, uint8_t slot,
+                                   uint16_t wait_mask, bool src_cache,
+                                   bool src_discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
 
 /* Publish the layer and per-lane half-float LOD together into operand bank 6. */
 bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
@@ -375,6 +391,11 @@ bool agx3_tex_stage_array_integer_lod(
    enum agx_isa_encoding enc, uint16_t layer, uint16_t lod, uint8_t slot,
    uint16_t wait_mask, bool layer_cache, bool layer_discard, bool lod_cache,
    bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+bool agx3_tex_stage_array_integer_lod_at(
+   enum agx_isa_encoding enc, uint16_t bank, uint16_t layer, uint16_t lod,
+   uint8_t slot, uint16_t wait_mask, bool layer_cache, bool layer_discard,
+   bool lod_cache, bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH],
+   uint8_t *len);
 
 /* Publish a runtime signed 2D coordinate offset into operand bank 6. */
 bool agx3_tex_stage_offset_2d(enum agx_isa_encoding enc, uint16_t x,

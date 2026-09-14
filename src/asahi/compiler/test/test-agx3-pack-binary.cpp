@@ -14261,6 +14261,116 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
    }
 }
 
+/* PACK_SMPIR stages a read's sampler operands six halves above the read's
+ * coordinate bank. metal-nt -arch applegpu_g17p, reads followed by a write,
+ * SMP f19=16:
+ *
+ *   texture2d_array layer          1705541600000000f0c00400
+ *   texture2d uint level           1705541600000004f0c00c00
+ *   texture2d_array layer + level  170554160010020070c06500
+ */
+TEST_F(AGX3PackBinary, SamplerOperandsFollowTheCoordinateBank)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   static const uint8_t layer16[] = {
+      0x17, 0x05, 0x54, 0x16, 0x00, 0x00, 0x00, 0x00,
+      0xf0, 0xc0, 0x04, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_stage_array_layer_at(enc, 16, 0, 1, 0, false, true,
+                                             bytes, &len));
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(layer16, layer16 + sizeof(layer16)));
+   static const uint8_t level16[] = {
+      0x17, 0x05, 0x54, 0x16, 0x00, 0x00, 0x00, 0x04,
+      0xf0, 0xc0, 0x0c, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_stage_typed_lod_at(enc, 16, 0, 1, 0, false, true,
+                                           AGX3_TEX_LEVEL_INTEGER, bytes,
+                                           &len));
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(level16, level16 + sizeof(level16)));
+   static const uint8_t layer_level16[] = {
+      0x17, 0x05, 0x54, 0x16, 0x00, 0x10, 0x02, 0x00,
+      0x70, 0xc0, 0x65, 0x00,
+   };
+   ASSERT_TRUE(agx3_tex_stage_array_integer_lod_at(
+      enc, 16, 8, 0, 1, 0, true, false, false, true, bytes, &len));
+   EXPECT_EQ(std::vector<uint8_t>(bytes, bytes + len),
+             std::vector<uint8_t>(layer_level16,
+                                  layer_level16 + sizeof(layer_level16)));
+   EXPECT_FALSE(agx3_tex_stage_array_layer_at(enc, 8, 0, 1, 0, false, true,
+                                              bytes, &len));
+}
+
+/* An array read in a shader that also writes an image stages its coordinates
+ * at halves 16/18 and its layer and level at half 22, clear of the write's
+ * coordinates (0/2), layer (6) and data (4/10/12/14), which imgwci's COPYs
+ * publish without waiting on the outstanding read. */
+TEST_F(AGX3PackBinary, ArrayImageReadStagesClearOfImageWrite)
+{
+   for (bool register_lod : {false, true}) {
+      SCOPED_TRACE(register_lod);
+      const auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index read_coord = agx_register(8, AGX_SIZE_32);
+      read_coord.channels_m1 = 2;
+      agx_index lod = register_lod ? agx_register(14, AGX_SIZE_32)
+                                   : agx_immediate(0);
+      agx_index heap = agx_register(16, AGX_SIZE_64);
+      agx_index data = agx_register(20, AGX_SIZE_32);
+      data.channels_m1 = 3;
+      agx_image_load_to(b, data, read_coord, lod, agx_uniform(12, AGX_SIZE_64),
+                        heap, agx_immediate(0), agx_null(),
+                        AGX_DIM_2D_ARRAY,
+                        register_lod ? AGX_LOD_MODE_LOD_MIN
+                                     : AGX_LOD_MODE_AUTO_LOD,
+                        15, false, false, false);
+      agx_index write_coord = agx_register(32, AGX_SIZE_32);
+      write_coord.channels_m1 = 2;
+      agx_image_write(b, data, write_coord, agx_immediate(0),
+                      agx_uniform(12, AGX_SIZE_64),
+                      agx_register(40, AGX_SIZE_32), AGX_DIM_2D_ARRAY,
+                      false);
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_FALSE(code.empty());
+
+      uint8_t bytes_scratch[AGX3_TEX_MAX_LENGTH], len_scratch = 0;
+      ASSERT_TRUE(register_lod
+                     ? agx3_tex_stage_array_integer_lod_at(
+                          enc, 16, 12, 14, 1, 0, false, false, false, false,
+                          bytes_scratch, &len_scratch)
+                     : agx3_tex_stage_array_layer_at(enc, 16, 12, 1, 0, false,
+                                                     false, bytes_scratch,
+                                                     &len_scratch));
+      EXPECT_NE(std::search(code.begin(), code.end(), bytes_scratch,
+                            bytes_scratch + len_scratch),
+                code.end());
+
+      /* Nothing is staged into bank 0's operand half, which the write's
+       * PACK_IMGWIR layer shares. */
+      ASSERT_TRUE(register_lod
+                     ? agx3_tex_stage_array_integer_lod(
+                          enc, 12, 14, 1, 0, false, false, false, false,
+                          bytes_scratch, &len_scratch)
+                     : agx3_tex_stage_array_layer(enc, 12, 1, 0, false,
+                                                  false, bytes_scratch,
+                                                  &len_scratch));
+      EXPECT_EQ(std::search(code.begin(), code.end(), bytes_scratch,
+                            bytes_scratch + len_scratch),
+                code.end());
+
+      /* The read's coordinates are staged at 16/18. */
+      uint8_t copy[AGX3_TEX_MAX_LENGTH], copy_len = 0;
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 18, 10, 1, 0, false, false,
+                                            copy, &copy_len));
+      EXPECT_NE(std::search(code.begin(), code.end(), copy, copy + copy_len),
+                code.end());
+   }
+}
+
 TEST_F(AGX3PackBinary, BufferFetchStoreKeepsNativeReadCoordinatesSeparate)
 {
    for (bool with_store : {false, true}) {

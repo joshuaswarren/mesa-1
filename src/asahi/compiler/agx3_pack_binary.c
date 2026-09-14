@@ -1182,8 +1182,10 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       return false;
 
    /* A read/write image stages its read coordinates at halves16/18, keeping
-    * them disjoint from imgwci's halves0/2. Native read-only indexed images,
-    * like ordinary texture loads, use the bank0 coordinate ABI. */
+    * them disjoint from imgwci's halves0/2, and its PACK_SMPIR operands at
+    * half 22 (agx3_tex_stage_*_at()), clear of imgwci's data lanes and layer.
+    * Native read-only indexed images, like ordinary texture loads, use the
+    * bank0 coordinate ABI. */
    const uint16_t staging_base =
       (I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image && !ms_array) ||
             separate_write_coords ? 16 : 0;
@@ -1203,7 +1205,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * 0..7; any outstanding read sharing its halves is retired first. */
    const bool plain_bank = !ms_2d && !ms_array && !array && !register_lod;
    const uint16_t bank_span =
-      plain_bank ? 2 * agx_channels(I->src[0]) : MAX2(staging_base + 4, 8);
+      plain_bank ? 2 * agx_channels(I->src[0]) : staging_base + 8;
    uint16_t staging_coord = staging_base;
    uint16_t bank_retire = 0;
    if (stage_coordinates && banks) {
@@ -1260,18 +1262,19 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       }
       if (combined_array_lod) {
          uint8_t packed[AGX3_TEX_MAX_LENGTH], packed_len = 0;
-         if (!agx3_tex_stage_array_integer_lod(
-                enc, I->src[0].value + 4, I->src[1].value, staging_slot,
-                staging_wait, I->src[0].cache, I->src[0].discard,
-                I->src[1].cache, I->src[1].discard, packed, &packed_len) ||
+         if (!agx3_tex_stage_array_integer_lod_at(
+                enc, staging_base, I->src[0].value + 4, I->src[1].value,
+                staging_slot, staging_wait, I->src[0].cache,
+                I->src[0].discard, I->src[1].cache, I->src[1].discard,
+                packed, &packed_len) ||
              !agx3_append(emission, packed, packed_len))
             return false;
          staging_wait = 0;
       } else if (register_lod) {
          uint8_t lod[AGX3_TEX_MAX_LENGTH], lod_len = 0;
-         if (!agx3_tex_stage_typed_lod(
-                enc, I->src[1].value, staging_slot, staging_wait,
-                I->src[1].cache, I->src[1].discard,
+         if (!agx3_tex_stage_typed_lod_at(
+                enc, staging_base, I->src[1].value, staging_slot,
+                staging_wait, I->src[1].cache, I->src[1].discard,
                 AGX3_TEX_LEVEL_INTEGER, lod, &lod_len) ||
              !agx3_append(emission, lod, lod_len))
             return false;
@@ -1298,8 +1301,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        * lowered layer is the low16 bits of the third coordinate word. */
       if (array && !combined_array_lod) {
          uint8_t packed[AGX3_TEX_MAX_LENGTH], packed_len = 0;
-         if (!agx3_tex_stage_array_layer(
-                enc, I->src[0].value + 4, staging_slot, 0,
+         if (!agx3_tex_stage_array_layer_at(
+                enc, staging_base, I->src[0].value + 4, staging_slot, 0,
                 I->src[0].cache, I->src[0].discard,
                 packed, &packed_len) ||
              !agx3_append(emission, packed, packed_len))
@@ -7199,7 +7202,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ((g17p_storage_image_protocol &&
                  I->op == AGX_OPCODE_TEXTURE_LOAD) ||
                 I->op == AGX_OPCODE_IMAGE_LOAD) &&
-               I->dim == AGX_DIM_2D;
+               (I->dim == AGX_DIM_2D || I->dim == AGX_DIM_2D_ARRAY ||
+                I->dim == AGX_DIM_3D);
             /* Compute kernels and API fragment functions stage outstanding
              * reads in disjoint banks (see agx3_emit_texture_fetch()).
              * Background and clear programs keep their single bank. */

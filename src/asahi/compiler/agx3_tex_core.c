@@ -1042,24 +1042,39 @@ agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
  * scalar LOD, preserving the source when it remains live. f5=6 selects
  * operand bank 6, not architectural r3. The FLOAT source is a half, while the
  * INTEGER source is the full uint required by texture2d::read. */
+/* PACK_SMPIR publishes a read's sampler operands at half bank + 6, beside the
+ * coordinates that read stages at `bank`. A read that shares a shader with an
+ * image write stages at bank 16, clear of imgwci's halves 0..14: metal-nt
+ * -arch applegpu_g17p publishes a texture2d_array read's layer followed by a
+ * write as 1705541600000000f0c00400, a texture2d read's uint level as
+ * 1705541600000004f0c00c00, and both for texture2d_array as
+ * 170554160010020070c06500 (layer r8), each with SMP f19=16. */
+static bool
+sampler_bank_valid(uint16_t bank)
+{
+   return bank == 0 || bank == 16;
+}
+
 bool
-agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
-                         uint16_t wait_mask, bool src_cache, bool src_discard,
-                         enum agx3_tex_level_kind kind,
-                         uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+agx3_tex_stage_typed_lod_at(enum agx_isa_encoding enc, uint16_t bank,
+                            uint16_t src, uint8_t slot, uint16_t wait_mask,
+                            bool src_cache, bool src_discard,
+                            enum agx3_tex_level_kind kind,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len)
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || slot < 1 || slot > 6 ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || !sampler_bank_valid(bank) ||
+       src >= 256 || slot < 1 || slot > 6 ||
        (wait_mask & ~0x3f) || (src_cache && src_discard) ||
        (kind != AGX3_TEX_LEVEL_MINIMUM && kind != AGX3_TEX_LEVEL_FLOAT &&
         kind != AGX3_TEX_LEVEL_INTEGER))
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(5, bank + 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, (unsigned)kind), KV(75, 16),
    };
    struct agx3_field_kv ov[10];
@@ -1081,6 +1096,16 @@ agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
     * Keep the same native instruction for Mesa's full 256-half bank. */
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+bool
+agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
+                         uint16_t wait_mask, bool src_cache, bool src_discard,
+                         enum agx3_tex_level_kind kind,
+                         uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_typed_lod_at(enc, 0, src, slot, wait_mask, src_cache,
+                                      src_discard, kind, out, len);
 }
 
 bool
@@ -1175,21 +1200,22 @@ agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
  * Register-indexed array samples use the independently witnessed slot-6 form
  * 1705540600180000f0e40400 for discarded r6. */
 bool
-agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
-                           uint8_t slot, uint16_t wait_mask, bool src_cache,
-                           bool src_discard,
-                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+agx3_tex_stage_array_layer_at(enum agx_isa_encoding enc, uint16_t bank,
+                              uint16_t src, uint8_t slot, uint16_t wait_mask,
+                              bool src_cache, bool src_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len)
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 256 || slot < 1 || slot > 6 ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || !sampler_bank_valid(bank) ||
+       src >= 256 || slot < 1 || slot > 6 ||
        (wait_mask & ~0x3f) || (src_cache && src_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(5, bank + 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
    };
    struct agx3_field_kv ov[10];
@@ -1207,6 +1233,16 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
 
    out[6] |= (src >> 7) & 1;
    return true;
+}
+
+bool
+agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
+                           uint8_t slot, uint16_t wait_mask, bool src_cache,
+                           bool src_discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_array_layer_at(enc, 0, src, slot, wait_mask,
+                                        src_cache, src_discard, out, len);
 }
 
 /* metal-nt -arch applegpu_g17p (AIR-NT 32023.917) stages a texture2d_array
@@ -1264,8 +1300,8 @@ agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
  * Two independent publications to bank 6 would overwrite the first operand.
  */
 static bool
-agx3_tex_stage_array_typed_lod(enum agx_isa_encoding enc, uint16_t layer,
-                               uint16_t lod, uint8_t slot,
+agx3_tex_stage_array_typed_lod(enum agx_isa_encoding enc, uint16_t bank,
+                               uint16_t layer, uint16_t lod, uint8_t slot,
                                uint16_t wait_mask, bool layer_cache,
                                bool layer_discard, bool lod_cache,
                                bool lod_discard,
@@ -1276,7 +1312,8 @@ agx3_tex_stage_array_typed_lod(enum agx_isa_encoding enc, uint16_t layer,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || layer >= 128 || (layer & 1) ||
+   if (enc != AGX_ISA_ENCODING_AGX3B || !sampler_bank_valid(bank) ||
+       layer >= 128 || (layer & 1) ||
        lod >= 256 || slot < 1 || slot > 6 || (wait_mask & ~0x3f) ||
        (kind != AGX3_TEX_LEVEL_FLOAT &&
         kind != AGX3_TEX_LEVEL_INTEGER) ||
@@ -1285,7 +1322,7 @@ agx3_tex_stage_array_typed_lod(enum agx_isa_encoding enc, uint16_t layer,
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(5, bank + 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(37, 2), KV(38, 1), KV(51, 1), KV(52, 2),
       KV(74, 4), KV(76, (unsigned)kind), KV(77, 16),
    };
@@ -1314,8 +1351,20 @@ agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
                          uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
    return agx3_tex_stage_array_typed_lod(
-      enc, layer, lod, slot, wait_mask, layer_cache, layer_discard,
+      enc, 0, layer, lod, slot, wait_mask, layer_cache, layer_discard,
       lod_cache, lod_discard, AGX3_TEX_LEVEL_FLOAT, out, len);
+}
+
+bool
+agx3_tex_stage_array_integer_lod_at(
+   enum agx_isa_encoding enc, uint16_t bank, uint16_t layer, uint16_t lod,
+   uint8_t slot, uint16_t wait_mask, bool layer_cache, bool layer_discard,
+   bool lod_cache, bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH],
+   uint8_t *len)
+{
+   return agx3_tex_stage_array_typed_lod(
+      enc, bank, layer, lod, slot, wait_mask, layer_cache, layer_discard,
+      lod_cache, lod_discard, AGX3_TEX_LEVEL_INTEGER, out, len);
 }
 
 bool
@@ -1324,9 +1373,9 @@ agx3_tex_stage_array_integer_lod(
    uint16_t wait_mask, bool layer_cache, bool layer_discard, bool lod_cache,
    bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
 {
-   return agx3_tex_stage_array_typed_lod(
-      enc, layer, lod, slot, wait_mask, layer_cache, layer_discard,
-      lod_cache, lod_discard, AGX3_TEX_LEVEL_INTEGER, out, len);
+   return agx3_tex_stage_array_integer_lod_at(
+      enc, 0, layer, lod, slot, wait_mask, layer_cache, layer_discard,
+      lod_cache, lod_discard, out, len);
 }
 
 /* Apple's immediate-layer plus immediate-LOD offset witness cannot use SMP's
