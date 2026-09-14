@@ -56,6 +56,7 @@ main(void)
           i == LIBAGX_COPY_IMAGE ||
           i == LIBAGX_MIPMAP_UNORM8X4 ||
           i == LIBAGX_MIPMAP_UNORM8X4_ODD ||
+          i == LIBAGX_RESOLVE_UNORM8X4 ||
           i == LIBAGX_DRAW_INDIRECT_BYTE_COUNT ||
           i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_DRAW_ROBUST_INDEX_0 ||
@@ -113,6 +114,40 @@ main(void)
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
+
+   /* The G17P Vulkan resolve path dispatches this raw RGBA8 kernel for 2x and
+    * 4x images. Pin the complete binary and its 84-byte argument ABI so a
+    * compiler change cannot silently alter the hardware-tested program. */
+   const uint32_t *resolve_blob =
+      libagx_g17p[LIBAGX_RESOLVE_UNORM8X4];
+   CHECK(resolve_blob != NULL);
+   if (!resolve_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *resolve_info =
+      (const void *)resolve_blob;
+   const uint8_t *resolve_binary =
+      (const uint8_t *)resolve_blob + sizeof(*resolve_info);
+   static const uint8_t resolve_end[] = {0x0e, 0x00, 0x00, 0x00};
+   CHECK(resolve_info->preamble_offset == 0);
+   CHECK(resolve_info->main_offset == 0);
+   CHECK(resolve_info->main_size == 4686);
+   CHECK(resolve_info->binary_size == 4686);
+   CHECK(resolve_info->nr_gprs == 42);
+   CHECK(resolve_info->nr_preamble_gprs == 0);
+   CHECK(resolve_info->push_count == 42);
+   CHECK(resolve_info->workgroup_size[0] == 32);
+   CHECK(resolve_info->workgroup_size[1] == 1);
+   CHECK(resolve_info->workgroup_size[2] == 1);
+   CHECK(resolve_info->local_size == 0);
+   CHECK(resolve_info->imageblock_stride == 0);
+   CHECK(!resolve_info->uses_txf);
+   CHECK(resolve_info->agx3_staging_known);
+   CHECK(resolve_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(resolve_binary, resolve_info->binary_size) ==
+         UINT64_C(0x3ec2844f60948ce4));
+   CHECK(memcmp(resolve_binary + resolve_info->binary_size -
+                   sizeof(resolve_end),
+                resolve_end, sizeof(resolve_end)) == 0);
 
    /* The G17P UNORM8 mip kernel replaces one firmware render job per level
     * with a launch in the command buffer's merged compute stream. Its native
