@@ -575,6 +575,86 @@ agx_optimizer_if_not(agx_instr **defs, agx_instr *I)
 }
 
 /*
+ * Evaluate an integer compare of two immediates on AGX3, which has no compare
+ * or select form without a register compare operand. Immediate inlining
+ * leaves one behind for e.g. umax(undef, 1), a constant compare can feed a
+ * select as a value, and fusing a compare of two constants into a select
+ * produces one; robust cube image coordinates do all of these.
+ */
+static bool
+agx_optimizer_eval_icond(agx_context *ctx, enum agx_icond icond, agx_index x,
+                         agx_index y, bool *result)
+{
+   if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       x.type != AGX_INDEX_IMMEDIATE || y.type != AGX_INDEX_IMMEDIATE ||
+       x.neg || y.neg)
+      return false;
+
+   /* A 16-bit immediate with its top bit set is negative in a 16-bit signed
+    * comparison but not in a 32-bit one, and the comparison width is no
+    * longer known here. Below that bit, signed and unsigned orderings agree.
+    */
+   const bool is_signed = icond == AGX_ICOND_SEQ || icond == AGX_ICOND_SLT ||
+                          icond == AGX_ICOND_SGT;
+   if (is_signed && (x.value >= 0x8000 || y.value >= 0x8000))
+      return false;
+
+   switch (icond) {
+   case AGX_ICOND_UEQ:
+   case AGX_ICOND_SEQ:
+      *result = x.value == y.value;
+      return true;
+   case AGX_ICOND_ULT:
+   case AGX_ICOND_SLT:
+      *result = x.value < y.value;
+      return true;
+   case AGX_ICOND_UGT:
+   case AGX_ICOND_SGT:
+      *result = x.value > y.value;
+      return true;
+   default:
+      return false;
+   }
+}
+
+static agx_instr *
+agx_optimizer_fold_icmp(agx_context *ctx, agx_instr *I)
+{
+   bool cond;
+   if (!agx_optimizer_eval_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+      return NULL;
+
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+   agx_instr *folded =
+      agx_mov_imm_to(&b, I->dest[0], cond != I->invert_cond);
+   agx_remove_instruction(I);
+   return folded;
+}
+
+static agx_instr *
+agx_optimizer_fold_icmpsel(agx_context *ctx, agx_instr *I)
+{
+   bool cond;
+   if (!agx_optimizer_eval_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+      return NULL;
+
+   const agx_index chosen = cond ? I->src[2] : I->src[3];
+   if (chosen.neg ||
+       !(chosen.type == AGX_INDEX_IMMEDIATE ||
+         ((chosen.type == AGX_INDEX_NORMAL ||
+           chosen.type == AGX_INDEX_REGISTER) &&
+          !chosen.abs)))
+      return NULL;
+
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+   agx_instr *folded = chosen.type == AGX_INDEX_IMMEDIATE
+                          ? agx_mov_imm_to(&b, I->dest[0], chosen.value)
+                          : agx_mov_to(&b, I->dest[0], chosen);
+   agx_remove_instruction(I);
+   return folded;
+}
+
+/*
  * Fuse conditions into select. Specifically, acts on icmpsel and fuses:
  *
  *    icmpsel(cmp(x, y, *), 0, z, w, eq) -> cmpsel(x, y, w, z, *)
@@ -747,8 +827,17 @@ agx_optimizer_forward(agx_context *ctx)
       if (I->op == AGX_OPCODE_IF_ICMP) {
          agx_optimizer_if_not(defs, I);
          agx_optimizer_if_cmp(defs, I);
+      } else if (I->op == AGX_OPCODE_ICMP) {
+         agx_instr *folded = agx_optimizer_fold_icmp(ctx, I);
+         if (folded)
+            defs[folded->dest[0].value] = folded;
       } else if (I->op == AGX_OPCODE_ICMPSEL) {
+         /* Fusing a compare of two inlined immediates yields a select the
+          * fold below can resolve. */
          agx_optimizer_cmpsel(defs, I);
+         agx_instr *folded = agx_optimizer_fold_icmpsel(ctx, I);
+         if (folded)
+            defs[folded->dest[0].value] = folded;
       } else if (I->op == AGX_OPCODE_BALLOT ||
                  I->op == AGX_OPCODE_QUAD_BALLOT) {
          agx_optimizer_ballot(ctx, defs, I);

@@ -164,6 +164,92 @@ TEST_F(Optimizer, G17PPreservesHalfWidenBeforeFltnorm)
 }
 
 /*
+ * AGX3 has no select form without a register compare operand, so a select of
+ * two immediates -- here fused out of a compare of two constants -- has to
+ * fold to the chosen operand.
+ */
+TEST_F(Optimizer, G17PFoldsAConstantSelect)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index two = agx_mov_imm(actual, 32, 2);
+   agx_index five = agx_mov_imm(actual, 32, 5);
+   agx_index lt = agx_icmp(actual, two, five, AGX_ICOND_ULT, false);
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_32);
+   agx_icmpsel_to(actual, out, lt, agx_zero(), wx, wy, AGX_ICOND_UEQ);
+   agx_unit_test(actual, out);
+
+   /* Burn the indices of the dead constants, compare and select; the chosen
+    * operand then propagates into the use. */
+   for (unsigned i = 0; i < 4; ++i)
+      (void)agx_temp(expected->shader, AGX_SIZE_32);
+   agx_unit_test(expected, wy);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
+/* A compare of two constants used as a value folds the same way, before it is
+ * lowered to a select of two immediates.
+ */
+TEST_F(Optimizer, G17PFoldsAConstantCompare)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index zero = agx_mov_imm(actual, 16, 0);
+   agx_index six = agx_mov_imm(actual, 16, 6);
+   agx_index eq = agx_icmp(actual, zero, six, AGX_ICOND_UEQ, true);
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_16);
+   agx_iadd_to(actual, out, eq, hx, 0);
+   agx_unit_test(actual, out);
+
+   for (unsigned i = 0; i < 3; ++i)
+      (void)agx_temp(expected->shader, AGX_SIZE_16);
+   out = agx_temp(expected->shader, AGX_SIZE_16);
+   agx_iadd_to(expected, out, agx_immediate(1), hx, 0);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
+/* The comparison width is unknown once both operands are immediates, so a
+ * signed compare of a 16-bit immediate with its top bit set stays a select.
+ */
+TEST_F(Optimizer, G17PKeepsASignDependentConstantSelect)
+{
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   struct agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   actual->shader->key = &key;
+   expected->shader->key = &key;
+
+   agx_index out = agx_temp(actual->shader, AGX_SIZE_16);
+   agx_icmpsel_to(actual, out, agx_abs(agx_immediate(0x8000)),
+                  agx_immediate(1), hx, hy, AGX_ICOND_SLT);
+   agx_unit_test(actual, out);
+
+   out = agx_temp(expected->shader, AGX_SIZE_16);
+   agx_icmpsel_to(expected, out, agx_abs(agx_immediate(0x8000)),
+                  agx_immediate(1), hx, hy, AGX_ICOND_SLT);
+   agx_unit_test(expected, out);
+
+   agx_optimize_and_dce(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
+/*
  * A tied fcmpsel with a GTN or LTN condition is G17P's native minimum or
  * maximum, and Apple's encoding carries the constant operand as one minifloat
  * that serves as both the compared and the selected value. Fold the constant
