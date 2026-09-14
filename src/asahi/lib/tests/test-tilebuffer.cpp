@@ -214,9 +214,10 @@ TEST(Tilebuffer, G17PDualRenderTargets)
    EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
    EXPECT_EQ(agx_tilebuffer_offset_B(&tib, 1), 4u);
 
+   /* Multisample layouts take the mixed-format programs. */
    tib = agx_build_tilebuffer_layout(wboit, 2, 2, false);
-   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_NONE);
-   EXPECT_FALSE(agx_g17p_rt0_tile_layout_supported(&tib));
+   EXPECT_EQ(agx_g17p_classify_mrt(&tib), AGX_G17P_MRT_MIXED);
+   EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
 
    tib = agx_build_tilebuffer_layout(wboit, 2, 1, false);
    tib._offset_B[1] = 4;

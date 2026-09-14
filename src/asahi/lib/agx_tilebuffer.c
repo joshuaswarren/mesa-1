@@ -413,6 +413,10 @@ agx_g17p_classify_mrt(const struct agx_tilebuffer_layout *tib)
    const unsigned active_count = agx_tilebuffer_compact(tib, &compact, NULL);
    tib = &compact;
 
+   /* Multisample multi-target layouts take the general mixed-format
+    * programs, whose end-of-tile builtin has a multisample form. */
+   if (tib->nr_samples == 2 || tib->nr_samples == 4)
+      return agx_g17p_classify_mixed_mrt(tib, active_count);
    if (tib->nr_samples != 1)
       return AGX_G17P_MRT_NONE;
 

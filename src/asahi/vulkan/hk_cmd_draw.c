@@ -491,6 +491,9 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
    memset(key.tib._offset_B, 0, sizeof(key.tib._offset_B));
    memset(key.op, 0, sizeof(key.op));
    key.mixed_mrt = true;
+   /* Multisample targets are stored unresolved: a multi-target pass
+    * resolves afterwards, from the multisample images. */
+   key.multisample_store = store && key.tib.nr_samples > 1;
 
    const VkRenderingAttachmentInfo *atts[HK_MAX_RTS];
    struct hk_image_view *views[HK_MAX_RTS];
@@ -504,7 +507,8 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
 
          struct hk_image_view *view = cmd->state.gfx.render.color_att[rt].iview;
          if (count == ARRAY_SIZE(views) || rt >= info->colorAttachmentCount ||
-             !view || view->vk.image->samples != 1 ||
+             !view ||
+             view->vk.image->samples != MAX2(key.tib.nr_samples, 1) ||
              info->pColorAttachments[rt].imageView == VK_NULL_HANDLE) {
             vk_command_buffer_set_error(&cmd->vk,
                                         VK_ERROR_FORMAT_NOT_SUPPORTED);

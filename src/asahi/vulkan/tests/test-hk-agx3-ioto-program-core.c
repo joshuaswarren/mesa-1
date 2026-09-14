@@ -2489,7 +2489,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    CHECK(agx_tilebuffer_offset_B(&tib, 1) == 4);
    tib = agx_build_tilebuffer_layout(mrt, 2, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    enum pipe_format wboit[AGX_MAX_RENDER_TARGETS] = {
       PIPE_FORMAT_R16G16B16A16_FLOAT,
@@ -2501,7 +2501,7 @@ test_g17p_single_layer_rt0_layout(void)
    CHECK(agx_tilebuffer_offset_B(&tib, 0) == 0);
    CHECK(agx_tilebuffer_offset_B(&tib, 1) == 8);
    tib = agx_build_tilebuffer_layout(wboit, 2, 2, false);
-   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
 
    tib = agx_build_tilebuffer_layout(rgba, 1, 2, false);
    CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));

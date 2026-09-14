@@ -306,6 +306,9 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
       .fs.ignore_tib_dependencies = true,
+      /* G17P multisample backgrounds store through the coverage register. */
+      .fs.nr_samples =
+         cache->dev->chip == AGX_CHIP_G17P ? key->tib.nr_samples : 0,
       .g17p_mrt_bg = key->mixed_mrt,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,

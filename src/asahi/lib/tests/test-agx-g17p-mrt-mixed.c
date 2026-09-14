@@ -231,8 +231,13 @@ check_layout_classification(const struct layout *l)
       bad.logical_format[l->count - 1] = PIPE_FORMAT_R11G11B10_FLOAT;
       CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE);
 
+      /* Multisample layouts take the mixed programs; other counts none. */
       bad = tib;
       bad.nr_samples = 2;
+      CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_MIXED);
+
+      bad = tib;
+      bad.nr_samples = 3;
       CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE);
 
       bad = tib;
@@ -329,6 +334,104 @@ expected_eot(unsigned count, const uint8_t *selectors, uint8_t *out)
    return out;
 }
 
+/* The multisample program for texture type 4 attachments changes three
+ * bytes per target: the wire width byte of its PACK_IMGWIR gains 2, and its
+ * IMGWBLK clears bit 7 of byte 8 and takes dimension class 2 in the selector's
+ * low nibble. */
+static const uint8_t *
+expected_ms_eot(unsigned count, const uint8_t *selectors, uint8_t *out)
+{
+   static const unsigned wire_offsets[][AGX_MAX_RENDER_TARGETS] = {
+      [2] = {43, 63},
+      [3] = {43, 63, 95},
+      [4] = {43, 63, 95, 127},
+      [5] = {43, 63, 95, 127, 159},
+      [6] = {43, 63, 95, 127, 159, 191},
+      [7] = {43, 75, 107, 139, 171, 203, 235},
+      [8] = {43, 63, 119, 151, 183, 215, 247, 279},
+   };
+   static const unsigned selector_offsets[][AGX_MAX_RENDER_TARGETS] = {
+      [2] = {101, 113},
+      [3] = {133, 145, 157},
+      [4] = {165, 177, 189, 201},
+      [5] = {197, 209, 221, 233, 245},
+      [6] = {229, 241, 253, 265, 277, 289},
+      [7] = {69, 273, 285, 297, 309, 321, 333},
+      [8] = {101, 113, 317, 329, 341, 353, 365, 377},
+   };
+   expected_eot(count, selectors, out);
+   for (unsigned rt = 0; rt < count; ++rt) {
+      out[wire_offsets[count][rt]] |= 0x02;
+      out[selector_offsets[count][rt] - 1] &= 0x7f;
+      out[selector_offsets[count][rt]] = (selectors[rt] & 0xf0) | 0x02;
+   }
+   return out;
+}
+
+static unsigned
+decode_hex(const char *hex, uint8_t *out, unsigned capacity)
+{
+   unsigned n = 0;
+   for (; hex[0] && hex[1] && n < capacity; hex += 2)
+      sscanf(hex, "%2hhx", &out[n++]);
+   return n;
+}
+
+/* metal-nt -arch applegpu_g17p builtin end-of-tile BTNF: two, seven and eight
+ * RGBA8 (internal format 2) targets in partition zero, texture type 4.
+ * .tmp/cts-renderpasses-current-dd52/mixed/native/mseot_same_n{2,7,8}_t4. */
+static const struct {
+   unsigned count;
+   const char *hex;
+} ms_eot_witnesses[] = {
+   {2,
+      "1c9c100624a814060c9d102624a910269f1054020304140050260a009f20540003001000"
+      "50260a009705540600080000d04010000b8221041b8021049705540e00100000d0441000"
+      "4b032f004200000400005b012f0042000004000057105400000000802872000057205408"
+      "00100090287200000e000000"},
+   {7,
+      "1c9c100624a814060c9d102624a910269f1054020304140050260a009f20540003001000"
+      "50260a009705540600080000d04010000b8221041b802104571054000000008028720000"
+      "9705540e00100000d04410004b8327004200000400005b81270042000004000097055416"
+      "00180000d05010008b8327004200000800009b8127004200000800009705541e00200000"
+      "d0541000cb8327004200000c0000db8127004200000c00009705542600280000d0601000"
+      "0b8367004200001000001b8167004200001000009705542e00300000d06010004b836700"
+      "4200001000005b8167004200001000009705543600380000d06410008b036f0042000014"
+      "00009b016f0042000014000057205408001000902872000057405410002000a028720000"
+      "57805418003000a02872000057005520004000b02872000057005428005000d028720000"
+      "57005630006000e0287200000e000000"},
+   {8,
+      "1c9c100624a814060c9d102624a910269f1054020304140050260a009f20540003001000"
+      "50260a009705540600080000d04010000b8221041b8021049705540e00100000d0441000"
+      "4b8327004200000400005b81270042000004000057105400000000802872000057205408"
+      "00100080287200009705541600180000d05010008b8327004200000800009b8127004200"
+      "000800009705541e00200000d0541000cb8327004200000c0000db8127004200000c0000"
+      "9705542600280000d06010000b8367004200001000001b8167004200001000009705542e"
+      "00300000d06410004b8367004200001400005b8167004200001400009705543600380000"
+      "d06410008b8367004200001400009b8167004200001400009705543e00400000d0441000"
+      "cb036f00420000040000db016f0042000004000057405410002000a02872000057805418"
+      "003000b02872000057005520004000b02872000057005628005000d02872000057005430"
+      "006000e0287200005720543800700090287200000e000000"},
+};
+
+static int
+test_multisample_eot_witnesses(void)
+{
+   const uint8_t rgba8[AGX_MAX_RENDER_TARGETS] = {
+      0x75, 0x75, 0x75, 0x75, 0x75, 0x75, 0x75, 0x75,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(ms_eot_witnesses); ++i) {
+      const unsigned count = ms_eot_witnesses[i].count;
+      uint8_t native[sizeof(agx3_g17p_octa_raw32_eot)];
+      uint8_t expected[sizeof(agx3_g17p_octa_raw32_eot)];
+      CHECK(decode_hex(ms_eot_witnesses[i].hex, native, sizeof(native)) ==
+            32 + 44 * count);
+      CHECK(!memcmp(expected_ms_eot(count, rgba8, expected), native,
+                    32 + 44 * count));
+   }
+   return 0;
+}
+
 static int
 check_eot_subset(unsigned count, const enum pipe_format *formats,
                  const uint8_t *offsets)
@@ -351,6 +454,16 @@ check_eot_subset(unsigned count, const enum pipe_format *formats,
          part.info.agx3_staging_halfs == 8 * count);
    CHECK(!memcmp(part.binary,
                  expected_eot(count, key.g17p_mrt_eot_selectors, expected),
+                 part.info.binary_size));
+   free(part.binary);
+
+   struct agx_shader_key ms_key = key;
+   ms_key.g17p_rt0_eot_multisample = true;
+   part = (struct agx_shader_part){0};
+   CHECK(compile_eot(count, formats, offsets, &ms_key, &part));
+   CHECK(part.info.binary_size == 32 + 44 * count);
+   CHECK(!memcmp(part.binary,
+                 expected_ms_eot(count, key.g17p_mrt_eot_selectors, expected),
                  part.info.binary_size));
    free(part.binary);
 
@@ -539,9 +652,10 @@ test_background_programs(void)
 }
 
 static bool
-compile_epilog_written(unsigned count, const enum pipe_format *formats,
+compile_epilog_samples(unsigned count, const enum pipe_format *formats,
                        unsigned written, uint64_t partitions, bool additive,
-                       bool write_z, struct agx_shader_part *part)
+                       bool write_z, unsigned samples,
+                       struct agx_shader_part *part)
 {
    const enum pipe_blendfactor dst =
       additive ? PIPE_BLENDFACTOR_ONE : PIPE_BLENDFACTOR_ZERO;
@@ -549,7 +663,7 @@ compile_epilog_written(unsigned count, const enum pipe_format *formats,
       .link.loc_written = written,
       .link.size_32 = written,
       .link.write_z = write_z,
-      .nr_samples = 1,
+      .nr_samples = samples,
    };
    memset(epilog.remap, -1, sizeof(epilog.remap));
    for (unsigned rt = 0; rt < count; ++rt) {
@@ -566,14 +680,24 @@ compile_epilog_written(unsigned count, const enum pipe_format *formats,
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P MRT epilog");
    agx_nir_fs_epilog(&b, &epilog);
-   agx_nir_lower_g17p_tile_samples(b.shader, 1);
+   agx_nir_lower_g17p_tile_samples(b.shader, samples);
    agx_preprocess_nir(b.shader);
    struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                                .fs.nr_samples = samples,
                                 .g17p_tile_partitions = partitions,
                                 .secondary = true};
    const bool ok = agx_compile_shader_nir(b.shader, &key, part);
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+compile_epilog_written(unsigned count, const enum pipe_format *formats,
+                       unsigned written, uint64_t partitions, bool additive,
+                       bool write_z, struct agx_shader_part *part)
+{
+   return compile_epilog_samples(count, formats, written, partitions,
+                                 additive, write_z, 1, part);
 }
 
 static bool
@@ -783,7 +907,7 @@ static const struct layout scalar_layouts[] = {
 };
 
 static int
-check_subset_epilogs(const struct layout *l)
+check_subset_epilogs(const struct layout *l, unsigned samples)
 {
    static const uint8_t *const bytes[] = {
       [W12] = wait_12,     [W48] = wait_48,     [W192] = wait_192,
@@ -815,11 +939,68 @@ check_subset_epilogs(const struct layout *l)
          memcpy(sequence[n], bytes[subset_witnesses[w].ops[n]], 6);
 
       struct agx_shader_part part = {0};
-      CHECK(compile_epilog_written(l->count, l->formats, written, partitions,
-                                   false, false, &part));
+      CHECK(compile_epilog_samples(l->count, l->formats, written, partitions,
+                                   false, false, samples, &part));
       CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
       CHECK(part.info.agx3_colour_link.colour_classes == classes);
       free(part.binary);
+   }
+   return 0;
+}
+
+/* Apple's 2x/4x store-only fragments of every target acquire all their
+ * classes in one PIXWAIT and release them once around stores through the
+ * coverage register, with no lstcol f13 even for eight targets; fragments
+ * writing only some targets bracket each partition exactly as at one sample
+ * (metal-nt -arch applegpu_g17p render pipelines of two to eight RGBA8
+ * targets, and of targets 1, 2, 1-2 of three and 1, 3 of four at 1x, 2x and
+ * 4x: msaa/native/persample/{msmrt,msmrt2,mssubset}.py). */
+static const uint8_t wait_60[6] = {0x87, 0x02, 0x54, 0x3c, 0x08, 0x00};
+static const uint8_t wait_252[6] = {0x87, 0x02, 0x54, 0xfc, 0x08, 0x00};
+static const uint8_t release_572[6] = {0x07, 0x02, 0x54, 0x3c, 0x02, 0x00};
+static const uint8_t release_764[6] = {0x07, 0x02, 0x54, 0xfc, 0x02, 0x00};
+
+static int
+test_multisample_epilogs(void)
+{
+   for (unsigned samples = 2; samples <= 4; samples += 2) {
+      for (unsigned i = 0; i < ARRAY_SIZE(layouts) + ARRAY_SIZE(wide_layouts);
+           ++i) {
+         const struct layout *l = i < ARRAY_SIZE(layouts)
+                                     ? &layouts[i]
+                                     : &wide_layouts[i - ARRAY_SIZE(layouts)];
+         uint8_t sequence[3][6];
+         memcpy(sequence[0], entry_512, 6);
+         memcpy(sequence[1], l->count == 2 ? wait_60 : wait_252, 6);
+         memcpy(sequence[2], l->count == 2 ? release_572 : release_764, 6);
+
+         /* A layout whose tile would spill at this count is not stored. */
+         enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+         memcpy(formats, l->formats, sizeof(l->formats));
+         struct agx_tilebuffer_layout tib =
+            agx_build_tilebuffer_layout(formats, l->count, samples, false);
+         if (agx_tilebuffer_spills(&tib))
+            continue;
+
+         struct agx_shader_part part = {0};
+         CHECK(compile_epilog_samples(l->count, l->formats,
+                                      BITFIELD_MASK(l->count), 0, false, false,
+                                      samples, &part));
+         CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, 3));
+         unsigned stores = 0;
+         CHECK(store_f13_mask(&part, &stores) == 0 && stores == l->count);
+         free(part.binary);
+      }
+
+      for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
+         enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+         memcpy(formats, layouts[i].formats, sizeof(layouts[i].formats));
+         struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(
+            formats, layouts[i].count, samples, false);
+         if (!agx_tilebuffer_spills(&tib) &&
+             check_subset_epilogs(&layouts[i], samples))
+            return 1;
+      }
    }
    return 0;
 }
@@ -867,7 +1048,7 @@ static int
 test_subset_epilogs(void)
 {
    for (unsigned i = 0; i < ARRAY_SIZE(layouts); ++i) {
-      if (check_subset_epilogs(&layouts[i]))
+      if (check_subset_epilogs(&layouts[i], 1))
          return 1;
    }
 
@@ -880,7 +1061,7 @@ test_subset_epilogs(void)
       CHECK(tib.sample_size_B == l->sample_size_B);
       for (unsigned rt = 0; rt < l->count; ++rt)
          CHECK(agx_tilebuffer_offset_B(&tib, rt) == l->offsets[rt]);
-      if (check_subset_epilogs(l))
+      if (check_subset_epilogs(l, 1))
          return 1;
    }
    return 0;
@@ -1049,6 +1230,7 @@ main(void)
        test_layout_classification() || test_eot_programs() ||
        test_background_programs() || test_epilogs() ||
        test_subset_epilogs() || test_octa_subset_epilogs() ||
+       test_multisample_eot_witnesses() || test_multisample_epilogs() ||
        test_homogeneous_programs_unchanged())
       return 1;
 

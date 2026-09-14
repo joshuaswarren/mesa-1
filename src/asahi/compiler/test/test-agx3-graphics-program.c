@@ -459,8 +459,17 @@ main(void)
       bad.staging_halfs -= 8;
       CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
                                               &eot_program));
+      /* The multisample program has the same shape; the imageblock carries
+       * the count. */
+      if (count <= 4) {
+         bad = mixed;
+         bad.imageblock.nr_samples = 2;
+         bad.imageblock.tile_size_px = 16 * 16;
+         CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                                &eot_program));
+      }
       bad = mixed;
-      bad.imageblock.nr_samples = 2;
+      bad.imageblock.nr_samples = 3;
       CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
                                               &eot_program));
       bad = mixed;

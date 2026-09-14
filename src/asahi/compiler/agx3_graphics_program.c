@@ -460,13 +460,17 @@ agx3_g17p_rt0_eot_program_generate(
          ALIGN_POT(count * desc->imageblock_offset1_B, 8) &&
       !high_offsets && desc->imageblock.nr_samples == 1;
    /* The same program reads every target's offset from its own uniform, so
-    * targets of other formats may sit at any offset inside the sample. */
+    * targets of other formats may sit at any offset inside the sample. Its
+    * multisample form has the same length and registers (texture type 4
+    * changes three bytes per target); the imageblock carries the count. */
    bool mixed_mrt =
       desc && desc->mixed_mrt && count >= 2 &&
       count <= AGX3_G17P_MRT_MAX_TARGETS &&
       desc->shader_binary_size == 32 + 44 * count && desc->nr_gprs == 8 &&
       desc->staging_halfs == 8 * count &&
-      desc->imageblock.nr_samples == 1;
+      (desc->imageblock.nr_samples == 1 ||
+       desc->imageblock.nr_samples == 2 ||
+       desc->imageblock.nr_samples == 4);
    for (unsigned rt = 0; mixed_mrt && rt < AGX3_G17P_MRT_MAX_TARGETS; ++rt) {
       mixed_mrt = rt < count ? offsets[rt] < desc->imageblock.sample_size_B
                              : offsets[rt] == 0;

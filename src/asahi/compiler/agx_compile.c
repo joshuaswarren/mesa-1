@@ -5786,6 +5786,10 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return false;
 
+   /* A multisample epilog stores every target through the coverage word
+    * register (agx_nir_lower_g17p_tile_samples). */
+   const bool multisample_stores =
+      ctx->key->fs.nr_samples > 1 && !ctx->key->fs.ignore_tib_dependencies;
    agx_instr *loads[AGX_MAX_RTS] = {0};
    agx_instr *stores[AGX_MAX_RTS] = {0};
    agx_instr *stop = NULL;
@@ -5831,8 +5835,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
             if (store_count >= ARRAY_SIZE(stores) || I->nr_dests != 0 ||
                 I->nr_srcs != 3 || I->explicit_coords ||
                 I->src[0].type != AGX_INDEX_NORMAL || I->src[0].memory ||
-                I->src[1].type != AGX_INDEX_IMMEDIATE ||
-                I->src[1].value != 0xff ||
+                !(multisample_stores
+                     ? I->src[1].type == AGX_INDEX_NORMAL &&
+                          I->src[1].size == AGX_SIZE_16
+                     : I->src[1].type == AGX_INDEX_IMMEDIATE &&
+                          I->src[1].value == 0xff) ||
                 !agx_is_null(I->src[2]))
                return false;
             for (unsigned i = 0; i < store_count; ++i) {
@@ -5879,7 +5886,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    const bool subset = partitions && written != partitions;
    if (!stop || (partitions && (written & ~partitions)) ||
        store_count < (subset && written != BITFIELD64_BIT(0) ? 1 : 2) ||
-       (subset && load_count) ||
+       ((subset || multisample_stores) && load_count) ||
        (depth_ops && (depth_ops != 3 || load_count)))
       return false;
 

@@ -2327,7 +2327,7 @@ agx3_tile_value_ok(agx_index value, uint8_t mask, int width)
 static bool
 agx3_tile_sample_operand(agx_index sample, struct agx3_tile_sample *out)
 {
-   if (sample.abs || sample.neg || sample.memory || sample.cache ||
+   if (sample.abs || sample.neg || sample.memory ||
        sample.size != AGX_SIZE_16)
       return false;
 
@@ -2343,7 +2343,7 @@ agx3_tile_sample_operand(agx_index sample, struct agx3_tile_sample *out)
        * no refusal -- there was no untagged store. The tags are gone now;
        * a multisample store carries a live mask register instead.
        */
-      if (sample.kill || sample.discard ||
+      if (sample.kill || sample.discard || sample.cache ||
           sample.value != AGX3_TILE_ALL_SAMPLES)
          return false;
 
@@ -2356,7 +2356,10 @@ agx3_tile_sample_operand(agx_index sample, struct agx3_tile_sample *out)
 
    /* Register allocation rewrites `kill` into the post-RA `discard` hint on
     * some paths, and the rest of this packer reads the pair together. f55 is
-    * that hint for the sample operand. */
+    * that hint for the sample operand. A mask read again by later stores may
+    * carry the post-RA `cache` hint instead; like any other live mask it
+    * leaves f55 clear, as on all but the last store of Apple's 2x/4x
+    * multi-target fragments. */
    *out = agx3_tile_sample_reg(sample.value, sample.kill || sample.discard);
    return true;
 }
@@ -5498,6 +5501,12 @@ struct agx3_g17p_mrt_protocol {
    bool valid;
    bool raw32_store;
    bool has_loads;
+   /* Stores carry the coverage register. When every partition is stored,
+    * all of their classes are acquired and released once, around all the
+    * stores. */
+   bool multisample;
+   bool multisample_combined;
+   uint16_t combined_classes;
    uint8_t count;
    /* Colour classes of the stored partitions, bit n for class pair n. */
    uint8_t classes;
@@ -5534,10 +5543,12 @@ agx3_g17p_mrt_class_pair(unsigned partition)
  *
  * Keep this admission as narrow as the native evidence.  A background may
  * emit one two- or four-store set to partition zero with no pixel
- * transaction; a colour epilog the same set, one per framebuffer sample,
- * after its one class-12 wait.  Each store's mask must be computed by its own
- * instruction so a repeated one cannot masquerade as a complete sample
- * domain.
+ * transaction, and a multi-target background one such set per target, at
+ * disjoint whole-sample tile ranges; a colour epilog emits one set to
+ * partition zero, one per framebuffer sample, after its one class-12 wait.
+ * Within a target each store's mask must be computed by its own instruction
+ * so a repeated one cannot masquerade as a complete sample domain.  Returns
+ * the number of targets, or zero.
  *
  * Distinct mask REGISTERS were the first spelling of that, taken from
  * Apple's msaa_f_sampleid_s4, whose four stores land in four registers.  A
@@ -5549,45 +5560,50 @@ agx3_g17p_mrt_class_pair(unsigned partition)
  * they name the same register AND nothing redefined it in between, so that is
  * what is checked.
  */
-static bool
+static unsigned
 agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        ctx->key->fs.ignore_tib_dependencies == colour ||
        list_length(&ctx->blocks) != 1)
-      return false;
+      return 0;
 
    /* Post-RA, the definition that reaches each store is the most recent write
     * of that half register, and the block is straight-line by the test above.
     * 192 is the sample operand's own register ceiling in
     * agx3_tile_sample_operand(). */
    const agx_instr *reaching[192] = {NULL};
-   unsigned stores = 0;
-   uint16_t mask_regs[4];
-   const agx_instr *mask_defs[4];
-   enum agx_format format = 0;
-   unsigned component_mask = 0;
+   struct {
+      uint16_t offset;
+      enum agx_format format;
+      unsigned component_mask;
+      unsigned stores;
+      uint16_t mask_regs[4];
+      const agx_instr *mask_defs[4];
+   } targets[AGX_MAX_RTS];
+   unsigned target_count = 0;
+   uint64_t written_B = 0;
    bool stopped = false, waited = false;
 
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
-         return false;
+         return 0;
 
       if (I->op == AGX_OPCODE_STOP) {
          stopped = true;
          continue;
       }
 
-      if (I->op == AGX_OPCODE_WAIT_PIX && colour && !waited && !stores &&
-          I->writeout == 12) {
+      if (I->op == AGX_OPCODE_WAIT_PIX && colour && !waited &&
+          !target_count && I->writeout == 12) {
          waited = true;
          continue;
       }
 
       if (agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
           I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
-         return false;
+         return 0;
 
       if (I->op != AGX_OPCODE_ST_TILE) {
          agx_foreach_dest(I, d) {
@@ -5606,38 +5622,68 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
       }
 
       struct agx3_tile_sample sample;
-      if (I->nr_srcs != 3 || I->pixel_offset != 0 || I->explicit_coords ||
-          !agx_is_null(I->src[2]) ||
+      if (I->nr_srcs != 3 || (colour && I->pixel_offset != 0) ||
+          I->explicit_coords || !agx_is_null(I->src[2]) ||
           !agx3_tile_sample_operand(I->src[1], &sample) || !sample.reg)
-         return false;
+         return 0;
 
-      if (stores >= ARRAY_SIZE(mask_defs))
-         return false;
+      unsigned t = 0;
+      while (t < target_count && targets[t].offset != I->pixel_offset)
+         t++;
+
+      if (t == target_count) {
+         /* A new target: its whole samples must not overlap another's. */
+         const int width = agx3_tile_format_width(I->format);
+         const unsigned size_B =
+            width < 0 ? 0 : util_last_bit(I->mask) << width;
+         const uint64_t bytes =
+            BITFIELD64_MASK(size_B) << MIN2(I->pixel_offset, 63);
+         if (t == ARRAY_SIZE(targets) || !size_B ||
+             I->pixel_offset + size_B > 64 || (written_B & bytes))
+            return 0;
+
+         written_B |= bytes;
+         targets[t].offset = I->pixel_offset;
+         targets[t].format = I->format;
+         targets[t].component_mask = I->mask;
+         targets[t].stores = 0;
+         target_count++;
+      } else if (I->format != targets[t].format ||
+                 I->mask != targets[t].component_mask) {
+         return 0;
+      }
+
+      if (targets[t].stores >= ARRAY_SIZE(targets[t].mask_defs))
+         return 0;
 
       /* Same register and the same definition still reaching it is the same
-       * mask twice, whatever it holds. */
+       * mask twice, whatever it holds. Each target needs every sample once;
+       * targets of one sample share its mask. */
       const agx_instr *def = sample.value < ARRAY_SIZE(reaching)
                                 ? reaching[sample.value] : NULL;
 
-      for (unsigned i = 0; i < stores; ++i) {
-         if (mask_regs[i] == sample.value && mask_defs[i] == def)
-            return false;
+      for (unsigned i = 0; i < targets[t].stores; ++i) {
+         if (targets[t].mask_regs[i] == sample.value &&
+             targets[t].mask_defs[i] == def)
+            return 0;
       }
 
-      if (stores == 0) {
-         format = I->format;
-         component_mask = I->mask;
-      } else if (I->format != format || I->mask != component_mask) {
-         return false;
-      }
-
-      mask_regs[stores] = sample.value;
-      mask_defs[stores++] = def;
+      targets[t].mask_regs[targets[t].stores] = sample.value;
+      targets[t].mask_defs[targets[t].stores++] = def;
    }
 
-   return stopped && waited == colour &&
-          (colour ? stores == ctx->key->fs.nr_samples
-                  : stores == 2 || stores == 4);
+   const unsigned samples =
+      target_count ? targets[0].stores : 0;
+   for (unsigned t = 0; t < target_count; ++t) {
+      if (targets[t].stores != samples)
+         return 0;
+   }
+
+   const bool complete = colour ? samples == ctx->key->fs.nr_samples
+                                : samples == 2 || samples == 4;
+   return stopped && waited == colour && complete &&
+                (target_count == 1 || ctx->key->g17p_mrt_bg)
+             ? target_count : 0;
 }
 
 static int
@@ -5714,6 +5760,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (p.offsets[0] != 0)
       return (struct agx3_g17p_mrt_protocol){0};
 
+   p.multisample = ctx->key->fs.nr_samples > 1 &&
+                   !ctx->key->fs.ignore_tib_dependencies;
    unsigned previous_load = p.count;
    unsigned next_store = p.count;
    bool stores_started = false;
@@ -5740,11 +5788,12 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
           (I->op != AGX_OPCODE_ST_TILE || I->nr_srcs != 3 || I->nr_dests ||
            !agx_is_null(I->src[2]) || partition < 0))
          return (struct agx3_g17p_mrt_protocol){0};
+      struct agx3_tile_sample sample;
       if (partition < 0 || I->nr_srcs < 2 ||
-          I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1].type !=
-             AGX_INDEX_IMMEDIATE ||
-          I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1].value !=
-             AGX3_TILE_ALL_SAMPLES)
+          !agx3_tile_sample_operand(
+             I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1], &sample) ||
+          sample.reg != p.multisample ||
+          (p.multisample && I->op == AGX_OPCODE_LD_TILE))
          return (struct agx3_g17p_mrt_protocol){0};
 
       if (I->op == AGX_OPCODE_LD_TILE) {
@@ -5761,7 +5810,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    }
 
    unsigned store_count = 0;
+   p.multisample_combined = p.multisample;
    for (int i = p.count - 1; i >= 0; --i) {
+      p.multisample_combined &= p.stores[i] != 0;
       const unsigned pair = agx3_g17p_mrt_class_pair(i);
       uint32_t read_class, write_class, combined_class;
       /* Blending four targets is not inferred from the store-only witness. */
@@ -5778,9 +5829,11 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       if (pair == 0)
          p.shared_last = i;
       p.classes |= BITFIELD_BIT(pair);
+      p.combined_classes |= combined_class;
       store_count++;
    }
-   if (p.stores[1] && p.stores[2] && store_count > 5)
+   /* Multisample store-only fragments of up to eight targets carry no f13. */
+   if (p.stores[1] && p.stores[2] && store_count > 5 && !p.multisample)
       p.f13_stores = store_count - 5;
 
    p.raw32_store = true;
@@ -5822,17 +5875,21 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
          stopped = true;
       } else if (I->op == AGX_OPCODE_ST_TILE && ctx->key->g17p_mrt_bg) {
          /* Apple's BG builtins for other layouts store each target once, in
-          * no required order, so only require disjoint whole-pixel stores. */
+          * no required order, so only require disjoint whole-pixel stores.
+          * A multisample clear stores each target through the coverage
+          * register, as the one-target multisample background does. */
          const int width = agx3_tile_format_width(I->format);
          const unsigned size_B =
             width < 0 ? 0 : util_last_bit(I->mask) << width;
          const uint64_t bytes =
             BITFIELD64_MASK(size_B) << MIN2(I->pixel_offset, 63);
+         struct agx3_tile_sample sample;
          if (!size_B || stores >= AGX_MAX_RTS ||
              I->pixel_offset + size_B > 64 ||
              (written_B & bytes) || I->nr_srcs != 3 || I->nr_dests != 0 ||
-             I->explicit_coords || I->src[1].type != AGX_INDEX_IMMEDIATE ||
-             I->src[1].value != AGX3_TILE_ALL_SAMPLES ||
+             I->explicit_coords ||
+             !agx3_tile_sample_operand(I->src[1], &sample) ||
+             sample.reg != (ctx->key->fs.nr_samples > 1) ||
              !agx_is_null(I->src[2]))
             return false;
          written_B |= bytes;
@@ -5999,7 +6056,8 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_COMPUTE || ctx->is_preamble ||
-       ctx->key->no_stop || ctx->key->g17p_rt0_eot_multisample ||
+       ctx->key->no_stop ||
+       (ctx->key->g17p_rt0_eot_multisample && !ctx->key->g17p_mrt_eot_count) ||
        list_length(&ctx->blocks) != 1)
       return false;
 
@@ -6113,30 +6171,53 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          /* The builtin for targets of any formats is the raw32 program with
           * each target's IMGWBLK selector replaced. Apple's factory derives
           * each selector from that target's format alone and changes no
-          * other byte. */
+          * other byte.
+          *
+          * Multisample attachments (BTNF texture type 4) change three bytes
+          * per target, exactly as the one-target multisample builtin does:
+          * the wire width byte of the target's PACK_IMGWIR gains 2, and its
+          * IMGWBLK clears bit 7 of byte 8 and replaces the selector's low
+          * nibble 5 with the multisample dimension class 2. metal-nt
+          * -arch applegpu_g17p builtin EOT BTNF witnesses of two to eight
+          * RGBA8 targets in one partition, texture types 2 and 4, differ in
+          * exactly those bytes. */
          static const struct {
             const uint8_t *text;
             uint16_t imgwblk[AGX_MAX_RTS];
+            uint16_t imgwir_wire[AGX_MAX_RTS];
          } templates[] = {
-            [2] = {agx3_g17p_dual_raw32_eot, {92, 104}},
-            [3] = {agx3_g17p_triple_raw32_eot, {124, 136, 148}},
-            [4] = {agx3_g17p_quad_eot, {156, 168, 180, 192}},
-            [5] = {agx3_g17p_penta_raw32_eot, {188, 200, 212, 224, 236}},
-            [6] = {agx3_g17p_hexa_raw32_eot, {220, 232, 244, 256, 268, 280}},
+            [2] = {agx3_g17p_dual_raw32_eot, {92, 104}, {43, 63}},
+            [3] = {agx3_g17p_triple_raw32_eot, {124, 136, 148},
+                   {43, 63, 95}},
+            [4] = {agx3_g17p_quad_eot, {156, 168, 180, 192},
+                   {43, 63, 95, 127}},
+            [5] = {agx3_g17p_penta_raw32_eot, {188, 200, 212, 224, 236},
+                   {43, 63, 95, 127, 159}},
+            [6] = {agx3_g17p_hexa_raw32_eot, {220, 232, 244, 256, 268, 280},
+                   {43, 63, 95, 127, 159, 191}},
             [7] = {agx3_g17p_hepta_raw32_eot,
-                   {60, 264, 276, 288, 300, 312, 324}},
+                   {60, 264, 276, 288, 300, 312, 324},
+                   {43, 75, 107, 139, 171, 203, 235}},
             [8] = {agx3_g17p_octa_raw32_eot,
-                   {92, 104, 308, 320, 332, 344, 356, 368}},
+                   {92, 104, 308, 320, 332, 344, 356, 368},
+                   {43, 63, 119, 151, 183, 215, 247, 279}},
          };
          static_assert(sizeof(agx3_g17p_octa_raw32_eot) == 32 + 44 * 8,
                        "native octa EOT");
          const size_t size = 32 + 44 * multi_eot_count;
+         const bool multisample = ctx->key->g17p_rt0_eot_multisample;
          uint8_t program[sizeof(agx3_g17p_octa_raw32_eot)];
          memcpy(program, templates[multi_eot_count].text, size);
          for (unsigned rt = 0; rt < multi_eot_count; ++rt) {
+            const unsigned imgwblk = templates[multi_eot_count].imgwblk[rt];
+            uint8_t selector = ctx->key->g17p_mrt_eot_selectors[rt];
+            if (multisample) {
+               program[templates[multi_eot_count].imgwir_wire[rt]] |= 0x02;
+               program[imgwblk + 8] &= 0x7f;
+               selector = (selector & 0xf0) | 0x02;
+            }
             /* Byte 9 of the target's 12-byte IMGWBLK. */
-            program[templates[multi_eot_count].imgwblk[rt] + 9] =
-               ctx->key->g17p_mrt_eot_selectors[rt];
+            program[imgwblk + 9] = selector;
          }
          /* Six or more targets exceed agx3_append's 8-bit length. */
          memcpy(util_dynarray_grow_bytes(emission, 1, size), program, size);
@@ -6615,8 +6696,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const struct agx3_g17p_mrt_protocol g17p_mrt =
       agx3_g17p_mrt_protocol(ctx);
    const bool g17p_multi_background = agx3_g17p_multi_background_protocol(ctx);
-   const bool g17p_msaa_background_stores =
+   const unsigned g17p_msaa_background_targets =
       agx3_g17p_sample_store_protocol(ctx, false);
+   const bool g17p_msaa_background_stores = g17p_msaa_background_targets > 0;
    const bool g17p_sample_colour_stores =
       tile_stores_left > 1 && agx3_g17p_sample_store_protocol(ctx, true);
    const bool g17p_colour_protocol =
@@ -7808,6 +7890,39 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                assert(tile_stores_left > 0);
                last = --tile_stores_left == 0;
             }
+            if (g17p_mrt.valid && g17p_mrt.multisample_combined) {
+               /* Apple's 2x/4x store-only fragments of two to eight targets
+                * acquire every stored partition's classes in one PIXWAIT
+                * (60, or 252 from three targets), store in descending
+                * partition order through the coverage register and release
+                * those classes once (msaa/native/persample/msmrt*.py).
+                * Fragments writing only some targets bracket each partition
+                * as at one sample (mssubset.py). */
+               uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
+               uint8_t len = 0;
+               if (!g17p_colour_open) {
+                  if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
+                      !agx3_append(emission, bytes, len))
+                     AGX3_REFUSE(I);
+                  ctx->agx3_colour_link.entry_emitted = true;
+                  ctx->agx3_colour_link.entry_offset =
+                     emission->size - len - initial_size;
+                  g17p_colour_open = true;
+               }
+               if ((g17p_mrt_stores_seen++ == 0 &&
+                    (!agx3_pixel_wait(enc, g17p_mrt.combined_classes, 0,
+                                      bytes, &len) ||
+                     !agx3_append(emission, bytes, len))) ||
+                   !agx3_emit_tile(emission, enc, I, slot, wait, false, false,
+                                   g17p_mrt.raw32_store,
+                                   g17p_mrt.count >= 3, false) ||
+                   (last &&
+                    (!agx3_pixel_release(enc, g17p_mrt.combined_classes, true,
+                                         0, bytes, &len) ||
+                     !agx3_append(emission, bytes, len))))
+                  AGX3_REFUSE(I);
+               continue;
+            }
             if (g17p_mrt.valid) {
                const int partition =
                   agx3_g17p_mrt_partition(&g17p_mrt, I->pixel_offset);
@@ -7844,11 +7959,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   !shared || partition == g17p_mrt.shared_last;
                const bool store_f13 =
                   !load && g17p_mrt_stores_seen++ < g17p_mrt.f13_stores;
+               /* A multisample store keeps its own coverage dependency. */
+               const bool store_waits = !acquire_class || g17p_mrt.multisample;
                if ((acquire_class &&
-                    (!agx3_pixel_wait(enc, acquire, wait, bytes, &len) ||
+                    (!agx3_pixel_wait(enc, acquire, store_waits ? 0 : wait,
+                                      bytes, &len) ||
                      !agx3_append(emission, bytes, len))) ||
                    !agx3_emit_tile(emission, enc, I, slot,
-                                   acquire_class ? 0 : wait, false, false,
+                                   store_waits ? wait : 0, false, false,
                                    g17p_mrt.raw32_store,
                                    g17p_mrt.count >= 3 && !g17p_mrt.has_loads,
                                    store_f13) ||
@@ -7877,7 +7995,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last,
                                 g17p_multi_background ||
                                    g17p_sample_colour_stores,
-                                g17p_multi_background &&
+                                (g17p_multi_background ||
+                                 g17p_msaa_background_targets > 1) &&
                                    ctx->key->g17p_mrt_bg,
                                 false))
                AGX3_REFUSE(I);
