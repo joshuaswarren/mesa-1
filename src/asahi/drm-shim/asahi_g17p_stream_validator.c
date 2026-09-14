@@ -1031,6 +1031,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
    struct asahi_g17p_stream_stats local = {0};
    bool pending_selector = false;
    bool have_state = false;
+   bool tessellation_state_seen = false;
    bool restart_seen = false;
    /* Cleared by every draw body, set by every barrier record.  A state
     * republication seen while this is false is a draw installing fresh VDM
@@ -1276,10 +1277,33 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          break;
       }
 
-      case AGX_VDM_RECORD_TESSELLATE_DIRECT:
-         oracle_gap_at(cursor, "VDM direct tessellate");
+      case AGX_VDM_RECORD_TESSELLATION_STATE:
+         if (!have_state || restart_seen)
+            return fail_at(cursor, "tessellation state has invalid order");
+         tessellation_state_seen = true;
          cursor += record.length;
          break;
+
+      case AGX_VDM_RECORD_TESSELLATE_DIRECT: {
+         const struct agx_vdm_tessellate_direct_info *draw =
+            &record.data.tessellate_direct;
+         const uint64_t factor_bytes =
+            ((uint64_t)draw->factor_buffer_size_minus_one + 1) * 4;
+         if (!have_state || restart_seen || !tessellation_state_seen ||
+             draw->patch_count == 0 || draw->instance_count == 0 ||
+             factor_bytes > SIZE_MAX ||
+             !memory->owned(memory->data, draw->factor_buffer,
+                            (size_t)factor_bytes))
+            return fail_at(cursor,
+                           "tessellate draw has no state or unowned factors");
+         local.draws++;
+         local.tessellated_draws++;
+         barrier_since_last_draw = false;
+         if (draw->instance_count > local.max_instance_count)
+            local.max_instance_count = draw->instance_count;
+         cursor += record.length;
+         break;
+      }
 
       case AGX_VDM_RECORD_UNKNOWN:
       default:

@@ -40,6 +40,7 @@ struct asahi_g17p_stream_memory {
 struct asahi_g17p_stream_stats {
    unsigned draws;
    unsigned indexed_draws;
+   unsigned tessellated_draws;
    unsigned state_updates;
    /* Every VDM memory-barrier record in the stream, and the subset of them
     * that separate one draw body from a later one.  hk_cs_init_graphics()
