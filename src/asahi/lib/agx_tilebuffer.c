@@ -5,6 +5,7 @@
 
 #include "agx_tilebuffer.h"
 #include <assert.h>
+#include "util/bitset.h"
 #include "util/format/u_format.h"
 #include "util/u_debug.h"
 #include "agx_bg_eot_key.h"
@@ -95,10 +96,22 @@ struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
                             uint8_t nr_samples, bool layered)
 {
+   return agx_build_tilebuffer_layout_bounded(formats, nr_cbufs, nr_samples,
+                                              layered, 0);
+}
+
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
+                                    uint8_t nr_cbufs, uint8_t nr_samples,
+                                    bool layered, uint8_t max_sample_size_B)
+{
    struct agx_tilebuffer_layout tib = {
       .nr_samples = nr_samples,
       .layered = layered,
+      .max_sample_size_B = max_sample_size_B,
    };
+   const unsigned max_bytes_per_sample =
+      max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE;
 
    uint32_t offset_B = 0;
    uint8_t order[] = {0, 1, 2, 3, 4, 5, 6, 7};
@@ -129,7 +142,7 @@ agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
        * need to spill it to memory. Otherwise, allocate it to the tilebuffer.
        */
       unsigned new_offset_B = offset_B + size_B;
-      bool fits = (new_offset_B <= MAX_BYTES_PER_SAMPLE) &&
+      bool fits = (new_offset_B <= max_bytes_per_sample) &&
                   (ALIGN_POT(new_offset_B, 8) * MIN_TILE_SIZE_PX *
                    nr_samples) <= MAX_BYTES_PER_TILE;
       if (fits) {
@@ -140,7 +153,7 @@ agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
       }
    }
 
-   assert(offset_B <= MAX_BYTES_PER_SAMPLE && "loop invariant");
+   assert(offset_B <= max_bytes_per_sample && "loop invariant");
 
    /* Multisampling needs a nonempty allocation.
     * XXX: Check this against hw
@@ -169,9 +182,9 @@ agx_tilebuffer_set_samples(struct agx_tilebuffer_layout *tib,
 {
    assert(tib->nr_samples == 0 && "must not be initialized");
 
-   *tib = agx_build_tilebuffer_layout(tib->logical_format,
-                                      ARRAY_SIZE(tib->logical_format),
-                                      nr_samples, tib->layered);
+   *tib = agx_build_tilebuffer_layout_bounded(
+      tib->logical_format, ARRAY_SIZE(tib->logical_format), nr_samples,
+      tib->layered, tib->max_sample_size_B);
 }
 
 enum pipe_format
@@ -389,16 +402,17 @@ agx_g17p_classify_mixed_mrt(const struct agx_tilebuffer_layout *tib,
 {
    bool mixed = !tib->layered && active_count >= 2 &&
                 active_count <= AGX_MAX_RENDER_TARGETS;
-   uint64_t occupied_B = 0;
+   BITSET_DECLARE(occupied_B, 256) = {0};
    for (unsigned rt = 0; rt < active_count; ++rt) {
       const unsigned offset_B = tib->_offset_B[rt];
       const unsigned size_B = format_size_B(tib->logical_format[rt]);
-      const uint64_t bytes = BITFIELD64_MASK(size_B) << MIN2(offset_B, 63);
       mixed &= !tib->spilled[rt] &&
                agx_g17p_mrt_eot_selector(tib->logical_format[rt]) != 0 &&
-               offset_B + size_B <= tib->sample_size_B &&
-               !(occupied_B & bytes);
-      occupied_B |= bytes;
+               size_B && offset_B + size_B <= tib->sample_size_B;
+      if (!mixed)
+         break;
+      mixed &= !BITSET_TEST_RANGE(occupied_B, offset_B, offset_B + size_B - 1);
+      BITSET_SET_RANGE(occupied_B, offset_B, offset_B + size_B - 1);
    }
 
    return mixed ? AGX_G17P_MRT_MIXED : AGX_G17P_MRT_NONE;

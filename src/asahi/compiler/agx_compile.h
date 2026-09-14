@@ -8,6 +8,7 @@
 #include "compiler/nir/nir.h"
 #include "asahi/lib/agx_chip.h"
 #include "agx3_fltnorm_core.h"
+#include "util/bitset.h"
 #include "util/shader_stats.h"
 #include "util/u_dynarray.h"
 #include "util/u_tristate.h"
@@ -402,9 +403,9 @@ struct agx_shader_key {
    /* G17P multi-target epilog: bit n is set when a colour target of the
     * framebuffer starts at tile byte n. Apple's fragments select a written
     * target's pixel classes from its position among all targets, so an epilog
-    * writing only some targets needs the others' offsets too. Zero derives
-    * the partitions from the tile operations. */
-   uint64_t g17p_tile_partitions;
+    * writing only some targets needs the others' offsets too. An empty set
+    * derives the partitions from the tile operations. */
+   BITSET_DECLARE(g17p_tile_partitions, AGX_G17P_MAX_BYTES_PER_SAMPLE);
 
    /* Number of targets, two to eight, stored by a G17P multi-target EOT for
     * arbitrary target formats, and the IMGWBLK selector of each target in

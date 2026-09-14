@@ -5384,8 +5384,11 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
             }
          } else if (I->op == AGX_OPCODE_MOV_IMM) {
             /* The imageblock offset reaches the program through its offset
-             * uniform, so a target need not start at byte zero. */
-            if (I->nr_dests != 1 || I->nr_srcs != 0 || I->imm >= 64 ||
+             * uniform, so a target need not start at byte zero, and may
+             * start past byte 64: Apple's builtin storing any one target of
+             * eight RGBA32Float targets is this single-target program. */
+            if (I->nr_dests != 1 || I->nr_srcs != 0 ||
+                I->imm >= AGX_G17P_MAX_BYTES_PER_SAMPLE ||
                 !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
                 I->dest[0].size != AGX_SIZE_32 ||
                 agx_channels(I->dest[0]) != 1)
@@ -6054,12 +6057,20 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return p;
 
-   const uint64_t partitions = ctx->key->fs.ignore_tib_dependencies
-                                  ? 0 : ctx->key->g17p_tile_partitions;
-   if (util_bitcount64(partitions) > ARRAY_SIZE(p.offsets))
-      return p;
-   u_foreach_bit64(offset, partitions)
-      p.offsets[p.count++] = offset;
+   const bool partitions =
+      !ctx->key->fs.ignore_tib_dependencies &&
+      !__bitset_is_empty(ctx->key->g17p_tile_partitions,
+                         BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE));
+   if (partitions) {
+      if (__bitset_count(ctx->key->g17p_tile_partitions,
+                         BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE)) >
+          ARRAY_SIZE(p.offsets))
+         return p;
+      unsigned offset;
+      BITSET_FOREACH_SET(offset, ctx->key->g17p_tile_partitions,
+                         AGX_G17P_MAX_BYTES_PER_SAMPLE)
+         p.offsets[p.count++] = offset;
+   }
 
    bool depth_written = false, tile_ops = false;
    agx_foreach_instr_global(ctx, I) {
@@ -6214,7 +6225,7 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
    unsigned stores = 0, stride = 0;
    bool stopped = false;
    enum agx_format format = 0;
-   uint64_t written_B = 0;
+   BITSET_DECLARE(written_B, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
    agx_foreach_instr_global(ctx, I) {
       if (stopped || agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
           I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
@@ -6225,22 +6236,25 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
          /* Apple's BG builtins for other layouts store each target once, in
           * no required order, so only require disjoint whole-pixel stores.
           * A multisample clear stores each target through the coverage
-          * register, as the one-target multisample background does. */
+          * register, as the one-target multisample background does. Five
+          * and eight RGBA32Float clears store up to offset 112 the same
+          * way. */
          const int width = agx3_tile_format_width(I->format);
          const unsigned size_B =
             width < 0 ? 0 : util_last_bit(I->mask) << width;
-         const uint64_t bytes =
-            BITFIELD64_MASK(size_B) << MIN2(I->pixel_offset, 63);
          struct agx3_tile_sample sample;
          if (!size_B || stores >= AGX_MAX_RTS ||
-             I->pixel_offset + size_B > 64 ||
-             (written_B & bytes) || I->nr_srcs != 3 || I->nr_dests != 0 ||
+             I->pixel_offset + size_B > AGX_G17P_MAX_BYTES_PER_SAMPLE ||
+             BITSET_TEST_RANGE(written_B, I->pixel_offset,
+                               I->pixel_offset + size_B - 1) ||
+             I->nr_srcs != 3 || I->nr_dests != 0 ||
              I->explicit_coords ||
              !agx3_tile_sample_operand(I->src[1], &sample) ||
              sample.reg != (ctx->key->fs.nr_samples > 1) ||
              !agx_is_null(I->src[2]))
             return false;
-         written_B |= bytes;
+         BITSET_SET_RANGE(written_B, I->pixel_offset,
+                          I->pixel_offset + size_B - 1);
          stores++;
       } else if (I->op == AGX_OPCODE_ST_TILE) {
          const bool rgba8 = I->format == AGX_FORMAT_U8NORM && I->mask == 15;
@@ -6437,7 +6451,8 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
             return false;
          values[reg] = UINT_MAX;
          if (I->op == AGX_OPCODE_MOV_IMM) {
-            if (mixed_count ? I->imm >= 64 : (I->imm > 48 || I->imm % 4))
+            if (mixed_count ? I->imm >= AGX_G17P_MAX_BYTES_PER_SAMPLE
+                            : (I->imm > 48 || I->imm % 4))
                return false;
             values[reg] = I->imm;
          } else if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_X && x == UINT_MAX) {

@@ -12,6 +12,7 @@
 #include "agx_abi.h"
 #include "util/bitscan.h"
 #include "util/format/u_formats.h"
+#include "agx_chip.h"
 #include "agx_pack.h"
 
 #ifdef __cplusplus
@@ -52,6 +53,10 @@ struct agx_tilebuffer_layout {
 
    /* If layered rendering is used */
    bool layered;
+
+   /* Most bytes a sample may hold before render targets spill, or zero for
+    * the 64-byte AGX2 bound. The tile size bounds it separately. */
+   uint8_t max_sample_size_B;
 
    /* Selected tile size in pixels. Either 32*32, 32*16, or 16*16. */
    uint16_t tile_size;
@@ -95,6 +100,13 @@ agx_tilebuffer_spills(struct agx_tilebuffer_layout *layout)
 struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
                             uint8_t nr_samples, bool layered);
+
+/* As agx_build_tilebuffer_layout(), spilling render targets only once a
+ * sample would exceed max_sample_size_B bytes (zero for the AGX2 bound). */
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
+                                    uint8_t nr_cbufs, uint8_t nr_samples,
+                                    bool layered, uint8_t max_sample_size_B);
 
 /* Compact attachment slots for internal programs without moving tile data.
  * map[dense slot] identifies the original logical attachment. */

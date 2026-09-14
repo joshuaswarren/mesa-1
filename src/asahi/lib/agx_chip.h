@@ -133,6 +133,14 @@ enum agx_submission_model {
    AGX_SUBMISSION_MODEL_SKSM,
    AGX_SUBMISSION_MODEL_UNKNOWN,
 };
+
+/* G17P keeps every colour target in the imageblock past 64 bytes a sample:
+ * Apple's applegpu_g17p fragments store five RGBA32Float targets at tile
+ * offsets 0..64 and eight at 0..112, and an eight-target mixed-format set at
+ * 65 bytes, with no memory store, and its background builtins clear them at
+ * the same offsets. */
+#define AGX_G17P_MAX_BYTES_PER_SAMPLE (128)
+
 #ifndef __OPENCL_VERSION__
 
 #include <stdbool.h>

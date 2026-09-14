@@ -6019,16 +6019,25 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    /* An epilog writing only some of the framebuffer's targets keeps each
     * store's partition. A lone store to partition zero is the ordinary
     * single-target protocol. */
-   const uint64_t partitions = ctx->key->g17p_tile_partitions;
-   uint64_t written = 0;
+   const BITSET_WORD *partitions = ctx->key->g17p_tile_partitions;
+   const bool keyed = !__bitset_is_empty(
+      partitions, BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE));
+   BITSET_DECLARE(written, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
+   bool unkeyed_store = false;
    for (unsigned i = 0; i < store_count; ++i) {
-      if (stores[i]->pixel_offset >= 64)
+      const unsigned offset = stores[i]->pixel_offset;
+      if (offset >= AGX_G17P_MAX_BYTES_PER_SAMPLE)
          return false;
-      written |= BITFIELD64_BIT(stores[i]->pixel_offset);
+      BITSET_SET(written, offset);
+      unkeyed_store |= !BITSET_TEST(partitions, offset);
    }
-   const bool subset = partitions && written != partitions;
-   if (!stop || (partitions && (written & ~partitions)) ||
-       store_count < (subset && written != BITFIELD64_BIT(0) ? 1 : 2) ||
+   const bool subset =
+      keyed && memcmp(written, partitions, sizeof(written)) != 0;
+   const bool only_partition0 =
+      __bitset_count(written, ARRAY_SIZE(written)) == 1 &&
+      BITSET_TEST(written, 0);
+   if (!stop || (keyed && unkeyed_store) ||
+       store_count < (subset && !only_partition0 ? 1 : 2) ||
        ((subset || multisample_stores) && load_count) ||
        (depth_ops && (depth_ops != 3 || load_count)))
       return false;

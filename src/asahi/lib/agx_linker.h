@@ -303,6 +303,8 @@ struct agx_fs_epilog_key {
    /* Tilebuffer configuration */
    enum pipe_format rt_formats[8];
    uint8_t nr_samples;
+   /* agx_tilebuffer_layout::max_sample_size_B of the render pass. */
+   uint8_t max_sample_size_B;
    bool force_small_tile;
    bool preserve_zero_mask;
    bool lower_srgb;
