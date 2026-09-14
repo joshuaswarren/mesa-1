@@ -5786,8 +5786,20 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
  * partition from the fourth on reuses partition 0's class pair: Apple's
  * store-only fragments of four to eight targets acquire class 12 before the
  * first store using it and release it after the last, holding it across
- * partitions 2 and 1 when partition 0 is written. Blending more than three
- * targets stays refused.
+ * partitions 2 and 1 when partition 0 is written.
+ *
+ * Blending fragments of four to eight targets hold the same classes around
+ * their loads. Partition 0's read class (8) is acquired once, before the
+ * first load of any partition sharing its pair, and held; partitions 2 and 1
+ * wait for their own read classes before their loads. The stores then
+ * acquire the shared write class (4) before the first shared store when any
+ * shared partition was loaded, or all of class 12 otherwise, and partitions 2
+ * and 1 acquire their write class if loaded or both of their classes if not.
+ * Loads go in descending partition order, as in Apple's RGBA8 fragments; its
+ * RGBA16Float fragments order them differently under the same held classes.
+ * See the metal-nt applegpu_g17p witnesses in test-agx-g17p-mrt-mixed.c:
+ * two to eight RGBA8 and three, four, five and eight RGBA16Float targets all
+ * blended, and 17 blended subsets of four, five and eight RGBA8 targets.
  *
  * Those fragments also set lstcol f13 on their leading stores when they store
  * more than five targets including targets 1 and 2: on all but the last five
@@ -5815,6 +5827,9 @@ struct agx3_g17p_mrt_protocol {
    uint8_t classes;
    /* The first and last stored partitions of class pair 0, in store order. */
    uint8_t shared_first, shared_last;
+   /* Whether a partition of class pair 0 is loaded, and the first such load. */
+   bool shared_loaded;
+   uint8_t shared_load_first;
    /* Number of leading stores carrying lstcol f13. */
    uint8_t f13_stores;
    uint16_t offsets[AGX_MAX_RTS];
@@ -6107,11 +6122,12 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
 
       const int partition = agx3_g17p_mrt_partition(&p, I->pixel_offset);
-      /* Four to eight targets of any formats share the store-only class-12
-       * lifetime; see the witnesses in test-agx-g17p-mrt-mixed.c. */
+      /* Four to eight targets of any formats share the class-12 lifetime;
+       * see the witnesses in test-agx-g17p-mrt-mixed.c. */
+      const bool load = I->op == AGX_OPCODE_LD_TILE;
       if (p.count >= 4 &&
-          (I->op != AGX_OPCODE_ST_TILE || I->nr_srcs != 3 || I->nr_dests ||
-           !agx_is_null(I->src[2]) || partition < 0))
+          (I->nr_srcs != (load ? 2 : 3) || I->nr_dests != (load ? 1 : 0) ||
+           !agx_is_null(I->src[load ? 1 : 2]) || partition < 0))
          return (struct agx3_g17p_mrt_protocol){0};
       struct agx3_tile_sample sample;
       if (partition < 0 || I->nr_srcs < 2 ||
@@ -6140,13 +6156,15 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       p.multisample_combined &= p.stores[i] != 0;
       const unsigned pair = agx3_g17p_mrt_class_pair(i);
       uint32_t read_class, write_class, combined_class;
-      /* Blending four targets is not inferred from the store-only witness. */
       if ((p.stores[i] != 1 && !(partitions && !p.stores[i] && !p.loads[i])) ||
-          (p.count >= 4 && p.loads[i]) ||
           !agx3_pixel_colour_partition_classes(
              pair, &read_class, &write_class, &combined_class))
          return (struct agx3_g17p_mrt_protocol){0};
       p.has_loads |= p.loads[i];
+      if (pair == 0 && p.loads[i] && !p.shared_loaded) {
+         p.shared_loaded = true;
+         p.shared_load_first = i;
+      }
       if (!p.stores[i])
          continue;
       if (pair == 0 && !(p.classes & BITFIELD_BIT(0)))
@@ -8315,15 +8333,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                }
 
                const bool load = I->op == AGX_OPCODE_LD_TILE;
-               const uint32_t acquire =
-                  load ? read_class
-                       : g17p_mrt.loads[partition] ? write_class
-                                                  : combined_class;
-               /* Class 12 opens before the first store using it and stays
-                * held until the last; the other pairs bracket their store. */
+               /* Class 12 opens before the first load or store using it and
+                * stays held until the last store; the other pairs bracket
+                * their own loads and store. */
                const bool shared = agx3_g17p_mrt_class_pair(partition) == 0;
+               const bool loaded = shared ? g17p_mrt.shared_loaded
+                                          : g17p_mrt.loads[partition];
+               const uint32_t acquire =
+                  load ? read_class : loaded ? write_class : combined_class;
                const bool acquire_class =
-                  !shared || partition == g17p_mrt.shared_first;
+                  !shared || partition == (load ? g17p_mrt.shared_load_first
+                                                : g17p_mrt.shared_first);
                const bool release_class =
                   !shared || partition == g17p_mrt.shared_last;
                const bool store_f13 =
@@ -8337,7 +8357,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    !agx3_emit_tile(emission, enc, I, slot,
                                    store_waits ? wait : 0, false, false,
                                    g17p_mrt.raw32_store,
-                                   g17p_mrt.count >= 3 && !g17p_mrt.has_loads,
+                                   g17p_mrt.count >= 4 ||
+                                      (g17p_mrt.count == 3 &&
+                                       !g17p_mrt.has_loads),
                                    store_f13) ||
                    (!load && release_class &&
                     (!agx3_pixel_release(enc, combined_class, last, 0, bytes,

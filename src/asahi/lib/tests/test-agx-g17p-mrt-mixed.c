@@ -1175,6 +1175,249 @@ check_golden(const char *name, bool ok, struct agx_shader_part *part,
    return 0;
 }
 
+/* Blending fragments: every target in `blended` reads the tilebuffer
+ * (SourceAlpha, OneMinusSourceAlpha), the others replace it. */
+static bool
+compile_epilog_blended(unsigned count, enum pipe_format format,
+                       unsigned blended, struct agx_shader_part *part)
+{
+   struct agx_fs_epilog_key epilog = {
+      .link.loc_written = BITFIELD_MASK(count),
+      .link.size_32 = BITFIELD_MASK(count),
+      .nr_samples = 1,
+   };
+   memset(epilog.remap, -1, sizeof(epilog.remap));
+   for (unsigned rt = 0; rt < count; ++rt) {
+      const bool blend = blended & BITFIELD_BIT(rt);
+      epilog.remap[rt] = rt;
+      epilog.rt_formats[rt] = format;
+      epilog.blend.rt[rt].colormask = 0xf;
+      epilog.blend.rt[rt].mode = agx_pack_blend_standard(
+         PIPE_BLEND_ADD,
+         blend ? PIPE_BLENDFACTOR_SRC_ALPHA : PIPE_BLENDFACTOR_ONE,
+         blend ? PIPE_BLENDFACTOR_INV_SRC_ALPHA : PIPE_BLENDFACTOR_ZERO,
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+         blend ? PIPE_BLENDFACTOR_INV_SRC_ALPHA : PIPE_BLENDFACTOR_ZERO);
+   }
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &epilog);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P blended MRT epilog");
+   agx_nir_fs_epilog(&b, &epilog);
+   agx_nir_lower_g17p_tile_samples(b.shader, 1);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
+                                .fs.nr_samples = 1,
+                                .secondary = true};
+   const bool ok = agx_compile_shader_nir(b.shader, &key, part);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+/* The colour transactions of a fragment in order: "W<class>" and
+ * "R<class>" for PIXWAIT and PIXREL, "L<offset>" and "S<offset>" for the
+ * loads and stores at a tile byte offset, "S<offset>*" for a store carrying
+ * lstcol f13. */
+static void
+colour_transactions(const struct agx_shader_part *part, char *out,
+                    size_t size)
+{
+   const uint8_t *text = part->binary;
+   size_t used = 0;
+   out[0] = 0;
+   for (size_t at = 0; at + 6 <= part->info.binary_size;) {
+      const bool pixel = (text[at] == 0x87 || text[at] == 0x07) &&
+                         text[at + 1] == 0x02 && text[at + 2] == 0x54;
+      const bool tile = at + 12 <= part->info.binary_size &&
+                        (text[at] == 0x67 || text[at] == 0xe7) &&
+                        (text[at + 1] & 0x07) == 0x06 &&
+                        (text[at + 2] & 0xfc) == 0x54;
+      int n = 0;
+      if (pixel) {
+         n = snprintf(out + used, size - used, "%s%c%u", used ? " " : "",
+                      text[at] == 0x87 ? 'W' : 'R',
+                      text[at + 3] | ((text[at + 4] & 3) << 8));
+         at += 6;
+      } else if (tile) {
+         const bool store = text[at] == 0xe7;
+         n = snprintf(out + used, size - used, "%s%c%u%s", used ? " " : "",
+                      store ? 'S' : 'L', text[at + 5] << 1,
+                      store && (text[at + 7] & 0x80) ? "*" : "");
+         at += 12;
+      } else {
+         at++;
+      }
+      if (n > 0)
+         used = MIN2(used + n, size - 1);
+   }
+}
+
+/* Split a transaction string at its first colour store's write wait: the
+ * loads, with the read classes acquired for them, and everything after. */
+static const char *
+store_phase(const char *ops)
+{
+   const char *s = strchr(ops, 'S');
+   if (!s)
+      return ops;
+   while (s > ops && s[-1] == ' ')
+      --s;
+   while (s > ops && s[-1] != ' ')
+      --s;
+   return (s[0] == 'W') ? s : strchr(s, 'S');
+}
+
+/* Every load must hold its partition's read class: 8 for partition 0 and
+ * the fourth partition on, 32 and 128 for partitions 1 and 2. */
+static bool
+loads_hold_classes(const char *ops, unsigned stride, char *loads,
+                   size_t size)
+{
+   unsigned held = 0;
+   size_t used = 0;
+   loads[0] = 0;
+   const char *end = store_phase(ops);
+   for (const char *p = ops; p < end && *p;) {
+      unsigned value = strtoul(p + 1, NULL, 10);
+      if (p[0] == 'W') {
+         held |= value;
+      } else if (p[0] == 'L') {
+         const unsigned rt = value / stride;
+         const unsigned read = rt == 1 ? 32 : rt == 2 ? 128 : 8;
+         if (!(held & read))
+            return false;
+         used += snprintf(loads + used, size - used, "%u,", value);
+      }
+      p = strchr(p, ' ');
+      if (!p)
+         break;
+      ++p;
+   }
+   return true;
+}
+
+/* The pixel transactions of Apple's blending fragments: metal-nt -arch
+ * applegpu_g17p -platform_version macos 26.0 26.0 render pipelines of
+ * `fs<N>` storing N float4 [[color(i)]] outputs, with blending
+ * (SourceAlpha / OneMinusSourceAlpha, Add) enabled on the attachments in
+ * `blended` and disabled on the rest. RGBA8Unorm witnesses load in
+ * descending target order; RGBA16Float ones load in another order under the
+ * same classes, so those compare their loads and store phases only. */
+static const struct {
+   unsigned count;
+   enum pipe_format format;
+   unsigned blended;
+   bool exact;
+   const char *ops;
+} blend_witnesses[] = {
+   {2, RGBA8, 0x3, true, "W512 W32 L4 W8 L0 W16 S4 R48 W4 S0 R524"},
+   {3, RGBA8, 0x7, true,
+    "W512 W128 L8 W32 L4 W8 L0 W64 S8 R192 W16 S4 R48 W4 S0 R524"},
+   {4, RGBA8, 0xf, true,
+    "W512 W8 L12 W128 L8 W32 L4 L0 W4 S12 W64 S8 R192 W16 S4 R48 S0 R524"},
+   {5, RGBA8, 0x1f, true,
+    "W512 W8 L16 L12 W128 L8 W32 L4 L0 W4 S16 S12 W64 S8 R192 W16 S4 R48 "
+    "S0 R524"},
+   {6, RGBA8, 0x3f, true,
+    "W512 W8 L20 L16 L12 W128 L8 W32 L4 L0 W4 S20* S16 S12 W64 S8 R192 "
+    "W16 S4 R48 S0 R524"},
+   {7, RGBA8, 0x7f, true,
+    "W512 W8 L24 L20 L16 L12 W128 L8 W32 L4 L0 W4 S24* S20* S16 S12 W64 "
+    "S8 R192 W16 S4 R48 S0 R524"},
+   {8, RGBA8, 0xff, true,
+    "W512 W8 L28 L24 L20 L16 L12 W128 L8 W32 L4 L0 W4 S28* S24* S20* S16 "
+    "S12 W64 S8 R192 W16 S4 R48 S0 R524"},
+   {4, RGBA8, 0x01, true,
+    "W512 W8 L0 W4 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {4, RGBA8, 0x03, true,
+    "W512 W32 L4 W8 L0 W4 S12 W192 S8 R192 W16 S4 R48 S0 R524"},
+   {4, RGBA8, 0x06, true,
+    "W512 W128 L8 W32 L4 W12 S12 W64 S8 R192 W16 S4 R48 S0 R524"},
+   {4, RGBA8, 0x07, true,
+    "W512 W128 L8 W32 L4 W8 L0 W4 S12 W64 S8 R192 W16 S4 R48 S0 R524"},
+   {4, RGBA8, 0x08, true,
+    "W512 W8 L12 W4 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {4, RGBA8, 0x09, true,
+    "W512 W8 L12 L0 W4 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {4, RGBA8, 0x0c, true,
+    "W512 W8 L12 W128 L8 W4 S12 W64 S8 R192 W48 S4 R48 S0 R524"},
+   {4, RGBA8, 0x0e, true,
+    "W512 W8 L12 W128 L8 W32 L4 W4 S12 W64 S8 R192 W16 S4 R48 S0 R524"},
+   {5, RGBA8, 0x10, true,
+    "W512 W8 L16 W4 S16 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {5, RGBA8, 0x11, true,
+    "W512 W8 L16 L0 W4 S16 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {8, RGBA8, 0x01, true,
+    "W512 W8 L0 W4 S28* S24* S20* S16 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {8, RGBA8, 0x0f, true,
+    "W512 W8 L12 W128 L8 W32 L4 L0 W4 S28* S24* S20* S16 S12 W64 S8 R192 "
+    "W16 S4 R48 S0 R524"},
+   {8, RGBA8, 0x10, true,
+    "W512 W8 L16 W4 S28* S24* S20* S16 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {8, RGBA8, 0x21, true,
+    "W512 W8 L20 L0 W4 S28* S24* S20* S16 S12 W192 S8 R192 W48 S4 R48 S0 "
+    "R524"},
+   {8, RGBA8, 0x80, true,
+    "W512 W8 L28 W4 S28* S24* S20* S16 S12 W192 S8 R192 W48 S4 R48 S0 R524"},
+   {8, RGBA8, 0x88, true,
+    "W512 W8 L28 L12 W4 S28* S24* S20* S16 S12 W192 S8 R192 W48 S4 R48 S0 "
+    "R524"},
+   {8, RGBA8, 0xf0, true,
+    "W512 W8 L28 L24 L20 L16 W4 S28* S24* S20* S16 S12 W192 S8 R192 W48 S4 "
+    "R48 S0 R524"},
+   {3, PIPE_FORMAT_R16G16B16A16_FLOAT, 0x7, false,
+    "W512 W32 L8 W128 L16 W8 L0 W64 S16 R192 W16 S8 R48 W4 S0 R524"},
+   {4, PIPE_FORMAT_R16G16B16A16_FLOAT, 0xf, false,
+    "W512 W128 L16 W32 L8 W8 L24 L0 W4 S24 W64 S16 R192 W16 S8 R48 S0 R524"},
+   {5, PIPE_FORMAT_R16G16B16A16_FLOAT, 0x1f, false,
+    "W512 W8 L24 W128 L16 W32 L8 L0 L32 W4 S32 S24 W64 S16 R192 W16 S8 R48 "
+    "S0 R524"},
+   {8, PIPE_FORMAT_R16G16B16A16_FLOAT, 0xff, false,
+    "W512 W8 L48 L40 L32 L24 W128 L16 W32 L8 L56 L0 W4 S56* S48* S40* S32 "
+    "S24 W64 S16 R192 W16 S8 R48 S0 R524"},
+};
+
+static int
+test_blended_epilogs(void)
+{
+   for (unsigned i = 0; i < ARRAY_SIZE(blend_witnesses); ++i) {
+      const unsigned count = blend_witnesses[i].count;
+      const enum pipe_format format = blend_witnesses[i].format;
+      const unsigned stride = util_format_get_blocksize(format);
+      struct agx_shader_part part = {0};
+      CHECK(compile_epilog_blended(count, format, blend_witnesses[i].blended,
+                                   &part));
+
+      char ops[512], want_loads[128], got_loads[128];
+      colour_transactions(&part, ops, sizeof(ops));
+      free(part.binary);
+      if (blend_witnesses[i].exact) {
+         if (strcmp(ops, blend_witnesses[i].ops))
+            fprintf(stderr, "blend %u:\n  got  %s\n  want %s\n", i, ops,
+                    blend_witnesses[i].ops);
+         CHECK(!strcmp(ops, blend_witnesses[i].ops));
+         continue;
+      }
+
+      /* Loads in either order under the same held classes, the same set of
+       * loads, then an identical store phase. */
+      CHECK(loads_hold_classes(ops, stride, got_loads, sizeof(got_loads)));
+      CHECK(loads_hold_classes(blend_witnesses[i].ops, stride, want_loads,
+                               sizeof(want_loads)));
+      unsigned got_set = 0, want_set = 0;
+      for (char *p = got_loads; *p; p = strchr(p, ',') + 1)
+         got_set |= BITFIELD_BIT(strtoul(p, NULL, 10) / stride);
+      for (char *p = want_loads; *p; p = strchr(p, ',') + 1)
+         want_set |= BITFIELD_BIT(strtoul(p, NULL, 10) / stride);
+      CHECK(got_set == want_set);
+      if (strcmp(store_phase(ops), store_phase(blend_witnesses[i].ops)))
+         fprintf(stderr, "blend %u stores:\n  got  %s\n  want %s\n", i,
+                 store_phase(ops), store_phase(blend_witnesses[i].ops));
+      CHECK(!strcmp(store_phase(ops), store_phase(blend_witnesses[i].ops)));
+   }
+   return 0;
+}
+
 static int
 test_homogeneous_programs_unchanged(void)
 {
@@ -1231,7 +1474,7 @@ main(void)
        test_background_programs() || test_epilogs() ||
        test_subset_epilogs() || test_octa_subset_epilogs() ||
        test_multisample_eot_witnesses() || test_multisample_epilogs() ||
-       test_homogeneous_programs_unchanged())
+       test_blended_epilogs() || test_homogeneous_programs_unchanged())
       return 1;
 
    printf("G17P mixed-format MRT: %u checks PASS\n", checks);

@@ -1826,10 +1826,13 @@ agx_ra(agx_context *ctx)
       quad_mask == BITFIELD_MASK(quad_stores);
    /* Apple's store-only fragments of three or more targets and multi-target
     * BG builtins of other formats store every width from the same bank:
-    * halves 0..31 for up to four targets and 0..63 for more. */
+    * halves 0..31 for up to four targets and 0..63 for more. Its blending
+    * fragments of four or more targets do too: eight RGBA16Float targets
+    * store from halves 0..31, five from 0..19. */
    const bool mrt_bank =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-      ctx->stage == MESA_SHADER_FRAGMENT && !tile_loads &&
+      ctx->stage == MESA_SHADER_FRAGMENT &&
+      (!tile_loads || quad_stores >= 4) &&
       quad_stores >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
       quad_stores <= AGX_MAX_RTS &&
       (ctx->key->secondary || ctx->key->g17p_mrt_bg);
