@@ -266,6 +266,15 @@ load_kernel_input(nir_builder *b, unsigned num_components, unsigned bit_size,
 int
 main(int argc, char **argv)
 {
+   /* Without this the compiler's own AGX_MESA_DEBUG flags stay clear here, so
+    * a kernel that fails to compile reports only its name and no reason.
+    * Declared locally: agx_compiler.h needs generated headers this tool does
+    * not include. */
+   {
+      extern int agx_compiler_debug;
+      extern uint64_t agx_get_compiler_debug(void);
+      agx_compiler_debug = (int)agx_get_compiler_debug();
+   }
    if (argc != 4) {
       fprintf(stderr, "Usage: %s [input spir-v] [output header] [output C]\n",
               argv[0]);
