@@ -1707,7 +1707,10 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
       NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
                dev->dev.chip, &shader->info.fs.epilog_key);
-      NIR_PASS(_, nir, agx_nir_lower_sample_mask);
+      if (dev->dev.chip == AGX_CHIP_G17P)
+         NIR_PASS(_, nir, agx_nir_lower_sample_mask_deferred);
+      else
+         NIR_PASS(_, nir, agx_nir_lower_sample_mask);
       if (dev->dev.chip == AGX_CHIP_G17P &&
           nir->info.fs.early_fragment_tests) {
          bool done = false;
