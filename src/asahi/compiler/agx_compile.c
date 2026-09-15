@@ -6315,21 +6315,53 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    /* Native acquires and loads higher partitions first.  Move only the tile
     * loads themselves; their SSA consumers stay in place and RA extends the
     * values' physical lifetimes safely. */
-   for (unsigned i = 0; i < load_count; ++i) {
-      for (unsigned j = i + 1; j < load_count; ++j) {
-         if (loads[j]->pixel_offset > loads[i]->pixel_offset) {
-            agx_instr *tmp = loads[i];
-            loads[i] = loads[j];
-            loads[j] = tmp;
+   if (!multisample_stores) {
+      for (unsigned i = 0; i < load_count; ++i) {
+         for (unsigned j = i + 1; j < load_count; ++j) {
+            if (loads[j]->pixel_offset > loads[i]->pixel_offset) {
+               agx_instr *tmp = loads[i];
+               loads[i] = loads[j];
+               loads[j] = tmp;
+            }
          }
       }
-   }
-   if (!multisample_stores) {
+
       agx_instr *load_anchor = first_wait;
       for (unsigned i = 0; i < load_count; ++i) {
          list_del(&loads[i]->link);
          list_add(&loads[i]->link, &load_anchor->link);
          load_anchor = loads[i];
+      }
+   } else if (load_count) {
+      const unsigned samples = ctx->key->fs.nr_samples;
+      if (load_count % samples)
+         return false;
+
+      const unsigned group_size = load_count / samples;
+      for (unsigned group = 0; group < samples; ++group) {
+         agx_instr **group_loads = &loads[group * group_size];
+         struct list_head *anchor = group_loads[0]->link.prev;
+
+         for (unsigned i = 0; i < group_size; ++i) {
+            for (unsigned j = i + 1; j < group_size; ++j) {
+               if (group_loads[j]->pixel_offset >
+                   group_loads[i]->pixel_offset) {
+                  agx_instr *tmp = group_loads[i];
+                  group_loads[i] = group_loads[j];
+                  group_loads[j] = tmp;
+               }
+            }
+
+            if (group > 0 &&
+                group_loads[i]->pixel_offset != loads[i]->pixel_offset)
+               return false;
+         }
+
+         for (unsigned i = 0; i < group_size; ++i) {
+            list_del(&group_loads[i]->link);
+            list_add(&group_loads[i]->link, anchor);
+            anchor = &group_loads[i]->link;
+         }
       }
    }
 

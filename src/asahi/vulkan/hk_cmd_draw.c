@@ -767,6 +767,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
     */
    if (!key->tib.nr_samples)
       key->tib.nr_samples = 1;
+   key->multisample_store = store && key->tib.nr_samples > 1;
 
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;

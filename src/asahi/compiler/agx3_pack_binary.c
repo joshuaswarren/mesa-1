@@ -8606,15 +8606,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                last = --tile_stores_left == 0;
             }
             if (g17p_mrt.valid && g17p_mrt.multisample_combined) {
-               /* Apple's 2x/4x store-only fragments of two to eight targets
-                * acquire every stored partition's classes in one PIXWAIT
-                * (60, or 252 from three targets), store in descending
-                * partition order through the coverage register and release
-                * those classes once (msaa/native/persample/msmrt*.py).
-                * Fragments writing only some targets bracket each partition
-                * as at one sample (mssubset.py). */
+               /* Apple's 2x/4x fragments of two to eight targets acquire every
+                * stored partition's classes in one PIXWAIT (60, or 252 from
+                * three targets), access the partitions in descending order
+                * through the coverage register and release those classes once
+                * (msaa/native/persample/msmrt*.py). Blended fragments open the
+                * same lifetime at their first load and keep it through the
+                * final store. Fragments writing only some targets bracket each
+                * partition as at one sample (mssubset.py). */
                uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
                uint8_t len = 0;
+               const bool load = I->op == AGX_OPCODE_LD_TILE;
+               const bool acquire = load ? first
+                                          : (!g17p_mrt.has_loads &&
+                                             g17p_mrt_stores_seen == 0);
                if (!g17p_colour_open) {
                   if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
                       !agx3_append(emission, bytes, len))
@@ -8624,18 +8629,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      emission->size - len - initial_size;
                   g17p_colour_open = true;
                }
-               if ((g17p_mrt_stores_seen++ == 0 &&
+               if ((acquire &&
                     (!agx3_pixel_wait(enc, g17p_mrt.combined_classes, 0,
                                       bytes, &len) ||
                      !agx3_append(emission, bytes, len))) ||
                    !agx3_emit_tile(emission, enc, I, slot, wait, false, false,
                                    g17p_mrt.raw32_store,
                                    g17p_mrt.count >= 3, false) ||
-                   (last &&
+                   (!load && last &&
                     (!agx3_pixel_release(enc, g17p_mrt.combined_classes, true,
                                          0, bytes, &len) ||
                      !agx3_append(emission, bytes, len))))
                   AGX3_REFUSE(I);
+               g17p_mrt_stores_seen += !load;
                continue;
             }
             if (g17p_mrt.valid) {

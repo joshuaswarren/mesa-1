@@ -764,10 +764,12 @@ compile_sample_shaded_epilog(unsigned count,
       epilog.remap[rt] = rt;
       epilog.rt_formats[rt] = formats[rt];
       epilog.blend.rt[rt].colormask =
-         BITFIELD_MASK(util_format_get_nr_components(formats[rt]));
+         rt == 1 ? 1 : BITFIELD_MASK(util_format_get_nr_components(formats[rt]));
+      const enum pipe_blendfactor dst =
+         rt == 1 ? PIPE_BLENDFACTOR_ZERO : PIPE_BLENDFACTOR_ONE;
       epilog.blend.rt[rt].mode = agx_pack_blend_standard(
-         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
-         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, dst,
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, dst);
    }
    agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &epilog);
 
@@ -1169,9 +1171,9 @@ test_multisample_epilogs(void)
     * per sample inside one combined colour transaction. This is the exact
     * shape used by the multisample-render-to-single-sample CTS family. */
    const enum pipe_format sample_shaded[] = {
-      PIPE_FORMAT_R8G8B8A8_UNORM,
       PIPE_FORMAT_R16G16B16A16_FLOAT,
-      PIPE_FORMAT_R32G32B32A32_UINT,
+      PIPE_FORMAT_R16G16B16A16_SINT,
+      PIPE_FORMAT_R8G8B8A8_UNORM,
    };
    struct agx_shader_part part = {0};
    CHECK(compile_sample_shaded_epilog(ARRAY_SIZE(sample_shaded),
@@ -1183,10 +1185,11 @@ test_multisample_epilogs(void)
    CHECK(reads_coverage_after_depth(&part));
    char ops[128];
    colour_transactions(&part, ops, sizeof(ops));
-   if (strcmp(ops, "W512 W1 R1 W252 S24 S16 S0 S24 S16 S0 R764"))
+   if (strcmp(ops,
+              "W512 W1 R1 W252 L16 L0 S16 S8 S0 L16 L0 S16 S8 S0 R764"))
       fprintf(stderr, "sample-shaded MRT transactions: %s\n", ops);
    CHECK(!strcmp(ops,
-                 "W512 W1 R1 W252 S24 S16 S0 S24 S16 S0 R764"));
+                 "W512 W1 R1 W252 L16 L0 S16 S8 S0 L16 L0 S16 S8 S0 R764"));
    free(part.binary);
 
    const enum pipe_format sample_shaded_4x[] = {
