@@ -1721,6 +1721,37 @@ g17p_count_bytes(const struct agx_shader_part *part, const uint8_t *needle,
    return count;
 }
 
+static bool
+test_g17p_pbe_to_texture_fence(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P PBE-to-texture fence");
+   nir_fence_pbe_to_tex_agx(&b);
+   b.shader->info.io_lowered = true;
+
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   static const uint8_t wait[] = {
+      0x07, 0x14, 0x54, 0x50, 0x06, 0x00,
+      0x07, 0x04, 0x54, 0xd0, 0x06, 0x00,
+   };
+   static const uint8_t execution[] = {
+      0x07, 0x04, 0x54, 0x51, 0x0e, 0x00,
+      0x07, 0x04, 0x54, 0xd1, 0x0e, 0x00,
+   };
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool ok = compiled &&
+                   g17p_count_bytes(&part, wait, sizeof(wait)) == 1 &&
+                   g17p_count_bytes(&part, execution, sizeof(execution)) == 0;
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 /* An epilog that reads a target only for channels it does not store, and one
  * that stores a target back unchanged. Apple's store-only fragments take
  * class 12 at once, and a fragment writing no channel takes no colour class
@@ -8500,6 +8531,7 @@ main(int argc, char **argv)
    RUN(test_g17p_unread_colour_waits);
    RUN(test_g17p_blended_payloads_beyond_bank);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
+   RUN(test_g17p_pbe_to_texture_fence);
    RUN(test_frag_sidefx_late_test_once);
    RUN(test_g17p_frag_sidefx_late_depth_once);
 #undef RUN

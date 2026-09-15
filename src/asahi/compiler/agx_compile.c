@@ -2657,7 +2657,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 
    case nir_intrinsic_fence_pbe_to_tex_agx: {
       if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
-         agx_scoped_barrier_agx3(b, AGX3_BARRIER_SCOPE_TEXTURE);
+         agx_scoped_barrier_agx3(
+            b, b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
+                  ? AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT
+                  : AGX3_BARRIER_SCOPE_TEXTURE);
          return NULL;
       }
 
