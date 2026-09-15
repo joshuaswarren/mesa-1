@@ -5032,6 +5032,38 @@ TEST_F(AGX3PackBinary, RefusesUnmappedOp)
    pack(b, /*expect_ok=*/false);
 }
 
+#define ASSERT_TRUE_VOID(x) do { if (!(x)) { ADD_FAILURE(); return; } } while (0)
+
+/* An AGX3B texel fetch stages its coordinates in every stage, so the packer
+ * emits two coordinate COPYs and then a fetch that reads the staging bank
+ * rather than the coordinate GPR. Apple's own applegpu_g17p vertex
+ * `texture2d<access::read>::read()` has exactly this shape -- two four-byte
+ * COPYs, the fetch, then PACK_SMPIR -- and a non-staged vertex fetch returns
+ * only the x and y components on hardware. AGX3C is unchanged. */
+static void
+append_staged_fetch(std::vector<uint8_t> &want, enum agx_isa_encoding enc,
+                    struct agx3_tex_fetch_desc d, uint16_t coord,
+                    unsigned coords)
+{
+   if (enc == AGX_ISA_ENCODING_AGX3B) {
+      for (unsigned i = 0; i < coords; ++i) {
+         uint8_t copy[AGX3_TEX_MAX_LENGTH];
+         uint8_t copy_len = 0;
+         ASSERT_TRUE_VOID(agx3_tex_stage_copy_hints(
+            enc, 2 * i, coord + 2 * i, 1, 0, false, false, copy, &copy_len));
+         want.insert(want.end(), copy, copy + copy_len);
+      }
+      d.coord = 0;
+      d.coord_kill = true;
+      d.wait_mask = 1u << 0;
+   }
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t length = 0;
+   ASSERT_TRUE_VOID(agx3_tex_encode_fetch(enc, &d, bytes, &length));
+   want.insert(want.end(), bytes, bytes + length);
+}
+
 TEST_F(AGX3PackBinary, TextureFetch2DLod0Immediate)
 {
    for (int e = 0; e < 2; ++e) {
@@ -5061,14 +5093,11 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod0Immediate)
          d.texture = 0;
          d.slot = 1;
          d.final = true;
-         uint8_t tb[AGX3_TEX_MAX_LENGTH];
-         uint8_t tl = 0;
-         ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, tb, &tl));
          struct agx3_encoded_end end;
          ASSERT_TRUE(agx3_pack_end(enc, &end));
 
          std::vector<uint8_t> want;
-         append(want, tb, tl);
+         append_staged_fetch(want, enc, d, 12, 2);
          append(want, end.bytes, end.length);
          EXPECT_EQ(pack(b), want);
       }
@@ -5404,14 +5433,11 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
    d.texture = 0;
    d.slot = 1;
    d.final = true;
-   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
-   uint8_t length = 0;
-   ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &length));
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(enc, &end));
 
    std::vector<uint8_t> want;
-   append(want, bytes, length);
+   append_staged_fetch(want, enc, d, 12, 2);
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 }
@@ -6313,10 +6339,6 @@ TEST_F(AGX3PackBinary, TextureFetchWaitSurvivesFallthroughBlock)
       d.mask = 15;
       d.slot = 1;
       d.final = true;
-      uint8_t tb[AGX3_TEX_MAX_LENGTH];
-      uint8_t tl = 0;
-      ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, tb, &tl));
-
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
       if (enc == AGX_ISA_ENCODING_AGX3B) {
@@ -6333,7 +6355,7 @@ TEST_F(AGX3PackBinary, TextureFetchWaitSurvivesFallthroughBlock)
       ASSERT_TRUE(agx3_pack_end(enc, &end));
 
       std::vector<uint8_t> want;
-      append(want, tb, tl);
+      append_staged_fetch(want, enc, d, 12, 2);
       append(want, ab, al);
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);

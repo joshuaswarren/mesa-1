@@ -8081,10 +8081,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* Apple's argument-buffer vertex read publishes uint2 coordinates
              * before SMP.EP4. G17P indexed imageLoad uses the same read-only
              * texture heap and coordinate ABI as texelFetch: its GPR pair is
-             * not a staging operand. Keep legacy immediate reads unchanged. */
+             * not a staging operand. Legacy immediate IMAGE_LOAD reads keep
+             * the unstaged form.
+             *
+             * A vertex texel fetch does not. The exception used to cover
+             * TEXTURE_LOAD too -- staging only when the texture operand is a
+             * run-time index -- and on AGX3B that is wrong: the unstaged form
+             * returns only the x and y components. Whether the shader asks
+             * for the whole vec4 or for .z alone, everything past y reads
+             * back as zero, while the identical fetch in a fragment shader
+             * (always staged) and a vertex textureLod are both correct.
+             * src/asahi/gl-tests/test-g17p-gl-vertex-flat-varying.c is that
+             * measurement, and KHR-GL33.texture_swizzle's 363 failures are
+             * all this one shape: the CTS samples in the vertex stage and
+             * passes the texel through a flat varying. */
+            const bool vertex_fetch_stages_coordinates =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_VERTEX &&
+               I->op == AGX_OPCODE_TEXTURE_LOAD;
             const bool staged =
                (enc == AGX_ISA_ENCODING_AGX3B &&
                 I->dim == AGX_DIM_2D_MS_ARRAY) ||
+               vertex_fetch_stages_coordinates ||
                ((I->op == AGX_OPCODE_TEXTURE_LOAD ||
                  enc == AGX_ISA_ENCODING_AGX3B) &&
                 ctx->stage == MESA_SHADER_VERTEX &&
