@@ -597,7 +597,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
 
    const uint32_t *bin = cache->dev->libagx_programs[program];
    if (!bin) {
-      mesa_loge("PRECOMPMISS program=%u has no compiled binary", program);
+      mesa_loge("asahi: libagx program %u is not built for this chip", program);
       ralloc_free(p);
       return NULL;
    }
@@ -621,9 +621,9 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
           info->main_size > info->binary_size - info->main_offset ||
           info->preamble_offset || info->nr_preamble_gprs ||
           info->rodata.size_16) {
-         mesa_loge("PRECOMPREJ program=%u block=%zu main_off=%u main=%u "
-                   "bin=%u pre_off=%u pre_gprs=%u rodata16=%u",
-                   program, block_size, info->main_offset, info->main_size,
+         mesa_loge("asahi: libagx program %u has no G17P launch shape: "
+                   "main %u@%u of %u, preamble %u/%u, rodata %u",
+                   program, info->main_size, info->main_offset,
                    info->binary_size, info->preamble_offset,
                    info->nr_preamble_gprs, info->rodata.size_16);
          ralloc_free(p);

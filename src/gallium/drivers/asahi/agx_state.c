@@ -4232,17 +4232,6 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
           cs->entry_offset > UINT64_MAX - cs->ptr ||
           !cs->b.workgroup.x || !cs->b.workgroup.y || !cs->b.workgroup.z ||
           agx_is_indirect(grid)) {
-         mesa_loge("PRECOMP prog=%u cs=%p bo=%u main=%u gprs=%u pre=%u "
-                   "rodata16=%u staging_known=%u args=%p argsz=%zu "
-                   "entry=%u wg=%u/%u/%u indirect=%u",
-                   (unsigned)program, (void *)cs, cs && cs->bo,
-                   cs ? cs->info.main_size : 0, cs ? cs->info.nr_gprs : 0,
-                   cs ? cs->info.nr_preamble_gprs : 0,
-                   cs ? cs->info.rodata.size_16 : 0,
-                   cs ? cs->info.agx3_staging_known : 0, args, arg_size,
-                   cs ? (unsigned)cs->entry_offset : 0,
-                   cs ? cs->b.workgroup.x : 0, cs ? cs->b.workgroup.y : 0,
-                   cs ? cs->b.workgroup.z : 0, agx_is_indirect(grid));
          agx_native_descriptor_rejected(dev, "precompiled compute program");
       }
 

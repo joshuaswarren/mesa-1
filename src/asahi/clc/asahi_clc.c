@@ -246,6 +246,7 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_draw_indirect_byte_count") ||
           !strcmp(func->name, "libagx_conditional_render") ||
           !strcmp(func->name, "libagx_draw_robust_index") ||
+          !strcmp(func->name, "libagx_unroll_restart") ||
           !strcmp(func->name, "libagx_copy_xfb_counters") ||
           !strcmp(func->name, "libagx_increment_ia") ||
           !strcmp(func->name, "libagx_increment_ia_restart_nonnull") ||
@@ -466,6 +467,28 @@ main(int argc, char **argv)
                  "libagx_copy_timestamp_0_g17p,\n"
                  "    [LIBAGX_TESS_FACTORS_HALF] = "
                  "libagx_tess_factors_half_0_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_0] = "
+                 "libagx_unroll_restart_0_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_1] = "
+                 "libagx_unroll_restart_1_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_2] = "
+                 "libagx_unroll_restart_2_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_3] = "
+                 "libagx_unroll_restart_3_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_4] = "
+                 "libagx_unroll_restart_4_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_5] = "
+                 "libagx_unroll_restart_5_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_6] = "
+                 "libagx_unroll_restart_6_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_7] = "
+                 "libagx_unroll_restart_7_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_8] = "
+                 "libagx_unroll_restart_8_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_9] = "
+                 "libagx_unroll_restart_9_g17p,\n"
+                 "    [LIBAGX_UNROLL_RESTART_10] = "
+                 "libagx_unroll_restart_10_g17p,\n"
                  "};\n\n");
       }
    }
