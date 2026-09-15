@@ -35,7 +35,14 @@ cf_valid(nir_builder *b, nir_def *cf)
     * do that. Either way the tests pass.
     */
    nir_def *cf01 = nir_trim_vector(b, cf, 2);
-   return nir_ior(b, bit, nir_fisnormal(b, cf01));
+
+   /* Reduce the per-channel check to one boolean: interpolate_at_offset
+    * selects a scalar with it. A vec2 condition made bcsel produce a vec2,
+    * which nir_vec hid for wider loads but a single-component
+    * interpolateAtSample/Offset result stored it as-is and failed NIR
+    * validation (pipeline.*.misc.interpolate_at_sample_no_sample_shading).
+    */
+   return nir_ior(b, bit, nir_ball(b, nir_fisnormal(b, cf01)));
 }
 
 static nir_def *
