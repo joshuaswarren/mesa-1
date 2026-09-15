@@ -6588,8 +6588,27 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
        * There is no draw packet to encode in that case. The pre-raster work,
        * including any shader side effects, has already been recorded above. */
       if (!agx_is_indirect(draw.b) &&
-          (draw.b.count[0] == 0 || draw.b.count[1] == 0))
+          (draw.b.count[0] == 0 || draw.b.count[1] == 0)) {
+         /* The bind tail was already published before lowering determined
+          * there were no complete primitives. Its selector word must still
+          * be present, even though no Index List follows it. */
+         if (dev->dev.chip == AGX_CHIP_G17P && g17p_native_bind_tail_emitted) {
+            struct agx_ptr state = hk_pool_vdm_alloc(cmd, 8, 4);
+            uint32_t offset;
+            if (!state.cpu || !hk_g17p_upload_draw_indices(
+                   state.cpu, 8, state.gpu, cs->scissor.size,
+                   cs->depth_bias.size, MAX2(dyn->vp.viewport_count, 1),
+                   &offset)) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               return;
+            }
+            memcpy(out, &offset, sizeof(offset));
+            out += sizeof(offset);
+            cs->current = out;
+         }
          continue;
+      }
 
       enum agx_primitive topology = cmd->state.gfx.topology;
       const bool native_tess = tess && dev->g17p_native_tess;
