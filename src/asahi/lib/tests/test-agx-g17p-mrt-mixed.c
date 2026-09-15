@@ -19,6 +19,7 @@
 #include <string.h>
 #include "util/format/u_format.h"
 #include "agx3_g17p_quad_eot.h"
+#include "agx3_sr_core.h"
 #include "agx_bg_eot_key.h"
 #include "agx_compile.h"
 #include "agx_linker.h"
@@ -582,8 +583,12 @@ compile_background(const struct agx_tilebuffer_layout *layout,
       nir_def *value;
       if (rt < reloads) {
          nir_def *coord = nir_u2u32(&b, nir_load_pixel_coord(&b));
+         if (tib.layered)
+            coord = nir_vec3(&b, nir_channel(&b, coord, 0),
+                             nir_channel(&b, coord, 1), nir_load_layer_id(&b));
          nir_def *tex = nir_txf(&b, coord, .texture_index = rt * 2,
                                 .dim = GLSL_SAMPLER_DIM_2D,
+                                .is_array = tib.layered,
                                 .dest_type = nir_type_uint32,
                                 .backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP);
          value = nir_trim_vector(&b, tex, nr);
@@ -622,6 +627,27 @@ compile_background(const struct agx_tilebuffer_layout *layout,
    return ok;
 }
 
+static bool
+has_background_layer_read(const struct agx_shader_part *part)
+{
+   const uint8_t *code = part->binary;
+   for (unsigned reg = 0; reg < 64; ++reg) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         struct agx3_sr_desc sr = {
+            .dest = reg, .width = AGX3_SR_W16, .sr = 12, .slot = slot,
+         };
+         uint8_t expected[AGX3_SR_MAX_LENGTH], len;
+         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &sr, expected, &len))
+            continue;
+         for (unsigned at = 0; at + len <= part->info.binary_size; at += 2) {
+            if (!memcmp(code + at, expected, len))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 static int
 test_background_programs(void)
 {
@@ -648,6 +674,18 @@ test_background_programs(void)
          free(part.binary);
       }
    }
+   /* Layered render-pass reloads must not use compute-grid Z as the layer.
+    * Pin the native BG half-register read in the compiled shader, beyond the
+    * isolated SR encoder test. */
+   const enum pipe_format layered_formats[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   struct agx_tilebuffer_layout layered =
+      agx_build_tilebuffer_layout(layered_formats, 1, 1, true);
+   struct agx_shader_part part = {0};
+   CHECK(compile_background(&layered, 1, false, 0, &part));
+   CHECK(has_background_layer_read(&part));
+   free(part.binary);
    return 0;
 }
 

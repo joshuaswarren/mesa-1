@@ -67,6 +67,8 @@ agx3_sr_witnessed(uint8_t sr, enum agx3_sr_width width)
       case 34: case 36:
       /* fragment-only, see the comment above */
       case 2: case 39: case 41:
+      /* G17P builtin BG array reloads read their layer with 34c31046. */
+      case 12:
          return true;
       default:
          return false;

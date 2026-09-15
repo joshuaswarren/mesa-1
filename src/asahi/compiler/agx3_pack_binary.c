@@ -743,6 +743,12 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       *apple = 41;
       *width = AGX3_SR_W16;
       return true;
+   case AGX_SR_BACKGROUND_LAYER_ID:
+      if (enc != AGX_ISA_ENCODING_AGX3B)
+         return false;
+      *apple = 12;
+      *width = AGX3_SR_W16;
+      return true;
       /* The semantic enum carries the hardware SR byte (0xd8/0xdd), while
        * agx3_sr_core consumes Apple's anonymous normalized f21 value. */
       SR(AGX_SR_INSTANCE_ID, 46, AGX3_SR_W32);
