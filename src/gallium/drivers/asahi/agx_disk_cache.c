@@ -56,6 +56,11 @@ static void
 write_shader(struct blob *blob, const struct agx_compiled_shader *binary,
              bool is_root_gs)
 {
+   /* Geometry variants contain a pre-GS compute helper with no API shader
+    * owner. Preserve each component's identity instead of inheriting the
+    * parent geometry stage and its resource bindings on a cache hit. */
+   blob_write_uint8(blob, binary->stage);
+   blob_write_uint8(blob, binary->so != NULL);
    blob_write_bytes(blob, &binary->b.info, sizeof(binary->b.info));
 
    if (binary->b.info.binary_size) {
@@ -91,8 +96,8 @@ read_shader(struct agx_screen *screen, struct blob_reader *blob,
             const struct agx_uncompiled_shader *uncompiled, bool is_root)
 {
    struct agx_compiled_shader *binary = CALLOC_STRUCT(agx_compiled_shader);
-   binary->stage = uncompiled->type;
-   binary->so = uncompiled;
+   binary->stage = blob_read_uint8(blob);
+   binary->so = blob_read_uint8(blob) ? uncompiled : NULL;
 
    blob_copy_bytes(blob, &binary->b.info, sizeof(binary->b.info));
    size_t size = binary->b.info.binary_size;
