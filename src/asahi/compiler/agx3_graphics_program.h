@@ -7,6 +7,7 @@
 
 #include "agx3_ioto_uniform_program.h"
 #include "asahi/lib/agx_ioto_state_core.h"
+#include "asahi/lib/agx_ioto_preshader_core.h"
 
 #define AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
 /* Software composer capacity, not a hardware field: the Ioto loader bounds a
@@ -36,6 +37,7 @@ struct agx3_g17p_graphics_program_desc {
    bool writes_sample_mask;
    uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
+   const struct agx_ioto_preshader_desc *preshader;
 };
 
 struct agx3_g17p_graphics_program {
@@ -132,6 +134,11 @@ bool agx3_g17p_rt0_eot_program_generate(
 bool agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, size_t *size);
+
+bool agx3_g17p_graphics_program_bound_with_preshader(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, const struct agx_ioto_preshader_desc *preshader,
+   size_t *size);
 
 bool agx3_g17p_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,

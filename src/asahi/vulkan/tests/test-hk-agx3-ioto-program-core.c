@@ -513,6 +513,68 @@ test_g17s_minimal_compute_admission(void)
 }
 
 static int
+test_g17p_compute_preamble(void)
+{
+   static const uint8_t code[] = {
+      0x67, 0x00, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x19, 0x00, 0x00, 0x40, 0x02, 0x00, 0x0b, 0x01,
+      0x07, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
+      0x4b, 0x00, 0x01, 0x04, 0x5b, 0x02, 0x01, 0x04,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t branch[] = {
+      0x0f, 0x00, 0x54, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x00,
+   };
+   const struct agx3_ioto_uniform_range range = {
+      .start_halfs = 0, .size_halfs = 8, .address = UINT64_C(0x10000024000),
+   };
+   struct agx3_cdm_direct_template_sources sources;
+   CHECK(agx3_cdm_direct_template_sources_compute(false, false, false, &sources));
+   for (unsigned resources = 0; resources < 2; ++resources) {
+      struct agx3_g17p_compute_program_desc desc = {
+         .program_va = UINT64_C(0x100000b0000),
+         .shader_va = UINT64_C(0x10000000100),
+         .uniform_ranges = resources ? &range : NULL,
+         .uniform_range_count = resources,
+         .shader_binary_size = 96,
+         .nr_gprs = 8,
+         .compiler_d_valid = true,
+         .compiler_d = 32,
+         .launch_sources = sources,
+      };
+      struct agx3_g17p_compute_program baseline, program;
+      CHECK(agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &baseline));
+      struct agx_ioto_preshader_desc preamble = {
+         .code = code, .code_size = sizeof(code),
+         .external_va = AGX_IOTO_PRESHADER_NO_VA,
+      };
+      desc.preshader = &preamble;
+      CHECK(agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &program));
+      const size_t prefix = baseline.length - AGX_IOTO_PRESHADER_ABSENT_SIZE;
+      CHECK(program.length == prefix + sizeof(code));
+      CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+      CHECK(memcmp(program.bytes + prefix, code, sizeof(code)) == 0);
+      CHECK(memcmp(&program.launch, &baseline.launch, sizeof(program.launch)) == 0);
+
+      preamble.code = NULL;
+      preamble.code_size = AGX_IOTO_PRESHADER_INLINE_LIMIT + 2;
+      preamble.external_va = UINT64_C(0x123456789abc);
+      CHECK(agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &program));
+      CHECK(program.length == prefix + sizeof(branch));
+      CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+      CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
+      CHECK(memcmp(&program.launch, &baseline.launch, sizeof(program.launch)) == 0);
+
+      const struct agx3_g17p_compute_program before = program;
+      preamble.external_va |= 1;
+      CHECK(!agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &program));
+      CHECK(memcmp(&before, &program, sizeof(program)) == 0);
+   }
+   puts("G17P compute preamble composition cases passed");
+   return 0;
+}
+
+static int
 test_g17p_dynamic_compute_program(void)
 {
    struct agx3_cdm_direct_template_sources sources;
@@ -3103,7 +3165,7 @@ main(void)
        test_coverage_initial_pixel_dependencies() ||
        test_g17p_precompiled_fill_program() || test_exact_target_order() || test_terminal_suffix_modes() ||
        test_fail_closed() || test_g17s_minimal_compute_admission() ||
-       test_g17p_dynamic_compute_program() ||
+       test_g17p_dynamic_compute_program() || test_g17p_compute_preamble() ||
        test_g17p_direct_add3_compute_bridge() ||
        test_g17p_no_resource_program_bridge() ||
        test_g17p_basic_graphics_program() || test_g17p_rt0_eot_program() ||

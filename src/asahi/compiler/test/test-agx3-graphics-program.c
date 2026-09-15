@@ -29,9 +29,85 @@ eot_offset(struct agx3_g17p_rt0_eot_program_desc *desc, unsigned rt)
    return offsets[rt];
 }
 
+static int
+test_preamble_programs(void)
+{
+   /* Compiler-produced G17P uniform-pointer preamble, including its END. */
+   static const uint8_t code[] = {
+      0x67, 0x00, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x19, 0x00, 0x00, 0x40, 0x02, 0x00, 0x0b, 0x01,
+      0x07, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
+      0x4b, 0x00, 0x01, 0x04, 0x5b, 0x02, 0x01, 0x04,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t branch[] = {
+      0x0f, 0x00, 0x54, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x00,
+   };
+   const struct agx3_ioto_uniform_range range = {
+      .start_halfs = 0, .size_halfs = 8, .address = UINT64_C(0x10000024000),
+   };
+   for (unsigned stage = 0; stage < 3; ++stage) {
+      for (unsigned resources = 0; resources < 2; ++resources) {
+         struct agx3_g17p_graphics_program_desc desc = {
+            .program_va = UINT64_C(0x10000100000),
+            .shader_va = UINT64_C(0x100002003c0),
+            .uniform_ranges = resources ? &range : NULL,
+            .uniform_range_count = resources,
+            .shader_binary_size = 128,
+            .nr_gprs = 16,
+            .fragment = stage != 0,
+            .writes_sample_mask = stage == 2,
+            .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
+         };
+         struct agx3_g17p_graphics_program baseline, program;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &baseline));
+         struct agx_ioto_preshader_desc preamble = {
+            .code = code, .code_size = sizeof(code),
+            .external_va = AGX_IOTO_PRESHADER_NO_VA,
+         };
+         desc.preshader = &preamble;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         const size_t prefix = baseline.length - AGX_IOTO_PRESHADER_ABSENT_SIZE;
+         CHECK(program.length == prefix + sizeof(code));
+         CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+         CHECK(memcmp(program.bytes + prefix, code, sizeof(code)) == 0);
+         size_t old_bound, bound;
+         CHECK(agx3_g17p_graphics_program_bound(
+            AGX_CHIP_G17P, desc.uniform_ranges, resources, &old_bound));
+         CHECK(agx3_g17p_graphics_program_bound_with_preshader(
+            AGX_CHIP_G17P, desc.uniform_ranges, resources, &preamble, &bound));
+         CHECK(bound == old_bound - AGX_IOTO_PRESHADER_ABSENT_SIZE + sizeof(code));
+         CHECK(program.length <= bound);
+
+         preamble.code = NULL;
+         preamble.code_size = AGX_IOTO_PRESHADER_INLINE_LIMIT + 2;
+         preamble.external_va = UINT64_C(0x123456789abc);
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         CHECK(program.length == prefix + sizeof(branch));
+         CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+         CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
+
+         const struct agx3_g17p_graphics_program before = program;
+         preamble.external_va |= 1;
+         CHECK(!agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         CHECK(memcmp(&before, &program, sizeof(program)) == 0);
+         bound = 123;
+         CHECK(!agx3_g17p_graphics_program_bound_with_preshader(
+            AGX_CHIP_G17P, desc.uniform_ranges, resources, &preamble, &bound));
+         CHECK(bound == 123);
+      }
+   }
+   return 0;
+}
+
 int
 main(void)
 {
+   CHECK(test_preamble_programs() == 0);
    uint16_t blend_base = UINT16_C(0xa5a5);
    CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 0,
                                                  &blend_base));

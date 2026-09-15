@@ -69,17 +69,35 @@ agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, size_t *size)
 {
+   return agx3_g17p_graphics_program_bound_with_preshader(
+      chip, ranges, range_count, NULL, size);
+}
+
+bool
+agx3_g17p_graphics_program_bound_with_preshader(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, const struct agx_ioto_preshader_desc *preshader,
+   size_t *size)
+{
+   size_t suffix_size = AGX_IOTO_PRESHADER_ABSENT_SIZE;
+   if (preshader) {
+      struct agx_ioto_preshader_output suffix;
+      if (!agx_ioto_preshader_emit(chip, preshader, &suffix))
+         return false;
+      suffix_size = suffix.length;
+   }
+   const size_t fixed_size = AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE -
+                            AGX_IOTO_PRESHADER_ABSENT_SIZE + suffix_size;
    size_t body, chunks;
    if (!size || chip != AGX_CHIP_G17P ||
        range_count > AGX3_G17P_GRAPHICS_MAX_RANGES ||
        !agx3_ioto_uniform_program_body_bound(chip, ranges, range_count, &body,
                                              &chunks) ||
        chunks > AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS ||
-       body > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE -
-                 AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE)
+       body > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE - fixed_size)
       return false;
 
-   *size = body + AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE;
+   *size = body + fixed_size;
    return true;
 }
 
@@ -101,6 +119,10 @@ agx3_g17p_graphics_program_generate(
     * has the same loader release mask as one active colour partition. */
    const unsigned colour_classes =
       !desc->fragment ? 0 : desc->colour_classes ? desc->colour_classes : 1;
+   const enum agx_ioto_g17p_program_stage stage =
+      !desc->fragment ? AGX_IOTO_G17P_PROGRAM_VERTEX_COMPUTE :
+      desc->writes_sample_mask ? AGX_IOTO_G17P_PROGRAM_COVERAGE_FRAGMENT :
+                                AGX_IOTO_G17P_PROGRAM_FRAGMENT;
 
    struct agx_ioto_state_tail_output tail;
    if (!graphics_state_tail(desc, &tail))
@@ -109,28 +131,15 @@ agx3_g17p_graphics_program_generate(
    struct agx3_g17p_graphics_program staged = {0};
    size_t written = 0;
    if (!desc->uniform_range_count) {
-      const bool composed =
-         desc->fragment && desc->writes_sample_mask
-            ? agx_ioto_g17p_coverage_fragment_program_compose(
-                 desc->program_va, NULL, 0, NULL, 0, &tail,
-                 colour_classes, staged.bytes, sizeof(staged.bytes),
-                 &written)
-            : desc->fragment
-            ? agx_ioto_g17p_fragment_no_resource_program_compose(
-                 desc->program_va, &tail, colour_classes, staged.bytes,
-                 sizeof(staged.bytes), &written)
-            : agx_ioto_g17p_no_resource_program_compose(
-                 desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
-                 &written);
-      const size_t expected =
-         desc->fragment ? AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE
-                        : AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE;
-      if (!composed || written != expected)
+      if (!agx_ioto_g17p_program_compose_with_preshader(
+             desc->program_va, NULL, 0, NULL, 0, &tail, stage, colour_classes,
+             desc->preshader, staged.bytes, sizeof(staged.bytes), &written))
          return false;
    } else {
       size_t bound;
-      if (!agx3_g17p_graphics_program_bound(
-             chip, desc->uniform_ranges, desc->uniform_range_count, &bound))
+      if (!agx3_g17p_graphics_program_bound_with_preshader(
+             chip, desc->uniform_ranges, desc->uniform_range_count,
+             desc->preshader, &bound))
          return false;
 
       uint8_t body[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
@@ -156,20 +165,10 @@ agx3_g17p_graphics_program_generate(
       if (!agx3_ioto_uniform_program_body_generate(
              chip, &load_desc, workspace, &body_size, &copy_offset) ||
           copy_offset > body_size ||
-          !(desc->fragment && desc->writes_sample_mask
-               ? agx_ioto_g17p_coverage_fragment_program_compose(
-                    desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, colour_classes,
-                    staged.bytes, sizeof(staged.bytes), &written)
-               : desc->fragment
-               ? agx_ioto_g17p_fragment_resource_program_compose(
-                    desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, colour_classes,
-                    staged.bytes, sizeof(staged.bytes), &written)
-               : agx_ioto_g17p_resource_program_compose(
-                    desc->program_va, body, copy_offset, body + copy_offset,
-                    body_size - copy_offset, &tail, staged.bytes,
-                    sizeof(staged.bytes), &written)))
+          !agx_ioto_g17p_program_compose_with_preshader(
+             desc->program_va, body, copy_offset, body + copy_offset,
+             body_size - copy_offset, &tail, stage, colour_classes,
+             desc->preshader, staged.bytes, sizeof(staged.bytes), &written))
          return false;
    }
 

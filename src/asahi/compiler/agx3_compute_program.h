@@ -27,6 +27,7 @@ struct agx3_g17p_compute_program_desc {
    uint32_t threadgroup_memory_size_B;
    struct agx3_cdm_direct_template_sources launch_sources;
    enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1;
+   const struct agx_ioto_preshader_desc *preshader;
 };
 
 struct agx3_g17p_compute_program {
