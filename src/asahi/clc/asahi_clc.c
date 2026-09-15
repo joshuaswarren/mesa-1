@@ -260,7 +260,36 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_copy_query_gl") ||
           !strcmp(func->name, "libagx_increment_cs_invocations") ||
           !strcmp(func->name, "libagx_copy_timestamp") ||
-          !strcmp(func->name, "libagx_tess_factors_half");
+          !strcmp(func->name, "libagx_tess_factors_half") ||
+          !strcmp(func->name, "libagx_tess_setup_indirect") ||
+          !strcmp(func->name, "libagx_tess_isoline");
+}
+
+/* A precompiled kernel has no printf buffer. AGX2 bakes the fixed
+ * LIBAGX_PRINTF_BUFFER_ADDRESS, but AGX3 has no such ABI -- its frontends
+ * publish a process-local address through runtime state -- so the backend
+ * refuses any shader that still carries the address intrinsic, and an
+ * assert() anywhere in a kernel takes the whole kernel with it. That is what
+ * kept the tessellation kernels off G17P: libagx_tess_setup_indirect asserts,
+ * so it never compiled, so LIBAGX_TESS_ISOLINE_0 was absent and
+ * KHR-GL33.cull_distance's tessellation cases aborted the process.
+ *
+ * Give those kernels an empty buffer instead. A zero size folds the printf
+ * lowering's own bounds check to false, so NIR deletes the whole printf --
+ * including every store -- and the null address is never dereferenced. No
+ * printf was ever going to reach a host here, on any target.
+ */
+static bool
+drop_printf_for_agx3(nir_builder *b, nir_intrinsic_instr *intr,
+                     UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_printf_buffer_address &&
+       intr->intrinsic != nir_intrinsic_load_printf_buffer_size)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_imm_intN_t(b, 0, intr->def.bit_size));
+   return true;
 }
 
 /* Lift every kernel-argument preamble load above the halves the AGX3
@@ -424,6 +453,8 @@ main(int argc, char **argv)
             nir_shader *clone = nir_shader_clone(NULL, s);
             if (key.dev.encoding != AGX_ISA_ENCODING_AGX2) {
                NIR_PASS(_, clone, nir_shader_intrinsics_pass,
+                        drop_printf_for_agx3, nir_metadata_control_flow, NULL);
+               NIR_PASS(_, clone, nir_shader_intrinsics_pass,
                         rebase_preamble_for_agx3, nir_metadata_all, NULL);
                key.reserved_preamble += AGX_ABI_AGX3_PRECOMP_ARG_HALFS;
             }
@@ -529,6 +560,12 @@ main(int argc, char **argv)
                  "libagx_unroll_restart_9_g17p,\n"
                  "    [LIBAGX_UNROLL_RESTART_10] = "
                  "libagx_unroll_restart_10_g17p,\n"
+                 "    [LIBAGX_TESS_SETUP_INDIRECT] = "
+                 "libagx_tess_setup_indirect_0_g17p,\n"
+                 "    [LIBAGX_TESS_ISOLINE_0] = "
+                 "libagx_tess_isoline_0_g17p,\n"
+                 "    [LIBAGX_TESS_ISOLINE_1] = "
+                 "libagx_tess_isoline_1_g17p,\n"
                  "};\n\n");
       }
    }
