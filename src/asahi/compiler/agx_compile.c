@@ -6959,6 +6959,80 @@ lower_printf_buffer(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
+/* A fragment shader that indexes a varying array at run time reads it through
+ * one load_interpolated_input whose offset is a value rather than a constant.
+ * That needs the interpolation to take its coefficient index from a register.
+ * AGX2 encodes exactly that -- `iter r4_r5_r6_r7, r0l, cf0` -- but no AGX3B
+ * form for it is witnessed, and Metal cannot express a dynamically indexed
+ * interpolant, so metal-nt will not produce one either. Refusing the shader
+ * is what KHR-GL33.shaders.indexing.varying_array's four *_dynamic_read cases
+ * hit.
+ *
+ * Read every slot the array spans and select between them. This runs in the
+ * compile rather than the preprocess because IO is lowered by then: the
+ * indirection is an offset source, not a deref, so
+ * nir_lower_indirect_derefs_to_if_else_trees cannot see it.
+ *
+ * It costs one interpolation per array element where AGX2 needs one in total.
+ * That is an efficiency gap against the baseline, recorded as such -- not a
+ * correctness one, and the alternative is refusing to compile at all.
+ */
+static bool
+lower_indirect_fs_input(nir_builder *b, nir_intrinsic_instr *intr,
+                        UNUSED void *data)
+{
+   unsigned offset_src;
+   if (intr->intrinsic == nir_intrinsic_load_interpolated_input)
+      offset_src = 1;
+   else if (intr->intrinsic == nir_intrinsic_load_input)
+      offset_src = 0;
+   else
+      return false;
+
+   if (nir_src_is_const(intr->src[offset_src]))
+      return false;
+
+   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   const unsigned slots = sem.num_slots;
+   if (slots <= 1 || slots > 32)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *index = intr->src[offset_src].ssa;
+   nir_def *result = NULL;
+
+   for (unsigned i = 0; i < slots; ++i) {
+      nir_io_semantics one_sem = sem;
+      one_sem.num_slots = 1;
+      one_sem.location = sem.location + i;
+
+      nir_def *one;
+      if (intr->intrinsic == nir_intrinsic_load_interpolated_input) {
+         one = nir_load_interpolated_input(
+            b, intr->def.num_components, intr->def.bit_size,
+            intr->src[0].ssa, nir_imm_int(b, 0),
+            .base = nir_intrinsic_base(intr) + i,
+            .component = nir_intrinsic_component(intr),
+            .dest_type = nir_intrinsic_dest_type(intr),
+            .io_semantics = one_sem);
+      } else {
+         one = nir_load_input(
+            b, intr->def.num_components, intr->def.bit_size,
+            nir_imm_int(b, 0), .base = nir_intrinsic_base(intr) + i,
+            .component = nir_intrinsic_component(intr),
+            .dest_type = nir_intrinsic_dest_type(intr),
+            .io_semantics = one_sem);
+      }
+
+      result = result == NULL
+                  ? one
+                  : nir_bcsel(b, nir_ieq_imm(b, index, i), one, result);
+   }
+
+   nir_def_replace(&intr->def, result);
+   return true;
+}
+
 static bool
 has_unlowered_printf_address(const nir_shader *nir)
 {
@@ -7017,6 +7091,12 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_printf_buffer,
             nir_metadata_control_flow, &key->dev);
+
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_indirect_fs_input,
+               nir_metadata_none, NULL);
+   }
 
    NIR_PASS(_, nir, nir_lower_frag_coord_to_pixel_coord);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
