@@ -3832,6 +3832,52 @@ agx_materialize_agx3_cf_constants(agx_context *ctx)
          I->src[s] = wide;
       }
 
+      /* The long native ABS compare has no grounded unordered selector.
+       * Ordered GE/LE are represented as an inverted unordered LT/GT, so an
+       * ABS modifier on either input cannot use that encoding point.  Keep
+       * the direct ABS form for EQ/LT/GT, and materialize only the otherwise
+       * unencodable modifier combination as exact IEEE sign-bit operations
+       * before register allocation.  This is also the safe path when ABS and
+       * NEG occur together, since the native modifier forms are disjoint. */
+      const bool unordered_relation =
+         I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN ||
+         I->fcond == AGX_FCOND_GE || I->fcond == AGX_FCOND_LE;
+      const bool has_abs = I->src[0].abs || I->src[1].abs;
+      const bool has_neg = I->src[0].neg || I->src[1].neg;
+      if (has_abs && (unordered_relation || has_neg)) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type != AGX_INDEX_NORMAL ||
+                I->src[s].size != AGX_SIZE_32 ||
+                (!I->src[s].abs && !I->src[s].neg))
+               continue;
+
+            const bool absolute = I->src[s].abs;
+            const bool negate = I->src[s].neg;
+            agx_index value = I->src[s];
+            value.abs = false;
+            value.neg = false;
+            agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+
+            if (absolute) {
+               agx_index mask =
+                  agx_mov_imm(&b, 32, UINT32_C(0x7fffffff));
+               agx_index result = agx_temp(ctx, AGX_SIZE_32);
+               agx_bitop_to(&b, result, value, mask, 0x8 /* AND */);
+               value = result;
+            }
+
+            if (negate) {
+               agx_index sign =
+                  agx_mov_imm(&b, 32, UINT32_C(0x80000000));
+               agx_index result = agx_temp(ctx, AGX_SIZE_32);
+               agx_bitop_to(&b, result, value, sign, 0x6 /* XOR */);
+               value = result;
+            }
+
+            I->src[s] = value;
+         }
+      }
+
       /* G17P's structured float-CF path is grounded for f32 register pairs
        * and for literal zero. Firefox's WebRender fragment compares a live
        * f32 against 1.0 (and later -10.0), which reaches AIR as a nonzero

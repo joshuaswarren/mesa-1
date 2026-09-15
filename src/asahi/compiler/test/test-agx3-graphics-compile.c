@@ -6840,6 +6840,53 @@ build_fs_chromium_minifloat_branch(void)
    return b.shader;
 }
 
+/* dEQP's varying-struct comparison keeps a real branch on x >= abs(y).
+ * G17P's direct ABS branch lacks the unordered selector required to express
+ * ordered GE, so the compiler must materialize fabs and use the ordinary
+ * register/register control-flow compare. */
+static nir_shader *
+build_fs_ordered_abs_branch(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "AGX3 ordered absolute-value branch FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *x = nir_channel(&b, input, 0);
+   nir_def *y = nir_channel(&b, input, 1);
+
+   nir_push_if(&b, nir_fge(&b, x, nir_fabs(&b, y)));
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 1);
+   tex->op = nir_texop_tex;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 2;
+   tex->texture_index = 0;
+   tex->sampler_index = 0;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_backend1, input);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_def *then_value = &tex->def;
+   nir_push_else(&b, NULL);
+   nir_def *else_value =
+      nir_vec4(&b, x, y, x, nir_imm_float(&b, 1.0f));
+   nir_pop_if(&b, NULL);
+
+   fs_store_colour(&b, nir_if_phi(&b, then_value, else_value));
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   return b.shader;
+}
+
 /* Hyprland clamps the motion-blur loop bound through a float comparison that
  * selects a raw 16-bit one or a retained half register. Both constants must
  * be materialized before using the general half-register FSEL. */
@@ -7617,6 +7664,8 @@ static const struct agx3_graphics_case cases[] = {
     build_fs_chromium_negated_equality_select, true, .g17p_only = true},
    {"fs-chromium-minifloat-branch", build_fs_chromium_minifloat_branch,
     true, .g17p_only = true, .expected_g17p_sampled_fragment = true},
+   {"fs-ordered-abs-branch", build_fs_ordered_abs_branch, true,
+    .g17p_only = true, .expected_g17p_sampled_fragment = true},
    {"fs-hyprland-motion-bound", build_fs_hyprland_motion_bound, true,
     .g17p_only = true},
    {"fs-glmark2-buffer", build_fs_glmark2_buffer, true,
