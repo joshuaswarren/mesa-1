@@ -117,7 +117,8 @@ if with_tests and with_tools.contains('drm-shim')
     ],
     link_with : [
       libasahi, libasahiwinsys, libasahi_compiler, libasahi_lib,
-      libasahi_layout, libasahi_decode, libgallium, libgalliumvl_stub,
+      libasahi_layout, libasahi_decode, libagx3b_disasm, libgallium,
+      libgalliumvl_stub,
     ],
     build_by_default : false,
   )

@@ -72,6 +72,7 @@ write_shader(struct blob *blob, const struct agx_compiled_shader *binary,
                     sizeof(binary->attrib_components_read));
    blob_write_bytes(blob, &binary->epilog_key, sizeof(binary->epilog_key));
    blob_write_uint8(blob, binary->g17p_texture_resources);
+   blob_write_uint8(blob, binary->g17p_storage_write);
    blob_write_uint8(blob, binary->g17p_custom_border_emulation);
    blob_write_uint32(blob, binary->push_range_count);
    blob_write_bytes(blob, binary->push,
@@ -131,6 +132,7 @@ read_shader(struct agx_screen *screen, struct blob_reader *blob,
                    sizeof(binary->attrib_components_read));
    blob_copy_bytes(blob, &binary->epilog_key, sizeof(binary->epilog_key));
    binary->g17p_texture_resources = blob_read_uint8(blob);
+   binary->g17p_storage_write = blob_read_uint8(blob);
    binary->g17p_custom_border_emulation = blob_read_uint8(blob);
    binary->push_range_count = blob_read_uint32(blob);
    blob_copy_bytes(blob, binary->push,

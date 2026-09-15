@@ -165,6 +165,12 @@ bool agx_nir_lower_g17p_txf(
 bool agx_nir_lower_g17p_storage_image(
    struct nir_shader *s, struct agx_g17p_storage_image_binding *binding);
 
+/* Lower Gallium's exact write-only scalar-integer image state to native
+ * G17P PBE state 0. The caller publishes the resolved PBE pointer and native
+ * write-control record in the first four 64-bit resource slots. */
+bool agx_nir_lower_g17p_gallium_storage_write(struct nir_shader *s,
+                                               unsigned pbe_state);
+
 /* Lower the exact compute textureLod(..., 0) -> rgba8 imageStore form emitted
  * by vkQuake.  The caller publishes the four-slot native resource tuple. */
 bool agx_nir_lower_g17p_sampled_storage(

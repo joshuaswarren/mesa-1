@@ -247,6 +247,8 @@ struct agx_precompiled_kernel_info {
    uint16_t workgroup_size[3];
    uint16_t local_size;
    uint16_t imageblock_stride;
+   uint16_t scratch_size;
+   uint16_t agx3_spectpr_scratch_size;
    bool uses_txf;
    bool agx3_staging_known;
    uint16_t agx3_staging_halfs;
@@ -283,6 +285,8 @@ agx_compact_kernel_info(struct agx_shader_info *info)
                          info->workgroup_size[2]},
       .local_size = info->local_size,
       .imageblock_stride = info->imageblock_stride,
+      .scratch_size = info->scratch_size,
+      .agx3_spectpr_scratch_size = info->agx3_spectpr_scratch_size,
       .uses_txf = info->uses_txf,
       .agx3_staging_known = info->agx3_staging_known,
       .agx3_staging_halfs = info->agx3_staging_halfs,

@@ -5200,6 +5200,83 @@ test_storage_image_lowering(void)
 }
 
 static nir_shader *
+build_gallium_storage_write(enum pipe_format format, unsigned state,
+                            enum gl_access_qualifier access)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "AGX3 Gallium write-only scalar storage image");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   BITSET_SET(b.shader->info.images_used, 0);
+
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *zero16 = nir_imm_intN_t(&b, 0, 16);
+   nir_def *coord = nir_imm_ivec4(&b, 0, 0, 0, 0);
+   nir_image_store(&b, nir_imm_intN_t(&b, state, 16), coord, zero,
+                   nir_imm_ivec4(&b, 9, 0, 0, 0), zero16,
+                   .image_dim = GLSL_SAMPLER_DIM_2D, .image_array = false,
+                   .format = format, .access = access,
+                   .src_type = format == PIPE_FORMAT_R32_SINT
+                                  ? nir_type_int32
+                                  : nir_type_uint32);
+   return b.shader;
+}
+
+static bool
+test_gallium_storage_write_lowering(void)
+{
+   const enum pipe_format formats[] = {
+      PIPE_FORMAT_R32_UINT,
+      PIPE_FORMAT_R32_SINT,
+   };
+
+   for (unsigned i = 0; i < ARRAY_SIZE(formats); ++i) {
+      nir_shader *nir = build_gallium_storage_write(
+         formats[i], 1, ACCESS_RESTRICT);
+      agx_preprocess_nir(nir);
+      bool ok = agx_nir_lower_g17p_gallium_storage_write(nir, 1);
+      unsigned stores = 0;
+      nir_foreach_block(block, nir_shader_get_entrypoint(nir)) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_image_store) {
+               stores++;
+               ok &= nir_src_is_const(intr->src[0]) &&
+                     nir_src_as_uint(intr->src[0]) == 0;
+            }
+         }
+      }
+
+      struct agx_shader_key key = {0};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      key.no_preamble = true;
+      key.reserved_preamble = AGX_G17P_STORAGE_ROOT_HALFS;
+      struct agx_shader_part part = {0};
+      ok &= stores == 1 && agx_compile_shader_nir(nir, &key, &part) &&
+            part.binary != NULL && part.info.binary_size > 0;
+      free(part.binary);
+      ralloc_free(nir);
+      if (!ok)
+         return false;
+   }
+
+   nir_shader *coherent = build_gallium_storage_write(
+      PIPE_FORMAT_R32_SINT, 1, ACCESS_RESTRICT | ACCESS_COHERENT);
+   nir_shader *wrong_state = build_gallium_storage_write(
+      PIPE_FORMAT_R32_SINT, 2, ACCESS_RESTRICT);
+   const bool rejected =
+      !agx_nir_lower_g17p_gallium_storage_write(coherent, 1) &&
+      !agx_nir_lower_g17p_gallium_storage_write(wrong_state, 1);
+   ralloc_free(coherent);
+   ralloc_free(wrong_state);
+   return rejected;
+}
+
+static nir_shader *
 build_cs_2d_image_access(bool store)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -9773,6 +9850,11 @@ main(int argc, char **argv)
 
    if (!test_storage_image_lowering()) {
       fputs("bounded storage-image lowering mismatch\n", stderr);
+      all_ok = false;
+   }
+
+   if (!test_gallium_storage_write_lowering()) {
+      fputs("Gallium scalar storage-write lowering mismatch\n", stderr);
       all_ok = false;
    }
 
