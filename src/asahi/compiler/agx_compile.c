@@ -1319,7 +1319,8 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
 static bool
 nir_is_coherent(nir_intrinsic_instr *instr)
 {
-   return nir_intrinsic_access(instr) & (ACCESS_COHERENT | ACCESS_VOLATILE);
+   return nir_intrinsic_access(instr) &
+          (ACCESS_COHERENT | ACCESS_VOLATILE | ACCESS_ATOMIC);
 }
 
 static void
@@ -2553,10 +2554,15 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          if (nir_intrinsic_memory_scope(instr) != SCOPE_NONE) {
             const nir_variable_mode modes =
                nir_intrinsic_memory_modes(instr);
+            const bool memory_only_g17p =
+               b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+               nir_intrinsic_execution_scope(instr) < SCOPE_WORKGROUP;
 
             /* The AGX2 cache-operation train collapses on AGX3 into one
-             * exact barrier per semantic memory scope. Keep Apple's observed
-             * device -> texture -> threadgroup ordering. A tessellation
+             * exact operation per semantic memory scope. G17P distinguishes
+             * a memory-only fence from a threadgroup execution barrier with
+             * the same memory class; choose from NIR's execution scope. Keep
+             * Apple's observed device -> texture -> threadgroup ordering. A tessellation
              * control shader runs as a compute kernel whose outputs poly
              * lowered to the global output buffer, so its output barrier is
              * a device-memory barrier. */
@@ -2565,12 +2571,22 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
                (modes & nir_var_shader_out);
             if ((modes & (nir_var_mem_global | nir_var_image)) ||
                 tcs_outputs) {
-               agx_scoped_barrier_agx3(b, AGX3_BARRIER_SCOPE_DEVICE);
+               agx_scoped_barrier_agx3(
+                  b, memory_only_g17p ? AGX3_BARRIER_SCOPE_DEVICE_FENCE
+                                     : AGX3_BARRIER_SCOPE_DEVICE);
                emitted = true;
             }
 
             if (modes & nir_var_image) {
-               agx_scoped_barrier_agx3(b, AGX3_BARRIER_SCOPE_TEXTURE);
+               const bool wait_for_prior_texture =
+                  nir_intrinsic_memory_semantics(instr) &
+                  (NIR_MEMORY_RELEASE | NIR_MEMORY_MAKE_AVAILABLE);
+               agx_scoped_barrier_agx3(
+                  b, memory_only_g17p
+                        ? (wait_for_prior_texture
+                              ? AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT
+                              : AGX3_BARRIER_SCOPE_TEXTURE_FENCE)
+                        : AGX3_BARRIER_SCOPE_TEXTURE);
                emitted = true;
             }
 
@@ -2581,8 +2597,8 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          }
 
          /* A workgroup execution barrier with no memory scope is the
-          * recovered mem_none form. Scoped memory barriers already carry the
-          * execution rendezvous, as shown by each Metal mem_flags contrast. */
+          * recovered mem_none form. Barriers selected above for an actual
+          * workgroup execution scope already carry the rendezvous. */
          if (nir_intrinsic_execution_scope(instr) >= SCOPE_WORKGROUP &&
              !emitted) {
             assert(mesa_shader_stage_is_compute(b->shader->nir->info.stage));

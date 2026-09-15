@@ -128,6 +128,7 @@ agx3_mem_encode_load_form(enum agx_isa_encoding enc,
    struct agx3_field_kv ov[32];
    unsigned n = common_overrides(d, /*off*/ 76, /*shift*/ 75, /*mask*/ 73, ov);
    ov[n++] = (struct agx3_field_kv)KV(12, d->slot);
+   ov[n++] = (struct agx3_field_kv)KV(77, d->coherent ? 1 : 0);
 
    return agx3_bind_compose(enc, "lddev", ep, base, nbase, ov, n, out, len);
 }
@@ -152,6 +153,7 @@ agx3_mem_encode_store(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
 
    struct agx3_field_kv ov[32];
    unsigned n = common_overrides(d, /*off*/ 74, /*shift*/ 73, /*mask*/ 71, ov);
+   ov[n++] = (struct agx3_field_kv)KV(75, d->coherent ? 1 : 0);
 
    return agx3_bind_compose(enc, "stdev", 0, base, nbase, ov, n, out, len);
 }

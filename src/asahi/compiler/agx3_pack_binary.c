@@ -3094,6 +3094,7 @@ agx3_translate_mem(const agx_instr *I, bool is_store, uint8_t slot,
 
    d->slot = slot;
    d->wait_mask = wait_mask;
+   d->coherent = I->coherent;
    return true;
 }
 
@@ -4190,7 +4191,7 @@ agx3_emit_scoped_barrier(struct util_dynarray *emission,
 {
    if (wait_mask != 0 || I->op != AGX_OPCODE_SCOPED_BARRIER_AGX3 ||
        I->nr_dests != 0 || I->nr_srcs != 0 ||
-       I->imm > AGX3_BARRIER_SCOPE_TEXTURE)
+       I->imm > AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT)
       return false;
 
    struct agx3_encoded_scoped_barrier encoded;

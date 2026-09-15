@@ -4646,7 +4646,10 @@ TEST_F(AGX3PackBinary, ScopedMemoryBarriers)
       const enum agx_isa_encoding enc =
          e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
       for (unsigned s = AGX3_BARRIER_SCOPE_EXECUTION;
-           s <= AGX3_BARRIER_SCOPE_TEXTURE; ++s) {
+           s <= AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT; ++s) {
+         if (enc == AGX_ISA_ENCODING_AGX3C &&
+             s > AGX3_BARRIER_SCOPE_TEXTURE)
+            continue;
          agx_builder *b = builder(enc);
          agx_scoped_barrier_agx3(b, s);
          agx_stop(b);
@@ -4668,7 +4671,7 @@ TEST_F(AGX3PackBinary, ScopedMemoryBarriers)
 TEST_F(AGX3PackBinary, ScopedMemoryBarrierRefusesUnknownScope)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
-   agx_scoped_barrier_agx3(b, AGX3_BARRIER_SCOPE_TEXTURE + 1);
+   agx_scoped_barrier_agx3(b, AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT + 1);
    agx_stop(b);
    pack(b, /*expect_ok=*/false);
 }

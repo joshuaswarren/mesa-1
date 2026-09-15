@@ -2161,7 +2161,8 @@ test_indexed_storage_image_read(void)
       nir_def *coord = nir_vec4(&b, nir_iand(&b, width, zero), zero,
                                 zero, zero);
       nir_def *value = nir_bindless_image_load(
-         &b, 4, 32, handle, coord, zero, nir_imm_intN_t(&b, 0, 16),
+         &b, mode == 0 ? 1 : 4, 32, handle, coord, zero,
+         nir_imm_intN_t(&b, 0, 16),
          .image_dim = mode == 3     ? GLSL_SAMPLER_DIM_3D
                       : mode >= 5   ? GLSL_SAMPLER_DIM_CUBE
                                     : GLSL_SAMPLER_DIM_2D,
@@ -4526,6 +4527,11 @@ build_cs_storage_image(unsigned mode)
       nir_pop_if(&b, NULL);
       nir_push_if(&b, nir_ult_imm(&b, nir_channel(&b, gid, 1), 4));
    }
+   if (mode == 8) {
+      nir_barrier(&b, .memory_scope = SCOPE_DEVICE,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL,
+                  .memory_modes = nir_var_image | nir_var_mem_ssbo);
+   }
    nir_bindless_image_store(
       &b, pbe, coord, zero,
       mode == 5 ? nir_imm_ivec4(&b, 9, 8, 7, 6) : value, zero,
@@ -4589,6 +4595,20 @@ test_storage_image_lowering(void)
       if (!ok)
          return false;
    }
+
+   /* Cross-domain barriers must stay on the general indexed storage path.
+    * The single-image state-0 lowering cannot describe that synchronization. */
+   nir_shader *nir = build_cs_storage_image(8);
+   struct agx_g17p_storage_image_binding binding = {
+      .texture_offset_B = UINT32_MAX,
+      .pbe_offset_B = UINT32_MAX,
+   };
+   const bool lowered = agx_nir_lower_g17p_storage_image(nir, &binding);
+   const bool ok = !lowered && binding.texture_offset_B == UINT32_MAX &&
+                   binding.pbe_offset_B == UINT32_MAX;
+   ralloc_free(nir);
+   if (!ok)
+      return false;
 
    return true;
 }
