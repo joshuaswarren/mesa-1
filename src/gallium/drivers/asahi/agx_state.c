@@ -4249,7 +4249,8 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
 
    if (dev->chip == AGX_CHIP_G17P) {
       if (!cs || !cs->bo || !cs->info.main_size || !cs->info.nr_gprs ||
-          cs->info.nr_preamble_gprs || cs->info.rodata.size_16 ||
+          cs->info.nr_preamble_gprs ||
+          (cs->info.rodata.size_16 && !cs->rodata_offset) ||
           !cs->info.agx3_staging_known || !args || !arg_size ||
           arg_size > UINT16_MAX * 2u ||
           cs->entry_offset > UINT64_MAX - cs->ptr ||
@@ -4270,6 +4271,23 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
          .size_halfs = DIV_ROUND_UP(arg_size, 2),
          .address = uploaded_data,
       };
+
+      /* Constants the compiler promoted out of the code are published as a
+       * second range, exactly as the legacy USC path maps them with
+       * agx_usc_immediates(). Their base is already in this ABI's numbering:
+       * agx_opt_promote_constants() allocates above push_count, which starts
+       * at the reserved preamble. Without this the kernel reads whatever the
+       * uniform file happened to hold -- which is why the launch-shape check
+       * refused a kernel carrying rodata rather than dispatching one. */
+      struct agx3_ioto_uniform_range ranges[2] = {range};
+      unsigned range_count = 1;
+      if (cs->info.rodata.size_16) {
+         ranges[range_count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = cs->info.rodata.base_uniform,
+            .size_halfs = cs->info.rodata.size_16,
+            .address = cs->ptr + cs->rodata_offset,
+         };
+      }
       struct agx3_cdm_direct_template_sources launch_sources;
       if (!uploaded_data ||
           !agx3_cdm_direct_template_sources_compute(false, false, false,
@@ -4283,8 +4301,8 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
       const struct agx3_g17p_compute_program_desc desc = {
          .program_va = native_program.gpu,
          .shader_va = cs->ptr + cs->entry_offset,
-         .uniform_ranges = &range,
-         .uniform_range_count = 1,
+         .uniform_ranges = ranges,
+         .uniform_range_count = range_count,
          .shader_binary_size = cs->info.main_size,
          .nr_gprs = cs->info.nr_gprs,
          .compiler_d_valid = cs->info.agx3_staging_known,

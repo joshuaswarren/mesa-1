@@ -605,6 +605,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
    const void *binary = (const uint8_t *)bin + sizeof(*info);
 
    p->info = *info;
+   p->rodata_offset = 0;
 
    assert(info->main_offset == 0 || program != LIBAGX_HELPER);
 
@@ -616,11 +617,19 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       const size_t lead_size = 0x340;
       const size_t main_span = MAX2(info->main_size, info->binary_size);
       const size_t block_size = agx3_code_block_size(main_span);
-      if (!block_size || block_size > SIZE_MAX - lead_size ||
+      /* Promoted constants live in the binary and are published as a uniform
+       * range beside the kernel's arguments, the same way the legacy USC path
+       * maps them with agx_usc_immediates(). They are carried in this image
+       * so one allocation still holds the whole program. */
+      const size_t rodata_size = (size_t)info->rodata.size_16 * 2;
+      const size_t rodata_pad = rodata_size ? ALIGN_POT(rodata_size, 16) : 0;
+      if (!block_size || block_size > SIZE_MAX - lead_size - rodata_pad ||
           info->main_offset > info->binary_size ||
           info->main_size > info->binary_size - info->main_offset ||
-          info->preamble_offset || info->nr_preamble_gprs ||
-          info->rodata.size_16) {
+          (rodata_size &&
+           (info->rodata.offset > info->binary_size ||
+            rodata_size > info->binary_size - info->rodata.offset)) ||
+          info->preamble_offset || info->nr_preamble_gprs) {
          mesa_loge("asahi: libagx program %u has no G17P launch shape: "
                    "main %u@%u of %u, preamble %u/%u, rodata %u",
                    program, info->main_size, info->main_offset,
@@ -630,8 +639,8 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
          return NULL;
       }
 
-      const size_t size = lead_size + block_size;
-      uint8_t *image = malloc(size);
+      const size_t size = lead_size + block_size + rodata_pad;
+      uint8_t *image = calloc(1, size);
       if (!image) {
          ralloc_free(p);
          return NULL;
@@ -641,6 +650,11 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
          image + lead_size, block_size,
          (const uint8_t *)binary + info->main_offset, info->main_size,
          main_span, NULL, false);
+      if (rodata_size) {
+         memcpy(image + lead_size + block_size,
+                (const uint8_t *)binary + info->rodata.offset, rodata_size);
+         p->rodata_offset = lead_size + block_size;
+      }
       p->ptr = built
          ? agx_pool_upload_aligned_with_bo(&cache->pool, image, size, 128,
                                            &p->bo)
