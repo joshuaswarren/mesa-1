@@ -19,6 +19,7 @@
 #include <string.h>
 #include "util/format/u_format.h"
 #include "agx3_g17p_quad_eot.h"
+#include "agx3_sr_core.h"
 #include "agx_bg_eot_key.h"
 #include "agx_compile.h"
 #include "agx_linker.h"
@@ -1022,6 +1023,43 @@ static const uint8_t wait_252[6] = {0x87, 0x02, 0x54, 0xfc, 0x08, 0x00};
 static const uint8_t release_572[6] = {0x07, 0x02, 0x54, 0x3c, 0x02, 0x00};
 static const uint8_t release_764[6] = {0x07, 0x02, 0x54, 0xfc, 0x02, 0x00};
 
+/* The colour mask must be read after depth has updated coverage. Previously
+ * CSE reused the SR39 read used to construct the depth words, leaving no read
+ * between the depth release and colour acquire in the compiled epilog. */
+static bool
+reads_coverage_after_depth(const struct agx_shader_part *part)
+{
+   const uint8_t *code = part->binary;
+   size_t begin = 0, end = part->info.binary_size;
+   for (; begin + 6 <= end; ++begin) {
+      if (!memcmp(code + begin, release_1, 6)) {
+         begin += 6;
+         break;
+      }
+   }
+   for (size_t i = begin; i + 6 <= end; ++i) {
+      if (!memcmp(code + i, wait_252, 6)) {
+         end = i;
+         break;
+      }
+   }
+   for (unsigned dest = 0; dest < 256; ++dest) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         const struct agx3_sr_desc sr = {
+            .dest = dest, .width = AGX3_SR_W16, .sr = 39, .slot = slot,
+         };
+         uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;
+         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &sr, bytes, &len))
+            return false;
+         for (size_t i = begin; i + len <= end; ++i) {
+            if (!memcmp(code + i, bytes, len))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 static void
 colour_transactions(const struct agx_shader_part *part, char *out,
                     size_t size);
@@ -1084,12 +1122,23 @@ test_multisample_epilogs(void)
    CHECK(store_f13_mask(&part, &stores) == 0);
    CHECK(stores == ARRAY_SIZE(sample_shaded) * 2);
    CHECK(part.info.agx3_colour_link.colour_classes == 7);
+   CHECK(reads_coverage_after_depth(&part));
    char ops[128];
    colour_transactions(&part, ops, sizeof(ops));
    if (strcmp(ops, "W512 W1 R1 W252 S24 S16 S0 S24 S16 S0 R764"))
       fprintf(stderr, "sample-shaded MRT transactions: %s\n", ops);
    CHECK(!strcmp(ops,
                  "W512 W1 R1 W252 S24 S16 S0 S24 S16 S0 R764"));
+   free(part.binary);
+
+   const enum pipe_format sample_shaded_4x[] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R16_SINT,
+   };
+   CHECK(compile_sample_shaded_epilog(ARRAY_SIZE(sample_shaded_4x),
+                                      sample_shaded_4x, 4, &part));
+   CHECK(reads_coverage_after_depth(&part));
    free(part.binary);
 
    return 0;

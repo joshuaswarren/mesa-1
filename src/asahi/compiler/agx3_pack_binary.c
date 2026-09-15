@@ -8668,6 +8668,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool active_thread =
                I->sr == AGX_SR_IS_ACTIVE_THREAD &&
                ctx->stage == MESA_SHADER_FRAGMENT;
+            const bool sample_coverage =
+               I->sr == AGX_SR_INPUT_SAMPLE_MASK &&
+               ctx->stage == MESA_SHADER_FRAGMENT;
             const bool subgroup_stage =
                ctx->stage == MESA_SHADER_COMPUTE ||
                ctx->stage == MESA_SHADER_VERTEX ||
@@ -8679,7 +8682,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->sr == AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP &&
                subgroup_stage;
             if (enc != AGX_ISA_ENCODING_AGX3B ||
-                !(active_thread || active_index || active_count) ||
+                !(active_thread || sample_coverage || active_index || active_count) ||
                 I->nr_dests != 1 ||
                 I->nr_srcs != 0 || !agx3_src_is_register(I->dest[0]) ||
                 I->dest[0].memory || I->dest[0].size != AGX_SIZE_16 ||
@@ -8687,7 +8690,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
             const struct agx3_sr_desc d = {
                .dest = I->dest[0].value, .width = AGX3_SR_W16,
-               .sr = active_index ? 34 : active_count ? 36 : 2, .slot = slot,
+               .sr = sample_coverage ? 39 : active_index ? 34 : active_count ? 36 : 2,
+               .slot = slot,
                .wait_mask = wait,
             };
             uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;

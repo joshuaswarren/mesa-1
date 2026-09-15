@@ -2289,9 +2289,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          /* G17P's covered samples are bits 0..3 of native W16 SR39, the word
           * Apple's multisample fragments AND with each sample's bit before
-          * that sample's tile store. */
+          * that sample's tile store. Unlike the API input mask, this changes
+          * after depth/stencil tests and cannot be CSE'd across them. */
          agx_index native = agx_temp(b->shader, AGX_SIZE_16);
-         agx_get_sr_to(b, native, AGX_SR_INPUT_SAMPLE_MASK);
+         agx_get_sr_coverage_to(b, native, AGX_SR_INPUT_SAMPLE_MASK);
          return agx_mov_to(b, dst, agx_and(b, native, agx_immediate(15)));
       }
       return agx_get_sr_coverage_to(b, dst, AGX_SR_COVERAGE_MASK);
@@ -2303,11 +2304,12 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        * real register operand for lstcol/lldcol: Apple's own multisample
        * fragments read exactly this, native W16 SR39, and pass it straight to
        * the tile access. Bits 0..3 are the covered samples -- the per-sample
-       * form ANDs this same word with 1/2/4/8. */
+       * form ANDs this same word with 1/2/4/8. Use the ordered coverage read
+       * so scheduling and CSE cannot reuse pre-depth coverage for tile stores. */
       assert(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
              "only the G17P tile lowering leaves this for the backend");
       assert(instr->def.bit_size == 16 && "16-bit sample mask");
-      return agx_get_sr_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
+      return agx_get_sr_coverage_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
 
    case nir_intrinsic_load_helper_invocation:
       /* Compare special register to zero. We could lower this in NIR (letting

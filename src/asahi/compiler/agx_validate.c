@@ -536,6 +536,12 @@ agx_validate_sr(const agx_instr *I)
       return true;
 
    switch (I->sr) {
+   case AGX_SR_INPUT_SAMPLE_MASK:
+      /* G17P SR39 combines immutable API input coverage with the mutable
+       * current coverage. Readers of its low nibble must be ordered against
+       * depth/stencil and coverage writes. */
+      return none || coverage;
+
    case AGX_SR_ACTIVE_THREAD_INDEX_IN_QUAD:
    case AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP:
    case AGX_SR_TOTAL_ACTIVE_THREADS_IN_QUAD:
