@@ -767,7 +767,12 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
     */
    if (!key->tib.nr_samples)
       key->tib.nr_samples = 1;
-   key->multisample_store = store && key->tib.nr_samples > 1;
+
+   /* The caller selected between keeping the multisample surface and a
+    * direct resolve from the attachment's store/resolve state and whether
+    * this is a partial render. Preserve that decision here: deriving it from
+    * the sample count alone makes a final direct resolve request both paths
+    * at once, and the EOT builder correctly rejects the contradiction. */
 
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;
