@@ -1372,17 +1372,21 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
          }
       } else {
          /* Fragment layer and gl_ViewportIndex are ordinary flat varyings
-          * that the vertex shader also writes out as user words. Cull
-          * distance emulation similarly links the VS-generated
-          * CULL_PRIMITIVE words into its FS prolog as noperspective
-          * coefficients. */
+          * that the vertex shader also writes out as user words. Clip-distance
+          * inputs use the compiler's compact coefficient layout while the
+          * fixed-function clipper consumes the same VS output. Cull-distance
+          * emulation similarly links the VS-generated CULL_PRIMITIVE words
+          * into its FS prolog as noperspective coefficients. */
          const bool cull_slot =
             b->slot == VARYING_SLOT_CULL_PRIMITIVE ||
             b->slot == VARYING_SLOT_CULL_PRIMITIVE + 1;
+         const bool clip_slot = b->slot == VARYING_SLOT_CLIP_DIST0 ||
+                                b->slot == VARYING_SLOT_CLIP_DIST1;
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
                                 b->slot == VARYING_SLOT_LAYER ||
-                                b->slot == VARYING_SLOT_VIEWPORT || cull_slot;
+                                b->slot == VARYING_SLOT_VIEWPORT || clip_slot ||
+                                cull_slot;
          if (!user_slot || (cull_slot && (b->perspective || !b->smooth)) ||
              (b->perspective && !has_rhw) ||
              b->offset + b->count > vs->info.uvs.components[b->slot])
