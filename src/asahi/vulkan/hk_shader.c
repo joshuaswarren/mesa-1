@@ -1581,7 +1581,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          ralloc_free(candidate);
       }
    } else if (dev->dev.chip == AGX_CHIP_G17P &&
-              nir->info.stage == MESA_SHADER_GEOMETRY) {
+              (nir->info.stage == MESA_SHADER_GEOMETRY ||
+               nir->info.stage == MESA_SHADER_TESS_CTRL ||
+               nir->info.stage == MESA_SHADER_TESS_EVAL)) {
       /* Poly executes geometry variants through CDM, so they use the native
        * indexed texture/sampler heaps just like compute shaders. Metal has no
        * geometry stage, but its indexed explicit-level vertex witness emits

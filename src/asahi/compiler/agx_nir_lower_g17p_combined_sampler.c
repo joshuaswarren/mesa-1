@@ -13,6 +13,15 @@
 
 #include <stdio.h>
 
+/* Pre-raster graphics stages have no implicit derivatives. Their Poly
+ * compute variants use the same native explicit-LOD texture operations. */
+static bool
+g17p_explicit_lod_stage(mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_GEOMETRY ||
+          stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_TESS_EVAL;
+}
+
 /* agx_nir_lower_g17p_indexed_samplers() is all-or-nothing per shader: one
  * unadmitted texture or image instruction and NOTHING in that shader gets a
  * heap index, so every texture instruction in it then reaches the packer with
@@ -696,9 +705,8 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
 bool
 agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 {
-   if (!shader || (shader->info.stage != MESA_SHADER_VERTEX &&
+   if (!shader || (!g17p_explicit_lod_stage(shader->info.stage) &&
                    shader->info.stage != MESA_SHADER_FRAGMENT &&
-                   shader->info.stage != MESA_SHADER_GEOMETRY &&
                    shader->info.stage != MESA_SHADER_COMPUTE))
       return false;
 
@@ -726,7 +734,7 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             /* Dynamic argument-buffer vertex witnesses cover explicit level
              * and gradient samples. Vertex implicit sampling has no fragment
              * quad derivatives; bias likewise remains fragment-only. */
-            if (!fetch && shader->info.stage == MESA_SHADER_VERTEX &&
+            if (!fetch && g17p_explicit_lod_stage(shader->info.stage) &&
                 tex->op != nir_texop_txl && tex->op != nir_texop_txd)
                return g17p_decline("vertex_implicit_sample", tex, NULL,
                                    shader->info.stage);

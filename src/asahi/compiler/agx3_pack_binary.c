@@ -8427,7 +8427,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* Native runtime-indexed vertex pipelines ground both a per-lane
              * explicit level and explicit gradients in every noncube sample
              * dimension, including depth comparisons and array layers. */
-            const bool vertex_explicit_lod = ctx->stage == MESA_SHADER_VERTEX &&
+            const bool vertex_explicit_lod =
+               (ctx->stage == MESA_SHADER_VERTEX ||
+                ctx->stage == MESA_SHADER_GEOMETRY ||
+                ctx->stage == MESA_SHADER_TESS_CTRL ||
+                ctx->stage == MESA_SHADER_TESS_EVAL) &&
                (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                 I->lod_mode == AGX_LOD_MODE_LOD_GRAD);
             /* Sampler-private staging groups 0/8/16 (see the note in

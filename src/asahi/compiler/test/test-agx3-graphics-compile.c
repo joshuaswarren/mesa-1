@@ -2133,8 +2133,10 @@ test_indexed_sampler_sets_stage(mesa_shader_stage stage)
       nir_def *image = nir_bindless_image_agx(&b, offset, .desc_set=sets[i]);
       nir_def *sampler = nir_bindless_sampler_agx(
          &b, nir_iadd_imm(&b, offset, 32), sampler_index, .desc_set=sets[i]);
-      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
-      tex->op=nir_texop_tex; tex->sampler_dim=GLSL_SAMPLER_DIM_2D;
+      const bool explicit_lod = stage != MESA_SHADER_FRAGMENT;
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, explicit_lod ? 4 : 3);
+      tex->op = explicit_lod ? nir_texop_txl : nir_texop_tex;
+      tex->sampler_dim=GLSL_SAMPLER_DIM_2D;
       tex->dest_type=nir_type_float32; tex->is_array=i==2;
       tex->coord_components=tex->is_array?3:2;
       tex->src[0]=nir_tex_src_for_ssa(
@@ -2145,6 +2147,9 @@ test_indexed_sampler_sets_stage(mesa_shader_stage stage)
             : nir_imm_vec2(&b, .25, .75));
       tex->src[1]=nir_tex_src_for_ssa(nir_tex_src_texture_handle,image);
       tex->src[2]=nir_tex_src_for_ssa(nir_tex_src_sampler_handle,sampler);
+      if (explicit_lod)
+         tex->src[3] = nir_tex_src_for_ssa(nir_tex_src_lod,
+                                          nir_imm_float(&b, 0.0f));
       nir_def_init(&tex->instr,&tex->def,4,32);
       nir_builder_instr_insert(&b,&tex->instr);
       result=nir_fadd(&b,result,&tex->def);
@@ -2194,7 +2199,9 @@ test_indexed_sampler_sets(void)
     * register texture/sampler instruction used after this NIR rewrite; Metal
     * has no geometry stage to target directly. */
    return test_indexed_sampler_sets_stage(MESA_SHADER_FRAGMENT) &&
-          test_indexed_sampler_sets_stage(MESA_SHADER_GEOMETRY);
+          test_indexed_sampler_sets_stage(MESA_SHADER_GEOMETRY) &&
+          test_indexed_sampler_sets_stage(MESA_SHADER_TESS_CTRL) &&
+          test_indexed_sampler_sets_stage(MESA_SHADER_TESS_EVAL);
 }
 
 static bool
@@ -8736,6 +8743,7 @@ main(int argc, char **argv)
    } while (0)
 
    RUN(test_g17p_eot_block_store);
+   RUN(test_indexed_sampler_sets);
    RUN(test_g17p_layered_eot_block_store);
    RUN(test_g17p_multisample_eot_block_store);
    RUN(test_g17p_background_reload_staging);
