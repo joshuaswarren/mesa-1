@@ -149,6 +149,21 @@ static const struct tps_vec tps_vecs[] = {
      .byte_offset = 4, .index = 4, .frame_region = 5, .value_kill = true,
      .wait_mask = 1u << 5},
     {0xef, 0x00, 0x56, 0x30, 0x04, 0x02, 0x17, 0x43, 0x00, 0x60}, 10},
+   /* G16G g16g-dynamic-stack-store-static-reads.metal fsvec4: a float4
+    * private-array element stored and reloaded through a byte index. The
+    * store carries the wait of the preceding static copies and signals no
+    * slot; the reload consumes the location (f66). */
+   {AGX_ISA_ENCODING_AGX3B, false, 0,
+    {.data = 0, .width = AGX3_MEM_W32, .mask = 15,
+     .byte_offset = 16, .index = 34, .index_kill = true, .frame_region = 1,
+     .wait_mask = 1},
+    {0xef, 0x10, 0x54, 0x00, 0x22, 0x0a, 0x17, 0x00, 0x01, 0x40}, 10},
+   {AGX_ISA_ENCODING_AGX3B, true, 0,
+    {.data = 0, .width = AGX3_MEM_W32, .mask = 15,
+     .byte_offset = 16, .index = 32, .index_kill = true, .frame_region = 1,
+     .slot = 6},
+    {0x6f, 0x00, 0x54, 0x00, 0x20, 0x0a, 0x57, 0x01, 0x04, 0x40, 0x02,
+     0x00}, 12},
    {AGX_ISA_ENCODING_AGX3B, true, 0,
     {.data = 0, .width = AGX3_MEM_W16, .mask = 3, .shift = 2,
      .byte_offset = 4, .index = 0, .index_kill = true, .frame_region = 1,

@@ -609,12 +609,15 @@ agx3_alu_int16_to_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                     enum agx3_alu_hint hint, bool is_signed, uint16_t wait_mask,
                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 128 ||
-       (dest & 1) || src >= 128 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 192 ||
+       (dest & 1) || src >= 192 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~UINT16_C(0x3f)))
       return false;
 
    /* Apple ushort_cs: a70756000200a420 (r0f <- r0h, wait slot6).
+    * The register fields reach half 191: hiregs.metal (96 live conversions)
+    * writes destinations up to half 160 and reads sources up to half 189 in
+    * the same form, the source's high bit in byte 6.
     * ushort_pair_cs additionally witnesses odd source half3 and no wait;
     * ushort_reuse_cs has f29=0 with a later16-bit store of the same source.
     * Versus U32 int2flt only f26 changes2->1. The fresh short_float and

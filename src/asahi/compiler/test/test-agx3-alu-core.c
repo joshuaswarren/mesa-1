@@ -936,6 +936,12 @@ static void test_u16_to_f32(void)
       {0,2,1,32,{0xa7,0x07,0x56,0x00,0x02,0x04,0xa4,0x20}},
       {2,3,1,0, {0xa7,0x07,0x54,0x02,0x02,0x06,0xa4,0x20}},
       {2,4,0,32,{0xa7,0x07,0x56,0x02,0x02,0x08,0x84,0x20}},
+      /* hiregs.metal / hiregs16.metal (96 live conversions): destinations
+       * and sources above half 127 use the same form, the source's high
+       * bit in byte 6. */
+      {132,88,1,0,{0xa7,0x07,0x54,0x84,0x02,0xb0,0xa4,0x20}},
+      {134,88,1,0,{0xa7,0x07,0x54,0x86,0x02,0xb0,0xa4,0x20}},
+      {70,162,1,0,{0xa7,0x07,0x54,0x46,0x02,0x44,0xa5,0x20}},
    };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
    for(unsigned i=0;i<sizeof(v)/sizeof(v[0]);++i) {
@@ -946,10 +952,11 @@ static void test_u16_to_f32(void)
    /* Independent literal bit decode: register halves, unsigned16 width,
     * source kill and all six wait bits. Adjacent source half is not consumed.
     */
-   for(unsigned d=0;d<128;d+=2) for(unsigned s=0;s<128;++s)
+   for(unsigned d=0;d<192;d+=2) for(unsigned s=0;s<192;++s)
       for(unsigned k=0;k<2;++k) for(unsigned w=0;w<64;++w) {
          assert(agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,d,s,k,w,bytes,&len));
-         assert(len==8 && bytes[3]==d && bytes[5]==(s<<1));
+         assert(len==8 && bytes[3]==d && bytes[5]==((s&0x7f)<<1) &&
+                (bytes[6]&1)==(s>>7));
          assert((bytes[6]&0x18)==0); /* source-width LUT[1]=0, U16 */
          assert(((bytes[6]>>5)&1)==k);
          assert((bytes[7]&0x40)==0); /* unsigned */
@@ -971,8 +978,8 @@ static void test_u16_to_f32(void)
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3C,0,0,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX2,0,0,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,1,0,0,0,bytes,&len));
-   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,128,0,0,0,bytes,&len));
-   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,128,0,0,bytes,&len));
+   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,192,0,0,0,bytes,&len));
+   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,192,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,0,0,64,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,0,0,0,NULL,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,0,0,0,bytes,NULL));

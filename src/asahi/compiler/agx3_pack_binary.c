@@ -3452,7 +3452,8 @@ agx3_translate_static_spill(const agx_instr *I, bool is_store, uint8_t slot,
        agx_channels(data) != 1 || (wide && (data.value & 1)) ||
        data.value > (wide ? 254 : 255) ||
        (!is_store && data.kill) || offset.type != AGX_INDEX_IMMEDIATE ||
-       offset.memory || offset.abs || offset.neg || offset.cache ||
+       /* abs on an immediate only marks the 16-bit form (offsets >= 256) */
+       offset.memory || offset.neg || offset.cache ||
        offset.discard || offset.kill || offset.size != AGX_SIZE_16 ||
        agx_channels(offset) != 1 || (offset.value & (wide ? 3 : 1)))
       return false;
@@ -3600,6 +3601,44 @@ agx3_translate_dynamic_stack_load(const agx_instr *I, uint8_t slot,
 }
 
 static bool
+agx3_dynamic_stack_store(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_STACK_STORE && I->nr_srcs == 2 &&
+          I->src[1].type == AGX_INDEX_REGISTER;
+}
+
+/* G16G private-array witnesses (compiler/test/probes/README-g16g-dynamic-
+ * stack-store.md): a dynamically indexed store is STTPS frame 1 with the
+ * data mask and a register index, like the dynamic load; a float4 store uses
+ * W32 mask 15 with a byte index. STTPS signals no scoreboard slot. Apple
+ * issues static RLD reads and dynamic LDTPS reads of the same array right
+ * after it without any wait, so the TPS pipeline orders them itself. */
+static bool
+agx3_translate_dynamic_stack_store(const agx_instr *I, uint16_t wait_mask,
+                                   struct agx3_tps_desc *d)
+{
+   if (!agx3_dynamic_stack_store(I) || I->nr_dests != 0 ||
+       I->format != AGX_FORMAT_I32 || !I->mask || (I->mask & ~15))
+      return false;
+   const agx_index value = I->src[0], index = I->src[1];
+   if (!agx3_tex_plain_reg(value) || value.size != AGX_SIZE_32 ||
+       agx_channels(value) != util_bitcount(I->mask) || (value.value & 1) ||
+       value.value + 2 * agx_channels(value) > 256 ||
+       (value.cache && value.discard) ||
+       !agx3_tex_plain_reg(index) || index.size != AGX_SIZE_32 ||
+       agx_channels(index) != 1 || (index.value & 1) || index.value > 254 ||
+       (index.cache && index.discard))
+      return false;
+   *d = (struct agx3_tps_desc){
+      .data = value.value, .width = AGX3_MEM_W32, .mask = I->mask,
+      .index = index.value, .index_kill = index.discard,
+      .frame_region = 1, .value_kill = value.discard, .slot = 0,
+      .wait_mask = wait_mask,
+   };
+   return true;
+}
+
+static bool
 agx3_append_static_spill_tokens(const agx_instr *I,
                                 struct agx3_slot_instr *slot_instr)
 {
@@ -3609,6 +3648,17 @@ agx3_append_static_spill_tokens(const agx_instr *I,
           slot_instr->nr_dsts >= AGX3_SLOT_MAX_REGS)
          return false;
       slot_instr->dst[slot_instr->nr_dsts++] = AGX3_SLOT_DYNAMIC_TPS_TOKEN;
+      return true;
+   }
+   if (agx3_dynamic_stack_store(I)) {
+      /* No slot is signalled; the alias token only records the write so the
+       * scoreboard treats the store like any other consumer of pending
+       * static TPS traffic. */
+      struct agx3_tps_desc desc;
+      if (!agx3_translate_dynamic_stack_store(I, 0, &desc) ||
+          slot_instr->nr_srcs >= AGX3_SLOT_MAX_REGS)
+         return false;
+      slot_instr->src[slot_instr->nr_srcs++] = AGX3_SLOT_DYNAMIC_TPS_TOKEN;
       return true;
    }
    if (slot_instr->nr_srcs >= AGX3_SLOT_MAX_REGS)
@@ -5069,18 +5119,15 @@ agx3_try_control_flow(struct util_dynarray *emission,
                             I->op == AGX_OPCODE_WHILE_FCMP ||
                             I->op == AGX_OPCODE_BREAK_IF_FCMP;
       /* CNDLT predicates are persistent across a backedge. Apple assigns
-       * outer through inner loop predicates to flag slots 0, 1, ... . A deep
-       * break needs the next slot so it does not overwrite the live predicate
-       * of the enclosing conditional; Apple's two-if outer-loop break uses
-       * slot 1, and the equivalent inner-loop break uses slot 2. NEST counts
-       * exec-mask levels exited, not loop depth. */
+       * outer through inner loop predicates to successive flag slots. NEST is
+       * the number of exec-mask levels a break exits, not this depth. Every
+       * compare here immediately precedes the CND that consumes it, so a slot
+       * is only busy for that pair. Apple's seven- and eight-deep loops test
+       * every level through flag slot 1, so deeper nests wrap the six slots. */
       if ((is_break_if || is_while) && loop_depth == 0)
          return -1;
-      const unsigned loop_slot = loop_depth - 1;
       const unsigned flag_slot =
-         is_break_if ? loop_slot + (I->nest > 1) : (is_while ? loop_slot : 0);
-      if (flag_slot >= 6)
-         return -1;
+         is_break_if || is_while ? (loop_depth - 1) % 6 : 0;
       if (!agx3_emit_cf_compare(emission, enc, I, is_float, flag_slot,
                                 &invert)) {
          if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
@@ -9465,6 +9512,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         if (agx3_dynamic_stack_store(I)) {
+            struct agx3_tps_desc desc;
+            uint8_t bytes[AGX3_LOCAL_TPS_MAX_LENGTH], len;
+            /* The address is unknown at compile time: every outstanding
+             * static copy or reload may touch the same location, so the
+             * store waits for all of them in its own wait field (Apple's
+             * STTPS carries the wait of the preceding static copies). */
+            const uint16_t retire = wait | outstanding_here;
+            if (!agx3_translate_dynamic_stack_store(I, retire, &desc) ||
+                !agx3_tps_encode_store(enc, &desc, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            outstanding &= ~retire;
+            continue;
+         }
+
          /* Static TPS spill/reload. Both copy and rld signal scoreboard slots;
           * their synthetic TPS dependency tokens make a reload wait the copy
           * that produced the same stack location. */
@@ -9847,7 +9910,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               I->dest[0].size == AGX_SIZE_32 ||
               I->dest[0].size == AGX_SIZE_64) &&
              agx_channels(I->dest[0]) == 1) {
-            agx_index a = I->src[0], m = I->src[1];
+            /* Multiplication commutes: NIR may place an immediate first. */
+            const bool constant_first = I->src[0].type == AGX_INDEX_IMMEDIATE &&
+                                        I->src[1].type == AGX_INDEX_REGISTER;
+            agx_index a = I->src[constant_first ? 1 : 0];
+            agx_index m = I->src[constant_first ? 0 : 1];
             const agx_index c = I->src[2];
 
             /* Multiplication commutes. Apple keeps the 32-bit operand of a
