@@ -9165,9 +9165,13 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
    b->shader->stage = MESA_SHADER_VERTEX;
 
    /* The promoted Apple vs68 witness grounds the same dense UVSW format used
-    * by the opt-in 72-output qualification shape. Exercise indices 0..71 and
-    * staging half-indices 0..142. A shared source keeps this codec test
-    * independent of the register allocator's synthetic no-spill pressure. */
+    * by the opt-in 72-output qualification shape. Exercise every UVS index the
+    * eight-bit index operand reaches. A shared source keeps this codec test
+    * independent of the register allocator's synthetic no-spill pressure.
+    *
+    * Staging addresses stop growing at AGX3_G17P_STAGING_OUTPUTS: that is the
+    * whole capacity of the separate eight-bit staging operand, and a wider
+    * program rotates through it rather than refusing. */
    for (unsigned c = 0; c < AGX3_MAX_VERTEX_OUTPUTS; ++c)
       agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
    agx_stop(b);
@@ -9175,7 +9179,7 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
    const auto bytes = pack(b);
    EXPECT_FALSE(bytes.empty());
    EXPECT_EQ(b->shader->agx3_staging_halfs,
-             2u * AGX3_MAX_VERTEX_OUTPUTS);
+             2u * AGX3_G17P_STAGING_OUTPUTS);
 
    agx_builder *too_wide = builder(enc);
    too_wide->shader->stage = MESA_SHADER_VERTEX;
@@ -9184,6 +9188,51 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
                   agx_register(4, AGX_SIZE_32));
    agx_stop(too_wide);
    EXPECT_TRUE(pack(too_wide, false).empty());
+}
+
+/* A points geometry shader capturing the full interleaved transform-feedback
+ * width writes position (four), point size (one) and thirty-one float4 user
+ * locations: 129 outputs, one past the staging operand's capacity. UVSW
+ * addresses its UVS index and its staging half through two independent
+ * eight-bit operands, so the index is not what runs out; the outputs past the
+ * capacity reuse the staging halves of batches that have already drained.
+ *
+ * KHR-GL33.transform_feedback.{capture,query,discard}_geometry_interleaved_test
+ * are exactly this shape, and refused at st_vary #4 while the width was
+ * pinned to the staging capacity. */
+TEST_F(AGX3PackBinary, VertexOutputsWiderThanTheStagingCapacityRotate)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   const unsigned count = AGX3_G17P_STAGING_OUTPUTS + 1;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+
+   for (unsigned c = 0; c < count; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
+   agx_stop(b);
+
+   const auto bytes = pack(b);
+   EXPECT_FALSE(bytes.empty());
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 2u * AGX3_G17P_STAGING_OUTPUTS);
+
+   /* Every UVSW keeps its own UVS index -- nothing about the index wraps --
+    * and takes the rotated staging half. UVSW is the eight-byte form starting
+    * 0x57, with the staging half in byte 3 and the UVS index split across
+    * bytes 4 and 5, exactly as the narrower wide-output test decodes it. */
+   unsigned writes = 0;
+   for (size_t at = 0; at + 8 <= bytes.size(); ) {
+      const uint8_t *p = bytes.data() + at;
+      if (p[0] != 0x57) {
+         at += (p[0] & 0xf) == 0xb && (p[2] & 7) != 1 ? 10 : 4;
+         continue;
+      }
+      const unsigned index = (p[4] >> 5) | ((p[5] & 0x1f) << 3);
+      EXPECT_EQ(index, writes) << writes;
+      EXPECT_EQ(p[3], 2u * (writes % AGX3_G17P_STAGING_OUTPUTS)) << writes;
+      ++writes;
+      at += 8;
+   }
+   EXPECT_EQ(writes, count);
 }
 
 TEST_F(AGX3PackBinary, SideEffectBeforeWideTerminalVertexOutputs)
@@ -9263,7 +9312,8 @@ TEST_F(AGX3PackBinary, FirefoxDenseOutputsAcceptAnyGroundedWidth)
 
       const auto bytes = pack(b);
       EXPECT_FALSE(bytes.empty()) << count;
-      EXPECT_EQ(b->shader->agx3_staging_halfs, 2u * count) << count;
+      EXPECT_EQ(b->shader->agx3_staging_halfs,
+                2u * MIN2(count, AGX3_G17P_STAGING_OUTPUTS)) << count;
    }
 
    /* The width ceiling still fails closed. */

@@ -5154,6 +5154,16 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
  * requiring every preceding producer to be DCE-safe incorrectly excluded that
  * native-shaped stream even though no instruction crosses a writeout.
  */
+/* The staging address a user output's COPY writes and its UVSW reads. Apple's
+ * half-2k scheme holds for every output it can address; beyond that the
+ * addresses rotate, which the drained batch boundary makes safe. See
+ * AGX3_G17P_STAGING_OUTPUTS. */
+static uint16_t
+agx3_g17p_output_staging_half(unsigned output)
+{
+   return (uint16_t)(2 * (output % AGX3_G17P_STAGING_OUTPUTS));
+}
+
 static unsigned
 agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
 {
@@ -7970,7 +7980,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                (g17p_position_protocol || g17p_user_output_protocol)
                   ? I->src[0].value % nslots + 1 : next_uvs_slot;
             const uint16_t staging_half =
-               2 * (g17p_user_output_protocol ? I->src[0].value : stage_slot - 1);
+               g17p_user_output_protocol
+                  ? agx3_g17p_output_staging_half(I->src[0].value)
+                  : (uint16_t)(2 * (stage_slot - 1));
             const uint16_t staging_bit = 1u << (stage_slot - 1);
             uint16_t stage_wait;
             if (g17p_terminal_outputs) {
@@ -8016,8 +8028,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        position < g17p_outputs_staged; ++position) {
                      const unsigned component = g17p_output_order[position];
                      uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
-                     if (!agx3_vary_uvsw(enc, component * 2, component,
-                                          component % nslots + 1, true,
+                     if (!agx3_vary_uvsw(enc,
+                                          agx3_g17p_output_staging_half(component),
+                                          component, component % nslots + 1, true,
                                           1u << (component % nslots), bytes, &len) ||
                          !agx3_append(emission, bytes, len))
                         AGX3_REFUSE(I);
