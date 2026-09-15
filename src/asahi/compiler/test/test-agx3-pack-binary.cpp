@@ -3273,6 +3273,69 @@ TEST_F(AGX3PackBinary, LocalAtomicScalarZeroAddress)
    }
 }
 
+TEST_F(AGX3PackBinary, LocalAtomicReturnedImmediateAddressG17P)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_local_atomic_to(b, agx_register(6, AGX_SIZE_32),
+                       agx_register(4, AGX_SIZE_32), agx_immediate(448),
+                       agx_immediate(0), AGX_ATOMIC_OPC_XCHG);
+   agx_stop(b);
+
+   agx_instr immediate_form = {};
+   immediate_form.op = AGX_OPCODE_LOCAL_ATOMIC;
+   EXPECT_TRUE(agx_allows_16bit_immediate(&immediate_form));
+
+   const struct agx3_local_atomic_desc d = {
+      .op = AGX3_ATOMIC_XCHG,
+      .value = 4,
+      .returns_value = true,
+      .result = 6,
+      .slot = 1,
+      .address_kind = AGX3_ATOMIC_INDEX_IMMEDIATE,
+      .address = 448,
+   };
+   uint8_t atomic[AGX3_ATOMIC_MAX_LENGTH], atomic_len = 0;
+   ASSERT_TRUE(agx3_atomic_encode_local(AGX_ISA_ENCODING_AGX3B, &d, atomic,
+                                        &atomic_len));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+
+   std::vector<uint8_t> want;
+   append(want, atomic, atomic_len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
+TEST_F(AGX3PackBinary, LocalAtomicReturnedRegisterAddressG17P)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_local_atomic_to(b, agx_register(10, AGX_SIZE_32),
+                       agx_register(14, AGX_SIZE_32),
+                       agx_register(12, AGX_SIZE_16), agx_immediate(0),
+                       AGX_ATOMIC_OPC_XCHG);
+   agx_stop(b);
+
+   const struct agx3_local_atomic_desc d = {
+      .op = AGX3_ATOMIC_XCHG,
+      .value = 14,
+      .returns_value = true,
+      .result = 10,
+      .slot = 1,
+      .address_kind = AGX3_ATOMIC_INDEX_REGISTER,
+      .address = 12,
+   };
+   uint8_t atomic[AGX3_ATOMIC_MAX_LENGTH], atomic_len = 0;
+   ASSERT_TRUE(agx3_atomic_encode_local(AGX_ISA_ENCODING_AGX3B, &d, atomic,
+                                        &atomic_len));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+
+   std::vector<uint8_t> want;
+   append(want, atomic, atomic_len);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
+}
+
 TEST_F(AGX3PackBinary, NarrowingMoveUsesLowHalfCopy)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

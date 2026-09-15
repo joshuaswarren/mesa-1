@@ -3318,10 +3318,10 @@ agx3_translate_device_atomic(const agx_instr *I,
    return true;
 }
 
-/* Apple's AGX3b no-result form accepts either a literal byte displacement or
- * a 16-bit GPR containing the byte address.  This is the shape produced by
- * Vulkan shared atomics after agx_compile folds the index into the base.
- * Returned atomics retain the cross-generation address-zero restriction. */
+/* AGX3b accepts either a literal byte displacement or a 16-bit GPR containing
+ * the byte address.  Vulkan shared atomics use both: static accesses keep the
+ * displacement, while dynamically indexed returned operations arrive with a
+ * register address after scalar lowering. */
 static bool
 agx3_translate_local_atomic(const agx_instr *I, uint8_t slot,
                             uint16_t wait_mask,
