@@ -3369,6 +3369,7 @@ TEST_F(AGX3PackBinary, SimdBroadcastImmediateWitnesses)
                .dest = 4,
                .src = 0,
                .lane = lane,
+               .src_live = true,
             };
             ASSERT_TRUE(agx3_subgroup_encode_shuffle(
                enc, &desc, broadcast, &broadcast_length));
@@ -3408,6 +3409,7 @@ TEST_F(AGX3PackBinary, SimdBroadcastEncodesEveryLane)
          .dest = 4,
          .src = 0,
          .lane = (uint16_t)lane,
+         .src_live = true,
       };
       ASSERT_TRUE(
          agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &desc, bytes,
@@ -3448,6 +3450,7 @@ TEST_F(AGX3PackBinary, SimdBroadcastWaitsForDeviceLoad)
       .lane = 3,
       /* G17P device loads use the native preferred slot 6. */
       .wait_mask = 1u << 5,
+      .src_live = true,
    };
    ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &shuffle,
                                              bytes, &length));
@@ -3459,6 +3462,51 @@ TEST_F(AGX3PackBinary, SimdBroadcastWaitsForDeviceLoad)
    ASSERT_GE(got.size(), want.size());
    const std::vector<uint8_t> tail(got.end() - want.size(), got.end());
    EXPECT_EQ(tail, want);
+}
+
+/*
+ * A SIMD broadcast encodes differently depending on whether its SOURCE is read
+ * again afterwards, and getting that wrong destroys the source register on
+ * hardware. Two metal-nt -arch applegpu_g17p kernels, identical but for the
+ * final use, settle the field:
+ *
+ *   uint x = lane + 1; out[tid] = simd_broadcast(x, 31);
+ *      ... 47 04 54 00 02 00 3e 2c 04 00      source dies
+ *   uint x = lane + 1; uint b = simd_broadcast(x, 31); out[tid] = b + x;
+ *      ... 47 04 54 04 03 00 3e 2c 02 00      source stays live
+ *
+ * Byte 8 is 0x04 on the final read and 0x02 while the source lives; the
+ * operand bytes differ only because the destination register does. The packer
+ * left this defaulted to the final-read form on EVERY immediate-lane
+ * broadcast, so `subgroupBroadcast(v, 31)` -- the read that ends every
+ * workgroup scan -- wiped v. On hardware `x = lane + 1; b = broadcast(x, 31)`
+ * returned b == 32 correctly and x == 0 in all 32 lanes, which emptied the
+ * tessellation prefix sum and left isoline tessellation drawing nothing.
+ */
+TEST_F(AGX3PackBinary, SimdBroadcastSourceLivenessMatchesNative)
+{
+   for (bool live : {false, true}) {
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      const struct agx3_subgroup_shuffle_desc desc = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = 4,
+         .src = 0,
+         .lane = 31,
+         .src_live = live,
+      };
+      ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &desc,
+                                                bytes, &length));
+      ASSERT_EQ(length, 10u);
+      EXPECT_EQ(bytes[8], live ? 0x02 : 0x04);
+
+      /* Nothing else moves with the liveness of the source. */
+      const uint8_t head[] = {0x47, 0x04};
+      EXPECT_EQ(memcmp(bytes, head, sizeof(head)), 0);
+      EXPECT_EQ(bytes[6], 0x3e); /* f29 = lane 31 */
+      EXPECT_EQ(bytes[7], 0x2c);
+      EXPECT_EQ(bytes[9], 0x00);
+   }
 }
 
 TEST_F(AGX3PackBinary, G17PScalarByteLoadRequiresAlignedHalf)

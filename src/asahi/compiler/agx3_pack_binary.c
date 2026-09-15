@@ -3751,6 +3751,10 @@ agx3_emit_simd_broadcast(struct util_dynarray *emission,
          .lane = I->src[1].value,
          .wait_mask = wait_mask,
          .dest_hint = I->dest[0].cache,
+         /* Every other shuffle site publishes this; leaving it out here left
+          * the field defaulted to "final read" on EVERY immediate-lane
+          * broadcast, and the hardware then destroyed the source register. */
+         .src_live = !I->src[0].discard,
       };
       uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
       return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&
