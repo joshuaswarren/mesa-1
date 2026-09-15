@@ -10382,6 +10382,11 @@ TEST(AGX3NativeRgb10A2, PackedFloatLayouts)
       ASSERT_TRUE(agx3_rgb10a2_unpack_encode(&d, out, &length));
       ASSERT_EQ(length, 8);
       EXPECT_EQ(memcmp(out, u.want, 8), 0);
+      /* The layout field adds a seventh fixed field. All six waits must
+       * still fit in the encoder's local field array. */
+      d.wait_mask = 0x3f;
+      ASSERT_TRUE(agx3_rgb10a2_unpack_encode(&d, out, &length));
+      ASSERT_EQ(length, 8);
    }
 }
 

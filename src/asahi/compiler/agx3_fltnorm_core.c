@@ -529,7 +529,8 @@ agx3_rgb10a2_unpack_encode(const struct agx3_rgb10a2_unpack_desc *d,
    const struct agx3_field_kv base[] = {
       KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2),
    };
-   struct agx3_field_kv fields[12] = {
+   /* Seven fixed fields plus all six scoreboard wait bits. */
+   struct agx3_field_kv fields[13] = {
       KV(2, d->dest), KV(18, d->source), KV(29, d->discard),
       KV(40, d->layout), KV(41, 0), KV(42, 0), KV(43, 0),
    };
