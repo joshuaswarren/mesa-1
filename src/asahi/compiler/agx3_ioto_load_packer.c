@@ -47,7 +47,10 @@ pack_absolute_load(void *context, enum agx_chip chip,
       .idx_kind = AGX3_MEM_IDX_IMM,
       .idx_scaled = false,
       .byte_off = load->byte_offset,
-      .slot = 1,
+      /* G17P's native finishRound encodes data.value=1 as physical slot
+       * 2. The GPU0 NOP's bit 1 waits for that same slot. The generic
+       * memory encoder takes one-based slot numbers. */
+      .slot = packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 ? 2 : 1,
       .wait_mask = 0,
    };
 
@@ -75,7 +78,7 @@ pack_absolute_load(void *context, enum agx_chip chip,
    }
 
    record->length = length;
-   *signal_slot = 1;
+   *signal_slot = desc.slot;
    return true;
 }
 
@@ -164,7 +167,7 @@ pack_absolute_copy(void *context, enum agx_chip chip,
    int wait_slot = -1;
    enum agx_isa_encoding enc;
    if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0) {
-      /* The first of Apple's four NOPs drains slot 1 before any GPU0 COPY. */
+      /* The first of Apple's four NOPs drains slot 2 before any GPU0 COPY. */
       enc = AGX_ISA_ENCODING_AGX3B;
    } else if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1) {
       enc = AGX_ISA_ENCODING_AGX3C;
