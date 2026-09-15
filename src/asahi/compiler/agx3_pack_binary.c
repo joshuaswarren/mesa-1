@@ -5175,7 +5175,7 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
    agx_foreach_block(ctx, block)
       output_block = block;
    bool outputs[AGX3_MAX_VERTEX_OUTPUTS] = {false};
-   unsigned output_count = 0, maximum_output = 0;
+   unsigned output_count = 0, maximum_output = 0, minimum_output = UINT_MAX;
    bool stopped = false;
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block(block, I) {
@@ -5204,6 +5204,7 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             outputs[I->src[0].value] = true;
             output_count++;
             maximum_output = MAX2(maximum_output, I->src[0].value);
+            minimum_output = MIN2(minimum_output, I->src[0].value);
             break;
          case AGX_OPCODE_GET_SR:
             /* A system-value read is a pure producer, validated by the SR
@@ -5224,7 +5225,24 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
          }
       }
    }
-   return stopped && output_count >= 5 && maximum_output + 1 == output_count
+   /* What the staging protocol needs is a dense run: that is what makes each
+    * batch of six take six distinct scoreboard slots and six distinct staging
+    * addresses, since both are derived from the UVS index modulo six.
+    *
+    * The run need not start at zero, but it may start in only one other
+    * place. A vertex shader that never writes gl_Position still leaves the
+    * four-entry UVS position group reserved, so its first output lands at
+    * AGX3_UVS_POSITION_ENTRIES. Any other base is a graph the UVS layout
+    * cannot produce, and still fails closed.
+    *
+    * KHR-GL33.transform_feedback_overflow_query_ARB's four single-stream
+    * cases are the positionless shape -- four captured floats and a point
+    * size at UVS 4..8, nothing at 0..3 -- and requiring density from zero
+    * refused them at st_vary #4, so all four failed on glLinkProgram alone. */
+   const bool grounded_base =
+      minimum_output == 0 || minimum_output == AGX3_UVS_POSITION_ENTRIES;
+   return stopped && output_count >= 5 && grounded_base &&
+                maximum_output + 1 - minimum_output == output_count
              ? output_count : 0;
 }
 

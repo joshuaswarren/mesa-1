@@ -1112,6 +1112,12 @@ void agx_pressure_schedule(agx_context *ctx);
  * batches later. Nothing about the UVS index itself wraps. */
 #define AGX3_MAX_VERTEX_OUTPUTS 256u
 #define AGX3_G17P_STAGING_OUTPUTS 128u
+
+/* UVS_POSITION is the first group in the hardware's UVS order (see
+ * agx_uvs.h) and agx_nir_lower_uvs.c gives it four entries whether or not
+ * the shader writes gl_Position. A vertex program that writes no position
+ * therefore starts its outputs here, and nowhere else. */
+#define AGX3_UVS_POSITION_ENTRIES 4u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 /* Materialize nonzero minifloats used by G17P structured f32 control flow so

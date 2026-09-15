@@ -7953,8 +7953,11 @@ TEST_F(AGX3PackBinary, SixVertexOutputsRefuseUnqualifiedGraphs)
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_VERTEX;
       for (unsigned component = 0; component < 6; ++component) {
+         /* A hole at index zero is not a base the UVS layout can produce: a
+          * positionless program starts at AGX3_UVS_POSITION_ENTRIES, not at
+          * one. */
          if (mode == 0 && component == 0)
-            continue; /* Missing position but user outputs remain. */
+            continue;
          unsigned index = mode == 1 && component == 0 ? 1 : component;
          if (mode == 2 && component == 5)
             index = 6;
@@ -7972,6 +7975,49 @@ TEST_F(AGX3PackBinary, SixVertexOutputsRefuseUnqualifiedGraphs)
       agx_stop(b);
       EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
+}
+
+/* A vertex shader that writes no gl_Position still leaves the four-entry UVS
+ * position group reserved, so its outputs are a dense run based at
+ * AGX3_UVS_POSITION_ENTRIES rather than at zero. That is the shape of
+ * KHR-GL33.transform_feedback_overflow_query_ARB's single-stream cases, whose
+ * four captured floats and point size land at UVS 4..8. */
+TEST_F(AGX3PackBinary, PositionlessVertexOutputsStageFromTheUvsPositionGroup)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned index = AGX3_UVS_POSITION_ENTRIES;
+        index < AGX3_UVS_POSITION_ENTRIES + 5; ++index)
+      agx_st_vary(b, agx_immediate(index), agx_register(0, AGX_SIZE_32));
+   agx_stop(b);
+
+   const auto bytes = pack(b);
+   ASSERT_FALSE(bytes.empty());
+
+   /* Each output keeps its own UVS index and stages at twice that index. */
+   unsigned writes = 0;
+   for (size_t at = 0; at + 8 <= bytes.size(); ) {
+      const uint8_t *p = bytes.data() + at;
+      if (p[0] != 0x57) {
+         at += (p[0] & 0xf) == 0xb && (p[2] & 7) != 1 ? 10 : 4;
+         continue;
+      }
+      const unsigned index = (p[4] >> 5) | ((p[5] & 0x1f) << 3);
+      EXPECT_EQ(index, AGX3_UVS_POSITION_ENTRIES + writes) << writes;
+      EXPECT_EQ(p[3], 2u * index) << writes;
+      ++writes;
+      at += 8;
+   }
+   EXPECT_EQ(writes, 5u);
+
+   /* A run based anywhere else is not a layout the driver emits. */
+   agx_builder *ungrounded = builder(AGX_ISA_ENCODING_AGX3B);
+   ungrounded->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned index = 5; index < 10; ++index)
+      agx_st_vary(ungrounded, agx_immediate(index),
+                  agx_register(0, AGX_SIZE_32));
+   agx_stop(ungrounded);
+   EXPECT_TRUE(pack(ungrounded, false).empty());
 }
 
 TEST_F(AGX3PackBinary, ProjectiveReciprocalMatchesNativeOperandForm)
