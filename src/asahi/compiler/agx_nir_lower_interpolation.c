@@ -46,8 +46,21 @@ cf_valid(nir_builder *b, nir_def *cf)
 }
 
 static nir_def *
+cf_constant_marker(nir_builder *b, nir_def *cf)
+{
+   /* Native HAL200 constant planes store unscaled C, with a nonzero
+    * significand and exponent 0 or 1 in A. Test the native marker directly
+    * so an ordinary coefficient with its low bit set remains a plane. */
+   nir_def *a = nir_channel(b, cf, 0);
+   nir_def *exponent_small =
+      nir_ult_imm(b, nir_iand_imm(b, a, 0x7f800000), 0x01000000);
+   nir_def *significand = nir_ine_imm(b, nir_iand_imm(b, a, 0x007fffff), 0);
+   return nir_iand(b, exponent_small, significand);
+}
+
+static nir_def *
 interpolate_at_offset(nir_builder *b, nir_def *cf, nir_def *offset,
-                      bool perspective)
+                      bool perspective, bool native)
 {
    /* Get the coordinate of the pixel within the tile */
    nir_def *pixel_coords = nir_load_pixel_coord(b);
@@ -81,6 +94,10 @@ interpolate_at_offset(nir_builder *b, nir_def *cf, nir_def *offset,
 
       interp = nir_fdiv(b, interp, rhw);
    }
+
+   if (native)
+      return nir_bcsel(b, cf_constant_marker(b, cf), nir_channel(b, cf, 2),
+                       interp);
 
    /* Replace invalid interpolations with the constant channel */
    return nir_bcsel(b, cf_valid(b, cf), interp, nir_channel(b, cf, 2));
@@ -165,7 +182,8 @@ interpolate_channel(nir_builder *b, nir_intrinsic_instr *load,
 
       nir_def *interp = interpolate_at_offset(
          b, coefficients, bary->src[0].ssa,
-         nir_intrinsic_interp_mode(bary) != INTERP_MODE_NOPERSPECTIVE);
+         nir_intrinsic_interp_mode(bary) != INTERP_MODE_NOPERSPECTIVE,
+         layer_as_varying);
 
       return nir_f2fN(b, interp, load->def.bit_size);
    }
