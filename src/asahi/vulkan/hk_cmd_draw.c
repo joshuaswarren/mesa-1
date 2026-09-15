@@ -768,11 +768,27 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    if (!key->tib.nr_samples)
       key->tib.nr_samples = 1;
 
-   /* The caller selected between keeping the multisample surface and a
-    * direct resolve from the attachment's store/resolve state and whether
-    * this is a partial render. Preserve that decision here: deriving it from
-    * the sample count alone makes a final direct resolve request both paths
-    * at once, and the EOT builder correctly rejects the contradiction. */
+   /* Decide from the compacted attachment and its matching view. Vulkan may
+    * leave holes before the sole live color attachment; selecting from
+    * logical slot0 and colorAttachmentCount before compaction loses its
+    * STORE requirement and selects a single-sample EOT for an MS surface.
+    * Keep samples for partial renders, explicit STORE, and resolves that
+    * execute after the pass. Final direct resolves remain single-sampled. */
+   if (store && active_count == 1) {
+      const VkRenderingAttachmentInfo *att = &attachments[0];
+      const struct hk_image_view *iview = color_att[0].iview;
+      const bool store_source = att->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
+      const bool has_resolve = att->resolveImageView != VK_NULL_HANDLE &&
+                               att->resolveMode != VK_RESOLVE_MODE_NONE;
+      const bool resolved_after_pass = has_resolve &&
+         !hk_agx3_g17p_direct_color_resolve_supported(
+            &key->tib, active_count, has_resolve,
+            att->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT, store_source);
+      key->multisample_store = hk_agx3_g17p_multisample_store_supported(
+         &key->tib, active_count,
+         partial_render || store_source || resolved_after_pass,
+         iview ? iview->vk.image->samples : 0);
+   }
 
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;
@@ -955,6 +971,14 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
           (dual_mrt_active &&
            (!iview1 || !target1_pbe_valid ||
             info->pColorAttachments[1].imageView == VK_NULL_HANDLE))) {
+         if (debug_get_bool_option("HK_DEBUG_RECORD", false))
+            mesa_loge("EOT target mismatch: partial=%u active=%u samples=%u "
+                      "target_samples=%u direct=%u ms_store=%u pbe=%u "
+                      "store_op=%u resolve_mode=%u",
+                      partial_render, active_count, key->tib.nr_samples,
+                      target ? target->vk.image->samples : 0,
+                      direct_resolve, multisample_store, target_pbe_valid,
+                      att->storeOp, att->resolveMode);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
          return (struct hk_bg_eot){0};
       }
@@ -1260,37 +1284,6 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
     * clear included, was lost.
     */
    key.single_sample_reload = false;
-
-   /* Keeping the samples in the stored surface is what makes a reload
-    * possible, and three different things ask for it: storeOp = STORE, which
-    * makes a multisample VkImage readable after the pass, a partial render,
-    * whose mid-frame flush exists only to be reloaded by the draws that
-    * follow it, and a resolve the end-of-tile program cannot perform itself,
-    * such as the sample-zero resolve of an integer attachment, which the
-    * resolve after the pass reads from the stored samples. On an A18 Pro the
-    * g17p-vulkan-msaa-store-fetch4 probe reads back the per-sample values of
-    * such a stored surface.
-    */
-   if (dev->dev.chip == AGX_CHIP_G17P && store &&
-       info->colorAttachmentCount >= 1) {
-      const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
-      const struct hk_image_view *iview0 =
-         hk_image_view_from_handle(att0->imageView);
-      const bool store_source = att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
-      const bool has_resolve = att0->resolveImageView != VK_NULL_HANDLE &&
-                               att0->resolveMode != VK_RESOLVE_MODE_NONE;
-      const bool resolved_after_pass =
-         has_resolve &&
-         !hk_agx3_g17p_direct_color_resolve_supported(
-            &key.tib, info->colorAttachmentCount, has_resolve,
-            att0->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT, store_source);
-      const bool keeps_samples =
-         partial_render || store_source || resolved_after_pass;
-
-      key.multisample_store = hk_agx3_g17p_multisample_store_supported(
-         &key.tib, info->colorAttachmentCount, keeps_samples,
-         iview0 ? iview0->vk.image->samples : 0);
-   }
 
    bool needs_textures_for_spilled_rts =
       agx_tilebuffer_spills(&render->tilebuffer) && !partial_render && !store;
