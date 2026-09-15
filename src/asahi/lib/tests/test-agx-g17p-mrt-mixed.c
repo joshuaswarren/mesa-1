@@ -83,6 +83,10 @@ static const struct layout layouts[] = {
     {PIPE_FORMAT_R8G8B8A8_SRGB, PIPE_FORMAT_B10G10R10A2_UNORM,
      PIPE_FORMAT_B8G8R8A8_UNORM, PIPE_FORMAT_R16G16_UINT},
     {0, 4, 12, 8}, 16},
+   {"rgb9e5x3", 3,
+    {PIPE_FORMAT_R9G9B9E5_FLOAT, PIPE_FORMAT_R9G9B9E5_FLOAT,
+     PIPE_FORMAT_R9G9B9E5_FLOAT},
+    {0, 4, 8}, 16},
 };
 
 #define RGBA8 PIPE_FORMAT_R8G8B8A8_UNORM
@@ -115,9 +119,11 @@ static const struct layout wide_layouts[] = {
 static enum pipe_format
 eot_store_format(enum pipe_format format)
 {
-   return format == PIPE_FORMAT_R11G11B10_FLOAT ? PIPE_FORMAT_R32_UINT
-          : util_format_is_srgb(format)        ? PIPE_FORMAT_R8_UNORM
-                                         : ail_pixel_format[format].renderable;
+   return (format == PIPE_FORMAT_R11G11B10_FLOAT ||
+           format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+             ? PIPE_FORMAT_R32_UINT
+          : util_format_is_srgb(format) ? PIPE_FORMAT_R8_UNORM
+                                        : ail_pixel_format[format].renderable;
 }
 
 static uint64_t
@@ -196,7 +202,7 @@ test_selectors_match_single_target_programs(void)
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B10G10R10A2_UINT) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B8G8R8A8_SNORM) == 0x75);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R11G11B10_FLOAT) == 0);
-   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R9G9B9E5_FLOAT) == 0);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R9G9B9E5_FLOAT) == 0x35);
    CHECK(admitted > 40);
    return 0;
 }
