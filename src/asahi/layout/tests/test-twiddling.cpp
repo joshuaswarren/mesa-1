@@ -230,6 +230,26 @@ TEST(Twiddling, PartialETC)
    test_ldst(32, 32, 4, 8, 16, 12, 512, PIPE_FORMAT_ETC2_RG11_SNORM);
 }
 
+/*
+ * Every block-compressed case above assumes block alignment. KHR-GL33's
+ * packed_pixels.varied_rectangle does not: it round-trips 10x10 and 15x15
+ * compressed textures, which are 3 and 4 blocks wide with a partial last
+ * block in each direction.
+ */
+TEST(Twiddling, UnalignedCompressed)
+{
+   /* 8-byte blocks: 10px -> 3 blocks, 15px -> 4 blocks */
+   test_ldst(10, 10, 0, 0, 10, 10, 3 * 8, PIPE_FORMAT_RGTC1_UNORM);
+   test_ldst(15, 15, 0, 0, 15, 15, 4 * 8, PIPE_FORMAT_RGTC1_UNORM);
+   test_ldst(10, 10, 0, 0, 10, 10, 3 * 8, PIPE_FORMAT_RGTC1_SNORM);
+   test_ldst(15, 15, 0, 0, 15, 15, 4 * 8, PIPE_FORMAT_DXT1_RGB);
+
+   /* 16-byte blocks */
+   test_ldst(10, 10, 0, 0, 10, 10, 3 * 16, PIPE_FORMAT_RGTC2_UNORM);
+   test_ldst(15, 15, 0, 0, 15, 15, 4 * 16, PIPE_FORMAT_RGTC2_UNORM);
+   test_ldst(10, 10, 0, 0, 10, 10, 3 * 16, PIPE_FORMAT_DXT5_RGBA);
+}
+
 TEST(Twiddling, DXT)
 {
    /* Block alignment assumed */
