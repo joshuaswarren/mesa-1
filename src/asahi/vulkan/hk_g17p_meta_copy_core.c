@@ -95,6 +95,35 @@ hk_g17p_tile_address_config_init(
 }
 
 bool
+hk_g17p_copy_aspect_plan(VkImageAspectFlags src, VkImageAspectFlags dst,
+                         struct hk_g17p_copy_aspect_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+   if (!plan)
+      return false;
+
+   const VkImageAspectFlags color = VK_IMAGE_ASPECT_COLOR_BIT;
+   const VkImageAspectFlags depth = VK_IMAGE_ASPECT_DEPTH_BIT;
+   const VkImageAspectFlags stencil = VK_IMAGE_ASPECT_STENCIL_BIT;
+   const bool src_single = src == color || src == depth || src == stencil;
+   const bool dst_single = dst == color || dst == depth || dst == stencil;
+   if (src == (depth | stencil) && dst == src) {
+      *plan = (struct hk_g17p_copy_aspect_plan){
+         .count = 2, .src = {depth, stencil}, .dst = {depth, stencil},
+      };
+   } else if (src_single && dst_single &&
+              (src == dst || src == color || dst == color)) {
+      *plan = (struct hk_g17p_copy_aspect_plan){
+         .count = 1, .src = {src}, .dst = {dst},
+      };
+   } else {
+      return false;
+   }
+   return true;
+}
+
+bool
 hk_g17p_image_copy_element_plan(
    VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
    struct hk_g17p_image_copy_element_plan *plan)
@@ -363,15 +392,12 @@ hk_g17p_uncompressed_upload_format(VkFormat format)
    const uint32_t block_B = vk_format_get_blocksize(format);
 
    /* This path copies raw format elements and never interprets their colour
-    * channels.  Admit every ordinary 1-, 2-, and 4-byte format instead of a
-    * semantic allowlist; the caller separately excludes depth/stencil and
-    * multi-plane images.  R32G32_UINT also needs the raw path because G17P's
-    * graphics upload does not preserve untouched array layers for that view.
-    * Other 8-byte formats remain unqualified and stay on the graphics path. */
+    * channels.  Admit every ordinary power-of-two format through 16 bytes;
+    * the caller separately excludes depth/stencil and multi-plane images. */
    return vk_format_get_blockwidth(format) == 1 &&
           vk_format_get_blockheight(format) == 1 &&
-          (block_B == 1 || block_B == 2 || block_B == 4 ||
-           format == VK_FORMAT_R32G32_UINT);
+          (block_B == 1 || block_B == 2 || block_B == 4 || block_B == 8 ||
+           block_B == 16);
 }
 
 bool
@@ -393,7 +419,8 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
       return false;
 
    const uint32_t block_B = vk_format_get_blocksize(copy->format);
-   if ((block_B != 1 && block_B != 2 && block_B != 4 && block_B != 8) ||
+   if ((block_B != 1 && block_B != 2 && block_B != 4 && block_B != 8 &&
+        block_B != 16) ||
        buffer_offset % block_B)
       return false;
 

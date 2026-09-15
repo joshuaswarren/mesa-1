@@ -1634,8 +1634,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    const bool layered =
       dev->dev.chip != AGX_CHIP_G17P ||
       !hk_agx3_g17p_single_layer_rendering(render->view_mask, layer_count);
-   render->tilebuffer = agx_build_tilebuffer_layout(
-      formats, render->color_att_count, render->tilebuffer.nr_samples, layered);
+   render->tilebuffer = agx_build_tilebuffer_layout_bounded(
+      formats, render->color_att_count, render->tilebuffer.nr_samples, layered,
+      dev->dev.chip == AGX_CHIP_G17P ? AGX_G17P_MAX_BYTES_PER_SAMPLE : 0);
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        !hk_agx3_g17p_rt0_tile_layout_supported(&render->tilebuffer)) {
@@ -3065,7 +3066,8 @@ static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
                             hk_internal_builder_t builder, bool preprocess_nir,
                             bool stop, unsigned cf_base,
-                            uint64_t g17p_tile_partitions, unsigned nr_samples)
+                            const BITSET_WORD *g17p_tile_partitions,
+                            unsigned nr_samples)
 {
    /* Try to get the cached shader */
    struct hash_entry *ent = _mesa_hash_table_search(dev->prolog_epilog.ht, key);
@@ -3081,10 +3083,13 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    struct agx_shader_key backend_key = {
       .dev = agx_gather_device_key(&dev->dev),
       .fs.nr_samples = nr_samples,
-      .g17p_tile_partitions = g17p_tile_partitions,
       .secondary = true,
       .no_stop = !stop,
    };
+   if (g17p_tile_partitions) {
+      memcpy(backend_key.g17p_tile_partitions, g17p_tile_partitions,
+             sizeof(backend_key.g17p_tile_partitions));
+   }
 
    /* We always use dynamic sample shading in the GL driver. Indicate that. */
    if (b.shader->info.stage == MESA_SHADER_FRAGMENT) {
@@ -3130,7 +3135,8 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 static struct agx_shader_part *
 hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
                      hk_internal_builder_t builder, bool preprocess_nir,
-                     bool stop, unsigned cf_base, uint64_t g17p_tile_partitions,
+                     bool stop, unsigned cf_base,
+                     const BITSET_WORD *g17p_tile_partitions,
                      unsigned nr_samples)
 {
    /* Build the meta shader key */
@@ -3263,17 +3269,18 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
 
    /* A G17P epilog selects each written target's pixel classes from its
     * position among all of the framebuffer's colour targets. */
-   uint64_t g17p_tile_partitions = 0;
+   BITSET_DECLARE(g17p_tile_partitions, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
    if (dev->dev.chip == AGX_CHIP_G17P) {
-      const struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(
-         key->epilog.rt_formats, ARRAY_SIZE(key->epilog.rt_formats),
-         key->epilog.nr_samples, true);
+      const struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout_bounded(
+            key->epilog.rt_formats, ARRAY_SIZE(key->epilog.rt_formats),
+            key->epilog.nr_samples, true, key->epilog.max_sample_size_B);
       for (unsigned rt = 0; rt < ARRAY_SIZE(tib.logical_format); ++rt) {
          if (tib.logical_format[rt] != PIPE_FORMAT_NONE && !tib.spilled[rt])
-            g17p_tile_partitions |= BITFIELD64_BIT(tib._offset_B[rt]);
+            BITSET_SET(g17p_tile_partitions, tib._offset_B[rt]);
       }
-      if (util_bitcount64(g17p_tile_partitions) < 2)
-         g17p_tile_partitions = 0;
+      if (BITSET_COUNT(g17p_tile_partitions) < 2)
+         BITSET_ZERO(g17p_tile_partitions);
    }
 
    struct agx_shader_part *epilog =
@@ -5279,6 +5286,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       key.epilog.link.already_ran_zs |= nontrivial_force_early;
 
       struct hk_rendering_state *render = &cmd->state.gfx.render;
+      key.epilog.max_sample_size_B = render->tilebuffer.max_sample_size_B;
       for (uint32_t i = 0; i < render->color_att_count; i++) {
          key.epilog.rt_formats[i] =
             hk_format_to_pipe_format(render->color_att[i].vk_format);

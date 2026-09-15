@@ -94,15 +94,55 @@ int main(void)
       CHECK(r[2].wait_mask==0);
    }
 
-   /* Round-robin over nslots: the 7th async op on a 6-slot part reuses slot 1;
-    * a consumer of the 1st load (still in slot 1) forces its wait first. */
+   /* Round-robin over nslots: the 7th async op on a 6-slot part wraps to
+    * slot 1. Every slot still holds an outstanding live result, so it waits
+    * the first load before reissuing slot 1; otherwise the first load's
+    * consumer would wait the 7th load instead. */
    {
       struct agx3_slot_instr p[8];
       for (int i=0;i<7;i++) p[i]=ld((uint16_t)(i*2));
       p[7]=st(0);  /* consume the first load, slot 1 */
       CHECK(agx3_slot_assign(p, 8, 6, r));
       CHECK(r[0].slot==1 && r[1].slot==2 && r[5].slot==6 && r[6].slot==1);
-      CHECK(r[7].wait_mask==0x1u);
+      CHECK(r[6].wait_mask==0x1u);
+      CHECK(r[7].wait_mask==0);
+   }
+
+   /* The wrap skips a slot whose outstanding generation is still live for a
+    * later consumer, taking the next already-waited one instead. */
+   {
+      struct agx3_slot_instr p[9];
+      for (int i=0;i<6;i++) p[i]=ld((uint16_t)(i*2));
+      p[6]=st(2);  /* retire slot 2 */
+      p[7]=ld(20);
+      p[8]=st(0);  /* consume the first load, slot 1 */
+      CHECK(agx3_slot_assign(p, 9, 6, r));
+      CHECK(r[6].wait_mask==(1u << 1));
+      CHECK(r[7].slot==2 && r[7].wait_mask==0);
+      CHECK(r[8].wait_mask==0x1u);
+   }
+
+   /* Coefficient loads cannot wait, and Apple's own reissue slots whose
+    * coefficients are still live: the seventh of seven wraps to slot 1 with
+    * no wait. They still skip a slot another load's live result holds. */
+   {
+      struct agx3_slot_instr p[9];
+      for (int i=0;i<7;i++) {
+         p[i]=ld((uint16_t)(i*2));
+         p[i].reissues_live_slot=true;
+      }
+      p[7]=st(0);
+      CHECK(agx3_slot_assign(p, 8, 6, r));
+      CHECK(r[6].slot==1 && r[6].wait_mask==0);
+
+      p[0].reissues_live_slot=false;  /* slot 1 now holds a device load */
+      CHECK(agx3_slot_assign(p, 8, 6, r));
+      CHECK(r[6].slot==2 && r[6].wait_mask==0);
+
+      for (int i=0;i<6;i++)
+         p[i].reissues_live_slot=false;  /* no coefficient slot to reissue */
+      CHECK(agx3_slot_assign(p, 8, 6, r));
+      CHECK(r[6].slot==1 && r[6].wait_mask==0);
    }
 
    /* agx3c has 8 slots. */

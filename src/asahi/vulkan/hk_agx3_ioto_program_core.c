@@ -10,6 +10,7 @@
 #include "asahi/lib/agx_ioto_core.h"
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/compiler/agx3_binder.h"
+#include "util/format/u_format.h"
 
 #include <string.h>
 
@@ -92,7 +93,25 @@ hk_agx3_g17p_direct_color_resolve_supported(
    struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
    bool has_resolve_target, bool average_resolve, bool store_source)
 {
-   return tib && (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+   if (!tib)
+      return false;
+
+   /* A 32-bit float target's lane is stored raw, and resolving it on the
+    * way out averages the bit patterns: an R32 or RG32 float view resolved
+    * this way reads back values like 4e22 on an A18 Pro. Keep the samples
+    * and resolve after the pass instead. */
+   const enum pipe_format format = tib->logical_format[0];
+   if (util_format_is_float(format) &&
+       util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0) ==
+          32)
+      return false;
+
+   /* An RGB9E5 tile keeps each sample's packed word, which averages no
+    * better. */
+   if (format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+      return false;
+
+   return (tib->nr_samples == 2 || tib->nr_samples == 4) &&
           color_attachment_count == 1 && has_resolve_target &&
           average_resolve && !store_source &&
           hk_agx3_g17p_rt0_tile_layout_supported(tib);

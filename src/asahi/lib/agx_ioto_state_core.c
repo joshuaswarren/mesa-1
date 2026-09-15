@@ -405,11 +405,16 @@ agx_ioto_g17p_fragment_speclm_build(
         samples != 4) ||
        (sample_size_B &&
         ((samples != 1 && samples != 2 && samples != 4) ||
-         (sample_size_B & 7) || sample_size_B > 64 ||
+         (sample_size_B & 7) || (sample_size_B >> 3) > 31 ||
          sample_size_B * samples * imageblock->tile_size_px > 32768u)))
       return false;
 
-   /* The imageblock bound here is structural -- a tile larger than 32 KiB has
+   /* SpecLM::encodeImageBlockData deposits the stride, in eight-byte units,
+    * as a five-bit field (bfi #35, #5 at 0x216af6a30), so a sample may hold
+    * up to 248 bytes; Apple's own fragments store eight RGBA32Float targets,
+    * 128 bytes a sample.
+    *
+    * The imageblock bound here is structural -- a tile larger than 32 KiB has
     * nowhere to live. Which tile a given format and sample count actually gets
     * is agx_select_tile_size()'s policy, and that stays one byte more
     * conservative than this unless AGX_TILE_32K says otherwise, so nothing

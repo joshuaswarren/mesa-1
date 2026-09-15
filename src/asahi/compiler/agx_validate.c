@@ -193,13 +193,15 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
          return DIV_ROUND_UP(util_bitcount(I->mask) * bytes, 4) * 2;
       }
 
-      /* An AGX3 tile load of an 8-bit normalized attachment comes back
-       * packed, two channels to a 16-bit register; normflt_agx3 unpacks it.
-       * See agx_unpack_normalized_agx3. */
+      /* An AGX3 tile load of an 8-bit attachment comes back packed, two
+       * channels to a 16-bit register; normflt_agx3 unpacks a normalized one
+       * and agx_unpack_integer_8_agx3 a pure integer one. */
       if (I->op == AGX_OPCODE_LD_TILE &&
           ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
           I->dest[d].size == AGX_SIZE_16 &&
-          (I->format == AGX_FORMAT_U8NORM || I->format == AGX_FORMAT_S8NORM))
+          (I->format == AGX_FORMAT_U8NORM || I->format == AGX_FORMAT_S8NORM ||
+           (I->format == AGX_FORMAT_I8 &&
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)))
          return DIV_ROUND_UP(util_bitcount(I->mask), 2);
 
       /* Can write 16-bit or 32-bit. Anything logically 64-bit is already

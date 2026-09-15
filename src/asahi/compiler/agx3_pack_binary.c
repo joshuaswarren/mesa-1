@@ -2514,7 +2514,8 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
               sample.value, I->format, I->mask,
               agx3_trace_shader_name ? agx3_trace_shader_name : "?");
    }
-   if ((I->format == AGX_FORMAT_RGB10A2 &&
+   if (((I->format == AGX_FORMAT_RGB10A2 ||
+         I->format == AGX_FORMAT_RGB9E5) &&
         (I->mask != 1 || value.size != AGX_SIZE_32)) ||
        width < 0 || !agx3_tile_value_ok(value, I->mask, width) ||
        !agx3_tile_sample_operand(sample, &sample_op) || !agx_is_null(coords))
@@ -2617,17 +2618,20 @@ agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
       if (i == 1 && !d.two_lanes)
          break;
       const agx_index src = I->src[i];
-      if (src.memory || src.abs || src.neg || agx_channels(src) != 1)
+      if (src.memory || agx_channels(src) != 1)
          return false;
 
       /* All three operand classes are witnessed: a register (every
        * interpolated shader), an 8-bit AGX minifloat immediate (a constant
        * colour, which the optimizer folds straight into this source), and a
-       * uniform (a colour read from a buffer). */
+       * uniform (a colour read from a buffer). A register may also carry the
+       * abs and neg modifiers. */
       if (agx3_src_is_register(src)) {
          if (src.size != AGX_SIZE_32)
             return false;
          d.src[i].kind = AGX3_FLTNORM_SRC_REGISTER;
+         d.src[i].abs = src.abs;
+         d.src[i].neg = src.neg;
       } else if (src.type == AGX_INDEX_IMMEDIATE) {
          if (src.value > 0xff)
             return false;
@@ -2659,11 +2663,15 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
                  uint16_t wait, bool first)
 {
    const bool unpack = I->op == AGX_OPCODE_UNPACK_RGB10A2_AGX3;
+   const uint8_t layout = I->format == AGX_FORMAT_RGB9E5
+                             ? AGX3_PACKED_RGB9E5
+                             : AGX3_PACKED_RGB10A2;
+   const unsigned lanes = layout == AGX3_PACKED_RGB10A2 ? 4 : 3;
    if (I->nr_dests != 1 || I->nr_srcs != (unpack ? 1 : 4))
       return false;
    const agx_index dest = I->dest[0];
    if (!agx3_src_is_register(dest) || dest.memory || dest.size != AGX_SIZE_32 ||
-       agx_channels(dest) != (unpack ? 4 : 1))
+       agx_channels(dest) != (unpack ? lanes : 1))
       return false;
    uint8_t bytes[14], length = 0;
    if (unpack) {
@@ -2673,16 +2681,21 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
          return false;
       const struct agx3_rgb10a2_unpack_desc d = {
          .dest = dest.value, .source = src.value,
-         .wait_mask = wait, .discard = src.discard,
+         .wait_mask = wait, .discard = src.discard, .layout = layout,
       };
       if (!agx3_rgb10a2_unpack_encode(&d, bytes, &length))
          return false;
    } else {
-      struct agx3_rgb10a2_desc d = {.dest = dest.value,
+      struct agx3_rgb10a2_desc d = {.dest = dest.value, .layout = layout,
                                    .first_instruction = first, .wait_mask = wait};
       for (unsigned i = 0; i < 4; ++i) {
          const agx_index src = I->src[i];
-         if (src.memory || src.abs || src.neg || agx_channels(src) != 1 ||
+         if (i >= lanes) {
+            if (!agx_is_null(src))
+               return false;
+            continue;
+         }
+         if (src.memory || agx_channels(src) != 1 ||
              (agx3_src_is_register(src) && src.size != AGX_SIZE_32))
             return false;
          d.kind[i] = agx3_src_is_register(src) ? AGX3_FLTNORM_SRC_REGISTER :
@@ -2690,6 +2703,8 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
          d.source[i] = src.value;
          d.discard[i] = src.discard;
          d.cache[i] = src.cache;
+         d.abs[i] = src.abs;
+         d.neg[i] = src.neg;
       }
       if (!agx3_rgb10a2_encode(&d, bytes, &length))
          return false;
@@ -5399,8 +5414,11 @@ agx3_g17p_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
             }
          } else if (I->op == AGX_OPCODE_MOV_IMM) {
             /* The imageblock offset reaches the program through its offset
-             * uniform, so a target need not start at byte zero. */
-            if (I->nr_dests != 1 || I->nr_srcs != 0 || I->imm >= 64 ||
+             * uniform, so a target need not start at byte zero, and may
+             * start past byte 64: Apple's builtin storing any one target of
+             * eight RGBA32Float targets is this single-target program. */
+            if (I->nr_dests != 1 || I->nr_srcs != 0 ||
+                I->imm >= AGX_G17P_MAX_BYTES_PER_SAMPLE ||
                 !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
                 I->dest[0].size != AGX_SIZE_32 ||
                 agx_channels(I->dest[0]) != 1)
@@ -5776,7 +5794,8 @@ agx3_g17p_deferred_write_wait(agx_context *ctx, bool blend)
             const bool load = I->op == AGX_OPCODE_LD_TILE;
             if (phase != (load ? 1 : 3) ||
                 !((agx3_g17p_8norm_format(I->format) && I->mask == 15) ||
-                  (I->format == AGX_FORMAT_RGB10A2 && I->mask == 1)) ||
+                  ((I->format == AGX_FORMAT_RGB10A2 ||
+                    I->format == AGX_FORMAT_RGB9E5) && I->mask == 1)) ||
                 I->pixel_offset || I->explicit_coords)
                return NULL;
             phase = load ? 2 : 4;
@@ -6069,12 +6088,20 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
        list_length(&ctx->blocks) != 1)
       return p;
 
-   const uint64_t partitions = ctx->key->fs.ignore_tib_dependencies
-                                  ? 0 : ctx->key->g17p_tile_partitions;
-   if (util_bitcount64(partitions) > ARRAY_SIZE(p.offsets))
-      return p;
-   u_foreach_bit64(offset, partitions)
-      p.offsets[p.count++] = offset;
+   const bool partitions =
+      !ctx->key->fs.ignore_tib_dependencies &&
+      !__bitset_is_empty(ctx->key->g17p_tile_partitions,
+                         BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE));
+   if (partitions) {
+      if (__bitset_count(ctx->key->g17p_tile_partitions,
+                         BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE)) >
+          ARRAY_SIZE(p.offsets))
+         return p;
+      unsigned offset;
+      BITSET_FOREACH_SET(offset, ctx->key->g17p_tile_partitions,
+                         AGX_G17P_MAX_BYTES_PER_SAMPLE)
+         p.offsets[p.count++] = offset;
+   }
 
    bool depth_written = false, tile_ops = false;
    agx_foreach_instr_global(ctx, I) {
@@ -6229,7 +6256,7 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
    unsigned stores = 0, stride = 0;
    bool stopped = false;
    enum agx_format format = 0;
-   uint64_t written_B = 0;
+   BITSET_DECLARE(written_B, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
    agx_foreach_instr_global(ctx, I) {
       if (stopped || agx3_is_cf_op(I) || I->op == AGX_OPCODE_WAIT_PIX ||
           I->op == AGX_OPCODE_SIGNAL_PIX || I->op == AGX_OPCODE_LD_TILE)
@@ -6240,22 +6267,25 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
          /* Apple's BG builtins for other layouts store each target once, in
           * no required order, so only require disjoint whole-pixel stores.
           * A multisample clear stores each target through the coverage
-          * register, as the one-target multisample background does. */
+          * register, as the one-target multisample background does. Five
+          * and eight RGBA32Float clears store up to offset 112 the same
+          * way. */
          const int width = agx3_tile_format_width(I->format);
          const unsigned size_B =
             width < 0 ? 0 : util_last_bit(I->mask) << width;
-         const uint64_t bytes =
-            BITFIELD64_MASK(size_B) << MIN2(I->pixel_offset, 63);
          struct agx3_tile_sample sample;
          if (!size_B || stores >= AGX_MAX_RTS ||
-             I->pixel_offset + size_B > 64 ||
-             (written_B & bytes) || I->nr_srcs != 3 || I->nr_dests != 0 ||
+             I->pixel_offset + size_B > AGX_G17P_MAX_BYTES_PER_SAMPLE ||
+             BITSET_TEST_RANGE(written_B, I->pixel_offset,
+                               I->pixel_offset + size_B - 1) ||
+             I->nr_srcs != 3 || I->nr_dests != 0 ||
              I->explicit_coords ||
              !agx3_tile_sample_operand(I->src[1], &sample) ||
              sample.reg != (ctx->key->fs.nr_samples > 1) ||
              !agx_is_null(I->src[2]))
             return false;
-         written_B |= bytes;
+         BITSET_SET_RANGE(written_B, I->pixel_offset,
+                          I->pixel_offset + size_B - 1);
          stores++;
       } else if (I->op == AGX_OPCODE_ST_TILE) {
          const bool rgba8 = I->format == AGX_FORMAT_U8NORM && I->mask == 15;
@@ -6452,7 +6482,8 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
             return false;
          values[reg] = UINT_MAX;
          if (I->op == AGX_OPCODE_MOV_IMM) {
-            if (mixed_count ? I->imm >= 64 : (I->imm > 48 || I->imm % 4))
+            if (mixed_count ? I->imm >= AGX_G17P_MAX_BYTES_PER_SAMPLE
+                            : (I->imm > 48 || I->imm % 4))
                return false;
             values[reg] = I->imm;
          } else if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_X && x == UINT_MAX) {
@@ -7113,7 +7144,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                if (phase != (load ? 1 : 3) ||
                    !((agx3_g17p_8norm_format(P->format) &&
                       (P->mask == 3 || P->mask == 15)) ||
-                     (P->format == AGX_FORMAT_RGB10A2 && P->mask == 1)) || P->pixel_offset || P->explicit_coords)
+                     ((P->format == AGX_FORMAT_RGB10A2 ||
+                       P->format == AGX_FORMAT_RGB9E5) && P->mask == 1)) ||
+                    P->pixel_offset || P->explicit_coords)
                   g17p_blend_protocol = false;
                phase = load ? 2 : 4;
             } else if (P->op == AGX_OPCODE_SIGNAL_PIX) {
@@ -7261,6 +7294,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_EXPORT)
             continue;
          e->is_async = agx3_is_async(I) || I->agx3_tex_coord_start;
+         e->reissues_live_slot = I->op == AGX_OPCODE_LDCF;
          if (I->agx3_tex_coord_start)
             e->preferred_slot = native_coord_preferred_slot;
          /* Plain 2D and 3D register-LOD fetches have two independent
@@ -11267,7 +11301,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool swap = I->src[0].type == AGX_INDEX_IMMEDIATE;
             const agx_index src = I->src[swap ? 1 : 0];
             const agx_index zero = I->src[swap ? 0 : 1];
-            if (agx3_src_is_register(src) && !src.memory && !src.abs && !src.neg &&
+            if (agx3_src_is_register(src) && !src.memory && !src.abs &&
+                (!src.neg || !I->saturate) &&
                 (!src.kill || src.discard) && src.size == AGX_SIZE_32 &&
                 agx_channels(src) == 1 &&
                 zero.type == AGX_INDEX_IMMEDIATE && zero.value == 0x80 &&
@@ -11277,9 +11312,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .dest_cache = I->dest[0].cache, .wait_mask = wait,
                };
                uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], len;
-               if (!agx3_falu_narrow_f32(enc, I->dest[0].value, src.value,
-                                         I->saturate, &runtime, bytes, &len) ||
-                   !agx3_append(emission, bytes, len))
+               /* -x is exactly -0.0 - x. */
+               const bool encoded =
+                  src.neg ? agx3_falu_narrow_imm_sub_f32(
+                               enc, I->dest[0].value, 0x80, src.value,
+                               &runtime, bytes, &len)
+                          : agx3_falu_narrow_f32(enc, I->dest[0].value,
+                                                 src.value, I->saturate,
+                                                 &runtime, bytes, &len);
+               if (!encoded || !agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
                continue;
             }
@@ -12781,32 +12822,56 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         /* a & ~b (truth table 0x2) and ~(a | b) (0x1) are their own
-          * two-register instructions. */
+         /* ~(a | b) (truth table 0x1), a & ~b (0x2), ~a & b (0x4),
+          * ~(a & b) (0x7), ~(a ^ b) (0x9), a | ~b (0xB) and ~a | b (0xD) are
+          * their own two-register instructions; the one-sided forms take
+          * their operands in order. */
+         const unsigned bit_tt = I->truth_table & 0xfu;
          if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_BITOP &&
-             ((I->truth_table & 0xfu) == 0x2u ||
-              (I->truth_table & 0xfu) == 0x1u) && I->nr_dests == 1 &&
-             I->nr_srcs == 2) {
+             (bit_tt == 0x1u || bit_tt == 0x2u || bit_tt == 0x4u ||
+              bit_tt == 0x7u || bit_tt == 0x9u || bit_tt == 0xbu ||
+              bit_tt == 0xdu) &&
+             I->nr_dests == 1 && I->nr_srcs == 2) {
             const agx_index dest = I->dest[0];
             if (!agx3_vary_reg32(dest) || agx_channels(dest) != 1)
                AGX3_REFUSE(I);
+            const bool swap = bit_tt == 0x4u || bit_tt == 0xdu;
             uint16_t src[2];
             enum agx3_alu_hint hints[2];
             for (unsigned i = 0; i < 2; ++i) {
-               if (!agx3_vary_reg32(I->src[i]) ||
-                   agx_channels(I->src[i]) != 1 || I->src[i].abs ||
-                   I->src[i].neg)
+               const agx_index x = I->src[swap ? 1 - i : i];
+               if (!agx3_vary_reg32(x) || agx_channels(x) != 1 || x.abs ||
+                   x.neg)
                   AGX3_REFUSE(I);
-               src[i] = I->src[i].value;
-               hints[i] = agx3_post_ra_hint(I->src[i]);
+               src[i] = x.value;
+               hints[i] = agx3_post_ra_hint(x);
             }
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
-            const bool nor = (I->truth_table & 0xfu) == 0x1u;
-            if (!(nor ? agx3_alu_bit_nor(enc, dest.value, src, hints,
-                                         dest.cache, wait, bytes, &length)
-                      : agx3_alu_bit_andc(enc, dest.value, src, hints,
-                                          dest.cache, wait, bytes, &length)) ||
-                !agx3_append(emission, bytes, length))
+            bool encoded;
+            switch (bit_tt) {
+            case 0x1u:
+               encoded = agx3_alu_bit_nor(enc, dest.value, src, hints,
+                                          dest.cache, wait, bytes, &length);
+               break;
+            case 0x2u:
+            case 0x4u:
+               encoded = agx3_alu_bit_andc(enc, dest.value, src, hints,
+                                           dest.cache, wait, bytes, &length);
+               break;
+            case 0x7u:
+               encoded = agx3_alu_bit_nand(enc, dest.value, src, hints,
+                                           dest.cache, wait, bytes, &length);
+               break;
+            case 0x9u:
+               encoded = agx3_alu_bit_xnor(enc, dest.value, src, hints,
+                                           dest.cache, wait, bytes, &length);
+               break;
+            default:
+               encoded = agx3_alu_bit_orc(enc, dest.value, src, hints,
+                                          dest.cache, wait, bytes, &length);
+               break;
+            }
+            if (!encoded || !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;
          }
