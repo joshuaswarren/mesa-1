@@ -87,6 +87,12 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    case AGX_OPCODE_ICMP_QUAD_BALLOT:
       return false;
    case AGX_OPCODE_EXPORT:
+      /* Register allocation copies an export's uniform source into its
+       * output register. AGX3 grounds that copy only for whole words; a
+       * half uniform (a 16-bit constant such as a stencil reference) has no
+       * witnessed uniform-to-half copy, so it is split from its aligned word
+       * below, ahead of the export run. */
+      return !(encoding == AGX_ISA_ENCODING_AGX3B && size == AGX_SIZE_16);
    case AGX_OPCODE_PHI:
       /* We would fail validation otherwise */
       return true;
@@ -111,7 +117,20 @@ void
 agx_lower_uniform_sources(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
-      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_instr *at = I;
+
+      /* Exports end the block and admit no instruction between them; place
+       * their materialized sources before the first export of the run. */
+      if (I->op == AGX_OPCODE_EXPORT) {
+         while (at->link.prev != &v_block->instructions) {
+            agx_instr *prev = list_entry(at->link.prev, agx_instr, link);
+            if (prev->op != AGX_OPCODE_EXPORT)
+               break;
+            at = prev;
+         }
+      }
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(at));
 
       agx_foreach_src(I, s) {
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
