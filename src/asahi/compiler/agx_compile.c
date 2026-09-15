@@ -6384,8 +6384,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    AGX_PASS(ctx, agx_ra);
 
-   /* Apple's G17P compiler publishes a 16-byte scratch footprint for both
-    * compute and fragment shaders that consume a device atomic's return.
+   /* Apple's G17P compiler publishes a 16-byte scratch footprint for compute,
+    * vertex and fragment shaders that consume a device atomic's return.
     * The otherwise equivalent return-unused shaders publish zero, and the
     * returned form immediately reloads the old value from that thread-private
     * word. applegpu_g17p places the word directly above the spill frame: at
@@ -6394,6 +6394,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * allocator-created spill size. */
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        (ctx->stage == MESA_SHADER_COMPUTE ||
+        ctx->stage == MESA_SHADER_VERTEX ||
         ctx->stage == MESA_SHADER_FRAGMENT)) {
       agx_foreach_instr_global(ctx, I) {
          if (I->op == AGX_OPCODE_ATOMIC && I->nr_dests == 1 &&
