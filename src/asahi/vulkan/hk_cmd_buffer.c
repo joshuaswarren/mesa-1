@@ -1302,8 +1302,10 @@ hk_g17p_basic_fragment_layout(struct hk_cmd_buffer *cmd)
  * HAL200 updateVaryingTable (0x3efa58) uses the same CF entry encoding for
  * smooth, linear and flat inputs, including their mixture in one shader.
  * Flat inputs select C. Native G17P Point and Triangle pipelines have identical
- * complete fragment text for flat vec2/vec3/vec4 inputs. Admit points with the
- * ordinary first-vertex selector as well as non-fan triangles, but never the
+ * complete fragment text for flat vec2/vec3/vec4 inputs. The provoking selector
+ * is topology-independent, so line lists and strips use the same witnessed
+ * first/last selector values as triangles. Admit points with the ordinary
+ * first-vertex selector as well as non-fan lines and triangles, but never the
  * first-fan layout. Position Z and reciprocal W use native coefficient sources.
  */
 bool
@@ -1339,11 +1341,15 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
       if (!b->smooth) {
          const bool point = gfx->topology == AGX_PRIMITIVE_POINTS &&
                             gfx->provoking == 0;
+         const bool line =
+            (gfx->topology == AGX_PRIMITIVE_LINES ||
+             gfx->topology == AGX_PRIMITIVE_LINE_STRIP) &&
+            (gfx->provoking == 0 || gfx->provoking == 2);
          const bool triangle =
             (gfx->topology == AGX_PRIMITIVE_TRIANGLES ||
              gfx->topology == AGX_PRIMITIVE_TRIANGLE_STRIP) &&
             (gfx->provoking == 0 || gfx->provoking == 2);
-         if (b->perspective || (!point && !triangle))
+         if (b->perspective || (!point && !line && !triangle))
             return false;
       }
       if (b->slot == VARYING_SLOT_POS) {
