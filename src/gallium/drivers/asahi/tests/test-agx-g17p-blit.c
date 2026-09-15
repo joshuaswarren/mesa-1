@@ -1021,7 +1021,7 @@ static bool
 check_vertex_output_shapes(struct pipe_context *pctx)
 {
    bool ok = true;
-   for (unsigned shape = 0; shape < 12; ++shape) {
+   for (unsigned shape = 0; shape < 13; ++shape) {
       const unsigned clip_count = shape < 8 ? shape + 1 : shape == 8 ? 8 : 0;
       const bool two_varyings = shape == 9 || shape == 11;
       /* KHR-GL30.transform_feedback3.multiple_streams links no fragment
@@ -1035,6 +1035,17 @@ check_vertex_output_shapes(struct pipe_context *pctx)
        * / 4 - 1 constant vec4 varyings and select gl_Position by gl_VertexID.
        */
       const unsigned interleaved = shape == 10 ? 64 / 4 - 1 : 0;
+      /* KHR-GL33.transform_feedback_overflow_query_ARB's program captures
+       * four SCALAR float varyings and never writes gl_Position at all --
+       * its vertex shader body is only `output1..4 = 1.0..4.0`.  Every other
+       * shape here writes position, so nothing covered a positionless one,
+       * and it is REFUSED: with no position the user outputs reach UVS index
+       * 4 while the output count is only 4, which is below every qualified
+       * shape in agx3_pack_binary.c's g17p_user_output_protocol (6, or >= 5
+       * with terminal/leave-staging-alone, or the Firefox dense suffix), so
+       * the `st_vary ... value >= 4` guard refuses it.  That is 5 of the 6
+       * gl33 failures. Expected to fail until the shape is qualified. */
+      const bool scalar_only = shape == 12;
       nir_builder vs = nir_builder_init_simple_shader(
          MESA_SHADER_VERTEX, &agx_nir_options, "vertex output shape");
       nir_def *vid = nir_i2f32(&vs, nir_load_vertex_id(&vs));
@@ -1062,8 +1073,20 @@ check_vertex_output_shapes(struct pipe_context *pctx)
                              .src_type = nir_type_float32);
          }
       }
-      nir_store_output(&vs, pos, nir_imm_int(&vs, 0), .base = 0,
-                       .write_mask = 0xf, .io_semantics.location = VARYING_SLOT_POS);
+      if (scalar_only) {
+         for (unsigned i = 0; i < 4; ++i) {
+            nir_store_output(&vs, nir_imm_float(&vs, 1.0f + i),
+                             nir_imm_int(&vs, 0), .base = 1 + i,
+                             .write_mask = 1,
+                             .io_semantics.location = VARYING_SLOT_VAR0 + i,
+                             .io_semantics.num_slots = 1,
+                             .src_type = nir_type_float32);
+         }
+      } else {
+         nir_store_output(&vs, pos, nir_imm_int(&vs, 0), .base = 0,
+                          .write_mask = 0xf,
+                          .io_semantics.location = VARYING_SLOT_POS);
+      }
       for (unsigned i = 0; i < clip_count; ++i) {
          nir_def *v = nir_fadd_imm(
             &vs,
