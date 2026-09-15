@@ -238,11 +238,15 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       !prolog && !nr_samples_shaded && main && epilog &&
       agx3_fuse_colour_parts(&main->info.agx3_colour_link,
                               &epilog->info.agx3_colour_link, fused_colour);
+   /* A native fragment enters its pixel transaction once. When the main part
+    * already entered (before a derivative consumer or a memory side effect),
+    * drop the epilog's gate; that is only sound when no epilog branch spans
+    * the removed bytes. */
    const bool dedup_entry = dev->chip == AGX_CHIP_G17P && fragment &&
       !prolog && !nr_samples_shaded && !colour_fused && main && epilog &&
       main->info.agx3_colour_link.entry_emitted &&
       epilog->info.agx3_colour_link.entry_emitted &&
-      epilog->info.agx3_colour_link.straight_line;
+      epilog->info.agx3_colour_link.branch_free;
    if (dedup_entry) {
       const uint32_t off = epilog->info.agx3_colour_link.entry_offset;
       uint8_t gate[AGX3_PIXEL_MAX_LENGTH], gate_size;

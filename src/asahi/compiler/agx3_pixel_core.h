@@ -49,6 +49,22 @@ bool agx3_pixel_colour_entry(enum agx_isa_encoding enc,
                              uint8_t out[AGX3_PIXEL_MAX_LENGTH], uint8_t *len);
 
 /*
+ * Bracket a colourless fragment's returning memory atomic. Apple's G17P
+ * fragments with no colour writes acquire pixel class 4 without the colour
+ * selector (f14=4, no f34) immediately before the atomic, and follow the
+ * reload of its result with a barrier. A fragment returning a colour instead
+ * acquires colour partition 0's write class (870254040800) there, and its
+ * store later acquires only class 8. Voiding atomics and plain stores take
+ * neither. AGX3b only.
+ */
+bool agx3_pixel_atomic_acquire(enum agx_isa_encoding enc,
+                               uint8_t out[AGX3_PIXEL_MAX_LENGTH],
+                               uint8_t *len);
+bool agx3_pixel_atomic_barrier(enum agx_isa_encoding enc,
+                               uint8_t out[AGX3_PIXEL_MAX_LENGTH],
+                               uint8_t *len);
+
+/*
  * Return the read, write, and combined pixel classes for one colour-tile
  * partition.  G17P assigns two class bits per partition: RT0 uses 8/4/12,
  * RT1 uses 32/16/48, and RT2 uses 128/64/192.  These are the complete

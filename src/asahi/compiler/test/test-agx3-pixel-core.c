@@ -66,6 +66,20 @@ main(void)
    expect_refused("AGX2 colour entry",
                   agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX2, b, &len));
 
+   /* metal-nt -arch applegpu_g17p fragment storing the result of
+    * atomic_fetch_add_explicit(): class 4 without the colour selector
+    * before the atomic, a barrier after its reload. */
+   expect("AGX3b returning-atomic class",
+          agx3_pixel_atomic_acquire(AGX_ISA_ENCODING_AGX3B, b, &len), b, len,
+          "870254040000");
+   expect("AGX3b returning-atomic barrier",
+          agx3_pixel_atomic_barrier(AGX_ISA_ENCODING_AGX3B, b, &len), b, len,
+          "070454c40800");
+   expect_refused("AGX3c returning-atomic class",
+                  agx3_pixel_atomic_acquire(AGX_ISA_ENCODING_AGX3C, b, &len));
+   expect_refused("AGX3c returning-atomic barrier",
+                  agx3_pixel_atomic_barrier(AGX_ISA_ENCODING_AGX3C, b, &len));
+
    /* Native multi-RT shaders allocate two pixel classes per tile partition.
     * Prove the architectural mapping independently of any workload layout. */
    static const struct {

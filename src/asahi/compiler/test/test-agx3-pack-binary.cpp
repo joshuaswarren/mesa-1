@@ -2975,6 +2975,70 @@ TEST_F(AGX3PackBinary, DeviceAtomicsUseGenerationSpecificReturnRegisters)
    }
 }
 
+TEST_F(AGX3PackBinary, FragmentAtomicsEnterPixelTransactionFirst)
+{
+   /* shape 0: voiding atomic; 1: returning atomic; 2: returning atomic in a
+    * fragment that also writes a colour. */
+   for (unsigned shape = 0; shape < 3; ++shape) {
+      const bool returned = shape != 0;
+      const bool colour = shape == 2;
+      const auto enc = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      if (colour) {
+         b->shader->nir = rzalloc(mem_ctx, nir_shader);
+         b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+         b->shader->nir->info.outputs_written =
+            BITFIELD64_BIT(FRAG_RESULT_DATA0);
+      }
+      const agx_index value = agx_register(6, AGX_SIZE_32);
+      const agx_index result =
+         returned ? agx_register(6, AGX_SIZE_32) : agx_null();
+      agx_atomic_to(b, result, value, agx_uniform(0, AGX_SIZE_64),
+                    agx_immediate(0), AGX_ATOMIC_OPC_ADD);
+      agx_stop(b);
+
+      struct agx3_device_atomic_desc d = {
+         .op = AGX3_ATOMIC_ADD,
+         .value = 6,
+         .returns_value = returned,
+         .result = (uint16_t)(returned ? 6 : 0),
+         .slot = (uint8_t)(returned ? 1 : 0),
+         .base_kind = AGX3_ATOMIC_BASE_UNIFORM,
+         .index_kind = AGX3_ATOMIC_INDEX_IMMEDIATE,
+      };
+
+      /* metal-nt -arch applegpu_g17p fragments with no colour writes enter
+       * before the first atomic; only a returning atomic takes class 4 and
+       * the barrier after its reload. */
+      const bool bracket = returned && !colour;
+      std::vector<uint8_t> want;
+      uint8_t pixel[AGX3_PIXEL_MAX_LENGTH], pixel_len = 0;
+      ASSERT_TRUE(agx3_pixel_colour_entry(enc, pixel, &pixel_len));
+      append(want, pixel, pixel_len);
+      if (bracket) {
+         ASSERT_TRUE(agx3_pixel_atomic_acquire(enc, pixel, &pixel_len));
+         append(want, pixel, pixel_len);
+      }
+      uint8_t atomic[AGX3_ATOMIC_MAX_LENGTH], atomic_len = 0;
+      ASSERT_TRUE(agx3_atomic_encode_device(enc, &d, atomic, &atomic_len));
+      append(want, atomic, atomic_len);
+      if (returned)
+         append_g17p_atomic_return_reload(want, 6);
+      if (bracket) {
+         ASSERT_TRUE(agx3_pixel_atomic_barrier(enc, pixel, &pixel_len));
+         append(want, pixel, pixel_len);
+      }
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want) << "shape=" << shape;
+      EXPECT_TRUE(b->shader->agx3_colour_link.entry_emitted);
+      EXPECT_EQ(b->shader->agx3_colour_link.entry_offset, 0u);
+      EXPECT_TRUE(b->shader->agx3_colour_link.branch_free);
+   }
+}
+
 TEST_F(AGX3PackBinary, DeviceAtomicUsesNativeMaskedExecutionMode)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -10019,8 +10083,10 @@ TEST_F(AGX3PackBinary, FragmentSideEffectLateDepthMatchesNativeProtocol)
 
    /* Fresh Apple fragment-atomic tail from the same d150404a... AIR /
     * 32cf4963... native pipeline: entry, stage Z, acquire class1, depthf,
-    * release. Construct every instruction independently, then compare the
-    * complete backend stream. */
+    * release. With no colour store after it, the release ends the program
+    * and carries the final bit, as in metal-nt -arch applegpu_g17p fragments
+    * with no colour writes (070254010200). Construct every instruction
+    * independently, then compare the complete backend stream. */
    std::vector<uint8_t> want;
    uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
@@ -10035,7 +10101,7 @@ TEST_F(AGX3PackBinary, FragmentSideEffectLateDepthMatchesNativeProtocol)
    ASSERT_TRUE(agx3_zs_encode_depth_stencil(enc, &zs, true, false, bytes,
                                             &len));
    append(want, bytes, len);
-   ASSERT_TRUE(agx3_pixel_release(enc, 1, false, 0, bytes, &len));
+   ASSERT_TRUE(agx3_pixel_release(enc, 1, true, 0, bytes, &len));
    append(want, bytes, len);
    want.insert(want.end(), {0x0e, 0, 0, 0});
    EXPECT_EQ(pack(b), want);

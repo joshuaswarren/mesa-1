@@ -7630,15 +7630,19 @@ g17p_front_facing_protocol(const struct agx_shader_part *part)
 }
 
 static bool
-g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
+g17p_depth_protocol(const struct agx_shader_part *part, bool final)
 {
-   (void)variant;
    if (!part->info.agx3_staging_known || part->info.agx3_staging_halfs != 4)
       return false;
    const uint8_t acquire[] = {0x87, 0x02, 0x54, 0x01, 0, 0};
-   const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, 0, 0};
+   const uint8_t release[] = {0x07, 0x02, 0x54, 0x01, final ? 0x02 : 0, 0};
    /* Two independent f32 staging writes, then one class-1 transaction.
-    * The source run is allocator-owned; do not pin a register allocation. */
+    * The source run is allocator-owned; do not pin a register allocation.
+    * A part that ends the program with no colour store makes the release
+    * final: metal-nt -arch applegpu_g17p depth-only fragments (the
+    * g17p-depth-witness probe, and a [[depth(any)]] function with no colour
+    * attachments) end in 870254010000 d71454000003 070254010200, while a
+    * fragment returning a colour releases class 1 plainly before its store. */
    for (unsigned slot = 1; slot <= 6; ++slot) {
       for (unsigned src = 0; src < 126; src += 2) {
          for (unsigned discard = 0; discard < 2; ++discard) {
@@ -7962,6 +7966,8 @@ static bool
 run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
 {
    nir_shader *nir = c->build();
+   const bool writes_colour =
+      nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DATA0);
 
    if (c->lower_combined_sampler) {
       struct agx_g17p_combined_sampler_binding binding;
@@ -8108,7 +8114,7 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
 
       if (result && enc == AGX_ISA_ENCODING_AGX3B &&
           c->expected_g17p_depth) {
-         result = g17p_depth_protocol(&part, c->expected_g17p_depth);
+         result = g17p_depth_protocol(&part, !writes_colour);
          if (!result)
             fprintf(stderr, "%s %s: depth staging protocol mismatch\n",
                     enc_name(enc), c->name);
@@ -8553,10 +8559,11 @@ main(int argc, char **argv)
       all_ok = false;
    }
 
-   if (!test_combined_sampler_biased_and_gradient(false) ||
-       !test_combined_sampler_biased_and_gradient(true)) {
-      fputs("combined sampler lowering disowned an API bias or gradient\n",
-            stderr);
+   if (!test_combined_sampler_biased_and_gradient(false, false) ||
+       !test_combined_sampler_biased_and_gradient(true, false) ||
+       !test_combined_sampler_biased_and_gradient(false, true)) {
+      fputs("combined sampler lowering disowned a 2D/cube API bias or gradient\n",
+             stderr);
       all_ok = false;
    }
 

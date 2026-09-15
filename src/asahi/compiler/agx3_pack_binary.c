@@ -2868,16 +2868,16 @@ agx3_emit_normflt(struct util_dynarray *emission, enum agx_isa_encoding enc,
  * mask Apple's fragment corpus puts in the instruction, so it passes straight
  * through; agx3_pixel_core refuses any class Apple never emitted.
  *
- * signal_pix has no producer in Mesa today. It is routed anyway because it is
- * grounded, but only for the release descriptors witnessed without the
- * end-of-sequence bit: Mesa's IR has no way to say "this is the final release",
- * and inventing that bit is exactly the kind of guess this backend refuses.
+ * signal_pix releases the late depth/stencil class of a fragment with memory
+ * side effects. `last` sets the end-of-sequence bit, which Apple puts on the
+ * final release of the whole fragment program.
  */
 static bool
 agx3_emit_pixel(struct util_dynarray *emission, enum agx_isa_encoding enc,
-                const agx_instr *I, uint16_t wait_mask)
+                const agx_instr *I, uint16_t wait_mask, bool last)
 {
-   if (I->nr_dests != 0 || I->nr_srcs != 0)
+   if (I->nr_dests != 0 || I->nr_srcs != 0 ||
+       (last && I->op != AGX_OPCODE_SIGNAL_PIX))
       return false;
 
    uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
@@ -2885,7 +2885,7 @@ agx3_emit_pixel(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const bool ok =
       I->op == AGX_OPCODE_WAIT_PIX
          ? agx3_pixel_wait(enc, I->writeout, wait_mask, bytes, &len)
-         : agx3_pixel_release(enc, I->writeout, false, wait_mask, bytes, &len);
+         : agx3_pixel_release(enc, I->writeout, last, wait_mask, bytes, &len);
 
    return ok && agx3_append(emission, bytes, len);
 }
@@ -7153,6 +7153,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned sample_group_members_left = 0;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
+   bool has_memory_write = false;
+   /* The last pixel release of a program-ending fragment part, when no
+    * colour store, coverage update, acquisition or branch follows it. */
+   const agx_instr *g17p_final_release = NULL;
    bool has_zs_emit = false;
    bool g17p_fragment_helper_protocol =
       enc == AGX_ISA_ENCODING_AGX3B &&
@@ -7193,6 +7197,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             has_packed_array_layer = true;
          if (scan_I->op == AGX_OPCODE_ST_TILE)
             tile_stores_left++;
+         if (scan_I->op == AGX_OPCODE_SIGNAL_PIX)
+            g17p_final_release = scan_I;
+         else if (scan_I->op == AGX_OPCODE_WAIT_PIX ||
+                  scan_I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 ||
+                  agx3_is_cf_op(scan_I))
+            g17p_final_release = NULL;
          if (scan_I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 ||
              scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3 ||
              scan_I->op == AGX_OPCODE_ZS_EMIT)
@@ -7200,6 +7210,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (scan_I->op == AGX_OPCODE_ZS_EMIT ||
              scan_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
             has_zs_emit = true;
+         if (scan_I->op == AGX_OPCODE_ATOMIC ||
+             scan_I->op == AGX_OPCODE_DEVICE_STORE ||
+             scan_I->op == AGX_OPCODE_IMAGE_WRITE)
+            has_memory_write = true;
          if (scan_I->op == AGX_OPCODE_DEVICE_LOAD)
             device_loads_left++;
          if (scan_I->op == AGX_OPCODE_IMAGE_WRITE)
@@ -7388,8 +7402,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       }
       g17p_blend_protocol &= phase == 4;
    }
+   /* A native fragment program ends with a final release: the colour store's
+    * class 12 with 0x200, or, with no colour store, its late depth class.
+    * metal-nt -arch applegpu_g17p fragments with no colour writes end in
+    * pixwait(1), depthf, 070254010200; the same atomic fragment returning a
+    * colour releases class 1 plainly and ends in 0702540c0200. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_FRAGMENT ||
+       ctx->key->no_stop || ctx->key->fs.ignore_tib_dependencies ||
+       tile_stores_left != 0)
+      g17p_final_release = NULL;
    const bool g17p_pixel_protocol =
       g17p_colour_protocol || g17p_blend_protocol || has_coverage_write;
+   const bool g17p_colourless_fragment =
+      enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
+      !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 0 &&
+      !(ctx->nir && (ctx->nir->info.outputs_written &
+                     BITFIELD64_RANGE(FRAG_RESULT_DATA0, AGX_MAX_RTS)));
    const agx_instr *g17p_deferred_write =
       g17p_pixel_protocol && !g17p_mrt.valid
          ? agx3_g17p_deferred_write_wait(ctx, g17p_blend_protocol)
@@ -7400,7 +7428,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       g17p_mrt.valid ? g17p_mrt.classes
                      : (g17p_colour_protocol || g17p_blend_protocol ? 1 : 0);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
+   ctx->agx3_colour_link.branch_free = list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, entry_I) {
+      if (agx3_is_cf_op(entry_I))
+         ctx->agx3_colour_link.branch_free = false;
       if (agx3_is_cf_op(entry_I) ||
           entry_I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 ||
           entry_I->op == AGX_OPCODE_ZS_EMIT_AGX3)
@@ -7820,13 +7851,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       : (ctx->stage == MESA_SHADER_FRAGMENT &&
          (has_coverage_write || has_zs_emit)) ? 8
                                               : 0;
-   if (has_coverage_write && enc == AGX_ISA_ENCODING_AGX3B &&
+   if ((has_coverage_write || (has_memory_write && !ctx->key->secondary)) &&
+       enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        !ctx->key->fs.ignore_tib_dependencies) {
       /* Native memory_discard enters before its first device load, then
        * uses unmarked SR/RHW inputs throughout the coverage operation.
        * This is the same existing entry gate, moved before the main part's
-       * root loads; do not restart the input protocol after MOVMSK. */
+       * root loads; do not restart the input protocol after MOVMSK.
+       *
+       * An API fragment shader with memory side effects enters before the
+       * first of them too. metal-nt -arch applegpu_g17p fragments with no
+       * colour writes emit 870254000600 ahead of a device store, a voiding
+       * atomic and a returning atomic alike. Without it, only the depth
+       * epilog opened the gate, after every side effect of the main part.
+       * agx_fast_link removes the epilog's gate. */
       uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
       if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
           !agx3_append(emission, entry, entry_len))
@@ -8583,7 +8622,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ctx->agx3_colour_link.entry_offset = emission->size - entry_len - initial_size;
                g17p_colour_open = true;
             }
-            if (!agx3_emit_pixel(emission, enc, I, wait))
+            if (!agx3_emit_pixel(emission, enc, I, wait,
+                                 I == g17p_final_release))
                AGX3_REFUSE(I);
             continue;
          }
@@ -8739,7 +8779,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   ctx->agx3_colour_link.entry_offset = emission->size - entry_len - initial_size;
                   g17p_colour_open = true;
                }
-               if (!agx3_emit_pixel(emission, enc, g17p_deferred_write, 0))
+               if (!agx3_emit_pixel(emission, enc, g17p_deferred_write, 0,
+                                    false))
                   AGX3_REFUSE(I);
             }
             /* Apple's per-sample RGBA32 fragments store from halves 24 and
@@ -8900,7 +8941,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                  !agx3_append(emission, bytes, len)))
                AGX3_REFUSE(I);
             if (g17p_deferred_zs_wait &&
-                !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
+                !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0,
+                                 false))
                AGX3_REFUSE(I);
             g17p_deferred_zs_wait = NULL;
 
@@ -9006,7 +9048,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_stage_copy_kill(enc, 0, depth.value, true, 1, wait,
                                       bytes, &len) ||
                 !agx3_append(emission, bytes, len) ||
-                !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0))
+                !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0,
+                                 false))
                AGX3_REFUSE(I);
             const struct agx3_zs_desc d = {
                .value = 0, .value_kill = true, .slot = 1, .wait_mask = 1,
@@ -9138,13 +9181,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool g17p_returned =
                enc == AGX_ISA_ENCODING_AGX3B && returned;
             const uint8_t atomic_slot = g17p_returned ? 1 : slot;
+            /* A colourless fragment's returning atomic runs under pixel
+             * class 4 and is followed by a barrier; see
+             * agx3_pixel_atomic_acquire(). With a colour store, Apple takes
+             * colour partition 0's write class instead, and the store then
+             * acquires only its read class; that shared protocol is not
+             * encoded, so colour-writing fragments keep neither. */
+            const bool pixel_bracket = g17p_returned &&
+               g17p_colourless_fragment;
+            uint8_t pixel[AGX3_PIXEL_MAX_LENGTH], pixel_len = 0;
             /* The old value must be published above the spill frame */
             const unsigned return_tps_half =
                g17p_returned ? ctx->agx3_atomic_return_tps_half : 0;
             if ((g17p_returned &&
                  (slot != 6 || return_tps_half * 2 < ctx->scratch_size_B)) ||
                 !agx3_translate_device_atomic(I, enc, block->divergent,
-                                              atomic_slot, wait, &d))
+                                              atomic_slot, wait, &d) ||
+                (pixel_bracket &&
+                 (!agx3_pixel_atomic_acquire(enc, pixel, &pixel_len) ||
+                  !agx3_append(emission, pixel, pixel_len))))
                AGX3_REFUSE(I);
             d.result_tps_half = return_tps_half;
             if (!agx3_atomic_encode_device(enc, &d, bytes, &len) ||
@@ -9167,7 +9222,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint8_t reload_len = 0;
                if (!agx3_static_spill_encode_load_form(
                       enc, &reload, 1, reload_bytes, &reload_len) ||
-                   !agx3_append(emission, reload_bytes, reload_len))
+                   !agx3_append(emission, reload_bytes, reload_len) ||
+                   (pixel_bracket &&
+                    (!agx3_pixel_atomic_barrier(enc, pixel, &pixel_len) ||
+                     !agx3_append(emission, pixel, pixel_len))))
                   AGX3_REFUSE(I);
             }
             continue;

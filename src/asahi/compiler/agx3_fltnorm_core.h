@@ -234,9 +234,13 @@ bool agx3_fltnorm_relocate_start(uint8_t *code, size_t size,
 /* Finite compiler provenance for a uniform-copy-only main and an opaque
  * RGBA8 two-pack epilog. No executable byte parsing is used for fusion. */
 struct agx3_colour_link_info {
-   /* Producer-recorded native pixel-entry provenance for part linking. */
+   /* Producer-recorded native pixel-entry provenance for part linking.
+    * straight_line admits a derivative-consumer entry gate in this part;
+    * branch_free says no branch crosses any byte of the part, so the
+    * linker may remove this part's entry gate. */
    bool entry_emitted;
    bool straight_line;
+   bool branch_free;
    uint32_t entry_offset;
 
    /* Colour pixel classes consumed by this part: bit n is the class of the
