@@ -67,8 +67,10 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
        * (tools/shared-atomic-probe.c mode 4: a 145-word shared struct copy
        * left every result untouched; AGX_MESA_DEBUG=nopromote passes). The
        * only witnessed uniform base is u4 in one small kernel, so keep
-       * threadgroup bases in GPRs on AGX3 and let this pass copy them. */
-      if (encoding != AGX_ISA_ENCODING_AGX2)
+       * threadgroup bases in GPRs on AGX3B and let this pass copy them.
+       * AGX3C still uses the fixed u8 base and has no grounded half-uniform
+       * copy; retain that existing encoding's local-memory contract. */
+      if (encoding == AGX_ISA_ENCODING_AGX3B)
          return false;
       return src_index == (op == AGX_OPCODE_LOCAL_LOAD ? 0 : 1);
    case AGX_OPCODE_IMAGE_WRITE:
