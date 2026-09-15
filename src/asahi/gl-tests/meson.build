@@ -470,6 +470,42 @@ test(
 )
 
 test(
+  'asahi-g13g-gl-xfb-geometry-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_geometry,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g13g-gl-xfb-overflow-query-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_overflow_query,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
   'asahi-g17p-gl-xfb-overflow-query-shim-submit',
   prog_python,
   args : [

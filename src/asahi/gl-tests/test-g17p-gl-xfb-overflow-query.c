@@ -33,6 +33,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* A shim control run must not silently answer from a different chip. */
+static bool
+renderer_is_expected(void)
+{
+   const char *expect = getenv("ASAHI_GL_EXPECT_RENDERER");
+   const char *renderer = (const char *)glGetString(GL_RENDERER);
+   if (expect && (!renderer || !strstr(renderer, expect))) {
+      fprintf(stderr,
+              "xfb overflow: expected a renderer containing '%s', got '%s'\n",
+              expect, renderer ? renderer : "(null)");
+      return false;
+   }
+   return true;
+}
+
 static GLuint
 compile_shader(GLenum stage, const char *source)
 {
@@ -717,6 +732,9 @@ main(void)
 
    printf("xfb overflow: renderer %s\n",
           (const char *)glGetString(GL_RENDERER));
+
+   if (!renderer_is_expected())
+      return 1;
 
    bool ok = true;
    ok &= single_stream(GL_INTERLEAVED_ATTRIBS, "interleaved");

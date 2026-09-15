@@ -44,6 +44,21 @@ static const char fs_source[] =
    "    color = vec4(0.5);\n"
    "}\n";
 
+/* A shim control run must not silently answer from a different chip. */
+static bool
+renderer_is_expected(void)
+{
+   const char *expect = getenv("ASAHI_GL_EXPECT_RENDERER");
+   const char *renderer = (const char *)glGetString(GL_RENDERER);
+   if (expect && (!renderer || !strstr(renderer, expect))) {
+      fprintf(stderr,
+              "xfb geometry: expected a renderer containing '%s', got '%s'\n",
+              expect, renderer ? renderer : "(null)");
+      return false;
+   }
+   return true;
+}
+
 static GLuint
 compile_shader(GLenum stage, const char *source)
 {
@@ -283,6 +298,9 @@ main(void)
       return 1;
 
    printf("xfb geometry: renderer %s\n", (const char *)glGetString(GL_RENDERER));
+
+   if (!renderer_is_expected())
+      return 1;
 
    /* The CTS's own limit arithmetic, verbatim. */
    GLint interleaved = 0, geometry_total = 0;
