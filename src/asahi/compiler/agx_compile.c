@@ -2906,6 +2906,43 @@ agx_fminmax_to(agx_builder *b, agx_index dst, agx_index s0, agx_index s1,
    return agx_fcmpsel_to(b, dst, s0, s1, s0, s1, fcond);
 }
 
+/* A fragment shader that reads a varying array at a run-time index computes
+ * its coefficient index as dest16 = imm + (index << 2), because the ITERPROJ
+ * coefficient operand is sixteen bits wide. AGX3B's shifted add
+ * (agx3_iadd_core.h) takes a narrow *source* but always writes a 32-bit
+ * register, so that shape was refused and the whole shader with it -- which
+ * is KHR-GL33.shaders.indexing.varying_array's four *_dynamic_read cases.
+ *
+ * Give the add the wide destination it requires and narrow afterwards. The
+ * low sixteen bits are unchanged by widening the sum, so this is exact.
+ */
+static void
+agx_lower_agx3_shifted_iadd_dest(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_IADD || I->nr_dests != 1 || I->nr_srcs != 2 ||
+          I->shift == 0 || I->saturate ||
+          I->dest[0].size != AGX_SIZE_16 || agx_channels(I->dest[0]) != 1)
+         continue;
+
+      /* Only the constant-addend form (agx3_iadd_core.h) is affected: it is
+       * the one that always writes a 32-bit register. A shifted add of two
+       * registers has its own encoding and keeps its narrow destination. */
+      if (I->src[0].type != AGX_INDEX_IMMEDIATE ||
+          I->src[1].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_after_instr(I));
+      agx_index narrow = I->dest[0];
+      agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+      I->dest[0] = wide;
+      agx_subdivide_to(&b, narrow, wide, 0);
+   }
+}
+
 static void
 agx_lower_agx3_fma_sources(agx_context *ctx)
 {
@@ -6432,6 +6469,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    }
 
    agx_lower_agx3_fma_sources(ctx);
+   agx_lower_agx3_shifted_iadd_dest(ctx);
 
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       agx_materialize_agx3_alu_constants(ctx);
