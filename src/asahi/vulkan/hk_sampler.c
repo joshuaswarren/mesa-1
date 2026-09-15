@@ -88,7 +88,8 @@ uses_border(const VkSamplerCreateInfo *info)
 }
 
 static enum agx_border_colour
-is_border_color_custom(VkBorderColor color, bool workaround_rgba4)
+is_border_color_custom(VkBorderColor color, bool workaround_rgba4,
+                       bool int_border_custom)
 {
    switch (color) {
    case VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK:
@@ -97,6 +98,16 @@ is_border_color_custom(VkBorderColor color, bool workaround_rgba4)
        * formats to worry about.
        */
       return workaround_rgba4;
+
+   case VK_BORDER_COLOR_INT_OPAQUE_WHITE:
+   case VK_BORDER_COLOR_INT_OPAQUE_BLACK:
+      /* Native scaled views sample a normalized twin and rescale in the
+       * shader; the hardware's opaque white there is the format maximum,
+       * while the integer border means the texel value one
+       * (pipeline.*.sampler.*.a2r10g10b10_uscaled_pack32.*clamp_to_border*).
+       * Emulate like a custom border so the shader applies the recorded
+       * integer value. */
+      return int_border_custom;
 
    case VK_BORDER_COLOR_INT_CUSTOM_EXT:
    case VK_BORDER_COLOR_FLOAT_CUSTOM_EXT:
@@ -110,9 +121,9 @@ is_border_color_custom(VkBorderColor color, bool workaround_rgba4)
 /* Translate an American VkBorderColor into a Canadian agx_border_colour */
 static enum agx_border_colour
 translate_border_color(VkBorderColor color, bool custom_to_1,
-                       bool workaround_rgba4)
+                       bool workaround_rgba4, bool int_border_custom)
 {
-   if (is_border_color_custom(color, workaround_rgba4)) {
+   if (is_border_color_custom(color, workaround_rgba4, int_border_custom)) {
       return custom_to_1 ? AGX_BORDER_COLOUR_OPAQUE_WHITE
                          : AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
    }
@@ -153,7 +164,8 @@ translate_reduction_mode(VkSamplerReductionMode mode)
 static bool
 pack_sampler(const struct hk_physical_device *pdev,
              const struct VkSamplerCreateInfo *info, bool custom_to_1,
-             bool workaround_rgba4, VkSamplerReductionMode reduction_mode,
+             bool workaround_rgba4, bool int_border_custom,
+             VkSamplerReductionMode reduction_mode,
              struct hk_native_sampler_descriptor *out)
 {
    const struct hk_native_sampler_state state = {
@@ -176,7 +188,7 @@ pack_sampler(const struct hk_physical_device *pdev,
       .border_colour =
          uses_border(info)
             ? translate_border_color(info->borderColor, custom_to_1,
-                                     workaround_rgba4)
+                                     workaround_rgba4, int_border_custom)
             : AGX_BORDER_COLOUR_TRANSPARENT_BLACK,
       .reduction_mode = translate_reduction_mode(reduction_mode),
       .pixel_coordinates = info->unnormalizedCoordinates,
@@ -240,10 +252,13 @@ hk_CreateSampler(VkDevice device,
          sampler->ycbcr.chroma_reconstruction = false;
    }
 
-   bool workaround_rgba4 = dev->vk.enabled_features.customBorderColors;
+   bool workaround_rgba4 = dev->vk.enabled_features.customBorderColors ||
+                           agx_native_graphics(&dev->dev);
+   bool int_border_custom = agx_native_graphics(&dev->dev);
    bool custom_border =
       uses_border(info) &&
-      is_border_color_custom(info->borderColor, workaround_rgba4);
+      is_border_color_custom(info->borderColor, workaround_rgba4,
+                             int_border_custom);
 
    /* Sanity check the noborder setting. There's no way to recover from it being
     * wrong but at least we can make noise to lint for errors in the driconf.
@@ -265,7 +280,7 @@ hk_CreateSampler(VkDevice device,
    }
 
    struct hk_native_sampler_descriptor samp;
-   if (!pack_sampler(pdev, info, true, workaround_rgba4,
+   if (!pack_sampler(pdev, info, true, workaround_rgba4, int_border_custom,
                      sampler->vk.reduction_mode, &samp)) {
       hk_DestroySampler(device, hk_sampler_to_handle(sampler), pAllocator);
       return hk_sampler_pack_error(dev, info, sampler->vk.reduction_mode,
@@ -315,6 +330,7 @@ hk_CreateSampler(VkDevice device,
          plane2_info.minFilter = chroma_filter;
 
          if (!pack_sampler(pdev, &plane2_info, false, workaround_rgba4,
+                          int_border_custom,
                            sampler->vk.reduction_mode, &samp)) {
             hk_DestroySampler(device, hk_sampler_to_handle(sampler),
                               pAllocator);
@@ -337,7 +353,7 @@ hk_CreateSampler(VkDevice device,
       /* If the sampler uses custom border colours, we need both clamp-to-1
        * and clamp-to-0 variants. We treat these as planes.
        */
-      if (!pack_sampler(pdev, info, false, workaround_rgba4,
+      if (!pack_sampler(pdev, info, false, workaround_rgba4, int_border_custom,
                         sampler->vk.reduction_mode, &samp)) {
          hk_DestroySampler(device, hk_sampler_to_handle(sampler), pAllocator);
          return hk_sampler_pack_error(dev, info, sampler->vk.reduction_mode,
@@ -372,6 +388,7 @@ hk_CreateSampler(VkDevice device,
 
       sampler->custom_border = bc;
       sampler->has_border = true;
+      sampler->border_is_int = vk_border_color_is_int(info->borderColor);
    }
 
    *pSampler = hk_sampler_to_handle(sampler);

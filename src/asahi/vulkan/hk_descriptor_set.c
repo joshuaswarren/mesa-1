@@ -168,7 +168,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       if (sampler->has_border) {
          assert(sampler->plane_count == 2);
          desc[0].sw.clamp_0_sampler_index_or_negative =
-            sampler->planes[1].hw->index + 28;
+            (sampler->planes[1].hw->index + 28) |
+            (sampler->border_is_int ? HK_BORDER_IS_INT_BIT : 0);
 
          assert(desc[0].sw.clamp_0_sampler_index_or_negative >= 0 &&
                 "we have a border colour");

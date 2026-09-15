@@ -25,9 +25,11 @@ struct hk_sampled_image_descriptor_sw {
    uint16_t sampler_index;
 
    /* Negative if there is no border colour, else the clamp=0 sampler index used
-    * for custom border colour emulation.
+    * for custom border colour emulation. Bit 14 marks an integer-typed
+    * border (VkBorderColor INT variants); indices stay below it.
     */
    int16_t clamp_0_sampler_index_or_negative;
+#define HK_BORDER_IS_INT_BIT (1 << 14)
 
    /* We want LOD bias and min LOD together as fp16 in this order and 32-bit
     * aligned. This lets us keep everything vectorized on the shader side, since
