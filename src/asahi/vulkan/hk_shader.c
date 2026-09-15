@@ -1840,6 +1840,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          (nir->info.has_transform_feedback_varyings ||
           (xfb_info && xfb_info->output_count) ||
           sw_stage == MESA_SHADER_GEOMETRY ||
+          /* A raster-discard TES may write only point size, leaving the
+           * four position components absent just like an XFB raster VS. */
+          sw_stage == MESA_SHADER_TESS_EVAL ||
           nir->info.next_stage == MESA_SHADER_GEOMETRY),
       /* G17P's Ioto resource program populates CProg before the main shader;
        * it does not execute AGX2's tex_state_store/sampler_state_store shader
