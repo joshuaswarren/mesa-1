@@ -6,6 +6,7 @@
 
 #include "asahi_clc.h"
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/lib/agx_abi.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/glsl_types.h"
 #include "compiler/spirv/nir_spirv.h"
@@ -261,6 +262,22 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_tess_factors_half");
 }
 
+/* Lift every kernel-argument preamble load above the halves the AGX3
+ * hardware ABI owns -- see AGX_ABI_AGX3_PRECOMP_ARG_HALFS.  Run per target,
+ * on that target's clone, so AGX2 keeps its arguments at half 0. */
+static bool
+rebase_preamble_for_agx3(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_preamble)
+      return false;
+
+   nir_intrinsic_set_base(intr,
+                          nir_intrinsic_base(intr) +
+                             AGX_ABI_AGX3_PRECOMP_ARG_HALFS);
+   return true;
+}
+
 static nir_def *
 load_kernel_input(nir_builder *b, unsigned num_components, unsigned bit_size,
                   unsigned offset_B)
@@ -404,6 +421,11 @@ main(int argc, char **argv)
             }
 
             nir_shader *clone = nir_shader_clone(NULL, s);
+            if (key.dev.encoding != AGX_ISA_ENCODING_AGX2) {
+               NIR_PASS(_, clone, nir_shader_intrinsics_pass,
+                        rebase_preamble_for_agx3, nir_metadata_all, NULL);
+               key.reserved_preamble += AGX_ABI_AGX3_PRECOMP_ARG_HALFS;
+            }
             if (!agx_compile_shader_nir(clone, &key, &compiled)) {
                fprintf(stderr, "Failed to compile %s for %s\n",
                        libfunc->name, *target);

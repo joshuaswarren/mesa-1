@@ -4263,8 +4263,10 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
 
       const uint64_t uploaded_data =
          agx_pool_upload_aligned(&batch->pool, args, arg_size, 4);
+      /* Above the halves the AGX3 hardware ABI owns, matching where the
+       * precompiler now places these loads. */
       const struct agx3_ioto_uniform_range range = {
-         .start_halfs = 0,
+         .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
          .size_halfs = DIV_ROUND_UP(arg_size, 2),
          .address = uploaded_data,
       };
