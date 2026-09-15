@@ -30,6 +30,13 @@ is_lstcol(const uint8_t *b, size_t left)
    return left >= 12 && b[0] == 0xe7 && (b[1] & 0x07) == 0x06 && b[2] == 0x54;
 }
 
+static bool
+is_lldcol(const uint8_t *b, size_t left)
+{
+   return left >= 12 && b[0] == 0x67 && (b[1] & 0x07) == 0x06 &&
+          b[2] == 0x54;
+}
+
 /* Choice group 2 alternative 1 (the register operand) sets word 5 bit 11. */
 static bool
 lstcol_sample_is_register(const uint8_t *b)
@@ -151,12 +158,72 @@ check_samples(unsigned nr_samples)
    return ok;
 }
 
+static bool
+check_alpha_coverage_blend(unsigned nr_samples)
+{
+   struct agx_fs_epilog_key key = {
+      .nr_samples = nr_samples,
+      .link.loc_written = BITFIELD_BIT(0),
+      .link.size_32 = BITFIELD_BIT(0),
+      .defer_monolithic_msaa = true,
+      .blend.alpha_to_coverage = true,
+   };
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &key);
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_SRC_ALPHA,
+      PIPE_BLENDFACTOR_INV_SRC_ALPHA, PIPE_BLEND_ADD,
+      PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P alpha-to-coverage blend epilog");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_g17p_tile_samples(b.shader, nr_samples);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .fs.nr_samples = nr_samples,
+      .secondary = true,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &backend_key, &part);
+   ralloc_free(b.shader);
+   if (!compiled) {
+      fprintf(stderr, "%ux alpha-to-coverage blend epilog did not compile\n",
+              nr_samples);
+      return false;
+   }
+
+   unsigned loads = 0, stores = 0;
+   for (unsigned i = 0; i + 12 <= part.info.binary_size; ++i) {
+      const uint8_t *at = (const uint8_t *)part.binary + i;
+      loads += is_lldcol(at, part.info.binary_size - i);
+      stores += is_lstcol(at, part.info.binary_size - i);
+   }
+   free(part.binary);
+   if (loads != 1 || stores != 1) {
+      fprintf(stderr,
+              "%ux alpha-to-coverage blend emitted %u loads/%u stores\n",
+              nr_samples, loads, stores);
+      return false;
+   }
+   return true;
+}
+
 int
 main(void)
 {
    bool ok = true;
    for (unsigned samples = 1; samples <= 4; samples *= 2)
       ok &= check_samples(samples);
+   for (unsigned samples = 2; samples <= 4; samples *= 2)
+      ok &= check_alpha_coverage_blend(samples);
 
    printf("%s\n", ok ? "PASS" : "FAIL");
    return ok ? 0 : 1;

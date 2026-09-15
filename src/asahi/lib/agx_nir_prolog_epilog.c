@@ -665,6 +665,13 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       nir_export_agx(b, sample_id, .base = AGX_ABI_FIN_SAMPLE_MASK);
    } else if (!key->defer_monolithic_msaa) {
       NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
+   } else if (key->blend.alpha_to_coverage) {
+      /* G17P can keep a pixel-shaded multisample blend as one tile
+       * load/store pair carrying the live coverage register. Lower the
+       * alpha discard while the epilog's test intrinsics are still available;
+       * doing it after this function leaves a newly introduced test query
+       * past divergence analysis. */
+      NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
    }
 
    /* Finally, lower uniforms according to our ABI */

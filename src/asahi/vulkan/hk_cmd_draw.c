@@ -3245,7 +3245,15 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, nir_opt_constant_folding);
       NIR_PASS(_, b->shader, agx_nir_hoist_g17p_zs_writes);
    } else {
-      agx_nir_fs_epilog(b, key);
+      /* G17P's tile operations carry the live coverage register. With
+       * alpha-to-coverage, Apple's 2x/4x blended fragments therefore issue
+       * one masked tile load/store pair rather than cloning the blend once
+       * per sample. Keep the ordinary per-sample lowering for every other
+       * pixel-shaded epilog. */
+      struct agx_fs_epilog_key pixel = *key;
+      pixel.defer_monolithic_msaa = key->blend.alpha_to_coverage &&
+                                    key->nr_samples > 1;
+      agx_nir_fs_epilog(b, &pixel);
    }
 
    NIR_PASS(_, b->shader, agx_nir_lower_g17p_tile_samples, key->nr_samples);

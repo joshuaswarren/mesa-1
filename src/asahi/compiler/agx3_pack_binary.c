@@ -2646,13 +2646,19 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
 
    uint8_t bytes[AGX3_TILE_MAX_LENGTH];
    uint8_t length = 0;
+   /* Every retained G17P multisample LLDCol uses the register sample mask
+    * with neither the first-load marker nor an incoming scoreboard wait. The
+    * coverage operation that produced the mask has already completed its
+    * pixel transaction before the load consumes the architectural register. */
+   const uint16_t tile_wait = load && sample_op.reg ? 0 : wait_mask;
    const bool ok =
       load ? agx3_tile_load(enc, value.value, (enum agx3_tile_width)width,
                             slot, I->mask, I->pixel_offset, sample_op,
-                            wait_mask, first_load, last_load, bytes, &length)
+                            tile_wait, sample_op.reg ? false : first_load,
+                            sample_op.reg ? false : last_load, bytes, &length)
            : agx3_tile_store_f13(enc, value.value,
                                  (enum agx3_tile_width)width, I->mask,
-                                 I->pixel_offset, sample_op, wait_mask,
+                                 I->pixel_offset, sample_op, tile_wait,
                                  store_f13, bytes, &length);
    return ok && agx3_append(emission, bytes, length);
 }
