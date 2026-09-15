@@ -61,9 +61,16 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    case AGX_OPCODE_ATOMIC:
       return src_index == 1 && memory_base;
    case AGX_OPCODE_LOCAL_LOAD:
-      return src_index == 0;
    case AGX_OPCODE_LOCAL_STORE:
-      return src_index == 1;
+      /* AGX3 threadgroup accesses with a promoted-constant uniform base
+       * silently miss on G16G once the shader carries many of them
+       * (tools/shared-atomic-probe.c mode 4: a 145-word shared struct copy
+       * left every result untouched; AGX_MESA_DEBUG=nopromote passes). The
+       * only witnessed uniform base is u4 in one small kernel, so keep
+       * threadgroup bases in GPRs on AGX3 and let this pass copy them. */
+      if (encoding != AGX_ISA_ENCODING_AGX2)
+         return false;
+      return src_index == (op == AGX_OPCODE_LOCAL_LOAD ? 0 : 1);
    case AGX_OPCODE_IMAGE_WRITE:
       return src_index == 3;
    case AGX_OPCODE_BLOCK_IMAGE_STORE:
