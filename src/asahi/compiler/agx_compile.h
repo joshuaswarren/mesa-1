@@ -101,10 +101,11 @@ struct agx_shader_info {
     * explicit shader scratch and does not use the legacy helper program. */
    unsigned agx3_spectpr_scratch_size;
 
-   /* Size in bytes of the main sahder */
-   unsigned main_size;
+   /* Byte lengths returned by function packing, excluding later segments. */
+   unsigned main_size, preamble_size;
 
-   /* Does the shader have a preamble? If so, it is at offset preamble_offset.
+   /* Does the shader have a preamble? If so, it is preamble_size bytes long
+    * at offset preamble_offset.
     * The main shader is at offset main_offset. The preamble is executed first.
     */
    bool has_preamble;
@@ -197,7 +198,7 @@ struct agx_shader_info {
 
 struct agx_precompiled_kernel_info {
    uint32_t preamble_offset, main_offset;
-   uint32_t main_size, binary_size;
+   uint32_t main_size, preamble_size, binary_size;
    struct agx_rodata rodata;
    uint16_t nr_gprs, nr_preamble_gprs;
    uint16_t push_count;
@@ -221,6 +222,7 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .preamble_offset = info->preamble_offset,
       .main_offset = info->main_offset,
       .main_size = info->main_size,
+      .preamble_size = info->preamble_size,
       .binary_size = info->binary_size,
       .rodata = info->rodata,
       .nr_gprs = info->nr_gprs,

@@ -1034,7 +1034,7 @@ check_constant_data_compute(enum agx_isa_encoding encoding, bool soft_fault)
  * uniform dwords. Each dword uses Apple's byte-exact reg-to-uniform copy form;
  * this checks the complete compiler path which Gallium's blitter VS needs. */
 static bool
-check_preamble_compute(enum agx_isa_encoding encoding)
+check_preamble_compute(enum agx_isa_encoding encoding, bool enable)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 generated preamble");
@@ -1057,15 +1057,41 @@ check_preamble_compute(enum agx_isa_encoding encoding)
    struct agx_shader_key key = {0};
    key.dev.encoding = encoding;
    key.reserved_preamble = 4 * (1 + 1);
+   key.no_preamble = !enable;
    key.has_scratch = true;
    key.promote_constants = true;
    key.promote_textures = true;
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
-   const bool valid = encoding == AGX_ISA_ENCODING_AGX3B
-                         ? compiled && part.binary != NULL &&
-                              part.info.has_preamble && part.info.binary_size > 8
-                         : !compiled && part.binary == NULL;
+   const bool supported = encoding == AGX_ISA_ENCODING_AGX3B ||
+                          encoding == AGX_ISA_ENCODING_AGX2;
+   bool valid = supported ? compiled && part.binary != NULL
+                          : !compiled && part.binary == NULL;
+   if (supported && valid) {
+      const struct agx_shader_info *info = &part.info;
+      valid = info->has_preamble == enable &&
+              (info->preamble_size != 0) == enable &&
+              (info->nr_preamble_gprs != 0) == enable &&
+              info->preamble_offset <= info->binary_size &&
+              info->preamble_size <= info->binary_size - info->preamble_offset;
+
+      /* G17P's constant-program suffix must copy the executable through END,
+       * without including inter-function padding or adjacent constant data. */
+      if (valid && enable && encoding == AGX_ISA_ENCODING_AGX3B) {
+         static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+         valid = info->preamble_size >= sizeof(end) &&
+                 memcmp((const uint8_t *)part.binary + info->preamble_offset +
+                           info->preamble_size - sizeof(end),
+                        end, sizeof(end)) == 0;
+      }
+
+      if (valid) {
+         const struct agx_precompiled_kernel_info compact =
+            agx_compact_kernel_info(&part.info);
+         valid = compact.preamble_offset == info->preamble_offset &&
+                 compact.preamble_size == info->preamble_size;
+      }
+   }
    if (!valid)
       fprintf(stderr, "AGX3 generated 64-bit preamble write failed\n");
 
@@ -2309,7 +2335,12 @@ main(int argc, char **argv)
       if (!check_constant_data_compute(encodings[i], false) ||
           !check_constant_data_compute(encodings[i], true))
          return 1;
-      if (!check_preamble_compute(encodings[i]))
+      if (!check_preamble_compute(encodings[i], true))
+         return 1;
+      if (encodings[i] == AGX_ISA_ENCODING_AGX3B &&
+          (!check_preamble_compute(encodings[i], false) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, false) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true)))
          return 1;
       if (!check_constant_array_ordering(encodings[i], true) ||
           !check_constant_array_ordering(encodings[i], false))

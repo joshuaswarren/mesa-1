@@ -7306,6 +7306,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
       if (func->is_preamble) {
          info->preamble_offset = offset;
+         info->preamble_size = binary.size - offset;
          info->has_preamble = true;
       } else if (func->is_entrypoint) {
          info->main_offset = offset;
