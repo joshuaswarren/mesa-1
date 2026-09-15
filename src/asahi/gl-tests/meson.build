@@ -469,6 +469,64 @@ test(
   suite : ['asahi'],
 )
 
+gl_vertex_flat_varying = executable(
+  'asahi-g17p-gl-vertex-flat-varying',
+  files('test-g17p-gl-vertex-flat-varying.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-vertex-flat-varying-software-control',
+  gl_vertex_flat_varying,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g13g-gl-vertex-flat-varying-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_flat_varying,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_texture_swizzle = executable(
+  'asahi-g17p-gl-texture-swizzle',
+  files('test-g17p-gl-texture-swizzle.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-texture-swizzle-software-control',
+  gl_texture_swizzle,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
 test(
   'asahi-g13g-gl-xfb-geometry-shim-control',
   prog_python,
