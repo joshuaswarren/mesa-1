@@ -247,6 +247,11 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_conditional_render") ||
           !strcmp(func->name, "libagx_draw_robust_index") ||
           !strcmp(func->name, "libagx_unroll_restart") ||
+          !strcmp(func->name, "libagx_gs_setup_indirect") ||
+          !strcmp(func->name, "libagx_prefix_sum_geom") ||
+          !strcmp(func->name, "libagx_copy_uchar") ||
+          !strcmp(func->name, "libagx_copy_uint4") ||
+          !strcmp(func->name, "libagx_fill") ||
           !strcmp(func->name, "libagx_copy_xfb_counters") ||
           !strcmp(func->name, "libagx_increment_ia") ||
           !strcmp(func->name, "libagx_increment_ia_restart_nonnull") ||
@@ -467,6 +472,16 @@ main(int argc, char **argv)
                  "libagx_copy_timestamp_0_g17p,\n"
                  "    [LIBAGX_TESS_FACTORS_HALF] = "
                  "libagx_tess_factors_half_0_g17p,\n"
+                 "    [LIBAGX_FILL] = "
+                 "libagx_fill_0_g17p,\n"
+                 "    [LIBAGX_COPY_UINT4] = "
+                 "libagx_copy_uint4_0_g17p,\n"
+                 "    [LIBAGX_COPY_UCHAR] = "
+                 "libagx_copy_uchar_0_g17p,\n"
+                 "    [LIBAGX_GS_SETUP_INDIRECT] = "
+                 "libagx_gs_setup_indirect_0_g17p,\n"
+                 "    [LIBAGX_PREFIX_SUM_GEOM] = "
+                 "libagx_prefix_sum_geom_0_g17p,\n"
                  "    [LIBAGX_UNROLL_RESTART_0] = "
                  "libagx_unroll_restart_0_g17p,\n"
                  "    [LIBAGX_UNROLL_RESTART_1] = "
