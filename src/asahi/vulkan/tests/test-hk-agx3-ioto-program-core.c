@@ -2916,6 +2916,64 @@ test_g17p_precompiled_fill_program(void)
    return 0;
 }
 
+static int
+test_g17p_compute_published_launch(void)
+{
+   struct agx3_cdm_direct_template_sources sources;
+   CHECK(agx3_cdm_direct_template_sources_compute(false, false, false, &sources));
+   const struct agx3_ioto_uniform_range args = {
+      .start_halfs = 0, .size_halfs = 14,
+      .address = UINT64_C(0x5ffde8c000),
+   };
+   struct hk_agx3_g17p_compute_program_desc desc = {
+      .program_va = UINT64_C(0x100000b0000),
+      .shader_va = UINT64_C(0x100000003c0),
+      .uniform_ranges = &args,
+      .shader_binary_size = 58, .nr_gprs = 16,
+      .compiler_d_valid = true, .launch_sources = sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   const struct agx3_compute_direct_grid grid = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {64, 1, 1}, .local_size = {32, 1, 1}, .dimensions = 1,
+   };
+
+   for (unsigned ranges = 0; ranges <= 1; ++ranges) {
+      desc.uniform_range_count = ranges;
+      desc.program_va = UINT64_C(0x100000b0000);
+      struct hk_agx3_g17p_compute_program retained, duplicate;
+      CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &retained));
+      desc.program_va += 0x400;
+      CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &duplicate));
+      /* These really are identical arena keys at different reservations. */
+      CHECK(retained.length == duplicate.length);
+      CHECK(!memcmp(retained.bytes, duplicate.bytes, retained.length));
+      CHECK(retained.launch.program_va != duplicate.launch.program_va);
+      CHECK(hk_agx3_g17p_compute_program_rebind_published(
+         &duplicate.launch, retained.launch.program_va));
+      CHECK(!memcmp(&retained.launch, &duplicate.launch, sizeof(retained.launch)));
+
+      uint8_t expected[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
+      uint8_t actual[sizeof(expected)];
+      struct agx3_compute_dispatch_sink a = {.data = expected, .capacity = sizeof(expected)};
+      struct agx3_compute_dispatch_sink b = {.data = actual, .capacity = sizeof(actual)};
+      CHECK(hk_agx3_g17p_native_compute_dispatch_append(&retained.launch, &grid, &a));
+      /* The reservation is now reusable; launch metadata must not need it. */
+      memset(duplicate.bytes, 0xa5, sizeof(duplicate.bytes));
+      CHECK(hk_agx3_g17p_native_compute_dispatch_append(&duplicate.launch, &grid, &b));
+      CHECK(a.length == b.length && !memcmp(expected, actual, a.length));
+
+      const struct agx3_compute_program before = duplicate.launch;
+      const uint64_t invalid[] = {0, 1, UINT64_C(0x1000000000000)};
+      for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i) {
+         CHECK(!hk_agx3_g17p_compute_program_rebind_published(&duplicate.launch, invalid[i]));
+         CHECK(!memcmp(&before, &duplicate.launch, sizeof(before)));
+      }
+   }
+   CHECK(!hk_agx3_g17p_compute_program_rebind_published(NULL, UINT64_C(0x100000b0000)));
+   return 0;
+}
+
 static uint64_t
 elapsed_ns(const struct timespec *start, const struct timespec *end)
 {
@@ -3121,6 +3179,7 @@ int
 main(void)
 {
    if (test_g17p_precompiled_data_layout() ||
+       test_g17p_compute_published_launch() ||
        test_coverage_initial_pixel_dependencies() ||
        test_g17p_precompiled_fill_program() || test_exact_target_order() || test_terminal_suffix_modes() ||
        test_fail_closed() || test_g17s_minimal_compute_admission() ||

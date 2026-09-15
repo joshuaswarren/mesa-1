@@ -671,6 +671,14 @@ hk_g17p_build_compute_program_raw(
    if (!published)
       return false;
 
+   /* Publication can deduplicate against an earlier loader and give the
+    * reservation back to the arena. Both direct and indirect launches must
+    * name the retained loader before that reservation is overwritten. */
+   if (!hk_agx3_g17p_compute_program_rebind_published(&out->launch, published)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+      return false;
+   }
+
    *program_va_out = published;
    if (trace && hk_g17p_launch_trace_enabled())
       fprintf(stderr, "G17P program[%s]: kind=%u va=%" PRIx64 " len=%u\n",

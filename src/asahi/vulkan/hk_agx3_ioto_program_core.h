@@ -352,6 +352,12 @@ bool hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    struct hk_agx3_g17p_compute_program *program);
 
+/* Arena deduplication may retain an earlier identical program and recycle the
+ * reservation used by generation. Launch the retained allocation, not the
+ * reservation. This changes no program bytes or launch-template fields. */
+bool hk_agx3_g17p_compute_program_rebind_published(
+   struct agx3_compute_program *launch, uint64_t published_va);
+
 /* Reuse a generated one-range program by replacing its sole absolute range
  * address and rebinding the command-buffer-local program VA. The template is
  * accepted only while the load schedule is provably unchanged. */

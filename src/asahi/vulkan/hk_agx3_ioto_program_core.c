@@ -769,6 +769,20 @@ hk_agx3_g17p_precompiled_data_layout(size_t data_size_B,
 }
 
 bool
+hk_agx3_g17p_compute_program_rebind_published(
+   struct agx3_compute_program *launch, uint64_t published_va)
+{
+   if (!launch || launch->chip != AGX_CHIP_G17P ||
+       !launch->g17p_native_compute_live_bound || !published_va ||
+       published_va > UINT64_C(0xffffffffffff) ||
+       (published_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)))
+      return false;
+
+   launch->program_va = published_va;
+   return true;
+}
+
+bool
 hk_agx3_g17p_compute_program_relocate_single_range_to(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    const struct agx3_ioto_uniform_range *template_range,
