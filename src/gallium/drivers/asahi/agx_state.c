@@ -4067,15 +4067,23 @@ agx_g17p_append_compute(struct agx_batch *batch,
                         size_t range_count, unsigned variable_shared_mem)
 {
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   /* Mode 2 reads the whole grid -- three global thread counts then three
+    * local sizes -- from six u32 in GPU memory, so the workgroup this call
+    * was handed is not the one that launches and must not be validated. */
+   const bool indirect_local = grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL;
    if (dev->chip != AGX_CHIP_G17P || !info || !binary ||
-       grid.mode != AGX_CDM_MODE_DIRECT || !info->main_size || !info->nr_gprs ||
+       (grid.mode != AGX_CDM_MODE_DIRECT && !indirect_local) ||
+       (indirect_local &&
+        (!grid.ptr || grid.ptr >= (UINT64_C(1) << 48) || (grid.ptr & 3))) ||
+       !info->main_size || !info->nr_gprs ||
        info->has_preamble || info->preamble_scratch_size || info->scratch_size ||
        !info->agx3_staging_known ||
        (info->main_offset != 0 &&
         info->main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
        info->main_offset > info->binary_size ||
        info->main_size > info->binary_size - info->main_offset ||
-       (range_count && !ranges) || !wg.x || !wg.y || !wg.z ||
+       (range_count && !ranges) ||
+       (!indirect_local && (!wg.x || !wg.y || !wg.z)) ||
        (linked && (!linked->bo || !linked->bo->va || !linked->size ||
                    !linked->nr_gprs || !linked->g17p_compiler_d_valid ||
                    linked->scratch_size))) {
@@ -4172,21 +4180,29 @@ agx_g17p_append_compute(struct agx_batch *batch,
                               native.length))
       return false;
 
-   const struct agx3_compute_direct_grid direct = {
-      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
-      .size = {grid.count[0], grid.count[1], grid.count[2]},
-      .local_size = {wg.x, wg.y, wg.z},
-      .dimensions = grid.count[2] != 1 || wg.z != 1
-                       ? 3
-                    : grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
-   };
    struct agx3_compute_dispatch_sink sink = {
       .data = batch->cdm.current,
       .capacity = batch->cdm.end - batch->cdm.current,
    };
-   if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
-                                                  &sink))
-      return false;
+   if (indirect_local) {
+      /* The kernel that writes this grid is already its own dispatch earlier
+       * in the stream, behind a full barrier, so the launch stands alone. */
+      if (!agx3_g17p_native_indirect_compute_launch_append(&native.launch,
+                                                           grid.ptr, 0, &sink))
+         return false;
+   } else {
+      const struct agx3_compute_direct_grid direct = {
+         .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+         .size = {grid.count[0], grid.count[1], grid.count[2]},
+         .local_size = {wg.x, wg.y, wg.z},
+         .dimensions = grid.count[2] != 1 || wg.z != 1
+                          ? 3
+                       : grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
+      };
+      if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
+                                                     &sink))
+         return false;
+   }
    batch->cdm.current += sink.length;
    if (constant_bo)
       agx_batch_add_bo(batch, constant_bo);
