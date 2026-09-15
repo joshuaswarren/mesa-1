@@ -11,6 +11,7 @@
 #define AGX_PBE_DIMENSION_2D_ARRAY 3u
 #define AGX_PBE_DIMENSION_2D_MULTISAMPLE 4u
 #define AGX_PBE_DIMENSION_3D 5u
+#define AGX_PBE_DIMENSION_2D_ARRAY_MULTISAMPLE 8u
 #define AGX_PBE_SAMPLE_SELECTOR_SHIFT 56u
 #define AGX_PBE_LAYOUT_LINEAR 0u
 #define AGX_PBE_LAYOUT_TWIDDLED 1u
@@ -288,6 +289,30 @@ agx_pbe_agx3_2d_multisample_pack(
    uint64_t word0 = load_le64(&out->bytes[0]);
    word0 = (word0 & ~UINT64_C(0xf)) | AGX_PBE_DIMENSION_2D_MULTISAMPLE;
    word0 |= selector << AGX_PBE_SAMPLE_SELECTOR_SHIFT;
+   store_le64(&out->bytes[0], word0);
+   return true;
+}
+
+bool
+agx_pbe_agx3_2d_array_multisample_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t layers, uint32_t samples,
+   struct agx_pbe_agx3_descriptor *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   /* HAL200's array+multisample path selects dimension 8 while retaining the
+    * layered word1 fields and the ordinary multisample selector. */
+   if ((samples != 2 && samples != 4) ||
+       !pack_layered(generation, fields,
+                     AGX_PBE_DIMENSION_2D_ARRAY_MULTISAMPLE, layers, 0, 1,
+                     out))
+      return false;
+
+   uint64_t word0 = load_le64(&out->bytes[0]);
+   word0 |= (uint64_t)((samples >> 2) & 3u)
+            << AGX_PBE_SAMPLE_SELECTOR_SHIFT;
    store_le64(&out->bytes[0], word0);
    return true;
 }
