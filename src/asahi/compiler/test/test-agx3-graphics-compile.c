@@ -4123,15 +4123,18 @@ test_combined_sampler_scope(void)
  * txb: the hardware sampler applies its own bias and the instruction applies
  * this one. */
 static nir_shader *
-build_fs_texture_api_bias(bool gradient)
+build_fs_texture_api_bias(bool gradient, bool cube)
 {
+   assert(!(gradient && cube));
+
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "AGX3 biased FS");
 
    nir_def *bary = nir_load_barycentric_pixel(
       &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
    nir_def *uv = nir_load_interpolated_input(
-      &b, 2, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      &b, cube ? 3 : 2, 32, bary, nir_imm_int(&b, 0), .base = 0,
+      .component = 0,
       .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
 
    nir_def *timage = nir_bindless_image_agx(&b, nir_imm_int(&b, 64),
@@ -4141,9 +4144,9 @@ build_fs_texture_api_bias(bool gradient)
 
    nir_tex_instr *tex = nir_tex_instr_create(b.shader, gradient ? 5 : 4);
    tex->op = gradient ? nir_texop_txd : nir_texop_txb;
-   tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   tex->sampler_dim = cube ? GLSL_SAMPLER_DIM_CUBE : GLSL_SAMPLER_DIM_2D;
    tex->dest_type = nir_type_float32;
-   tex->coord_components = 2;
+   tex->coord_components = cube ? 3 : 2;
    tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, uv);
    tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, timage);
    tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, tsampler);
@@ -4176,9 +4179,9 @@ build_fs_texture_api_bias(bool gradient)
 /* The lowering keeps the API bias and the explicit gradients, binds the
  * combined sampler, and leaves no descriptor crawl behind. */
 static bool
-test_combined_sampler_biased_and_gradient(bool gradient)
+test_combined_sampler_biased_and_gradient(bool gradient, bool cube)
 {
-   nir_shader *shader = build_fs_texture_api_bias(gradient);
+   nir_shader *shader = build_fs_texture_api_bias(gradient, cube);
    struct agx_g17p_combined_sampler_binding binding = {
       .texture_offset_B = UINT32_MAX,
       .sampler_index_offset_B = UINT32_MAX,
@@ -4198,6 +4201,9 @@ test_combined_sampler_biased_and_gradient(bool gradient)
                const int ddx = nir_tex_instr_src_index(tex, nir_tex_src_ddx);
                const int ddy = nir_tex_instr_src_index(tex, nir_tex_src_ddy);
                samples += tex->texture_index == 0 && tex->sampler_index == 0 &&
+                          tex->sampler_dim ==
+                             (cube ? GLSL_SAMPLER_DIM_CUBE
+                                   : GLSL_SAMPLER_DIM_2D) &&
                           (gradient ? (tex->op == nir_texop_txd && ddx >= 0 &&
                                        ddy >= 0)
                                     : (tex->op == nir_texop_txb && bias >= 0));
@@ -8384,8 +8390,9 @@ main(int argc, char **argv)
       return ok ? 0 : 1;
    }
    if (argc == 2 && !strcmp(argv[1], "--bias-gradient-only")) {
-      const bool ok = test_combined_sampler_biased_and_gradient(false) &&
-                      test_combined_sampler_biased_and_gradient(true) &&
+      const bool ok = test_combined_sampler_biased_and_gradient(false, false) &&
+                      test_combined_sampler_biased_and_gradient(true, false) &&
+                      test_combined_sampler_biased_and_gradient(false, true) &&
                       test_combined_sampler_scope();
       fprintf(stderr, "API LOD bias and explicit gradient lowering: %s\n",
               ok ? "PASS" : "FAIL");

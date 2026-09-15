@@ -106,7 +106,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
              !nir_src_is_const(tex->src[level_src].src))) &&
             tex->op == nir_texop_txl) &&
          !(tex->op == nir_texop_txb &&
-           nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0 &&
+           (!tex->is_shadow ||
+            nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0) &&
            !(tex->is_shadow && cube_array)))) ||
        tex->is_sparse ||
        tex->coord_components != (query_lod ? (three_d || cube ? 3 : 2) :
