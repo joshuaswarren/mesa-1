@@ -1304,9 +1304,9 @@ hk_g17p_basic_fragment_layout(struct hk_cmd_buffer *cmd)
  * Flat inputs select C. Native G17P Point and Triangle pipelines have identical
  * complete fragment text for flat vec2/vec3/vec4 inputs. The provoking selector
  * is topology-independent, so line lists and strips use the same witnessed
- * first/last selector values as triangles. Admit points with the ordinary
- * first-vertex selector as well as non-fan lines and triangles, but never the
- * first-fan layout. Position Z and reciprocal W use native coefficient sources.
+ * first/last selector values as triangles. First-provoking fans use their
+ * dedicated selector and the fragment shader's draw-root B/C coefficient
+ * choice. Position Z and reciprocal W use native coefficient sources.
  */
 bool
 hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
@@ -1349,7 +1349,9 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             (gfx->topology == AGX_PRIMITIVE_TRIANGLES ||
              gfx->topology == AGX_PRIMITIVE_TRIANGLE_STRIP) &&
             (gfx->provoking == 0 || gfx->provoking == 2);
-         if (b->perspective || (!point && !line && !triangle))
+         const bool fan = gfx->topology == AGX_PRIMITIVE_TRIANGLE_FAN &&
+                          (gfx->provoking == 1 || gfx->provoking == 2);
+         if (b->perspective || (!point && !line && !triangle && !fan))
             return false;
       }
       if (b->slot == VARYING_SLOT_POS) {

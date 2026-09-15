@@ -1390,21 +1390,25 @@ hk_g17p_lower_storage_records(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
-/* The native G17P flat path takes the C coefficient directly. Its launch
- * admission currently permits only non-fan triangle primitives, so the
- * first-fan B/C selection is unreachable. Keep that topology restriction
- * paired with this lowering; do not import a root pointer and perform a
- * redundant per-pixel select for a topology this path never executes.
- */
+/* A first-provoking triangle fan stores the flat value in coefficient B;
+ * every other supported topology stores it in C. agx_nir_lower_interpolation
+ * introduces this intrinsic after descriptor lowering, so lower it to the
+ * draw-root provoking selector here. The later G17P root-resource pass then
+ * publishes the root pointer through the normal native uniform contract. */
 static bool
-hk_g17p_lower_flat_nonfan_triangles(nir_builder *b, nir_intrinsic_instr *intr,
-                                    UNUSED void *data)
+hk_g17p_lower_is_first_fan(nir_builder *b, nir_intrinsic_instr *intr,
+                           UNUSED void *data)
 {
    if (intr->intrinsic != nir_intrinsic_load_is_first_fan_agx)
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
-   nir_def_replace(&intr->def, nir_imm_false(b));
+   const unsigned offset = hk_root_descriptor_offset(draw.provoking);
+   nir_def *addr = nir_iadd(
+      b, nir_load_root_agx(b), nir_imm_int64(b, offset));
+   nir_def *provoking = nir_load_global_constant(
+      b, 1, 16, addr, .align_mul = 2, .access = ACCESS_CAN_SPECULATE);
+   nir_def_replace(&intr->def, nir_ieq_imm(b, provoking, 1));
    return true;
 }
 
@@ -1715,7 +1719,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                dev->dev.chip == AGX_CHIP_G17P);
       if (dev->dev.chip == AGX_CHIP_G17P) {
          NIR_PASS(_, nir, nir_shader_intrinsics_pass,
-                  hk_g17p_lower_flat_nonfan_triangles,
+                  hk_g17p_lower_is_first_fan,
                   nir_metadata_control_flow, NULL);
       }
    } else if (sw_stage == MESA_SHADER_TESS_EVAL ||
