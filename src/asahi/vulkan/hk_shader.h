@@ -336,6 +336,10 @@ struct hk_linked_shader {
     * dynamic blend constants. Zero means the standard half4 ABI. */
    uint16_t g17p_blend_constant_base;
 
+   /* The pipeline-statistics fragment prolog loads its counter address from
+    * the descriptor root even when the application fragment shader does not. */
+   bool g17p_prolog_uses_root;
+
    /* Distinct from hk_shader::counts due to addition of cf_binding_count, which
     * is delayed since it depends on cull distance.
     */

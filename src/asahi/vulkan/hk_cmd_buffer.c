@@ -1762,7 +1762,9 @@ hk_g17p_graphics_uniform_ranges(
       };
    }
 
-   if (s->info.agx3_uses_root || s->info.set_count != 0) {
+   if (hk_agx3_g17p_graphics_needs_root(
+          s->info.agx3_uses_root, linked->g17p_prolog_uses_root,
+          s->info.set_count)) {
       if (!root_ptr)
          return hk_g17p_graphics_ranges_refused(range_count, count);
 

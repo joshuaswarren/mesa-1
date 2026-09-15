@@ -95,7 +95,7 @@ struct hk_agx3_g17p_graphics_program_desc {
  *   3. draw parameters                     uses_base_param
  *   4. draw ID                             uses_draw_id
  *   5. texture/sampler heap pointers       agx3_indexed_sampler_valid
- *   6. root descriptor                     agx3_uses_root || set_count
+ *   6. root descriptor                     shader/prolog root || set_count
  *   7. promoted constants                  rodata.size_16 != 0
  *
  * The combined-sampler range is not in that list: it is fragment-only, and
@@ -158,6 +158,13 @@ struct hk_agx3_g17p_indexed_storage_heap {
 bool hk_agx3_g17p_indexed_storage_pointers(
    const struct hk_agx3_g17p_indexed_storage_heap *heap,
    uint64_t pointers[4]);
+
+static inline bool
+hk_agx3_g17p_graphics_needs_root(bool shader_uses_root,
+                                 bool prolog_uses_root, uint8_t set_count)
+{
+   return shader_uses_root || prolog_uses_root || set_count != 0;
+}
 
 /* Load one root descriptor followed by every descriptor-set pointer named by
  * the shader's pipeline layout. */

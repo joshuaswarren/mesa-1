@@ -3338,6 +3338,7 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
    }
 
    linked->g17p_blend_constant_base = key->epilog.blend_constant_base;
+   linked->g17p_prolog_uses_root = key->prolog.statistics;
 
    _mesa_hash_table_insert(shader->linked.ht, key_clone, linked);
    return linked;

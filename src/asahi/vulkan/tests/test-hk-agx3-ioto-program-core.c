@@ -30,6 +30,16 @@ static unsigned checks;
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 static int
+test_g17p_graphics_root_requirement(void)
+{
+   CHECK(!hk_agx3_g17p_graphics_needs_root(false, false, 0));
+   CHECK(hk_agx3_g17p_graphics_needs_root(true, false, 0));
+   CHECK(hk_agx3_g17p_graphics_needs_root(false, true, 0));
+   CHECK(hk_agx3_g17p_graphics_needs_root(false, false, 1));
+   return 0;
+}
+
+static int
 test_g17p_precompiled_data_layout(void)
 {
    uint32_t upload = 0;
@@ -3179,6 +3189,7 @@ int
 main(void)
 {
    if (test_g17p_precompiled_data_layout() ||
+       test_g17p_graphics_root_requirement() ||
        test_g17p_compute_published_launch() ||
        test_coverage_initial_pixel_dependencies() ||
        test_g17p_precompiled_fill_program() || test_exact_target_order() || test_terminal_suffix_modes() ||
