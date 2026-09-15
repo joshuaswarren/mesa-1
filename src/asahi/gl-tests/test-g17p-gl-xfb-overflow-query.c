@@ -175,14 +175,21 @@ single_stream(GLenum mode, const char *mode_name)
  * vertex shader. This one reaches it through a geometry shader and never
  * pauses, which separates "the geometry path never reports overflow" from
  * "pause and resume lose the running offset". */
+/* `dynamic` makes the geometry shader's vertex count depend on a uniform.
+ * A statically known count lets poly_previous_xfb_primitives() compute the
+ * base arithmetically; a dynamic one sends it through the count buffer and
+ * the libagx_prefix_sum_geom kernel, which is a different machine entirely
+ * (threadgroup memory, a barrier and a subgroup scan). The CTS's
+ * multiple-streams case emits conditionally, so it takes the second path --
+ * this row isolates that from the stream count. */
 static bool
-geometry_overflow(void)
+geometry_overflow(bool dynamic)
 {
    static const char vs_source[] =
       "#version 150 core\n"
       "void main() {\n"
       "}";
-   static const char gs_source[] =
+   static const char gs_static[] =
       "#version 150 core\n"
       "layout(points) in;\n"
       "layout(points, max_vertices = 1) out;\n"
@@ -192,6 +199,20 @@ geometry_overflow(void)
       "    EmitVertex();\n"
       "    EndPrimitive();\n"
       "}";
+   static const char gs_dynamic[] =
+      "#version 150 core\n"
+      "layout(points) in;\n"
+      "layout(points, max_vertices = 1) out;\n"
+      "out float output1;\n"
+      "uniform uint emit;\n"
+      "void main() {\n"
+      "    if (emit != 0u) {\n"
+      "        output1 = 1.0;\n"
+      "        EmitVertex();\n"
+      "        EndPrimitive();\n"
+      "    }\n"
+      "}";
+   const char *gs_source = dynamic ? gs_dynamic : gs_static;
    static const char *varyings[] = {"output1"};
 
    GLuint vs = compile_shader(GL_VERTEX_SHADER, vs_source);
@@ -228,6 +249,11 @@ geometry_overflow(void)
    glGenQueries(1, &written_query);
 
    glUseProgram(program);
+   {
+      const GLint emit = glGetUniformLocation(program, "emit");
+      if (emit >= 0)
+         glUniform1ui((GLuint)emit, 1);
+   }
    glEnable(GL_RASTERIZER_DISCARD);
 
    bool ok = true;
@@ -251,8 +277,9 @@ geometry_overflow(void)
       const bool step_ok =
          over == cases[i].overflow && written == cases[i].written;
       ok &= step_ok;
-      printf("  geometry %2d points           overflow %u/%u  written %2u/%2u  %s\n",
-             cases[i].points, over, cases[i].overflow, written,
+      printf("  geometry%s %2d points %s overflow %u/%u  written %2u/%2u  %s\n",
+             dynamic ? " dyn" : "    ", cases[i].points,
+             dynamic ? "  " : "      ", over, cases[i].overflow, written,
              cases[i].written, step_ok ? "ok" : "WRONG");
    }
 
@@ -742,7 +769,8 @@ main(void)
 
    /* The query results only mean anything where something actually ran. */
    if (getenv("ASAHI_GL_NOOP_SHIM") == NULL) {
-      ok &= geometry_overflow();
+      ok &= geometry_overflow(false);
+      ok &= geometry_overflow(true);
       ok &= pause_resume();
       ok &= streams_without_pause();
       ok &= multiple_streams();
