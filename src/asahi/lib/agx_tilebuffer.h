@@ -171,6 +171,13 @@ void agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib);
 bool agx_g17p_rt0_tile_layout_supported(
    const struct agx_tilebuffer_layout *tib);
 
+/* Logical active attachment mask for compact RGBA8 storage in partition zero. */
+unsigned agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib);
+
+/* Dense, unspilled single-sample RGBA8 layouts with three to eight targets. */
+unsigned
+agx_g17p_wide_rgba8_mrt_count(const struct agx_tilebuffer_layout *tib);
+
 enum agx_g17p_mrt_layout {
    AGX_G17P_MRT_NONE,
    AGX_G17P_MRT_WBOIT,

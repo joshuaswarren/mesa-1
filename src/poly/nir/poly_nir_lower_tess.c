@@ -97,13 +97,29 @@ static nir_def *
 lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr)
 {
    switch (intr->intrinsic) {
-   case nir_intrinsic_barrier:
-      /* A patch fits in a subgroup, so a pure execution rendezvous is
-       * redundant. Memory barriers still order the global TCS output buffer
-       * between the control-point and patch-constant phases. */
-      return nir_intrinsic_memory_scope(intr) == SCOPE_NONE
-                ? NIR_LOWER_INSTR_PROGRESS_REPLACE
-                : NULL;
+    case nir_intrinsic_barrier: {
+       /* A patch fits in a subgroup, so a pure execution rendezvous is
+        * redundant. Memory barriers still order the global TCS output buffer
+        * between the control-point and patch-constant phases. */
+       if (nir_intrinsic_memory_scope(intr) == SCOPE_NONE)
+          return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+
+       /* Output loads/stores below become global accesses. Their barriers
+        * must follow that address-space change while preserving scopes,
+        * acquire/release semantics, and ordering for any other memory modes.
+        * Leaving shader_out here loses the output-buffer memory ordering. */
+       nir_variable_mode modes = nir_intrinsic_memory_modes(intr);
+       if (!(modes & nir_var_shader_out))
+          return NULL;
+
+       nir_barrier(b,
+                   .execution_scope = nir_intrinsic_execution_scope(intr),
+                   .memory_scope = nir_intrinsic_memory_scope(intr),
+                   .memory_semantics = nir_intrinsic_memory_semantics(intr),
+                   .memory_modes = (modes & ~nir_var_shader_out) |
+                                   nir_var_mem_global);
+       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+    }
 
    case nir_intrinsic_load_primitive_id:
       return nir_channel(b, nir_load_workgroup_id(b), 0);

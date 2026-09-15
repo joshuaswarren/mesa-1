@@ -15,6 +15,24 @@
 #include <string.h>
 
 bool
+hk_agx3_g17p_precompiled_data_pack(const void *data, size_t size,
+                                 void *output, size_t capacity, size_t *written)
+{
+   if (!data || !output || !written || !size ||
+       size > HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE)
+      return false;
+
+   const size_t padded = (size + 3u) & ~(size_t)3u;
+   if (padded > capacity)
+      return false;
+
+   memmove(output, data, size);
+   memset((uint8_t *)output + size, 0, padded - size);
+   *written = padded;
+   return true;
+}
+
+bool
 hk_agx3_ioto_program_generate(
    enum agx_chip chip, const struct hk_agx3_ioto_program_desc *desc,
    void *output, size_t capacity, size_t *written)
@@ -85,6 +103,16 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     */
    struct agx_tilebuffer_layout physical = *tib;
    physical.layered = false;
+
+   /* Attachmentless rendering learns its sample count at draw time. An empty
+    * pass may end before that happens. Validate its physical layout as 1x,
+    * without changing the deferred sample count in the render state. The
+    * physical validator still rejects any other occupied render target.
+    */
+   if (physical.nr_samples == 0 && physical.sample_size_B == 0 &&
+       physical.logical_format[0] == PIPE_FORMAT_NONE)
+      physical.nr_samples = 1;
+
    return agx_g17p_rt0_tile_layout_supported(&physical);
 }
 

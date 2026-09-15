@@ -2423,6 +2423,13 @@ test_multisample_sample_stage(void)
    CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 12, 0,
                                   false, true, other, &other_len));
    CHECK(hex_eq(other, other_len, "1705540400180000d0c00800"));
+   static const uint8_t native_r4[] = {
+      0x17,0x05,0x54,0x04,0x00,0x10,
+      0x00,0x00,0xd0,0xc0,0x08,0x00,
+   };
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 8, 0,
+                                  false, true, bytes, &len));
+   CHECK(len == sizeof(native_r4) && !memcmp(bytes, native_r4, len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 256, 0,
                                    false, false, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 3, 0,
@@ -3475,11 +3482,24 @@ test_minimum_lod_witnesses(void)
       d.lod = AGX3_TEX_LOD_GRADIENT;
       CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
       if (cubes[i].shadow) {
-         /* No comparison cube-array witness takes a register LOD. */
          d.lod = cubes[i].lod;
          d.array = true;
          d.array_layer = 6;
-         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+         if (cubes[i].min_lod) {
+            /* No cube-array witness clamps a minimum beside its bias. */
+            CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+         } else {
+            /* The comparison cube array does take a register level. AIR-NT
+             * 32023.917 -arch applegpu_g17p compiles
+             * depthcube_array.sample_compare(s, dir, uint(layer), ref,
+             * level(lod)), every operand a varying, to the auxiliary layer
+             * word 1705540003200000f0880400, the face+level word
+             * 1705540600040c00f0c21700, the pixel entry 870254000600 and
+             * then this SMP. KHR-GL30.ext_texture_shadow_lod's textureLod
+             * and bias on samplerCubeArrayShadow are this shape. */
+            CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+            CHECK(hex_eq(bytes, len, "05800ca090002803010000000100"));
+         }
       }
    }
    /* texture2d_array gradient2d + min_lod_clamp. */

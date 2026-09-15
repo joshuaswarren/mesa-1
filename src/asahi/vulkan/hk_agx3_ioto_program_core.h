@@ -22,6 +22,15 @@ extern "C" {
 
 struct agx_tilebuffer_layout;
 
+/* Native uniform loads address 512 half-registers in complete dwords. */
+#define HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE 1024u
+
+/* Pack an argument block with zero padding through the last native load.
+ * Leaves output and *written unchanged on failure. */
+bool hk_agx3_g17p_precompiled_data_pack(const void *data, size_t size,
+                                      void *output, size_t capacity,
+                                      size_t *written);
+
 struct hk_agx3_ioto_program_desc {
    uint64_t program_va;
    const void *body;

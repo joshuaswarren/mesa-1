@@ -17,5 +17,3 @@ void main() {
     v_texcoord = texcoord;
     v_texcoordMatte = texcoordMatte;
 }
-
-

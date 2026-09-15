@@ -154,10 +154,26 @@ lower(nir_builder *b, nir_instr *instr, void *data)
    bool force_bindless = agx_nir_needs_texture_crawl(instr);
    if (options->g17p_plain_txf_crawl && instr->type == nir_instr_type_tex) {
       nir_tex_instr *tex = nir_instr_as_tex(instr);
-      force_bindless |= tex->op == nir_texop_txf &&
-                        tex->sampler_dim == GLSL_SAMPLER_DIM_2D &&
-                        !tex->is_array &&
-                        !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP);
+
+      /* agx_nir_lower_texture() crawls a G17P integer fetch's descriptor to
+       * predicate it: the explicit out-of-bounds path reads the size of a two-
+       * or three-dimensional fetch, and the older robustness path reads the
+       * descriptor for a fetch carrying a minimum level. A crawl needs the
+       * descriptor, and only a bindless fetch has one, so every fetch that
+       * lowering will crawl has to be made bindless here.
+       *
+       * agx_nir_needs_texture_crawl() already covers the shapes that crawl on
+       * every chip -- a non-zero level, an array layer, a buffer texture --
+       * so this adds the two that are particular to G17P. Keep it in step with
+       * the conditions in agx_nir_lower_texture(): a fetch that reaches a
+       * crawl without a descriptor asserts rather than falls back.
+       */
+      force_bindless |=
+         tex->op == nir_texop_txf &&
+         !(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP) &&
+         (tex->sampler_dim == GLSL_SAMPLER_DIM_2D ||
+          tex->sampler_dim == GLSL_SAMPLER_DIM_3D ||
+          nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0);
    }
    b->cursor = nir_before_instr(instr);
 

@@ -54,6 +54,15 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   }
 
   test(
+    'hk_g17p_attachmentless_record',
+    g17p_attachmentless_record,
+    env : g17p_queue_progress_environment,
+    depends : [_dev_icd, libvulkan_asahi, libasahi_noop_drm_shim],
+    suite : ['asahi', 'g17p-attachmentless'],
+    timeout : 30,
+  )
+
+  test(
     'hk_g17p_pipeline_cache_persistence',
     g17p_pipeline_cache,
     env : g17p_queue_progress_environment,

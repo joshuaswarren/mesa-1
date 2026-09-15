@@ -308,9 +308,13 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
 
    assert(size > 0 && "must stop");
 
+   /* The staging accounting is per instruction, so a linked software vertex
+    * shader (a compute-stage main behind the vertex prolog) is described the
+    * same way as a hardware vertex or fragment program. */
    if (dev->chip == AGX_CHIP_G17P &&
        (main->info.stage == MESA_SHADER_VERTEX ||
-        main->info.stage == MESA_SHADER_FRAGMENT) &&
+        main->info.stage == MESA_SHADER_FRAGMENT ||
+        main->info.stage == MESA_SHADER_COMPUTE) &&
        staging_known && !linked->g17p_compiler_d_valid) {
       linked->g17p_compiler_d_valid = true;
       linked->g17p_compiler_d = staging_halfs * 2;

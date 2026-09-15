@@ -150,7 +150,9 @@ bool agx_ioto_g17p_no_resource_program_compose(
 /* Compose the ordinary no-resource G17P fragment-stage program captured in
  * every valid EXP-G1a vary0-class run.  Unlike compute and vertex programs,
  * the fragment loader terminates its default profile prefix with the exact
- * six-byte PIXREL record before stop; it has no SETPROFILECTL suffix. */
+ * six-byte PIXREL record before stop; it has no SETPROFILECTL suffix.
+ * colour_classes names consumed synchronization partitions (bits 0..2),
+ * independent of the number or physical placement of colour attachments. */
 bool agx_ioto_g17p_fragment_no_resource_program_compose(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
    unsigned colour_classes, void *output, size_t capacity, size_t *written);

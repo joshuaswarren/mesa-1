@@ -546,6 +546,9 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
     * encoding of the native texture heap index. The fetch instruction's 3D
     * selector is orthogonal to the integer-LOD PACK_SMPIR transaction. */
    const bool valid_lod = lod >= 0 &&
+      nir_src_num_components(tex->src[lod].src) == 1 &&
+      (nir_src_bit_size(tex->src[lod].src) == 16 ||
+       nir_src_bit_size(tex->src[lod].src) == 32) &&
       (nir_src_is_const(tex->src[lod].src)
          ? nir_src_as_uint(tex->src[lod].src) <= 63
          : (nir_src_num_components(tex->src[lod].src) == 1 &&
@@ -778,11 +781,12 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                const int lod =
                   nir_tex_instr_src_index(tex, nir_tex_src_lod);
                assert(lod >= 0);
+               nir_def *level = tex->src[lod].src.ssa;
                nir_src_rewrite(&tex->src[lod].src,
                                nir_src_is_const(tex->src[lod].src)
                                   ? nir_imm_intN_t(
                                        &b, nir_src_as_uint(tex->src[lod].src), 32)
-                                  : nir_u2u32(&b, tex->src[lod].src.ssa));
+                                  : nir_u2u32(&b, level));
             }
 
             nir_def *set = nir_load_descriptor_set_agx(&b, nir_intrinsic_desc_set(image));

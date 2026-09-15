@@ -2413,11 +2413,12 @@ intrinsic("load_uvs_index_agx", dest_comp = 1, bit_sizes=[16],
 #   (((((y * tile_width) + x) * nr_samples) + sample) * sample_stride) + offset
 #
 # src[] = { sample mask }
-# base = offset
-load("local_pixel_agx", [1], [BASE, FORMAT], [CAN_REORDER, CAN_ELIMINATE])
+# base = byte offset, target = logical colour attachment index. The latter
+# remains unchanged when inactive attachments compact the physical layout.
+load("local_pixel_agx", [1], [BASE, FORMAT, TARGET], [CAN_REORDER, CAN_ELIMINATE])
 # src[] = { value, sample mask, coordinates }
-# base = offset
-store("local_pixel_agx", [1, -1], [BASE, WRITE_MASK, FORMAT, EXPLICIT_COORD], [CAN_REORDER])
+# base = byte offset, target = logical colour attachment index
+store("local_pixel_agx", [1, -1], [BASE, WRITE_MASK, FORMAT, EXPLICIT_COORD, TARGET], [CAN_REORDER])
 
 # Combined depth/stencil emit, applying to a mask of samples. base indicates
 # which to write (1 = depth, 2 = stencil, 3 = both).

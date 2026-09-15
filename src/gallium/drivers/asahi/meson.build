@@ -57,6 +57,27 @@ driver_asahi = declare_dependency(
 )
 
 if with_tests and with_tools.contains('drm-shim')
+  test(
+    'asahi-g17p-texture-crawl',
+    executable(
+      'asahi-g17p-texture-crawl',
+      files('tests/test-agx-g17p-texture-crawl.c'),
+      include_directories : [
+        inc_gallium_aux, inc_gallium, inc_include, inc_src, inc_asahi,
+        inc_virtio_gpu, inc_virtio_vdrm,
+      ],
+      dependencies : [
+        idep_nir, idep_mesautil, idep_agx_pack, dep_libdrm, idep_libagx,
+        idep_libagx_shaders_h, idep_xmlconfig,
+      ],
+      link_with : [
+        libasahi, libasahiwinsys, libasahi_compiler, libasahi_lib,
+        libasahi_layout, libasahi_decode, libgallium, libgalliumvl_stub,
+      ],
+    ),
+    suite : ['asahi'],
+  )
+
   asahi_g17p_blit_test = executable(
     'asahi-g17p-blit',
     files('tests/test-agx-g17p-blit.c'),
@@ -77,6 +98,40 @@ if with_tests and with_tools.contains('drm-shim')
 
   # The shim has to be preloaded before libc's open(), so the test runs the
   # binary through a wrapper that sets LD_PRELOAD and the chip selector.
+  foreach chip : ['g13g', 'g17p']
+    test(
+      'asahi-' + chip + '-gallium-xfb-program',
+      prog_python,
+      args : [
+        files('tests/run-shim.py'),
+        libasahi_noop_drm_shim,
+        asahi_g17p_blit_test,
+      ],
+      env : [
+        'ASAHI_SHIM_CHIP=' + chip,
+        'AGX_TEST_XFB_COPY_PROGRAM=1',
+      ],
+      suite : ['asahi'],
+    )
+
+    # Linked-program vertex output shapes: clip distances and multiple user
+    # varyings must reach the AGX3 vertex writeout with inlined UVS indices.
+    test(
+      'asahi-' + chip + '-gallium-vertex-output-shapes',
+      prog_python,
+      args : [
+        files('tests/run-shim.py'),
+        libasahi_noop_drm_shim,
+        asahi_g17p_blit_test,
+      ],
+      env : [
+        'ASAHI_SHIM_CHIP=' + chip,
+        'AGX_TEST_VERTEX_OUTPUT_SHAPES=1',
+      ],
+      suite : ['asahi'],
+    )
+  endforeach
+
   test(
     'asahi-g17p-gallium-blit',
     prog_python,

@@ -645,6 +645,17 @@ hk_g17p_build_compute_program_raw(
 
    if (!cache_hit) {
       if (!hk_agx3_g17p_compute_program_generate(dev->dev.chip, &desc, out)) {
+         mesa_loge("G17P compute program rejected (%s): binary=%u scratch=%u "
+                   "gprs=%u compiler_d_valid=%u compiler_d=%u shared=%u "
+                   "kind=%u ranges=%zu program=%" PRIx64 " shader=%" PRIx64,
+                   trace ? trace : "unknown", shader_binary_size, scratch_size,
+                   nr_gprs, compiler_d_valid, compiler_d,
+                   threadgroup_memory_size_B, (unsigned)kind, range_count,
+                   program_va, shader_va);
+         for (size_t i = 0; i < range_count; ++i)
+            mesa_loge("G17P compute range[%zu]: start=%u size=%u address=%" PRIx64,
+                      i, ranges[i].start_halfs, ranges[i].size_halfs,
+                      ranges[i].address);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return false;
       }

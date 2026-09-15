@@ -156,6 +156,9 @@ hk_CreateInstance(const VkInstanceCreateInfo *pCreateInfo,
    if (result != VK_SUCCESS)
       goto fail_alloc;
 
+   instance->vk.enable_debug_logging =
+      debug_get_bool_option("HK_DEBUG_LOGGING", false);
+
    hk_init_dri_options(instance);
 
    /* Every vk_command_buffer_set_error() in the recording path is silent

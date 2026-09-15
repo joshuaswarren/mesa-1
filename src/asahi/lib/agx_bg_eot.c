@@ -4,6 +4,7 @@
  */
 
 #include "agx_bg_eot.h"
+#include "agx_g17p_wide_mrt_eot.h"
 #include "util/simple_mtx.h"
 #include "util/u_debug.h"
 #include "agx_compile.h"
@@ -79,8 +80,15 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
        (main_offset != 0 &&
         main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
        main_offset > bin->info.binary_size ||
-       bin->info.main_size > bin->info.binary_size - main_offset)
+       bin->info.main_size > bin->info.binary_size - main_offset) {
+      mesa_loge("asahi: G17P %s program geometry is unproven: binary=%u "
+                "main=%u@%u preamble=%u rodata=%u",
+                bin->info.stage == MESA_SHADER_COMPUTE ? "end-of-tile"
+                                                       : "background",
+                bin->info.binary_size, bin->info.main_size, main_offset,
+                bin->info.has_preamble, bin->info.rodata.size_16);
       return false;
+   }
 
    const size_t size = lead_size + block_size;
    uint8_t *image = malloc(size);
@@ -221,6 +229,9 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
    struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);
    struct agx_shader_part bin;
    if (!agx_compile_shader_nir(shader, key, &bin)) {
+      mesa_loge("asahi: the %s shader did not compile for this chip",
+                shader->info.stage == MESA_SHADER_COMPUTE ? "end-of-tile"
+                                                          : "background");
       ralloc_free(shader);
       ralloc_free(res);
       return NULL;
@@ -309,10 +320,19 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
       /* G17P multisample backgrounds store through the coverage register. */
       .fs.nr_samples =
          cache->dev->chip == AGX_CHIP_G17P ? key->tib.nr_samples : 0,
-      .g17p_mrt_bg = key->mixed_mrt,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P,
    };
+
+   /* The multi-target background protocol is keyed, not inferred: without
+    * this the packer sees a bare run of tile stores, refuses the shader and
+    * the draw is dropped. Vulkan says so through mixed_mrt; GL reaches the
+    * same shapes through an ordinary draw-buffer mask, and
+    * KHR-GL30.draw_buffers clears eight RGBA8 targets at once. */
+   unsigned background_targets = 0;
+   for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+      background_targets += key->op[rt] != AGX_BG_EOT_NONE;
+   compiler_key.g17p_mrt_bg = key->mixed_mrt || background_targets > 1;
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_BG_EOT_NONE)
@@ -342,6 +362,40 @@ static struct agx_bg_eot_shader *
 agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
                              struct agx_bg_eot_key *key)
 {
+   const unsigned rgba8_mask = agx_g17p_rgba8_mrt_mask(&key->tib);
+   const unsigned active_count = util_bitcount(rgba8_mask);
+   if (cache->dev->chip == AGX_CHIP_G17P && rgba8_mask) {
+      /* EOT partitions are physical offset/sample-stride quotients, not
+       * fragment synchronization classes. All these compact offsets stay
+       * in partition zero; native PBEs and offset arguments use active order. */
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+         if (key->op[rt] != ((rgba8_mask & BITFIELD_BIT(rt))
+                              ? AGX_EOT_STORE : AGX_BG_EOT_NONE))
+            return NULL;
+      }
+      struct agx_g17p_wide_mrt_eot native;
+      if (!agx_g17p_wide_mrt_eot_get(active_count, &native))
+         return NULL;
+      struct agx_shader_part bin = {
+         .binary = (void *)native.code,
+         .info = {
+            .stage = MESA_SHADER_COMPUTE,
+            .binary_size = native.size,
+            .main_size = native.size,
+            .nr_gprs = 8,
+            .agx3_staging_known = true,
+            .agx3_staging_halfs = native.staging_halfs,
+         },
+      };
+      struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);
+      if (!res || !agx_g17p_upload_bg_eot(cache, &bin, res)) {
+         ralloc_free(res);
+         return NULL;
+      }
+      res->info = bin.info;
+      return res;
+   }
+
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
                                                   &agx_nir_options, "agx_eot");
 
@@ -446,8 +500,11 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       /* A mixed layout storing several targets uses the multi-target
        * builtin, selecting each target's IMGWBLK tail by its format. A
        * single stored target keeps its format's own program. */
+      /* Counted whatever named the layout. A GL draw-buffer mask reaches the
+       * same several-target store as a Vulkan mixed layout; the selectors
+       * come from each target's own logical format either way. */
       unsigned stores = 0;
-      for (unsigned rt = 0; key->mixed_mrt && rt < ARRAY_SIZE(key->op); ++rt)
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
          stores += key->op[rt] == AGX_EOT_STORE;
 
       if (stores > 1 &&

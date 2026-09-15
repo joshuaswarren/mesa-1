@@ -5511,6 +5511,15 @@ nir_opt_varyings_bulk(nir_shader **shaders, uint32_t num_shaders, bool spirv,
        * linked/unlinked code paths. Honeykrisp depends on this.
        */
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
+      /* As below: a lone pre-rasterization shader has no consumer, so its
+       * interpolation qualifiers are known and empty.
+       */
+      if (nir->info.stage != MESA_SHADER_FRAGMENT) {
+         nir->info.known_interpolation_qualifiers = true;
+         nir->info.linear_varyings = 0;
+         nir->info.perspective_varyings = 0;
+      }
       return;
    }
 
@@ -5605,5 +5614,15 @@ nir_opt_varyings_bulk(nir_shader **shaders, uint32_t num_shaders, bool spirv,
 
       producer->info.linear_varyings = fs->info.linear_varyings;
       producer->info.perspective_varyings = fs->info.perspective_varyings;
+   } else {
+      /* A program that ends before rasterization has no consumer for its user
+       * varyings: only transform feedback and fixed-function outputs are
+       * observable. The qualifiers are therefore known, and every slot is
+       * trivially flat, so a driver whose varying layout depends on them need
+       * not fall back to a dynamic one.
+       */
+      fs->info.known_interpolation_qualifiers = true;
+      fs->info.linear_varyings = 0;
+      fs->info.perspective_varyings = 0;
    }
 }

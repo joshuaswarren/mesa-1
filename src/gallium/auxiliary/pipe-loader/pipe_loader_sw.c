@@ -333,13 +333,6 @@ pipe_loader_sw_release(struct pipe_loader_device **dev)
    pipe_loader_base_release(dev);
 }
 
-static const struct driOptionDescription *
-pipe_loader_sw_get_driconf(struct pipe_loader_device *dev, unsigned *count)
-{
-   *count = 0;
-   return NULL;
-}
-
 #if defined(HAVE_DRI) && defined(HAVE_ZINK)
 static const driOptionDescription zink_driconf[] = {
       #include "gallium/drivers/zink/driinfo_zink.h"
@@ -352,6 +345,22 @@ pipe_loader_vk_get_driconf(struct pipe_loader_device *dev, unsigned *count)
    return zink_driconf;
 }
 #endif
+
+static const struct driOptionDescription *
+pipe_loader_sw_get_driconf(struct pipe_loader_device *dev, unsigned *count)
+{
+#if defined(HAVE_DRI) && defined(HAVE_ZINK)
+   /* sw_screen_create_vk() honors GALLIUM_DRIVER even for a KMS SWRAST
+    * loader. A display-only DRM device can therefore use hardware Zink.
+    * Supply the same driver's options before it queries its configuration.
+    */
+   const char *driver = debug_get_option("GALLIUM_DRIVER", NULL);
+   if (driver && !strcmp(driver, "zink"))
+      return pipe_loader_vk_get_driconf(dev, count);
+#endif
+   *count = 0;
+   return NULL;
+}
 
 static struct pipe_screen *
 pipe_loader_sw_create_screen(struct pipe_loader_device *dev,

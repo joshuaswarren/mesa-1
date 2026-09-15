@@ -726,6 +726,19 @@ compile_epilog_samples(unsigned count, const enum pipe_format *formats,
                                 .secondary = true};
    u_foreach_bit64(offset, partitions)
       BITSET_SET(key.g17p_tile_partitions, offset);
+   /* Match Honeykrisp's keyed physical partitions even when every target
+    * is written. Unkeyed GL shaders now carry logical attachment IDs, which
+    * differ from physical order for the reordered mixed-format witnesses. */
+   if (!partitions && count > 1) {
+      enum pipe_format full_formats[AGX_MAX_RENDER_TARGETS] = {0};
+      memcpy(full_formats, formats, count * sizeof(*formats));
+      const struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_bounded(
+         full_formats, count, samples, false, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+      for (unsigned rt = 0; rt < count; ++rt) {
+         if (full_formats[rt] != PIPE_FORMAT_NONE && !tib.spilled[rt])
+            BITSET_SET(key.g17p_tile_partitions, tib._offset_B[rt]);
+      }
+   }
    const bool ok = agx_compile_shader_nir(b.shader, &key, part);
    ralloc_free(b.shader);
    return ok;
@@ -899,6 +912,14 @@ test_epilogs(void)
             memcpy(sequence[n++], wait_48, 6);
             memcpy(sequence[n++], release_48, 6);
             memcpy(sequence[n++], release_524, 6);
+         }
+         if (!contains_in_order(&part, (const uint8_t (*)[6])sequence, n)) {
+            fprintf(stderr, "MRT epilog mismatch: layout=%u targets=%u depth=%u\n",
+                    i, l->count, write_z);
+            const uint8_t *bytes = part.binary;
+            for (unsigned j = 0; j < part.info.binary_size; ++j)
+               fprintf(stderr, "%02x", bytes[j]);
+            fprintf(stderr, "\n");
          }
          CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
 

@@ -17,6 +17,11 @@ static struct agx3_slot_instr
 alu(uint16_t d, uint16_t a, uint16_t b){ struct agx3_slot_instr I={0}; I.nr_dsts=1; I.dst[0]=d; I.nr_srcs=2; I.src[0]=a; I.src[1]=b; return I; }
 static struct agx3_slot_instr
 st(uint16_t a){ struct agx3_slot_instr I={0}; I.nr_srcs=1; I.src[0]=a; return I; }
+/* An asynchronous store: no destination, one payload register it reads. */
+static struct agx3_slot_instr
+stdev(uint16_t a){ struct agx3_slot_instr I={0}; I.is_async=true; I.latches_srcs=true; I.nr_srcs=1; I.src[0]=a; return I; }
+static struct agx3_slot_instr
+mov(uint16_t d){ struct agx3_slot_instr I={0}; I.nr_dsts=1; I.dst[0]=d; return I; }
 
 int main(void)
 {
@@ -31,6 +36,35 @@ int main(void)
       CHECK(r[1].slot==2 && r[1].wait_mask==0);
       CHECK(r[2].slot==0 && r[2].wait_mask==0x3u);  /* wait slots 1 and 2 */
       CHECK(r[3].slot==0 && r[3].wait_mask==0);      /* add result is sync */
+   }
+
+   /* Write-after-read. An asynchronous store latches its payload when it
+    * retires, so redefining that register first must wait the store's slot.
+    * A store has no destination, so nothing else tracks its payload: this is
+    * what corrupted the transform feedback copy program, which reuses one
+    * payload quad for every captured varying. */
+   {
+      struct agx3_slot_instr p[] = { stdev(8), mov(8), stdev(8) };
+      CHECK(agx3_slot_assign(p, 3, 6, r));
+      CHECK(r[0].slot==1 && r[0].wait_mask==0);
+      CHECK(r[1].slot==0 && r[1].wait_mask==0x1u); /* wait the store */
+      CHECK(r[2].slot==2);
+   }
+
+   /* Having waited the slot once, a second redefinition needs no further
+    * wait until a new generation is outstanding. */
+   {
+      struct agx3_slot_instr p[] = { stdev(8), mov(8), mov(8) };
+      CHECK(agx3_slot_assign(p, 3, 6, r));
+      CHECK(r[1].wait_mask==0x1u);
+      CHECK(r[2].wait_mask==0);
+   }
+
+   /* A register no outstanding operation reads is free to redefine. */
+   {
+      struct agx3_slot_instr p[] = { stdev(8), mov(10) };
+      CHECK(agx3_slot_assign(p, 2, 6, r));
+      CHECK(r[1].wait_mask==0);
    }
 
    /* Waited once = satisfied globally: two consumers of the same load; only the
@@ -303,6 +337,36 @@ int main(void)
       CHECK(r[4].wait_mask == 4);
       p[3].nr_srcs = AGX3_SLOT_MAX_REGS + 1;
       CHECK(!agx3_slot_assign(p, 5, 6, r));
+   }
+
+   /* Integrating store-payload tracking with generation-safe allocation:
+    * a resultless store still owns its slot until its reader retires. */
+   {
+      struct agx3_slot_instr store = st(0);
+      store.is_async = true;
+      store.latches_srcs = true;
+      struct agx3_slot_instr p[] = {store, ld(8), alu(0, 2, 4), st(8)};
+      CHECK(agx3_slot_assign(p, 4, 1, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+      CHECK(r[1].slot == 1 && r[1].wait_mask == 1);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[3].wait_mask == 1);
+   }
+
+   /* A texture's internal staging generation must also retire store readers,
+    * even though no prior async instruction wrote a result on that slot. */
+   {
+      struct agx3_slot_instr store = st(0), texture = ld(8);
+      store.is_async = true;
+      store.latches_srcs = true;
+      store.preferred_slot = 2;
+      texture.preferred_slot = 1;
+      texture.transient_slots = 1u << 1;
+      struct agx3_slot_instr p[] = {store, texture, alu(0, 2, 4), st(8)};
+      CHECK(agx3_slot_assign(p, 4, 6, r));
+      CHECK(r[1].slot == 1 && r[1].wait_mask == 2);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[3].wait_mask == 1);
    }
 
    /* Malformed inputs. */

@@ -6,6 +6,7 @@
 #include "../agx_ioto_program_core.h"
 
 #include "../agx_ioto_core.h"
+#include "../../compiler/test/probes/g17p-sparse-mrt.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -617,6 +618,22 @@ test_g17p_fragment_no_resource_program(void)
       CHECK(written == sizeof(expected));
       CHECK(memcmp(output, expected_variant, sizeof(expected_variant)) == 0);
       CHECK(output[sizeof(expected)] == 0xa5);
+   }
+
+   /* Independent native metadata for holes, including no attachment zero. */
+   for (unsigned i = 0; i < sizeof(g17p_sparse_mrt_oracles) /
+                            sizeof(g17p_sparse_mrt_oracles[0]); ++i) {
+      unsigned release = g17p_sparse_mrt_oracles[i].loader_release;
+      uint8_t expected_variant[sizeof(expected)];
+      memcpy(expected_variant, expected, sizeof(expected_variant));
+      expected_variant[pixrel_offset + 3] = release;
+      expected_variant[pixrel_offset + 4] = release >> 8;
+      CHECK(agx_ioto_g17p_fragment_no_resource_program_compose(
+         UINT64_C(0x10000130640), &tail,
+         g17p_sparse_mrt_oracles[i].partition_mask, output,
+         sizeof(expected), &written));
+      CHECK(written == sizeof(expected));
+      CHECK(!memcmp(output, expected_variant, sizeof(expected_variant)));
    }
 
    uint8_t before[sizeof(output)];

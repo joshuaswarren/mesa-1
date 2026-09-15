@@ -62,7 +62,10 @@ test(
     libgallium_dri,
     gl_mrt,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -88,7 +91,10 @@ test(
     gl_mrt,
     '--wboit',
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -126,6 +132,7 @@ test(
     gl_msaa,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_MSAA_DRAWS=12',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -152,7 +159,10 @@ test(
     libgallium_dri,
     gl_texture_offset,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -189,7 +199,10 @@ test(
     libgallium_dri,
     gl_depth_texture,
   ],
-  env : ['ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE=1'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_DEPTH_TEXTURE=1',
+  ],
   suite : ['asahi'],
 )
 
@@ -213,38 +226,42 @@ gl_hypr_mixed_draw = executable(
   build_by_default : false,
 )
 
-test(
-  'asahi-g17p-gl-hypr-mixed-draw-software-control',
-  gl_hypr_mixed_draw,
-  args : [
-    files('hypr-0.56.1-tex300.vert'),
-    files('hypr-0.56.1-border-rounded.frag'),
-  ],
-  env : [
-    'EGL_PLATFORM=surfaceless',
-    'LIBGL_ALWAYS_SOFTWARE=true',
-  ],
-  suite : ['asahi'],
-)
-
-test(
-  'asahi-g17p-gl-hypr-mixed-draw-shim-submit',
-  prog_python,
-  args : [
-    files('run-gl-shim.py'),
-    libasahi_noop_drm_shim,
-    libegl,
-    libgallium_dri,
+foreach mode : ['tight', 'api-barrier']
+  test(
+    'asahi-g17p-gl-hypr-mixed-draw-software-control-' + mode,
     gl_hypr_mixed_draw,
-    files('hypr-0.56.1-tex300.vert'),
-    files('hypr-0.56.1-border-rounded.frag'),
-  ],
-  env : [
-    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
-    'MESA_SHADER_CACHE_DISABLE=true',
-  ],
-  suite : ['asahi'],
-)
+    args : [
+      files('hypr-0.56.1-tex300.vert'),
+      files('hypr-0.56.1-border-rounded.frag'),
+      '--' + mode,
+    ],
+    env : [
+      'EGL_PLATFORM=surfaceless',
+      'LIBGL_ALWAYS_SOFTWARE=true',
+    ],
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-gl-hypr-mixed-draw-shim-submit-' + mode,
+    prog_python,
+    args : [
+      files('run-gl-shim.py'),
+      libasahi_noop_drm_shim,
+      libegl,
+      libgallium_dri,
+      gl_hypr_mixed_draw,
+      files('hypr-0.56.1-tex300.vert'),
+      files('hypr-0.56.1-border-rounded.frag'),
+      '--' + mode,
+    ],
+    env : [
+      'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+      'MESA_SHADER_CACHE_DISABLE=true',
+    ],
+    suite : ['asahi'],
+  )
+endforeach
 
 gl_multi_viewport = executable(
   'asahi-g17p-gl-multi-viewport',
@@ -254,6 +271,179 @@ gl_multi_viewport = executable(
     cc.find_library('GL'),
   ],
   build_by_default : false,
+)
+
+gl_rgb32_fbo = executable(
+  'asahi-g17p-gl-rgb32-fbo',
+  files('test-g17p-gl-rgb32-fbo.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+gl_stencil_blit = executable(
+  'asahi-g17p-gl-stencil-blit',
+  files('test-g17p-gl-stencil-blit.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-stencil-blit-software-control',
+  gl_stencil_blit,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_default_framebuffer = executable(
+  'asahi-g17p-gl-default-framebuffer',
+  files('test-g17p-gl-default-framebuffer.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('X11'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-default-framebuffer-software-control',
+  gl_default_framebuffer,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_array_shadow = executable(
+  'asahi-g17p-gl-array-shadow',
+  files('test-g17p-gl-array-shadow.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-array-shadow-software-control',
+  gl_array_shadow,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_lod_bias = executable(
+  'asahi-g17p-gl-lod-bias',
+  files('test-g17p-gl-lod-bias.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-lod-bias-software-control',
+  gl_lod_bias,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_msaa_resolve = executable(
+  'asahi-g17p-gl-msaa-resolve',
+  files('test-g17p-gl-msaa-resolve.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-msaa-resolve-software-control',
+  gl_msaa_resolve,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_xfb_interleaved = executable(
+  'asahi-g17p-gl-xfb-interleaved',
+  files('test-g17p-gl-xfb-interleaved.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-xfb-interleaved-software-control',
+  gl_xfb_interleaved,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_xfb_streams = executable(
+  'asahi-g17p-gl-xfb-streams',
+  files('test-g17p-gl-xfb-streams.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-xfb-streams-software-control',
+  gl_xfb_streams,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-xfb-streams-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_streams,
+  ],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
 )
 
 test(
@@ -289,7 +479,38 @@ test(
     libgallium_dri,
     gl_multi_viewport,
   ],
-  env : ['ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT=1'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_MULTI_VIEWPORT=1',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-rgb32-fbo-software-control',
+  gl_rgb32_fbo,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-rgb32-fbo-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_rgb32_fbo,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_RGB32_FBO_DRAWS=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -463,6 +684,7 @@ test(
     gl_texture_cube_lod,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -510,6 +732,7 @@ test(
     gl_frag_constants,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS=7',
     'MESA_SHADER_CACHE_DISABLE=true',
@@ -538,6 +761,7 @@ test(
     gl_packed16_fbo,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_16BIT_FBO_DRAWS=4',
     'MESA_SHADER_CACHE_DISABLE=true',
@@ -555,7 +779,10 @@ test(
     libgallium_dri,
     gl_layered_fbo,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -570,6 +797,7 @@ test(
     gl_texture_array,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -597,6 +825,7 @@ test(
     gl_texture_3d,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -624,6 +853,7 @@ test(
     gl_texture_border,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS=3',
     'MESA_SHADER_CACHE_DISABLE=true',
@@ -652,7 +882,79 @@ test(
     gl_vertex_texture,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+# The kernel refuses a render job whose VM has not bound every T8140 native
+# context view (mmu.rs install_t8140_job_context_aliases), which is how a
+# driver without the fixed 0x1000000000 render-context bind fails on Neo:
+# "job context view 0 source 0x1000000000+0x10000 -> 0x0 is not bound".
+# The shim models that registry, so this asserts the bind contract host-side.
+test(
+  'asahi-g17p-gl-vertex-texture-shim-context-views',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_texture,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_GL_EXPECT_RENDERER=A18 Pro',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+# The same draw on a shader-cache HIT, which is the path every launch after the
+# first one takes and which no other shim oracle exercises, because they all
+# disable the cache. A compiled-shader property that survives compilation but
+# not serialisation shows up only here.
+test(
+  'asahi-g17p-gl-vertex-texture-shim-warm-cache',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_texture,
+  ],
+  env : [
+    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS=1',
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_GL_EXPECT_RENDERER=A18 Pro',
+    'ASAHI_GL_SHIM_WARM_CACHE=1',
+  ],
+  suite : ['asahi'],
+)
+
+# The AGX2 control arm: the same client and the same shim, changing only the
+# reported chip. A failure that reproduces here is not G17P-specific.
+test(
+  'asahi-g13g-gl-vertex-texture-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_texture,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
   suite : ['asahi'],
@@ -678,7 +980,10 @@ test(
     libgallium_dri,
     egl_shared_context,
   ],
-  env : ['MESA_SHADER_CACHE_DISABLE=true'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
   suite : ['asahi'],
 )
 
@@ -729,6 +1034,7 @@ test(
     gl_compute,
   ],
   env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
     'ASAHI_SHIM_G17P_EXPECT_COMPUTE=1',
     'MESA_SHADER_CACHE_DISABLE=true',
   ],
@@ -919,7 +1225,10 @@ test(
     libgallium_dri,
     egl_gbm_swap,
   ],
-  env : ['ASAHI_SHIM_G17P_EXPECT_SWAP_LIFECYCLE=1'],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'ASAHI_SHIM_G17P_EXPECT_SWAP_LIFECYCLE=1',
+  ],
   suite : ['asahi'],
 )
 

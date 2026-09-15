@@ -15,29 +15,76 @@
 #define WIDTH  8
 #define HEIGHT 8
 
-static void
-print_driver_provenance(void)
+/*
+ * Which driver actually ran.
+ *
+ * A G17P GL run can reach EGL 1.5 / GL 4.6 / GLES 3.2 and report an Apple G17P
+ * renderer through a Gallium that has none of this project's G17P work in it --
+ * the system Mesa's own asahi driver does exactly that.  Such a driver never
+ * binds the fixed render context at 0x1000000000, so the kernel refuses its
+ * first render job ("job context view 0 ... is not bound") and the failure
+ * reads as a driver bug in code that was never loaded.
+ *
+ * Two independent discriminators are printed, and either can be made fatal:
+ * the mapped libgallium object, and the renderer string (this driver names the
+ * exact product, "Apple A18 Pro (G17P ..)", where a driver without the G17P
+ * product table falls back to "Apple M5 Unknown (G17P ..)").
+ */
+static bool
+check_driver_provenance(void)
 {
-   const GLubyte *version = glGetString(GL_VERSION);
-   printf("vertex-texture GL_VERSION: %s\n", version ? (const char *)version
-                                                     : "(null)");
+   const char *renderer = (const char *)glGetString(GL_RENDERER);
+   const char *version = (const char *)glGetString(GL_VERSION);
+
+   printf("vertex-texture GL_RENDERER: %s\n", renderer ? renderer : "(null)");
+   printf("vertex-texture GL_VERSION: %s\n", version ? version : "(null)");
+
+   const char *expect_driver = getenv("ASAHI_GL_EXPECT_DRIVER");
+   char previous[4096] = {0};
+   unsigned mapped = 0;
+   bool foreign = false;
 
    FILE *maps = fopen("/proc/self/maps", "r");
-   if (!maps) {
-      perror("vertex-texture fopen(/proc/self/maps)");
-      return;
+   char line[4096];
+   while (maps && fgets(line, sizeof(line), maps)) {
+      char *path = strchr(line, '/');
+      if (!path || !strstr(path, "libgallium"))
+         continue;
+
+      char *newline = strchr(path, '\n');
+      if (newline)
+         *newline = '\0';
+      if (!strcmp(path, previous))
+         continue;
+
+      snprintf(previous, sizeof(previous), "%s", path);
+      printf("vertex-texture gallium object: %s\n", path);
+      mapped++;
+
+      if (expect_driver && !strstr(path, expect_driver))
+         foreign = true;
+   }
+   if (maps)
+      fclose(maps);
+
+   if (expect_driver && (!mapped || foreign)) {
+      fprintf(stderr,
+              "vertex-texture: expected the Gallium driver at '%s'; %u "
+              "libgallium object(s) mapped, foreign=%d\n",
+              expect_driver, mapped, foreign);
+      return false;
    }
 
-   char *line = NULL;
-   size_t capacity = 0;
-   while (getline(&line, &capacity, maps) >= 0) {
-      if (strstr(line, "asahi_dri.so") || strstr(line, "libgallium-"))
-         printf("vertex-texture driver map: %s", line);
+   const char *expect_renderer = getenv("ASAHI_GL_EXPECT_RENDERER");
+   if (expect_renderer &&
+       (!renderer || !strstr(renderer, expect_renderer))) {
+      fprintf(stderr,
+              "vertex-texture: expected a renderer containing '%s', got '%s'\n",
+              expect_renderer, renderer ? renderer : "(null)");
+      return false;
    }
 
-   free(line);
-   fclose(maps);
-   fflush(stdout);
+   return true;
 }
 
 static GLuint
@@ -137,7 +184,8 @@ main(void)
        !eglMakeCurrent(display, surface, surface, context))
       return 1;
 
-   print_driver_provenance();
+   if (!check_driver_provenance())
+      return 1;
 
    GLuint program = make_program();
    if (!program)

@@ -426,6 +426,9 @@ typedef struct {
    /* TODO: Handle tilebuffer ops more efficient */
    bool explicit_coords : 1;
 
+   /* Logical attachment identity, independent of the physical pixel_offset. */
+   uint8_t colour_target;
+
    /* TODO: Handle iter ops more efficient */
    enum agx_interpolation interpolation : 2;
    bool perspective                    : 1;

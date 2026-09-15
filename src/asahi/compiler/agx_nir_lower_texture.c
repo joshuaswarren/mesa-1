@@ -1054,11 +1054,14 @@ lower_robustness(nir_builder *b, nir_intrinsic_instr *intr, UNUSED void *data)
  * can accurately lower descriptors after this pass but before calling
  * the full agx_nir_lower_texture.
  */
+static bool lower_texture_early(nir_shader *s, bool support_lod_bias,
+                                bool lower_2d_robustness,
+                                bool shadow_keeps_sampler_bias);
+
 bool
 agx_nir_lower_texture_early(nir_shader *s, bool support_lod_bias)
 {
-   return agx_nir_lower_texture_early_with_2d_robustness(
-      s, support_lod_bias, false);
+   return lower_texture_early(s, support_lod_bias, false, false);
 }
 
 static bool
@@ -1167,7 +1170,12 @@ agx_nir_lower_g17p_texture_early(nir_shader *s, bool support_lod_bias)
                lower_g17p_projected_3d_runtime_offset,
                nir_metadata_control_flow, NULL);
    }
-   progress |= agx_nir_lower_texture_early(s, support_lod_bias);
+   /* A depth comparison keeps its sampler's bias in the descriptor: the
+    * AGX3B comparison sample has no witnessed per-lane level form in the
+    * vertex stage, where a GLSL `texture()` arrives as an explicit level
+    * zero, and folding a bias into that level would leave the shape
+    * unencodable. agx_upload_samplers() packs the field to match. */
+   progress |= lower_texture_early(s, support_lod_bias, false, true);
 
    /* No qualified runtime-offset ABI can place 3D Z beside the gradient
     * banks, and the inferred bank-8 continuation fails filtered samples on
@@ -1183,10 +1191,9 @@ agx_nir_lower_g17p_texture_early(nir_shader *s, bool support_lod_bias)
    return progress;
 }
 
-bool
-agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
-                                               bool support_lod_bias,
-                                               bool lower_2d_robustness)
+static bool
+lower_texture_early(nir_shader *s, bool support_lod_bias,
+                    bool lower_2d_robustness, bool shadow_keeps_sampler_bias)
 {
    bool progress = false;
 
@@ -1199,6 +1206,7 @@ agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
       .lower_tg4_offsets = true,
       .lower_index_to_offset = true,
       .lower_sampler_lod_bias = support_lod_bias,
+      .keep_sampler_lod_bias_for_shadow = shadow_keeps_sampler_bias,
 
       /* Unclear if/how mipmapped 1D textures work in the hardware. */
       .lower_1d = true,
@@ -1211,6 +1219,14 @@ agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
 
    NIR_PASS(progress, s, nir_lower_tex, &lower_tex_options);
    return progress;
+}
+
+bool
+agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
+                                               bool support_lod_bias,
+                                               bool lower_2d_robustness)
+{
+   return lower_texture_early(s, support_lod_bias, lower_2d_robustness, false);
 }
 
 static bool

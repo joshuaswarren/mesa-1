@@ -126,8 +126,8 @@ struct ra_ctx {
    /* SSA values read by G17P's 192-half f32log2 operand domain. */
    BITSET_WORD *log2_gpr;
 
-   /* SSA cube-coordinate vectors that must stay above CEM's fixed scratch
-    * register bank. */
+   /* SSA coordinates that must stay above CEM's fixed scratch register bank
+    * or a fully occupied MRT store bank. */
    BITSET_WORD *high_gpr;
 };
 
@@ -1942,6 +1942,27 @@ agx_ra(agx_context *ctx)
          classes[v] = ra_class_for_index(I->dest[d]);
 
          max_ncomps = MAX2(max_ncomps, ncomps[v]);
+      }
+   }
+
+   /* The ordered eight-target RGBA8 reload keeps sixteen packed halves live
+    * until its terminal tile stores. Its shared texture coordinates are also
+    * bank-constrained, so the shuffler cannot evict them from that low bank.
+    * Place those coordinates above it from the outset, within their existing
+    * seven-bit COPY domain. This does not relax the tile or texture encodings.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ctx->agx3_mrt_tile_ops_ordered) {
+      unsigned tile_halfs = 0;
+      for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
+         if (BITSET_TEST(low_gpr, ssa))
+            tile_halfs += ncomps[ssa];
+      }
+      if (tile_halfs >= 16) {
+         for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
+            if (BITSET_TEST(texture_gpr, ssa) && !BITSET_TEST(low_gpr, ssa))
+               BITSET_SET(high_gpr, ssa);
+         }
       }
    }
 

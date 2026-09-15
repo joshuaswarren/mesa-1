@@ -239,6 +239,39 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
 }
 
 unsigned
+agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
+{
+   if (!tib || tib->layered || tib->nr_samples != 1 ||
+       (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16))
+      return 0;
+
+   unsigned count = 0, mask = 0;
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      const enum pipe_format format = tib->logical_format[rt];
+      if (format == PIPE_FORMAT_NONE)
+         continue;
+      if ((format != PIPE_FORMAT_R8G8B8A8_UNORM &&
+           format != PIPE_FORMAT_B8G8R8A8_UNORM &&
+           format != PIPE_FORMAT_R8G8B8X8_UNORM &&
+           format != PIPE_FORMAT_B8G8R8X8_UNORM) ||
+          tib->spilled[rt] || tib->_offset_B[rt] != 4 * count)
+         return 0;
+      mask |= BITFIELD_BIT(rt);
+      ++count;
+   }
+   return count && tib->sample_size_B == ALIGN_POT(4 * count, 8) &&
+          tib->sample_size_B * tib->tile_size < 32768 ? mask : 0;
+}
+
+unsigned
+agx_g17p_wide_rgba8_mrt_count(const struct agx_tilebuffer_layout *tib)
+{
+   const unsigned mask = agx_g17p_rgba8_mrt_mask(tib);
+   const unsigned count = util_bitcount(mask);
+   return count >= 3 && mask == BITFIELD_MASK(count) ? count : 0;
+}
+
+unsigned
 agx_tilebuffer_compact(const struct agx_tilebuffer_layout *src,
                        struct agx_tilebuffer_layout *dst,
                        uint8_t map[AGX_MAX_RENDER_TARGETS])
@@ -270,6 +303,14 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
    if (!tib)
       return false;
 
+   /* Compaction only carries the spill flag of an occupied target, so read
+    * the flags before it: a spilled slot with no format is inconsistent
+    * metadata and must not be silently dropped. */
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      if (tib->spilled[rt])
+         return false;
+   }
+
    struct agx_tilebuffer_layout compact;
    const unsigned count = agx_tilebuffer_compact(tib, &compact, NULL);
    tib = &compact;
@@ -277,7 +318,6 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
     * layout; the empty BG/EOT programs use the single-sample form. */
    if (count == 0 && compact.nr_samples == 0)
       compact.nr_samples = 1;
-
    if ((tib->nr_samples != 1 && tib->nr_samples != 2 &&
         tib->nr_samples != 4) ||
        tib->layered || tib->spilled[0])
@@ -296,6 +336,53 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
           tib->nr_samples > 1) &&
          tib->tile_size == 16 * 16))
       return false;
+
+   /* Multisample tiles repeat one sample's allocation, so what matters is the
+    * physical tilebuffer format rather than the API format in front of it.
+    * A hardware sweep at four samples
+    * (src/asahi/gl-tests/test-g17p-gl-msaa-resolve.c, which reads every sample
+    * back individually before resolving) covers each physical family below:
+    * rgba8, rgb565, rgba4, rgb5_a1, rgb10_a2, r8, rg8, r16f and rgba16f all
+    * reach every sample and resolve to the drawn colour. Naming the physical
+    * format also admits the BGRA and RGBX spellings of the same tiles, which
+    * the previous logical-format list had to enumerate one at a time.
+    */
+   if (tib->nr_samples > 1 && tib->logical_format[0] != PIPE_FORMAT_NONE) {
+      switch (agx_tilebuffer_physical_format(tib, 0)) {
+      case PIPE_FORMAT_R8_UNORM:
+      case PIPE_FORMAT_R8G8_UNORM:
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      case PIPE_FORMAT_R16_UNORM:
+      case PIPE_FORMAT_R16_FLOAT:
+      case PIPE_FORMAT_R10G10B10A2_UNORM:
+      /* The signed normalized families, which GL 3.3 reaches where GL 3.0 did
+       * not: KHR-GL33.texture_size_promotion renders to them. The same sweep
+       * covers them -- r8_snorm, rg8_snorm, rgba8_snorm, r16_snorm, rg16_snorm
+       * and rgba16_snorm all reach every sample and resolve. */
+      case PIPE_FORMAT_R8_SNORM:
+      case PIPE_FORMAT_R16_SNORM:
+      /* The integer families the same case renders to. The sweep draws these
+       * through an integer fragment output and reads them back with an
+       * integer sampler: r8i and rgba8i share the eight-bit tile, rgb10a2ui
+       * the sixteen-bit one, and all three reach every sample. */
+      case PIPE_FORMAT_R8_UINT:
+      case PIPE_FORMAT_R16_UINT:
+      /* Vulkan's qualified raw-copy/resolve path preserves individual
+       * R32 words, including packed RGB9E5, until the separate resolve. */
+      case PIPE_FORMAT_R32_UINT:
+      case PIPE_FORMAT_R9G9B9E5_FLOAT:
+      /* The remaining two colour formats the conformance blit walks. Their
+       * tiles are the same eight bytes per sample as the families above. */
+      case PIPE_FORMAT_R8G8B8A8_SRGB:
+      case PIPE_FORMAT_R11G11B10_FLOAT:
+         break;
+      default:
+         return false;
+      }
+   }
+
+   if (agx_g17p_rgba8_mrt_mask(tib))
+      return true;
 
    for (unsigned rt = mrt == AGX_G17P_MRT_MIXED ? AGX_MAX_RENDER_TARGETS
                       : raw32 || mrt == AGX_G17P_MRT_RGBA8 ? 4
@@ -336,13 +423,21 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
       (tib->logical_format[0] == PIPE_FORMAT_R32G32B32A32_FLOAT ||
        tib->logical_format[0] == PIPE_FORMAT_R32G32B32X32_FLOAT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R32_UINT;
+   /* At any sample count: the sweep draws this one through an integer
+    * fragment output and reads every sample back with an integer sampler, and
+    * all four are the drawn value. KHR-GL33.texture_size_promotion renders to
+    * it multisampled. */
    const bool rgb10a2u = tib->sample_size_B == 8 &&
       (tib->logical_format[0] == PIPE_FORMAT_R10G10B10A2_UINT ||
        tib->logical_format[0] == PIPE_FORMAT_B10G10R10A2_UINT) &&
       agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_UINT;
-   /* The packed float word is stored raw, so its samples cannot be
-    * resolved by averaging the lane. */
-   const bool r11g11b10f = tib->nr_samples == 1 && tib->sample_size_B == 8 &&
+   /* The packed float tile is eight bytes per sample at any sample count, and
+    * KHR-GL30.framebuffer_blit.multisampled_to_singlesampled_blit_color_config
+    * exercises it at four samples through GL_R11F_G11F_B10F. Whether such a
+    * tile can be resolved by averaging the raw word is a separate question
+    * from whether the layout is admissible; restricting admission to one
+    * sample refuses that conformance case outright. */
+   const bool r11g11b10f = tib->sample_size_B == 8 &&
       tib->logical_format[0] == PIPE_FORMAT_R11G11B10_FLOAT &&
       agx_tilebuffer_physical_format(tib, 0) ==
          PIPE_FORMAT_R11G11B10_FLOAT;
@@ -359,16 +454,17 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
             agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_FLOAT ||
             agx_tilebuffer_physical_format(tib, 0) ==
                PIPE_FORMAT_R10G10B10A2_UNORM ||
+            /* Every spelling of the signed normalized tiles at once. Naming
+             * the physical format admits the BGRA and RGBX forms the logical
+             * list had to enumerate and still missed: GL 3.3's
+             * texture_size_promotion renders to r8g8b8x8_snorm. */
+            agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R8_SNORM ||
+            agx_tilebuffer_physical_format(tib, 0) == PIPE_FORMAT_R16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_R16G16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R32_UINT ||
-            tib->logical_format[0] == PIPE_FORMAT_R8_SNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_R8G8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8X8_UINT ||
-            tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8_SRGB ||
             tib->logical_format[0] == PIPE_FORMAT_R8G8B8A8_SRGB ||
@@ -381,13 +477,11 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8X8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_B8G8R8A8_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UNORM ||
-            tib->logical_format[0] == PIPE_FORMAT_R16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16_FLOAT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_FLOAT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_FLOAT ||
-            tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_SNORM ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_UINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16_SINT ||
             tib->logical_format[0] == PIPE_FORMAT_R16G16B16A16_UNORM ||

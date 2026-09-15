@@ -800,11 +800,24 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
    if (format == AGX_FORMAT_RGB10A2) {
       if (nr_channels != 4)
          return 0;
-      for (unsigned i = 0; i < 4; ++i)
-         if (channels[i].size != AGX_SIZE_32)
+      agx_index pack_sources[4];
+      for (unsigned i = 0; i < 4; ++i) {
+         if (channels[i].size == AGX_SIZE_32) {
+            pack_sources[i] = channels[i];
+         } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                    channels[i].size == AGX_SIZE_16) {
+            /* As with the normalized 8-bit epilog below, a texture result
+             * can arrive through the half export ABI. The native RGB10A2
+             * pack consumes f32, so widen before packing instead of handing
+             * an unpacked half vector to the tile-store encoder. */
+            pack_sources[i] = agx_temp(b->shader, AGX_SIZE_32);
+            agx_fmov_to(b, pack_sources[i], channels[i]);
+         } else {
             return 0;
-      packed[0] = agx_pack_rgb10a2_agx3(b, channels[0], channels[1],
-                                      channels[2], channels[3]);
+         }
+      }
+      packed[0] = agx_pack_rgb10a2_agx3(b, pack_sources[0], pack_sources[1],
+                                      pack_sources[2], pack_sources[3]);
       return 1;
    }
 
@@ -1015,7 +1028,8 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
                                      format == AGX_FORMAT_RGB9E5))
                          ? 1
                          : nir_intrinsic_write_mask(instr),
-                      nir_intrinsic_base(instr), explicit);
+                      nir_intrinsic_base(instr), explicit,
+                      nir_intrinsic_target(instr));
 }
 
 /* Stage one G17P depth/stencil word, whose low nibble selects every sample
@@ -1143,76 +1157,17 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
    return agx_zs_emit(b, agx_src_index(&instr->src[0]), zs, base);
 }
 
-/*
- * The tilebuffer read half of the same story as agx_pack_normalized_agx3():
- * an 8-bit normalized attachment comes back packed, two channels to a 16-bit
- * register, and `normflt` is the unpack -- one 16-bit register in, two 32-bit
- * floats out. Apple's programmable-blending shaders spend exactly
- * ceil(channels / 2) of them straight after the tile load.
- *
- * Returns true if it handled the load.
- */
-static bool
-agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
-                           nir_intrinsic_instr *instr, enum agx_format format,
-                           unsigned nr_comps)
+/* Unpack already-loaded normalized halves into `dest`. A byte format packs
+ * two channels into each half; a 16-bit one occupies a half per channel and
+ * is recollected into the pair the conversion consumes. Tile and device
+ * traffic differ only in how the halves arrive, so both share this tail. */
+static void
+agx_unpack_normalized_halves_agx3(agx_builder *b, agx_index dest,
+                                  agx_index *halves, enum agx_format format,
+                                  unsigned nr_comps)
 {
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX2)
-      return false;
-   if (format == AGX_FORMAT_RGB10A2) {
-      if (nr_comps != 4 || dest.size != AGX_SIZE_32)
-         return false;
-      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
-      agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
-                    format, 1, nir_intrinsic_base(instr), false);
-      agx_unpack_rgb10a2_agx3_to(b, dest, packed);
-      agx_emit_cached_split(b, dest, 4);
-      return true;
-   }
-   /* Apple reads an RGB9E5 target's three float lanes back with the same
-    * native conversion (rgb9e5/native/rgb9e5.py fs_read). The format has no
-    * alpha, so a four-component read sees 1.0 there. */
-   if (format == AGX_FORMAT_RGB9E5 &&
-       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-      if ((nr_comps != 3 && nr_comps != 4) || dest.size != AGX_SIZE_32)
-         return false;
-      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
-      agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
-                    format, 1, nir_intrinsic_base(instr), false);
-      agx_index rgb = nr_comps == 3 ? dest : agx_vec_temp(b->shader,
-                                                          AGX_SIZE_32, 3);
-      agx_unpack_rgb10a2_agx3_to(b, rgb, packed)->format = format;
-      if (nr_comps == 4) {
-         agx_index channels[4] = {agx_null()};
-         agx_emit_split(b, channels, rgb, 3);
-         channels[3] = agx_mov_imm(b, 32, fui(1.0f));
-         agx_emit_collect_to(b, dest, 4, channels);
-      }
-      agx_emit_cached_split(b, dest, nr_comps);
-      return true;
-   }
-   const bool norm8 =
-      format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_S8NORM;
    const bool norm16 =
       format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
-   if (!norm8 &&
-       !(norm16 && b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B))
-      return false;
-   if (nr_comps < 1 || nr_comps > 4 ||
-       (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32))
-      return false;
-
-   const unsigned loaded_channels =
-      norm16 ? nr_comps : DIV_ROUND_UP(nr_comps, 2);
-
-   agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
-   packed.channels_m1 = loaded_channels - 1;
-   agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(), format,
-                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
-
-   agx_index halves[4] = {agx_null()};
-   agx_emit_split(b, halves, packed, loaded_channels);
-
    agx_index channels[4] = {agx_null()};
    const unsigned conversions = DIV_ROUND_UP(nr_comps, 2);
    for (unsigned i = 0; i < conversions; ++i) {
@@ -1243,6 +1198,82 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
 
    agx_emit_collect_to(b, dest, nr_comps, channels);
    agx_emit_cached_split(b, dest, nr_comps);
+}
+
+/*
+ * The tilebuffer read half of the same story as agx_pack_normalized_agx3():
+ * an 8-bit normalized attachment comes back packed, two channels to a 16-bit
+ * register, and `normflt` is the unpack -- one 16-bit register in, two 32-bit
+ * floats out. Apple's programmable-blending shaders spend exactly
+ * ceil(channels / 2) of them straight after the tile load.
+ *
+ * Returns true if it handled the load.
+ */
+static bool
+agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
+                           nir_intrinsic_instr *instr, enum agx_format format,
+                           unsigned nr_comps)
+{
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX2)
+      return false;
+   if (format == AGX_FORMAT_RGB10A2) {
+      if (nr_comps != 4 || dest.size != AGX_SIZE_32)
+         return false;
+      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
+      agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
+                    format, 1, nir_intrinsic_base(instr), false,
+                    nir_intrinsic_target(instr));
+      agx_unpack_rgb10a2_agx3_to(b, dest, packed);
+      agx_emit_cached_split(b, dest, 4);
+      return true;
+   }
+   /* Apple reads an RGB9E5 target's three float lanes back with the same
+    * native conversion (rgb9e5/native/rgb9e5.py fs_read). The format has no
+    * alpha, so a four-component read sees 1.0 there. */
+   if (format == AGX_FORMAT_RGB9E5 &&
+       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      if ((nr_comps != 3 && nr_comps != 4) || dest.size != AGX_SIZE_32)
+         return false;
+      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
+      agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
+                    format, 1, nir_intrinsic_base(instr), false,
+                    nir_intrinsic_target(instr));
+      agx_index rgb = nr_comps == 3 ? dest : agx_vec_temp(b->shader,
+                                                          AGX_SIZE_32, 3);
+      agx_unpack_rgb10a2_agx3_to(b, rgb, packed)->format = format;
+      if (nr_comps == 4) {
+         agx_index channels[4] = {agx_null()};
+         agx_emit_split(b, channels, rgb, 3);
+         channels[3] = agx_mov_imm(b, 32, fui(1.0f));
+         agx_emit_collect_to(b, dest, 4, channels);
+      }
+      agx_emit_cached_split(b, dest, nr_comps);
+      return true;
+   }
+   const bool norm8 =
+      format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_S8NORM;
+   const bool norm16 =
+      format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
+   if (!norm8 &&
+       !(norm16 && b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B))
+      return false;
+   if (nr_comps < 1 || nr_comps > 4 ||
+       (dest.size != AGX_SIZE_16 && dest.size != AGX_SIZE_32))
+      return false;
+
+   const unsigned loaded_channels =
+      norm16 ? nr_comps : DIV_ROUND_UP(nr_comps, 2);
+
+   agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
+   packed.channels_m1 = loaded_channels - 1;
+   agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(), format,
+                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false,
+                  nir_intrinsic_target(instr));
+
+   agx_index halves[4] = {agx_null()};
+   agx_emit_split(b, halves, packed, loaded_channels);
+
+   agx_unpack_normalized_halves_agx3(b, dest, halves, format, nr_comps);
    return true;
 }
 
@@ -1269,7 +1300,8 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
       packed.channels_m1 = nr_halfs - 1;
       agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
                      format, BITFIELD_MASK(nr_comps),
-                     nir_intrinsic_base(instr), false);
+                     nir_intrinsic_base(instr), false,
+                     nir_intrinsic_target(instr));
 
       agx_index halfs[2] = {agx_null()};
       agx_emit_split(b, halfs, packed, nr_halfs);
@@ -1279,7 +1311,8 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
    }
 
    agx_ld_tile_to(b, dest, agx_src_index(&instr->src[0]), agx_null(), format,
-                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false);
+                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false,
+                  nir_intrinsic_target(instr));
    agx_emit_cached_split(b, dest, nr_comps);
 }
 
@@ -1309,6 +1342,41 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
    /* Zero-extend offset if we're not sign-extending */
    if (!nir_intrinsic_sign_extend(instr))
       offset = agx_abs(offset);
+
+   const bool norm8 = fmt == AGX_FORMAT_U8NORM || fmt == AGX_FORMAT_S8NORM;
+   const bool norm16 = fmt == AGX_FORMAT_U16NORM || fmt == AGX_FORMAT_S16NORM;
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       (norm8 || norm16)) {
+      const unsigned nr = instr->def.num_components;
+      assert(nr >= 1 && nr <= 4 && packed_count == 0);
+      assert(dest.size == AGX_SIZE_16 || dest.size == AGX_SIZE_32);
+
+      /* Device memory provides raw bytes/halves, with no format conversion:
+       * agx3_fmt_to_width() has no normalized device witness, so a load left
+       * carrying one is refused at the packer and the draw is dropped. Keep
+       * the element width and index scaling intact and reuse the grounded
+       * normalized unpack the tile load already uses. Byte loads reserve an
+       * aligned 32-bit payload even for a single channel. */
+      agx_index packed = norm8 ? agx_temp(b->shader, AGX_SIZE_32)
+                              : agx_vec_temp(b->shader, AGX_SIZE_16, nr);
+      agx_instr *load = agx_device_load_to(
+         b, packed, addr, offset, norm8 ? AGX_FORMAT_I8 : AGX_FORMAT_I16,
+         BITFIELD_MASK(nr), shift, nir_is_coherent(instr));
+      load->memory_index_is_bytes = index_bytes;
+      load->memory_is_packed = norm8 && nr > 1;
+
+      agx_index halves[4] = {agx_null()};
+      if (norm8) {
+         for (unsigned i = 0; i < DIV_ROUND_UP(nr, 2); ++i) {
+            halves[i] = agx_temp(b->shader, AGX_SIZE_16);
+            agx_subdivide_to(b, halves[i], packed, i);
+         }
+      } else {
+         agx_emit_split(b, halves, packed, nr);
+      }
+      agx_unpack_normalized_halves_agx3(b, dest, halves, fmt, nr);
+      return;
+   }
 
    /* AGX3 memory traffic is raw. Convert a normalized packed texel with
     * the same native instruction used by tile loads, after its real load. */
@@ -4273,8 +4341,12 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          /* Compatibility for callers which already performed the AGX2 NIR
           * quadrant reduction. Fold [0,4] exactly to [-1,1], then use the
-          * same native sinc operation as the G17P radians lowering. */
-         agx_index middle = agx_fadd(b, agx_immediate_f(2.0f), agx_neg(s0));
+          * same native sinc operation as the G17P radians lowering. The
+          * folds stay in the operand's own precision: the builder would size
+          * the temporary from the leading immediate and make a 16-bit add of
+          * a 32-bit quadrant, which neither keeps the precision nor packs. */
+         agx_index middle = agx_temp(b->shader, s0.size);
+         agx_fadd_to(b, middle, agx_immediate_f(2.0f), agx_neg(s0));
          agx_index last = agx_fadd(b, s0, agx_immediate_f(-4.0f));
          agx_index t = agx_fcmpsel(b, s0, agx_immediate_f(1.0f), s0,
                                    middle, AGX_FCOND_LE);
@@ -5343,6 +5415,16 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
     */
    NIR_PASS(_, nir, agx_nir_lower_address, byte_indices);
 
+   /* Now that loads carry an index, a select between two of them can choose
+    * the index instead of the loaded data. Run it to a fixed point with the
+    * cleanup below, so a chain of candidate selects collapses to one load.
+    * poly's geometry rasterization copy loaded every candidate vertex per
+    * varying, which overflowed the AGX3B register file and spilled.
+    */
+   NIR_PASS(_, nir, agx_nir_opt_select_load);
+   NIR_PASS(_, nir, nir_opt_cse);
+   NIR_PASS(_, nir, nir_opt_dce);
+
    NIR_PASS(progress, nir, nir_opt_uniform_subgroup, &subgroups_options);
    if (progress) {
       if (byte_indices)
@@ -6128,15 +6210,27 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    const bool only_partition0 =
       __bitset_count(written, ARRAY_SIZE(written)) == 1 &&
       BITSET_TEST(written, 0);
+   /* An unkeyed GL store still names its logical attachment. Keep the
+    * qualified Vulkan sample-shaded load/depth protocol alongside it. */
+   const bool lone_sparse_store =
+      !keyed && store_count == 1 && stores[0]->colour_target != 0;
    if (!stop || (keyed && unkeyed_store) ||
-       store_count < (subset && !only_partition0 ? 1 : 2) ||
+       (!lone_sparse_store &&
+        store_count < (subset && !only_partition0 ? 1 : 2)) ||
        (subset && load_count) || (depth_ops && depth_ops != 3))
       return false;
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
     * ordinary colour transactions, including two/three RGBA32 targets. Other
     * multi-target BG programs have no transactions either and store in no
-    * required partition order. */
+    * required partition order.
+    *
+    * The wide-MRT class protocol is a FRAGMENT witness
+    * (test/probes/g17p-wide-mrt/), and extending it to clears is not
+    * supported by anything: a background compiled with the transaction no
+    * longer matches agx3_g17p_rt0_bg_program_generate()'s loader
+    * descriptor, and KHR-GL30.draw_buffers.draw_buffers_1 aborts the
+    * process at "background Ioto program" on real hardware. */
    if (ctx->key->fs.ignore_tib_dependencies) {
       bool rgba32 = !load_count;
       for (unsigned i = 0; i < store_count; ++i)
