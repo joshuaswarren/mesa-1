@@ -9077,6 +9077,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 I->src[0].size != AGX_SIZE_16 || agx_channels(I->src[0]) != 1 ||
                 !agx3_vary_reg32(I->src[1]) || agx_channels(I->src[1]) != 1)
                AGX3_REFUSE(I);
+            const bool force_early = I->imm & 1;
+            if ((I->imm & ~3) || (force_early && !(I->imm & 2)))
+               AGX3_REFUSE(I);
             if (!g17p_colour_open) {
                uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
                if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
@@ -9096,7 +9099,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * SR2's complete coverage word before acquiring class1. Keep
              * this ordering within the atomic pseudo rather than inheriting
              * the AGX2 wait-before-mask-calculation schedule. */
-            if ((I->imm & 2) &&
+            if ((I->imm & 2) && !force_early &&
                 (!agx3_pixel_wait(enc, 1, 0, bytes, &len) ||
                  !agx3_append(emission, bytes, len)))
                AGX3_REFUSE(I);
@@ -9111,7 +9114,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * kill_memory emit these early MOVMSKs without PIXREL(1),
              * then bracket the eventual testing update with one wait and
              * release. Keep that release paired with its acquire. */
-            if ((I->imm & 2) &&
+            if ((I->imm & 2) && !force_early &&
                 (!agx3_pixel_release(enc, 1, false, 0, bytes, &len) ||
                  !agx3_append(emission, bytes, len)))
                AGX3_REFUSE(I);
@@ -13368,8 +13371,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
 
    util_dynarray_foreach(&fixups, struct agx3_branch_fixup, fixup) {
-      if (!agx3_fixup_branch(emission, enc, *fixup))
+      if (!agx3_fixup_branch(emission, enc, *fixup)) {
+         if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
+            fprintf(stderr,
+                    "AGX3 branch fixup refused: at=%lld target=%lld last=%lld "
+                    "skip_end=%u loop_exit=%u bn=%u\n",
+                    (long long)fixup->offset,
+                    (long long)fixup->block->offset,
+                    (long long)fixup->block->last_offset, fixup->skip_to_end,
+                    fixup->loop_exit, fixup->is_bn);
          goto fail;
+      }
    }
 
    /* Separately compiled parts do not share a scoreboard ledger. Apple's

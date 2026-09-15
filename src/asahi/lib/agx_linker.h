@@ -309,6 +309,13 @@ struct agx_fs_epilog_key {
    bool preserve_zero_mask;
    bool lower_srgb;
 
+   /* G17P's pre-main MOVMSK also runs depth/stencil tests. For late-tests
+    * shaders, defer the API sample mask to the epilog so it can be combined
+    * with shader and alpha-to-coverage masks before any output is committed.
+    */
+   bool defer_api_sample_mask;
+   uint8_t api_sample_mask;
+
    /* Leave pixel-shaded MSAA lowering to a caller that will unroll the
     * per-sample epilog itself. Used by the G17P sample-shaded path.
     */

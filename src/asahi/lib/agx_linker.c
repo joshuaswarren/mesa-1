@@ -238,25 +238,48 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       !prolog && !nr_samples_shaded && main && epilog &&
       agx3_fuse_colour_parts(&main->info.agx3_colour_link,
                               &epilog->info.agx3_colour_link, fused_colour);
-   /* A native fragment enters its pixel transaction once. When the main part
-    * already entered (before a derivative consumer or a memory side effect),
-    * drop the epilog's gate; that is only sound when no epilog branch spans
-    * the removed bytes. */
-   const bool dedup_entry = dev->chip == AGX_CHIP_G17P && fragment &&
-      !prolog && !nr_samples_shaded && !colour_fused && main && epilog &&
-      main->info.agx3_colour_link.entry_emitted &&
-      epilog->info.agx3_colour_link.entry_emitted &&
-      epilog->info.agx3_colour_link.branch_free;
-   if (dedup_entry) {
-      const uint32_t off = epilog->info.agx3_colour_link.entry_offset;
-      uint8_t gate[AGX3_PIXEL_MAX_LENGTH], gate_size;
-      if ((off & 1) || off > epilog->info.main_size ||
-          epilog->info.main_size - off < AGX3_PIXEL_MAX_LENGTH ||
-          !agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3B, gate, &gate_size) ||
-          gate_size != AGX3_PIXEL_MAX_LENGTH ||
-          memcmp((const uint8_t *)epilog->binary + epilog->info.main_offset + off,
-                 gate, gate_size))
-         return false;
+   /* A native fragment enters its pixel transaction once across all linked
+    * parts.  A sample-mask prolog already opens it, so retaining the main
+    * shader's second entry resets the coverage state immediately before its
+    * forced-early wait.  Keep the first gate and remove every later one.  A
+    * gate at offset zero is outside all of that part's branches; otherwise
+    * retain the older branch-free proof that no branch spans the bytes. */
+   struct agx_shader_part *parts[] = {prolog, main, epilog};
+   bool drop_entry[ARRAY_SIZE(parts)] = {false};
+   bool entry_seen = false;
+   if (dev->chip == AGX_CHIP_G17P && fragment && !nr_samples_shaded &&
+       !colour_fused) {
+      for (unsigned i = 0; i < ARRAY_SIZE(parts); ++i) {
+         struct agx_shader_part *part = parts[i];
+         if (!part || !part->info.agx3_colour_link.entry_emitted)
+            continue;
+
+         const uint32_t off = part->info.agx3_colour_link.entry_offset;
+         if (entry_seen) {
+            if (off != 0 && !part->info.agx3_colour_link.branch_free)
+               return false;
+            drop_entry[i] = true;
+         } else {
+            entry_seen = true;
+         }
+      }
+
+      for (unsigned i = 0; i < ARRAY_SIZE(parts); ++i) {
+         if (!drop_entry[i])
+            continue;
+         struct agx_shader_part *part = parts[i];
+         const uint32_t off = part->info.agx3_colour_link.entry_offset;
+         uint8_t gate[AGX3_PIXEL_MAX_LENGTH], gate_size;
+         if ((off & 1) || off > part->info.main_size ||
+             part->info.main_size - off < AGX3_PIXEL_MAX_LENGTH ||
+             !agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3B, gate,
+                                      &gate_size) ||
+             gate_size != AGX3_PIXEL_MAX_LENGTH ||
+             memcmp((const uint8_t *)part->binary + part->info.main_offset +
+                       off,
+                    gate, gate_size))
+            return false;
+      }
    }
    size_t size = 0;
    unsigned nr_gprs = 0, scratch_size = 0, agx3_spectpr_scratch_size = 0;
@@ -275,8 +298,6 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
       else
          size += sizeof(stop);
    }
-
-   struct agx_shader_part *parts[] = {prolog, main, epilog};
 
    for (unsigned i = 0; i < ARRAY_SIZE(parts); ++i) {
       struct agx_shader_part *part = parts[i];
@@ -307,8 +328,9 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
 
    if (colour_fused)
       size = sizeof(fused_colour);
-   else if (dedup_entry)
-      size -= AGX3_PIXEL_MAX_LENGTH;
+   else
+      for (unsigned i = 0; i < ARRAY_SIZE(parts); ++i)
+         size -= drop_entry[i] ? AGX3_PIXEL_MAX_LENGTH : 0;
 
    assert(size > 0 && "must stop");
 
@@ -389,7 +411,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
 
       size_t sz = part->info.main_size;
       const uint8_t *part_code = (const uint8_t *)part->binary + part->info.main_offset;
-      if (dedup_entry && i == 2) {
+      if (drop_entry[i]) {
          const unsigned gate = part->info.agx3_colour_link.entry_offset;
          memcpy(linked_map + offset, part_code, gate);
          memcpy(linked_map + offset + gate, part_code + gate + AGX3_PIXEL_MAX_LENGTH,

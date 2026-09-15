@@ -12,9 +12,14 @@
 #include "nir_builder_opcodes.h"
 #include "nir_intrinsics.h"
 
+struct lower_per_sample_ctx {
+   bool force_early_pending;
+};
+
 static bool
 lower_to_per_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
+   struct lower_per_sample_ctx *ctx = data;
    b->cursor = nir_before_instr(&intr->instr);
 
    switch (intr->intrinsic) {
@@ -30,6 +35,16 @@ lower_to_per_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    case nir_intrinsic_store_zs_agx:
    case nir_intrinsic_demote_samples:
    case nir_intrinsic_sample_mask_agx: {
+      /* Explicit early tests are a per-pixel operation even when the shader
+       * body is sample shaded.  Keep the all/all update inserted at the
+       * function entry intact; the G17P static unroller hoists it ahead of
+       * all sample copies below. */
+      if (intr->intrinsic == nir_intrinsic_sample_mask_agx &&
+          ctx->force_early_pending) {
+         ctx->force_early_pending = false;
+         return false;
+      }
+
       /* Fragment I/O inside the loop should only affect active samples. */
       unsigned mask_index =
          (intr->intrinsic == nir_intrinsic_store_local_pixel_agx) ? 1 : 0;
@@ -50,8 +65,11 @@ lower_to_per_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 bool
 agx_nir_lower_to_per_sample(nir_shader *shader)
 {
+   struct lower_per_sample_ctx ctx = {
+      .force_early_pending = shader->info.fs.early_fragment_tests,
+   };
    return nir_shader_intrinsics_pass(shader, lower_to_per_sample,
-                                     nir_metadata_control_flow, NULL);
+                                     nir_metadata_control_flow, &ctx);
 }
 
 static bool
@@ -184,10 +202,37 @@ agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
    assert(nr_samples == 2 || nr_samples == 4);
 
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+
+   /* The forced early Z/S update belongs before the complete unrolled sample
+    * body.  Cloning it once per sample runs the same tests repeatedly, which
+    * violates the sample-mask contract and kills the later invocations. */
+   bool force_early = false;
+   if (shader->info.fs.early_fragment_tests) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_sample_mask_agx) {
+               nir_instr_remove(instr);
+               force_early = true;
+               break;
+            }
+         }
+         if (force_early)
+            break;
+      }
+   }
+
    nir_cf_list body;
    nir_cf_extract(&body, nir_before_impl(impl), nir_after_impl(impl));
 
    nir_builder b = nir_builder_at(nir_before_impl(impl));
+   if (force_early)
+      nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
+                          nir_imm_intN_t(&b, 0xff, 16));
+
    nir_def *samples_log2 =
       nir_imm_intN_t(&b, util_logbase2(nr_samples), 16);
 
@@ -214,14 +259,47 @@ agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
     * end of the function, so gather them all there. */
    struct util_dynarray exports;
    util_dynarray_init(&exports, NULL);
+   nir_def *write_samples[4] = {NULL};
+   unsigned write_sample_count = 0;
    nir_foreach_block(block, impl) {
-      nir_foreach_instr(instr, block) {
-         if (instr->type == nir_instr_type_intrinsic &&
-             nir_instr_as_intrinsic(instr)->intrinsic ==
-                nir_intrinsic_export_agx)
-            util_dynarray_append(&exports, instr);
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_export_agx) {
+            nir_intrinsic_instr *export = intr;
+
+            /* A forced-early shader exports one software write mask.  The
+             * per-sample unroll clones that export along with the body, but
+             * the fragment ABI has only one FOUT_WRITE_SAMPLES half.  Fold
+             * the clones into one mask: each invocation owns only its active
+             * bit and leaves every other sample untouched. */
+            if (nir_intrinsic_base(export) ==
+                AGX_ABI_FOUT_WRITE_SAMPLES) {
+               assert(write_sample_count < nr_samples);
+               write_samples[write_sample_count++] = export->src[0].ssa;
+               nir_instr_remove(instr);
+            } else {
+               util_dynarray_append(&exports, instr);
+            }
+         }
       }
    }
+
+   if (write_sample_count) {
+      assert(write_sample_count == nr_samples);
+      b = nir_builder_at(nir_after_impl(impl));
+      nir_def *combined = nir_imm_intN_t(&b, 0xff, 16);
+      for (unsigned i = 0; i < nr_samples; ++i) {
+         const unsigned bit = BITFIELD_BIT(i);
+         nir_def *owned = nir_iand_imm(&b, write_samples[i], bit);
+         nir_def *keep_others = nir_ior_imm(&b, owned, 0xff ^ bit);
+         combined = nir_iand(&b, combined, keep_others);
+      }
+      nir_export_agx(&b, combined, .base = AGX_ABI_FOUT_WRITE_SAMPLES);
+   }
+
    util_dynarray_foreach(&exports, nir_instr *, instr)
       nir_instr_move(nir_after_impl(impl), *instr);
    util_dynarray_fini(&exports);
@@ -229,13 +307,50 @@ agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
    return nir_progress(true, impl, nir_metadata_none);
 }
 
+static bool movable_zs_source(nir_def *def);
+
+static bool
+movable_zs_src_cb(nir_src *src, void *data)
+{
+   return movable_zs_source(src->ssa);
+}
+
 static bool
 movable_zs_source(nir_def *def)
 {
-   return nir_def_instr(def)->type == nir_instr_type_load_const ||
-          (nir_def_instr(def)->type == nir_instr_type_intrinsic &&
-           nir_instr_as_intrinsic(nir_def_instr(def))->intrinsic ==
-              nir_intrinsic_load_exported_agx);
+   nir_instr *instr = nir_def_instr(def);
+   switch (instr->type) {
+   case nir_instr_type_load_const:
+   case nir_instr_type_undef:
+      return true;
+   case nir_instr_type_alu:
+      return nir_foreach_src(instr, movable_zs_src_cb, NULL);
+   case nir_instr_type_intrinsic:
+      return nir_instr_as_intrinsic(instr)->intrinsic ==
+             nir_intrinsic_load_exported_agx;
+   default:
+      return false;
+   }
+}
+
+struct move_zs_state {
+   nir_cursor cursor;
+   struct set *moved;
+};
+
+static bool
+move_zs_source(nir_src *src, void *data)
+{
+   struct move_zs_state *state = data;
+   nir_instr *instr = nir_def_instr(src->ssa);
+   if (_mesa_set_search(state->moved, instr))
+      return true;
+
+   nir_foreach_src(instr, move_zs_source, state);
+   nir_instr_move(state->cursor, instr);
+   state->cursor = nir_after_instr(instr);
+   _mesa_set_add(state->moved, instr);
+   return true;
 }
 
 /*
@@ -250,21 +365,47 @@ bool
 agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   nir_intrinsic_instr *kills[8];
    nir_intrinsic_instr *writes[8];
-   unsigned count = 0;
+   unsigned kill_count = 0, count = 0;
+   bool progress = false;
 
    nir_foreach_block(block, impl) {
-      nir_foreach_instr(instr, block) {
+      nir_foreach_instr_safe(instr, block) {
          if (instr->type != nir_instr_type_intrinsic)
             continue;
 
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         if (intr->intrinsic == nir_intrinsic_demote_samples ||
-             intr->intrinsic == nir_intrinsic_sample_mask_agx)
+         if (intr->intrinsic == nir_intrinsic_demote_samples)
             return false;
+
+         if (intr->intrinsic == nir_intrinsic_sample_mask_agx) {
+            /* A late split epilog kills the samples discarded by the main
+             * shader before opening the class-1 DEPTHF transaction.  The
+             * per-sample unroller cloned that update, so gather every clone
+             * ahead of every depth write. */
+            if (kill_count == ARRAY_SIZE(kills) ||
+                block != nir_start_block(impl) ||
+                !nir_src_is_const(intr->src[1]) ||
+                nir_src_as_uint(intr->src[1]) != 0 ||
+                !movable_zs_source(intr->src[0].ssa))
+               return false;
+            kills[kill_count++] = intr;
+            continue;
+         }
 
          if (intr->intrinsic != nir_intrinsic_store_zs_agx)
             continue;
+
+         /* Static sample unrolling can prove that an API mask excludes this
+          * sample. A zero-coverage Z/S store is no operation; retaining it
+          * would instead make the backend issue a DEPTHF for that sample. */
+         if (nir_src_is_const(intr->src[0]) &&
+             nir_src_as_uint(intr->src[0]) == 0) {
+            nir_instr_remove(instr);
+            progress = true;
+            continue;
+         }
 
          if (count == ARRAY_SIZE(writes) || block != nir_start_block(impl))
             return false;
@@ -278,18 +419,23 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
    }
 
    if (count < 2)
-      return false;
+      return nir_progress(progress, impl, nir_metadata_control_flow);
 
-   nir_cursor cursor = nir_before_impl(impl);
-   for (unsigned w = 0; w < count; ++w) {
-      for (unsigned i = 0; i < 3; ++i) {
-         nir_instr *source = nir_def_instr(writes[w]->src[i].ssa);
-         nir_instr_move(cursor, source);
-         cursor = nir_after_instr(source);
-      }
-      nir_instr_move(cursor, &writes[w]->instr);
-      cursor = nir_after_instr(&writes[w]->instr);
+   struct move_zs_state state = {
+      .cursor = nir_before_impl(impl),
+      .moved = _mesa_pointer_set_create(NULL),
+   };
+   for (unsigned k = 0; k < kill_count; ++k) {
+      nir_foreach_src(&kills[k]->instr, move_zs_source, &state);
+      nir_instr_move(state.cursor, &kills[k]->instr);
+      state.cursor = nir_after_instr(&kills[k]->instr);
    }
+   for (unsigned w = 0; w < count; ++w) {
+      nir_foreach_src(&writes[w]->instr, move_zs_source, &state);
+      nir_instr_move(state.cursor, &writes[w]->instr);
+      state.cursor = nir_after_instr(&writes[w]->instr);
+   }
+   _mesa_set_destroy(state.moved, NULL);
 
    return nir_progress(true, impl, nir_metadata_control_flow);
 }

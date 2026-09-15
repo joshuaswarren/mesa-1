@@ -514,6 +514,12 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
          nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_WRITE_SAMPLES);
    }
 
+   if (key->defer_api_sample_mask) {
+      nir_def *api_mask = nir_imm_intN_t(b, key->api_sample_mask, 16);
+      write_samples = write_samples ? nir_iand(b, write_samples, api_mask)
+                                    : api_mask;
+   }
+
    /* Now lower the resulting program using the key */
    struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_bounded(
       key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples, true,
@@ -611,9 +617,15 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
     * particularly alpha-to-coverage.
     */
    if (key->link.write_z || key->link.write_s) {
+      nir_def *zs_samples =
+         write_samples ? nir_iand(b, write_samples,
+                                  nir_load_active_samples_agx(b))
+                       : nir_imm_intN_t(b, 0xFF, 16);
+      nir_def *depth =
+         nir_load_exported_agx(b, 1, 32, .base = AGX_ABI_FOUT_Z);
+
       nir_store_zs_agx(
-         b, nir_imm_intN_t(b, 0xFF, 16),
-         nir_load_exported_agx(b, 1, 32, .base = AGX_ABI_FOUT_Z),
+         b, zs_samples, depth,
          nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_S),
          .base = (key->link.write_z ? 1 : 0) | (key->link.write_s ? 2 : 0));
 
@@ -718,13 +730,13 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    if (intr->intrinsic == nir_intrinsic_demote_samples &&
-       b->shader->info.fs.early_fragment_tests) {
+       (b->shader->info.fs.early_fragment_tests ||
+        (ctx->preserve_early_demote && b->shader->info.writes_memory))) {
 
-      /* G17P has no sample operand on LSTCOL.  Keep the demote in the main
-       * shader so its grounded MOVMSK lowering updates coverage before the
-       * linked epilog emits the ordinary whole-pixel store. */
-      if (ctx->preserve_early_demote)
-         return false;
+      /* G17P carries the discard mask across the split for both early and
+       * late tests. LSTCOL consumes it directly, and late DEPTHF must use it
+       * too: MOVMSK does not make a split epilog's reconstructed depth word
+       * retain the main shader's discard predicate. */
 
       if (!ctx->masked_samples) {
          b->cursor = nir_before_impl(nir_shader_get_entrypoint(b->shader));
@@ -917,8 +929,22 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
 
    const unsigned mask = nir_src_as_uint(intr->src[src]);
+   if (mask == 0) {
+      /* Static unrolling can prove that the API mask excludes this sample.
+       * A zero-coverage tile access is dead, and keeping it would turn one
+       * surviving sample into an unsupported mixed zero/nonzero protocol. */
+      b->cursor = nir_before_instr(&intr->instr);
+      if (intr->intrinsic == nir_intrinsic_load_local_pixel_agx) {
+         nir_def_rewrite_uses(
+            &intr->def,
+            nir_undef(b, intr->def.num_components, intr->def.bit_size));
+      }
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+
    if (mask != ALL_SAMPLES &&
-       (mask == 0 || mask >= (1u << samples)))
+       mask >= (1u << samples))
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);

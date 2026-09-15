@@ -557,6 +557,10 @@ typedef struct {
     * one class-1 transaction, released after the last. */
    unsigned zs_writes_left;
 
+   /* The first coverage update in an explicit-early fragment is the one
+    * per-pixel Z/S test.  It has a distinct G17P acquire/retain protocol. */
+   bool force_early_tests_pending;
+
    /* Has r0l been zeroed yet due to control flow? */
    bool any_cf;
 

@@ -3242,7 +3242,12 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
       NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples, key->nr_samples,
                key->link.loc_written);
-      NIR_PASS(_, b->shader, nir_opt_constant_folding);
+      bool opt_progress;
+      do {
+         opt_progress = false;
+         NIR_PASS(opt_progress, b->shader, nir_opt_constant_folding);
+         NIR_PASS(opt_progress, b->shader, nir_opt_algebraic);
+      } while (opt_progress);
       NIR_PASS(_, b->shader, agx_nir_hoist_g17p_zs_writes);
    } else {
       /* G17P's tile operations carry the live coverage register. With
@@ -5181,6 +5186,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       unsigned tib_sample_mask = BITFIELD_MASK(dyn->ms.rasterization_samples);
       unsigned api_sample_mask = dyn->ms.sample_mask & tib_sample_mask;
       bool has_sample_mask = api_sample_mask != tib_sample_mask;
+      bool defer_api_sample_mask =
+         dev->dev.chip == AGX_CHIP_G17P && has_sample_mask &&
+         !nontrivial_force_early;
 
       if (hw_vs->info.cull_distance_array_size) {
          perf_debug(cmd, "Emulating cull distance (size %u)",
@@ -5241,14 +5249,20 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)),
 
          .prolog.cull_distance_size = hw_vs->info.cull_distance_array_size,
-         .prolog.api_sample_mask = has_sample_mask ? api_sample_mask : 0xff,
+         .prolog.api_sample_mask =
+            has_sample_mask && !nontrivial_force_early &&
+                  !defer_api_sample_mask
+               ? api_sample_mask
+               : 0xff,
          .prolog.nr_samples = dev->dev.chip == AGX_CHIP_G17P
                                  ? MAX2(dyn->ms.rasterization_samples, 1)
                                  : 0,
          .nr_samples_shaded = samples_shaded,
       };
 
-      bool prolog_discards = has_sample_mask || key.prolog.cull_distance_size;
+      bool prolog_discards =
+         (has_sample_mask && !defer_api_sample_mask) ||
+         key.prolog.cull_distance_size;
 
       bool needs_prolog = key.prolog.statistics || prolog_discards;
 
@@ -5277,6 +5291,8 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          .blend.alpha_to_one = dyn->ms.alpha_to_one_enable,
          .blend.logicop_enable = dyn->cb.logic_op_enable,
          .blend.logicop_func = vk_logic_op_to_pipe(dyn->cb.logic_op),
+         .defer_api_sample_mask = defer_api_sample_mask,
+         .api_sample_mask = api_sample_mask,
       };
       agx_fs_epilog_apply_device_policy(dev->dev.chip, &key.epilog);
 

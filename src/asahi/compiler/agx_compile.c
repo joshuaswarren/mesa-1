@@ -1041,16 +1041,15 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
                       nir_intrinsic_target(instr));
 }
 
-/* Stage one G17P depth/stencil word, whose low nibble selects every sample
- * and whose next two nibbles come from `mid`, and write it under the class-1
- * transaction the first write of the shader opens and the last releases. */
+/* Stage one G17P depth/stencil word under the class-1 transaction the first
+ * write of the shader opens and the last releases. */
 static agx_instr *
 agx_emit_zs_word_agx3(agx_builder *b, nir_intrinsic_instr *instr,
-                      agx_index z, agx_index s, unsigned base, agx_index mid)
+                      agx_index z, agx_index s, unsigned base,
+                      agx_index coverage, agx_index prepared_depth)
 {
    const bool write_z = base & 1;
    const bool write_s = base & 2;
-   agx_index coverage = agx_iadd(b, agx_immediate(15), mid, 4);
 
    agx_index word = agx_temp(b->shader, AGX_SIZE_32);
    if (write_s)
@@ -1060,7 +1059,9 @@ agx_emit_zs_word_agx3(agx_builder *b, nir_intrinsic_instr *instr,
 
    if (write_z) {
       agx_index depth;
-      if (nir_src_is_const(instr->src[1])) {
+      if (!agx_is_null(prepared_depth)) {
+         depth = prepared_depth;
+      } else if (nir_src_is_const(instr->src[1])) {
          const float value = nir_src_as_float(instr->src[1]);
          depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
       } else {
@@ -1106,9 +1107,35 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
    const unsigned samples = MAX2(b->shader->key->fs.nr_samples, 1);
    const unsigned mask =
       nir_src_is_const(instr->src[0]) ? nir_src_as_uint(instr->src[0]) : 0;
+   const bool dynamic_mask = !nir_src_is_const(instr->src[0]);
    const bool sample_words =
       samples > 1 &&
       (mask == 0xff || util_bitcount(mask & BITFIELD_MASK(samples)) == 1);
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       samples > 1 && dynamic_mask) {
+      /* A split late shader keeps its discard predicate in a register. The
+       * native late-mask/depth sequence intersects that predicate with SR39's
+      * current coverage, preserves the API nibble above it, and issues one
+      * DEPTHF for the resulting word. */
+      agx_index sr39 = agx_temp(b->shader, AGX_SIZE_16);
+      agx_get_sr_coverage_to(b, sr39, AGX_SR_INPUT_SAMPLE_MASK);
+      agx_index upper = agx_ushr(b, sr39, agx_immediate(4));
+      agx_index keep = agx_and(b, agx_src_index(&instr->src[0]),
+                               agx_immediate(BITFIELD_MASK(samples)));
+      agx_index covered = agx_and(b, sr39, keep);
+      agx_index mid = agx_iadd(b, upper, covered, 4);
+      agx_index coverage = agx_iadd(b, keep, mid, 4);
+      agx_index depth = agx_null();
+      if (write_z) {
+         agx_index finite = agx_temp(b->shader, AGX_SIZE_32);
+         agx_fmov_to(b, finite, z)->saturate = true;
+         agx_index nan = agx_mov_imm(b, 32, UINT32_C(0x7fc00000));
+         depth = agx_temp(b->shader, AGX_SIZE_32);
+         agx_icmpsel_to(b, depth, keep, agx_immediate(0), nan, finite,
+                        AGX_ICOND_UEQ);
+      }
+      return agx_emit_zs_word_agx3(b, instr, z, s, base, coverage, depth);
+   }
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        !sample_words) {
       /* At several samples, only a mask known at compile time has a
@@ -1116,8 +1143,10 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
        * packer refuses there. */
       agx_index sr2 = agx_temp(b->shader, AGX_SIZE_16);
       agx_get_coverage_1x_agx3_to(b, sr2);
-      return agx_emit_zs_word_agx3(b, instr, z, s, base,
-                                   agx_iadd(b, sr2, sr2, 4));
+      return agx_emit_zs_word_agx3(
+         b, instr, z, s, base,
+         agx_iadd(b, agx_immediate(15), agx_iadd(b, sr2, sr2, 4), 4),
+         agx_null());
    } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
       /* Apple's 2x/4x fragments writing [[depth(any)]] or [[stencil]] per
        * [[sample_id]] write one DEPTHF per sample, each word built from SR39:
@@ -1138,13 +1167,16 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
             continue;
 
          agx_index sr39 = agx_temp(b->shader, AGX_SIZE_16);
-         agx_get_sr_to(b, sr39, AGX_SR_INPUT_SAMPLE_MASK);
+         agx_get_sr_coverage_to(b, sr39, AGX_SR_INPUT_SAMPLE_MASK);
          agx_index upper = agx_ushr(b, sr39, agx_immediate(4));
          agx_index covered = agx_and(
             b, sr39,
             agx_immediate(combined ? BITFIELD_MASK(4) : BITFIELD_BIT(i)));
-         last = agx_emit_zs_word_agx3(b, instr, z, s, base,
-                                      agx_iadd(b, upper, covered, 4));
+         last = agx_emit_zs_word_agx3(
+            b, instr, z, s, base,
+            agx_iadd(b, agx_immediate(15),
+                     agx_iadd(b, upper, covered, 4), 4),
+            agx_null());
       }
       return last;
    }
@@ -2332,11 +2364,33 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        * wait_pix before merely discarding. Omit the wait_pix when the affected
        * samples are unconditionally killed.
        */
-      bool no_tests =
-         nir_src_is_const(instr->src[1]) && nir_src_as_uint(instr->src[1]) == 0;
+      /* TARGET and LIVE are independent.  A prolog which only removes the
+       * samples excluded by the API mask has disjoint constant sets (for
+       * example TARGET=0xfd, LIVE=2 at 2x), so it performs no Z/S tests even
+       * though LIVE itself is nonzero.  Treating that as a testing MOVMSK ran
+       * depth before the main shader and made a later explicit-early update
+       * test the surviving sample twice. */
+      bool no_tests = nir_src_is_const(instr->src[1]) &&
+         (nir_src_as_uint(instr->src[1]) == 0 ||
+          (nir_src_is_const(instr->src[0]) &&
+           !(nir_src_as_uint(instr->src[0]) &
+             nir_src_as_uint(instr->src[1]))));
 
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           !b->shader->key->fs.inside_sample_loop) {
+         /* The all/all update inserted at the start of an explicit-early
+          * shader is a distinct native protocol: acquire class 1 before
+          * reading SR39 and building the coverage word, then keep the class
+          * until the fragment's final pixel release.  Ordinary late/sample
+          * mask writes instead build and stage the word before acquiring it.
+          */
+         const bool force_early =
+            !no_tests && b->shader->force_early_tests_pending;
+         b->shader->force_early_tests_pending = false;
+
+         if (force_early)
+            agx_wait_pixel_mask(b, 0x1);
+
          /* MOVMSK takes one coverage word: the samples that stay alive in
           * nibble 0, above the pixel's coverage and API input mask. Native
           * early-fragment-tests code uses word zero for a no-op. Keep TARGET
@@ -2371,9 +2425,15 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
             target = agx_ushr(b, agx_iadd(b, masked, agx_immediate(all), 0),
                               agx_immediate(samples));
             agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
-            agx_get_sr_to(b, t16, AGX_SR_INPUT_SAMPLE_MASK);
+            agx_get_sr_coverage_to(b, t16, AGX_SR_INPUT_SAMPLE_MASK);
             agx_index upper = agx_ushr(b, t16, agx_immediate(4));
             agx_index covered = agx_and(b, t16, agx_immediate(15));
+            /* MOVMSK may only remove samples from the current coverage.  A
+             * previous prolog/discard can already have cleared bits in SR39;
+             * using the requested keep set directly resurrects those samples
+             * and makes a later all-kill update leave one sample live.  This
+             * is the second BAND in Apple's native conditional-kill prefix. */
+            keep = agx_and(b, keep, covered);
             mid = agx_iadd(b, covered, upper, 4);
          }
 
@@ -2385,7 +2445,9 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          agx_emit_collect_to(b, word32, 2, (agx_index[]){word, zero});
          agx_index selected = agx_temp(b->shader, AGX_SIZE_32);
          agx_imad_to(b, selected, target32, word32, agx_zero(), 0);
-         return agx_sample_mask_agx3(b, target, selected, !no_tests ? 2 : 0);
+         return agx_sample_mask_agx3(
+            b, target, selected,
+            (!no_tests ? 2 : 0) | (force_early ? 1 : 0));
       }
 
       if (!no_tests)
@@ -6830,6 +6892,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    if (ctx->stage == MESA_SHADER_FRAGMENT && !ctx->is_preamble) {
       ctx->any_cf = key->fs.inside_sample_loop;
+      ctx->force_early_tests_pending = nir->info.fs.early_fragment_tests;
 
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -6936,6 +6999,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
    if (!agx3_tile_store_payloads_fit(ctx)) {
+      if (agx_compiler_debug & AGX_DBG_REFUSE)
+         fprintf(stderr, "AGX3 refused fragment: tile-store payload bank overflow\n");
       ralloc_free(ctx);
       return false;
    }
@@ -7063,6 +7128,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
        * aborts -- on any ungrounded op and rolls the emitted shader prefix back
        * before returning false. */
       if (!agx3_pack_binary(ctx, binary)) {
+         if (agx_compiler_debug & AGX_DBG_REFUSE)
+            fprintf(stderr, "AGX3 refused shader during binary packing\n");
          binary->size = initial_binary_size;
          ralloc_free(ctx);
          return false;
