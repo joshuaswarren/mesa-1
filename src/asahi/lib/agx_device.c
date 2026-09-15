@@ -1295,6 +1295,18 @@ agx_open_device(void *memctx, struct agx_device *dev)
       return false;
    }
 
+   /* Keep captured addresses unavailable to ordinary allocations between
+    * capture and replay. Reserve after all fixed firmware/alias holes, and
+    * only for G17P using the common allocator; other winsyses own their VA. */
+   if (dev->chip == AGX_CHIP_G17P && dev->ops.va_alloc == NULL) {
+      dev->replay_heap_initialized = agx_capture_replay_heap_init(
+         &dev->main_heap, &dev->replay_heap, user_size);
+      if (!dev->replay_heap_initialized) {
+         fprintf(stderr, "Failed to reserve capture/replay GPU VA\n");
+         return false;
+      }
+   }
+
    if (dev->ops.va_init != NULL &&
        !dev->ops.va_init(dev, user_start, user_size, dev->shader_base,
                          shader_size)) {
@@ -1502,6 +1514,8 @@ agx_close_device(struct agx_device *dev)
    util_sparse_array_finish(&dev->bo_map);
    agxdecode_destroy_context(dev->agxdecode);
 
+   if (dev->replay_heap_initialized)
+      util_vma_heap_finish(&dev->replay_heap);
    util_vma_heap_finish(&dev->main_heap);
    util_vma_heap_finish(&dev->usc_heap);
    if (dev->chip == AGX_CHIP_G17P)

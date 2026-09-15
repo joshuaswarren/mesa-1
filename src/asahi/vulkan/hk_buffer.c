@@ -131,6 +131,8 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
       enum agx_va_flags flags = 0;
       uint64_t bda_fixed_addr = 0;
       if (bda_capture_replay) {
+         if (dev->dev.replay_heap_initialized)
+            flags |= AGX_VA_CAPTURE_REPLAY;
          bda_fixed_addr = hk_get_bda_replay_addr(pCreateInfo);
          if (bda_fixed_addr != 0)
             flags |= AGX_VA_FIXED;

@@ -260,6 +260,9 @@ struct agx_device {
    struct agx_bo *g17p_render_context_bo;
    struct util_vma_heap main_heap;
    struct util_vma_heap usc_heap;
+   struct util_vma_heap replay_heap;
+   /* Heap selection must stay stable when replay_heap.free_size reaches 0. */
+   bool replay_heap_initialized;
    /* Native command-pool BO aliases with representable 32-bit context offsets.
     * Protected by vma_lock like the other heaps. */
    struct util_vma_heap g17p_vdm_alias_heap;
