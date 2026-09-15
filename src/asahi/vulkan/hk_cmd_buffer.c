@@ -855,6 +855,29 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    return vk_command_buffer_end(&cmd->vk);
 }
 
+static bool
+hk_dependency_has_host_read(const VkDependencyInfo *info)
+{
+   for (uint32_t i = 0; i < info->memoryBarrierCount; ++i) {
+      if (info->pMemoryBarriers[i].dstAccessMask & VK_ACCESS_2_HOST_READ_BIT)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      if (info->pBufferMemoryBarriers[i].dstAccessMask &
+          VK_ACCESS_2_HOST_READ_BIT)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < info->imageMemoryBarrierCount; ++i) {
+      if (info->pImageMemoryBarriers[i].dstAccessMask &
+          VK_ACCESS_2_HOST_READ_BIT)
+         return true;
+   }
+
+   return false;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -877,6 +900,21 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    }
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
+
+   /* A barrier-only command buffer otherwise records no GPU work, so it
+    * cannot make a preceding fragment store visible to the host. Emit the
+    * exact G17P strong CDM cache-maintenance record only when the API requests
+    * host-read availability. This preserves ordinary batching and adds work
+    * only at the synchronization boundary the application already declared. */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       hk_dependency_has_host_read(pDependencyInfo)) {
+      struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true);
+      if (!cs)
+         return;
+
+      hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
+      hk_cdm_cache_flush(dev, cs);
+   }
 }
 
 void
