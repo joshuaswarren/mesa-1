@@ -7796,7 +7796,21 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       _mesa_hash_table_next_entry(uncompiled->variants, NULL)->data;
 
    struct agx_grid grid;
-   if (indirect) {
+   if (indirect && agx_device(pipe->screen)->chip == AGX_CHIP_G17P) {
+      /* G17P launches an indirect dispatch from a six-word grid -- three
+       * global thread counts then the three local sizes -- so the API's three
+       * workgroup counts are not the record the hardware reads. Expand them
+       * with the same one-invocation setup kernel the tessellator already
+       * uses for its indirect launches, and dispatch through the grounded
+       * indirect-local record rather than grounding a second launch form. */
+      uint64_t expanded =
+         agx_pool_alloc_aligned(&batch->pool, 6 * sizeof(uint32_t), 4).gpu;
+
+      libagx_setup_indirect_dispatch(batch, agx_1d(1), AGX_BARRIER_ALL,
+                                     indirect, expanded, wg.x, wg.y, wg.z);
+
+      grid = agx_grid_indirect_local(expanded);
+   } else if (indirect) {
       grid = agx_grid_indirect(indirect);
    } else {
       grid = agx_3d(0, 0, 0);

@@ -260,6 +260,7 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_copy_query") ||
           !strcmp(func->name, "libagx_copy_query_gl") ||
           !strcmp(func->name, "libagx_increment_cs_invocations") ||
+          !strcmp(func->name, "libagx_setup_indirect_dispatch") ||
           !strcmp(func->name, "libagx_copy_timestamp") ||
           !strcmp(func->name, "libagx_tess_factors_half") ||
           !strcmp(func->name, "libagx_tess_setup_indirect") ||
@@ -574,6 +575,8 @@ main(int argc, char **argv)
                  "libagx_tess_isoline_0_g17p,\n"
                  "    [LIBAGX_TESS_ISOLINE_1] = "
                  "libagx_tess_isoline_1_g17p,\n"
+                 "    [LIBAGX_SETUP_INDIRECT_DISPATCH] = "
+                 "libagx_setup_indirect_dispatch_0_g17p,\n"
                  "};\n\n");
       }
    }
