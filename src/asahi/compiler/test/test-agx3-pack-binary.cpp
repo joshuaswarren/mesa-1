@@ -1627,9 +1627,25 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 
-   /* Mixing the negate with an absolute source still has no witness: ABS is
-    * a longer endpoint that carries no f65, so it fails closed rather than
-    * dropping one of the two modifiers. */
+   /* Mixing the negate with an absolute source IS one instruction: the
+    * fourteen-byte abs endpoint carries the same comparator-1 negate as the
+    * ten-byte one, in the same place (byte 7 bit 3). metal-nt
+    * -arch applegpu_g17p on a kernel whose two selects are warmed first, so
+    * neither row takes a wait, gives the minimal pair
+    *
+    *   (fabs(x) <  y) ? 255u : 0u   02 83 07 8b a3 ff 03 00 20 80 00 00 01 00
+    *   (fabs(x) < -y) ? 255u : 0u   12 03 1f 0b a3 ff 03 08 20 80 00 00 01 00
+    *
+    * differing in the operand block and in exactly that bit -- `01 00` is the
+    * abs mask naming comparator 0 in both.  Apple also spells `-x < fabs(y)`
+    * by exchanging the operands and reversing the relation onto the same
+    * negate (22 95 07 87 23 83 02 08 20 81 00 00 01 00), which is the
+    * normalisation agx3_alu_fcmp_select() already performs.
+    *
+    * So the byte-constant specialization above must DECLINE this shape rather
+    * than refuse it, and the general compare-select encodes it: refusing made
+    * the fragment program unlinkable, and the driver then dropped every draw
+    * that emulated a single cull distance. */
    b = builder(enc);
    a = agx_register(8, AGX_SIZE_32);
    a.abs = true;
@@ -1638,7 +1654,31 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
                   agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   const std::vector<uint8_t> absneg = pack(b);
+
+   b = builder(enc);
+   a = agx_register(8, AGX_SIZE_32);
+   a.abs = true;
+   c = agx_register(16, AGX_SIZE_32);
+   agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
+                  agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+   const std::vector<uint8_t> abs_only = pack(b);
+
+   /* Both encode, on the same endpoint, and the negate is the single bit
+    * Apple's own pair moves. */
+   ASSERT_EQ(absneg.size(), abs_only.size());
+   ASSERT_GT(absneg.size(), 14u);
+   std::vector<uint8_t> expected = abs_only;
+   expected[7] |= 0x08;
+   EXPECT_EQ(absneg, expected);
+
+   /* The trailing abs mask still names comparator 0 only, and the selected
+    * byte constants are untouched -- this stayed the integer placement. */
+   EXPECT_EQ(absneg[4], 0xa3);
+   EXPECT_EQ(absneg[5], 255);
+   EXPECT_EQ(absneg[12], 0x01);
+   EXPECT_EQ(absneg[13], 0x00);
 }
 
 TEST_F(AGX3PackBinary, MinifloatSpecializationDeclinesOtherGroundedForms)

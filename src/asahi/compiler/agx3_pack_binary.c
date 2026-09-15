@@ -10395,7 +10395,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              (I->src[0].size == AGX_SIZE_16 || I->src[0].size == AGX_SIZE_32) &&
              (I->src[1].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_32) &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
-             I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255) {
+             I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255 &&
+             /* An ABS source takes the fourteen-byte ep28..35 endpoint, whose
+              * encoder here (agx3_alu_fcmp_select_imm_width_abs) carries only
+              * the two abs bits and has no argument for a negate, so this
+              * specialization cannot spell a comparison that wants one of
+              * each. The endpoint itself is not the limit: it holds the same
+              * comparator-1 negate as the ten-byte form, and the general
+              * compare-select below deposits f47, f64 and f65 independently
+              * and encodes the pair byte-for-byte as Apple does (see the
+              * witnessed minimal pair in the Hyprland float-select test). So
+              * decline the shape here and let it fall through, the way every
+              * other shape this block cannot spell already does. Refusing
+              * dropped the whole draw instead: `ball(feq(cf, 0))` from the
+              * cull-distance emulation folds to `|a| == -(b)` and reaches
+              * exactly this, which made every single-cull-distance fragment
+              * program unlinkable. */
+             !((I->src[0].abs || I->src[1].abs) &&
+               (I->src[0].neg || I->src[1].neg))) {
             /* A negated comparison source. f65 names the SECOND comparator
              * and only that one; `-a > b` is Apple's own `b < -a`, so the
              * encoder swaps the operands and reverses the relation instead of
@@ -10436,7 +10453,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->saturate || I->src[0].kill || I->src[1].kill ||
                 (I->src[0].cache && I->src[0].discard) ||
                 (I->src[1].cache && I->src[1].discard) ||
-                (any_abs && any_neg) ||
                 I->src[2].abs || I->src[2].neg ||
                 I->src[3].abs || I->src[3].neg ||
                 !(any_abs
