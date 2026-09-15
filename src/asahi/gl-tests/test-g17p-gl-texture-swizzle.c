@@ -234,10 +234,20 @@ main(void)
    }
    glViewport(0, 0, 8, 8);
 
+   /* Access methods 10 and 11 of KHR-GL33.texture_swizzle are textureGrad and
+    * textureGradOffset, and those eight smoke cases are all that family still
+    * fails. Explicit gradients are their own sampling path. */
    static const struct { const char *name, *fetch; bool vertex; } access[] = {
-      {"fs texture",    "texture(tex, vec2(0.5))",    false},
-      {"fs texelFetch", "texelFetch(tex, ivec2(0), 0)", false},
-      {"vs texelFetch", "texelFetch(tex, ivec2(0), 0)", true},
+      {"fs texture",     "texture(tex, vec2(0.5))",    false},
+      {"fs texelFetch",  "texelFetch(tex, ivec2(0), 0)", false},
+      {"vs texelFetch",  "texelFetch(tex, ivec2(0), 0)", true},
+      {"fs textureGrad",
+       "textureGrad(tex, vec2(0.5), vec2(0.0), vec2(0.0))", false},
+      {"fs gradOffset",
+       "textureGradOffset(tex, vec2(0.5), vec2(0.0), vec2(0.0), ivec2(0))",
+       false},
+      {"vs textureGrad",
+       "textureGrad(tex, vec2(0.5), vec2(0.0), vec2(0.0))", true},
    };
    /* Identity, a full reversal (the shape the CTS logs), constants, and one
     * broadcast. */
