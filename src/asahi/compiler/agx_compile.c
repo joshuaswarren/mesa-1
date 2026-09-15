@@ -2928,7 +2928,8 @@ agx_lower_agx3_shifted_iadd_dest(agx_context *ctx)
           I->dest[0].size != AGX_SIZE_16 || agx_channels(I->dest[0]) != 1)
          continue;
 
-      /* Only the constant-addend form (agx3_iadd_core.h) is affected: it is
+      
+/* Only the constant-addend form (agx3_iadd_core.h) is affected: it is
        * the one that always writes a 32-bit register. A shifted add of two
        * registers has its own encoding and keeps its narrow destination. */
       if (I->src[0].type != AGX_INDEX_IMMEDIATE ||
@@ -2943,6 +2944,40 @@ agx_lower_agx3_shifted_iadd_dest(agx_context *ctx)
    }
 }
 
+/* AGX3B's transcendental forms take one width: agx3_alu_hexp2_neg() for a
+ * half pair, agx3_alu_f32exp2_mod() for a word pair, and no mixed form. The
+ * exponent of the level-of-detail calculation textureGrad needs arrives as an
+ * exp2 of a 16-bit value into a 32-bit result, which was refused -- and a
+ * refusal takes the whole shader, which is what
+ * KHR-GL33.texture_swizzle's eight remaining smoke cases hit.
+ *
+ * Widen the source. Half to float is exact, so no value changes; it is the
+ * same move agx_lower_agx3_fma_sources() makes for a mixed FFMA. Only the
+ * mismatched shape is touched, and that shape did not encode at all before.
+ */
+static void
+agx_lower_agx3_mixed_width_transcendental(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if ((I->op != AGX_OPCODE_EXP2 && I->op != AGX_OPCODE_LOG2) ||
+          I->nr_dests != 1 || I->nr_srcs != 1 || I->saturate)
+         continue;
+
+      if (I->dest[0].size != AGX_SIZE_32 || I->src[0].size != AGX_SIZE_16 ||
+          agx_channels(I->src[0]) != 1 ||
+          I->src[0].type == AGX_INDEX_IMMEDIATE ||
+          I->src[0].type == AGX_INDEX_NULL)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index widened = agx_temp(ctx, AGX_SIZE_32);
+      agx_fmov_to(&b, widened, I->src[0]);
+      I->src[0] = widened;
+   }
+}
 static void
 agx_lower_agx3_fma_sources(agx_context *ctx)
 {
@@ -6469,6 +6504,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    }
 
    agx_lower_agx3_fma_sources(ctx);
+   agx_lower_agx3_mixed_width_transcendental(ctx);
    agx_lower_agx3_shifted_iadd_dest(ctx);
 
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
