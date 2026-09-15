@@ -300,9 +300,18 @@ get_buffer_address(const VkDescriptorBufferInfo *const info, bool read_only)
       hk_buffer_addr_range(buffer, info->offset, info->range, read_only);
    assert(addr_range.range <= UINT32_MAX);
 
+   uint32_t sparse_map_page = 0;
+   if (!read_only && buffer && buffer->sparse_map) {
+      const uint64_t map_addr = buffer->sparse_map->va->addr;
+      assert((map_addr % AIL_PAGESIZE) == 0);
+      assert((map_addr / AIL_PAGESIZE) <= UINT32_MAX);
+      sparse_map_page = map_addr / AIL_PAGESIZE;
+   }
+
    return (struct hk_buffer_address){
       .base_addr = addr_range.addr,
       .size = addr_range.range,
+      .sparse_map_page = sparse_map_page,
    };
 }
 

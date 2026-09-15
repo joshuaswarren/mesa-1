@@ -30,6 +30,10 @@ struct hk_queue {
        */
       uint64_t timeline_value;
    } drm;
+
+   /* Device-lifetime command storage for the G17P SSTT maintenance encoder.
+    * Sparse image remaps submit this record before their signal operations. */
+   struct agx_bo *g17p_sstt_flush_bo;
 };
 
 static inline struct hk_device *

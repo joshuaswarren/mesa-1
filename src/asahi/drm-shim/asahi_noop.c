@@ -117,6 +117,7 @@ struct asahi_vm_mapping {
    uint64_t address;
    uint64_t size;
    uint64_t object_offset;
+   bool single_page;
    struct shim_bo *bo;
 };
 
@@ -915,7 +916,10 @@ add_mapping(int fd, const struct drm_asahi_gem_bind_op *op)
 {
    struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
    struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, op->handle);
-   if (!bo || op->offset > bo->size || op->range > bo->size - op->offset) {
+   const bool single_page = op->flags & DRM_ASAHI_BIND_SINGLE_PAGE;
+   const uint64_t object_range = single_page ? UINT64_C(0x4000) : op->range;
+   if (!bo || op->offset > bo->size ||
+       object_range > bo->size - op->offset) {
       if (bo)
          drm_shim_bo_put(bo);
       return false;
@@ -939,6 +943,7 @@ add_mapping(int fd, const struct drm_asahi_gem_bind_op *op)
       .address = op->addr,
       .size = op->range,
       .object_offset = op->offset,
+      .single_page = single_page,
       .bo = bo,
    };
    if (op->addr >= SHIM_G17P_USC_WINDOW_BASE &&
@@ -980,11 +985,25 @@ shim_gpu_read(void *data, uint64_t address, void *dst, size_t size)
    if (!mapping)
       return false;
 
-   const uint64_t bo_offset =
-      mapping->object_offset + (address - mapping->address);
-   const uint64_t file_offset = mapping->bo->mem_addr + bo_offset;
-   return pread(shim_device.mem_fd, dst, size, (off_t)file_offset) ==
-          (ssize_t)size;
+   size_t copied = 0;
+   while (copied < size) {
+      const uint64_t mapping_offset = address - mapping->address + copied;
+      const uint64_t page_offset = mapping_offset & UINT64_C(0x3fff);
+      const size_t chunk = mapping->single_page
+                              ? MIN2(size - copied,
+                                     (size_t)(UINT64_C(0x4000) - page_offset))
+                              : size - copied;
+      const uint64_t bo_offset =
+         mapping->object_offset +
+         (mapping->single_page ? page_offset : mapping_offset);
+      const uint64_t file_offset = mapping->bo->mem_addr + bo_offset;
+      if (pread(shim_device.mem_fd, (uint8_t *)dst + copied, chunk,
+                (off_t)file_offset) != (ssize_t)chunk)
+         return false;
+      copied += chunk;
+   }
+
+   return true;
 }
 
 static int
@@ -1475,13 +1494,14 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
          compute_stats.barriers += stats.barriers;
          compute_stats.prologue_barriers += stats.prologue_barriers;
          compute_stats.strong_barriers += stats.strong_barriers;
+         compute_stats.sstt_flushes += stats.sstt_flushes;
          compute_stats.terminated |= stats.terminated;
          fprintf(stderr,
                  "shim: G17P CDM validated: %u launches (%u 2D), %u barriers, "
-                 "%u prologue (%u strong)\n",
+                 "%u prologue (%u strong), %u SSTT flushes\n",
                  stats.launches, stats.two_dimensional_launches,
                  stats.barriers, stats.prologue_barriers,
-                 stats.strong_barriers);
+                 stats.strong_barriers, stats.sstt_flushes);
       }
 
       cursor += command_size;

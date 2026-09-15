@@ -154,6 +154,59 @@ hk_CreateBuffer(VkDevice device, const VkBufferCreateInfo *pCreateInfo,
          vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
          return result;
       }
+
+      if (dev->dev.chip == AGX_CHIP_G17P &&
+         (buffer->vk.create_flags &
+           VK_BUFFER_CREATE_SPARSE_RESIDENCY_BIT)) {
+         const uint64_t entries = DIV_ROUND_UP(vma_size_B, AIL_PAGESIZE);
+
+         if (entries > UINT32_MAX ||
+             DIV_ROUND_UP(entries, 32) >
+                (SIZE_MAX - sizeof(struct hk_sparse_buffer_map_header)) /
+                   sizeof(uint32_t)) {
+            agx_va_free(&dev->dev, buffer->va, true);
+            buffer->va = NULL;
+            vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+            return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                             "Sparse buffer residency map is too large");
+         }
+
+         const uint64_t map_size_B = align64(
+            sizeof(struct hk_sparse_buffer_map_header) +
+               (DIV_ROUND_UP(entries, 32) * sizeof(uint32_t)),
+            AIL_PAGESIZE);
+
+         buffer->sparse_map = agx_bo_create(
+            &dev->dev, map_size_B, AIL_PAGESIZE,
+            AGX_BO_WRITEBACK | AGX_BO_ZERO_ON_REUSE,
+            "Vulkan sparse buffer residency map");
+         if (!buffer->sparse_map || !agx_bo_map(buffer->sparse_map)) {
+            agx_bo_unreference(&dev->dev, buffer->sparse_map);
+            buffer->sparse_map = NULL;
+            agx_va_free(&dev->dev, buffer->va, true);
+            buffer->va = NULL;
+            vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+            return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                             "Sparse buffer residency map allocation failed");
+         }
+
+         buffer->sparse_map_entries = entries;
+         struct hk_sparse_buffer_map_header *map =
+            agx_bo_map(buffer->sparse_map);
+         memset(map, 0, map_size_B);
+         map->resource_base = buffer->va->addr;
+         map->page_count = entries;
+
+         if (agx_bo_sync_for_device(buffer->sparse_map, 0, map_size_B)) {
+            agx_bo_unreference(&dev->dev, buffer->sparse_map);
+            buffer->sparse_map = NULL;
+            agx_va_free(&dev->dev, buffer->va, true);
+            buffer->va = NULL;
+            vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
+            return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
+                             "Sparse buffer residency map upload failed");
+         }
+      }
    }
 
    *pBuffer = hk_buffer_to_handle(buffer);
@@ -174,6 +227,8 @@ hk_DestroyBuffer(VkDevice device, VkBuffer _buffer,
    if (buffer->va) {
       agx_va_free(&dev->dev, buffer->va, true);
    }
+
+   agx_bo_unreference(&dev->dev, buffer->sparse_map);
 
    vk_buffer_destroy(&dev->vk, pAllocator, &buffer->vk);
 }

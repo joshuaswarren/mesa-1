@@ -19,6 +19,7 @@
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_pack.h"
+#include "asahi/genxml/agx3_cmdstream.h"
 #include "agx_vdm_hal200_bind_tail_core.h"
 #include "decode.h"
 #include "hk_cmd_buffer.h"
@@ -839,6 +840,7 @@ struct hk_bind_builder {
    struct hk_device *dev;
    struct vk_object_base *obj_base;
    struct agx_va *va;
+   struct hk_buffer *buffer;
    struct hk_image *image;
 
    /* State */
@@ -854,12 +856,14 @@ struct hk_bind_builder {
 
 static inline struct hk_bind_builder
 hk_bind_builder(struct hk_device *dev, struct vk_object_base *obj_base,
-                struct agx_va *va, struct hk_image *image)
+                struct agx_va *va, struct hk_buffer *buffer,
+                struct hk_image *image)
 {
    struct hk_bind_builder b = {
       .dev = dev,
       .obj_base = obj_base,
       .va = va,
+      .buffer = buffer,
       .image = image,
    };
 
@@ -911,6 +915,50 @@ hk_flush_bind(struct hk_bind_builder *b)
    }
 
    util_dynarray_append(&b->binds, op);
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+hk_sparse_buffer_map_commit(struct hk_bind_builder *b)
+{
+   if (!b->buffer || !b->buffer->sparse_map)
+      return VK_SUCCESS;
+
+   struct hk_sparse_buffer_map_header *header =
+      agx_bo_map(b->buffer->sparse_map);
+   uint32_t *map = (uint32_t *)(header + 1);
+   struct drm_asahi_gem_bind_op *ops = b->binds.data;
+   const unsigned count = util_dynarray_num_elements(
+      &b->binds, struct drm_asahi_gem_bind_op);
+   assert((count % 2) == 0);
+
+   for (unsigned i = 0; i < count; i += 2) {
+      const struct drm_asahi_gem_bind_op *op = &ops[i];
+      assert(op->addr >= b->va->addr);
+      const uint64_t first = (op->addr - b->va->addr) / AIL_PAGESIZE;
+      const uint64_t pages = DIV_ROUND_UP(op->range, AIL_PAGESIZE);
+      const bool resident =
+         op->handle != b->dev->dev.scratch_bo->uapi_handle;
+
+      for (uint64_t page = 0; page < pages; ++page) {
+         if (first + page >= b->buffer->sparse_map_entries)
+            break;
+
+         const uint64_t target = first + page;
+         const uint32_t mask = BITFIELD_BIT(target & 31);
+         if (resident)
+            map[target >> 5] |= mask;
+         else
+            map[target >> 5] &= ~mask;
+      }
+   }
+
+   if (agx_bo_sync_for_device(b->buffer->sparse_map, 0,
+                              b->buffer->sparse_map->size)) {
+      return vk_errorf(b->dev, VK_ERROR_DEVICE_LOST,
+                       "Sparse buffer residency map upload failed");
+   }
 
    return VK_SUCCESS;
 }
@@ -980,7 +1028,9 @@ hk_bind_builder_finish(struct hk_bind_builder *b)
             error == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_UNKNOWN,
             "Sparse VM_BIND batch failed: %s", strerror(error));
       } else {
-         hk_sparse_image_map_commit(b);
+         b->result = hk_sparse_buffer_map_commit(b);
+         if (b->result == VK_SUCCESS)
+            hk_sparse_image_map_commit(b);
       }
    }
 
@@ -1021,7 +1071,7 @@ hk_sparse_buffer_bind_memory(struct hk_device *device,
    VK_FROM_HANDLE(hk_buffer, buffer, bind->buffer);
 
    struct hk_bind_builder b =
-      hk_bind_builder(device, &buffer->vk.base, buffer->va, NULL);
+      hk_bind_builder(device, &buffer->vk.base, buffer->va, buffer, NULL);
 
    for (uint32_t i = 0; i < bind->bindCount; ++i) {
       struct hk_device_memory *cur_mem = NULL;
@@ -1043,7 +1093,8 @@ hk_sparse_image_opaque_bind_memory(
    VK_FROM_HANDLE(hk_image, image, bind->image);
 
    struct hk_bind_builder b =
-      hk_bind_builder(device, &image->vk.base, image->planes[0].va, image);
+      hk_bind_builder(device, &image->vk.base, image->planes[0].va, NULL,
+                      image);
 
    for (uint32_t i = 0; i < bind->bindCount; ++i) {
       struct hk_device_memory *mem = NULL;
@@ -1123,7 +1174,8 @@ hk_sparse_image_bind_memory(struct hk_device *device,
    struct ail_layout *layout = &image->planes[0].layout;
 
    struct hk_bind_builder b =
-      hk_bind_builder(device, &image->vk.base, image->planes[0].va, image);
+      hk_bind_builder(device, &image->vk.base, image->planes[0].va, NULL,
+                      image);
 
    for (uint32_t i = 0; i < bind->bindCount; ++i) {
       struct hk_device_memory *mem = NULL;
@@ -1203,10 +1255,32 @@ hk_queue_submit_bind_sparse_memory(struct hk_device *device,
    return VK_SUCCESS;
 }
 
+static bool
+hk_sparse_submission_updates_sstt(const struct vk_queue_submit *submission)
+{
+   for (uint32_t i = 0; i < submission->image_opaque_bind_count; ++i) {
+      VK_FROM_HANDLE(hk_image, image, submission->image_opaque_binds[i].image);
+      if (submission->image_opaque_binds[i].bindCount &&
+          image->planes[0].sparse_map)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < submission->image_bind_count; ++i) {
+      VK_FROM_HANDLE(hk_image, image, submission->image_binds[i].image);
+      if (submission->image_binds[i].bindCount &&
+          image->planes[0].sparse_map)
+         return true;
+   }
+
+   return false;
+}
+
 static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
 {
+   bool flush_sstt = false;
+
    /* TODO: Support asynchronous sparse queue? */
    if (submit->buffer_bind_count || submit->image_bind_count ||
        submit->image_opaque_bind_count) {
@@ -1214,9 +1288,12 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       VkResult result = hk_queue_submit_bind_sparse_memory(dev, submit);
       if (result != VK_SUCCESS)
          return result;
+
+      flush_sstt = dev->dev.chip == AGX_CHIP_G17P &&
+                   hk_sparse_submission_updates_sstt(submit);
    }
 
-   unsigned command_count = 0;
+   unsigned command_count = flush_sstt ? 1 : 0;
 
    /* Gather the number of individual commands to submit up front */
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
@@ -1283,6 +1360,23 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
    unsigned nr_vdm = 0, nr_cdm = 0;
    unsigned nr_draws = 0, nr_dispatches = 0, nr_flushes = 0, nr_merged = 0;
+
+   if (flush_sstt) {
+      assert(queue->g17p_sstt_flush_bo);
+      const struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
+      const struct drm_asahi_cmd_compute cmd = {
+         .cdm_ctrl_stream_base = queue->g17p_sstt_flush_bo->va->addr,
+         .cdm_ctrl_stream_end =
+            queue->g17p_sstt_flush_bo->va->addr +
+            AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE +
+            AGX3_CDM_STREAM_TERMINATE_SIZE,
+      };
+
+      util_dynarray_append(&payload, header);
+      util_dynarray_append(&payload, cmd);
+      nr_cdm++;
+      nr_flushes++;
+   }
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
@@ -1502,6 +1596,26 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
     * reusing point 1 lets it return before the first submit has completed. */
    queue->drm.timeline_value = initial_value;
 
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       dev->vk.enabled_features.sparseBinding) {
+      queue->g17p_sstt_flush_bo =
+         agx_bo_create(&dev->dev, AIL_PAGESIZE, 0, 0, "SSTT flush stream");
+      if (!queue->g17p_sstt_flush_bo) {
+         hk_queue_finish(dev, queue);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+
+      uint8_t *stream = agx_bo_map(queue->g17p_sstt_flush_bo);
+      if (!stream ||
+          !agx3_cdm_sstt_flush_invalidate_pack(AGX_CHIP_G17P, stream) ||
+          !agx3_cdm_stream_terminate_pack(
+             AGX_CHIP_G17P,
+             stream + AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE)) {
+         hk_queue_finish(dev, queue);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+   }
+
    return VK_SUCCESS;
 }
 
@@ -1510,6 +1624,7 @@ hk_queue_finish(struct hk_device *dev, struct hk_queue *queue)
 {
    drmSyncobjDestroy(dev->dev.fd, queue->drm.syncobj);
    agx_destroy_command_queue(&dev->dev, queue->drm.id);
+   agx_bo_unreference(&dev->dev, queue->g17p_sstt_flush_bo);
    vk_queue_finish(&queue->vk);
    vk_free(&dev->vk.alloc, queue);
 }

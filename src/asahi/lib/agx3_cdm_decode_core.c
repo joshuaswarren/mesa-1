@@ -62,6 +62,13 @@ agx3_cdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
       return true;
 
    case AGX_CDM_BLOCK_TYPE_BARRIER:
+      if (agx3_cdm_sstt_flush_invalidate_validate(chip, bytes, available)) {
+         record->kind = AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE;
+         record->length = AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE;
+         record->chip = chip;
+         return true;
+      }
+
       if (agx3_cdm_secondary_barrier_validate(chip, bytes, available)) {
          record->kind = AGX3_CDM_RECORD_SECONDARY_BARRIER;
          record->length = AGX3_CDM_SECONDARY_BARRIER_SIZE;
