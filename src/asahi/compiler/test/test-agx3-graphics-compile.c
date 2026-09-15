@@ -5102,6 +5102,65 @@ test_buffer_fetch_r32_store(void)
    return ok;
 }
 
+static bool
+test_buffer_fetch_unorm_store_fallback(void)
+{
+   /* The native indexed state-1 write following a lowered buffer fetch
+    * resolves an empty normalized state on G17P.  Preserve the descriptor-
+    * backed bindless write while still lowering the fetch to the native
+    * indexed texture heap. */
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "G17P buffer fetch to normalized store fallback");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *index = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+   nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *handle = nir_bindless_image_agx(&b, zero, .desc_set = 0);
+   nir_def *value = nir_build_tex(
+      &b, nir_texop_txf, .texture_handle = handle, .coord = index,
+      .lod = zero, .dim = GLSL_SAMPLER_DIM_BUF, .dest_type = nir_type_float32);
+   nir_def *pbe = nir_bindless_image_agx(
+      &b, nir_imm_int(&b, 128), .desc_set = 0);
+   nir_bindless_image_store(
+      &b, pbe, nir_vec4(&b, index, index, zero, zero), zero, value, zero,
+      .image_dim = GLSL_SAMPLER_DIM_2D,
+      .format = PIPE_FORMAT_R8G8B8A8_UNORM, .src_type = nir_type_float32,
+      .access = ACCESS_NON_READABLE);
+
+   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+   struct buffer_metadata_fixture fixture = {.elements = 64};
+   bool progress;
+   do {
+      progress = nir_shader_intrinsics_pass(
+         b.shader, fold_buffer_descriptor, nir_metadata_control_flow,
+         &fixture);
+      progress |= nir_opt_constant_folding(b.shader);
+      progress |= nir_opt_dead_cf(b.shader);
+      progress |= nir_opt_dce(b.shader);
+   } while (progress);
+   agx_preprocess_nir_g17p(b.shader);
+
+   struct agx_g17p_indexed_storage_binding binding = {0};
+   bool ok = agx_nir_lower_g17p_indexed_samplers(b.shader) &&
+             !agx_nir_lower_g17p_indexed_storage(b.shader, &binding);
+   unsigned bindless_stores = 0, ordinary_stores = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(b.shader)) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         const nir_intrinsic_op op =
+            nir_instr_as_intrinsic(instr)->intrinsic;
+         bindless_stores += op == nir_intrinsic_bindless_image_store;
+         ordinary_stores += op == nir_intrinsic_image_store;
+      }
+   }
+   ok &= bindless_stores == 1 && ordinary_stores == 0;
+   ralloc_free(b.shader);
+   return ok;
+}
+
 /* Apple's builtin end-of-tile factory, asked for a 2D-multisample attachment
  * (texture type 4) instead of a 2D one (texture type 2), emits a second
  * program per selector. The pair differs in exactly three bytes and two
@@ -8251,7 +8310,8 @@ main(int argc, char **argv)
    if (argc == 2 && !strcmp(argv[1], "--buffer-metadata-only")) {
       const bool ok = test_g17p_buffer_metadata() &&
                       test_g17p_buffer_image_metadata() &&
-                      test_buffer_fetch_r32_store();
+                      test_buffer_fetch_r32_store() &&
+                      test_buffer_fetch_unorm_store_fallback();
       fprintf(stderr, "G17P buffer metadata lowering: %s\n", ok ? "PASS" : "FAIL");
       return ok ? 0 : 1;
    }
@@ -8449,7 +8509,8 @@ main(int argc, char **argv)
    }
 
    if (!test_g17p_buffer_metadata() ||
-       !test_g17p_buffer_image_metadata() || !test_buffer_fetch_r32_store()) {
+       !test_g17p_buffer_image_metadata() || !test_buffer_fetch_r32_store() ||
+       !test_buffer_fetch_unorm_store_fallback()) {
       fputs("buffer metadata lowering mismatch\n", stderr);
       all_ok = false;
    }

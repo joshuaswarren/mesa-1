@@ -1173,11 +1173,22 @@ agx_nir_lower_g17p_indexed_storage(
       return false;
 
    nir_intrinsic_instr *store = NULL;
+   bool has_buffer_fetch = false;
    uint8_t pbe_set = 0;
    uint32_t pbe_offset_B = 0;
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               /* Buffer textures are lowered to a 2D txf whose coordinate is
+                * carried in backend1; ordinary 2D texelFetch keeps coord. */
+               has_buffer_fetch |=
+                  tex->op == nir_texop_txf &&
+                  nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0;
+               continue;
+            }
+
             if (instr->type != nir_instr_type_intrinsic)
                continue;
 
@@ -1221,6 +1232,17 @@ agx_nir_lower_g17p_indexed_storage(
    }
 
    if (!store)
+      return false;
+
+   /* The indexed texture path occupies the first native state pair with the
+    * texture/sampler heap roots.  A normalized immediate-state write after a
+    * lowered texel-buffer fetch currently resolves state 1 as empty on G17P,
+    * producing an all-zero destination.  Keep the working bindless PBE form
+    * for this mixed shape; integer state 1 and straight-line sampled-storage
+    * retain their independently witnessed specialized paths. */
+   if (has_buffer_fetch &&
+       (nir_intrinsic_format(store) == PIPE_FORMAT_R8G8B8A8_UNORM ||
+        nir_intrinsic_format(store) == PIPE_FORMAT_R10G10B10A2_UNORM))
       return false;
 
    nir_builder b = nir_builder_at(nir_before_instr(&store->instr));
