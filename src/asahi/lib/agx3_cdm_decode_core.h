@@ -20,6 +20,8 @@ extern "C" {
 enum agx3_cdm_record_kind {
    AGX3_CDM_RECORD_UNKNOWN = 0,
    AGX3_CDM_RECORD_LAUNCH,
+   AGX3_CDM_RECORD_INDIRECT_LAUNCH,
+   AGX3_CDM_RECORD_INDIRECT_LAUNCH_36,
    AGX3_CDM_RECORD_STREAM_LINK,
    AGX3_CDM_RECORD_LINK_PADDING,
    AGX3_CDM_RECORD_BARRIER,
@@ -41,6 +43,17 @@ struct agx3_cdm_decoded_record {
          uint32_t global_size[3];
          uint32_t local_size[3];
       } launch;
+      struct {
+         uint32_t word0_payload;
+         uint32_t word1_payload;
+         uint64_t pipeline;
+         uint32_t opaque_word3;
+         uint16_t word4_payload;
+         uint64_t parameters;
+         /* Set only for the nine-word form; left unnamed because the
+          * recovered corpus does not prove their meaning. */
+         uint32_t trailing_words[3];
+      } indirect_launch;
       struct {
          uint64_t target;
          bool with_return;
