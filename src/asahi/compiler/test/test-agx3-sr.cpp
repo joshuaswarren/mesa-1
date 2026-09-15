@@ -100,6 +100,24 @@ TEST(AGX3SrCore, HardwareVertexInvocationInputs)
    }
 }
 
+TEST(AGX3SrCore, G17PBackgroundLayerInput)
+{
+   /* Native builtin BG array reload, SR 0xc3 into h6 on slot 3. */
+   struct agx3_sr_desc d = {};
+   d.dest = 6;
+   d.width = AGX3_SR_W16;
+   d.sr = 12;
+   d.slot = 3;
+   uint8_t out[AGX3_SR_MAX_LENGTH];
+   uint8_t len = 0;
+   const uint8_t expected[] = {0x34, 0xc3, 0x10, 0x46};
+   ASSERT_TRUE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+   ASSERT_EQ(len, sizeof(expected));
+   EXPECT_EQ(0, memcmp(out, expected, len));
+   d.width = AGX3_SR_W32;
+   EXPECT_FALSE(agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
+}
+
 TEST(AGX3SrCore, FragmentCoverageInputs)
 {
    /* Apple's isolated fragment probes read the per-invocation 1x coverage

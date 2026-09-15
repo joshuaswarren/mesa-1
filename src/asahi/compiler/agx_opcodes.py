@@ -150,6 +150,8 @@ SR = enum("sr", {
    144: 'helper_op',
    146: 'helper_arg_l',
    147: 'helper_arg_h',
+   # G17P builtin background reload: native half-register layer input.
+   195: 'background_layer_id',
    # AGX3 hardware-vertex inputs. Apple emits these as explicit 32-bit rld
    # instructions instead of the AGX2 preloaded-input ABI.
    216: 'instance_id',
