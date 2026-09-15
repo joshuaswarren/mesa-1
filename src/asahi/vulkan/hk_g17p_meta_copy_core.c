@@ -95,6 +95,35 @@ hk_g17p_tile_address_config_init(
 }
 
 bool
+hk_g17p_copy_aspect_plan(VkImageAspectFlags src, VkImageAspectFlags dst,
+                         struct hk_g17p_copy_aspect_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+   if (!plan)
+      return false;
+
+   const VkImageAspectFlags color = VK_IMAGE_ASPECT_COLOR_BIT;
+   const VkImageAspectFlags depth = VK_IMAGE_ASPECT_DEPTH_BIT;
+   const VkImageAspectFlags stencil = VK_IMAGE_ASPECT_STENCIL_BIT;
+   const bool src_single = src == color || src == depth || src == stencil;
+   const bool dst_single = dst == color || dst == depth || dst == stencil;
+   if (src == (depth | stencil) && dst == src) {
+      *plan = (struct hk_g17p_copy_aspect_plan){
+         .count = 2, .src = {depth, stencil}, .dst = {depth, stencil},
+      };
+   } else if (src_single && dst_single &&
+              (src == dst || src == color || dst == color)) {
+      *plan = (struct hk_g17p_copy_aspect_plan){
+         .count = 1, .src = {src}, .dst = {dst},
+      };
+   } else {
+      return false;
+   }
+   return true;
+}
+
+bool
 hk_g17p_image_copy_element_plan(
    VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
    struct hk_g17p_image_copy_element_plan *plan)

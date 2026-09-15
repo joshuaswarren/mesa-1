@@ -2486,26 +2486,26 @@ hk_g17p_raw_image_copy_supported(struct hk_device *dev,
 
    for (uint32_t r = 0; r < info->regionCount; ++r) {
       const VkImageCopy2 *region = &info->pRegions[r];
-      if (region->srcSubresource.aspectMask !=
-             region->dstSubresource.aspectMask ||
+      struct hk_g17p_copy_aspect_plan aspects;
+      if (!hk_g17p_copy_aspect_plan(region->srcSubresource.aspectMask,
+                                    region->dstSubresource.aspectMask,
+                                    &aspects) ||
           region->srcSubresource.mipLevel >= src->vk.mip_levels ||
           region->dstSubresource.mipLevel >= dst->vk.mip_levels)
          return false;
 
-      u_foreach_bit(aspect_bit, region->srcSubresource.aspectMask) {
-         const VkImageAspectFlags aspect = 1u << aspect_bit;
-         if (!(aspect & (VK_IMAGE_ASPECT_COLOR_BIT |
-                         VK_IMAGE_ASPECT_DEPTH_BIT |
-                         VK_IMAGE_ASPECT_STENCIL_BIT)))
-            return false;
-
-         const uint8_t src_plane = hk_image_aspects_to_plane(src, aspect);
-         const uint8_t dst_plane = hk_image_aspects_to_plane(dst, aspect);
+      for (unsigned a = 0; a < aspects.count; ++a) {
+         const uint8_t src_plane =
+            hk_image_aspects_to_plane(src, aspects.src[a]);
+         const uint8_t dst_plane =
+            hk_image_aspects_to_plane(dst, aspects.dst[a]);
          if (src_plane >= src->plane_count || dst_plane >= dst->plane_count)
             return false;
 
-         const VkFormat src_format = aspect_format(src->vk.format, aspect);
-         const VkFormat dst_format = aspect_format(dst->vk.format, aspect);
+         const VkFormat src_format =
+            aspect_format(src->vk.format, aspects.src[a]);
+         const VkFormat dst_format =
+            aspect_format(dst->vk.format, aspects.dst[a]);
          struct hk_g17p_image_copy_element_plan plan;
          if (!hk_g17p_image_copy_element_plan(
                 src_format, dst_format, region, &plan) ||
@@ -2579,12 +2579,20 @@ hk_g17p_copy_raw_image(struct hk_cmd_buffer *cmd, struct hk_image *src,
             ? region->extent.depth
             : vk_image_subresource_layer_count(&dst->vk,
                                                 &region->dstSubresource);
-      u_foreach_bit(aspect_bit, region->srcSubresource.aspectMask) {
-         const VkImageAspectFlags aspect = 1u << aspect_bit;
-         const uint8_t src_plane = hk_image_aspects_to_plane(src, aspect);
-         const uint8_t dst_plane = hk_image_aspects_to_plane(dst, aspect);
-         const VkFormat src_format = aspect_format(src->vk.format, aspect);
-         const VkFormat dst_format = aspect_format(dst->vk.format, aspect);
+      struct hk_g17p_copy_aspect_plan aspects;
+      const bool mapped = hk_g17p_copy_aspect_plan(
+         region->srcSubresource.aspectMask, region->dstSubresource.aspectMask,
+         &aspects);
+      assert(mapped);
+      for (unsigned a = 0; a < aspects.count; ++a) {
+         const uint8_t src_plane =
+            hk_image_aspects_to_plane(src, aspects.src[a]);
+         const uint8_t dst_plane =
+            hk_image_aspects_to_plane(dst, aspects.dst[a]);
+         const VkFormat src_format =
+            aspect_format(src->vk.format, aspects.src[a]);
+         const VkFormat dst_format =
+            aspect_format(dst->vk.format, aspects.dst[a]);
          struct hk_g17p_image_copy_element_plan plan;
          const bool planned = hk_g17p_image_copy_element_plan(
             src_format, dst_format, region, &plan);

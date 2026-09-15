@@ -87,6 +87,17 @@ struct hk_g17p_image_copy_element_plan {
    uint32_t height_el;
 };
 
+struct hk_g17p_copy_aspect_plan {
+   unsigned count;
+   VkImageAspectFlags src[2];
+   VkImageAspectFlags dst[2];
+};
+
+/* Keep combined depth/stencil copies plane-wise; maintenance8 also permits
+ * a single depth or stencil aspect to copy raw bits to/from a color aspect. */
+bool hk_g17p_copy_aspect_plan(VkImageAspectFlags src, VkImageAspectFlags dst,
+                              struct hk_g17p_copy_aspect_plan *plan);
+
 /* Reduce AIL's power-of-two tile geometry once on the CPU. G17P transfer tiles
  * are at most 128 elements per axis. Raw copy and mip kernels consume this
  * form so every element uses shifts and a seven-bit Morton encoder instead of
