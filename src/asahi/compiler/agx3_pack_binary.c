@@ -9020,7 +9020,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool g17p_returned =
                enc == AGX_ISA_ENCODING_AGX3B && returned;
             const uint8_t atomic_slot = g17p_returned ? 1 : slot;
-            if ((g17p_returned && (slot != 6 || ctx->scratch_size_B != 0)) ||
+            const bool atomic_overlaps_spills =
+               ctx->scratch_size_B != 0 && ctx->spill_base_B < 16;
+            if ((g17p_returned && (slot != 6 || atomic_overlaps_spills)) ||
                 !agx3_translate_device_atomic(I, enc, block->divergent,
                                               atomic_slot, wait, &d) ||
                 !agx3_atomic_encode_device(enc, &d, bytes, &len) ||

@@ -265,6 +265,8 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_tess_factors_half") ||
           !strcmp(func->name, "libagx_tess_setup_indirect") ||
           !strcmp(func->name, "libagx_tess_isoline") ||
+          !strcmp(func->name, "libagx_tess_tri") ||
+          !strcmp(func->name, "libagx_tess_quad") ||
           !strcmp(func->name, "libagx_prefix_sum_tess");
 }
 
@@ -430,6 +432,10 @@ main(int argc, char **argv)
 
             struct agx_shader_part compiled;
             bool is_helper = !strcmp(libfunc->name, "libagx_helper");
+            const bool g17p_tessellator =
+               !strcmp(*target, "g17p") &&
+               (!strcmp(libfunc->name, "libagx_tess_tri") ||
+                !strcmp(libfunc->name, "libagx_tess_quad"));
             struct agx_shader_key key = {
                .promote_constants = !is_helper,
 
@@ -442,6 +448,11 @@ main(int argc, char **argv)
                .reserved_preamble = layout.size_B / 2,
                .is_helper = is_helper,
                .no_preamble = !strcmp(*target, "g17p"),
+               /* AGX3 static spills live in the launch-allocated TPS frame.
+                * The triangle and quad tessellators exceed G17P's 192-half
+                * register file; compile their ordinary spill/reload path
+                * instead of omitting the kernels from the shipped table. */
+               .has_scratch = g17p_tessellator,
             };
 
             key.dev.encoding = !strcmp(*target, "g17p")
@@ -471,8 +482,8 @@ main(int argc, char **argv)
             free(compiled.binary);
             ralloc_free(clone);
 
-            assert(compiled.info.scratch_size == 0 &&
-                   "internal shaders do not spill");
+            assert((compiled.info.scratch_size == 0 || g17p_tessellator) &&
+                   "only G17P tessellators may spill");
 
             assert(compiled.info.preamble_scratch_size == 0 &&
                    "internal shader preambles do not spill");
@@ -575,6 +586,14 @@ main(int argc, char **argv)
                  "libagx_tess_isoline_0_g17p,\n"
                  "    [LIBAGX_TESS_ISOLINE_1] = "
                  "libagx_tess_isoline_1_g17p,\n"
+                 "    [LIBAGX_TESS_TRI_0] = "
+                 "libagx_tess_tri_0_g17p,\n"
+                 "    [LIBAGX_TESS_TRI_1] = "
+                 "libagx_tess_tri_1_g17p,\n"
+                 "    [LIBAGX_TESS_QUAD_0] = "
+                 "libagx_tess_quad_0_g17p,\n"
+                 "    [LIBAGX_TESS_QUAD_1] = "
+                 "libagx_tess_quad_1_g17p,\n"
                  "    [LIBAGX_SETUP_INDIRECT_DISPATCH] = "
                  "libagx_setup_indirect_dispatch_0_g17p,\n"
                  "};\n\n");

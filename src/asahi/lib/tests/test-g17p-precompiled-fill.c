@@ -42,17 +42,20 @@ main(void)
     * libagx receives its six arguments in contiguous uniform halves. */
    static const uint8_t expected[] = {
       0x0c, 0xa0, 0x10, 0x06, 0x1c, 0xa1, 0x10, 0x26,
-      0x2b, 0x04, 0x01, 0x08, 0x9f, 0x30, 0x54, 0x00,
+      0x2b, 0x10, 0x01, 0x08, 0x9f, 0x30, 0x54, 0x00,
       0x02, 0x04, 0x10, 0x00, 0xd0, 0x2f, 0x2a, 0x00,
-      0x4b, 0x06, 0x01, 0x08, 0x5b, 0x08, 0x01, 0x08,
-      0x6b, 0x0a, 0x01, 0x08, 0x7b, 0x0c, 0x01, 0x08,
-      0xe7, 0x00, 0x54, 0x08, 0x00, 0x00, 0x20, 0x00,
+      0x4b, 0x12, 0x01, 0x08, 0x5b, 0x14, 0x01, 0x08,
+      0x6b, 0x16, 0x01, 0x08, 0x7b, 0x18, 0x01, 0x08,
+      0xe7, 0x00, 0x54, 0x08, 0x03, 0x00, 0x20, 0x00,
       0x17, 0x00, 0x00, 0x10, 0x10, 0x00, 0x0e, 0x00,
       0x00, 0x00,
    };
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
-      if (i == LIBAGX_FILL_UINT4 ||
+      if (i == LIBAGX_FILL ||
+          i == LIBAGX_COPY_UINT4 ||
+          i == LIBAGX_COPY_UCHAR ||
+          i == LIBAGX_FILL_UINT4 ||
           i == LIBAGX_COPY_IMAGE ||
           i == LIBAGX_MIPMAP_UNORM8X4 ||
           i == LIBAGX_MIPMAP_UNORM8X4_ODD ||
@@ -62,14 +65,30 @@ main(void)
           i == LIBAGX_DRAW_ROBUST_INDEX_1 ||
           i == LIBAGX_DRAW_ROBUST_INDEX_2 ||
           i == LIBAGX_INCREMENT_IA ||
+          i == LIBAGX_INCREMENT_IA_RESTART ||
           i == LIBAGX_INCREMENT_IA_RESTART_NONNULL ||
+          (i >= LIBAGX_UNROLL_RESTART_0 &&
+           i <= LIBAGX_UNROLL_RESTART_10) ||
+          i == LIBAGX_GS_SETUP_INDIRECT ||
+          i == LIBAGX_PREFIX_SUM_GEOM ||
+          i == LIBAGX_PREFIX_SUM_TESS_0 ||
+          i == LIBAGX_PREFIX_SUM_TESS_1 ||
           i == LIBAGX_COPY_QUERY ||
+          i == LIBAGX_COPY_QUERY_GL ||
           i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
+          i == LIBAGX_SETUP_INDIRECT_DISPATCH ||
           i == LIBAGX_COPY_TIMESTAMP ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1 ||
           i == LIBAGX_CONDITIONAL_RENDER ||
-          i == LIBAGX_TESS_FACTORS_HALF)
+          i == LIBAGX_TESS_FACTORS_HALF ||
+          i == LIBAGX_TESS_SETUP_INDIRECT ||
+          i == LIBAGX_TESS_ISOLINE_0 ||
+          i == LIBAGX_TESS_ISOLINE_1 ||
+          i == LIBAGX_TESS_TRI_0 ||
+          i == LIBAGX_TESS_TRI_1 ||
+          i == LIBAGX_TESS_QUAD_0 ||
+          i == LIBAGX_TESS_QUAD_1)
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
@@ -98,7 +117,7 @@ main(void)
    CHECK(copy_image_info->binary_size == 1670);
    CHECK(copy_image_info->nr_gprs == 22);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
-   CHECK(copy_image_info->push_count == 42);
+   CHECK(copy_image_info->push_count == 54);
    CHECK(copy_image_info->workgroup_size[0] == 32);
    CHECK(copy_image_info->workgroup_size[1] == 1);
    CHECK(copy_image_info->workgroup_size[2] == 1);
@@ -108,7 +127,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0xbc86c399457f3a6a));
+         UINT64_C(0x2b548d68d69cb6f8));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -136,7 +155,7 @@ main(void)
    CHECK(mipmap_info->binary_size == 3234);
    CHECK(mipmap_info->nr_gprs == 38);
    CHECK(mipmap_info->nr_preamble_gprs == 0);
-   CHECK(mipmap_info->push_count == 28);
+   CHECK(mipmap_info->push_count == 40);
    CHECK(mipmap_info->workgroup_size[0] == 32);
    CHECK(mipmap_info->workgroup_size[1] == 1);
    CHECK(mipmap_info->workgroup_size[2] == 1);
@@ -146,7 +165,7 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0xd412eb7d64cc5c54));
+         UINT64_C(0x02eb67699a97a578));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -171,7 +190,7 @@ main(void)
    CHECK(odd_mipmap_info->binary_size == 3474);
    CHECK(odd_mipmap_info->nr_gprs == 36);
    CHECK(odd_mipmap_info->nr_preamble_gprs == 0);
-   CHECK(odd_mipmap_info->push_count == 28);
+   CHECK(odd_mipmap_info->push_count == 40);
    CHECK(odd_mipmap_info->workgroup_size[0] == 32);
    CHECK(odd_mipmap_info->workgroup_size[1] == 1);
    CHECK(odd_mipmap_info->workgroup_size[2] == 1);
@@ -181,7 +200,7 @@ main(void)
    CHECK(odd_mipmap_info->agx3_staging_known);
    CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
-         UINT64_C(0x1256365ce6cd378b));
+         UINT64_C(0x6945f3c63666667b));
    CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -202,7 +221,7 @@ main(void)
    CHECK(byte_count_info->binary_size == 332);
    CHECK(byte_count_info->nr_gprs == 16);
    CHECK(byte_count_info->nr_preamble_gprs == 0);
-   CHECK(byte_count_info->push_count == 16);
+   CHECK(byte_count_info->push_count == 28);
    CHECK(byte_count_info->workgroup_size[0] == 1);
    CHECK(byte_count_info->workgroup_size[1] == 1);
    CHECK(byte_count_info->workgroup_size[2] == 1);
@@ -212,7 +231,7 @@ main(void)
    CHECK(byte_count_info->agx3_staging_known);
    CHECK(byte_count_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(byte_count_binary, byte_count_info->binary_size) ==
-         UINT64_C(0xa698ddb6b7dcd46c));
+         UINT64_C(0x0981a4715defd3c2));
    CHECK(memcmp(byte_count_binary + byte_count_info->binary_size -
                    sizeof(byte_count_end),
                 byte_count_end, sizeof(byte_count_end)) == 0);
@@ -226,12 +245,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
-       UINT64_C(0x0b9b4afcfff889cc)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
-       UINT64_C(0xbfe2ca3f22a5575b)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
-       UINT64_C(0xc64c99e36e9c9b95)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3470,
+       UINT64_C(0xb05c70fdd6c4f224)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3586,
+       UINT64_C(0x04595c2f8e9e0974)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3510,
+       UINT64_C(0x6203053d03b24f90)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -257,7 +276,7 @@ main(void)
       CHECK(robust_info->binary_size == robust_index[i].size);
       CHECK(robust_info->nr_gprs == 56);
       CHECK(robust_info->nr_preamble_gprs == 0);
-      CHECK(robust_info->push_count == 32);
+      CHECK(robust_info->push_count == 44);
       CHECK(robust_info->workgroup_size[0] == 32);
       CHECK(robust_info->workgroup_size[1] == 1);
       CHECK(robust_info->workgroup_size[2] == 1);
@@ -283,7 +302,7 @@ main(void)
    CHECK(info->binary_size == sizeof(expected));
    CHECK(info->nr_gprs == 16);
    CHECK(info->nr_preamble_gprs == 0);
-   CHECK(info->push_count == 14);
+   CHECK(info->push_count == 26);
    CHECK(info->workgroup_size[0] == 32);
    CHECK(info->workgroup_size[1] == 1);
    CHECK(info->workgroup_size[2] == 1);
@@ -311,7 +330,7 @@ main(void)
    CHECK(xfb_info->main_size == 172);
    CHECK(xfb_info->binary_size == 172);
    CHECK(xfb_info->nr_gprs == 12);
-   CHECK(xfb_info->push_count == 4);
+   CHECK(xfb_info->push_count == 16);
    CHECK(xfb_info->workgroup_size[0] == 4);
    CHECK(xfb_info->workgroup_size[1] == 1);
    CHECK(xfb_info->workgroup_size[2] == 1);
@@ -340,7 +359,7 @@ main(void)
    CHECK(ia_info->binary_size == 1364);
    CHECK(ia_info->nr_gprs == 26);
    CHECK(ia_info->nr_preamble_gprs == 0);
-   CHECK(ia_info->push_count == 28);
+   CHECK(ia_info->push_count == 40);
    CHECK(ia_info->workgroup_size[0] == 1);
    CHECK(ia_info->workgroup_size[1] == 1);
    CHECK(ia_info->workgroup_size[2] == 1);
@@ -350,7 +369,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0xccb20ed438e45f04));
+         UINT64_C(0x132f65a0df120431));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -372,12 +391,12 @@ main(void)
       /* The top-level loop has the native guard/entry/exit scopes. Native
        * descriptor scheduling assigns independent slots and uses per-slot
        * dependent wait carriers while keeping adjacent producers overlapped. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0x7798f979bfc20f26)},
-      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
-       UINT64_C(0x28b92f478b1714d4)},
-      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
-       UINT64_C(0xd292b1db166dd1e9)},
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 52,
+       {1024, 1, 1}, 4, UINT64_C(0x63684eef950d336b)},
+      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 37, {32, 1, 1}, 0,
+       UINT64_C(0x64a1031992df83e1)},
+      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 22, {1, 1, 1}, 0,
+       UINT64_C(0x78a446feaf2e4552)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(statistics); ++i) {
       const uint32_t *statistics_blob = libagx_g17p[statistics[i].index];
@@ -426,8 +445,8 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } predicate[] = {
-      {LIBAGX_PREDICATE_INDIRECT_0, 642, UINT64_C(0xd312d6837034a3df)},
-      {LIBAGX_PREDICATE_INDIRECT_1, 784, UINT64_C(0xa7af1ba09fd87252)},
+      {LIBAGX_PREDICATE_INDIRECT_0, 642, UINT64_C(0x4d13544f625d66de)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 784, UINT64_C(0xd82b9078051ecbf3)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
       const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
@@ -444,7 +463,7 @@ main(void)
       CHECK(predicate_info->binary_size == predicate[i].size);
       CHECK(predicate_info->nr_gprs == 24);
       CHECK(predicate_info->nr_preamble_gprs == 0);
-      CHECK(predicate_info->push_count == 14);
+      CHECK(predicate_info->push_count == 26);
       CHECK(predicate_info->workgroup_size[0] == 32);
       CHECK(predicate_info->workgroup_size[1] == 1);
       CHECK(predicate_info->workgroup_size[2] == 1);
@@ -480,7 +499,7 @@ main(void)
    CHECK(conditional_info->binary_size == 180);
    CHECK(conditional_info->nr_gprs == 6);
    CHECK(conditional_info->nr_preamble_gprs == 0);
-   CHECK(conditional_info->push_count == 16);
+   CHECK(conditional_info->push_count == 28);
    CHECK(conditional_info->workgroup_size[0] == 1);
    CHECK(conditional_info->workgroup_size[1] == 1);
    CHECK(conditional_info->workgroup_size[2] == 1);
@@ -490,7 +509,7 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0x89f7e9a45c600e83));
+         UINT64_C(0x10da7969e9a8236a));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);
@@ -504,8 +523,8 @@ main(void)
     * The Mesa ABI form addresses both pointers from its uniforms, leaving
     * exactly that load, store and end. */
    static const uint8_t timestamp_expected[] = {
-      0x67, 0x00, 0x54, 0x00, 0x01, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
-      0x40, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x67, 0x00, 0x54, 0x00, 0x04, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
+      0x40, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x03, 0x00, 0x00, 0x00,
       0x19, 0x00, 0x00, 0x90, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
    const uint32_t *timestamp_blob = libagx_g17p[LIBAGX_COPY_TIMESTAMP];
@@ -520,7 +539,7 @@ main(void)
    CHECK(timestamp_info->binary_size == sizeof(timestamp_expected));
    CHECK(timestamp_info->nr_gprs == 4);
    CHECK(timestamp_info->nr_preamble_gprs == 0);
-   CHECK(timestamp_info->push_count == 8);
+   CHECK(timestamp_info->push_count == 20);
    CHECK(timestamp_info->workgroup_size[0] == 1);
    CHECK(timestamp_info->workgroup_size[1] == 1);
    CHECK(timestamp_info->workgroup_size[2] == 1);
@@ -549,7 +568,7 @@ main(void)
    CHECK(factors_info->binary_size == 1496);
    CHECK(factors_info->nr_gprs == 24);
    CHECK(factors_info->nr_preamble_gprs == 0);
-   CHECK(factors_info->push_count == 12);
+   CHECK(factors_info->push_count == 24);
    CHECK(factors_info->workgroup_size[0] == 32);
    CHECK(factors_info->workgroup_size[1] == 1);
    CHECK(factors_info->workgroup_size[2] == 1);
@@ -559,9 +578,61 @@ main(void)
    CHECK(factors_info->agx3_staging_known);
    CHECK(factors_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
-         UINT64_C(0x0d3d3701f282d673));
+         UINT64_C(0x146c784e634c800b));
    CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
+
+   /* Pin both forms of each triangle and quad tessellator. Variant 0 stays
+    * entirely in registers. Variant 1 consumes a returned heap-allocation
+    * atomic and exceeds G17P's 192-half register file, so its ordinary spills
+    * begin after the native 16-byte atomic TPS reservation. */
+   const struct {
+      enum libagx_program index;
+      uint32_t main_offset;
+      uint32_t main_size;
+      uint32_t binary_size;
+      uint16_t nr_gprs;
+      uint16_t push_count;
+      uint16_t scratch_size;
+      uint16_t spectpr_scratch_size;
+      uint64_t hash;
+   } tessellators[] = {
+      {LIBAGX_TESS_TRI_0, 0, 1832, 1832, 30, 16, 0, 0,
+       UINT64_C(0x97ebaf3fec6aa659)},
+      {LIBAGX_TESS_TRI_1, 128, 44162, 44290, 192, 24, 68, 16,
+       UINT64_C(0x21ae6571b7e8b2c1)},
+      {LIBAGX_TESS_QUAD_0, 0, 2584, 2584, 36, 16, 0, 0,
+       UINT64_C(0xe57b6f263500a379)},
+      {LIBAGX_TESS_QUAD_1, 128, 43192, 43320, 192, 24, 120, 16,
+       UINT64_C(0xb9bcd095d5f78c9c)},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(tessellators); ++i) {
+      const uint32_t *blob = libagx_g17p[tessellators[i].index];
+      CHECK(blob != NULL);
+      if (!blob)
+         continue;
+
+      const struct agx_precompiled_kernel_info *info = (const void *)blob;
+      const uint8_t *binary = (const uint8_t *)blob + sizeof(*info);
+      CHECK(info->preamble_offset == 0);
+      CHECK(info->main_offset == tessellators[i].main_offset);
+      CHECK(info->main_size == tessellators[i].main_size);
+      CHECK(info->binary_size == tessellators[i].binary_size);
+      CHECK(info->nr_gprs == tessellators[i].nr_gprs);
+      CHECK(info->nr_preamble_gprs == 0);
+      CHECK(info->push_count == tessellators[i].push_count);
+      CHECK(info->workgroup_size[0] == 64);
+      CHECK(info->workgroup_size[1] == 1);
+      CHECK(info->workgroup_size[2] == 1);
+      CHECK(info->scratch_size == tessellators[i].scratch_size);
+      CHECK(info->agx3_spectpr_scratch_size ==
+            tessellators[i].spectpr_scratch_size);
+      CHECK(info->agx3_staging_known);
+      CHECK(info->agx3_staging_halfs == 0);
+      CHECK(fnv1a64(binary, info->binary_size) == tessellators[i].hash);
+      CHECK(memcmp(binary + info->binary_size - sizeof(end), end,
+                   sizeof(end)) == 0);
+   }
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",

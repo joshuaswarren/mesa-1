@@ -48,6 +48,7 @@
 
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/genxml/agx_pack.h"
+#include "asahi/isa/disasm.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_xfb_info.h"
 #include "compiler/glsl_types.h"
@@ -577,6 +578,85 @@ check_msaa_depth_blit(struct pipe_context *pctx, unsigned samples)
 
    printf("msaa depth blit: %ux to %ux %s\n", samples, samples,
           ok ? "built a program" : "DROPPED, no fragment program");
+
+   pipe_resource_reference(&src, NULL);
+   pipe_resource_reference(&dst, NULL);
+   return ok;
+}
+
+static unsigned
+count_g17p_depth_writes(const struct agx_linked_shader *linked)
+{
+   if (!linked || !linked->bo || !linked->size)
+      return 0;
+
+   FILE *out = tmpfile();
+   if (!out)
+      return 0;
+
+   uint8_t *code = (uint8_t *)agx_bo_map(linked->bo) + linked->entry_offset;
+   agx3b_disassemble(code, linked->size, out);
+   rewind(out);
+
+   unsigned writes = 0;
+   char line[512];
+   while (fgets(line, sizeof(line), out))
+      writes += strstr(line, "depthf") != NULL;
+
+   fclose(out);
+   return writes;
+}
+
+/* A single-sample depth source is replicated to every destination sample by
+ * one pixel-rate blit draw.  Its fragment epilog therefore needs one native
+ * depthf write per destination sample.  This catches a mismatch between the
+ * sample count used to lower the epilog NIR and the count passed to the AGX3
+ * backend: the resulting program still encodes, but a 1x depthf leaves a
+ * multisample destination untouched on hardware. */
+static bool
+check_depth_replication_blit(struct pipe_context *pctx, unsigned samples)
+{
+   struct pipe_screen *screen = pctx->screen;
+   struct agx_context *ctx = agx_context(pctx);
+   struct pipe_resource templ = {
+      .target = PIPE_TEXTURE_2D,
+      .format = PIPE_FORMAT_Z32_FLOAT,
+      .width0 = 32,
+      .height0 = 32,
+      .depth0 = 1,
+      .array_size = 1,
+      .last_level = 0,
+      .nr_samples = 1,
+      .nr_storage_samples = 1,
+      .usage = PIPE_USAGE_DEFAULT,
+      .bind = PIPE_BIND_DEPTH_STENCIL | PIPE_BIND_SAMPLER_VIEW,
+   };
+   struct pipe_resource *src = screen->resource_create(screen, &templ);
+   templ.nr_samples = templ.nr_storage_samples = samples;
+   struct pipe_resource *dst = screen->resource_create(screen, &templ);
+   if (!src || !dst) {
+      fprintf(stderr, "depth replication: %ux target unsupported\n", samples);
+      pipe_resource_reference(&src, NULL);
+      pipe_resource_reference(&dst, NULL);
+      return true;
+   }
+
+   const struct pipe_blit_info info = {
+      .src = {.resource = src,
+              .format = PIPE_FORMAT_Z32_FLOAT,
+              .box = {.width = 32, .height = 32, .depth = 1}},
+      .dst = {.resource = dst,
+              .format = PIPE_FORMAT_Z32_FLOAT,
+              .box = {.width = 32, .height = 32, .depth = 1}},
+      .mask = PIPE_MASK_Z,
+      .filter = PIPE_TEX_FILTER_NEAREST,
+   };
+
+   pctx->blit(pctx, &info);
+   const unsigned writes = count_g17p_depth_writes(ctx->linked.fs);
+   const bool ok = writes == samples;
+   printf("depth replication: 1x to %ux emitted %u depth writes (%s)\n",
+          samples, writes, ok ? "correct" : "expected one per sample");
 
    pipe_resource_reference(&src, NULL);
    pipe_resource_reference(&dst, NULL);
@@ -1216,6 +1296,10 @@ main(void)
       return 1;
 
    if (!check_msaa_depth_blit(pctx, 2) || !check_msaa_depth_blit(pctx, 4))
+      return 1;
+
+   if (!check_depth_replication_blit(pctx, 2) ||
+       !check_depth_replication_blit(pctx, 4))
       return 1;
 
    if (!check_scissored_blit(pctx))

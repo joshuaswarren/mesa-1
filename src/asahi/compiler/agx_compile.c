@@ -6542,6 +6542,26 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    AGX_PASS(ctx, agx3_bank_scalar_tile_store_inputs);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);
 
+   /* A returned G17P device atomic publishes its value in TPS half 0 before
+    * RLD moves it to the assigned GPR. If this shader also needs compiler
+    * spills, reserve the complete 16-byte native atomic frame before RA lays
+    * out ordinary spill cells. This keeps both mechanisms in one static TPS
+    * frame without adding a memory barrier or serializing the kernel. */
+   bool g17p_returned_atomic = false;
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       (ctx->stage == MESA_SHADER_COMPUTE ||
+        ctx->stage == MESA_SHADER_FRAGMENT)) {
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_ATOMIC && I->nr_dests == 1 &&
+             !agx_is_null(I->dest[0])) {
+            g17p_returned_atomic = true;
+            break;
+         }
+      }
+   }
+   if (g17p_returned_atomic && ctx->key->has_scratch)
+      ctx->scratch_size_B = MAX2(ctx->scratch_size_B, 16);
+
    AGX_PASS(ctx, agx_ra);
 
    /* Apple's G17P compiler publishes a 16-byte scratch footprint for both
@@ -6551,18 +6571,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * this fixed ABI reservation distinct from allocator-created spill size;
     * the packer refuses a mixed returned-atomic/compiler-scratch shader until
     * ordinary scratch offsets are rebased around these words. */
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       (ctx->stage == MESA_SHADER_COMPUTE ||
-        ctx->stage == MESA_SHADER_FRAGMENT)) {
-      agx_foreach_instr_global(ctx, I) {
-         if (I->op == AGX_OPCODE_ATOMIC && I->nr_dests == 1 &&
-             !agx_is_null(I->dest[0])) {
-            out->agx3_spectpr_scratch_size =
-               MAX2(out->agx3_spectpr_scratch_size, 16);
-            break;
-         }
-      }
-   }
+   if (g17p_returned_atomic)
+      out->agx3_spectpr_scratch_size =
+         MAX2(out->agx3_spectpr_scratch_size, 16);
 
    agx_lower_64bit_postra(ctx);
 
