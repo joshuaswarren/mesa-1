@@ -732,6 +732,66 @@ compile_epilog_samples(unsigned count, const enum pipe_format *formats,
 }
 
 static bool
+compile_sample_shaded_epilog(unsigned count,
+                             const enum pipe_format *formats,
+                             unsigned samples,
+                             struct agx_shader_part *part)
+{
+   const unsigned written = BITFIELD_MASK(count);
+   struct agx_fs_epilog_key epilog = {
+      .link.loc_written = written,
+      .link.size_32 = written,
+      .link.sample_shading = true,
+      .link.write_z = true,
+      .nr_samples = samples,
+      .max_sample_size_B = AGX_G17P_MAX_BYTES_PER_SAMPLE,
+   };
+   memset(epilog.remap, -1, sizeof(epilog.remap));
+   for (unsigned rt = 0; rt < count; ++rt) {
+      epilog.remap[rt] = rt;
+      epilog.rt_formats[rt] = formats[rt];
+      epilog.blend.rt[rt].colormask =
+         BITFIELD_MASK(util_format_get_nr_components(formats[rt]));
+      epilog.blend.rt[rt].mode = agx_pack_blend_standard(
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+   }
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &epilog);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P sample-shaded MRT epilog");
+   struct agx_fs_epilog_key pixel = epilog;
+   pixel.link.sample_shading = false;
+   pixel.defer_monolithic_msaa = true;
+   agx_nir_fs_epilog(&b, &pixel);
+   NIR_PASS(_, b.shader, agx_nir_lower_to_per_sample);
+   NIR_PASS(_, b.shader, agx_nir_unroll_g17p_samples, samples, written);
+   NIR_PASS(_, b.shader, nir_opt_constant_folding);
+   NIR_PASS(_, b.shader, agx_nir_hoist_g17p_zs_writes);
+   NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, samples);
+   agx_preprocess_nir(b.shader);
+
+   enum pipe_format full_formats[AGX_MAX_RENDER_TARGETS] = {0};
+   memcpy(full_formats, formats, count * sizeof(*formats));
+   const struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_bounded(
+      full_formats, count, samples, false, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .fs.nr_samples = samples,
+      .secondary = true,
+   };
+   for (unsigned rt = 0; rt < count; ++rt) {
+      if (!tib.spilled[rt])
+         BITSET_SET(key.g17p_tile_partitions, tib._offset_B[rt]);
+   }
+
+   const bool ok = agx_compile_shader_nir(b.shader, &key, part);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
 compile_epilog_written(unsigned count, const enum pipe_format *formats,
                        unsigned written, uint64_t partitions, bool additive,
                        bool write_z, struct agx_shader_part *part)
@@ -1000,6 +1060,47 @@ static const uint8_t wait_252[6] = {0x87, 0x02, 0x54, 0xfc, 0x08, 0x00};
 static const uint8_t release_572[6] = {0x07, 0x02, 0x54, 0x3c, 0x02, 0x00};
 static const uint8_t release_764[6] = {0x07, 0x02, 0x54, 0xfc, 0x02, 0x00};
 
+/* The colour mask must be read after depth has updated coverage. Previously
+ * CSE reused the SR39 read used to construct the depth words, leaving no read
+ * between the depth release and colour acquire in the compiled epilog. */
+static bool
+reads_coverage_after_depth(const struct agx_shader_part *part)
+{
+   const uint8_t *code = part->binary;
+   size_t begin = 0, end = part->info.binary_size;
+   for (; begin + 6 <= end; ++begin) {
+      if (!memcmp(code + begin, release_1, 6)) {
+         begin += 6;
+         break;
+      }
+   }
+   for (size_t i = begin; i + 6 <= end; ++i) {
+      if (!memcmp(code + i, wait_252, 6)) {
+         end = i;
+         break;
+      }
+   }
+   for (unsigned dest = 0; dest < 256; ++dest) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         const struct agx3_sr_desc sr = {
+            .dest = dest, .width = AGX3_SR_W16, .sr = 39, .slot = slot,
+         };
+         uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;
+         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &sr, bytes, &len))
+            return false;
+         for (size_t i = begin; i + len <= end; ++i) {
+            if (!memcmp(code + i, bytes, len))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+static void
+colour_transactions(const struct agx_shader_part *part, char *out,
+                    size_t size);
+
 static int
 test_multisample_epilogs(void)
 {
@@ -1042,6 +1143,41 @@ test_multisample_epilogs(void)
             return 1;
       }
    }
+
+   /* A sample-shaded MRT epilog repeats the same descending target set once
+    * per sample inside one combined colour transaction. This is the exact
+    * shape used by the multisample-render-to-single-sample CTS family. */
+   const enum pipe_format sample_shaded[] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R32G32B32A32_UINT,
+   };
+   struct agx_shader_part part = {0};
+   CHECK(compile_sample_shaded_epilog(ARRAY_SIZE(sample_shaded),
+                                      sample_shaded, 2, &part));
+   unsigned stores = 0;
+   CHECK(store_f13_mask(&part, &stores) == 0);
+   CHECK(stores == ARRAY_SIZE(sample_shaded) * 2);
+   CHECK(part.info.agx3_colour_link.colour_classes == 7);
+   CHECK(reads_coverage_after_depth(&part));
+   char ops[128];
+   colour_transactions(&part, ops, sizeof(ops));
+   if (strcmp(ops, "W512 W1 R1 W252 S24 S16 S0 S24 S16 S0 R764"))
+      fprintf(stderr, "sample-shaded MRT transactions: %s\n", ops);
+   CHECK(!strcmp(ops,
+                 "W512 W1 R1 W252 S24 S16 S0 S24 S16 S0 R764"));
+   free(part.binary);
+
+   const enum pipe_format sample_shaded_4x[] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R16_SINT,
+   };
+   CHECK(compile_sample_shaded_epilog(ARRAY_SIZE(sample_shaded_4x),
+                                      sample_shaded_4x, 4, &part));
+   CHECK(reads_coverage_after_depth(&part));
+   free(part.binary);
+
    return 0;
 }
 

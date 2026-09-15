@@ -6150,7 +6150,10 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    p.multisample = ctx->key->fs.nr_samples > 1 &&
                    !ctx->key->fs.ignore_tib_dependencies;
    unsigned previous_load = p.count;
-   unsigned next_store = p.count;
+   uint8_t load_order[AGX_MAX_RTS * 4];
+   unsigned load_instr_count = 0;
+   uint8_t store_order[AGX_MAX_RTS * 4];
+   unsigned store_instr_count = 0;
    bool stores_started = false;
    bool stopped = false;
    agx_foreach_instr_global(ctx, I) {
@@ -6163,7 +6166,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
 
       if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE) {
-         if (stores_started)
+         if (stores_started &&
+             (!p.multisample || !agx_opcodes_info[I->op].can_eliminate))
             return (struct agx3_g17p_mrt_protocol){0};
          continue;
       }
@@ -6180,20 +6184,80 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       if (partition < 0 || I->nr_srcs < 2 ||
           !agx3_tile_sample_operand(
              I->src[I->op == AGX_OPCODE_LD_TILE ? 0 : 1], &sample) ||
-          sample.reg != p.multisample ||
-          (p.multisample && I->op == AGX_OPCODE_LD_TILE))
+          sample.reg != p.multisample)
          return (struct agx3_g17p_mrt_protocol){0};
 
       if (I->op == AGX_OPCODE_LD_TILE) {
-         if (++p.loads[partition] > 1 || stores_started ||
-             (unsigned)partition >= previous_load)
+         const unsigned max_loads =
+            p.multisample ? ctx->key->fs.nr_samples : 1;
+         if (++p.loads[partition] > max_loads ||
+             (!p.multisample &&
+              (stores_started || (unsigned)partition > previous_load)) ||
+             load_instr_count >= ARRAY_SIZE(load_order))
             return (struct agx3_g17p_mrt_protocol){0};
          previous_load = partition;
+         load_order[load_instr_count++] = partition;
       } else {
          stores_started = true;
-         if (++p.stores[partition] > 1 || (unsigned)partition >= next_store)
+         if (store_instr_count >= ARRAY_SIZE(store_order))
             return (struct agx3_g17p_mrt_protocol){0};
-         next_store = partition;
+         p.stores[partition]++;
+         store_order[store_instr_count++] = partition;
+      }
+   }
+
+   unsigned stored_partitions = 0;
+   unsigned stores_per_partition = 0;
+   for (unsigned i = 0; i < p.count; ++i) {
+      if (!p.stores[i])
+         continue;
+
+      stored_partitions++;
+      if (!stores_per_partition)
+         stores_per_partition = p.stores[i];
+      else if (p.stores[i] != stores_per_partition)
+         return (struct agx3_g17p_mrt_protocol){0};
+   }
+
+   if (!stored_partitions ||
+       (stores_per_partition != 1 &&
+        !(p.multisample &&
+          stores_per_partition == ctx->key->fs.nr_samples)) ||
+       store_instr_count != stored_partitions * stores_per_partition)
+      return (struct agx3_g17p_mrt_protocol){0};
+
+   unsigned loaded_partitions = 0;
+   for (unsigned i = 0; i < p.count; ++i) {
+      if (p.loads[i] &&
+          p.loads[i] != (p.multisample ? ctx->key->fs.nr_samples : 1))
+         return (struct agx3_g17p_mrt_protocol){0};
+      loaded_partitions += p.loads[i] != 0;
+   }
+
+   if (load_instr_count !=
+       loaded_partitions * (p.multisample ? ctx->key->fs.nr_samples : 1))
+      return (struct agx3_g17p_mrt_protocol){0};
+
+   if (p.multisample) {
+      for (unsigned sample = 0; sample < ctx->key->fs.nr_samples; ++sample) {
+         unsigned at = sample * loaded_partitions;
+         for (int partition = p.count - 1; partition >= 0; --partition) {
+            if (p.loads[partition] && load_order[at++] != partition)
+               return (struct agx3_g17p_mrt_protocol){0};
+         }
+      }
+   }
+
+   /* Each unrolled sample repeats the same descending target set. This is
+    * the multi-target form of the already-grounded per-sample colour-store
+    * protocol; no new instruction or modifier shape is introduced. */
+   for (unsigned sample = 0; sample < stores_per_partition; ++sample) {
+      unsigned at = sample * stored_partitions;
+      for (int partition = p.count - 1; partition >= 0; --partition) {
+         if (!p.stores[partition])
+            continue;
+         if (store_order[at++] != partition)
+            return (struct agx3_g17p_mrt_protocol){0};
       }
    }
 
@@ -6203,7 +6267,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       p.multisample_combined &= p.stores[i] != 0;
       const unsigned pair = agx3_g17p_mrt_class_pair(i);
       uint32_t read_class, write_class, combined_class;
-      if ((p.stores[i] != 1 && !(partitions && !p.stores[i] && !p.loads[i])) ||
+      if ((p.stores[i] != stores_per_partition &&
+           !(partitions && !p.stores[i] && !p.loads[i])) ||
           !agx3_pixel_colour_partition_classes(
              pair, &read_class, &write_class, &combined_class))
          return (struct agx3_g17p_mrt_protocol){0};
@@ -8639,6 +8704,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool active_thread =
                I->sr == AGX_SR_IS_ACTIVE_THREAD &&
                ctx->stage == MESA_SHADER_FRAGMENT;
+            const bool sample_coverage =
+               I->sr == AGX_SR_INPUT_SAMPLE_MASK &&
+               ctx->stage == MESA_SHADER_FRAGMENT;
             const bool subgroup_stage =
                ctx->stage == MESA_SHADER_COMPUTE ||
                ctx->stage == MESA_SHADER_VERTEX ||
@@ -8650,7 +8718,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->sr == AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP &&
                subgroup_stage;
             if (enc != AGX_ISA_ENCODING_AGX3B ||
-                !(active_thread || active_index || active_count) ||
+                !(active_thread || sample_coverage || active_index || active_count) ||
                 I->nr_dests != 1 ||
                 I->nr_srcs != 0 || !agx3_src_is_register(I->dest[0]) ||
                 I->dest[0].memory || I->dest[0].size != AGX_SIZE_16 ||
@@ -8658,7 +8726,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
             const struct agx3_sr_desc d = {
                .dest = I->dest[0].value, .width = AGX3_SR_W16,
-               .sr = active_index ? 34 : active_count ? 36 : 2, .slot = slot,
+               .sr = sample_coverage ? 39 : active_index ? 34 : active_count ? 36 : 2,
+               .slot = slot,
                .wait_mask = wait,
             };
             uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;

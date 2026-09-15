@@ -3223,6 +3223,7 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
        * epilog, then store and blend each sample from its own colours. */
       struct agx_fs_epilog_key pixel = *key;
       pixel.link.sample_shading = false;
+      pixel.defer_monolithic_msaa = true;
       agx_nir_fs_epilog(b, &pixel);
 
       NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
