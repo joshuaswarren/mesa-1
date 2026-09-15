@@ -262,7 +262,8 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_copy_timestamp") ||
           !strcmp(func->name, "libagx_tess_factors_half") ||
           !strcmp(func->name, "libagx_tess_setup_indirect") ||
-          !strcmp(func->name, "libagx_tess_isoline");
+          !strcmp(func->name, "libagx_tess_isoline") ||
+          !strcmp(func->name, "libagx_prefix_sum_tess");
 }
 
 /* A precompiled kernel has no printf buffer. AGX2 bakes the fixed
@@ -560,6 +561,10 @@ main(int argc, char **argv)
                  "libagx_unroll_restart_9_g17p,\n"
                  "    [LIBAGX_UNROLL_RESTART_10] = "
                  "libagx_unroll_restart_10_g17p,\n"
+                 "    [LIBAGX_PREFIX_SUM_TESS_0] = "
+                 "libagx_prefix_sum_tess_0_g17p,\n"
+                 "    [LIBAGX_PREFIX_SUM_TESS_1] = "
+                 "libagx_prefix_sum_tess_1_g17p,\n"
                  "    [LIBAGX_TESS_SETUP_INDIRECT] = "
                  "libagx_tess_setup_indirect_0_g17p,\n"
                  "    [LIBAGX_TESS_ISOLINE_0] = "
