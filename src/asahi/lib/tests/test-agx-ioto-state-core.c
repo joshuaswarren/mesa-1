@@ -830,11 +830,15 @@ test_g17p_runtime_compute_shared_tail(void)
       uint32_t size_B;
       uint32_t speclm_word1;
    } cases[] = {
-      {256, UINT32_C(0x00000480)},
-      {1024, UINT32_C(0x00001080)},
-      {4096, UINT32_C(0x00004080)},
-      {16384, UINT32_C(0x00010080)},
-      {32768, UINT32_C(0x00020080)},
+      /* f18 counts 4-byte words, so the second SPECLM dword is
+       * (bytes << 4) | 0x80.  A G17P sweep on 2026-09-15 measured the granted
+       * memory directly -- 256 B requested yielded 64 B usable, 320 yielded
+       * 80, 384 yielded 96, 512 yielded 128 -- exactly a quarter, which is
+       * what the old byte-scaled encoding produced. */
+      {256, UINT32_C(0x00001080)},
+      {1024, UINT32_C(0x00004080)},
+      {4096, UINT32_C(0x00010080)},
+      {16320, UINT32_C(0x0003FC80)},
    };
    const uint64_t shader_va = UINT64_C(0x100000003c0);
    struct agx_ioto_state_tail_output output;
@@ -852,7 +856,8 @@ test_g17p_runtime_compute_shared_tail(void)
    }
 
    const struct agx_ioto_state_tail_output before = output;
-   static const uint32_t invalid_sizes[] = {0, 64, 255, 257, 32769};
+   /* 16384 and above no longer fit: f18 is 16 bits of 4-byte words. */
+   static const uint32_t invalid_sizes[] = {0, 64, 255, 257, 16384, 32768};
    for (unsigned i = 0; i < ARRAY_SIZE(invalid_sizes); ++i) {
       CHECK(!agx_ioto_g17p_runtime_compute_tail_build_shared(
          shader_va, AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
