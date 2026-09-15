@@ -4641,6 +4641,39 @@ test_storage_image_lowering(void)
    if (!ok)
       return false;
 
+   /* Buffer-image lowering preserves its descriptor class while mapping the
+    * coordinate to 2D.  A Gen9 linear buffer descriptor is valid through the
+    * indexed texture/PBE route, but not through the direct state-0 image-view
+    * pair selected here. */
+   nir = build_cs_storage_image(0);
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+                intr->intrinsic == nir_intrinsic_bindless_image_store) {
+               nir_intrinsic_set_access(
+                  intr, nir_intrinsic_access(intr) | ACCESS_BUFFER_AGX);
+            }
+         }
+      }
+   }
+   binding = (struct agx_g17p_storage_image_binding){
+      .texture_offset_B = UINT32_MAX,
+      .pbe_offset_B = UINT32_MAX,
+   };
+   const bool buffer_lowered =
+      agx_nir_lower_g17p_storage_image(nir, &binding);
+   const bool buffer_ok =
+      !buffer_lowered && binding.texture_offset_B == UINT32_MAX &&
+      binding.pbe_offset_B == UINT32_MAX;
+   ralloc_free(nir);
+   if (!buffer_ok)
+      return false;
+
    return true;
 }
 

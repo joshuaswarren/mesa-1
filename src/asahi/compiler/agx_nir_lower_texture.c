@@ -781,6 +781,9 @@ lower_buffer_image(nir_builder *b, nir_intrinsic_instr *intr,
     */
    nir_def *coord2d = coords_for_buffer_texture(b, coord);
    nir_src_rewrite(&intr->src[1], nir_pad_vector(b, coord2d, 4));
+   if (buffer_metadata)
+      nir_intrinsic_set_access(
+         intr, nir_intrinsic_access(intr) | ACCESS_BUFFER_AGX);
    nir_intrinsic_set_image_dim(intr, GLSL_SAMPLER_DIM_2D);
 }
 

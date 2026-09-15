@@ -1265,6 +1265,7 @@ g17p_storage_image_shape(const nir_intrinsic_instr *intr, bool load)
    const enum pipe_format format = nir_intrinsic_format(intr);
    if (intr->intrinsic != (load ? nir_intrinsic_bindless_image_load
                                 : nir_intrinsic_bindless_image_store) ||
+       (nir_intrinsic_access(intr) & ACCESS_BUFFER_AGX) ||
        nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
        nir_intrinsic_image_array(intr) ||
        (format != PIPE_FORMAT_R8G8B8A8_UINT &&
