@@ -16,6 +16,7 @@
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx3_code_container_core.h"
+#include "asahi/lib/agx3_g17p_grid_helper_core.h"
 #include "asahi/lib/agx_g17p_draw_state_upload.h"
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_ppp.h"
@@ -4167,7 +4168,13 @@ agx_g17p_append_compute(struct agx_batch *batch,
       .threadgroup_memory_size_B =
          shared ? MAX2(256u, ALIGN_POT((uint32_t)shared, 64u)) : 0,
       .launch_sources = launch_sources,
-      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+      /* The program announces how it will be launched.  An indirectly
+       * launched one takes its dimensions from the geometry block; a record
+       * that selects indirect mode while its program still announces
+       * DIRECT_ADD3 runs no invocations at all.  hk_cmd_dispatch.c picks the
+       * kind the same way. */
+      .ldshdr_f1 = indirect_local ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1
+                                  : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
    };
    struct agx3_g17p_compute_program native;
    if (!agx3_g17p_compute_program_generate(dev->chip, &desc, &native))
@@ -4281,6 +4288,15 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
          .compiler_d_valid = cs->info.agx3_staging_known,
          .compiler_d = (uint32_t)cs->info.agx3_staging_halfs * 2,
          .launch_sources = launch_sources,
+         /* Precompiled kernels use threadgroup memory too -- the restart
+          * unroll and the prefix sums keep their cross-subgroup scratch
+          * there -- and the API compute path above declares it while this
+          * one did not.  Leaving it zero does not fail the dispatch, so the
+          * shortfall is silent.  Same rounding as that path. */
+         .threadgroup_memory_size_B =
+            cs->info.local_size
+               ? MAX2(256u, ALIGN_POT(cs->info.local_size, 64u))
+               : 0,
          .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
       };
       struct agx3_g17p_compute_program native;
