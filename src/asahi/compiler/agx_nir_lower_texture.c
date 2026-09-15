@@ -476,6 +476,22 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
 
    if (offset != NULL) {
       if (gen9 && !g17p_offset_is_constant(offset)) {
+         /* Gather's PACK_SMPIR form consumes X and Y as adjacent 16-bit
+          * inputs.  Keep them in one 32-bit SSA value so register allocation
+          * preserves that exact pair.  The generic runtime-offset path below
+          * instead builds a complete bank-6 word for filtered samples; using
+          * it for an array gather made the layer occupy X's low nibble and
+          * produced wrong texels, while a plain gather arrived as two 32-bit
+          * channels and was refused by the packer. */
+         if (tex->op == nir_texop_tg4) {
+            assert(offset->num_components == 2);
+            nir_def *packed = nir_pack_32_2x16_split(
+               b, nir_i2i16(b, nir_channel(b, offset, 0)),
+               nir_i2i16(b, nir_channel(b, offset, 1)));
+            nir_tex_instr_add_src(tex, nir_tex_src_backend2, packed);
+            goto offset_lowered;
+         }
+
          /* Array layer, register LOD/bias, and a runtime 2D offset occupy
           * complementary fields of sampler bank 6. Multiple PACK_SMPIR
           * instructions replace that word instead of composing it, so publish

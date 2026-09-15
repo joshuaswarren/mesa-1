@@ -173,7 +173,22 @@ g17p_sample_shape(const nir_tex_instr *tex)
       nir_src_num_components(tex->src[offset_src].src) == 1;
    const bool staged_packed_offset =
       packed_offset && !nir_src_is_const(tex->src[offset_src].src) &&
-      (tex->is_array || has_lod || has_bias || has_minimum);
+      (tex->op == nir_texop_tg4 || tex->is_array || has_lod || has_bias ||
+       has_minimum);
+   const uint32_t constant_offset =
+      has_offset && nir_src_is_const(tex->src[offset_src].src)
+         ? nir_src_as_uint(tex->src[offset_src].src)
+         : 0;
+   /* lower_regular_texture() keeps G17P gather X/Y as two 16-bit lanes so a
+    * runtime value can feed PACK_SMPIR directly.  A constant therefore has
+    * its signed nibbles in bits 0..3 and 16..19 (for example, CTS offset
+    * (+8,+8) is 0x00080008), not in the compact SMP byte used after
+    * agx_emit_tex() folds it.  Admit exactly that generated representation;
+    * the backend later maps it to (y << 4) | x. */
+   const bool valid_constant_offset =
+      tex->op == nir_texop_tg4
+         ? (constant_offset & ~0x000f000fu) == 0
+         : constant_offset <= (three_d ? 0xfffu : 0xffu);
    /* Native bank-6 minimum operands are grounded for 2D, 2D-array and 3D
     * fragment samples, and for biased cube samples. The shared texture lowering has already combined a
     * bias/minimum pair into one f16x2 source, or left the gradient minimum
@@ -205,8 +220,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
         (!packed_offset && three_d) ||
         (packed_offset && !staged_packed_offset &&
          (!nir_src_is_const(tex->src[offset_src].src) ||
-           nir_src_as_uint(tex->src[offset_src].src) >
-              (three_d ? 0xfffu : 0xffu))) ||
+           !valid_constant_offset)) ||
          cube))
       return false;
 

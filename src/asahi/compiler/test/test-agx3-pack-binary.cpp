@@ -15912,41 +15912,62 @@ TEST_F(AGX3PackBinary, IndexedGatherKeepsNativeHandles)
 {
    for (unsigned shape = 0; shape < 3; ++shape) {
       for (bool shadow : {false, true}) {
-         nir_builder b = nir_builder_init_simple_shader(
-            MESA_SHADER_COMPUTE, &agx_nir_options, "indexed gather");
-         nir_def *image = nir_bindless_image_agx(&b, nir_imm_int(&b, 72),
-                                                  .desc_set = 1);
-         nir_def *smp = nir_bindless_sampler_agx(
-            &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 3, 16), .desc_set = 1);
-         nir_tex_instr *tex = nir_tex_instr_create(b.shader,
-                                                    3 + shadow + (shape < 2));
-         tex->op = nir_texop_tg4;
-         tex->sampler_dim = shape == 2 ? GLSL_SAMPLER_DIM_CUBE : GLSL_SAMPLER_DIM_2D;
-         tex->is_array = shape == 1;
-         tex->is_shadow = shadow;
-         tex->is_new_style_shadow = false;
-         tex->dest_type = nir_type_float32;
-         tex->coord_components = shape ? 3 : 2;
-         unsigned i = 0;
-         tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_coord,
-            shape ? nir_imm_vec3(&b, .5, .25, 1) : nir_imm_vec2(&b, .5, .25));
-         tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
-         tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, smp);
-         if (shadow)
-            tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_comparator,
-                                                 nir_imm_float(&b, .5));
-         if (shape < 2)
-            tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_offset,
-               nir_load_global_constant(&b, 2, 32, nir_imm_int64(&b, 0x10000),
-                                           .align_mul = 4));
-         nir_def_init(&tex->instr, &tex->def, 4, 32);
-         nir_builder_instr_insert(&b, &tex->instr);
-         nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000), .align_mul = 4);
-         ASSERT_TRUE(agx_nir_lower_g17p_indexed_samplers(b.shader));
-         const int texture = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
-         ASSERT_GE(texture, 0);
-         EXPECT_EQ(nir_src_bit_size(tex->src[texture].src), 64);
-         ralloc_free(b.shader);
+         for (bool constant_offset : {false, true}) {
+            if (shape == 2 && constant_offset)
+               continue;
+            nir_builder b = nir_builder_init_simple_shader(
+               MESA_SHADER_COMPUTE, &agx_nir_options, "indexed gather");
+            nir_def *image = nir_bindless_image_agx(&b, nir_imm_int(&b, 72),
+                                                     .desc_set = 1);
+            nir_def *smp = nir_bindless_sampler_agx(
+               &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 3, 16),
+               .desc_set = 1);
+            nir_tex_instr *tex = nir_tex_instr_create(
+               b.shader, 3 + shadow + (shape < 2));
+            tex->op = nir_texop_tg4;
+            tex->sampler_dim = shape == 2 ? GLSL_SAMPLER_DIM_CUBE
+                                          : GLSL_SAMPLER_DIM_2D;
+            tex->is_array = shape == 1;
+            tex->is_shadow = shadow;
+            tex->is_new_style_shadow = false;
+            tex->dest_type = nir_type_float32;
+            tex->coord_components = shape ? 3 : 2;
+            unsigned i = 0;
+            tex->src[i++] = nir_tex_src_for_ssa(
+               nir_tex_src_coord, shape ? nir_imm_vec3(&b, .5, .25, 1)
+                                        : nir_imm_vec2(&b, .5, .25));
+            tex->src[i++] =
+               nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+            tex->src[i++] =
+               nir_tex_src_for_ssa(nir_tex_src_sampler_handle, smp);
+            if (shadow)
+               tex->src[i++] = nir_tex_src_for_ssa(
+                  nir_tex_src_comparator, nir_imm_float(&b, .5));
+            if (shape < 2) {
+               nir_def *packed_offset;
+               if (constant_offset) {
+                  packed_offset = nir_imm_int(&b, 0x00080008);
+               } else {
+                  nir_def *runtime = nir_load_global_constant(
+                     &b, 2, 32, nir_imm_int64(&b, 0x10000), .align_mul = 4);
+                  packed_offset = nir_pack_32_2x16_split(
+                     &b, nir_i2i16(&b, nir_channel(&b, runtime, 0)),
+                     nir_i2i16(&b, nir_channel(&b, runtime, 1)));
+               }
+               tex->src[i++] = nir_tex_src_for_ssa(nir_tex_src_backend2,
+                                                    packed_offset);
+            }
+            nir_def_init(&tex->instr, &tex->def, 4, 32);
+            nir_builder_instr_insert(&b, &tex->instr);
+            nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000),
+                             .align_mul = 4);
+            ASSERT_TRUE(agx_nir_lower_g17p_indexed_samplers(b.shader));
+            const int texture = nir_tex_instr_src_index(
+               tex, nir_tex_src_texture_offset);
+            ASSERT_GE(texture, 0);
+            EXPECT_EQ(nir_src_bit_size(tex->src[texture].src), 64);
+            ralloc_free(b.shader);
+         }
       }
    }
 }
