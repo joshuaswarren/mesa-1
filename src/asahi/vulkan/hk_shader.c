@@ -2615,6 +2615,19 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
                          nir_opts, NULL);
 
+   /* Only a complete pipeline known to have no fragment shader can fix an
+    * empty interpolation contract. A pre-raster library or shader object
+    * must retain draw-time UVS indices for its eventual fragment consumer. */
+   if (dev->dev.chip == AGX_CHIP_G17P && shader_count > 0 &&
+       hk_pipeline_has_no_fragment_shader(state)) {
+      nir_shader *last = shaders[shader_count - 1];
+      if (last->info.stage <= MESA_SHADER_GEOMETRY) {
+         last->info.known_interpolation_qualifiers = true;
+         last->info.linear_varyings = 0;
+         last->info.perspective_varyings = 0;
+      }
+   }
+
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =
          hk_compile_shader(dev, &infos[i], state, features, pAllocator,

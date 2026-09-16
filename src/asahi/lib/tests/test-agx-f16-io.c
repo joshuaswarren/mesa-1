@@ -60,6 +60,49 @@ build_f16_output(void)
    return b.shader;
 }
 
+/* A separately compiled VS has no interpolation contract yet. In particular,
+ * adding the default flat Layer must not move an eventual smooth colour from
+ * slot 4 to slot 5 while the fragment linkage still reads slot 4. */
+static bool
+check_unlinked_interpolation_contract(void)
+{
+   nir_shader *nir = build_f16_output();
+   nir->info.io_lowered = true;
+   nir_opt_varyings_bulk(&nir, 1, true, UINT32_MAX, UINT32_MAX, NULL, NULL);
+   bool valid = !nir->info.known_interpolation_qualifiers;
+
+   agx_nir_lower_default_layer(nir);
+   struct agx_unlinked_uvs_layout layout = {0};
+   agx_nir_lower_uvs(nir, &layout, true);
+
+   unsigned dynamic_indices = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_load_uvs_index_agx)
+               dynamic_indices++;
+         }
+      }
+   }
+   valid &= dynamic_indices == 2;
+
+   struct agx_varyings_vs smooth, flat;
+   agx_assign_uvs(&smooth, &layout, VARYING_BIT_LAYER, 0);
+   agx_assign_uvs(&flat, &layout,
+                  VARYING_BIT_LAYER | BITFIELD64_BIT(VARYING_SLOT_VAR0), 0);
+   valid &= smooth.slots[VARYING_SLOT_VAR0] == 4 &&
+            smooth.slots[VARYING_SLOT_LAYER] == 5 &&
+            flat.slots[VARYING_SLOT_LAYER] == 4 &&
+            flat.slots[VARYING_SLOT_VAR0] == 5;
+
+   if (!valid)
+      fprintf(stderr, "unlinked VS lost its draw-time interpolation contract\n");
+   ralloc_free(nir);
+   return valid;
+}
+
 static bool
 has_type_correct_varying_store(nir_shader *nir)
 {
@@ -569,6 +612,9 @@ static const struct vs_input_case vs_input_cases[] = {
 int
 main(void)
 {
+   if (!check_unlinked_interpolation_contract())
+      return 1;
+
    for (unsigned i = 0; i < ARRAY_SIZE(vs_input_cases); ++i) {
       if (!lowered_vs_input(&vs_input_cases[i]))
          return 1;
