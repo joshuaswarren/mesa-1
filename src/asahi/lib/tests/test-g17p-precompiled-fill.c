@@ -180,7 +180,8 @@ main(void)
    CHECK(resolve_info->binary_size == 4686);
    CHECK(resolve_info->nr_gprs == 42);
    CHECK(resolve_info->nr_preamble_gprs == 0);
-   CHECK(resolve_info->push_count == 42);
+   /* Arguments follow the twelve hardware-owned uniform halves. */
+   CHECK(resolve_info->push_count == 54);
    CHECK(resolve_info->workgroup_size[0] == 32);
    CHECK(resolve_info->workgroup_size[1] == 1);
    CHECK(resolve_info->workgroup_size[2] == 1);
@@ -190,7 +191,7 @@ main(void)
    CHECK(resolve_info->agx3_staging_known);
    CHECK(resolve_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(resolve_binary, resolve_info->binary_size) ==
-         UINT64_C(0x3ec2844f60948ce4));
+         UINT64_C(0x0c01f8b47f7ad26a));
    CHECK(memcmp(resolve_binary + resolve_info->binary_size -
                    sizeof(resolve_end),
                 resolve_end, sizeof(resolve_end)) == 0);
@@ -308,12 +309,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
-       UINT64_C(0x4d6a2a534eb147d2)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
-       UINT64_C(0x35d000696c7b7865)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
-       UINT64_C(0xa8a7f8b341b3355f)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3470,
+       UINT64_C(0xb05c70fdd6c4f224)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3586,
+       UINT64_C(0x04595c2f8e9e0974)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3510,
+       UINT64_C(0x6203053d03b24f90)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -454,12 +455,12 @@ main(void)
       /* The top-level loop has the native guard/entry/exit scopes. Native
        * descriptor scheduling assigns independent slots and uses per-slot
        * dependent wait carriers while keeping adjacent producers overlapped. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xf620f3d617876470)},
-      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
-       UINT64_C(0x28b92f478b1714d4)},
-      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
-       UINT64_C(0xd292b1db166dd1e9)},
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 52,
+       {1024, 1, 1}, 4, UINT64_C(0x914376da0ee10aa1)},
+      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 37, {32, 1, 1}, 0,
+       UINT64_C(0x64a1031992df83e1)},
+      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 22, {1, 1, 1}, 0,
+       UINT64_C(0x78a446feaf2e4552)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(statistics); ++i) {
       const uint32_t *statistics_blob = libagx_g17p[statistics[i].index];
@@ -584,10 +585,11 @@ main(void)
     * 64-bit stdev (native __compute text SHA-256
     * 682dde00553bdaf5abe66ee9c2d7bb9f1ce9e3cb50db1dbd79f0289094885441).
     * The Mesa ABI form addresses both pointers from its uniforms, leaving
-    * exactly that load, store and end. */
+    * exactly that load, store and end. The source load is coherent: its f77
+    * bit follows the native atomic-load witness in test-agx3-mem-core.c. */
    static const uint8_t timestamp_expected[] = {
       0x67, 0x00, 0x54, 0x00, 0x04, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
-      0x40, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x03, 0x00, 0x00, 0x00,
+      0x80, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x03, 0x00, 0x00, 0x00,
       0x19, 0x00, 0x00, 0x90, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
    const uint32_t *timestamp_blob = libagx_g17p[LIBAGX_COPY_TIMESTAMP];
@@ -632,7 +634,7 @@ main(void)
    CHECK(factors_info->binary_size == 1518);
    CHECK(factors_info->nr_gprs == 28);
    CHECK(factors_info->nr_preamble_gprs == 0);
-   CHECK(factors_info->push_count == 10);
+   CHECK(factors_info->push_count == 22);
    CHECK(factors_info->workgroup_size[0] == 32);
    CHECK(factors_info->workgroup_size[1] == 1);
    CHECK(factors_info->workgroup_size[2] == 1);
@@ -642,14 +644,18 @@ main(void)
    CHECK(factors_info->agx3_staging_known);
    CHECK(factors_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
-         UINT64_C(0x897af867361b9f42));
+         UINT64_C(0x94037445b34ccad1));
    CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
 
    /* Pin both forms of each triangle and quad tessellator. Variant 0 stays
     * entirely in registers. Variant 1 consumes a returned heap-allocation
     * atomic and exceeds G17P's 192-half register file. The atomic return
-    * reservation is above the ordinary spill frame. */
+    * reservation is above the ordinary spill frame, and spectpr/TPS metadata
+    * records the full extent, not just the sixteen-byte reservation. Their
+    * printf pointer occupies uniform halves 16..19, after the twelve-half
+    * hardware prefix and the four-half parameter pointer. G17P CLC disables
+    * preambles; these kernels therefore have no old 128-byte main prefix. */
    const struct {
       enum libagx_program index;
       uint32_t main_offset;
@@ -659,16 +665,17 @@ main(void)
       uint16_t push_count;
       uint16_t scratch_size;
       uint16_t spectpr_scratch_size;
+      uint16_t printf_uniform;
       uint64_t hash;
    } tessellators[] = {
-      {LIBAGX_TESS_TRI_0, 0, 1832, 1832, 30, 16, 0, 0,
+      {LIBAGX_TESS_TRI_0, 0, 1832, 1832, 30, 16, 0, 0, 0,
        UINT64_C(0x97ebaf3fec6aa659)},
-      {LIBAGX_TESS_TRI_1, 128, 44162, 44290, 192, 24, 68, 16,
-       UINT64_C(0x21ae6571b7e8b2c1)},
-      {LIBAGX_TESS_QUAD_0, 0, 2584, 2584, 36, 16, 0, 0,
+      {LIBAGX_TESS_TRI_1, 0, 45910, 45910, 192, 20, 52, 68, 16,
+       UINT64_C(0xade1acc2388bd77e)},
+      {LIBAGX_TESS_QUAD_0, 0, 2584, 2584, 36, 16, 0, 0, 0,
        UINT64_C(0xe57b6f263500a379)},
-      {LIBAGX_TESS_QUAD_1, 128, 43192, 43320, 192, 24, 120, 16,
-       UINT64_C(0xb9bcd095d5f78c9c)},
+      {LIBAGX_TESS_QUAD_1, 0, 42318, 42318, 192, 20, 104, 120, 16,
+       UINT64_C(0x28e5b08fd766e9bf)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(tessellators); ++i) {
       const uint32_t *blob = libagx_g17p[tessellators[i].index];
@@ -691,6 +698,12 @@ main(void)
       CHECK(info->scratch_size == tessellators[i].scratch_size);
       CHECK(info->agx3_spectpr_scratch_size ==
             tessellators[i].spectpr_scratch_size);
+      CHECK(info->agx3_tps_size == tessellators[i].spectpr_scratch_size);
+      CHECK(info->printf_uniform == tessellators[i].printf_uniform);
+      if (tessellators[i].printf_uniform) {
+         CHECK(info->push_count == info->printf_uniform + 4);
+         CHECK(info->agx3_tps_size == info->scratch_size + 16);
+      }
       CHECK(info->agx3_staging_known);
       CHECK(info->agx3_staging_halfs == 0);
       CHECK(fnv1a64(binary, info->binary_size) == tessellators[i].hash);
@@ -715,7 +728,7 @@ main(void)
    CHECK(setup_info->binary_size == 2186);
    CHECK(setup_info->nr_gprs == 48);
    CHECK(setup_info->nr_preamble_gprs == 0);
-   CHECK(setup_info->push_count == 40);
+   CHECK(setup_info->push_count == 52);
    CHECK(setup_info->workgroup_size[0] == 1);
    CHECK(setup_info->workgroup_size[1] == 1);
    CHECK(setup_info->workgroup_size[2] == 1);
@@ -725,7 +738,7 @@ main(void)
    CHECK(setup_info->agx3_staging_known);
    CHECK(setup_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(setup_binary, setup_info->binary_size) ==
-         UINT64_C(0xbf22b41150f292ab));
+         UINT64_C(0xd48c2d369cc860e2));
    CHECK(memcmp(setup_binary + setup_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
 
