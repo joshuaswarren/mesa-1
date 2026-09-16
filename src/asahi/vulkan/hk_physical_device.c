@@ -833,8 +833,9 @@ hk_get_device_features(
          hk_g17p_unverified_feature("shader_quad_control");
    }
 
-   /* G16G qualifies Vulkan view-bounds lowering for both robust image modes.
-    * Its descriptor swizzle supplies the required out-of-bounds alpha. */
+   /* G16G inserts explicit view bounds for robust image operations in NIR.
+    * It qualifies both robust modes, and its descriptor swizzle supplies the
+    * required out-of-bounds alpha. */
    if (dev->chip == AGX_CHIP_G16G) {
       features->robustImageAccess = true;
       features->robustImageAccess2 = true;
