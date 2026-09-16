@@ -410,6 +410,7 @@ if with_tests
             '../compiler/agx3_graphics_program.c',
             '../compiler/agx3_ioto_uniform_program.c',
             '../compiler/agx3_ioto_load_packer.c',
+            '../compiler/agx3_static_spill_core.c',
             '../compiler/agx3_mem_core.c',
             '../compiler/agx3_binder.c',
             '../compiler/agx3_compose/agx3_compose.c',

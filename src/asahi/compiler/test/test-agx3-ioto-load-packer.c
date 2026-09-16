@@ -389,12 +389,67 @@ test_mem_form_bounds(void)
    return true;
 }
 
+static bool
+test_cprog_inputs(void)
+{
+   /* Native G17P copyGprToCprog oracle, driver SHA-256 666816a37045b6dc...
+    * Source Register(type=3, half=10, value=1), encoder +0x100 clear.
+    * These cover packed partial masks and the odd-TPS-half split. */
+   static const struct {
+      uint16_t destination;
+      uint8_t mask, length;
+      uint8_t bytes[AGX3_IOTO_CPROG_COPY_MAX_SIZE];
+   } native[] = {
+      {0, 1, 10, {0x43, 0x0a, 0x0f, 0x00, 0x22, 0x40, 0x00, 0x14, 0x00, 0x00}},
+      {0, 2, 10, {0x43, 0x0a, 0x0f, 0x00, 0x2a, 0x40, 0x00, 0x14, 0x00, 0x00}},
+      {0, 3, 10, {0x4b, 0x0b, 0x0f, 0x00, 0x22, 0x40, 0x00, 0x14, 0x00, 0x00}},
+      {2, 3, 20, {0x43, 0x0a, 0x0f, 0x00, 0x26, 0x40, 0x00, 0x14, 0x00, 0x00,
+                  0x53, 0x0a, 0x0f, 0x00, 0x2a, 0x40, 0x00, 0x14, 0x00, 0x00}},
+      {4, 3, 10, {0x5b, 0x0b, 0x0f, 0x00, 0x22, 0x40, 0x00, 0x14, 0x00, 0x00}},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(native); ++i) {
+      struct agx3_ioto_cprog_copy_output out;
+      const struct agx3_ioto_cprog_copy_desc d = {
+         .destination_bytes = native[i].destination,
+         .source_half = 10,
+         .lane_mask = native[i].mask,
+         .source_wait_slot = 1,
+      };
+      CHECK(agx3_ioto_pack_cprog_copy(AGX_CHIP_G17P, &d, &out));
+      CHECK(out.length == native[i].length);
+      CHECK(out.written_bytes == (native[i].mask == 3 ? 4 : 2));
+      CHECK(memcmp(out.bytes, native[i].bytes, sizeof(out.bytes)) == 0);
+   }
+
+   const struct agx3_ioto_cprog_copy_desc invalid[] = {
+      {1, 0, 3, -1}, {0, 1, 3, -1}, {0, 256, 3, -1},
+      {0, 0, 0, -1}, {0, 0, 4, -1}, {0, 0, 3, -2}, {0, 0, 3, 6},
+   };
+   struct agx3_ioto_cprog_copy_output out, before;
+   memset(&out, 0xa5, sizeof(out));
+   before = out;
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i) {
+      CHECK(!agx3_ioto_pack_cprog_copy(AGX_CHIP_G17P, &invalid[i], &out));
+      CHECK(memcmp(&out, &before, sizeof(out)) == 0);
+   }
+
+   const struct agx3_ioto_cprog_copy_desc boundary = {65534, 254, 3, -1};
+   CHECK(!agx3_ioto_pack_cprog_copy(AGX_CHIP_G17S, &boundary, &out));
+   CHECK(!agx3_ioto_pack_cprog_copy(AGX_CHIP_G13G, &boundary, &out));
+   CHECK(!agx3_ioto_pack_cprog_copy(AGX_CHIP_G17P, NULL, &out));
+   CHECK(memcmp(&out, &before, sizeof(out)) == 0);
+   CHECK(!agx3_ioto_pack_cprog_copy(AGX_CHIP_G17P, &boundary, NULL));
+   CHECK(agx3_ioto_pack_cprog_copy(AGX_CHIP_G17P, &boundary, &out));
+   CHECK(out.length == 20 && out.written_bytes == 4);
+   return true;
+}
+
 int
 main(void)
 {
    if (!test_target_gate() || !test_load_records() || !test_copy_records() ||
        !test_native_rounds() || !test_native_direct_sources() ||
-       !test_mem_form_bounds())
+       !test_mem_form_bounds() || !test_cprog_inputs())
       return 1;
    printf("agx3_ioto_load_packer: %u checks passed\n", checks);
    return 0;

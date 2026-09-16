@@ -568,6 +568,7 @@ if with_tests
       'agx3_ioto_load_packer_test',
       files(
         'agx3_ioto_load_packer.c',
+        'agx3_static_spill_core.c',
         'agx3_mem_core.c',
         'agx3_binder.c',
         'agx3_compose/agx3_compose.c',
@@ -591,6 +592,7 @@ if with_tests
       files(
         'agx3_ioto_uniform_program.c',
         'agx3_ioto_load_packer.c',
+        'agx3_static_spill_core.c',
         'agx3_mem_core.c',
         'agx3_binder.c',
         'agx3_compose/agx3_compose.c',
@@ -852,6 +854,7 @@ if with_tests
         'agx3_graphics_program.c',
         'agx3_ioto_uniform_program.c',
         'agx3_ioto_load_packer.c',
+        'agx3_static_spill_core.c',
         'agx3_mem_core.c',
         'agx3_binder.c',
         'agx3_compose/agx3_compose.c',

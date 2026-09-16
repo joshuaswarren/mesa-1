@@ -6,10 +6,57 @@
 #include "agx3_ioto_load_packer.h"
 
 #include "agx3_binder.h"
+#include "agx3_static_spill_core.h"
 
 #include <string.h>
 
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
+
+bool
+agx3_ioto_pack_cprog_copy(enum agx_chip chip,
+                         const struct agx3_ioto_cprog_copy_desc *desc,
+                         struct agx3_ioto_cprog_copy_output *output)
+{
+   if (chip != AGX_CHIP_G17P || desc == NULL || output == NULL ||
+       (desc->destination_bytes & 1) || desc->source_half >= 256 ||
+       (desc->source_half & 1) || desc->lane_mask < 1 || desc->lane_mask > 3 ||
+       desc->source_wait_slot < -1 || desc->source_wait_slot >= 6)
+      return false;
+
+   struct agx3_ioto_cprog_copy_output staged = {0};
+   uint32_t destination = 8u + desc->destination_bytes / 2u;
+   uint16_t source = desc->source_half + (desc->lane_mask == 2);
+   unsigned remaining = desc->lane_mask == 3 ? 2 : 1;
+   staged.written_bytes = 2 * remaining;
+
+   while (remaining) {
+      const unsigned halves = remaining == 2 && !(destination & 1) ? 2 : 1;
+      const struct agx3_static_spill_store_desc store = {
+         .tps_half = destination,
+         .src = source,
+         .width = halves == 2 ? AGX3_MEM_W32 : AGX3_MEM_W16,
+         .src_kill = true,
+         .slot = 6,
+         .wait_mask = desc->source_wait_slot < 0
+                         ? 0
+                         : (uint16_t)(1u << desc->source_wait_slot),
+      };
+      uint8_t encoded[AGX3_STATIC_SPILL_MAX_LENGTH], length;
+      if (!agx3_static_spill_encode_store(AGX_ISA_ENCODING_AGX3B, &store,
+                                         encoded, &length) ||
+          length > sizeof(staged.bytes) - staged.length)
+         return false;
+
+      memcpy(staged.bytes + staged.length, encoded, length);
+      staged.length += length;
+      destination += halves;
+      source += halves;
+      remaining -= halves;
+   }
+
+   *output = staged;
+   return true;
+}
 
 static enum agx_ioto_load_raw_kind
 gpu1_lddev_kind(uint8_t ep)
