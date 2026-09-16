@@ -78,15 +78,17 @@ agx_compose_float_src(agx_index to, agx_index from)
 }
 
 /* AGX3's grounded fmin/fmax encoding requires the compared values to remain
- * tied to the selected values. Inlining a minifloat into only the comparison
- * breaks that identity and needlessly turns a native min/max into a general
- * FSEL. Keep the shared SSA value explicit through register allocation. */
+ * tied to the selected values. Inlining an immediate into only one side (a
+ * minifloat into the comparison, or raw bits that fit an integer immediate,
+ * such as +0.0, into the selection) breaks that identity, and the resulting
+ * general FSEL has no NaN-correct grounded form. Keep the shared SSA value
+ * explicit on both sides through register allocation. */
 static bool
 agx_preserve_g17p_tied_fcmpsel(agx_context *ctx, agx_instr *I, unsigned src)
 {
    return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_FCMPSEL && src < 2 &&
-          agx_is_equiv(I->src[src], I->src[src + 2]);
+          I->op == AGX_OPCODE_FCMPSEL && src < 4 &&
+          agx_is_equiv(I->src[src], I->src[src ^ 2]);
 }
 
 /*

@@ -10367,13 +10367,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 (compare.size == AGX_SIZE_16 || compare.size == AGX_SIZE_32)) {
                unsigned condition = I->fcond;
                bool swap = I->invert_cond;
-               if (condition == AGX_FCOND_LTN) {
-                  condition = AGX_FCOND_GE;
-                  swap = !swap;
-               } else if (condition == AGX_FCOND_GTN) {
-                  condition = AGX_FCOND_LE;
-                  swap = !swap;
-               }
+               /* LTN/GTN are minNum/maxNum conditions. Rewriting them to
+                * GE/LE with swapped integer selections returns the NaN when
+                * src0 is NaN. Untied condition-3/7 selects are not grounded. */
+               if (condition == AGX_FCOND_LTN || condition == AGX_FCOND_GTN)
+                  AGX3_REFUSE(I);
                if (zero_first) {
                   switch (condition) {
                   case AGX_FCOND_LT: condition = AGX_FCOND_GT; break;
@@ -10865,13 +10863,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
                unsigned condition = I->fcond;
                bool swap = I->invert_cond;
-               if (condition == AGX_FCOND_LTN) {
-                  condition = AGX_FCOND_GE;
-                  swap = !swap;
-               } else if (condition == AGX_FCOND_GTN) {
-                  condition = AGX_FCOND_LE;
-                  swap = !swap;
-               }
+               /* The tied min/max handler above owns condition 3/7. There is
+                * no grounded untied encoding with those NaN semantics. */
+               if (condition == AGX_FCOND_LTN || condition == AGX_FCOND_GTN)
+                  AGX3_REFUSE(I);
                uint16_t fsel_wait = wait;
                if (fsel_wait != 0 && fsel_wait != 32) {
                   if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))

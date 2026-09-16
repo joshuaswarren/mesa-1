@@ -1956,26 +1956,31 @@ agx_lower_agx3_stack_vectors(agx_context *ctx)
    agx_foreach_instr_global_safe(ctx, I) {
       const bool store = I->op == AGX_OPCODE_STACK_STORE;
       if ((!store && I->op != AGX_OPCODE_STACK_LOAD) ||
-          I->format != AGX_FORMAT_I32 || I->mask == 1)
+          (I->format != AGX_FORMAT_I32 && I->format != AGX_FORMAT_I16) ||
+          I->mask == 1)
          continue;
+      /* Spilled 16-bit vectors take the same route one half at a time
+       * (subgroups.ballot_broadcast.*.subgroupbroadcast_{f,i,u}16vec*). */
+      const bool halves = I->format == AGX_FORMAT_I16;
       agx_index data = store ? I->src[0] : I->dest[0];
       agx_index offset = I->src[store ? 1 : 0];
       if (data.type != AGX_INDEX_REGISTER || data.memory ||
-          (data.size != AGX_SIZE_32 && data.size != AGX_SIZE_64) ||
+          (halves ? data.size != AGX_SIZE_16
+                  : (data.size != AGX_SIZE_32 && data.size != AGX_SIZE_64)) ||
           offset.type != AGX_INDEX_IMMEDIATE)
          continue;
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
       unsigned packed = 0;
       u_foreach_bit(c, I->mask) {
          agx_index component = data;
-         component.value += 2 * packed++;
+         component.value += (halves ? 1 : 2) * packed++;
          component.channels_m1 = 0;
-         component.size = AGX_SIZE_32;
-         agx_index address = agx_immediate(offset.value + 4 * c);
+         component.size = halves ? AGX_SIZE_16 : AGX_SIZE_32;
+         agx_index address = agx_immediate(offset.value + (halves ? 2 : 4) * c);
          if (store)
-            agx_stack_store(&b, component, address, AGX_FORMAT_I32, 1);
+            agx_stack_store(&b, component, address, I->format, 1);
          else
-            agx_stack_load_to(&b, component, address, AGX_FORMAT_I32, 1);
+            agx_stack_load_to(&b, component, address, I->format, 1);
       }
       agx_remove_instruction(I);
    }
@@ -3240,7 +3245,11 @@ agx_fminmax_to(agx_builder *b, agx_index dst, agx_index s0, agx_index s1,
    enum agx_fcond fcond = fmax ? AGX_FCOND_GTN : AGX_FCOND_LTN;
 
    /* Calculate min/max with the appropriate hardware instruction. This will not
-    * handle denorms, but we were already lowered for that.
+    * handle denorms, but we were already lowered for that. On AGX3 the tied
+    * fcmpsel is the native fsel condition 3/7 min/max (IEEE minNum/maxNum,
+    * the semantics of NIR's fmin/fmax and fmin_agx/fmax_agx); the optimizer
+    * keeps both sides tied and the packer never rewrites LTN/GTN into an
+    * ordered GE/LE select, which would return the NaN when s0 is NaN.
     */
    return agx_fcmpsel_to(b, dst, s0, s1, s0, s1, fcond);
 }
@@ -7978,6 +7987,21 @@ agx_nir_lower_g17p_f16_classify(nir_builder *b, nir_alu_instr *alu,
 }
 
 /* Shared preprocessing with target-bounded subgroup choices. */
+static nir_mem_access_size_align
+agx3_scratch_word_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
+                                uint8_t bit_size, uint32_t align,
+                                uint32_t align_offset, bool offset_is_const,
+                                enum gl_access_qualifier access,
+                                const void *cb_data)
+{
+   return (nir_mem_access_size_align){
+      .num_components = MIN2(MAX2(bytes / 4, 1), 4),
+      .bit_size = 32,
+      .align = 4,
+      .shift = nir_mem_access_shift_method_scalar,
+   };
+}
+
 static void
 agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
 {
@@ -8008,6 +8032,20 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    /* Lower large arrays to scratch and small arrays to csel */
    NIR_PASS(_, nir, nir_lower_vars_to_scratch, AGX_SCRATCH_ARRAY_THRESHOLD_B,
             glsl_get_natural_size_align_bytes, glsl_get_word_size_align_bytes);
+
+   /* The native stack protocol is grounded for 32-bit words and single
+    * static halves only. Access scratch in whole words on AGX3: loads
+    * over-read within the private frame and narrow stores become the
+    * pass's read-modify-write of the containing word
+    * (subgroups.ballot_broadcast.*.subgroupbroadcast_{f,i,u}16vec*,
+    * {i,u}8vec*). */
+   if (g17p) {
+      nir_lower_mem_access_bit_sizes_options scratch_words = {
+         .modes = nir_var_function_temp,
+         .callback = agx3_scratch_word_size_align_cb,
+      };
+      NIR_PASS(_, nir, nir_lower_mem_access_bit_sizes, &scratch_words);
+   }
    NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
             nir_var_function_temp, ~0);
    NIR_PASS(_, nir, nir_split_var_copies);

@@ -2532,6 +2532,51 @@ TEST_F(AGX3PackBinary, WboitInfinityRepairUsesMixedWidthFsel)
    EXPECT_EQ(pack(b), want);
 }
 
+/* fmin/fmax lower to a tied fcmpsel with LTN/GTN. On AGX3B that is the
+ * native fsel.ep7 with condition 3/7 (IEEE minNum/maxNum): Apple's
+ * -fno-fast-math fmin/fmax emit 12031e0501c0 / 12031e0500c0 after two loads
+ * (wait slot 5); without a wait byte 5 carries no wait bits. The former
+ * generic-FSEL route rewrote LTN into GE with swapped selects
+ * (02013f0385020200, condition 5), which returns the NaN when src0 is NaN. */
+TEST_F(AGX3PackBinary, TiedF32MinMaxUsesNativeFselCondition)
+{
+   for (int m = 0; m < 2; ++m) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(2, AGX_SIZE_32);
+      agx_index c = agx_register(4, AGX_SIZE_32);
+      a.discard = c.discard = true;
+      agx_index dest = agx_register(2, AGX_SIZE_32);
+      agx_fcmpsel_to(b, dest, a, c, a, c,
+                     m ? AGX_FCOND_GTN : AGX_FCOND_LTN);
+      agx_stop(b);
+
+      std::vector<uint8_t> want = {0x12, 0x03, 0x1e, 0x05,
+                                   (uint8_t)(m ? 0x00 : 0x01), 0x00,
+                                   0x0e, 0x00, 0x00, 0x00};
+      std::vector<uint8_t> got = pack(b);
+      EXPECT_EQ(got, want);
+      /* fsel.ep7: 6 bytes, condition field in byte 4 bit 0 (3 -> 1, 7 -> 0),
+       * compare/select registers tied (bytes 1 and 3). */
+      ASSERT_EQ(got.size(), 10u);
+      EXPECT_EQ(got[1] & 0x7e, 2);
+      EXPECT_EQ(got[3] & 0x7e, 4);
+   }
+}
+
+/* An untied LTN/GTN select has no NaN-correct grounded form: the packer must
+ * refuse it rather than rewrite the condition into an ordered GE/LE. */
+TEST_F(AGX3PackBinary, UntiedLtnFselIsRefused)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(2, AGX_SIZE_32);
+   agx_index c = agx_register(4, AGX_SIZE_32);
+   agx_index other = agx_register(6, AGX_SIZE_32);
+   agx_index dest = agx_register(2, AGX_SIZE_32);
+   agx_fcmpsel_to(b, dest, a, c, a, other, AGX_FCOND_LTN);
+   agx_stop(b);
+   pack(b, false);
+}
+
 TEST_F(AGX3PackBinary, UpdateLightmapMixedWidthLtFsel)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
