@@ -1753,11 +1753,11 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
          !(dev->chip == AGX_CHIP_G17P && stage == MESA_SHADER_FRAGMENT),
       .no_stop = !terminal,
       .secondary = secondary,
-       /* G17P binds the linked executable through a native Ioto program with
-        * no executable preshader contract. Keep all stages monolithic,
-        * including geometry/tessellation lowered to compute: `stage` still
-        * names their original API stage here. */
-       .no_preamble = dev->chip == AGX_CHIP_G17P,
+      /* Native preamble composition is wired below, but its runtime entry
+       * state and uniform publication still require hardware qualification.
+       * Keep generation disabled for all G17P stages, including geometry and
+       * tessellation lowered to compute (stage is the original API stage). */
+      .no_preamble = dev->chip == AGX_CHIP_G17P,
    };
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -3768,6 +3768,36 @@ agx_update_descriptors(struct agx_batch *batch, struct agx_compiled_shader *cs)
       agx_pool_upload_aligned(&batch->pool, unif, sizeof(*unif), 16);
 }
 
+static bool
+agx_bind_g17p_preamble(const struct agx_shader_info *info, const void *binary,
+                       struct agx_bo *original_bo,
+                       struct agx_ioto_preshader_desc *preamble)
+{
+   *preamble = (struct agx_ioto_preshader_desc){
+      .external_va = AGX_IOTO_PRESHADER_NO_VA,
+   };
+   if (!info->has_preamble)
+      return !info->preamble_size && !info->nr_preamble_gprs &&
+             !info->preamble_scratch_size;
+
+   if (!info->nr_preamble_gprs || info->preamble_scratch_size ||
+       !original_bo || !original_bo->va ||
+       info->main_offset > info->binary_size ||
+       info->main_size > info->binary_size - info->main_offset)
+      return false;
+
+   /* The compiler gives preambles uniform inputs, with no incoming GPR ABI.
+    * Do not request Apple's optional entry-register prelude. Reuse the
+    * original binary's upload: linking relocates only the main program. */
+   if (!agx_ioto_preshader_bind_range(
+          binary, info->binary_size, original_bo->va->addr, original_bo->size,
+          info->preamble_offset, info->preamble_size, preamble))
+      return false;
+
+   return info->preamble_offset + info->preamble_size <= info->main_offset ||
+          info->main_offset + info->main_size <= info->preamble_offset;
+}
+
 static uint32_t
 agx_build_g17p_graphics_program(struct agx_batch *batch,
                                 struct agx_compiled_shader *cs,
@@ -3775,9 +3805,12 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
                                 uint64_t *full_va)
 {
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   struct agx_ioto_preshader_desc preamble;
    if (!linked || !linked->bo || !linked->bo->va || !linked->size ||
-       cs->b.info.has_preamble || cs->b.info.preamble_scratch_size)
+       !agx_bind_g17p_preamble(&cs->b.info, cs->b.binary, cs->bo, &preamble))
       return 0;
+   const struct agx_ioto_preshader_desc *preshader =
+      cs->b.info.has_preamble ? &preamble : NULL;
 
    struct agx3_ioto_uniform_range
       ranges[AGX3_G17P_GRAPHICS_MAX_RANGES];
@@ -3887,8 +3920,8 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
    }
 
    size_t capacity;
-   if (!agx3_g17p_graphics_program_bound(dev->chip, ranges, count,
-                                          &capacity))
+   if (!agx3_g17p_graphics_program_bound_with_preshader(
+          dev->chip, ranges, count, preshader, &capacity))
       return 0;
 
    struct agx_bo *program_bo = NULL;
@@ -3909,6 +3942,7 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       .shader_va = linked->bo->va->addr + linked->entry_offset,
       .uniform_ranges = ranges,
       .uniform_range_count = count,
+      .preshader = preshader,
       .shader_binary_size = linked->size,
       .scratch_size = linked->scratch_size,
       .nr_gprs = linked->nr_gprs,
@@ -4103,7 +4137,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
        (indirect_local &&
         (!grid.ptr || grid.ptr >= (UINT64_C(1) << 48) || (grid.ptr & 3))) ||
        !info->main_size || !info->nr_gprs ||
-       info->has_preamble || info->preamble_scratch_size || info->scratch_size ||
+       info->preamble_scratch_size || info->scratch_size ||
        !info->agx3_staging_known ||
        (info->main_offset != 0 &&
         info->main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
@@ -4126,6 +4160,10 @@ agx_g17p_append_compute(struct agx_batch *batch,
       }
       return false;
    }
+
+   struct agx_ioto_preshader_desc preamble;
+   if (!agx_bind_g17p_preamble(info, binary, constant_bo, &preamble))
+      return false;
 
    uint64_t shader_va;
    uint32_t shader_binary_size, nr_gprs, compiler_d;
@@ -4186,6 +4224,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
       .shader_va = shader_va,
       .uniform_ranges = ranges,
       .uniform_range_count = range_count,
+      .preshader = info->has_preamble ? &preamble : NULL,
       .shader_binary_size = shader_binary_size,
       .scratch_size = info->scratch_size,
       .nr_gprs = nr_gprs,
