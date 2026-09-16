@@ -3409,7 +3409,6 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
       ralloc_free(key_clone);
       return NULL;
    }
-
    linked->g17p_blend_constant_base = key->epilog.blend_constant_base;
    linked->g17p_emrt_heap_base = key->epilog.emrt_heap_base;
    linked->g17p_prolog_uses_root = key->prolog.statistics;
