@@ -8,6 +8,7 @@
 #include "agx_state.h"
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx3_graphics_program.h"
@@ -719,18 +720,17 @@ target_is_cube(enum pipe_texture_target target)
    return target == PIPE_TEXTURE_CUBE || target == PIPE_TEXTURE_CUBE_ARRAY;
 }
 
-static void
+static NORETURN void
 agx_native_descriptor_rejected(struct agx_device *dev, const char *operation)
 {
    mesa_loge("asahi: %s has no proven native descriptor encoding on %s",
              operation, agx_chip_name(dev->chip));
 
-   /* Every recognised AGX3 identity remains behind the device-open gate.  If
-    * this fires, stop before constructing or submitting a command stream; a
-    * zero descriptor is not a valid substitute for rejected hardware state.
+   /* A rejected descriptor must stop command construction in release builds
+    * too. UNREACHABLE only promises the compiler that this cannot happen;
+    * it does not provide a runtime failure path when assertions are disabled.
     */
-   assert(!agx_chip_driver_supported(dev->chip));
-   UNREACHABLE("native descriptor encoding rejected");
+   abort();
 }
 
 static bool
