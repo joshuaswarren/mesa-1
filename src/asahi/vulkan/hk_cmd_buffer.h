@@ -568,6 +568,16 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    a->scratch.cs.main |= b->scratch.cs.main;
    a->scratch.cs.preamble |= b->scratch.cs.preamble;
 
+   /* Submission sees only the merged root. Keep the destinations recorded
+    * by both streams without changing their inline/link batching policy. */
+   for (unsigned i = 0; i < b->compute_attachments.count; ++i) {
+      const struct drm_asahi_attachment *attachment =
+         &b->compute_attachments.list[i];
+      hk_drm_attachment_set_add(&a->compute_attachments,
+                                attachment->pointer, attachment->size);
+   }
+   a->compute_attachments.complete &= b->compute_attachments.complete;
+
    a->timestamp = b->timestamp;
 
    a->stats.calls += b->stats.calls;

@@ -281,7 +281,7 @@ if with_tests
     'hk_cdm_inline_merge',
     executable(
       'hk_cdm_inline_merge_test',
-      files('tests/test-hk-cdm-inline-merge.c'),
+      files('tests/test-hk-cdm-inline-merge.c', 'hk_drm_render_core.c'),
       include_directories : [
         inc_gallium,
         inc_gallium_aux,

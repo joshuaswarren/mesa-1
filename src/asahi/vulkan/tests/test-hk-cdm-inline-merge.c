@@ -7,6 +7,36 @@
 
 static unsigned jump_calls;
 
+static void
+test_attachment_merge(bool linked)
+{
+   uint8_t a_root[256] = {0}, b_root[256] = {0};
+   struct hk_cmd_buffer cmd = {0};
+   struct hk_cs a = {
+      .cmd = &cmd, .type = HK_CS_CDM,
+      .start = a_root, .current = a_root + 4, .end = a_root + sizeof(a_root),
+   };
+   struct hk_cs b = {
+      .cmd = &cmd, .type = HK_CS_CDM,
+      .start = b_root, .current = b_root + 4, .end = b_root + sizeof(b_root),
+      .stream_linked = linked,
+   };
+   hk_drm_attachment_set_init(&a.compute_attachments);
+   hk_drm_attachment_set_init(&b.compute_attachments);
+   assert(hk_drm_attachment_set_add(&a.compute_attachments, 0x1000, 0x1000));
+   assert(hk_drm_attachment_set_add(&b.compute_attachments, 0x2000, 0x1000));
+   assert(hk_drm_attachment_set_add(&b.compute_attachments, 0x8000, 0x1000));
+   b.compute_attachments.complete = false;
+   hk_cs_merge_cdm(&a, &b);
+   assert(a.compute_attachments.count == 2);
+   assert(a.compute_attachments.list[0].pointer == 0x1000);
+   assert(a.compute_attachments.list[0].size == 0x2000);
+   assert(a.compute_attachments.list[1].pointer == 0x8000);
+   assert(a.compute_attachments.list[1].size == 0x1000);
+   assert(!a.compute_attachments.complete);
+   assert(b.compute_attachments.count == 2);
+}
+
 void *
 hk_cmd_buffer_emit_cs_jump(UNUSED struct hk_cmd_buffer *cmd, void *current,
                            UNUSED uint64_t target, UNUSED bool vdm)
@@ -73,6 +103,8 @@ main(void)
       AGX_CHIP_G17P, a_root + submitted_len - sizeof(terminate),
       sizeof(terminate)));
 
+   test_attachment_merge(false);
+   test_attachment_merge(true);
    puts("G17P inline CDM merge and terminal pointer PASS");
    return 0;
 }
