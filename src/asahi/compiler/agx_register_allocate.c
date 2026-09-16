@@ -129,6 +129,11 @@ struct ra_ctx {
    /* SSA coordinates that must stay above CEM's fixed scratch register bank
     * or a fully occupied MRT store bank. */
    BITSET_WORD *high_gpr;
+
+   /* Values that must be allocated below half 128: coordinates of a
+    * cube-array sample with a register LOD (the fused layer/face/LOD
+    * PACK_SMPIR operand carries a seven-bit layer register). */
+   BITSET_WORD *tex_low128;
 };
 
 /*
@@ -381,6 +386,10 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
        (I->op == AGX_OPCODE_LOG2 ||
         BITSET_TEST(rctx->log2_gpr, I->dest[d].value)))
       limit = MIN2(limit, 192);
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ra_class_for_index(I->dest[d]) == RA_GPR &&
+       BITSET_TEST(rctx->tex_low128, I->dest[d].value))
+      limit = MIN2(limit, 128);
    return limit;
 }
 
@@ -1877,6 +1886,7 @@ agx_ra(agx_context *ctx)
    BITSET_WORD *texture_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *log2_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
+   BITSET_WORD *tex_low128 = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
    const unsigned tile_gpr_limit = agx3_tile_store_bank(ctx);
@@ -1959,6 +1969,16 @@ agx_ra(agx_context *ctx)
           (I->dim == AGX_DIM_CUBE || I->dim == AGX_DIM_CUBE_ARRAY) &&
           I->src[0].type == AGX_INDEX_NORMAL)
          BITSET_SET(high_gpr, I->src[0].value);
+
+      /* agx3_tex_stage_cube_array_lod encodes the layer register (coords + 6
+       * halves) in seven bits; keep such coordinate vectors below half 128. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->dim == AGX_DIM_CUBE_ARRAY &&
+          I->src[0].type == AGX_INDEX_NORMAL && I->nr_srcs > 1 &&
+          I->src[1].type == AGX_INDEX_NORMAL &&
+          (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+           I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS))
+         BITSET_SET(tex_low128, I->src[0].value);
 
       /* Record collects/phis so we can coalesce when assigning */
       if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
@@ -2058,6 +2078,7 @@ agx_ra(agx_context *ctx)
          .texture_gpr = texture_gpr,
          .log2_gpr = log2_gpr,
          .high_gpr = high_gpr,
+         .tex_low128 = tex_low128,
          .bound[RA_GPR] = max_regs,
          .bound[RA_MEM] = AGX_NUM_MODELED_REGS,
          .count[RA_GPR] = &reg_count,
@@ -2221,6 +2242,7 @@ agx_ra(agx_context *ctx)
    free(texture_gpr);
    free(log2_gpr);
    free(high_gpr);
+   free(tex_low128);
    free(src_to_collect_phi);
    free(ncomps);
    free(ncomps_unrounded);
