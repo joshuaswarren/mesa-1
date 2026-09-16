@@ -3486,6 +3486,309 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
    }
 }
 
+/* The native half-width branch encoder supports register/register and
+ * register/zero comparisons. Materialize other constants while SSA temporaries
+ * can still be allocated; never invent a scratch register in the packer. */
+bool
+agx_lower_agx3_cf_constants(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      bool floating = false;
+      switch (I->op) {
+      case AGX_OPCODE_IF_FCMP:
+      case AGX_OPCODE_WHILE_FCMP:
+      case AGX_OPCODE_BREAK_IF_FCMP:
+         floating = true;
+         break;
+      case AGX_OPCODE_IF_ICMP:
+      case AGX_OPCODE_ELSE_ICMP:
+      case AGX_OPCODE_WHILE_ICMP:
+      case AGX_OPCODE_BREAK_IF_ICMP:
+         break;
+      default:
+         continue;
+      }
+      if (I->nr_srcs != 2)
+         continue;
+      /* Constant propagation may leave a constant predicate inside
+       * structured control flow. The native integer branch still requires
+       * one register comparator; keep the branch's mask-stack semantics.
+       */
+      if (!floating && I->src[0].type == AGX_INDEX_IMMEDIATE &&
+          I->src[1].type == AGX_INDEX_IMMEDIATE &&
+          !I->src[0].abs && !I->src[0].neg) {
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         I->src[0] = agx_mov_imm(&b, 32, I->src[0].value);
+         progress = true;
+      }
+      /* Native FCMP branches compare full floats. Widen actual half
+       * operands after copy propagation, which could otherwise fold this
+       * conversion back into the branch. Binary16 values are exact in F32.
+       * Immediate zero keeps the separately supported register/zero form. */
+      if (floating) {
+         for (unsigned s = 0; s < 2; ++s) {
+            if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
+                I->src[s].size != AGX_SIZE_16)
+               continue;
+            agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+            agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+            agx_fmov_to(&b, wide, I->src[s]);
+            I->src[s] = wide;
+            progress = true;
+         }
+      }
+      /* Native branch predicates have no qualified absolute-value operand.
+       * Clear the IEEE sign bit before RA, preserving zeros, infinities and
+       * NaN payloads. If abs is followed by negation, materialize that bit too
+       * so the register/zero predicate remains a plain operand. Negated
+       * equality and unordered relations likewise need plain operands;
+       * only strict LT/GT currently have a native negated encoding. */
+      if (floating) {
+         for (unsigned s = 0; s < 2; ++s) {
+            agx_index src = I->src[s];
+            const bool native_neg =
+               (I->fcond == AGX_FCOND_LT || I->fcond == AGX_FCOND_GT) &&
+               !I->src[0].abs && !I->src[1].abs &&
+               I->src[0].type != AGX_INDEX_IMMEDIATE &&
+               I->src[1].type != AGX_INDEX_IMMEDIATE &&
+               (I->src[0].neg != I->src[1].neg);
+            if ((!src.abs && (!src.neg || native_neg)) ||
+                src.type == AGX_INDEX_IMMEDIATE ||
+                src.size != AGX_SIZE_32 || agx_channels(src) != 1)
+               continue;
+            agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+            const bool negate = src.neg, clear_sign = src.abs;
+            src.abs = src.neg = false;
+            agx_index absolute = src;
+            if (clear_sign) {
+               absolute = agx_temp(ctx, AGX_SIZE_32);
+               agx_bitop_to(&b, absolute, src,
+                            agx_mov_imm(&b, 32, 0x7fffffff), 0x8);
+            }
+            if (negate) {
+               agx_index negative = agx_temp(ctx, AGX_SIZE_32);
+               agx_bitop_to(&b, negative, absolute,
+                            agx_mov_imm(&b, 32, 0x80000000), 0x6);
+               absolute = negative;
+            }
+            I->src[s] = absolute;
+            progress = true;
+         }
+      }
+      for (unsigned s = 0; s < 2; ++s) {
+         agx_index src = I->src[s], other = I->src[1 - s];
+         if (floating) {
+            /* FCMP has a register/zero form, but arbitrary minifloats must
+             * use its register/register form. Preserve IEEE value and source
+             * modifiers while allocating the temporary through normal SSA. */
+            if (src.type != AGX_INDEX_IMMEDIATE || src.value == 0 ||
+                src.value > UINT8_MAX || other.type == AGX_INDEX_IMMEDIATE ||
+                other.size != AGX_SIZE_32 || agx_channels(other) != 1)
+               continue;
+            float value = agx_minifloat_decode(src.value);
+            if (src.abs)
+               value = fabsf(value);
+            if (src.neg)
+               value = -value;
+            agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+            I->src[s] = agx_mov_imm(&b, 32, fui(value));
+            progress = true;
+            continue;
+         }
+         if (src.type != AGX_INDEX_IMMEDIATE || src.value == 0 ||
+             src.value > UINT8_MAX || src.abs || src.neg ||
+             other.type == AGX_INDEX_IMMEDIATE || other.size != AGX_SIZE_16 ||
+             agx_channels(other) != 1)
+            continue;
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         I->src[s] = agx_mov_imm(&b, 16, src.value);
+         progress = true;
+      }
+   }
+   return progress;
+}
+
+/* Half-width shift-add has register operands. Fold an immediate's integer
+ * negation modulo 2^16 and allocate it normally before RA. This also covers
+ * decrementing 16-bit loop counters without guessing a half subtract opcode. */
+bool
+agx_lower_agx3_half_iadd_constants(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      /* 64-bit adds have register operands too: no grounded form takes an
+       * immediate (float_controls.fp32.input_args.rounding_rte_conv_from_
+       * {int,uint}64_*_vert, whose constants stay immediates in vertex
+       * shaders). */
+      if (I->op != AGX_OPCODE_IADD || I->nr_dests != 1 || I->nr_srcs != 2 ||
+          (I->dest[0].size != AGX_SIZE_16 && I->dest[0].size != AGX_SIZE_64) ||
+          agx_channels(I->dest[0]) != 1 || I->saturate)
+         continue;
+      const bool wide = I->dest[0].size == AGX_SIZE_64;
+      agx_foreach_src(I, s) {
+         agx_index src = I->src[s];
+         if (src.type != AGX_INDEX_IMMEDIATE || src.value > UINT8_MAX || src.abs)
+            continue;
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         if (wide) {
+            uint64_t value = src.neg ? -(uint64_t)src.value : src.value;
+            I->src[s] = agx_mov_imm(&b, 64, value);
+         } else {
+            uint16_t value = src.neg ? -src.value : src.value;
+            I->src[s] = agx_mov_imm(&b, 16, value);
+         }
+         progress = true;
+      }
+   }
+   return progress;
+}
+
+/* No grounded AGX3 form adds two 64-bit registers (address forms take one
+ * 64-bit base). Split a plain 64-bit add into a low 32-bit add, a carry from
+ * an unsigned compare and a high 32-bit add, then recombine the pair
+ * (float_controls.fp32.input_args.rounding_rte_conv_from_{int,uint}64_*). */
+static bool
+agx_lower_agx3_wide_iadd(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_IADD || I->nr_dests != 1 || I->nr_srcs != 2 ||
+          I->dest[0].size != AGX_SIZE_64 || agx_channels(I->dest[0]) != 1 ||
+          I->shift != 0 || I->saturate)
+         continue;
+      bool wide_regs = true;
+      agx_foreach_src(I, s) {
+         if (I->src[s].type != AGX_INDEX_NORMAL || I->src[s].size != AGX_SIZE_64 ||
+             I->src[s].abs || I->src[s].neg || agx_channels(I->src[s]) != 1)
+            wide_regs = false;
+      }
+      if (!wide_regs)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index lo[2], hi[2];
+      for (unsigned s = 0; s < 2; ++s) {
+         lo[s] = agx_temp(ctx, AGX_SIZE_32);
+         hi[s] = agx_temp(ctx, AGX_SIZE_32);
+         agx_subdivide_to(&b, lo[s], I->src[s], 0);
+         agx_subdivide_to(&b, hi[s], I->src[s], 1);
+      }
+      agx_index sum_lo = agx_iadd(&b, lo[0], lo[1], 0);
+      agx_index carry =
+         agx_icmpsel(&b, sum_lo, lo[0], agx_mov_imm(&b, 32, 1),
+                     agx_mov_imm(&b, 32, 0), AGX_ICOND_ULT);
+      agx_index sum_hi =
+         agx_iadd(&b, agx_iadd(&b, hi[0], hi[1], 0), carry, 0);
+      /* Two 32-bit halves collect straight into the 64-bit value, as
+       * nir_op_pack_64_2x32_split does. */
+      agx_emit_collect_to(&b, I->dest[0], 2, (agx_index[]){sum_lo, sum_hi});
+      agx_remove_instruction(I);
+      progress = true;
+   }
+   return progress;
+}
+
+/* Adding zero with IADD computes an extension and, for source 1, a left
+ * shift. AGX IR plain half sources are signed; abs selects zero extension.
+ * Legalize before SIGNEXT lowering and allocation, preserving shift/order. */
+bool
+agx_lower_agx3_widening_iadd(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_IADD || I->nr_dests != 1 || I->nr_srcs != 2 ||
+          I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
+          I->saturate)
+         continue;
+      bool imm_first = I->src[0].type == AGX_INDEX_IMMEDIATE;
+      agx_index zero = I->src[imm_first ? 0 : 1];
+      agx_index half = I->src[imm_first ? 1 : 0];
+      if (zero.type != AGX_INDEX_IMMEDIATE || zero.value || zero.abs || zero.neg ||
+          half.type == AGX_INDEX_IMMEDIATE || half.type == AGX_INDEX_NULL ||
+          (half.size != AGX_SIZE_16 && half.size != AGX_SIZE_32) ||
+          agx_channels(half) != 1 || half.neg) {
+         /* General mixed-width addition needs the same signed/unsigned
+          * extension even when the other operand is nonzero. Keep the add
+          * and its source-1 shift after materializing the extension. */
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         agx_foreach_src(I, s) {
+            agx_index src = I->src[s];
+            if (src.size != AGX_SIZE_16 ||
+                src.type == AGX_INDEX_IMMEDIATE || src.type == AGX_INDEX_NULL ||
+                agx_channels(src) != 1)
+               continue;
+            bool is_unsigned = src.abs;
+            bool subtract = src.neg;
+            src.abs = false;
+            src.neg = false;
+            agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+            if (is_unsigned)
+               agx_mov_to(&b, wide, src);
+            else
+               agx_signext_to(&b, wide, src);
+            /* Negation is subtraction, independent of extension. */
+            I->src[s] = subtract ? agx_neg(wide) : wide;
+            progress = true;
+         }
+         continue;
+      }
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      bool is_unsigned = half.abs || half.size == AGX_SIZE_32;
+      unsigned shift = imm_first ? I->shift : 0;
+      agx_index extended = shift ? agx_temp(ctx, AGX_SIZE_32) : I->dest[0];
+      half.abs = false;
+      if (is_unsigned)
+         agx_mov_to(&b, extended, half);
+      else
+         agx_signext_to(&b, extended, half);
+      if (shift)
+         agx_bfi_to(&b, I->dest[0], agx_zero(), extended,
+                     agx_mov_imm(&b, 32, shift), 0);
+      agx_remove_instruction(I);
+      progress = true;
+   }
+   return progress;
+}
+
+/* Native register subtraction has no shifted-source form in the current
+ * encoder. Keep modulo-32-bit semantics by shifting before subtracting. */
+static bool
+agx_lower_agx3_shifted_subtract(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_IADD || !I->shift || I->saturate ||
+          I->dest[0].size != AGX_SIZE_32 || !I->src[1].neg ||
+          I->src[1].size != AGX_SIZE_32 || I->src[1].abs)
+         continue;
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index src = I->src[1];
+      src.neg = false;
+      agx_index shifted = agx_temp(ctx, AGX_SIZE_32);
+      agx_bfi_to(&b, shifted, agx_zero(), src,
+                 agx_mov_imm(&b, 32, I->shift), 0);
+      I->src[1] = agx_neg(shifted);
+      I->shift = 0;
+      progress = true;
+   }
+   return progress;
+}
+
 static void
 agx_materialize_agx3_alu_constants(agx_context *ctx)
 {
@@ -7609,7 +7912,12 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       agx_materialize_agx3_alu_constants(ctx);
 
-   agx_materialize_agx3_cf_constants(ctx);
+   /* Constant materialization can introduce mixed-width FADD operands. */
+   agx_lower_agx3_fma_sources(ctx);
+
+   AGX_PASS(ctx, agx_lower_agx3_cf_constants);
+   AGX_PASS(ctx, agx_lower_agx3_half_iadd_constants);
+   AGX_PASS(ctx, agx_lower_agx3_wide_iadd);
 
    /* For correctness, lower uniform sources after copyprop (for correctness,
     * as copyprop creates uniform sources). To keep register pressure in
