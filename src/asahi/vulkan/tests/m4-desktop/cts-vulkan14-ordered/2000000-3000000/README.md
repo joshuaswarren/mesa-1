@@ -14,7 +14,7 @@ Total counted: 1,000,000. A retained recovery attempt (`run-recover*`) overrides
 
 ## Remaining
 
-- `dEQP-VK.subgroups.basic.graphics.subgroupmemorybarrierimage` (Fail, 0 of 27 values; also failed in the 1.2M-2.0M range). Compiles cleanly; image writes from vertex/tessellation/geometry stages under subgroup barriers give wrong values and need a hardware experiment.
+- `dEQP-VK.subgroups.basic.graphics.subgroupmemorybarrierimage` (Fail, 0 of 27 values; also failed in the 1.2M-2.0M range). Compiles cleanly and every single-stage variant (`framebuffer.*_{vertex,tess_control,tess_eval,geometry,fragment}`, which only read the image) and the compute variant (store, barrier, load) pass; only the all-stages pipeline that stores and reloads the image in the same subgroup fails, in every iteration. Forcing other AGX3 barrier scopes (device instead of device-fence, a second device scope, an added execution scope) changes nothing (`build/claude-fix/r6-mbi-exp-*`), and the load/store lowering is identical to the passing variants, so the barrier encoding is not the cause. Isolating the failing stage needs a probe outside the CTS (same-invocation visibility of an image store in the hardware vertex stage, or the fragment stage's helper-lane early return around the elected lane are the remaining suspects).
 
 ## Stops and recoveries
 
