@@ -2469,6 +2469,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
       }
 
+      /* Explicit interpolateAtSample() is not sample shading. Fold its
+       * single-sample clamp too, without cloning the per-pixel shader body
+       * or guessing a G17P samples-log2 special-register encoding. */
+      if (dev->dev.chip == AGX_CHIP_G17P && key->fs.g17p_samples)
+         NIR_PASS(_, nir, agx_nir_specialize_sample_count,
+                  key->fs.g17p_samples);
+
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
       /* G17P exposes the raster layer through the flat coefficient table.
        * SR28 is the compute grid-Z register and does not hold a fragment
@@ -2866,7 +2873,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       sample_variants = dev->dev.chip == AGX_CHIP_G17P &&
          key_tmp.fs.g17p_samples == 0 &&
          (nir->info.fs.uses_sample_shading || key_tmp.fs.force_sample_shading ||
-          coverage_updates);
+          coverage_updates || agx_nir_needs_sample_count(nir));
    }
 
    size_t size = sizeof(struct hk_api_shader) +

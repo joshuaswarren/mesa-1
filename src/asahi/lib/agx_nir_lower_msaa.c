@@ -16,6 +16,48 @@ struct lower_per_sample_ctx {
    bool force_early_pending;
 };
 
+/* Explicit sample interpolation is per-pixel, but its single-sample clamp
+ * still depends on rasterizationSamples. It needs native specialization when
+ * compiled without that state, just as a sample-shaded fragment does. */
+bool
+agx_nir_needs_sample_count(const nir_shader *shader)
+{
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+            if (op == nir_intrinsic_load_barycentric_at_sample ||
+                op == nir_intrinsic_load_samples_log2_agx)
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+static bool
+specialize_sample_count(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_samples_log2_agx)
+      return false;
+
+   unsigned samples = *(const unsigned *)data;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def,
+                   nir_imm_intN_t(b, util_logbase2(samples), intr->def.bit_size));
+   return true;
+}
+
+bool
+agx_nir_specialize_sample_count(nir_shader *shader, unsigned samples)
+{
+   assert(samples == 1 || samples == 2 || samples == 4);
+   return nir_shader_intrinsics_pass(shader, specialize_sample_count,
+                                     nir_metadata_control_flow, &samples);
+}
+
 static bool
 lower_to_per_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
