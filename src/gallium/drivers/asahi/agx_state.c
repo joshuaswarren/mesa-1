@@ -3778,9 +3778,12 @@ agx_bind_g17p_preamble(const struct agx_shader_info *info, const void *binary,
    };
    if (!info->has_preamble)
       return !info->preamble_size && !info->nr_preamble_gprs &&
-             !info->preamble_scratch_size;
+             !info->preamble_scratch_size &&
+             !info->agx3_preamble_staging_known &&
+             !info->agx3_preamble_staging_halfs;
 
-   if (!info->nr_preamble_gprs || info->preamble_scratch_size ||
+   if (!info->nr_preamble_gprs || !info->agx3_preamble_staging_known ||
+       info->preamble_scratch_size ||
        !original_bo || !original_bo->va ||
        info->main_offset > info->binary_size ||
        info->main_size > info->binary_size - info->main_offset)
@@ -5621,15 +5624,6 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
    }
 
    if (dev->chip == AGX_CHIP_G17P || IS_DIRTY(VS) || varyings_dirty) {
-      struct agx_vdm_state_vertex_shader_word_0_packed counts;
-      agx_pack(&counts, VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
-         cfg.uniform_register_count = vs->b.info.push_count;
-         cfg.preshader_register_count = vs->b.info.nr_preamble_gprs;
-         cfg.texture_state_register_count = agx_nr_tex_descriptors(batch, vs);
-         cfg.sampler_state_register_count =
-            translate_sampler_state_count(ctx, vs->stage);
-      }
-
       uint64_t pipeline = 0;
       const uint32_t packed_pipeline =
          agx_build_pipeline(batch, vs,
@@ -5640,11 +5634,20 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
          if (agx_drop_for_null_g17p_program(ctx, vs, pipeline, "vertex"))
             return NULL;
 
+         /* Native G17P uses thread-invariant IPR/spill byte footprints here,
+          * not the AGX2 uniform/texture/sampler or temporary-register counts.
+          * vs is the GS copy shader on geometry draws, matching pipeline. */
+         struct agx_vdm_state_update_preamble_counts resources;
+         if (!agx_vdm_state_update_encode_preamble_counts(
+                dev->chip, (uint32_t)vs->b.info.agx3_preamble_staging_halfs * 2,
+                vs->b.info.preamble_scratch_size, &resources))
+            agx_native_descriptor_rejected(dev, "vertex preamble resources");
+
          const uint32_t provoking = ctx->rast->base.flatshade_first ? 0 : 2;
          const struct agx_vdm_state_update_info info = {
-            .raw_vertex_shader_word0 = counts.opaque[0],
+            .raw_vertex_shader_word0 = (uint32_t)resources.ipr_dwords << 8,
             .pipeline = pipeline,
-            .raw_pipeline_template = 0,
+            .raw_pipeline_template = resources.spill_dwords << 3,
             .raw_vertex_outputs = {
                vs->uvs.vdm.opaque[0],
                ctx->rast->base.rasterizer_discard ? 0x30 + provoking
@@ -5663,6 +5666,14 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
          memcpy(out, encoded.bytes, encoded.length);
          out += encoded.length;
       } else {
+         struct agx_vdm_state_vertex_shader_word_0_packed counts;
+         agx_pack(&counts, VDM_STATE_VERTEX_SHADER_WORD_0, cfg) {
+            cfg.uniform_register_count = vs->b.info.push_count;
+            cfg.preshader_register_count = vs->b.info.nr_preamble_gprs;
+            cfg.texture_state_register_count = agx_nr_tex_descriptors(batch, vs);
+            cfg.sampler_state_register_count =
+               translate_sampler_state_count(ctx, vs->stage);
+         }
          agx_push(out, VDM_STATE, cfg) {
             cfg.vertex_shader_word_0_present = true;
             cfg.vertex_shader_word_1_present = true;
