@@ -133,23 +133,10 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
          if (generation == 9 && integer != PIPE_FORMAT_NONE)
             desc[plane].sw.scaled_conversion =
                util_format_is_pure_sint(integer) ? 1 : 2;
-         if (generation == 9 && hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE) {
-            const struct util_format_description *fmt = util_format_description(logical);
-            const VkComponentSwizzle swizzle[4] = {view->vk.swizzle.r, view->vk.swizzle.g,
-                                                  view->vk.swizzle.b, view->vk.swizzle.a};
-            uint16_t kind = 3 | ((fmt->channel[0].size == 16) << 2) |
-                                  ((fmt->channel[0].size == 10) << 7);
-            for (unsigned c = 0; c < 4; ++c) {
-               unsigned component = swizzle[c] == VK_COMPONENT_SWIZZLE_IDENTITY ? c :
-                  swizzle[c] >= VK_COMPONENT_SWIZZLE_R ? swizzle[c] - VK_COMPONENT_SWIZZLE_R : 4;
-               if (component < 4 && fmt->swizzle[component] < PIPE_SWIZZLE_0) {
-                  kind |= BITFIELD_BIT(3 + c);
-                  if (fmt->channel[fmt->swizzle[component]].size == 2)
-                     kind |= BITFIELD_BIT(8 + c);
-               }
-            }
-            desc[plane].sw.scaled_conversion = kind;
-         }
+         /* The normalized descriptor path -- sample a UNORM view and rescale
+          * per channel in the shader -- returned the wrong texel for every
+          * scaled format it was measured against, so scaled sampling uses the
+          * integer descriptor set above. */
       }
    }
 

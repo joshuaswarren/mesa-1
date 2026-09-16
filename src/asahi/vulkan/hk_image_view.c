@@ -225,14 +225,15 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
    if (padded_rgb)
       p_format = hk_padded_image_format(p_format);
    if (agx_native_graphics(&dev->dev)) {
-      enum pipe_format normalized = hk_uscaled_normalized_format(p_format);
       enum pipe_format integer = hk_scaled_texture_format(p_format);
-      /* Normalized descriptors are only a sampling optimization. Background
-       * tile reloads and storage views must preserve the integer physical
-       * values or a later partial render saturates untouched USCALED pixels. */
-      if (normalized != PIPE_FORMAT_NONE && usage == HK_DESC_USAGE_SAMPLED)
-         p_format = normalized;
-      else if (integer != PIPE_FORMAT_NONE)
+      /* Scaled formats sample through an integer descriptor and a shader
+       * conversion.  The normalized descriptor that used to serve sampled
+       * views -- a UNORM read rescaled in the shader -- produced the wrong
+       * texel for every scaled format measured, so it is gone; see
+       * hk_descriptor_set.c.  Background tile reloads and storage views
+       * always wanted the integer physical values anyway, or a later partial
+       * render saturates untouched USCALED pixels. */
+      if (integer != PIPE_FORMAT_NONE)
          p_format = integer;
    }
    const struct util_format_description *desc =
