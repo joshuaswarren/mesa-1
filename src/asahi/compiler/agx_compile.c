@@ -1711,6 +1711,24 @@ agx_get_sr_native_width_to(agx_builder *b, agx_index dst, enum agx_sr sr)
    return agx_get_sr_to(b, dst, sr);
 }
 
+/* Apple reads the active-thread index/count of the SIMD-group (SR 34/36)
+ * into half registers (witness-sr59); NIR presents them as uint32_t. */
+static agx_instr *
+agx_get_sr_coverage_native_width_to(agx_builder *b, agx_index dst,
+                                    enum agx_sr sr)
+{
+   if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+       dst.size == AGX_SIZE_32 &&
+       (sr == AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP ||
+        sr == AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP)) {
+      agx_index native = agx_temp(b->shader, AGX_SIZE_16);
+      agx_get_sr_coverage_to(b, native, sr);
+      return agx_mov_to(b, dst, native);
+   }
+
+   return agx_get_sr_coverage_to(b, dst, sr);
+}
+
 static agx_instr *
 agx_load_compute_dimension(agx_builder *b, agx_index dst,
                            nir_intrinsic_instr *instr, enum agx_sr base)
@@ -2964,22 +2982,12 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          b, dst, AGX_SR_SUBGROUP_INDEX_IN_THREADGROUP);
 
    case nir_intrinsic_load_active_subgroup_invocation_agx:
-      return agx_get_sr_coverage_to(b, dst,
-                                    AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP);
+      return agx_get_sr_coverage_native_width_to(
+         b, dst, AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP);
 
    case nir_intrinsic_load_active_subgroup_count_agx:
-      /* AGX3 reads the count as a 16-bit value, as Apple's uniform atomics
-       * do; zero-extend it for the 32-bit consumers NIR expects. */
-      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
-          dst.size == AGX_SIZE_32) {
-         agx_index native = agx_temp(b->shader, AGX_SIZE_16);
-         agx_get_sr_coverage_to(b, native,
-                                AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP);
-         return agx_mov_to(b, dst, native);
-      }
-
-      return agx_get_sr_coverage_to(b, dst,
-                                    AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP);
+      return agx_get_sr_coverage_native_width_to(
+         b, dst, AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP);
 
    case nir_intrinsic_reduce: {
       assert((instr->def.bit_size == 1 || instr->def.bit_size == 16 ||
@@ -5784,11 +5792,10 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    /*
     * Rewrites a uniform-address atomic into "one lane of the subgroup performs
     * the whole operation", which needs ACTIVE_THREAD_INDEX_IN_SUBGROUP and
-    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. Apple's AGX3 numbers for those two
-    * special registers are not witnessed (agx3_map_sr() carries only the
-    * registers we have witnesses for), so on AGX3 the optimized form cannot
-    * be encoded and every shader containing a uniform-address atomic failed
-    * to compile.
+    * TOTAL_ACTIVE_THREADS_IN_SUBGROUP. Their AGX3 numbers (SR 34/36) are now
+    * witnessed and grounded in agx3_map_sr(), but the optimized form is kept
+    * off on AGX3 until a CTS campaign validates it; before the witness every
+    * shader containing a uniform-address atomic failed to compile.
     *
     * Skipping the optimization keeps atomics CORRECT -- each lane performs its
     * own atomic, which is what the unoptimized program means -- at the cost of

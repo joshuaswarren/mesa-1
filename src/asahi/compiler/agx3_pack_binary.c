@@ -731,26 +731,22 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       SR(AGX_SR_THREAD_POSITION_IN_GRID_X, 23, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Y, 24, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Z, 25, AGX3_SR_W32);
-   case AGX_SR_INPUT_SAMPLE_MASK:
-      if (enc != AGX_ISA_ENCODING_AGX3B)
-         return false;
-      *apple = 39;
-      *width = AGX3_SR_W16;
-      return true;
-   case AGX_SR_BACKFACING:
-      if (enc != AGX_ISA_ENCODING_AGX3B)
-         return false;
-      *apple = 41;
-      *width = AGX3_SR_W16;
-      return true;
-   case AGX_SR_BACKGROUND_LAYER_ID:
-      if (enc != AGX_ISA_ENCODING_AGX3B)
-         return false;
-      *apple = 12;
-      *width = AGX3_SR_W16;
-      return true;
-      /* The semantic enum carries the hardware SR byte (0xd8/0xdd), while
-       * agx3_sr_core consumes Apple's anonymous normalized f21 value. */
+      SR(AGX_SR_INPUT_SAMPLE_MASK, 39, AGX3_SR_W16);
+      SR(AGX_SR_COVERAGE_MASK, 39, AGX3_SR_W16);
+      SR(AGX_SR_IS_ACTIVE_THREAD, 2, AGX3_SR_W16);
+      SR(AGX_SR_BACKFACING, 41, AGX3_SR_W16);
+      SR(AGX_SR_BACKGROUND_LAYER_ID, 12, AGX3_SR_W16);
+      SR(AGX_SR_RENDER_TARGET_LAYER, 12, AGX3_SR_W16);
+      /* Apple's uniform-address atomic election reads the active-thread
+       * index (SR 34) and count (SR 36) of the SIMD-group, and quad_is_first
+       * reads SR 33, all into half registers in the short form, also after
+       * discard_fragment (build/claude-fix/witness-sr59/REPORT.md, 15/15
+       * byte-exact re-encodes). */
+      SR(AGX_SR_ACTIVE_THREAD_INDEX_IN_QUAD, 33, AGX3_SR_W16);
+      SR(AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP, 34, AGX3_SR_W16);
+      SR(AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP, 36, AGX3_SR_W16);
+      /* The invocation enums carry hardware SR bytes (0xd8/0xdd), while
+       * agx3_sr_core consumes Apple's normalized f21 value. */
       SR(AGX_SR_INSTANCE_ID, 46, AGX3_SR_W32);
       SR(AGX_SR_TESS_PATCH_ID, 47, AGX3_SR_W32);
       SR(AGX_SR_TESS_COORD_U, 48, AGX3_SR_W32);
