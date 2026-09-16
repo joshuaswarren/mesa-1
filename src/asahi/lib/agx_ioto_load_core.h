@@ -33,6 +33,27 @@ extern "C" {
 #define AGX_IOTO_LOAD_NOP_SIZE            2u
 #define AGX_IOTO_LOAD_GPU0_ROUND_NOP_SIZE 8u
 
+#define AGX_IOTO_CPROG_UNIFORM_HALFS 512u
+#define AGX_IOTO_CPROG_UNIFORM_WORDS (AGX_IOTO_CPROG_UNIFORM_HALFS / 64u)
+
+/* Live source uniform halves of a compiled preamble. Known-empty differs
+ * from missing metadata. This describes inputs, not a qualified entry ABI. */
+struct agx_ioto_cprog_inputs {
+   uint64_t uniform_halfs[AGX_IOTO_CPROG_UNIFORM_WORDS];
+   bool known;
+};
+
+/* G17P default TPS input layout: source indices are packed in increasing
+ * order at TPS byte 16. Offset is relative to that payload, for
+ * agx3_ioto_pack_cprog_copy(). Output arguments are unchanged on failure.
+ * Frame size covers input storage only, not compiler pressure spills. */
+bool agx_ioto_cprog_input_offset(enum agx_chip chip,
+                                const struct agx_ioto_cprog_inputs *inputs,
+                                uint16_t source_half, uint16_t *offset_bytes);
+bool agx_ioto_cprog_input_frame(enum agx_chip chip,
+                               const struct agx_ioto_cprog_inputs *inputs,
+                               uint16_t *input_halfs, uint16_t *frame_bytes);
+
 enum agx_ioto_load_encoding {
    AGX_IOTO_LOAD_ENCODING_UNSUPPORTED = 0,
    AGX_IOTO_LOAD_ENCODING_GPU0,

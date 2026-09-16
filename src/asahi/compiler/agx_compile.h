@@ -7,6 +7,7 @@
 
 #include "compiler/nir/nir.h"
 #include "asahi/lib/agx_chip.h"
+#include "asahi/lib/agx_ioto_load_core.h"
 #include "agx3_fltnorm_core.h"
 #include "util/shader_stats.h"
 #include "util/u_dynarray.h"
@@ -172,6 +173,10 @@ struct agx_shader_info {
    uint16_t agx3_preamble_staging_halfs;
    bool agx3_preamble_staging_known;
 
+   /* Live uniform inputs after optimization, lowering, and register allocation.
+    * Retained separately from resource sizes and hardware entry policy. */
+   struct agx_ioto_cprog_inputs agx3_preamble_inputs;
+
    /* Output mask set during driver lowering */
    uint64_t outputs;
 
@@ -216,6 +221,7 @@ struct agx_precompiled_kernel_info {
    uint16_t agx3_staging_halfs;
    bool agx3_preamble_staging_known;
    uint16_t agx3_preamble_staging_halfs;
+   struct agx_ioto_cprog_inputs agx3_preamble_inputs;
 };
 
 static inline struct agx_precompiled_kernel_info
@@ -245,6 +251,7 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .agx3_staging_halfs = info->agx3_staging_halfs,
       .agx3_preamble_staging_known = info->agx3_preamble_staging_known,
       .agx3_preamble_staging_halfs = info->agx3_preamble_staging_halfs,
+      .agx3_preamble_inputs = info->agx3_preamble_inputs,
    };
 }
 

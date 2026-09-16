@@ -8,6 +8,56 @@
 #include <limits.h>
 #include <string.h>
 
+static unsigned
+cprog_popcount(uint64_t bits)
+{
+   unsigned count = 0;
+   while (bits) {
+      bits &= bits - 1;
+      ++count;
+   }
+   return count;
+}
+
+bool
+agx_ioto_cprog_input_offset(enum agx_chip chip,
+                            const struct agx_ioto_cprog_inputs *inputs,
+                            uint16_t source_half, uint16_t *offset_bytes)
+{
+   if (chip != AGX_CHIP_G17P || inputs == NULL || !inputs->known ||
+       offset_bytes == NULL || source_half >= AGX_IOTO_CPROG_UNIFORM_HALFS)
+      return false;
+
+   const unsigned word = source_half / 64, bit = source_half % 64;
+   if (!(inputs->uniform_halfs[word] & (UINT64_C(1) << bit)))
+      return false;
+
+   unsigned preceding = 0;
+   for (unsigned i = 0; i < word; ++i)
+      preceding += cprog_popcount(inputs->uniform_halfs[i]);
+   preceding += cprog_popcount(inputs->uniform_halfs[word] &
+                               ((UINT64_C(1) << bit) - 1));
+   *offset_bytes = 2 * preceding;
+   return true;
+}
+
+bool
+agx_ioto_cprog_input_frame(enum agx_chip chip,
+                           const struct agx_ioto_cprog_inputs *inputs,
+                           uint16_t *input_halfs, uint16_t *frame_bytes)
+{
+   if (chip != AGX_CHIP_G17P || inputs == NULL || !inputs->known ||
+       input_halfs == NULL || frame_bytes == NULL || input_halfs == frame_bytes)
+      return false;
+
+   unsigned count = 0;
+   for (unsigned i = 0; i < AGX_IOTO_CPROG_UNIFORM_WORDS; ++i)
+      count += cprog_popcount(inputs->uniform_halfs[i]);
+   *input_halfs = count;
+   *frame_bytes = count ? (16u + 2u * count + 15u) & ~15u : 0;
+   return true;
+}
+
 static uint16_t
 load_u16(const uint8_t *bytes)
 {

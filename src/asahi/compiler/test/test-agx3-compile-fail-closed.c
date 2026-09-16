@@ -1101,6 +1101,11 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable,
           * need temporary registers but no IPR staging; a known zero must
           * remain distinct from missing metadata and from the GPR count. */
          valid &= info->agx3_preamble_staging_halfs == 0;
+         valid &= info->agx3_preamble_inputs.known == enable &&
+                  info->agx3_preamble_inputs.uniform_halfs[0] ==
+                     (enable ? UINT64_C(0xf) : 0);
+         for (unsigned w = 1; w < AGX_IOTO_CPROG_UNIFORM_WORDS; ++w)
+            valid &= info->agx3_preamble_inputs.uniform_halfs[w] == 0;
       } else {
          valid &= !info->agx3_preamble_staging_known &&
                   info->agx3_preamble_staging_halfs == 0;
@@ -1132,7 +1137,12 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable,
                  compact.agx3_preamble_staging_halfs ==
                     info->agx3_preamble_staging_halfs &&
                  compact.agx3_preamble_staging_known ==
-                    info->agx3_preamble_staging_known;
+                    info->agx3_preamble_staging_known &&
+                 compact.agx3_preamble_inputs.known ==
+                    info->agx3_preamble_inputs.known &&
+                 memcmp(compact.agx3_preamble_inputs.uniform_halfs,
+                        info->agx3_preamble_inputs.uniform_halfs,
+                        sizeof(info->agx3_preamble_inputs.uniform_halfs)) == 0;
       }
    }
    if (supported && (uniform_loads || !valid)) {
@@ -1158,6 +1168,8 @@ enum preamble_input_test {
    PREAMBLE_UNIFORM_INPUT,
    PREAMBLE_ENTRY_GPR,
    MAIN_ENTRY_GPR,
+   PREAMBLE_SPARSE_UNIFORMS,
+   PREAMBLE_CONSTANT_ONLY,
 };
 
 static bool
@@ -1182,6 +1194,21 @@ check_preamble_entry_gpr(enum agx_isa_encoding encoding,
       /* Software vertex invocation data arrives in a fixed GPR. It is not
        * a draw/dispatch-uniform input and must not be used by a preamble. */
       value = nir_load_vertex_id_zero_base(&p);
+   } else if (input == PREAMBLE_CONSTANT_ONLY) {
+      value = nir_imm_int(&p, 47);
+      /* Dead input references must not survive into the input bitmap. */
+      nir_load_preamble(&p, 1, 64, .base = 196);
+   } else if (input == PREAMBLE_SPARSE_UNIFORMS) {
+      nir_def *a = nir_load_global_constant(
+         &p, 1, 32, nir_load_preamble(&p, 1, 64, .base = 8),
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+      nir_def *b = nir_load_global_constant(
+         &p, 1, 32, nir_load_preamble(&p, 1, 64, .base = 508),
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+      value = nir_ixor(&p, a, b);
+      value = nir_ixor(&p, value, nir_load_preamble(&p, 1, 32, .base = 64));
+      value = nir_ixor(&p, value, nir_u2u32(&p, nir_load_preamble(&p, 1, 16, .base = 127)));
+      nir_load_preamble(&p, 1, 64, .base = 196);
    } else {
       value = nir_load_global_constant(
          &p, 1, 32, nir_load_preamble(&p, 1, 64, .base = 0),
@@ -1198,10 +1225,30 @@ check_preamble_entry_gpr(enum agx_isa_encoding encoding,
    key.has_scratch = true;
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
-   const bool valid = input == PREAMBLE_ENTRY_GPR
+   bool valid = input == PREAMBLE_ENTRY_GPR
                          ? !compiled && !part.binary &&
                               !part.info.has_preamble && !part.info.binary_size
                          : compiled && part.binary && part.info.has_preamble;
+   if (compiled && valid) {
+      struct agx_ioto_cprog_inputs expected = {0};
+      if (encoding != AGX_ISA_ENCODING_AGX2) {
+         expected.known = true;
+         if (input == PREAMBLE_SPARSE_UNIFORMS) {
+            expected.uniform_halfs[0] = 0xf00;
+            expected.uniform_halfs[1] = UINT64_C(0x8000000000000003);
+            expected.uniform_halfs[7] = UINT64_C(0xf000000000000000);
+         } else if (input != PREAMBLE_CONSTANT_ONLY) {
+            expected.uniform_halfs[0] = 0xf;
+         }
+      }
+      const struct agx_precompiled_kernel_info compact = agx_compact_kernel_info(&part.info);
+      valid &= part.info.agx3_preamble_inputs.known == expected.known &&
+               compact.agx3_preamble_inputs.known == expected.known &&
+               memcmp(part.info.agx3_preamble_inputs.uniform_halfs, expected.uniform_halfs,
+                      sizeof(expected.uniform_halfs)) == 0 &&
+               memcmp(compact.agx3_preamble_inputs.uniform_halfs, expected.uniform_halfs,
+                      sizeof(expected.uniform_halfs)) == 0;
+   }
    fprintf(stderr, "preamble input encoding=%u mode=%u compiled=%u valid=%u\n",
            encoding, input, compiled, valid);
    free(part.binary);
@@ -2456,7 +2503,7 @@ main(int argc, char **argv)
            !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true, 32)))
          return 1;
       if (encodings[i] == AGX_ISA_ENCODING_AGX3B) {
-         for (unsigned input = PREAMBLE_UNIFORM_INPUT; input <= MAIN_ENTRY_GPR;
+         for (unsigned input = PREAMBLE_UNIFORM_INPUT; input <= PREAMBLE_CONSTANT_ONLY;
               ++input) {
             if (!check_preamble_entry_gpr(encodings[i], input) ||
                 !check_preamble_entry_gpr(AGX_ISA_ENCODING_AGX2, input))
