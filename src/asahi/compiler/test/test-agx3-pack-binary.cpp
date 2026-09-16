@@ -10909,6 +10909,53 @@ TEST_F(AGX3PackBinary, G17PUniformHalfMoveUsesNativeCopy)
    }
 }
 
+/*
+ * The same materialized move at 32 bits, with the destination register
+ * allocation actually gave it in a ray-query shader.
+ *
+ * Every dEQP-VK.ray_query case was refused on G17P with
+ *
+ *   agx3_pack_binary.c:11687: no grounded AGX3 encoding for bitop
+ *     [d32:reg134 s0=32:uni12 s1=16:imm#0 ... chan=1 mask=0x0 fmt=0 shift=0]
+ *
+ * because the compact four-byte `copy` names its destination in a seven-bit
+ * field and truncates at half 127, while these shaders' pressure put the
+ * destinations at halves 134-154. Apple's compiler encodes exactly those
+ * destinations in the ten-byte ep1 -- see the metal-nt witnesses quoted in
+ * agx3_copy_core.c -- so the fix is the encoding point, not a restriction on
+ * where the value may live.
+ */
+TEST_F(AGX3PackBinary, G17PUniformWordMoveReachesHighDestinations)
+{
+   for (unsigned dest : {2u, 126u, 128u, 134u, 154u, 254u}) {
+      for (unsigned uniform : {8u, 12u, 18u}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         agx_bitop_to(b, agx_register(dest, AGX_SIZE_32),
+                      agx_uniform(uniform, AGX_SIZE_32), agx_zero(),
+                      AGX3_SEL_TT_MOV);
+         agx_stop(b);
+
+         uint8_t bytes[AGX3_COPY_MAX_LENGTH], len = 0;
+         std::vector<uint8_t> want;
+         ASSERT_TRUE(agx3_copy_encode_uniform_to_reg32(
+            AGX_ISA_ENCODING_AGX3B, dest, uniform, bytes, &len))
+            << "dest half=" << dest << " uniform=" << uniform;
+         EXPECT_EQ(len, dest < AGX3_COPY_REG16_DEST_HALVES ? 4u : 10u)
+            << "dest half=" << dest;
+         append(want, bytes, len);
+         struct agx3_encoded_end end;
+         ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+         append(want, end.bytes, end.length);
+
+         std::vector<uint8_t> got = pack(b);
+         EXPECT_FALSE(got.empty())
+            << "refused dest half=" << dest << " uniform=" << uniform;
+         EXPECT_EQ(got, want)
+            << "dest half=" << dest << " uniform=" << uniform;
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PPaddedUniformHalfStoreUsesNativeDwordCopy)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

@@ -38,9 +38,12 @@ extern "C" {
 /* Apple's ordinary `copy` is four bytes; its extended ep1 record is ten. */
 #define AGX3_COPY_MAX_LENGTH 10u
 
-/* The 16-bit COPY destination field is seven bits wide, so a half copy can
- * only name a destination below this half index.  Register allocation needs
- * the same number to know when a half victim could become unencodable. */
+/* The compact COPY's destination field (f2) is seven bits wide at EVERY
+ * width, so no four-byte copy can name a destination at or above this half
+ * index -- the 16-bit forms refuse there, and the 32-bit uniform form moves
+ * to the ten-byte ep1.  Register allocation needs the same number to know
+ * when a half victim could become unencodable.  The SOURCE fields are not
+ * narrow this way: Apple's own ep0 copies carry sources well past it. */
 #define AGX3_COPY_REG16_DEST_HALVES 128u
 
 /*
@@ -48,6 +51,12 @@ extern "C" {
  * units, the unit agx_index.value already carries.  Returns false -- writing
  * nothing -- for an unknown encoding, a misaligned or out-of-range index, or
  * any value the composer refuses.
+ *
+ * Only the DESTINATION is narrow in the compact four-byte point: it lives in
+ * a seven-bit f2 and truncates at half 127, while the uniform source spans
+ * the whole 512-half file there. Destinations at or above half 128 move to
+ * the ten-byte ep1, exactly where Apple's own compiler moves them; see the
+ * G17P witnesses in agx3_copy_core.c.
  */
 /*
  * Encode `copy dest16, src16` -- a 16-bit register-to-register move. Mesa
