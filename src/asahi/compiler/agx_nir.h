@@ -58,6 +58,8 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 /* G17P appends one native texture-heap index after the 64-byte texture/PBE
  * storage descriptor pair. Other generations retain their existing ABI. */
 #define AGX_G17P_STORAGE_HEAP_INDEX_OFFSET 64
+
+bool agx_nir_lower_g17p_bindless_storage(struct nir_shader *s);
 /* G17P storage descriptors reserve the following eight bytes for the two
  * texture-heap indices.  Image atomics keep their software address metadata
  * in a separate packed word after those indices, 40 bytes past the native PBE

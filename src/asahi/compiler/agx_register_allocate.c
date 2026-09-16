@@ -1811,7 +1811,7 @@ agx_ra(agx_context *ctx)
        * "must have remat something").
        */
       const unsigned remat_slack =
-         4 + MAX2(2, agx_reserved_register_count(ctx));
+         4 + MAX2(2, agx_reserved_registers(ctx));
       if ((effective_demand_remat + remat_slack) < effective_demand) {
          unsigned l = agx_round_registers(
             align(agx_round_registers(effective_demand_remat + remat_slack), 16));

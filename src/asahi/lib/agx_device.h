@@ -511,6 +511,13 @@ unsigned agx_get_num_cores(const struct agx_device *dev);
 
 struct agx_device_key agx_gather_device_key(struct agx_device *dev);
 
+/* Native HAL200 graphics recording shared by G16G and G17P. */
+static inline bool
+agx_native_graphics(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P;
+}
+
 struct agx_va *agx_va_alloc(struct agx_device *dev, uint64_t size_B,
                             uint64_t align_B, enum agx_va_flags flags,
                             uint64_t fixed_va);

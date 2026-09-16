@@ -736,7 +736,6 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       SR(AGX_SR_IS_ACTIVE_THREAD, 2, AGX3_SR_W16);
       SR(AGX_SR_BACKFACING, 41, AGX3_SR_W16);
       SR(AGX_SR_BACKGROUND_LAYER_ID, 12, AGX3_SR_W16);
-      SR(AGX_SR_RENDER_TARGET_LAYER, 12, AGX3_SR_W16);
       /* Apple's uniform-address atomic election reads the active-thread
        * index (SR 34) and count (SR 36) of the SIMD-group, and quad_is_first
        * reads SR 33, all into half registers in the short form, also after

@@ -3961,15 +3961,6 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          agx_mov_to(&b, wide, I->src[0]);
          I->src[0] = wide;
       }
-      if (I->op == AGX_OPCODE_PACK_LOD_OFFSET_AGX3 &&
-          I->src[0].type == AGX_INDEX_IMMEDIATE) {
-         /* Copyprop folds the half LOD back to a raw immediate. The native
-          * pack reads a half register, so restore its bit pattern before RA. */
-         I->src[0] = agx_mov_imm(&b, 16, I->src[0].value);
-      }
-      if (I->op == AGX_OPCODE_PACK_LOD_OFFSET_AGX3 &&
-          I->src[1].type == AGX_INDEX_IMMEDIATE)
-         I->src[1] = agx_mov_imm(&b, 32, I->src[1].value);
       /* ISEL accepts a register comparator and an immediate comparator,
        * including ICMP pseudos lowered to ISEL after register allocation.
        */

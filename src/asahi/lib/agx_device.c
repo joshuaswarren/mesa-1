@@ -1769,6 +1769,7 @@ agx_gather_device_key(struct agx_device *dev)
                    dev->params.num_dies > 1;
 
    return (struct agx_device_key){
+      .chip = dev->chip,
       .encoding = agx_chip_isa_encoding(dev->chip),
       .needs_g13x_coherency = u_tristate_make(g13x_coh),
       .soft_fault = agx_has_soft_fault(dev),
