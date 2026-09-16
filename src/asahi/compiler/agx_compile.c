@@ -6523,6 +6523,21 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* RA correctness depends on DCE */
    AGX_PASS(ctx, agx_dce, true);
 
+   /* A preamble runs before the main shader and is not supplied with its
+    * per-invocation GPR inputs. Check this after DCE so a dead preload does
+    * not reject the shader, and before RA lowers PRELOAD away. Uniform
+    * sources are a separate register file and remain valid inputs. */
+   if (ctx->is_preamble) {
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_PRELOAD) {
+            if (agx_should_dump(nir, AGX_DBG_SHADERS))
+               fprintf(stderr, "Preamble requires a main-shader entry GPR\n");
+            ralloc_free(ctx);
+            return false;
+         }
+      }
+   }
+
    AGX_PASS(ctx, agx_lower_agx3_device_atomic_sources);
 
    if (agx_should_dump(nir, AGX_DBG_SHADERS))

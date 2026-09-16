@@ -1135,6 +1135,62 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable,
    return valid;
 }
 
+/* A preamble has uniform inputs, but no per-invocation entry-register ABI. */
+enum preamble_input_test {
+   PREAMBLE_UNIFORM_INPUT,
+   PREAMBLE_ENTRY_GPR,
+   MAIN_ENTRY_GPR,
+};
+
+static bool
+check_preamble_entry_gpr(enum agx_isa_encoding encoding,
+                         enum preamble_input_test input)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "preamble input ABI");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *root = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *store_value = nir_load_preamble(&b, 1, 32, .base = 4);
+   if (input == MAIN_ENTRY_GPR)
+      store_value = nir_ixor(&b, store_value, nir_load_vertex_id_zero_base(&b));
+   nir_store_global(&b, store_value, root, .align_mul = 4);
+
+   nir_builder p = nir_builder_create(nir_shader_get_preamble(b.shader));
+   p.cursor = nir_after_impl(p.impl);
+   nir_def *value;
+   if (input == PREAMBLE_ENTRY_GPR) {
+      /* Software vertex invocation data arrives in a fixed GPR. It is not
+       * a draw/dispatch-uniform input and must not be used by a preamble. */
+      value = nir_load_vertex_id_zero_base(&p);
+   } else {
+      value = nir_load_global_constant(
+         &p, 1, 32, nir_load_preamble(&p, 1, 64, .base = 0),
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+   }
+   nir_store_preamble(&p, value, .base = 4,
+                      .preamble_class = nir_preamble_class_general);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = encoding;
+   key.reserved_preamble = 8;
+   key.no_preamble = true; /* Preserve the explicit preamble without adding one. */
+   key.has_scratch = true;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = input == PREAMBLE_ENTRY_GPR
+                         ? !compiled && !part.binary &&
+                              !part.info.has_preamble && !part.info.binary_size
+                         : compiled && part.binary && part.info.has_preamble;
+   fprintf(stderr, "preamble input encoding=%u mode=%u compiled=%u valid=%u\n",
+           encoding, input, compiled, valid);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
 /*
  * hk_nir_lower_descriptors.c lower_load_constant (:66-93), reproduced so this
  * test can run the same ordering Honeykrisp does without linking libhk.
@@ -2381,6 +2437,14 @@ main(int argc, char **argv)
            !check_preamble_compute(AGX_ISA_ENCODING_AGX2, false, 32) ||
            !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true, 32)))
          return 1;
+      if (encodings[i] == AGX_ISA_ENCODING_AGX3B) {
+         for (unsigned input = PREAMBLE_UNIFORM_INPUT; input <= MAIN_ENTRY_GPR;
+              ++input) {
+            if (!check_preamble_entry_gpr(encodings[i], input) ||
+                !check_preamble_entry_gpr(AGX_ISA_ENCODING_AGX2, input))
+               return 1;
+         }
+      }
       if (!check_constant_array_ordering(encodings[i], true) ||
           !check_constant_array_ordering(encodings[i], false))
          return 1;
