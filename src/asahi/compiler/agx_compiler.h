@@ -600,6 +600,10 @@ typedef struct {
 
    /* Beginning of stack allocation used for parallel copy lowering */
    bool has_spill_pcopy_reserved;
+
+   /* The remat-only spiller had to spill a value to scratch; register
+    * allocation must finish with real spilling under the full budget. */
+   bool remat_fallback_spilled;
    unsigned spill_pcopy_base;
 
    /* Stats for shader-db */

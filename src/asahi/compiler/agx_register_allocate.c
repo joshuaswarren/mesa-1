@@ -1794,6 +1794,7 @@ agx_ra(agx_context *ctx)
    unsigned effective_demand = agx_calc_register_demand(ctx, false);
    bool spilling = (effective_demand > max_possible_regs);
    bool remat = false;
+   const unsigned full_budget = max_possible_regs;
 
    /* If we need multiple waves, see if we can rematerialize constants to save
     * waves. If we only have a single wave regardless, this is pointless.
@@ -1803,11 +1804,17 @@ agx_ra(agx_context *ctx)
 
       /* Worst-case assume we need 6 16-bit registers for constants, for a
        * four-source cmpsel where 3 sources are 32-bit constants. Rounded to
-       * ensure live-range splitting works.
+       * ensure live-range splitting works. The remat-only spiller also keeps
+       * RA's reserved low bank free (four halves on AGX3, two before), so the
+       * slack must grow with it or the remat-only pass cannot meet its budget
+       * (ssbo.phys.layout.random.8bit.nested_structs_arrays.20 asserted
+       * "must have remat something").
        */
-      if ((effective_demand_remat + 6) < effective_demand) {
+      const unsigned remat_slack =
+         4 + MAX2(2, agx_reserved_register_count(ctx));
+      if ((effective_demand_remat + remat_slack) < effective_demand) {
          unsigned l = agx_round_registers(
-            align(agx_round_registers(effective_demand_remat + 6), 16));
+            align(agx_round_registers(effective_demand_remat + remat_slack), 16));
 
          /* Only rematerialize if it actually lets us save a wave */
          if (l < agx_round_registers(effective_demand)) {
@@ -1822,6 +1829,17 @@ agx_ra(agx_context *ctx)
              "internal shaders are unspillable");
 
       agx_spill(ctx, max_possible_regs, remat);
+
+      if (remat && ctx->remat_fallback_spilled) {
+         /* The wave-saving remat-only pass could not meet its estimated
+          * budget and spilled to scratch; finish under the full budget. */
+         max_possible_regs = full_budget;
+         remat = false;
+         spilling = true;
+         agx_compute_liveness(ctx);
+         if (agx_calc_register_demand(ctx, false) > max_possible_regs)
+            agx_spill(ctx, max_possible_regs, false);
+      }
 
       /* After spilling, recalculate liveness and demand */
       agx_compute_liveness(ctx);

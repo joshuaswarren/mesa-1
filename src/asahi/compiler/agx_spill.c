@@ -308,7 +308,15 @@ static void
 insert_spill(agx_builder *b, struct spill_ctx *ctx, unsigned node)
 {
    if (!ctx->remat[node]) {
-      assert(!ctx->remat_only && "must have remat something");
+      /* The remat-only budget is an estimate; when a value that cannot be
+       * rematerialized must leave the register file, spill it to scratch and
+       * let register allocation finish with real spilling under the full
+       * budget instead of failing the compile
+       * (ssbo.phys.layout.random.8bit.nested_structs_arrays.20). */
+      if (ctx->remat_only) {
+         assert(b->shader->key->has_scratch && "remat fallback needs scratch");
+         b->shader->remat_fallback_spilled = true;
+      }
 
       agx_index idx = reconstruct_index(ctx, node);
       agx_mov_to(b, agx_index_as_mem(idx, ctx->spill_base), idx);
