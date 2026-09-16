@@ -60,6 +60,14 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
          }
 
          enum pipe_format format = view_format ? view_format : layout->format;
+
+         /* G17P stores optimal three-component images in four-component
+          * allocations. Attachment clears arrive with the logical view
+          * format, but the memory fill must use the physical format just as
+          * M1/M2's render clear does through the image view. */
+         if (view_format != PIPE_FORMAT_NONE &&
+             hk_padded_image_format(view_format) == layout->format)
+            format = layout->format;
          bool stencil = format == PIPE_FORMAT_S8_UINT;
 
          if (stencil) {
@@ -75,6 +83,7 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
 
          unsigned blocksize_B = util_format_get_blocksize(format);
          assert(util_is_power_of_two_nonzero(blocksize_B) && blocksize_B <= 16);
+         uint32_t size = ail_get_level_size_B(layout, level);
 
          /* Splat out to 128-bit */
          uint8_t *bytes = (uint8_t *)c;
@@ -85,8 +94,6 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
          uint64_t address =
             image->planes[plane].addr +
             ail_get_layer_level_B(layout, base_array_layer, level);
-
-         uint32_t size = ail_get_level_size_B(layout, level);
 
          assert((layout->layer_stride_B % 16) == 0 && "aligned");
          uint32_t layer_stride_uint4 = layout->layer_stride_B / 16;
