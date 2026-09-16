@@ -586,6 +586,28 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       unsigned rt = rt_order[i];
       int location = key->remap[rt];
 
+      /* A write-disabled attachment stores its own tile value back; blending
+       * cannot express this for pure-integer formats (nir_lower_blend skips
+       * them: dynamic_rendering.*.local_read.interaction_with_color_write_
+       * enable on r32_uint). */
+      if ((key->preserve_rt & BITFIELD_BIT(rt)) &&
+          key->rt_formats[rt] != PIPE_FORMAT_NONE) {
+         nir_io_semantics sem = {
+            .location = FRAG_RESULT_DATA0 + rt,
+            .num_slots = 1,
+            .fb_fetch_output = true,
+         };
+         b->shader->info.outputs_read |= BITFIELD64_BIT(sem.location);
+         b->shader->info.fs.uses_fbfetch_output = true;
+         nir_def *dst = nir_load_output(b, 4, 32, nir_imm_int(b, 0),
+                                        .dest_type = nir_type_float32,
+                                        .io_semantics = sem);
+         nir_store_output(b, dst, nir_imm_int(b, 0),
+                          .io_semantics.location = FRAG_RESULT_DATA0 + rt,
+                          .src_type = nir_type_float32);
+         continue;
+      }
+
       /* Negative remaps indicate the attachment isn't written. */
       if (location >= 0 && key->link.loc_written & BITFIELD_BIT(location)) {
          copy_colour(b, key, rt, location, false);

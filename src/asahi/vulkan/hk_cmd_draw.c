@@ -5430,12 +5430,15 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           * nir_lower_blend always blends, so use a default blend state when
           * blending is disabled at an API level.
           */
-         if (dev->dev.chip == AGX_CHIP_G17P && !write_enable) {
+         if (agx_native_graphics(&dev->dev) && !write_enable) {
+            /* The epilog reloads and stores the tile value itself, which
+             * unlike a ZERO/ONE blend also covers pure-integer formats. */
+            key.epilog.preserve_rt |= BITFIELD_BIT(i);
             key.epilog.blend.rt[i] = (struct agx_blend_rt_key){
                .colormask = BITFIELD_MASK(4),
                .mode = agx_pack_blend_standard(
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE,
-                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ZERO, PIPE_BLENDFACTOR_ONE),
+                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
+                  PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO),
             };
          } else if (!dyn->cb.attachments[i].blend_enable) {
             key.epilog.blend.rt[i] = (struct agx_blend_rt_key){

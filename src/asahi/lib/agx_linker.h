@@ -331,6 +331,11 @@ struct agx_fs_epilog_key {
     * pointers occupy that standard range, so a linked G17P epilog may place
     * the constants after the main shader's uniform footprint instead. */
    uint16_t blend_constant_base;
+
+   /* Render targets whose tile value must be stored back unchanged (colour
+    * write disabled while raster coverage still makes the tile nonempty).
+    * Independent of blending, so it also holds for pure-integer formats. */
+   uint8_t preserve_rt;
 };
 
 /* Apply framebuffer rules which are properties of the hardware generation,
