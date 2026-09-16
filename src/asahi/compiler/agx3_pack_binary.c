@@ -3808,6 +3808,9 @@ agx3_emit_simd_broadcast(struct util_dynarray *emission,
          .lane = I->src[1].value,
          .wait_mask = wait_mask,
          .dest_hint = I->dest[0].cache,
+         /* Every other shuffle site publishes this; leaving it out here left
+          * the field defaulted to "final read" on EVERY immediate-lane
+          * broadcast, and the hardware then destroyed the source register. */
          .src_live = !I->src[0].discard,
       };
       uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
@@ -5225,6 +5228,16 @@ agx3_is_g17p_float2_position_vs(agx_context *ctx,
  * excluded that native-shaped stream even though no instruction crosses a
  * writeout.
  */
+/* The staging address a user output's COPY writes and its UVSW reads. Apple's
+ * half-2k scheme holds for every output it can address; beyond that the
+ * addresses rotate, which the drained batch boundary makes safe. See
+ * AGX3_G17P_STAGING_OUTPUTS. */
+static uint16_t
+agx3_g17p_output_staging_half(unsigned output)
+{
+   return (uint16_t)(2 * (output % AGX3_G17P_STAGING_OUTPUTS));
+}
+
 static unsigned
 agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
 {
@@ -5236,7 +5249,7 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
    agx_foreach_block(ctx, block)
       output_block = block;
    bool outputs[AGX3_MAX_VERTEX_OUTPUTS] = {false};
-   unsigned output_count = 0, maximum_output = 0;
+   unsigned output_count = 0, maximum_output = 0, minimum_output = UINT_MAX;
    bool stopped = false;
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block(block, I) {
@@ -5265,6 +5278,7 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             outputs[I->src[0].value] = true;
             output_count++;
             maximum_output = MAX2(maximum_output, I->src[0].value);
+            minimum_output = MIN2(minimum_output, I->src[0].value);
             break;
          case AGX_OPCODE_GET_SR:
             /* A system-value read is a pure producer, validated by the SR
@@ -5285,10 +5299,12 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
          }
       }
    }
-   const bool dense_wide = output_count >= 5 &&
-                           maximum_output + 1 == output_count;
+   const bool grounded_base =
+      minimum_output == 0 || minimum_output == AGX3_UVS_POSITION_ENTRIES;
+   const bool dense_wide = output_count >= 5 && grounded_base &&
+      maximum_output + 1 - minimum_output == output_count;
    const bool sparse_high = ctx->key->g17p_sparse_vertex_outputs &&
-                            output_count > 0 && maximum_output >= 4;
+      output_count > 0 && maximum_output >= 4;
    return stopped && (dense_wide || sparse_high) ? output_count : 0;
 }
 
@@ -8205,7 +8221,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                (g17p_position_protocol || g17p_user_output_protocol)
                   ? I->src[0].value % nslots + 1 : next_uvs_slot;
             const uint16_t staging_half =
-               2 * (g17p_user_output_protocol ? I->src[0].value : stage_slot - 1);
+               g17p_user_output_protocol
+                  ? agx3_g17p_output_staging_half(I->src[0].value)
+                  : (uint16_t)(2 * (stage_slot - 1));
             const uint16_t staging_bit = 1u << (stage_slot - 1);
             uint16_t stage_wait;
             if (g17p_terminal_outputs) {
@@ -8251,8 +8269,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                        position < g17p_outputs_staged; ++position) {
                      const unsigned component = g17p_output_order[position];
                      uint8_t bytes[AGX3_VARY_MAX_LENGTH], len = 0;
-                     if (!agx3_vary_uvsw(enc, component * 2, component,
-                                          component % nslots + 1, true,
+                     if (!agx3_vary_uvsw(enc,
+                                          agx3_g17p_output_staging_half(component),
+                                          component, component % nslots + 1, true,
                                           1u << (component % nslots), bytes, &len) ||
                          !agx3_append(emission, bytes, len))
                         AGX3_REFUSE(I);
@@ -8285,10 +8304,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             /* Apple's argument-buffer vertex read publishes uint2 coordinates
              * before SMP.EP4. G17P indexed imageLoad uses the same read-only
              * texture heap and coordinate ABI as texelFetch: its GPR pair is
-             * not a staging operand. Keep legacy immediate reads unchanged. */
+             * not a staging operand. Legacy immediate IMAGE_LOAD reads keep
+             * the unstaged form.
+             *
+             * A vertex texel fetch does not. The exception used to cover
+             * TEXTURE_LOAD too -- staging only when the texture operand is a
+             * run-time index -- and on AGX3B that is wrong: the unstaged form
+             * returns only the x and y components. Whether the shader asks
+             * for the whole vec4 or for .z alone, everything past y reads
+             * back as zero, while the identical fetch in a fragment shader
+             * (always staged) and a vertex textureLod are both correct.
+             * src/asahi/gl-tests/test-g17p-gl-vertex-flat-varying.c is that
+             * measurement, and KHR-GL33.texture_swizzle's 363 failures are
+             * all this one shape: the CTS samples in the vertex stage and
+             * passes the texel through a flat varying. */
+            const bool vertex_fetch_stages_coordinates =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_VERTEX &&
+               I->op == AGX_OPCODE_TEXTURE_LOAD;
             const bool staged =
                (enc == AGX_ISA_ENCODING_AGX3B &&
                 I->dim == AGX_DIM_2D_MS_ARRAY) ||
+               vertex_fetch_stages_coordinates ||
                ((I->op == AGX_OPCODE_TEXTURE_LOAD ||
                  enc == AGX_ISA_ENCODING_AGX3B) &&
                 ctx->stage == MESA_SHADER_VERTEX &&
@@ -10662,7 +10699,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              (I->src[0].size == AGX_SIZE_16 || I->src[0].size == AGX_SIZE_32) &&
              (I->src[1].size == AGX_SIZE_16 || I->src[1].size == AGX_SIZE_32) &&
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 255 &&
-             I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255) {
+             I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 255 &&
+             /* An ABS source takes the fourteen-byte ep28..35 endpoint, whose
+              * encoder here (agx3_alu_fcmp_select_imm_width_abs) carries only
+              * the two abs bits and has no argument for a negate, so this
+              * specialization cannot spell a comparison that wants one of
+              * each. The endpoint itself is not the limit: it holds the same
+              * comparator-1 negate as the ten-byte form, and the general
+              * compare-select below deposits f47, f64 and f65 independently
+              * and encodes the pair byte-for-byte as Apple does (see the
+              * witnessed minimal pair in the Hyprland float-select test). So
+              * decline the shape here and let it fall through, the way every
+              * other shape this block cannot spell already does. Refusing
+              * dropped the whole draw instead: `ball(feq(cf, 0))` from the
+              * cull-distance emulation folds to `|a| == -(b)` and reaches
+              * exactly this, which made every single-cull-distance fragment
+              * program unlinkable. */
+             !((I->src[0].abs || I->src[1].abs) &&
+               (I->src[0].neg || I->src[1].neg))) {
             /* A negated comparison source. f65 names the SECOND comparator
              * and only that one; `-a > b` is Apple's own `b < -a`, so the
              * encoder swaps the operands and reverses the relation instead of

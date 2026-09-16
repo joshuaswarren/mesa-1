@@ -291,6 +291,71 @@ test_g17p_native_compute_join(void)
    CHECK(bad_indirect_sink.length == 0 &&
          memcmp(indirect_bytes, indirect_before, sizeof(indirect_bytes)) == 0);
 
+   /* The standalone launch is byte-for-byte the tail of the coupled pair --
+    * the same six words plus the same barrier -- so GL, whose grid producer
+    * is already its own dispatch, gets the identical record without a helper
+    * prefix it has no use for. */
+   const uint8_t *expected_standalone =
+      expected_indirect + sizeof(expected_indirect) -
+      AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE;
+   uint8_t standalone_bytes[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE + 2];
+   memset(standalone_bytes, 0x4d, sizeof(standalone_bytes));
+   struct agx3_compute_dispatch_sink standalone_sink = {
+      .data = standalone_bytes,
+      .capacity = sizeof(standalone_bytes),
+      .length = 1,
+   };
+   CHECK(agx3_g17p_native_indirect_compute_launch_append(
+      &indirect_program, indirect.geometry_va, 0, &standalone_sink));
+   CHECK(standalone_sink.length == 1 + AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE);
+   CHECK(standalone_bytes[0] == 0x4d &&
+         standalone_bytes[standalone_sink.length] == 0x4d);
+   CHECK(memcmp(standalone_bytes + 1, expected_standalone,
+                AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE) == 0);
+
+   /* A caller-selected barrier reaches only the trailing barrier word. */
+   uint8_t strong_standalone[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE];
+   struct agx3_compute_dispatch_sink strong_standalone_sink = {
+      .data = strong_standalone,
+      .capacity = sizeof(strong_standalone),
+   };
+   CHECK(agx3_g17p_native_indirect_compute_launch_append(
+      &indirect_program, indirect.geometry_va, 5, &strong_standalone_sink));
+   CHECK(strong_standalone_sink.length ==
+         AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE);
+   CHECK(memcmp(strong_standalone, expected_standalone,
+                AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE) == 0);
+   CHECK(memcmp(strong_standalone + AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE,
+                expected_standalone + AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE, 4) != 0);
+
+   /* Every refusal leaves the sink untouched: a misaligned or out-of-range
+    * geometry address, a zero one, and a sink one byte short. */
+   static const uint64_t bad_geometry[] = {
+      0, UINT64_C(0x100001014c2), UINT64_C(1) << 48,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(bad_geometry); ++i) {
+      uint8_t rejected[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE];
+      memset(rejected, 0x4d, sizeof(rejected));
+      struct agx3_compute_dispatch_sink rejected_sink = {
+         .data = rejected,
+         .capacity = sizeof(rejected),
+      };
+      CHECK(!agx3_g17p_native_indirect_compute_launch_append(
+         &indirect_program, bad_geometry[i], 0, &rejected_sink));
+      CHECK(rejected_sink.length == 0);
+      for (unsigned b = 0; b < sizeof(rejected); ++b)
+         CHECK(rejected[b] == 0x4d);
+   }
+
+   uint8_t tight[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE - 1];
+   struct agx3_compute_dispatch_sink tight_sink = {
+      .data = tight,
+      .capacity = sizeof(tight),
+   };
+   CHECK(!agx3_g17p_native_indirect_compute_launch_append(
+      &indirect_program, indirect.geometry_va, 0, &tight_sink));
+   CHECK(tight_sink.length == 0);
+
    uint8_t before[sizeof(dispatch)];
    memcpy(before, dispatch, sizeof(dispatch));
    struct agx3_compute_dispatch_sink failed = {

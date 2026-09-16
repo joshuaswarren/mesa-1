@@ -16,6 +16,7 @@
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx3_code_container_core.h"
+#include "asahi/lib/agx3_g17p_grid_helper_core.h"
 #include "asahi/lib/agx_g17p_draw_state_upload.h"
 #include "asahi/lib/agx_helpers.h"
 #include "asahi/lib/agx_ppp.h"
@@ -4067,15 +4068,23 @@ agx_g17p_append_compute(struct agx_batch *batch,
                         size_t range_count, unsigned variable_shared_mem)
 {
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   /* Mode 2 reads the whole grid -- three global thread counts then three
+    * local sizes -- from six u32 in GPU memory, so the workgroup this call
+    * was handed is not the one that launches and must not be validated. */
+   const bool indirect_local = grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL;
    if (dev->chip != AGX_CHIP_G17P || !info || !binary ||
-       grid.mode != AGX_CDM_MODE_DIRECT || !info->main_size || !info->nr_gprs ||
+       (grid.mode != AGX_CDM_MODE_DIRECT && !indirect_local) ||
+       (indirect_local &&
+        (!grid.ptr || grid.ptr >= (UINT64_C(1) << 48) || (grid.ptr & 3))) ||
+       !info->main_size || !info->nr_gprs ||
        info->has_preamble || info->preamble_scratch_size || info->scratch_size ||
        !info->agx3_staging_known ||
        (info->main_offset != 0 &&
         info->main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
        info->main_offset > info->binary_size ||
        info->main_size > info->binary_size - info->main_offset ||
-       (range_count && !ranges) || !wg.x || !wg.y || !wg.z ||
+       (range_count && !ranges) ||
+       (!indirect_local && (!wg.x || !wg.y || !wg.z)) ||
        (linked && (!linked->bo || !linked->bo->va || !linked->size ||
                    !linked->nr_gprs || !linked->g17p_compiler_d_valid ||
                    linked->scratch_size))) {
@@ -4159,7 +4168,13 @@ agx_g17p_append_compute(struct agx_batch *batch,
       .threadgroup_memory_size_B =
          shared ? MAX2(256u, ALIGN_POT((uint32_t)shared, 64u)) : 0,
       .launch_sources = launch_sources,
-      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+      /* The program announces how it will be launched.  An indirectly
+       * launched one takes its dimensions from the geometry block; a record
+       * that selects indirect mode while its program still announces
+       * DIRECT_ADD3 runs no invocations at all.  hk_cmd_dispatch.c picks the
+       * kind the same way. */
+      .ldshdr_f1 = indirect_local ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1
+                                  : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
    };
    struct agx3_g17p_compute_program native;
    if (!agx3_g17p_compute_program_generate(dev->chip, &desc, &native))
@@ -4172,21 +4187,29 @@ agx_g17p_append_compute(struct agx_batch *batch,
                               native.length))
       return false;
 
-   const struct agx3_compute_direct_grid direct = {
-      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
-      .size = {grid.count[0], grid.count[1], grid.count[2]},
-      .local_size = {wg.x, wg.y, wg.z},
-      .dimensions = grid.count[2] != 1 || wg.z != 1
-                       ? 3
-                    : grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
-   };
    struct agx3_compute_dispatch_sink sink = {
       .data = batch->cdm.current,
       .capacity = batch->cdm.end - batch->cdm.current,
    };
-   if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
-                                                  &sink))
-      return false;
+   if (indirect_local) {
+      /* The kernel that writes this grid is already its own dispatch earlier
+       * in the stream, behind a full barrier, so the launch stands alone. */
+      if (!agx3_g17p_native_indirect_compute_launch_append(&native.launch,
+                                                           grid.ptr, 0, &sink))
+         return false;
+   } else {
+      const struct agx3_compute_direct_grid direct = {
+         .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+         .size = {grid.count[0], grid.count[1], grid.count[2]},
+         .local_size = {wg.x, wg.y, wg.z},
+         .dimensions = grid.count[2] != 1 || wg.z != 1
+                          ? 3
+                       : grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
+      };
+      if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
+                                                     &sink))
+         return false;
+   }
    batch->cdm.current += sink.length;
    if (constant_bo)
       agx_batch_add_bo(batch, constant_bo);
@@ -4226,7 +4249,10 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
 
    if (dev->chip == AGX_CHIP_G17P) {
       if (!cs || !cs->bo || !cs->info.main_size || !cs->info.nr_gprs ||
-          cs->info.nr_preamble_gprs || cs->info.rodata.size_16 ||
+          cs->info.nr_preamble_gprs ||
+          (cs->info.rodata.size_16 && !cs->rodata_offset) ||
+          (cs->info.printf_uniform &&
+           cs->info.printf_uniform < AGX_ABI_AGX3_PRECOMP_ARG_HALFS) ||
           !cs->info.agx3_staging_known || !args || !arg_size ||
           arg_size > UINT16_MAX * 2u ||
           cs->entry_offset > UINT64_MAX - cs->ptr ||
@@ -4238,13 +4264,46 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
       if (!grid.count[0] || !grid.count[1] || !grid.count[2])
          return;
 
-      const uint64_t uploaded_data =
-         agx_pool_upload_aligned(&batch->pool, args, arg_size, 4);
+      /* Match the precompiler's rebased arguments and optional runtime printf
+       * address. Pad packed argument structs for Ioto's whole-dword loads. */
+      const size_t printf_offset = cs->info.printf_uniform
+         ? (size_t)(cs->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
+         : 0;
+      const size_t upload_size = ALIGN_POT(
+         cs->info.printf_uniform ? MAX2(arg_size, printf_offset + 8) : arg_size, 4);
+      struct agx_ptr uploaded = agx_pool_alloc_aligned(&batch->pool, upload_size, 4);
+      if (!uploaded.cpu || upload_size / 2 > UINT16_MAX)
+         agx_native_descriptor_rejected(dev, "precompiled argument upload");
+      memcpy(uploaded.cpu, args, arg_size);
+      memset((uint8_t *)uploaded.cpu + arg_size, 0, upload_size - arg_size);
+      if (cs->info.printf_uniform)
+         memcpy((uint8_t *)uploaded.cpu + printf_offset,
+                &dev->printf_buffer_address, sizeof(uint64_t));
+      const uint64_t uploaded_data = uploaded.gpu;
+      /* Above the halves the AGX3 hardware ABI owns, matching where the
+       * precompiler now places these loads. */
       const struct agx3_ioto_uniform_range range = {
-         .start_halfs = 0,
-         .size_halfs = DIV_ROUND_UP(arg_size, 2),
+         .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
+         .size_halfs = upload_size / 2,
          .address = uploaded_data,
       };
+
+      /* Constants the compiler promoted out of the code are published as a
+       * second range, exactly as the legacy USC path maps them with
+       * agx_usc_immediates(). Their base is already in this ABI's numbering:
+       * agx_opt_promote_constants() allocates above push_count, which starts
+       * at the reserved preamble. Without this the kernel reads whatever the
+       * uniform file happened to hold -- which is why the launch-shape check
+       * refused a kernel carrying rodata rather than dispatching one. */
+      struct agx3_ioto_uniform_range ranges[2] = {range};
+      unsigned range_count = 1;
+      if (cs->info.rodata.size_16) {
+         ranges[range_count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = cs->info.rodata.base_uniform,
+            .size_halfs = cs->info.rodata.size_16,
+            .address = cs->ptr + cs->rodata_offset,
+         };
+      }
       struct agx3_cdm_direct_template_sources launch_sources;
       if (!uploaded_data ||
           !agx3_cdm_direct_template_sources_compute(false, false, false,
@@ -4258,13 +4317,22 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
       const struct agx3_g17p_compute_program_desc desc = {
          .program_va = native_program.gpu,
          .shader_va = cs->ptr + cs->entry_offset,
-         .uniform_ranges = &range,
-         .uniform_range_count = 1,
+         .uniform_ranges = ranges,
+         .uniform_range_count = range_count,
          .shader_binary_size = cs->info.main_size,
          .nr_gprs = cs->info.nr_gprs,
          .compiler_d_valid = cs->info.agx3_staging_known,
          .compiler_d = (uint32_t)cs->info.agx3_staging_halfs * 2,
          .launch_sources = launch_sources,
+         /* Precompiled kernels use threadgroup memory too -- the restart
+          * unroll and the prefix sums keep their cross-subgroup scratch
+          * there -- and the API compute path above declares it while this
+          * one did not.  Leaving it zero does not fail the dispatch, so the
+          * shortfall is silent.  Same rounding as that path. */
+         .threadgroup_memory_size_B =
+            cs->info.local_size
+               ? MAX2(256u, ALIGN_POT(cs->info.local_size, 64u))
+               : 0,
          .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
       };
       struct agx3_g17p_compute_program native;
@@ -7744,7 +7812,21 @@ agx_launch_grid(struct pipe_context *pipe, const struct pipe_grid_info *info)
       _mesa_hash_table_next_entry(uncompiled->variants, NULL)->data;
 
    struct agx_grid grid;
-   if (indirect) {
+   if (indirect && agx_device(pipe->screen)->chip == AGX_CHIP_G17P) {
+      /* G17P launches an indirect dispatch from a six-word grid -- three
+       * global thread counts then the three local sizes -- so the API's three
+       * workgroup counts are not the record the hardware reads. Expand them
+       * with the same one-invocation setup kernel the tessellator already
+       * uses for its indirect launches, and dispatch through the grounded
+       * indirect-local record rather than grounding a second launch form. */
+      uint64_t expanded =
+         agx_pool_alloc_aligned(&batch->pool, 6 * sizeof(uint32_t), 4).gpu;
+
+      libagx_setup_indirect_dispatch(batch, agx_1d(1), AGX_BARRIER_ALL,
+                                     indirect, expanded, wg.x, wg.y, wg.z);
+
+      grid = agx_grid_indirect_local(expanded);
+   } else if (indirect) {
       grid = agx_grid_indirect(indirect);
    } else {
       grid = agx_3d(0, 0, 0);

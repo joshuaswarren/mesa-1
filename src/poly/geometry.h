@@ -137,6 +137,33 @@ poly_heap_alloc_offs(global struct poly_heap *heap, uint size_B)
    return offs;
 }
 
+/* The same allocation without the printf+abort overflow report, for kernels
+ * that must also be precompiled for AGX3. That backend refuses any shader
+ * still carrying load_printf_buffer_address, because the printf buffer is
+ * process-local and baking its address into cached machine code would poison
+ * the cache, so a kernel reachable from this allocator cannot be built at all.
+ *
+ * Returns false on an exhausted heap and leaves *offs_out alone; the caller
+ * emits empty work rather than writing through an invalid address, exactly as
+ * the robust index shadow in libagx/draws.cl and the restart unroll already
+ * do. Callers that keep the abort are unaffected.
+ */
+static inline bool
+poly_heap_try_alloc_offs(global struct poly_heap *heap, uint size_B,
+                         uint *offs_out)
+{
+   size_B = align(size_B, 16);
+
+   uint offs =
+      atomic_fetch_add((volatile atomic_uint *)(&heap->bottom), size_B);
+
+   if (!poly_heap_allocation_fits(offs, size_B, heap->size))
+      return false;
+
+   *offs_out = offs;
+   return true;
+}
+
 static inline global void *
 poly_heap_alloc(global struct poly_heap *heap, uint size_B)
 {
@@ -637,20 +664,43 @@ poly_gs_setup_indirect(uint64_t index_buffer, constant uint *draw,
    uint vertex_buffer_size =
       poly_tcs_in_size(vertex_count * instance_count, vs_outputs);
 
+   /* Every allocation here is checked rather than aborting, so this setup can
+    * be precompiled for AGX3; see poly_heap_try_alloc_offs(). An exhausted
+    * heap draws nothing: the counts are zeroed and each buffer is left at the
+    * heap base, in bounds and unread. */
+   uint count_offs = 0, vertex_offs = 0, index_offs = 0;
+   bool allocated = true;
+
    if (is_prefix_summing) {
-      p->count_buffer = poly_heap_alloc(
-         heap, p->input_primitives * p->count_buffer_stride);
+      allocated &= poly_heap_try_alloc_offs(
+         heap, p->input_primitives * p->count_buffer_stride, &count_offs);
    }
 
-   vp->output_buffer = (uintptr_t)poly_heap_alloc(heap, vertex_buffer_size);
+   allocated &=
+      poly_heap_try_alloc_offs(heap, vertex_buffer_size, &vertex_offs);
+
+   if (shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
+      allocated &=
+         poly_heap_try_alloc_offs(heap, p->draw.index_count * 4, &index_offs);
+   }
+
+   if (!allocated) {
+      count_offs = vertex_offs = index_offs = 0;
+      p->draw.index_count = 0;
+      poly_vertex_params_set_draw(vp, 0, 0);
+      poly_geometry_params_set_draw(p, prim, shape, max_indices, 0, 0);
+   }
+
+   if (is_prefix_summing)
+      p->count_buffer = (global uint *)(heap->base + count_offs);
+
+   vp->output_buffer = (uintptr_t)(heap->base + vertex_offs);
 
    vp->outputs = vs_outputs;
 
    if (shape == POLY_GS_SHAPE_DYNAMIC_INDEXED) {
-      const uint32_t index_offset =
-         poly_heap_alloc_offs(heap, p->draw.index_count * 4);
-      p->draw.first_index = index_offset / 4;
-      p->output_index_buffer = (global uint *)(heap->base + index_offset);
+      p->draw.first_index = index_offs / 4;
+      p->output_index_buffer = (global uint *)(heap->base + index_offs);
    }
 }
 

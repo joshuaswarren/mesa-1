@@ -1718,9 +1718,25 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 
-   /* The long endpoint has independent absolute and negate fields. The fresh
-    * mixed_abs_neg Metal witness confirms this combination rather than
-    * forcing it through the short f65-only form. */
+   /* Mixing the negate with an absolute source IS one instruction: the
+    * fourteen-byte abs endpoint carries the same comparator-1 negate as the
+    * ten-byte one, in the same place (byte 7 bit 3). metal-nt
+    * -arch applegpu_g17p on a kernel whose two selects are warmed first, so
+    * neither row takes a wait, gives the minimal pair
+    *
+    *   (fabs(x) <  y) ? 255u : 0u   02 83 07 8b a3 ff 03 00 20 80 00 00 01 00
+    *   (fabs(x) < -y) ? 255u : 0u   12 03 1f 0b a3 ff 03 08 20 80 00 00 01 00
+    *
+    * differing in the operand block and in exactly that bit -- `01 00` is the
+    * abs mask naming comparator 0 in both.  Apple also spells `-x < fabs(y)`
+    * by exchanging the operands and reversing the relation onto the same
+    * negate (22 95 07 87 23 83 02 08 20 81 00 00 01 00), which is the
+    * normalisation agx3_alu_fcmp_select() already performs.
+    *
+    * So the byte-constant specialization above must DECLINE this shape rather
+    * than refuse it, and the general compare-select encodes it: refusing made
+    * the fragment program unlinkable, and the driver then dropped every draw
+    * that emulated a single cull distance. */
    b = builder(enc);
    a = agx_register(8, AGX_SIZE_32);
    a.abs = true;
@@ -1729,7 +1745,31 @@ TEST_F(AGX3PackBinary, HyprlandRemainingFloatSelectsMatchNativeForms)
    agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
                   agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
    agx_stop(b);
-   EXPECT_FALSE(pack(b).empty());
+   const std::vector<uint8_t> absneg = pack(b);
+
+   b = builder(enc);
+   a = agx_register(8, AGX_SIZE_32);
+   a.abs = true;
+   c = agx_register(16, AGX_SIZE_32);
+   agx_fcmpsel_to(b, agx_register(1, AGX_SIZE_16), a, c,
+                  agx_immediate(255), agx_immediate(0), AGX_FCOND_LT);
+   agx_stop(b);
+   const std::vector<uint8_t> abs_only = pack(b);
+
+   /* Both encode, on the same endpoint, and the negate is the single bit
+    * Apple's own pair moves. */
+   ASSERT_EQ(absneg.size(), abs_only.size());
+   ASSERT_GT(absneg.size(), 14u);
+   std::vector<uint8_t> expected = abs_only;
+   expected[7] |= 0x08;
+   EXPECT_EQ(absneg, expected);
+
+   /* The trailing abs mask still names comparator 0 only, and the selected
+    * byte constants are untouched -- this stayed the integer placement. */
+   EXPECT_EQ(absneg[4], 0xa3);
+   EXPECT_EQ(absneg[5], 255);
+   EXPECT_EQ(absneg[12], 0x01);
+   EXPECT_EQ(absneg[13], 0x00);
 }
 
 TEST_F(AGX3PackBinary, MinifloatSpecializationDeclinesOtherGroundedForms)
@@ -3671,6 +3711,51 @@ TEST_F(AGX3PackBinary, SimdBroadcastLastLanePreservesLivePrefix)
    }
 }
 
+/*
+ * A SIMD broadcast encodes differently depending on whether its SOURCE is read
+ * again afterwards, and getting that wrong destroys the source register on
+ * hardware. Two metal-nt -arch applegpu_g17p kernels, identical but for the
+ * final use, settle the field:
+ *
+ *   uint x = lane + 1; out[tid] = simd_broadcast(x, 31);
+ *      ... 47 04 54 00 02 00 3e 2c 04 00      source dies
+ *   uint x = lane + 1; uint b = simd_broadcast(x, 31); out[tid] = b + x;
+ *      ... 47 04 54 04 03 00 3e 2c 02 00      source stays live
+ *
+ * Byte 8 is 0x04 on the final read and 0x02 while the source lives; the
+ * operand bytes differ only because the destination register does. The packer
+ * left this defaulted to the final-read form on EVERY immediate-lane
+ * broadcast, so `subgroupBroadcast(v, 31)` -- the read that ends every
+ * workgroup scan -- wiped v. On hardware `x = lane + 1; b = broadcast(x, 31)`
+ * returned b == 32 correctly and x == 0 in all 32 lanes, which emptied the
+ * tessellation prefix sum and left isoline tessellation drawing nothing.
+ */
+TEST_F(AGX3PackBinary, SimdBroadcastSourceLivenessMatchesNative)
+{
+   for (bool live : {false, true}) {
+      uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+      const struct agx3_subgroup_shuffle_desc desc = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = 4,
+         .src = 0,
+         .lane = 31,
+         .src_live = live,
+      };
+      ASSERT_TRUE(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &desc,
+                                                bytes, &length));
+      ASSERT_EQ(length, 10u);
+      EXPECT_EQ(bytes[8], live ? 0x02 : 0x04);
+
+      /* Nothing else moves with the liveness of the source. */
+      const uint8_t head[] = {0x47, 0x04};
+      EXPECT_EQ(memcmp(bytes, head, sizeof(head)), 0);
+      EXPECT_EQ(bytes[6], 0x3e); /* f29 = lane 31 */
+      EXPECT_EQ(bytes[7], 0x2c);
+      EXPECT_EQ(bytes[9], 0x00);
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PScalarByteLoadRequiresAlignedHalf)
 {
    agx_builder *good = builder(AGX_ISA_ENCODING_AGX3B);
@@ -5386,6 +5471,38 @@ TEST_F(AGX3PackBinary, RefusesUnmappedOp)
    pack(b, /*expect_ok=*/false);
 }
 
+#define ASSERT_TRUE_VOID(x) do { if (!(x)) { ADD_FAILURE(); return; } } while (0)
+
+/* An AGX3B texel fetch stages its coordinates in every stage, so the packer
+ * emits two coordinate COPYs and then a fetch that reads the staging bank
+ * rather than the coordinate GPR. Apple's own applegpu_g17p vertex
+ * `texture2d<access::read>::read()` has exactly this shape -- two four-byte
+ * COPYs, the fetch, then PACK_SMPIR -- and a non-staged vertex fetch returns
+ * only the x and y components on hardware. AGX3C is unchanged. */
+static void
+append_staged_fetch(std::vector<uint8_t> &want, enum agx_isa_encoding enc,
+                    struct agx3_tex_fetch_desc d, uint16_t coord,
+                    unsigned coords)
+{
+   if (enc == AGX_ISA_ENCODING_AGX3B) {
+      for (unsigned i = 0; i < coords; ++i) {
+         uint8_t copy[AGX3_TEX_MAX_LENGTH];
+         uint8_t copy_len = 0;
+         ASSERT_TRUE_VOID(agx3_tex_stage_copy_hints(
+            enc, 2 * i, coord + 2 * i, 1, 0, false, false, copy, &copy_len));
+         want.insert(want.end(), copy, copy + copy_len);
+      }
+      d.coord = 0;
+      d.coord_kill = true;
+      d.wait_mask = 1u << 0;
+   }
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t length = 0;
+   ASSERT_TRUE_VOID(agx3_tex_encode_fetch(enc, &d, bytes, &length));
+   want.insert(want.end(), bytes, bytes + length);
+}
+
 TEST_F(AGX3PackBinary, TextureFetch2DLod0Immediate)
 {
    for (int e = 0; e < 2; ++e) {
@@ -5415,14 +5532,11 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod0Immediate)
          d.texture = 0;
          d.slot = 1;
          d.final = true;
-         uint8_t tb[AGX3_TEX_MAX_LENGTH];
-         uint8_t tl = 0;
-         ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, tb, &tl));
          struct agx3_encoded_end end;
          ASSERT_TRUE(agx3_pack_end(enc, &end));
 
          std::vector<uint8_t> want;
-         append(want, tb, tl);
+         append_staged_fetch(want, enc, d, 12, 2);
          append(want, end.bytes, end.length);
          EXPECT_EQ(pack(b), want);
       }
@@ -5758,14 +5872,11 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
    d.texture = 0;
    d.slot = 1;
    d.final = true;
-   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
-   uint8_t length = 0;
-   ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, bytes, &length));
    struct agx3_encoded_end end;
    ASSERT_TRUE(agx3_pack_end(enc, &end));
 
    std::vector<uint8_t> want;
-   append(want, bytes, length);
+   append_staged_fetch(want, enc, d, 12, 2);
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
 }
@@ -6667,10 +6778,6 @@ TEST_F(AGX3PackBinary, TextureFetchWaitSurvivesFallthroughBlock)
       d.mask = 15;
       d.slot = 1;
       d.final = true;
-      uint8_t tb[AGX3_TEX_MAX_LENGTH];
-      uint8_t tl = 0;
-      ASSERT_TRUE(agx3_tex_encode_fetch(enc, &d, tb, &tl));
-
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
       if (enc == AGX_ISA_ENCODING_AGX3B) {
@@ -6687,7 +6794,7 @@ TEST_F(AGX3PackBinary, TextureFetchWaitSurvivesFallthroughBlock)
       ASSERT_TRUE(agx3_pack_end(enc, &end));
 
       std::vector<uint8_t> want;
-      append(want, tb, tl);
+      append_staged_fetch(want, enc, d, 12, 2);
       append(want, ab, al);
       append(want, end.bytes, end.length);
       EXPECT_EQ(pack(b), want);
@@ -8455,8 +8562,11 @@ TEST_F(AGX3PackBinary, SixVertexOutputsRefuseUnqualifiedGraphs)
       agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
       b->shader->stage = MESA_SHADER_VERTEX;
       for (unsigned component = 0; component < 6; ++component) {
+         /* A hole at index zero is not a base the UVS layout can produce: a
+          * positionless program starts at AGX3_UVS_POSITION_ENTRIES, not at
+          * one. */
          if (mode == 0 && component == 0)
-            continue; /* Missing position but user outputs remain. */
+            continue;
          unsigned index = mode == 1 && component == 0 ? 1 : component;
          if (mode == 2 && component == 5)
             index = 6;
@@ -8474,6 +8584,49 @@ TEST_F(AGX3PackBinary, SixVertexOutputsRefuseUnqualifiedGraphs)
       agx_stop(b);
       EXPECT_TRUE(pack(b, false).empty()) << "mode=" << mode;
    }
+}
+
+/* A vertex shader that writes no gl_Position still leaves the four-entry UVS
+ * position group reserved, so its outputs are a dense run based at
+ * AGX3_UVS_POSITION_ENTRIES rather than at zero. That is the shape of
+ * KHR-GL33.transform_feedback_overflow_query_ARB's single-stream cases, whose
+ * four captured floats and point size land at UVS 4..8. */
+TEST_F(AGX3PackBinary, PositionlessVertexOutputsStageFromTheUvsPositionGroup)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned index = AGX3_UVS_POSITION_ENTRIES;
+        index < AGX3_UVS_POSITION_ENTRIES + 5; ++index)
+      agx_st_vary(b, agx_immediate(index), agx_register(0, AGX_SIZE_32));
+   agx_stop(b);
+
+   const auto bytes = pack(b);
+   ASSERT_FALSE(bytes.empty());
+
+   /* Each output keeps its own UVS index and stages at twice that index. */
+   unsigned writes = 0;
+   for (size_t at = 0; at + 8 <= bytes.size(); ) {
+      const uint8_t *p = bytes.data() + at;
+      if (p[0] != 0x57) {
+         at += (p[0] & 0xf) == 0xb && (p[2] & 7) != 1 ? 10 : 4;
+         continue;
+      }
+      const unsigned index = (p[4] >> 5) | ((p[5] & 0x1f) << 3);
+      EXPECT_EQ(index, AGX3_UVS_POSITION_ENTRIES + writes) << writes;
+      EXPECT_EQ(p[3], 2u * index) << writes;
+      ++writes;
+      at += 8;
+   }
+   EXPECT_EQ(writes, 5u);
+
+   /* A run based anywhere else is not a layout the driver emits. */
+   agx_builder *ungrounded = builder(AGX_ISA_ENCODING_AGX3B);
+   ungrounded->shader->stage = MESA_SHADER_VERTEX;
+   for (unsigned index = 5; index < 10; ++index)
+      agx_st_vary(ungrounded, agx_immediate(index),
+                  agx_register(0, AGX_SIZE_32));
+   agx_stop(ungrounded);
+   EXPECT_TRUE(pack(ungrounded, false).empty());
 }
 
 TEST_F(AGX3PackBinary, ProjectiveReciprocalMatchesNativeOperandForm)
@@ -9708,9 +9861,13 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
    b->shader->stage = MESA_SHADER_VERTEX;
 
    /* The promoted Apple vs68 witness grounds the same dense UVSW format used
-    * by the opt-in 72-output qualification shape. Exercise indices 0..71 and
-    * staging half-indices 0..142. A shared source keeps this codec test
-    * independent of the register allocator's synthetic no-spill pressure. */
+    * by the opt-in 72-output qualification shape. Exercise every UVS index the
+    * eight-bit index operand reaches. A shared source keeps this codec test
+    * independent of the register allocator's synthetic no-spill pressure.
+    *
+    * Staging addresses stop growing at AGX3_G17P_STAGING_OUTPUTS: that is the
+    * whole capacity of the separate eight-bit staging operand, and a wider
+    * program rotates through it rather than refusing. */
    for (unsigned c = 0; c < AGX3_MAX_VERTEX_OUTPUTS; ++c)
       agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
    agx_stop(b);
@@ -9718,7 +9875,7 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
    const auto bytes = pack(b);
    EXPECT_FALSE(bytes.empty());
    EXPECT_EQ(b->shader->agx3_staging_halfs,
-             2u * AGX3_MAX_VERTEX_OUTPUTS);
+             2u * AGX3_G17P_STAGING_OUTPUTS);
 
    agx_builder *too_wide = builder(enc);
    too_wide->shader->stage = MESA_SHADER_VERTEX;
@@ -9727,6 +9884,51 @@ TEST_F(AGX3PackBinary, NativeMaximumVertexOutputs)
                   agx_register(4, AGX_SIZE_32));
    agx_stop(too_wide);
    EXPECT_TRUE(pack(too_wide, false).empty());
+}
+
+/* A points geometry shader capturing the full interleaved transform-feedback
+ * width writes position (four), point size (one) and thirty-one float4 user
+ * locations: 129 outputs, one past the staging operand's capacity. UVSW
+ * addresses its UVS index and its staging half through two independent
+ * eight-bit operands, so the index is not what runs out; the outputs past the
+ * capacity reuse the staging halves of batches that have already drained.
+ *
+ * KHR-GL33.transform_feedback.{capture,query,discard}_geometry_interleaved_test
+ * are exactly this shape, and refused at st_vary #4 while the width was
+ * pinned to the staging capacity. */
+TEST_F(AGX3PackBinary, VertexOutputsWiderThanTheStagingCapacityRotate)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   const unsigned count = AGX3_G17P_STAGING_OUTPUTS + 1;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_VERTEX;
+
+   for (unsigned c = 0; c < count; ++c)
+      agx_st_vary(b, agx_immediate(c), agx_register(4, AGX_SIZE_32));
+   agx_stop(b);
+
+   const auto bytes = pack(b);
+   EXPECT_FALSE(bytes.empty());
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 2u * AGX3_G17P_STAGING_OUTPUTS);
+
+   /* Every UVSW keeps its own UVS index -- nothing about the index wraps --
+    * and takes the rotated staging half. UVSW is the eight-byte form starting
+    * 0x57, with the staging half in byte 3 and the UVS index split across
+    * bytes 4 and 5, exactly as the narrower wide-output test decodes it. */
+   unsigned writes = 0;
+   for (size_t at = 0; at + 8 <= bytes.size(); ) {
+      const uint8_t *p = bytes.data() + at;
+      if (p[0] != 0x57) {
+         at += (p[0] & 0xf) == 0xb && (p[2] & 7) != 1 ? 10 : 4;
+         continue;
+      }
+      const unsigned index = (p[4] >> 5) | ((p[5] & 0x1f) << 3);
+      EXPECT_EQ(index, writes) << writes;
+      EXPECT_EQ(p[3], 2u * (writes % AGX3_G17P_STAGING_OUTPUTS)) << writes;
+      ++writes;
+      at += 8;
+   }
+   EXPECT_EQ(writes, count);
 }
 
 TEST_F(AGX3PackBinary, SideEffectBeforeWideTerminalVertexOutputs)
@@ -9806,7 +10008,8 @@ TEST_F(AGX3PackBinary, FirefoxDenseOutputsAcceptAnyGroundedWidth)
 
       const auto bytes = pack(b);
       EXPECT_FALSE(bytes.empty()) << count;
-      EXPECT_EQ(b->shader->agx3_staging_halfs, 2u * count) << count;
+      EXPECT_EQ(b->shader->agx3_staging_halfs,
+                2u * MIN2(count, AGX3_G17P_STAGING_OUTPUTS)) << count;
    }
 
    /* The width ceiling still fails closed. */

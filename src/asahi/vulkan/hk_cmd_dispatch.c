@@ -888,7 +888,10 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
    if (dev->dev.chip != AGX_CHIP_G17P || !prog->bo ||
        !prog->info.main_size || !prog->info.nr_gprs ||
-       prog->info.nr_preamble_gprs || prog->info.rodata.size_16 ||
+       prog->info.nr_preamble_gprs ||
+       (prog->info.rodata.size_16 && !prog->rodata_offset) ||
+       (prog->info.printf_uniform &&
+        prog->info.printf_uniform < AGX_ABI_AGX3_PRECOMP_ARG_HALFS) ||
        !prog->info.agx3_staging_known ||
        !data || !data_size ||
        prog->entry_offset > UINT64_MAX - prog->ptr ||
@@ -910,7 +913,9 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
 
    /* A kernel that can printf reads the buffer address after its arguments */
-   const size_t printf_offset_B = (size_t)prog->info.printf_uniform * 2;
+   const size_t printf_offset_B = prog->info.printf_uniform
+      ? (size_t)(prog->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
+      : 0;
    const size_t uniform_data_size =
       prog->info.printf_uniform
          ? MAX2(data_size, printf_offset_B + sizeof(uint64_t))
@@ -950,10 +955,19 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
              &dev->dev.printf_buffer_address, sizeof(uint64_t));
    }
    const struct agx3_ioto_uniform_range range = {
-      .start_halfs = 0,
+      .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
       .size_halfs = uniform_size_halfs,
       .address = uploaded.gpu,
    };
+   struct agx3_ioto_uniform_range ranges[2] = {range};
+   unsigned range_count = 1;
+   if (prog->info.rodata.size_16) {
+      ranges[range_count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = prog->info.rodata.base_uniform,
+         .size_halfs = prog->info.rodata.size_16,
+         .address = prog->ptr + prog->rodata_offset,
+      };
+   }
    struct agx3_cdm_direct_template_sources launch_sources;
    if (!agx3_cdm_direct_template_sources_compute(false, false, false,
                                                   &launch_sources)) {
@@ -988,7 +1002,7 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
           &launch_sources,
           indirect ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1
                    : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
-          "precompiled", &range, 1, &program_va, &program))
+          "precompiled", ranges, range_count, &program_va, &program))
       return;
 
    if (indirect) {

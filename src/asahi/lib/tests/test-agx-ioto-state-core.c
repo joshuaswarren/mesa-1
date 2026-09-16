@@ -830,6 +830,7 @@ test_g17p_runtime_compute_shared_tail(void)
       uint32_t size_B;
       uint32_t speclm_word1;
    } cases[] = {
+      /* Keep the complete Vulkan-qualified 32 KiB allocation range. */
       {256, UINT32_C(0x00000480)},
       {1024, UINT32_C(0x00001080)},
       {4096, UINT32_C(0x00004080)},

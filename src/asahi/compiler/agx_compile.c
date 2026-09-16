@@ -3122,6 +3122,77 @@ agx_fminmax_to(agx_builder *b, agx_index dst, agx_index s0, agx_index s1,
    return agx_fcmpsel_to(b, dst, s0, s1, s0, s1, fcond);
 }
 
+/* A fragment shader that reads a varying array at a run-time index computes
+ * its coefficient index as dest16 = imm + (index << 2), because the ITERPROJ
+ * coefficient operand is sixteen bits wide. AGX3B's shifted add
+ * (agx3_iadd_core.h) takes a narrow *source* but always writes a 32-bit
+ * register, so that shape was refused and the whole shader with it -- which
+ * is KHR-GL33.shaders.indexing.varying_array's four *_dynamic_read cases.
+ *
+ * Give the add the wide destination it requires and narrow afterwards. The
+ * low sixteen bits are unchanged by widening the sum, so this is exact.
+ */
+static void
+agx_lower_agx3_shifted_iadd_dest(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_IADD || I->nr_dests != 1 || I->nr_srcs != 2 ||
+          I->shift == 0 || I->saturate ||
+          I->dest[0].size != AGX_SIZE_16 || agx_channels(I->dest[0]) != 1)
+         continue;
+
+      /* Only the constant-addend form (agx3_iadd_core.h) is affected: it is
+       * the one that always writes a 32-bit register. A shifted add of two
+       * registers has its own encoding and keeps its narrow destination. */
+      if (I->src[0].type != AGX_INDEX_IMMEDIATE ||
+          I->src[1].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_after_instr(I));
+      agx_index narrow = I->dest[0];
+      agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+      I->dest[0] = wide;
+      agx_subdivide_to(&b, narrow, wide, 0);
+   }
+}
+
+/* AGX3B's transcendental forms take one width: agx3_alu_hexp2_neg() for a
+ * half pair, agx3_alu_f32exp2_mod() for a word pair, and no mixed form. The
+ * exponent of the level-of-detail calculation textureGrad needs arrives as an
+ * exp2 of a 16-bit value into a 32-bit result, which was refused -- and a
+ * refusal takes the whole shader, which is what
+ * KHR-GL33.texture_swizzle's eight remaining smoke cases hit.
+ *
+ * Widen the source. Half to float is exact, so no value changes; it is the
+ * same move agx_lower_agx3_fma_sources() makes for a mixed FFMA. Only the
+ * mismatched shape is touched, and that shape did not encode at all before.
+ */
+static void
+agx_lower_agx3_mixed_width_transcendental(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return;
+
+   agx_foreach_instr_global_safe(ctx, I) {
+      if ((I->op != AGX_OPCODE_EXP2 && I->op != AGX_OPCODE_LOG2) ||
+          I->nr_dests != 1 || I->nr_srcs != 1 || I->saturate)
+         continue;
+
+      if (I->dest[0].size != AGX_SIZE_32 || I->src[0].size != AGX_SIZE_16 ||
+          agx_channels(I->src[0]) != 1 ||
+          I->src[0].type == AGX_INDEX_IMMEDIATE ||
+          I->src[0].type == AGX_INDEX_NULL)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index widened = agx_temp(ctx, AGX_SIZE_32);
+      agx_fmov_to(&b, widened, I->src[0]);
+      I->src[0] = widened;
+   }
+}
 static void
 agx_lower_agx3_fma_sources(agx_context *ctx)
 {
@@ -7116,6 +7187,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    }
 
    agx_lower_agx3_fma_sources(ctx);
+   agx_lower_agx3_mixed_width_transcendental(ctx);
+   agx_lower_agx3_shifted_iadd_dest(ctx);
 
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       agx_materialize_agx3_alu_constants(ctx);
@@ -7662,6 +7735,80 @@ lower_printf_buffer(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    return true;
 }
 
+/* A fragment shader that indexes a varying array at run time reads it through
+ * one load_interpolated_input whose offset is a value rather than a constant.
+ * That needs the interpolation to take its coefficient index from a register.
+ * AGX2 encodes exactly that -- `iter r4_r5_r6_r7, r0l, cf0` -- but no AGX3B
+ * form for it is witnessed, and Metal cannot express a dynamically indexed
+ * interpolant, so metal-nt will not produce one either. Refusing the shader
+ * is what KHR-GL33.shaders.indexing.varying_array's four *_dynamic_read cases
+ * hit.
+ *
+ * Read every slot the array spans and select between them. This runs in the
+ * compile rather than the preprocess because IO is lowered by then: the
+ * indirection is an offset source, not a deref, so
+ * nir_lower_indirect_derefs_to_if_else_trees cannot see it.
+ *
+ * It costs one interpolation per array element where AGX2 needs one in total.
+ * That is an efficiency gap against the baseline, recorded as such -- not a
+ * correctness one, and the alternative is refusing to compile at all.
+ */
+static bool
+lower_indirect_fs_input(nir_builder *b, nir_intrinsic_instr *intr,
+                        UNUSED void *data)
+{
+   unsigned offset_src;
+   if (intr->intrinsic == nir_intrinsic_load_interpolated_input)
+      offset_src = 1;
+   else if (intr->intrinsic == nir_intrinsic_load_input)
+      offset_src = 0;
+   else
+      return false;
+
+   if (nir_src_is_const(intr->src[offset_src]))
+      return false;
+
+   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   const unsigned slots = sem.num_slots;
+   if (slots <= 1 || slots > 32)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *index = intr->src[offset_src].ssa;
+   nir_def *result = NULL;
+
+   for (unsigned i = 0; i < slots; ++i) {
+      nir_io_semantics one_sem = sem;
+      one_sem.num_slots = 1;
+      one_sem.location = sem.location + i;
+
+      nir_def *one;
+      if (intr->intrinsic == nir_intrinsic_load_interpolated_input) {
+         one = nir_load_interpolated_input(
+            b, intr->def.num_components, intr->def.bit_size,
+            intr->src[0].ssa, nir_imm_int(b, 0),
+            .base = nir_intrinsic_base(intr) + i,
+            .component = nir_intrinsic_component(intr),
+            .dest_type = nir_intrinsic_dest_type(intr),
+            .io_semantics = one_sem);
+      } else {
+         one = nir_load_input(
+            b, intr->def.num_components, intr->def.bit_size,
+            nir_imm_int(b, 0), .base = nir_intrinsic_base(intr) + i,
+            .component = nir_intrinsic_component(intr),
+            .dest_type = nir_intrinsic_dest_type(intr),
+            .io_semantics = one_sem);
+      }
+
+      result = result == NULL
+                  ? one
+                  : nir_bcsel(b, nir_ieq_imm(b, index, i), one, result);
+   }
+
+   nir_def_replace(&intr->def, result);
+   return true;
+}
+
 static bool
 has_unlowered_printf_address(const nir_shader *nir)
 {
@@ -7722,6 +7869,12 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_printf_buffer,
             nir_metadata_control_flow, &key->dev);
+
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       nir->info.stage == MESA_SHADER_FRAGMENT) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_indirect_fs_input,
+               nir_metadata_none, NULL);
+   }
 
    NIR_PASS(_, nir, nir_lower_frag_coord_to_pixel_coord);
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);

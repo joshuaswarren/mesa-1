@@ -17,6 +17,11 @@ struct agx_precompiled_shader {
    struct agx_bo *bo;
    uint64_t ptr;
    uint32_t entry_offset;
+   /* G17P only: byte offset of the promoted-constant block within the
+    * uploaded image, valid when info.rodata.size_16 is nonzero. The legacy
+    * USC path reaches the same bytes through agx_usc_immediates() and does
+    * not need this. */
+   uint32_t rodata_offset;
    struct agx_precompiled_kernel_info info;
 };
 

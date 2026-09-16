@@ -144,12 +144,24 @@ poly_setup_unroll_for_draw(global struct poly_heap *heap,
    uint max_verts = max_prims * mesa_vertices_per_prim(mode);
    uint alloc_size = max_verts * index_size_B;
 
-   /* Allocate unrolled index buffer.
+   /* Allocate the unrolled index buffer.  The general allocator reports
+    * overflow through the AGX2 printf/abort ABI, and a precompiled kernel
+    * that must also run on G17P cannot bake a process-local printf address
+    * into cached machine code -- agx_compile_shader_nir() refuses any AGX3
+    * shader still carrying load_printf_buffer_address.  Allocate inline and
+    * make overflow memory-safe instead, exactly as the robust index shadow
+    * in libagx/draws.cl already does: an exhausted heap returns NULL and the
+    * caller emits an empty draw rather than unrolling to an invalid address.
     *
     * TODO: For multidraw, should be atomic. But multidraw+unroll isn't
     * currently wired up in any driver.
     */
-   uint old_heap_bottom_B = poly_heap_alloc_offs(heap, alloc_size);
+   uint old_heap_bottom_B = atomic_fetch_add(
+      (volatile global atomic_uint *)(&heap->bottom), align(alloc_size, 16));
+
+   if (!poly_heap_allocation_fits(old_heap_bottom_B, align(alloc_size, 16),
+                                  heap->size))
+      return NULL;
 
    /* Setup most of the descriptor. Count will be determined after unroll. */
    out_draw[1] = in_draw[1];                       /* instance count */
@@ -191,6 +203,14 @@ poly_unroll_restart_sizes(global uint32_t *out_draw,
       out_ptr = *(uintptr_t *)scratch;
    } else {
       out_ptr = sub_group_broadcast(out_ptr, 0);
+   }
+
+   /* An exhausted heap allocates nothing. Every lane sees the same NULL, so
+    * the draw is emitted empty and no lane stores through it. */
+   if (out_ptr == 0) {
+      if (tid == 0)
+         out_draw[0] = 0;
+      return;
    }
 
    uintptr_t in_ptr = (uintptr_t)(poly_index_buffer(

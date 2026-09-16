@@ -1102,11 +1102,32 @@ void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
-/* Apple's G17P compiler emits position plus thirty-one float4 user locations
+/* UVSW carries the UVS index and the staging address in two independent
+ * eight-bit operands, so the hardware addresses 256 vertex outputs while only
+ * 128 distinct staging pairs exist.
+ *
+ * Apple's G17P compiler emits position plus thirty-one float4 user locations
  * as 128 UVSWs for UVS indices 0..127, and __GPU_LD_MD root.field1.field3 is
  * 128; a thirty-second float4 exceeds the fragment's 127 coefficients. Each
- * output stages at half 2k, which UVSW's eight-bit staging operand covers. */
-#define AGX3_MAX_VERTEX_OUTPUTS 128u
+ * of those outputs stages at half 2k, and that scheme is kept verbatim for
+ * the first AGX3_G17P_STAGING_OUTPUTS of any program.
+ *
+ * GL asks for more than Apple's own compiler ever emits: a points geometry
+ * shader may write the full 128 interleaved transform-feedback components as
+ * thirty-one float4 locations and still need position (four) and point size
+ * (one), which is 129 outputs. Those past the staging capacity reuse the
+ * addresses of batches that have already drained -- every batch boundary
+ * waits on all six scoreboard slots, so the COPY/UVSW pair that last owned a
+ * staging half has retired long before it is written again, twenty-one
+ * batches later. Nothing about the UVS index itself wraps. */
+#define AGX3_MAX_VERTEX_OUTPUTS 256u
+#define AGX3_G17P_STAGING_OUTPUTS 128u
+
+/* UVS_POSITION is the first group in the hardware's UVS order (see
+ * agx_uvs.h) and agx_nir_lower_uvs.c gives it four entries whether or not
+ * the shader writes gl_Position. A vertex program that writes no position
+ * therefore starts its outputs here, and nowhere else. */
+#define AGX3_UVS_POSITION_ENTRIES 4u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 /* Materialize nonzero minifloats used by G17P structured f32 control flow so

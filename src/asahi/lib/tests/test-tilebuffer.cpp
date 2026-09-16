@@ -613,8 +613,11 @@ TEST(Tilebuffer, G17PRGB32EOTKey)
       EXPECT_EQ(key.g17p_rt0_eot_i32_signed_four_words,
                 format.signed_format);
 
-      /* The CTS branch admits raw32 multisample stores and preserves their
-       * samples for a separate resolve after the render pass. */
+      /* Apple stores the 32-bit tile at every sample count with the same
+       * lstcol it uses at one: metal-nt -arch applegpu_g17p on one
+       * RGBA32Float attachment fed by a multisample read emits
+       * e71654000000012e00000000 at one sample and e71654000000082e08000008
+       * at four. KHR-GL33.texture_size_promotion renders to it. */
       tib = agx_build_tilebuffer_layout(rt, 1, 2, false);
       EXPECT_TRUE(agx_g17p_rt0_tile_layout_supported(&tib));
       tib = agx_build_tilebuffer_layout(rt, 1, 1, true);

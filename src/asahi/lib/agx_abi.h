@@ -48,6 +48,21 @@
  * using texture state place the ordinary vertex ABI after this prefix. */
 #define AGX_ABI_G17P_TEXTURE_POINTER_HALFS 8
 
+/* AGX3 threadgroup accesses take their base from uniform half 8, which
+ * agx_emit_local_store/load hard-code and which the hardware preloads -- no
+ * driver path ever writes it.  A shader that places its own uniforms over
+ * that half therefore destroys its shared-memory base, silently: the stores
+ * land nowhere and the loads read zero.
+ *
+ * API shaders are unaffected because their pushes are small, but precompiled
+ * kernel arguments start at half 0 and run past it (libagx_unroll_restart's
+ * are 26 halves), which is why a geometry shader plus primitive restart drew
+ * nothing.  Precompiled AGX3 kernels therefore place their arguments above
+ * both the texture-pointer prefix and this half.  Four-half aligned so 64-bit
+ * arguments keep their uniform-pair alignment. */
+#define AGX_ABI_AGX3_THREADGROUP_BASE_HALF 8
+#define AGX_ABI_AGX3_PRECOMP_ARG_HALFS 12
+
 #define AGX_ABI_FUNI_EMRT_HEAP (0)
 #define AGX_ABI_FUNI_BLEND_R   (AGX_ABI_FUNI_EMRT_HEAP + 4)
 #define AGX_ABI_FUNI_BLEND_G   (AGX_ABI_FUNI_BLEND_R + 2)

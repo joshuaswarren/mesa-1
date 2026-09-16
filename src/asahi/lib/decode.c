@@ -711,18 +711,23 @@ agxdecode_cdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
    if (available < sizeof(uint32_t))
       return STATE_ERROR;
 
-   /* Type zero has three witnessed lengths (24/36/40 bytes).  Only the
-    * 40-byte direct form has a semantic discriminant strong enough for a
-    * record-at-a-time stream parser: canonical template masks plus word-3's
-    * direct bit/dimension value.  Refuse an indirect or malformed prefix
-    * instead of consuming it as a 40-byte record and losing synchronization. */
-   if ((map[3] >> 5) == AGX_CDM_BLOCK_TYPE_LAUNCH) {
+   /* Type zero has three witnessed lengths (24/36/40 bytes), and word 0's
+    * mode field is what separates them -- 0 direct, 1 the nine-word indirect
+    * form, 2 the compact one -- so the record decoder can size any of them
+    * without guessing.  The direct SEMANTIC unpack is a stricter thing: it
+    * also demands word 3 be a canonical dimension word.  The native compute
+    * path derives word 3 from the program VA instead, which hardware settled
+    * (see agx3_g17p_native_compute_launch_pack), so a mismatch there is a
+    * note about an unresolved field, not a reason to abandon the stream. */
+   if ((map[3] >> 5) == AGX_CDM_BLOCK_TYPE_LAUNCH &&
+       ((map[3] >> 3) & 3) == 0) {
       struct agx3_cdm_direct_launch_info direct;
       if (!agx3_cdm_direct_launch_unpack(chip, map, available, &direct)) {
          fprintf(agxdecode_dump_stream,
-                 "Ambiguous or non-canonical AGX3 launch for %s\n",
+                 "Note: AGX3 launch is not the canonical direct form for %s\n",
                  agxdecode_chip_name(chip));
-         return STATE_ERROR;
+         u_hexdump(agxdecode_dump_stream, map,
+                   MIN2(available, (size_t)AGX3_CDM_DIRECT_LAUNCH_SIZE), false);
       }
    }
 
@@ -755,6 +760,37 @@ agxdecode_cdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
       if (record.data.launch.pipeline != 0)
          agxdecode_stateful(ctx, record.data.launch.pipeline, "Ioto pipeline",
                             agxdecode_ioto, verbose, params, NULL);
+      return record.length;
+
+   case AGX3_CDM_RECORD_INDIRECT_LAUNCH_36:
+   case AGX3_CDM_RECORD_INDIRECT_LAUNCH:
+      fprintf(agxdecode_dump_stream,
+              "AGX3 Compute (indirect, %u bytes)\n"
+              "  Word 0 payload = 0x%08" PRIx32 "\n"
+              "  Word 1 payload = 0x%08" PRIx32 "\n"
+              "  Pipeline = 0x%012" PRIx64 "\n"
+              "  Opaque word 3 = 0x%08" PRIx32 "\n"
+              "  Word 4 payload = 0x%04" PRIx16 "\n"
+              "  Parameters = 0x%012" PRIx64 "\n",
+              (unsigned)record.length,
+              record.data.indirect_launch.word0_payload,
+              record.data.indirect_launch.word1_payload,
+              record.data.indirect_launch.pipeline,
+              record.data.indirect_launch.opaque_word3,
+              record.data.indirect_launch.word4_payload,
+              record.data.indirect_launch.parameters);
+      if (record.kind == AGX3_CDM_RECORD_INDIRECT_LAUNCH_36) {
+         fprintf(agxdecode_dump_stream,
+                 "  Trailing = (0x%08" PRIx32 ", 0x%08" PRIx32
+                 ", 0x%08" PRIx32 ")\n",
+                 record.data.indirect_launch.trailing_words[0],
+                 record.data.indirect_launch.trailing_words[1],
+                 record.data.indirect_launch.trailing_words[2]);
+      }
+      if (record.data.indirect_launch.pipeline != 0)
+         agxdecode_stateful(ctx, record.data.indirect_launch.pipeline,
+                            "Ioto pipeline", agxdecode_ioto, verbose, params,
+                            NULL);
       return record.length;
 
    case AGX3_CDM_RECORD_STREAM_LINK:

@@ -623,10 +623,16 @@ agx_ioto_g17p_runtime_compute_tail_build_shared(
                                                   &staged))
       return false;
 
-   /* EXP-0024's hardware-validated static sweep places
-    * `(bytes << 2) | 0x80` in the second SPECLM dword. In the recovered GPU0
-    * field graph that is exactly byte-size f18 plus enable f24. Repack the
-    * record through the field encoder instead of patching opaque bytes. */
+   /* EXP-0024's static sweep encodes `(bytes << 2) | 0x80` in the
+    * second SPECLM dword: byte-size f18 plus enable f24. Vulkan CTS
+    * workgroup_memory_explicit_layout.size.{4096,16384,32768} validates
+    * accesses across the complete allocation on G17P with this encoding.
+    *
+    * Do not apply j700 cb7295b7596's GL-probe-derived fourfold scaling
+    * globally: its 16320-byte limit rejects Vulkan's passing 16/32 KiB
+    * cases. The discrepancy with that probe remains unexplained; it is
+    * not evidence that this Vulkan-qualified allocation is too small.
+    */
    struct agx_ioto_state speclm = {0};
    speclm.f[18] = threadgroup_memory_size_B;
    speclm.f[24] = 1;

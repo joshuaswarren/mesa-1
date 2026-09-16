@@ -6,6 +6,7 @@
 
 #include "asahi_clc.h"
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/lib/agx_abi.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/glsl_types.h"
 #include "compiler/spirv/nir_spirv.h"
@@ -273,11 +274,20 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_draw_indirect_byte_count") ||
           !strcmp(func->name, "libagx_conditional_render") ||
           !strcmp(func->name, "libagx_draw_robust_index") ||
+          !strcmp(func->name, "libagx_unroll_restart") ||
+          !strcmp(func->name, "libagx_gs_setup_indirect") ||
+          !strcmp(func->name, "libagx_prefix_sum_geom") ||
+          !strcmp(func->name, "libagx_copy_uchar") ||
+          !strcmp(func->name, "libagx_copy_uint4") ||
+          !strcmp(func->name, "libagx_fill") ||
           !strcmp(func->name, "libagx_copy_xfb_counters") ||
           !strcmp(func->name, "libagx_increment_ia") ||
+          !strcmp(func->name, "libagx_increment_ia_restart") ||
           !strcmp(func->name, "libagx_increment_ia_restart_nonnull") ||
           !strcmp(func->name, "libagx_copy_query") ||
+          !strcmp(func->name, "libagx_copy_query_gl") ||
           !strcmp(func->name, "libagx_increment_cs_invocations") ||
+          !strcmp(func->name, "libagx_setup_indirect_dispatch") ||
           !strcmp(func->name, "libagx_copy_timestamp") ||
           !strcmp(func->name, "libagx_tess_setup_indirect_hw") ||
           !strcmp(func->name, "libagx_tess_factors_half") ||
@@ -288,10 +298,6 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_tess_tri") ||
           !strcmp(func->name, "libagx_tess_quad") ||
           !strcmp(func->name, "libagx_prefix_sum_tess") ||
-          /* Geometry shaders */
-          !strcmp(func->name, "libagx_gs_setup_indirect") ||
-          !strcmp(func->name, "libagx_prefix_sum_geom") ||
-          !strcmp(func->name, "libagx_unroll_restart") ||
           !strcmp(func->name, "libagx_draw_without_adj");
 }
 
@@ -318,6 +324,22 @@ print_supported_binary_map(FILE *fp, const nir_shader *nir, const char *target)
    fprintf(fp, "};\n\n");
 }
 
+/* Lift every kernel-argument preamble load above the halves the AGX3
+ * hardware ABI owns -- see AGX_ABI_AGX3_PRECOMP_ARG_HALFS.  Run per target,
+ * on that target's clone, so AGX2 keeps its arguments at half 0. */
+static bool
+rebase_preamble_for_agx3(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_preamble)
+      return false;
+
+   nir_intrinsic_set_base(intr,
+                          nir_intrinsic_base(intr) +
+                             AGX_ABI_AGX3_PRECOMP_ARG_HALFS);
+   return true;
+}
+
 static nir_def *
 load_kernel_input(nir_builder *b, unsigned num_components, unsigned bit_size,
                   unsigned offset_B)
@@ -329,6 +351,15 @@ load_kernel_input(nir_builder *b, unsigned num_components, unsigned bit_size,
 int
 main(int argc, char **argv)
 {
+   /* Without this the compiler's own AGX_MESA_DEBUG flags stay clear here, so
+    * a kernel that fails to compile reports only its name and no reason.
+    * Declared locally: agx_compiler.h needs generated headers this tool does
+    * not include. */
+   {
+      extern int agx_compiler_debug;
+      extern uint64_t agx_get_compiler_debug(void);
+      agx_compiler_debug = (int)agx_get_compiler_debug();
+   }
    if (argc != 4) {
       fprintf(stderr, "Usage: %s [input spir-v] [output header] [output C]\n",
               argv[0]);
@@ -458,8 +489,17 @@ main(int argc, char **argv)
 
             nir_shader *clone = nir_shader_clone(NULL, s);
 
+            if (key.dev.encoding != AGX_ISA_ENCODING_AGX2) {
+               NIR_PASS(_, clone, nir_shader_intrinsics_pass,
+                        rebase_preamble_for_agx3, nir_metadata_all, NULL);
+               key.reserved_preamble += AGX_ABI_AGX3_PRECOMP_ARG_HALFS;
+            }
+
             uint16_t printf_uniform = 0;
             if (!strcmp(*target, "g17p")) {
+               /* Both frontends publish the allocator-owned printf buffer.
+                * Keep that runtime ABI instead of dropping kernel assertions
+                * as upstream did before this branch supplied the address. */
                bool uses_printf = false;
                nir_shader_intrinsics_pass(clone, uses_printf_address,
                                           nir_metadata_all, &uses_printf);
@@ -468,7 +508,8 @@ main(int argc, char **argv)
                   /* A 64-bit uniform address must start on a whole dword
                    * of halves.
                    */
-                  unsigned base_halfs = ALIGN_POT(layout.size_B, 8) / 2;
+                  unsigned base_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS +
+                     ALIGN_POT(layout.size_B, 8) / 2;
                   printf_uniform = base_halfs;
                   key.reserved_preamble = base_halfs + 4;
 
@@ -477,7 +518,6 @@ main(int argc, char **argv)
                            nir_metadata_control_flow, &base_halfs);
                }
             }
-
             if (!agx_compile_shader_nir(clone, &key, &compiled)) {
                fprintf(stderr, "Failed to compile %s for %s\n",
                        libfunc->name, *target);
