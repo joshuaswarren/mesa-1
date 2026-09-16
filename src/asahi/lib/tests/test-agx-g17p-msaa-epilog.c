@@ -402,6 +402,56 @@ check_native_spill(unsigned write_mask, bool blend, bool depth, bool resident)
    return compiled && staging_ok;
 }
 
+static bool
+check_late_mask_split(bool alpha_coverage)
+{
+   nir_builder main = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "late native mask");
+   nir_demote_samples(&main, nir_imm_intN_t(&main, 3, 16));
+   main.shader->info.fs.uses_discard = true;
+   main.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
+   struct agx_fs_epilog_link_info link = {0};
+   agx_nir_lower_fs_output_to_epilog_for_device(main.shader, AGX_CHIP_G17P,
+                                                &link);
+   bool ok = link.sample_mask_after_force_early &&
+      count_intrinsic(main.shader, nir_intrinsic_demote_samples) == 0;
+   ralloc_free(main.shader);
+
+   struct agx_fs_epilog_key key = {
+      .nr_samples = 4,
+      .link.loc_written = 1,
+      .link.size_32 = 1,
+      .link.sample_mask_after_force_early = true,
+      .defer_monolithic_msaa = true,
+      .blend.alpha_to_coverage = alpha_coverage,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO,
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "late mask epilog");
+   agx_nir_fs_epilog(&b, &key);
+   ok &= count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx) == 1;
+   ok &= count_intrinsic(b.shader, nir_intrinsic_demote_samples) == 0;
+   agx_nir_lower_g17p_tile_samples(b.shader, 4);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key backend = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = 4,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &backend, &part);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -414,6 +464,8 @@ main(int argc, char **argv)
                                 atoi(argv[3])) ? 0 : 1;
 
    bool ok = true;
+   ok &= check_late_mask_split(false);
+   ok &= check_late_mask_split(true);
    for (unsigned samples = 1; samples <= 4; samples *= 2)
       ok &= check_samples(samples);
    for (unsigned samples = 2; samples <= 4; samples *= 2)

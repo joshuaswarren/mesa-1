@@ -2464,7 +2464,10 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
              * and makes a later all-kill update leave one sample live.  This
              * is the second BAND in Apple's native conditional-kill prefix. */
             keep = agx_and(b, keep, covered);
-            mid = agx_iadd(b, covered, upper, 4);
+            /* Native MOVMSK has the API mask in bits 4..7 and coverage in
+             * bits 8..11, like DEPTHF. Preserve that order after a previous
+             * update has made the two SR39 nibbles different. */
+            mid = agx_iadd(b, upper, covered, 4);
          }
 
          agx_index word = agx_iadd(b, keep, mid, 4);

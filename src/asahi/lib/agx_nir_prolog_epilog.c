@@ -560,6 +560,25 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       }
    }
 
+   /* Import masks before the colour stores: alpha-to-coverage is inserted
+    * before those stores and must be dominated by the imported write mask. */
+   nir_def *sample_id = NULL, *write_samples = NULL;
+   if (key->link.sample_shading) {
+      sample_id =
+         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_SAMPLE_MASK);
+   }
+
+   if (key->link.sample_mask_after_force_early) {
+      write_samples =
+         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_WRITE_SAMPLES);
+   }
+
+   if (key->defer_api_sample_mask) {
+      nir_def *api_mask = nir_imm_intN_t(b, key->api_sample_mask, 16);
+      write_samples = write_samples ? nir_iand(b, write_samples, api_mask)
+                                    : api_mask;
+   }
+
    /* First, construct a passthrough shader reading each colour and outputting
     * the value.
     */
@@ -585,24 +604,6 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             copy_colour(b, key, rt, 1, true);
          }
       }
-   }
-
-   /* Grab registers early, this has to happen in the first block. */
-   nir_def *sample_id = NULL, *write_samples = NULL;
-   if (key->link.sample_shading) {
-      sample_id =
-         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_SAMPLE_MASK);
-   }
-
-   if (key->link.sample_mask_after_force_early) {
-      write_samples =
-         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_WRITE_SAMPLES);
-   }
-
-   if (key->defer_api_sample_mask) {
-      nir_def *api_mask = nir_imm_intN_t(b, key->api_sample_mask, 16);
-      write_samples = write_samples ? nir_iand(b, write_samples, api_mask)
-                                    : api_mask;
    }
 
    /* Now lower the resulting program using the key */
@@ -694,6 +695,39 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, nir_lower_alpha_to_coverage, false,
                NULL);
 
+   /* Native late SampleMask writes cross the main/epilog split in a register.
+    * Combine them with alpha coverage before the one test-triggering update,
+    * as Apple's G17P sample-mask + alpha-coverage fragment does. Applying the
+    * mask only to the tile store would still update depth for killed samples.
+    * Early-tested shaders must not run the tests again. */
+   if (write_samples && !key->link.already_ran_zs) {
+      bool merged = false;
+      nir_foreach_block(block, b->impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_demote_samples)
+               continue;
+            nir_builder mask_b = nir_builder_at(nir_before_instr(instr));
+            nir_def *killed = nir_ixor(
+               &mask_b, write_samples, nir_imm_intN_t(&mask_b, ALL_SAMPLES, 16));
+            killed = nir_u2uN(&mask_b, killed, intr->src[0].ssa->bit_size);
+            nir_src_rewrite(&intr->src[0],
+                            nir_ior(&mask_b, intr->src[0].ssa, killed));
+            merged = true;
+         }
+      }
+      if (!merged) {
+         nir_builder mask_b =
+            nir_builder_at(nir_after_instr(nir_def_instr(write_samples)));
+         nir_demote_samples(&mask_b,
+                            nir_ixor(&mask_b, write_samples,
+                                      nir_imm_intN_t(&mask_b, ALL_SAMPLES, 16)));
+      }
+      b->shader->info.fs.uses_discard = true;
+   }
+
    /* Depth/stencil writes must be deferred until after all discards,
     * particularly alpha-to-coverage.
     */
@@ -750,7 +784,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
        * the pixel shaded path. Must be done before agx_nir_lower_to_per_sample
        * to avoid duplicating tests.
        */
-      if (key->blend.alpha_to_coverage) {
+      if (b->shader->info.fs.uses_discard) {
          NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
       }
 
@@ -765,7 +799,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       nir_export_agx(b, sample_id, .base = AGX_ABI_FIN_SAMPLE_MASK);
    } else if (!key->defer_monolithic_msaa) {
       NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
-   } else if (key->blend.alpha_to_coverage) {
+   } else if (b->shader->info.fs.uses_discard) {
       /* G17P can keep a pixel-shaded multisample blend as one tile
        * load/store pair carrying the live coverage register. Lower the
        * alpha discard while the epilog's test intrinsics are still available;
@@ -833,12 +867,18 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    if (intr->intrinsic == nir_intrinsic_demote_samples &&
        (b->shader->info.fs.early_fragment_tests ||
-        (ctx->preserve_early_demote && b->shader->info.writes_memory))) {
+        (ctx->preserve_early_demote &&
+         (b->shader->info.writes_memory ||
+          (!b->shader->info.fs.uses_sample_shading &&
+           (b->shader->info.outputs_written &
+            BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))))))) {
 
       /* G17P carries the discard mask across the split for both early and
        * late tests. LSTCOL consumes it directly, and late DEPTHF must use it
        * too: MOVMSK does not make a split epilog's reconstructed depth word
-       * retain the main shader's discard predicate. */
+       * retain the main shader's discard predicate. Late per-pixel SampleMask
+       * outputs must also combine with alpha coverage before triggering tests.
+       * Keep ordinary discard-only shaders on their existing lowering. */
 
       if (!ctx->masked_samples) {
          b->cursor = nir_before_impl(nir_shader_get_entrypoint(b->shader));
