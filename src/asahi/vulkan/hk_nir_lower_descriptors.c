@@ -648,6 +648,27 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    case nir_intrinsic_image_deref_store_block_agx:
       return lower_image_intrin(b, intrin, ctx);
 
+   case nir_intrinsic_load_image_descriptor_word_agx: {
+      b->cursor = nir_instr_remove(&intrin->instr);
+      const struct hk_storage_image_descriptor_layout native =
+         hk_storage_image_descriptor_layout(ctx->descriptor_generation);
+      nir_def *word = load_resource_deref_desc(
+         b, 1, 32, nir_src_as_deref(intrin->src[0]), native.texture, ctx);
+      nir_def_rewrite_uses(&intrin->def, word);
+      return true;
+   }
+
+   case nir_intrinsic_load_texture_descriptor_word_agx: {
+      /* First word of the (plane 0) texture descriptor of a sampled image. */
+      b->cursor = nir_instr_remove(&intrin->instr);
+      const struct hk_sampled_image_descriptor_layout native =
+         hk_sampled_image_descriptor_layout(ctx->descriptor_generation);
+      nir_def *word = load_resource_deref_desc(
+         b, 1, 32, nir_src_as_deref(intrin->src[0]), native.texture, ctx);
+      nir_def_rewrite_uses(&intrin->def, word);
+      return true;
+   }
+
    case nir_intrinsic_load_num_workgroups: {
       b->cursor = nir_instr_remove(&intrin->instr);
 

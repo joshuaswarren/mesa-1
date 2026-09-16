@@ -1345,6 +1345,156 @@ lower_subpass_dim(nir_builder *b, nir_tex_instr *tex, UNUSED void *_data)
    return true;
 }
 
+/* Native texel fetches are memory-safe but can alias another texel within
+ * the allocation. Enforce the Vulkan view bounds before narrowing coordinates
+ * or LODs for the hardware, and return zero for invalid fetches. */
+static bool
+hk_lower_native_robust_txf(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
+{
+   if (tex->op != nir_texop_txf && tex->op != nir_texop_txf_ms)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   const int coord_idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   const int lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   const int sample_idx = nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
+   nir_def *coord = tex->src[coord_idx].src.ssa;
+   const unsigned components = tex->coord_components;
+   nir_def *size = nir_build_texture_query(b, tex, nir_texop_txs,
+                                           components, nir_type_uint32,
+                                           false, lod_idx >= 0);
+   if (lod_idx >= 0) {
+      nir_tex_instr *query = nir_instr_as_tex(nir_def_instr(size));
+      const int query_lod = nir_tex_instr_src_index(query, nir_tex_src_lod);
+      nir_src_rewrite(&query->src[query_lod].src, tex->src[lod_idx].src.ssa);
+   }
+   nir_def *valid = nir_ball(b, nir_ult(b, coord, size));
+   if (lod_idx >= 0 && tex->sampler_dim != GLSL_SAMPLER_DIM_BUF) {
+      nir_def *levels = nir_build_texture_query(b, tex, nir_texop_query_levels,
+                                               1, nir_type_uint32, false, false);
+      nir_def *lod = tex->src[lod_idx].src.ssa;
+      valid = nir_iand(b, valid, nir_ult(b, lod, levels));
+      nir_src_rewrite(&tex->src[lod_idx].src,
+                      nir_bcsel(b, valid, lod, nir_imm_int(b, 0)));
+   }
+   if (sample_idx >= 0) {
+      nir_def *samples = nir_build_texture_query(b, tex, nir_texop_texture_samples,
+                                                1, nir_type_uint32, false, false);
+      nir_def *sample = tex->src[sample_idx].src.ssa;
+      valid = nir_iand(b, valid, nir_ult(b, sample, samples));
+      nir_src_rewrite(&tex->src[sample_idx].src,
+                      nir_bcsel(b, valid, sample, nir_imm_int(b, 0)));
+   }
+   nir_src_rewrite(&tex->src[coord_idx].src,
+                   nir_bcsel(b, valid, coord, nir_imm_zero(b, components, 32)));
+   /* robustImageAccess2: an invalid fetch returns (0,0,0,1) for a view whose
+    * format has no alpha channel and (0,0,0,0) otherwise. The descriptor's
+    * alpha swizzle is the constant one exactly for alpha-less formats. */
+   nir_def *invalid_value = nir_imm_zero(b, tex->def.num_components,
+                                         tex->def.bit_size);
+   const int deref_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (tex->def.num_components == 4 && deref_idx >= 0) {
+      nir_def *word0 = nir_load_texture_descriptor_word_agx(
+         b, tex->src[deref_idx].src.ssa);
+      nir_def *swizzle_a = nir_ubitfield_extract_imm(b, word0, 25, 3);
+      nir_def *one = nir_alu_type_get_base_type(tex->dest_type) == nir_type_float
+                        ? nir_imm_floatN_t(b, 1, tex->def.bit_size)
+                        : nir_imm_intN_t(b, 1, tex->def.bit_size);
+      nir_def *alpha = nir_bcsel(b, nir_ieq_imm(b, swizzle_a, AGX_CHANNEL_1),
+                                 one, nir_imm_zero(b, 1, tex->def.bit_size));
+      invalid_value = nir_vector_insert_imm(b, invalid_value, alpha, 3);
+   }
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *result = nir_bcsel(b, valid, &tex->def, invalid_value);
+   nir_def_rewrite_uses_after(&tex->def, result);
+   return true;
+}
+
+static bool
+should_lower_robust(const nir_intrinsic_instr *intr, const void *data)
+{
+   /* The hardware is robust, but our software image atomics are not. Unlike the
+    * GL driver, we don't use the common buffer image lowering, using the
+    * agx_nir_lower_texture lowering for robustImageAccess2 semantics.
+    */
+   if (data && *(const bool *)data &&
+       (intr->intrinsic == nir_intrinsic_image_deref_load ||
+        intr->intrinsic == nir_intrinsic_image_deref_store))
+      return true;
+
+   return intr->intrinsic == nir_intrinsic_image_deref_atomic ||
+          intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
+}
+
+/* robustImageAccess2 returns (0,0,0,1) out of bounds for a view whose format
+ * has no alpha channel and (0,0,0,0) otherwise. A load without a format
+ * qualifier reads that from the native texture descriptor: hk packs the
+ * format's swizzle into it, so the alpha swizzle is the constant one exactly
+ * for alpha-less formats, and the null descriptor swizzles alpha to zero. */
+static nir_def *
+hk_native_robust_oob_alpha(nir_builder *b, nir_intrinsic_instr *load,
+                           const void *data)
+{
+   const nir_alu_type type = nir_intrinsic_dest_type(load);
+   const unsigned bit_size = load->def.bit_size;
+   nir_def *zero = nir_imm_zero(b, 1, bit_size);
+   nir_def *one = nir_alu_type_get_base_type(type) == nir_type_float
+                     ? nir_imm_floatN_t(b, 1, bit_size)
+                     : nir_imm_intN_t(b, 1, bit_size);
+
+   /* The descriptor read is resolved by hk_nir_lower_descriptors, which runs
+    * after this pass; the wrap itself must precede descriptor lowering so
+    * the native read path's own coordinate clamp applies inside the branch. */
+   if (!(data && *(const bool *)data) ||
+       load->intrinsic != nir_intrinsic_image_deref_load)
+      return one;
+
+   nir_def *word0 = nir_load_image_descriptor_word_agx(b, load->src[0].ssa);
+   nir_def *swizzle_a = nir_ubitfield_extract_imm(b, word0, 25, 3);
+   return nir_bcsel(b, nir_ieq_imm(b, swizzle_a, AGX_CHANNEL_1), one, zero);
+}
+
+/* G16's qualified native offset forms cover immediate XYZ offsets and
+ * non-array explicit/bias LOD. Lower other shapes with NIR's coordinate
+ * arithmetic, preserving their LOD and array-layer semantics. */
+static bool
+hk_lower_native_texture_offset(const nir_instr *instr, UNUSED const void *data)
+{
+   const nir_tex_instr *tex = nir_instr_as_tex(instr);
+   const int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset < 0)
+      return false;
+   return tex->op == nir_texop_txf ||
+          (tex->is_array && tex->op == nir_texop_txd) ||
+          (tex->op == nir_texop_tg4 &&
+           (tex->is_shadow || !nir_src_is_const(tex->src[offset].src)));
+}
+
+/* Use the existing coefficient interpolation at the selected sample's
+ * programmable location. Locations come from this draw's root descriptor. */
+static bool
+hk_lower_native_sample_barycentric(nir_builder *b, nir_intrinsic_instr *intr,
+                                  UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_barycentric_at_sample)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *packed = nir_load_sample_positions_agx(b);
+   nir_def *sample = nir_u2u32(b, intr->src[0].ssa);
+   nir_def *position = nir_ushr(b, packed, nir_imul_imm(b, sample, 8));
+   nir_def *offset[2];
+   for (unsigned c = 0; c < 2; ++c) {
+      nir_def *nibble = nir_iand_imm(b, nir_ushr_imm(b, position, c * 4), 15);
+      offset[c] = nir_fadd_imm(b, nir_fmul_imm(b, nir_u2f32(b, nibble),
+                                             1.0 / 16.0), -0.5);
+   }
+   nir_def_replace(&intr->def, nir_load_barycentric_at_offset(
+      b, intr->def.bit_size, nir_vec2(b, offset[0], offset[1]),
+      .interp_mode = nir_intrinsic_interp_mode(intr)));
+   return true;
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
@@ -1417,6 +1567,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    const bool lower_g17p_robust_images =
       dev->dev.chip == AGX_CHIP_G17P &&
       rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT;
+   const bool native_robust_images =
+      dev->dev.chip == AGX_CHIP_G16G &&
+      rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT;
 
    /* A G17P image load does not see a store made earlier in the same
     * invocation; forward the stored value. Run it before the robust lowering
@@ -1425,6 +1578,16 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, hk_nir_forward_image_stores, lower_g17p_robust_images);
    NIR_PASS(_, nir, hk_nir_lower_robust_image_access,
             lower_g17p_robust_images);
+   if (native_robust_images) {
+      NIR_PASS(_, nir, nir_lower_robust_access_cb, should_lower_robust,
+               hk_native_robust_oob_alpha, &native_robust_images);
+   }
+   if (native_robust_images) {
+      const nir_lower_tex_options offsets = {.lower_txf_offset = true};
+      NIR_PASS(_, nir, nir_lower_tex, &offsets);
+      NIR_PASS(_, nir, nir_shader_tex_pass, hk_lower_native_robust_txf,
+               nir_metadata_control_flow, NULL);
+   }
 
    /* We must do early lowering before hk_nir_lower_descriptors, since this will
     * create lod_bias instructions.

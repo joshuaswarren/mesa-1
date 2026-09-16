@@ -2359,6 +2359,17 @@ intrinsic("load_texture_handle_agx", [1], 1, [],
           flags=[CAN_ELIMINATE, CAN_REORDER],
           bit_sizes=[32])
 
+# Load the first 32-bit word of the native texture descriptor bound to a
+# texture deref (source 0), before descriptor lowering resolves the deref.
+intrinsic("load_texture_descriptor_word_agx", [1], 1, [],
+          flags=[CAN_ELIMINATE, CAN_REORDER],
+          bit_sizes=[32])
+
+# Same for the read (texture) half of a storage image deref (source 0).
+intrinsic("load_image_descriptor_word_agx", [1], 1, [],
+          flags=[CAN_ELIMINATE, CAN_REORDER],
+          bit_sizes=[32])
+
 # Load descriptor set address
 intrinsic("load_descriptor_set_agx", [], 1, [DESC_SET],
           flags=[CAN_ELIMINATE, CAN_REORDER],
