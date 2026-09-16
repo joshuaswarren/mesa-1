@@ -388,6 +388,7 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
       limit = MIN2(limit, 192);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        ra_class_for_index(I->dest[d]) == RA_GPR &&
+       rctx->tex_low128 &&
        BITSET_TEST(rctx->tex_low128, I->dest[d].value))
       limit = MIN2(limit, 128);
    return limit;

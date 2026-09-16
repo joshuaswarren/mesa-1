@@ -4,6 +4,46 @@ Apple's Metal toolchain is installed on the development Mac and targets our exac
 part directly.  This turns ISA questions from inference into witness: write MSL,
 get Apple's byte-exact `applegpu_g17p` machine code, diff against ours.
 
+## Required compiler-change gate
+
+Use this workflow for every AGX3B change that can affect instruction selection,
+operand packing, staging, register allocation, scheduling, or program ABI.  It
+is also required before adding a G16G/G17P chip gate or accepting a changed
+G17P byte golden.  A host test proves only what our compiler emitted; it is not
+an architecture oracle.
+
+The default rule is that G16G and G17P share the AGX3B compiler path.  Start
+with one common implementation.  Keep a chip-specific branch only when an
+Apple-compiler witness, captured hardware result, or device limit proves a
+real difference.  Resource counts and command-stream plumbing may differ even
+when the ISA form does not.
+
+For each fix:
+
+1. Reduce the failing CTS or application shader to the smallest MSL program
+   that preserves the disputed operation and its live operands.
+2. Compile it with `metal-nt -arch applegpu_g17p`.  Compile an M4/G16G witness
+   too when its native target is available.
+3. Extract the embedded Mach-O `__TEXT,__text` or stage section.  Decode every
+   relevant instruction and record raw bytes plus the re-composed field vector.
+4. Compile the equivalent NIR with Mesa and diff instruction form, operands,
+   register domains, staging order, and waits.  Do not compare only total size
+   or a hash.
+5. Keep the MSL, `.mtlp-json`, toolchain version, exact command, extracted text
+   hash, and conclusion under `src/asahi/compiler/test/probes/` for a permanent
+   rule.  Temporary investigations may begin under `.tmp`, but the evidence
+   that justifies production code must move into the tree.
+
+The 2026-09-16 Eryk-tail integration is the model.  A G17P half-uniform clamp
+emitted tied `fsel` operations whose compared and selected register fields were
+identical, validating per-instruction uniform-copy reuse on both G16G and G17P.
+A `texturecube_array` sample with register LOD emitted the fused `PACK_SMPIR`
+layer/face/LOD form with its seven-bit register field, validating the shared
+low-128 allocator constraint.  The former changed exactly one G17P background
+clear golden from 442 bytes to 394; the four sibling programs stayed
+byte-identical.  The native witness justified updating that golden instead of
+adding a G17P exception.
+
 ## Toolchain
 
     MT=$(dirname $(xcrun -f metal))     # Metal.xctoolchain/usr/bin
