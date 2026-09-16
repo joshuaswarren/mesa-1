@@ -349,15 +349,46 @@ test_unrolled_sample_depth(void)
    return ok;
 }
 
-/* A late-discard main shader exports its surviving-sample mask to the split
- * epilog. At multisample count the epilog is unrolled, so each surviving
- * DEPTHF must intersect its sample bit with that dynamic exported mask
- * directly, without a separate MOVMSK. The API mask below statically removes
- * sample 1, leaving exactly one depth and colour operation for sample 0.
- * This is the exact shape used by
- * samplemask_no_early_fragment_tests_depth_samples_2. */
+/* Interpret the pure scalar mask expressions used in these epilog fixtures.
+ * Unknown operations fail the check rather than becoming assumed constants. */
 static bool
-test_unrolled_dynamic_depth_mask(void)
+eval_sample_mask(nir_def *def, unsigned exported_mask, unsigned *value)
+{
+   if (def->num_components != 1 || def->bit_size != 16)
+      return false;
+   nir_instr *instr = nir_def_instr(def);
+   if (instr->type == nir_instr_type_load_const) {
+      *value = nir_const_value_as_uint(nir_instr_as_load_const(instr)->value[0], 16);
+      return true;
+   }
+   if (instr->type == nir_instr_type_intrinsic) {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      if (intr->intrinsic != nir_intrinsic_load_exported_agx ||
+          nir_intrinsic_base(intr) != AGX_ABI_FOUT_WRITE_SAMPLES)
+         return false;
+      *value = exported_mask;
+      return true;
+   }
+   if (instr->type != nir_instr_type_alu)
+      return false;
+   nir_alu_instr *alu = nir_instr_as_alu(instr);
+   unsigned a, b;
+   if (alu->op != nir_op_iand && alu->op != nir_op_ior && alu->op != nir_op_ixor)
+      return false;
+   if (!eval_sample_mask(alu->src[0].src.ssa, exported_mask, &a) ||
+       !eval_sample_mask(alu->src[1].src.ssa, exported_mask, &b))
+      return false;
+   *value = alu->op == nir_op_iand ? a & b :
+            alu->op == nir_op_ior ? a | b : a ^ b;
+   return true;
+}
+
+/* A late-discard main shader exports its surviving-sample mask to the split
+ * epilog. Apply all per-sample kills once, before the depth transaction, and
+ * keep only API-enabled depth writes. Exercise every possible 8-bit exported
+ * mask to check the semantic union, not just the number of instructions. */
+static bool
+test_unrolled_dynamic_depth_mask_case(unsigned samples, unsigned api_mask)
 {
    struct agx_fs_epilog_key key = {
       .link.loc_written = BITFIELD_BIT(0),
@@ -365,10 +396,10 @@ test_unrolled_dynamic_depth_mask(void)
       .link.sample_shading = true,
       .link.write_z = true,
       .link.sample_mask_after_force_early = true,
-      .nr_samples = 2,
+      .nr_samples = samples,
       .preserve_zero_mask = true,
       .defer_api_sample_mask = true,
-      .api_sample_mask = 1,
+      .api_sample_mask = api_mask,
    };
    memset(key.remap, -1, sizeof(key.remap));
    key.remap[0] = 0;
@@ -386,7 +417,7 @@ test_unrolled_dynamic_depth_mask(void)
    pixel.defer_monolithic_msaa = true;
    agx_nir_fs_epilog(&b, &pixel);
    agx_nir_lower_to_per_sample(b.shader);
-   bool ok = agx_nir_unroll_g17p_samples(b.shader, 2,
+   bool ok = agx_nir_unroll_g17p_samples(b.shader, samples,
                                          key.link.loc_written);
    bool opt_progress;
    do {
@@ -397,15 +428,40 @@ test_unrolled_dynamic_depth_mask(void)
    const bool hoisted = agx_nir_hoist_g17p_zs_writes(b.shader);
    const unsigned sample_masks =
       count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx);
-   ok &= hoisted && sample_masks == 0;
-   agx_nir_lower_g17p_tile_samples(b.shader, 2);
+   ok &= hoisted && sample_masks == 1;
+   bool saw_output = false;
+   unsigned seen_masks = 0;
+   nir_foreach_block(block, b.impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_store_zs_agx ||
+             intr->intrinsic == nir_intrinsic_store_local_pixel_agx) {
+            saw_output = true;
+            ok &= seen_masks == 1;
+         }
+         if (intr->intrinsic != nir_intrinsic_sample_mask_agx)
+            continue;
+         seen_masks++;
+         ok &= !saw_output && nir_src_is_const(intr->src[1]) &&
+               nir_src_as_uint(intr->src[1]) == 0;
+         for (unsigned mask = 0; mask < 256; ++mask) {
+            unsigned killed = 0;
+            ok &= eval_sample_mask(intr->src[0].ssa, mask, &killed) &&
+                  killed == ((~(mask & api_mask)) & ((1u << samples) - 1));
+         }
+      }
+   }
+   nir_validate_shader(b.shader, "after hoisting G17P sample kills and depth");
+   agx_nir_lower_g17p_tile_samples(b.shader, samples);
    agx_preprocess_nir(b.shader);
 
    struct agx_shader_key backend_key = {
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,
       .secondary = true,
       .no_preamble = true,
-      .fs.nr_samples = 2,
+      .fs.nr_samples = samples,
    };
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &backend_key, &part);
@@ -424,19 +480,31 @@ test_unrolled_dynamic_depth_mask(void)
           text[at + 2] == 0x54 && text[at + 5] == 0x03)
          depth_writes++;
    }
-   ok &= depth_writes == 1;
+   ok &= depth_writes == util_bitcount(api_mask);
 
    if (!ok) {
       fprintf(stderr,
-              "dynamic depth metrics: hoisted=%u masks=%u waits=%u "
+              "dynamic depth metrics: samples=%u api_mask=%x hoisted=%u masks=%u waits=%u "
               "releases=%u depth=%u binary=%u compiled=%u\n",
-              hoisted, sample_masks, waits, releases, depth_writes,
+              samples, api_mask, hoisted, sample_masks, waits, releases, depth_writes,
               part.info.binary_size, compiled);
    }
 
    free(part.binary);
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+test_unrolled_dynamic_depth_mask(void)
+{
+   for (unsigned samples = 2; samples <= 4; samples *= 2) {
+      for (unsigned mask = 1; mask < (1u << samples); ++mask) {
+         if (!test_unrolled_dynamic_depth_mask_case(samples, mask))
+            return false;
+      }
+   }
+   return true;
 }
 
 int
