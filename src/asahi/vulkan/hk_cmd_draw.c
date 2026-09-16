@@ -4119,14 +4119,21 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * control only changes these two words; retain the allocation and staging
     * layout and do not add launches, cache flushes or device-global state. */
    const bool depth_test = render->depth_att.iview && dyn->ds.depth.test_enable;
+   /* A shader with side effects under VK_COMPARE_OP_NEVER emulates the test
+    * by exporting NaN depth (agx_nir_lower_frag_sidefx); the hardware test
+    * must then pass everything, as FRAGMENT_FACE does, or the fragments
+    * never run (rasterization.frag_side_effects.*.depth_never). */
+   const VkCompareOp depth_compare =
+      gfx->descriptors.root.draw.force_never_in_shader
+         ? VK_COMPARE_OP_ALWAYS : dyn->ds.depth.compare_op;
    if (dyn->ds.depth.bounds_test.enable ||
        !agx_ppp_hal200_depth_face_pack(
           dev->dev.chip, depth_test, dyn->ds.depth.write_enable,
-          dyn->ds.depth.compare_op, primary_fields.words[1],
+          depth_compare, primary_fields.words[1],
           &primary_fields.words[1]) ||
        !agx_ppp_hal200_depth_face_pack(
           dev->dev.chip, depth_test, dyn->ds.depth.write_enable,
-          dyn->ds.depth.compare_op, primary_fields.words[3],
+          depth_compare, primary_fields.words[3],
           &primary_fields.words[3]))
       return hk_g17p_bind_tail_refused(__LINE__);
 
