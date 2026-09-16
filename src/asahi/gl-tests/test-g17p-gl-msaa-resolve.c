@@ -108,9 +108,190 @@ static const char vs_quad[] =
    "    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);\n"
    "}\n";
 
-int
-main(void)
+/* Exercise GL 3.3's API sample mask together with late depth and discard.
+ * Read all samples into one wide image, keeping the diagnostic independent
+ * of colour/depth resolve behaviour and requiring only one readback per pass.
+ */
+static bool
+run_sparse_depth_masks(void)
 {
+   if (getenv("ASAHI_GL_NOOP_SHIM")) {
+      fprintf(stderr, "sparse depth masks require real readback, not a no-op shim\n");
+      return false;
+   }
+   printf("sparse depth renderer: %s; GL: %s\n",
+          (const char *)glGetString(GL_RENDERER),
+          (const char *)glGetString(GL_VERSION));
+   static const char write_fs[] =
+      "#version 330 core\n"
+      "uniform int phase;\n"
+      "out vec4 color;\n"
+      "void main() {\n"
+      "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+      "  if (((p.x + p.y) & 1) != phase) discard;\n"
+      "  gl_FragDepth = 0.25 + 0.125 * float(p.x & 1);\n"
+      "  color = vec4(1.0, 0.0, 0.0, 1.0);\n"
+      "}\n";
+   static const char probe_fs[] =
+      "#version 330 core\n"
+      "out vec4 color;\n"
+      "void main() { gl_FragDepth = 0.5; color = vec4(0.0, 1.0, 0.0, 1.0); }\n";
+   static const char inspect_fs[] =
+      "#version 330 core\n"
+      "uniform sampler2DMS colors;\n"
+      "uniform sampler2DMS depths;\n"
+      "uniform int extent;\n"
+      "out vec4 color;\n"
+      "void main() {\n"
+      "  ivec2 p = ivec2(gl_FragCoord.xy);\n"
+      "  int sample_index = p.x / extent;\n"
+      "  p.x %= extent;\n"
+      "  color = vec4(texelFetch(colors, p, sample_index).rgb,\n"
+      "               texelFetch(depths, p, sample_index).r);\n"
+      "}\n";
+   GLuint write = link_program(vs_quad, write_fs);
+   GLuint probe = link_program(vs_quad, probe_fs);
+   GLuint inspect = link_program(vs_quad, inspect_fs);
+   if (!write || !probe || !inspect)
+      return false;
+   glUseProgram(inspect);
+   glUniform1i(glGetUniformLocation(inspect, "colors"), 0);
+   glUniform1i(glGetUniformLocation(inspect, "depths"), 1);
+   glUniform1i(glGetUniformLocation(inspect, "extent"), SIZE);
+   glDisable(GL_DITHER);
+
+   unsigned checked = 0, sample_counts = 0;
+   bool ok = true;
+   for (unsigned samples = 2; samples <= 4 && ok; samples *= 2) {
+      GLuint textures[3], fbos[2];
+      glGenTextures(3, textures);
+      glGenFramebuffers(2, fbos);
+      glBindFramebuffer(GL_FRAMEBUFFER, fbos[0]);
+      for (unsigned i = 0; i < 2; ++i) {
+         glActiveTexture(GL_TEXTURE0 + i);
+         glBindTexture(GL_TEXTURE_2D_MULTISAMPLE, textures[i]);
+         glTexImage2DMultisample(GL_TEXTURE_2D_MULTISAMPLE, samples,
+                                 i ? GL_DEPTH_COMPONENT32F : GL_RGBA8,
+                                 SIZE, SIZE, GL_TRUE);
+         glFramebufferTexture2D(GL_FRAMEBUFFER,
+                                i ? GL_DEPTH_ATTACHMENT : GL_COLOR_ATTACHMENT0,
+                                GL_TEXTURE_2D_MULTISAMPLE, textures[i], 0);
+      }
+      GLint actual_samples = 0;
+      glGetIntegerv(GL_SAMPLES, &actual_samples);
+      if (glGetError() != GL_NO_ERROR ||
+          glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+         fprintf(stderr, "sparse depth: %ux FBO creation failed\n", samples);
+         ok = false;
+      } else if (actual_samples != (GLint)samples) {
+         /* Some software drivers round a request for 2 up to 4. That is not
+          * evidence for the 2x shader variant. Report it explicitly. */
+         fprintf(stderr, "sparse depth: requested %ux, got %dx; not tested\n",
+                 samples, actual_samples);
+         glDeleteFramebuffers(2, fbos);
+         glDeleteTextures(3, textures);
+         continue;
+      }
+      glActiveTexture(GL_TEXTURE0);
+      glBindTexture(GL_TEXTURE_2D, textures[2]);
+      glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, SIZE * samples, SIZE, 0,
+                   GL_RGBA, GL_FLOAT, NULL);
+      glBindFramebuffer(GL_FRAMEBUFFER, fbos[1]);
+      glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                             GL_TEXTURE_2D, textures[2], 0);
+      ok &= glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+      float pixels[SAMPLES * SIZE * SIZE * 4];
+      unsigned masks_checked = 0;
+      for (unsigned mask = 0; mask < (1u << samples) && ok; ++mask) {
+         for (unsigned phase = 0; phase < 2 && ok; ++phase) {
+            glBindFramebuffer(GL_FRAMEBUFFER, fbos[0]);
+            glViewport(0, 0, SIZE, SIZE);
+            glDisable(GL_SAMPLE_MASK);
+            glEnable(GL_DEPTH_TEST);
+            glDepthFunc(GL_LESS);
+            glDepthMask(GL_TRUE);
+            glClearDepth(1.0);
+            glClearColor(0.0, 0.0, 1.0, 1.0);
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+            glEnable(GL_SAMPLE_MASK);
+            glSampleMaski(0, mask);
+            glUseProgram(write);
+            glUniform1i(glGetUniformLocation(write, "phase"), phase);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+            glDisable(GL_SAMPLE_MASK);
+            for (unsigned pass = 0; pass < 2 && ok; ++pass) {
+               if (pass) {
+                  glBindFramebuffer(GL_FRAMEBUFFER, fbos[0]);
+                  glViewport(0, 0, SIZE, SIZE);
+                  glEnable(GL_DEPTH_TEST);
+                  glUseProgram(probe);
+                  glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+               }
+               glBindFramebuffer(GL_FRAMEBUFFER, fbos[1]);
+               glViewport(0, 0, SIZE * samples, SIZE);
+               glDisable(GL_DEPTH_TEST);
+               glUseProgram(inspect);
+               glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+               glReadPixels(0, 0, SIZE * samples, SIZE, GL_RGBA, GL_FLOAT, pixels);
+               if (glGetError() != GL_NO_ERROR) {
+                  fprintf(stderr, "sparse depth: %ux mask=%x phase=%u pass=%u GL error\n",
+                          samples, mask, phase, pass);
+                  ok = false;
+                  break;
+               }
+               for (unsigned y = 0; y < SIZE && ok; ++y) {
+                  for (unsigned x = 0; x < SIZE * samples && ok; ++x) {
+                     unsigned sample = x / SIZE, px = x % SIZE;
+                     bool written = (mask & (1u << sample)) &&
+                                    ((px + y) & 1) == phase;
+                     float expected[4] = {
+                        written ? 1.0f : 0.0f,
+                        !written && pass ? 1.0f : 0.0f,
+                        !written && !pass ? 1.0f : 0.0f,
+                        written ? 0.25f + 0.125f * (px & 1)
+                                : pass ? 0.5f : 1.0f,
+                     };
+                     float *pixel = &pixels[4 * (y * SIZE * samples + x)];
+                     for (unsigned c = 0; c < 4; ++c) {
+                        if (!isfinite(pixel[c]) || fabsf(pixel[c] - expected[c]) > 0.00001f) {
+                           fprintf(stderr, "sparse depth: %ux mask=%x phase=%u pass=%u sample=%u xy=%u,%u component=%u got=%g expected=%g\n",
+                                   samples, mask, phase, pass, sample, px, y, c,
+                                   pixel[c], expected[c]);
+                           ok = false;
+                           break;
+                        }
+                     }
+                     checked++;
+                  }
+               }
+            }
+         }
+         masks_checked++;
+      }
+      if (ok) {
+         ++sample_counts;
+         printf("sparse depth: %ux, %u masks, both discard phases and depth passes verified\n",
+                samples, masks_checked);
+      }
+      glDeleteFramebuffers(2, fbos);
+      glDeleteTextures(3, textures);
+   }
+   glDeleteProgram(write);
+   glDeleteProgram(probe);
+   glDeleteProgram(inspect);
+   printf("sparse depth: %s, %u exact sample counts, %u sample observations\n",
+          ok && sample_counts ? "PASS" : "FAIL", sample_counts, checked);
+   return ok && sample_counts;
+}
+
+int
+main(int argc, char **argv)
+{
+   const bool sparse_depth = argc == 2 && !strcmp(argv[1], "--sparse-depth");
+   if (argc != 1 && !sparse_depth) {
+      fprintf(stderr, "usage: %s [--sparse-depth]\n", argv[0]);
+      return 1;
+   }
    EGLDisplay display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
    EGLint major, minor;
    if (display == EGL_NO_DISPLAY || !eglInitialize(display, &major, &minor) ||
@@ -143,6 +324,9 @@ main(void)
    GLuint vao;
    glGenVertexArrays(1, &vao);
    glBindVertexArray(vao);
+
+   if (sparse_depth)
+      return run_sparse_depth_masks() ? 0 : 1;
 
    const char *only = getenv("ASAHI_GL_MSAA_FORMAT");
    bool all_ok = true;

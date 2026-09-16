@@ -387,6 +387,17 @@ test(
   suite : ['asahi'],
 )
 
+test(
+  'asahi-g17p-gl-msaa-sparse-depth-software-control',
+  gl_msaa_resolve,
+  args : ['--sparse-depth'],
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
 gl_xfb_interleaved = executable(
   'asahi-g17p-gl-xfb-interleaved',
   files('test-g17p-gl-xfb-interleaved.c'),
