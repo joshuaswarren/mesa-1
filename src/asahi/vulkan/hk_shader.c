@@ -898,6 +898,148 @@ lower_ycbcr_explicit(nir_builder *b, nir_tex_instr *tex, void *state)
    return true;
 }
 
+/* Look up the conversion of a plane access produced by the common pass. */
+static const struct vk_ycbcr_conversion_state *
+plane_tex_conversion(nir_tex_instr *tex, const void *state, unsigned *plane)
+{
+   const int plane_src = nir_tex_instr_src_index(tex, nir_tex_src_plane);
+   const int deref_src = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (plane_src < 0 || deref_src < 0 || !nir_src_is_const(tex->src[plane_src].src))
+      return NULL;
+
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[deref_src].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   unsigned array_index = 0;
+   if (deref->deref_type != nir_deref_type_var) {
+      if (deref->deref_type != nir_deref_type_array ||
+          !nir_src_is_const(deref->arr.index))
+         return NULL;
+      array_index = nir_src_as_uint(deref->arr.index);
+   }
+   *plane = nir_src_as_uint(tex->src[plane_src].src);
+   return lookup_ycbcr_conversion(state, var->data.descriptor_set,
+                                  var->data.binding, array_index);
+}
+
+/* The texture unit filters 16-bit UNORM planes at 16-bit precision: a
+ * linear blend of two texels rounds to a whole code, half a code away from
+ * the exact result. Chroma reconstruction must keep the format's precision
+ * (the conversion tests bound it to a 2^-16 step), so blend 16-bit chroma
+ * planes in the shader from nearest fetches. Multi-planar images have one
+ * mip level and YCbCr samplers clamp to edge, so the blend of the four
+ * clamped neighbours at the sample position is the linear filter result. */
+static bool
+lower_ycbcr_chroma_blend(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   switch (tex->op) {
+   case nir_texop_tex:
+   case nir_texop_txb:
+   case nir_texop_txl:
+   case nir_texop_txd:
+      break;
+   default:
+      return false;
+   }
+   const int coord_src = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (coord_src < 0 || tex->sampler_dim != GLSL_SAMPLER_DIM_2D)
+      return false;
+
+   unsigned plane;
+   const struct vk_ycbcr_conversion_state *conversion =
+      plane_tex_conversion(tex, state, &plane);
+   if (!conversion || conversion->chroma_filter != VK_FILTER_LINEAR)
+      return false;
+   const struct vk_format_ycbcr_info *info =
+      vk_format_get_ycbcr_info(conversion->format);
+   assert(info && plane < info->n_planes);
+   if (!info->planes[plane].has_chroma)
+      return false;
+   switch (info->planes[plane].format) {
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16G16_UNORM:
+      break;
+   default:
+      return false;
+   }
+
+   const int deref_src = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   nir_def *texture = tex->src[deref_src].src.ssa;
+   b->cursor = nir_before_instr(&tex->instr);
+
+   nir_tex_instr *txs = nir_tex_instr_create(b->shader, 2);
+   txs->op = nir_texop_txs;
+   txs->sampler_dim = tex->sampler_dim;
+   txs->is_array = tex->is_array;
+   txs->dest_type = nir_type_int32;
+   txs->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref, texture);
+   txs->src[1] = nir_tex_src_for_ssa(nir_tex_src_plane, nir_imm_int(b, plane));
+   nir_def_init(&txs->instr, &txs->def, nir_tex_instr_dest_size(txs), 32);
+   nir_builder_instr_insert(b, &txs->instr);
+   nir_def *size = nir_channels(b, &txs->def, 3);
+
+   /* The texture unit converts the coordinate to fixed point with
+    * subTexelPrecisionBits fractional bits before filtering. Do the same, so
+    * a sample that lies on a texel centre or boundary in that precision gets
+    * the exact weight rather than a rounding residue of the float scaling. */
+   nir_def *coord = tex->src[coord_src].src.ssa;
+   nir_def *pos = nir_fadd_imm(
+      b, nir_fmul(b, nir_channels(b, coord, 3), nir_i2f32(b, size)), -0.5);
+   pos = nir_fmul_imm(b, nir_fround_even(b, nir_fmul_imm(b, pos, 256.0)),
+                      1.0 / 256.0);
+   nir_def *base = nir_ffloor(b, pos);
+   nir_def *weight = nir_fsub(b, pos, base);
+   nir_def *ibase = nir_f2i32(b, base);
+   const int offset_src = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset_src >= 0)
+      ibase = nir_iadd(b, ibase, nir_channels(b, tex->src[offset_src].src.ssa, 3));
+
+   nir_def *layer = NULL;
+   if (tex->is_array) {
+      layer = nir_f2i32(b, nir_fround_even(b, nir_channel(b, coord, 2)));
+      layer = nir_imin(b, nir_imax(b, layer, nir_imm_int(b, 0)),
+                       nir_iadd_imm(b, nir_channel(b, &txs->def, 2), -1));
+   }
+
+   nir_def *taps[4];
+   for (unsigned tap = 0; tap < 4; ++tap) {
+      nir_def *xy = nir_iadd(b, ibase, nir_imm_ivec2(b, tap & 1, tap >> 1));
+      xy = nir_imin(b, nir_imax(b, xy, nir_imm_int(b, 0)),
+                    nir_iadd_imm(b, size, -1));
+      nir_def *texel = layer ? nir_vec3(b, nir_channel(b, xy, 0),
+                                        nir_channel(b, xy, 1), layer)
+                             : xy;
+      nir_tex_instr *fetch = nir_tex_instr_create(b->shader, 4);
+      fetch->op = nir_texop_txf;
+      fetch->sampler_dim = tex->sampler_dim;
+      fetch->is_array = tex->is_array;
+      fetch->dest_type = tex->dest_type;
+      fetch->coord_components = texel->num_components;
+      fetch->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref, texture);
+      fetch->src[1] = nir_tex_src_for_ssa(nir_tex_src_coord, texel);
+      fetch->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
+      fetch->src[3] = nir_tex_src_for_ssa(nir_tex_src_plane, nir_imm_int(b, plane));
+      nir_def_init(&fetch->instr, &fetch->def, tex->def.num_components,
+                   tex->def.bit_size);
+      nir_builder_instr_insert(b, &fetch->instr);
+      taps[tap] = &fetch->def;
+   }
+
+   nir_def *x = nir_channel(b, weight, 0), *y = nir_channel(b, weight, 1);
+   if (tex->def.bit_size != 32) {
+      x = nir_f2fN(b, x, tex->def.bit_size);
+      y = nir_f2fN(b, y, tex->def.bit_size);
+   }
+   b->shader->info.flrp_lowered = false;
+   nir_def *result = nir_flrp(b, nir_flrp(b, taps[0], taps[1], x),
+                              nir_flrp(b, taps[2], taps[3], x), y);
+   nir_def_replace(&tex->def, result);
+   return true;
+}
+
+/* hk_format_to_pipe_format samples X6R10/X4R12 planes through R16_UNORM.
+ * Restore their logical UNORM range before range expansion and YCbCr matrix
+ * conversion. The correction commutes with filtering; absent channels and
+ * alpha must retain their descriptor defaults. */
 static bool
 lower_ycbcr_plane_range(nir_builder *b, nir_tex_instr *tex, void *data)
 {
@@ -1253,7 +1395,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_metadata_none, (void *)&ycbcr_state);
    NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lookup_ycbcr_conversion,
             &ycbcr_state);
-   if (dev->dev.chip == AGX_CHIP_G17P) {
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_chroma_blend,
+            nir_metadata_none, (void *)&ycbcr_state);
+   if (agx_native_graphics(&dev->dev)) {
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_plane_range,
                nir_metadata_control_flow, (void *)&ycbcr_state);
    }
