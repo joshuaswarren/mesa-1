@@ -2112,20 +2112,42 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    VkResult result;
    enum hk_feature_key features = hk_make_feature_key(vk_features);
 
-   /* Set when G17P canonicalized an API request for per-sample fragment
-    * execution down to single-sample.  The collapse is exact at one
-    * rasterization sample and wrong at more, but rasterizationSamples is
-    * dynamic state, so the real count is only known per draw.  Carry the API
-    * intent to hk_flush_dynamic_state() and refuse there rather than silently
-    * shading once and reporting gl_SampleID == 0.
+   /* Retain the draw-time guard for a fixed-count shader whose exports cannot
+    * be unrolled. Dynamic sample-rate shaders use native variants below.
     */
    bool g17p_collapsed_sample_shading = false;
 
    /* We consume the NIR, regardless of success or failure */
    nir_shader *nir = info->nir;
 
+   if (!nir->info.io_lowered) {
+      hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
+                   info->set_layouts, features);
+   }
+
+   union hk_key key_tmp, *key = NULL;
+   bool sample_variants = false;
+   if (info->stage == MESA_SHADER_FRAGMENT) {
+      hk_populate_fs_key(&key_tmp.fs, state, dev->dev.chip);
+      /* Coverage updates also embed the raster sample count, even when the
+       * application shades once per pixel. These include SampleMask writes,
+       * discards, and early tests or late tests guarding memory writes. */
+      const bool coverage_updates = nir->info.fs.uses_discard ||
+         nir->info.writes_memory ||
+         (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK)) ||
+         (nir->info.fs.early_fragment_tests &&
+          (nir->info.outputs_written &
+           (BITFIELD64_BIT(FRAG_RESULT_DEPTH) |
+            BITFIELD64_BIT(FRAG_RESULT_STENCIL))));
+      sample_variants = dev->dev.chip == AGX_CHIP_G17P &&
+         key_tmp.fs.g17p_samples == 0 &&
+         (nir->info.fs.uses_sample_shading || key_tmp.fs.force_sample_shading ||
+          coverage_updates);
+   }
+
    size_t size = sizeof(struct hk_api_shader) +
-                 sizeof(struct hk_shader) * hk_num_variants(info->stage);
+                 sizeof(struct hk_shader) *
+                    (sample_variants ? 3 : hk_num_variants(info->stage));
    struct hk_api_shader *obj =
       vk_shader_zalloc(&dev->vk, &hk_shader_ops, info->stage, pAllocator, size);
 
@@ -2134,34 +2156,23 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
    }
 
-   if (!nir->info.io_lowered) {
-      hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
-                   info->set_layouts, features);
-   }
+   obj->g17p_sample_variants = sample_variants;
 
    mesa_shader_stage sw_stage = nir->info.stage;
 
-   union hk_key key_tmp, *key = NULL;
    if (sw_stage == MESA_SHADER_FRAGMENT) {
-      hk_populate_fs_key(&key_tmp.fs, state, dev->dev.chip);
       key = &key_tmp;
 
       nir->info.fs.uses_sample_shading |= key->fs.force_sample_shading;
 
-      /* G17P has no external sample loop: agx_linker.c's is AGX2 machine
-       * code. A pipeline that fixes two or four samples unrolls the samples
-       * inside the fragment instead (hk_compile_nir). Otherwise canonicalize
-       * sample builtins and qualifiers now, before split FS lowering observes
-       * uses_sample_shading.
-       *
-       * That is exact only at ONE rasterization sample, where per-sample and
-       * per-pixel invocation coincide.  With a dynamic count, or a shader
-       * object compiled with no pipeline state, the count is not known until
-       * the draw.  Record the intent instead; hk_flush_dynamic_state()
-       * refuses the draw if the count turns out to be greater than one.
+      /* Fixed-count fragments unroll in hk_compile_nir. Dynamic sample-rate
+       * shaders retain their sample inputs until each variant is compiled.
+       * Canonicalization is exact only at one sample; keep the draw-time
+       * refusal for unsupported fixed-count export footprints.
        */
       if (dev->dev.chip == AGX_CHIP_G17P &&
           nir->info.fs.uses_sample_shading &&
+          !sample_variants &&
           !hk_g17p_unrolls_sample_shading(nir, &key->fs)) {
          g17p_collapsed_sample_shading = true;
          NIR_PASS(_, nir, agx_nir_lower_g17p_1x_sample_shading);
@@ -2177,7 +2188,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          nir->info.fs.uses_discard = true;
       }
 
-      NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, false);
+      if (!sample_variants)
+         NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, false);
    } else if (sw_stage == MESA_SHADER_VERTEX) {
       hk_populate_vs_key(&key_tmp.vs, state);
       key = &key_tmp;
@@ -2361,6 +2373,41 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
             return result;
          }
       }
+   } else if (sample_variants) {
+      /* The sample count is dynamic API state, but native coverage words and
+       * export registers depend on it. Compile the same native specialization
+       * as a fixed-count pipeline, without changing GPU batching or inserting
+       * an AGX2 machine-code loop into a G17P fragment. */
+      hk_foreach_variant(obj, shader) {
+         const unsigned samples = 1u << (shader - obj->variants);
+         nir_shader *clone = nir_shader_clone(NULL, nir);
+         if (!clone) {
+            ralloc_free(nir);
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+         }
+         key->fs.g17p_samples = samples;
+         if (samples == 1) {
+            NIR_PASS(_, clone, agx_nir_lower_g17p_1x_sample_shading);
+         } else if (clone->info.fs.uses_sample_shading &&
+                    !hk_g17p_unrolls_sample_shading(clone, &key->fs)) {
+            ralloc_free(clone);
+            ralloc_free(nir);
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+         }
+         NIR_PASS(_, clone, agx_nir_lower_sample_intrinsics, false);
+
+         result = hk_compile_nir(dev, pAllocator, clone, info->flags,
+                                 info->robustness, key, features, shader,
+                                 sw_stage, true, NULL, info->set_layout_count);
+         if (result != VK_SUCCESS) {
+            ralloc_free(nir);
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return result;
+         }
+      }
+      ralloc_free(nir);
    } else {
       struct hk_shader *shader = hk_only_variant(obj);
 
@@ -2654,17 +2701,23 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    mesa_shader_stage stage = blob_read_uint8(blob);
-   if (blob->overrun)
+   const unsigned sample_variants = blob_read_uint8(blob);
+   if (blob->overrun || stage >= MESA_SHADER_STAGES || sample_variants > 1 ||
+       (sample_variants && (stage != MESA_SHADER_FRAGMENT ||
+                            dev->dev.chip != AGX_CHIP_G17P)))
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    size_t size = sizeof(struct hk_api_shader) +
-                 sizeof(struct hk_shader) * hk_num_variants(stage);
+                 sizeof(struct hk_shader) *
+                    (sample_variants ? 3 : hk_num_variants(stage));
 
    struct hk_api_shader *obj =
       vk_shader_zalloc(&dev->vk, &hk_shader_ops, stage, pAllocator, size);
 
    if (obj == NULL)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   obj->g17p_sample_variants = sample_variants;
 
    hk_foreach_variant(obj, shader) {
       VkResult result = hk_deserialize_shader(dev, blob, shader);
@@ -2703,6 +2756,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       container_of(vk_shader, struct hk_api_shader, vk);
 
    blob_write_uint8(blob, vk_shader->stage);
+   blob_write_uint8(blob, obj->g17p_sample_variants);
 
    hk_foreach_variant(obj, shader) {
       hk_shader_serialize(vk_dev, shader, blob);

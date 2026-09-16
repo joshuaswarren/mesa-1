@@ -107,6 +107,25 @@ hk_files = files(
 )
 
 if with_tests
+  test(
+    'hk_shader_variants',
+    executable(
+      'hk_shader_variants_test',
+      files('tests/test-hk-shader-variants.c'),
+      include_directories : [
+        include_directories('.', '../libagx', '../../gallium/include',
+                            '../../gallium/auxiliary', '../../vulkan/runtime',
+                            '../../vulkan/util', '../../vulkan/wsi',
+                            '../../compiler/spirv', '../../virtio/virtio-gpu',
+                            '../../virtio/vdrm'),
+        inc_include, inc_src, inc_asahi,
+      ],
+      dependencies : [idep_nir, idep_mesautil, idep_libagx,
+                      idep_libagx_shaders_h, idep_agx_pack],
+    ),
+    suite : ['asahi'],
+  )
+
   if host_machine.system() == 'linux'
     hk_sparse_format_properties = executable(
       'hk-sparse-format-properties',

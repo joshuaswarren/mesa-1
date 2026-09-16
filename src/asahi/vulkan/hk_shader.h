@@ -251,7 +251,7 @@ hk_num_variants(mesa_shader_stage stage)
 /*
  * An hk_api shader maps 1:1 to a VkShader object. An hk_api_shader may contain
  * multiple hardware hk_shader's, built at shader compile time. This complexity
- * is required to efficiently implement the legacy geometry pipeline.
+ * implements the legacy geometry pipeline and native sample-count variants.
  */
 struct hk_api_shader {
    struct vk_shader vk;
@@ -259,21 +259,33 @@ struct hk_api_shader {
    /* Is this an internal passthrough geometry shader? */
    bool is_passthrough;
 
+   /* Dynamic G17P sample-rate/coverage shaders have native 1x/2x/4x binaries. */
+   bool g17p_sample_variants;
+
    struct hk_shader variants[];
 };
 
+static inline unsigned
+hk_api_num_variants(const struct hk_api_shader *obj)
+{
+   return obj->g17p_sample_variants ? 3 : hk_num_variants(obj->vk.stage);
+}
+
 #define hk_foreach_variant(api_shader, var)                                    \
    for (struct hk_shader *var = api_shader->variants;                          \
-        var < api_shader->variants + hk_num_variants(api_shader->vk.stage);    \
+        var < api_shader->variants + hk_api_num_variants(api_shader);          \
         ++var)
 
 static const char *
 hk_variant_name(struct hk_api_shader *obj, struct hk_shader *variant)
 {
    unsigned i = variant - obj->variants;
-   assert(i < hk_num_variants(obj->vk.stage));
+   assert(i < hk_api_num_variants(obj));
 
-   if (hk_num_variants(obj->vk.stage) == 1) {
+   if (obj->g17p_sample_variants) {
+      static const char *names[] = {"1 sample", "2 samples", "4 samples"};
+      return names[i];
+   } else if (hk_api_num_variants(obj) == 1) {
       return NULL;
    } else if (obj->vk.stage == MESA_SHADER_GEOMETRY) {
       assert(i < ARRAY_SIZE(hk_gs_variant_name));
@@ -290,7 +302,7 @@ hk_only_variant(struct hk_api_shader *obj)
    if (!obj)
       return NULL;
 
-   assert(hk_num_variants(obj->vk.stage) == 1);
+   assert(hk_api_num_variants(obj) == 1);
    return &obj->variants[0];
 }
 
@@ -301,6 +313,20 @@ hk_any_variant(struct hk_api_shader *obj)
       return NULL;
 
    return &obj->variants[0];
+}
+
+static inline struct hk_shader *
+hk_fs_variant(struct hk_api_shader *obj, unsigned samples)
+{
+   if (!obj)
+      return NULL;
+
+   assert(obj->vk.stage == MESA_SHADER_FRAGMENT);
+   if (!obj->g17p_sample_variants)
+      return hk_only_variant(obj);
+
+   assert(samples == 0 || samples == 1 || samples == 2 || samples == 4);
+   return &obj->variants[samples > 1 ? util_logbase2(samples) : 0];
 }
 
 static struct hk_shader *

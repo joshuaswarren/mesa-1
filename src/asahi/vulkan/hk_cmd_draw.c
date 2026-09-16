@@ -2245,6 +2245,13 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
    }
 }
 
+static struct hk_shader *
+hk_bound_fs(struct hk_cmd_buffer *cmd)
+{
+   return hk_fs_variant(cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT],
+                        cmd->vk.dynamic_graphics_state.ms.rasterization_samples);
+}
+
 static uint64_t
 hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -2252,7 +2259,7 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
    struct hk_shader *count = hk_count_gs_variant(gs);
 
    /* XXX: We should deduplicate this logic */
@@ -3050,10 +3057,18 @@ hk_upload_constant_data(struct hk_cmd_buffer *cmd, struct hk_shader *s)
 static void
 hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
-   if (cmd->state.gfx.shaders_dirty == 0)
+   struct hk_api_shader *fs_obj =
+      cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
+   const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
+      BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
+                  MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
+   if (cmd->state.gfx.shaders_dirty == 0 && !sample_variant_dirty)
       return;
 
    struct hk_graphics_state *gfx = &cmd->state.gfx;
+   if (sample_variant_dirty)
+      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
    desc->root_dirty = true;
 
@@ -3067,25 +3082,24 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    }
 
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
+   struct hk_shader *fs = hk_bound_fs(cmd);
 
-   /* If we have a new VS/FS pair, UVS locations may have changed so need to
-    * relink. We do this here because there's no dependence on the fast linked
-    * shaders.
+   /* A new VS/FS pair or sample-count variant may change interpolation. This
+    * assignment does not depend on the fast linked shaders.
     */
    agx_assign_uvs(&gfx->linked_varyings, &hw_vs->info.uvs,
-                  hk_only_variant(fs)->info.fs.interp.flat,
-                  hk_only_variant(fs)->info.fs.interp.linear);
+                  fs->info.fs.interp.flat,
+                  fs->info.fs.interp.linear);
 
    for (unsigned i = 0; i < VARYING_SLOT_MAX; ++i) {
       desc->root.draw.uvs_index[i] = gfx->linked_varyings.slots[i];
    }
 
-   /* Every variant of an API shader carries the same constant data. */
+   /* Upload constant data for the selected fragment variant. */
    desc->root.draw.vs_constant_data_addr = hk_upload_constant_data(
       cmd, hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]));
    desc->root.draw.fs_constant_data_addr =
-      hk_upload_constant_data(cmd, hk_only_variant(fs));
+      hk_upload_constant_data(cmd, fs);
 }
 
 static void build_g17p_fs_epilog(nir_builder *b, const void *key_);
@@ -3989,7 +4003,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                          dyn->vp.scissor_count))
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
    struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
    if (!fs || !linked_fs)
       return hk_g17p_bind_tail_refused(__LINE__);
@@ -4539,7 +4553,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
 
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
 
    bool hw_vs_dirty = IS_SHADER_DIRTY(VERTEX) || IS_SHADER_DIRTY(TESS_EVAL) ||
                       IS_SHADER_DIRTY(GEOMETRY);
@@ -5061,7 +5075,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       out += interdraw_barrier.length;
    }
 
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
 
    bool gt_dirty = IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL) ||
                    IS_SHADER_DIRTY(GEOMETRY);
@@ -5243,12 +5257,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          perf_debug(cmd, "Emulating sample mask");
       }
 
-      /* hk_compile_shader() canonicalized this shader's sample builtins to
-       * single-sample because its pipeline did not fix the sample count. That
-       * is exact at one rasterization sample and wrong at more.  Now that the
-       * real count is known, refuse rather than shade once and hand the
-       * application gl_SampleID == 0 as if it were the answer.  A refusal is
-       * recoverable; a plausible wrong pixel is not.
+      /* A fixed-count shader whose sample exports exceeded the register file
+       * was canonicalized to one sample. Keep that guard; dynamic sample-rate
+       * shaders instead select a native variant in hk_bound_fs().
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
           dyn->ms.rasterization_samples > 1) {
