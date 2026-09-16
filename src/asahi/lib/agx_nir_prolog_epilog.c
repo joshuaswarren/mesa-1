@@ -575,18 +575,40 @@ convert_scaled_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    const struct util_format_description *desc =
       util_format_description(format);
-   const unsigned bits = desc->channel[0].size;
-   if ((bits != 8 && bits != 16) || desc->channel[0].normalized)
-      return false;
-
    const bool is_signed = desc->channel[0].type == UTIL_FORMAT_TYPE_SIGNED;
+   unsigned component_bits[4];
+   for (unsigned c = 0; c < intr->num_components; ++c) {
+      /* Meta fragment shaders may carry a fourth value into a three-component
+       * attachment. Constant format swizzles need no special range, so retain
+       * the format's uniform channel width for that otherwise-unobservable
+       * lane. Packed formats map all four logical components to real channels. */
+      const unsigned channel = desc->swizzle[c] < PIPE_SWIZZLE_0
+                                  ? desc->swizzle[c]
+                                  : 0;
+      if (desc->channel[channel].normalized ||
+          desc->channel[channel].type != desc->channel[0].type)
+         return false;
+
+      component_bits[c] = desc->channel[channel].size;
+      if (component_bits[c] == 0 || component_bits[c] >= 32)
+         return false;
+   }
+
    b->cursor = nir_before_instr(&intr->instr);
-   nir_def *limit = nir_imm_float(b, 1u << bits);
-   nir_def *signed_limit = nir_fmul_imm(b, limit, 0.5);
-   nir_def *upper = nir_fadd_imm(
-      b, is_signed ? signed_limit : limit, -1);
-   nir_def *lower =
-      is_signed ? nir_fneg(b, signed_limit) : nir_imm_float(b, 0);
+   nir_def *upper_components[4];
+   nir_def *lower_components[4];
+   for (unsigned c = 0; c < intr->num_components; ++c) {
+      const unsigned bits = component_bits[c];
+      nir_def *limit = nir_imm_float(b, 1u << bits);
+      nir_def *signed_limit = nir_fmul_imm(b, limit, 0.5);
+      upper_components[c] = nir_fadd_imm(
+         b, is_signed ? signed_limit : limit, -1);
+      lower_components[c] =
+         is_signed ? nir_fneg(b, signed_limit) : nir_imm_float(b, 0);
+   }
+
+   nir_def *upper = nir_vec(b, upper_components, intr->num_components);
+   nir_def *lower = nir_vec(b, lower_components, intr->num_components);
    nir_def *rounded = nir_fround_even(b, intr->src[0].ssa);
    nir_def *clamped = nir_fmin(b, nir_fmax(b, rounded, lower), upper);
    nir_src_rewrite(&intr->src[0],
