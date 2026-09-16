@@ -444,12 +444,169 @@ test_cprog_inputs(void)
    return true;
 }
 
+static bool
+logical_state_unchanged(const struct fixture *f, const struct fixture *before)
+{
+   return memcmp(&f->core, &before->core, sizeof(f->core)) == 0 &&
+          memcmp(f->loads, before->loads, sizeof(f->loads)) == 0 &&
+          memcmp(f->cache, before->cache, sizeof(f->cache)) == 0 &&
+          memcmp(f->bytes, before->bytes, before->core.sink.length) == 0;
+}
+
+static bool
+test_cprog_rounds(void)
+{
+   /* Ready-source copyGprToCprog bytes from native G17P 360.34.5,
+    * driver SHA-256 666816a37045b6dc... . The ordinary uniform COPY must
+    * leave its source live when the following TPS COPY still reads it. */
+   static const struct {
+      uint64_t mask;
+      unsigned extra_bound;
+      uint8_t length;
+      uint8_t copies[38];
+   } native[] = {
+      {0, 0, 8,
+       {0xab, 0x04, 0x09, 0x04, 0xbb, 0x06, 0x09, 0x04}},
+      {UINT64_C(1) << 20, 10, 18,
+       {0xab, 0x04, 0x01, 0x04,
+        0x43, 0x04, 0x0f, 0x00, 0x22, 0x00, 0x00, 0x14, 0x00, 0x00,
+        0xbb, 0x06, 0x09, 0x04}},
+      {UINT64_C(3) << 20, 20, 18,
+       {0xab, 0x04, 0x01, 0x04,
+        0x4b, 0x05, 0x0f, 0x00, 0x22, 0x00, 0x00, 0x14, 0x00, 0x00,
+        0xbb, 0x06, 0x09, 0x04}},
+      {(UINT64_C(1) << 20) | (UINT64_C(3) << 22), 30, 38,
+       {0xab, 0x04, 0x01, 0x04,
+        0x43, 0x04, 0x0f, 0x00, 0x22, 0x00, 0x00, 0x14, 0x00, 0x00,
+        0xbb, 0x06, 0x01, 0x04,
+        0x43, 0x06, 0x0f, 0x00, 0x26, 0x00, 0x00, 0x14, 0x00, 0x00,
+        0x53, 0x06, 0x0f, 0x00, 0x2a, 0x00, 0x00, 0x14, 0x00, 0x00}},
+   };
+   struct fixture baseline;
+   CHECK(fixture_init(&baseline, AGX_CHIP_G17P, true));
+   CHECK(queue_two_dwords(&baseline));
+   CHECK(agx3_ioto_load_finish_round_native(&baseline.core, true,
+                                           workspace(&baseline)));
+
+   for (unsigned n = 0; n < ARRAY_SIZE(native); ++n) {
+      /* Exercise both a single finish and an earlier load-only finish. */
+      for (unsigned staged = 0; staged < 2; ++staged) {
+         struct fixture f;
+         struct agx3_ioto_load_packer packer;
+         struct agx_ioto_load_emit_ops ops;
+         const struct agx_ioto_cprog_inputs inputs = {
+            .known = true, .uniform_halfs = {native[n].mask},
+         };
+         CHECK(fixture_init(&f, AGX_CHIP_G17P, true));
+         CHECK(queue_two_dwords(&f));
+         CHECK(agx3_ioto_load_packer_init(&packer, AGX_CHIP_G17P));
+         packer.cprog_inputs = &inputs;
+         agx3_ioto_load_packer_ops(&packer, &ops);
+         if (staged) {
+            CHECK(agx_ioto_load_finish_round(&f.core, false, &ops,
+                                              workspace(&f)));
+            CHECK(f.core.sink.length == 18 && f.core.loads[0].processed);
+         }
+         size_t ordinary, bound;
+         CHECK(agx_ioto_load_finish_worst_case_size(&f.core, true, &ordinary));
+         CHECK(agx_ioto_load_finish_worst_case_size_with_ops(
+            &f.core, true, &ops, &bound));
+         CHECK(bound == ordinary + native[n].extra_bound);
+
+         f.core.sink.capacity = f.core.sink.length + bound - 1;
+         struct fixture before = f;
+         CHECK(!agx_ioto_load_finish_round(&f.core, true, &ops, workspace(&f)));
+         CHECK(logical_state_unchanged(&f, &before));
+
+         f.core.sink.capacity++;
+         CHECK(agx_ioto_load_finish_round(&f.core, true, &ops, workspace(&f)));
+         CHECK(f.core.sink.length == 26 + native[n].length);
+         /* Address setup, LDDEV and the existing four NOPs are unchanged. */
+         CHECK(memcmp(f.bytes, baseline.bytes, 26) == 0);
+         CHECK(memcmp(f.bytes + 26, native[n].copies, native[n].length) == 0);
+         CHECK(f.core.load_count == 0 && f.core.cache_count == 0);
+         CHECK(f.core.current_gpr_dwords == f.core.initial_gpr_dwords);
+      }
+   }
+   return true;
+}
+
+static bool
+reject_extra_copy(void *context, enum agx_chip chip,
+                  const struct agx_ioto_inflight_load *load, uint8_t dword,
+                  struct agx_ioto_load_raw_record records[2], uint8_t *count)
+{
+   (void)context;
+   (void)chip;
+   (void)load;
+   (void)dword;
+   (void)records;
+   (void)count;
+   return false;
+}
+
+static bool
+invalid_extra_copy(void *context, enum agx_chip chip,
+                   const struct agx_ioto_inflight_load *load, uint8_t dword,
+                   struct agx_ioto_load_raw_record records[2], uint8_t *count)
+{
+   (void)context;
+   (void)chip;
+   (void)load;
+   (void)dword;
+   /* An LDDEV must never be accepted in the optional COPY stream. */
+   records[0] = (struct agx_ioto_load_raw_record){
+      .kind = AGX_IOTO_GPU0_INLINE_LDDEV14, .length = 14,
+   };
+   *count = 1;
+   return true;
+}
+
+static bool
+test_cprog_round_failures(void)
+{
+   for (unsigned mode = 0; mode < 9; ++mode) {
+      struct fixture f;
+      struct agx3_ioto_load_packer packer;
+      struct agx_ioto_load_emit_ops ops;
+      struct agx_ioto_cprog_inputs inputs = {
+         .known = true, .uniform_halfs = {UINT64_C(1) << 20},
+      };
+      CHECK(fixture_init(&f, AGX_CHIP_G17P, true));
+      CHECK(queue_two_dwords(&f));
+      CHECK(agx3_ioto_load_packer_init(&packer, AGX_CHIP_G17P));
+      packer.cprog_inputs = &inputs;
+      agx3_ioto_load_packer_ops(&packer, &ops);
+      switch (mode) {
+      case 0: inputs.known = false; break;
+      case 1: f.core.fast_path_enabled = true; break;
+      case 2: f.core.gpu0_round_nops = false; break;
+      case 3: ops.extra_copy_bound = NULL; break;
+      case 4: ops.pack_extra_copies = NULL; break;
+      case 5: ops.pack_extra_copies = reject_extra_copy; break;
+      case 6: ops.pack_extra_copies = invalid_extra_copy; break;
+      case 7: f.core.loads[0].lane_mask = 1; break;
+      case 8: f.core.chip = packer.chip = AGX_CHIP_G15G; break;
+      }
+      struct fixture before = f;
+      CHECK(!agx_ioto_load_finish_round(&f.core, true, &ops, workspace(&f)));
+      CHECK(logical_state_unchanged(&f, &before));
+      if (mode == 5 || mode == 6) {
+         /* These fail after the ordinary COPY was emitted, so exercise
+          * rollback after partial work, not just input validation. */
+         CHECK(memcmp(f.bytes + 26, (uint8_t[]){0xab, 0x04, 0x01, 0x04}, 4) == 0);
+      }
+   }
+   return true;
+}
+
 int
 main(void)
 {
    if (!test_target_gate() || !test_load_records() || !test_copy_records() ||
        !test_native_rounds() || !test_native_direct_sources() ||
-       !test_mem_form_bounds() || !test_cprog_inputs())
+       !test_mem_form_bounds() || !test_cprog_inputs() || !test_cprog_rounds() ||
+       !test_cprog_round_failures())
       return 1;
    printf("agx3_ioto_load_packer: %u checks passed\n", checks);
    return 0;

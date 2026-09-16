@@ -23,6 +23,9 @@ struct agx3_ioto_load_packer {
    enum agx_chip chip;
    enum agx_ioto_load_encoding encoding;
    bool copy_wait_emitted;
+   /* Optional known input set, borrowed for the complete load transaction.
+    * Qualified for G17P with the default allocator and round NOPs only. */
+   const struct agx_ioto_cprog_inputs *cprog_inputs;
 };
 
 /* Native G17P copyGprToCprog with encoder +0x100 clear. The destination is

@@ -137,7 +137,7 @@ add_half(uint16_t base, uint16_t increment, uint16_t *result)
 
 static bool
 pack_copy_fields(enum agx_isa_encoding enc, uint16_t destination_half,
-                 uint16_t source_half, int wait_slot,
+                 uint16_t source_half, int wait_slot, bool source_kill,
                  struct agx_ioto_load_raw_record *record)
 {
    /* f23 selects the register source file; f27 is carried as a last-use
@@ -146,15 +146,15 @@ pack_copy_fields(enum agx_isa_encoding enc, uint16_t destination_half,
     * nonzero sources followed by further reads of those source halves
     * (valid194053 first Ioto page+0x10a: 4b2c0144). Therefore f27 must not be
     * described as selecting gathered data instead of register zero. Keep
-    * this existing last-use policy; do not infer data loss from the bit
-    * alone or apply it to copies whose source remains live.
+    * the source live when a constant-program input copy follows; otherwise
+    * retain the existing last-use policy.
     */
    struct agx3_field_kv baseline[7] = {
       KV(9, 3),
       KV(10, 2),
       KV(23, 2),
       KV(24, 2),
-      KV(27, 1),
+      KV(27, source_kill),
    };
    unsigned nbaseline = 5;
    if (enc == AGX_ISA_ENCODING_AGX3C) {
@@ -187,6 +187,33 @@ pack_copy_fields(enum agx_isa_encoding enc, uint16_t destination_half,
    }
 
    return false;
+}
+
+static bool
+cprog_lanes(const struct agx3_ioto_load_packer *packer,
+             const struct agx_ioto_inflight_load *load, uint8_t dword,
+             uint8_t *mask, uint16_t *offset)
+{
+   *mask = 0;
+   *offset = 0;
+   if (packer->cprog_inputs == NULL)
+      return true;
+   if (packer->chip != AGX_CHIP_G17P || !packer->cprog_inputs->known ||
+       !direct_load_registers_ok(load) || dword >= load->count_dwords)
+      return false;
+
+   const unsigned uniform = load->native_slot_half + 2u * dword;
+   if (uniform >= AGX_IOTO_CPROG_UNIFORM_HALFS - 1)
+      return false;
+   for (unsigned h = 0; h < 2; ++h) {
+      unsigned half = uniform + h;
+      if (packer->cprog_inputs->uniform_halfs[half / 64] &
+          (UINT64_C(1) << (half % 64)))
+         *mask |= 1u << h;
+   }
+   return *mask == 0 ||
+          agx_ioto_cprog_input_offset(packer->chip, packer->cprog_inputs,
+                                      uniform + (*mask == 2), offset);
 }
 
 static bool
@@ -224,12 +251,93 @@ pack_absolute_copy(void *context, enum agx_chip chip,
       return false;
    }
 
+   uint8_t cprog_mask;
+   uint16_t cprog_offset;
+   if (!cprog_lanes(packer, load, dword, &cprog_mask, &cprog_offset))
+      return false;
+
    memset(record, 0, sizeof(*record));
-   if (!pack_copy_fields(enc, destination_half, source_half, wait_slot, record))
+   if (!pack_copy_fields(enc, destination_half, source_half, wait_slot,
+                         cprog_mask == 0, record))
       return false;
 
    if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1)
       packer->copy_wait_emitted = true;
+   return true;
+}
+
+static bool
+cprog_copy_bound(void *context, enum agx_chip chip,
+                  const struct agx_ioto_inflight_load *load, size_t *bytes)
+{
+   const struct agx3_ioto_load_packer *packer = context;
+   if (packer == NULL || packer->chip != chip || bytes == NULL ||
+       !direct_load_registers_ok(load))
+      return false;
+
+   /* Keep ordinary uniform uploads independent of the preamble input mask. */
+   const unsigned full_mask = (1u << (2u * load->count_dwords)) - 1;
+   if ((load->lane_mask & full_mask) != full_mask)
+      return false;
+
+   size_t total = 0;
+   for (unsigned dword = 0; dword < load->count_dwords; ++dword) {
+      uint8_t mask;
+      uint16_t offset;
+      if (!cprog_lanes(packer, load, dword, &mask, &offset))
+         return false;
+      total += ((mask & 1) != 0) * AGX_IOTO_LOAD_GPU0_COPY_MAX_SIZE;
+      total += ((mask & 2) != 0) * AGX_IOTO_LOAD_GPU0_COPY_MAX_SIZE;
+   }
+   *bytes = total;
+   return true;
+}
+
+static bool
+pack_cprog_copies(void *context, enum agx_chip chip,
+                   const struct agx_ioto_inflight_load *load, uint8_t dword,
+                   struct agx_ioto_load_raw_record records[2], uint8_t *count)
+{
+   const struct agx3_ioto_load_packer *packer = context;
+   uint8_t mask;
+   uint16_t offset, source;
+   if (packer == NULL || packer->chip != chip || records == NULL || count == NULL ||
+       !cprog_lanes(packer, load, dword, &mask, &offset) ||
+       !add_half(load->data.half, 2u * dword, &source))
+      return false;
+   *count = 0;
+   if (mask == 0)
+      return true;
+
+   const struct agx3_ioto_cprog_copy_desc desc = {
+      .destination_bytes = offset,
+      .source_half = source,
+      .lane_mask = mask,
+      /* The existing first round NOP retires the loaded registers. */
+      .source_wait_slot = -1,
+   };
+   struct agx3_ioto_cprog_copy_output output;
+   if (!agx3_ioto_pack_cprog_copy(chip, &desc, &output))
+      return false;
+
+   size_t cursor = 0;
+   while (cursor < output.length) {
+      struct agx_ioto_record decoded;
+      size_t consumed;
+      if (*count >= 2 ||
+          !agx_ioto_validate_kind(chip, AGX_IOTO_KIND_COPY_EP1,
+                                  output.bytes + cursor, output.length - cursor,
+                                  &decoded, &consumed) ||
+          consumed != AGX_IOTO_LOAD_GPU0_COPY_MAX_SIZE)
+         return false;
+      records[*count] = (struct agx_ioto_load_raw_record){
+         .kind = AGX_IOTO_LOAD_RAW_COPY_EP1,
+         .length = consumed,
+      };
+      memcpy(records[*count].bytes, output.bytes + cursor, consumed);
+      ++*count;
+      cursor += consumed;
+   }
    return true;
 }
 
@@ -267,6 +375,10 @@ agx3_ioto_load_packer_ops(struct agx3_ioto_load_packer *packer,
    *ops = (struct agx_ioto_load_emit_ops){
       .pack_load = pack_absolute_load,
       .pack_copy = pack_absolute_copy,
+      .extra_copy_bound = packer != NULL && packer->cprog_inputs != NULL
+                             ? cprog_copy_bound : NULL,
+      .pack_extra_copies = packer != NULL && packer->cprog_inputs != NULL
+                             ? pack_cprog_copies : NULL,
       .context = packer,
    };
 }

@@ -354,6 +354,41 @@ agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
    return true;
 }
 
+bool
+agx_ioto_load_finish_worst_case_size_with_ops(
+   const struct agx_ioto_load_core *core, bool complete_round,
+   const struct agx_ioto_load_emit_ops *ops, size_t *required)
+{
+   size_t total;
+   if (required != NULL)
+      *required = 0;
+   if (required == NULL ||
+       !agx_ioto_load_finish_worst_case_size(core, complete_round, &total))
+      return false;
+
+   if (ops != NULL &&
+       ((ops->extra_copy_bound == NULL) != (ops->pack_extra_copies == NULL)))
+      return false;
+   if (ops != NULL && ops->pack_extra_copies != NULL) {
+      if (core->chip != AGX_CHIP_G17P || core->fast_path_enabled ||
+          !core->gpu0_round_nops)
+         return false;
+      if (complete_round) {
+         for (size_t i = 0; i < core->load_count; ++i) {
+            size_t extra;
+            if (!ops->extra_copy_bound(ops->context, core->chip, &core->loads[i],
+                                       &extra) ||
+                extra > 2u * core->loads[i].count_dwords *
+                           AGX_IOTO_LOAD_GPU0_COPY_MAX_SIZE ||
+                !add_size(&total, extra))
+               return false;
+         }
+      }
+   }
+   *required = total;
+   return true;
+}
+
 static enum agx_ioto_kind
 raw_ioto_kind(enum agx_ioto_load_raw_kind kind)
 {
@@ -444,7 +479,8 @@ agx_ioto_load_finish_round(struct agx_ioto_load_core *core, bool complete_round,
       return false;
 
    size_t required;
-   if (!agx_ioto_load_finish_worst_case_size(core, complete_round, &required) ||
+   if (!agx_ioto_load_finish_worst_case_size_with_ops(core, complete_round, ops,
+                                                    &required) ||
        required > core->sink.capacity - core->sink.length)
       return false;
 
@@ -512,6 +548,19 @@ agx_ioto_load_finish_round(struct agx_ioto_load_core *core, bool complete_round,
                 !raw_record_valid(core, &raw, false) ||
                 !append_bytes(core, raw.bytes, raw.length))
                goto fail;
+
+            if (ops->pack_extra_copies != NULL) {
+               struct agx_ioto_load_raw_record extra[2] = {0};
+               uint8_t count = 0;
+               if (!ops->pack_extra_copies(ops->context, core->chip, load,
+                                           dword, extra, &count) || count > 2)
+                  goto fail;
+               for (unsigned e = 0; e < count; ++e) {
+                  if (!raw_record_valid(core, &extra[e], false) ||
+                      !append_bytes(core, extra[e].bytes, extra[e].length))
+                     goto fail;
+               }
+            }
          }
       }
 
@@ -678,7 +727,7 @@ agx_ioto_load_absolute(struct agx_ioto_load_core *core,
 
    size_t finish_size = 0;
    if (needs_round &&
-       (!agx_ioto_load_finish_worst_case_size(core, true, &finish_size) ||
+       (!agx_ioto_load_finish_worst_case_size_with_ops(core, true, ops, &finish_size) ||
         workspace.capacity < core->load_count || ops == NULL))
       return false;
    size_t append_size = finish_size;
@@ -820,7 +869,7 @@ load_from_fixed(struct agx_ioto_load_core *core,
 
    size_t finish_size = 0;
    if (needs_round &&
-       (!agx_ioto_load_finish_worst_case_size(core, true, &finish_size) ||
+       (!agx_ioto_load_finish_worst_case_size_with_ops(core, true, ops, &finish_size) ||
         workspace.capacity < core->load_count || ops == NULL))
       return false;
    size_t append_size = finish_size;

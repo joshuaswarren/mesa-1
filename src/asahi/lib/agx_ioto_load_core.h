@@ -132,7 +132,19 @@ struct agx_ioto_load_emit_ops {
    bool (*pack_copy)(void *context, enum agx_chip chip,
                      const struct agx_ioto_inflight_load *load, uint8_t dword,
                      uint8_t lane_code,
-                     struct agx_ioto_load_raw_record *record);
+                      struct agx_ioto_load_raw_record *record);
+   /* Optional copies from the same loaded registers after the ordinary
+    * uniform copy. Both callbacks must be supplied together. The bound
+    * callback is pure; extra copies are validated and appended within the
+    * same transaction. Currently qualified only for default G17P TPS inputs. */
+   bool (*extra_copy_bound)(void *context, enum agx_chip chip,
+                            const struct agx_ioto_inflight_load *load,
+                            size_t *bytes);
+   bool (*pack_extra_copies)(void *context, enum agx_chip chip,
+                             const struct agx_ioto_inflight_load *load,
+                             uint8_t dword,
+                             struct agx_ioto_load_raw_record records[2],
+                             uint8_t *count);
    void *context;
 };
 
@@ -241,10 +253,16 @@ agx_ioto_load_allocator_reserve(struct agx_ioto_load_core *core,
 int agx_ioto_load_compare(const struct agx_ioto_inflight_load *a,
                           const struct agx_ioto_inflight_load *b);
 
-/* Maximum bytes a finish call may append for the current pending set. */
+/* Maximum ordinary load/uniform-copy bytes for the current pending set.
+ * Use the with_ops variant when optional input copies are enabled. */
 bool agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
                                           bool complete_round,
                                           size_t *required);
+
+/* Includes optional input copies. NULL ops retains the original bound. */
+bool agx_ioto_load_finish_worst_case_size_with_ops(
+   const struct agx_ioto_load_core *core, bool complete_round,
+   const struct agx_ioto_load_emit_ops *ops, size_t *required);
 
 /* false emits/marks only loads; true also resets allocation, emits the GPU0
  * four-NOP pad when configured, emits copies, and consumes pending loads. */
