@@ -2496,6 +2496,11 @@ intrinsic("load_polygon_stipple_agx", src_comp=[1], dest_comp=1, bit_sizes=[32],
 # The fixed-function sample mask specified in the API (e.g. glSampleMask)
 system_value("api_sample_mask_agx", 1, bit_sizes=[16])
 
+# Nonzero when alpha-to-coverage is enabled for the draw. Read by fragment
+# shaders that write the sample mask, which apply alpha-to-coverage themselves
+# ahead of their own coverage update instead of in the epilog.
+system_value("alpha_to_coverage_agx", 1, bit_sizes=[16])
+
 # Bit mask of samples currently being shaded. For API-level sample shading, this
 # will usually equal (1 << sample_id). Multiple bits can be set when sample
 # shading is only enabled due to framebuffer fetch, and the framebuffer has

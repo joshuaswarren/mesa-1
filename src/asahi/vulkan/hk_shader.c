@@ -1973,6 +1973,17 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
+      /* A shader that writes gl_SampleMask owns its coverage update. Apply
+       * draw-time alpha-to-coverage before that update so killed samples also
+       * skip depth/stencil tests, colour stores and occlusion accounting. */
+      if (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK)) {
+         nir_builder b = nir_builder_at(
+            nir_before_impl(nir_shader_get_entrypoint(nir)));
+         nir_def *enable =
+            nir_ine_imm(&b, nir_load_alpha_to_coverage_agx(&b), 0);
+         NIR_PASS(_, nir, nir_lower_alpha_to_coverage, false, enable);
+      }
+
       NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
                dev->dev.chip, &shader->info.fs.epilog_key);
       if (dev->dev.chip == AGX_CHIP_G17P)

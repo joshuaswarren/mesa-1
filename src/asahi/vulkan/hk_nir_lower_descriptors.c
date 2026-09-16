@@ -460,6 +460,9 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    case nir_intrinsic_load_api_sample_mask_agx:
       return lower_sysval_to_root_table(b, intrin, draw.api_sample_mask);
 
+   case nir_intrinsic_load_alpha_to_coverage_agx:
+      return lower_sysval_to_root_table(b, intrin, draw.alpha_to_coverage);
+
    case nir_intrinsic_load_sample_positions_agx:
       return lower_sysval_to_root_table(b, intrin, draw.ppp_multisamplectl);
 

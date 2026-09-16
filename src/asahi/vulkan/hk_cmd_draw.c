@@ -5133,6 +5133,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    if (fs_dirty || IS_DIRTY(MS_ALPHA_TO_COVERAGE_ENABLE)) {
       desc->root.draw.no_epilog_discard = !epilog_discards ? ~0 : 0;
+      desc->root.draw.alpha_to_coverage = dyn->ms.alpha_to_coverage_enable;
       desc->root_dirty = true;
    }
 

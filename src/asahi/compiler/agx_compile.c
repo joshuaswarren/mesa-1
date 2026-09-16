@@ -2267,18 +2267,96 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
          }
       }
 
-      switch (stored) {
-      case nir_type_float:
-         write->format = AGX_FORMAT_U8NORM;
+      if (b->shader->key->dev.chip == AGX_CHIP_G16G) {
+         /* M4's qualified native PBE path selects the input conversion from
+          * the declared image format. Keep it separate from G17P's witnessed
+          * data-type selector below. */
+         switch (nir_intrinsic_format(instr)) {
+      case PIPE_FORMAT_NONE:
+         write->format = nir_intrinsic_src_type(instr) == nir_type_float32
+                            ? AGX_FORMAT_F16 : AGX_FORMAT_I32;
          break;
-      case nir_type_int:
-      case nir_type_uint:
+      case PIPE_FORMAT_R10G10B10A2_UINT:
+      case PIPE_FORMAT_B10G10R10A2_UINT:
+      case PIPE_FORMAT_R16_UINT:
+      case PIPE_FORMAT_R16_SINT:
+      case PIPE_FORMAT_R16G16_UINT:
+      case PIPE_FORMAT_R16G16_SINT:
+      case PIPE_FORMAT_R16G16B16A16_SINT:
+      case PIPE_FORMAT_R16G16B16A16_UINT:
+         write->format = AGX_FORMAT_I16;
+         break;
+      case PIPE_FORMAT_R8_UINT:
+      case PIPE_FORMAT_R8G8_UINT:
+      case PIPE_FORMAT_R8G8B8A8_UINT:
+      case PIPE_FORMAT_R8_SINT:
+      case PIPE_FORMAT_R8G8_SINT:
+      case PIPE_FORMAT_R8G8B8A8_SINT:
          write->format = AGX_FORMAT_I8;
          break;
+      case PIPE_FORMAT_R8G8_UNORM:
+      case PIPE_FORMAT_R8_UNORM:
+      case PIPE_FORMAT_R8G8B8A8_UNORM:
+      case PIPE_FORMAT_B8G8R8A8_UNORM:
+         write->format = AGX_FORMAT_U8NORM;
+         break;
+      case PIPE_FORMAT_R10G10B10A2_UNORM:
+      case PIPE_FORMAT_B10G10R10A2_UNORM:
+         write->format = AGX_FORMAT_RGB10A2;
+         break;
+      case PIPE_FORMAT_R32_UINT:
+      case PIPE_FORMAT_R32_SINT:
+      case PIPE_FORMAT_R32G32_UINT:
+      case PIPE_FORMAT_R32G32_SINT:
+      case PIPE_FORMAT_R32G32B32A32_SINT:
+      case PIPE_FORMAT_R32G32B32A32_UINT:
+         write->format = AGX_FORMAT_I32;
+         break;
+      case PIPE_FORMAT_R5G6B5_UNORM:
+      case PIPE_FORMAT_B5G6R5_UNORM:
+      case PIPE_FORMAT_R11G11B10_FLOAT:
+      case PIPE_FORMAT_R8_SNORM:
+      case PIPE_FORMAT_R8G8_SNORM:
+      case PIPE_FORMAT_R8G8B8A8_SNORM:
+      case PIPE_FORMAT_R32_FLOAT:
+      case PIPE_FORMAT_R32G32_FLOAT:
+      case PIPE_FORMAT_R32G32B32A32_FLOAT:
+         /* AGX3 uses this tag for floating input lanes; the PBE
+          * descriptor controls whether storage is F16 or F32. */
+         write->format = AGX_FORMAT_F16;
+         break;
+      case PIPE_FORMAT_R16_UNORM:
+      case PIPE_FORMAT_R16G16_UNORM:
+      case PIPE_FORMAT_R16_SNORM:
+      case PIPE_FORMAT_R16G16_SNORM:
+      case PIPE_FORMAT_R16G16B16A16_UNORM:
+      case PIPE_FORMAT_R16G16B16A16_SNORM:
+         /* Native formatted stores take F32 lanes for both normalized
+          * signs; the PBE descriptor selects the destination conversion. */
+         write->format = AGX_FORMAT_U16NORM;
+         break;
+      case PIPE_FORMAT_R16_FLOAT:
+      case PIPE_FORMAT_R16G16_FLOAT:
+      case PIPE_FORMAT_R16G16B16A16_FLOAT:
+         write->format = AGX_FORMAT_F16;
+         break;
       default:
-         /* The AGX3 packer remains fail-closed for anything unwitnessed. */
          write->format = AGX_NUM_FORMATS;
          break;
+         }
+      } else {
+         switch (stored) {
+         case nir_type_float:
+            write->format = AGX_FORMAT_U8NORM;
+            break;
+         case nir_type_int:
+         case nir_type_uint:
+            write->format = AGX_FORMAT_I8;
+            break;
+         default:
+            write->format = AGX_NUM_FORMATS;
+            break;
+         }
       }
    }
    return write;

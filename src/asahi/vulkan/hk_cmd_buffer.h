@@ -106,6 +106,12 @@ struct hk_root_descriptor_table {
          uint16_t rasterization_stream;
          uint16_t _pad6;
 
+         /* Alpha-to-coverage enable for fragment shaders that write the
+          * sample mask; they apply it before their own coverage update.
+          * Sysval fields must sit at 4-byte offsets (root table loads). */
+         uint16_t alpha_to_coverage;
+         uint16_t _pad7;
+
          /* Mapping from varying slots written by the last vertex stage to UVS
           * indices. This mapping must be compatible with the fragment shader.
           */
