@@ -1034,7 +1034,8 @@ check_constant_data_compute(enum agx_isa_encoding encoding, bool soft_fault)
  * uniform dwords. Each dword uses Apple's byte-exact reg-to-uniform copy form;
  * this checks the complete compiler path which Gallium's blitter VS needs. */
 static bool
-check_preamble_compute(enum agx_isa_encoding encoding, bool enable)
+check_preamble_compute(enum agx_isa_encoding encoding, bool enable,
+                       unsigned uniform_loads)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 generated preamble");
@@ -1046,8 +1047,24 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable)
    nir_def *output = nir_load_global_constant(&b, 1, 64, root, .align_mul = 8,
                                               .access = ACCESS_CAN_SPECULATE);
    nir_def *index = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+
+   /* Keep a nontrivial uniform calculation live through a varying store.
+    * This exercises a real compiler-generated external preamble, rather than
+    * padding the short fixture to cross the native 256-byte inline limit. */
+   nir_def *value = index;
+   if (uniform_loads) {
+      nir_def *sum = nir_imm_int(&b, 0);
+      for (unsigned i = 0; i < uniform_loads; ++i) {
+         nir_def *input = nir_load_global_constant(
+            &b, 1, 32, nir_iadd_imm(&b, root, 8 + i * sizeof(uint32_t)),
+            .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+         sum = nir_ixor(&b, nir_imul_imm(&b, sum, 33), input);
+      }
+      value = nir_ixor(&b, sum, index);
+   }
+
    nir_store_global(
-      &b, index,
+      &b, value,
       nir_iadd(&b, output,
                nir_u2u64(&b, nir_imul_imm(&b, index, sizeof(uint32_t)))),
       .align_mul = 4);
@@ -1073,7 +1090,17 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable)
               (info->preamble_size != 0) == enable &&
               (info->nr_preamble_gprs != 0) == enable &&
               info->preamble_offset <= info->binary_size &&
-              info->preamble_size <= info->binary_size - info->preamble_offset;
+              info->preamble_size <= info->binary_size - info->preamble_offset &&
+              info->main_offset <= info->binary_size &&
+              info->main_size <= info->binary_size - info->main_offset;
+
+      if (valid && enable) {
+         valid = info->preamble_offset + info->preamble_size <= info->main_offset ||
+                 info->main_offset + info->main_size <= info->preamble_offset;
+         if (uniform_loads)
+            valid &= info->preamble_size > 256 && info->scratch_size == 0 &&
+                     info->preamble_scratch_size == 0;
+      }
 
       /* G17P's constant-program suffix must copy the executable through END,
        * without including inter-function padding or adjacent constant data. */
@@ -1091,6 +1118,14 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable)
          valid = compact.preamble_offset == info->preamble_offset &&
                  compact.preamble_size == info->preamble_size;
       }
+   }
+   if (uniform_loads && supported) {
+      fprintf(stderr,
+              "preamble workload encoding=%u enabled=%u inputs=%u main=%u "
+              "preamble=%u gprs=%u preamble_gprs=%u valid=%u\n",
+              encoding, enable, uniform_loads, part.info.main_size,
+              part.info.preamble_size, part.info.nr_gprs,
+              part.info.nr_preamble_gprs, valid);
    }
    if (!valid)
       fprintf(stderr, "AGX3 generated 64-bit preamble write failed\n");
@@ -2335,12 +2370,16 @@ main(int argc, char **argv)
       if (!check_constant_data_compute(encodings[i], false) ||
           !check_constant_data_compute(encodings[i], true))
          return 1;
-      if (!check_preamble_compute(encodings[i], true))
+      if (!check_preamble_compute(encodings[i], true, 0))
          return 1;
       if (encodings[i] == AGX_ISA_ENCODING_AGX3B &&
-          (!check_preamble_compute(encodings[i], false) ||
-           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, false) ||
-           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true)))
+          (!check_preamble_compute(encodings[i], false, 0) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, false, 0) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true, 0) ||
+           !check_preamble_compute(encodings[i], false, 32) ||
+           !check_preamble_compute(encodings[i], true, 32) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, false, 32) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true, 32)))
          return 1;
       if (!check_constant_array_ordering(encodings[i], true) ||
           !check_constant_array_ordering(encodings[i], false))
