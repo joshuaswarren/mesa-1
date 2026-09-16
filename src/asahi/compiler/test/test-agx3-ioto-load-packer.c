@@ -622,7 +622,7 @@ test_cprog_round_failures(void)
 }
 
 static bool
-test_gpu0_specializations(bool source_kill)
+test_gpu0_load_specializations(void)
 {
    struct agx_ioto_inflight_load load = absolute_record(0);
    /* Every signed offset at every load width; register fields then varied
@@ -643,6 +643,12 @@ test_gpu0_specializations(bool source_kill)
       }
    }
 
+   return true;
+}
+
+static bool
+test_gpu0_copy_specializations(bool source_kill)
+{
    struct agx3_ioto_load_packer packer;
    struct agx_ioto_load_emit_ops ops;
    CHECK(agx3_ioto_load_packer_init(&packer, AGX_CHIP_G17P));
@@ -670,7 +676,7 @@ test_gpu0_specializations(bool source_kill)
             if (reference)
                break;
          }
-         load = absolute_record(0);
+         struct agx_ioto_inflight_load load = absolute_record(0);
          load.data.half = src;
          load.native_slot_half = dst;
          struct agx_ioto_load_raw_record raw;
@@ -693,8 +699,9 @@ main(void)
    if (!test_target_gate() || !test_load_records() || !test_copy_records() ||
        !test_native_rounds() || !test_native_direct_sources() ||
        !test_mem_form_bounds() || !test_cprog_inputs() || !test_cprog_rounds() ||
-       !test_cprog_round_failures() || !test_gpu0_specializations(false) ||
-       !test_gpu0_specializations(true))
+       !test_cprog_round_failures() || !test_gpu0_load_specializations() ||
+       !test_gpu0_copy_specializations(false) ||
+       !test_gpu0_copy_specializations(true))
       return 1;
    printf("agx3_ioto_load_packer: %u checks passed\n", checks);
    return 0;
