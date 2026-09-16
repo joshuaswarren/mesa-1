@@ -4192,9 +4192,18 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct agx_ppp_hal200_graphics_fields cull_fields = {
       .words = {UINT32_C(0x00000480)},
    };
+   /* Software tessellation emits its own winding; fold the domain's
+    * orientation into the front face as the common CULL packet does
+    * (shader_object.misc.state.*.vert_tess_frag.cull.*). */
+   bool front_face_ccw = dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE;
+   if (gfx->shaders[MESA_SHADER_TESS_CTRL] &&
+       !gfx->shaders[MESA_SHADER_GEOMETRY]) {
+      front_face_ccw ^= gfx->tess.info.ccw;
+      front_face_ccw ^= dyn->ts.domain_origin ==
+                        VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
+   }
    if (!agx_ppp_hal200_cull_mode_pack(
-          dev->dev.chip, dyn->rs.cull_mode,
-          dyn->rs.front_face == VK_FRONT_FACE_COUNTER_CLOCKWISE,
+          dev->dev.chip, dyn->rs.cull_mode, front_face_ccw,
           cull_fields.words[0], &cull_fields.words[0]))
       return hk_g17p_bind_tail_refused(__LINE__);
    if (!agx_ppp_hal200_cull_provoking_pack(dev->dev.chip, gfx->provoking,

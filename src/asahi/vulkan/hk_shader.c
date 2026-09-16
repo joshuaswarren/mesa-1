@@ -2064,7 +2064,12 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
     * we have a geometry/tessellation shader, the hardware vertex (software
     * GS/TES) will handle this itself instead.
     */
-   if (sw_stage == MESA_SHADER_VERTEX && hw && !kill_psiz) {
+   if ((sw_stage == MESA_SHADER_VERTEX || sw_stage == MESA_SHADER_TESS_EVAL) &&
+       hw && !kill_psiz) {
+      /* An evaluation shader is the hardware vertex shader too, and with
+       * shader objects point mode may come from the control shader alone;
+       * HLSL domain shaders write no point size
+       * (shader_object.tessellation.hlsl.point_mode*). */
       NIR_PASS(_, nir, nir_lower_default_point_size);
    }
 
