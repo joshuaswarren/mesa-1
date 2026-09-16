@@ -1094,6 +1094,18 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable,
               info->main_offset <= info->binary_size &&
               info->main_size <= info->binary_size - info->main_offset;
 
+      if (encoding == AGX_ISA_ENCODING_AGX3B) {
+         valid &= info->agx3_staging_known &&
+                  info->agx3_preamble_staging_known == enable;
+         /* Constant loads return directly to GPRs. These preambles therefore
+          * need temporary registers but no IPR staging; a known zero must
+          * remain distinct from missing metadata and from the GPR count. */
+         valid &= info->agx3_preamble_staging_halfs == 0;
+      } else {
+         valid &= !info->agx3_preamble_staging_known &&
+                  info->agx3_preamble_staging_halfs == 0;
+      }
+
       if (valid && enable) {
          valid = info->preamble_offset + info->preamble_size <= info->main_offset ||
                  info->main_offset + info->main_size <= info->preamble_offset;
@@ -1116,16 +1128,22 @@ check_preamble_compute(enum agx_isa_encoding encoding, bool enable,
          const struct agx_precompiled_kernel_info compact =
             agx_compact_kernel_info(&part.info);
          valid = compact.preamble_offset == info->preamble_offset &&
-                 compact.preamble_size == info->preamble_size;
+                 compact.preamble_size == info->preamble_size &&
+                 compact.agx3_preamble_staging_halfs ==
+                    info->agx3_preamble_staging_halfs &&
+                 compact.agx3_preamble_staging_known ==
+                    info->agx3_preamble_staging_known;
       }
    }
-   if (uniform_loads && supported) {
+   if (supported && (uniform_loads || !valid)) {
       fprintf(stderr,
               "preamble workload encoding=%u enabled=%u inputs=%u main=%u "
-              "preamble=%u gprs=%u preamble_gprs=%u valid=%u\n",
+              "preamble=%u gprs=%u preamble_gprs=%u staging_halfs=%u "
+              "preamble_staging_halfs=%u valid=%u\n",
               encoding, enable, uniform_loads, part.info.main_size,
               part.info.preamble_size, part.info.nr_gprs,
-              part.info.nr_preamble_gprs, valid);
+              part.info.nr_preamble_gprs, part.info.agx3_staging_halfs,
+              part.info.agx3_preamble_staging_halfs, valid);
    }
    if (!valid)
       fprintf(stderr, "AGX3 generated 64-bit preamble write failed\n");

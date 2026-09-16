@@ -163,10 +163,14 @@ struct agx_shader_info {
     */
    uint16_t nr_gprs, nr_preamble_gprs;
 
-   /* Half of the AGX3 compiler staging footprint. The launch path doubles
-    * this value to reproduce Apple ShaderInfo fields 38/42. */
+   /* AGX3 IPR footprints in halfwords. The launch path doubles these values
+    * to obtain bytes: ShaderInfo fields 38/42 for main, and field 37
+    * (thread_invariant_largest_ipr_bytes) for the preamble. These are not
+    * temporary GPR counts. */
    uint16_t agx3_staging_halfs;
    bool agx3_staging_known;
+   uint16_t agx3_preamble_staging_halfs;
+   bool agx3_preamble_staging_known;
 
    /* Output mask set during driver lowering */
    uint64_t outputs;
@@ -210,6 +214,8 @@ struct agx_precompiled_kernel_info {
    bool uses_txf;
    bool agx3_staging_known;
    uint16_t agx3_staging_halfs;
+   bool agx3_preamble_staging_known;
+   uint16_t agx3_preamble_staging_halfs;
 };
 
 static inline struct agx_precompiled_kernel_info
@@ -237,6 +243,8 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .uses_txf = info->uses_txf,
       .agx3_staging_known = info->agx3_staging_known,
       .agx3_staging_halfs = info->agx3_staging_halfs,
+      .agx3_preamble_staging_known = info->agx3_preamble_staging_known,
+      .agx3_preamble_staging_halfs = info->agx3_preamble_staging_halfs,
    };
 }
 

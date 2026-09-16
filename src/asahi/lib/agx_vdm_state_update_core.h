@@ -72,10 +72,12 @@ enum agx_vdm_state_update_draw_path {
 /*
  * Structural inputs used by Apple's VertexProgramVariant template builder.
  *
- * The two state-load counts and the VsStateConfig fields are deliberately
- * named after their proven producer/position.  Their higher-level compiler
- * meanings are not yet grounded, and they are not interchangeable with the
- * AGX2 Counts, VDM_STATE_VERTEX_OUTPUTS, or VDM_STATE_VERTEX_UNKNOWN words.
+ * The 12-bit count is round_up(ceil(thread_invariant_largest_ipr_bytes / 4), 2)
+ * from ShaderInfo field 37. It measures the thread-invariant IPR footprint,
+ * not temporary GPRs. The 18-bit count and VsStateConfig fields remain named
+ * after their proven producer/position; their higher-level meanings are not
+ * yet grounded. These are not interchangeable with the AGX2 Counts,
+ * VDM_STATE_VERTEX_OUTPUTS, or VDM_STATE_VERTEX_UNKNOWN words.
  */
 struct agx_vdm_state_update_template_info {
    uint64_t pipeline;
