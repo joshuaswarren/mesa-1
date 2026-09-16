@@ -8,10 +8,13 @@
 #include <string.h>
 
 bool
-agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
-                 unsigned nslots, struct agx3_slot_result *out)
+agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
+                           unsigned nslots,
+                           const struct agx3_slot_live_range *live,
+                           unsigned live_count, struct agx3_slot_result *out)
 {
-   if (instrs == NULL || out == NULL || nslots < 1 || nslots > 8)
+   if (instrs == NULL || out == NULL || nslots < 1 || nslots > 8 ||
+       (live_count != 0 && live == NULL))
       return false;
 
    /* reg_slot[r] = slot (1..nslots) of the async op whose result currently
@@ -19,6 +22,19 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
     * (or never). */
    uint8_t reg_slot[AGX3_SLOT_NUM_TOKENS];
    memset(reg_slot, 0, sizeof(reg_slot));
+
+   for (unsigned i = 0; i < live_count; ++i) {
+      const struct agx3_slot_live_range *range = &live[i];
+      if (range->count == 0 || range->slot == 0 || range->slot > nslots ||
+          range->first >= AGX3_SLOT_NUM_TOKENS ||
+          range->count > AGX3_SLOT_NUM_TOKENS - range->first)
+         return false;
+      for (unsigned r = range->first; r < range->first + range->count; ++r) {
+         if (reg_slot[r] != 0)
+            return false;
+         reg_slot[r] = range->slot;
+      }
+   }
 
    /* reader_slots[r] = the slots of the in-flight stores that latch
     * half-register r as payload. A store has no destination, so the result
@@ -166,4 +182,11 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
    }
 
    return true;
+}
+
+bool
+agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
+                 unsigned nslots, struct agx3_slot_result *out)
+{
+   return agx3_slot_assign_with_live(instrs, n, nslots, NULL, 0, out);
 }
