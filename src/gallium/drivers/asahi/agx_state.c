@@ -1746,7 +1746,7 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
    };
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      NIR_PASS(_, nir, agx_nir_lower_interpolation, false);
    }
 
    /* We always use dynamic sample shading in the GL driver. Indicate that. */
@@ -1876,7 +1876,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
                   NULL);
          NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
-         NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs);
+         NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs, false);
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
 
@@ -2028,7 +2028,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       NIR_PASS(_, gs_copy, agx_nir_lower_cull_distance_vs);
 
       struct agx_unlinked_uvs_layout uvs = {0};
-      NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs);
+      NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs, false);
 
       compiled->gs_copy =
          agx_compile_nir(dev, gs_copy, &pctx->debug, MESA_SHADER_GEOMETRY,
