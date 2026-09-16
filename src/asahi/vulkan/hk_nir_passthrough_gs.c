@@ -48,6 +48,13 @@ hk_nir_passthrough_gs(nir_builder *b, const void *key_)
    s->info.gs.invocations = 1;
    s->info.gs.active_stream_mask = 1;
 
+   /* This generated shader may copy the full XFB interface. On G17P that can
+    * exceed the 192-half register file, so it must participate in the normal
+    * scratch ABI rather than inherit nir_builder's unspillable internal tag.
+    * The draw path already allocates geometry scratch from the compiled
+    * variant's scratch_size. */
+   s->info.internal = false;
+
    if (key->xfb_info.output_count) {
       size_t size = nir_xfb_info_size(key->xfb_info.output_count);
       s->xfb_info = ralloc_memdup(s, &key->xfb_info, size);

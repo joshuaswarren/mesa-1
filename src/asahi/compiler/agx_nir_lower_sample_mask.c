@@ -224,3 +224,91 @@ agx_nir_lower_sample_mask(nir_shader *shader)
 
    return true;
 }
+
+struct deferred_ctx {
+   nir_variable *killed;
+};
+
+static bool
+accumulate_demote(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   struct deferred_ctx *ctx = data;
+   if (intr->intrinsic != nir_intrinsic_demote_samples)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *killed = nir_u2u16(b, intr->src[0].ssa);
+   nir_store_var(b, ctx->killed,
+                 nir_ior(b, nir_load_var(b, ctx->killed), killed),
+                 nir_component_mask(1));
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+/*
+ * Native G16G variant. A MOVMSK coverage update takes the killed lanes out of
+ * the quad: derivatives and quad operations after a demote then read stale
+ * neighbours and helperInvocationEXT() lanes stop contributing
+ * (dEQP-VK.glsl.demote.*_deriv, draw.renderpass.shader_invocation.helper_*).
+ * Demote only needs the fragment's coverage gone by the time its colour is
+ * stored, so accumulate every demote into one killed mask and issue a single
+ * coverage update at the end of the shader. With early tests the tests still
+ * run at the start; otherwise the final update also runs the tests, which is
+ * the fused form run_tests_after_last_discard() builds for an unconditional
+ * last discard.
+ */
+bool
+agx_nir_lower_sample_mask_deferred(nir_shader *shader)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+
+   /* Only shaders whose derivatives or quad operations need every lane
+    * defer their kills. Depth-writing (z_export) and forced-early shaders
+    * rely on the kill preceding the test-triggering operation or the
+    * colour export: pipeline.*.multisample.z_export.*_static_atc and
+    * samplemask_early_fragment_tests_depth lost their depth writes with a
+    * kill at the end of the shader. */
+   if (!shader->info.fs.needs_coarse_quad_helper_invocations &&
+       !shader->info.fs.needs_full_quad_helper_invocations)
+      return agx_nir_lower_sample_mask(shader);
+
+   bool writes_zs =
+      shader->info.outputs_written &
+      (BITFIELD64_BIT(FRAG_RESULT_STENCIL) | BITFIELD64_BIT(FRAG_RESULT_DEPTH));
+
+   const bool early = shader->info.fs.early_fragment_tests;
+   if (early) {
+      if (shader->info.fs.uses_discard || writes_zs ||
+          shader->info.writes_memory)
+         run_tests_at_start(shader);
+   }
+
+   if (!shader->info.fs.uses_discard)
+      return nir_progress(early, impl, nir_metadata_control_flow);
+
+   nir_builder b = nir_builder_at(nir_before_impl(impl));
+   struct deferred_ctx ctx = {
+      .killed = nir_local_variable_create(impl, glsl_uint16_t_type(),
+                                          "killed_samples"),
+   };
+   nir_store_var(&b, ctx.killed, nir_imm_intN_t(&b, 0, 16),
+                 nir_component_mask(1));
+   nir_shader_intrinsics_pass(shader, accumulate_demote,
+                              nir_metadata_none, &ctx);
+
+   b.cursor = nir_after_impl(impl);
+   nir_def *killed = nir_load_var(&b, ctx.killed);
+   if (early || writes_zs) {
+      /* Tests already ran (or zs_emit runs them): kill without testing. */
+      nir_sample_mask_agx(&b, killed, nir_imm_intN_t(&b, 0, 16));
+   } else {
+      nir_def *all_samples = nir_imm_intN_t(&b, ALL_SAMPLES, 16);
+      nir_def *live = nir_ixor(&b, killed, all_samples);
+      nir_def *testing = nir_load_shader_part_tests_zs_agx(&b);
+      nir_sample_mask_agx(&b, nir_ior(&b, testing, killed), live);
+   }
+
+   nir_progress(true, impl, nir_metadata_none);
+   NIR_PASS(_, shader, nir_lower_vars_to_ssa);
+   return true;
+}

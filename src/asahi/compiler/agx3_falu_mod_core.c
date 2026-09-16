@@ -184,6 +184,42 @@ agx3_falu_narrow_f32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    return false;
 }
 
+/* Half of a minifloat minus a register: f32add with a 16-bit destination,
+ * the register negated in the first operand and the minifloat in the other.
+ * Apple's half4(1.0 - x) and half4(-x - 1.0) (blend/native/negpack3.py
+ * fs_h_onem, fs_h_negm1) differ only in the immediate; with exact negative
+ * zero this is the negated float-to-half conversion. */
+bool
+agx3_falu_narrow_imm_sub_f32(enum agx_isa_encoding enc, uint16_t dest,
+                             uint8_t minifloat, uint16_t src,
+                             const struct agx3_falu_runtime *runtime,
+                             uint8_t out[AGX3_FALU_MOD_MAX_LENGTH],
+                             uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !runtime || !out || !len ||
+       dest >= 256 || src >= 256 || (src & 1) || runtime->wait_mask > 0x3f ||
+       (runtime->cache[0] && runtime->discard[0]))
+      return false;
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, 1), KV(25, 1), KV(26, 2), KV(42, 2), KV(43, 2),
+      KV(48, 1),
+   };
+   struct agx3_field_kv ov[16] = {
+      KV(2, dest), KV(35, src), KV(17, minifloat),
+      KV(11, runtime->dest_cache), KV(44, runtime->cache[0]),
+      KV(46, runtime->discard[0]),
+   };
+   unsigned n = 6;
+   for (unsigned i = 0; i < 6; ++i)
+      ov[n++] = (struct agx3_field_kv)KV(52 + i,
+                                       (runtime->wait_mask >> i) & 1);
+   for (unsigned ep = 0; ep <= 3; ++ep) {
+      if (agx3_bind_compose(enc, "f32add", ep, base, 7, ov, n, out, len))
+         return true;
+   }
+   return false;
+}
+
 bool
 agx3_falu_mul_mod(enum agx_isa_encoding enc, uint16_t dest, uint16_t src0,
                   uint16_t src1, const struct agx3_falu_mods *m,

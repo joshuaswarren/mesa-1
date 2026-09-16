@@ -315,3 +315,43 @@ Two smaller facts fell out and are worth not rediscovering:
   `.tmp/g17p-deep-break-evidence/extract.py`.
 * `cndend`'s own count (`f10`) is sixteen bits too, at the same bit position as
   `cndcf`'s. Only 1 and 2 are witnessed and encoded.
+
+## Witness: centroid interpolation is an explicit ITRCOORDS token (2026-09-14)
+
+Question: G17P centroid inputs were encoded as the f32interp register-source
+leaf reading an "implicit" coordinate register that nothing produced, and
+single-sample centroid and centre interpolation disagreed on hardware. What
+does Apple emit?
+
+```metal
+struct VCentroid { float4 pos [[position]]; float4 c [[centroid_perspective]]; };
+vertex VCentroid v_centroid(uint vid [[vertex_id]]) {
+  VCentroid o; o.pos = float4(float(vid), 0.0, 0.0, 1.0);
+  o.c = float4(float(vid)); return o;
+}
+fragment float4 f_centroid(VCentroid in [[stage_in]]) { return in.c; }
+```
+
+compiled as a render pipeline (`raster_sample_count` 1, then 4, one RGBA8Unorm
+colour attachment), with the same `metal`/`metallib`/`metal-nt -arch
+applegpu_g17p -platform_version macos 26.0 26.0` invocation as above.
+Decoded with `decomp`, the 1x fragment opens:
+
+    04c2110601000000   rld  SR39 W16 -> h0, slot 1, f48=1 (entry marker)
+    af14540603000a01   itrcoords r6 <- h0 (terminal), wait slot 1, f38=1
+    2f055400030003020900  f32interp RHW, token r6 live, f54=1
+    af005404030002482001  f32rcp
+    2f055400030203020800  f32interp coef 1, token r6 live
+    ...
+    2f055406030803022000  f32interp coef 4, token r6 final (f43)
+
+`[[centroid_no_perspective]]` is the same chain without the RHW, and 4x adds
+only a later unmarked SR39 read for the tile store. So the centroid is computed
+from the covered samples in SR39 by ITRCOORDS mode 1 (explicit sample
+interpolation is mode 2 on a sample index) and consumed through exactly the
+sample-token f32interp leaves. There is no implicit form.
+
+The same programs show where the fragment entry marker goes when SR39 is the
+first input: on the long-form rld (f48), not on the first f32interp (f63).
+`uint m [[sample_mask]]` inputs and a 4x fragment with no inputs at all open
+the same way (`14c2110601000000`, SR39 into h2).

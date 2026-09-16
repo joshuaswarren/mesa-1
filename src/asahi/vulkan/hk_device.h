@@ -130,6 +130,10 @@ struct hk_device {
     * not exist. */
    struct hk_api_shader *g17p_grid_helper;
 
+   /* The same contract for an indirect-local grid, which an earlier kernel
+    * already wrote as a launch geometry: this helper copies it. */
+   struct hk_api_shader *g17p_geometry_copy_helper;
+
    /* Indirected for common secondary emulation */
    struct vk_device_dispatch_table cmd_dispatch;
 
@@ -147,6 +151,9 @@ struct hk_device {
    } scratch;
 
    uint32_t perftest;
+
+   /* Copy of hk_physical_device::g17p_native_tess */
+   bool g17p_native_tess;
 
    struct {
       struct u_rwlock lock;

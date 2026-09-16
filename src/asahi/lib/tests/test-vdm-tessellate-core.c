@@ -365,10 +365,84 @@ test_tessellation_state_witnesses(void)
    return 0;
 }
 
+/*
+ * An indirect Tessellate record captured from Metal on the development Mac:
+ * two patches drawn from a four-word argument buffer at 0x1000001cf00, with
+ * factors in a 24-byte buffer at 0x10000018300. The G17P plugin packs the
+ * same seven words.
+ */
+static int
+test_tessellate_indirect(void)
+{
+   static const uint8_t witness[AGX_VDM_TESSELLATE_INDIRECT_LENGTH] = {
+      0x00, 0x0c, 0x30, 0xb4, 0x00, 0x83, 0x01, 0x00, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0xcf, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+   };
+   const struct agx_vdm_tessellate_indirect_info info = {
+      .factor_buffer = UINT64_C(0x10000018300),
+      .indirect_buffer = UINT64_C(0x1000001cf00),
+      .instance_stride_word = 0,
+      .factor_buffer_size_minus_one = 5,
+   };
+
+   struct agx_vdm_tessellate_indirect packed;
+   CHECK(agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &info, &packed));
+   CHECK(packed.length == sizeof(witness));
+   CHECK(memcmp(packed.bytes, witness, sizeof(witness)) == 0);
+
+   struct agx_vdm_tessellate_indirect_info decoded;
+   CHECK(agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, witness,
+                                            sizeof(witness), &decoded));
+   CHECK(memcmp(&decoded, &info, sizeof(info)) == 0);
+
+   /* Every split field reaches its word. */
+   const struct agx_vdm_tessellate_indirect_info wide = {
+      .factor_buffer = UINT64_C(0xfedcba987654),
+      .indirect_buffer = UINT64_C(0xabcd12345678),
+      .instance_stride_word = 0x71234,
+      .factor_buffer_size_minus_one = 0x89abcdef,
+   };
+   CHECK(agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &wide, &packed));
+   CHECK(agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, packed.bytes,
+                                            packed.length, &decoded));
+   CHECK(memcmp(&decoded, &wide, sizeof(wide)) == 0);
+
+   struct agx_vdm_tessellate_indirect_info bad = info;
+   bad.indirect_buffer |= 2;
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &bad, &packed));
+   CHECK(packed.length == 0);
+   bad = info;
+   bad.factor_buffer = UINT64_C(1) << 48;
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &bad, &packed));
+   bad = info;
+   bad.instance_stride_word = 0x80000;
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &bad, &packed));
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G13G, &info, &packed));
+
+   uint8_t corrupt[AGX_VDM_TESSELLATE_INDIRECT_LENGTH];
+   memcpy(corrupt, witness, sizeof(corrupt));
+   corrupt[12] |= 1;
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, corrupt,
+                                             sizeof(corrupt), &decoded));
+   memcpy(corrupt, witness, sizeof(corrupt));
+   corrupt[10] = 1; /* above 48 bits */
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, corrupt,
+                                             sizeof(corrupt), &decoded));
+   memcpy(corrupt, witness, sizeof(corrupt));
+   corrupt[3] = 0xb2;
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, corrupt,
+                                             sizeof(corrupt), &decoded));
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, witness,
+                                             sizeof(witness) - 4, &decoded));
+   return 0;
+}
+
 int
 main(void)
 {
    CHECK(test_tessellation_state_witnesses() == 0);
+   CHECK(test_tessellate_indirect() == 0);
    CHECK(test_exact_witness_and_targets() == 0);
    CHECK(test_domains() == 0);
    CHECK(test_corruption_classification() == 0);

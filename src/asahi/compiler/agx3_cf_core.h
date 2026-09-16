@@ -114,11 +114,10 @@ bool agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond c
  *   short x;  if (x == 7)   0a 04 23 86 06 00 17 c2 02 00
  *   ushort x; if (x == 2)   0a 04 23 82 06 00 07 c2 02 00
  *
- * A non-zero immediate is refused for the two unsigned ordered relations:
- * Apple compiles `ushort x < 2` to the compact six-byte encoding point
- * instead (0a 04 22 82 05 c2), so this ten-byte form has no witness there.
- * At 256 and above Apple changes the instruction, so the immediate is capped
- * at 255.
+ * The two unsigned ordered relations use the compact six-byte encoding point.
+ * Fresh dead/live witnesses for `ushort x < 4` are both
+ * 0a 04 22 84 05 c2, so that form has no source-lifetime fields. At 256 and
+ * above Apple changes the instruction, so the immediate is capped at 255.
  */
 bool agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc,
                                 enum agx3_cf_icond cond, unsigned slot,

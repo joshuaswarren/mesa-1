@@ -41,7 +41,9 @@ hk_get_buffer_format_features(struct hk_physical_device *pdev,
 
       /* RGB32 specially supported for uniform texel buffers only. */
       if (util_is_power_of_two_nonzero(util_format_get_blocksize(p_format))) {
+         /* Reads obtain their format from the buffer texture descriptor. */
          features |= VK_FORMAT_FEATURE_2_STORAGE_TEXEL_BUFFER_BIT |
+                     VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
                      VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
       }
 

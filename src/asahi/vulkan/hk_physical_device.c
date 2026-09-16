@@ -603,14 +603,10 @@ hk_get_device_features(
       /* VK_EXT_extended_dynamic_state2 */
       .extendedDynamicState2 = true,
       .extendedDynamicState2LogicOp = true,
-      .extendedDynamicState2PatchControlPoints =
-         dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState2PatchControlPoints = true,
 
       /* VK_EXT_extended_dynamic_state3 */
-      /* Keep G17P states behind their actual native path: no tessellation
-       * domain origin or rasterization streams. */
-      .extendedDynamicState3TessellationDomainOrigin =
-         dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState3TessellationDomainOrigin = true,
       .extendedDynamicState3DepthClampEnable = true,
       .extendedDynamicState3PolygonMode = true,
       .extendedDynamicState3RasterizationSamples = true,
@@ -621,8 +617,7 @@ hk_get_device_features(
       .extendedDynamicState3ColorBlendEnable = true,
       .extendedDynamicState3ColorBlendEquation = true,
       .extendedDynamicState3ColorWriteMask = true,
-      .extendedDynamicState3RasterizationStream =
-         dev->chip != AGX_CHIP_G17P,
+      .extendedDynamicState3RasterizationStream = true,
       .extendedDynamicState3ConservativeRasterizationMode = false,
       .extendedDynamicState3ExtraPrimitiveOverestimationSize = false,
       .extendedDynamicState3DepthClipEnable = true,
@@ -755,13 +750,20 @@ hk_get_device_features(
       /* The first HAL200 path is intentionally one ordinary, single-sample
        * graphics pipeline. Keep optional feature reporting within that path
        * until the corresponding joined Ioto programs are implemented. */
-      features->geometryShader = false;
-      /* Hardware tessellation: the vertex and control shaders run as
-       * compute, and a native Tessellate command runs the evaluation shader
-       * as the post-tessellation vertex program. Isolines and point mode
-       * have no native tessellator output yet. */
+      /* Geometry and tessellation shaders run in compute and draw through
+       * their raster and evaluation vertex programs, as on AGX2. */
+      features->geometryShader = hk_g17p_unverified_feature("geometry_shader");
       features->tessellationShader =
          hk_g17p_unverified_feature("tessellation_shader");
+      features->shaderTessellationAndGeometryPointSize =
+         features->geometryShader || features->tessellationShader;
+      features->geometryStreams = features->geometryShader;
+      features->extendedDynamicState3RasterizationStream =
+         features->geometryShader;
+      features->extendedDynamicState2PatchControlPoints =
+         features->tessellationShader;
+      features->extendedDynamicState3TessellationDomainOrigin =
+         features->tessellationShader;
       /* IA vertex/primitive recording, including reset/reuse/unavailable
        * handling, has passed its exact hardware oracle twice. Every applicable
        * graphics/compute counter now has a strict native helper or fragment-
@@ -793,13 +795,21 @@ hk_get_device_features(
        * Dawn requires this feature; without it Chromium's WebGPU silently
        * falls back to SwiftShader. */
       features->fragmentStoresAndAtomics = true;
-      features->shaderTessellationAndGeometryPointSize = false;
-      features->shaderResourceResidency = false;
       features->advancedBlendCoherentOperations = true;
-      features->sparseBinding = false;
-      features->sparseResidencyAliased = false;
-      features->sparseResidencyImage2D = false;
-      features->sparseResidencyBuffer = false;
+      /* Sparse binding and residency reuse the AGX2 architecture wholesale:
+       * per-page VM_BIND with unbound pages mapped to the scratch/zero page,
+       * a read-only shadow at +sparse_ro_offset, and a userspace sparse map
+       * that the G17P texture descriptor points at in Sparse mode. The kernel
+       * already accepts DRM_ASAHI_BIND_SINGLE_PAGE binds, and the G17P user VA
+       * window is split for the RO alias exactly as AGX2 is. Keep it behind
+       * the unverified-feature opt-in until the residency-query descriptor
+       * path is qualified on hardware; every piece below is chip-agnostic. */
+      const bool sparse = hk_g17p_unverified_feature("sparse");
+      features->shaderResourceResidency = sparse;
+      features->sparseBinding = sparse;
+      features->sparseResidencyAliased = sparse;
+      features->sparseResidencyImage2D = sparse;
+      features->sparseResidencyBuffer = sparse;
       /* The common Honeykrisp lowering duplicates a draw per view, writes
        * ViewIndex through the draw root and routes it through the packed
        * layer/viewport UVS output.  G17P now also has exact array BG/EOT
@@ -808,7 +818,6 @@ hk_get_device_features(
       /* The direct triangle path uses the native geometry pipeline plus the
        * G17P-compiled libagx XFB counter-copy kernel. */
       features->transformFeedback = true;
-      features->geometryStreams = false;
       /* Precompiled predicate kernels use the same direct HAL200 Ioto launch
        * as the public compute path, followed by native indirect Index Lists.
        * Both indexed and non-indexed count/clamp/stride paths are qualified. */
@@ -1518,6 +1527,9 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_pdev_alloc;
    }
 
+   pdev->g17p_native_tess = pdev->dev.chip == AGX_CHIP_G17P &&
+                            debug_get_bool_option("HK_G17P_NATIVE_TESS", false);
+
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &hk_physical_device_entrypoints, true);
@@ -1603,9 +1615,13 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       VK_QUEUE_SPARSE_BINDING_BIT;
    if (pdev->dev.chip == AGX_CHIP_G17P) {
       /* Graphics, compute and transfers use the native HAL200 queue path.
-       * Sparse binding still requires separate kernel support. */
+       * Sparse binding rides the shared per-page VM_BIND path; advertise it
+       * only when the same opt-in that turns on the sparse features above is
+       * set, so the queue family and the device features stay consistent. */
       queue_flags = VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT |
                     VK_QUEUE_TRANSFER_BIT;
+      if (pdev->vk.supported_features.sparseBinding)
+         queue_flags |= VK_QUEUE_SPARSE_BINDING_BIT;
    }
 
    uint32_t queue_count = 1;

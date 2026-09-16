@@ -22,6 +22,10 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
 
    /* ALU cannot access 64-bit uniforms */
    bool is_64 = size == AGX_SIZE_64;
+   /* AGX3 memory bases address four-half uniform groups. A pointer packed
+    * at a two-half boundary must be copied to a GPR pair before use. */
+   bool memory_base = !high &&
+      (encoding == AGX_ISA_ENCODING_AGX2 || !(value & 3));
 
    switch (op) {
    case AGX_OPCODE_FLTNORM_AGX3:
@@ -52,14 +56,23 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
       return !high && src_index == 0;
 
    case AGX_OPCODE_DEVICE_LOAD:
-      return src_index == 0 && !high;
+      return src_index == 0 && memory_base;
    case AGX_OPCODE_DEVICE_STORE:
    case AGX_OPCODE_ATOMIC:
-      return src_index == 1 && !high;
+      return src_index == 1 && memory_base;
    case AGX_OPCODE_LOCAL_LOAD:
-      return src_index == 0;
    case AGX_OPCODE_LOCAL_STORE:
-      return src_index == 1;
+      /* AGX3 threadgroup accesses with a promoted-constant uniform base
+       * silently miss on G16G once the shader carries many of them
+       * (tools/shared-atomic-probe.c mode 4: a 145-word shared struct copy
+       * left every result untouched; AGX_MESA_DEBUG=nopromote passes). The
+       * only witnessed uniform base is u4 in one small kernel, so keep
+       * threadgroup bases in GPRs on AGX3B and let this pass copy them.
+       * AGX3C still uses the fixed u8 base and has no grounded half-uniform
+       * copy; retain that existing encoding's local-memory contract. */
+      if (encoding == AGX_ISA_ENCODING_AGX3B)
+         return false;
+      return src_index == (op == AGX_OPCODE_LOCAL_LOAD ? 0 : 1);
    case AGX_OPCODE_IMAGE_WRITE:
       return src_index == 3;
    case AGX_OPCODE_BLOCK_IMAGE_STORE:
@@ -83,6 +96,12 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    case AGX_OPCODE_ICMP_QUAD_BALLOT:
       return false;
    case AGX_OPCODE_EXPORT:
+      /* Register allocation copies an export's uniform source into its
+       * output register. AGX3 grounds that copy only for whole words; a
+       * half uniform (a 16-bit constant such as a stencil reference) has no
+       * witnessed uniform-to-half copy, so it is split from its aligned word
+       * below, ahead of the export run. */
+      return !(encoding == AGX_ISA_ENCODING_AGX3B && size == AGX_SIZE_16);
    case AGX_OPCODE_PHI:
       /* We would fail validation otherwise */
       return true;
@@ -107,7 +126,20 @@ void
 agx_lower_uniform_sources(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
-      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_instr *at = I;
+
+      /* Exports end the block and admit no instruction between them; place
+       * their materialized sources before the first export of the run. */
+      if (I->op == AGX_OPCODE_EXPORT) {
+         while (at->link.prev != &v_block->instructions) {
+            agx_instr *prev = list_entry(at->link.prev, agx_instr, link);
+            if (prev->op != AGX_OPCODE_EXPORT)
+               break;
+            at = prev;
+         }
+      }
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(at));
 
       agx_foreach_src(I, s) {
          if (I->src[s].type == AGX_INDEX_UNIFORM &&

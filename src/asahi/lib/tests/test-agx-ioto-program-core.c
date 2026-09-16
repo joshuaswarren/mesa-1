@@ -697,6 +697,13 @@ test_g17p_resource_program(void)
                 sizeof(terminate)) == 0);
    CHECK(output[written] == 0xa5);
 
+   /* Native coverage/resource loaders can copy a completed load before the
+    * final copy suffix. This has been accepted since the coverage loader
+    * integration; only non-straight-line records are invalid here. */
+   CHECK(agx_ioto_g17p_resource_program_compose(
+      UINT64_C(0x10001990240), copies, sizeof(copies), copies, sizeof(copies),
+      &tail, output, sizeof(output), &written));
+
    uint8_t before[sizeof(output)];
    memcpy(before, output, sizeof(output));
    written = 41;
@@ -707,6 +714,10 @@ test_g17p_resource_program(void)
    CHECK(!agx_ioto_g17p_resource_program_compose(
       UINT64_C(0x10001990240), copies, sizeof(copies) - 1, copies,
       sizeof(copies), &tail, output, sizeof(output), &written));
+   CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 41);
+   CHECK(!agx_ioto_g17p_resource_program_compose(
+      UINT64_C(0x10001990240), terminate, sizeof(terminate), copies, sizeof(copies),
+      &tail, output, sizeof(output), &written));
    CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 41);
    static const uint8_t nop[] = {0x06, 0x00};
    CHECK(!agx_ioto_g17p_resource_program_compose(
@@ -819,6 +830,9 @@ test_g17p_fragment_resource_program(void)
    BG_REJECT(UINT64_C(0x10000130640), pre_copy, sizeof(pre_copy), copies,
              sizeof(copies), NULL, sizeof(expected));
    BG_REJECT(UINT64_C(0x10000130640), copies, sizeof(copies) - 1, copies,
+             sizeof(copies), &tail, sizeof(expected));
+   static const uint8_t bad_pre[] = {0x0e, 0x00, 0x00, 0x00};
+   BG_REJECT(UINT64_C(0x10000130640), bad_pre, sizeof(bad_pre), copies,
              sizeof(copies), &tail, sizeof(expected));
    static const uint8_t bad_copy[] = {0x06, 0x00};
    BG_REJECT(UINT64_C(0x10000130640), pre_copy, sizeof(pre_copy), bad_copy,

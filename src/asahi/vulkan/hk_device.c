@@ -403,21 +403,21 @@ hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
  * say how many threads it launches, and an idempotent kernel is correct for
  * any answer.
  */
-static void
-hk_init_g17p_grid_helper(struct hk_device *dev,
-                         const VkAllocationCallbacks *pAllocator)
+static struct hk_api_shader *
+hk_build_g17p_grid_helper(struct hk_device *dev,
+                          const VkAllocationCallbacks *pAllocator,
+                          bool copy_geometry)
 {
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return;
-
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P indirect grid helper");
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      copy_geometry ? "G17P indirect geometry copy"
+                    : "G17P indirect grid helper");
    b.shader->info.workgroup_size[0] = 1;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
 
    nir_def *root = nir_load_root_agx(&b);
-   nir_def *groups_addr = nir_load_global(
+   nir_def *grid_addr = nir_load_global(
       &b, 1, 64,
       nir_iadd_imm(&b, root, hk_root_descriptor_offset(cs.group_count_addr)),
       .align_mul = 8);
@@ -426,17 +426,29 @@ hk_init_g17p_grid_helper(struct hk_device *dev,
       nir_iadd_imm(&b, root,
                    hk_root_descriptor_offset(cs.grid_helper_geometry_addr)),
       .align_mul = 8);
-   nir_def *local = nir_load_global(
-      &b, 3, 32,
-      nir_iadd_imm(&b, root,
-                   hk_root_descriptor_offset(cs.grid_helper_local_size)),
-      .align_mul = 4);
+   nir_def *global, *local;
 
-   /* VkDispatchIndirectCommand is exactly three u32 threadgroup counts. */
-   nir_def *groups = nir_load_global(&b, 3, 32, groups_addr, .align_mul = 4);
+   if (copy_geometry) {
+      /* An indirect-local grid is already a launch geometry, written by an
+       * earlier kernel in the layout the main record consumes. */
+      global = nir_load_global(&b, 3, 32, grid_addr, .align_mul = 4);
+      local = nir_load_global(
+         &b, 3, 32,
+         nir_iadd_imm(&b, grid_addr, AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET),
+         .align_mul = 4);
+   } else {
+      local = nir_load_global(
+         &b, 3, 32,
+         nir_iadd_imm(&b, root,
+                      hk_root_descriptor_offset(cs.grid_helper_local_size)),
+         .align_mul = 4);
 
-   nir_store_global(&b, nir_imul(&b, groups, local), geometry_addr,
-                    .align_mul = 4);
+      /* VkDispatchIndirectCommand is exactly three u32 threadgroup counts. */
+      nir_def *groups = nir_load_global(&b, 3, 32, grid_addr, .align_mul = 4);
+      global = nir_imul(&b, groups, local);
+   }
+
+   nir_store_global(&b, global, geometry_addr, .align_mul = 4);
    nir_store_global(&b, local,
                     nir_iadd_imm(&b, geometry_addr,
                                  AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET),
@@ -447,11 +459,24 @@ hk_init_g17p_grid_helper(struct hk_device *dev,
       .robustness = &vk_robustness_disabled,
       .stage = MESA_SHADER_COMPUTE,
    };
-   hk_compile_shader(dev, &info, NULL, NULL, pAllocator,
-                     &dev->g17p_grid_helper);
+   struct hk_api_shader *helper = NULL;
+   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &helper);
+   return helper;
+}
+
+static void
+hk_init_g17p_grid_helper(struct hk_device *dev,
+                         const VkAllocationCallbacks *pAllocator)
+{
+   if (dev->dev.chip != AGX_CHIP_G17P)
+      return;
+
+   dev->g17p_grid_helper = hk_build_g17p_grid_helper(dev, pAllocator, false);
+   dev->g17p_geometry_copy_helper =
+      hk_build_g17p_grid_helper(dev, pAllocator, true);
 
    /* A refusal is not fatal: it costs indirect dispatch, not the device. */
-   if (!dev->g17p_grid_helper)
+   if (!dev->g17p_grid_helper || !dev->g17p_geometry_copy_helper)
       mesa_logw("G17P indirect compute unavailable: grid helper refused");
 }
 
@@ -518,6 +543,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+   dev->g17p_native_tess = pdev->g17p_native_tess;
 
    if (instance->no_border) {
       dev->perftest |= HK_PERF_NOBORDER;
@@ -741,6 +767,11 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    if (dev->g17p_grid_helper) {
       hk_api_shader_destroy(&dev->vk, &dev->g17p_grid_helper->vk, pAllocator);
+   }
+
+   if (dev->g17p_geometry_copy_helper) {
+      hk_api_shader_destroy(&dev->vk, &dev->g17p_geometry_copy_helper->vk,
+                            pAllocator);
    }
 
    hk_destroy_sampler_heap(dev, &dev->samplers);

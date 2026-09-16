@@ -223,14 +223,18 @@ hk_pack_native_pbe(unsigned generation,
     * packets are the bounded layered exceptions. */
    const bool array = generation == 9 &&
                       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   const bool array_multisample =
+      generation == 9 &&
+      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED;
    const bool three_d = generation == 9 &&
                         legacy->dimension == AGX_TEXTURE_DIMENSION_3D;
-   const bool layered = array || three_d;
-   /* The end-of-tile store is the only producer of a multisample write
-    * target, and it only ever addresses one non-array layer. */
+   const bool layered = array || array_multisample || three_d;
+   /* Multisample stores use the recovered Gen9 dimension-4 packet for one
+    * layer and dimension 8 for a layered render target. */
    const bool multisample =
       generation == 9 &&
-      legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
+      (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
+       array_multisample);
    if ((!layered && !multisample &&
         legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
@@ -281,9 +285,13 @@ hk_pack_native_pbe(unsigned generation,
    };
    struct agx_pbe_agx3_descriptor packed;
    const bool valid = multisample
-      ? agx_pbe_agx3_2d_multisample_pack(
-           generation, &fields,
-           legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
+      ? (array_multisample
+            ? agx_pbe_agx3_2d_array_multisample_pack(
+                 generation, &fields, legacy->layers,
+                 legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed)
+            : agx_pbe_agx3_2d_multisample_pack(
+                 generation, &fields,
+                 legacy->samples == AGX_SAMPLE_COUNT_4 ? 4u : 2u, &packed))
       : layered
       ? (array ? agx_pbe_agx3_2d_array_mip_pack(
                     generation, &fields, legacy->layers, legacy->level,

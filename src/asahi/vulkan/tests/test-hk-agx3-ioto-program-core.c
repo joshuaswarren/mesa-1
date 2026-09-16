@@ -30,6 +30,16 @@ static unsigned checks;
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 static int
+test_g17p_graphics_root_requirement(void)
+{
+   CHECK(!hk_agx3_g17p_graphics_needs_root(false, false, 0));
+   CHECK(hk_agx3_g17p_graphics_needs_root(true, false, 0));
+   CHECK(hk_agx3_g17p_graphics_needs_root(false, true, 0));
+   CHECK(hk_agx3_g17p_graphics_needs_root(false, false, 1));
+   return 0;
+}
+
+static int
 test_g17p_precompiled_data_layout(void)
 {
    uint32_t upload = 0;
@@ -1085,7 +1095,7 @@ test_g17p_basic_graphics_program(void)
    };
    static const uint8_t expected_resource_prefix[] = {
       0x0c, 0x20, 0x1c, 0x00, 0x67, 0x00, 0x54, 0x04, 0x00, 0x00, 0x00, 0x00,
-      0x19, 0x00, 0x00, 0x40, 0x22, 0x00, 0x06, 0x08, 0x06, 0x00, 0x06, 0x00,
+      0x59, 0x00, 0x00, 0x40, 0x22, 0x00, 0x06, 0x08, 0x06, 0x00, 0x06, 0x00,
       0x06, 0x00, 0xab, 0x04, 0x09, 0x04, 0xbb, 0x06, 0x09, 0x04,
    };
    struct hk_agx3_g17p_graphics_program_desc resource = fragment;
@@ -1978,7 +1988,7 @@ test_g17p_rt0_background_programs(void)
    static const uint8_t clear_pre_copy[] = {
       0x0c, 0x80, 0x02, 0x00, 0x00, 0x00, 0x46, 0x00, 0x1c, 0x80,
       0x02, 0x00, 0x04, 0x00, 0x00, 0x00, 0x67, 0x00, 0x54, 0x04,
-      0x00, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x40, 0x22, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x57, 0x00, 0x00, 0x40, 0x22, 0x00,
       0x06, 0x08, 0x06, 0x00, 0x06, 0x00, 0x06, 0x00,
    };
    static const uint8_t clear_copies[] = {
@@ -2637,7 +2647,42 @@ test_g17p_single_layer_rt0_layout(void)
       &tib, 1, true, true, false));
    CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
       NULL, 1, true, true, false));
+
+   /* Raw 32-bit float lanes keep their samples for the resolve after the
+    * pass, while the store of those samples stays admitted. */
+   enum pipe_format r32f[AGX_MAX_RENDER_TARGETS] = {PIPE_FORMAT_R32_FLOAT};
+   tib = agx_build_tilebuffer_layout(r32f, 1, 4, false);
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+      &tib, 1, true, true, false));
+   CHECK(hk_agx3_g17p_multisample_store_supported(&tib, 1, true, 4));
+
+   /* So do RGB9E5 samples, each one packed word. */
+   enum pipe_format rgb9e5[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R9G9B9E5_FLOAT,
+   };
+   for (unsigned samples = 2; samples <= 4; samples += 2) {
+      tib = agx_build_tilebuffer_layout(rgb9e5, 1, samples, false);
+      CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+      CHECK(!hk_agx3_g17p_direct_color_resolve_supported(
+         &tib, 1, true, true, false));
+      CHECK(hk_agx3_g17p_multisample_store_supported(&tib, 1, true, samples));
+   }
    CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(NULL));
+   const enum pipe_format spill_formats[] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R32G32B32A32_UINT,
+   };
+   tib = agx_build_tilebuffer_layout_bounded(
+      spill_formats, 3, 4, false, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+   CHECK(tib.spilled[0] && !tib.spilled[1] && !tib.spilled[2]);
+   CHECK(agx_tilebuffer_total_size(&tib) < 32768);
+   const struct agx_tilebuffer_layout spilled = tib;
+   CHECK(hk_agx3_g17p_rt0_tile_layout_supported(&tib));
+   CHECK(memcmp(&tib, &spilled, sizeof(tib)) == 0);
+   tib.logical_format[0] = PIPE_FORMAT_NONE;
+   CHECK(!hk_agx3_g17p_rt0_tile_layout_supported(&tib));
    return 0;
 }
 
@@ -2966,6 +3011,64 @@ test_g17p_precompiled_fill_program(void)
    return 0;
 }
 
+static int
+test_g17p_compute_published_launch(void)
+{
+   struct agx3_cdm_direct_template_sources sources;
+   CHECK(agx3_cdm_direct_template_sources_compute(false, false, false, &sources));
+   const struct agx3_ioto_uniform_range args = {
+      .start_halfs = 0, .size_halfs = 14,
+      .address = UINT64_C(0x5ffde8c000),
+   };
+   struct hk_agx3_g17p_compute_program_desc desc = {
+      .program_va = UINT64_C(0x100000b0000),
+      .shader_va = UINT64_C(0x100000003c0),
+      .uniform_ranges = &args,
+      .shader_binary_size = 58, .nr_gprs = 16,
+      .compiler_d_valid = true, .launch_sources = sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   const struct agx3_compute_direct_grid grid = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {64, 1, 1}, .local_size = {32, 1, 1}, .dimensions = 1,
+   };
+
+   for (unsigned ranges = 0; ranges <= 1; ++ranges) {
+      desc.uniform_range_count = ranges;
+      desc.program_va = UINT64_C(0x100000b0000);
+      struct hk_agx3_g17p_compute_program retained, duplicate;
+      CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &retained));
+      desc.program_va += 0x400;
+      CHECK(hk_agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &duplicate));
+      /* These really are identical arena keys at different reservations. */
+      CHECK(retained.length == duplicate.length);
+      CHECK(!memcmp(retained.bytes, duplicate.bytes, retained.length));
+      CHECK(retained.launch.program_va != duplicate.launch.program_va);
+      CHECK(hk_agx3_g17p_compute_program_rebind_published(
+         &duplicate.launch, retained.launch.program_va));
+      CHECK(!memcmp(&retained.launch, &duplicate.launch, sizeof(retained.launch)));
+
+      uint8_t expected[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
+      uint8_t actual[sizeof(expected)];
+      struct agx3_compute_dispatch_sink a = {.data = expected, .capacity = sizeof(expected)};
+      struct agx3_compute_dispatch_sink b = {.data = actual, .capacity = sizeof(actual)};
+      CHECK(hk_agx3_g17p_native_compute_dispatch_append(&retained.launch, &grid, &a));
+      /* The reservation is now reusable; launch metadata must not need it. */
+      memset(duplicate.bytes, 0xa5, sizeof(duplicate.bytes));
+      CHECK(hk_agx3_g17p_native_compute_dispatch_append(&duplicate.launch, &grid, &b));
+      CHECK(a.length == b.length && !memcmp(expected, actual, a.length));
+
+      const struct agx3_compute_program before = duplicate.launch;
+      const uint64_t invalid[] = {0, 1, UINT64_C(0x1000000000000)};
+      for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i) {
+         CHECK(!hk_agx3_g17p_compute_program_rebind_published(&duplicate.launch, invalid[i]));
+         CHECK(!memcmp(&before, &duplicate.launch, sizeof(before)));
+      }
+   }
+   CHECK(!hk_agx3_g17p_compute_program_rebind_published(NULL, UINT64_C(0x100000b0000)));
+   return 0;
+}
+
 static uint64_t
 elapsed_ns(const struct timespec *start, const struct timespec *end)
 {
@@ -3171,6 +3274,8 @@ int
 main(void)
 {
    if (test_g17p_precompiled_data_layout() ||
+       test_g17p_graphics_root_requirement() ||
+       test_g17p_compute_published_launch() ||
        test_coverage_initial_pixel_dependencies() ||
        test_g17p_precompiled_fill_program() || test_exact_target_order() || test_terminal_suffix_modes() ||
        test_fail_closed() || test_g17s_minimal_compute_admission() ||

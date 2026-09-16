@@ -437,7 +437,8 @@ typedef struct {
    bool coherent : 1;
    /* AGX3 memory index scale excludes the access-format size. */
    bool memory_index_is_bytes : 1;
-   /* Raw subword memory elements occupy packed 32-bit SSA words. */
+   /* Raw subword memory elements use packed payloads (device loads use
+    * 32-bit SSA words; byte stores and shared loads use 16-bit halves). */
    bool memory_is_packed : 1;
 
    /* Explicit AGX3 SCS load semantics.  These stay on the internal SCS pseudo
@@ -532,6 +533,11 @@ typedef struct {
    bool is_preamble;
    unsigned scratch_size_B;
 
+   /* AGX3b: thread-private storage half a returned device atomic publishes
+    * its old value to, above the spill frame.
+    */
+   unsigned agx3_atomic_return_tps_half;
+
    struct list_head blocks; /* list of agx_block */
    struct agx_shader_info *out;
    struct agx_shader_key *key;
@@ -551,6 +557,10 @@ typedef struct {
    /* G17P depth/stencil writes not yet emitted. Every sample's write shares
     * one class-1 transaction, released after the last. */
    unsigned zs_writes_left;
+
+   /* The first coverage update in an explicit-early fragment is the one
+    * per-pixel Z/S test.  It has a distinct G17P acquire/retain protocol. */
+   bool force_early_tests_pending;
 
    /* Has r0l been zeroed yet due to control flow? */
    bool any_cf;
@@ -1143,6 +1153,7 @@ void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);
 void agx_ra(agx_context *ctx);
+unsigned agx3_tile_store_bank(agx_context *ctx);
 
 /* AGX3b device atomics return through their value register.  Legalize the
  * SSA three-address form before RA so the allocator can enforce that physical

@@ -303,9 +303,28 @@ struct agx_fs_epilog_key {
    /* Tilebuffer configuration */
    enum pipe_format rt_formats[8];
    uint8_t nr_samples;
+   /* agx_tilebuffer_layout::max_sample_size_B of the render pass. */
+   uint8_t max_sample_size_B;
+   uint16_t max_bytes_per_tile;
+   uint16_t max_samples_per_tile;
    bool force_small_tile;
    bool preserve_zero_mask;
    bool lower_srgb;
+   bool native_spills;
+   /* Absolute uniform-half address of the private native spill table. */
+   uint16_t emrt_heap_base;
+
+   /* G17P's pre-main MOVMSK also runs depth/stencil tests. For late-tests
+    * shaders, defer the API sample mask to the epilog so it can be combined
+    * with shader and alpha-to-coverage masks before any output is committed.
+    */
+   bool defer_api_sample_mask;
+   uint8_t api_sample_mask;
+
+   /* Leave pixel-shaded MSAA lowering to a caller that will unroll the
+    * per-sample epilog itself. Used by the G17P sample-shaded path.
+    */
+   bool defer_monolithic_msaa;
 
    /* Absolute uniform-half base for dynamic blend constants. Zero selects
     * the standard fragment ABI at AGX_ABI_FUNI_BLEND_R. HAL200 resource

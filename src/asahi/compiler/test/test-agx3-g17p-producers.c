@@ -149,6 +149,53 @@ static const struct fn_v fn_vs[] = {
    {"s_r8 fltnorm h0",    "97045400020000904420", 0, 2,0,true, 0,0,false, false,false,0, 1},
 };
 
+/* blend/native/negpack.py and negpack2.py: -x, abs(x) and -abs(x) into
+ * normalized attachments. */
+struct fn_mod_v {
+   const char *n, *hex;
+   bool two, snorm, is_16bit;
+   bool abs[2], neg[2];
+};
+static const struct fn_mod_v fn_mod_vs[] = {
+   {"neg r8unorm",     "970454000200009044c1", false, false, false, {0}, {1}},
+   {"neg rg8unorm",    "97045400020008d045d3", true, false, false, {0}, {1, 1}},
+   {"abs rg8unorm",    "97045400020008d0c5c6", true, false, false, {1, 1}, {0}},
+   {"nabs rg8unorm",   "97045400020008d0c5d7", true, false, false, {1, 1}, {1, 1}},
+   {"neg r16unorm",    "97045400020000904481", false, false, true, {0}, {1}},
+   {"neg rg16snorm",   "97045400020008d04553", true, true, true, {0}, {1, 1}},
+   {"neg r8snorm",     "97045400020000904461", false, true, false, {0}, {1}},
+};
+
+static void
+test_fltnorm_modifiers(void)
+{
+   uint8_t o[AGX3_FLTNORM_MAX_LENGTH];
+   uint8_t l;
+   for (unsigned i = 0; i < sizeof(fn_mod_vs) / sizeof(*fn_mod_vs); ++i) {
+      const struct fn_mod_v *v = &fn_mod_vs[i];
+      struct agx3_fltnorm_desc d = {
+         .src = {{AGX3_FLTNORM_SRC_REGISTER, 0, true, v->abs[0], v->neg[0]},
+                 {v->two ? AGX3_FLTNORM_SRC_REGISTER : AGX3_FLTNORM_SRC_NONE,
+                  2, v->two, v->abs[1], v->neg[1]}},
+         .two_lanes = v->two,
+         .snorm = v->snorm,
+         .is_16bit = v->is_16bit,
+      };
+      bool ok = agx3_fltnorm_encode(B, &d, o, &l);
+      check(v->n, v->hex, o, l, ok);
+   }
+
+   /* Only register operands carry the modifiers. */
+   struct agx3_fltnorm_desc imm = {
+      .src = {{AGX3_FLTNORM_SRC_IMMEDIATE, 48, false, false, true}},
+   };
+   checks++;
+   if (agx3_fltnorm_encode(B, &imm, o, &l)) {
+      fprintf(stderr, "negated immediate fltnorm accepted\n");
+      failures++;
+   }
+}
+
 static void
 test_fltnorm(void)
 {
@@ -237,6 +284,7 @@ static const struct sa_v sa_vs[] = {
    {"shl7 first, dead source",      "9f115400030000401414", 0, true, true, 0, false, 0, true, 3, 1},
    {"shl7 first, live source",      "9f115401030000401014", 1, true, true, 0, false, 0, false, 3, 1},
    {"shl7 second",                  "9f015400030000001404", 0, true, true, 0, false, 0, true, 4, 0},
+   {"ushort shift1 native",         "9f015602020008401404", 2, false, true, 0, false, 2, true, 1, 0x20},
 };
 
 static void
@@ -604,6 +652,7 @@ main(void)
 {
    test_stage();
    test_fltnorm();
+   test_fltnorm_modifiers();
    test_persp();
    test_writeout();
    test_subgroup();

@@ -61,6 +61,45 @@ bool agx_vdm_tessellate_direct_unpack(
    enum agx_chip chip, const void *bytes, size_t size,
    struct agx_vdm_tessellate_direct_info *info);
 
+#define AGX_VDM_TESSELLATE_INDIRECT_LENGTH 28u
+
+struct agx_vdm_tessellate_indirect_info {
+   uint64_t factor_buffer;
+
+   /* Four words: patch count, instance count, patch start, base instance. */
+   uint64_t indirect_buffer;
+
+   /* As agx_vdm_tessellate_direct_info. */
+   uint32_t instance_stride_word;
+   uint32_t factor_buffer_size_minus_one;
+};
+
+struct agx_vdm_tessellate_indirect {
+   uint8_t bytes[AGX_VDM_TESSELLATE_INDIRECT_LENGTH];
+   uint8_t length;
+};
+
+/*
+ * The seven-dword indirect Tessellate record, built by
+ * HWTessellationContext::drawPatches(indirect) in the G17P render plugin
+ * (0x216cb8910..0x216cb8958):
+ *
+ *   word0 0xb4300c00 | factor_buffer[39:32]
+ *   word1 factor_buffer[31:0]
+ *   word2 indirect_buffer[47:32]
+ *   word3 indirect_buffer[31:0], whose low two bits are cleared
+ *   word4 instance stride word
+ *   word5 factor buffer size in words, minus one
+ *   word6 factor_buffer[47:40]
+ */
+bool agx_vdm_tessellate_indirect_pack(
+   enum agx_chip chip, const struct agx_vdm_tessellate_indirect_info *info,
+   struct agx_vdm_tessellate_indirect *out);
+
+bool agx_vdm_tessellate_indirect_unpack(
+   enum agx_chip chip, const void *bytes, size_t size,
+   struct agx_vdm_tessellate_indirect_info *info);
+
 #define AGX_VDM_TESSELLATION_STATE_LENGTH 12u
 
 enum agx_vdm_tessellation_partition {

@@ -215,10 +215,10 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
 
    if (!is_c(enc)) {
       if (d->lane_kind == AGX3_SUBGROUP_LANE_REGISTER) {
-         if (!d->quad && d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST) {
-            ADD_FIELD(11, 1);
-            ADD_FIELD(25, 1);
-            ADD_FIELD(41, 1);
+         if (d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST) {
+            ADD_FIELD(11, d->dest_hint);
+            ADD_FIELD(d->src_live ? 25 : 27, 1);
+            ADD_FIELD(d->lane_live ? 39 : 41, 1);
          } else if (d->op == AGX3_SUBGROUP_SHUFFLE_UP ||
                     d->op == AGX3_SUBGROUP_SHUFFLE_DOWN) {
             ADD_FIELD(11, 1);
@@ -268,6 +268,12 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
                             uint8_t *length)
 {
    if (d == NULL || out == NULL || length == NULL)
+      return false;
+
+   if (d->src_cache &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->quad || d->src_half ||
+        d->type != AGX3_SUBGROUP_BALLOT_INTEGER || d->compare_immediate ||
+        !d->src_live))
       return false;
 
    /*
@@ -353,12 +359,23 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
       ADD_FIELD(11, 1);
    ADD_FIELD(23, 2);
    ADD_FIELD(24, d->src_half ? 1 : 2);
-   /* Register comparisons must preserve a source used after the ballot too.
-    * G17P's native signed ballot uses f25 for a live source and f27 on its
-    * final read. Unconditionally setting f27 erased the shared ballot before
-    * primitive-restart expansion could broadcast its first nonempty word. */
-   if (!d->compare_immediate || !d->src_live)
-      ADD_FIELD(d->src_live ? 25 : 27, 1);
+   /* G17P simd_ballot(x != 0), metal-nt 32023.917:
+    *   dead x: 17075600020000582212
+    *   live x: 17075600020400182212
+    * The live witness reads half 2 instead of half 0 and clears f27.
+    * This source discard bit also applies to our register-zero comparison.
+    * In restart unrolling, its input is a shared ballot mask that is still
+    * needed by the broadcast selecting the first nonempty subgroup.
+    */
+   const bool live_integer_ballot =
+      enc == AGX_ISA_ENCODING_AGX3B && !d->quad &&
+      d->type == AGX3_SUBGROUP_BALLOT_INTEGER && d->src_live;
+   if ((!d->compare_immediate && !live_integer_ballot) || !d->src_live)
+      ADD_FIELD(27, 1);
+   /* The signed-register live witness 17075404030002182206 also sets
+    * f25. Preserve its cache hint independently of f27's discard flag. */
+   if (d->src_cache)
+      ADD_FIELD(25, 1);
 
    const char *mnemonic;
    uint16_t cond_field, invert_field;

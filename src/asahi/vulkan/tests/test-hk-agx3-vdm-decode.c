@@ -102,6 +102,7 @@ test_program_cache_lifetime(void)
    };
 
    CHECK(!hk_agx3_shader_binary_version_supported(0));
+   CHECK(!hk_agx3_shader_binary_version_supported(15));
    CHECK(hk_agx3_shader_binary_version_supported(
       HK_AGX3_SHADER_BINARY_VERSION));
    CHECK(!hk_agx3_shader_binary_version_supported(
@@ -217,6 +218,23 @@ test_g17p_vertex_program_info(void)
                                           &program));
    CHECK(program.template_info.raw_vs_output_count_0 == 5);
    CHECK(program.template_info.raw_vs_output_count_2 == 0);
+
+   /* The XFB clip-distance raster variant appends the combined clip/cull
+    * group after ordinary varyings and optional point size. VsStateConfig's
+    * field3 remains the total f32 UVS footprint. */
+   struct hk_agx3_g17p_vertex_compile_info clip_info = compiler_info;
+   clip_info.uvs_written = BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST0) |
+                           BITFIELD64_BIT(VARYING_SLOT_CLIP_DIST1);
+   clip_info.user_size = 8;
+   clip_info.psiz_off = 12;
+   clip_info.layer_viewport_off = clip_info.clip_off = 13;
+   clip_info.uvs_size = 20;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &clip_info,
+                                          &program));
+   CHECK(program.template_info.raw_vs_output_count_0 == 20);
+   clip_info.uvs_size = 22;
+   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &clip_info,
+                                           &program));
 
    const struct hk_agx3_g17p_vertex_compile_info vkcube_info = {
       .hardware_vertex = true,

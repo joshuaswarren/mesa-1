@@ -126,7 +126,9 @@ struct hk_root_descriptor_table {
          /* Native G17P indirect dispatch only.  The grid helper reads the
           * threadgroup counts at group_count_addr, multiplies them by
           * grid_helper_local_size, and publishes the six-u32 launch geometry
-          * at grid_helper_geometry_addr for the main record to consume.  Both
+          * at grid_helper_geometry_addr for the main record to consume.  For
+          * an indirect-local grid, group_count_addr instead holds a launch
+          * geometry, which the geometry copy helper publishes as it is.  Both
           * are zero for every direct dispatch and for every other chip. */
          uint64_t grid_helper_geometry_addr;
          uint32_t grid_helper_local_size[3];
@@ -318,13 +320,14 @@ struct hk_graphics_state {
       struct hk_tess_info info;
       enum mesa_prim prim;
 
-      /* G17P hardware tessellation: the factor records the tessellator reads
-       * and the patch/instance counts of the draw that filled them. */
+      /* G17P hardware tessellation: the factor buffer the tessellator reads,
+       * and either the unrolled patch count of a direct draw or the patch
+       * draw an indirect draw's setup kernel writes. */
       const struct poly_tess_params *params;
       uint64_t factor_buffer;
+      uint64_t patch_draw;
       uint32_t factor_buffer_size_B;
       uint32_t patches;
-      uint32_t instances;
    } tess;
 
    /* Needed by vk_command_buffer::dynamic_graphics_state */
@@ -398,6 +401,11 @@ struct hk_cs {
    /* AGX3 CDM: the value of current just after a strong cache flush, so a
     * flush requested with nothing recorded since it can be elided. */
    void *strong_flush_end;
+
+   /* Likewise for the weak ordering barrier attached to a native launch. A
+    * later cache-flush request upgrades this record in place instead of
+    * emitting two adjacent barriers. */
+   void *weak_barrier_end;
 
    /* Whether there is more than just the root chunk */
    bool stream_linked;
@@ -475,6 +483,9 @@ struct hk_cs {
       struct agx_timestamp_req end;
    } timestamp;
 
+   /* Writable destinations known while recording meta compute dispatches. */
+   struct hk_drm_attachment_set compute_attachments;
+
    /* Remaining state is for graphics only, ignored for compute */
    struct agx_tilebuffer_layout tib;
 
@@ -519,15 +530,53 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    assert(a->cmd == b->cmd);
    assert(!a->timestamp.end.handle);
 
-   void *link_end =
-      hk_cmd_buffer_emit_cs_jump(a->cmd, a->current, b->addr, false);
-   const bool linked = link_end != a->current;
-   a->current = b->current;
-   a->stream_linked |= linked || b->stream_linked;
+   const size_t b_size = (uint8_t *)b->current - (uint8_t *)b->start;
+   const size_t remaining = (uint8_t *)a->end - (uint8_t *)a->current;
+   const bool inline_b = !a->stream_linked && !b->stream_linked &&
+                         hk_cs_space_fits(remaining, b_size,
+                                          AGX_CDM_STREAM_LINK_LENGTH);
+
+   if (inline_b) {
+      uint8_t *dst = a->current;
+      memcpy(dst, b->start, b_size);
+      a->current = dst + b_size;
+
+      /* These markers point just past an emitted barrier. Preserve them in
+       * the destination root so another adjacent merge still has an exact
+       * view of the stream tail. */
+      a->strong_flush_end =
+         b->strong_flush_end
+            ? dst + ((uint8_t *)b->strong_flush_end - (uint8_t *)b->start)
+            : NULL;
+      a->weak_barrier_end =
+         b->weak_barrier_end
+            ? dst + ((uint8_t *)b->weak_barrier_end - (uint8_t *)b->start)
+            : NULL;
+   } else {
+      void *link_end =
+         hk_cmd_buffer_emit_cs_jump(a->cmd, a->current, b->addr, false);
+      const bool linked = link_end != a->current;
+      a->current = b->current;
+      a->end = b->end;
+      a->chunk = b->chunk;
+      a->stream_linked |= linked || b->stream_linked;
+      a->strong_flush_end = b->strong_flush_end;
+      a->weak_barrier_end = b->weak_barrier_end;
+   }
 
    a->uses_sampler_heap |= b->uses_sampler_heap;
    a->scratch.cs.main |= b->scratch.cs.main;
    a->scratch.cs.preamble |= b->scratch.cs.preamble;
+
+   /* Submission sees only the merged root. Keep the destinations recorded
+    * by both streams without changing their inline/link batching policy. */
+   for (unsigned i = 0; i < b->compute_attachments.count; ++i) {
+      const struct drm_asahi_attachment *attachment =
+         &b->compute_attachments.list[i];
+      hk_drm_attachment_set_add(&a->compute_attachments,
+                                attachment->pointer, attachment->size);
+   }
+   a->compute_attachments.complete &= b->compute_attachments.complete;
 
    a->timestamp = b->timestamp;
 
@@ -831,6 +880,9 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
       };
 
       list_inithead(&cs->node);
+      hk_drm_attachment_set_init(&cs->compute_attachments);
+      /* Only known meta destinations are collected so far. */
+      cs->compute_attachments.complete = false;
 
       bool before_gfx = (ptr == &cmd->current_cs.pre_gfx);
 
@@ -940,6 +992,15 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
        */
       if (cs->imm_writes.size) {
          hk_dispatch_imm_writes(cmd, cs);
+      }
+
+      /* A transformed draw may reserve a pre-graphics stream and then prove
+       * that it has no vertices to process. Do not leave an empty CDM job in
+       * the submission list. */
+      if (cs->stats.cmds == 0 && cs->stats.flushes == 0 &&
+          !cs->timestamp.end.handle) {
+         list_del(&cs->node);
+         hk_cs_destroy(cs);
       }
    }
 

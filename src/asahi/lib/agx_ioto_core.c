@@ -59,7 +59,7 @@ struct agx_ioto_form {
  * Fixed bits and lengths are kept as a literal transcription of the recovered
  * gpu0/gpu1 encoder graph.  Unlisted bits are opaque and are never rewritten.
  */
-static const struct agx_ioto_form agx_ioto_forms[] = {
+static const struct agx_ioto_form agx_ioto_gpu0_forms[] = {
    FORM1(NOP_EP0, GPU0, 2, FW(0, 0x0006, 0x001f)),
    FORM2(NOP_EP1, GPU0, 4, FW(0, 0x001e, 0x001f),
          FW(1, 0x0100, 0x0f00)),
@@ -100,6 +100,9 @@ static const struct agx_ioto_form agx_ioto_forms[] = {
    FORM1(CNDRET_EP0, GPU0, 4, FW(0, 0x028f, 0x07ff)),
    FORM1(SETPROFILECTL_EP0, GPU0, 4, FW(0, 0x03f7, 0x07ff)),
 
+};
+
+static const struct agx_ioto_form agx_ioto_gpu1_forms[] = {
    FORM1(NOP_EP0, GPU1, 2, FW(0, 0x0006, 0x001f)),
    FORM2(NOP_EP1, GPU1, 4, FW(0, 0x001e, 0x001f),
          FW(1, 0x0000, 0x0f80)),
@@ -220,13 +223,29 @@ agx_ioto_target_supported(enum agx_chip chip)
 }
 
 static const struct agx_ioto_form *
+agx_ioto_encoding_forms(enum agx_ioto_encoding encoding, size_t *count)
+{
+   switch (encoding) {
+   case AGX_IOTO_ENCODING_GPU0:
+      *count = sizeof(agx_ioto_gpu0_forms) / sizeof(agx_ioto_gpu0_forms[0]);
+      return agx_ioto_gpu0_forms;
+   case AGX_IOTO_ENCODING_GPU1:
+      *count = sizeof(agx_ioto_gpu1_forms) / sizeof(agx_ioto_gpu1_forms[0]);
+      return agx_ioto_gpu1_forms;
+   default:
+      *count = 0;
+      return NULL;
+   }
+}
+
+static const struct agx_ioto_form *
 agx_ioto_find_form(enum agx_ioto_encoding encoding, enum agx_ioto_kind kind)
 {
-   for (size_t i = 0; i < sizeof(agx_ioto_forms) / sizeof(agx_ioto_forms[0]);
-        ++i) {
-      if (agx_ioto_forms[i].encoding == encoding &&
-          agx_ioto_forms[i].kind == kind)
-         return &agx_ioto_forms[i];
+   size_t count;
+   const struct agx_ioto_form *forms = agx_ioto_encoding_forms(encoding, &count);
+   for (size_t i = 0; i < count; ++i) {
+      if (forms[i].kind == kind)
+         return &forms[i];
    }
 
    return NULL;
@@ -322,10 +341,15 @@ agx_ioto_decode_one(enum agx_chip chip, const void *stream, size_t available,
    const struct agx_ioto_form *match = NULL;
    bool incomplete_match = false;
 
-   for (size_t i = 0; i < sizeof(agx_ioto_forms) / sizeof(agx_ioto_forms[0]);
-        ++i) {
-      const struct agx_ioto_form *form = &agx_ioto_forms[i];
-      if (form->encoding != encoding ||
+   size_t count;
+   const struct agx_ioto_form *forms = agx_ioto_encoding_forms(encoding, &count);
+   for (size_t i = 0; i < count; ++i) {
+      const struct agx_ioto_form *form = &forms[i];
+      /* Every form begins with a word-zero opcode predicate. Reject using
+       * the first available byte before checking longer prefixes. Keep all
+       * candidates: ambiguous and truncated streams must still fail. */
+      if (((bytes[0] ^ form->fixed[0].value) &
+           form->fixed[0].mask & 0xff) != 0 ||
           !agx_ioto_prefix_matches(form, bytes, available))
          continue;
 

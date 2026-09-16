@@ -2,6 +2,7 @@
 /* SPDX-License-Identifier: MIT */
 
 #include "agx3_ioto_load_packer.h"
+#include "agx3_binder.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -107,7 +108,7 @@ test_load_records(void)
 {
    static const uint8_t gpu0_expected[] = {
       0x67, 0x00, 0x54, 0x28, 0x16, 0x00, 0x00,
-      0x00, 0x11, 0x00, 0x00, 0x40, 0x22, 0x00,
+      0x00, 0x51, 0x00, 0x00, 0x40, 0x22, 0x00,
    };
    static const uint8_t gpu1_ep0[] = {
       0x4f, 0x2c, 0x43, 0x00, 0x80, 0x04, 0x00, 0x20,
@@ -125,7 +126,7 @@ test_load_records(void)
       CHECK(raw.kind == AGX_IOTO_GPU0_INLINE_LDDEV14);
       CHECK(raw.length == sizeof(gpu0_expected));
       CHECK(memcmp(raw.bytes, gpu0_expected, sizeof(gpu0_expected)) == 0);
-      CHECK(slot == 1);
+      CHECK(slot == 2);
    }
    for (size_t i = 0; i < ARRAY_SIZE(gpu1_targets); ++i) {
       CHECK(pack_load(gpu1_targets[i], &load, &raw, &slot));
@@ -226,7 +227,7 @@ static bool
 test_native_rounds(void)
 {
    static const uint8_t gpu0_tail[] = {
-      0x67, 0x00, 0x54, 0x04, 0x00, 0x00, 0x00, 0x00, 0x19, 0x00,
+      0x67, 0x00, 0x54, 0x04, 0x00, 0x00, 0x00, 0x00, 0x59, 0x00,
       0x00, 0x40, 0x22, 0x00, 0x06, 0x08, 0x06, 0x00, 0x06, 0x00,
       0x06, 0x00, 0xab, 0x04, 0x09, 0x04, 0xbb, 0x06, 0x09, 0x04,
    };
@@ -266,7 +267,7 @@ test_native_direct_sources(void)
    };
    static const uint8_t gpu0_scs[] = {
       0x4c, 0x80, 0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x67, 0x00,
-      0x54, 0x00, 0x04, 0x00, 0x00, 0x00, 0x19, 0x60, 0x24, 0x40,
+      0x54, 0x00, 0x04, 0x00, 0x00, 0x00, 0x59, 0x60, 0x24, 0x40,
       0x22, 0x00, 0x06, 0x08, 0x06, 0x00, 0x06, 0x00, 0x06, 0x00,
       0x7b, 0x00, 0x09, 0x04, 0x8b, 0x02, 0x09, 0x04,
    };
@@ -445,6 +446,26 @@ test_cprog_inputs(void)
 }
 
 static bool
+compare_gpu0_load(struct agx_ioto_inflight_load load)
+{
+   const struct agx3_mem_desc desc = {
+      .data = load.data.half, .width = AGX3_MEM_W32,
+      .mask = (1u << load.count_dwords) - 1, .base = load.base.half,
+      .idx_kind = AGX3_MEM_IDX_IMM, .byte_off = load.byte_offset, .slot = 2,
+   };
+   uint8_t expected[AGX3_MEM_MAX_LENGTH], length = 0, slot = 0;
+   struct agx_ioto_load_raw_record raw;
+   bool reference = agx3_mem_encode_load_form(AGX_ISA_ENCODING_AGX3B,
+                                             &desc, 0, expected, &length);
+   CHECK(pack_load(AGX_CHIP_G17P, &load, &raw, &slot) == reference);
+   if (reference) {
+      CHECK(raw.length == length && slot == 2);
+      CHECK(memcmp(raw.bytes, expected, length) == 0);
+   }
+   return true;
+}
+
+static bool
 logical_state_unchanged(const struct fixture *f, const struct fixture *before)
 {
    return memcmp(&f->core, &before->core, sizeof(f->core)) == 0 &&
@@ -600,13 +621,80 @@ test_cprog_round_failures(void)
    return true;
 }
 
+static bool
+test_gpu0_specializations(bool source_kill)
+{
+   struct agx_ioto_inflight_load load = absolute_record(0);
+   /* Every signed offset at every load width; register fields then varied
+    * independently across the full accepted/rejected boundary. */
+   for (unsigned count = 1; count <= 4; ++count) {
+      load.count_dwords = count;
+      for (int offset = -32768; offset <= 32767; ++offset) {
+         load.byte_offset = offset;
+         CHECK(compare_gpu0_load(load));
+      }
+      for (unsigned data = 0; data <= 256; ++data) {
+         for (unsigned base = 0; base <= 192; ++base) {
+            load.data.half = data;
+            load.base.half = base;
+            load.byte_offset = (int16_t)(data * 193 + base * 79);
+            CHECK(compare_gpu0_load(load));
+         }
+      }
+   }
+
+   struct agx3_ioto_load_packer packer;
+   struct agx_ioto_load_emit_ops ops;
+   CHECK(agx3_ioto_load_packer_init(&packer, AGX_CHIP_G17P));
+   struct agx_ioto_cprog_inputs inputs = {.known = true};
+   for (unsigned i = 0; i < ARRAY_SIZE(inputs.uniform_halfs); ++i)
+      inputs.uniform_halfs[i] = UINT64_MAX;
+   if (!source_kill)
+      packer.cprog_inputs = &inputs;
+   agx3_ioto_load_packer_ops(&packer, &ops);
+   const struct agx3_field_kv baseline[] = {
+      {9, 3}, {10, 2}, {23, 2}, {24, 2}, {27, source_kill},
+   };
+   /* Exhaust the specialized region and the surrounding extended-form
+    * fallback, including the existing ep0 alias at destination 512. */
+   for (unsigned dst = 0; dst <= (source_kill ? 513 : 510); ++dst) {
+      for (unsigned src = 0; src <= 256; ++src) {
+         const struct agx3_field_kv fields[] = {{3, dst}, {16, src}};
+         uint8_t expected[32], length = 0;
+         bool reference = false;
+         unsigned ep;
+         for (ep = 0; ep < 2; ++ep) {
+            reference = agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "copy", ep,
+               baseline, ARRAY_SIZE(baseline), fields, ARRAY_SIZE(fields),
+               expected, &length);
+            if (reference)
+               break;
+         }
+         load = absolute_record(0);
+         load.data.half = src;
+         load.native_slot_half = dst;
+         struct agx_ioto_load_raw_record raw;
+         CHECK(ops.pack_copy(ops.context, AGX_CHIP_G17P, &load, 0, 3, &raw)
+               == reference);
+         if (reference) {
+            CHECK(raw.length == length);
+            CHECK(raw.kind == (ep == 0 ? AGX_IOTO_LOAD_RAW_COPY_EP0 :
+                                         AGX_IOTO_LOAD_RAW_COPY_EP1));
+            CHECK(memcmp(raw.bytes, expected, length) == 0);
+         }
+      }
+   }
+   return true;
+}
+
 int
 main(void)
 {
    if (!test_target_gate() || !test_load_records() || !test_copy_records() ||
        !test_native_rounds() || !test_native_direct_sources() ||
        !test_mem_form_bounds() || !test_cprog_inputs() || !test_cprog_rounds() ||
-       !test_cprog_round_failures())
+       !test_cprog_round_failures() || !test_gpu0_specializations(false) ||
+       !test_gpu0_specializations(true))
       return 1;
    printf("agx3_ioto_load_packer: %u checks passed\n", checks);
    return 0;

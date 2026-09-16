@@ -476,6 +476,22 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
 
    if (offset != NULL) {
       if (gen9 && !g17p_offset_is_constant(offset)) {
+         /* Gather's PACK_SMPIR form consumes X and Y as adjacent 16-bit
+          * inputs.  Keep them in one 32-bit SSA value so register allocation
+          * preserves that exact pair.  The generic runtime-offset path below
+          * instead builds a complete bank-6 word for filtered samples; using
+          * it for an array gather made the layer occupy X's low nibble and
+          * produced wrong texels, while a plain gather arrived as two 32-bit
+          * channels and was refused by the packer. */
+         if (tex->op == nir_texop_tg4) {
+            assert(offset->num_components == 2);
+            nir_def *packed = nir_pack_32_2x16_split(
+               b, nir_i2i16(b, nir_channel(b, offset, 0)),
+               nir_i2i16(b, nir_channel(b, offset, 1)));
+            nir_tex_instr_add_src(tex, nir_tex_src_backend2, packed);
+            goto offset_lowered;
+         }
+
          /* Array layer, register LOD/bias, and a runtime 2D offset occupy
           * complementary fields of sampler bank 6. Multiple PACK_SMPIR
           * instructions replace that word instead of composing it, so publish
@@ -765,6 +781,9 @@ lower_buffer_image(nir_builder *b, nir_intrinsic_instr *intr,
     */
    nir_def *coord2d = coords_for_buffer_texture(b, coord);
    nir_src_rewrite(&intr->src[1], nir_pad_vector(b, coord2d, 4));
+   if (buffer_metadata)
+      nir_intrinsic_set_access(
+         intr, nir_intrinsic_access(intr) | ACCESS_BUFFER_AGX);
    nir_intrinsic_set_image_dim(intr, GLSL_SAMPLER_DIM_2D);
 }
 
@@ -1327,7 +1346,7 @@ agx_nir_lower_texture(nir_shader *s)
 
 static bool
 lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
-                         UNUSED void *data)
+                         void *data)
 {
    b->cursor = nir_before_instr(&intr->instr);
 
@@ -1337,8 +1356,17 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
    if (nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_MS)
       return false;
 
-   nir_def *index_px =
-      nir_u2u32(b, image_texel_address(b, intr, true, false));
+   nir_def *index_px;
+   if (*(unsigned *)data == 9) {
+      nir_def *pbe = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
+      index_px = libagx_emrt_ms_index_gen9(b,
+         nir_iadd_imm(b, pbe, AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE),
+         nir_iadd_imm(b, pbe, AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET - 32),
+         intr->src[1].ssa, nir_u2u32(b, intr->src[2].ssa),
+         nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr))));
+   } else {
+      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false));
+   }
    nir_def *coord2d = coords_for_buffer_texture(b, index_px);
 
    nir_src_rewrite(&intr->src[1], nir_pad_vector(b, coord2d, 4));
@@ -1351,8 +1379,15 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
 bool
 agx_nir_lower_multisampled_image_store(nir_shader *s)
 {
+   return agx_nir_lower_multisampled_image_store_for_generation(s, 0);
+}
+
+bool
+agx_nir_lower_multisampled_image_store_for_generation(nir_shader *s,
+                                                     unsigned generation)
+{
    return nir_shader_intrinsics_pass(s, lower_multisampled_store,
-                                     nir_metadata_control_flow, NULL);
+                                     nir_metadata_control_flow, &generation);
 }
 
 /*

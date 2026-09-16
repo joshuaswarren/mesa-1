@@ -729,7 +729,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                      bool partial_render)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (agx_g17p_classify_mrt(&key->tib) == AGX_G17P_MRT_MIXED)
+   if (agx_tilebuffer_spills(&key->tib) ||
+       agx_g17p_classify_mrt(&key->tib) == AGX_G17P_MRT_MIXED)
       return hk_build_g17p_mixed_bg_eot(cmd, key, info, store);
 
    /* Vulkan keeps unused colour attachments as holes in the logical array.
@@ -767,6 +768,28 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
     */
    if (!key->tib.nr_samples)
       key->tib.nr_samples = 1;
+
+   /* Decide from the compacted attachment and its matching view. Vulkan may
+    * leave holes before the sole live color attachment; selecting from
+    * logical slot0 and colorAttachmentCount before compaction loses its
+    * STORE requirement and selects a single-sample EOT for an MS surface.
+    * Keep samples for partial renders, explicit STORE, and resolves that
+    * execute after the pass. Final direct resolves remain single-sampled. */
+   if (store && active_count == 1) {
+      const VkRenderingAttachmentInfo *att = &attachments[0];
+      const struct hk_image_view *iview = color_att[0].iview;
+      const bool store_source = att->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
+      const bool has_resolve = att->resolveImageView != VK_NULL_HANDLE &&
+                               att->resolveMode != VK_RESOLVE_MODE_NONE;
+      const bool resolved_after_pass = has_resolve &&
+         !hk_agx3_g17p_direct_color_resolve_supported(
+            &key->tib, active_count, has_resolve,
+            att->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT, store_source);
+      key->multisample_store = hk_agx3_g17p_multisample_store_supported(
+         &key->tib, active_count,
+         partial_render || store_source || resolved_after_pass,
+         iview ? iview->vk.image->samples : 0);
+   }
 
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    const bool wboit_mrt = mrt == AGX_G17P_MRT_WBOIT;
@@ -949,6 +972,14 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
           (dual_mrt_active &&
            (!iview1 || !target1_pbe_valid ||
             info->pColorAttachments[1].imageView == VK_NULL_HANDLE))) {
+         if (debug_get_bool_option("HK_DEBUG_RECORD", false))
+            mesa_loge("EOT target mismatch: partial=%u active=%u samples=%u "
+                      "target_samples=%u direct=%u ms_store=%u pbe=%u "
+                      "store_op=%u resolve_mode=%u",
+                      partial_render, active_count, key->tib.nr_samples,
+                      target ? target->vk.image->samples : 0,
+                      direct_resolve, multisample_store, target_pbe_valid,
+                      att->storeOp, att->resolveMode);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
          return (struct hk_bg_eot){0};
       }
@@ -1255,37 +1286,6 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
     */
    key.single_sample_reload = false;
 
-   /* Keeping the samples in the stored surface is what makes a reload
-    * possible, and three different things ask for it: storeOp = STORE, which
-    * makes a multisample VkImage readable after the pass, a partial render,
-    * whose mid-frame flush exists only to be reloaded by the draws that
-    * follow it, and a resolve the end-of-tile program cannot perform itself,
-    * such as the sample-zero resolve of an integer attachment, which the
-    * resolve after the pass reads from the stored samples. On an A18 Pro the
-    * g17p-vulkan-msaa-store-fetch4 probe reads back the per-sample values of
-    * such a stored surface.
-    */
-   if (dev->dev.chip == AGX_CHIP_G17P && store &&
-       info->colorAttachmentCount >= 1) {
-      const VkRenderingAttachmentInfo *att0 = &info->pColorAttachments[0];
-      const struct hk_image_view *iview0 =
-         hk_image_view_from_handle(att0->imageView);
-      const bool store_source = att0->storeOp == VK_ATTACHMENT_STORE_OP_STORE;
-      const bool has_resolve = att0->resolveImageView != VK_NULL_HANDLE &&
-                               att0->resolveMode != VK_RESOLVE_MODE_NONE;
-      const bool resolved_after_pass =
-         has_resolve &&
-         !hk_agx3_g17p_direct_color_resolve_supported(
-            &key.tib, info->colorAttachmentCount, has_resolve,
-            att0->resolveMode == VK_RESOLVE_MODE_AVERAGE_BIT, store_source);
-      const bool keeps_samples =
-         partial_render || store_source || resolved_after_pass;
-
-      key.multisample_store = hk_agx3_g17p_multisample_store_supported(
-         &key.tib, info->colorAttachmentCount, keeps_samples,
-         iview0 ? iview0->vk.image->samples : 0);
-   }
-
    bool needs_textures_for_spilled_rts =
       agx_tilebuffer_spills(&render->tilebuffer) && !partial_render && !store;
 
@@ -1298,7 +1298,8 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
        * main memory. When render targets are already spilled to main memory,
        * there's nothing to do.
        */
-      if (key.tib.spilled[i] && (partial_render || store))
+      if (key.tib.spilled[i] &&
+          (partial_render || store || dev->dev.chip == AGX_CHIP_G17P))
          continue;
 
       if (store) {
@@ -1641,8 +1642,14 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    const bool layered =
       dev->dev.chip != AGX_CHIP_G17P ||
       !hk_agx3_g17p_single_layer_rendering(render->view_mask, layer_count);
-   render->tilebuffer = agx_build_tilebuffer_layout(
-      formats, render->color_att_count, render->tilebuffer.nr_samples, layered);
+   /* Storage capacity and raster samples are independent limits. In
+    * particular 16x16 at 4x may occupy the full32KiB, while 32x32 at 4x
+    * exceeds the sample budget even for an eight-byte sample. */
+   const bool native_tile_limits = dev->dev.chip == AGX_CHIP_G17P;
+   render->tilebuffer = agx_build_tilebuffer_layout_with_limits(
+      formats, render->color_att_count, render->tilebuffer.nr_samples, layered,
+      dev->dev.chip == AGX_CHIP_G17P ? AGX_G17P_MAX_BYTES_PER_SAMPLE : 0,
+      native_tile_limits ? 32768 : 0, native_tile_limits ? 2048 : 0);
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
        !hk_agx3_g17p_rt0_tile_layout_supported(&render->tilebuffer)) {
@@ -1732,6 +1739,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
       assert(desc->format == PIPE_FORMAT_Z32_FLOAT ||
              desc->format == PIPE_FORMAT_Z16_UNORM ||
+             desc->format == PIPE_FORMAT_Z16_UNORM_S8_UINT ||
              desc->format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT);
 
       render->cr.depth.buffer =
@@ -1972,7 +1980,19 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    if (clear_att[clear_count].aspectMask != 0)
       clear_count++;
 
-   if (clear_count > 0 && incomplete_render_area) {
+   const bool clear_spills = dev->dev.chip == AGX_CHIP_G17P &&
+      agx_tilebuffer_spills(&render->tilebuffer);
+   if (clear_spills && !incomplete_render_area) {
+      unsigned selected = 0;
+      for (unsigned i = 0; i < clear_count; ++i) {
+         if (clear_att[i].aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
+             render->tilebuffer.spilled[clear_att[i].colorAttachment])
+            clear_att[selected++] = clear_att[i];
+      }
+      clear_count = selected;
+   }
+   cs->cr.process_empty_tiles = resolved_clear;
+   if (clear_count > 0 && (incomplete_render_area || clear_spills)) {
       const VkClearRect clear_rect = {
          .rect = render->area,
          .baseArrayLayer = 0,
@@ -2225,6 +2245,13 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
    }
 }
 
+static struct hk_shader *
+hk_bound_fs(struct hk_cmd_buffer *cmd)
+{
+   return hk_fs_variant(cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT],
+                        cmd->vk.dynamic_graphics_state.ms.rasterization_samples);
+}
+
 static uint64_t
 hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
 {
@@ -2232,7 +2259,7 @@ hk_upload_geometry_params(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_api_shader *gs = gfx->shaders[MESA_SHADER_GEOMETRY];
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
    struct hk_shader *count = hk_count_gs_variant(gs);
 
    /* XXX: We should deduplicate this logic */
@@ -2689,58 +2716,109 @@ hk_launch_gs_prerast(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  * kernel turns each patch's levels into the factor record the tessellator
  * reads. The draw itself is then a native Tessellate command that runs the
  * evaluation shader as the post-tessellation vertex program.
+ *
+ * The tessellator draws every instance's patches as one run, in the order the
+ * TCS dispatch unrolled them, so that the evaluation shader addresses the TCS
+ * output directly by the tessellator's patch index. An indirect draw only
+ * learns its patch count on the GPU: a setup kernel places its buffers in the
+ * heap and writes the launch grids and the patch draw the native indirect
+ * Tessellate command reads.
  */
 static void
 hk_launch_tess_g17p(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                     struct agx_draw draw)
 {
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_shader *vs = hk_bound_sw_vs(gfx);
    struct hk_shader *tcs = hk_only_variant(gfx->shaders[MESA_SHADER_TESS_CTRL]);
-   const struct poly_tess_params *p = gfx->tess.params;
+   const uint64_t params = gfx->descriptors.root.draw.tess_params;
+   const bool quads = gfx->tess.info.mode == TESS_PRIMITIVE_QUADS;
+   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
+   struct agx_grid grid_vs, grid_tcs, grid_factors;
 
-   if (agx_is_indirect(draw.b) || !p ||
-       gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES ||
+   if (!gfx->tess.params || gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES ||
        gfx->tess.info.points) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
 
-   const uint32_t patches = draw.b.count[0] / dyn->ts.patch_control_points;
-   const uint32_t unrolled = patches * draw.b.count[1];
-
    uint64_t tcs_stat = hk_pipeline_stat_addr(
       cmd, VK_QUERY_PIPELINE_STATISTIC_TESSELLATION_CONTROL_SHADER_PATCHES_BIT);
-   if (hk_stat_enabled(tcs_stat)) {
-      libagx_increment_statistic(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX,
-                                 tcs_stat, patches);
+
+   if (agx_is_indirect(draw.b)) {
+      struct agx_ptr patch_draw = hk_pool_alloc(cmd, 4 * sizeof(uint32_t), 4);
+      if (!patch_draw.gpu) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         return;
+      }
+
+      struct libagx_tess_setup_indirect_hw_args args = {
+         .p = params,
+         .grids = gfx->tess.grids,
+         .vp = gfx->descriptors.root.draw.vertex_params,
+         .indirect = draw.b.ptr,
+         .patch_draw = patch_draw.gpu,
+         .vertex_outputs = vs->b.info.outputs,
+         .factor_record_B = record_B,
+         .tcs_statistic = tcs_stat,
+      };
+
+      if (draw.indexed) {
+         args.in_index_buffer = draw.index_buffer;
+         args.in_index_size_B = agx_index_size_to_B(draw.index_size);
+         args.in_index_buffer_range_el = agx_draw_index_range_el(draw);
+      }
+
+      libagx_tess_setup_indirect_hw_struct(cmd, agx_1d(1),
+                                           AGX_BARRIER_ALL | AGX_PREGFX, args);
+
+      const uint32_t grid_stride = 6 * sizeof(uint32_t);
+      grid_vs = agx_grid_indirect_local(gfx->tess.grids);
+      grid_tcs = agx_grid_indirect_local(gfx->tess.grids + grid_stride);
+      grid_factors =
+         agx_grid_indirect_local(gfx->tess.grids + 2 * grid_stride);
+
+      /* The records are somewhere in the heap, which the tessellator reads
+       * as the factor buffer from the draw's patch start. */
+      gfx->tess.factor_buffer = dev->heap->va->addr;
+      gfx->tess.factor_buffer_size_B = dev->heap->size;
+      gfx->tess.patch_draw = patch_draw.gpu;
+      gfx->tess.patches = 0;
+   } else {
+      const uint32_t patches = draw.b.count[0] / dyn->ts.patch_control_points;
+      const uint32_t unrolled = patches * draw.b.count[1];
+
+      if (hk_stat_enabled(tcs_stat)) {
+         libagx_increment_statistic(cmd, agx_1d(1),
+                                    AGX_BARRIER_ALL | AGX_PREGFX, tcs_stat,
+                                    patches);
+      }
+
+      grid_vs = grid_tcs = draw.b;
+      grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
+      grid_factors = agx_1d(unrolled);
+
+      struct agx_ptr factors = hk_pool_alloc(cmd, unrolled * record_B, 4);
+      if (!factors.cpu) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+         return;
+      }
+
+      gfx->tess.factor_buffer = factors.gpu;
+      gfx->tess.factor_buffer_size_B = unrolled * record_B;
+      gfx->tess.patch_draw = 0;
+      gfx->tess.patches = unrolled;
    }
 
-   struct agx_grid grid_tcs = draw.b;
-   grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
-
-   hk_dispatch_with_local_size(cmd, cs, vs, draw.b, agx_workgroup(64, 1, 1));
+   hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, agx_workgroup(64, 1, 1));
    hk_dispatch_with_local_size(
       cmd, cs, tcs, grid_tcs,
       agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
 
-   const bool quads = gfx->tess.info.mode == TESS_PRIMITIVE_QUADS;
-   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
-   struct agx_ptr factors = hk_pool_alloc(cmd, unrolled * record_B, 4);
-   if (!factors.cpu) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      return;
-   }
-
-   libagx_tess_factors_half(cmd, agx_1d(unrolled),
-                            AGX_BARRIER_ALL | AGX_PREGFX, p->tcs_buffer,
-                            factors.gpu, p->tcs_stride_el, quads);
-
-   gfx->tess.factor_buffer = factors.gpu;
-   gfx->tess.factor_buffer_size_B = unrolled * record_B;
-   gfx->tess.patches = patches;
-   gfx->tess.instances = draw.b.count[1];
+   libagx_tess_factors_half(cmd, grid_factors, AGX_BARRIER_ALL | AGX_PREGFX,
+                            params, gfx->tess.factor_buffer, quads);
 }
 
 /*
@@ -2757,14 +2835,12 @@ hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    const struct hk_tess_info info = gfx->tess.info;
-   const bool quads = info.mode == TESS_PRIMITIVE_QUADS;
-   const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
 
-   /* Vulkan orders a tessellated triangle in a domain whose origin is the
-    * upper left unless the pipeline says otherwise; the tessellator's
-    * clockwise output is that default clockwise order. */
+   /* The tessellator orders its output in a lower-left domain: a clockwise
+    * triangle there is counter-clockwise in Vulkan's default upper-left
+    * domain, so only a lower-left pipeline keeps the shader's winding. */
    const bool ccw =
-      info.ccw ^
+      info.ccw ==
       (dyn->ts.domain_origin == VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT);
    const struct agx_vdm_tessellation_state_info state = {
       .partition = info.spacing == TESS_SPACING_EQUAL
@@ -2774,32 +2850,49 @@ hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                       : AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN,
       .counterclockwise = ccw,
       .max_factor = 64,
-      .quads = quads,
+      .quads = info.mode == TESS_PRIMITIVE_QUADS,
       .float_factors = false,
-      /* The factor records are unrolled per instance, instance by instance. */
-      .step = gfx->tess.instances > 1
-                 ? AGX_VDM_TESSELLATION_STEP_PER_PATCH_AND_PER_INSTANCE
-                 : AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+      .step = AGX_VDM_TESSELLATION_STEP_PER_PATCH,
       .scale_half = 0x3c00,
    };
-   const struct agx_vdm_tessellate_direct_info direct = {
-      .factor_buffer = gfx->tess.factor_buffer,
-      .patch_count = gfx->tess.patches,
-      .instance_count = gfx->tess.instances,
-      .instance_stride_word =
-         gfx->tess.instances > 1 ? (gfx->tess.patches * record_B) >> 2 : 0,
-      .factor_buffer_size_minus_one =
-         DIV_ROUND_UP(gfx->tess.factor_buffer_size_B, 4) - 1,
-   };
+   const uint32_t factor_words_minus_one =
+      DIV_ROUND_UP(gfx->tess.factor_buffer_size_B, 4) - 1;
 
    uint8_t state_bytes[AGX_VDM_TESSELLATION_STATE_LENGTH];
-   struct agx_vdm_tessellate_direct encoded;
+   uint8_t draw_bytes[MAX2(AGX_VDM_TESSELLATE_DIRECT_LENGTH,
+                           AGX_VDM_TESSELLATE_INDIRECT_LENGTH)];
+   size_t draw_B;
+   bool packed;
+   if (gfx->tess.patch_draw) {
+      const struct agx_vdm_tessellate_indirect_info indirect = {
+         .factor_buffer = gfx->tess.factor_buffer,
+         .indirect_buffer = gfx->tess.patch_draw,
+         .factor_buffer_size_minus_one = factor_words_minus_one,
+      };
+      struct agx_vdm_tessellate_indirect encoded;
+      packed = agx_vdm_tessellate_indirect_pack(dev->dev.chip, &indirect,
+                                                &encoded);
+      memcpy(draw_bytes, encoded.bytes, encoded.length);
+      draw_B = encoded.length;
+   } else {
+      const struct agx_vdm_tessellate_direct_info direct = {
+         .factor_buffer = gfx->tess.factor_buffer,
+         .patch_count = gfx->tess.patches,
+         .instance_count = 1,
+         .factor_buffer_size_minus_one = factor_words_minus_one,
+      };
+      struct agx_vdm_tessellate_direct encoded;
+      packed = agx_vdm_tessellate_direct_pack(dev->dev.chip, &direct,
+                                              &encoded) &&
+               gfx->tess.patches;
+      memcpy(draw_bytes, encoded.bytes, encoded.length);
+      draw_B = encoded.length;
+   }
+
    const size_t selector_B = render_state_emitted ? sizeof(uint32_t) : 0;
-   const size_t total_B =
-      selector_B + sizeof(state_bytes) + AGX_VDM_TESSELLATE_DIRECT_LENGTH;
-   if (!gfx->tess.factor_buffer || !gfx->tess.patches ||
+   const size_t total_B = selector_B + sizeof(state_bytes) + draw_B;
+   if (!gfx->tess.factor_buffer || !packed ||
        !agx_vdm_tessellation_state_pack(dev->dev.chip, &state, state_bytes) ||
-       !agx_vdm_tessellate_direct_pack(dev->dev.chip, &direct, &encoded) ||
        (size_t)((uint8_t *)cs->end - out) < total_B) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return false;
@@ -2812,8 +2905,8 @@ hk_g17p_emit_tessellate(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
    memcpy(cursor, state_bytes, sizeof(state_bytes));
    cursor += sizeof(state_bytes);
-   memcpy(cursor, encoded.bytes, encoded.length);
-   cursor += encoded.length;
+   memcpy(cursor, draw_bytes, draw_B);
+   cursor += draw_B;
    cs->current = cursor;
    return true;
 }
@@ -2886,14 +2979,23 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    hk_reserve_scratch(cmd, cs, vs);
    hk_reserve_scratch(cmd, cs, tcs);
 
-   hk_dispatch_with_usc(
-      dev, cs, &vs->b.info,
-      hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]), grid_vs,
-      agx_workgroup(64, 1, 1));
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      hk_dispatch_with_local_size(cmd, cs, vs, grid_vs,
+                                  agx_workgroup(64, 1, 1));
+      hk_dispatch_with_local_size(
+         cmd, cs, tcs, grid_tcs,
+         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+   } else {
+      hk_dispatch_with_usc(
+         dev, cs, &vs->b.info,
+         hk_upload_usc_words(cmd, vs, gfx->linked[MESA_SHADER_VERTEX]),
+         grid_vs, agx_workgroup(64, 1, 1));
 
-   hk_dispatch_with_usc(
-      dev, cs, &tcs->b.info, hk_upload_usc_words(cmd, tcs, tcs->only_linked),
-      grid_tcs, agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+      hk_dispatch_with_usc(
+         dev, cs, &tcs->b.info,
+         hk_upload_usc_words(cmd, tcs, tcs->only_linked), grid_tcs,
+         agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
+   }
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
@@ -2955,10 +3057,18 @@ hk_upload_constant_data(struct hk_cmd_buffer *cmd, struct hk_shader *s)
 static void
 hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
-   if (cmd->state.gfx.shaders_dirty == 0)
+   struct hk_api_shader *fs_obj =
+      cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
+   const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
+      BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
+                  MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
+   if (cmd->state.gfx.shaders_dirty == 0 && !sample_variant_dirty)
       return;
 
    struct hk_graphics_state *gfx = &cmd->state.gfx;
+   if (sample_variant_dirty)
+      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+
    struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
    desc->root_dirty = true;
 
@@ -2972,32 +3082,34 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    }
 
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
+   struct hk_shader *fs = hk_bound_fs(cmd);
 
-   /* If we have a new VS/FS pair, UVS locations may have changed so need to
-    * relink. We do this here because there's no dependence on the fast linked
-    * shaders.
+   /* A new VS/FS pair or sample-count variant may change interpolation. This
+    * assignment does not depend on the fast linked shaders.
     */
    agx_assign_uvs(&gfx->linked_varyings, &hw_vs->info.uvs,
-                  hk_only_variant(fs)->info.fs.interp.flat,
-                  hk_only_variant(fs)->info.fs.interp.linear);
+                  fs->info.fs.interp.flat,
+                  fs->info.fs.interp.linear);
 
    for (unsigned i = 0; i < VARYING_SLOT_MAX; ++i) {
       desc->root.draw.uvs_index[i] = gfx->linked_varyings.slots[i];
    }
 
-   /* Every variant of an API shader carries the same constant data. */
+   /* Upload constant data for the selected fragment variant. */
    desc->root.draw.vs_constant_data_addr = hk_upload_constant_data(
       cmd, hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]));
    desc->root.draw.fs_constant_data_addr =
-      hk_upload_constant_data(cmd, hk_only_variant(fs));
+      hk_upload_constant_data(cmd, fs);
 }
+
+static void build_g17p_fs_epilog(nir_builder *b, const void *key_);
 
 static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
                             hk_internal_builder_t builder, bool preprocess_nir,
                             bool stop, unsigned cf_base,
-                            uint64_t g17p_tile_partitions, unsigned nr_samples)
+                            const BITSET_WORD *g17p_tile_partitions,
+                            unsigned nr_samples)
 {
    /* Try to get the cached shader */
    struct hash_entry *ent = _mesa_hash_table_search(dev->prolog_epilog.ht, key);
@@ -3013,10 +3125,37 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    struct agx_shader_key backend_key = {
       .dev = agx_gather_device_key(&dev->dev),
       .fs.nr_samples = nr_samples,
-      .g17p_tile_partitions = g17p_tile_partitions,
       .secondary = true,
       .no_stop = !stop,
    };
+   if (builder == build_g17p_fs_epilog)
+      backend_key.g17p_emrt =
+         ((const struct agx_fs_epilog_key *)key->key)->native_spills;
+   if (backend_key.g17p_emrt) {
+      /* Unrolling replaces the loop induction mask with a constant sample.
+       * Materialize native register masks after that optimization as well. */
+      NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, nr_samples);
+      /* Only the image accesses may be conditional. Every resident tile
+       * operation must execute on every path through the epilog. */
+      nir_metadata_require(b.impl, nir_metadata_dominance);
+      nir_foreach_block(block, b.impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_op op = nir_instr_as_intrinsic(instr)->intrinsic;
+            if ((op == nir_intrinsic_store_local_pixel_agx ||
+                 op == nir_intrinsic_load_local_pixel_agx) &&
+                !nir_block_dominates(block, nir_impl_last_block(b.impl))) {
+               backend_key.g17p_emrt = false;
+               mesa_loge("G17P eMRT has conditional resident tile access");
+            }
+         }
+      }
+   }
+   if (g17p_tile_partitions) {
+      memcpy(backend_key.g17p_tile_partitions, g17p_tile_partitions,
+             sizeof(backend_key.g17p_tile_partitions));
+   }
 
    /* We always use dynamic sample shading in the GL driver. Indicate that. */
    if (b.shader->info.stage == MESA_SHADER_FRAGMENT) {
@@ -3062,7 +3201,8 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 static struct agx_shader_part *
 hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
                      hk_internal_builder_t builder, bool preprocess_nir,
-                     bool stop, unsigned cf_base, uint64_t g17p_tile_partitions,
+                     bool stop, unsigned cf_base,
+                     const BITSET_WORD *g17p_tile_partitions,
                      unsigned nr_samples)
 {
    /* Build the meta shader key */
@@ -3149,15 +3289,29 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
        * epilog, then store and blend each sample from its own colours. */
       struct agx_fs_epilog_key pixel = *key;
       pixel.link.sample_shading = false;
+      pixel.defer_monolithic_msaa = true;
       agx_nir_fs_epilog(b, &pixel);
 
       NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
       NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples, key->nr_samples,
                key->link.loc_written);
-      NIR_PASS(_, b->shader, nir_opt_constant_folding);
+      bool opt_progress;
+      do {
+         opt_progress = false;
+         NIR_PASS(opt_progress, b->shader, nir_opt_constant_folding);
+         NIR_PASS(opt_progress, b->shader, nir_opt_algebraic);
+      } while (opt_progress);
       NIR_PASS(_, b->shader, agx_nir_hoist_g17p_zs_writes);
    } else {
-      agx_nir_fs_epilog(b, key);
+      /* G17P's tile operations carry the live coverage register. With
+       * alpha-to-coverage, Apple's 2x/4x blended fragments therefore issue
+       * one masked tile load/store pair rather than cloning the blend once
+       * per sample. Keep the ordinary per-sample lowering for every other
+       * pixel-shaded epilog. */
+      struct agx_fs_epilog_key pixel = *key;
+      pixel.defer_monolithic_msaa = key->blend.alpha_to_coverage &&
+                                    key->nr_samples > 1;
+      agx_nir_fs_epilog(b, &pixel);
    }
 
    NIR_PASS(_, b->shader, agx_nir_lower_g17p_tile_samples, key->nr_samples);
@@ -3195,17 +3349,19 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
 
    /* A G17P epilog selects each written target's pixel classes from its
     * position among all of the framebuffer's colour targets. */
-   uint64_t g17p_tile_partitions = 0;
+   BITSET_DECLARE(g17p_tile_partitions, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
    if (dev->dev.chip == AGX_CHIP_G17P) {
-      const struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(
-         key->epilog.rt_formats, ARRAY_SIZE(key->epilog.rt_formats),
-         key->epilog.nr_samples, true);
+      const struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout_with_limits(
+            key->epilog.rt_formats, ARRAY_SIZE(key->epilog.rt_formats),
+            key->epilog.nr_samples, true, key->epilog.max_sample_size_B,
+            key->epilog.max_bytes_per_tile, key->epilog.max_samples_per_tile);
       for (unsigned rt = 0; rt < ARRAY_SIZE(tib.logical_format); ++rt) {
          if (tib.logical_format[rt] != PIPE_FORMAT_NONE && !tib.spilled[rt])
-            g17p_tile_partitions |= BITFIELD64_BIT(tib._offset_B[rt]);
+            BITSET_SET(g17p_tile_partitions, tib._offset_B[rt]);
       }
-      if (util_bitcount64(g17p_tile_partitions) < 2)
-         g17p_tile_partitions = 0;
+      if (BITSET_COUNT(g17p_tile_partitions) < 2)
+         BITSET_ZERO(g17p_tile_partitions);
    }
 
    struct agx_shader_part *epilog =
@@ -3255,6 +3411,8 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
    }
 
    linked->g17p_blend_constant_base = key->epilog.blend_constant_base;
+   linked->g17p_emrt_heap_base = key->epilog.emrt_heap_base;
+   linked->g17p_prolog_uses_root = key->prolog.statistics;
 
    _mesa_hash_table_insert(shader->linked.ht, key_clone, linked);
    return linked;
@@ -3845,7 +4003,7 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                          dyn->vp.scissor_count))
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
    struct hk_linked_shader *linked_fs = gfx->linked[MESA_SHADER_FRAGMENT];
    if (!fs || !linked_fs)
       return hk_g17p_bind_tail_refused(__LINE__);
@@ -4056,7 +4214,10 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct agx_ppp_w_clamp_cull2_core w_cull2_record;
    const struct agx_ppp_w_clamp_cull2_fields w_cull2_fields = {
       .w_clamp_raw = 0,
-      .cull2_raw = UINT32_C(0x80),
+      /* The generated primitive-ID coefficient needs its rasterizer input
+       * enabled as well as the matching VDM producer and output slot. */
+      .cull2_raw = UINT32_C(0x80) |
+                   (gfx->generate_primitive_id ? UINT32_C(0x1000) : 0),
    };
 
    struct agx_ppp_viewport_payload_fields viewport_fields = {
@@ -4392,7 +4553,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
 
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
 
    bool hw_vs_dirty = IS_SHADER_DIRTY(VERTEX) || IS_SHADER_DIRTY(TESS_EVAL) ||
                       IS_SHADER_DIRTY(GEOMETRY);
@@ -4744,7 +4905,7 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
 static float
 hk_depth_bias_factor(VkFormat format, bool exact, bool force_unorm)
 {
-   if (format == VK_FORMAT_D16_UNORM) {
+   if (hk_depth_stencil_plane_format(format, 0) == VK_FORMAT_D16_UNORM) {
       return exact ? (1 << 16) : (1 << 15);
    } else if (force_unorm) {
       return exact ? (1ull << 24) : (1ull << 23);
@@ -4914,7 +5075,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       out += interdraw_barrier.length;
    }
 
-   struct hk_shader *fs = hk_only_variant(gfx->shaders[MESA_SHADER_FRAGMENT]);
+   struct hk_shader *fs = hk_bound_fs(cmd);
 
    bool gt_dirty = IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL) ||
                    IS_SHADER_DIRTY(GEOMETRY);
@@ -5083,6 +5244,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       unsigned tib_sample_mask = BITFIELD_MASK(dyn->ms.rasterization_samples);
       unsigned api_sample_mask = dyn->ms.sample_mask & tib_sample_mask;
       bool has_sample_mask = api_sample_mask != tib_sample_mask;
+      bool defer_api_sample_mask =
+         dev->dev.chip == AGX_CHIP_G17P && has_sample_mask &&
+         !nontrivial_force_early;
 
       if (hw_vs->info.cull_distance_array_size) {
          perf_debug(cmd, "Emulating cull distance (size %u)",
@@ -5093,12 +5257,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          perf_debug(cmd, "Emulating sample mask");
       }
 
-      /* hk_compile_shader() canonicalized this shader's sample builtins to
-       * single-sample because its pipeline did not fix the sample count. That
-       * is exact at one rasterization sample and wrong at more.  Now that the
-       * real count is known, refuse rather than shade once and hand the
-       * application gl_SampleID == 0 as if it were the answer.  A refusal is
-       * recoverable; a plausible wrong pixel is not.
+      /* A fixed-count shader whose sample exports exceeded the register file
+       * was canonicalized to one sample. Keep that guard; dynamic sample-rate
+       * shaders instead select a native variant in hk_bound_fs().
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
           dyn->ms.rasterization_samples > 1) {
@@ -5143,14 +5304,20 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)),
 
          .prolog.cull_distance_size = hw_vs->info.cull_distance_array_size,
-         .prolog.api_sample_mask = has_sample_mask ? api_sample_mask : 0xff,
+         .prolog.api_sample_mask =
+            has_sample_mask && !nontrivial_force_early &&
+                  !defer_api_sample_mask
+               ? api_sample_mask
+               : 0xff,
          .prolog.nr_samples = dev->dev.chip == AGX_CHIP_G17P
                                  ? MAX2(dyn->ms.rasterization_samples, 1)
                                  : 0,
          .nr_samples_shaded = samples_shaded,
       };
 
-      bool prolog_discards = has_sample_mask || key.prolog.cull_distance_size;
+      bool prolog_discards =
+         (has_sample_mask && !defer_api_sample_mask) ||
+         key.prolog.cull_distance_size;
 
       bool needs_prolog = key.prolog.statistics || prolog_discards;
 
@@ -5179,10 +5346,26 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          .blend.alpha_to_one = dyn->ms.alpha_to_one_enable,
          .blend.logicop_enable = dyn->cb.logic_op_enable,
          .blend.logicop_func = vk_logic_op_to_pipe(dyn->cb.logic_op),
+         .defer_api_sample_mask = defer_api_sample_mask,
+         .api_sample_mask = api_sample_mask,
       };
       agx_fs_epilog_apply_device_policy(dev->dev.chip, &key.epilog);
 
-      if (dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
+      key.epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&
+         agx_tilebuffer_spills(&render->tilebuffer);
+      if (key.epilog.native_spills) {
+         uint16_t base;
+         if (!hk_g17p_relocated_blend_constant_base(fs, &base) ||
+             ALIGN_POT(base, 4) > 512 - 12) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            cs->current = out;
+            return;
+         }
+         key.epilog.emrt_heap_base = ALIGN_POT(base, 4);
+         key.epilog.blend_constant_base = key.epilog.emrt_heap_base + 4;
+      }
+
+      if (!key.epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
           (fs->info.agx3_combined_sampler_valid ||
            fs->info.agx3_indexed_sampler_valid) &&
           !hk_g17p_relocated_blend_constant_base(
@@ -5211,6 +5394,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       key.epilog.link.already_ran_zs |= nontrivial_force_early;
 
       struct hk_rendering_state *render = &cmd->state.gfx.render;
+      key.epilog.max_sample_size_B = render->tilebuffer.max_sample_size_B;
+      key.epilog.max_bytes_per_tile = render->tilebuffer.max_bytes_per_tile;
+      key.epilog.max_samples_per_tile = render->tilebuffer.max_samples_per_tile;
       for (uint32_t i = 0; i < render->color_att_count; i++) {
          key.epilog.rt_formats[i] =
             hk_format_to_pipe_format(render->color_att[i].vk_format);
@@ -5565,6 +5751,9 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             .template_info = program->template_info,
          };
          info.template_info.pipeline = pipeline_program;
+         info.template_info.raw_vs_output_flag_6 = gfx->generate_primitive_id;
+         info.template_info.raw_vs_output_count_1_extra =
+            gfx->generate_primitive_id;
          if (hk_g17p_cycle_vdm_context_enabled(dev) &&
              cs->agx3_raw_active_context_selector == UINT32_MAX)
             cs->agx3_raw_active_context_selector = 1;
@@ -5849,6 +6038,10 @@ hk_handle_passthrough_gs(struct hk_cmd_buffer *cmd, struct agx_draw draw)
    perf_debug(cmd, "Binding passthrough GS for%s\n", xfb_outputs ? " XFB" : "");
 
    gs = hk_meta_shader(dev, hk_nir_passthrough_gs, key, key_size);
+   if (!gs) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
    gs->is_passthrough = true;
    hk_cmd_bind_graphics_shader(cmd, MESA_SHADER_GEOMETRY, gs);
 }
@@ -5936,7 +6129,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       dbias_selected &&
       ((dyn->rs.depth_bias.representation ==
         VK_DEPTH_BIAS_REPRESENTATION_LEAST_REPRESENTABLE_VALUE_FORCE_UNORM_EXT) ||
-       (gfx->render.depth_att.vk_format == VK_FORMAT_D16_UNORM));
+       (hk_depth_stencil_plane_format(gfx->render.depth_att.vk_format, 0) ==
+        VK_FORMAT_D16_UNORM));
 
    if (dbias_selected) {
       /* Attempt to set dbias_is_int per the draw requirement. If this fails,
@@ -5993,6 +6187,8 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
    /* TODO: Try to reduce draw overhead of this */
    hk_handle_passthrough_gs(cmd, *draw);
+   if (vk_command_buffer_has_error(&cmd->vk))
+      return NULL;
 
    hk_flush_shaders(cmd);
 
@@ -6013,16 +6209,12 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    const bool ordinary_draw_path =
       !geom && !tess && !adj &&
       (!*needs_idx_robust || g17p_robust_index_path);
-   const bool xfb_passthrough_path =
-      dev->dev.chip == AGX_CHIP_G17P && geom && !tess && !adj &&
-      !*needs_idx_robust && gfx->xfb_enabled &&
-      gfx->shaders[MESA_SHADER_GEOMETRY]->is_passthrough;
-   /* G17P tessellates in hardware: the evaluation shader is the bound
-    * hardware vertex program and its render state publishes exactly like an
-    * ordinary draw's. The vertex shader fetches the API indices in compute. */
-   const bool g17p_tessellation_path =
-      dev->dev.chip == AGX_CHIP_G17P && tess && !geom && !adj;
-   *needs_idx_robust &= !g17p_tessellation_path;
+   /* Geometry and tessellation draw their compute-generated vertices through
+    * the bound hardware vertex program: poly's geometry raster variant, or
+    * the evaluation shader after the software or hardware tessellator. It
+    * publishes its render state exactly like an ordinary draw's. */
+   const bool g17p_transformed_path =
+      dev->dev.chip == AGX_CHIP_G17P && (geom || tess) && !adj;
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 
@@ -6087,8 +6279,7 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    }
 
    hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
-                          ordinary_draw_path || xfb_passthrough_path ||
-                             g17p_tessellation_path,
+                          ordinary_draw_path || g17p_transformed_path,
                           g17p_native_bind_tail_emitted);
    return cs;
 }
@@ -6187,27 +6378,27 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    bool geom = cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY];
    bool tess = cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
 
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
    /* Clipper counters depend on geom/tess outputs and must be written with the
     * geom/tess output. They are updated as IA counters only when geom/tess is
-    * not used.
+    * not used. G17P represents a counter that is not written by the writable
+    * scratch page, like a disabled one.
     */
    if (geom || tess) {
-      c_prims = 0;
-      c_inv = 0;
+      c_prims = dev->dev.chip == AGX_CHIP_G17P ? AGX_SCRATCH_PAGE_ADDRESS : 0;
+      c_inv = c_prims;
    }
 
    uint32_t patch_size = dyn->ts.patch_control_points;
 
    if (draw.restart) {
       uint32_t index_size_B = agx_index_size_to_B(draw.index_size);
-      struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
-         /* G17P does not expose geometry or tessellation, so disabled
-          * statistics are represented by the writable scratch page and all
-          * five addresses are valid. Use the native specialization that does
-          * not need to reduce nullable 64-bit pointers. */
-         assert(!geom && !tess);
+         /* Disabled statistics are represented by the writable scratch page,
+          * so all five addresses are valid. Use the native specialization
+          * that does not need to reduce nullable 64-bit pointers. */
          libagx_increment_ia_restart_nonnull(
             cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX, ia_vertices,
             ia_prims, vs_invocations, c_prims, c_inv, draw_ptr,
@@ -6243,9 +6434,9 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
    /* A tessellated draw with fewer vertices than one patch draws nothing.
-    * G17P hands the tessellator whole patches, so filter it with the other
-    * trivial draws before any state is published. */
-   if (dev->dev.chip == AGX_CHIP_G17P && !agx_is_indirect(draw_.b) &&
+    * The hardware tessellator takes whole patches, so filter it with the
+    * other trivial draws before any state is published. */
+   if (dev->g17p_native_tess && !agx_is_indirect(draw_.b) &&
        cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
        draw_.b.count[0] < dyn->ts.patch_control_points)
       return;
@@ -6323,7 +6514,14 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
     * in-range indices and pads the overread with zero indices; only draws
     * that reach the native Index List unmodified prove their complete span
     * here. */
-   if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed) {
+   /* Geometry and software tessellation run the vertex shader in compute,
+    * which fetches indices robustly like on every other generation. */
+   const bool software_index_fetch =
+      cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
+      (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
+       !dev->g17p_native_tess);
+   if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed &&
+       !software_index_fetch) {
       uint64_t address;
       uint32_t size_word;
       const bool valid_index_size =
@@ -6343,7 +6541,6 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       /* A tessellated draw's vertex shader fetches its indices in compute,
        * but they still have to be in range. */
       if (!valid_index_size ||
-          cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
           (agx_is_indirect(draw_.b)
               ? (!draw_.b.ptr || !draw_.index_buffer ||
                  draw_.index_buffer_range_B == 0 ||
@@ -6355,7 +6552,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                       agx_index_size_to_B(draw_.index_size), &address,
                       &size_word))) {
          mesa_loge("native G17P indexed draw requires a valid "
-                   "uint8/uint16/uint32 range without geometry");
+                   "uint8/uint16/uint32 range");
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -6406,7 +6603,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                       stat_c_prims, stat_c_inv);
       }
 
-      if (tess && dev->dev.chip == AGX_CHIP_G17P) {
+      if (tess && dev->g17p_native_tess) {
          hk_launch_tess_g17p(cmd, ccs, draw);
          if (vk_command_buffer_has_error(&cmd->vk))
             return;
@@ -6453,9 +6650,36 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          }
       }
 
+      /* Geometry, tessellation and adjacency lowering can turn a nonempty API
+       * draw into a direct raster draw with no complete output primitives.
+       * There is no draw packet to encode in that case. The pre-raster work,
+       * including any shader side effects, has already been recorded above. */
+      if (!agx_is_indirect(draw.b) &&
+          (draw.b.count[0] == 0 || draw.b.count[1] == 0)) {
+         /* The bind tail was already published before lowering determined
+          * there were no complete primitives. Its selector word must still
+          * be present, even though no Index List follows it. */
+         if (dev->dev.chip == AGX_CHIP_G17P && g17p_native_bind_tail_emitted) {
+            struct agx_ptr state = hk_pool_vdm_alloc(cmd, 8, 4);
+            uint32_t offset;
+            if (!state.cpu || !hk_g17p_upload_draw_indices(
+                   state.cpu, 8, state.gpu, cs->scissor.size,
+                   cs->depth_bias.size, MAX2(dyn->vp.viewport_count, 1),
+                   &offset)) {
+               vk_command_buffer_set_error(&cmd->vk,
+                                           VK_ERROR_FEATURE_NOT_PRESENT);
+               return;
+            }
+            memcpy(out, &offset, sizeof(offset));
+            out += sizeof(offset);
+            cs->current = out;
+         }
+         continue;
+      }
+
       enum agx_primitive topology = cmd->state.gfx.topology;
-      const bool g17p_tess = tess && dev->dev.chip == AGX_CHIP_G17P;
-      if (!g17p_tess &&
+      const bool native_tess = tess && dev->g17p_native_tess;
+      if (!native_tess &&
           !agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
@@ -6559,7 +6783,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                                            VK_ERROR_FEATURE_NOT_PRESENT);
                return;
             }
-            if (tess) {
+            if (native_tess) {
                if (!hk_g17p_emit_tessellate(cmd, cs, out, draw_state_offset,
                                             g17p_native_bind_tail_emitted))
                   return;

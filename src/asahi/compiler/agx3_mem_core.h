@@ -62,6 +62,10 @@ struct agx3_mem_desc {
    uint8_t slot;       /* load only: 1..6 (agx3b) / 1..8 (agx3c) */
    uint16_t wait_mask; /* bit i sets wait slot i */
 
+   /* Atomic/coherent access qualifier. Apple's AGX3 encoders expose this as
+    * f77 on loads and f75 on stores. */
+   bool coherent;
+
    /* AGX3b f79=2. Apple's vertex corpus sets this on the final LDDEV and only
     * the final LDDEV; no AGX3c or store witness carries it. */
    bool agx3b_last_load;

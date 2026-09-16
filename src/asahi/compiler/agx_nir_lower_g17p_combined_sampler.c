@@ -13,6 +13,15 @@
 
 #include <stdio.h>
 
+/* Pre-raster graphics stages have no implicit derivatives. Their Poly
+ * compute variants use the same native explicit-LOD texture operations. */
+static bool
+g17p_explicit_lod_stage(mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_GEOMETRY ||
+          stage == MESA_SHADER_TESS_CTRL || stage == MESA_SHADER_TESS_EVAL;
+}
+
 /* agx_nir_lower_g17p_indexed_samplers() is all-or-nothing per shader: one
  * unadmitted texture or image instruction and NOTHING in that shader gets a
  * heap index, so every texture instruction in it then reaches the packer with
@@ -106,7 +115,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
              !nir_src_is_const(tex->src[level_src].src))) &&
             tex->op == nir_texop_txl) &&
          !(tex->op == nir_texop_txb &&
-           nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0 &&
+           (!tex->is_shadow ||
+            nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0) &&
            !(tex->is_shadow && cube_array)))) ||
        tex->is_sparse ||
        tex->coord_components != (query_lod ? (three_d || cube ? 3 : 2) :
@@ -173,7 +183,22 @@ g17p_sample_shape(const nir_tex_instr *tex)
       nir_src_num_components(tex->src[offset_src].src) == 1;
    const bool staged_packed_offset =
       packed_offset && !nir_src_is_const(tex->src[offset_src].src) &&
-      (tex->is_array || has_lod || has_bias || has_minimum);
+      (tex->op == nir_texop_tg4 || tex->is_array || has_lod || has_bias ||
+       has_minimum);
+   const uint32_t constant_offset =
+      has_offset && nir_src_is_const(tex->src[offset_src].src)
+         ? nir_src_as_uint(tex->src[offset_src].src)
+         : 0;
+   /* lower_regular_texture() keeps G17P gather X/Y as two 16-bit lanes so a
+    * runtime value can feed PACK_SMPIR directly.  A constant therefore has
+    * its signed nibbles in bits 0..3 and 16..19 (for example, CTS offset
+    * (+8,+8) is 0x00080008), not in the compact SMP byte used after
+    * agx_emit_tex() folds it.  Admit exactly that generated representation;
+    * the backend later maps it to (y << 4) | x. */
+   const bool valid_constant_offset =
+      tex->op == nir_texop_tg4
+         ? (constant_offset & ~0x000f000fu) == 0
+         : constant_offset <= (three_d ? 0xfffu : 0xffu);
    /* Native bank-6 minimum operands are grounded for 2D, 2D-array and 3D
     * fragment samples, and for biased cube samples. The shared texture lowering has already combined a
     * bias/minimum pair into one f16x2 source, or left the gradient minimum
@@ -205,8 +230,7 @@ g17p_sample_shape(const nir_tex_instr *tex)
         (!packed_offset && three_d) ||
         (packed_offset && !staged_packed_offset &&
          (!nir_src_is_const(tex->src[offset_src].src) ||
-           nir_src_as_uint(tex->src[offset_src].src) >
-              (three_d ? 0xfffu : 0xffu))) ||
+           !valid_constant_offset)) ||
          cube))
       return false;
 
@@ -624,19 +648,21 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
     * maps both cube forms onto AGX_DIM_2D_ARRAY. They therefore use the same
     * qualified fetch as an ordinary array image; rejecting the original NIR
     * dimension here only leaves its unencodable software descriptor handle in
-    * place. Multisample remains excluded by the constant-zero sample index
-    * below. */
+    * place. Multisample uses the emitter's native sample/layer packing and
+    * may have a nonzero or dynamic sample index. */
    const enum glsl_sampler_dim image_dim = nir_intrinsic_image_dim(intr);
+   const bool ms = image_dim == GLSL_SAMPLER_DIM_MS;
    if (intr->intrinsic != nir_intrinsic_bindless_image_load ||
-       !(image_dim == GLSL_SAMPLER_DIM_2D ||
+       !(ms || image_dim == GLSL_SAMPLER_DIM_2D ||
          image_dim == GLSL_SAMPLER_DIM_CUBE ||
          (image_dim == GLSL_SAMPLER_DIM_3D &&
           !nir_intrinsic_image_array(intr))) ||
-       intr->def.num_components != 4 || intr->def.bit_size != 32 ||
+       intr->def.num_components < 1 || intr->def.num_components > 4 ||
+       intr->def.bit_size != 32 ||
        nir_src_num_components(intr->src[1]) != 4 ||
        nir_src_bit_size(intr->src[1]) != 32 ||
-       !nir_src_is_const(intr->src[2]) ||
-       nir_src_as_uint(intr->src[2]) != 0 ||
+       (!ms && (!nir_src_is_const(intr->src[2]) ||
+                nir_src_as_uint(intr->src[2]) != 0)) ||
        !nir_src_is_const(intr->src[3]) ||
        nir_src_as_uint(intr->src[3]) != 0 ||
        (nir_intrinsic_access(intr) & ACCESS_NON_READABLE))
@@ -680,7 +706,7 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
 bool
 agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
 {
-   if (!shader || (shader->info.stage != MESA_SHADER_VERTEX &&
+   if (!shader || (!g17p_explicit_lod_stage(shader->info.stage) &&
                    shader->info.stage != MESA_SHADER_FRAGMENT &&
                    shader->info.stage != MESA_SHADER_COMPUTE))
       return false;
@@ -709,7 +735,7 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
             /* Dynamic argument-buffer vertex witnesses cover explicit level
              * and gradient samples. Vertex implicit sampling has no fragment
              * quad derivatives; bias likewise remains fragment-only. */
-            if (!fetch && shader->info.stage == MESA_SHADER_VERTEX &&
+            if (!fetch && g17p_explicit_lod_stage(shader->info.stage) &&
                 tex->op != nir_texop_txl && tex->op != nir_texop_txd)
                return g17p_decline("vertex_implicit_sample", tex, NULL,
                                    shader->info.stage);
@@ -1157,11 +1183,22 @@ agx_nir_lower_g17p_indexed_storage(
       return false;
 
    nir_intrinsic_instr *store = NULL;
+   bool has_buffer_fetch = false;
    uint8_t pbe_set = 0;
    uint32_t pbe_offset_B = 0;
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex) {
+               nir_tex_instr *tex = nir_instr_as_tex(instr);
+               /* Buffer textures are lowered to a 2D txf whose coordinate is
+                * carried in backend1; ordinary 2D texelFetch keeps coord. */
+               has_buffer_fetch |=
+                  tex->op == nir_texop_txf &&
+                  nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0;
+               continue;
+            }
+
             if (instr->type != nir_instr_type_intrinsic)
                continue;
 
@@ -1207,6 +1244,17 @@ agx_nir_lower_g17p_indexed_storage(
    if (!store)
       return false;
 
+   /* The indexed texture path occupies the first native state pair with the
+    * texture/sampler heap roots.  A normalized immediate-state write after a
+    * lowered texel-buffer fetch currently resolves state 1 as empty on G17P,
+    * producing an all-zero destination.  Keep the working bindless PBE form
+    * for this mixed shape; integer state 1 and straight-line sampled-storage
+    * retain their independently witnessed specialized paths. */
+   if (has_buffer_fetch &&
+       (nir_intrinsic_format(store) == PIPE_FORMAT_R8G8B8A8_UNORM ||
+        nir_intrinsic_format(store) == PIPE_FORMAT_R10G10B10A2_UNORM))
+      return false;
+
    nir_builder b = nir_builder_at(nir_before_instr(&store->instr));
    nir_src_rewrite(&store->src[0], nir_imm_intN_t(&b, 1, 16));
    store->intrinsic = nir_intrinsic_image_store;
@@ -1227,6 +1275,7 @@ g17p_storage_image_shape(const nir_intrinsic_instr *intr, bool load)
    const enum pipe_format format = nir_intrinsic_format(intr);
    if (intr->intrinsic != (load ? nir_intrinsic_bindless_image_load
                                 : nir_intrinsic_bindless_image_store) ||
+       (nir_intrinsic_access(intr) & ACCESS_BUFFER_AGX) ||
        nir_intrinsic_image_dim(intr) != GLSL_SAMPLER_DIM_2D ||
        nir_intrinsic_image_array(intr) ||
        (format != PIPE_FORMAT_R8G8B8A8_UINT &&
@@ -1297,6 +1346,19 @@ agx_nir_lower_g17p_storage_image(
                continue;
 
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            /* The single-image state-0 route predates the general indexed
+             * storage ABI. It is correct for an isolated image roundtrip, but
+             * it does not carry the resource metadata needed to order an
+             * image with buffer/global memory in one shader. The indexed path
+             * does, and is already used by the passing two-image memory-model
+             * variants, so leave cross-domain barriers for that lowering. */
+            if (intr->intrinsic == nir_intrinsic_barrier) {
+               const nir_variable_mode modes =
+                  nir_intrinsic_memory_modes(intr);
+               if ((modes & nir_var_image) &&
+                   (modes & (nir_var_mem_ssbo | nir_var_mem_global)))
+                  return false;
+            }
             if (intr->intrinsic == nir_intrinsic_bindless_image_load) {
                if (load || !g17p_storage_image_shape(intr, true) ||
                    !g17p_storage_handle_offset(intr, &texture_offset_B))

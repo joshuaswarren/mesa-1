@@ -53,8 +53,9 @@ static void kmsro_ro_destroy(struct renderonly *ro)
    FREE(ro);
 }
 
-struct pipe_screen *kmsro_drm_screen_create(int kms_fd,
-                                            const struct pipe_screen_config *config)
+static struct pipe_screen *
+kmsro_screen_create(int kms_fd, const struct pipe_screen_config *config,
+                    bool force_zink)
 {
    struct pipe_screen *screen = NULL;
    char *render_dev_name = NULL;
@@ -86,39 +87,39 @@ struct pipe_screen *kmsro_drm_screen_create(int kms_fd,
       util_sparse_array_init(&ro->bo_map, sizeof(struct renderonly_scanout), 64);
       simple_mtx_init(&ro->bo_map_lock, mtx_plain);
 
-      if (strcmp(render_dev_name, "asahi") == 0) {
+      if (!force_zink && strcmp(render_dev_name, "asahi") == 0) {
 #if defined(GALLIUM_ASAHI)
          ro->create_for_resource = renderonly_create_gpu_import_for_resource;
          screen = asahi_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
 #endif
       }
-      else if (strcmp(render_dev_name, "etnaviv") == 0) {
+      else if (!force_zink && strcmp(render_dev_name, "etnaviv") == 0) {
 #if defined(GALLIUM_ETNAVIV)
          ro->create_for_resource = renderonly_create_kms_dumb_buffer_for_resource;
          screen = etna_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
 #endif
-      } else if (strcmp(render_dev_name, "msm") == 0) {
+      } else if (!force_zink && strcmp(render_dev_name, "msm") == 0) {
 #if defined(GALLIUM_FREEDRENO)
          ro->create_for_resource = renderonly_create_kms_dumb_buffer_for_resource;
          screen = fd_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
 #endif
-      } else if (strcmp(render_dev_name, "lima") == 0) {
+      } else if (!force_zink && strcmp(render_dev_name, "lima") == 0) {
 #if defined(GALLIUM_LIMA)
          ro->create_for_resource = renderonly_create_kms_dumb_buffer_for_resource;
          screen = lima_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
 #endif
-      } else if (strcmp(render_dev_name, "panfrost") == 0 ||
-               strcmp(render_dev_name, "panthor") == 0) {
+      } else if (!force_zink && (strcmp(render_dev_name, "panfrost") == 0 ||
+                         strcmp(render_dev_name, "panthor") == 0)) {
 #if defined(GALLIUM_PANFROST)
          ro->create_for_resource = panfrost_create_kms_dumb_buffer_for_resource;
          screen = panfrost_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
 #endif
-      } else if (strcmp(render_dev_name, "v3d") == 0) {
+      } else if (!force_zink && strcmp(render_dev_name, "v3d") == 0) {
 #if defined(GALLIUM_V3D)
          ro->create_for_resource = renderonly_create_kms_dumb_buffer_for_resource;
          screen = v3d_drm_screen_create_renderonly(ro->gpu_fd, ro, config);
 #endif
-      } else if (strcmp(render_dev_name, "vc4") == 0) {
+      } else if (!force_zink && strcmp(render_dev_name, "vc4") == 0) {
 #if defined(GALLIUM_VC4)
          /* Passes the vc4-allocated BO through to the KMS-only DRM device using
          * PRIME buffer sharing.  The VC4 BO must be linear, which the SCANOUT
@@ -154,4 +155,16 @@ out:
       close(gpu_fds[i]);
    free(gpu_fds);
    return screen;
+}
+
+struct pipe_screen *
+kmsro_drm_screen_create(int kms_fd, const struct pipe_screen_config *config)
+{
+   return kmsro_screen_create(kms_fd, config, false);
+}
+
+struct pipe_screen *
+kmsro_drm_screen_create_zink(int kms_fd, const struct pipe_screen_config *config)
+{
+   return kmsro_screen_create(kms_fd, config, true);
 }

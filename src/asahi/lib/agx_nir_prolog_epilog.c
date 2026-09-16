@@ -121,6 +121,64 @@ map_fs_part_uniform(nir_intrinsic_instr *intr,
 }
 
 static bool
+lower_native_emrt_handle(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_texture_handle_agx)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *index = intr->src[0].ssa;
+   nir_def *rt = nir_ushr_imm(b, index, 1);
+   nir_def *offset = nir_iadd(b, nir_imul_imm(b, rt, AGX_G17P_EMRT_DESCRIPTOR_SIZE),
+                            nir_ishl_imm(b, nir_iand_imm(b, index, 1), 5));
+   nir_def_replace(&intr->def, nir_bindless_image_agx(b, offset, .desc_set = 0));
+   return true;
+}
+
+static bool
+lower_native_emrt_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_fs_epilog_key *key = data;
+   b->cursor = nir_before_instr(&intr->instr);
+
+   if (intr->intrinsic == nir_intrinsic_bindless_image_store) {
+      nir_def *value = intr->src[3].ssa;
+      nir_alu_type type = nir_alu_type_get_base_type(nir_intrinsic_src_type(intr));
+      if (value->bit_size < 32) {
+         value = type == nir_type_float ? nir_f2f32(b, value) :
+                 type == nir_type_int ? nir_i2i32(b, value) : nir_u2u32(b, value);
+         nir_src_rewrite(&intr->src[3], value);
+         nir_intrinsic_set_src_type(intr, type | 32);
+      }
+      /* G17P's existing bindless store consumes native 32-byte PBE records,
+       * not byte offsets. Descriptor crawls retain their byte handles. */
+      nir_intrinsic_instr *handle = nir_src_as_intrinsic(intr->src[0]);
+      assert(handle && handle->intrinsic == nir_intrinsic_bindless_image_agx);
+      nir_src_rewrite(&intr->src[0], nir_bindless_image_agx(
+         b, nir_ushr_imm(b, handle->src[0].ssa, 5),
+         .desc_set = key->emrt_heap_base));
+      return true;
+   }
+
+   if (intr->intrinsic == nir_intrinsic_load_descriptor_set_agx) {
+      assert(nir_intrinsic_desc_set(intr) == 0);
+      nir_def_replace(&intr->def,
+         nir_load_preamble(b, 1, 64, .base = key->emrt_heap_base));
+      return true;
+   }
+
+   if (intr->intrinsic == nir_intrinsic_load_from_texture_handle_agx) {
+      nir_intrinsic_instr *handle = nir_src_as_intrinsic(intr->src[0]);
+      assert(handle && handle->intrinsic == nir_intrinsic_bindless_image_agx);
+      nir_def_replace(&intr->def, nir_iadd(b,
+         nir_load_preamble(b, 1, 64, .base = key->emrt_heap_base),
+         nir_u2u64(b, handle->src[0].ssa)));
+      return true;
+   }
+   return false;
+}
+
+static bool
 lower_non_monolithic_uniforms(nir_builder *b, nir_intrinsic_instr *intr,
                               void *data)
 {
@@ -476,10 +534,56 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    b->shader->info.stage = MESA_SHADER_FRAGMENT;
    b->shader->info.name = "FS epilog";
 
+   struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_with_limits(
+      key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples, true,
+      key->max_sample_size_B, key->max_bytes_per_tile, key->max_samples_per_tile);
+
+   unsigned rt_order[AGX_MAX_RENDER_TARGETS];
+   for (unsigned rt = 0; rt < ARRAY_SIZE(rt_order); ++rt)
+      rt_order[rt] = rt;
+
+   if (key->native_spills && agx_tilebuffer_spills(&tib)) {
+      /* Spill stores introduce conditional image accesses. Emit those first,
+       * then the resident attachments, so every sample finishes its tile
+       * stores in one block. These outputs address distinct attachments;
+       * sorting before blend lowering keeps each destination load with its
+       * own store and does not move accesses across sample iterations. */
+      for (unsigned i = 0; i < ARRAY_SIZE(rt_order); ++i) {
+         for (unsigned j = i + 1; j < ARRAY_SIZE(rt_order); ++j) {
+            unsigned a = rt_order[i], c = rt_order[j];
+            if ((!tib.spilled[a] && tib.spilled[c]) ||
+                (!tib.spilled[a] && !tib.spilled[c] &&
+                 agx_tilebuffer_offset_B(&tib, a) <
+                    agx_tilebuffer_offset_B(&tib, c)))
+               SWAP(rt_order[i], rt_order[j]);
+         }
+      }
+   }
+
+   /* Import masks before the colour stores: alpha-to-coverage is inserted
+    * before those stores and must be dominated by the imported write mask. */
+   nir_def *sample_id = NULL, *write_samples = NULL;
+   if (key->link.sample_shading) {
+      sample_id =
+         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_SAMPLE_MASK);
+   }
+
+   if (key->link.sample_mask_after_force_early) {
+      write_samples =
+         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_WRITE_SAMPLES);
+   }
+
+   if (key->defer_api_sample_mask) {
+      nir_def *api_mask = nir_imm_intN_t(b, key->api_sample_mask, 16);
+      write_samples = write_samples ? nir_iand(b, write_samples, api_mask)
+                                    : api_mask;
+   }
+
    /* First, construct a passthrough shader reading each colour and outputting
     * the value.
     */
-   for (unsigned rt = 0; rt < ARRAY_SIZE(key->remap); ++rt) {
+   for (unsigned i = 0; i < ARRAY_SIZE(key->remap); ++i) {
+      unsigned rt = rt_order[i];
       int location = key->remap[rt];
 
       /* Negative remaps indicate the attachment isn't written. */
@@ -502,22 +606,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       }
    }
 
-   /* Grab registers early, this has to happen in the first block. */
-   nir_def *sample_id = NULL, *write_samples = NULL;
-   if (key->link.sample_shading) {
-      sample_id =
-         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_SAMPLE_MASK);
-   }
-
-   if (key->link.sample_mask_after_force_early) {
-      write_samples =
-         nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_WRITE_SAMPLES);
-   }
-
    /* Now lower the resulting program using the key */
-   struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout(
-      key->rt_formats, ARRAY_SIZE(key->rt_formats), key->nr_samples, true);
-
    if (key->force_small_tile)
       tib.tile_size = 16 * 16;
 
@@ -606,13 +695,52 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, nir_lower_alpha_to_coverage, false,
                NULL);
 
+   /* Native late SampleMask writes cross the main/epilog split in a register.
+    * Combine them with alpha coverage before the one test-triggering update,
+    * as Apple's G17P sample-mask + alpha-coverage fragment does. Applying the
+    * mask only to the tile store would still update depth for killed samples.
+    * Early-tested shaders must not run the tests again. */
+   if (write_samples && !key->link.already_ran_zs) {
+      bool merged = false;
+      nir_foreach_block(block, b->impl) {
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_demote_samples)
+               continue;
+            nir_builder mask_b = nir_builder_at(nir_before_instr(instr));
+            nir_def *killed = nir_ixor(
+               &mask_b, write_samples, nir_imm_intN_t(&mask_b, ALL_SAMPLES, 16));
+            killed = nir_u2uN(&mask_b, killed, intr->src[0].ssa->bit_size);
+            nir_src_rewrite(&intr->src[0],
+                            nir_ior(&mask_b, intr->src[0].ssa, killed));
+            merged = true;
+         }
+      }
+      if (!merged) {
+         nir_builder mask_b =
+            nir_builder_at(nir_after_instr(nir_def_instr(write_samples)));
+         nir_demote_samples(&mask_b,
+                            nir_ixor(&mask_b, write_samples,
+                                      nir_imm_intN_t(&mask_b, ALL_SAMPLES, 16)));
+      }
+      b->shader->info.fs.uses_discard = true;
+   }
+
    /* Depth/stencil writes must be deferred until after all discards,
     * particularly alpha-to-coverage.
     */
    if (key->link.write_z || key->link.write_s) {
+      nir_def *zs_samples =
+         write_samples ? nir_iand(b, write_samples,
+                                  nir_load_active_samples_agx(b))
+                       : nir_imm_intN_t(b, 0xFF, 16);
+      nir_def *depth =
+         nir_load_exported_agx(b, 1, 32, .base = AGX_ABI_FOUT_Z);
+
       nir_store_zs_agx(
-         b, nir_imm_intN_t(b, 0xFF, 16),
-         nir_load_exported_agx(b, 1, 32, .base = AGX_ABI_FOUT_Z),
+         b, zs_samples, depth,
          nir_load_exported_agx(b, 1, 16, .base = AGX_ABI_FOUT_S),
          .base = (key->link.write_z ? 1 : 0) | (key->link.write_s ? 2 : 0));
 
@@ -633,8 +761,15 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    NIR_PASS(_, b->shader, agx_nir_lower_tilebuffer, &tib, colormasks, &rt_spill,
             write_samples, &force_translucent, key->preserve_zero_mask,
             key->lower_srgb);
-   NIR_PASS(_, b->shader, agx_nir_lower_texture);
-   NIR_PASS(_, b->shader, agx_nir_lower_multisampled_image_store);
+   const bool native_spills = key->native_spills && agx_tilebuffer_spills(&tib);
+   if (native_spills) {
+      NIR_PASS(_, b->shader, nir_shader_intrinsics_pass, lower_native_emrt_handle,
+               nir_metadata_control_flow, NULL);
+   }
+   NIR_PASS(_, b->shader, agx_nir_lower_texture_for_generation,
+            native_spills ? 9 : 0);
+   NIR_PASS(_, b->shader, agx_nir_lower_multisampled_image_store_for_generation,
+            native_spills ? 9 : 0);
 
    /* If the API shader runs once per sample, then the epilog runs once per
     * sample as well, so we need to lower our code to run for a single sample.
@@ -649,7 +784,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
        * the pixel shaded path. Must be done before agx_nir_lower_to_per_sample
        * to avoid duplicating tests.
        */
-      if (key->blend.alpha_to_coverage) {
+      if (b->shader->info.fs.uses_discard) {
          NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
       }
 
@@ -662,8 +797,29 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
        */
       b->cursor = nir_after_impl(b->impl);
       nir_export_agx(b, sample_id, .base = AGX_ABI_FIN_SAMPLE_MASK);
-   } else {
+   } else if (!key->defer_monolithic_msaa) {
       NIR_PASS(_, b->shader, agx_nir_lower_monolithic_msaa, key->nr_samples);
+   } else if (b->shader->info.fs.uses_discard) {
+      /* G17P can keep a pixel-shaded multisample blend as one tile
+       * load/store pair carrying the live coverage register. Lower the
+       * alpha discard while the epilog's test intrinsics are still available;
+       * doing it after this function leaves a newly introduced test query
+       * past divergence analysis. */
+      NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
+   }
+
+   if (native_spills) {
+      /* The generated loop has exactly two or four iterations. G17P's MRT
+       * transaction is specialized for those sample groups; do not let the
+       * general cost heuristic leave a dynamic loop around the spill crawl. */
+      foreach_list_typed(nir_cf_node, node, node, &b->impl->body) {
+         if (node->type == nir_cf_node_loop)
+            nir_cf_node_as_loop(node)->control = nir_loop_control_unroll;
+      }
+      NIR_PASS(_, b->shader, nir_opt_constant_folding);
+      NIR_PASS(_, b->shader, agx_nir_lower_g17p_indexed_samplers);
+      NIR_PASS(_, b->shader, nir_shader_intrinsics_pass, lower_native_emrt_uniforms,
+               nir_metadata_control_flow, (void *)key);
    }
 
    /* Finally, lower uniforms according to our ABI */
@@ -710,13 +866,19 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    }
 
    if (intr->intrinsic == nir_intrinsic_demote_samples &&
-       b->shader->info.fs.early_fragment_tests) {
+       (b->shader->info.fs.early_fragment_tests ||
+        (ctx->preserve_early_demote &&
+         (b->shader->info.writes_memory ||
+          (!b->shader->info.fs.uses_sample_shading &&
+           (b->shader->info.outputs_written &
+            BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK))))))) {
 
-      /* G17P has no sample operand on LSTCOL.  Keep the demote in the main
-       * shader so its grounded MOVMSK lowering updates coverage before the
-       * linked epilog emits the ordinary whole-pixel store. */
-      if (ctx->preserve_early_demote)
-         return false;
+      /* G17P carries the discard mask across the split for both early and
+       * late tests. LSTCOL consumes it directly, and late DEPTHF must use it
+       * too: MOVMSK does not make a split epilog's reconstructed depth word
+       * retain the main shader's discard predicate. Late per-pixel SampleMask
+       * outputs must also combine with alpha coverage before triggering tests.
+       * Keep ordinary discard-only shaders on their existing lowering. */
 
       if (!ctx->masked_samples) {
          b->cursor = nir_before_impl(nir_shader_get_entrypoint(b->shader));
@@ -873,9 +1035,16 @@ agx_nir_lower_fs_output_to_epilog_for_device(
  * `mask & active_samples` to that sample's one-hot constant beforehand, so it
  * too becomes coverage ANDed with the sample's bit.
  */
+struct g17p_tile_sample_state {
+   unsigned samples;
+   nir_def *coverage;
+   nir_block *block;
+};
+
 static bool
 lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
+   struct g17p_tile_sample_state *state = data;
    unsigned src;
    switch (intr->intrinsic) {
    case nir_intrinsic_load_local_pixel_agx:
@@ -885,10 +1054,15 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       src = 1;
       break;
    default:
+      /* Coverage changes at depth/stencil writes, demotes and interlocks.
+       * Conservatively end the local reuse window at any side effect. */
+      if (!(nir_intrinsic_infos[intr->intrinsic].flags &
+            NIR_INTRINSIC_CAN_ELIMINATE))
+         state->coverage = NULL;
       return false;
    }
 
-   const unsigned samples = *(const unsigned *)data;
+   const unsigned samples = state->samples;
    if (samples == 1) {
       /* Per-sample epilogs still carry a dynamic active-sample mask, but
        * there is only sample zero. The native 1x tile instruction takes the
@@ -909,13 +1083,35 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       return false;
 
    const unsigned mask = nir_src_as_uint(intr->src[src]);
+   if (mask == 0) {
+      /* Static unrolling can prove that the API mask excludes this sample.
+       * A zero-coverage tile access is dead, and keeping it would turn one
+       * surviving sample into an unsupported mixed zero/nonzero protocol. */
+      b->cursor = nir_before_instr(&intr->instr);
+      if (intr->intrinsic == nir_intrinsic_load_local_pixel_agx) {
+         nir_def_rewrite_uses(
+            &intr->def,
+            nir_undef(b, intr->def.num_components, intr->def.bit_size));
+      }
+      nir_instr_remove(&intr->instr);
+      return true;
+   }
+
    if (mask != ALL_SAMPLES &&
-       (mask == 0 || mask >= (1u << samples)))
+       mask >= (1u << samples))
       return false;
 
    b->cursor = nir_before_instr(&intr->instr);
 
-   nir_def *coverage = nir_load_active_samples_agx(b);
+   /* active_samples_agx is a loop system value: NIR may CSE it across
+    * depth/stencil writes. At this point we need the hardware's *current*
+    * coverage, including the tests for this particular unrolled sample.
+    * load_sample_mask is ordered and lowers to the same G17P SR39 read. */
+   if (!state->coverage || state->block != intr->instr.block) {
+      state->coverage = nir_u2u16(b, nir_load_sample_mask(b));
+      state->block = intr->instr.block;
+   }
+   nir_def *coverage = state->coverage;
    nir_def *sel = (mask == ALL_SAMPLES)
                      ? coverage
                      : nir_iand(b, coverage, nir_imm_intN_t(b, mask, 16));
@@ -930,8 +1126,9 @@ agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples)
    if (nr_samples != 1 && nr_samples != 2 && nr_samples != 4)
       return false;
 
+   struct g17p_tile_sample_state state = {.samples = nr_samples};
    return nir_shader_intrinsics_pass(s, lower_g17p_tile_sample,
-                                     nir_metadata_control_flow, &nr_samples);
+                                     nir_metadata_control_flow, &state);
 }
 
 bool

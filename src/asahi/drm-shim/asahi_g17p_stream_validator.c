@@ -637,8 +637,17 @@ asahi_g17p_compute_validate(
          need_barrier = false;
          break;
 
+      case AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE:
+         /* HAL200 emits SSTT maintenance in a command encoder of its own.
+          * Combining it with shader launches would leave ordering ambiguous. */
+         if (need_barrier || local.launches || local.sstt_flushes)
+            return fail_at(cursor, "SSTT flush-invalidate ordering is invalid");
+
+         local.sstt_flushes++;
+         break;
+
       case AGX3_CDM_RECORD_STREAM_TERMINATE:
-         if (need_barrier || !local.launches ||
+         if (need_barrier || (!local.launches && !local.sstt_flushes) ||
              (!followed_link &&
               cursor + record.length != compute->cdm_ctrl_stream_end))
             return fail_at(cursor, "compute terminator is not final");
@@ -816,7 +825,11 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
           !agx_ppp_hal200_graphics_core_unpack(
              AGX_CHIP_G17P, AGX_PPP_HAL200_GRAPHICS_OUTPUT, bytes, size,
              &graphics) ||
-          (graphics.words[0] & ~UINT32_C(0x003d0000)) ||
+          /* The low sixteen bits are the eight clip-distance enables and
+           * their companion select bits. agx_ppp_hal200_output_select_pack()
+           * bounds the live producer to this same field; rejecting it here
+           * made valid XFB clip/cull streams look malformed. */
+          (graphics.words[0] & ~UINT32_C(0x003dffff)) ||
           !!(graphics.words[0] & UINT32_C(0x00080000)) !=
              !!(graphics.words[0] & UINT32_C(0x00100000)) ||
           graphics.words[1] ||
@@ -1310,6 +1323,25 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          barrier_since_last_draw = false;
          if (draw->instance_count > local.max_instance_count)
             local.max_instance_count = draw->instance_count;
+         cursor += record.length;
+         break;
+      }
+
+      case AGX_VDM_RECORD_TESSELLATE_INDIRECT: {
+         const struct agx_vdm_tessellate_indirect_info *draw =
+            &record.data.tessellate_indirect;
+         const uint64_t factor_bytes =
+            ((uint64_t)draw->factor_buffer_size_minus_one + 1) * 4;
+         if (!have_state || restart_seen || !tessellation_state_seen ||
+             factor_bytes > SIZE_MAX ||
+             !memory->owned(memory->data, draw->factor_buffer,
+                            (size_t)factor_bytes) ||
+             !memory->owned(memory->data, draw->indirect_buffer, 16))
+            return fail_at(cursor, "indirect tessellate draw has no state or "
+                                   "unowned factors or arguments");
+         local.draws++;
+         local.tessellated_draws++;
+         barrier_since_last_draw = false;
          cursor += record.length;
          break;
       }

@@ -19,6 +19,7 @@
 #include <string.h>
 #include "util/format/u_format.h"
 #include "agx3_g17p_quad_eot.h"
+#include "agx3_sr_core.h"
 #include "agx_bg_eot_key.h"
 #include "agx_compile.h"
 #include "agx_linker.h"
@@ -82,6 +83,10 @@ static const struct layout layouts[] = {
     {PIPE_FORMAT_R8G8B8A8_SRGB, PIPE_FORMAT_B10G10R10A2_UNORM,
      PIPE_FORMAT_B8G8R8A8_UNORM, PIPE_FORMAT_R16G16_UINT},
     {0, 4, 12, 8}, 16},
+   {"rgb9e5x3", 3,
+    {PIPE_FORMAT_R9G9B9E5_FLOAT, PIPE_FORMAT_R9G9B9E5_FLOAT,
+     PIPE_FORMAT_R9G9B9E5_FLOAT},
+    {0, 4, 8}, 16},
 };
 
 #define RGBA8 PIPE_FORMAT_R8G8B8A8_UNORM
@@ -114,9 +119,11 @@ static const struct layout wide_layouts[] = {
 static enum pipe_format
 eot_store_format(enum pipe_format format)
 {
-   return format == PIPE_FORMAT_R11G11B10_FLOAT ? PIPE_FORMAT_R32_UINT
-          : util_format_is_srgb(format)        ? PIPE_FORMAT_R8_UNORM
-                                         : ail_pixel_format[format].renderable;
+   return (format == PIPE_FORMAT_R11G11B10_FLOAT ||
+           format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+             ? PIPE_FORMAT_R32_UINT
+          : util_format_is_srgb(format) ? PIPE_FORMAT_R8_UNORM
+                                        : ail_pixel_format[format].renderable;
 }
 
 static uint64_t
@@ -195,7 +202,7 @@ test_selectors_match_single_target_programs(void)
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B10G10R10A2_UINT) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B8G8R8A8_SNORM) == 0x75);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R11G11B10_FLOAT) == 0);
-   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R9G9B9E5_FLOAT) == 0);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R9G9B9E5_FLOAT) == 0x35);
    CHECK(admitted > 40);
    return 0;
 }
@@ -582,8 +589,12 @@ compile_background(const struct agx_tilebuffer_layout *layout,
       nir_def *value;
       if (rt < reloads) {
          nir_def *coord = nir_u2u32(&b, nir_load_pixel_coord(&b));
+         if (tib.layered)
+            coord = nir_vec3(&b, nir_channel(&b, coord, 0),
+                             nir_channel(&b, coord, 1), nir_load_layer_id(&b));
          nir_def *tex = nir_txf(&b, coord, .texture_index = rt * 2,
                                 .dim = GLSL_SAMPLER_DIM_2D,
+                                .is_array = tib.layered,
                                 .dest_type = nir_type_uint32,
                                 .backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP);
          value = nir_trim_vector(&b, tex, nr);
@@ -622,6 +633,27 @@ compile_background(const struct agx_tilebuffer_layout *layout,
    return ok;
 }
 
+static bool
+has_background_layer_read(const struct agx_shader_part *part)
+{
+   const uint8_t *code = part->binary;
+   for (unsigned reg = 0; reg < 64; ++reg) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         struct agx3_sr_desc sr = {
+            .dest = reg, .width = AGX3_SR_W16, .sr = 12, .slot = slot,
+         };
+         uint8_t expected[AGX3_SR_MAX_LENGTH], len;
+         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &sr, expected, &len))
+            continue;
+         for (unsigned at = 0; at + len <= part->info.binary_size; at += 2) {
+            if (!memcmp(code + at, expected, len))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
 static int
 test_background_programs(void)
 {
@@ -648,6 +680,18 @@ test_background_programs(void)
          free(part.binary);
       }
    }
+   /* Layered render-pass reloads must not use compute-grid Z as the layer.
+    * Pin the native BG half-register read in the compiled shader, beyond the
+    * isolated SR encoder test. */
+   const enum pipe_format layered_formats[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   struct agx_tilebuffer_layout layered =
+      agx_build_tilebuffer_layout(layered_formats, 1, 1, true);
+   struct agx_shader_part part = {0};
+   CHECK(compile_background(&layered, 1, false, 0, &part));
+   CHECK(has_background_layer_read(&part));
+   free(part.binary);
    return 0;
 }
 
@@ -664,6 +708,7 @@ compile_epilog_samples(unsigned count, const enum pipe_format *formats,
       .link.size_32 = written,
       .link.write_z = write_z,
       .nr_samples = samples,
+      .max_sample_size_B = AGX_G17P_MAX_BYTES_PER_SAMPLE,
    };
    memset(epilog.remap, -1, sizeof(epilog.remap));
    for (unsigned rt = 0; rt < count; ++rt) {
@@ -684,8 +729,84 @@ compile_epilog_samples(unsigned count, const enum pipe_format *formats,
    agx_preprocess_nir(b.shader);
    struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
                                 .fs.nr_samples = samples,
-                                .g17p_tile_partitions = partitions,
                                 .secondary = true};
+   u_foreach_bit64(offset, partitions)
+      BITSET_SET(key.g17p_tile_partitions, offset);
+   /* Match Honeykrisp's keyed physical partitions even when every target
+    * is written. Unkeyed GL shaders now carry logical attachment IDs, which
+    * differ from physical order for the reordered mixed-format witnesses. */
+   if (!partitions && count > 1) {
+      enum pipe_format full_formats[AGX_MAX_RENDER_TARGETS] = {0};
+      memcpy(full_formats, formats, count * sizeof(*formats));
+      const struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_bounded(
+         full_formats, count, samples, false, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+      for (unsigned rt = 0; rt < count; ++rt) {
+         if (full_formats[rt] != PIPE_FORMAT_NONE && !tib.spilled[rt])
+            BITSET_SET(key.g17p_tile_partitions, tib._offset_B[rt]);
+      }
+   }
+   const bool ok = agx_compile_shader_nir(b.shader, &key, part);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
+compile_sample_shaded_epilog(unsigned count,
+                             const enum pipe_format *formats,
+                             unsigned samples,
+                             struct agx_shader_part *part)
+{
+   const unsigned written = BITFIELD_MASK(count);
+   struct agx_fs_epilog_key epilog = {
+      .link.loc_written = written,
+      .link.size_32 = written,
+      .link.sample_shading = true,
+      .link.write_z = true,
+      .nr_samples = samples,
+      .max_sample_size_B = AGX_G17P_MAX_BYTES_PER_SAMPLE,
+   };
+   memset(epilog.remap, -1, sizeof(epilog.remap));
+   for (unsigned rt = 0; rt < count; ++rt) {
+      epilog.remap[rt] = rt;
+      epilog.rt_formats[rt] = formats[rt];
+      epilog.blend.rt[rt].colormask =
+         rt == 1 ? 1 : BITFIELD_MASK(util_format_get_nr_components(formats[rt]));
+      const enum pipe_blendfactor dst =
+         rt == 1 ? PIPE_BLENDFACTOR_ZERO : PIPE_BLENDFACTOR_ONE;
+      epilog.blend.rt[rt].mode = agx_pack_blend_standard(
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, dst,
+         PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE, dst);
+   }
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &epilog);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P sample-shaded MRT epilog");
+   struct agx_fs_epilog_key pixel = epilog;
+   pixel.link.sample_shading = false;
+   pixel.defer_monolithic_msaa = true;
+   agx_nir_fs_epilog(&b, &pixel);
+   NIR_PASS(_, b.shader, agx_nir_lower_to_per_sample);
+   NIR_PASS(_, b.shader, agx_nir_unroll_g17p_samples, samples, written);
+   NIR_PASS(_, b.shader, nir_opt_constant_folding);
+   NIR_PASS(_, b.shader, agx_nir_hoist_g17p_zs_writes);
+   NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, samples);
+   agx_preprocess_nir(b.shader);
+
+   enum pipe_format full_formats[AGX_MAX_RENDER_TARGETS] = {0};
+   memcpy(full_formats, formats, count * sizeof(*formats));
+   const struct agx_tilebuffer_layout tib = agx_build_tilebuffer_layout_bounded(
+      full_formats, count, samples, false, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .fs.nr_samples = samples,
+      .secondary = true,
+   };
+   for (unsigned rt = 0; rt < count; ++rt) {
+      if (!tib.spilled[rt])
+         BITSET_SET(key.g17p_tile_partitions, tib._offset_B[rt]);
+   }
+
    const bool ok = agx_compile_shader_nir(b.shader, &key, part);
    ralloc_free(b.shader);
    return ok;
@@ -799,6 +920,14 @@ test_epilogs(void)
             memcpy(sequence[n++], wait_48, 6);
             memcpy(sequence[n++], release_48, 6);
             memcpy(sequence[n++], release_524, 6);
+         }
+         if (!contains_in_order(&part, (const uint8_t (*)[6])sequence, n)) {
+            fprintf(stderr, "MRT epilog mismatch: layout=%u targets=%u depth=%u\n",
+                    i, l->count, write_z);
+            const uint8_t *bytes = part.binary;
+            for (unsigned j = 0; j < part.info.binary_size; ++j)
+               fprintf(stderr, "%02x", bytes[j]);
+            fprintf(stderr, "\n");
          }
          CHECK(contains_in_order(&part, (const uint8_t (*)[6])sequence, n));
 
@@ -960,6 +1089,47 @@ static const uint8_t wait_252[6] = {0x87, 0x02, 0x54, 0xfc, 0x08, 0x00};
 static const uint8_t release_572[6] = {0x07, 0x02, 0x54, 0x3c, 0x02, 0x00};
 static const uint8_t release_764[6] = {0x07, 0x02, 0x54, 0xfc, 0x02, 0x00};
 
+/* The colour mask must be read after depth has updated coverage. Previously
+ * CSE reused the SR39 read used to construct the depth words, leaving no read
+ * between the depth release and colour acquire in the compiled epilog. */
+static bool
+reads_coverage_after_depth(const struct agx_shader_part *part)
+{
+   const uint8_t *code = part->binary;
+   size_t begin = 0, end = part->info.binary_size;
+   for (; begin + 6 <= end; ++begin) {
+      if (!memcmp(code + begin, release_1, 6)) {
+         begin += 6;
+         break;
+      }
+   }
+   for (size_t i = begin; i + 6 <= end; ++i) {
+      if (!memcmp(code + i, wait_252, 6)) {
+         end = i;
+         break;
+      }
+   }
+   for (unsigned dest = 0; dest < 256; ++dest) {
+      for (unsigned slot = 1; slot <= 6; ++slot) {
+         const struct agx3_sr_desc sr = {
+            .dest = dest, .width = AGX3_SR_W16, .sr = 39, .slot = slot,
+         };
+         uint8_t bytes[AGX3_SR_MAX_LENGTH], len = 0;
+         if (!agx3_sr_encode(AGX_ISA_ENCODING_AGX3B, &sr, bytes, &len))
+            return false;
+         for (size_t i = begin; i + len <= end; ++i) {
+            if (!memcmp(code + i, bytes, len))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+static void
+colour_transactions(const struct agx_shader_part *part, char *out,
+                    size_t size);
+
 static int
 test_multisample_epilogs(void)
 {
@@ -1002,6 +1172,42 @@ test_multisample_epilogs(void)
             return 1;
       }
    }
+
+   /* A sample-shaded MRT epilog repeats the same descending target set once
+    * per sample inside one combined colour transaction. This is the exact
+    * shape used by the multisample-render-to-single-sample CTS family. */
+   const enum pipe_format sample_shaded[] = {
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R16G16B16A16_SINT,
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+   };
+   struct agx_shader_part part = {0};
+   CHECK(compile_sample_shaded_epilog(ARRAY_SIZE(sample_shaded),
+                                      sample_shaded, 2, &part));
+   unsigned stores = 0;
+   CHECK(store_f13_mask(&part, &stores) == 0);
+   CHECK(stores == ARRAY_SIZE(sample_shaded) * 2);
+   CHECK(part.info.agx3_colour_link.colour_classes == 7);
+   CHECK(reads_coverage_after_depth(&part));
+   char ops[128];
+   colour_transactions(&part, ops, sizeof(ops));
+   if (strcmp(ops,
+              "W512 W1 R1 W252 L16 L0 S16 S8 S0 L16 L0 S16 S8 S0 R764"))
+      fprintf(stderr, "sample-shaded MRT transactions: %s\n", ops);
+   CHECK(!strcmp(ops,
+                 "W512 W1 R1 W252 L16 L0 S16 S8 S0 L16 L0 S16 S8 S0 R764"));
+   free(part.binary);
+
+   const enum pipe_format sample_shaded_4x[] = {
+      PIPE_FORMAT_R8G8B8A8_UNORM,
+      PIPE_FORMAT_R16G16B16A16_FLOAT,
+      PIPE_FORMAT_R16_SINT,
+   };
+   CHECK(compile_sample_shaded_epilog(ARRAY_SIZE(sample_shaded_4x),
+                                      sample_shaded_4x, 4, &part));
+   CHECK(reads_coverage_after_depth(&part));
+   free(part.binary);
+
    return 0;
 }
 
@@ -1185,6 +1391,7 @@ compile_epilog_blended(unsigned count, enum pipe_format format,
       .link.loc_written = BITFIELD_MASK(count),
       .link.size_32 = BITFIELD_MASK(count),
       .nr_samples = 1,
+      .max_sample_size_B = AGX_G17P_MAX_BYTES_PER_SAMPLE,
    };
    memset(epilog.remap, -1, sizeof(epilog.remap));
    for (unsigned rt = 0; rt < count; ++rt) {
@@ -1418,6 +1625,184 @@ test_blended_epilogs(void)
    return 0;
 }
 
+/* G17P keeps colour targets in the imageblock past 64 bytes a sample. The
+ * witnesses are metal-nt -arch applegpu_g17p render pipelines storing float4
+ * [[color(i)]] outputs (blending as in blend_witnesses where noted), and
+ * builtin BG constructors for five RGBA32Float targets at sample size 80. */
+static int
+test_wide_samples(void)
+{
+   const enum pipe_format rgba32f = PIPE_FORMAT_R32G32B32A32_FLOAT;
+   enum pipe_format f5[AGX_MAX_RENDER_TARGETS] = {rgba32f, rgba32f, rgba32f,
+                                                  rgba32f, rgba32f};
+   enum pipe_format f8[AGX_MAX_RENDER_TARGETS] = {rgba32f, rgba32f, rgba32f,
+                                                  rgba32f, rgba32f, rgba32f,
+                                                  rgba32f, rgba32f};
+   /* An eight-target CTS attachment set of 65 bytes. */
+   enum pipe_format m8[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R32G32B32A32_UINT, PIPE_FORMAT_R16_FLOAT,
+      PIPE_FORMAT_R16G16B16A16_UNORM, PIPE_FORMAT_R16_SINT,
+      PIPE_FORMAT_R32G32B32A32_UINT, PIPE_FORMAT_R8G8B8A8_SNORM,
+      PIPE_FORMAT_R32G32B32A32_SINT, PIPE_FORMAT_R8_SNORM,
+   };
+   const uint8_t bound = AGX_G17P_MAX_BYTES_PER_SAMPLE;
+
+   /* The AGX2 bound is unchanged. */
+   const struct agx_tilebuffer_layout agx2 =
+      agx_build_tilebuffer_layout(f5, 5, 1, false);
+   CHECK(agx2.spilled[4] && agx2.sample_size_B == 64 && !agx2.max_sample_size_B);
+
+   struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout_bounded(f5, 5, 1, false, bound);
+   CHECK(!agx_tilebuffer_spills(&tib) && tib.sample_size_B == 80 &&
+         tib.tile_size == 16 * 16);
+   for (unsigned rt = 0; rt < 5; ++rt)
+      CHECK(tib._offset_B[rt] == 16 * rt);
+   CHECK(agx_g17p_classify_mrt(&tib) == AGX_G17P_MRT_MIXED);
+   CHECK(agx_g17p_rt0_tile_layout_supported(&tib));
+
+   /* A layout completed at draw time keeps its bound. */
+   struct agx_tilebuffer_layout deferred =
+      agx_build_tilebuffer_layout_bounded(f5, 5, 0, false, bound);
+   agx_tilebuffer_set_samples(&deferred, 1);
+   CHECK(!agx_tilebuffer_spills(&deferred) && deferred.sample_size_B == 80 &&
+         deferred.max_sample_size_B == bound);
+
+   /* 128 bytes fill a 16x16 tile to exactly 32 KiB, and two samples of 80
+    * bytes overflow it: both still spill. */
+   struct agx_tilebuffer_layout full =
+      agx_build_tilebuffer_layout_bounded(f8, 8, 1, false, bound);
+   CHECK(agx_tilebuffer_spills(&full) && !agx_g17p_rt0_tile_layout_supported(&full));
+   struct agx_tilebuffer_layout two =
+      agx_build_tilebuffer_layout_bounded(f5, 5, 2, false, bound);
+   CHECK(agx_tilebuffer_spills(&two));
+
+   struct agx_tilebuffer_layout mixed =
+      agx_build_tilebuffer_layout_bounded(m8, 8, 1, false, bound);
+   CHECK(!agx_tilebuffer_spills(&mixed) && mixed.sample_size_B == 72 &&
+         mixed.tile_size == 16 * 16);
+   CHECK(agx_g17p_classify_mrt(&mixed) == AGX_G17P_MRT_MIXED);
+   CHECK(agx_g17p_rt0_tile_layout_supported(&mixed));
+
+   /* The end-of-tile programs take each offset as a uniform. Apple's builtin
+    * storing any one target of eight RGBA32Float targets is the 68-byte
+    * single-target program, and Mesa's for the target at byte 64 matches it
+    * byte for byte. */
+   static const uint8_t apple_single_rgba32f[68] = {
+      0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+      0x24, 0xa9, 0x10, 0x26, 0x9f, 0x10, 0x54, 0x00, 0x00, 0x04, 0x14, 0x00,
+      0x50, 0x06, 0x0b, 0x00, 0x9f, 0x20, 0x54, 0x02, 0x00, 0x00, 0x10, 0x00,
+      0x50, 0x06, 0x0b, 0x00, 0x97, 0x05, 0x54, 0x04, 0x00, 0x08, 0x00, 0x00,
+      0xd0, 0x40, 0x10, 0x00, 0x57, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0xa8, 0x35, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   struct agx_shader_key eot_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+   };
+   agx_g17p_configure_rt0_eot_key(rgba32f, &eot_key);
+   const uint8_t offset64 = 64;
+   struct agx_shader_part eot = {0};
+   CHECK(compile_eot(1, &rgba32f, &offset64, &eot_key, &eot));
+   CHECK(eot.info.binary_size == sizeof(apple_single_rgba32f) &&
+         !memcmp(eot.binary, apple_single_rgba32f,
+                 sizeof(apple_single_rgba32f)));
+   free(eot.binary);
+
+   struct layout wide = {"5.rgba32f", 5, {0}, {0}, tib.sample_size_B};
+   struct layout wide_mixed = {"8.mixed", 8, {0}, {0}, mixed.sample_size_B};
+   for (unsigned rt = 0; rt < 8; ++rt) {
+      if (rt < 5) {
+         wide.formats[rt] = f5[rt];
+         wide.offsets[rt] = tib._offset_B[rt];
+      }
+      wide_mixed.formats[rt] = m8[rt];
+      wide_mixed.offsets[rt] = mixed._offset_B[rt];
+   }
+   CHECK(!check_eot_programs(&wide, false));
+   CHECK(!check_eot_programs(&wide_mixed, false));
+
+   /* Apple's clear and reload builtins store every target at its offset:
+    * lstcol f57 = 0, 16, 32, 48 and 64. */
+   for (unsigned reloads = 0; reloads <= 5; reloads += 5) {
+      struct agx_shader_part part = {0};
+      CHECK(compile_background(&tib, reloads, true,
+                               reloads < 5 ? 4 + 8 * 5 : 0, &part));
+      char ops[256];
+      colour_transactions(&part, ops, sizeof(ops));
+      free(part.binary);
+      unsigned stored = 0;
+      for (const char *p = ops; (p = strchr(p, 'S')); ++p)
+         stored |= BITFIELD_BIT(strtoul(p + 1, NULL, 10) / 16);
+      CHECK(stored == BITFIELD_MASK(5) && !strchr(ops, 'W'));
+   }
+
+   /* dEQP-VK.renderpasses.*.attachment.8.620: eight targets of 80 bytes.
+    * Apple's clear and reload builtins for this layout (BTNF, sample size 80,
+    * these offsets) store the same targets, the reload in the same order, and
+    * a metal-nt render pipeline declaring the attachments in offset order
+    * stores them with the same transactions, f13 and classes. */
+   enum pipe_format a620[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_R32G32B32A32_UINT, PIPE_FORMAT_R32G32B32A32_SINT,
+      PIPE_FORMAT_R16G16B16A16_SINT, PIPE_FORMAT_R16G16_UNORM,
+      PIPE_FORMAT_R16G16B16A16_UINT, PIPE_FORMAT_R16G16_SNORM,
+      PIPE_FORMAT_R32G32B32A32_FLOAT, PIPE_FORMAT_R16G16B16A16_UNORM,
+   };
+   static const uint8_t offsets620[8] = {0, 16, 48, 56, 60, 68, 32, 72};
+   struct agx_tilebuffer_layout t620 =
+      agx_build_tilebuffer_layout_bounded(a620, 8, 1, false, bound);
+   CHECK(!agx_tilebuffer_spills(&t620) && t620.sample_size_B == 80 &&
+         t620.tile_size == 16 * 16 &&
+         !memcmp(t620._offset_B, offsets620, sizeof(offsets620)));
+   CHECK(agx_g17p_rt0_tile_layout_supported(&t620));
+   {
+      char ops[512];
+      struct agx_shader_part part = {0};
+      CHECK(compile_background(&t620, 8, true, 0, &part));
+      colour_transactions(&part, ops, sizeof(ops));
+      free(part.binary);
+      CHECK(!strcmp(ops, "S0 S16 S48 S56 S60 S68 S32 S72"));
+
+      part = (struct agx_shader_part){0};
+      CHECK(compile_background(&t620, 0, true, 4 + 8 * 8, &part));
+      colour_transactions(&part, ops, sizeof(ops));
+      free(part.binary);
+      uint32_t stored = 0, expected = 0;
+      unsigned stores = 0;
+      for (const char *p = ops; (p = strchr(p, 'S')); ++p, ++stores)
+         stored |= BITFIELD_BIT(strtoul(p + 1, NULL, 10) / 4);
+      for (unsigned rt = 0; rt < 8; ++rt)
+         expected |= BITFIELD_BIT(offsets620[rt] / 4);
+      CHECK(stores == 8 && stored == expected && !strchr(ops, 'W'));
+
+      part = (struct agx_shader_part){0};
+      CHECK(compile_epilog(8, a620, false, false, &part));
+      colour_transactions(&part, ops, sizeof(ops));
+      free(part.binary);
+      CHECK(!strcmp(ops, "W512 W12 S72* S68* S60* S56 S48 W192 S32 R192 W48 "
+                         "S16 R48 S0 R524"));
+   }
+
+   /* Store-only and blending fragments of five RGBA32Float targets. */
+   struct agx_shader_part part = {0};
+   CHECK(compile_epilog(5, f5, false, false, &part));
+   char ops[512];
+   colour_transactions(&part, ops, sizeof(ops));
+   free(part.binary);
+   CHECK(!strcmp(ops, "W512 W12 S64 S48 W192 S32 R192 W48 S16 R48 S0 R524"));
+
+   part = (struct agx_shader_part){0};
+   CHECK(compile_epilog_blended(5, rgba32f, BITFIELD_MASK(5), &part));
+   colour_transactions(&part, ops, sizeof(ops));
+   free(part.binary);
+   char loads[128];
+   CHECK(loads_hold_classes(ops, 16, loads, sizeof(loads)));
+   CHECK(!strcmp(store_phase(ops),
+                 store_phase("W512 W8 L64 L48 W128 L32 W32 L16 L0 W4 S64 S48 "
+                             "W64 S32 R192 W16 S16 R48 S0 R524")));
+   return 0;
+}
+
 static int
 test_homogeneous_programs_unchanged(void)
 {
@@ -1474,7 +1859,8 @@ main(void)
        test_background_programs() || test_epilogs() ||
        test_subset_epilogs() || test_octa_subset_epilogs() ||
        test_multisample_eot_witnesses() || test_multisample_epilogs() ||
-       test_blended_epilogs() || test_homogeneous_programs_unchanged())
+       test_blended_epilogs() || test_wide_samples() ||
+       test_homogeneous_programs_unchanged())
       return 1;
 
    printf("G17P mixed-format MRT: %u checks PASS\n", checks);

@@ -564,6 +564,39 @@ main(void)
                                               &eot_program));
    }
 
+   /* dEQP-VK.renderpasses.*.attachment.8.620 stores eight targets of an
+    * 80-byte sample. Each offset reaches its uniform unchanged, including
+    * those past 64: Apple's configurePBE writes
+    * ((draw_state >> 12) & 255) % sample_stride, which is the offset itself
+    * for any target inside the sample. */
+   {
+      static const uint8_t offsets[AGX3_G17P_MRT_MAX_TARGETS] = {
+         0, 16, 48, 56, 60, 68, 32, 72};
+      struct agx3_g17p_rt0_eot_program_desc wide = eot;
+      wide.shader_binary_size = 32 + 44 * 8;
+      wide.staging_halfs = 8 * 8;
+      wide.attachment_count = 8;
+      wide.mixed_mrt = true;
+      wide.imageblock.sample_size_B = 80;
+      wide.imageblock.tile_size_px = 16 * 16;
+      uint8_t loads[2 * AGX3_G17P_MRT_MAX_TARGETS];
+      for (unsigned rt = 0; rt < AGX3_G17P_MRT_MAX_TARGETS; ++rt) {
+         *eot_offset(&wide, rt) = offsets[rt];
+         loads[2 * rt] = 0x0c | ((8 + 2 * rt) >> 1) << 4;
+         loads[2 * rt + 1] = offsets[rt];
+      }
+      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &wide,
+                                               &eot_program));
+      bool found = false;
+      for (size_t at = 0; !found && at + sizeof(loads) <= eot_program.length;
+           ++at)
+         found = !memcmp(eot_program.bytes + at, loads, sizeof(loads));
+      CHECK(found);
+      wide.imageblock_offset7_B = 80;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &wide,
+                                                &eot_program));
+   }
+
    /* The native layered array EOT is an 84-byte, eight-half program. It keeps
     * the same single-attachment Ioto resource ABI and 128-byte LDSHDR fetch
     * span as the other admitted RT0 builtins. */

@@ -813,6 +813,10 @@ agxdecode_cdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
               "AGX3 Barrier\n  Flags = 0x%x\n", record.data.barrier.flags);
       return record.length;
 
+   case AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE:
+      agxdecode_log("AGX3 SSTT Flush Invalidate\n");
+      return record.length;
+
    case AGX3_CDM_RECORD_SUBSTREAM_BARRIER:
       fprintf(agxdecode_dump_stream,
               "AGX3 Substream Barrier\n  Flags = 0x%x\n  Substream = %u\n",
@@ -1169,6 +1173,38 @@ agxdecode_vdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
               record.data.tessellate_direct.base_instance,
               record.data.tessellate_direct.instance_stride_word,
               record.data.tessellate_direct.factor_buffer_size_minus_one);
+      return record.length;
+
+   case AGX_VDM_RECORD_TESSELLATE_INDIRECT:
+      fprintf(agxdecode_dump_stream,
+              "AGX3 Indirect Tessellate\n"
+              "  Factor buffer = 0x%012" PRIx64 "\n"
+              "  Indirect buffer = 0x%012" PRIx64 "\n"
+              "  Instance stride word = 0x%08" PRIx32 "\n"
+              "  Factor buffer size minus one = 0x%08" PRIx32 "\n",
+              record.data.tessellate_indirect.factor_buffer,
+              record.data.tessellate_indirect.indirect_buffer,
+              record.data.tessellate_indirect.instance_stride_word,
+              record.data.tessellate_indirect.factor_buffer_size_minus_one);
+      return record.length;
+
+   case AGX_VDM_RECORD_TESSELLATION_STATE:
+      fprintf(agxdecode_dump_stream,
+              "AGX3 Tessellation State\n"
+              "  Partition = %u\n"
+              "  Counter-clockwise = %u\n"
+              "  Maximum factor = %u\n"
+              "  Quads = %u\n"
+              "  Float factors = %u\n"
+              "  Step function = %u\n"
+              "  Scale = 0x%04x\n",
+              record.data.tessellation_state.partition,
+              record.data.tessellation_state.counterclockwise,
+              record.data.tessellation_state.max_factor,
+              record.data.tessellation_state.quads,
+              record.data.tessellation_state.float_factors,
+              record.data.tessellation_state.step,
+              record.data.tessellation_state.scale_half);
       return record.length;
 
    case AGX_VDM_RECORD_UNKNOWN:

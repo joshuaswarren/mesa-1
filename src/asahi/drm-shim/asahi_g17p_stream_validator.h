@@ -95,6 +95,7 @@ struct asahi_g17p_compute_stats {
    unsigned barriers;
    unsigned prologue_barriers;
    unsigned strong_barriers;
+   unsigned sstt_flushes;
    bool terminated;
 };
 

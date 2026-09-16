@@ -240,9 +240,24 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
          return;
       }
 
+      /* Native AGX3 launches carry a weak ordering barrier in their tail.
+       * When an API operation immediately needs a cache flush, strengthen
+       * that record in place. Apple's emitter does not produce adjacent weak
+       * and strong barriers, and retaining the weak record buys no ordering
+       * while making the control stream larger. */
+      if (cs->current == cs->weak_barrier_end) {
+         memcpy((uint8_t *)cs->current - sizeof(packed), packed,
+                sizeof(packed));
+         cs->strong_flush_end = cs->current;
+         cs->weak_barrier_end = NULL;
+         cs->stats.flushes++;
+         return;
+      }
+
       memcpy(cs->current, packed, sizeof(packed));
       cs->current = (uint32_t *)((uint8_t *)cs->current + sizeof(packed));
       cs->strong_flush_end = cs->current;
+      cs->weak_barrier_end = NULL;
       break;
    }
 
@@ -370,13 +385,14 @@ static bool
 hk_g17p_internal_graphics_uniform_ranges(
    struct hk_cmd_buffer *cmd, struct hk_shader *s,
    struct hk_linked_shader *linked, uint64_t root_ptr,
+   uint64_t texture_pointers,
    struct agx3_ioto_uniform_range
       ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
    size_t *range_count)
 {
    if (s->info.stage != MESA_SHADER_VERTEX)
-      return hk_g17p_compute_uniform_ranges(s, root_ptr, 0, ranges,
-                                             range_count);
+      return hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
+                                             ranges, range_count);
 
    const unsigned nr_vbos = DIV_ROUND_UP(
       BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
@@ -655,6 +671,14 @@ hk_g17p_build_compute_program_raw(
    if (!published)
       return false;
 
+   /* Publication can deduplicate against an earlier loader and give the
+    * reservation back to the arena. Both direct and indirect launches must
+    * name the retained loader before that reservation is overwritten. */
+   if (!hk_agx3_g17p_compute_program_rebind_published(&out->launch, published)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_UNKNOWN);
+      return false;
+   }
+
    *program_va_out = published;
    if (trace && hk_g17p_launch_trace_enabled())
       fprintf(stderr, "G17P program[%s]: kind=%u va=%" PRIx64 " len=%u\n",
@@ -677,8 +701,8 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 {
    size_t range_count;
    const bool ranges_ok = internal_graphics
-      ? hk_g17p_internal_graphics_uniform_ranges(cmd, s, linked, root_ptr,
-                                                  ranges, &range_count)
+      ? hk_g17p_internal_graphics_uniform_ranges(
+           cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
       : hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,
                                         &range_count);
    if (!ranges_ok) {
@@ -717,6 +741,134 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    return ok;
 }
 
+/*
+ * The helper that publishes an indirect grid's launch geometry. An
+ * indirect-global grid holds threadgroup counts, which the grid helper
+ * multiplies by the local size; an indirect-local grid already holds the
+ * geometry, written by an earlier kernel, which the copy helper publishes.
+ */
+static struct hk_shader *
+hk_g17p_indirect_helper(struct hk_device *dev, struct agx_grid grid)
+{
+   struct hk_api_shader *helper =
+      grid.mode == AGX_CDM_MODE_INDIRECT_GLOBAL ? dev->g17p_grid_helper
+      : grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL
+         ? dev->g17p_geometry_copy_helper
+         : NULL;
+
+   return helper ? hk_only_variant(helper) : NULL;
+}
+
+static bool
+hk_g17p_indirect_launch_supported(struct hk_device *dev, struct agx_grid grid,
+                                  struct agx_workgroup local_size)
+{
+   /* Without a helper program there is nothing to publish the geometry, so
+    * refuse rather than record a launch whose dimensions never arrive. */
+   struct hk_shader *helper = hk_g17p_indirect_helper(dev, grid);
+   if (grid.ptr == 0 || (grid.ptr & 3) != 0 ||
+       !hk_g17p_compute_shader_supported(helper,
+                                         helper ? helper->only_linked : NULL))
+      return false;
+
+   /* The local size must be launchable at all: a zero component would make
+    * the helper publish a zero global size, which is indistinguishable from a
+    * geometry block it never wrote.  The product itself is the application's
+    * responsibility -- the helper multiplies in wrapping 32-bit, exactly as
+    * the AGX2 hardware indirect mode does, and Vulkan already bounds
+    * groupCount by maxComputeWorkGroupCount.  An indirect-local grid brings
+    * its own local size. */
+   return grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL ||
+          (local_size.x != 0 && local_size.y != 0 && local_size.z != 0);
+}
+
+/*
+ * Append an indirect launch of a built main program: the helper publishes
+ * the grid's launch geometry, and the main record consumes it.
+ */
+static bool
+hk_g17p_append_indirect_launch(
+   struct hk_cmd_buffer *cmd, struct agx_grid grid,
+   struct agx_workgroup local_size,
+   const struct hk_agx3_g17p_compute_program *program,
+   struct agx3_compute_dispatch_sink *sink)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_shader *helper_s = hk_g17p_indirect_helper(dev, grid);
+
+   /* The six-u32 block the helper publishes and the main record consumes.
+    * It lives in the command buffer's own pool, so it is allocated per
+    * dispatch and cannot be shared between two launches in flight. */
+   const struct agx_ptr geometry =
+      hk_pool_alloc(cmd, AGX3_G17P_INDIRECT_GEOMETRY_SIZE,
+                    AGX3_G17P_INDIRECT_GEOMETRY_ALIGNMENT);
+   if (!geometry.gpu) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return false;
+   }
+
+   /* Zero it: an unwritten block must not read back as a launchable
+    * geometry if the helper never ran. */
+   memset(geometry.cpu, 0, AGX3_G17P_INDIRECT_GEOMETRY_SIZE);
+
+   /* The helper gets its own root.  It shares the caller's descriptor
+    * state -- it touches none of it -- but it needs the grid address, the
+    * geometry address and the local size, and the caller's root must keep
+    * describing the caller's dispatch. */
+   struct hk_root_descriptor_table helper_root =
+      cmd->state.cs.descriptors.root;
+   helper_root.cs.group_count_addr = grid.ptr;
+   helper_root.cs.grid_helper_geometry_addr = geometry.gpu;
+   helper_root.cs.grid_helper_local_size[0] = local_size.x;
+   helper_root.cs.grid_helper_local_size[1] = local_size.y;
+   helper_root.cs.grid_helper_local_size[2] = local_size.z;
+
+   const struct agx_ptr helper_root_ptr =
+      hk_pool_alloc(cmd, sizeof(helper_root), 8);
+   if (!helper_root_ptr.gpu) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      return false;
+   }
+   helper_root.root_desc_addr = helper_root_ptr.gpu;
+   memcpy(helper_root_ptr.cpu, &helper_root, sizeof(helper_root));
+
+   struct agx3_ioto_uniform_range
+      helper_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   size_t helper_range_count;
+   uint64_t helper_program_va;
+   struct hk_agx3_g17p_compute_program helper_program;
+   if (!hk_g17p_build_compute_program(
+          cmd, helper_s, helper_s->only_linked, helper_root_ptr.gpu, 0, false,
+          AGX3_G17P_GRID_HELPER_LDSHDR_F1, "grid-helper", helper_ranges,
+          &helper_range_count, &helper_program_va, &helper_program))
+      return false;
+
+   const struct agx3_g17p_native_indirect_dispatch dispatch = {
+      .helper_program = &helper_program.launch,
+      .geometry_va = geometry.gpu,
+   };
+   const size_t start = sink->length;
+   if (!hk_agx3_g17p_native_indirect_compute_dispatch_append(
+          &program->launch, &dispatch, sink)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return false;
+   }
+
+   if (hk_g17p_launch_trace_enabled()) {
+      fprintf(stderr,
+              "G17P indirect launch: args=%" PRIx64 " geometry=%" PRIx64
+              " helper_program=%" PRIx64 " local=%ux%ux%u bytes=%zu\n",
+              grid.ptr, (uint64_t)geometry.gpu, helper_program_va,
+              local_size.x, local_size.y, local_size.z, sink->length - start);
+      hk_g17p_trace_line("indirect-pair",
+                         (uint64_t)(uintptr_t)(sink->data + start),
+                         (const uint8_t *)sink->data + start,
+                         sink->length - start);
+   }
+
+   return true;
+}
+
 void
 hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                          enum agx_barrier barrier, enum libagx_program idx,
@@ -736,24 +888,48 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
    if (dev->dev.chip != AGX_CHIP_G17P || !prog->bo ||
        !prog->info.main_size || !prog->info.nr_gprs ||
-       prog->info.nr_preamble_gprs || prog->info.rodata.size_16 ||
+       prog->info.nr_preamble_gprs ||
+       (prog->info.rodata.size_16 && !prog->rodata_offset) ||
+       (prog->info.printf_uniform &&
+        prog->info.printf_uniform < AGX_ABI_AGX3_PRECOMP_ARG_HALFS) ||
        !prog->info.agx3_staging_known ||
        !data || !data_size ||
        prog->entry_offset > UINT64_MAX - prog->ptr ||
        prog->b.workgroup.x == 0 || prog->b.workgroup.y == 0 ||
-       prog->b.workgroup.z == 0 || agx_is_indirect(grid)) {
+       prog->b.workgroup.z == 0) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
 
-   uint32_t uploaded_size;
-   uint16_t uniform_size_halfs;
-   if (!hk_agx3_g17p_precompiled_data_layout(
-          data_size, &uploaded_size, &uniform_size_halfs)) {
+   const bool indirect = agx_is_indirect(grid);
+   const struct agx_workgroup local_size = {
+      .x = prog->b.workgroup.x,
+      .y = prog->b.workgroup.y,
+      .z = prog->b.workgroup.z,
+   };
+   if (indirect && !hk_g17p_indirect_launch_supported(dev, grid, local_size)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
-   if (grid.count[0] == 0 || grid.count[1] == 0 || grid.count[2] == 0)
+
+   /* A kernel that can printf reads the buffer address after its arguments */
+   const size_t printf_offset_B = prog->info.printf_uniform
+      ? (size_t)(prog->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
+      : 0;
+   const size_t uniform_data_size =
+      prog->info.printf_uniform
+         ? MAX2(data_size, printf_offset_B + sizeof(uint64_t))
+         : data_size;
+
+   uint32_t uploaded_size;
+   uint16_t uniform_size_halfs;
+   if (!hk_agx3_g17p_precompiled_data_layout(
+          uniform_data_size, &uploaded_size, &uniform_size_halfs)) {
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+   if (!indirect &&
+       (grid.count[0] == 0 || grid.count[1] == 0 || grid.count[2] == 0))
       return;
 
    struct hk_cs **target = (barrier & AGX_POSTGFX)  ? &cmd->current_cs.post_gfx
@@ -774,11 +950,24 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
    }
    memcpy(uploaded.cpu, data, data_size);
    memset((uint8_t *)uploaded.cpu + data_size, 0, uploaded_size - data_size);
+   if (prog->info.printf_uniform) {
+      memcpy((uint8_t *)uploaded.cpu + printf_offset_B,
+             &dev->dev.printf_buffer_address, sizeof(uint64_t));
+   }
    const struct agx3_ioto_uniform_range range = {
-      .start_halfs = 0,
+      .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
       .size_halfs = uniform_size_halfs,
       .address = uploaded.gpu,
    };
+   struct agx3_ioto_uniform_range ranges[2] = {range};
+   unsigned range_count = 1;
+   if (prog->info.rodata.size_16) {
+      ranges[range_count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = prog->info.rodata.base_uniform,
+         .size_halfs = prog->info.rodata.size_16,
+         .address = prog->ptr + prog->rodata_offset,
+      };
+   }
    struct agx3_cdm_direct_template_sources launch_sources;
    if (!agx3_cdm_direct_template_sources_compute(false, false, false,
                                                   &launch_sources)) {
@@ -786,17 +975,50 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
 
+   /* Precompiled kernels carry static workgroup memory in the same compiler
+    * field as runtime shaders.  G17P allocates it in 64-byte units with a
+    * witnessed 256-byte floor.  In particular, the restart unroller needs
+    * its 128-byte ballot array for cross-subgroup barriers. */
+   const uint32_t threadgroup_memory_size_B =
+      prog->info.local_size
+         ? MAX2(256u, ALIGN_POT(prog->info.local_size, 64u))
+         : 0;
+
+   if (hk_g17p_launch_trace_enabled())
+      fprintf(stderr,
+              "G17P precompiled resources: program=%u local=%u allocated=%u\n",
+              (unsigned)idx, (unsigned)prog->info.local_size,
+              threadgroup_memory_size_B);
+
    uint64_t program_va;
    struct hk_agx3_g17p_compute_program program;
    if (!hk_g17p_build_compute_program_raw(
           cmd, (uint32_t)idx, uploaded_size,
           prog->ptr + prog->entry_offset,
-          prog->info.main_size, 0,
+          prog->info.main_size, prog->info.agx3_tps_size,
           prog->info.nr_gprs, true,
-          (uint32_t)prog->info.agx3_staging_halfs * 2, 0, &launch_sources,
-          AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3, "precompiled", &range,
-          1, &program_va, &program))
+          (uint32_t)prog->info.agx3_staging_halfs * 2,
+          threadgroup_memory_size_B,
+          &launch_sources,
+          indirect ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1
+                   : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+          "precompiled", ranges, range_count, &program_va, &program))
       return;
+
+   if (indirect) {
+      hk_ensure_cs_has_space(cmd, cs, 0x2000);
+      struct agx3_compute_dispatch_sink sink = {
+         .data = (uint8_t *)cs->current,
+         .capacity = (uint8_t *)cs->end - (uint8_t *)cs->current,
+      };
+      if (!hk_g17p_append_indirect_launch(cmd, grid, local_size, &program,
+                                          &sink))
+         return;
+
+      cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+      cs->stats.cmds++;
+      return;
+   }
 
    const struct agx3_compute_direct_grid direct = {
       .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
@@ -824,8 +1046,12 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
-   if (barrier_flags == 0x5)
+   if (barrier_flags == 0x5) {
       cs->strong_flush_end = cs->current;
+      cs->weak_barrier_end = NULL;
+   } else {
+      cs->weak_barrier_end = cs->current;
+   }
    cs->stats.cmds++;
 }
 
@@ -847,37 +1073,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
    }
 
-   /* An indirect grid supplies its threadgroup counts at submit time; the
-    * grid helper turns them into the geometry the main record consumes.
-    * Without a helper program there is nothing to publish that geometry, so
-    * refuse rather than record a launch whose dimensions never arrive. */
    const bool indirect = agx_is_indirect(grid);
-   struct hk_shader *helper_s =
-      indirect && dev->g17p_grid_helper
-         ? hk_only_variant(dev->g17p_grid_helper) : NULL;
-   struct hk_linked_shader *helper_linked =
-      helper_s ? helper_s->only_linked : NULL;
    if (indirect) {
-      if (grid.mode != AGX_CDM_MODE_INDIRECT_GLOBAL || grid.ptr == 0 ||
-          (grid.ptr & 3) != 0 ||
-          !hk_g17p_compute_shader_supported(helper_s, helper_linked)) {
+      if (!hk_g17p_indirect_launch_supported(dev, grid, local_size)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
    } else if (grid.count[0] == 0 || grid.count[1] == 0 ||
               grid.count[2] == 0) {
-      return;
-   }
-
-   /* The local size must be launchable at all: a zero component would make
-    * the helper publish a zero global size, which is indistinguishable from a
-    * geometry block it never wrote.  The product itself is the application's
-    * responsibility -- the helper multiplies in wrapping 32-bit, exactly as
-    * the AGX2 hardware indirect mode does, and Vulkan already bounds
-    * groupCount by maxComputeWorkGroupCount. */
-   if (indirect &&
-       (local_size.x == 0 || local_size.y == 0 || local_size.z == 0)) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
 
@@ -905,11 +1108,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    uint64_t texture_pointers = 0;
+   /* Poly geometry kernels use graphics descriptor roots but execute through
+    * CDM. Their indexed samples consume the same device-global texture and
+    * sampler heap pair as compute. Other internal-graphics resource profiles
+    * still need their own root contracts. */
    if (internal_graphics &&
        (s->info.agx3_txf_texture_valid || s->info.agx3_storage_image_valid ||
         s->info.agx3_sampled_storage_valid ||
-        s->info.agx3_indexed_storage_valid ||
-        s->info.agx3_indexed_sampler_valid)) {
+        s->info.agx3_indexed_storage_valid)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -917,7 +1123,9 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        s->info.agx3_sampled_storage_valid ||
        s->info.agx3_indexed_storage_valid ||
        s->info.agx3_indexed_sampler_valid) {
-      const struct hk_descriptor_state *descriptors = &cmd->state.cs.descriptors;
+      const struct hk_descriptor_state *descriptors = internal_graphics
+         ? &cmd->state.gfx.descriptors
+         : &cmd->state.cs.descriptors;
 
       if (s->info.agx3_indexed_sampler_valid) {
          if (!dev->sampled_images.bo || !dev->sampled_images.bo->va ||
@@ -1243,76 +1451,9 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    };
 
    if (indirect) {
-      /* The six-u32 block the helper publishes and the main record consumes.
-       * It lives in the command buffer's own pool, so it is allocated per
-       * dispatch and cannot be shared between two launches in flight. */
-      const struct agx_ptr geometry =
-         hk_pool_alloc(cmd, AGX3_G17P_INDIRECT_GEOMETRY_SIZE,
-                       AGX3_G17P_INDIRECT_GEOMETRY_ALIGNMENT);
-      if (!geometry.gpu) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      if (!hk_g17p_append_indirect_launch(cmd, grid, local_size, &program,
+                                          &sink))
          return;
-      }
-
-      /* Zero it: an unwritten block must not read back as a launchable
-       * geometry if the helper never ran. */
-      memset(geometry.cpu, 0, AGX3_G17P_INDIRECT_GEOMETRY_SIZE);
-
-      /* The helper gets its own root.  It shares the caller's descriptor
-       * state -- it touches none of it -- but it needs the argument address,
-       * the geometry address and the local size, and the caller's root must
-       * keep describing the caller's dispatch. */
-      struct hk_root_descriptor_table helper_root =
-         cmd->state.cs.descriptors.root;
-      helper_root.cs.group_count_addr = grid.ptr;
-      helper_root.cs.grid_helper_geometry_addr = geometry.gpu;
-      helper_root.cs.grid_helper_local_size[0] = local_size.x;
-      helper_root.cs.grid_helper_local_size[1] = local_size.y;
-      helper_root.cs.grid_helper_local_size[2] = local_size.z;
-
-      const struct agx_ptr helper_root_ptr =
-         hk_pool_alloc(cmd, sizeof(helper_root), 8);
-      if (!helper_root_ptr.gpu) {
-         vk_command_buffer_set_error(&cmd->vk,
-                                     VK_ERROR_OUT_OF_DEVICE_MEMORY);
-         return;
-      }
-      helper_root.root_desc_addr = helper_root_ptr.gpu;
-      memcpy(helper_root_ptr.cpu, &helper_root, sizeof(helper_root));
-
-      struct agx3_ioto_uniform_range
-         helper_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
-      size_t helper_range_count;
-      uint64_t helper_program_va;
-      struct hk_agx3_g17p_compute_program helper_program;
-      if (!hk_g17p_build_compute_program(
-             cmd, helper_s, helper_linked, helper_root_ptr.gpu, 0,
-             false, AGX3_G17P_GRID_HELPER_LDSHDR_F1, "grid-helper",
-             helper_ranges, &helper_range_count, &helper_program_va,
-             &helper_program))
-         return;
-
-      const struct agx3_g17p_native_indirect_dispatch dispatch = {
-         .helper_program = &helper_program.launch,
-         .geometry_va = geometry.gpu,
-      };
-      if (!hk_agx3_g17p_native_indirect_compute_dispatch_append(
-             &program.launch, &dispatch, &sink)) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return;
-      }
-
-      if (hk_g17p_launch_trace_enabled()) {
-         fprintf(stderr,
-                 "G17P indirect launch: args=%" PRIx64 " geometry=%" PRIx64
-                 " helper_program=%" PRIx64 " local=%ux%ux%u bytes=%zu\n",
-                 grid.ptr, (uint64_t)geometry.gpu,
-                 helper_program_va, local_size.x, local_size.y,
-                 local_size.z, sink.length);
-         hk_g17p_trace_line("indirect-pair", (uint64_t)(uintptr_t)cs->current,
-                            (const uint8_t *)sink.data, sink.length);
-      }
 
       cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
       cs->stats.cmds++;
@@ -1394,8 +1535,12 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
-   if (barrier_flags == 0x5)
+   if (barrier_flags == 0x5) {
       cs->strong_flush_end = cs->current;
+      cs->weak_barrier_end = NULL;
+   } else {
+      cs->weak_barrier_end = cs->current;
+   }
    cs->stats.cmds++;
 }
 

@@ -53,6 +53,9 @@ enum agx_va_flags {
 
    /* VA must be fixed, otherwise allocated by the driver. */
    AGX_VA_FIXED = (1 << 1),
+
+   /* Ordinary allocations never occupy the capture/replay address region. */
+   AGX_VA_CAPTURE_REPLAY = (1 << 2),
 };
 
 struct agx_va {

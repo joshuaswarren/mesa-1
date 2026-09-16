@@ -457,6 +457,24 @@ test_links_and_barriers(void)
       }
    }
 
+   {
+      uint8_t bytes[AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE];
+      struct agx3_cdm_decoded_record decoded;
+      CHECK(agx3_cdm_sstt_flush_invalidate_pack(AGX_CHIP_G17P, bytes));
+      CHECK(agx3_cdm_decode_one(AGX_CHIP_G17P, bytes, sizeof(bytes),
+                                &decoded));
+      CHECK(decoded.kind == AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE);
+      CHECK(decoded.length == AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE);
+      CHECK(decoded.chip == AGX_CHIP_G17P);
+
+      bytes[0] ^= 1;
+      CHECK(!agx3_cdm_sstt_flush_invalidate_validate(AGX_CHIP_G17P, bytes,
+                                                      sizeof(bytes)));
+      CHECK(!agx3_cdm_sstt_flush_invalidate_pack(AGX_CHIP_G17S, bytes));
+      CHECK(!agx3_cdm_sstt_flush_invalidate_validate(
+         AGX_CHIP_G17P, bytes, AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE - 1));
+   }
+
    return 0;
 }
 

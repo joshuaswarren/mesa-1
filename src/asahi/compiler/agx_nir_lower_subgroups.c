@@ -213,7 +213,8 @@ lower_subgroup_filter(const nir_intrinsic_instr *intr, const void *data)
       /* Fresh G17P witnesses pin the native qRedfmin/qRedfmax forms. Keep
        * every other target and non-quad shape on the established common
        * lowering path. */
-      if (agx_options->g17p_clustered_float && cluster == 4)
+      if (agx_options->g17p_clustered_float && cluster == 4 &&
+          intr->def.bit_size == 32)
          return false;
       return true;
 

@@ -207,6 +207,7 @@ load_geometry_param_offset(nir_builder *b, uint32_t offset, uint8_t bytes)
 /* Helpers for lowering I/O to variables */
 struct lower_output_to_var_state {
    nir_variable *outputs[NUM_TOTAL_VARYING_SLOTS];
+   uint8_t half_components[NUM_TOTAL_VARYING_SLOTS];
 };
 
 static void
@@ -232,6 +233,15 @@ lower_store_to_var(nir_builder *b, nir_intrinsic_instr *intr,
 
    unsigned nr_components = glsl_get_components(glsl_without_array(var->type));
    assert(component < nr_components);
+
+   /* The selected-vertex temporaries contain raw words, just like the
+    * pre-GS output buffer. Preserve narrow bits here and restore their width
+    * when forwarding each component to the rasterizer. */
+   assert(value->bit_size == 16 || value->bit_size == 32);
+   if (value->bit_size == 16)
+      state->half_components[sem.location + nir_src_as_uint(intr->src[1])] |=
+         BITFIELD_BIT(component);
+   value = nir_u2u32(b, value);
 
    /* Turn it into a vec4 write like NIR expects */
    value = nir_vector_insert_imm(b, nir_undef(b, nr_components, 32), value,
@@ -318,8 +328,11 @@ poly_load_per_vertex_input(nir_builder *b, nir_intrinsic_instr *intr,
    addr = poly_vertex_output_address(b, vp, input_mask, vertex, location);
 
    addr = nir_iadd_imm(b, addr, 4 * nir_intrinsic_component(intr));
-   return nir_load_global_constant(b, intr->def.num_components,
-                                   intr->def.bit_size, addr, .align_mul = 4);
+   /* Vertex output storage has one raw word per component, including narrow
+    * interfaces. */
+   nir_def *value = nir_load_global_constant(b, intr->def.num_components, 32,
+                                             addr, .align_mul = 4);
+   return nir_u2uN(b, value, intr->def.bit_size);
 }
 
 static bool
@@ -827,8 +840,18 @@ create_gs_rast_shader(const nir_shader *gs, const struct lower_gs_state *state)
             nir_bcsel(b, nir_ieq(b, rs.stream, rast_stream), value, killed);
       }
 
-      nir_store_output(b, value, nir_imm_int(b, 0),
-                       .io_semantics.location = slot);
+      if (rs.outputs.half_components[slot]) {
+         for (unsigned c = 0; c < value->num_components; ++c) {
+            nir_def *component = nir_channel(b, value, c);
+            if (rs.outputs.half_components[slot] & BITFIELD_BIT(c))
+               component = nir_u2u16(b, component);
+            nir_store_output(b, component, nir_imm_int(b, 0),
+                             .component = c, .io_semantics.location = slot);
+         }
+      } else {
+         nir_store_output(b, value, nir_imm_int(b, 0),
+                          .io_semantics.location = slot);
+      }
    }
 
    /* The geometry shader might not write point size - ensure it does, if we're
@@ -1443,10 +1466,11 @@ lower_vs_before_gs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       b, vp, nir_imm_int64(b, b->shader->info.outputs_written), linear_id,
       location);
 
-   assert(nir_src_bit_size(intr->src[0]) == 32);
+   assert(nir_src_bit_size(intr->src[0]) == 16 ||
+          nir_src_bit_size(intr->src[0]) == 32);
    addr = nir_iadd_imm(b, addr, nir_intrinsic_component(intr) * 4);
 
-   nir_store_global(b, intr->src[0].ssa, addr,
+   nir_store_global(b, nir_u2u32(b, intr->src[0].ssa), addr,
                     .write_mask = nir_intrinsic_write_mask(intr));
    return true;
 }

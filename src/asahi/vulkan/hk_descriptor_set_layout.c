@@ -106,7 +106,7 @@ hk_descriptor_stride_align_for_type(
 
    case VK_DESCRIPTOR_TYPE_MUTABLE_EXT:
       *stride = *alignment = 0;
-      if (type_list == NULL) {
+      if (type_list == NULL || type_list->descriptorTypeCount == 0) {
          *stride = HK_MAX_DESCRIPTOR_SIZE;
          *alignment = pdev->dev.chip == AGX_CHIP_G17P
                          ? HK_G17P_STORAGE_ALIGNMENT

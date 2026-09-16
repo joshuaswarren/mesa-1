@@ -21,6 +21,8 @@ const struct ail_pixel_format_entry ail_pixel_format[PIPE_FORMAT_COUNT] = {
    AIL_FMT(R5G6B5_UNORM,            R5G6B5,                UNORM, F16),
    AIL_FMT(B5G6R5_UNORM,            R5G6B5,                UNORM, F16),
 
+   AIL_FMT(A1R5G5B5_UNORM,          A1R5G5B5,              UNORM, F16),
+   AIL_FMT(A1B5G5R5_UNORM,          A1R5G5B5,              UNORM, F16),
    AIL_FMT(R5G5B5A1_UNORM,          R5G5B5A1,              UNORM, F16),
    AIL_FMT(B5G5R5A1_UNORM,          R5G5B5A1,              UNORM, F16),
    AIL_FMT(R5G5B5X1_UNORM,          R5G5B5A1,              UNORM, F16),

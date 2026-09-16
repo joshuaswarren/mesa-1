@@ -59,6 +59,7 @@ main(void)
           i == LIBAGX_COPY_IMAGE ||
           i == LIBAGX_MIPMAP_UNORM8X4 ||
           i == LIBAGX_MIPMAP_UNORM8X4_ODD ||
+          i == LIBAGX_RESOLVE_UNORM8X4 ||
           i == LIBAGX_DRAW_INDIRECT_BYTE_COUNT ||
           i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_DRAW_ROBUST_INDEX_0 ||
@@ -81,17 +82,45 @@ main(void)
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1 ||
           i == LIBAGX_CONDITIONAL_RENDER ||
-          i == LIBAGX_TESS_FACTORS_HALF ||
+          i == LIBAGX_DRAW_WITHOUT_ADJ ||
+          (i >= LIBAGX_UNROLL_RESTART_0 &&
+           i <= LIBAGX_UNROLL_RESTART_10) ||
+          i == LIBAGX_GS_SETUP_INDIRECT ||
+          i == LIBAGX_PREFIX_SUM_GEOM ||
+          (i >= LIBAGX_PREFIX_SUM_TESS_0 &&
+           i <= LIBAGX_PREFIX_SUM_TESS_1) ||
+          i == LIBAGX_INCREMENT_STATISTIC ||
           i == LIBAGX_TESS_SETUP_INDIRECT ||
-          i == LIBAGX_TESS_ISOLINE_0 ||
-          i == LIBAGX_TESS_ISOLINE_1 ||
-          i == LIBAGX_TESS_TRI_0 ||
-          i == LIBAGX_TESS_TRI_1 ||
-          i == LIBAGX_TESS_QUAD_0 ||
-          i == LIBAGX_TESS_QUAD_1)
+          i == LIBAGX_TESS_SETUP_INDIRECT_HW ||
+          i == LIBAGX_TESS_FACTORS_HALF ||
+          (i >= LIBAGX_TESS_ISOLINE_0 && i <= LIBAGX_TESS_QUAD_1))
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
+   }
+
+   /* Every primitive-restart variant is one 1024-thread workgroup and uses
+    * the same 128-byte local ballot array.  The G17P precompiled dispatcher
+    * consumes this metadata to allocate threadgroup memory in its Ioto
+    * program, so pin it independently of the generated machine code. */
+   for (unsigned i = LIBAGX_UNROLL_RESTART_0;
+        i <= LIBAGX_UNROLL_RESTART_10; ++i) {
+      const struct agx_precompiled_kernel_info *unroll_info =
+         (const void *)libagx_g17p[i];
+      CHECK(unroll_info->workgroup_size[0] == 1024);
+      CHECK(unroll_info->workgroup_size[1] == 1);
+      CHECK(unroll_info->workgroup_size[2] == 1);
+      CHECK(unroll_info->local_size == 128);
+   }
+
+   /* Tessellation's two prefix variants exchange 32 subgroup totals through
+    * the same shared allocation before generating the indirect draw. */
+   for (unsigned i = LIBAGX_PREFIX_SUM_TESS_0;
+        i <= LIBAGX_PREFIX_SUM_TESS_1; ++i) {
+      const struct agx_precompiled_kernel_info *info =
+         (const void *)libagx_g17p[i];
+      CHECK(info->workgroup_size[0] == 1024);
+      CHECK(info->local_size == 128);
    }
 
    /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
@@ -131,6 +160,40 @@ main(void)
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
+
+   /* The G17P Vulkan resolve path dispatches this raw RGBA8 kernel for 2x and
+    * 4x images. Pin the complete binary and its 84-byte argument ABI so a
+    * compiler change cannot silently alter the hardware-tested program. */
+   const uint32_t *resolve_blob =
+      libagx_g17p[LIBAGX_RESOLVE_UNORM8X4];
+   CHECK(resolve_blob != NULL);
+   if (!resolve_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *resolve_info =
+      (const void *)resolve_blob;
+   const uint8_t *resolve_binary =
+      (const uint8_t *)resolve_blob + sizeof(*resolve_info);
+   static const uint8_t resolve_end[] = {0x0e, 0x00, 0x00, 0x00};
+   CHECK(resolve_info->preamble_offset == 0);
+   CHECK(resolve_info->main_offset == 0);
+   CHECK(resolve_info->main_size == 4686);
+   CHECK(resolve_info->binary_size == 4686);
+   CHECK(resolve_info->nr_gprs == 42);
+   CHECK(resolve_info->nr_preamble_gprs == 0);
+   CHECK(resolve_info->push_count == 42);
+   CHECK(resolve_info->workgroup_size[0] == 32);
+   CHECK(resolve_info->workgroup_size[1] == 1);
+   CHECK(resolve_info->workgroup_size[2] == 1);
+   CHECK(resolve_info->local_size == 0);
+   CHECK(resolve_info->imageblock_stride == 0);
+   CHECK(!resolve_info->uses_txf);
+   CHECK(resolve_info->agx3_staging_known);
+   CHECK(resolve_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(resolve_binary, resolve_info->binary_size) ==
+         UINT64_C(0x3ec2844f60948ce4));
+   CHECK(memcmp(resolve_binary + resolve_info->binary_size -
+                   sizeof(resolve_end),
+                resolve_end, sizeof(resolve_end)) == 0);
 
    /* The G17P UNORM8 mip kernel replaces one firmware render job per level
     * with a launch in the command buffer's merged compute stream. Its native
@@ -245,12 +308,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3470,
-       UINT64_C(0xb05c70fdd6c4f224)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3586,
-       UINT64_C(0x04595c2f8e9e0974)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3510,
-       UINT64_C(0x6203053d03b24f90)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
+       UINT64_C(0x4d6a2a534eb147d2)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
+       UINT64_C(0x35d000696c7b7865)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
+       UINT64_C(0xa8a7f8b341b3355f)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -391,12 +454,12 @@ main(void)
       /* The top-level loop has the native guard/entry/exit scopes. Native
        * descriptor scheduling assigns independent slots and uses per-slot
        * dependent wait carriers while keeping adjacent producers overlapped. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 52,
-       {1024, 1, 1}, 4, UINT64_C(0x63684eef950d336b)},
-      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 37, {32, 1, 1}, 0,
-       UINT64_C(0x64a1031992df83e1)},
-      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 22, {1, 1, 1}, 0,
-       UINT64_C(0x78a446feaf2e4552)},
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0xf620f3d617876470)},
+      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
+       UINT64_C(0x28b92f478b1714d4)},
+      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
+       UINT64_C(0xd292b1db166dd1e9)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(statistics); ++i) {
       const uint32_t *statistics_blob = libagx_g17p[statistics[i].index];
@@ -552,8 +615,9 @@ main(void)
                 timestamp_expected, sizeof(timestamp_expected)) == 0);
 
    /* Hardware tessellation factor records: one KERNEL(32) invocation per
-    * patch reading the TCS levels as floats and as bits, and writing IEEE
-    * halves. Pin the whole generated program and its launch ABI. */
+    * patch reading the TCS levels as floats and as bits through the
+    * tessellation parameters, and writing IEEE halves from the draw's first
+    * patch index. Pin the whole generated program and its launch ABI. */
    const uint32_t *factors_blob = libagx_g17p[LIBAGX_TESS_FACTORS_HALF];
    CHECK(factors_blob != NULL);
    if (!factors_blob)
@@ -564,11 +628,11 @@ main(void)
       (const uint8_t *)factors_blob + sizeof(*factors_info);
    CHECK(factors_info->preamble_offset == 0);
    CHECK(factors_info->main_offset == 0);
-   CHECK(factors_info->main_size == 1496);
-   CHECK(factors_info->binary_size == 1496);
-   CHECK(factors_info->nr_gprs == 24);
+   CHECK(factors_info->main_size == 1518);
+   CHECK(factors_info->binary_size == 1518);
+   CHECK(factors_info->nr_gprs == 28);
    CHECK(factors_info->nr_preamble_gprs == 0);
-   CHECK(factors_info->push_count == 24);
+   CHECK(factors_info->push_count == 10);
    CHECK(factors_info->workgroup_size[0] == 32);
    CHECK(factors_info->workgroup_size[1] == 1);
    CHECK(factors_info->workgroup_size[2] == 1);
@@ -578,14 +642,14 @@ main(void)
    CHECK(factors_info->agx3_staging_known);
    CHECK(factors_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
-         UINT64_C(0x146c784e634c800b));
+         UINT64_C(0x897af867361b9f42));
    CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
 
    /* Pin both forms of each triangle and quad tessellator. Variant 0 stays
     * entirely in registers. Variant 1 consumes a returned heap-allocation
-    * atomic and exceeds G17P's 192-half register file, so its ordinary spills
-    * begin after the native 16-byte atomic TPS reservation. */
+    * atomic and exceeds G17P's 192-half register file. The atomic return
+    * reservation is above the ordinary spill frame. */
    const struct {
       enum libagx_program index;
       uint32_t main_offset;
@@ -633,6 +697,37 @@ main(void)
       CHECK(memcmp(binary + info->binary_size - sizeof(end), end,
                    sizeof(end)) == 0);
    }
+   /* Indirect hardware tessellation setup: one invocation that places the
+    * TCS outputs, vertex outputs and factor records in the heap without the
+    * AGX2 printf/abort overflow ABI, and writes the launch grids and the
+    * patch draw. Pin the whole generated program and its launch ABI. */
+   const uint32_t *setup_blob = libagx_g17p[LIBAGX_TESS_SETUP_INDIRECT_HW];
+   CHECK(setup_blob != NULL);
+   if (!setup_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *setup_info =
+      (const void *)setup_blob;
+   const uint8_t *setup_binary =
+      (const uint8_t *)setup_blob + sizeof(*setup_info);
+   CHECK(setup_info->preamble_offset == 0);
+   CHECK(setup_info->main_offset == 0);
+   CHECK(setup_info->main_size == 2186);
+   CHECK(setup_info->binary_size == 2186);
+   CHECK(setup_info->nr_gprs == 48);
+   CHECK(setup_info->nr_preamble_gprs == 0);
+   CHECK(setup_info->push_count == 40);
+   CHECK(setup_info->workgroup_size[0] == 1);
+   CHECK(setup_info->workgroup_size[1] == 1);
+   CHECK(setup_info->workgroup_size[2] == 1);
+   CHECK(setup_info->local_size == 0);
+   CHECK(setup_info->imageblock_stride == 0);
+   CHECK(!setup_info->uses_txf);
+   CHECK(setup_info->agx3_staging_known);
+   CHECK(setup_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(setup_binary, setup_info->binary_size) ==
+         UINT64_C(0xbf22b41150f292ab));
+   CHECK(memcmp(setup_binary + setup_info->binary_size - sizeof(end),
+                end, sizeof(end)) == 0);
 
    if (failures) {
       fprintf(stderr, "g17p-precompiled-fill: %u/%u checks failed\n",

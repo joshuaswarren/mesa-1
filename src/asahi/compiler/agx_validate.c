@@ -185,6 +185,11 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
    case AGX_OPCODE_LOCAL_LOAD:
    case AGX_OPCODE_STACK_LOAD:
    case AGX_OPCODE_LD_TILE:
+      if (I->op == AGX_OPCODE_LOCAL_LOAD && I->memory_is_packed) {
+         assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+         assert(I->format == AGX_FORMAT_I8 && I->dest[d].size == AGX_SIZE_16);
+         return DIV_ROUND_UP(util_bitcount(I->mask), 2);
+      }
       if (I->op == AGX_OPCODE_DEVICE_LOAD && I->memory_is_packed) {
          assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
          assert(I->dest[d].size == AGX_SIZE_32);
@@ -193,13 +198,15 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
          return DIV_ROUND_UP(util_bitcount(I->mask) * bytes, 4) * 2;
       }
 
-      /* An AGX3 tile load of an 8-bit normalized attachment comes back
-       * packed, two channels to a 16-bit register; normflt_agx3 unpacks it.
-       * See agx_unpack_normalized_agx3. */
+      /* An AGX3 tile load of an 8-bit attachment comes back packed, two
+       * channels to a 16-bit register; normflt_agx3 unpacks a normalized one
+       * and agx_unpack_integer_8_agx3 a pure integer one. */
       if (I->op == AGX_OPCODE_LD_TILE &&
           ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
           I->dest[d].size == AGX_SIZE_16 &&
-          (I->format == AGX_FORMAT_U8NORM || I->format == AGX_FORMAT_S8NORM))
+          (I->format == AGX_FORMAT_U8NORM || I->format == AGX_FORMAT_S8NORM ||
+           (I->format == AGX_FORMAT_I8 &&
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)))
          return DIV_ROUND_UP(util_bitcount(I->mask), 2);
 
       /* Can write 16-bit or 32-bit. Anything logically 64-bit is already
@@ -304,7 +311,8 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
    case AGX_OPCODE_ST_TILE:
       /* See agx_write_registers */
       if (s == 0) {
-         if (I->op == AGX_OPCODE_DEVICE_STORE && I->memory_is_packed) {
+         if ((I->op == AGX_OPCODE_DEVICE_STORE ||
+              I->op == AGX_OPCODE_LOCAL_STORE) && I->memory_is_packed) {
             assert(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
             assert(I->format == AGX_FORMAT_I8);
             return DIV_ROUND_UP(util_bitcount(I->mask), 2);
@@ -534,6 +542,12 @@ agx_validate_sr(const agx_instr *I)
       return true;
 
    switch (I->sr) {
+   case AGX_SR_INPUT_SAMPLE_MASK:
+      /* G17P SR39 combines immutable API input coverage with the mutable
+       * current coverage. Readers of its low nibble must be ordered against
+       * depth/stencil and coverage writes. */
+      return none || coverage;
+
    case AGX_SR_ACTIVE_THREAD_INDEX_IN_QUAD:
    case AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP:
    case AGX_SR_TOTAL_ACTIVE_THREADS_IN_QUAD:

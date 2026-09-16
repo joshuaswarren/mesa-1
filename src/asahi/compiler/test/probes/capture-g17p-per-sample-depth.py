@@ -7,7 +7,7 @@ Requires Apple's metal, metallib and metal-nt tools through xcrun.
 
 The companion to capture-g17p-per-sample-fragment.py, for the depth store
 rather than the tilebuffer one. See README-g17p-per-sample-fragment.md.
-""" 
+"""
 import importlib.util, json, subprocess, sys
 from pathlib import Path
 HERE = Path(__file__).resolve().parent

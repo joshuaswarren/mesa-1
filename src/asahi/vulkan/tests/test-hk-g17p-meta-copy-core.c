@@ -122,6 +122,34 @@ tile_offset_shifted(uint32_t x, uint32_t y,
 int
 main(void)
 {
+   const VkImageAspectFlags color = VK_IMAGE_ASPECT_COLOR_BIT;
+   const VkImageAspectFlags depth = VK_IMAGE_ASPECT_DEPTH_BIT;
+   const VkImageAspectFlags stencil = VK_IMAGE_ASPECT_STENCIL_BIT;
+   const VkImageAspectFlags pairs[][2] = {
+      {color, color}, {depth, depth}, {stencil, stencil},
+      {depth | stencil, depth | stencil},
+      {color, depth}, {depth, color}, {color, stencil}, {stencil, color},
+   };
+   for (unsigned src = 0; src < 128; ++src) {
+      for (unsigned dst = 0; dst < 128; ++dst) {
+         bool expected = false;
+         for (unsigned i = 0; i < sizeof(pairs) / sizeof(pairs[0]); ++i)
+            expected |= src == pairs[i][0] && dst == pairs[i][1];
+         struct hk_g17p_copy_aspect_plan plan = {.count = 99};
+         CHECK(hk_g17p_copy_aspect_plan(src, dst, &plan) == expected);
+         if (!expected) {
+            CHECK(plan.count == 0 && plan.src[0] == 0 && plan.dst[0] == 0);
+         } else if (src == (depth | stencil)) {
+            CHECK(plan.count == 2);
+            CHECK(plan.src[0] == depth && plan.dst[0] == depth);
+            CHECK(plan.src[1] == stencil && plan.dst[1] == stencil);
+         } else {
+            CHECK(plan.count == 1 && plan.src[0] == src && plan.dst[0] == dst);
+         }
+      }
+   }
+   CHECK(!hk_g17p_copy_aspect_plan(color, depth, NULL));
+
    VkImageCopy2 element_region = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
       .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
@@ -626,11 +654,13 @@ main(void)
          raw_plan.buffer_slice_stride_B == 46080 &&
          raw_plan.buffer_span_B == 64296);
    raw_upload.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
+   CHECK(raw_plan.block_size_B == 8);
    raw_upload.format = VK_FORMAT_R32G32B32A32_UINT;
-   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
+   CHECK(raw_plan.block_size_B == 16);
    raw_upload.format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));

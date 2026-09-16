@@ -7,6 +7,18 @@
 
 #include <string.h>
 
+/* Whether a register still belongs to this generation, as result or payload. */
+static bool
+agx3_slot_generation_live(const uint8_t *reg_slot,
+                          const uint16_t *reader_slots, unsigned slot)
+{
+   for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r) {
+      if (reg_slot[r] == slot || (reader_slots[r] & (1u << (slot - 1))))
+         return true;
+   }
+   return false;
+}
+
 bool
 agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
                            unsigned nslots,
@@ -22,6 +34,7 @@ agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
     * (or never). */
    uint8_t reg_slot[AGX3_SLOT_NUM_TOKENS];
    memset(reg_slot, 0, sizeof(reg_slot));
+   uint16_t pending = 0;
 
    for (unsigned i = 0; i < live_count; ++i) {
       const struct agx3_slot_live_range *range = &live[i];
@@ -34,6 +47,7 @@ agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
             return false;
          reg_slot[r] = range->slot;
       }
+      pending |= (uint16_t)(1u << (range->slot - 1));
    }
 
    /* reader_slots[r] = the slots of the in-flight stores that latch
@@ -43,10 +57,15 @@ agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
     * the next varying's setup raced the outstanding store. */
    uint16_t reader_slots[AGX3_SLOT_NUM_TOKENS];
    memset(reader_slots, 0, sizeof(reader_slots));
+   uint16_t active_reader_slots = 0;
 
    /* slot_waited[s] = the slot has been synchronised since it was last
     * allocated, so later consumers need not wait it again. */
    bool slot_waited[9] = {false};
+
+   /* slot_reissuable[s] = the slot's outstanding generation was issued by an
+    * instruction that reissues live slots itself. */
+   bool slot_reissuable[9] = {false};
 
    unsigned next = 0; /* round-robin cursor into 0..nslots-1 */
 
@@ -63,6 +82,12 @@ agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
          return false;
 
       uint16_t wait_mask = 0;
+      if (I->drain) {
+         wait_mask = pending;
+         for (unsigned slot = 1; slot <= nslots; ++slot)
+            if (pending & (1u << (slot - 1)))
+               slot_waited[slot] = true;
+      }
       for (unsigned s = 0; s < I->nr_srcs; ++s) {
          const uint16_t r = I->src[s];
          if (r >= AGX3_SLOT_NUM_TOKENS)
@@ -123,6 +148,7 @@ agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
 
          bool live = false;
          for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r) {
+            live |= (reader_slots[r] & bit) != 0;
             if (reg_slot[r] == slot) {
                live = true;
                reg_slot[r] = 0;
@@ -131,23 +157,64 @@ agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
          if (live && !slot_waited[slot])
             wait_mask |= bit;
          slot_waited[slot] = true;
+         pending &= (uint16_t)~bit;
       }
-
-      out[i].wait_mask = wait_mask;
 
       /* Every slot this instruction waited is now retired, so the registers
        * its async ops were reading are free again. */
-      if (wait_mask) {
+      if (wait_mask & active_reader_slots) {
          for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r)
             reader_slots[r] &= (uint16_t)~wait_mask;
+         active_reader_slots &= (uint16_t)~wait_mask;
       }
 
       if (I->is_async) {
-         const uint8_t slot =
-            I->preferred_slot ? I->preferred_slot : (uint8_t)(next + 1);
-         if (!I->preferred_slot)
-            next = (next + 1) % nslots;
+         /*
+          * A slot names one generation at a time. Issuing it while an earlier
+          * generation is still outstanding for a live result leaves that
+          * result's consumer waiting on the new generation instead, so it can
+          * read its register before the older operation has written it. The
+          * round-robin allocation therefore skips such slots, and when every
+          * slot is in that state it waits the old generation out first.
+          *
+          * A preferred slot keeps its witnessed protocol: Apple's fragment
+          * tile loads, for one, issue slot 6 again for each tile read. So
+          * does an instruction that reissues live slots, such as a fragment
+          * coefficient load, which has no wait field: it only skips a slot
+          * whose live generation some other kind of instruction issued, and
+          * when every slot is in that state it takes the next one as before.
+          */
+         uint8_t slot = I->preferred_slot;
+         if (!slot) {
+            for (unsigned t = 0; t < nslots && !slot; ++t) {
+               const uint8_t candidate = (uint8_t)((next + t) % nslots + 1);
+               if (slot_waited[candidate] ||
+                   !agx3_slot_generation_live(reg_slot, reader_slots, candidate) ||
+                   (I->reissues_live_slot && slot_reissuable[candidate]))
+                  slot = candidate;
+            }
+            if (!slot) {
+               slot = (uint8_t)(next + 1);
+               if (!I->reissues_live_slot) {
+                  wait_mask |= (uint16_t)(1u << (slot - 1));
+                  slot_waited[slot] = true;
+               }
+            }
+            next = slot % nslots;
+         }
+
+         out[i].wait_mask = wait_mask;
          out[i].slot = slot;
+         pending &= (uint16_t)~wait_mask;
+         pending |= (uint16_t)(1u << (slot - 1));
+
+         /* Allocation can add a wait when every generation is occupied.
+          * Retire its payload readers before recording this instruction. */
+         if (wait_mask & active_reader_slots) {
+            for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r)
+               reader_slots[r] &= (uint16_t)~wait_mask;
+            active_reader_slots &= (uint16_t)~wait_mask;
+         }
 
          /* Reusing an already-synchronized slot starts a new dependency
           * generation. Retire the old generation's register aliases before
@@ -160,19 +227,21 @@ agx3_slot_assign_with_live(const struct agx3_slot_instr *instrs, unsigned n,
             }
          }
          slot_waited[slot] = false; /* freshly outstanding */
-         for (unsigned r = 0; r < AGX3_SLOT_NUM_TOKENS; ++r)
-            reader_slots[r] &= (uint16_t)~(1u << (slot - 1));
+         slot_reissuable[slot] = I->reissues_live_slot;
          for (unsigned d = 0; d < I->nr_dsts; ++d) {
             if (I->dst[d] >= AGX3_SLOT_NUM_TOKENS)
                return false;
             reg_slot[I->dst[d]] = slot;
          }
-         if (I->latches_srcs) {
+         if (I->latches_srcs && I->nr_srcs) {
+            active_reader_slots |= (uint16_t)(1u << (slot - 1));
             for (unsigned s = 0; s < I->nr_srcs; ++s)
                reader_slots[I->src[s]] |= (uint16_t)(1u << (slot - 1));
          }
       } else {
+         out[i].wait_mask = wait_mask;
          out[i].slot = 0;
+         pending &= (uint16_t)~wait_mask;
          for (unsigned d = 0; d < I->nr_dsts; ++d) {
             if (I->dst[d] >= AGX3_SLOT_NUM_TOKENS)
                return false;

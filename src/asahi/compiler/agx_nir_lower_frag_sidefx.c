@@ -102,7 +102,8 @@ agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p)
     * will predicate simple writes for us, but that fails with sample shading so
     * we do that in software too.
     */
-   NIR_PASS(_, s, nir_lower_helper_writes, s->info.fs.uses_sample_shading);
+   NIR_PASS(_, s, nir_lower_helper_writes,
+            s->info.fs.uses_sample_shading || g17p);
 
    bool writes_zs =
       s->info.outputs_written &

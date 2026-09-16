@@ -855,6 +855,29 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    return vk_command_buffer_end(&cmd->vk);
 }
 
+static bool
+hk_dependency_has_host_read(const VkDependencyInfo *info)
+{
+   for (uint32_t i = 0; i < info->memoryBarrierCount; ++i) {
+      if (info->pMemoryBarriers[i].dstAccessMask & VK_ACCESS_2_HOST_READ_BIT)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      if (info->pBufferMemoryBarriers[i].dstAccessMask &
+          VK_ACCESS_2_HOST_READ_BIT)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < info->imageMemoryBarrierCount; ++i) {
+      if (info->pImageMemoryBarriers[i].dstAccessMask &
+          VK_ACCESS_2_HOST_READ_BIT)
+         return true;
+   }
+
+   return false;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -877,6 +900,21 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    }
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
+
+   /* A barrier-only command buffer otherwise records no GPU work, so it
+    * cannot make a preceding fragment store visible to the host. Emit the
+    * exact G17P strong CDM cache-maintenance record only when the API requests
+    * host-read availability. This preserves ordinary batching and adds work
+    * only at the synchronization boundary the application already declared. */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       hk_dependency_has_host_read(pDependencyInfo)) {
+      struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true);
+      if (!cs)
+         return;
+
+      hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
+      hk_cdm_cache_flush(dev, cs);
+   }
 }
 
 void
@@ -1197,6 +1235,35 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    return root_ptr.gpu;
 }
 
+static uint64_t
+hk_upload_native_spilled_rt_descs(struct hk_cmd_buffer *cmd)
+{
+   const struct hk_rendering_state *render = &cmd->state.gfx.render;
+   uint8_t entries[HK_MAX_RTS][AGX_G17P_EMRT_DESCRIPTOR_SIZE] = {0};
+   for (unsigned rt = 0; rt < render->color_att_count; ++rt) {
+      if (!render->tilebuffer.spilled[rt])
+         continue;
+      const struct hk_image_view *view = render->color_att[rt].iview;
+      if (!view || !view->planes[0].emrt_pbe_valid ||
+          !view->planes[0].emrt_read_heap_index) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
+         return 0;
+      }
+      memcpy(entries[rt], &view->planes[0].emrt_texture, 32);
+      memcpy(entries[rt] + 32, &view->planes[0].emrt_pbe, 32);
+      memcpy(entries[rt] + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET,
+             &view->planes[0].emrt_read_heap_index, 4);
+      memcpy(entries[rt] + AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET,
+             &view->planes[0].emrt_read_heap_index, 4);
+      memcpy(entries[rt] + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET,
+             &view->planes[0].emrt_atomic_sw, 8);
+      memcpy(entries[rt] + AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET,
+             &view->planes[0].emrt_aligned_width, 4);
+   }
+   return hk_pool_upload(cmd, entries,
+                         render->color_att_count * sizeof(entries[0]), 32);
+}
+
 void
 hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
                                struct hk_cmd_buffer *cmd)
@@ -1302,9 +1369,11 @@ hk_g17p_basic_fragment_layout(struct hk_cmd_buffer *cmd)
  * HAL200 updateVaryingTable (0x3efa58) uses the same CF entry encoding for
  * smooth, linear and flat inputs, including their mixture in one shader.
  * Flat inputs select C. Native G17P Point and Triangle pipelines have identical
- * complete fragment text for flat vec2/vec3/vec4 inputs. Admit points with the
- * ordinary first-vertex selector as well as non-fan triangles, but never the
- * first-fan layout. Position Z and reciprocal W use native coefficient sources.
+ * complete fragment text for flat vec2/vec3/vec4 inputs. The provoking selector
+ * is topology-independent, so line lists and strips use the same witnessed
+ * first/last selector values as triangles. First-provoking fans use their
+ * dedicated selector and the fragment shader's draw-root B/C coefficient
+ * choice. Position Z and reciprocal W use native coefficient sources.
  */
 bool
 hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
@@ -1317,13 +1386,12 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
       return cf->nr_cf == 0;
 
    /* The coefficients describe the hardware vertex program the draw
-    * launches: the API vertex shader, or the post-tessellation vertex
-    * program when tessellation is bound. */
+    * launches: the API vertex shader, the post-tessellation vertex program,
+    * or the geometry raster-copy variant. */
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct hk_shader *vs =
       gfx->shaders[MESA_SHADER_VERTEX] ? hk_bound_hw_vs(gfx) : NULL;
-   if (!vs || gfx->shaders[MESA_SHADER_GEOMETRY] ||
-       cf->nr_bindings > HK_AGX3_G17P_MAX_COEFFICIENTS ||
+   if (!vs || cf->nr_bindings > HK_AGX3_G17P_MAX_COEFFICIENTS ||
        cf->nr_cf > HK_AGX3_G17P_MAX_COEFFICIENTS ||
        vs->agx3_vdm_state_update.source_layout !=
           AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT ||
@@ -1340,11 +1408,17 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
       if (!b->smooth) {
          const bool point = gfx->topology == AGX_PRIMITIVE_POINTS &&
                             gfx->provoking == 0;
+         const bool line =
+            (gfx->topology == AGX_PRIMITIVE_LINES ||
+             gfx->topology == AGX_PRIMITIVE_LINE_STRIP) &&
+            (gfx->provoking == 0 || gfx->provoking == 2);
          const bool triangle =
             (gfx->topology == AGX_PRIMITIVE_TRIANGLES ||
              gfx->topology == AGX_PRIMITIVE_TRIANGLE_STRIP) &&
             (gfx->provoking == 0 || gfx->provoking == 2);
-         if (b->perspective || (!point && !triangle))
+         const bool fan = gfx->topology == AGX_PRIMITIVE_TRIANGLE_FAN &&
+                          (gfx->provoking == 1 || gfx->provoking == 2);
+         if (b->perspective || (!point && !line && !triangle && !fan))
             return false;
       }
       if (b->slot == VARYING_SLOT_POS) {
@@ -1364,12 +1438,24 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             return false;
          }
       } else {
-         /* A fragment gl_ViewportIndex read is an ordinary flat varying
-          * that the vertex shader also writes out as a user word. */
+         /* Fragment layer and gl_ViewportIndex are ordinary flat varyings
+          * that the vertex shader also writes out as user words. Clip-distance
+          * inputs use the compiler's compact coefficient layout while the
+          * fixed-function clipper consumes the same VS output. Cull-distance
+          * emulation similarly links the VS-generated CULL_PRIMITIVE words
+          * into its FS prolog as noperspective coefficients. */
+         const bool cull_slot =
+            b->slot == VARYING_SLOT_CULL_PRIMITIVE ||
+            b->slot == VARYING_SLOT_CULL_PRIMITIVE + 1;
+         const bool clip_slot = b->slot == VARYING_SLOT_CLIP_DIST0 ||
+                                b->slot == VARYING_SLOT_CLIP_DIST1;
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
-                                b->slot == VARYING_SLOT_VIEWPORT;
-         if (!user_slot || (b->perspective && !has_rhw) ||
+                                b->slot == VARYING_SLOT_LAYER ||
+                                b->slot == VARYING_SLOT_VIEWPORT || clip_slot ||
+                                cull_slot;
+         if (!user_slot || (cull_slot && (b->perspective || !b->smooth)) ||
+             (b->perspective && !has_rhw) ||
              b->offset + b->count > vs->info.uvs.components[b->slot])
             return false;
          ++user_bindings;
@@ -1388,6 +1474,8 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
                                          struct hk_shader *s,
                                          struct hk_linked_shader *linked)
 {
+   const bool native_spills = s->info.stage == MESA_SHADER_FRAGMENT &&
+      agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer);
    if (!linked || !linked->b.bo || !linked->b.bo->va || linked->b.size == 0 ||
        linked->b.size > UINT32_MAX || s->b.info.has_preamble ||
        s->b.info.scratch_size > AGX3_G17P_MAX_SPILL_B ||
@@ -1398,7 +1486,7 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
         !(s->info.agx3_indexed_sampler_valid &&
           s->b.info.sampler_state_count == 1)) ||
        s->b.info.uses_sampler_heap ||
-       (linked->b.uses_txf && !s->info.agx3_indexed_sampler_valid) ||
+       (linked->b.uses_txf && !s->info.agx3_indexed_sampler_valid && !native_spills) ||
        s->info.set_count > HK_AGX3_G17P_MAX_ROOT_SETS) {
       mesa_loge_once(
          "G17P graphics program refused: linked=%u bo=%u va=%u size=%zu "
@@ -1499,7 +1587,8 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
 
 #define HK_G17P_FRAGMENT_RANGES                                                \
    (1 /* blend constants */ + 1 /* combined sampler heap */ +                  \
-    1 /* indexed sampler heap */ + 1 /* root */ + 1 /* promoted constants */)
+    1 /* indexed sampler heap */ + 1 /* root */ + 1 /* promoted constants */ + \
+    1 /* native spill table */)
 
 static_assert(HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_VERTEX_RANGES &&
                  HK_AGX3_G17P_GRAPHICS_MAX_RANGES >= HK_G17P_FRAGMENT_RANGES,
@@ -1531,7 +1620,9 @@ hk_g17p_graphics_uniform_ranges(
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    const uint64_t root_ptr = cmd->state.gfx.root;
    size_t count = 0;
-   unsigned root_uniform = 0;
+   const unsigned root_uniform = s->info.agx3_root_uniform;
+   const bool native_spills = s->info.stage == MESA_SHADER_FRAGMENT &&
+      agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer);
 
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
@@ -1590,15 +1681,22 @@ hk_g17p_graphics_uniform_ranges(
          };
       }
 
-      root_uniform = uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_attribs);
    } else if ((s->info.stage == MESA_SHADER_GEOMETRY ||
                s->info.stage == MESA_SHADER_TESS_EVAL) &&
               s->b.info.stage == MESA_SHADER_VERTEX) {
-      /* poly's raster variant lowers its geometry parameter loads, and the
-       * post-tessellation vertex program its control-shader output loads,
-       * against the compute-style root at uniform zero. */
-      root_uniform = 0;
+      /* The compiled geometry/tessellation raster variant owns its root
+       * layout. Do not infer it from the original API stage. */
    } else if (s->info.stage == MESA_SHADER_FRAGMENT) {
+      if (native_spills) {
+         const uint64_t table = hk_upload_native_spilled_rt_descs(cmd);
+         const uint64_t pointer = table ? hk_pool_upload(cmd, &table, 8, 8) : 0;
+         if (!pointer || !linked->g17p_emrt_heap_base)
+            return hk_g17p_graphics_ranges_refused(range_count, count);
+         ranges[count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = linked->g17p_emrt_heap_base,
+            .size_halfs = 4, .address = pointer,
+         };
+      }
       if (cmd->state.gfx.uses_blend_constant) {
          /* The non-monolithic blend epilog reads the four constants from
           * the base selected by its linked key. It is half4 for the standard
@@ -1615,7 +1713,6 @@ hk_g17p_graphics_uniform_ranges(
             return hk_g17p_graphics_ranges_refused(range_count, count);
          count++;
       }
-      root_uniform = AGX_ABI_FUNI_ROOT;
    } else {
       return hk_g17p_graphics_ranges_refused(range_count, count);
    }
@@ -1708,9 +1805,12 @@ hk_g17p_graphics_uniform_ranges(
       };
    }
 
-   if (s->info.agx3_indexed_sampler_valid) {
-      if ((s->info.stage != MESA_SHADER_FRAGMENT &&
-           s->info.stage != MESA_SHADER_VERTEX) ||
+   if (native_spills && s->info.agx3_combined_sampler_valid)
+      return hk_g17p_graphics_ranges_refused(range_count, count);
+
+   if (s->info.agx3_indexed_sampler_valid || native_spills) {
+      if ((s->b.info.stage != MESA_SHADER_FRAGMENT &&
+           s->b.info.stage != MESA_SHADER_VERTEX) ||
           !dev->sampled_images.bo || !dev->samplers.table.bo)
          return hk_g17p_graphics_ranges_refused(range_count, count);
       const uint64_t pointers[2] = {
@@ -1749,7 +1849,9 @@ hk_g17p_graphics_uniform_ranges(
       };
    }
 
-   if (s->info.agx3_uses_root || s->info.set_count != 0) {
+   if (hk_agx3_g17p_graphics_needs_root(
+          s->info.agx3_uses_root, linked->g17p_prolog_uses_root,
+          s->info.set_count)) {
       if (!root_ptr)
          return hk_g17p_graphics_ranges_refused(range_count, count);
 

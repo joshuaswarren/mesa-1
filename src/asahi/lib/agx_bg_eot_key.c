@@ -9,10 +9,11 @@
 enum pipe_format
 agx_g17p_rt0_pbe_format(enum pipe_format format)
 {
-   /* R11G11B10 is packed explicitly into one tile word on G17P. Store that
-    * word without another format conversion. Other formats retain the
-    * existing raw-sRGB rule. */
-   return format == PIPE_FORMAT_R11G11B10_FLOAT
+   /* R11G11B10 and R9G9B9E5 are packed explicitly into one tile word on
+    * G17P. Store that word without another format conversion. Other formats
+    * retain the existing raw-sRGB rule. */
+   return (format == PIPE_FORMAT_R11G11B10_FLOAT ||
+           format == PIPE_FORMAT_R9G9B9E5_FLOAT)
              ? PIPE_FORMAT_R32_UINT
              : util_format_linear(format);
 }
@@ -100,6 +101,10 @@ agx_g17p_mrt_eot_selector(enum pipe_format format)
    case PIPE_FORMAT_R32G32_FLOAT:
    case PIPE_FORMAT_R32G32B32A32_FLOAT:
    case PIPE_FORMAT_R32G32B32X32_FLOAT:
+   /* RGB9E5 is packed into one raw R32 word before the tile store, and its
+    * PBE is likewise R32_UINT. Multi-target EOT therefore uses the grounded
+    * W32 integer selector rather than asking IMGWBLK to convert it again. */
+   case PIPE_FORMAT_R9G9B9E5_FLOAT:
       return 0x35;
 
    default:
@@ -121,6 +126,7 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
       format == PIPE_FORMAT_R32_SINT || format == PIPE_FORMAT_R32G32_SINT ||
       format == PIPE_FORMAT_R32G32_UINT ||
       format == PIPE_FORMAT_R11G11B10_FLOAT ||
+      format == PIPE_FORMAT_R9G9B9E5_FLOAT ||
       format == PIPE_FORMAT_R32G32B32X32_FLOAT ||
       format == PIPE_FORMAT_R32G32B32A32_FLOAT ||
       format == PIPE_FORMAT_R32G32B32X32_UINT ||
@@ -141,6 +147,7 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
    case PIPE_FORMAT_R32_UINT:
    case PIPE_FORMAT_R32_SINT:
    case PIPE_FORMAT_R11G11B10_FLOAT:
+   case PIPE_FORMAT_R9G9B9E5_FLOAT:
    case PIPE_FORMAT_R8_UINT:
    case PIPE_FORMAT_R8_SINT:
    case PIPE_FORMAT_R8G8_UINT:

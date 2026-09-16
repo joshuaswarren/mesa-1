@@ -349,6 +349,96 @@ test_unrolled_sample_depth(void)
    return ok;
 }
 
+/* A late-discard main shader exports its surviving-sample mask to the split
+ * epilog. At multisample count the epilog is unrolled, so each surviving
+ * DEPTHF must intersect its sample bit with that dynamic exported mask
+ * directly, without a separate MOVMSK. The API mask below statically removes
+ * sample 1, leaving exactly one depth and colour operation for sample 0.
+ * This is the exact shape used by
+ * samplemask_no_early_fragment_tests_depth_samples_2. */
+static bool
+test_unrolled_dynamic_depth_mask(void)
+{
+   struct agx_fs_epilog_key key = {
+      .link.loc_written = BITFIELD_BIT(0),
+      .link.size_32 = BITFIELD_BIT(0),
+      .link.sample_shading = true,
+      .link.write_z = true,
+      .link.sample_mask_after_force_early = true,
+      .nr_samples = 2,
+      .preserve_zero_mask = true,
+      .defer_api_sample_mask = true,
+      .api_sample_mask = 1,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.rt_formats[0] = PIPE_FORMAT_R8G8B8A8_UNORM;
+   key.blend.rt[0].colormask = 0xf;
+   key.blend.rt[0].mode =
+      agx_pack_blend_standard(PIPE_BLEND_ADD, PIPE_BLENDFACTOR_ONE,
+                              PIPE_BLENDFACTOR_ZERO, PIPE_BLEND_ADD,
+                              PIPE_BLENDFACTOR_ONE, PIPE_BLENDFACTOR_ZERO);
+
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P dynamic-mask depth FS epilog");
+   struct agx_fs_epilog_key pixel = key;
+   pixel.link.sample_shading = false;
+   pixel.defer_monolithic_msaa = true;
+   agx_nir_fs_epilog(&b, &pixel);
+   agx_nir_lower_to_per_sample(b.shader);
+   bool ok = agx_nir_unroll_g17p_samples(b.shader, 2,
+                                         key.link.loc_written);
+   bool opt_progress;
+   do {
+      opt_progress = false;
+      opt_progress |= nir_opt_constant_folding(b.shader);
+      opt_progress |= nir_opt_algebraic(b.shader);
+   } while (opt_progress);
+   const bool hoisted = agx_nir_hoist_g17p_zs_writes(b.shader);
+   const unsigned sample_masks =
+      count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx);
+   ok &= hoisted && sample_masks == 0;
+   agx_nir_lower_g17p_tile_samples(b.shader, 2);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = 2,
+   };
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &backend_key, &part);
+   ok &= compiled;
+
+   static const uint8_t wait1[] = {0x87, 0x02, 0x54, 0x01, 0x00, 0x00};
+   static const uint8_t release1[] = {0x07, 0x02, 0x54, 0x01, 0x00, 0x00};
+   const unsigned waits = count_bytes(&part, wait1, sizeof(wait1));
+   const unsigned releases = count_bytes(&part, release1, sizeof(release1));
+   ok &= waits == 1 && releases == 1;
+
+   unsigned depth_writes = 0;
+   const uint8_t *text = part.binary;
+   for (size_t at = 0; text && at + 6 <= part.info.binary_size; ++at) {
+      if (text[at] == 0xd7 && (text[at + 1] & 0x0f) == 0x04 &&
+          text[at + 2] == 0x54 && text[at + 5] == 0x03)
+         depth_writes++;
+   }
+   ok &= depth_writes == 1;
+
+   if (!ok) {
+      fprintf(stderr,
+              "dynamic depth metrics: hoisted=%u masks=%u waits=%u "
+              "releases=%u depth=%u binary=%u compiled=%u\n",
+              hoisted, sample_masks, waits, releases, depth_writes,
+              part.info.binary_size, compiled);
+   }
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -362,6 +452,10 @@ main(void)
    }
    if (!test_unrolled_sample_depth()) {
       fprintf(stderr, "G17P per-sample depth writes were not staged per sample\n");
+      return 1;
+   }
+   if (!test_unrolled_dynamic_depth_mask()) {
+      fprintf(stderr, "G17P dynamic sample mask did not reach multisample DEPTHF\n");
       return 1;
    }
    if (!test_epilog_discard_policy()) {
@@ -384,9 +478,9 @@ main(void)
    struct agx_fs_epilog_link_info link = {0};
    if (!agx_nir_lower_fs_output_to_epilog_for_device(
           main, AGX_CHIP_G17P, &link) ||
-       link.sample_mask_after_force_early ||
-       count_intrinsic(main, nir_intrinsic_demote_samples) != 1) {
-      fprintf(stderr, "G17P split moved the early demote into LSTCOL\n");
+       !link.sample_mask_after_force_early ||
+       count_intrinsic(main, nir_intrinsic_demote_samples) != 0) {
+      fprintf(stderr, "G17P split did not export its post-test sample mask\n");
       return 1;
    }
 
@@ -409,8 +503,8 @@ main(void)
 
    agx_nir_lower_sample_mask(main);
    if (count_intrinsic(main, nir_intrinsic_demote_samples) != 0 ||
-       count_intrinsic(main, nir_intrinsic_sample_mask_agx) != 2) {
-      fprintf(stderr, "G17P early demote did not lower to MOVMSK NIR\n");
+       count_intrinsic(main, nir_intrinsic_sample_mask_agx) != 1) {
+      fprintf(stderr, "G17P forced-early test was not retained exactly once\n");
       return 1;
    }
 

@@ -92,13 +92,20 @@ bool agx_pbe_agx3_3d_mip_pack(
  * logical width and height, not sample-expanded ones.
  *
  * Bounded to the tiled 2x/4x colour shapes G17P's tilebuffer admits. 8x has
- * the same encoder path but no tilebuffer or layout qualification, and
- * multisample arrays (dimension 8) need their own end-of-tile evidence, so
- * both are refused here rather than guessed.
+ * the same encoder path but no tilebuffer or layout qualification, so it is
+ * refused here rather than guessed.
  */
 bool agx_pbe_agx3_2d_multisample_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
    uint32_t samples, struct agx_pbe_agx3_descriptor *out);
+
+/* Layered multisample colour target. The Gen9 encoder combines the layered
+ * dimension-8 selector and layer-count fields with the same 2x/4x sample
+ * selector as the dimension-4 packet. */
+bool agx_pbe_agx3_2d_array_multisample_pack(
+   uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
+   uint32_t layers, uint32_t samples,
+   struct agx_pbe_agx3_descriptor *out);
 
 /* Gen9 native mip extension: the existing descriptor is unchanged for
  * level=0, levels=1. Width/height and buffer describe the complete mip chain. */

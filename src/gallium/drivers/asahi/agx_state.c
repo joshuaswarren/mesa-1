@@ -1761,7 +1761,7 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
    };
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      NIR_PASS(_, nir, agx_nir_lower_interpolation, false);
    }
 
    /* We always use dynamic sample shading in the GL driver. Indicate that. */
@@ -1897,7 +1897,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
                   NULL);
          NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
-         NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs);
+         NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs, false);
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
 
@@ -2050,7 +2050,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       NIR_PASS(_, gs_copy, agx_nir_lower_cull_distance_vs);
 
       struct agx_unlinked_uvs_layout uvs = {0};
-      NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs);
+      NIR_PASS(_, gs_copy, agx_nir_lower_uvs, &uvs, false);
 
       compiled->gs_copy =
          agx_compile_nir(dev, gs_copy, &pctx->debug, MESA_SHADER_GEOMETRY,
@@ -4319,6 +4319,8 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
       if (!cs || !cs->bo || !cs->info.main_size || !cs->info.nr_gprs ||
           cs->info.nr_preamble_gprs ||
           (cs->info.rodata.size_16 && !cs->rodata_offset) ||
+          (cs->info.printf_uniform &&
+           cs->info.printf_uniform < AGX_ABI_AGX3_PRECOMP_ARG_HALFS) ||
           !cs->info.agx3_staging_known || !args || !arg_size ||
           arg_size > UINT16_MAX * 2u ||
           cs->entry_offset > UINT64_MAX - cs->ptr ||
@@ -4330,13 +4332,27 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
       if (!grid.count[0] || !grid.count[1] || !grid.count[2])
          return;
 
-      const uint64_t uploaded_data =
-         agx_pool_upload_aligned(&batch->pool, args, arg_size, 4);
+      /* Match the precompiler's rebased arguments and optional runtime printf
+       * address. Pad packed argument structs for Ioto's whole-dword loads. */
+      const size_t printf_offset = cs->info.printf_uniform
+         ? (size_t)(cs->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
+         : 0;
+      const size_t upload_size = ALIGN_POT(
+         cs->info.printf_uniform ? MAX2(arg_size, printf_offset + 8) : arg_size, 4);
+      struct agx_ptr uploaded = agx_pool_alloc_aligned(&batch->pool, upload_size, 4);
+      if (!uploaded.cpu || upload_size / 2 > UINT16_MAX)
+         agx_native_descriptor_rejected(dev, "precompiled argument upload");
+      memcpy(uploaded.cpu, args, arg_size);
+      memset((uint8_t *)uploaded.cpu + arg_size, 0, upload_size - arg_size);
+      if (cs->info.printf_uniform)
+         memcpy((uint8_t *)uploaded.cpu + printf_offset,
+                &dev->printf_buffer_address, sizeof(uint64_t));
+      const uint64_t uploaded_data = uploaded.gpu;
       /* Above the halves the AGX3 hardware ABI owns, matching where the
        * precompiler now places these loads. */
       const struct agx3_ioto_uniform_range range = {
          .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
-         .size_halfs = DIV_ROUND_UP(arg_size, 2),
+         .size_halfs = upload_size / 2,
          .address = uploaded_data,
       };
 

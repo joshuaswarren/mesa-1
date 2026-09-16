@@ -14,7 +14,7 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                   uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len || dest >= 256 ||
-       src >= 128 || (!half && ((dest | src) & 1)) ||
+       src >= 256 || (!half && ((dest | src) & 1)) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
       return false;
 
@@ -28,7 +28,11 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     *   2705560302044004  h3 <- popcount(h2), h2 stored later, slot 6
     *   2705560402004c04  r2 <- popcount(r0), r0 stored later, slot 6
     *   2715540202045c04  r1 <- popcount(^r1), wait slot 1
-    *   2705540403004e04  $r2 <- popcount($r0) */
+    *   2705540403004e04  $r2 <- popcount($r0)
+    * and, with enough 64-bit values live that the source lands high:
+    *   2705548003005d04  $r64 <- popcount(^r64)
+    *   2705549803305d04  $r76 <- popcount(^r76)
+    *   2705549003005c04  $r72 <- popcount(^r0) */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, half ? 1 : 2}, {23, 2}, {24, half ? 1 : 2},
    };
@@ -556,7 +560,7 @@ agx3_alu_fadd_stage(enum agx_isa_encoding enc, uint16_t staging_dest,
 bool
 agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
                            uint16_t src, uint8_t immediate, uint16_t addend,
-                           bool negate_addend, enum agx3_alu_hint src_hint,
+                           bool negate_addend, bool saturate, enum agx3_alu_hint src_hint,
                            enum agx3_alu_hint addend_hint, bool dest_cache,
                            uint16_t wait_mask,
                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
@@ -575,13 +579,13 @@ agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
       {2,dest},{11,dest_cache},{18,src},{34,immediate},{52,addend},
       {27,src_hint==AGX3_ALU_HINT_CACHE},{29,src_hint==AGX3_ALU_HINT_DISCARD},
       {61,addend_hint==AGX3_ALU_HINT_CACHE},{63,addend_hint==AGX3_ALU_HINT_DISCARD},
-      {65,negate_addend},
+      {65,negate_addend},{14,saturate},
    };
-   unsigned n=10;
+   unsigned n=11;
    for(unsigned slot=0;slot<6;slot++)
       if(wait_mask & (1u<<slot))fields[n++]=(struct agx3_field_kv){97+slot,1};
    for(unsigned ep=2;ep<=4;ep++)
-      if(agx3_bind_compose(enc,"f32fma",ep,base,negate_addend ? 11 : 10,
+      if(agx3_bind_compose(enc,"f32fma",ep,base,(negate_addend || saturate) ? 11 : 10,
                            fields,n,out,len))
          return true;
    return false;
@@ -595,7 +599,7 @@ agx3_alu_fma_minifloat(enum agx_isa_encoding enc, uint16_t dest,
                        uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   return agx3_alu_fma_minifloat_mod(enc, dest, src, immediate, addend, false,
+   return agx3_alu_fma_minifloat_mod(enc, dest, src, immediate, addend, false, false,
                                      src_hint, addend_hint, dest_cache,
                                      wait_mask, out, len);
 }
@@ -652,8 +656,8 @@ agx3_alu_float_to_int32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                         bool dest_cache, uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
-   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 128 ||
-       src >= 128 || (dest & 1) || (src & 1) ||
+   if (!out || !len || enc != AGX_ISA_ENCODING_AGX3B || dest >= 256 ||
+       src >= 256 || (dest & 1) || (src & 1) ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~UINT16_C(0x3f)))
       return false;
@@ -664,7 +668,14 @@ agx3_alu_float_to_int32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
     *
     * Against the previously used fixed baseline, f11 is destination cache,
     * f25 is source cache and f27 is source discard. They are lifetime fields,
-    * so derive them from post-RA state rather than baking in discard. */
+    * so derive them from post-RA state rather than baking in discard.
+    *
+    * metal-nt 32023.917 applegpu_g17p, 96 live uint(float) results:
+    *   270754be037cb5080200  $r95 <- uint(^r95)
+    * Both register fields address eight-bit half indices. Restricting them
+    * to halves below 128 rejected high-pressure tessellation evaluation
+    * shaders whose float-to-integer result landed at half 128.
+    */
    const struct agx3_field_kv base[] = {
       {9, 2}, {10, 2}, {23, 2}, {24, 2},
       {41, is_signed ? 5 : 4}, {42, 1},
@@ -1413,6 +1424,43 @@ agx3_alu_bit_nor(enum agx_isa_encoding enc, uint16_t dest,
     *   2b030e01010000800000  bit_nor r2, ^r1, r0
     *   2b011603010000800000  bit_nor r2, r0, ^r1 */
    return agx3_alu_bit_named(enc, "bit_nor", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
+}
+
+/* Apple's two-register logic ops of uint attachments (blend/native/bitops.py),
+ * r2 = a, r0 = b, both dead, slot-6 wait:
+ *   ~(a & b)   0b031e01030800800000  bit_nand
+ *   ~(a ^ b)   0b031f01010000800000  bit_xnor
+ *   a | ~b     0b011f03030000800000  bit_orc r0, ^r0, ^r2 (a = r0, b = r2)
+ *   ~a | b     0b031f01030000800000  bit_orc r0, ^r2, ^r0
+ * bit_orc keeps its operand order, like bit_andc. */
+bool
+agx3_alu_bit_nand(enum agx_isa_encoding enc, uint16_t dest,
+                  const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_bit_named(enc, "bit_nand", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
+}
+
+bool
+agx3_alu_bit_xnor(enum agx_isa_encoding enc, uint16_t dest,
+                  const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_bit_named(enc, "bit_xnor", dest, src, hints, dest_cache,
+                             wait_mask, out, len);
+}
+
+bool
+agx3_alu_bit_orc(enum agx_isa_encoding enc, uint16_t dest,
+                 const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                 bool dest_cache, uint16_t wait_mask,
+                 uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_alu_bit_named(enc, "bit_orc", dest, src, hints, dest_cache,
                              wait_mask, out, len);
 }
 

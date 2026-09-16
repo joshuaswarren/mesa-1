@@ -16,10 +16,9 @@
  * Per-mnemonic canonical baselines, taken verbatim from the decoded bare
  * witnesses (transcendental-int-re analysis.json `baselines`, corpus_frag for
  * the gradients). f9/f10/f25/f26/f29 are the operand-shape selectors; f11,
- * f27, f29 and f40(b)/f42(c) include the liveness-hint bits exactly as the
- * canonical witness carried them -- the research grades them non-semantic,
- * and replaying the witness value keeps every emitted byte string one Apple
- * itself produced. On AGX3c the class discriminator f33=3 plus the f34
+ * f27, f29 and f40(b)/f42(c) retain the canonical witness values here. G17P's
+ * rounding/log/exp source-discard field is overridden from the actual source
+ * lifetime below. On AGX3c the class discriminator f33=3 plus the f34
  * op-select join the baseline (f32sinc uses a distinct word0 without f42).
  */
 struct funop_form {
@@ -101,10 +100,10 @@ is_b(enum agx_isa_encoding e)
 }
 
 bool
-agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
-                  uint16_t src, bool src_abs, bool src_neg, bool saturate,
-                  uint16_t wait_mask, uint8_t out[AGX3_FUNOP_MAX_LENGTH],
-                  uint8_t *len)
+agx3_funop_encode_source_lifetime(
+   enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest, uint16_t src,
+   bool src_abs, bool src_neg, bool saturate, uint16_t wait_mask, bool src_live,
+   uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len)
 {
    if (out == NULL || len == NULL)
       return false;
@@ -136,6 +135,14 @@ agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, dest);
    ov[n++] = (struct agx3_field_kv)KV(18, src);
+   /* G17P rounding/log/exp share f29 as the source-discard bit. Apple's
+    * trunc(x) is 2f0056000200b0400600 when x dies and
+    * 2f005600020490400600 when x is also stored: only the source register
+    * changes and f29 clears. Floor, ceil, log2 and exp2 preserve x likewise.
+    * Tessellation's int64 conversion rounds a coordinate which the position
+    * calculation reads again, so the baseline's last-use hint is not safe. */
+   if (is_b(enc) && op <= AGX3_FUNOP_EXP2)
+      ov[n++] = (struct agx3_field_kv)KV(29, !src_live);
    if (src_abs)
       ov[n++] = (struct agx3_field_kv)KV(30, 1);
    if (src_neg)
@@ -160,4 +167,14 @@ agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
       return false;
    }
    return true;
+}
+
+bool
+agx3_funop_encode(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t dest,
+                  uint16_t src, bool src_abs, bool src_neg, bool saturate,
+                  uint16_t wait_mask, uint8_t out[AGX3_FUNOP_MAX_LENGTH],
+                  uint8_t *len)
+{
+   return agx3_funop_encode_source_lifetime(enc, op, dest, src, src_abs, src_neg,
+                                           saturate, wait_mask, false, out, len);
 }

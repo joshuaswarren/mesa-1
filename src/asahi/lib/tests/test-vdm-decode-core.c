@@ -471,6 +471,27 @@ test_tessellate_direct(void)
             info.factor_buffer_size_minus_one);
    }
 
+   /* The indirect Tessellate record shares block type 5. */
+   const struct agx_vdm_tessellate_indirect_info indirect = {
+      .factor_buffer = UINT64_C(0x10000018300),
+      .indirect_buffer = UINT64_C(0x1000001cf00),
+      .factor_buffer_size_minus_one = 5,
+   };
+   struct agx_vdm_tessellate_indirect packed;
+   CHECK(agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &indirect, &packed));
+   uint8_t stream[AGX_VDM_TESSELLATE_INDIRECT_LENGTH + 8];
+   memcpy(stream, packed.bytes, packed.length);
+   memset(stream + packed.length, 0x5a, 8);
+
+   struct agx_vdm_decoded_record record;
+   CHECK(agx_vdm_decode_one(AGX_CHIP_G17P, stream, sizeof(stream), &record));
+   CHECK(record.kind == AGX_VDM_RECORD_TESSELLATE_INDIRECT);
+   CHECK(record.length == AGX_VDM_TESSELLATE_INDIRECT_LENGTH);
+   CHECK(memcmp(&record.data.tessellate_indirect, &indirect,
+                sizeof(indirect)) == 0);
+   CHECK(!agx_vdm_decode_one(AGX_CHIP_G17P, stream,
+                             AGX_VDM_TESSELLATE_INDIRECT_LENGTH - 4, &record));
+
    return 0;
 }
 

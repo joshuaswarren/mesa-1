@@ -9,6 +9,7 @@
 #include "asahi/lib/agx_chip.h"
 #include "asahi/lib/agx_ioto_load_core.h"
 #include "agx3_fltnorm_core.h"
+#include "util/bitset.h"
 #include "util/shader_stats.h"
 #include "util/u_dynarray.h"
 #include "util/u_tristate.h"
@@ -222,6 +223,17 @@ struct agx_precompiled_kernel_info {
    bool agx3_preamble_staging_known;
    uint16_t agx3_preamble_staging_halfs;
    struct agx_ioto_cprog_inputs agx3_preamble_inputs;
+
+   /* AGX3 kernels read the printf buffer address from a 64-bit uniform at this
+    * half, the first multiple of 4 after their arguments, or 0 if they do not
+    * use it. AGX2 kernels use the fixed LIBAGX_PRINTF_BUFFER_ADDRESS.
+    */
+   uint16_t printf_uniform;
+
+   /* AGX3 thread-private storage frame in bytes: spills and returned atomic
+    * words. AGX2 kernels do not spill.
+    */
+   uint16_t agx3_tps_size;
 };
 
 static inline struct agx_precompiled_kernel_info
@@ -252,6 +264,8 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .agx3_preamble_staging_known = info->agx3_preamble_staging_known,
       .agx3_preamble_staging_halfs = info->agx3_preamble_staging_halfs,
       .agx3_preamble_inputs = info->agx3_preamble_inputs,
+      .agx3_tps_size =
+         MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
    };
 }
 
@@ -419,13 +433,23 @@ struct agx_shader_key {
     * builtin for such layouts stores each target without pixel transactions,
     * at f13=0 even from high registers, and in no required partition order. */
    bool g17p_mrt_bg;
+   /* Generated native eMRT epilog. Memory writes may split its sample groups
+    * into blocks, but tile operations retain the per-sample partition order. */
+   bool g17p_emrt;
+
+   /* A Honeykrisp hardware vertex binary adjacent to software geometry or
+    * transform feedback. The API VS hardware variant may expose only values
+    * consumed by GS/XFB, while the generated post-GS raster VS may expose only
+    * values GS produced. Both may therefore have a sparse terminal UVS
+    * suffix. */
+   bool g17p_sparse_vertex_outputs;
 
    /* G17P multi-target epilog: bit n is set when a colour target of the
     * framebuffer starts at tile byte n. Apple's fragments select a written
     * target's pixel classes from its position among all targets, so an epilog
-    * writing only some targets needs the others' offsets too. Zero derives
-    * the partitions from the tile operations. */
-   uint64_t g17p_tile_partitions;
+    * writing only some targets needs the others' offsets too. An empty set
+    * derives the partitions from the tile operations. */
+   BITSET_DECLARE(g17p_tile_partitions, AGX_G17P_MAX_BYTES_PER_SAMPLE);
 
    /* Number of targets, two to eight, stored by a G17P multi-target EOT for
     * arbitrary target formats, and the IMGWBLK selector of each target in
@@ -450,7 +474,8 @@ void agx_preprocess_nir(nir_shader *nir);
 void agx_preprocess_nir_g17p(nir_shader *nir);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
-bool agx_nir_lower_interpolation(nir_shader *s);
+bool agx_nir_lower_sample_mask_deferred(nir_shader *s);
+bool agx_nir_lower_interpolation(nir_shader *s, bool layer_as_varying);
 
 bool agx_nir_lower_cull_distance_vs(struct nir_shader *s);
 bool agx_nir_lower_cull_distance_fs(struct nir_shader *s,

@@ -85,7 +85,9 @@ enum agx_dbg {
 #define MAX_BO_CACHE_BUCKET (22) /* 2^22 = 4MB */
 
 /* Fencepost problem, hence the off-by-one */
-#define NR_BO_CACHE_BUCKETS (MAX_BO_CACHE_BUCKET - MIN_BO_CACHE_BUCKET + 1)
+#define NR_BO_CACHE_FLAG_BUCKETS 16
+#define NR_BO_CACHE_BUCKETS \
+   ((MAX_BO_CACHE_BUCKET - MIN_BO_CACHE_BUCKET + 1) * NR_BO_CACHE_FLAG_BUCKETS)
 
 /* Forward decl only, do not pull in all of NIR */
 struct nir_shader;
@@ -260,8 +262,11 @@ struct agx_device {
    struct agx_bo *g17p_render_context_bo;
    struct util_vma_heap main_heap;
    struct util_vma_heap usc_heap;
-   /* G17P command-pool BO aliases whose compact VDM offsets must remain below
-    * 0x02000000. Protected by vma_lock like the other heaps. */
+   struct util_vma_heap replay_heap;
+   /* Heap selection must stay stable when replay_heap.free_size reaches 0. */
+   bool replay_heap_initialized;
+   /* Native command-pool BO aliases with representable 32-bit context offsets.
+    * Protected by vma_lock like the other heaps. */
    struct util_vma_heap g17p_vdm_alias_heap;
    uint64_t main_heap_base;
    uint64_t main_heap_size;
@@ -310,8 +315,9 @@ struct agx_device {
        */
       struct list_head lru;
 
-      /* The BO cache is a set of buckets with power-of-two sizes.  Each bucket
-       * is a linked list of free panfrost_bo objects.
+      /* Power-of-two size classes, subdivided by allocation-flag hash.
+       * Exact flags are still checked when fetching; collisions only affect
+       * lookup cost. Each bucket is a list of free agx_bo objects.
        */
       struct list_head buckets[NR_BO_CACHE_BUCKETS];
 

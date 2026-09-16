@@ -15,7 +15,7 @@ agx_nir_lower_g17p_1x_sample_shading() performs.
 This is the witness that AGX3 has no equivalent of the AGX2 external sample
 loop spliced by agx_fast_link(): the way to run per-sample on G17P is to
 unroll the body, not to wrap it.
-""" 
+"""
 import importlib.util, json, subprocess, sys
 from pathlib import Path
 HERE = Path(__file__).resolve().parent

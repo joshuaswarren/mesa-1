@@ -53,6 +53,9 @@ struct agx3_subgroup_shuffle_desc {
     * f27 on its final read.  This is ignored by the older SIMD witnesses. */
    bool src_live;
 
+   /* Register-lane quad broadcast must retain a lane read again later. */
+   bool lane_live;
+
    /* 16-bit data (f10 = f24 = 1), dest and src in half units. Grounded for
     * the SIMD broadcast with an immediate lane and for every SIMD shuffle with
     * a register lane. */
@@ -89,6 +92,9 @@ struct agx3_subgroup_ballot_desc {
    bool dest_half;
    bool dest_cache;
    bool src_live;
+   /* Source cache hint for G17P's full-width integer register comparison.
+    * Native live operands occur both with and without this hint. */
+   bool src_cache;
    uint8_t condition;
    bool invert;
    uint16_t wait_mask;

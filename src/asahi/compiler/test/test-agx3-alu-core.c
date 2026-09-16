@@ -53,6 +53,18 @@ test_native_popcount(void)
        {0x27, 0x05, 0x56, 0x04, 0x02, 0x00, 0x4c, 0x04}},
       {3, 2, true, AGX3_ALU_HINT_DISCARD, true, 1u << 5,
        {0x27, 0x05, 0x56, 0x03, 0x03, 0x04, 0x50, 0x04}},
+      /* A chain of 70 to 78 live 64-bit values pushes the counted value
+       * into h128 and above: the source's eighth bit is its own. */
+      {128, 128, false, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0x27, 0x05, 0x54, 0x80, 0x03, 0x00, 0x5d, 0x04}},
+      {136, 136, false, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0x27, 0x05, 0x54, 0x88, 0x03, 0x10, 0x5d, 0x04}},
+      {144, 0, false, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0x27, 0x05, 0x54, 0x90, 0x03, 0x00, 0x5c, 0x04}},
+      {152, 152, false, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0x27, 0x05, 0x54, 0x98, 0x03, 0x30, 0x5d, 0x04}},
+      {160, 160, false, AGX3_ALU_HINT_DISCARD, true, 0,
+       {0x27, 0x05, 0x54, 0xa0, 0x03, 0x40, 0x5d, 0x04}},
    };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
    for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
@@ -448,6 +460,47 @@ test_native_bit_nor(void)
    assert(!agx3_alu_bit_nor(AGX_ISA_ENCODING_AGX3C, 4, cases[0].src,
                             cases[0].hints, false, 32, bytes, &len));
    puts("Native bit_nor: three exact live/dead witnesses PASS");
+}
+
+/* blend/native/bitops.py, R32Uint and RGBA32Uint logic ops. */
+static void
+test_native_bit_nand_xnor_orc(void)
+{
+   const enum agx3_alu_hint dead[] = {
+      AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+   };
+   const struct {
+      bool (*encode)(enum agx_isa_encoding, uint16_t, const uint16_t[2],
+                     const enum agx3_alu_hint[2], bool, uint16_t,
+                     uint8_t[AGX3_ALU_MAX_LENGTH], uint8_t *);
+      uint16_t dest, src[2], wait;
+      uint8_t bytes[10];
+   } cases[] = {
+      {agx3_alu_bit_nand, 0, {2, 0}, 32,
+       {0x0b, 0x03, 0x1e, 0x01, 0x03, 0x08, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_nand, 2, {2, 10}, 0,
+       {0x1b, 0x03, 0x1e, 0x0b, 0x03, 0x08, 0x00, 0x00, 0x00, 0x00}},
+      {agx3_alu_bit_xnor, 0, {2, 0}, 32,
+       {0x0b, 0x03, 0x1f, 0x01, 0x01, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_xnor, 6, {6, 8}, 0,
+       {0x3b, 0x07, 0x1f, 0x09, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00}},
+      {agx3_alu_bit_orc, 0, {0, 2}, 32,
+       {0x0b, 0x01, 0x1f, 0x03, 0x03, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_orc, 0, {2, 0}, 32,
+       {0x0b, 0x03, 0x1f, 0x01, 0x03, 0x00, 0x00, 0x80, 0x00, 0x00}},
+      {agx3_alu_bit_orc, 4, {12, 4}, 0,
+       {0x2b, 0x0d, 0x1f, 0x05, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00}},
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      assert(cases[i].encode(AGX_ISA_ENCODING_AGX3B, cases[i].dest,
+                             cases[i].src, dead, false, cases[i].wait, bytes,
+                             &len));
+      assert(len == 10 && !memcmp(bytes, cases[i].bytes, 10));
+   }
+   assert(!agx3_alu_bit_orc(AGX_ISA_ENCODING_AGX3C, 0, cases[4].src, dead,
+                            false, 32, bytes, &len));
+   puts("Native bit_nand/bit_xnor/bit_orc: seven exact witnesses PASS");
 }
 
 static void
@@ -1699,10 +1752,20 @@ static void test_float_to_int32_liveness(void)
       AGX_ISA_ENCODING_AGX3B, 4, 2, true, AGX3_ALU_HINT_CACHE, true, 0,
       out, &len));
    exact(out, len, "27075404030496480300");
+   assert(agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 190, 190, false, AGX3_ALU_HINT_DISCARD, true, 0,
+      out, &len));
+   exact(out, len, "270754be037cb5080200");
+   assert(!agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 256, 0, false, AGX3_ALU_HINT_NONE, false, 0,
+      out, &len));
+   assert(!agx3_alu_float_to_int32(
+      AGX_ISA_ENCODING_AGX3B, 0, 256, false, AGX3_ALU_HINT_NONE, false, 0,
+      out, &len));
    assert(!agx3_alu_float_to_int32(
       AGX_ISA_ENCODING_AGX3B, 4, 3, true, AGX3_ALU_HINT_NONE, false, 0,
       out, &len));
-   puts("Float-to-int32: native live-source cache vector PASS");
+   puts("Float-to-int32: native live-source cache and high-register vectors PASS");
 }
 
 static void test_i32_to_f16(void)
@@ -1835,6 +1898,15 @@ test_f16_to_int32(void)
 static void
 test_native_fma_minifloat(void)
 {
+   /* M4 applegpu_g16g offline compiler: saturate(fma(-8, src.x, src.y)).
+    * Native text+0x52, multiplier 0xe0, result saturation field14. */
+   {
+      uint8_t out[16], len;
+      assert(agx3_alu_fma_minifloat_mod(
+         AGX_ISA_ENCODING_AGX3B, 0, 0, 224, 2, false, true,
+         AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD, false, 0x20, out, &len));
+      exact(out, len, "09011ee1820202020082");
+   }
    {
       static const struct {
          uint16_t dest, src, addend;
@@ -1857,7 +1929,7 @@ test_native_fma_minifloat(void)
          assert(agx3_alu_fma_minifloat_mod(
             AGX_ISA_ENCODING_AGX3B, negative_addend[i].dest,
             negative_addend[i].src, negative_addend[i].immediate,
-            negative_addend[i].addend, true, negative_addend[i].src_hint,
+            negative_addend[i].addend, true, false, negative_addend[i].src_hint,
             negative_addend[i].addend_hint, false, 0, out, &len));
          exact(out, len, negative_addend[i].bytes);
       }
@@ -5335,6 +5407,7 @@ int main(void){
    test_native_bit_andc();
    test_band_identity_wait();
    test_form_lifetime_baselines();
+   test_native_bit_nand_xnor_orc();
    test_native_bit_nor();
    test_native_ft1();
    test_native_f32_rcp_rsqrt();

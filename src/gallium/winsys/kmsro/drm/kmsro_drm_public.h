@@ -33,4 +33,7 @@ struct pipe_screen_config;
 struct pipe_screen *kmsro_drm_screen_create(int kms_fd,
                                             const struct pipe_screen_config *config);
 
+struct pipe_screen *
+kmsro_drm_screen_create_zink(int kms_fd, const struct pipe_screen_config *config);
+
 #endif /* __KMSRO_DRM_PUBLIC_H__ */

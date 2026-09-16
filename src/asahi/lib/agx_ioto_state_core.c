@@ -405,11 +405,16 @@ agx_ioto_g17p_fragment_speclm_build(
         samples != 4) ||
        (sample_size_B &&
         ((samples != 1 && samples != 2 && samples != 4) ||
-         (sample_size_B & 7) || sample_size_B > 64 ||
+         (sample_size_B & 7) || (sample_size_B >> 3) > 31 ||
          sample_size_B * samples * imageblock->tile_size_px > 32768u)))
       return false;
 
-   /* The imageblock bound here is structural -- a tile larger than 32 KiB has
+   /* SpecLM::encodeImageBlockData deposits the stride, in eight-byte units,
+    * as a five-bit field (bfi #35, #5 at 0x216af6a30), so a sample may hold
+    * up to 248 bytes; Apple's own fragments store eight RGBA32Float targets,
+    * 128 bytes a sample.
+    *
+    * The imageblock bound here is structural -- a tile larger than 32 KiB has
     * nowhere to live. Which tile a given format and sample count actually gets
     * is agx_select_tile_size()'s policy, and that stays one byte more
     * conservative than this unless AGX_TILE_32K says otherwise, so nothing
@@ -608,11 +613,8 @@ agx_ioto_g17p_runtime_compute_tail_build_shared(
    uint32_t threadgroup_memory_size_B,
    struct agx_ioto_state_tail_output *output)
 {
-   /* f18 counts 4-byte words (see the sweep below) and packs into 16 bits,
-    * so the largest grantable size is 0xffff words rounded down to the
-    * 64-byte alignment this record keeps. */
    if (!output || threadgroup_memory_size_B < 256 ||
-       threadgroup_memory_size_B > 16320 ||
+       threadgroup_memory_size_B > 32768 ||
        (threadgroup_memory_size_B & 63) != 0)
       return false;
 
@@ -621,24 +623,18 @@ agx_ioto_g17p_runtime_compute_tail_build_shared(
                                                   &staged))
       return false;
 
-   /* EXP-0024's static sweep placed `(bytes << 2) | 0x80` in the second
-    * SPECLM dword and read that as byte-size f18 plus enable f24.  The enable
-    * is right; the scale was not, and nothing caught it because that sweep
-    * evidently held one size fixed.  A direct G17P sweep on 2026-09-15 --
-    * request a size, then have a kernel report the highest of 32 uint slots
-    * that actually round-trips -- shows the granted memory is exactly a
-    * QUARTER of f18:
+   /* EXP-0024's static sweep encodes `(bytes << 2) | 0x80` in the
+    * second SPECLM dword: byte-size f18 plus enable f24. Vulkan CTS
+    * workgroup_memory_explicit_layout.size.{4096,16384,32768} validates
+    * accesses across the complete allocation on G17P with this encoding.
     *
-    *     f18 = 256 -> 64 B      f18 = 384 -> 96 B
-    *     f18 = 320 -> 80 B      f18 = 512 -> 128 B
-    *
-    * So f18 counts 4-byte words, not bytes.  A caller asking for its real
-    * byte size silently got a quarter of it and every access past that point
-    * read zero, which halved libagx_unroll_restart's 128-byte ballot array
-    * and broke primitive restart.  Scale here so callers keep passing bytes.
+    * Do not apply j700 cb7295b7596's GL-probe-derived fourfold scaling
+    * globally: its 16320-byte limit rejects Vulkan's passing 16/32 KiB
+    * cases. The discrepancy with that probe remains unexplained; it is
+    * not evidence that this Vulkan-qualified allocation is too small.
     */
    struct agx_ioto_state speclm = {0};
-   speclm.f[18] = threadgroup_memory_size_B * 4;
+   speclm.f[18] = threadgroup_memory_size_B;
    speclm.f[24] = 1;
    if (!agx_ioto_state_pack_speclm(AGX_CHIP_G17P, &speclm, staged.bytes,
                                     AGX_IOTO_SPECLM_SIZE))

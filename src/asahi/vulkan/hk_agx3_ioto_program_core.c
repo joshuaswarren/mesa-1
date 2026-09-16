@@ -10,6 +10,7 @@
 #include "asahi/lib/agx_ioto_core.h"
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/compiler/agx3_binder.h"
+#include "util/format/u_format.h"
 
 #include <string.h>
 
@@ -102,6 +103,16 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     */
    struct agx_tilebuffer_layout physical = *tib;
    physical.layered = false;
+   /* Spilled attachments are accessed by the fragment epilog in memory.
+    * Validate only the in-tile targets here, retaining allocation and offsets. */
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      if (!physical.spilled[rt])
+         continue;
+      if (physical.logical_format[rt] == PIPE_FORMAT_NONE)
+         return false;
+      physical.logical_format[rt] = PIPE_FORMAT_NONE;
+      physical.spilled[rt] = false;
+   }
 
    /* Attachmentless rendering learns its sample count at draw time. An empty
     * pass may end before that happens. Validate its physical layout as 1x,
@@ -120,7 +131,25 @@ hk_agx3_g17p_direct_color_resolve_supported(
    struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
    bool has_resolve_target, bool average_resolve, bool store_source)
 {
-   return tib && (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+   if (!tib)
+      return false;
+
+   /* A 32-bit float target's lane is stored raw, and resolving it on the
+    * way out averages the bit patterns: an R32 or RG32 float view resolved
+    * this way reads back values like 4e22 on an A18 Pro. Keep the samples
+    * and resolve after the pass instead. */
+   const enum pipe_format format = tib->logical_format[0];
+   if (util_format_is_float(format) &&
+       util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0) ==
+          32)
+      return false;
+
+   /* An RGB9E5 tile keeps each sample's packed word, which averages no
+    * better. */
+   if (format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+      return false;
+
+   return (tib->nr_samples == 2 || tib->nr_samples == 4) &&
           color_attachment_count == 1 && has_resolve_target &&
           average_resolve && !store_source &&
           hk_agx3_g17p_rt0_tile_layout_supported(tib);
@@ -746,6 +775,20 @@ hk_agx3_g17p_precompiled_data_layout(size_t data_size_B,
    const uint32_t aligned = ((uint32_t)data_size_B + 3u) & ~3u;
    *upload_size_B = aligned;
    *uniform_size_halfs = aligned / 2u;
+   return true;
+}
+
+bool
+hk_agx3_g17p_compute_program_rebind_published(
+   struct agx3_compute_program *launch, uint64_t published_va)
+{
+   if (!launch || launch->chip != AGX_CHIP_G17P ||
+       !launch->g17p_native_compute_live_bound || !published_va ||
+       published_va > UINT64_C(0xffffffffffff) ||
+       (published_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)))
+      return false;
+
+   launch->program_va = published_va;
    return true;
 }
 

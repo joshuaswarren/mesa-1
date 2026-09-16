@@ -72,6 +72,33 @@ direct_load_registers_ok(const struct agx_ioto_inflight_load *load)
           load->count_dwords >= 1 && load->count_dwords <= 4;
 }
 
+/* Specializations of the AGX3b tables for the fixed Ioto absolute-load
+ * operands below. Keep the general composer for every other form. These are
+ * compared byte-for-byte against it over every offset and register encoding
+ * by test-agx3-ioto-load-packer.c.
+ */
+static bool
+pack_gpu0_absolute_load(const struct agx_ioto_inflight_load *load,
+                       uint8_t *bytes)
+{
+   if (load->data.half >= 192 || load->base.half > 188 ||
+       (load->base.half & 1))
+      return false;
+
+   /* f73's masks 1/3/7/15 map to selectors 0/4/6/3. f76 is the
+    * signed byte offset. Its 16 bits occupy bytes9[7:5], 10, 11[4:0]. */
+   /* Preserve the established GPU0 physical completion slot2 (bit6). */
+   static const uint8_t masks[] = {0x51, 0x59, 0x5d, 0x57};
+   const uint16_t offset = (uint16_t)load->byte_offset;
+   const uint8_t encoded[] = {
+      0x67, 0x00, 0x54, load->data.half, load->base.half >> 1,
+      0x00, 0x00, 0x00, masks[load->count_dwords - 1],
+      offset << 5, offset >> 3, 0x40 | (offset >> 11), 0x22, 0x00,
+   };
+   memcpy(bytes, encoded, sizeof(encoded));
+   return true;
+}
+
 static bool
 pack_absolute_load(void *context, enum agx_chip chip,
                    const struct agx_ioto_inflight_load *load,
@@ -94,16 +121,21 @@ pack_absolute_load(void *context, enum agx_chip chip,
       .idx_kind = AGX3_MEM_IDX_IMM,
       .idx_scaled = false,
       .byte_off = load->byte_offset,
-      .slot = 1,
+      /* G17P's native finishRound encodes data.value=1 as physical slot
+       * 2. The GPU0 NOP's bit 1 waits for that same slot. The generic
+       * memory encoder takes one-based slot numbers. */
+      .slot = packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 ? 2 : 1,
       .wait_mask = 0,
    };
 
    memset(record, 0, sizeof(*record));
    uint8_t length = 0;
    if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0) {
-      if (!agx3_mem_encode_load_form(AGX_ISA_ENCODING_AGX3B, &desc, 0,
-                                     record->bytes, &length) ||
-          length != AGX_IOTO_LOAD_INLINE_LDDEV14_SIZE)
+      if (pack_gpu0_absolute_load(load, record->bytes)) {
+         length = AGX_IOTO_LOAD_INLINE_LDDEV14_SIZE;
+      } else if (!agx3_mem_encode_load_form(AGX_ISA_ENCODING_AGX3B, &desc, 0,
+                                           record->bytes, &length) ||
+                 length != AGX_IOTO_LOAD_INLINE_LDDEV14_SIZE)
          return false;
       record->kind = AGX_IOTO_GPU0_INLINE_LDDEV14;
    } else if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1) {
@@ -122,7 +154,7 @@ pack_absolute_load(void *context, enum agx_chip chip,
    }
 
    record->length = length;
-   *signal_slot = 1;
+   *signal_slot = desc.slot;
    return true;
 }
 
@@ -140,6 +172,23 @@ pack_copy_fields(enum agx_isa_encoding enc, uint16_t destination_half,
                  uint16_t source_half, int wait_slot, bool source_kill,
                  struct agx_ioto_load_raw_record *record)
 {
+   /* COPY ep0: f3 destination bits [4:1], [6:5], [0] go to
+    * byte0[7:4], byte2[7:6], byte3[0]. f16 source bits [6:0], [7]
+    * go to byte1[6:0], byte3[4]. Larger destinations use the composer
+    * (including its exact extended-form and alias rules). */
+   if (enc == AGX_ISA_ENCODING_AGX3B && wait_slot < 0 &&
+       destination_half < 128 && source_half < 256) {
+      record->bytes[0] = 0x0b | ((destination_half & 0x1e) << 3);
+      record->bytes[1] = source_half & 0x7f;
+      record->bytes[2] = 0x01 | (source_kill ? 0x08 : 0) |
+                         ((destination_half & 0x60) << 1);
+      record->bytes[3] = 0x04 | (destination_half & 1) |
+                         ((source_half & 0x80) >> 3);
+      record->kind = AGX_IOTO_LOAD_RAW_COPY_EP0;
+      record->length = 4;
+      return true;
+   }
+
    /* f23 selects the register source file; f27 is carried as a last-use
     * hint by this all-dwords gathered-copy path. Native EOT's final gathered
     * copies have it set, but native BG also has f27-clear copies with
@@ -238,7 +287,7 @@ pack_absolute_copy(void *context, enum agx_chip chip,
    int wait_slot = -1;
    enum agx_isa_encoding enc;
    if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU0) {
-      /* The first of Apple's four NOPs drains slot 1 before any GPU0 COPY. */
+      /* The first of Apple's four NOPs drains slot 2 before any GPU0 COPY. */
       enc = AGX_ISA_ENCODING_AGX3B;
    } else if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1) {
       enc = AGX_ISA_ENCODING_AGX3C;

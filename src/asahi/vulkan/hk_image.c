@@ -46,6 +46,12 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       return 0;
 
    enum pipe_format p_format = hk_format_to_pipe_format(vk_format);
+   /* D16S8 uses the existing independent D16 and S8 planes. */
+   if (vk_format == VK_FORMAT_D16_UNORM_S8_UINT) {
+      if (pdev->dev.chip != AGX_CHIP_G17P)
+         return 0;
+      p_format = PIPE_FORMAT_Z16_UNORM;
+   }
    if (p_format == PIPE_FORMAT_NONE)
       return 0;
 
@@ -230,8 +236,8 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
       format = ycbcr_info->planes[plane].format;
       width /= ycbcr_info->planes[plane].denominator_scales[0];
       height /= ycbcr_info->planes[plane].denominator_scales[0];
-   } else if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-      format = (plane == 0) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_S8_UINT;
+   } else if (hk_split_depth_stencil(format)) {
+      format = hk_depth_stencil_plane_format(format, plane);
    }
 
    /* Allow disabling compression for debugging */
@@ -496,6 +502,8 @@ hk_GetPhysicalDeviceImageFormatProperties2(
    VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
        pImageFormatInfo->type == VK_IMAGE_TYPE_2D && ycbcr_info == NULL &&
+       /* The imported D16S8 path is initially single-sample qualified. */
+       pImageFormatInfo->format != VK_FORMAT_D16_UNORM_S8_UINT &&
        (features & (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
                     VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
        !(pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)) {
@@ -878,7 +886,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
    /* We do not support interleaved depth/stencil. Instead, we decompose to
     * a depth plane and a stencil plane.
     */
-   if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+   if (hk_split_depth_stencil(image->vk.format)) {
       image->plane_count = 2;
    }
 
@@ -934,9 +942,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       VkFormat format =
          ycbcr_info ? ycbcr_info->planes[plane].format : pCreateInfo->format;
 
-      if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-         format = (plane == 0) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_S8_UINT;
-      }
+      format = hk_depth_stencil_plane_format(format, plane);
 
       const uint8_t width_scale =
          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[0] : 1;
@@ -1531,7 +1537,7 @@ hk_plane_index(VkFormat format, VkImageAspectFlags aspect_mask)
    case VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT:
       return 2;
    case VK_IMAGE_ASPECT_STENCIL_BIT:
-      return format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+      return hk_split_depth_stencil(format);
    }
 }
 
@@ -1846,7 +1852,7 @@ hk_CopyImageToImageEXT(VkDevice _device,
       pCopyImageToImageInfo->flags & VK_HOST_IMAGE_COPY_MEMCPY_EXT;
 
    for (uint32_t i = 0; i < pCopyImageToImageInfo->regionCount; ++i) {
-      if (src_image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+      if (hk_split_depth_stencil(src_image->vk.format)) {
          VkImageCopy2 info = pCopyImageToImageInfo->pRegions[i];
          u_foreach_bit(b, info.dstSubresource.aspectMask) {
             info.srcSubresource.aspectMask = BITFIELD_BIT(b);

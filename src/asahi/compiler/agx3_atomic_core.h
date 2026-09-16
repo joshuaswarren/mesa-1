@@ -59,6 +59,9 @@ struct agx3_device_atomic_desc {
    bool returns_value;
    uint16_t result; /* GPR half index; equals value on AGX3b */
    uint8_t slot;    /* 1..6 (AGX3b), 1..8 (AGX3c) when returning */
+   /* AGX3b: thread-private storage half the old value is published to, for a
+    * following reload into the result register. Even. */
+   uint32_t result_tps_half;
 
    enum agx3_atomic_base_kind base_kind;
    uint16_t base; /* uniform half (4-aligned) or GPR half (2-aligned) */

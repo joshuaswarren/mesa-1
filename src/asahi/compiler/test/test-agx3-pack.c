@@ -5747,6 +5747,14 @@ test_scoped_barrier(void)
       {AGX_ISA_ENCODING_AGX3B, AGX3_BARRIER_SCOPE_TEXTURE, 12,
        {0x07, 0x04, 0x54, 0x51, 0x0e, 0x00,
         0x07, 0x04, 0x54, 0xd1, 0x0e, 0x00}},
+      {AGX_ISA_ENCODING_AGX3B, AGX3_BARRIER_SCOPE_DEVICE_FENCE, 6,
+       {0x07, 0x04, 0x54, 0x84, 0x0a, 0x00}},
+      {AGX_ISA_ENCODING_AGX3B, AGX3_BARRIER_SCOPE_TEXTURE_FENCE, 12,
+       {0x07, 0x04, 0x54, 0x50, 0x06, 0x00,
+        0x07, 0x04, 0x54, 0xd0, 0x06, 0x00}},
+      {AGX_ISA_ENCODING_AGX3B, AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT, 12,
+       {0x07, 0x14, 0x54, 0x50, 0x06, 0x00,
+        0x07, 0x04, 0x54, 0xd0, 0x06, 0x00}},
       {AGX_ISA_ENCODING_AGX3C, AGX3_BARRIER_SCOPE_EXECUTION, 6,
        {0x07, 0x51, 0x00, 0x06, 0x00, 0x00}},
       {AGX_ISA_ENCODING_AGX3C, AGX3_BARRIER_SCOPE_THREADGROUP, 6,
@@ -5785,7 +5793,11 @@ test_scoped_barrier(void)
    CHECK(!agx3_pack_scoped_barrier(AGX_ISA_ENCODING_AGX3B,
                                     (enum agx3_barrier_scope)-1, &packed));
    CHECK(!agx3_pack_scoped_barrier(AGX_ISA_ENCODING_AGX3C,
-                                    AGX3_BARRIER_SCOPE_TEXTURE + 1, &packed));
+                                    AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT + 1,
+                                    &packed));
+   CHECK(!agx3_pack_scoped_barrier(AGX_ISA_ENCODING_AGX3C,
+                                    AGX3_BARRIER_SCOPE_DEVICE_FENCE,
+                                    &packed));
    CHECK(!agx3_pack_scoped_barrier(AGX_ISA_ENCODING_AGX3C,
                                     AGX3_BARRIER_SCOPE_DEVICE, NULL));
    CHECK(!agx3_unpack_scoped_barrier(

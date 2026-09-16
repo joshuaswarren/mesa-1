@@ -80,6 +80,8 @@ hk_files = files(
   'hk_nir_passthrough_gs.c',
   'hk_nir_ray_tracing.c',
   'hk_nir_ray_tracing.h',
+  'hk_nir_widen_16bit_varyings.c',
+  'hk_nir_widen_16bit_varyings.h',
   'hk_native_descriptor.h',
   'hk_native_descriptor_pack.c',
   'hk_native_descriptor_pack.h',
@@ -105,6 +107,25 @@ hk_files = files(
 )
 
 if with_tests
+  test(
+    'hk_shader_variants',
+    executable(
+      'hk_shader_variants_test',
+      files('tests/test-hk-shader-variants.c'),
+      include_directories : [
+        include_directories('.', '../libagx', '../../gallium/include',
+                            '../../gallium/auxiliary', '../../vulkan/runtime',
+                            '../../vulkan/util', '../../vulkan/wsi',
+                            '../../compiler/spirv', '../../virtio/virtio-gpu',
+                            '../../virtio/vdrm'),
+        inc_include, inc_src, inc_asahi,
+      ],
+      dependencies : [idep_nir, idep_mesautil, idep_libagx,
+                      idep_libagx_shaders_h, idep_agx_pack],
+    ),
+    suite : ['asahi'],
+  )
+
   if host_machine.system() == 'linux'
     hk_sparse_format_properties = executable(
       'hk-sparse-format-properties',
@@ -149,6 +170,20 @@ if with_tests
       'hk_nir_forward_image_stores_test',
       files('tests/test-hk-nir-forward-image-stores.c',
             'hk_nir_forward_image_stores.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_nir_widen_16bit_varyings',
+    executable(
+      'hk_nir_widen_16bit_varyings_test',
+      files('tests/test-hk-nir-widen-16bit-varyings.c',
+            'hk_nir_widen_16bit_varyings.c'),
       include_directories : [include_directories('.'), inc_include, inc_src],
       dependencies : [idep_nir, idep_mesautil],
       c_args : [c_msvc_compat_args],
@@ -238,6 +273,34 @@ if with_tests
     executable(
       'hk_cmd_lifetime_test',
       files('tests/test-hk-cmd-lifetime.c', 'hk_cmd_lifetime.c'),
+      include_directories : [
+        inc_gallium,
+        inc_gallium_aux,
+        inc_include,
+        inc_src,
+        inc_asahi,
+        inc_virtio_gpu,
+        inc_virtio_vdrm,
+      ],
+      dependencies : [
+        idep_nir,
+        idep_mesautil,
+        idep_libagx,
+        idep_libagx_shaders_h,
+        idep_vulkan_runtime_headers,
+        idep_vulkan_util_headers,
+      ],
+      c_args : [c_msvc_compat_args, '-Wno-error=pointer-arith'],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_cdm_inline_merge',
+    executable(
+      'hk_cdm_inline_merge_test',
+      files('tests/test-hk-cdm-inline-merge.c', 'hk_drm_render_core.c'),
       include_directories : [
         inc_gallium,
         inc_gallium_aux,

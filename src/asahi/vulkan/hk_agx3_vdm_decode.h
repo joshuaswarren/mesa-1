@@ -23,7 +23,7 @@ extern "C" {
 /* Bump whenever the Honeykrisp shader payload below changes.  Vulkan shader
  * binaries carry this version outside the driver-private blob, so stale
  * layouts are rejected before any fields are consumed. */
-#define HK_AGX3_SHADER_BINARY_VERSION 14u
+#define HK_AGX3_SHADER_BINARY_VERSION 16u
 
 /* A G17P vertex program writes at most 128 UVS words: Apple's compiler emits
  * position plus thirty-one float4 user locations. Its fragment linker refuses
@@ -61,9 +61,9 @@ struct hk_agx3_g17p_vertex_compile_info {
 };
 
 /* Build the exact G17P VertexProgramVariant fields for a hardware vertex
- * shader with position and up to the opt-in candidate's seventeen ordinary
- * float4 user locations. System outputs and preambles are separate state
- * shapes. */
+ * shader with position, ordinary user locations, and the Vulkan-bounded
+ * eight-word combined clip/cull-distance tail. System outputs and preambles
+ * are separate state shapes. */
 bool hk_agx3_g17p_vertex_program_info(
    enum agx_chip chip,
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,

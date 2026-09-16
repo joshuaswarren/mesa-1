@@ -35,12 +35,32 @@ cf_valid(nir_builder *b, nir_def *cf)
     * do that. Either way the tests pass.
     */
    nir_def *cf01 = nir_trim_vector(b, cf, 2);
-   return nir_ior(b, bit, nir_fisnormal(b, cf01));
+
+   /* Reduce the per-channel check to one boolean: interpolate_at_offset
+    * selects a scalar with it. A vec2 condition made bcsel produce a vec2,
+    * which nir_vec hid for wider loads but a single-component
+    * interpolateAtSample/Offset result stored it as-is and failed NIR
+    * validation (pipeline.*.misc.interpolate_at_sample_no_sample_shading).
+    */
+   return nir_ior(b, bit, nir_ball(b, nir_fisnormal(b, cf01)));
+}
+
+static nir_def *
+cf_constant_marker(nir_builder *b, nir_def *cf)
+{
+   /* Native HAL200 constant planes store unscaled C, with a nonzero
+    * significand and exponent 0 or 1 in A. Test the native marker directly
+    * so an ordinary coefficient with its low bit set remains a plane. */
+   nir_def *a = nir_channel(b, cf, 0);
+   nir_def *exponent_small =
+      nir_ult_imm(b, nir_iand_imm(b, a, 0x7f800000), 0x01000000);
+   nir_def *significand = nir_ine_imm(b, nir_iand_imm(b, a, 0x007fffff), 0);
+   return nir_iand(b, exponent_small, significand);
 }
 
 static nir_def *
 interpolate_at_offset(nir_builder *b, nir_def *cf, nir_def *offset,
-                      bool perspective)
+                      bool perspective, bool native)
 {
    /* Get the coordinate of the pixel within the tile */
    nir_def *pixel_coords = nir_load_pixel_coord(b);
@@ -74,6 +94,10 @@ interpolate_at_offset(nir_builder *b, nir_def *cf, nir_def *offset,
 
       interp = nir_fdiv(b, interp, rhw);
    }
+
+   if (native)
+      return nir_bcsel(b, cf_constant_marker(b, cf), nir_channel(b, cf, 2),
+                       interp);
 
    /* Replace invalid interpolations with the constant channel */
    return nir_bcsel(b, cf_valid(b, cf), interp, nir_channel(b, cf, 2));
@@ -120,7 +144,8 @@ needs_lower(const nir_instr *instr, UNUSED const void *_)
 }
 
 static nir_def *
-interpolate_channel(nir_builder *b, nir_intrinsic_instr *load, unsigned channel)
+interpolate_channel(nir_builder *b, nir_intrinsic_instr *load,
+                    unsigned channel, bool layer_as_varying)
 {
    nir_def *coefficients = nir_load_coefficients_agx(
       b, nir_get_io_offset_src(load)->ssa,
@@ -131,7 +156,8 @@ interpolate_channel(nir_builder *b, nir_intrinsic_instr *load, unsigned channel)
    if (load->intrinsic == nir_intrinsic_load_input) {
       nir_def *flat;
 
-      if (nir_intrinsic_io_semantics(load).location == VARYING_SLOT_LAYER)
+      if (nir_intrinsic_io_semantics(load).location == VARYING_SLOT_LAYER &&
+          !layer_as_varying)
          flat = nir_load_layer_id(b);
       else
          flat = interpolate_flat(b, coefficients);
@@ -156,7 +182,8 @@ interpolate_channel(nir_builder *b, nir_intrinsic_instr *load, unsigned channel)
 
       nir_def *interp = interpolate_at_offset(
          b, coefficients, bary->src[0].ssa,
-         nir_intrinsic_interp_mode(bary) != INTERP_MODE_NOPERSPECTIVE);
+         nir_intrinsic_interp_mode(bary) != INTERP_MODE_NOPERSPECTIVE,
+         layer_as_varying);
 
       return nir_f2fN(b, interp, load->def.bit_size);
    }
@@ -166,20 +193,22 @@ static nir_def *
 lower(nir_builder *b, nir_instr *instr, void *data)
 {
    nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   const bool layer_as_varying = *(const bool *)data;
 
    /* Each component is loaded separated */
    nir_def *values[NIR_MAX_VEC_COMPONENTS] = {NULL};
    for (unsigned i = 0; i < intr->def.num_components; ++i) {
-      values[i] = interpolate_channel(b, intr, i);
+      values[i] = interpolate_channel(b, intr, i, layer_as_varying);
    }
 
    return nir_vec(b, values, intr->def.num_components);
 }
 
 bool
-agx_nir_lower_interpolation(nir_shader *s)
+agx_nir_lower_interpolation(nir_shader *s, bool layer_as_varying)
 {
    assert(s->info.stage == MESA_SHADER_FRAGMENT);
 
-   return nir_shader_lower_instructions(s, needs_lower, lower, NULL);
+   return nir_shader_lower_instructions(s, needs_lower, lower,
+                                        &layer_as_varying);
 }

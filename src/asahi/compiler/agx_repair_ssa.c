@@ -61,6 +61,13 @@ static void add_phi_operands(struct repair_ctx *ctx, agx_block *block,
 static agx_index
 resolve_read(struct repair_ctx *ctx, agx_block *block, agx_index node)
 {
+   /* A use's modifiers are not part of the variable being reconstructed.
+    * agx_replace_src() preserves them on that use. Carrying them into a new
+    * phi would modify its destination and every incoming value, corrupting
+    * unrelated uses (including integer loop counters after spilling). */
+   node.abs = false;
+   node.neg = false;
+
    struct repair_block *rb = repair_block(ctx, block);
 
    /* Local value numbering */

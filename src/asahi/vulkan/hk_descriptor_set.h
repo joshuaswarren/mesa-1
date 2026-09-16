@@ -71,7 +71,12 @@ static_assert(sizeof(struct hk_storage_image_descriptor) == 80,
 struct hk_buffer_address {
    uint64_t base_addr;
    uint32_t size;
-   uint32_t zero; /* Must be zero! */
+   /*
+    * G17P sparse-buffer descriptors store the page number of the residency
+    * map here. Descriptor lowering consumes it and restores the address
+    * format's required zero byte offset before explicit-I/O lowering.
+    */
+   uint32_t sparse_map_page;
 };
 
 struct hk_descriptor_pool {

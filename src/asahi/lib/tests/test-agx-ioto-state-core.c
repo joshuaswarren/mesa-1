@@ -830,15 +830,12 @@ test_g17p_runtime_compute_shared_tail(void)
       uint32_t size_B;
       uint32_t speclm_word1;
    } cases[] = {
-      /* f18 counts 4-byte words, so the second SPECLM dword is
-       * (bytes << 4) | 0x80.  A G17P sweep on 2026-09-15 measured the granted
-       * memory directly -- 256 B requested yielded 64 B usable, 320 yielded
-       * 80, 384 yielded 96, 512 yielded 128 -- exactly a quarter, which is
-       * what the old byte-scaled encoding produced. */
-      {256, UINT32_C(0x00001080)},
-      {1024, UINT32_C(0x00004080)},
-      {4096, UINT32_C(0x00010080)},
-      {16320, UINT32_C(0x0003FC80)},
+      /* Keep the complete Vulkan-qualified 32 KiB allocation range. */
+      {256, UINT32_C(0x00000480)},
+      {1024, UINT32_C(0x00001080)},
+      {4096, UINT32_C(0x00004080)},
+      {16384, UINT32_C(0x00010080)},
+      {32768, UINT32_C(0x00020080)},
    };
    const uint64_t shader_va = UINT64_C(0x100000003c0);
    struct agx_ioto_state_tail_output output;
@@ -856,8 +853,7 @@ test_g17p_runtime_compute_shared_tail(void)
    }
 
    const struct agx_ioto_state_tail_output before = output;
-   /* 16384 and above no longer fit: f18 is 16 bits of 4-byte words. */
-   static const uint32_t invalid_sizes[] = {0, 64, 255, 257, 16384, 32768};
+   static const uint32_t invalid_sizes[] = {0, 64, 255, 257, 32769};
    for (unsigned i = 0; i < ARRAY_SIZE(invalid_sizes); ++i) {
       CHECK(!agx_ioto_g17p_runtime_compute_tail_build_shared(
          shader_va, AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
@@ -909,6 +905,10 @@ test_g17p_fragment_imageblock_speclm(void)
       {{24, 1, 32 * 32}, {0x77, 0x00, 0x2a, 0x47, 0x4b, 0, 0, 0}},
       {{32, 1, 32 * 16}, {0x77, 0x00, 0x2a, 0x09, 0x43, 0, 0, 0}},
       {{64, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x11, 0x41, 0, 0, 0}},
+      /* Past 64 bytes the stride keeps its five-bit field. */
+      {{72, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x13, 0x41, 0, 0, 0}},
+      {{80, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x15, 0x41, 0, 0, 0}},
+      {{120, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x1f, 0x41, 0, 0, 0}},
       {{8, 2, 32 * 32}, {0x77, 0x00, 0x2a, 0x42, 0x4b, 0, 0, 0}},
       {{16, 2, 32 * 16}, {0x77, 0x00, 0x2a, 0x04, 0x43, 0, 0, 0}},
       {{8, 4, 32 * 16}, {0x77, 0x00, 0xaa, 0x02, 0x43, 0, 0, 0}},
@@ -928,8 +928,9 @@ test_g17p_fragment_imageblock_speclm(void)
    static const struct agx_ioto_g17p_imageblock invalid[] = {
       {0, 3, 32 * 32},   {8, 0, 32 * 32}, {8, 3, 32 * 32},
       {8, 8, 32 * 32},
-      {4, 1, 32 * 32},   {9, 1, 32 * 32}, {72, 1, 16 * 16},
-      {8, 1, 8 * 8},     {8, 1, 64 * 64}, {64, 4, 16 * 16},
+      {4, 1, 32 * 32},   {9, 1, 32 * 32}, {72, 1, 32 * 32},
+      {136, 1, 16 * 16}, {8, 1, 8 * 8},   {8, 1, 64 * 64},
+      {64, 4, 16 * 16},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i) {
       memcpy(output, before, sizeof(output));

@@ -188,6 +188,9 @@ format_for_plane(struct hk_image_view *view, unsigned view_plane)
    VkFormat plane_format =
       ycbcr_info ? ycbcr_info->planes[view_plane].format : view->vk.format;
 
+   if (view->vk.format == VK_FORMAT_D16_UNORM_S8_UINT)
+      plane_format = hk_depth_stencil_plane_format(view->vk.format,
+         view->vk.aspects == VK_IMAGE_ASPECT_STENCIL_BIT);
    enum pipe_format p_format = hk_format_to_pipe_format(plane_format);
    if (view->vk.aspects == VK_IMAGE_ASPECT_STENCIL_BIT)
       p_format = get_stencil_format(p_format);
@@ -409,6 +412,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    unsigned layers = view->vk.view_type == VK_IMAGE_VIEW_TYPE_3D
                         ? image->vk.extent.depth
                         : view->vk.layer_count;
+   /* A non-layered auxiliary program addresses only layer zero, even when
+    * the attachment view spans more layers. Keep the linear extension and
+    * native layer count consistent with its 2D descriptor dimension. */
+   if (usage == HK_DESC_USAGE_BG_EOT)
+      layers = 1;
 
    struct AGX_PBE cfg = {AGX_PBE_header};
    if (atomic_sw_out)
@@ -479,8 +487,11 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
             cfg.level = level;
          }
 
+         /* A single-layer BG/EOT descriptor is 2D even when the API view
+          * is an array. It does not need the linear array-stride extension. */
          if (layout->tiling == AIL_TILING_LINEAR &&
-             (hk_image_view_type_is_array(view->vk.view_type))) {
+             hk_image_view_type_is_array(view->vk.view_type) &&
+             (layers > 1 || cfg.dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY)) {
 
             cfg.depth_linear = layers;
             cfg.layer_stride_linear = (layout->layer_stride_B - 0x80);
@@ -561,14 +572,9 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
       }
    }
 
-   /* PBEStateEncoderGen9 keeps a one-layer array at dimension 3 only for a
-    * texture's own write descriptor; a one-layer framebuffer target is
-    * dimension 2. The spilled-MRT store has no Gen9 witness for its array
-    * form, so keep refusing a one-layer one. */
-   if (generation == 9 && usage == HK_DESC_USAGE_EMRT && layers == 1) {
-      memset(out, 0, sizeof(*out));
-      return false;
-   }
+   /* eMRT uses the ordinary native array-store path, not the non-array
+    * end-of-tile builtin. Multisample stores instead address the linear
+    * buffer descriptor constructed above. */
 
    return hk_pack_native_pbe(generation, out, &cfg);
 }
@@ -655,7 +661,23 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
          pack_pbe(dev, view, p, HK_DESC_USAGE_BG_EOT, &view->planes[p].eot,
                   NULL);
       view->planes[p].emrt_pbe_valid = pack_pbe(
-         dev, view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_pbe, NULL);
+         dev, view, p, HK_DESC_USAGE_EMRT, &view->planes[p].emrt_pbe,
+         &view->planes[p].emrt_atomic_sw);
+      if (dev->dev.chip == AGX_CHIP_G17P &&
+          (view->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+          view->planes[p].emrt_pbe_valid) {
+         const struct ail_layout *layout =
+            &image->planes[view->planes[p].image_plane].layout;
+         const unsigned level = view->vk.base_mip_level;
+         view->planes[p].emrt_aligned_width =
+            align(u_minify(layout->width_px, level),
+                  layout->tilesize_el[level].width_el);
+         VkResult result = hk_descriptor_table_add(
+            dev, &dev->sampled_images, &view->planes[p].emrt_texture, 32,
+            &view->planes[p].emrt_read_heap_index);
+         if (result != VK_SUCCESS)
+            return result;
+      }
       view->planes[p].layered_eot_pbe_valid =
          pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
                   &view->planes[p].layered_eot, NULL);
@@ -676,6 +698,9 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       for (unsigned p = 0; p < view->plane_count; ++p) {
+         if (view->planes[p].emrt_read_heap_index)
+            hk_descriptor_table_remove(dev, &dev->sampled_images,
+                                        view->planes[p].emrt_read_heap_index);
          if (view->planes[p].storage_heap_index)
             hk_descriptor_table_remove(dev, &dev->sampled_images,
                                         view->planes[p].storage_heap_index);

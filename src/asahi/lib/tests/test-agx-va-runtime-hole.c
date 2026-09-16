@@ -502,8 +502,15 @@ test_g17p_vdm_command_alias_heap(void)
    uint32_t compact = 0;
    assert(agx_g17p_vdm_alias_compact(first, &compact));
    assert(compact == AGX_G17P_VDM_ALIAS_OFFSET_START);
+   /* SuperTuxKart creates more than the old 192 live 128-KiB command BOs
+    * during pipeline warmup. Offsets must survive the former +32-MiB bound. */
+   assert(agx_g17p_vdm_alias_compact(
+      AGX_G17P_VDM_USER_BASE + UINT64_C(0x02000000), &compact));
+   assert(compact == UINT32_C(0x02000000));
    assert(agx_g17p_vdm_alias_compact(last + command_bo_size - 1, &compact));
-   assert(compact == AGX_G17P_VDM_ALIAS_OFFSET_END - 1);
+   assert(compact == UINT32_MAX);
+   assert(!agx_g17p_vdm_alias_compact(
+      AGX_G17P_VDM_USER_BASE + (UINT64_C(1) << 32), &compact));
    assert(!agx_g17p_vdm_alias_compact(AGX_G17P_VDM_ALIAS_BASE - 1,
                                       &compact));
    assert(!agx_g17p_vdm_alias_compact(first, NULL));
@@ -562,6 +569,35 @@ test_g17p_vdm_payload_context_address(void)
    assert(!agx_g17p_vdm_payload_expand(compact, 4, NULL));
 }
 
+static void
+test_capture_replay_region_isolated_even_when_full(void)
+{
+   const uint64_t user_start = UINT64_C(0x4000000000);
+   const uint64_t user_size = UINT64_C(0x2000000000);
+   const uint64_t replay_size = user_size / 8;
+   struct util_vma_heap main_heap, replay_heap;
+   util_vma_heap_init(&main_heap, user_start, user_size);
+   assert(agx_capture_replay_heap_init(&main_heap, &replay_heap, user_size));
+   assert(main_heap.free_size == user_size - replay_size);
+   assert(replay_heap.free_size == replay_size);
+
+   const uint64_t captured = util_vma_heap_alloc(&replay_heap, replay_size, PAGE);
+   assert(captured && replay_heap.free_size == 0);
+   assert(!util_vma_heap_alloc(&replay_heap, PAGE, PAGE));
+   assert(!util_vma_heap_alloc_addr(&main_heap, captured, PAGE));
+
+   /* Freeing the last replay allocation returns it to that same heap. */
+   util_vma_heap_free(&replay_heap, captured, replay_size);
+   const uint64_t ordinary = util_vma_heap_alloc(&main_heap, PAGE, PAGE);
+   assert(ordinary && (ordinary < captured || ordinary >= captured + replay_size));
+   assert(util_vma_heap_alloc_addr(&replay_heap, captured, replay_size));
+   assert(!util_vma_heap_alloc_addr(&main_heap, captured, PAGE));
+   util_vma_heap_free(&replay_heap, captured, replay_size);
+   util_vma_heap_free(&main_heap, ordinary, PAGE);
+   util_vma_heap_finish(&replay_heap);
+   util_vma_heap_finish(&main_heap);
+}
+
 int
 main(void)
 {
@@ -577,6 +613,7 @@ main(void)
    test_g17p_user_window_fits_usc_resource_pointer();
    test_g17p_vdm_command_alias_heap();
    test_g17p_vdm_payload_context_address();
+   test_capture_replay_region_isolated_even_when_full();
    puts("AGX VA layout: user-window split and G17 kernel reservations passed");
    return 0;
 }

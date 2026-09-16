@@ -176,14 +176,22 @@ agx_vdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
    }
 
    case 5:
-      if (available < AGX_VDM_TESSELLATE_DIRECT_LENGTH ||
-          !agx_vdm_tessellate_direct_unpack(
+      if (available >= AGX_VDM_TESSELLATE_DIRECT_LENGTH &&
+          agx_vdm_tessellate_direct_unpack(
              chip, bytes, AGX_VDM_TESSELLATE_DIRECT_LENGTH,
-             &record->data.tessellate_direct))
+             &record->data.tessellate_direct)) {
+         record->kind = AGX_VDM_RECORD_TESSELLATE_DIRECT;
+         record->length = AGX_VDM_TESSELLATE_DIRECT_LENGTH;
+      } else if (available >= AGX_VDM_TESSELLATE_INDIRECT_LENGTH &&
+                 agx_vdm_tessellate_indirect_unpack(
+                    chip, bytes, AGX_VDM_TESSELLATE_INDIRECT_LENGTH,
+                    &record->data.tessellate_indirect)) {
+         record->kind = AGX_VDM_RECORD_TESSELLATE_INDIRECT;
+         record->length = AGX_VDM_TESSELLATE_INDIRECT_LENGTH;
+      } else {
          return false;
+      }
 
-      record->kind = AGX_VDM_RECORD_TESSELLATE_DIRECT;
-      record->length = AGX_VDM_TESSELLATE_DIRECT_LENGTH;
       record->chip = chip;
       return true;
 

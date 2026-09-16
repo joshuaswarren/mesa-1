@@ -426,10 +426,51 @@ check_buffer_metadata(void)
    assert(!hk_pack_native_pbe(9, &pbe, &pbe_with_tail));
 }
 
+static void
+check_layered_multisample_pbe(void)
+{
+   struct AGX_PBE semantic = {
+      AGX_PBE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED,
+      .layout = AGX_LAYOUT_GPU,
+      .channels = AGX_CHANNELS_R8G8B8A8,
+      .type = AGX_TEXTURE_TYPE_UNORM,
+      .swizzle_r = AGX_CHANNEL_R,
+      .swizzle_g = AGX_CHANNEL_G,
+      .swizzle_b = AGX_CHANNEL_B,
+      .swizzle_a = AGX_CHANNEL_A,
+      .width = 200,
+      .height = 180,
+      .buffer = UINT64_C(0x123456789ab0),
+      .layers = 12,
+      .samples = AGX_SAMPLE_COUNT_4,
+   };
+   struct hk_native_pbe_descriptor packed;
+   assert(hk_pack_native_pbe(9, &packed, &semantic));
+
+   uint64_t word0, word1;
+   memcpy(&word0, (const uint8_t *)packed.opaque, sizeof(word0));
+   memcpy(&word1, (const uint8_t *)packed.opaque + 8, sizeof(word1));
+   assert((word0 & 0xf) == 8);
+   assert(((word0 >> 56) & 3) == 1);
+   assert(((word1 >> 44) & 0xffff) == 11);
+
+   semantic.samples = AGX_SAMPLE_COUNT_2;
+   assert(hk_pack_native_pbe(9, &packed, &semantic));
+   memcpy(&word0, (const uint8_t *)packed.opaque, sizeof(word0));
+   assert(((word0 >> 56) & 3) == 0);
+
+   semantic.layers = 0;
+   assert(!hk_pack_native_pbe(9, &packed, &semantic));
+   semantic.layers = 12;
+   assert(!hk_pack_native_pbe(10, &packed, &semantic));
+}
+
 int
 main(void)
 {
    check_buffer_metadata();
+   check_layered_multisample_pbe();
    uint64_t atomic_sw = 0;
    assert(hk_pack_g17p_image_atomic_sw(0x180, 64, 32, 0x4000, 4,
                                        &atomic_sw));
