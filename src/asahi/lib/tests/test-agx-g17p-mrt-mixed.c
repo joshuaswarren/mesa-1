@@ -203,7 +203,7 @@ test_selectors_match_single_target_programs(void)
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B5G5R5A1_UNORM) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B10G10R10A2_UINT) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B8G8R8A8_SNORM) == 0x75);
-   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R11G11B10_FLOAT) == 0);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R11G11B10_FLOAT) == 0x35);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_R9G9B9E5_FLOAT) == 0x35);
    CHECK(admitted > 40);
    return 0;
@@ -237,7 +237,7 @@ check_layout_classification(const struct layout *l)
       CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE);
 
       bad = tib;
-      bad.logical_format[l->count - 1] = PIPE_FORMAT_R11G11B10_FLOAT;
+      bad.logical_format[l->count - 1] = PIPE_FORMAT_R32G32B32_FLOAT;
       CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE);
 
       /* Multisample layouts take the mixed programs; other counts none. */
@@ -312,6 +312,17 @@ test_layout_classification(void)
       PIPE_FORMAT_R32G32B32A32_SINT, PIPE_FORMAT_R32G32B32A32_FLOAT};
    tib = agx_build_tilebuffer_layout(wide, 4, 1, false);
    CHECK(tib.tile_size == 16 * 16);
+   CHECK(agx_g17p_classify_mrt(&tib) == AGX_G17P_MRT_MIXED);
+   CHECK(agx_g17p_rt0_tile_layout_supported(&tib));
+
+   /* The failing CTS render pass leaves attachment zero unused. Compacting
+    * its three packed-float targets preserves their physical offsets and the
+    * 16-byte sample while selecting the generic mixed program. */
+   enum pipe_format sparse_r11[AGX_MAX_RENDER_TARGETS] = {
+      PIPE_FORMAT_NONE, PIPE_FORMAT_R11G11B10_FLOAT,
+      PIPE_FORMAT_R11G11B10_FLOAT, PIPE_FORMAT_R11G11B10_FLOAT};
+   tib = agx_build_tilebuffer_layout(sparse_r11, 4, 1, false);
+   CHECK(tib.sample_size_B == 16);
    CHECK(agx_g17p_classify_mrt(&tib) == AGX_G17P_MRT_MIXED);
    CHECK(agx_g17p_rt0_tile_layout_supported(&tib));
    return 0;
@@ -546,6 +557,16 @@ test_eot_programs(void)
       if (check_eot_programs(&wide_layouts[i], false))
          return 1;
    }
+
+   /* Packed R11G11B10 reaches EOT as one raw R32 word per target. Exercise
+    * the exact three compacted targets and physical offsets from the sparse
+    * CTS render pass against the native raw32 template. */
+   const enum pipe_format r11[3] = {
+      PIPE_FORMAT_R11G11B10_FLOAT, PIPE_FORMAT_R11G11B10_FLOAT,
+      PIPE_FORMAT_R11G11B10_FLOAT};
+   const uint8_t r11_offsets[3] = {4, 8, 12};
+   if (check_eot_subset(3, r11, r11_offsets))
+      return 1;
 
    /* Homogeneous RGBA8 targets reproduce the separately captured programs. */
    const uint8_t rgba8[] = {0x75, 0x75, 0x75, 0x75};
@@ -1386,14 +1407,18 @@ check_golden(const char *name, bool ok, struct agx_shader_part *part,
 /* Blending fragments: every target in `blended` reads the tilebuffer
  * (SourceAlpha, OneMinusSourceAlpha), the others replace it. */
 static bool
-compile_epilog_blended(unsigned count, enum pipe_format format,
-                       unsigned blended, struct agx_shader_part *part)
+compile_epilog_blended_preserve(unsigned count, enum pipe_format format,
+                                unsigned blended, unsigned preserve_rt,
+                                struct agx_shader_part *part)
 {
    struct agx_fs_epilog_key epilog = {
-      .link.loc_written = BITFIELD_MASK(count),
-      .link.size_32 = BITFIELD_MASK(count),
+      .link.loc_written = (uint8_t)BITFIELD_MASK(count),
+      .link.size_32 = (uint8_t)BITFIELD_MASK(count),
       .nr_samples = 1,
       .max_sample_size_B = AGX_G17P_MAX_BYTES_PER_SAMPLE,
+      .preserve_zero_mask = true,
+      .lower_srgb = true,
+      .preserve_rt = preserve_rt,
    };
    memset(epilog.remap, -1, sizeof(epilog.remap));
    for (unsigned rt = 0; rt < count; ++rt) {
@@ -1418,9 +1443,25 @@ compile_epilog_blended(unsigned count, enum pipe_format format,
    struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
                                 .fs.nr_samples = 1,
                                 .secondary = true};
+   if (preserve_rt) {
+      enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+      for (unsigned rt = 0; rt < count; ++rt)
+         formats[rt] = format;
+      const struct agx_tilebuffer_layout tib =
+         agx_build_tilebuffer_layout(formats, count, 1, false);
+      for (unsigned rt = 0; rt < count; ++rt)
+         BITSET_SET(key.g17p_tile_partitions, tib._offset_B[rt]);
+   }
    const bool ok = agx_compile_shader_nir(b.shader, &key, part);
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+compile_epilog_blended(unsigned count, enum pipe_format format,
+                       unsigned blended, struct agx_shader_part *part)
+{
+   return compile_epilog_blended_preserve(count, format, blended, 0, part);
 }
 
 /* The colour transactions of a fragment in order: "W<class>" and
@@ -1576,6 +1617,8 @@ static const struct {
     "R48 S0 R524"},
    {3, PIPE_FORMAT_R16G16B16A16_FLOAT, 0x7, false,
     "W512 W32 L8 W128 L16 W8 L0 W64 S16 R192 W16 S8 R48 W4 S0 R524"},
+   {3, PIPE_FORMAT_R32G32B32A32_FLOAT, 0x7, true,
+    "W512 W128 L32 W32 L16 W8 L0 W64 S32 R192 W16 S16 R48 W4 S0 R524"},
    {4, PIPE_FORMAT_R16G16B16A16_FLOAT, 0xf, false,
     "W512 W128 L16 W32 L8 W8 L24 L0 W4 S24 W64 S16 R192 W16 S8 R48 S0 R524"},
    {5, PIPE_FORMAT_R16G16B16A16_FLOAT, 0x1f, false,
@@ -1623,6 +1666,32 @@ test_blended_epilogs(void)
          fprintf(stderr, "blend %u stores:\n  got  %s\n  want %s\n", i,
                  store_phase(ops), store_phase(blend_witnesses[i].ops));
       CHECK(!strcmp(store_phase(ops), store_phase(blend_witnesses[i].ops)));
+   }
+
+   return 0;
+}
+
+static int
+test_preserved_blended_epilogs(void)
+{
+   /* VK_EXT_shader_object changes color-write enable dynamically. The CTS
+    * path disables RT0 while blending RT1..3, so production reloads and stores
+    * RT0 unchanged instead of dropping the store from a nonempty HAL200 tile. */
+   const enum pipe_format preserve_formats[] = {
+      PIPE_FORMAT_R32_FLOAT, PIPE_FORMAT_R32G32_FLOAT,
+      PIPE_FORMAT_R32G32B32A32_FLOAT};
+   for (unsigned i = 0; i < ARRAY_SIZE(preserve_formats); ++i) {
+      struct agx_shader_part part = {0};
+      CHECK(compile_epilog_blended_preserve(
+         4, preserve_formats[i], 0xe, BITFIELD_BIT(0), &part));
+
+      if (preserve_formats[i] == PIPE_FORMAT_R32G32B32A32_FLOAT) {
+         char ops[256];
+         colour_transactions(&part, ops, sizeof(ops));
+         CHECK(!strcmp(ops, "W512 W8 L48 W128 L32 W32 L16 W4 S48 R12 "
+                            "W64 S32 R192 W16 S16 R560"));
+      }
+      free(part.binary);
    }
    return 0;
 }
@@ -1861,7 +1930,8 @@ main(void)
        test_background_programs() || test_epilogs() ||
        test_subset_epilogs() || test_octa_subset_epilogs() ||
        test_multisample_eot_witnesses() || test_multisample_epilogs() ||
-       test_blended_epilogs() || test_wide_samples() ||
+       test_blended_epilogs() || test_preserved_blended_epilogs() ||
+       test_wide_samples() ||
        test_homogeneous_programs_unchanged())
       return 1;
 

@@ -7277,10 +7277,13 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
     * qualified Vulkan sample-shaded load/depth protocol alongside it. */
    const bool lone_sparse_store =
       !keyed && store_count == 1 && stores[0]->colour_target != 0;
+   /* A keyed subset may blend each stored partition while omitted partitions
+    * remain untouched. Apple's four-RGBA32Float G17P witness with RT0 masked
+    * and RT1..3 blended uses exactly that load/store shape. */
    if (!stop || (keyed && unkeyed_store) ||
        (!lone_sparse_store &&
         store_count < (subset && !only_partition0 ? 1 : 2)) ||
-       (subset && load_count) || (depth_ops && depth_ops != 3))
+       (depth_ops && depth_ops != 3))
       return false;
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
@@ -7576,9 +7579,9 @@ agx3_merge_unread_pixel_waits(agx_context *ctx)
 }
 
 /* Tile stores read their payloads from a bank of GPR halves
- * (agx3_tile_store_bank). Payloads that must be live together beyond it, such
- * as three blended RGBA32 targets, have no register assignment: refuse the
- * shader rather than let register allocation find none.
+ * (agx3_tile_store_bank). Payloads that must be live together beyond the
+ * grounded bank have no register assignment: refuse the shader rather than
+ * let register allocation find none.
  */
 static bool
 agx3_tile_store_payloads_fit(agx_context *ctx)

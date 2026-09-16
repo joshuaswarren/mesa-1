@@ -103,9 +103,11 @@ agx_g17p_mrt_eot_selector(enum pipe_format format)
    case PIPE_FORMAT_R32G32_FLOAT:
    case PIPE_FORMAT_R32G32B32A32_FLOAT:
    case PIPE_FORMAT_R32G32B32X32_FLOAT:
-   /* RGB9E5 is packed into one raw R32 word before the tile store, and its
-    * PBE is likewise R32_UINT. Multi-target EOT therefore uses the grounded
-    * W32 integer selector rather than asking IMGWBLK to convert it again. */
+   /* RGB9E5 and R11G11B10 are packed into one raw R32 word before the tile
+    * store, and their PBE is likewise R32_UINT. Multi-target EOT therefore
+    * uses the grounded W32 integer selector rather than asking IMGWBLK to
+    * convert it again. */
+   case PIPE_FORMAT_R11G11B10_FLOAT:
    case PIPE_FORMAT_R9G9B9E5_FLOAT:
       return 0x35;
 

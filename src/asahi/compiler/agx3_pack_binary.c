@@ -2617,17 +2617,12 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const agx_index coords = load ? I->src[1] : I->src[2];
    const int width = agx3_tile_format_width(I->format);
    struct agx3_tile_sample sample_op;
-   /* The instrument that first surfaced this. Prints every tile access the
-    * encoder is asked to emit, with the shader it came from, so a multisample
-    * store that still carries an immediate mask is visible offline instead of
-    * only as wrong pixels. */
-   if (getenv("AGX_TRACE_TILE_COVERAGE")) {
+   if (getenv("AGX_TRACE_TILE_COVERAGE"))
       fprintf(stderr, "TILE %s sample=%s%u fmt=%u mask=%u shader=%s\n",
               load ? "load" : "store",
               sample.type == AGX_INDEX_IMMEDIATE ? "imm " : "reg ",
               sample.value, I->format, I->mask,
               agx3_trace_shader_name ? agx3_trace_shader_name : "?");
-   }
    if (((I->format == AGX_FORMAT_RGB10A2 ||
          I->format == AGX_FORMAT_RGB9E5) &&
         (I->mask != 1 || value.size != AGX_SIZE_32)) ||
@@ -8979,9 +8974,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    !agx3_emit_tile(emission, enc, I, slot,
                                    store_waits ? wait : 0, false, false,
                                    g17p_mrt.raw32_store,
-                                   g17p_mrt.count >= 4 ||
-                                      (g17p_mrt.count == 3 &&
-                                       !g17p_mrt.has_loads),
+                                   g17p_mrt.count >= 3,
                                    store_f13) ||
                    (!load && release_class &&
                     (!agx3_pixel_release(enc, combined_class, last, 0, bytes,
