@@ -4003,7 +4003,8 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
        * selected values in slots 2/3 have integer bit-pattern semantics.
        * FCMP is lowered to a boolean FSEL later, so normalize it here too.
        */
-      if (I->op == AGX_OPCODE_FCMPSEL || I->op == AGX_OPCODE_FCMP) {
+      if (ctx->key->dev.chip != AGX_CHIP_G17P &&
+          (I->op == AGX_OPCODE_FCMPSEL || I->op == AGX_OPCODE_FCMP)) {
          if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
              I->op == AGX_OPCODE_FCMP) {
             /* Boolean FCMP becomes an immediate-alternative FSEL after this

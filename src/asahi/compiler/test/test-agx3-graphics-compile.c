@@ -1241,6 +1241,7 @@ test_g17p_divergent_quad_loop(void)
    };
    nir_shader *nir = build_fs_divergent_quad_loop();
    struct agx_shader_key key = {
+      .dev.chip = AGX_CHIP_G17P,
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,
       .no_preamble = true,
    };
@@ -1305,6 +1306,7 @@ test_g17p_alpha_coverage_boundary(void)
    };
    nir_shader *nir = build_fs_alpha_coverage_boundary();
    struct agx_shader_key key = {
+      .dev.chip = AGX_CHIP_G17P,
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,
       .no_preamble = true,
    };

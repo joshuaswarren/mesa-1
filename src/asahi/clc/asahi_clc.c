@@ -481,6 +481,10 @@ main(int argc, char **argv)
             key.dev.encoding = !strcmp(*target, "g17p")
                                   ? AGX_ISA_ENCODING_AGX3B
                                   : AGX_ISA_ENCODING_AGX2;
+            key.dev.chip = !strcmp(*target, "g17p")
+                              ? AGX_CHIP_G17P
+                              : !strcmp(*target, "g13x") ? AGX_CHIP_G13X
+                                                          : AGX_CHIP_G13G;
 
             if (has_atomic) {
                key.dev.needs_g13x_coherency =

@@ -1234,6 +1234,8 @@ g17p_backend_key(enum agx_isa_encoding encoding, struct agx_shader_key *key)
 {
    *key = (struct agx_shader_key){0};
    key->dev.encoding = encoding;
+   key->dev.chip = encoding == AGX_ISA_ENCODING_AGX3B ? AGX_CHIP_G17P
+                                                       : AGX_CHIP_G13G;
    key->reserved_preamble = 4 * (1 + 1);
    key->has_scratch = true;
    key->promote_constants = true;
@@ -1248,13 +1250,13 @@ g17p_backend_key(enum agx_isa_encoding encoding, struct agx_shader_key *key)
  * Honeykrisp must run nir_opt_large_constants BEFORE agx_preprocess_nir
  * (hk_shader.c hk_preprocess_nir_internal).  Run it after and the array is
  * already scratch, nir_opt_large_constants has no function_temp variable left
- * to move, and the shader reaches the backend as stack_store/stack_load
- * traffic which AGX3 cannot encode and which
- * hk_g17p_compute_shader_supported() would refuse anyway.
+ * to move, and the shader reaches the backend as stack_store/stack_load.
+ * AGX3B now has a grounded dynamic/static TPS path for that fallback; AGX3C
+ * does not and must continue to fail closed.
  *
  * `ordered` reproduces the correct order and must compile with no scratch and
- * a non-empty constant blob.  `!ordered` reproduces the regression and must
- * FAIL CLOSED -- never silently produce a scratch-using shader.
+ * a non-empty constant blob. `!ordered` pins the bounded AGX3B scratch launch
+ * and the corresponding AGX3C rejection.
  */
 static bool
 check_constant_array_ordering(enum agx_isa_encoding encoding, bool ordered)
@@ -1307,21 +1309,38 @@ check_constant_array_ordering(enum agx_isa_encoding encoding, bool ordered)
                  b.shader->constant_data_size, b.shader->scratch_size);
       }
 
-      /* ...and the backend must refuse it rather than emit something. */
-      if (valid && compiled) {
-         fprintf(stderr,
-                 "AGX3 accepted a scratch-using compute shader; if stack "
-                 "access is now grounded, widen "
-                 "hk_g17p_compute_shader_supported() in the same change\n");
-         valid = false;
-      }
+      if (encoding == AGX_ISA_ENCODING_AGX3B) {
+         /* The grounded AGX3B TPS backend must preserve it in a launchable,
+          * bounded private frame. hk_g17p_compute_shader_supported() already
+          * admits this same 4096-byte bound. */
+         if (valid)
+            valid = compiled && part.binary != NULL &&
+                    part.info.binary_size > 4 && part.info.main_size > 4 &&
+                    !part.info.has_preamble &&
+                    part.info.preamble_scratch_size == 0 &&
+                    part.info.scratch_size > 0 &&
+                    part.info.scratch_size <= 4096 &&
+                    part.info.agx3_staging_known;
 
-      if (valid) {
-         const uint8_t zero[sizeof(part)] = {0};
-         if (memcmp(&part, zero, sizeof(part)) != 0) {
-            fprintf(stderr, "AGX3 scratch rejection did not clear output\n");
-            valid = false;
+         if (!valid)
+            fprintf(stderr,
+                    "AGX3B scratch fallback is not a bounded launch: "
+                    "compiled %u binary %u main %u scratch %u preamble %u "
+                    "staging %u\n",
+                    compiled, compiled ? part.info.binary_size : 0,
+                    compiled ? part.info.main_size : 0,
+                    compiled ? part.info.scratch_size : 0,
+                    compiled ? part.info.preamble_scratch_size : 0,
+                    compiled ? part.info.agx3_staging_known : 0);
+      } else {
+         /* AGX3C has no corresponding TPS witness and remains fail-closed. */
+         valid &= !compiled;
+         if (valid) {
+            const uint8_t zero[sizeof(part)] = {0};
+            valid = memcmp(&part, zero, sizeof(part)) == 0;
          }
+         if (!valid)
+            fprintf(stderr, "AGX3C scratch path did not fail closed\n");
       }
    }
 
@@ -2432,7 +2451,7 @@ main(int argc, char **argv)
    glsl_type_singleton_decref();
 
    puts("agx3_compile: compute SR/shared-memory/constant-data paths emitted; "
-        "constant arrays kept out of scratch; unlowered ray queries and "
-        "printf addresses rejected");
+        "AGX3B scratch fallback bounded; unlowered ray queries and printf "
+        "addresses rejected");
    return 0;
 }

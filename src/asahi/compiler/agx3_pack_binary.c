@@ -731,11 +731,26 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       SR(AGX_SR_THREAD_POSITION_IN_GRID_X, 23, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Y, 24, AGX3_SR_W32);
       SR(AGX_SR_THREAD_POSITION_IN_GRID_Z, 25, AGX3_SR_W32);
-      SR(AGX_SR_INPUT_SAMPLE_MASK, 39, AGX3_SR_W16);
+   case AGX_SR_INPUT_SAMPLE_MASK:
+      if (enc != AGX_ISA_ENCODING_AGX3B)
+         return false;
+      *apple = 39;
+      *width = AGX3_SR_W16;
+      return true;
       SR(AGX_SR_COVERAGE_MASK, 39, AGX3_SR_W16);
       SR(AGX_SR_IS_ACTIVE_THREAD, 2, AGX3_SR_W16);
-      SR(AGX_SR_BACKFACING, 41, AGX3_SR_W16);
-      SR(AGX_SR_BACKGROUND_LAYER_ID, 12, AGX3_SR_W16);
+   case AGX_SR_BACKFACING:
+      if (enc != AGX_ISA_ENCODING_AGX3B)
+         return false;
+      *apple = 41;
+      *width = AGX3_SR_W16;
+      return true;
+   case AGX_SR_BACKGROUND_LAYER_ID:
+      if (enc != AGX_ISA_ENCODING_AGX3B)
+         return false;
+      *apple = 12;
+      *width = AGX3_SR_W16;
+      return true;
       /* Apple's uniform-address atomic election reads the active-thread
        * index (SR 34) and count (SR 36) of the SIMD-group, and quad_is_first
        * reads SR 33, all into half registers in the short form, also after
@@ -5027,6 +5042,7 @@ agx3_is_loop_guard_push(const agx_instr *I)
 static int
 agx3_try_control_flow(struct util_dynarray *emission,
                       struct util_dynarray *fixups, enum agx_isa_encoding enc,
+                      enum agx_chip chip,
                       const agx_instr *I, uint16_t wait_mask,
                       uint16_t outstanding, bool after_loop_backedge,
                       bool loop_exit_jump, unsigned loop_depth)
@@ -5113,16 +5129,20 @@ agx3_try_control_flow(struct util_dynarray *emission,
       const bool is_float = I->op == AGX_OPCODE_IF_FCMP ||
                             I->op == AGX_OPCODE_WHILE_FCMP ||
                             I->op == AGX_OPCODE_BREAK_IF_FCMP;
-      /* CNDLT predicates are persistent across a backedge. Apple assigns
-       * outer through inner loop predicates to successive flag slots. NEST is
-       * the number of exec-mask levels a break exits, not this depth. Every
-       * compare here immediately precedes the CND that consumes it, so a slot
-       * is only busy for that pair. Apple's seven- and eight-deep loops test
-       * every level through flag slot 1, so deeper nests wrap the six slots. */
+      /* G16G reuses each loop's slot for its breaks and wraps deep loop nests,
+       * as witnessed by M4's seven- and eight-deep loop shaders. G17P instead
+       * assigns a deep break the next slot so it cannot overwrite the live
+       * predicate of an enclosing conditional. NEST counts exec-mask levels
+       * exited, not loop depth. */
       if ((is_break_if || is_while) && loop_depth == 0)
          return -1;
-      const unsigned flag_slot =
-         is_break_if || is_while ? (loop_depth - 1) % 6 : 0;
+      const unsigned loop_slot = loop_depth - 1;
+      const unsigned flag_slot = chip == AGX_CHIP_G16G
+         ? (is_break_if || is_while ? loop_slot % 6 : 0)
+         : (is_break_if ? loop_slot + (I->nest > 1)
+                        : (is_while ? loop_slot : 0));
+      if (flag_slot >= 6)
+         return -1;
       if (!agx3_emit_cf_compare(emission, enc, I, is_float, flag_slot,
                                 &invert)) {
          if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
@@ -8067,7 +8087,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (loop_pop)
             block->loop_exit_offset = emission->size;
          const int cf = agx3_try_control_flow(
-            emission, &fixups, enc, I, cf_wait, cf_outstanding,
+            emission, &fixups, enc, ctx->key->dev.chip, I, cf_wait,
+            cf_outstanding,
             after_loop_backedge,
             I->op == AGX_OPCODE_JMP_EXEC_NONE_AFTER && after_loop_exit_test,
             loop_depth);
@@ -10369,7 +10390,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                /* LTN/GTN are minNum/maxNum conditions. Rewriting them to
                 * GE/LE with swapped integer selections returns the NaN when
                 * src0 is NaN. Untied condition-3/7 selects are not grounded. */
-               if (condition == AGX_FCOND_LTN || condition == AGX_FCOND_GTN)
+               if (ctx->key->dev.chip != AGX_CHIP_G17P &&
+                   (condition == AGX_FCOND_LTN || condition == AGX_FCOND_GTN))
                   AGX3_REFUSE(I);
                if (zero_first) {
                   switch (condition) {
@@ -10745,6 +10767,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               (agx3_src_is_zero_imm(I->src[0]) && agx3_vary_reg32(I->src[1]))) &&
              (agx3_src_is_register(I->src[2]) ||
               agx3_src_is_register(I->src[3]))) {
+            /* G16G's condition-3/7 full-register form is grounded only when
+             * the alternatives are tied min/max operands, handled above.
+             * Rewriting an untied all-register form to ordered GE/LE returns
+             * the NaN operand. G17P retains its separately qualified legacy
+             * form, and immediate-alternative M4 witnesses remain below. */
+            if (ctx->key->dev.chip != AGX_CHIP_G17P &&
+                I->dest[0].size == AGX_SIZE_32 &&
+                (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
+                agx3_src_is_register(I->src[0]) &&
+                agx3_src_is_register(I->src[1]) &&
+                agx3_src_is_register(I->src[2]) &&
+                agx3_src_is_register(I->src[3]))
+               AGX3_REFUSE(I);
             const bool zero_first=agx3_src_is_zero_imm(I->src[0]);
             const bool compare_zero=zero_first || agx3_src_is_zero_imm(I->src[1]);
             unsigned condition=I->fcond;
@@ -10864,7 +10899,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                bool swap = I->invert_cond;
                /* The tied min/max handler above owns condition 3/7. There is
                 * no grounded untied encoding with those NaN semantics. */
-               if (condition == AGX_FCOND_LTN || condition == AGX_FCOND_GTN)
+               if (ctx->key->dev.chip != AGX_CHIP_G17P &&
+                   (condition == AGX_FCOND_LTN || condition == AGX_FCOND_GTN))
                   AGX3_REFUSE(I);
                uint16_t fsel_wait = wait;
                if (fsel_wait != 0 && fsel_wait != 32) {
