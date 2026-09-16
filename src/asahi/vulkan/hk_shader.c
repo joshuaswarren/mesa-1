@@ -1343,12 +1343,17 @@ lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
       nir_i2f32(b, value), nir_u2f32(b, value));
    nir_def *scale = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, kind, 4), 0),
                              nir_imm_float(b, 65535), nir_imm_float(b, 255));
+   scale = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, kind, 128), 0),
+                     nir_imm_float(b, 1023), scale);
    nir_def *factors[4];
    for (unsigned c = 0; c < value->num_components; ++c) {
       unsigned component = tex->op == nir_texop_tg4 ? tex->component : c;
       factors[c] = nir_bcsel(b,
          nir_ine_imm(b, nir_iand_imm(b, kind, BITFIELD_BIT(3 + component)), 0),
-         scale, nir_imm_float(b, 1));
+         nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(
+            b, kind, BITFIELD_BIT(8 + component)), 0),
+            nir_imm_float(b, 3), scale),
+         nir_imm_float(b, 1));
    }
    nir_def *normalized = nir_fmul(b, value, nir_vec(b, factors, value->num_components));
    if (tex->op == nir_texop_txf || tex->op == nir_texop_txf_ms || tex->op == nir_texop_tg4)

@@ -42,7 +42,9 @@ struct hk_sampled_image_descriptor_sw {
    uint16_t min_lod_uint16;
    /* Low two bits: 0 = none, 1 = SINT, 2 = UINT, 3 = normalized USCALED.
     * For kind 3, bit 2 selects 16 rather than 8 bits, and bits 3..6 mark
-    * swizzled output channels to rescale (constant zero/one stay unchanged). */
+    * swizzled output channels to rescale (constant zero/one stay unchanged).
+    * Bit 7 selects packed 10:10:10:2; bits 8..11 mark its swizzled 2-bit
+    * channels. */
    uint16_t scaled_conversion;
    /* TODO: This should probably be a heap! */
    uint32_t border[4];

@@ -137,12 +137,16 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
             const struct util_format_description *fmt = util_format_description(logical);
             const VkComponentSwizzle swizzle[4] = {view->vk.swizzle.r, view->vk.swizzle.g,
                                                   view->vk.swizzle.b, view->vk.swizzle.a};
-            uint16_t kind = 3 | ((fmt->channel[0].size == 16) << 2);
+            uint16_t kind = 3 | ((fmt->channel[0].size == 16) << 2) |
+                                  ((fmt->channel[0].size == 10) << 7);
             for (unsigned c = 0; c < 4; ++c) {
                unsigned component = swizzle[c] == VK_COMPONENT_SWIZZLE_IDENTITY ? c :
                   swizzle[c] >= VK_COMPONENT_SWIZZLE_R ? swizzle[c] - VK_COMPONENT_SWIZZLE_R : 4;
-               if (component < 4 && fmt->swizzle[component] < PIPE_SWIZZLE_0)
+               if (component < 4 && fmt->swizzle[component] < PIPE_SWIZZLE_0) {
                   kind |= BITFIELD_BIT(3 + c);
+                  if (fmt->channel[fmt->swizzle[component]].size == 2)
+                     kind |= BITFIELD_BIT(8 + c);
+               }
             }
             desc[plane].sw.scaled_conversion = kind;
          }
