@@ -3138,10 +3138,13 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    if (builder == build_g17p_fs_epilog)
       backend_key.g17p_emrt =
          ((const struct agx_fs_epilog_key *)key->key)->native_spills;
-   if (backend_key.g17p_emrt) {
-      /* Unrolling replaces the loop induction mask with a constant sample.
-       * Materialize native register masks after that optimization as well. */
+   if (builder == build_g17p_fs_epilog) {
+      /* Preprocessing can unroll any multisample epilog, not only eMRT.
+       * Its induction masks then become literals. Materialize the native
+       * coverage operands after that transformation, before binary packing. */
       NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, nr_samples);
+   }
+   if (backend_key.g17p_emrt) {
       /* Only the image accesses may be conditional. Every resident tile
        * operation must execute on every path through the epilog. */
       nir_metadata_require(b.impl, nir_metadata_dominance);

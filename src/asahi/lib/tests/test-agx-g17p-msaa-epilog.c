@@ -452,9 +452,64 @@ check_late_mask_split(bool alpha_coverage)
    return ok;
 }
 
+static bool
+check_alpha_one_after_preprocess(unsigned samples)
+{
+   struct agx_fs_epilog_key key = {
+      .nr_samples = samples,
+      .link.loc_written = 1,
+      .link.size_32 = 1,
+      .rt_formats = {PIPE_FORMAT_R8G8B8A8_UNORM},
+      .blend.alpha_to_one = true,
+      .preserve_zero_mask = true,
+      .lower_srgb = true,
+   };
+   memset(key.remap, -1, sizeof(key.remap));
+   key.remap[0] = 0;
+   key.blend.rt[0].colormask = 15;
+   key.blend.rt[0].mode = agx_pack_blend_standard(
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_SRC_ALPHA, PIPE_BLENDFACTOR_INV_SRC_ALPHA,
+      PIPE_BLEND_ADD, PIPE_BLENDFACTOR_SRC_ALPHA, PIPE_BLENDFACTOR_INV_SRC_ALPHA);
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P late alpha-one masks");
+   agx_nir_fs_epilog(&b, &key);
+   agx_nir_lower_g17p_tile_samples(b.shader, samples);
+   agx_preprocess_nir(b.shader);
+   /* The earlier pass must not be mistaken for a complete lowering: loop
+    * optimization has just exposed constant sample operands. */
+   bool ok = agx_nir_lower_g17p_tile_samples(b.shader, samples);
+   ok &= count_intrinsic(b.shader, nir_intrinsic_load_sample_mask) == 1;
+   struct agx_shader_key backend = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = samples,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &backend, &part);
+   unsigned stores = 0;
+   const uint8_t *bytes = part.binary;
+   for (unsigned i = 0; ok && i + 12 <= part.info.binary_size; ++i) {
+      if (is_lstcol(bytes + i, part.info.binary_size - i)) {
+         stores++;
+         ok &= lstcol_sample_is_register(bytes + i);
+      }
+   }
+   ok &= stores == samples;
+   if (!ok)
+      fprintf(stderr, "%ux alpha-one late mask lowering failed (%u stores)\n",
+              samples, stores);
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "alpha-one"))
+      return (check_alpha_one_after_preprocess(2) &&
+              check_alpha_one_after_preprocess(4)) ? 0 : 1;
    if (argc == 2 && !strcmp(argv[1], "half2"))
       return check_half2_sample_exports() ? 0 : 1;
    if (argc == 3)
@@ -464,6 +519,8 @@ main(int argc, char **argv)
                                 atoi(argv[3])) ? 0 : 1;
 
    bool ok = true;
+   ok &= check_alpha_one_after_preprocess(2);
+   ok &= check_alpha_one_after_preprocess(4);
    ok &= check_late_mask_split(false);
    ok &= check_late_mask_split(true);
    for (unsigned samples = 1; samples <= 4; samples *= 2)
