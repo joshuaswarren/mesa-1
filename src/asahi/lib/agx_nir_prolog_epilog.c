@@ -915,8 +915,12 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       b->cursor = nir_before_instr(&intr->instr);
 
       nir_def *mask = nir_load_var(b, ctx->masked_samples);
-      nir_def *mask_2 =
-         nir_ixor(b, intr->src[0].ssa, nir_imm_intN_t(b, 0xff, 16));
+      /* The demoted-sample mask arrives as 16-bit from the sample-mask
+       * lowering but as 32-bit when it comes straight from gl_SampleMask
+       * (fragment_operations.early_fragment.samplemask_*). Coverage is eight
+       * bits, so narrow it before combining with the 16-bit accumulator. */
+      nir_def *demoted = nir_u2uN(b, intr->src[0].ssa, 16);
+      nir_def *mask_2 = nir_ixor(b, demoted, nir_imm_intN_t(b, 0xff, 16));
 
       mask = nir_iand(b, mask, mask_2);
       nir_store_var(b, ctx->masked_samples, mask, nir_component_mask(1));
