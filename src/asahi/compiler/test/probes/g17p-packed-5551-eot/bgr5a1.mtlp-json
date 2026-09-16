@@ -1,0 +1,15 @@
+{
+  "pipelines": {
+    "render_pipelines": [
+      {
+        "vertex_function": "packed_5551_vertex",
+        "fragment_function": "packed_5551_fragment",
+        "color_attachments": [
+          {
+            "pixel_format": "BGR5A1Unorm"
+          }
+        ]
+      }
+    ]
+  }
+}

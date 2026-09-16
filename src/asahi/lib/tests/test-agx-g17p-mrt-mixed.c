@@ -198,6 +198,8 @@ test_selectors_match_single_target_programs(void)
     * order is the PBE's, as for the BGRA forms already listed. */
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_A4B4G4R4_UNORM) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_A4R4G4B4_UNORM) == 0x15);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_A1B5G5R5_UNORM) == 0x15);
+   CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_A1R5G5B5_UNORM) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B5G5R5A1_UNORM) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B10G10R10A2_UINT) == 0x15);
    CHECK(agx_g17p_mrt_eot_selector(PIPE_FORMAT_B8G8R8A8_SNORM) == 0x75);

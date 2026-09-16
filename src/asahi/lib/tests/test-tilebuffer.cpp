@@ -436,6 +436,9 @@ TEST(Tilebuffer, G17PPacked16EOTKey)
 {
    struct agx_shader_key key = {};
    const enum pipe_format packed[] = {
+      /* Vulkan R5G5B5A1/B5G5R5A1 use these low-alpha Gallium forms. */
+      PIPE_FORMAT_A1B5G5R5_UNORM,
+      PIPE_FORMAT_A1R5G5B5_UNORM,
       PIPE_FORMAT_R5G5B5A1_UNORM,
       PIPE_FORMAT_B5G5R5A1_UNORM,
       PIPE_FORMAT_R5G5B5X1_UNORM,
