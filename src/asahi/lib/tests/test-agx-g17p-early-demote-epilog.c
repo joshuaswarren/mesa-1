@@ -286,12 +286,12 @@ test_unrolled_sample_shading(void)
  * 4i + 2 and writes all four DEPTHFs under one class-1 transaction. The
  * unrolled epilog completes that transaction before its colour stores. */
 static bool
-test_unrolled_sample_depth(bool alpha_coverage)
+test_unrolled_sample_depth(bool alpha_coverage, bool writes_depth)
 {
    struct agx_fs_epilog_key key = {
       .link.loc_written = BITFIELD_BIT(0),
       .link.size_32 = BITFIELD_BIT(0),
-      .link.write_z = true,
+      .link.write_z = writes_depth,
       .nr_samples = 4,
       .defer_monolithic_msaa = true,
       .blend.alpha_to_coverage = alpha_coverage,
@@ -334,6 +334,8 @@ test_unrolled_sample_depth(bool alpha_coverage)
    static const uint8_t wait1[] = {0x87, 0x02, 0x54, 0x01, 0x00, 0x00};
    static const uint8_t release1[] = {0x07, 0x02, 0x54, 0x01, 0x00, 0x00};
    static const uint8_t wait12[] = {0x87, 0x02, 0x54, 0x0c, 0x08, 0x00};
+   /* Without a depth export, the combined testing mask owns class 1. With
+    * a depth export, DEPTHF owns it instead. Both require one transaction. */
    ok &= count_bytes(&part, wait1, sizeof(wait1)) == 1 &&
          count_bytes(&part, release1, sizeof(release1)) == 1 &&
          count_bytes(&part, wait12, sizeof(wait12)) == 1;
@@ -351,12 +353,16 @@ test_unrolled_sample_depth(bool alpha_coverage)
       if (!memcmp(text + at, wait12, sizeof(wait12)))
          colour_wait = at;
    }
-   ok &= depth_writes == 4 && first_depthf < colour_wait;
+   ok &= depth_writes == (writes_depth ? 4 : 0) &&
+         (!writes_depth || first_depthf < colour_wait);
 
    if (!ok)
-      fprintf(stderr, "depth fixture: alpha=%u binary=%u depth=%u first=%zu colour=%zu masks=%u\n",
+      fprintf(stderr, "depth fixture: alpha=%u binary=%u depth=%u first=%zu colour=%zu masks=%u waits=%u releases=%u colour-waits=%u\n",
               alpha_coverage, part.info.binary_size, depth_writes, first_depthf,
-              colour_wait, count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx));
+              colour_wait, count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx),
+              count_bytes(&part, wait1, sizeof(wait1)),
+              count_bytes(&part, release1, sizeof(release1)),
+              count_bytes(&part, wait12, sizeof(wait12)));
 
    free(part.binary);
    ralloc_free(b.shader);
@@ -394,6 +400,64 @@ eval_sample_mask(nir_def *def, unsigned exported_mask, unsigned *value)
       return false;
    *value = alu->op == nir_op_iand ? a & b :
             alu->op == nir_op_ior ? a | b : a ^ b;
+   return true;
+}
+
+static bool
+test_disjoint_testing_masks(void)
+{
+   for (unsigned samples = 2; samples <= 4; samples *= 2) {
+      for (unsigned dynamic = 0; dynamic < 2; ++dynamic) {
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_FRAGMENT, &agx_nir_options, "disjoint testing masks");
+         nir_def *input = nir_load_exported_agx(
+            &b, 1, 16, .base = AGX_ABI_FOUT_WRITE_SAMPLES);
+         for (unsigned i = 0; i < samples; ++i) {
+            nir_def *bit = nir_imm_intN_t(&b, 1u << i, 16);
+            nir_def *target = dynamic ? nir_iand(&b, input, bit) : bit;
+            /* Other samples' LIVE bits must never leak into this target. */
+            nir_sample_mask_agx(&b, target, nir_ixor(&b, input, bit));
+         }
+         bool ok = agx_nir_hoist_g17p_zs_writes(b.shader) &&
+                   count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx) == 1;
+         nir_intrinsic_instr *mask = NULL;
+         nir_foreach_block(block, b.impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_intrinsic &&
+                   nir_instr_as_intrinsic(instr)->intrinsic ==
+                      nir_intrinsic_sample_mask_agx)
+                  mask = nir_instr_as_intrinsic(instr);
+            }
+         }
+         const unsigned all = (1u << samples) - 1;
+         for (unsigned input_mask = 0; mask && input_mask < 256; ++input_mask) {
+            unsigned target = 0, live = 0;
+            ok &= eval_sample_mask(mask->src[0].ssa, input_mask, &target) &&
+                  eval_sample_mask(mask->src[1].ssa, input_mask, &live);
+            ok &= target == (dynamic ? input_mask & all : all);
+            ok &= live == (dynamic ? 0 : (~input_mask & all));
+         }
+         ok &= mask != NULL;
+         ralloc_free(b.shader);
+         if (!ok)
+            return false;
+      }
+   }
+
+   /* Repeated targets and mutable coverage inputs do not commute. */
+   for (unsigned bad = 0; bad < 2; ++bad) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_FRAGMENT, &agx_nir_options, "noncommuting testing masks");
+      nir_def *live = bad ? nir_u2u16(&b, nir_load_sample_mask(&b))
+                         : nir_imm_intN_t(&b, 0xff, 16);
+      nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 1, 16), live);
+      nir_sample_mask_agx(&b, nir_imm_intN_t(&b, bad ? 2 : 1, 16), live);
+      bool ok = !agx_nir_hoist_g17p_zs_writes(b.shader) &&
+                count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx) == 2;
+      ralloc_free(b.shader);
+      if (!ok)
+         return false;
+   }
    return true;
 }
 
@@ -524,6 +588,10 @@ test_unrolled_dynamic_depth_mask(void)
 int
 main(void)
 {
+   if (!test_disjoint_testing_masks()) {
+      fprintf(stderr, "G17P testing-mask coalescing changed sample semantics\n");
+      return 1;
+   }
    if (!test_single_sample_shading()) {
       fprintf(stderr, "G17P 1x sample shading was not folded to pixel shading\n");
       return 1;
@@ -532,7 +600,9 @@ main(void)
       fprintf(stderr, "G17P samples were not unrolled into one transaction\n");
       return 1;
    }
-   if (!test_unrolled_sample_depth(false) || !test_unrolled_sample_depth(true)) {
+   if (!test_unrolled_sample_depth(false, true) ||
+       !test_unrolled_sample_depth(true, true) ||
+       !test_unrolled_sample_depth(true, false)) {
       fprintf(stderr, "G17P per-sample depth writes were not staged per sample\n");
       return 1;
    }

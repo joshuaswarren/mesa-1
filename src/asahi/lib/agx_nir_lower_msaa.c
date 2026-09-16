@@ -351,6 +351,27 @@ agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
 
 static bool movable_zs_source(nir_def *def);
 
+/* Conservative set of bits a target can affect. Per-sample lowering ends
+ * each target with AND(active_sample), even if algebraic folding has not
+ * reduced its other operand to a constant yet. Unknown expressions may set
+ * every bit, so they never prove independence from another nonempty target. */
+static unsigned
+possible_sample_targets(nir_def *def)
+{
+   nir_instr *instr = nir_def_instr(def);
+   if (def->num_components != 1 || def->bit_size != 16)
+      return UINT_MAX;
+   if (instr->type == nir_instr_type_load_const)
+      return nir_src_as_uint(nir_src_for_ssa(def));
+   if (instr->type == nir_instr_type_alu) {
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      if (alu->op == nir_op_iand)
+         return possible_sample_targets(alu->src[0].src.ssa) &
+                possible_sample_targets(alu->src[1].src.ssa);
+   }
+   return UINT16_MAX;
+}
+
 static bool
 movable_zs_src_cb(nir_src *src, void *data)
 {
@@ -419,6 +440,7 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
    nir_intrinsic_instr *writes[8];
    unsigned kill_count = 0, count = 0;
    bool progress = false;
+   bool tests_samples = false;
 
    nir_foreach_block(block, impl) {
       nir_foreach_instr_safe(instr, block) {
@@ -430,16 +452,16 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
             return false;
 
          if (intr->intrinsic == nir_intrinsic_sample_mask_agx) {
-            /* A late split epilog kills the samples discarded by the main
-             * shader before opening the class-1 DEPTHF transaction.  The
-             * per-sample unroller cloned that update, so gather every clone
-             * ahead of every depth write. */
+            /* Pure kills may precede the depth transaction. Colour-only
+             * epilogs may instead test their targeted samples here; admit
+             * those only for provably disjoint target sets, checked below. */
             if (kill_count == ARRAY_SIZE(kills) ||
                 block != nir_start_block(impl) ||
-                !nir_src_is_const(intr->src[1]) ||
-                nir_src_as_uint(intr->src[1]) != 0 ||
-                !movable_zs_source(intr->src[0].ssa))
+                !movable_zs_source(intr->src[0].ssa) ||
+                !movable_zs_source(intr->src[1].ssa))
                return false;
+            tests_samples |= !nir_src_is_const(intr->src[1]) ||
+                             nir_src_as_uint(intr->src[1]) != 0;
             kills[kill_count++] = intr;
             continue;
          }
@@ -468,28 +490,49 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
       }
    }
 
-   if (count == 0 || (count == 1 && kill_count == 0))
+   if (tests_samples) {
+      /* Do not combine testing updates with DEPTHF, or test one sample
+       * twice. Independent targets permit LIVE to be masked by its own
+       * TARGET before unioning; ORing the unmasked LIVE values is wrong. */
+      if (count)
+         return false;
+      unsigned targets = 0;
+      for (unsigned k = 0; k < kill_count; ++k) {
+         unsigned target = possible_sample_targets(kills[k]->src[0].ssa);
+         if (targets & target)
+            return false;
+         targets |= target;
+      }
+   }
+
+   if ((count == 0 && kill_count <= 1) || (count == 1 && kill_count == 0))
       return nir_progress(progress, impl, nir_metadata_control_flow);
 
    struct move_zs_state state = {
       .cursor = nir_before_impl(impl),
       .moved = _mesa_pointer_set_create(NULL),
    };
-   nir_def *killed = NULL;
+   nir_def *affected = NULL, *surviving = NULL;
    for (unsigned k = 0; k < kill_count; ++k) {
       nir_foreach_src(&kills[k]->instr, move_zs_source, &state);
       nir_builder b = nir_builder_at(state.cursor);
-      nir_def *mask = kills[k]->src[0].ssa;
-      killed = killed ? nir_ior(&b, killed, mask) : mask;
+      nir_def *target = kills[k]->src[0].ssa;
+      affected = affected ? nir_ior(&b, affected, target) : target;
+      if (tests_samples) {
+         nir_def *live = nir_iand(&b, target, kills[k]->src[1].ssa);
+         surviving = surviving ? nir_ior(&b, surviving, live) : live;
+      }
       state.cursor = b.cursor;
       nir_instr_remove(&kills[k]->instr);
    }
-   if (killed) {
-      /* Kill-only updates commute: union their disjoint sample masks and
-       * issue one coverage update before any Z/S or colour write. Keeping
-       * each unrolled clone would repeat the same coverage transaction. */
+   if (affected) {
+      /* Kill-only updates commute even with overlapping targets. Testing
+       * updates have disjoint targets, so each sample keeps its own LIVE bit
+       * and runs tests at most once, before the shared colour transaction. */
       nir_builder b = nir_builder_at(state.cursor);
-      nir_sample_mask_agx(&b, killed, nir_imm_intN_t(&b, 0, killed->bit_size));
+      if (!surviving)
+         surviving = nir_imm_intN_t(&b, 0, affected->bit_size);
+      nir_sample_mask_agx(&b, affected, surviving);
       state.cursor = b.cursor;
    }
    for (unsigned w = 0; w < count; ++w) {
