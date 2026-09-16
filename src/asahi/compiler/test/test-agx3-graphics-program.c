@@ -43,6 +43,9 @@ test_preamble_programs(void)
    static const uint8_t branch[] = {
       0x0f, 0x00, 0x54, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x00,
    };
+   uint8_t binary[128 + sizeof(code)];
+   memset(binary, 0xa5, sizeof(binary));
+   memcpy(binary + 128, code, sizeof(code));
    const struct agx3_ioto_uniform_range range = {
       .start_halfs = 0, .size_halfs = 8, .address = UINT64_C(0x10000024000),
    };
@@ -62,10 +65,10 @@ test_preamble_programs(void)
          struct agx3_g17p_graphics_program baseline, program;
          CHECK(agx3_g17p_graphics_program_generate(
             AGX_CHIP_G17P, &desc, &baseline));
-         struct agx_ioto_preshader_desc preamble = {
-            .code = code, .code_size = sizeof(code),
-            .external_va = AGX_IOTO_PRESHADER_NO_VA,
-         };
+         struct agx_ioto_preshader_desc preamble = {0};
+         CHECK(agx_ioto_preshader_bind_range(
+            binary, sizeof(binary), UINT64_C(0x123456789a3c), sizeof(binary),
+            128, sizeof(code), &preamble));
          desc.preshader = &preamble;
          CHECK(agx3_g17p_graphics_program_generate(
             AGX_CHIP_G17P, &desc, &program));
@@ -81,13 +84,20 @@ test_preamble_programs(void)
          CHECK(bound == old_bound - AGX_IOTO_PRESHADER_ABSENT_SIZE + sizeof(code));
          CHECK(program.length <= bound);
 
-         preamble.code = NULL;
-         preamble.code_size = AGX_IOTO_PRESHADER_INLINE_LIMIT + 2;
-         preamble.external_va = UINT64_C(0x123456789abc);
+         preamble.force_external = true;
          CHECK(agx3_g17p_graphics_program_generate(
             AGX_CHIP_G17P, &desc, &program));
          CHECK(program.length == prefix + sizeof(branch));
          CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+         CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
+
+         /* The automatic external selection retains the same branch. */
+         preamble.force_external = false;
+         preamble.code = NULL;
+         preamble.code_size = AGX_IOTO_PRESHADER_INLINE_LIMIT + 2;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         CHECK(program.length == prefix + sizeof(branch));
          CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
 
          const struct agx3_g17p_graphics_program before = program;
