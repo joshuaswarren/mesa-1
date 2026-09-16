@@ -247,6 +247,16 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
       desc->swizzle[3],
    };
 
+   /* A three-component image is stored in a four-component physical format,
+    * so the padded channel is whatever the allocation happened to contain.
+    * The API format has no alpha, and Vulkan requires a sampled texel with no
+    * alpha channel to read one.  Taking the swizzle from the physical format
+    * returns the padding instead, which is why every sampled RGB/BGR format
+    * mismatched.  Force it back.
+    */
+   if (padded_rgb && usage == HK_DESC_USAGE_SAMPLED)
+      format_swizzle[3] = PIPE_SWIZZLE_1;
+
    /* Different APIs have different depth/stencil swizzle rules. Vulkan expects
     * R001 behaviour, override here because Mesa's format table is not that.
     */
