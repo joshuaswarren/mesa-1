@@ -1236,6 +1236,82 @@ agx_nir_lower_custom_border(nir_shader *nir)
    return nir_shader_tex_pass(nir, lower, nir_metadata_none, NULL);
 }
 
+/* Unformatted float images may name scaled views. Their native descriptor
+ * uses integer texels; the shader performs the Vulkan numerical conversion.
+ * The descriptor's existing type/channel fields avoid a new software ABI. */
+static bool
+lower_scaled_storage(nir_builder *b, nir_intrinsic_instr *intr, void *unused)
+{
+   const bool load = intr->intrinsic == nir_intrinsic_bindless_image_load;
+   const bool store = intr->intrinsic == nir_intrinsic_bindless_image_store;
+   if ((!load && !store) || nir_intrinsic_format(intr) != PIPE_FORMAT_NONE ||
+       (load ? nir_intrinsic_dest_type(intr)
+             : nir_intrinsic_src_type(intr)) != nir_type_float32)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *address = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
+   nir_def *header =
+      nir_load_global_constant(b, 1, 32, address, .align_mul = 4);
+   nir_def *type = nir_iand_imm(b, nir_ushr_imm(b, header, 13), 7);
+   nir_def *is_signed = nir_ieq_imm(b, type, AGX_TEXTURE_TYPE_SINT);
+   nir_def *is_integer = nir_ior(
+      b, is_signed, nir_ieq_imm(b, type, AGX_TEXTURE_TYPE_UINT));
+   if (load) {
+      b->cursor = nir_after_instr(&intr->instr);
+      nir_def *value = &intr->def;
+      nir_def *converted =
+         nir_bcsel(b, is_signed, nir_i2f32(b, value), nir_u2f32(b, value));
+      nir_def_rewrite_uses_after(
+         value, nir_bcsel(b, is_integer, converted, value));
+      return true;
+   }
+
+   nir_def *channels = nir_iand_imm(b, nir_ushr_imm(b, header, 6), 127);
+   nir_def *is_8 = nir_ior(
+      b, nir_ieq_imm(b, channels, AGX_CHANNELS_R8),
+      nir_ior(b, nir_ieq_imm(b, channels, AGX_CHANNELS_R8G8),
+              nir_ieq_imm(b, channels, AGX_CHANNELS_R8G8B8A8)));
+   nir_def *is_16 = nir_ior(
+      b, nir_ieq_imm(b, channels, AGX_CHANNELS_R16),
+      nir_ior(b, nir_ieq_imm(b, channels, AGX_CHANNELS_R16G16),
+              nir_ieq_imm(b, channels, AGX_CHANNELS_R16G16B16A16)));
+   nir_push_if(b, nir_iand(b, is_integer, nir_ior(b, is_8, is_16)));
+   {
+      nir_def *limit = nir_bcsel(b, is_8, nir_imm_float(b, 256),
+                                 nir_imm_float(b, 65536));
+      nir_def *signed_limit = nir_fmul_imm(b, limit, 0.5);
+      nir_def *upper = nir_fadd_imm(
+         b, nir_bcsel(b, is_signed, signed_limit, limit), -1);
+      nir_def *lower = nir_bcsel(b, is_signed, nir_fneg(b, signed_limit),
+                                 nir_imm_float(b, 0));
+      nir_def *rounded = nir_fround_even(b, intr->src[3].ssa);
+      nir_def *clamped = nir_fmin(b, nir_fmax(b, rounded, lower), upper);
+      nir_def *value = nir_bcsel(b, is_signed, nir_f2i32(b, clamped),
+                                 nir_f2u32(b, clamped));
+      nir_push_if(b, is_8);
+      for (unsigned wide = 0; wide < 2; ++wide) {
+         if (wide)
+            nir_push_else(b, NULL);
+         nir_intrinsic_instr *copy = nir_instr_as_intrinsic(
+            nir_instr_clone(b->shader, &intr->instr));
+         nir_builder_instr_insert(b, &copy->instr);
+         nir_src_rewrite(&copy->src[3], value);
+         /* The descriptor retains signedness and channel count. The typed
+          * intrinsic selects the matching raw I8/I16 staging instruction. */
+         nir_intrinsic_set_format(copy, wide ? PIPE_FORMAT_R16G16B16A16_UINT
+                                             : PIPE_FORMAT_R8G8B8A8_UINT);
+         nir_intrinsic_set_src_type(copy, nir_type_uint32);
+      }
+      nir_pop_if(b, NULL);
+   }
+   nir_push_else(b, NULL);
+   nir_builder_instr_insert(b, nir_instr_clone(b->shader, &intr->instr));
+   nir_pop_if(b, NULL);
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
 /* Image-view formats are dynamic descriptor state. Recover scaled samples
  * from the integer descriptor result without changing ordinary float samples. */
 static bool
@@ -1788,9 +1864,12 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_control_flow, NULL);
    }
 
-   if (agx_chip_descriptor_generation(dev->dev.chip) == 9)
+   if (agx_chip_descriptor_generation(dev->dev.chip) == 9) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_scaled_storage,
+               nir_metadata_none, NULL);
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_scaled_sample,
                nir_metadata_control_flow, NULL);
+   }
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       /* hk_nir_lower_robust_image_access() leaves formatless loads to this

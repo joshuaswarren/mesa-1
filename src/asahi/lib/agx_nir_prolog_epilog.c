@@ -527,6 +527,76 @@ copy_colour(nir_builder *b, const struct agx_fs_epilog_key *key,
                     .src_type = nir_type_float | size);
 }
 
+/* Blend in the API format, then restore the wider physical store shape.
+ * Padding is never observable through a public view or image transfer. */
+static bool
+pad_blended_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_fs_epilog_key *key = data;
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location < FRAG_RESULT_DATA0 || sem.location > FRAG_RESULT_DATA7)
+      return false;
+
+   unsigned rt = sem.location - FRAG_RESULT_DATA0;
+   if (key->blend_formats[rt] == PIPE_FORMAT_NONE &&
+       key->scaled_formats[rt] == PIPE_FORMAT_NONE)
+      return false;
+
+   unsigned comps = util_format_get_nr_components(key->rt_formats[rt]);
+   if (intr->num_components >= comps)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(&intr->src[0], nir_pad_vector(b, intr->src[0].ssa, comps));
+   intr->num_components = comps;
+   return true;
+}
+
+/* Scaled Vulkan attachments have floating-point shader semantics and integer
+ * physical storage. Convert after blending and before tilebuffer lowering. */
+static bool
+convert_scaled_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_fs_epilog_key *key = data;
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location < FRAG_RESULT_DATA0 || sem.location > FRAG_RESULT_DATA7)
+      return false;
+
+   const unsigned rt = sem.location - FRAG_RESULT_DATA0;
+   const enum pipe_format format = key->scaled_formats[rt];
+   if (format == PIPE_FORMAT_NONE)
+      return false;
+
+   const struct util_format_description *desc =
+      util_format_description(format);
+   const unsigned bits = desc->channel[0].size;
+   if ((bits != 8 && bits != 16) || desc->channel[0].normalized)
+      return false;
+
+   const bool is_signed = desc->channel[0].type == UTIL_FORMAT_TYPE_SIGNED;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *limit = nir_imm_float(b, 1u << bits);
+   nir_def *signed_limit = nir_fmul_imm(b, limit, 0.5);
+   nir_def *upper = nir_fadd_imm(
+      b, is_signed ? signed_limit : limit, -1);
+   nir_def *lower =
+      is_signed ? nir_fneg(b, signed_limit) : nir_imm_float(b, 0);
+   nir_def *rounded = nir_fround_even(b, intr->src[0].ssa);
+   nir_def *clamped = nir_fmin(b, nir_fmax(b, rounded, lower), upper);
+   nir_src_rewrite(&intr->src[0],
+                   is_signed ? nir_f2i32(b, clamped)
+                             : nir_f2u32(b, clamped));
+   nir_intrinsic_set_src_type(intr, is_signed ? nir_type_int32
+                                               : nir_type_uint32);
+   return true;
+}
+
 void
 agx_nir_fs_epilog(nir_builder *b, const void *key_)
 {
@@ -647,7 +717,9 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             agx_unpack_blend_advanced(key->blend.rt[i].mode);
 
          opts.rt[i] = (nir_lower_blend_rt){
-            .format = key->rt_formats[i],
+            .format = key->blend_formats[i] != PIPE_FORMAT_NONE
+                         ? key->blend_formats[i]
+                         : key->rt_formats[i],
             .advanced_blend = true,
             .colormask = key->blend.rt[i].colormask,
             .blend_mode = blend.op,
@@ -660,7 +732,9 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             agx_unpack_blend_standard(key->blend.rt[i].mode);
 
          opts.rt[i] = (nir_lower_blend_rt){
-            .format = key->rt_formats[i],
+            .format = key->blend_formats[i] != PIPE_FORMAT_NONE
+                         ? key->blend_formats[i]
+                         : key->rt_formats[i],
 
             .rgb.src_factor = blend.rgb_src_factor,
             .rgb.dst_factor = blend.rgb_dst_factor,
@@ -778,6 +852,10 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, nir_lower_alpha_to_one);
 
    NIR_PASS(_, b->shader, nir_lower_blend, &opts);
+   nir_shader_intrinsics_pass(b->shader, convert_scaled_output,
+                              nir_metadata_control_flow, (void *)key);
+   nir_shader_intrinsics_pass(b->shader, pad_blended_output,
+                              nir_metadata_control_flow, (void *)key);
 
    unsigned rt_spill = key->link.rt_spill_base;
    NIR_PASS(_, b->shader, agx_nir_lower_tilebuffer, &tib, colormasks, &rt_spill,

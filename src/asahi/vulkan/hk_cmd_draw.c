@@ -1634,6 +1634,13 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    enum pipe_format formats[HK_MAX_RTS] = {0};
    for (unsigned i = 0; i < render->color_att_count; ++i) {
       formats[i] = hk_format_to_pipe_format(render->color_att[i].vk_format);
+      if (agx_native_graphics(&dev->dev)) {
+         formats[i] = hk_padded_image_format(formats[i]);
+         const enum pipe_format integer =
+            hk_scaled_texture_format(formats[i]);
+         if (integer != PIPE_FORMAT_NONE)
+            formats[i] = integer;
+      }
    }
 
    /* G17P's bounded RT0 programs use non-array image operations. Other chips
@@ -5416,6 +5423,18 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       for (uint32_t i = 0; i < render->color_att_count; i++) {
          key.epilog.rt_formats[i] =
             hk_format_to_pipe_format(render->color_att[i].vk_format);
+         if (agx_native_graphics(&dev->dev)) {
+            const enum pipe_format logical = key.epilog.rt_formats[i];
+            key.epilog.rt_formats[i] = hk_padded_image_format(logical);
+            const enum pipe_format integer =
+               hk_scaled_texture_format(key.epilog.rt_formats[i]);
+            if (integer != PIPE_FORMAT_NONE) {
+               key.epilog.rt_formats[i] = integer;
+               key.epilog.scaled_formats[i] = logical;
+            } else if (key.epilog.rt_formats[i] != logical) {
+               key.epilog.blend_formats[i] = logical;
+            }
+         }
 
          const struct vk_color_blend_attachment_state *cb =
             &dyn->cb.attachments[i];

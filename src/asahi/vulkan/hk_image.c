@@ -1017,6 +1017,11 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[1] : 1;
 
       const enum pipe_format p_format = hk_format_to_pipe_format(format);
+      const enum pipe_format layout_format =
+         agx_native_graphics(&dev->dev) &&
+               pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL
+            ? hk_padded_image_format(p_format)
+            : p_format;
       uint32_t linear_stride_B = 0;
       if (mod_explicit_info &&
           image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR) {
@@ -1041,7 +1046,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          .tiling = hk_map_tiling(dev, pCreateInfo, image->vk.drm_format_mod),
          .compressed = compressed,
          .mipmapped_z = pCreateInfo->imageType == VK_IMAGE_TYPE_3D,
-         .format = p_format,
+         .format = layout_format,
 
          .linear_stride_B = linear_stride_B,
 

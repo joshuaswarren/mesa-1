@@ -227,7 +227,10 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
    if (agx_native_graphics(&dev->dev)) {
       enum pipe_format normalized = hk_uscaled_normalized_format(p_format);
       enum pipe_format integer = hk_scaled_texture_format(p_format);
-      if (normalized != PIPE_FORMAT_NONE)
+      /* Normalized descriptors are only a sampling optimization. Background
+       * tile reloads and storage views must preserve the integer physical
+       * values or a later partial render saturates untouched USCALED pixels. */
+      if (normalized != PIPE_FORMAT_NONE && usage == HK_DESC_USAGE_SAMPLED)
          p_format = normalized;
       else if (integer != PIPE_FORMAT_NONE)
          p_format = integer;
@@ -410,6 +413,12 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    unsigned layer = view->vk.base_array_layer;
 
    enum pipe_format p_format = format_for_plane(view, view_plane);
+   if (agx_native_graphics(&dev->dev)) {
+      p_format = hk_padded_image_format(p_format);
+      enum pipe_format integer = hk_scaled_texture_format(p_format);
+      if (integer != PIPE_FORMAT_NONE)
+         p_format = integer;
+   }
 
    bool eot =
       usage == HK_DESC_USAGE_BG_EOT || usage == HK_DESC_USAGE_LAYERED_BG_EOT;

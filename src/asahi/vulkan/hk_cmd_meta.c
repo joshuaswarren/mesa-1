@@ -238,6 +238,7 @@ enum hk_meta_object_key_type {
    HK_META_OBJECT_KEY_EVENT_WAIT = VK_META_OBJECT_KEY_DRIVER_OFFSET,
    HK_META_OBJECT_KEY_SPARSE_BUFFER_COPY,
    HK_META_OBJECT_KEY_QUERY_COPY,
+   HK_META_OBJECT_KEY_BLOCK_COPY,
 };
 
 struct hk_meta_event_wait_info {
@@ -2168,7 +2169,26 @@ hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
             VkBlitImageInfo2 info = *pBlitImageInfo;
             info.regionCount = 1;
             info.pRegions = &one;
-            vk_meta_blit_image2(&cmd->vk, &dev->meta, &info);
+            /* Native optimal RGB images have four-component physical
+             * storage.  Render the blit through that physical destination
+             * view while preserving the logical source sampling format. */
+            enum pipe_format logical =
+               hk_format_to_pipe_format(dst_image->vk.format);
+            enum pipe_format physical = hk_padded_image_format(logical);
+            enum pipe_format scaled = hk_scaled_texture_format(physical);
+            /* Scaled blits keep a floating-point shader interface. The
+             * rendering and PBE paths select their integer physical storage
+             * independently, avoiding an integer sampler type for a scaled
+             * source (and preserving normalized USCALED filtering). */
+            VkFormat dst_format = scaled != PIPE_FORMAT_NONE
+                                     ? dst_image->vk.format
+                                     : physical == logical
+                                          ? dst_image->vk.format
+                                          : vk_format_from_pipe_format(physical);
+            vk_meta_blit_image(&cmd->vk, &dev->meta, &src_image->vk,
+                               src_image->vk.format, info.srcImageLayout,
+                               &dst_image->vk, dst_format, info.dstImageLayout,
+                               1, &one, info.filter);
             if (vk_command_buffer_has_error(&cmd->vk))
                break;
          }
@@ -2549,6 +2569,349 @@ hk_g17p_buffer_upload_plane(const struct hk_image *image,
    *plane = hk_image_aspects_to_plane(image, aspect);
    *format = aspect_format(image->vk.format, aspect);
    return *plane < image->plane_count && *format != VK_FORMAT_UNDEFINED;
+}
+
+static bool
+hk_g17p_padded_rgb_layout(const struct hk_image *image, uint8_t plane,
+                          VkFormat format, uint32_t *api_block_B,
+                          uint32_t *physical_block_B)
+{
+   const enum pipe_format api = hk_format_to_pipe_format(format);
+   const enum pipe_format physical = hk_padded_image_format(api);
+   if (api == PIPE_FORMAT_NONE || physical == api ||
+       image->planes[plane].layout.format != physical)
+      return false;
+
+   *api_block_B = util_format_get_blocksize(api);
+   *physical_block_B = util_format_get_blocksize(physical);
+   return *api_block_B != 0 && *physical_block_B != 0 &&
+          *api_block_B * 4 == *physical_block_B * 3;
+}
+
+/* The M1/M2 path stores three-component formats in four-component tiled
+ * images.  Buffer transfers still use the packed Vulkan representation, so
+ * the GPU copy needs independent source and destination element sizes. */
+struct hk_block_copy_key {
+   enum hk_meta_object_key_type type;
+   uint32_t block_B;
+   uint32_t packed_rgb_buffer_B;
+   bool to_image;
+   int32_t src_tile_log2_w, src_tile_log2_h;
+   int32_t dst_tile_log2_w, dst_tile_log2_h;
+};
+
+struct hk_block_copy_push {
+   uint64_t src, dst;
+   uint32_t src_stride, dst_stride;
+   uint32_t src_x, src_y, dst_x, dst_y;
+   uint32_t width, height;
+};
+
+#define block_push(b, field)                                                   \
+   nir_load_push_constant(                                                     \
+      b, 1, sizeof(((struct hk_block_copy_push *)0)->field) * 8,               \
+      nir_imm_int(b, offsetof(struct hk_block_copy_push, field)))
+
+static nir_def *
+hk_block_copy_index(nir_builder *b, nir_def *x, nir_def *y, nir_def *stride,
+                    int tile_log2_w, int tile_log2_h)
+{
+   if (tile_log2_w < 0)
+      return nir_iadd(b, nir_umul_2x32_64(b, y, stride), nir_u2u64(b, x));
+
+   nir_def *tile =
+      nir_iadd(b, nir_imul(b, nir_ushr_imm(b, y, tile_log2_h), stride),
+               nir_ushr_imm(b, x, tile_log2_w));
+   nir_def *index = nir_ishl_imm(b, tile, tile_log2_w + tile_log2_h);
+   for (unsigned bit = 0; bit < tile_log2_w; bit++)
+      index =
+         nir_ior(b, index, nir_ishl_imm(b, nir_iand_imm(b, x, 1u << bit), bit));
+   for (unsigned bit = 0; bit < tile_log2_h; bit++)
+      index = nir_ior(b, index,
+                      nir_ishl_imm(b, nir_iand_imm(b, y, 1u << bit), bit + 1));
+   return nir_u2u64(b, index);
+}
+
+static nir_shader *
+hk_build_block_copy(const struct hk_block_copy_key *key)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE, NULL,
+                                                  "hk-meta-block-copy");
+   b.shader->info.workgroup_size[0] = 8;
+   b.shader->info.workgroup_size[1] = 8;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *id = nir_load_global_invocation_id(&b, 32);
+   nir_def *x = nir_channel(&b, id, 0);
+   nir_def *y = nir_channel(&b, id, 1);
+   nir_push_if(&b, nir_iand(&b, nir_ult(&b, x, block_push(&b, width)),
+                            nir_ult(&b, y, block_push(&b, height))));
+
+   nir_def *src_el = hk_block_copy_index(
+      &b, nir_iadd(&b, x, block_push(&b, src_x)),
+      nir_iadd(&b, y, block_push(&b, src_y)), block_push(&b, src_stride),
+      key->src_tile_log2_w, key->src_tile_log2_h);
+   nir_def *dst_el = hk_block_copy_index(
+      &b, nir_iadd(&b, x, block_push(&b, dst_x)),
+      nir_iadd(&b, y, block_push(&b, dst_y)), block_push(&b, dst_stride),
+      key->dst_tile_log2_w, key->dst_tile_log2_h);
+
+   const unsigned src_B = key->to_image ? key->packed_rgb_buffer_B
+                                        : key->block_B;
+   const unsigned dst_B = key->to_image ? key->block_B
+                                        : key->packed_rgb_buffer_B;
+   nir_def *src =
+      nir_iadd(&b, block_push(&b, src), nir_imul_imm(&b, src_el, src_B));
+   nir_def *dst =
+      nir_iadd(&b, block_push(&b, dst), nir_imul_imm(&b, dst_el, dst_B));
+
+   const unsigned bits = (key->packed_rgb_buffer_B / 3) * 8;
+   const unsigned component_B = bits / 8;
+   /* Apple's G17P compiler witnesses the packed transfer as three explicit
+    * component loads and stores.  Preserve that access contract instead of
+    * relying on a three-vector global operation in the AGX3 backend. */
+   for (unsigned c = 0; c < 3; ++c) {
+      nir_def *value = nir_load_global(
+         &b, 1, bits, nir_iadd_imm(&b, src, c * component_B),
+         .align_mul = component_B);
+      nir_store_global(&b, value,
+                       nir_iadd_imm(&b, dst, c * component_B),
+                       .align_mul = component_B);
+   }
+   nir_pop_if(&b, NULL);
+   return b.shader;
+}
+
+#undef block_push
+
+static void
+hk_dispatch_block_copy(struct hk_cmd_buffer *cmd,
+                       const struct hk_block_copy_key *key,
+                       const struct hk_block_copy_push *push)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const VkPushConstantRange range = {
+      .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+      .size = sizeof(*push),
+   };
+   VkPipelineLayout layout;
+   VkResult result =
+      vk_meta_get_pipeline_layout(&dev->vk, &dev->meta, NULL, &range,
+                                  &key->type, sizeof(key->type), &layout);
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd->vk, result);
+      return;
+   }
+
+   VkPipeline pipeline = vk_meta_lookup_pipeline(&dev->meta, key, sizeof(*key));
+   if (pipeline == VK_NULL_HANDLE) {
+      const VkPipelineShaderStageNirCreateInfoMESA nir_info = {
+         .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_NIR_CREATE_INFO_MESA,
+         .nir = hk_build_block_copy(key),
+      };
+      const VkComputePipelineCreateInfo info = {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .stage =
+            {
+               .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+               .pNext = &nir_info,
+               .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+               .pName = "main",
+            },
+         .layout = layout,
+      };
+      result = vk_meta_create_compute_pipeline(&dev->vk, &dev->meta, &info,
+                                               key, sizeof(*key), &pipeline);
+      ralloc_free(nir_info.nir);
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd->vk, result);
+         return;
+      }
+   }
+
+   const struct vk_device_dispatch_table *disp = &dev->vk.dispatch_table;
+   VkCommandBuffer cb = vk_command_buffer_to_handle(&cmd->vk);
+   disp->CmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+   disp->CmdPushConstants(cb, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0,
+                          sizeof(*push), push);
+   disp->CmdDispatch(cb, DIV_ROUND_UP(push->width, 8),
+                     DIV_ROUND_UP(push->height, 8), 1);
+}
+
+static int
+hk_block_copy_tile_log2(const struct ail_layout *layout, unsigned level,
+                        bool height)
+{
+   if (layout->tiling == AIL_TILING_LINEAR)
+      return -1;
+
+   const struct ail_tile tile = layout->tilesize_el[level];
+   return util_logbase2(height ? tile.height_el : tile.width_el);
+}
+
+static uint32_t
+hk_block_copy_stride(const struct ail_layout *layout, unsigned level)
+{
+   if (layout->tiling == AIL_TILING_LINEAR)
+      return ail_get_linear_stride_B(layout, level) /
+             ail_get_blocksize_B(layout);
+
+   return DIV_ROUND_UP(layout->stride_el[level],
+                       layout->tilesize_el[level].width_el);
+}
+
+static bool
+hk_g17p_copy_padded_rgb_buffer_image(
+   struct hk_cmd_buffer *cmd, struct hk_image *image, VkBuffer buffer_handle,
+   uint32_t region_count, const VkBufferImageCopy2 *regions,
+   VkImageLayout image_layout, bool to_image)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (dev->dev.chip != AGX_CHIP_G17P || region_count == 0 ||
+       image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
+       (image_layout != (to_image ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                                  : VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) &&
+        image_layout != VK_IMAGE_LAYOUT_GENERAL))
+      return false;
+
+   VK_FROM_HANDLE(hk_buffer, buffer, buffer_handle);
+   for (unsigned r = 0; r < region_count; ++r) {
+      const VkBufferImageCopy2 *region = &regions[r];
+      uint8_t plane;
+      VkFormat format;
+      if (!hk_g17p_buffer_upload_plane(
+             image, region->imageSubresource.aspectMask, &plane, &format))
+         return false;
+
+      const struct ail_layout *layout = &image->planes[plane].layout;
+      uint32_t buffer_block_B, block_B;
+      if (!hk_g17p_padded_rgb_layout(image, plane, format, &buffer_block_B,
+                                     &block_B) ||
+          (layout->tiling != AIL_TILING_GPU &&
+           layout->tiling != AIL_TILING_LINEAR) ||
+          layout->compressed)
+         return false;
+
+      const uint32_t block_w = util_format_get_blockwidth(layout->format);
+      const uint32_t block_h = util_format_get_blockheight(layout->format);
+      const uint32_t level = region->imageSubresource.mipLevel;
+      if (level >= image->vk.mip_levels)
+         return false;
+
+      const bool is_3d = image->vk.image_type == VK_IMAGE_TYPE_3D;
+      const uint32_t layers = vk_image_subresource_layer_count(
+         &image->vk, &region->imageSubresource);
+      const uint32_t mip_w = u_minify(layout->width_px, level);
+      const uint32_t mip_h = u_minify(layout->height_px, level);
+      const uint32_t mip_d = u_minify(image->vk.extent.depth, level);
+      const uint32_t z = region->imageOffset.z;
+      const uint32_t depth = region->imageExtent.depth;
+      const uint32_t slices = is_3d ? depth : layers;
+      const uint32_t base_slice =
+         is_3d ? z : region->imageSubresource.baseArrayLayer;
+      const uint32_t x = region->imageOffset.x;
+      const uint32_t y = region->imageOffset.y;
+      const uint32_t width = region->imageExtent.width;
+      const uint32_t height = region->imageExtent.height;
+      const uint32_t row_px =
+         region->bufferRowLength ? region->bufferRowLength : width;
+      const uint32_t image_h_px =
+         region->bufferImageHeight ? region->bufferImageHeight : height;
+
+      if (layers == 0 ||
+          region->imageSubresource.baseArrayLayer >= image->vk.array_layers ||
+          layers > image->vk.array_layers -
+                      region->imageSubresource.baseArrayLayer ||
+          region->imageOffset.x < 0 || region->imageOffset.y < 0 ||
+          region->imageOffset.z < 0 || !depth ||
+          (is_3d ? (region->imageSubresource.baseArrayLayer != 0 ||
+                    layers != 1 || z >= mip_d || depth > mip_d - z)
+                 : (z != 0 || depth != 1)) ||
+          (image->vk.image_type == VK_IMAGE_TYPE_1D &&
+           (y != 0 || height != 1)) ||
+          !width || !height || x >= mip_w || y >= mip_h ||
+          width > mip_w - x || height > mip_h - y || (x % block_w) ||
+          (y % block_h) ||
+          ((width % block_w) && x + width != mip_w) ||
+          ((height % block_h) && y + height != mip_h) || row_px < width ||
+          image_h_px < height ||
+          (region->bufferOffset % (buffer_block_B / 3)))
+         return false;
+
+      const uint32_t blocks_x =
+         util_format_get_nblocksx(layout->format, width);
+      const uint32_t blocks_y =
+         util_format_get_nblocksy(layout->format, height);
+      const uint64_t buffer_row_B =
+         (uint64_t)util_format_get_nblocksx(layout->format, row_px) *
+         buffer_block_B;
+      const uint64_t buffer_layer_B =
+         (uint64_t)util_format_get_nblocksy(layout->format, image_h_px) *
+         buffer_row_B;
+      if (region->bufferOffset > buffer->vk.size ||
+          buffer_layer_B > buffer->vk.size - region->bufferOffset ||
+          slices > (buffer->vk.size - region->bufferOffset) / buffer_layer_B)
+         return false;
+
+      const uint64_t buffer_base =
+         to_image ? hk_buffer_address_ro(buffer, region->bufferOffset)
+                  : hk_buffer_address_rw(buffer, region->bufferOffset);
+      const uint64_t image_base = hk_image_base_address(image, plane);
+      struct hk_block_copy_key key = {
+         .type = HK_META_OBJECT_KEY_BLOCK_COPY,
+         .block_B = block_B,
+         .packed_rgb_buffer_B = buffer_block_B,
+         .to_image = to_image,
+         .src_tile_log2_w = -1,
+         .src_tile_log2_h = -1,
+         .dst_tile_log2_w = hk_block_copy_tile_log2(layout, level, false),
+         .dst_tile_log2_h = hk_block_copy_tile_log2(layout, level, true),
+      };
+      if (!to_image) {
+         key.src_tile_log2_w = key.dst_tile_log2_w;
+         key.src_tile_log2_h = key.dst_tile_log2_h;
+         key.dst_tile_log2_w = key.dst_tile_log2_h = -1;
+      }
+
+      for (uint32_t slice = 0; slice < slices; ++slice) {
+         struct hk_block_copy_push push = {
+            .src = buffer_base + slice * buffer_layer_B,
+            .dst = image_base +
+                   ail_get_layer_level_B(layout, base_slice + slice, level),
+            .src_stride = buffer_row_B / buffer_block_B,
+            .dst_stride = hk_block_copy_stride(layout, level),
+            .dst_x = x / block_w,
+            .dst_y = y / block_h,
+            .width = blocks_x,
+            .height = blocks_y,
+         };
+         if (!to_image) {
+            uint64_t address = push.src;
+            push.src = push.dst;
+            push.dst = address;
+            uint32_t stride = push.src_stride;
+            push.src_stride = push.dst_stride;
+            push.dst_stride = stride;
+            push.src_x = push.dst_x;
+            push.src_y = push.dst_y;
+            push.dst_x = push.dst_y = 0;
+         }
+
+         hk_dispatch_block_copy(cmd, &key, &push);
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return true;
+      }
+
+      if (cmd->current_cs.cs) {
+         const uint64_t dst = to_image ? image_base : buffer_base;
+         const uint64_t size =
+            to_image ? layout->size_B : buffer_layer_B * slices;
+         hk_drm_attachment_set_add(&cmd->current_cs.cs->compute_attachments,
+                                   dst, size);
+      }
+   }
+
+   return true;
 }
 
 static bool
@@ -3064,6 +3427,30 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
 
    bool gfx = hk_copy_requires_gfx(dst_image);
    if (dev->dev.chip == AGX_CHIP_G17P) {
+      uint8_t plane;
+      VkFormat format;
+      uint32_t api_block_B, physical_block_B;
+      const bool padded_rgb =
+         pCopyBufferToImageInfo->regionCount > 0 &&
+         hk_g17p_buffer_upload_plane(
+            dst_image,
+            pCopyBufferToImageInfo->pRegions[0].imageSubresource.aspectMask,
+            &plane, &format) &&
+         hk_g17p_padded_rgb_layout(dst_image, plane, format, &api_block_B,
+                                   &physical_block_B);
+      if (padded_rgb) {
+         struct hk_meta_save save;
+         hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+         if (!hk_g17p_copy_padded_rgb_buffer_image(
+                cmd, dst_image, pCopyBufferToImageInfo->srcBuffer,
+                pCopyBufferToImageInfo->regionCount,
+                pCopyBufferToImageInfo->pRegions,
+                pCopyBufferToImageInfo->dstImageLayout, true))
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+         hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+         return;
+      }
       if (hk_g17p_block_copy_format(dev, dst_image->vk.format)) {
          struct hk_meta_save save;
          hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
@@ -3173,8 +3560,27 @@ hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       hk_g17p_block_copy_format(dev, src_image->vk.format)) {
+   uint8_t plane;
+   VkFormat format;
+   uint32_t api_block_B, physical_block_B;
+   const bool padded_rgb =
+      dev->dev.chip == AGX_CHIP_G17P &&
+      pCopyImageToBufferInfo->regionCount > 0 &&
+      hk_g17p_buffer_upload_plane(
+         src_image,
+         pCopyImageToBufferInfo->pRegions[0].imageSubresource.aspectMask,
+         &plane, &format) &&
+      hk_g17p_padded_rgb_layout(src_image, plane, format, &api_block_B,
+                                &physical_block_B);
+   if (padded_rgb) {
+      if (!hk_g17p_copy_padded_rgb_buffer_image(
+             cmd, src_image, pCopyImageToBufferInfo->dstBuffer,
+             pCopyImageToBufferInfo->regionCount,
+             pCopyImageToBufferInfo->pRegions,
+             pCopyImageToBufferInfo->srcImageLayout, false))
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+   } else if (dev->dev.chip == AGX_CHIP_G17P &&
+              hk_g17p_block_copy_format(dev, src_image->vk.format)) {
       /* A compressed Vulkan copy preserves the encoded block bytes.  The
        * common meta path samples and decodes the source, so use the symmetric
        * raw AIL-addressed path on G17P instead. */
