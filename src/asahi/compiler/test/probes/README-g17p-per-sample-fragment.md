@@ -1,5 +1,11 @@
 # G17P runs a fragment function per sample by unrolling it
 
+Scope clarification (2026-09-16): the captures below demonstrate unrolling for
+these simple shaders, not every native per-sample fragment. The alpha-coverage
+plus depth witness in `README-g17p-sample-alpha-depth.md` contains a native
+sample loop with a combined class-13 transaction. Neither observation permits
+splicing the AGX2 external sample-loop bytes into an AGX3 shader.
+
 `agx_fast_link()` splices literal AGX2 machine-code fragments around a fragment
 shader to run it once per sample, and refuses to do so on G17P because those
 fragments are not AGX3 code:

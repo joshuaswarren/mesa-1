@@ -7082,6 +7082,71 @@ TEST_F(AGX3PackBinary, G17PBackgroundWritesCompleteMultisamplePartition)
    }
 }
 
+TEST_F(AGX3PackBinary, G17PSparseSampleStoresShareOneColourTransaction)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned stores : {2u, 3u, 4u}) {
+      SCOPED_TRACE(stores);
+      agx_builder *b = builder(enc);
+      key.secondary = true;
+      key.fs.nr_samples = 4;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_wait_pix(b, 12);
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      for (unsigned sample = 0; sample < stores; ++sample) {
+         agx_index mask = agx_register(8, AGX_SIZE_16);
+         agx_mov_imm_to(b, mask, 1u << sample);
+         mask.discard = true;
+         agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0,
+                     false, 0);
+      }
+      agx_stop(b);
+      const auto bytes = pack(b);
+      uint8_t wait[AGX3_PIXEL_MAX_LENGTH], release[AGX3_PIXEL_MAX_LENGTH];
+      uint8_t wait_length, release_length;
+      ASSERT_TRUE(agx3_pixel_wait(enc, 12, 0, wait, &wait_length));
+      ASSERT_TRUE(agx3_pixel_release(enc, 12, true, 0, release,
+                                    &release_length));
+      auto count = [&](const uint8_t *word, unsigned size) {
+         unsigned n = 0;
+         auto at = bytes.begin();
+         while ((at = std::search(at, bytes.end(), word, word + size)) !=
+                bytes.end()) {
+            ++n;
+            at += size;
+         }
+         return n;
+      };
+      EXPECT_EQ(count(wait, wait_length), 1u);
+      EXPECT_EQ(count(release, release_length), 1u);
+   }
+
+   /* Omitting no-op colour writes does not relax the transaction, sample
+    * count, mask-lifetime or complete-background requirements. */
+   for (unsigned bad = 0; bad < 4; ++bad) {
+      SCOPED_TRACE(bad);
+      agx_builder *b = builder(enc);
+      key.secondary = true;
+      key.fs.nr_samples = bad == 1 ? 2 : 4;
+      key.fs.ignore_tib_dependencies = bad == 3;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      if (bad != 0 && bad != 3)
+         agx_wait_pix(b, 12);
+      agx_index value = agx_register(0, AGX_SIZE_16);
+      value.channels_m1 = 1;
+      for (unsigned sample = 0; sample < 3; ++sample) {
+         agx_index mask = agx_register(8, AGX_SIZE_16);
+         if (bad != 2 || sample == 0)
+            agx_mov_imm_to(b, mask, 1u << sample);
+         agx_st_tile(b, value, mask, agx_null(), AGX_FORMAT_U8NORM, 15, 0,
+                     false, 0);
+      }
+      agx_stop(b);
+      EXPECT_TRUE(pack(b, false).empty());
+   }
+}
+
 TEST_F(AGX3PackBinary, TileLoadSequenceBoundaryMarkers)
 {
    for (int e = 0; e < 2; ++e) {

@@ -282,16 +282,17 @@ function's `level | (levels-1) << 44` write into word2 and its word0 bit 58 /
 word1 bit 63 extension markers are exactly what `agx_pbe_agx3_2d_mip_pack`
 already encodes from independent evidence.
 
-## Witness: AGX3 per-sample fragment execution is an unrolled shader (2026-09-10)
+## Witness: simple AGX3 per-sample fragments are unrolled (2026-09-10)
 
 `.tmp/g17p-msaa-grounding/` compiles the same MSL fragment function at
 `raster_sample_count` 1, 2 and 4 (the key is a `render_pipelines` entry field of
 that name). For a shader that reads `[[sample_id]]`, Apple's `applegpu_g17p`
 text grows 234 -> 290 -> 422 bytes and the number of tile-store sequences goes
-1 -> 2 -> 4, with the sample index folded in as an immediate. So per-sample
-execution on AGX3 is **unrolled inside the fragment program**, not an external
-sample loop as on AGX2 -- which is why `agx_linker.c`'s AGX2 loop does not
-transfer and `sampleRateShading` is a compiler gap rather than a hardware one.
+1 -> 2 -> 4, with the sample index folded in as an immediate. These shaders
+are **unrolled inside the fragment program**; this is not a universal native
+rule. The later `README-g17p-sample-alpha-depth.md` witness has a native sample
+loop and combined class-13 transaction for alpha coverage plus depth. Neither
+shape makes `agx_linker.c`'s AGX2 external-loop bytes valid AGX3 code.
 
 Separately, the *per-pixel* program for the same shader is 210 bytes at 1x and
 214 at 2x and 4x (2x and 4x byte-identical), so the ordinary fragment epilogue

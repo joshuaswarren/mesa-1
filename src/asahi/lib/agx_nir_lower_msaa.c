@@ -368,8 +368,16 @@ movable_zs_source(nir_def *def)
    case nir_instr_type_alu:
       return nir_foreach_src(instr, movable_zs_src_cb, NULL);
    case nir_instr_type_intrinsic:
-      return nir_instr_as_intrinsic(instr)->intrinsic ==
-             nir_intrinsic_load_exported_agx;
+      switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+      case nir_intrinsic_load_exported_agx:
+      /* Alpha-coverage dithering reads FragCoord.xy, later lowered to pixel
+       * coordinates. Both inputs are invariant across coverage/Z/S updates. */
+      case nir_intrinsic_load_frag_coord:
+      case nir_intrinsic_load_pixel_coord:
+         return true;
+      default:
+         return false;
+      }
    default:
       return false;
    }
@@ -400,8 +408,8 @@ move_zs_source(nir_src *src, void *data)
  * between the colour stores of the samples around it. Apple's per-sample
  * depth writes all share one class-1 transaction, which a colour transaction
  * cannot interrupt, so move every such write, with the constant and exported
- * values it reads, to the start of the epilog. Only an epilog that discards
- * nothing may reorder its depth writes ahead of its colours.
+ * values it reads, to the start of the epilog. Pure exported-mask kills can
+ * move with them, but must all precede the depth transaction.
  */
 bool
 agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
@@ -460,17 +468,29 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
       }
    }
 
-   if (count < 2)
+   if (count == 0 || (count == 1 && kill_count == 0))
       return nir_progress(progress, impl, nir_metadata_control_flow);
 
    struct move_zs_state state = {
       .cursor = nir_before_impl(impl),
       .moved = _mesa_pointer_set_create(NULL),
    };
+   nir_def *killed = NULL;
    for (unsigned k = 0; k < kill_count; ++k) {
       nir_foreach_src(&kills[k]->instr, move_zs_source, &state);
-      nir_instr_move(state.cursor, &kills[k]->instr);
-      state.cursor = nir_after_instr(&kills[k]->instr);
+      nir_builder b = nir_builder_at(state.cursor);
+      nir_def *mask = kills[k]->src[0].ssa;
+      killed = killed ? nir_ior(&b, killed, mask) : mask;
+      state.cursor = b.cursor;
+      nir_instr_remove(&kills[k]->instr);
+   }
+   if (killed) {
+      /* Kill-only updates commute: union their disjoint sample masks and
+       * issue one coverage update before any Z/S or colour write. Keeping
+       * each unrolled clone would repeat the same coverage transaction. */
+      nir_builder b = nir_builder_at(state.cursor);
+      nir_sample_mask_agx(&b, killed, nir_imm_intN_t(&b, 0, killed->bit_size));
+      state.cursor = b.cursor;
    }
    for (unsigned w = 0; w < count; ++w) {
       nir_foreach_src(&writes[w]->instr, move_zs_source, &state);

@@ -6175,7 +6175,10 @@ agx3_g17p_mrt_class_pair(unsigned partition)
  * emit one two- or four-store set to partition zero with no pixel
  * transaction, and a multi-target background one such set per target, at
  * disjoint whole-sample tile ranges; a colour epilog emits one set to
- * partition zero, one per framebuffer sample, after its one class-12 wait.
+ * partition zero, at most one per framebuffer sample, after its one class-12
+ * wait. API-disabled samples have zero coverage, so their no-op colour stores
+ * may already have been eliminated. They do not require a different pixel
+ * transaction or a replacement store.
  * Within a target each store's mask must be computed by its own instruction
  * so a repeated one cannot masquerade as a complete sample domain.  Returns
  * the number of targets, or zero.
@@ -6308,8 +6311,8 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
          return 0;
 
       /* Same register and the same definition still reaching it is the same
-       * mask twice, whatever it holds. Each target needs every sample once;
-       * targets of one sample share its mask. */
+       * mask twice, whatever it holds. Each target writes a sample at most
+       * once; background targets of one sample share its mask. */
       const agx_instr *def = sample.value < ARRAY_SIZE(reaching)
                                 ? reaching[sample.value] : NULL;
 
@@ -6330,8 +6333,10 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
          return 0;
    }
 
-   const bool complete = colour ? samples == ctx->key->fs.nr_samples
-                                : samples == 2 || samples == 4;
+   const bool complete = colour
+      ? (ctx->key->fs.nr_samples == 2 || ctx->key->fs.nr_samples == 4) &&
+           samples > 0 && samples <= ctx->key->fs.nr_samples
+      : samples == 2 || samples == 4;
    return stopped && waited == colour && complete &&
                 (depth == 0 || depth == 3) &&
                 (target_count == 1 || ctx->key->g17p_mrt_bg)
