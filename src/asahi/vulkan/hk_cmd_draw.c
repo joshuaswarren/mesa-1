@@ -6772,15 +6772,38 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                           "allocation size is conservative");
 
             uint64_t out_draw = hk_pool_alloc(cmd, size, 4).gpu;
-            struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
+            struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-            libagx_draw_without_adj(
-               cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX, out_draw,
-               draw.b.ptr, desc->root.draw.vertex_params, draw.index_buffer,
-               draw.indexed ? agx_draw_index_range_el(draw) : 0,
-               draw.indexed ? agx_index_size_to_B(draw.index_size) : 0, prim);
+            if (dev->dev.chip == AGX_CHIP_G17P) {
+               /* As in the direct case above, a G17P hardware vertex shader
+                * never sees the prolog's remap, so the mapping has to reach
+                * the input assembler as real indices.  The output count is
+                * only known once the GPU has read the indirect command, so
+                * the kernel allocates the index buffer from the heap and
+                * names it in the indexed indirect draw it writes. */
+               libagx_write_adj_indices_indirect(
+                  cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
+                  hk_heap(cmd), draw.b.ptr, out_draw,
+                  draw.indexed ? draw.index_buffer : 0,
+                  draw.indexed ? agx_draw_index_range_el(draw) : 0,
+                  draw.indexed ? agx_index_size_to_B(draw.index_size) : 0,
+                  prim);
 
-            draw = agx_draw_indirect(out_draw);
+               draw = agx_draw_indexed_indirect(out_draw, dev->heap->va->addr,
+                                                dev->heap->size,
+                                                AGX_INDEX_SIZE_U32, false);
+            } else {
+               struct hk_descriptor_state *desc = &cmd->state.gfx.descriptors;
+
+               libagx_draw_without_adj(
+                  cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_PREGFX, out_draw,
+                  draw.b.ptr, desc->root.draw.vertex_params, draw.index_buffer,
+                  draw.indexed ? agx_draw_index_range_el(draw) : 0,
+                  draw.indexed ? agx_index_size_to_B(draw.index_size) : 0,
+                  prim);
+
+               draw = agx_draw_indirect(out_draw);
+            }
          } else {
             unsigned count = libagx_remap_adj_count(draw.b.count[0], prim);
             struct hk_device *dev = hk_cmd_buffer_device(cmd);

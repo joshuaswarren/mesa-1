@@ -325,6 +325,67 @@ libagx_write_adj_indices(global uint *out, uint64_t index_buffer,
 }
 
 /*
+ * The indirect form of libagx_write_adj_indices.  The output index count is
+ * not known until the GPU has read the indirect command, so the index buffer
+ * is allocated from the geometry heap and named by an indexed indirect draw,
+ * exactly as the primitive-restart unroll does.
+ */
+KERNEL(1024)
+libagx_write_adj_indices_indirect(global struct poly_heap *heap,
+                                  constant uint *in_draw,
+                                  global uint *out_draw, uint64_t index_buffer,
+                                  uint index_buffer_range_el,
+                                  uint index_size_B, enum mesa_prim prim)
+{
+   uint tid = cl_local_id.x;
+
+   /* VkDrawIndirectCommand and VkDrawIndexedIndirectCommand agree on their
+    * first three words; only the tail differs. */
+   uint count = libagx_remap_adj_count(in_draw[0], prim);
+   uint instances = in_draw[1];
+   uint first = in_draw[2];
+   uint vertex_offset = index_size_B ? in_draw[3] : 0;
+   uint first_instance = index_size_B ? in_draw[4] : in_draw[3];
+
+   local uint offs_sh;
+   local uint ok_sh;
+
+   if (tid == 0) {
+      uint offs = 0;
+      uint ok = count > 0 && poly_heap_try_alloc_offs(heap, count * 4, &offs);
+
+      offs_sh = offs;
+      ok_sh = ok;
+
+      /* An exhausted heap draws nothing rather than writing through an
+       * invalid address, matching the restart unroll's behaviour. */
+      out_draw[0] = ok ? count : 0;
+      out_draw[1] = instances;
+      out_draw[2] = ok ? (offs / 4) : 0;
+      out_draw[3] = 0; /* vertexOffset, folded into the indices below */
+      out_draw[4] = first_instance;
+   }
+
+   barrier(CLK_LOCAL_MEM_FENCE);
+
+   if (!ok_sh)
+      return;
+
+   global uint *out = (global uint *)(heap->base + offs_sh);
+
+   for (uint i = tid; i < count; i += 1024) {
+      uint src = poly_map_adj_vertex(i, prim);
+
+      out[i] =
+         index_size_B
+            ? vertex_offset + poly_load_index(
+                                 index_buffer + (uint64_t)first * index_size_B,
+                                 index_buffer_range_el, src, index_size_B)
+            : first + src;
+   }
+}
+
+/*
  * Indexing/offseting is in software if necessary so we strip all
  * indexing/offset information.
  */

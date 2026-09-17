@@ -321,7 +321,12 @@ target_supports_program(const char *target, const nir_function *func)
            * libagx_draw_without_adj uses.  Its ARITHMETIC has a host oracle:
            * test-poly-adj-map checks poly_map_adj_vertex() against the
            * per-topology sequences for all four adjacency primitives. */
-          !strcmp(func->name, "libagx_write_adj_indices");
+          !strcmp(func->name, "libagx_write_adj_indices") ||
+          /* Its indirect form.  Same mapping and the same index load, plus a
+           * heap allocation and one barrier -- both already qualified here by
+           * libagx_unroll_restart, which allocates from the same heap with the
+           * same printf-free poly_heap_try_alloc_offs(). */
+          !strcmp(func->name, "libagx_write_adj_indices_indirect");
 }
 
 /* Like nir_precomp_print_binary_map, but programs the target does not support
