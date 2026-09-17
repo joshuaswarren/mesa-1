@@ -20,6 +20,8 @@
 #include "pool.h"
 #include "shader_enums.h"
 
+#include "asahi/genxml/agx3_cmdstream.h"
+
 #include "hk_private.h"
 #include "hk_conditional_render_core.h"
 #include "hk_shader.h"
@@ -439,6 +441,15 @@ struct hk_cs {
     * emitting two adjacent barriers. */
    void *weak_barrier_end;
 
+   /* AGX3 CDM: the value of current just after a standalone barrier that is
+    * the stream's *first* record. Apple's emitter only opens a stream with a
+    * barrier (the strong flush that makes a preceding render visible), so a
+    * stream is canonical on its own; but concatenating it after a stream that
+    * already ends in a barrier leaves two adjacent barriers with no launch
+    * between them, which Apple never emits. hk_cs_merge_cdm() uses this to
+    * fold the leading record into the destination's trailing one. */
+   void *leading_barrier_end;
+
    /* Whether there is more than just the root chunk */
    bool stream_linked;
 
@@ -570,19 +581,44 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
 
    if (inline_b) {
       uint8_t *dst = a->current;
-      memcpy(dst, b->start, b_size);
-      a->current = dst + b_size;
+
+      /* Two barriers with no launch between them is not a shape Apple's CDM
+       * emitter produces, and the G17P stream oracle rejects it. Within one
+       * stream hk_cdm_cache_flush() already strengthens the trailing record
+       * in place; do the same across a concatenation. b's leading barrier is
+       * the strong flush, so copying its word over a's trailing barrier is
+       * exactly that upgrade -- no encoder needed, and it removes a record
+       * rather than adding one. */
+      const bool b_opens_with_barrier =
+         b->leading_barrier_end &&
+         (uint8_t *)b->leading_barrier_end ==
+            (uint8_t *)b->start + AGX3_CDM_BARRIER_SIZE;
+      const bool a_ends_with_barrier =
+         ((uint8_t *)a->current == (uint8_t *)a->strong_flush_end ||
+          (uint8_t *)a->current == (uint8_t *)a->weak_barrier_end) &&
+         (uint8_t *)a->current - (uint8_t *)a->start >= AGX3_CDM_BARRIER_SIZE;
+      const size_t b_skip = (b_opens_with_barrier && a_ends_with_barrier)
+                               ? AGX3_CDM_BARRIER_SIZE
+                               : 0;
+      if (b_skip)
+         memcpy(dst - AGX3_CDM_BARRIER_SIZE, b->start, AGX3_CDM_BARRIER_SIZE);
+
+      memcpy(dst, (const uint8_t *)b->start + b_skip, b_size - b_skip);
+      a->current = dst + (b_size - b_skip);
 
       /* These markers point just past an emitted barrier. Preserve them in
        * the destination root so another adjacent merge still has an exact
-       * view of the stream tail. */
+       * view of the stream tail. A marker on the folded record maps onto the
+       * trailing record that absorbed it. */
       a->strong_flush_end =
          b->strong_flush_end
-            ? dst + ((uint8_t *)b->strong_flush_end - (uint8_t *)b->start)
+            ? dst + ((uint8_t *)b->strong_flush_end - (uint8_t *)b->start) -
+                 b_skip
             : NULL;
       a->weak_barrier_end =
          b->weak_barrier_end
-            ? dst + ((uint8_t *)b->weak_barrier_end - (uint8_t *)b->start)
+            ? dst + ((uint8_t *)b->weak_barrier_end - (uint8_t *)b->start) -
+                 b_skip
             : NULL;
    } else {
       void *link_end =

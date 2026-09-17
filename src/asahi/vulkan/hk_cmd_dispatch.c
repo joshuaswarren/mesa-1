@@ -254,10 +254,17 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
          return;
       }
 
+      const bool at_stream_start = cs->current == cs->start;
       memcpy(cs->current, packed, sizeof(packed));
       cs->current = (uint32_t *)((uint8_t *)cs->current + sizeof(packed));
       cs->strong_flush_end = cs->current;
       cs->weak_barrier_end = NULL;
+      /* A barrier that opens the stream is the post-graphics strong flush.
+       * It is canonical here and only here; record it so a later inline
+       * concatenation can fold it into the preceding stream's trailing
+       * barrier instead of leaving the two adjacent. */
+      if (at_stream_start)
+         cs->leading_barrier_end = cs->current;
       break;
    }
 
@@ -1023,6 +1030,14 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
          return;
 
       cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+      /* The indirect pair ends in the deferred launch's own weak ordering
+       * barrier (agx3_g17p_native_indirect_compute_dispatch_append passes
+       * flags 0).  Record it exactly as the direct path does, so a following
+       * hk_cdm_cache_flush() strengthens that record in place instead of
+       * appending a second barrier after it: two adjacent barriers with no
+       * launch between them is a shape Apple's CDM emitter never produces and
+       * the G17P stream oracle rejects. */
+      cs->weak_barrier_end = cs->current;
       cs->stats.cmds++;
       return;
    }
@@ -1463,6 +1478,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          return;
 
       cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
+      /* The indirect pair ends in the deferred launch's own weak ordering
+       * barrier (agx3_g17p_native_indirect_compute_dispatch_append passes
+       * flags 0).  Record it exactly as the direct path does, so a following
+       * hk_cdm_cache_flush() strengthens that record in place instead of
+       * appending a second barrier after it: two adjacent barriers with no
+       * launch between them is a shape Apple's CDM emitter never produces and
+       * the G17P stream oracle rejects. */
+      cs->weak_barrier_end = cs->current;
       cs->stats.cmds++;
       return;
    }
