@@ -99,10 +99,31 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->multisample && (d->lod_x64 || d->register_lod)))
       return false;
 
-   /* Sparse residency is witnessed on AGX3b only, and only for the ordinary
-    * (non-multisample) read.  metal-nt emits no sparse multisample form, and
-    * f142 is beyond the 8-byte AGX3c encoding entirely. */
-   if (d->sparse && (enc != AGX_ISA_ENCODING_AGX3B || d->multisample))
+   /* Sparse residency on the FETCH/READ path is refused: it assembles, but it
+    * does not execute correctly.
+    *
+    * Measured on Neo (G17P, A18 Pro) over a 570-case 1-in-6 sample of
+    * dEQP-VK.sparse_resources.shader_intrinsics.*, with the sparse encoders
+    * otherwise enabled, the split is exact and falls along the two encoders:
+    *
+    *   pass: 2d_sparse_sample_implicit_lod 28, 2d_sparse_gather 27,
+    *         2d_sparse_sample_explicit_lod 4      -- all agx3_tex_sample_*
+    *   fail: 2d_sparse_fetch 29, 2d_sparse_read 27, 2d_array_sparse_read 28,
+    *         2d_array_sparse_fetch 27, cube_sparse_read 25,
+    *         cube_array_sparse_read 25            -- all this encoder
+    *
+    * Every sample-side case passes and every fetch-side case returns wrong
+    * data, so the three witnessed fields (f142, f120, f112+4) are sufficient
+    * for the sample form and are NOT sufficient here -- the fetch form needs
+    * something further that the dense-vs-sparse delta did not expose. This is
+    * not the ep4 tail gap noted above: the sample form takes ep4 too and
+    * passes.
+    *
+    * Refuse until a witness explains the difference. A clean refusal is a
+    * NotSupported or a pipeline-creation failure; emitting this form instead
+    * silently corrupts every sparse texel fetch.
+    */
+   if (d->sparse)
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;

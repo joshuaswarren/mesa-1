@@ -3689,16 +3689,19 @@ test_sparse_residency(void)
    CHECK(length == 20 &&
          hex_eq(bytes, length, "2dc00c38bc000900920390010100802000000000"));
 
-   /* The texel fetch carries the same three fields. */
+   /* The texel fetch composes the same three fields, but hardware showed the
+    * result does not execute correctly -- every sparse fetch/read case on Neo
+    * returned wrong data while every sparse sample case passed -- so the fetch
+    * encoder now refuses. See the comment on the refusal in agx3_tex_core.c.
+    * Restore the byte-exact expectation together with the encoder once a
+    * witness explains what the fetch form needs beyond f142/f120/f112. */
    struct agx3_tex_fetch_desc fetch = {
       .dest = 10, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
       .slot = 1, .wait_mask = 1, .coord_kill = true, .final = false,
       .texture_kind = AGX3_TEX_OPERAND_UNIFORM, .texture_value = 24,
       .sparse = true,
    };
-   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
-   CHECK(length == 20 &&
-         hex_eq(bytes, length, "2dc00c38b0001701900282000200002000400000"));
+   CHECK(!agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
 
    struct agx3_tex_fetch_desc dense_fetch = fetch;
    dense_fetch.sparse = false;
@@ -3706,14 +3709,10 @@ test_sparse_residency(void)
    CHECK(length == 20 &&
          hex_eq(bytes, length, "2dc00c38b0001701900280000100002000000000"));
 
-   /* A sparse fetch round-trips through the strict decoder, and the decoded
-    * descriptor reports the residency request. */
-   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
+   /* The decoder keeps its sparse axis: it must still recognise the form if it
+    * is met, even though the encoder now refuses to emit it. The dense fetch
+    * round-trips and reports no residency request. */
    struct agx3_tex_fetch_desc decoded;
-   CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
-   CHECK(decoded.sparse && decoded.dest == 10 && decoded.mask == 15 &&
-         decoded.texture_kind == AGX3_TEX_OPERAND_UNIFORM &&
-         decoded.texture_value == 24);
    CHECK(agx3_tex_encode_fetch(enc, &dense_fetch, bytes, &length));
    CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
    CHECK(!decoded.sparse);
