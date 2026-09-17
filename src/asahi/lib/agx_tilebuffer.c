@@ -26,6 +26,16 @@
  */
 #define MAX_BYTES_PER_SAMPLE (64)
 
+/* USC Shared::sample_stride_in_8_bytes is a four-bit field (cmdbuf.xml), so
+ * the record cannot name a sample wider than 15 * 8 bytes however large the
+ * imageblock is. G17P's shaders do address 128 -- Apple's own eight-target
+ * fragments store at tile offsets 0..112 -- but there is no witness for the
+ * record at that size, and eight 16-byte targets pack 0x10 into a field that
+ * holds 0xf. Keep the layout inside what the record can hold and spill the
+ * remainder, which is the same mechanism every other over-large layout uses.
+ */
+#define MAX_ENCODABLE_BYTES_PER_SAMPLE (15 * 8)
+
 /* Minimum tile size in pixels, architectural. */
 #define MIN_TILE_SIZE_PX (16 * 16)
 
@@ -111,7 +121,8 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
       .max_samples_per_tile = max_samples_per_tile,
    };
    const unsigned max_bytes_per_sample =
-      max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE;
+      MIN2(max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE,
+           MAX_ENCODABLE_BYTES_PER_SAMPLE);
    const unsigned tile_capacity =
       max_bytes_per_tile ? max_bytes_per_tile : MAX_BYTES_PER_TILE;
 
@@ -226,6 +237,8 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
    agx_pack(&tib->usc, USC_SHARED, cfg) {
       if (tib->nr_samples > 0) {
          cfg.uses_shared_memory = true;
+         assert(tib->sample_size_B <= MAX_ENCODABLE_BYTES_PER_SAMPLE &&
+                "the layout must stay inside the record's four-bit field");
          cfg.sample_stride_in_8_bytes = tib->sample_size_B / 8;
          cfg.sample_count = tib->nr_samples;
          cfg.bytes_per_threadgroup = agx_tilebuffer_total_size(tib);
