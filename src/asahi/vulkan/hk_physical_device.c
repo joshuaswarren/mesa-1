@@ -1005,7 +1005,7 @@ hk_get_device_properties(const struct agx_device *dev,
        * maxRayDispatchInvocationCount is bounded by what one compute dispatch
        * can launch, since the launch is exactly a compute dispatch. */
       .shaderGroupHandleSize = HK_RAY_TRACING_GROUP_HANDLE_SIZE,
-      .maxRayRecursionDepth = 1,
+      .maxRayRecursionDepth = HK_MAX_RAY_RECURSION_DEPTH,
       .maxShaderGroupStride = 16384,
       .shaderGroupBaseAlignment = 64,
       .shaderGroupHandleCaptureReplaySize = 0,

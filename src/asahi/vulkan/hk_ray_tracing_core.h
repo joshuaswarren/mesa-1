@@ -48,6 +48,14 @@ extern "C" {
  * subgroup, and flat in Y/Z so the launch index arithmetic is a pure
  * decomposition of the compute global invocation id.
  */
+/*
+ * maxRayRecursionDepth.  Recursion is unrolled into the megakernel at compile
+ * time, so every extra level multiplies the compiled code; this is a code-size
+ * decision, not a hardware limit.  A pipeline asking for more is refused
+ * rather than silently given a shader that traces one level and stops.
+ */
+#define HK_MAX_RAY_RECURSION_DEPTH 1
+
 #define HK_RT_WORKGROUP_SIZE_X      32
 #define HK_RT_WORKGROUP_SIZE_X_LOG2 5
 #define HK_RT_WORKGROUP_SIZE_Y 1
