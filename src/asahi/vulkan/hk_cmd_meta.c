@@ -70,6 +70,11 @@ hk_device_init_meta(struct hk_device *dev)
     * Let common meta lower a stencil blit to eight bit-selective discard
     * passes instead of compiling an unencodable stencil-export shader. */
    dev->meta.use_stencil_export = dev->dev.chip != AGX_CHIP_G17P;
+   /* A scaled image is read through an exact integer descriptor or a
+    * filterable normalized one depending on whether the sampler filters, so
+    * a blit source has to arrive together with its sampler for the driver to
+    * choose.  See hk_descriptor_set.c. */
+   dev->meta.use_combined_blit_descriptors = dev->dev.chip == AGX_CHIP_G17P;
    dev->meta.use_masked_rgba8_buffer_unpack =
       dev->dev.chip == AGX_CHIP_G17P;
    dev->meta.use_rect_list_pipeline = true;

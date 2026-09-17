@@ -60,6 +60,29 @@ static void write_desc(struct hk_descriptor_set *set, uint32_t binding,
  * traversal walks it with global loads.  A null handle writes zero, which the
  * traversal treats as an empty structure.
  */
+static VkFilter
+hk_scaled_view_filter(VkDescriptorType descriptor_type,
+                      const struct hk_descriptor_set *set, uint32_t binding,
+                      uint32_t elem, const VkDescriptorImageInfo *info)
+{
+   if (descriptor_type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+      return VK_FILTER_NEAREST;
+
+   const struct hk_descriptor_set_binding_layout *binding_layout =
+      &set->layout->binding[binding];
+   const struct hk_sampler *sampler =
+      binding_layout->immutable_samplers
+         ? binding_layout->immutable_samplers[elem]
+         : (info && info->sampler ? hk_sampler_from_handle(info->sampler)
+                                  : NULL);
+   if (sampler == NULL)
+      return VK_FILTER_NEAREST;
+
+   return (sampler->mag_filter == VK_FILTER_LINEAR ||
+           sampler->min_filter == VK_FILTER_LINEAR)
+             ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+}
+
 static void
 write_accel_struct_desc(struct hk_descriptor_set *set,
                         VkAccelerationStructureKHR _accel_struct,
@@ -133,6 +156,32 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
          if (generation == 9 && integer != PIPE_FORMAT_NONE)
             desc[plane].sw.scaled_conversion =
                util_format_is_pure_sint(integer) ? 1 : 2;
+         if (generation == 9 &&
+             hk_scaled_view_filter(descriptor_type, set, binding, elem, info) ==
+                VK_FILTER_LINEAR &&
+             view->planes[plane].filterable_valid &&
+             hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE) {
+            desc[plane].tex = view->planes[plane].sampled_filterable;
+            desc[plane].sw.sampled_heap_index =
+               view->planes[plane].filterable_heap_index;
+            const struct util_format_description *fmt =
+               util_format_description(logical);
+            const VkComponentSwizzle sw[4] = {
+               view->vk.swizzle.r, view->vk.swizzle.g,
+               view->vk.swizzle.b, view->vk.swizzle.a};
+            uint16_t kind = 3 | ((fmt->channel[0].size == 16) << 2) |
+                                ((fmt->channel[0].size == 10) << 7);
+            for (unsigned c = 0; c < 4; ++c) {
+               unsigned comp = sw[c] == VK_COMPONENT_SWIZZLE_IDENTITY ? c :
+                  sw[c] >= VK_COMPONENT_SWIZZLE_R ? sw[c] - VK_COMPONENT_SWIZZLE_R : 4;
+               if (comp < 4 && fmt->swizzle[comp] < PIPE_SWIZZLE_0) {
+                  kind |= BITFIELD_BIT(3 + c);
+                  if (fmt->channel[fmt->swizzle[comp]].size == 2)
+                     kind |= BITFIELD_BIT(8 + c);
+               }
+            }
+            desc[plane].sw.scaled_conversion = kind;
+         }
          /* The normalized descriptor path -- sample a UNORM view and rescale
           * per channel in the shader -- returned the wrong texel for every
           * scaled format it was measured against, so scaled sampling uses the

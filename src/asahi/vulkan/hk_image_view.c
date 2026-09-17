@@ -23,6 +23,7 @@
 
 enum hk_desc_usage {
    HK_DESC_USAGE_SAMPLED,
+   HK_DESC_USAGE_SAMPLED_FILTERABLE,
    HK_DESC_USAGE_STORAGE,
    HK_DESC_USAGE_INPUT,
    HK_DESC_USAGE_BG_EOT,
@@ -209,7 +210,9 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
    struct ail_layout *layout = &plane->layout;
    uint64_t base_addr = hk_image_base_address(image, image_plane);
 
-   bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED;
+   const bool sampled_like = usage == HK_DESC_USAGE_SAMPLED ||
+                             usage == HK_DESC_USAGE_SAMPLED_FILTERABLE;
+   bool cubes_to_2d = !sampled_like;
 
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
@@ -226,6 +229,12 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
       p_format = hk_padded_image_format(p_format);
    if (agx_native_graphics(&dev->dev)) {
       enum pipe_format integer = hk_scaled_texture_format(p_format);
+      enum pipe_format normalized = hk_uscaled_normalized_format(p_format);
+      if (usage == HK_DESC_USAGE_SAMPLED_FILTERABLE &&
+          normalized != PIPE_FORMAT_NONE) {
+         p_format = normalized;
+         integer = PIPE_FORMAT_NONE;
+      }
       /* Scaled formats sample through an integer descriptor and a shader
        * conversion.  The normalized descriptor that used to serve sampled
        * views -- a UNORM read rescaled in the shader -- produced the wrong
@@ -255,7 +264,7 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
     * returns the padding instead, which is why every sampled RGB/BGR format
     * mismatched.  Force it back.
     */
-   if (padded_rgb && usage == HK_DESC_USAGE_SAMPLED)
+   if (padded_rgb && sampled_like)
       format_swizzle[3] = PIPE_SWIZZLE_1;
 
    /* Different APIs have different depth/stencil swizzle rules. Vulkan expects
@@ -675,6 +684,18 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             &view->planes[p].sampled_heap_index);
          if (result != VK_SUCCESS)
             return result;
+         view->planes[p].filterable_valid =
+            hk_uscaled_normalized_format(hk_padded_image_format(
+               hk_format_to_pipe_format(view->vk.format))) != PIPE_FORMAT_NONE &&
+            pack_texture(dev, view, p, HK_DESC_USAGE_SAMPLED_FILTERABLE,
+                         &view->planes[p].sampled_filterable);
+         if (view->planes[p].filterable_valid) {
+            result = hk_descriptor_table_add(
+               dev, &dev->sampled_images, &view->planes[p].sampled_filterable,
+               32, &view->planes[p].filterable_heap_index);
+            if (result != VK_SUCCESS)
+               return result;
+         }
          if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
             result = hk_descriptor_table_add(
                dev, &dev->sampled_images, &view->planes[p].ro_storage, 32,
