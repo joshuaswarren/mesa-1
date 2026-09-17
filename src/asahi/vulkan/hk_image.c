@@ -473,11 +473,26 @@ hk_GetPhysicalDeviceImageFormatProperties2(
 
       features &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
 
-      /* We also do not support sparse RGB32 uniform texel buffers, as we do not
-       * have residency query support for this interaction and there are no
-       * known use cases.
+      /* We also do not support sparse RESIDENCY on a format whose texel block
+       * is not a power of two, as we have no residency granularity to report
+       * for that interaction and there are no known use cases.
+       *
+       * Sparse BINDING and ALIASED have no such interaction: they bind and
+       * alias opaque memory ranges and never ask about texel blocks.
+       * Refusing them there made
+       * vkGetPhysicalDeviceImageFormatProperties fail a combination the spec
+       * requires. CTS excludes a non-power-of-two pixel size only under
+       * VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT (vktApiFeatureInfo.cpp,
+       * isRequiredImageParameterCombination), and the combination it then
+       * demands and we refused is
+       * SPARSE_ALIASED_BIT|SPARSE_BINDING_BIT with SAMPLED usage --
+       * captured on Neo. Every three-channel format failed
+       * dEQP-VK.api.info.image_format_properties as soon as sparseBinding was
+       * advertised. G17P stores a three-channel image padded to four, so it
+       * is the generation that reaches this at all.
        */
-      if (!util_is_power_of_two_nonzero(
+      if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) &&
+          !util_is_power_of_two_nonzero(
              vk_format_get_blocksize(pImageFormatInfo->format))) {
 
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
