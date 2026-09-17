@@ -1210,6 +1210,81 @@ hk_rt_stage_to_nir(struct hk_device *dev,
                                           nir_out);
 }
 
+
+/*
+ * A `rayQueryEXT` declared inside a ray-tracing stage is an ordinary
+ * function_temp variable, and hk_nir_lower_ray_queries() finds it by
+ * `var->data.ray_query` and then requires every rq_* intrinsic's source to
+ * still be a DEREF of it (`hk_nir_lower_ray_queries.c:607-617`).  The
+ * per-stage nir_lower_explicit_io(nir_var_function_temp) below rewrites that
+ * deref into a 32-bit scratch offset, after which the pass aborts on
+ * nir_instr_as_deref -- `nir.h:3060: nir_instr_as_deref: Assertion `parent &&
+ * parent->type == nir_instr_type_deref' failed`, and a plain SIGSEGV in a
+ * release build.  lavapipe has the same shape and the same hazard
+ * (`lvp_ray_tracing_pipeline.c:181`).
+ *
+ * Ray-query lowering cannot simply move earlier: it needs rq_initialize's
+ * acceleration structure to already be a resolved 64-bit address, and
+ * descriptor lowering happens inside hk_lower_nir(), long after the megakernel
+ * is assembled (`hk_shader.c:1764-1783`).  So park the query variables in a
+ * mode the stage lowering does not touch and put them back before the stage
+ * joins the megakernel.  Nothing between those two points lowers
+ * nir_var_shader_temp inside a stage, and nothing after the unpark lowers
+ * function_temp until hk_lower_nir() has run the ray-query pass.
+ */
+static nir_variable *
+hk_deref_base_var(nir_deref_instr *deref)
+{
+   while (deref->deref_type != nir_deref_type_var) {
+      if (deref->deref_type == nir_deref_type_cast)
+         return NULL;
+
+      deref = nir_deref_instr_parent(deref);
+      if (!deref)
+         return NULL;
+   }
+
+   return deref->var;
+}
+
+static void
+hk_park_ray_query_vars(nir_shader *nir, bool park)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   const nir_variable_mode to =
+      park ? nir_var_shader_temp : nir_var_function_temp;
+   struct exec_list *src = park ? &impl->locals : &nir->variables;
+   struct exec_list *dst = park ? &nir->variables : &impl->locals;
+   bool any = false;
+
+   foreach_list_typed_safe (nir_variable, var, node, src) {
+      if (!var->data.ray_query)
+         continue;
+
+      exec_node_remove(&var->node);
+      var->data.mode = to;
+      exec_list_push_tail(dst, &var->node);
+      any = true;
+   }
+
+   if (!any)
+      return;
+
+   nir_foreach_block (block, impl) {
+      nir_foreach_instr (instr, block) {
+         if (instr->type != nir_instr_type_deref)
+            continue;
+
+         nir_deref_instr *deref = nir_instr_as_deref(instr);
+         nir_variable *var = hk_deref_base_var(deref);
+         if (var && var->data.ray_query)
+            deref->modes = to;
+      }
+   }
+
+   nir_progress(true, impl, nir_metadata_all);
+}
+
 static VkResult
 hk_compile_ray_tracing_stages(
    struct hk_device *dev, struct hk_ray_tracing_pipeline *pipeline,
@@ -1269,6 +1344,8 @@ hk_compile_ray_tracing_stages(
           nir->info.stage == MESA_SHADER_INTERSECTION)
          nir->scratch_size = HK_RAY_HIT_ATTRIBS_SIZE;
 
+      hk_park_ray_query_vars(nir, true);
+
       NIR_PASS(_, nir, nir_lower_vars_to_explicit_types,
                nir_var_function_temp | nir_var_shader_call_data |
                   nir_var_ray_hit_attrib,
@@ -1295,6 +1372,8 @@ hk_compile_ray_tracing_stages(
        * (`agx_nir_lower_address.c:110-111`, `:240`). */
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_constant,
                nir_address_format_64bit_global);
+
+      hk_park_ray_query_vars(nir, false);
 
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                hk_move_ray_tracing_intrinsic, nir_metadata_control_flow, NULL);
@@ -1539,6 +1618,24 @@ hk_compile_ray_tracing_pipeline(
               b->shader->scratch_size);
       nir_print_shader(b->shader, stderr);
    }
+
+   /* hk_lower_nir() gates hk_nir_lower_ray_queries on `info.ray_queries > 0`
+    * (`hk_shader.c:1783`), and info.ray_queries is only ever set by
+    * nir_shader_gather_info() -- which hk calls in exactly one place,
+    * hk_preprocess_nir_internal() (`hk_shader.c:206`), the function this path
+    * must NOT run (see below).  The megakernel starts from
+    * nir_builder_init_simple_shader(), so its info.ray_queries is 0 no matter
+    * what the stages contain, and a rayQueryEXT in any ray-tracing stage then
+    * reaches agx_emit_intrinsic() as `rq_initialize`.  That is not a corner:
+    * dEQP-VK.ray_query has a variant of nearly every case for each
+    * ray-tracing-pipeline stage.
+    *
+    * Gather here, after inlining, when the stages' ray-query variables are
+    * function_temp locals of the entrypoint and nir_shader_gather_info() can
+    * see them (`nir_gather_info.c:1168-1182`).  This is also what every
+    * ordinary shader gets; the megakernel simply reaches hk_compile_shader()
+    * by a different road. */
+   nir_shader_gather_info(b->shader, nir_shader_get_entrypoint(b->shader));
 
    /* Hand the megakernel to the ordinary compute path with `io_lowered` still
     * false, exactly as hk's own internal compute shaders do, so that

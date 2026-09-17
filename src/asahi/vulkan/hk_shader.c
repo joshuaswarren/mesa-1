@@ -1780,8 +1780,23 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * by the time the traversal reads a node through it, and before shared
     * memory is laid out, because the pass introduces shader temporaries that
     * nir_lower_vars_to_ssa still has to promote. */
-   if (nir->info.ray_queries > 0)
+   if (nir->info.ray_queries > 0) {
       NIR_PASS(_, nir, hk_nir_lower_ray_queries);
+
+      /* The pass replaces every ray-query variable with ordinary temporaries
+       * and lowers every rq_* intrinsic, so the source count is now stale.
+       * That is not cosmetic: the AGX3 backend refuses outright any shader
+       * whose info.ray_queries is nonzero (`agx_compile.c:8610-8613`), and it
+       * also derives uses_ray_traversal / ray_traversal_depth_nonzero from it
+       * (`:8776-8781`).  Measured on the g17p drm-shim: an ordinary ray-query
+       * compute pipeline already reaches agx_compile_shader_nir() with
+       * ray_queries == 0 -- refreshed somewhere downstream of this call -- so
+       * zeroing it here changes nothing for the path that measured 43/45 on
+       * Neo.  The ray-tracing megakernel gets no such refresh, and without
+       * this every ray query inside a ray-tracing-pipeline stage fails
+       * creation with "AGX backend cannot encode compute shader for G17P". */
+      nir->info.ray_queries = 0;
+   }
 
    /* Before inserting bounds checks, we want to do a fair bit of optimization.
     * lower_load_global_constant_offset_instr has special optimizations for
