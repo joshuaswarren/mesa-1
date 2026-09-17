@@ -5201,14 +5201,34 @@ agx3_try_control_flow(struct util_dynarray *emission,
        * as witnessed by M4's seven- and eight-deep loop shaders. G17P instead
        * assigns a deep break the next slot so it cannot overwrite the live
        * predicate of an enclosing conditional. NEST counts exec-mask levels
-       * exited, not loop depth. */
+       * exited, not loop depth.
+       *
+       * There are only six flag slots, so a per-depth assignment runs out at
+       * the seventh nested loop and used to refuse the shader. It does not
+       * have to: a flag slot is an ordinary allocatable resource, not a
+       * per-depth one, and Apple reuses them freely on G17P too. Compiling
+       * test/probes/g16g-nested-loops.metal -- the seven- and eight-deep
+       * probe already in the tree -- with `metal-nt -arch applegpu_g17p`
+       * gives eight CNDLT loop tests in slots 1,1,1,1,1,1,1,0: slot 1 carries
+       * seven different loops' exit predicates in one program. See
+       * test/probes/README-g17p-deep-loops-and-shift-immediates.md for the
+       * decoded bytes.
+       *
+       * Our own emission is stricter still: every compare is immediately
+       * followed by the CND that consumes it (see agx3_emit_cf_compare and
+       * agx3_emit_cnd below), so a predicate is never live across another
+       * instruction and any slot is reusable.
+       *
+       * Wrapping modulo six therefore keeps every depth that already encoded
+       * byte-identical -- depths 1..6 are unchanged -- and only replaces a
+       * refusal at depth seven and beyond. */
       if ((is_break_if || is_while) && loop_depth == 0)
          return -1;
       const unsigned loop_slot = loop_depth - 1;
       const unsigned flag_slot = chip == AGX_CHIP_G16G
          ? (is_break_if || is_while ? loop_slot % 6 : 0)
-         : (is_break_if ? loop_slot + (I->nest > 1)
-                        : (is_while ? loop_slot : 0));
+         : (is_break_if ? (loop_slot + (I->nest > 1)) % 6
+                        : (is_while ? loop_slot % 6 : 0));
       if (flag_slot >= 6)
          return -1;
       if (!agx3_emit_cf_compare(emission, enc, I, is_float, flag_slot,
