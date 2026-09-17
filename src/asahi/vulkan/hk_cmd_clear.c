@@ -78,8 +78,32 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
             format = PIPE_FORMAT_R32_FLOAT;
          }
 
+         const uint32_t *source = &clear_value[stencil ? 1 : 0];
+
+         /* A scaled format has no numeric type the Vulkan clear union names,
+          * and CTS fills the integer members for it (its tcu channel class is
+          * an integer one).  u_format packs a scaled format through its float
+          * entry point, because the format is not pure-integer, so reinterpret
+          * the supplied integers as the float values they stand for.  Without
+          * this an unsigned clear of 178 packs float 2.5e-43 and the image
+          * clears to zero. */
+         float scaled_value[4];
+         if (hk_scaled_texture_format(format) != PIPE_FORMAT_NONE) {
+            const struct util_format_description *desc =
+               util_format_description(format);
+            const int chan = util_format_get_first_non_void_channel(format);
+            const bool is_signed =
+               chan >= 0 && desc->channel[chan].type == UTIL_FORMAT_TYPE_SIGNED;
+
+            for (unsigned i = 0; i < 4; ++i) {
+               scaled_value[i] = is_signed ? (float)(int32_t)source[i]
+                                           : (float)source[i];
+            }
+            source = (const uint32_t *)scaled_value;
+         }
+
          uint32_t c[4];
-         util_format_pack_rgba(format, c, &clear_value[stencil ? 1 : 0], 1);
+         util_format_pack_rgba(format, c, source, 1);
 
          unsigned blocksize_B = util_format_get_blocksize(format);
          assert(util_is_power_of_two_nonzero(blocksize_B) && blocksize_B <= 16);

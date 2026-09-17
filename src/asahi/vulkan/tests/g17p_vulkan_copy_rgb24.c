@@ -29,6 +29,11 @@ static uint32_t g_height = 4u;
 
 static VkFormat g_format = VK_FORMAT_B8G8R8_UNORM;
 static uint32_t g_texel_B = 3u;
+/* With --clear, replace the buffer upload with vkCmdClearColorImage of these
+ * four float components.  A scaled format stores them verbatim (11 22 33 44),
+ * a normalized one clamps every one of them to its maximum. */
+static bool g_clear = false;
+static const float g_clear_rgba[4] = {17.0f, 34.0f, 51.0f, 68.0f};
 
 #define VK_FN(name) static PFN_##name name
 VK_FN(vkGetInstanceProcAddr);
@@ -56,6 +61,7 @@ VK_FN(vkAllocateCommandBuffers);
 VK_FN(vkBeginCommandBuffer);
 VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkCmdCopyBufferToImage);
+VK_FN(vkCmdClearColorImage);
 VK_FN(vkCmdCopyImage);
 VK_FN(vkCmdCopyImageToBuffer);
 VK_FN(vkEndCommandBuffer);
@@ -225,7 +231,13 @@ main(int argc, char **argv)
       g_width = (uint32_t)strtoul(argv[3], NULL, 0);
    if (argc >= 5)
       g_height = (uint32_t)strtoul(argv[4], NULL, 0);
-   if (argc > 5 || g_texel_B == 0 || g_texel_B > 16 || !g_width || !g_height) {
+   if (argc >= 6 && !strcmp(argv[5], "--clear"))
+      g_clear = true;
+   else if (argc >= 6) {
+      fprintf(stderr, TEST_NAME ": unknown argument %s\n", argv[5]);
+      return EXIT_FAILURE;
+   }
+   if (argc > 6 || g_texel_B == 0 || g_texel_B > 16 || !g_width || !g_height) {
       fprintf(stderr,
               "usage: " TEST_NAME " <VkFormat> <bytes per texel> [w] [h]\n");
       return EXIT_FAILURE;
@@ -342,6 +354,7 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkBeginCommandBuffer);
    LOAD_DEVICE(device, vkCmdPipelineBarrier);
    LOAD_DEVICE(device, vkCmdCopyBufferToImage);
+   LOAD_DEVICE(device, vkCmdClearColorImage);
    LOAD_DEVICE(device, vkCmdCopyImage);
    LOAD_DEVICE(device, vkCmdCopyImageToBuffer);
    LOAD_DEVICE(device, vkEndCommandBuffer);
@@ -398,8 +411,17 @@ main(int argc, char **argv)
       .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
       .imageExtent = {WIDTH, HEIGHT, 1},
    };
-   vkCmdCopyBufferToImage(cb, upload.buffer, src,
-                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+   if (g_clear) {
+      VkClearColorValue value;
+      memcpy(value.float32, g_clear_rgba, sizeof(g_clear_rgba));
+      const VkImageSubresourceRange whole = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0,
+                                             1};
+      vkCmdClearColorImage(cb, src, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           &value, 1, &whole);
+   } else {
+      vkCmdCopyBufferToImage(cb, upload.buffer, src,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+   }
 
    barrier(cb, src, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -452,6 +474,18 @@ main(int argc, char **argv)
    printf(TEST_NAME ": %ux%u %u-byte texels, %u of %u texels copied "
                     "correctly before the first wrong one\n",
           WIDTH, HEIGHT, g_texel_B, good, WIDTH * HEIGHT);
+
+   if (g_clear) {
+      printf(TEST_NAME ": cleared to %g %g %g %g\n", (double)g_clear_rgba[0],
+             (double)g_clear_rgba[1], (double)g_clear_rgba[2],
+             (double)g_clear_rgba[3]);
+      bool uniform = true;
+      for (uint32_t i = g_texel_B; i < image_bytes; ++i)
+         uniform &= src_back.map[i] == src_back.map[i % g_texel_B];
+      printf(TEST_NAME ": clear is %s across the image\n",
+             uniform ? "UNIFORM" : "NOT UNIFORM");
+      return EXIT_SUCCESS;
+   }
 
    const bool src_ok = memcmp(src_back.map, upload.map, image_bytes) == 0;
    const bool dst_ok = memcmp(dst_back.map, upload.map, image_bytes) == 0;
