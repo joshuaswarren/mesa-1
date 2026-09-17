@@ -72,8 +72,7 @@ hk_upload_rodata(struct hk_device *dev)
                        "%s has no known sampler heap element size",
                        agx_chip_name(dev->dev.chip));
 
-   const size_t rodata_size =
-      align(sampler_size, sizeof(uint64_t)) + sizeof(struct poly_heap);
+   const size_t rodata_size = align(sampler_size, sizeof(uint64_t));
    dev->rodata.bo =
       agx_bo_create(&dev->dev, rodata_size, 0, 0, "Read only data");
 
@@ -98,6 +97,7 @@ hk_upload_rodata(struct hk_device *dev)
    struct hk_native_sampler_descriptor txf;
    if (!hk_pack_native_txf_sampler(dev->dev.chip, &txf)) {
       agx_bo_unreference(&dev->dev, dev->rodata.bo);
+      dev->rodata.bo = NULL;
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                        "%s cannot pack the texel-fetch sampler",
                        agx_chip_name(dev->dev.chip));
@@ -105,17 +105,27 @@ hk_upload_rodata(struct hk_device *dev)
    memcpy(map + offs, &txf, sampler_size);
    offs += sampler_size;
 
-   /* The heap descriptor isn't strictly readonly data, but we only have a
-    * single instance of it device-wide and -- after initializing at heap
-    * allocate time -- it is read-only from the CPU perspective. The GPU uses it
-    * for scratch, but is required to reset it after use to ensure resubmitting
-    * the same command buffer works.
-    *
-    * So, we allocate it here for convenience.
+   /* The heap descriptor is NOT read-only data: hk_init_heap() writes it from
+    * the CPU on the first tessellated or geometry-shaded draw, and the libagx
+    * allocator then atomically bumps poly_heap::bottom from the GPU on every
+    * such draw (src/poly/geometry.h poly_heap_alloc_offs). It used to be
+    * suballocated out of the buffer object above, 32 bytes after the texel
+    * fetch sampler whose base address is handed to every G17P background
+    * reload program as a sampler table pointer -- so one tessellation draw
+    * turned bytes the fragment path can address from zero into live allocator
+    * state. Give it its own buffer object; the sampler table then never
+    * changes after device creation.
     */
-   offs = align(offs, sizeof(uint64_t));
-   dev->rodata.heap = dev->rodata.bo->va->addr + offs;
-   offs += sizeof(struct poly_heap);
+   dev->rodata.heap_bo = agx_bo_create(&dev->dev, sizeof(struct poly_heap), 0,
+                                       0, "Geometry heap descriptor");
+   if (!dev->rodata.heap_bo) {
+      agx_bo_unreference(&dev->dev, dev->rodata.bo);
+      dev->rodata.bo = NULL;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   memset(agx_bo_map(dev->rodata.heap_bo), 0, sizeof(struct poly_heap));
+   dev->rodata.heap = dev->rodata.heap_bo->va->addr;
 
    return VK_SUCCESS;
 }
@@ -707,6 +717,7 @@ fail_internal_shaders:
 fail_bg_eot:
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_rodata:
+   agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
 fail_queries:
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
@@ -778,6 +789,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    if (dev->dev.chip == AGX_CHIP_G17P)
       hk_descriptor_table_finish(dev, &dev->sampled_images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
+   agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);

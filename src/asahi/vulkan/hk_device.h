@@ -98,7 +98,18 @@ struct hk_device {
    } g17p_compute_program_cache;
 
    struct {
+      /* Immutable for the device's lifetime: the native texel-fetch sampler
+       * table. Its address is published to the GPU as a sampler table base by
+       * every G17P background reload program, so nothing that any subsystem
+       * writes at draw time may share this buffer object. */
       struct agx_bo *bo;
+
+      /* The geometry/tessellation heap descriptor. hk_init_heap() writes it
+       * from the CPU on the first tessellated or geometry-shaded draw, and the
+       * libagx bump allocator then atomically updates poly_heap::bottom from
+       * the GPU on every such draw. Kept in its own buffer object so that
+       * mutation cannot reach the sampler table above. */
+      struct agx_bo *heap_bo;
       uint64_t heap;
    } rodata;
 

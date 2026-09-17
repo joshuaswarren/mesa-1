@@ -2121,8 +2121,7 @@ hk_init_heap(const void *data)
    /* The geometry state buffer is initialized here and then is treated by
     * the CPU as rodata, even though the GPU uses it for scratch internally.
     */
-   off_t off = dev->rodata.heap - dev->rodata.bo->va->addr;
-   struct poly_heap *map = agx_bo_map(dev->rodata.bo) + off;
+   struct poly_heap *map = agx_bo_map(dev->rodata.heap_bo);
 
    *map = (struct poly_heap){
       .base = dev->heap->va->addr,
