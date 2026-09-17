@@ -5266,7 +5266,18 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
             prim = u_decomposed_prim(prim);
          }
 
-         key.prolog.adjacency = prim;
+         /* On G17P the adjacency mapping is materialised into a real index
+          * buffer by libagx_write_adj_indices{,_indirect}(), because a
+          * hardware vertex shader reads its invocation index from SR 0xdd and
+          * so never observes a remap the prolog performed.  Asking the prolog
+          * to remap as well applies the mapping twice and collapses every
+          * primitive.  This only bites when a prolog actually runs, which is
+          * why it shows up in the shader-object and linked-library pipeline
+          * families (dynamic vertex input => use_prolog=1) and not in
+          * monolithic (static_vi=1, use_prolog=0).
+          */
+         if (dev->dev.chip != AGX_CHIP_G17P)
+            key.prolog.adjacency = prim;
       }
 
       if (key.prolog.adjacency || !key.prolog.hw) {
@@ -6760,9 +6771,26 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
          assert(!geom && "geometry shaders handle adj directly");
          enum mesa_prim prim = vk_topology_to_mesa(dyn->ia.primitive_topology);
 
+         if (hk_g17p_launch_trace_enabled()) {
+            fprintf(stderr,
+                    "G17P adj-enter: prim=%u restart=%u indexed=%u "
+                    "indirect=%u index_size=%u count=%u\n",
+                    (unsigned)prim, draw.restart, draw.indexed,
+                    agx_is_indirect(draw.b), (unsigned)draw.index_size,
+                    agx_is_indirect(draw.b) ? 0u : draw.b.count[0]);
+         }
+
          if (draw.restart) {
             draw = hk_draw_without_restart(cmd, draw, 1);
             prim = u_decomposed_prim(prim);
+
+            if (hk_g17p_launch_trace_enabled()) {
+               fprintf(stderr,
+                       "G17P adj-after-unroll: prim=%u indirect=%u "
+                       "index_size=%u\n",
+                       (unsigned)prim, agx_is_indirect(draw.b),
+                       (unsigned)draw.index_size);
+            }
          }
 
          if (agx_is_indirect(draw.b)) {
@@ -6781,6 +6809,21 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                 * only known once the GPU has read the indirect command, so
                 * the kernel allocates the index buffer from the heap and
                 * names it in the indexed indirect draw it writes. */
+               if (hk_g17p_launch_trace_enabled()) {
+                  fprintf(stderr,
+                          "G17P adj-indirect-kernel: prim=%u in_draw=%llx "
+                          "out_draw=%llx ib=%llx range_el=%u elsize=%u\n",
+                          (unsigned)prim,
+                          (unsigned long long)draw.b.ptr,
+                          (unsigned long long)out_draw,
+                          (unsigned long long)(draw.indexed ? draw.index_buffer
+                                                            : 0),
+                          draw.indexed ? agx_draw_index_range_el(draw) : 0,
+                          draw.indexed
+                             ? agx_index_size_to_B(draw.index_size)
+                             : 0);
+               }
+
                libagx_write_adj_indices_indirect(
                   cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
                   hk_heap(cmd), draw.b.ptr, out_draw,
