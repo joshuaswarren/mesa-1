@@ -2853,9 +2853,32 @@ hk_g17p_copy_padded_rgb_buffer_image(
       const uint64_t buffer_layer_B =
          (uint64_t)util_format_get_nblocksy(layout->format, image_h_px) *
          buffer_row_B;
+      /* Vulkan requires the buffer to hold only the bytes the copy actually
+       * addresses, not whole padded layers. The dispatch below walks
+       * blocks_x x blocks_y blocks per slice at buffer_base + slice *
+       * buffer_layer_B with row stride buffer_row_B, so the last byte it
+       * touches is:
+       *
+       *   (slices - 1) layer strides
+       * + (blocks_y - 1) row strides
+       * + blocks_x blocks of the final row
+       *
+       * Bounding on buffer_layer_B instead demanded a whole padded layer from
+       * bufferOffset, which rejected every legal tightly-sized copy --
+       * dEQP-VK.api.copy_and_blit.*.tightly_sized_buffer_offset_* and
+       * use_after_copy.r8g8b8_unorm.* -- and, because this path defers its
+       * failure, surfaced as VK_ERROR_FEATURE_NOT_PRESENT from
+       * vkEndCommandBuffer. AGX2 reports those cases NotSupported because it
+       * does not advertise the format at all; G17P advertises it and then
+       * refused, which is worse.
+       */
+      if (!slices)
+         return false;
+      const uint64_t copied_B = (uint64_t)(slices - 1) * buffer_layer_B +
+                                (uint64_t)(blocks_y - 1) * buffer_row_B +
+                                (uint64_t)blocks_x * buffer_block_B;
       if (region->bufferOffset > buffer->vk.size ||
-          buffer_layer_B > buffer->vk.size - region->bufferOffset ||
-          slices > (buffer->vk.size - region->bufferOffset) / buffer_layer_B)
+          copied_B > buffer->vk.size - region->bufferOffset)
          return false;
 
       const uint64_t buffer_base =
@@ -2909,8 +2932,9 @@ hk_g17p_copy_padded_rgb_buffer_image(
 
       if (cmd->current_cs.cs) {
          const uint64_t dst = to_image ? image_base : buffer_base;
-         const uint64_t size =
-            to_image ? layout->size_B : buffer_layer_B * slices;
+         /* Declare the range the dispatch actually touches. Whole padded
+          * layers would now run past the end of a tightly-sized buffer. */
+         const uint64_t size = to_image ? layout->size_B : copied_B;
          hk_drm_attachment_set_add(&cmd->current_cs.cs->compute_attachments,
                                    dst, size);
       }
