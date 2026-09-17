@@ -1930,9 +1930,19 @@ test_g17p_halfword_tile_widening(void)
    return true;
 }
 
-/* Three blended RGBA32 targets need 24 payload halves live at their stores,
- * but a fragment reading the tile stores from halves 0..15 only. The shader
- * must be refused, not abort register allocation. */
+/* Three blended RGBA32 targets need 24 payload halves live at their stores.
+ * This was once beyond the tile-store bank and refused; 46eeb53ec49 ("asahi:
+ * complete native G17P three-target blend and subset epilogs") implemented it
+ * against Apple's witnessed register bank, and agx3_tile_store_bank() now
+ * returns 32 for this shape -- see its comment recording that Apple's own
+ * blending fragments store three RGBA32Float targets from halves0..23. So the
+ * shader must now COMPILE, and register allocation must find an assignment.
+ *
+ * NOTE: this no longer gives agx3_tile_store_payloads_fit() negative coverage.
+ * Re-establishing that needs a shape whose demand genuinely exceeds the bank
+ * the function computes for it, grounded in an Apple witness rather than
+ * assumed -- asserting a refusal for a shape the hardware supports would be
+ * worse than having no negative case. */
 static bool
 test_g17p_blended_payloads_beyond_bank(void)
 {
@@ -1959,11 +1969,13 @@ test_g17p_blended_payloads_beyond_bank(void)
    };
    struct agx_shader_part part;
    memset(&part, 0xa5, sizeof(part));
-   const struct agx_shader_part cleared = {0};
-   const bool ok = !agx_compile_shader_nir(nir, &key, &part) &&
-                   !memcmp(&part, &cleared, sizeof(part));
+   const bool ok = agx_compile_shader_nir(nir, &key, &part) &&
+                   part.binary != NULL && part.info.binary_size > 0;
    if (!ok)
-      fprintf(stderr, "G17P blend beyond the tile store bank was not refused\n");
+      fprintf(stderr,
+              "G17P three-target RGBA32 blend was not compiled\n");
+   if (part.binary)
+      free(part.binary);
    ralloc_free(nir);
    return ok;
 }

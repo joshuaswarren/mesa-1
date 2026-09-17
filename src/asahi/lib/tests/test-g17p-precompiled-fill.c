@@ -53,6 +53,22 @@ main(void)
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 ||
+          /* Qualified in agx_supports_precompiled() (src/asahi/clc/
+           * asahi_clc.c) after this list was first written.  This list is a
+           * deliberate second copy: it is a tripwire, so a kernel that starts
+           * being precompiled for G17P without anyone deciding to qualify it
+           * fails here.  Keep the two in step by hand. */
+          i == LIBAGX_FILL ||
+          i == LIBAGX_COPY_UINT4 ||
+          i == LIBAGX_COPY_UCHAR ||
+          i == LIBAGX_COPY_QUERY_GL ||
+          i == LIBAGX_INCREMENT_IA_RESTART ||
+          i == LIBAGX_SETUP_INDIRECT_DISPATCH ||
+          /* Qualified for its arithmetic oracle only; its machine code has
+           * never executed, and the ray-tracing-pipeline path it serves is
+           * behind HK_G17P_UNVERIFIED_FEATURES.  Presence here is not a claim
+           * that it runs -- see the comment on it in agx_supports_precompiled(). */
+          i == LIBAGX_TRACE_RAYS_INDIRECT_SETUP ||
           i == LIBAGX_COPY_IMAGE ||
           i == LIBAGX_MIPMAP_UNORM8X4 ||
           i == LIBAGX_MIPMAP_UNORM8X4_ODD ||
