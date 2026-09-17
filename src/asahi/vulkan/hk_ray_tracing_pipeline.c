@@ -1279,6 +1279,23 @@ hk_compile_ray_tracing_stages(
       NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_function_temp,
                nir_address_format_32bit_offset);
 
+      /* A shaderRecordEXT block is not a variable.  vtn builds a deref_cast of
+       * nir_load_shader_record_ptr() in nir_var_mem_constant
+       * (`vtn_variables.c:448-457` and `:1884-1886`), so there is no
+       * nir_variable for nir_lower_vars_to_explicit_types to find and the mode
+       * is one hk_lower_nir() never lowers: it lowers nir_var_mem_global,
+       * nir_var_mem_ssbo, nir_var_mem_ubo and nir_var_mem_shared and no other
+       * (`hk_shader.c:1767-1775`, `:1811-1814`).  Without this the deref
+       * survives every pass and reaches the AGX backend, where
+       * agx_extract_nir_src() reads a def that was never emitted -- in a
+       * release build a SIGSEGV inside agx_emit_alu() with no message, which
+       * is nowhere near the deref.  64-bit global is the right format: the
+       * record address is an ordinary device address and
+       * agx_nir_lower_address() already lowers load_global_constant
+       * (`agx_nir_lower_address.c:110-111`, `:240`). */
+      NIR_PASS(_, nir, nir_lower_explicit_io, nir_var_mem_constant,
+               nir_address_format_64bit_global);
+
       NIR_PASS(_, nir, nir_shader_intrinsics_pass,
                hk_move_ray_tracing_intrinsic, nir_metadata_control_flow, NULL);
 
