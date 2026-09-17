@@ -2817,6 +2817,18 @@ hk_launch_tess_g17p(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       gfx->tess.factor_buffer_size_B = unrolled * record_B;
       gfx->tess.patch_draw = 0;
       gfx->tess.patches = unrolled;
+
+      if (hk_g17p_launch_trace_enabled()) {
+         fprintf(stderr,
+                 "G17P tess draw: verts=%u instances=%u cps=%u patches=%u "
+                 "unrolled=%u record_B=%u factors=%" PRIx64 " size=%u "
+                 "vs_grid=%u/%u/%u tcs_grid=%u/%u/%u\n",
+                 draw.b.count[0], draw.b.count[1],
+                 dyn->ts.patch_control_points, patches, unrolled, record_B,
+                 (uint64_t)factors.gpu, unrolled * record_B, grid_vs.count[0],
+                 grid_vs.count[1], grid_vs.count[2], grid_tcs.count[0],
+                 grid_tcs.count[1], grid_tcs.count[2]);
+      }
    }
 
    hk_dispatch_with_local_size(cmd, cs, vs, grid_vs, agx_workgroup(64, 1, 1));
@@ -2973,6 +2985,15 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
       grid_tcs.count[0] = patches * tcs->info.tess.tcs_output_patch_size;
       grid_tess = agx_1d(patches * draw.b.count[1]);
+
+      if (hk_g17p_launch_trace_enabled()) {
+         fprintf(stderr,
+                 "G17P sw tess draw: verts=%u instances=%u cps=%u patches=%u "
+                 "unrolled=%u out_draws=%" PRIx64 " heap=%u\n",
+                 draw.b.count[0], draw.b.count[1], input_patch_size, patches,
+                 patches * draw.b.count[1], (uint64_t)gfx->tess.out_draws,
+                 (unsigned)dev->heap->size);
+      }
 
       /* TCS invocation counter increments once per-patch */
       if (hk_stat_enabled(tcs_stat)) {

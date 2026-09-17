@@ -2677,6 +2677,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-workgroup-shared-1024',
+      files('tests/g17p_vulkan_compute_min.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_WORKGROUP_SHARED_1024=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-compute-atomic2d',
       files('tests/g17p_vulkan_compute_min.c'),
       include_directories : [inc_include],
