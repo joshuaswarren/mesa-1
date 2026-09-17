@@ -1266,3 +1266,16 @@ void agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                          uint64_t attribs_read, struct agx_velem_key *keys);
 
 struct agx_robustness hk_prolog_robustness(struct hk_device *dev);
+
+/* A refusal during command recording reaches the application as one
+ * VK_ERROR_FEATURE_NOT_PRESENT out of vkEndCommandBuffer, with nothing to say
+ * which of the driver's three dozen refusal sites produced it -- so every such
+ * failure costs a bisect that the driver already knows the answer to.
+ * HK_DEBUG=cmderr names the file and line that set the error. */
+void hk_trace_cmd_error(const char *file, unsigned line, VkResult error);
+
+#undef vk_command_buffer_set_error
+#define vk_command_buffer_set_error(command_buffer, error)                     \
+   (hk_trace_cmd_error(__FILE__, __LINE__, (error)),                           \
+    __vk_command_buffer_set_error((command_buffer), (error), __FILE__,          \
+                                  __LINE__))

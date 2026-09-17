@@ -757,8 +757,24 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
          }
       }
    }
-   if (!samples && !image_reads)
+   if (!samples && !image_reads) {
+      if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE)) {
+         unsigned tex = 0, intrinsics = 0;
+         nir_foreach_function_impl(impl, shader) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  tex += instr->type == nir_instr_type_tex;
+                  intrinsics += instr->type == nir_instr_type_intrinsic;
+               }
+            }
+         }
+         fprintf(stderr,
+                 "G17P indexed samplers: nothing to lower in stage %u "
+                 "(%u tex, %u intrinsics)\n",
+                 (unsigned)shader->info.stage, tex, intrinsics);
+      }
       return false;
+   }
 
    nir_foreach_function_impl(impl, shader) {
       nir_builder b = nir_builder_create(impl);

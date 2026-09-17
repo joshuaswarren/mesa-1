@@ -6355,6 +6355,19 @@ agx3_g17p_mrt_partition(const struct agx3_g17p_mrt_protocol *p,
    return -1;
 }
 
+/* Metal has no geometry or tessellation-control stage: Apple compiles both as
+ * kernels, and Honeykrisp launches them the same way, through CDM. Their
+ * texture fetches must therefore take the kernel path here. The unstaged form
+ * returns only x and y on AGX3B -- see the `staged` decision below -- and it
+ * also leaves the staging footprint unknown, which makes hk_dispatch_g17p_
+ * native() refuse the dispatch outright. */
+static inline bool
+agx3_stage_runs_as_kernel(mesa_shader_stage stage)
+{
+   return stage == MESA_SHADER_COMPUTE || stage == MESA_SHADER_TESS_CTRL ||
+          stage == MESA_SHADER_GEOMETRY;
+}
+
 static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_refused(unsigned line)
 {
@@ -6373,9 +6386,12 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
        (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
        (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1)) {
       /* Not a refusal by itself -- a single-target shader legitimately has no
-       * MRT protocol -- but when a later tile op does refuse, the reason is
-       * almost always one of these, so name which one held. */
-      if (agx_compiler_debug & AGX_DBG_REFUSE) {
+       * MRT protocol -- so report only when the key names two or more tile
+       * partitions, which is when the protocol is the thing a later tile op
+       * will need. Reporting every shader buries the one that matters. */
+      if ((agx_compiler_debug & AGX_DBG_REFUSE) &&
+          __bitset_count(ctx->key->g17p_tile_partitions,
+                         BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE)) >= 2) {
          fprintf(stderr,
                  "G17P MRT protocol declined: agx3b=%u frag=%u preamble=%u "
                  "ordered=%u secondary=%u ignore-tib=%u emrt=%u blocks=%u\n",
@@ -8451,7 +8467,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ctx->stage == MESA_SHADER_VERTEX &&
                 I->src[3].type != AGX_INDEX_IMMEDIATE) ||
                ctx->stage == MESA_SHADER_FRAGMENT ||
-               ctx->stage == MESA_SHADER_COMPUTE;
+               agx3_stage_runs_as_kernel(ctx->stage);
             /* imgwci takes its coordinates from staging halves 0/2, so a
              * read in a shader that also writes images must not stage its
              * coordinates there: an unwaited write COPY can replace them
@@ -8480,7 +8496,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                I->src[1].type == AGX_INDEX_REGISTER;
             const bool staged_bank_reads =
-               ctx->stage == MESA_SHADER_COMPUTE ||
+               agx3_stage_runs_as_kernel(ctx->stage) ||
                (ctx->stage == MESA_SHADER_FRAGMENT &&
                 !ctx->key->fs.ignore_tib_dependencies);
             assert(texture_ops_left > 0);

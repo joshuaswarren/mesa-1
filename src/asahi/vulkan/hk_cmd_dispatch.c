@@ -335,12 +335,19 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
                                  struct hk_linked_shader *linked)
 {
    if (s && linked && hk_g17p_launch_trace_enabled())
-      fprintf(stderr,"G17P compute resources: txf=%u binding=%u storage=%u sampled_storage=%u preamble=%u local=%u texture=%u sampler=%u heap=%u scratch=%u/%u\n",
+      fprintf(stderr,"G17P compute resources: txf=%u binding=%u storage=%u sampled_storage=%u preamble=%u local=%u texture=%u sampler=%u heap=%u scratch=%u/%u idx_samp=%u idx_store=%u combined=%u stage=%u/%u bo=%u va=%u size=%u gprs=%u pre_scratch=%u staging=%u sets=%u\n",
          linked->b.uses_txf,s->info.agx3_txf_texture_valid,
          s->info.agx3_storage_image_valid,s->info.agx3_sampled_storage_valid,
          s->b.info.has_preamble,
          s->b.info.local_size,s->b.info.texture_state_count,s->b.info.sampler_state_count,
-         s->b.info.uses_sampler_heap,s->b.info.scratch_size,linked->b.scratch_size);
+         s->b.info.uses_sampler_heap,s->b.info.scratch_size,linked->b.scratch_size,
+         s->info.agx3_indexed_sampler_valid,s->info.agx3_indexed_storage_valid,
+         s->info.agx3_combined_sampler_valid,
+         (unsigned)s->b.info.stage,(unsigned)s->info.stage,
+         linked->b.bo != NULL, linked->b.bo && linked->b.bo->va != NULL,
+         (unsigned)linked->b.size, linked->b.nr_gprs,
+         s->b.info.preamble_scratch_size, s->b.info.agx3_staging_known,
+         s->info.set_count);
    /* poly_nir_lower_gs preserves the API geometry stage on the main kernel,
     * even though Honeykrisp has always launched that binary through CDM. */
    return s && linked &&

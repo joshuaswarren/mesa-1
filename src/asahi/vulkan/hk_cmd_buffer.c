@@ -743,6 +743,21 @@ hk_cmd_buffer_emit_vdm_terminate(struct hk_cmd_buffer *cmd, void *current)
    return current;
 }
 
+
+/* See the macro in hk_cmd_buffer.h. Off unless HK_DEBUG names it, so this
+ * costs one relaxed load on a path that is already failing the submission. */
+void
+hk_trace_cmd_error(const char *file, unsigned line, VkResult error)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *debug = getenv("HK_DEBUG");
+      enabled = debug && strstr(debug, "cmderr") != NULL;
+   }
+   if (enabled)
+      mesa_loge("command buffer error %d set at %s:%u", (int)error, file, line);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
                       const VkCommandBufferBeginInfo *pBeginInfo)
