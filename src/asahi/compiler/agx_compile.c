@@ -6128,9 +6128,22 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
       nir_def *small = cosine ? nir_imm_float(b, 1) : x;
       result = nir_bcsel(b, nir_flt_imm(b, nir_fabs(b, x), 0x1p-12f),
                         small, result);
-      result = nir_bcsel(b, nir_flt(b, nir_imm_float(b, uif(0x4ac90fdb)),
-                                  nir_fabs(b, x)),
-                        nir_imm_float(b, 0), result);
+      /* Past the range the three-piece reduction can resolve there is no
+       * quadrant left to recover and Apple's sequence answers zero.  An
+       * infinite argument is not merely a large finite one: sin and cos of
+       * an infinity are NaN, and a shader compiled without the NotInf or
+       * NotNaN fast-math decorations is entitled to that NaN.  Separate the
+       * two with an exact equality against infinity rather than letting the
+       * range test fold them together.  A NaN argument never reaches this
+       * select -- the comparison is false for it and the reduction above
+       * already propagates it. */
+      nir_def *magnitude = nir_fabs(b, x);
+      nir_def *out_of_range =
+         nir_flt(b, nir_imm_float(b, uif(0x4ac90fdb)), magnitude);
+      nir_def *out_of_range_value =
+         nir_bcsel(b, nir_feq(b, magnitude, nir_imm_float(b, uif(0x7f800000))),
+                   nir_imm_float(b, uif(0x7fc00000)), nir_imm_float(b, 0));
+      result = nir_bcsel(b, out_of_range, out_of_range_value, result);
       if (bits != 32)
          result = nir_f2fN(b, result, bits);
       b->fp_math_ctrl = saved_ctrl;
