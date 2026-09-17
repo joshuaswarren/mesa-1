@@ -121,7 +121,10 @@ g17p_sample_shape(const nir_tex_instr *tex)
            (!tex->is_shadow ||
             nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0) &&
            !(tex->is_shadow && cube_array)))) ||
-       tex->is_sparse ||
+       /* Sparse residency rides on the ordinary sample: the encoder sets
+        * three extra fields and the instruction writes one more register.
+        * A depth comparison and a LOD query have no sparse witness. */
+       (tex->is_sparse && (tex->is_shadow || query_lod)) ||
        tex->coord_components != (query_lod ? (three_d || cube ? 3 : 2) :
                                 cube_array ? 4 :
                                 (tex->is_array || three_d || cube) ? 3 : 2) ||
@@ -133,7 +136,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
         tex->dest_type != nir_type_uint32 &&
         tex->dest_type != nir_type_int32) ||
        tex->def.num_components !=
-          (query_lod ? 2 : (tex->is_shadow && tex->op != nir_texop_tg4) ? 1 : 4) ||
+          ((query_lod ? 2 : (tex->is_shadow && tex->op != nir_texop_tg4) ? 1 : 4) +
+           (tex->is_sparse ? 1 : 0)) ||
        (query_lod && tex->dest_type != nir_type_float32) ||
        tex->def.bit_size != 32)
       return false;
@@ -554,9 +558,11 @@ g17p_indexed_fetch_shape(const nir_tex_instr *tex)
                        : three_d ? GLSL_SAMPLER_DIM_3D
                                  : GLSL_SAMPLER_DIM_2D) ||
        (three_d && tex->is_array) ||
-       tex->is_shadow || tex->is_sparse || tex->texture_index ||
+       tex->is_shadow || tex->texture_index ||
+       /* No sparse multisample read is witnessed. */
+       (tex->is_sparse && multisample) ||
        tex->sampler_index || tex->def.bit_size != 32 ||
-       tex->def.num_components != 4 ||
+       tex->def.num_components != (tex->is_sparse ? 5u : 4u) ||
        (tex->dest_type != nir_type_float32 && tex->dest_type != nir_type_int32 &&
         tex->dest_type != nir_type_uint32) ||
        (!lowered_buffer &&
@@ -655,12 +661,20 @@ g17p_indexed_image_fetch_shape(const nir_intrinsic_instr *intr)
     * may have a nonzero or dynamic sample index. */
    const enum glsl_sampler_dim image_dim = nir_intrinsic_image_dim(intr);
    const bool ms = image_dim == GLSL_SAMPLER_DIM_MS;
-   if (intr->intrinsic != nir_intrinsic_bindless_image_load ||
+   /* OpImageSparseRead arrives as bindless_image_sparse_load: the same fetch
+    * with one more destination component for the residency code.  Without
+    * this the pass leaves the software heap-index handle in place and the
+    * packer refuses the shape it cannot encode. */
+   const bool sparse = intr->intrinsic == nir_intrinsic_bindless_image_sparse_load;
+   if ((intr->intrinsic != nir_intrinsic_bindless_image_load && !sparse) ||
+       (sparse && ms) ||
        !(ms || image_dim == GLSL_SAMPLER_DIM_2D ||
          image_dim == GLSL_SAMPLER_DIM_CUBE ||
          (image_dim == GLSL_SAMPLER_DIM_3D &&
           !nir_intrinsic_image_array(intr))) ||
-       intr->def.num_components < 1 || intr->def.num_components > 4 ||
+       intr->def.num_components < 1 ||
+       intr->def.num_components > (sparse ? 5u : 4u) ||
+       (sparse && intr->def.num_components != 5) ||
        intr->def.bit_size != 32 ||
        nir_src_num_components(intr->src[1]) != 4 ||
        nir_src_bit_size(intr->src[1]) != 32 ||
@@ -720,7 +734,9 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
          nir_foreach_instr(instr, block) {
             if (instr->type == nir_instr_type_intrinsic) {
                nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-               if (intr->intrinsic == nir_intrinsic_bindless_image_load) {
+               if (intr->intrinsic == nir_intrinsic_bindless_image_load ||
+                   intr->intrinsic ==
+                      nir_intrinsic_bindless_image_sparse_load) {
                   if (!g17p_indexed_image_fetch_shape(intr))
                      return g17p_decline("image_fetch_shape", NULL, intr,
                                          shader->info.stage);
@@ -786,7 +802,9 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
          nir_foreach_instr_safe(instr, block) {
             if (instr->type == nir_instr_type_intrinsic) {
                nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-               if (intr->intrinsic != nir_intrinsic_bindless_image_load)
+               if (intr->intrinsic != nir_intrinsic_bindless_image_load &&
+                   intr->intrinsic !=
+                      nir_intrinsic_bindless_image_sparse_load)
                   continue;
 
                b.cursor = nir_before_instr(instr);

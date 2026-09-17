@@ -3632,6 +3632,145 @@ test_runtime_gather_witnesses(void)
    return 0;
 }
 
+/*
+ * Sparse texel residency.
+ *
+ * Witness: xcrun metal-nt -arch applegpu_g17p -N k.mtlp-json
+ *          -platform_version macos 27.0 27.0 (MetalToolchain v27.1.5194.15),
+ * probes/g17p-sparse-residency.{metal,mtlp-json}, __TEXT,__text of each
+ * compute object.  Both arms of each pair bind the texture and sampler
+ * through the same argument buffer, so the only source difference is
+ * sparse_sample/sparse_read against sample/read:
+ *
+ *   sample  k_ab_dense  05800cb8b4000900920390010100802000800098
+ *           k_ab_sparse 2dc00c38bc000900920392010200802028c00018
+ *   fetch   k_ab_dread  05800cb8b0001701900280000100002000800098
+ *           k_ab_sread  2dc00c38b0001701900282000200002028c00018
+ *
+ * Decoding both pairs against the generated AGX3b encoder tables leaves
+ * exactly three field differences beyond register allocation and the group
+ * terminator: f112 4 -> 8, f120 0 -> 1 and f142 0 -> 1.
+ *
+ * The goldens below are this encoder's bytes, which reproduce Apple's
+ * through byte 15 and carry f120 at byte 17 bit 6.  They differ from Apple's
+ * in three ep4 places -- the destination copy in f19's upper byte, f91, and
+ * bits 154..159 -- and those three are not specific to sparse: the dense arms
+ * below, and every other ep4 texture operation this encoder emits, differ
+ * from Apple in exactly the same way.  See the KNOWN GAP note at the top of
+ * agx3_tex_core.c.  What this test pins is therefore the sparse delta, which
+ * is byte-identical to Apple's: byte 10 bit 1 (f142), byte 12 (f112 4 -> 8)
+ * and byte 17 bit 6 (f120), and nothing else.
+ */
+static int
+test_sparse_residency(void)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t length;
+
+   /* Apple's own sparse sample, byte for byte through byte 18. */
+   struct agx3_tex_sample_desc sample = {
+      .dest = 10, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 0, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = false, .compute_stage = true,
+      .texture_kind = AGX3_TEX_OPERAND_UNIFORM, .texture_value = 24,
+      .sampler_kind = AGX3_TEX_OPERAND_UNIFORM, .sampler_value = 28,
+      .sparse = true,
+   };
+   CHECK(agx3_tex_encode_sample(enc, &sample, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38bc000900920392010200802000400000"));
+
+   /* The dense sibling differs in exactly the three sparse fields: byte 10
+    * bit 1 (f142), byte 12 (f112 4 -> 8) and byte 17 bit 6 (f120). */
+   struct agx3_tex_sample_desc dense = sample;
+   dense.sparse = false;
+   CHECK(agx3_tex_encode_sample(enc, &dense, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38bc000900920390010100802000000000"));
+
+   /* The texel fetch carries the same three fields. */
+   struct agx3_tex_fetch_desc fetch = {
+      .dest = 10, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = false,
+      .texture_kind = AGX3_TEX_OPERAND_UNIFORM, .texture_value = 24,
+      .sparse = true,
+   };
+   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38b0001701900282000200002000400000"));
+
+   struct agx3_tex_fetch_desc dense_fetch = fetch;
+   dense_fetch.sparse = false;
+   CHECK(agx3_tex_encode_fetch(enc, &dense_fetch, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38b0001701900280000100002000000000"));
+
+   /* A sparse fetch round-trips through the strict decoder, and the decoded
+    * descriptor reports the residency request. */
+   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
+   struct agx3_tex_fetch_desc decoded;
+   CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
+   CHECK(decoded.sparse && decoded.dest == 10 && decoded.mask == 15 &&
+         decoded.texture_kind == AGX3_TEX_OPERAND_UNIFORM &&
+         decoded.texture_value == 24);
+   CHECK(agx3_tex_encode_fetch(enc, &dense_fetch, bytes, &length));
+   CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
+   CHECK(!decoded.sparse);
+
+   /* f120 deposits instruction bit 142, past the 112-bit ep3 form, so a
+    * sparse operation takes the 20-byte ep4 form even when both descriptors
+    * are immediate -- where the dense sibling stays 14 bytes. */
+   struct agx3_tex_sample_desc immediate = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_LEVEL, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .compute_stage = true,
+   };
+   CHECK(agx3_tex_encode_sample(enc, &immediate, bytes, &length));
+   CHECK(length == 14);
+   immediate.sparse = true;
+   CHECK(agx3_tex_encode_sample(enc, &immediate, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "05800cb8b0000900000212000200000000400000"));
+
+   /* Negative: no AGX3c witness exists, and f142 is outside the AGX3c sample
+    * entirely. */
+   struct agx3_tex_sample_desc agx3c = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .sparse = true,
+   };
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &agx3c, bytes,
+                                 &length));
+   struct agx3_tex_fetch_desc agx3c_fetch = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .sparse = true,
+   };
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &agx3c_fetch, bytes,
+                                &length));
+
+   /* Negative: a depth comparison and a LOD query have no sparse witness. */
+   struct agx3_tex_sample_desc bad = sample;
+   bad.shadow = true;
+   bad.mask = 1;
+   CHECK(!agx3_tex_encode_sample(enc, &bad, bytes, &length));
+   bad = sample;
+   bad.query_lod = true;
+   bad.mask = 3;
+   CHECK(!agx3_tex_encode_sample(enc, &bad, bytes, &length));
+
+   /* Negative: no sparse multisample read is witnessed. */
+   struct agx3_tex_fetch_desc bad_ms = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .multisample = true, .sparse = true,
+   };
+   CHECK(!agx3_tex_encode_fetch(enc, &bad_ms, bytes, &length));
+
+   return 0;
+}
+
 int
 main(void)
 {
@@ -3651,7 +3790,7 @@ main(void)
        test_vertex_offset_witnesses() ||
        test_shadow_lod_witnesses() ||
        test_3d_lod_witnesses() || test_image_write_state0_witnesses() ||
-       test_query_lod_witnesses())
+       test_query_lod_witnesses() || test_sparse_residency())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

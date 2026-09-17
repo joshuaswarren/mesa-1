@@ -198,6 +198,97 @@ TEST_F(AGX3PackBinary, SingleSparseMultisampleBlendKeepsPartitionClass)
    }
 }
 
+/*
+ * Sparse texel residency reaches the packer as an eight-channel destination
+ * with a four-bit channel mask: agx_emit_texture reserves the extra register
+ * the instruction writes after the masked channels (agx_validate.c sizes a
+ * sparse texture result at eight channels), and agx_instr::mask is four bits
+ * wide, so the residency component never appears in it.
+ *
+ * Before this was admitted, both the filtered sample and the texel fetch
+ * refused outright, and the G17P refusal printer named exactly this shape:
+ * "texture_load [... chan=8 mask=0xf ...]".
+ */
+TEST_F(AGX3PackBinary, SparseResidencySampleEmitsTheWitnessedFields)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool sparse : {false, true}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index dest = agx_register(16, AGX_SIZE_32);
+      dest.channels_m1 = sparse ? 7 : 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0,
+         false, false, false, AGX_GATHER_NONE, sparse);
+      I->mask = 15;
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_FALSE(code.empty());
+
+      /* A sparse sample is the 20-byte ep4 form even with immediate
+       * descriptors, because f120 deposits instruction bit 142, past the
+       * 112-bit ep3 form. */
+      struct agx3_tex_sample_desc d = {};
+      d.dest = 16;
+      d.coord = 0;
+      d.width = AGX3_TEX_W32;
+      d.mask = 15;
+      d.lod = AGX3_TEX_LOD_LEVEL;
+      d.slot = 1;
+      d.wait_mask = 1;
+      d.compute_stage = true;
+      d.final = true;
+      d.sparse = sparse;
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      EXPECT_EQ(len, sparse ? 20u : 14u);
+      EXPECT_NE(std::search(code.begin(), code.end(), bytes, bytes + len),
+                code.end());
+   }
+}
+
+TEST_F(AGX3PackBinary, SparseResidencyFetchEmitsTheWitnessedFields)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool sparse : {false, true}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index dest = agx_register(16, AGX_SIZE_32);
+      dest.channels_m1 = sparse ? 7 : 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+         false, false, false, AGX_GATHER_NONE, sparse);
+      I->op = AGX_OPCODE_TEXTURE_LOAD;
+      I->mask = 15;
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_FALSE(code.empty());
+
+      /* The emitted fetch decodes back through the strict decoder, and the
+       * residency request survives the round trip.  A sparse fetch is the
+       * 20-byte ep4 form even with an immediate descriptor, because f120
+       * deposits instruction bit 142, past the 112-bit ep3 form. */
+      const unsigned want = sparse ? 20u : 14u;
+      bool found = false;
+      for (size_t at = 0; at + want <= code.size() && !found; ++at) {
+         struct agx3_tex_fetch_desc decoded;
+         if (!agx3_tex_decode_fetch(enc, code.data() + at, want, &decoded))
+            continue;
+         if (decoded.dest != 16 || decoded.mask != 15)
+            continue;
+         EXPECT_EQ(decoded.sparse, sparse);
+         found = true;
+      }
+      EXPECT_TRUE(found);
+   }
+}
+
 TEST_F(AGX3PackBinary, MinimumLodStagesBiasLowAndMinimumHigh)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

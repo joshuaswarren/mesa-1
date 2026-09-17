@@ -18,6 +18,28 @@ one_or_zero(uint16_t value)
    return (value & (value - 1)) == 0;
 }
 
+/*
+ * KNOWN GAP, not specific to sparse: the 20-byte ep4 form carries three
+ * things this encoder leaves zero, and every ep4 texture operation it emits
+ * -- dense and sparse alike -- differs from Apple's own bytes in exactly
+ * those places.  Matched `xcrun metal-nt -arch applegpu_g17p` compute kernels
+ * (test/probes/g17p-sparse-residency.metal) show:
+ *
+ *   f19 upper byte  a copy of the destination half-register; dest 0 encodes
+ *                   f19 = 0, dest 2 encodes 512, dest 10 encodes 2560, and
+ *                   destination half 2 over coordinate bank 4 encodes 516
+ *   f91             set for a 32-bit result, clear for a 16-bit one
+ *                   (05800cb8b4...00800098 W32 against
+ *                    05000cb8b4...00000098 W16, otherwise identical)
+ *   bits 154..159   Apple sets 155/156/159; the generated AGX3b tables
+ *                   deposit nothing into those bits, so no field value can
+ *                   produce them at all
+ *
+ * Adding the first two would change every existing ep4 golden in the tree on
+ * an inference no host test can settle, so they are recorded here rather than
+ * encoded.  Whether the hardware reads any of them is unknown.
+ */
+
 static bool
 fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
 {
@@ -77,6 +99,12 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->multisample && (d->lod_x64 || d->register_lod)))
       return false;
 
+   /* Sparse residency is witnessed on AGX3b only, and only for the ordinary
+    * (non-multisample) read.  metal-nt emits no sparse multisample form, and
+    * f142 is beyond the 8-byte AGX3c encoding entirely. */
+   if (d->sparse && (enc != AGX_ISA_ENCODING_AGX3B || d->multisample))
+      return false;
+
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
    const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0x7f : 0x3f;
    return d->slot >= 1 && d->slot <= slots &&
@@ -112,7 +140,7 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
 
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] = (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   base[nb++] = (struct agx3_field_kv)KV(112, 4);
+   base[nb++] = (struct agx3_field_kv)KV(112, d->sparse ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
@@ -124,7 +152,7 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
       base[nb++] = (struct agx3_field_kv)KV(61, 164);
    }
 
-   struct agx3_field_kv ov[24];
+   struct agx3_field_kv ov[28];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
@@ -170,6 +198,10 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
       ov[n++] = (struct agx3_field_kv)KV(150, d->final ? 2 : 0);
       ov[n++] = (struct agx3_field_kv)KV(155, 1);
    }
+   if (d->sparse) {
+      ov[n++] = (struct agx3_field_kv)KV(120, 1);
+      ov[n++] = (struct agx3_field_kv)KV(142, 1);
+   }
    for (unsigned i = 0; i < 8; ++i)
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(62 + i, 1);
@@ -177,12 +209,15 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
    /*
     * Immediate operands are ep3; register and uniform operands are ep4. Only
     * AGX3b is witnessed for the non-immediate kinds, so AGX3c refuses them
-    * rather than assuming its encoding points line up.
+    * rather than assuming its encoding points line up.  f120 deposits
+    * instruction bit 142, past the 112-bit ep3 form, so a sparse read is
+    * always ep4.
     */
-   if (!immediate_operands && enc != AGX_ISA_ENCODING_AGX3B)
+   if ((!immediate_operands || d->sparse) && enc != AGX_ISA_ENCODING_AGX3B)
       return false;
-   const int ep =
-      enc == AGX_ISA_ENCODING_AGX3B ? (immediate_operands ? 3 : 4) : 0;
+   const int ep = enc == AGX_ISA_ENCODING_AGX3B
+                     ? (immediate_operands && !d->sparse ? 3 : 4)
+                     : 0;
    if (!agx3_bind_compose(enc, "smp", ep, base, nb, ov, n, out, len)) {
       memset(out, 0, AGX3_TEX_MAX_LENGTH);
       *len = 0;
@@ -220,6 +255,14 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    if (d->sample_abi > AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT ||
        (d->sample_abi == AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT &&
         enc != AGX_ISA_ENCODING_AGX3B))
+      return false;
+
+   /* Sparse residency is witnessed on AGX3b for the implicit, immediate
+    * level, immediate bias, 2D-array, 3D, cube and gather shapes.  A depth
+    * comparison, a LOD query and every AGX3c form have no witness, and f142
+    * lies past the 14-byte AGX3c sample entirely. */
+   if (d->sparse && (enc != AGX_ISA_ENCODING_AGX3B || d->shadow ||
+                     d->query_lod))
       return false;
 
    /* The native clamp corpus covers fragment 2D, 2D-array and 3D samples,
@@ -594,8 +637,11 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
     */
    if (operand_profile & 1)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
+   /* The sparse residency request raises this operand-profile field by four:
+    * 4 -> 8 on the driver profile, 8 -> 12 on Apple's fragment profile.  Both
+    * steps are witnessed; see agx3_tex_fetch_desc::sparse. */
    base[nb++] = (struct agx3_field_kv)KV(
-      112, (operand_profile & 2) ? 8 : 4);
+      112, ((operand_profile & 2) ? 8 : 4) + (d->sparse ? 4 : 0));
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
@@ -608,7 +654,7 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       base[nb++] = (struct agx3_field_kv)KV(61, 164);
    }
 
-   struct agx3_field_kv ov[34];
+   struct agx3_field_kv ov[40];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(10, d->width);
@@ -725,11 +771,18 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       ov[n++] = (struct agx3_field_kv)KV(147, d->final ? 2 : 0);
    else
       ov[n++] = (struct agx3_field_kv)KV(150, d->final ? 2 : 0);
+   if (d->sparse) {
+      ov[n++] = (struct agx3_field_kv)KV(120, 1);
+      ov[n++] = (struct agx3_field_kv)KV(142, 1);
+   }
    for (unsigned i = 0; i < 8; ++i)
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(62 + i, 1);
 
-   if (!agx3_bind_compose(enc, "smp", immediate ? 3 : 4, base, nb, ov, n, out, len)) {
+   /* f120 deposits instruction bit 142, past the 112-bit ep3 form, so a
+    * sparse sample takes ep4 even when both descriptors are immediate. */
+   const int ep = (immediate && !d->sparse) ? 3 : 4;
+   if (!agx3_bind_compose(enc, "smp", ep, base, nb, ov, n, out, len)) {
       memset(out, 0, AGX3_TEX_MAX_LENGTH);
       *len = 0;
       return false;
@@ -1037,20 +1090,39 @@ agx3_tex_decode_fetch(enum agx_isa_encoding enc, const void *instruction,
       d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
       /* Repack both native index kinds. Their context selector, upper bits,
        * and every reserved field are validated by exact byte comparison. */
-      for (unsigned kind = AGX3_TEX_OPERAND_REGISTER;
+      for (unsigned kind = AGX3_TEX_OPERAND_IMMEDIATE;
            kind <= AGX3_TEX_OPERAND_UNIFORM; ++kind) {
          d.texture_kind = kind;
          d.texture_kill = kind == AGX3_TEX_OPERAND_REGISTER && (p[15] & 8);
          for (unsigned array = 0; array < 2; ++array) {
             for (unsigned three_d = 0; three_d < 2; ++three_d) {
-               d.array = array;
-               d.three_d = three_d;
-               uint8_t canonical[AGX3_TEX_MAX_LENGTH], length;
-               if (agx3_tex_encode_fetch(enc, &d, canonical, &length) &&
-                   length == instruction_size &&
-                   !memcmp(canonical, instruction, length)) {
-                  *out = d;
-                  return true;
+               /* Sparse is the other ep4 axis: it forces the 20-byte form
+                * even for an immediate descriptor, so both readings of an
+                * immediate ep4 read have to be tried. */
+               for (unsigned sparse = 0; sparse < 2; ++sparse) {
+                  d.array = array;
+                  d.three_d = three_d;
+                  d.sparse = sparse;
+                  if (kind == AGX3_TEX_OPERAND_IMMEDIATE) {
+                     if (!sparse)
+                        continue;
+                     d.texture = (((word(p, 0) >> 12) & 7) << 1) |
+                                 (((word(p, 4) >> 4) & 7) << 4) |
+                                 (((p[15] >> 2) & 1) << 7);
+                     d.texture_value = 0;
+                  } else {
+                     d.texture = 0;
+                     d.texture_value = (((word(p, 0) >> 12) & 7) << 1) |
+                                       (((word(p, 4) >> 4) & 7) << 4) |
+                                       (((p[15] >> 2) & 1) << 7);
+                  }
+                  uint8_t canonical[AGX3_TEX_MAX_LENGTH], length;
+                  if (agx3_tex_encode_fetch(enc, &d, canonical, &length) &&
+                      length == instruction_size &&
+                      !memcmp(canonical, instruction, length)) {
+                     *out = d;
+                     return true;
+                  }
                }
             }
          }

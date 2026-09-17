@@ -1268,11 +1268,16 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * dependency shape. */
    const uint8_t staging_slot = ms_array || combined_array_lod
       ? 1 : register_lod ? 2 : slot;
+   /* A sparse read writes one extra register after its masked channels, so
+    * agx_emit_texture reserves an eight-channel destination for it (see
+    * agx_validate.c's sparse size rule). The encoded result mask stays the
+    * four-bit channel mask; the residency component is implicit. */
    if (I->nr_dests != 1 || I->nr_srcs != 6 ||
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
         I->dest[0].size != AGX_SIZE_32) ||
-       agx_channels(I->dest[0]) != 4 || I->dest[0].value >= 128 ||
+       agx_channels(I->dest[0]) != (I->sparse ? 8u : 4u) ||
+       I->dest[0].value >= 128 ||
        (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1)) ||
        !agx3_tex_plain_reg(I->src[0]) ||
        I->src[0].size != AGX_SIZE_32 ||
@@ -1305,10 +1310,16 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        (I->dim != AGX_DIM_2D && I->dim != AGX_DIM_2D_ARRAY && !ms_2d &&
         !ms_array && !three_d) ||
        (three_d && enc != AGX_ISA_ENCODING_AGX3B) ||
-       (enc == AGX_ISA_ENCODING_AGX3B ? (!I->mask || (I->mask & ~15u))
+       /* agx_instr::mask is four bits wide, so the residency component of a
+        * sparse result never appears in it; the hardware writes that
+        * component implicitly, after the masked channels. */
+       (enc == AGX_ISA_ENCODING_AGX3B ? (I->mask == 0 || (I->mask & ~15u))
                                     : (I->mask != 1 && I->mask != 15)) ||
        I->offset || I->shadow ||
-       I->query_lod || I->gather != AGX_GATHER_NONE || I->sparse)
+       I->query_lod || I->gather != AGX_GATHER_NONE ||
+       /* Only AGX3b witnesses the sparse read, and the multisample form has
+        * no witness at all. */
+       (I->sparse && (enc != AGX_ISA_ENCODING_AGX3B || ms_2d || ms_array)))
       return false;
 
    /* A read/write image stages its read coordinates at halves16/18, keeping
@@ -1490,6 +1501,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       .coord = stage_coordinates ? staging_coord : I->src[0].value,
       .width = I->dest[0].size == AGX_SIZE_32 ? AGX3_TEX_W32 : AGX3_TEX_W16,
       .mask = I->mask,
+      .sparse = I->sparse,
       .texture = immediate ? I->src[3].value : 0,
       .texture_kind = immediate ? AGX3_TEX_OPERAND_IMMEDIATE :
          I->src[3].type == AGX_INDEX_UNIFORM ? AGX3_TEX_OPERAND_UNIFORM :
@@ -1958,7 +1970,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        !agx3_tex_plain_reg(I->dest[0]) ||
        (I->dest[0].size != AGX_SIZE_16 &&
         I->dest[0].size != AGX_SIZE_32) ||
-       agx_channels(I->dest[0]) != 4 || I->dest[0].value >= 128 ||
+       /* Sparse residency widens only the destination reservation: the extra
+        * register the instruction writes after its masked channels. */
+       agx_channels(I->dest[0]) != (I->sparse ? 8u : 4u) ||
+       I->dest[0].value >= 128 ||
        (I->dest[0].size == AGX_SIZE_32 && (I->dest[0].value & 1)) ||
        !agx3_tex_plain_reg(I->src[0]) ||
        I->src[0].size != AGX_SIZE_32 ||
@@ -2007,7 +2022,10 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          (!implicit_lod && !explicit_lod && !biased_lod &&
           !register_bias && !bias_min))) ||
        (I->mask == 0 || (I->mask & ~15u)) ||
-       I->sparse ||
+       /* metal-nt witnesses the sparse sample on AGX3b for the implicit,
+        * immediate level, immediate bias, array, 3D, cube and gather shapes.
+        * A depth comparison and a LOD query have no witness. */
+       (I->sparse && (enc != AGX_ISA_ENCODING_AGX3B || shadow || query_lod)) ||
        /* A minimum LOD and a runtime offset share bank 6 only through the
         * packed word. */
        (min_lod && ((cube && !bias_min) || vertex_stage ||
@@ -2448,6 +2466,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       .coord = coord,
       .width = I->dest[0].size == AGX_SIZE_32 ? AGX3_TEX_W32 : AGX3_TEX_W16,
       .mask = I->mask,
+      .sparse = I->sparse,
       .texture = texture_immediate ? I->src[3].value : 0,
       .sampler = sampler_immediate ? I->src[4].value : 0,
       .texture_kind = texture_immediate ? AGX3_TEX_OPERAND_IMMEDIATE :
