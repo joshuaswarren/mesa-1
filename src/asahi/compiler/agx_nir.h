@@ -29,6 +29,12 @@ bool agx_nir_lower_layer(struct nir_shader *s);
 bool agx_nir_lower_clip_distance(struct nir_shader *s);
 bool agx_nir_lower_subgroups(struct nir_shader *s);
 bool agx_nir_lower_subgroups_g17p(struct nir_shader *s);
+
+/* AGX3 ldtg/sttg index threadgroup memory in scalar elements, scaled by the
+ * access width; NIR shared offsets are bytes.  Idempotent, so a frontend may
+ * run it as early as the optimizer can use it and agx_compile_shader_nir()
+ * still guarantees it for any AGX3 target. */
+bool agx_nir_lower_shared_element_index(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 
 bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);

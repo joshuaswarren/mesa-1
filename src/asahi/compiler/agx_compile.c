@@ -8441,6 +8441,19 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
     * their byte-addressed encoding.
     */
    NIR_PASS(_, nir, agx_nir_lower_shared_bitsize, g17p);
+
+   /* A frontend that reaches this helper with `g17p` set owns the element-index
+    * conversion for the whole shader, including shared accesses that do not
+    * exist yet: hk_shader.c lowers `shared` variables to load_shared and
+    * store_shared at :1810, which is *between* its two calls here (:252 and
+    * :1892), so the first call legitimately finds nothing and the second does
+    * the work.  Record the ownership rather than the work -- a flag set by the
+    * pass itself would let that empty first call pass for a finished job and
+    * suppress both the real conversion and the backstop below, which is
+    * exactly how the Vulkan front end lost its conversion once already.
+    */
+   if (g17p)
+      nir->info.shared_element_index_agx = true;
 }
 
 void
@@ -8700,6 +8713,29 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    const bool is_agx3 = key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
                        key->dev.encoding == AGX_ISA_ENCODING_AGX3C;
    const bool is_g17p = key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
+
+   /* AGX3's ldtg/sttg index counts scalar elements and the instruction's own
+    * shift field scales it by the access width, so a NIR byte offset has to be
+    * divided by that width.  A frontend that knows its target does this during
+    * preprocessing, where the optimizer can fold the division into the address
+    * arithmetic and claims it with the shader_info bit above, so this backstop
+    * only fires for a frontend that reaches an AGX3 target without having
+    * claimed it -- which is how every internal libagx kernel used to reach
+    * G17P with a byte offset in the element-index field, a fourfold
+    * over-stride for a 32-bit element.
+    *
+    * AGX3C shares the convention (agx_emit_local_load/store put the address in
+    * the index for every AGX3 encoding) but is deliberately left out: applying
+    * it there turns test-agx3-compile-fail-closed.c's shared read-modify-write
+    * into a refusal, because the resulting 16-bit index reaches the AGX3C
+    * zero-extend path -- `bitop [d32:reg0 s0=16:reg0 s1=16:imm#0]`,
+    * agx3_pack_binary.c:11641, the copy16 + clr pair -- which has no AGX3C
+    * form.  That gap is unrelated to threadgroup memory and no frontend in
+    * this tree compiles a shared-memory shader for AGX3C, so it is a separate
+    * fix; until then AGX3C keeps the over-stride it already had. */
+   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       !nir->info.shared_element_index_agx)
+      NIR_PASS(_, nir, agx_nir_lower_shared_element_index);
 
    /* AGX2 has native 64-bit add and 32x32->64 multiply forms, so the shared
     * compiler options preserve them.  G17P has no grounded 64-bit add, so
