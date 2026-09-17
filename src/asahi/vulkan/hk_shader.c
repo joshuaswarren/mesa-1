@@ -414,7 +414,9 @@ hk_hash_graphics_state(struct vk_physical_device *device,
    }
 
    if (state &&
-       (stages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT))) {
+       (stages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                  VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+                  VK_SHADER_STAGE_GEOMETRY_BIT))) {
       const bool is_multiview = state->mv->view_mask != 0;
       _mesa_blake3_update(&blake3_ctx, &is_multiview, sizeof(is_multiview));
    }
@@ -1117,6 +1119,9 @@ glsl_type_size(const struct glsl_type *type, bool bindless)
  *
  * The "proper" implementation on AGX would use vertex amplification, but a
  * MacBook is not a VR headset.
+ *
+ * This must run on the last pre-rasterization stage, since that is the stage
+ * whose layer output the rasterizer consumes: see hk_lower_multiview_stage().
  */
 static void
 hk_lower_multiview(nir_shader *nir)
@@ -1133,9 +1138,21 @@ hk_lower_multiview(nir_shader *nir)
       nir_fixup_deref_modes(nir);
    }
 
-   /* Now write the view index as the layer */
-   nir_builder b =
-      nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+   /* Now write the view index as the layer.
+    *
+    * A geometry shader's EmitVertex snapshots the output variables, so the
+    * store has to precede them; the view index is a per-draw root constant,
+    * so hoisting it to the top of main is correct. Every other stage writes
+    * its outputs once, and on G17P the store must stay with them: a store
+    * separated from the terminal writeout bundle leaves
+    * agx3_g17p_vertex_output_count() with a partial bundle, and the packer
+    * then refuses the stranded UVS slot (agx3_pack_binary.c, "User-output
+    * graphs outside the qualified scalar shapes").
+    */
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir->info.stage == MESA_SHADER_GEOMETRY
+                                     ? nir_before_impl(impl)
+                                     : nir_after_impl(impl));
 
    nir_variable *layer =
       nir_variable_create(nir, nir_var_shader_out, glsl_uint_type(), NULL);
@@ -1628,10 +1645,40 @@ hk_lower_native_sample_barycentric(nir_builder *b, nir_intrinsic_instr *intr,
    return true;
 }
 
+/*
+ * ViewIndex reaches the rasterizer as the layer ID, so the ViewIndex -> Layer
+ * store belongs in the last pre-rasterization stage and nowhere else: a store
+ * in an earlier stage feeds the next shader stage instead of the rasterizer
+ * and is dropped. next_stage_mask is the exact next stage in the pipeline
+ * (vk_pipeline.c fills it from the sorted stage array, or FRAGMENT for the
+ * last geometry stage), so it identifies that stage without a separate
+ * stage-set query.
+ */
+static bool
+hk_lower_multiview_stage(mesa_shader_stage stage,
+                         VkShaderStageFlags next_stage_mask)
+{
+   const VkShaderStageFlags later_geom =
+      VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+      VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+      VK_SHADER_STAGE_GEOMETRY_BIT;
+
+   switch (stage) {
+   case MESA_SHADER_VERTEX:
+      return !(next_stage_mask & later_geom);
+   case MESA_SHADER_TESS_EVAL:
+      return !(next_stage_mask & VK_SHADER_STAGE_GEOMETRY_BIT);
+   case MESA_SHADER_GEOMETRY:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
-             uint32_t set_layout_count,
+             VkShaderStageFlags next_stage_mask, uint32_t set_layout_count,
              struct vk_descriptor_set_layout *const *set_layouts,
              enum hk_feature_key features)
 {
@@ -1655,11 +1702,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_lower_wpos_center);
    }
 
-   /* XXX: should be last geometry stage, how do I get to that? */
-   if (nir->info.stage == MESA_SHADER_VERTEX) {
-      if (is_multiview)
-         hk_lower_multiview(nir);
-   }
+   if (is_multiview &&
+       hk_lower_multiview_stage(nir->info.stage, next_stage_mask))
+      hk_lower_multiview(nir);
 
    if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
       NIR_PASS(_, nir, nir_lower_patch_vertices,
@@ -2870,8 +2915,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    nir_shader *nir = info->nir;
 
    if (!nir->info.io_lowered) {
-      hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
-                   info->set_layouts, features);
+      hk_lower_nir(dev, nir, info->robustness, false, info->next_stage_mask,
+                   info->set_layout_count, info->set_layouts, features);
    }
 
    union hk_key key_tmp, *key = NULL;
@@ -3303,7 +3348,8 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       nir_shader *nir = info->nir;
 
       hk_lower_nir(dev, nir, info->robustness, is_multiview,
-                   info->set_layout_count, info->set_layouts, hk_features);
+                   info->next_stage_mask, info->set_layout_count,
+                   info->set_layouts, hk_features);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
          enum hk_nir_widen_16bit_varyings_mode mode = 0;

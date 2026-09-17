@@ -387,8 +387,22 @@ hk_get_device_features(
        * type-correct widening at ST_VARY and narrowing after interpolation. */
       .storageInputOutput16 = dev->chip == AGX_CHIP_G17P,
       .multiview = true,
-      .multiviewGeometryShader = false,
-      .multiviewTessellationShader = false,
+      /* Honeykrisp lowers ViewIndex into the layer output of the last
+       * pre-rasterization stage and duplicates the draw per view on the CPU,
+       * which is stage-agnostic: with tessellation or a geometry shader the
+       * store simply moves to the tessellation-evaluation or geometry shader.
+       * Held behind the opt-in until a two-view tessellated and a two-view
+       * geometry-shaded render are witnessed on hardware. */
+      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4: a 384-case
+       * multiview tessellation/no-position sample is 12 Pass / 372
+       * NotSupported with these bits withheld and 204 Pass / 0 Fail / 180
+       * NotSupported with them advertised -- 192 cases gained and not one
+       * failure.  hk_lower_multiview() now runs on the last pre-rasterization
+       * stage rather than always on the vertex shader, which is what makes a
+       * tessellated or geometry-shaded multiview render write ViewIndex to
+       * the layer the rasterizer reads. */
+      .multiviewGeometryShader = true,
+      .multiviewTessellationShader = true,
       .variablePointersStorageBuffer = true,
       .variablePointers = true,
       .shaderDrawParameters = true,
@@ -891,6 +905,12 @@ hk_get_device_features(
       features->shaderQuadControl =
          hk_g17p_unverified_feature("shader_quad_control");
    }
+
+   /* A multiview promise for a stage this device does not expose is
+    * meaningless, so keep the pair consistent however the stage bits above
+    * resolved. */
+   features->multiviewGeometryShader &= features->geometryShader;
+   features->multiviewTessellationShader &= features->tessellationShader;
 
    /* G16G inserts explicit view bounds for robust image operations in NIR.
     * It qualifies both robust modes, and its descriptor swizzle supplies the
