@@ -113,6 +113,19 @@ bool hk_g17p_image_copy_element_plan(
    VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
    struct hk_g17p_image_copy_element_plan *plan);
 
+/* A raw copy moves storage, so its element is the physical one.  Three-
+ * component images are stored four-component on the native path, so the API
+ * block size (3, 6 or 12 bytes) is smaller than the element the tiled
+ * addressing indexes; using it copies only three quarters of the surface.
+ * Compressed pairs and every non-padded format already agree.  Fails when the
+ * two endpoints disagree or either is narrower than the API block, so a new
+ * format cannot silently reintroduce the mismatch.
+ */
+bool hk_g17p_image_copy_storage_block(uint32_t api_block_B,
+                                      uint32_t src_storage_B,
+                                      uint32_t dst_storage_B,
+                                      uint32_t *storage_B);
+
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and
  * VK_IMAGE_LAYOUT_SHARED_PRESENT_KHR.  Honeykrisp never acts on a layout, so

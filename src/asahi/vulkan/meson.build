@@ -2694,6 +2694,15 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    executable(
+      'g17p-vulkan-copy-rgb24',
+      files('tests/g17p_vulkan_copy_rgb24.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
   executable(
       'g17p-vulkan-image-copy-subregion',
       files('tests/g17p_vulkan_image_copy_subregion.c'),

@@ -3247,14 +3247,19 @@ hk_g17p_raw_image_copy_supported(struct hk_device *dev,
             aspect_format(dst->vk.format, aspects.dst[a]);
          struct hk_g17p_image_copy_element_plan plan;
          if (!hk_g17p_image_copy_element_plan(
-                src_format, dst_format, region, &plan) ||
-             (uint64_t)plan.block_size_B * src->vk.samples > 16)
+                src_format, dst_format, region, &plan))
             return false;
 
          const struct ail_layout *src_layout =
             &src->planes[src_plane].layout;
          const struct ail_layout *dst_layout =
             &dst->planes[dst_plane].layout;
+         uint32_t storage_B;
+         if (!hk_g17p_image_copy_storage_block(
+                plan.block_size_B, ail_get_blocksize_B(src_layout),
+                ail_get_blocksize_B(dst_layout), &storage_B) ||
+             (uint64_t)storage_B * src->vk.samples > 16)
+            return false;
          if ((src_layout->tiling != AIL_TILING_GPU &&
               src_layout->tiling != AIL_TILING_LINEAR) ||
              (dst_layout->tiling != AIL_TILING_GPU &&
@@ -3336,13 +3341,20 @@ hk_g17p_copy_raw_image(struct hk_cmd_buffer *cmd, struct hk_image *src,
          const bool planned = hk_g17p_image_copy_element_plan(
             src_format, dst_format, region, &plan);
          assert(planned);
-         const uint32_t raw_block_size_B =
-            plan.block_size_B * src->vk.samples;
 
          const struct ail_layout *src_layout =
             &src->planes[src_plane].layout;
          const struct ail_layout *dst_layout =
             &dst->planes[dst_plane].layout;
+         /* A raw copy moves storage, not API texels: a three-component image
+          * is stored four-component, so the element the tiled addressing
+          * indexes is wider than the packed Vulkan block. */
+         uint32_t storage_B;
+         const bool sized = hk_g17p_image_copy_storage_block(
+            plan.block_size_B, ail_get_blocksize_B(src_layout),
+            ail_get_blocksize_B(dst_layout), &storage_B);
+         assert(sized);
+         const uint32_t raw_block_size_B = storage_B * src->vk.samples;
          const struct ail_tile src_tile = src_layout->tilesize_el[src_level];
          const struct ail_tile dst_tile = dst_layout->tilesize_el[dst_level];
          const bool src_tiled = src_layout->tiling == AIL_TILING_GPU;

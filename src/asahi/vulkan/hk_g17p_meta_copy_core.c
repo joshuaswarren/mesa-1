@@ -157,6 +157,20 @@ hk_g17p_image_copy_element_plan(
 }
 
 bool
+hk_g17p_image_copy_storage_block(uint32_t api_block_B, uint32_t src_storage_B,
+                                 uint32_t dst_storage_B, uint32_t *storage_B)
+{
+   if (storage_B)
+      *storage_B = 0;
+   if (!storage_B || !api_block_B || src_storage_B != dst_storage_B ||
+       src_storage_B < api_block_B)
+      return false;
+
+   *storage_B = src_storage_B;
+   return true;
+}
+
+bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
 {
    return layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
