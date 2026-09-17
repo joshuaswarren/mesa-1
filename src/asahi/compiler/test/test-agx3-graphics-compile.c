@@ -8077,9 +8077,11 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_sample_zs_writes = 2, .nr_samples = 2},
    {"fs-depth-stencil-write-4x", build_fs_depth_stencil, true,
     .g17p_only = true, .expected_g17p_sample_zs_writes = 1, .nr_samples = 4},
-   /* Such a write to samples known only at run time has no witnessed word. */
-   {"fs-depth-dynamic-samples-4x", build_fs_depth_dynamic_samples, false,
-    .g17p_only = true, .nr_samples = 4},
+   /* A write to samples known only at run time takes the same per-sample
+    * words, with the run-time predicate ANDed into each coverage nibble. */
+   {"fs-depth-dynamic-samples-4x", build_fs_depth_dynamic_samples, true,
+    .g17p_only = true, .expected_g17p_sample_mask_input = true,
+    .expected_g17p_sample_zs_writes = 4, .nr_samples = 4},
 };
 
 static bool
@@ -8223,9 +8225,11 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
 
       if (result && enc == AGX_ISA_ENCODING_AGX3B && c->nr_samples > 1 &&
           c->expected_g17p_sample_zs_writes) {
+         const bool depth_only = c->build == build_fs_depth ||
+                                 c->build == build_fs_depth_dynamic_samples;
          result = g17p_sample_zs_protocol(
             &part, c->expected_g17p_sample_zs_writes,
-            c->build != build_fs_stencil, c->build != build_fs_depth);
+            c->build != build_fs_stencil, !depth_only);
          if (!result)
             fprintf(stderr, "%s %s: per-sample depth/stencil protocol "
                             "mismatch\n",

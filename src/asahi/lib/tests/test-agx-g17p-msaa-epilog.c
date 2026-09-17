@@ -504,6 +504,101 @@ check_alpha_one_after_preprocess(unsigned samples)
    return ok;
 }
 
+/* form 38 depthf, size 6, as the early-demote epilog test spells it. */
+static bool
+is_depthf(const uint8_t *b, size_t left)
+{
+   return left >= 6 && b[0] == 0xd7 && (b[1] & 0x0f) == 0x04 && b[2] == 0x54;
+}
+
+/*
+ * A late gl_SampleMask shader that also writes gl_FragDepth arrives at the
+ * epilog with its surviving samples in a register. The depth/stencil write is
+ * the one test-triggering update, so at several samples it must carry that
+ * register itself and reach the hardware as one write per sample. A separate
+ * coverage update ahead of it runs the depth/stencil test on every surviving
+ * sample a second time, and a single write naming several samples at once
+ * only ever lands sample zero's depth: both spellings failed
+ * renderpasses.*.multisample.<depth format>.samples_{2,4}. At one sample the
+ * write's word has no mask field, so there the kill is kept, ahead of it.
+ */
+static bool
+check_late_mask_depth(unsigned samples)
+{
+   nir_builder main = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "late native mask and depth");
+   nir_demote_samples(&main, nir_imm_intN_t(&main, 1, 16));
+   nir_store_zs_agx(&main, nir_imm_intN_t(&main, 0xff, 16),
+                    nir_imm_float(&main, 0.5f), nir_undef(&main, 1, 16),
+                    .base = 1);
+   main.shader->info.fs.uses_discard = true;
+   main.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK) |
+                                       BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+
+   struct agx_fs_epilog_link_info link = {0};
+   agx_nir_lower_fs_output_to_epilog_for_device(main.shader, AGX_CHIP_G17P,
+                                                &link);
+   bool ok = link.sample_mask_after_force_early && link.write_z;
+   ralloc_free(main.shader);
+
+   struct agx_fs_epilog_key key = {
+      .link = link,
+      .nr_samples = samples,
+   };
+   agx_fs_epilog_apply_device_policy(AGX_CHIP_G17P, &key);
+   memset(key.remap, -1, sizeof(key.remap));
+
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "late mask depth epilog");
+   agx_nir_fs_epilog(&b, &key);
+
+   /* Whatever the sample count, no coverage update may follow the write that
+    * triggered the tests. */
+   bool seen_write = false;
+   unsigned masks = 0;
+   nir_foreach_block(block, b.impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic == nir_intrinsic_store_zs_agx)
+            seen_write = true;
+         else if (intr->intrinsic == nir_intrinsic_sample_mask_agx ||
+                  intr->intrinsic == nir_intrinsic_demote_samples) {
+            masks++;
+            ok &= !seen_write;
+         }
+      }
+   }
+   ok &= seen_write && masks == (samples > 1 ? 0 : 1);
+
+   NIR_PASS(_, b.shader, agx_nir_lower_g17p_tile_samples, samples);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key backend = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = samples,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &backend, &part);
+
+   unsigned writes = 0;
+   const uint8_t *bytes = part.binary;
+   for (unsigned i = 0; bytes && i + 6 <= part.info.binary_size; ++i)
+      writes += is_depthf(bytes + i, part.info.binary_size - i);
+
+   /* One word per sample, each naming its own sample alone. */
+   ok &= writes == samples;
+   if (!ok)
+      fprintf(stderr, "%ux late mask depth epilog: %u masks, %u depth writes\n",
+              samples, masks, writes);
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -523,6 +618,8 @@ main(int argc, char **argv)
    ok &= check_alpha_one_after_preprocess(4);
    ok &= check_late_mask_split(false);
    ok &= check_late_mask_split(true);
+   for (unsigned samples = 1; samples <= 4; samples *= 2)
+      ok &= check_late_mask_depth(samples);
    for (unsigned samples = 1; samples <= 4; samples *= 2)
       ok &= check_samples(samples);
    for (unsigned samples = 2; samples <= 4; samples *= 2)

@@ -1080,6 +1080,37 @@ agx_emit_zs_word_agx3(agx_builder *b, nir_intrinsic_instr *instr,
    return I;
 }
 
+/*
+ * Bits a run-time depth/stencil sample mask can still set. Per-sample lowering
+ * hands the backend expressions like `exported_mask & (1 << id)`, whose value
+ * is unknown but whose reach is not: an AND can only clear bits. Anything else
+ * may set every sample.
+ */
+static unsigned
+agx_possible_zs_samples(nir_def *def)
+{
+   if (def->num_components != 1)
+      return UINT_MAX;
+
+   nir_instr *instr = nir_def_instr(def);
+   if (instr->type == nir_instr_type_load_const)
+      return nir_src_as_uint(nir_src_for_ssa(def));
+
+   if (instr->type == nir_instr_type_alu) {
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      if (nir_op_infos[alu->op].num_inputs == 1 &&
+          (alu->op == nir_op_mov || alu->op == nir_op_u2u16 ||
+           alu->op == nir_op_u2u32))
+         return agx_possible_zs_samples(alu->src[0].src.ssa);
+
+      if (alu->op == nir_op_iand)
+         return agx_possible_zs_samples(alu->src[0].src.ssa) &
+                agx_possible_zs_samples(alu->src[1].src.ssa);
+   }
+
+   return UINT_MAX;
+}
+
 static agx_instr *
 agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
 {
@@ -1113,28 +1144,43 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
       (mask == 0xff || util_bitcount(mask & BITFIELD_MASK(samples)) == 1);
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        samples > 1 && dynamic_mask) {
-      /* A split late shader keeps its discard predicate in a register. The
-       * native late-mask/depth sequence intersects that predicate with SR39's
-      * current coverage, preserves the API nibble above it, and issues one
-      * DEPTHF for the resulting word. */
-      agx_index sr39 = agx_temp(b->shader, AGX_SIZE_16);
-      agx_get_sr_coverage_to(b, sr39, AGX_SR_INPUT_SAMPLE_MASK);
-      agx_index upper = agx_ushr(b, sr39, agx_immediate(4));
+      /* A split late shader keeps its discard predicate in a register. Fold
+       * that predicate into the same per-sample words a compile-time mask
+       * produces below: one DEPTHF per sample, each naming that sample alone
+       * in the coverage nibble. Collapsing them into a single word whose
+       * coverage nibble names several samples is not a form Apple emits, and
+       * on G17P only sample zero receives the depth it stages -- measured on
+       * renderpasses.*.multisample.d32_sfloat.samples_4, where samples 1..3
+       * kept the clear and sample 0 alone held the written value. A sample
+       * the predicate excludes gets an empty coverage nibble, exactly as a
+       * sample an earlier kill removed from SR39 does. */
+      unsigned reach =
+         agx_possible_zs_samples(instr->src[0].ssa) & BITFIELD_MASK(samples);
+
+      /* A mask that provably reaches nothing still needs a word for the
+       * transaction to stay balanced; every sample's coverage is empty, so
+       * which samples it names does not matter. */
+      if (!reach)
+         reach = BITFIELD_MASK(samples);
+
       agx_index keep = agx_and(b, agx_src_index(&instr->src[0]),
                                agx_immediate(BITFIELD_MASK(samples)));
-      agx_index covered = agx_and(b, sr39, keep);
-      agx_index mid = agx_iadd(b, upper, covered, 4);
-      agx_index coverage = agx_iadd(b, keep, mid, 4);
-      agx_index depth = agx_null();
-      if (write_z) {
-         agx_index finite = agx_temp(b->shader, AGX_SIZE_32);
-         agx_fmov_to(b, finite, z)->saturate = true;
-         agx_index nan = agx_mov_imm(b, 32, UINT32_C(0x7fc00000));
-         depth = agx_temp(b->shader, AGX_SIZE_32);
-         agx_icmpsel_to(b, depth, keep, agx_immediate(0), nan, finite,
-                        AGX_ICOND_UEQ);
+      agx_instr *last = NULL;
+      b->shader->zs_writes_left += util_bitcount(reach) - 1;
+      u_foreach_bit(i, reach) {
+         agx_index sr39 = agx_temp(b->shader, AGX_SIZE_16);
+         agx_get_sr_coverage_to(b, sr39, AGX_SR_INPUT_SAMPLE_MASK);
+         agx_index upper = agx_ushr(b, sr39, agx_immediate(4));
+         agx_index covered =
+            agx_and(b, agx_and(b, sr39, keep),
+                    agx_immediate(BITFIELD_BIT(i)));
+         last = agx_emit_zs_word_agx3(
+            b, instr, z, s, base,
+            agx_iadd(b, agx_immediate(15),
+                     agx_iadd(b, upper, covered, 4), 4),
+            agx_null());
       }
-      return agx_emit_zs_word_agx3(b, instr, z, s, base, coverage, depth);
+      return last;
    }
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        !sample_words) {

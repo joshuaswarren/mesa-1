@@ -817,9 +817,26 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
     * Combine them with alpha coverage before the one test-triggering update,
     * as Apple's G17P sample-mask + alpha-coverage fragment does. Applying the
     * mask only to the tile store would still update depth for killed samples.
-    * Early-tested shaders must not run the tests again. */
+    * Early-tested shaders must not run the tests again.
+    *
+    * At two and four samples the G17P depth/stencil write names the surviving
+    * samples in its own per-sample coverage words, so it already excludes the
+    * killed ones and needs no coverage update of its own. Issuing one anyway
+    * makes the hardware run the depth/stencil test on each surviving sample
+    * twice -- measured as four INCREMENT_AND_WRAP steps where the API asked
+    * for two, on renderpasses.*.multisample.d32_sfloat_s8_uint.samples_4. At
+    * one sample the write's word has no mask field at all, so there the kill
+    * is the only thing that can hold the test back, as
+    * fragment_operations.early_fragment.discard_no_early_fragment_tests_stencil
+    * depends on. A deferred epilog is cloned per sample after this point and
+    * coalesces its kills itself (agx_nir_hoist_g17p_zs_writes), so leave that
+    * shape alone. */
+   const bool zs_carries_write_samples =
+      (key->link.write_z || key->link.write_s) && key->nr_samples > 1 &&
+      !key->defer_monolithic_msaa;
+
    if (write_samples && !key->link.already_ran_zs) {
-      bool merged = false;
+      bool kills = false;
       nir_foreach_block(block, b->impl) {
          nir_foreach_instr_safe(instr, block) {
             if (instr->type != nir_instr_type_intrinsic)
@@ -833,17 +850,35 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             killed = nir_u2uN(&mask_b, killed, intr->src[0].ssa->bit_size);
             nir_src_rewrite(&intr->src[0],
                             nir_ior(&mask_b, intr->src[0].ssa, killed));
-            merged = true;
+            kills = true;
          }
       }
-      if (!merged) {
-         nir_builder mask_b =
-            nir_builder_at(nir_after_instr(nir_def_instr(write_samples)));
+      if (!kills && !zs_carries_write_samples) {
+         nir_instr *imported = nir_def_instr(write_samples);
+         nir_builder mask_b = nir_builder_at(nir_after_instr(imported));
+
+         /* Two builders sharing one insertion point emit in reverse order.
+          * `b` is parked on the imported mask itself whenever no colour was
+          * copied, so without carrying it past the kill everything `b`
+          * appends next -- the depth/stencil write below among it -- is
+          * threaded in *ahead* of the kill, and a coverage update after the
+          * write that triggered the tests is far too late. */
+         const bool b_shares_cursor = b->cursor.option == nir_cursor_after_instr &&
+                                      b->cursor.instr == imported;
+
          nir_demote_samples(&mask_b,
                             nir_ixor(&mask_b, write_samples,
                                       nir_imm_intN_t(&mask_b, ALL_SAMPLES, 16)));
+         if (b_shares_cursor)
+            b->cursor = mask_b.cursor;
+
+         kills = true;
       }
-      b->shader->info.fs.uses_discard = true;
+
+      /* Colour stores keep their own copy of the mask either way, through
+       * agx_nir_lower_tilebuffer. */
+      if (kills)
+         b->shader->info.fs.uses_discard = true;
    }
 
    /* Depth/stencil writes must be deferred until after all discards,
