@@ -753,8 +753,17 @@ hk_get_device_features(
       /* Geometry and tessellation shaders run in compute and draw through
        * their raster and evaluation vertex programs, as on AGX2. */
       features->geometryShader = hk_g17p_unverified_feature("geometry_shader");
-      features->tessellationShader =
-         hk_g17p_unverified_feature("tessellation_shader");
+      /* Qualified on hardware, Neo, native Vulkan 1.4: the whole
+       * dEQP-VK.tessellation group is 496 Pass / 607 NotSupported / 0 Fail,
+       * and the 4,961-case stratified sample gains 54 NotSupported -> Pass
+       * with no case going the other way. The one interaction that kept this
+       * gated -- a self-dependency MSAA render pass failing after a
+       * tessellated draw in the same process -- was the geometry heap
+       * descriptor sharing a buffer object with the sampler table, fixed in
+       * the preceding commit. The remaining NotSupported inside the group are
+       * other gates: shaderFloat64, vertex-pipeline stores and geometry
+       * shaders. */
+      features->tessellationShader = true;
       features->shaderTessellationAndGeometryPointSize =
          features->geometryShader || features->tessellationShader;
       features->geometryStreams = features->geometryShader;
