@@ -2642,7 +2642,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
           /* A raster-discard TES may write only point size, leaving the
            * four position components absent just like an XFB raster VS. */
           sw_stage == MESA_SHADER_TESS_EVAL ||
-          nir->info.next_stage == MESA_SHADER_GEOMETRY),
+          nir->info.next_stage == MESA_SHADER_GEOMETRY ||
+          /* The hardware variant of a control-point vertex shader is never
+           * bound -- the software variant runs in compute -- but it is still
+           * compiled, and its UVS layout is as sparse as the geometry case
+           * above. Without this the AGX3 packer refuses it at st_vary #4 and
+           * takes every G17P tessellation pipeline with it. */
+          nir->info.next_stage == MESA_SHADER_TESS_CTRL),
       /* G17P's Ioto resource program populates CProg before the main shader;
        * it does not execute AGX2's tex_state_store/sampler_state_store shader
        * preamble.  The bounded G17P descriptor lowerings above convert the
