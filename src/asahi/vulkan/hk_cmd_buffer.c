@@ -146,6 +146,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
+   hk_descriptor_state_fini(cmd, &cmd->state.rt.descriptors);
 
    if (hk_g17p_upload_quarantine_enabled(dev)) {
       /* Diagnostic lifetime falsifier: neither ordinary/USC upload BOs nor
@@ -1036,6 +1037,11 @@ hk_CmdBindDescriptorSets2KHR(
       hk_bind_descriptor_sets(cmd, &cmd->state.cs.descriptors,
                               pBindDescriptorSetsInfo);
    }
+
+   if (pBindDescriptorSetsInfo->stageFlags & HK_RT_SHADER_STAGES) {
+      hk_bind_descriptor_sets(cmd, &cmd->state.rt.descriptors,
+                              pBindDescriptorSetsInfo);
+   }
 }
 
 static void
@@ -1058,6 +1064,9 @@ hk_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
 
    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
       hk_push_constants(cmd, &cmd->state.cs.descriptors, pPushConstantsInfo);
+
+   if (pPushConstantsInfo->stageFlags & HK_RT_SHADER_STAGES)
+      hk_push_constants(cmd, &cmd->state.rt.descriptors, pPushConstantsInfo);
 }
 
 static struct hk_push_descriptor_set *
@@ -1116,6 +1125,11 @@ hk_CmdPushDescriptorSet2KHR(
 
    if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
       hk_push_descriptor_set(cmd, &cmd->state.cs.descriptors,
+                             pPushDescriptorSetInfo);
+   }
+
+   if (pPushDescriptorSetInfo->stageFlags & HK_RT_SHADER_STAGES) {
+      hk_push_descriptor_set(cmd, &cmd->state.rt.descriptors,
                              pPushDescriptorSetInfo);
    }
 }

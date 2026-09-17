@@ -131,7 +131,7 @@ hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
    return &agx_nir_options;
 }
 
-static struct spirv_to_nir_options
+struct spirv_to_nir_options
 hk_get_spirv_options(struct vk_physical_device *vk_pdev,
                      UNUSED mesa_shader_stage stage,
                      const struct vk_pipeline_robustness_state *rs)

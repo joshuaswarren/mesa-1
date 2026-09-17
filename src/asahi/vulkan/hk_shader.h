@@ -443,6 +443,11 @@ const nir_shader_compiler_options *
 hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
                    UNUSED const struct vk_pipeline_robustness_state *rs);
 
+struct spirv_to_nir_options
+hk_get_spirv_options(struct vk_physical_device *vk_pdev,
+                     UNUSED mesa_shader_stage stage,
+                     const struct vk_pipeline_robustness_state *rs);
+
 struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
                                      hk_internal_builder_t builder, void *data,
                                      size_t data_size);

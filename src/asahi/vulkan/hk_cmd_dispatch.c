@@ -1680,6 +1680,50 @@ hk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
    dispatch(cmd, agx_3d(groupCountX, groupCountY, groupCountZ));
 }
 
+/*
+ * Dispatch a ray-tracing megakernel.
+ *
+ * VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR has its own descriptor state, but the
+ * megakernel executes on the ordinary compute path, so the ray-tracing state is
+ * installed into the compute slots for the duration of one dispatch and put
+ * back afterwards.  Anything the dispatch lazily allocates inside the
+ * descriptor state (a pushed descriptor snapshot, the constant-data address)
+ * is carried back rather than dropped, or it would leak.
+ */
+void
+hk_cmd_dispatch_rays(struct hk_cmd_buffer *cmd, struct hk_api_shader *shader,
+                     uint64_t record_addr, uint64_t group_count_addr,
+                     struct agx_grid grid)
+{
+   struct hk_descriptor_state *rt = &cmd->state.rt.descriptors;
+
+   if (rt->push_dirty)
+      hk_cmd_buffer_flush_push_descriptors(cmd, rt);
+
+   const struct hk_compute_state saved = cmd->state.cs;
+
+   cmd->state.cs.shader = shader;
+   cmd->state.cs.descriptors = *rt;
+
+   struct hk_descriptor_state *desc = &cmd->state.cs.descriptors;
+   desc->root.cs.base_group[0] = 0;
+   desc->root.cs.base_group[1] = 0;
+   desc->root.cs.base_group[2] = 0;
+   desc->root.cs.group_count_addr = group_count_addr;
+   desc->root.cs.trace_rays_addr = record_addr;
+   desc->root_dirty = true;
+
+   dispatch(cmd, grid);
+
+   /* Carry the state back before restoring, so a pushed descriptor set the
+    * flush above allocated stays owned by the ray-tracing state. */
+   *rt = cmd->state.cs.descriptors;
+   rt->root.cs.trace_rays_addr = 0;
+
+   cmd->state.cs = saved;
+   cmd->state.cs.descriptors.root_dirty = true;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer,
                        VkDeviceSize offset)

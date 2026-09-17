@@ -475,3 +475,56 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
                                 render_state_emitted != 0, empty_draw_jump);
    }
 }
+
+/*
+ * VK_KHR_ray_tracing_pipeline indirect trace rays.
+ *
+ * The megakernel reads its launch size out of a VkTraceRaysIndirectCommand2KHR
+ * record, and the command stream needs the same launch expressed as
+ * threadgroups.  Neither is known on the host for an indirect trace, so one
+ * invocation reads the application's three dimensions and publishes both.
+ *
+ * `out_record_dims` is the address of the `width` member of a record the driver
+ * assembled on the host (vkCmdTraceRaysIndirectKHR, whose indirect buffer holds
+ * only the dimensions), or zero when the application supplied the whole record
+ * itself (vkCmdTraceRaysIndirect2KHR).
+ */
+KERNEL(1)
+libagx_trace_rays_indirect_setup(global uint32_t *out_record_dims,
+                                 global VkDispatchIndirectCommand *out_groups,
+                                 constant uint32_t *in_dims,
+                                 uint32_t local_size_x_log2)
+{
+   uint32_t width = in_dims[0];
+   uint32_t height = in_dims[1];
+   uint32_t depth = in_dims[2];
+
+   if (out_record_dims) {
+      out_record_dims[0] = width;
+      out_record_dims[1] = height;
+      out_record_dims[2] = depth;
+   }
+
+   /* The megakernel bounds-checks its own launch id, so a partial trailing
+    * workgroup retires without tracing.
+    *
+    * The workgroup size is a power of two the driver owns, so this rounds up
+    * with a shift rather than a division: an integer divide by a runtime value
+    * is the one arithmetic form most likely to need an encoding this backend
+    * does not have, and there is no reason to risk it for a constant. */
+   /* Round up WITHOUT the (width + mask) form: that wraps for any width above
+    * 0xFFFFFFE0 and silently launches zero workgroups.  maxRayDispatchInvocation-
+    * Count is 2^30, so a conforming application cannot reach it -- but the
+    * width comes out of a device buffer nothing validates, and a wrap here is
+    * a whole trace that quietly does not happen.  The host side computes the
+    * same thing the same way (hk_rt_launch_group_count), and
+    * test-hk-ray-tracing-core pins the two together at the top of the range;
+    * the first version of this kernel used the wrapping form and that test is
+    * what caught it. */
+   const uint32_t mask = (1u << local_size_x_log2) - 1u;
+   *out_groups = (VkDispatchIndirectCommand){
+      .x = (width >> local_size_x_log2) + ((width & mask) ? 1u : 0u),
+      .y = height,
+      .z = depth,
+   };
+}

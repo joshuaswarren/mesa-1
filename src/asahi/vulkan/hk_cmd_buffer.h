@@ -45,6 +45,8 @@ struct hk_cmd_bo;
 struct hk_cmd_pool;
 struct hk_image_view;
 struct hk_push_descriptor_set;
+struct hk_ray_tracing_pipeline;
+struct hk_api_shader;
 struct hk_shader;
 struct hk_linked_shader;
 struct agx_usc_builder;
@@ -139,6 +141,13 @@ struct hk_root_descriptor_table {
          uint64_t grid_helper_geometry_addr;
          uint32_t grid_helper_local_size[3];
          uint32_t _pad_grid_helper;
+
+         /* VK_KHR_ray_tracing_pipeline: device address of the
+          * VkTraceRaysIndirectCommand2KHR record the megakernel reads its
+          * shader binding tables and launch size from.  Zero for every
+          * ordinary compute dispatch; the ray-tracing megakernel is the only
+          * shader that loads it. */
+         uint64_t trace_rays_addr;
       } cs;
    };
 
@@ -345,6 +354,23 @@ struct hk_compute_state {
    struct hk_descriptor_state descriptors;
    struct hk_api_shader *shader;
 };
+
+/*
+ * VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR state.  Descriptor sets and push
+ * constants bound to the ray-tracing bind point are separate from the compute
+ * ones, even though the pipeline executes as a compute shader: an application
+ * may bind a compute pipeline's sets between vkCmdBindPipeline and
+ * vkCmdTraceRaysKHR and neither may disturb the other.
+ */
+struct hk_ray_tracing_state {
+   struct hk_descriptor_state descriptors;
+   struct hk_ray_tracing_pipeline *pipeline;
+};
+
+#define HK_RT_SHADER_STAGES                                                    \
+   (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |         \
+    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |       \
+    VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR)
 
 struct hk_cmd_push {
    void *map;
@@ -639,6 +665,7 @@ struct hk_cmd_buffer {
    struct {
       struct hk_graphics_state gfx;
       struct hk_compute_state cs;
+      struct hk_ray_tracing_state rt;
       struct hk_conditional_render_state conditional;
    } state;
 
@@ -1130,6 +1157,8 @@ hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
       return &cmd->state.gfx.descriptors;
    case VK_PIPELINE_BIND_POINT_COMPUTE:
       return &cmd->state.cs.descriptors;
+   case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR:
+      return &cmd->state.rt.descriptors;
    default:
       UNREACHABLE("Unhandled bind point");
    }
@@ -1196,6 +1225,10 @@ void hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
                    VkPipelineBindPoint bind_point);
 void hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
                  VkPipelineBindPoint bind_point);
+
+void hk_cmd_dispatch_rays(struct hk_cmd_buffer *cmd,
+                          struct hk_api_shader *shader, uint64_t record_addr,
+                          uint64_t group_count_addr, struct agx_grid grid);
 
 void hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer,
                                uint32_t invocations_x, uint32_t invocations_y,

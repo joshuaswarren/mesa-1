@@ -88,6 +88,13 @@ struct hk_device {
    simple_mtx_t radix_sort_lock;
    struct agx_bg_eot_cache bg_eot;
 
+   /* VK_KHR_ray_tracing_pipeline shader group handles.  A handle is one
+    * device-unique index, so a handle captured from a pipeline library keeps
+    * naming the same group in every pipeline that imports the library.  It
+    * starts at one: zero is the value an unwritten shader binding table
+    * record has, and no group may collide with it. */
+   uint32_t rt_group_handle_alloc;
+
    /* Device-lifetime templates for precompiled G17P meta compute programs.
     * The libagx programs and their executable BOs have the same lifetime. */
    struct {

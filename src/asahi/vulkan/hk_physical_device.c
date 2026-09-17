@@ -20,6 +20,7 @@
 #include "hk_agx3_vdm_decode.h"
 #include "hk_native_descriptor.h"
 #include "hk_private.h"
+#include "hk_ray_tracing_core.h"
 #include "hk_shader.h"
 #include "hk_wsi.h"
 
@@ -84,12 +85,25 @@ hk_get_device_extensions(const struct hk_instance *instance,
     */
    const bool ray_query = hk_g17p_unverified_feature("ray_query");
 
+   /*
+    * VK_KHR_ray_tracing_pipeline.  The whole pipeline compiles to one compute
+    * megakernel over the same software traversal ray_query uses, so it needs
+    * exactly what ray_query needs and nothing more -- but it has never
+    * executed on hardware either, and an extension bit is a promise.  It is
+    * advertised only for the probe that would let the default flip.
+    */
+   const bool ray_tracing_pipeline =
+      ray_query && hk_g17p_unverified_feature("ray_tracing_pipeline");
+
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
       .KHR_acceleration_structure = ray_query,
       .KHR_deferred_host_operations = ray_query,
       .KHR_ray_query = ray_query,
+      .KHR_ray_tracing_pipeline = ray_tracing_pipeline,
+      .KHR_ray_tracing_maintenance1 = ray_tracing_pipeline,
+      .KHR_pipeline_library = ray_tracing_pipeline,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_calibrated_timestamps = true,
@@ -431,7 +445,25 @@ hk_get_device_features(
       .accelerationStructureHostCommands = false,
       .descriptorBindingAccelerationStructureUpdateAfterBind = false,
       .rayQuery = supported_extensions->KHR_ray_query,
-      .rayTraversalPrimitiveCulling = supported_extensions->KHR_ray_query,
+      .rayTraversalPrimitiveCulling = supported_extensions->KHR_ray_query ||
+                                      supported_extensions->KHR_ray_tracing_pipeline,
+
+      /* VK_KHR_ray_tracing_pipeline.  Shader-group handle capture/replay is
+       * off because shaderGroupHandleCaptureReplaySize is zero: a handle is a
+       * device-unique index with nothing to replay.  The pipeline stack size
+       * is static scratch in the compiled megakernel, so the dynamic state
+       * cannot change it and is not advertised either. */
+      .rayTracingPipeline = supported_extensions->KHR_ray_tracing_pipeline,
+      .rayTracingPipelineShaderGroupHandleCaptureReplay = false,
+      .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
+      .rayTracingPipelineTraceRaysIndirect =
+         supported_extensions->KHR_ray_tracing_pipeline,
+
+      /* VK_KHR_ray_tracing_maintenance1 */
+      .rayTracingMaintenance1 =
+         supported_extensions->KHR_ray_tracing_maintenance1,
+      .rayTracingPipelineTraceRaysIndirect2 =
+         supported_extensions->KHR_ray_tracing_maintenance1,
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -958,6 +990,28 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxDescriptorSetUpdateAfterBindAccelerationStructures =
          HK_MAX_DESCRIPTORS,
       .minAccelerationStructureScratchOffsetAlignment = 128,
+
+      /* VK_KHR_ray_tracing_pipeline.  shaderGroupHandleSize is fixed at 32 by
+       * the specification.  The base and handle alignments are the
+       * specification's minima -- nothing in the megakernel's SBT fetch
+       * requires more, because every record address arrives as a device
+       * address the shader adds a stride to.
+       *
+       * maxRayRecursionDepth is 1, and that is a real limit rather than a
+       * policy: recursion is unrolled into the megakernel at compile time, so
+       * every extra level multiplies the compiled code.  Raising it is a
+       * decision about code size, not a hardware question.
+       *
+       * maxRayDispatchInvocationCount is bounded by what one compute dispatch
+       * can launch, since the launch is exactly a compute dispatch. */
+      .shaderGroupHandleSize = HK_RAY_TRACING_GROUP_HANDLE_SIZE,
+      .maxRayRecursionDepth = 1,
+      .maxShaderGroupStride = 16384,
+      .shaderGroupBaseAlignment = 64,
+      .shaderGroupHandleCaptureReplaySize = 0,
+      .maxRayDispatchInvocationCount = 1u << 30,
+      .shaderGroupHandleAlignment = 32,
+      .maxRayHitAttributeSize = HK_RAY_HIT_ATTRIBS_SIZE,
 
       .maxPerStageDescriptorSamplers = HK_MAX_DESCRIPTORS,
       .maxPerStageDescriptorUniformBuffers = HK_MAX_DESCRIPTORS,

@@ -19,6 +19,7 @@ hk_files = files(
   'hk_cmd_dispatch.c',
   'hk_cmd_draw.c',
   'hk_cmd_meta.c',
+  'hk_cmd_trace_rays.c',
   'hk_cmd_pool.c',
   'hk_cmd_pool.h',
   'hk_descriptor_set.h',
@@ -79,6 +80,10 @@ hk_files = files(
   'hk_nir_lower_robust_image.h',
   'hk_nir_passthrough_gs.c',
   'hk_nir_ray_tracing.c',
+  'hk_ray_tracing_core.c',
+  'hk_ray_tracing_core.h',
+  'hk_ray_tracing_pipeline.c',
+  'hk_ray_tracing_pipeline.h',
   'hk_nir_ray_tracing.h',
   'hk_nir_widen_16bit_varyings.c',
   'hk_nir_widen_16bit_varyings.h',
@@ -135,6 +140,20 @@ if with_tests
       c_args : [c_msvc_compat_args],
     )
   endif
+
+  test(
+    'hk_ray_tracing_core',
+    executable(
+      'hk_ray_tracing_core_test',
+      files('tests/test-hk-ray-tracing-core.c',
+            'hk_ray_tracing_core.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
 
   test(
     'hk_bvh_depth_core',
@@ -2358,6 +2377,20 @@ if with_tests
     # Generic encodability probe: takes SPIR-V paths on the command line and
     # reports whether vkCreateComputePipelines accepts each one. This is the
     # tool that measures README-agx3-packer-limits.md's matrix.
+    # VK_KHR_ray_tracing_pipeline host-side probe.  Compiles every ray
+    # tracing stage into the megakernel, imports a pipeline library, and
+    # records all three trace-rays forms under the no-op drm-shim.  It
+    # executes nothing; see docs/G17P_RAYTRACING_PIPELINE_ABI.md for what a
+    # pass does and does not establish.
+    executable(
+      'hk-rt-pipeline-probe',
+      files('tests/hk_rt_pipeline_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-graphics-probe',
       files('tests/g17p_vulkan_graphics_probe.c'),
