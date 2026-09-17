@@ -4079,9 +4079,23 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
     * had to spend a whole synchronous prelude retiring one. */
    if (I->nr_srcs == 2 && agx3_subgroup_imm_lane(I->src[1]) &&
        enc == AGX_ISA_ENCODING_AGX3B) {
+      /* 16-bit data narrows this encoding point's width pair, which is a
+       * different field from the quad selector, so a half broadcast or
+       * butterfly encodes for quad exactly as it does for SIMD -- Apple's
+       * applegpu_g17p words are in agx3_subgroup_encode_shuffle().  Reaching
+       * for the 32-bit operand predicate here refused every 16-bit
+       * subgroupQuadBroadcast and subgroupQuadSwap, which is one refused
+       * shader per case.  The shifts keep the 32-bit predicate: their 16-bit
+       * width pair is not this composition. */
+      const bool half = I->nr_dests == 1 &&
+                        I->dest[0].size == AGX_SIZE_16 &&
+                        (op == AGX3_SUBGROUP_SHUFFLE_BROADCAST ||
+                         op == AGX3_SUBGROUP_SHUFFLE_XOR);
       if (I->nr_dests != 1 || I->saturate ||
-          !agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) ||
-          !agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER))
+          !(half ? agx3_subgroup_plain_half(I->dest[0]) &&
+                      agx3_subgroup_plain_half(I->src[0])
+                 : agx3_subgroup_plain(I->dest[0], AGX_INDEX_REGISTER) &&
+                      agx3_subgroup_plain(I->src[0], AGX_INDEX_REGISTER)))
          return false;
 
       const struct agx3_subgroup_shuffle_desc d = {
@@ -4094,6 +4108,7 @@ agx3_emit_subgroup_shuffle(struct util_dynarray *emission,
          .wait_mask = wait_mask,
          .dest_hint = I->dest[0].cache,
          .src_live = !I->src[0].discard,
+         .half = half,
       };
       uint8_t bytes[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
       return agx3_subgroup_encode_shuffle(enc, &d, bytes, &length) &&
