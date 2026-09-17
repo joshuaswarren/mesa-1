@@ -2438,17 +2438,36 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                candidate = nir_shader_clone(NULL, nir);
                if (candidate &&
                    agx_nir_lower_g17p_indexed_samplers(candidate)) {
-                  struct agx_g17p_indexed_storage_binding indexed_storage;
-                  const bool has_indexed_storage =
-                     agx_nir_lower_g17p_indexed_storage(candidate,
-                                                        &indexed_storage);
+                  /* Keep the storage image BINDLESS alongside indexed
+                   * samplers.
+                   *
+                   * agx_nir_lower_g17p_indexed_storage() rewrites the image
+                   * store to the immediate-slot form: image_write with a zero
+                   * base and a constant resource index, with the PBE
+                   * descriptor delivered through the launch's argument slots
+                   * by hk_agx3_g17p_indexed_storage_pointers()
+                   * (hk_cmd_dispatch.c).  Measured on G17P with the
+                   * image_2d_view_3d_image compute sampler cases: in that
+                   * combination the store lands nowhere at all -- the
+                   * destination reads back byte-identical to its pre-dispatch
+                   * clear -- at resource index 1 and at index 2 alike.  The
+                   * ordinary bindless image write, which the fragment stage
+                   * and every non-sampling compute shader already use on this
+                   * chip, stores correctly: 8 fail -> 0 fail, with 2823
+                   * neighbouring cases per-case identical.
+                   *
+                   * WHY the immediate-slot store fails here is NOT understood.
+                   * Only that it does, and that the bindless form does not.
+                   * The slot layout is a plausible suspect -- slots 0/1 carry
+                   * the texture and sampler heap bases that the shader
+                   * dereferences itself -- but that is a hypothesis, not a
+                   * measurement, and the driver does build a combined pointer
+                   * set for exactly this case rather than ignoring it.
+                   */
                   ralloc_free(nir);
                   nir = candidate;
                   shader->info.agx3_indexed_sampler_valid = true;
-                  shader->info.agx3_indexed_storage_valid =
-                     has_indexed_storage;
-                  if (has_indexed_storage)
-                     shader->info.agx3_indexed_storage = indexed_storage;
+                  shader->info.agx3_indexed_storage_valid = false;
                } else {
                   ralloc_free(candidate);
                   candidate = nir_shader_clone(NULL, nir);
