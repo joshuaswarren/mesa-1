@@ -595,8 +595,6 @@ hk_GetPhysicalDeviceImageFormatProperties2(
    VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
        pImageFormatInfo->type == VK_IMAGE_TYPE_2D && ycbcr_info == NULL &&
-       /* The imported D16S8 path is initially single-sample qualified. */
-       pImageFormatInfo->format != VK_FORMAT_D16_UNORM_S8_UINT &&
        (features & (VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
                     VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT)) &&
        !(pImageFormatInfo->flags & VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT)) {
