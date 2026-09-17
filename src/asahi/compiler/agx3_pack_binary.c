@@ -6371,8 +6371,22 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->agx3_mrt_tile_ops_ordered ||
        (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
-       (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1))
+       (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1)) {
+      /* Not a refusal by itself -- a single-target shader legitimately has no
+       * MRT protocol -- but when a later tile op does refuse, the reason is
+       * almost always one of these, so name which one held. */
+      if (agx_compiler_debug & AGX_DBG_REFUSE) {
+         fprintf(stderr,
+                 "G17P MRT protocol declined: agx3b=%u frag=%u preamble=%u "
+                 "ordered=%u secondary=%u ignore-tib=%u emrt=%u blocks=%u\n",
+                 ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B,
+                 ctx->stage == MESA_SHADER_FRAGMENT, ctx->is_preamble,
+                 ctx->agx3_mrt_tile_ops_ordered, ctx->key->secondary,
+                 ctx->key->fs.ignore_tib_dependencies, ctx->key->g17p_emrt,
+                 list_length(&ctx->blocks));
+      }
       return p;
+   }
 
    const bool partitions =
       !ctx->key->fs.ignore_tib_dependencies &&

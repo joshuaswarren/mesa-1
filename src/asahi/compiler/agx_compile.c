@@ -7163,7 +7163,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    /* Apple's store-only MRT fragments that export depth complete the class-1
     * depth transaction before the first colour transaction, which follows
     * unchanged. Admit exactly that leading wait, depth write and signal. */
-   unsigned depth_ops = 0;
+   unsigned depth_ops = 0, sample_masks = 0;
    agx_foreach_block(ctx, block) {
       agx_foreach_instr_in_block(block, I) {
          const bool colour_started = first_wait || load_count || store_count;
@@ -7202,6 +7202,17 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
             depth_ops = 3;
             break;
          case AGX_OPCODE_FLTNORM_AGX3:
+            break;
+         case AGX_OPCODE_SAMPLE_MASK_AGX3:
+            /* A force-early shader defers its sample mask to the epilog,
+             * which kills the masked samples before anything else runs:
+             * agx_nir_prolog_epilog.c emits the demote from the imported
+             * write-samples word, and the packer places the instruction ahead
+             * of the first WAIT_PIX. That is outside the colour transaction,
+             * so it does not disturb the class protocol. Admit it only there;
+             * between tile ops it would kill samples mid-transaction. */
+            if (colour_started || depth_ops || sample_masks++)
+               return false;
             break;
          case AGX_OPCODE_ST_TILE:
             if (store_count >= ARRAY_SIZE(stores) || I->nr_dests != 0 ||
@@ -7246,8 +7257,14 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
             stop = I;
             break;
          default:
-            if (!agx_opcodes_info[I->op].can_eliminate)
+            if (!agx_opcodes_info[I->op].can_eliminate) {
+               if (agx_compiler_debug & AGX_DBG_REFUSE) {
+                  fprintf(stderr,
+                          "G17P MRT order: unexpected %s between tile ops\n",
+                          agx_opcodes_info[I->op].name);
+               }
                return false;
+            }
             break;
          }
       }
