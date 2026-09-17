@@ -1763,6 +1763,35 @@ agx_ra(agx_context *ctx)
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
       max_possible_regs = MIN2(max_possible_regs, AGX3B_NUM_REGS);
 
+   /* A cube-array sample whose texture or sampler descriptor is a register
+    * publishes CEM's face through agx3_tex_stage_cube_array_layer(), which
+    * names it in the seven-bit f30 operand. The plain cube's cube_z and
+    * cube_lod forms carry an eighth bit and reach half 255; this one stops
+    * at half 127. The packer reserves the CEM scratch immediately ABOVE
+    * whatever this allocation used, so a shader that reaches half 126 puts
+    * the face at half 128 and the entire pipeline is refused -- measured as
+    * VK_ERROR_FEATURE_NOT_PRESENT with "cube staging face=half128" on
+    * dEQP-VK.pipeline.*.image.*.view_type.cube_array.*.count_8.*, where the
+    * GLSL sampler array is indexed by a loop counter.
+    *
+    * Budget the scratch inside the file instead. The bound must survive the
+    * ROUND_DOWN_TO(reg_file_alignment) below, which is 8 or 16 halves, so
+    * use a multiple of both: the scratch then ends at half 126 at the
+    * latest. Shaders of this exact shape lose the halves above 112 and spill
+    * instead; every other shader keeps the full file.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+             I->dim == AGX_DIM_CUBE_ARRAY && I->nr_srcs == 6 &&
+             (I->src[3].type != AGX_INDEX_IMMEDIATE ||
+              I->src[4].type != AGX_INDEX_IMMEDIATE)) {
+            max_possible_regs = MIN2(max_possible_regs, 112);
+            break;
+         }
+      }
+   }
+
    if (force_spilling) {
       /* Even when testing spilling, we need enough room for preloaded/exported
        * regs.
