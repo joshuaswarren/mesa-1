@@ -57,6 +57,59 @@ static const struct local_vec local_vecs[] = {
     {0x67, 0x02, 0x54, 0x00, 0x00, 0x02, 0x80, 0x00, 0x44, 0x0d, 0x00,
      0xc0, 0x0c, 0x00}, 14},
 
+   /*
+    * applegpu_g17p witnesses, produced this session with
+    *   metal -c tg.metal -o tg.air; metallib tg.air -o tg.metallib
+    *   metal-nt -arch applegpu_g17p -N tg.mtlp-json \
+    *            -platform_version macos 27.0 27.0 tg.metallib -o tg.nat
+    * and read out of __TEXT,__text.  They pin two conventions that the G16G
+    * corpus above only showed at one value each:
+    *
+    *  - every threadgroup access takes its base from a *uniform*, and the
+    *    half is chosen per shader after the buffer arguments: 4 with one
+    *    buffer, 16 with four, and a second block gets its own half (5).
+    *    It is therefore a per-block base the runtime writes, not a fixed
+    *    hardware-preloaded half.
+    *  - every threadgroup load lands on scoreboard slot 6.
+    */
+   {AGX_ISA_ENCODING_AGX3B, false, 0,
+    {.data = 0, .width = AGX3_MEM_W32, .mask = 1, .shift = 2,
+     .base_kind = AGX3_LOCAL_BASE_UNIFORM, .base = 4,
+     .index_is_register = true, .index = 5, .index_kill = true,
+     .wait_mask = 1u << 1},
+    {0xe7, 0x22, 0x54, 0x00, 0x04, 0x0a, 0x80, 0x00, 0x44, 0x02, 0x00,
+     0x30, 0x02, 0x00}, 14},
+   {AGX_ISA_ENCODING_AGX3B, true, 0,
+    {.data = 0, .width = AGX3_MEM_W32, .mask = 1, .shift = 2,
+     .base_kind = AGX3_LOCAL_BASE_UNIFORM, .base = 4,
+     .index_is_register = true, .index = 4, .index_kill = true, .slot = 6,
+     .wait_mask = 1u << 2},
+    {0x67, 0x42, 0x54, 0x00, 0x04, 0x08, 0x80, 0x00, 0x44, 0x0d, 0x00,
+     0xc0, 0x08, 0x00}, 14},
+   /* A vec4 store into the second 16 bytes of the block: the index still
+    * counts scalar elements and the static part rides byte_offset. */
+   {AGX_ISA_ENCODING_AGX3B, false, 0,
+    {.data = 30, .width = AGX3_MEM_W32, .mask = 15, .shift = 2,
+     .base_kind = AGX3_LOCAL_BASE_UNIFORM, .base = 4,
+     .index_is_register = true, .index = 4, .byte_offset = 16,
+     .value_kill = true},
+    {0xe7, 0x02, 0x54, 0x1e, 0x04, 0x08, 0x00, 0x00, 0x5c, 0x83, 0x00,
+     0x30, 0x02, 0x00}, 14},
+   /* Four buffer arguments push the same base to uniform half 16. */
+   {AGX_ISA_ENCODING_AGX3B, false, 0,
+    {.data = 0, .width = AGX3_MEM_W32, .mask = 1, .shift = 2,
+     .base_kind = AGX3_LOCAL_BASE_UNIFORM, .base = 16,
+     .index_is_register = true, .index = 10, .index_kill = true},
+    {0xe7, 0x02, 0x54, 0x00, 0x10, 0x14, 0x80, 0x00, 0x44, 0x02, 0x00,
+     0x30, 0x02, 0x00}, 14},
+   /* A shader with two threadgroup blocks gets a base uniform each. */
+   {AGX_ISA_ENCODING_AGX3B, false, 0,
+    {.data = 2, .width = AGX3_MEM_W32, .mask = 1, .shift = 2,
+     .base_kind = AGX3_LOCAL_BASE_UNIFORM, .base = 5,
+     .index_is_register = true, .index = 10, .index_kill = true},
+    {0xe7, 0x02, 0x54, 0x02, 0x05, 0x14, 0x80, 0x00, 0x44, 0x02, 0x00,
+     0x30, 0x02, 0x00}, 14},
+
    {AGX_ISA_ENCODING_AGX3C, false, 1,
     {.data = 0, .width = AGX3_MEM_W32, .mask = 1, .shift = 2,
      .base_kind = AGX3_LOCAL_BASE_UNIFORM, .base = 8,

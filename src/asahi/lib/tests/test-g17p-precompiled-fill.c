@@ -75,6 +75,8 @@ main(void)
            i <= LIBAGX_UNROLL_RESTART_10) ||
           i == LIBAGX_GS_SETUP_INDIRECT ||
           i == LIBAGX_PREFIX_SUM_GEOM ||
+          i == LIBAGX_G17P_LOCAL_PROBE ||
+          i == LIBAGX_G17P_LOCAL_SG_PROBE ||
           (i >= LIBAGX_PREFIX_SUM_TESS_0 &&
            i <= LIBAGX_PREFIX_SUM_TESS_1) ||
           i == LIBAGX_INCREMENT_STATISTIC ||
@@ -109,6 +111,28 @@ main(void)
          (const void *)libagx_g17p[i];
       CHECK(info->workgroup_size[0] == 1024);
       CHECK(info->local_size == 128);
+   }
+
+   /* The two threadgroup-memory probes carry the same launch shape as the
+    * tessellation prefix sum they exist to compare against: one 1024-thread
+    * workgroup, and a shared allocation the precompiled dispatcher must
+    * publish (4096 B for the 1024-slot array, 128 B for the 32-subgroup
+    * exchange). They are never dispatched by the driver; see geometry.cl. */
+   {
+      const struct agx_precompiled_kernel_info *probe =
+         (const void *)libagx_g17p[LIBAGX_G17P_LOCAL_PROBE];
+      CHECK(probe != NULL);
+      if (probe) {
+         CHECK(probe->workgroup_size[0] == 1024);
+         CHECK(probe->local_size == 4096);
+      }
+      const struct agx_precompiled_kernel_info *sg_probe =
+         (const void *)libagx_g17p[LIBAGX_G17P_LOCAL_SG_PROBE];
+      CHECK(sg_probe != NULL);
+      if (sg_probe) {
+         CHECK(sg_probe->workgroup_size[0] == 1024);
+         CHECK(sg_probe->local_size == 128);
+      }
    }
 
    /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
