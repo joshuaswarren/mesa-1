@@ -2824,12 +2824,27 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          b, dst, AGX_SR_THREAD_INDEX_IN_THREADGROUP);
 
    case nir_intrinsic_load_layer_id:
-      /* G17P builtin BG reloads get the tile's layer from native SR 0xc3
-       * (normalized SR12, W16), not the compute dispatch's grid-Z input.
-       * Ordinary fragment layer reads are lowered to flat varyings in hk. */
+      /* Two G17P fragment programs read the tile's own layer rather than an
+       * API gl_Layer, and native SR 0xc3 (normalized SR12, W16) is what
+       * supplies it:
+       *
+       *  - the builtin background reload (fs.ignore_tib_dependencies), and
+       *  - with a spilled render target, the fragment epilog's eMRT image
+       *    store, whose layer coordinate image_coords() in
+       *    agx_nir_lower_tilebuffer.c builds from this intrinsic. Reading the
+       *    compute grid-Z input there made every layered eMRT store address
+       *    layer zero.
+       *
+       * Both are driver-internal, and hk sets g17p_emrt only for the eMRT
+       * epilog (hk_cmd_draw.c). An API gl_Layer read never reaches here from
+       * hk -- nir_lower_sysvals_to_varyings rewrites it as a flat coefficient
+       * first (hk_shader.c) -- but it does from gallium, which lowers
+       * VARYING_SLOT_LAYER back to this intrinsic with layer_as_varying
+       * false and sets neither key bit. Leave that path alone. */
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           stage == MESA_SHADER_FRAGMENT &&
-          b->shader->key->fs.ignore_tib_dependencies)
+          (b->shader->key->fs.ignore_tib_dependencies ||
+           b->shader->key->g17p_emrt))
          return agx_get_sr_native_width_to(b, dst, AGX_SR_BACKGROUND_LAYER_ID);
       return agx_get_sr_to(b, dst, AGX_SR_THREADGROUP_POSITION_IN_GRID_Z);
 

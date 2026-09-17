@@ -1677,9 +1677,35 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
     * particular 16x16 at 4x may occupy the full32KiB, while 32x32 at 4x
     * exceeds the sample budget even for an eight-byte sample. */
    const bool native_tile_limits = dev->dev.chip == AGX_CHIP_G17P;
+   /* A G17P multisample tilebuffer wider than eight bytes per sample only
+    * keeps a tile's whole sample where colour-writing geometry covered that
+    * tile; see AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE. A load-op clear
+    * gets that guarantee from the full-area clear draw emitted below, so it
+    * stays in the tilebuffer. A reloaded attachment cannot: the background
+    * reload is itself the truncating program, and nothing else rewrites the
+    * tiles the application does not draw to. Multiview has a second, separate
+    * defect that the clear draw does not cover either. Those two spill. */
+   bool g17p_wide_ms_to_memory = false;
+   if (dev->dev.chip == AGX_CHIP_G17P && render->tilebuffer.nr_samples > 1) {
+      g17p_wide_ms_to_memory = render->view_mask != 0;
+
+      for (uint32_t i = 0; i < pRenderingInfo->colorAttachmentCount; i++) {
+         const VkRenderingAttachmentInfo *att =
+            &pRenderingInfo->pColorAttachments[i];
+
+         g17p_wide_ms_to_memory |= att->imageView != VK_NULL_HANDLE &&
+                                   att->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD &&
+                                   is_attachment_stored(att);
+      }
+   }
+   const uint8_t max_sample_size_B =
+      dev->dev.chip != AGX_CHIP_G17P ? 0
+      : g17p_wide_ms_to_memory
+           ? AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE
+           : AGX_G17P_MAX_BYTES_PER_SAMPLE;
    render->tilebuffer = agx_build_tilebuffer_layout_with_limits(
       formats, render->color_att_count, render->tilebuffer.nr_samples, layered,
-      dev->dev.chip == AGX_CHIP_G17P ? AGX_G17P_MAX_BYTES_PER_SAMPLE : 0,
+      max_sample_size_B,
       native_tile_limits ? 32768 : 0, native_tile_limits ? 2048 : 0);
 
    if (dev->dev.chip == AGX_CHIP_G17P &&
@@ -1978,6 +2004,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       resolved_clear |= is_attachment_stored(att_info);
    }
 
+   const uint32_t color_clear_count = clear_count;
+
    clear_att[clear_count] = (VkClearAttachment){
       .aspectMask = 0,
    };
@@ -2013,7 +2041,20 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    const bool clear_spills = dev->dev.chip == AGX_CHIP_G17P &&
       agx_tilebuffer_spills(&render->tilebuffer);
-   if (clear_spills && !incomplete_render_area) {
+
+   /* A G17P multisample tilebuffer wider than eight bytes per sample cannot
+    * survive a tile that no colour-writing geometry covered: see
+    * AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE. Emit the load-op clear as
+    * an ordinary full-area draw instead. That covers every tile, so the
+    * background program only ever runs on a tile the hardware also
+    * rasterizes, which keeps the whole sample. The target stays in the
+    * tilebuffer. */
+   const bool clear_wide_multisample =
+      dev->dev.chip == AGX_CHIP_G17P && color_clear_count > 0 &&
+      render->tilebuffer.nr_samples > 1 &&
+      render->tilebuffer.sample_size_B >
+         AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE;
+   if (clear_spills && !incomplete_render_area && !clear_wide_multisample) {
       unsigned selected = 0;
       for (unsigned i = 0; i < clear_count; ++i) {
          if (clear_att[i].aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
@@ -2023,7 +2064,8 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       clear_count = selected;
    }
    cs->cr.process_empty_tiles = resolved_clear;
-   if (clear_count > 0 && (incomplete_render_area || clear_spills)) {
+   if (clear_count > 0 &&
+       (incomplete_render_area || clear_spills || clear_wide_multisample)) {
       const VkClearRect clear_rect = {
          .rect = render->area,
          .baseArrayLayer = 0,
