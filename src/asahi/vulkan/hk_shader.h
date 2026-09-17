@@ -279,6 +279,45 @@ hk_num_variants(mesa_shader_stage stage)
 }
 
 /*
+ * A G17P hardware vertex program whose UVS layout does not start at component
+ * zero with a four-component position group. The AGX3 packer admits a dense
+ * terminal output run only from five outputs up, a floor every position-
+ * writing shader clears through its four position components alone, so every
+ * shape below needs the sparse component-addressed staging protocol instead.
+ *
+ * `info` is the hardware shader being compiled and `sw_stage` the API stage it
+ * serves; `xfb_outputs` says whether the pipeline records transform feedback.
+ */
+static inline bool
+hk_g17p_sparse_vertex_outputs(const struct shader_info *info,
+                              mesa_shader_stage sw_stage, bool xfb_outputs)
+{
+   if (info->stage != MESA_SHADER_VERTEX)
+      return false;
+
+   return info->has_transform_feedback_varyings || xfb_outputs ||
+          sw_stage == MESA_SHADER_GEOMETRY ||
+          /* A raster-discard TES may write only point size, leaving the
+           * four position components absent just like an XFB raster VS. */
+          sw_stage == MESA_SHADER_TESS_EVAL ||
+          info->next_stage == MESA_SHADER_GEOMETRY ||
+          /* The hardware variant of a control-point vertex shader is never
+           * bound -- the software variant runs in compute -- but it is still
+           * compiled, and its UVS layout is as sparse as the geometry case
+           * above. Without this the AGX3 packer refuses it at st_vary #4 and
+           * takes every G17P tessellation pipeline with it. */
+          info->next_stage == MESA_SHADER_TESS_CTRL ||
+          /* A vertex shader may legally write no gl_Position at all. The
+           * four-entry UVS position group stays reserved, so its user
+           * varyings are a dense run based at AGX3_UVS_POSITION_ENTRIES --
+           * the same shape as the XFB and geometry cases -- but there are
+           * fewer than five of them, so the dense-run admission refuses the
+           * store at st_vary #4. That is the whole
+           * dEQP-VK.pipeline.*.no_position.basic.*.v0* family. */
+          !(info->outputs_written & VARYING_BIT_POS);
+}
+
+/*
  * An hk_api shader maps 1:1 to a VkShader object. An hk_api_shader may contain
  * multiple hardware hk_shader's, built at shader compile time. This complexity
  * implements the legacy geometry pipeline and native sample-count variants.
