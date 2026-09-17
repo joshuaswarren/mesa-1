@@ -1634,6 +1634,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    uint32_t queue_count = 1;
    if (pdev->dev.params.features & DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES) {
+#define HK_ADVERTISED_QUEUES 8u
       struct drm_asahi_queue_limits limits = {0};
       struct drm_asahi_get_params query = {
          .param_group = DRM_ASAHI_PARAM_GROUP_QUEUE_LIMITS,
@@ -1651,7 +1652,20 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
                             "Kernel reports no usable command queues");
          goto fail_disk_cache;
       }
-      queue_count = limits.max_queues;
+      /* limits.max_queues is the machine-wide pool of application GART
+       * contexts (g17_queue_limits.rs: contexts 5..62), shared with every
+       * other client on the device. VkQueueFamilyProperties::queueCount is a
+       * per-device guarantee: an application may create a device with that
+       * many queues and expect it to succeed. Handing the shared pool out as
+       * the guarantee makes any application that asks for queueCount queues
+       * fail with VK_ERROR_OUT_OF_DEVICE_MEMORY as soon as anything else is
+       * running -- measured on Neo with a desktop up, the kernel reports 58
+       * and the 39th queue fails, deterministically.
+       *
+       * Advertise a count we can deliver instead. A real guarantee needs a
+       * per-client reservation in the kernel; until then this is the number,
+       * and it still exercises every multi-queue path. */
+      queue_count = MIN2(limits.max_queues, HK_ADVERTISED_QUEUES);
    }
 
    pdev->queue_families[pdev->queue_family_count++] = (struct hk_queue_family){

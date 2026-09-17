@@ -323,12 +323,24 @@ main(int argc, char **argv)
    if (family == UINT32_MAX)
       die("no graphics queue family");
 
+   float priorities[64];
+   for (unsigned i = 0; i < 64; ++i)
+      priorities[i] = 1.0f;
    const float priority = 1.0f;
+   (void)priority;
+   uint32_t queue_count = 1;
+   if (getenv("HK_PROBE_QUEUE_COUNT")) {
+      queue_count = (uint32_t)strtoul(getenv("HK_PROBE_QUEUE_COUNT"), NULL, 0);
+      if (queue_count > families[family].queueCount)
+         queue_count = families[family].queueCount;
+      printf(TEST_NAME ": family %u advertises %u queues, asking for %u\n",
+             family, families[family].queueCount, queue_count);
+   }
    const VkDeviceQueueCreateInfo queue_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
       .queueFamilyIndex = family,
-      .queueCount = 1,
-      .pQueuePriorities = &priority,
+      .queueCount = queue_count,
+      .pQueuePriorities = priorities,
    };
    const VkDeviceCreateInfo device_info = {
       .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
@@ -338,6 +350,26 @@ main(int argc, char **argv)
    VkDevice device;
    check(vkCreateDevice(physical, &device_info, NULL, &device),
          "vkCreateDevice");
+
+   /* dEQP-VK.synchronization.signal_order creates a second logical device on
+    * the same physical device and fails at that call with
+    * VK_ERROR_OUT_OF_DEVICE_MEMORY. Report how many this driver will create,
+    * so a limit shows up as a number rather than as one test's resource
+    * error. */
+   if (getenv("HK_PROBE_DEVICE_COUNT")) {
+      const unsigned want = (unsigned)strtoul(
+         getenv("HK_PROBE_DEVICE_COUNT"), NULL, 0);
+      for (unsigned i = 1; i < want; ++i) {
+         VkDevice extra;
+         VkResult r = vkCreateDevice(physical, &device_info, NULL, &extra);
+         printf(TEST_NAME ": device %u: %s (%d)\n", i + 1,
+                r == VK_SUCCESS ? "created" : "FAILED", (int)r);
+         if (r != VK_SUCCESS)
+            return EXIT_FAILURE;
+      }
+      printf(TEST_NAME ": %u devices created\n", want);
+      return EXIT_SUCCESS;
+   }
 
    LOAD_DEVICE(device, vkDestroyDevice);
    LOAD_DEVICE(device, vkGetDeviceQueue);
