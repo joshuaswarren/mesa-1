@@ -81,14 +81,22 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       const enum pipe_format integer = hk_scaled_texture_format(padded);
       const enum pipe_format storage =
          integer != PIPE_FORMAT_NONE ? integer : padded;
+      /* vkCmdBlitImage between a scaled and a non-scaled format has no
+       * agreed-upon result: the scaled side carries integer values and the
+       * other carries normalized ones, so no conversion satisfies both. Other
+       * drivers withhold every image feature from scaled formats for this
+       * reason. Keep sampling and transfers, which are well-defined, and
+       * withhold blit. */
+      const bool blittable = integer == PIPE_FORMAT_NONE;
       if (ail_pixel_format[storage].texturable) {
-         rgb |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
-                VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+         rgb |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
+         if (blittable)
+            rgb |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
          if (!util_format_is_pure_integer(storage) ||
              hk_uscaled_normalized_format(padded) != PIPE_FORMAT_NONE)
             rgb |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
       }
-      if (ail_pixel_format[storage].renderable)
+      if (ail_pixel_format[storage].renderable && blittable)
          rgb |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
       if (ail_pixel_format[padded].renderable) {
          rgb |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
@@ -125,13 +133,16 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    if (agx_chip_descriptor_generation(pdev->dev.chip) == 9 &&
        hk_scaled_texture_format(p_format) != PIPE_FORMAT_NONE) {
       /* Integer fetch plus float conversion is exact for 8/16-bit scaled
-       * formats. Linear filtering and attachment conversion are separate. */
-      features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
-                  VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+       * formats. Linear filtering and attachment conversion are separate.
+       *
+       * Blit is deliberately absent: a blit between a scaled and a non-scaled
+       * format has no well-defined result, because one side stores integers
+       * and the other normalized values. radv and anv withhold every image
+       * feature from scaled formats for the same reason. */
+      features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
       if (hk_uscaled_normalized_format(p_format) != PIPE_FORMAT_NONE)
          features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
       if (ail_pixel_format[hk_scaled_texture_format(p_format)].renderable) {
-         features |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
          /* The dynamic scaled image-store lowering supports uniform 8/16-bit
           * components. Packed scaled formats still use integer blit views. */
          const unsigned bits = util_format_get_component_bits(
