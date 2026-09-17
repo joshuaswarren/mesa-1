@@ -544,6 +544,16 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
    if (!hk_g17p_bg_eot_shader_supported(shader) ||
        (!store && (shader->info.push_count != key.reserved_preamble ||
                    shader->info.uses_txf != (reloads > 0)))) {
+      mesa_loge("G17P %s shader declined: supported=%u push=%u want=%u "
+                "uses_txf=%u want=%u count=%u reloads=%u samples=%u "
+                "layered=%u sample_size=%uB",
+                store ? "EOT" : "background",
+                hk_g17p_bg_eot_shader_supported(shader),
+                shader ? shader->info.push_count : 0,
+                key.reserved_preamble,
+                shader ? shader->info.uses_txf : 0, reloads > 0, count,
+                reloads, key.tib.nr_samples, key.tib.layered,
+                key.tib.sample_size_B);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return (struct hk_bg_eot){0};
    }
@@ -821,6 +831,20 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          (store ? op == AGX_EOT_STORE : (op == AGX_BG_CLEAR || op == AGX_BG_LOAD));
       if ((rt == 0 && !rt0_supported) ||
           (rt != 0 && op != AGX_BG_EOT_NONE && !dual_mrt_rt1 && !multi_mrt_rt)) {
+         /* The refusal is about WHICH target carries WHICH operation in a
+          * layout the G17P background/EOT programs cannot express, and the
+          * deferred VK_ERROR_FEATURE_NOT_PRESENT surfaces much later at
+          * vkEndCommandBuffer with none of that visible. Name it. */
+         mesa_loge("G17P %s program declined: rt%u op=%u, ops=%u%u%u%u%u%u%u%u "
+                   "mrt=%u dual=%u multi=%u/%u samples=%u layered=%u "
+                   "sample_size=%uB",
+                   store ? "EOT" : "background", rt, (unsigned)op,
+                   (unsigned)key->op[0], (unsigned)key->op[1],
+                   (unsigned)key->op[2], (unsigned)key->op[3],
+                   (unsigned)key->op[4], (unsigned)key->op[5],
+                   (unsigned)key->op[6], (unsigned)key->op[7], (unsigned)mrt,
+                   dual_mrt, multi_mrt, multi_count, key->tib.nr_samples,
+                   key->tib.layered, key->tib.sample_size_B);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
