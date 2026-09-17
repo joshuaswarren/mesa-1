@@ -15979,10 +15979,16 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
          EXPECT_NE(std::search(code.begin(), code.end(), read_coords,
                                read_coords + sizeof(read_coords)),
                    code.end());
+         /* The scoreboard wait is carried by the FIRST staged copy, which is
+          * the first coordinate copy -- not the first data copy. Waiting on a
+          * data copy runs after the coordinates have already been staged, so a
+          * coordinate coming straight from an outstanding async producer was
+          * copied before that producer retired and the store landed at texel
+          * (0,0) (agx3_pack_binary.c, agx3_emit_storage_image_write). */
          std::vector<uint8_t> coordinates;
          uint8_t coordinate[AGX3_STAGE_MAX_LENGTH], coordinate_len = 0;
          ASSERT_TRUE(agx3_stage_copy_source(
-            AGX_ISA_ENCODING_AGX3B, 0, 0, false, 1, 0,
+            AGX_ISA_ENCODING_AGX3B, 0, 0, false, 1, 1,
             coordinate, &coordinate_len));
          append(coordinates, coordinate, coordinate_len);
          ASSERT_TRUE(agx3_stage_copy_source(
@@ -15995,16 +16001,17 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
          const auto first = std::search(code.begin(), code.end(), imgwci,
                                         imgwci + sizeof(imgwci));
          ASSERT_NE(first, code.end());
-         /* The native witness consumes the image-load scoreboard signal once:
-          * the first data-staging COPY waits on slot 1, while the remaining
-          * components only join the same slot-1 staging transaction. */
+         /* The native witness consumes the image-load scoreboard signal once,
+          * on the first staged copy of the whole run. The coordinate copies
+          * come first and carry it (above), so every data-staging COPY only
+          * joins the same slot-1 staging transaction. */
          const unsigned data_dest[4] = {4, 6, 12, 14};
          std::vector<uint8_t> staging;
          for (unsigned c = 0; c < 4; ++c) {
             uint8_t copy[AGX3_STAGE_MAX_LENGTH], len = 0;
             ASSERT_TRUE(agx3_stage_copy_source(
-               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 1,
-               c == 0 ? 1 : 0, copy, &len));
+               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 1, 0,
+               copy, &len));
             append(staging, copy, len);
          }
          ASSERT_GE(std::distance(code.begin(), first), staging.size());
