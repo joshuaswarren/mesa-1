@@ -282,6 +282,18 @@ if with_tests
   )
 
   test(
+    'asahi-poly-adj-map',
+    executable(
+      'asahi-poly-adj-map',
+      files('tests/test-poly-adj-map.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-precompiled-fill',
     executable(
       'asahi-g17p-precompiled-fill',

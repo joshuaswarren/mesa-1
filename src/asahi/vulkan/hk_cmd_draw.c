@@ -6783,10 +6783,37 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
             draw = agx_draw_indirect(out_draw);
          } else {
             unsigned count = libagx_remap_adj_count(draw.b.count[0], prim);
+            struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-            draw = (struct agx_draw){
-               .b = agx_3d(count, draw.b.count[1], 1),
-            };
+            /* Software indexing hands the remap to the VS prolog, which a G17P
+             * hardware vertex shader never observes: it reads its invocation
+             * index straight from SR 0xdd rather than the
+             * AGX_ABI_VIN_VERTEX_ID the prolog exports, so every adjacency
+             * draw fetched in[i] where it owed in[map(i)].  Materialise the
+             * mapping as an index buffer instead and let the input assembler
+             * apply it, which is the one path the vertex stage does see. */
+            if (count > 0 && dev->dev.chip == AGX_CHIP_G17P) {
+               unsigned ib_B = count * sizeof(uint32_t);
+               uint64_t ib = hk_pool_alloc(cmd, ib_B, 4).gpu;
+
+               /* Take the index buffer straight off the draw rather than out
+                * of poly_vertex_params, which is only uploaded when the linked
+                * vertex shader asked for software indexing. */
+               libagx_write_adj_indices(
+                  cmd, agx_1d(count), AGX_BARRIER_ALL | AGX_PREGFX, ib,
+                  draw.indexed ? agx_draw_index_buffer(draw) : 0,
+                  draw.indexed ? agx_draw_index_range_el(draw) : 0, count,
+                  draw.indexed ? agx_index_size_to_B(draw.index_size) : 0,
+                  draw.indexed ? draw.index_bias : draw.start, prim);
+
+               draw = agx_draw_indexed(count, draw.b.count[1], 0, 0,
+                                       draw.start_instance, ib, ib_B,
+                                       AGX_INDEX_SIZE_U32, false);
+            } else {
+               draw = (struct agx_draw){
+                  .b = agx_3d(count, draw.b.count[1], 1),
+               };
+            }
          }
       }
 

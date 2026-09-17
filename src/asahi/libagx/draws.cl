@@ -291,6 +291,40 @@ libagx_d3d12_predicate(global uint32_t *out, constant uint32_t *in,
 }
 
 /*
+ * Materialise an adjacency decomposition as a real index buffer.
+ *
+ * The software-indexing path strips a draw's index/offset information and has
+ * the VS prolog remap gl_VertexIndex instead.  That never works on G17P: a
+ * hardware vertex shader reads its invocation index from SR 0xdd directly
+ * (agx_compile.c, nir_intrinsic_load_vertex_id), so it never observes the
+ * AGX_ABI_VIN_VERTEX_ID the prolog exported, and every adjacency draw fetched
+ * attributes at in[i] instead of in[map(i)].
+ *
+ * Writing the mapped -- and, for an indexed draw, already-resolved -- indices
+ * into a buffer lets the hardware input assembler perform the remap, which is
+ * the one path the vertex stage does observe.  first_vertex is folded in here
+ * so the resulting draw needs no index bias of its own.
+ */
+KERNEL(64)
+libagx_write_adj_indices(global uint *out, uint64_t index_buffer,
+                         uint index_buffer_range_el, uint count,
+                         uint index_size_B, uint first_vertex,
+                         enum mesa_prim prim)
+{
+   uint i = cl_global_id.x;
+   if (i >= count)
+      return;
+
+   uint src = poly_map_adj_vertex(i, prim);
+
+   out[i] = first_vertex + (index_size_B
+                               ? poly_load_index(index_buffer,
+                                                 index_buffer_range_el, src,
+                                                 index_size_B)
+                               : src);
+}
+
+/*
  * Indexing/offseting is in software if necessary so we strip all
  * indexing/offset information.
  */

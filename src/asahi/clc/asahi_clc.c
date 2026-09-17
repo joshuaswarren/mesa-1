@@ -310,7 +310,18 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_prefix_sum_tess") ||
           !strcmp(func->name, "libagx_g17p_local_probe") ||
           !strcmp(func->name, "libagx_g17p_local_sg_probe") ||
-          !strcmp(func->name, "libagx_draw_without_adj");
+          !strcmp(func->name, "libagx_draw_without_adj") ||
+          /* Materialises an adjacency decomposition as an index buffer, which
+           * is the only remap a G17P hardware vertex shader observes: it reads
+           * its invocation index from SR 0xdd, never the prolog's exported
+           * AGX_ABI_VIN_VERTEX_ID.  One invocation per output index, one call
+           * to poly_map_adj_vertex(), at most one index-buffer load and one
+           * global store -- no atomics, barriers, printf or scratch, and the
+           * same poly_load_index() the already-qualified
+           * libagx_draw_without_adj uses.  Its ARITHMETIC has a host oracle:
+           * test-poly-adj-map checks poly_map_adj_vertex() against the
+           * per-topology sequences for all four adjacency primitives. */
+          !strcmp(func->name, "libagx_write_adj_indices");
 }
 
 /* Like nir_precomp_print_binary_map, but programs the target does not support
