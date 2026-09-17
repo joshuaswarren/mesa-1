@@ -122,7 +122,8 @@ typedef struct {
                            uint32_t syncobj, uint64_t wait_value,
                            struct drm_asahi_gem_bind_op *ops,
                            uint32_t count);
-   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr);
+   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+                   size_t length);
    ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
    int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
                  struct agx_submit_virt *virt);
@@ -387,8 +388,20 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
    return addr + dev->sparse_ro_offset;
 }
 
+/*
+ * `length` bounds a PLACED mapping.  Zero means the whole BO, which is what
+ * every ordinary map wants.
+ *
+ * A placed map may not be given the BO's size: agx_bo_cache_fetch() hands back
+ * BOs up to twice the requested size (agx_bo.c), so a VkDeviceMemory of n bytes
+ * can be backed by a BO of 2n, and mapping bo->size with MAP_FIXED at the
+ * address the application reserved would land on whatever the application put
+ * after its allocation.  VK_EXT_map_memory_placed requires exactly the memory
+ * object's range; dEQP-VK.memory.map_placed.* reserves guard pages
+ * immediately after it, fills them, and checks the pattern survives.
+ */
 static inline void *
-agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
+agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t length)
 {
    /* The BO cache deliberately preserves CPU mappings.  A Vulkan allocation
     * may therefore inherit a mapping from an earlier allocation even though
@@ -405,7 +418,7 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
    }
 
    if (!bo->_map)
-      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr);
+      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr, fixed_addr ? length : 0);
 
    return bo->_map;
 }
@@ -413,7 +426,7 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
 static inline void *
 agx_bo_map(struct agx_bo *bo)
 {
-   return agx_bo_map_placed(bo, NULL);
+   return agx_bo_map_placed(bo, NULL, 0);
 }
 
 static inline bool

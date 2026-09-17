@@ -366,7 +366,10 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
                        "Memory object already mapped.");
    }
 
-   mem->map = agx_bo_map_placed(mem->bo, fixed_addr);
+   /* Bound a placed mapping by the memory object, not the BO: the BO cache
+    * may have handed us one up to twice as large, and the application has
+    * reserved only mem->vk.size at this address. */
+   mem->map = agx_bo_map_placed(mem->bo, fixed_addr, mem->vk.size);
    if (mem->map == NULL) {
       *ppData = NULL;
       return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,

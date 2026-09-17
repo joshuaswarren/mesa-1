@@ -2158,7 +2158,8 @@ out:
  * asserted away rather than silently ignored.
  * ------------------------------------------------------------------------- */
 static void
-d3dkmt_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
+d3dkmt_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+               UNUSED size_t length)
 {
    struct agx_d3dkmt_winsys *ws = agx_d3dkmt_ws(dev);
 

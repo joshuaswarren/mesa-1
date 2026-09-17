@@ -191,7 +191,8 @@ agx_virtio_bo_unbind_object(struct agx_device *dev, uint32_t object_handle)
 }
 
 static void
-agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
+agx_virtio_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+                   UNUSED size_t length)
 {
    bo->_map = vdrm_bo_map(dev->vdrm, bo->handle, bo->size, fixed_addr);
    if (bo->_map == MAP_FAILED) {
