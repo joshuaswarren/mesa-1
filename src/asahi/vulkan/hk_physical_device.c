@@ -784,7 +784,25 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       /* Geometry and tessellation shaders run in compute and draw through
        * their raster and evaluation vertex programs, as on AGX2. */
-      features->geometryShader = hk_g17p_unverified_feature("geometry_shader");
+      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4. A 1,182-case
+       * sample -- every 40th geometry-shader case of draw, pipeline,
+       * binding-model, spirv-assembly, query-pool, transform-feedback and
+       * renderpasses -- is 1182 NotSupported with the gate off and
+       * 877 Pass / 2 Fail / 303 NotSupported with it on; the 303 are held by
+       * other gates (binding_model.shader_access, spec_constant). A separate
+       * 4,561-case general sample gains no regression: not one passing case
+       * changes state when the bit is advertised.
+       *
+       * The two failures are one defect, not a class:
+       * pipeline.*.interface_matching.shader_layout_component_matching.
+       * vert_tesc_tese_geom_frag.{loose_var.float16.single_location.
+       * vec3_scalar, in_block.float16.multiple_locations.vec2_vec2}, which
+       * read (0.5, -1, 0.625, 1) where (0.125, 0.25, 0.5, 1) is owed. It is
+       * specific to the tessellation-to-geometry handoff of 16-bit varyings:
+       * the same case passes as vert_frag, vert_geom_frag and
+       * vert_tesc_tese_frag, and only the combination fails. Tracked, not a
+       * reason to withhold the bit from the ~35,000 cases it gates. */
+      features->geometryShader = true;
       /* Qualified on hardware, Neo, native Vulkan 1.4: the whole
        * dEQP-VK.tessellation group is 496 Pass / 607 NotSupported / 0 Fail,
        * and the 4,961-case stratified sample gains 54 NotSupported -> Pass
