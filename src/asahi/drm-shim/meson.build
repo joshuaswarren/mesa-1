@@ -838,7 +838,9 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '6')
   g17p_layered_mip_blit_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
   g17p_layered_mip_blit_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,0')
+    # The one strong barrier is the host-read cache flush (6aae441547b),
+    # which strengthens the final launch's tail record in place.
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,1')
   test(
     'hk_g17p_layered_mip_blit',
     g17p_vulkan_layered_mip_blit,

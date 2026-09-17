@@ -982,12 +982,14 @@ check_stencil_blit_coverage(void)
     * the API command cannot pass. G17P's fragment layer input is an ordinary
     * flat varying, while the observer remains a no-varying draw, so this
     * sequence must exercise both paths. The two clears and final transfer also
-    * have an exact three-launch compute envelope. */
+    * have an exact three-launch compute envelope. All three launch tail
+    * barriers are strong here: two request AGX_BARRIER_ALL and the third is
+    * strengthened in place by the host-read flush (6aae441547b). */
    if (matrix_stats.draws != 9 || matrix_stats.state_updates != 9 ||
        matrix_stats.stencil_state_updates != 9 ||
        !matrix_stats.stencil_enabled || !matrix_stats.varying_fs ||
        !matrix_stats.no_varying_fs || compute_stats.launches != 3 ||
-       compute_stats.barriers != 3 || compute_stats.strong_barriers != 2) {
+       compute_stats.barriers != 3 || compute_stats.strong_barriers != 3) {
       fprintf(stderr,
               "shim: incomplete G17P stencil blit coverage: draws=%u "
               "state=%u stencil-state=%u stencil=%u varying=%u/%u "

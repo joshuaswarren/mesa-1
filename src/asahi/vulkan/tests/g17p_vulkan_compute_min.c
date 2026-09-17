@@ -290,8 +290,11 @@ main(int argc, char **argv)
    if (submit_only &&
        (!shim_validate || !strcmp(shim_validate, "0")))
       die("--submit-only requires the G17P DRM-shim stream validator");
+   /* Three launches, each ending in its own barrier. Two are strong: the
+    * predicate patch requests AGX_BARRIER_ALL, and the host-read flush
+    * (6aae441547b) strengthens the final launch's tail barrier in place. */
    if (submit_only &&
-       setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS", "3,3,0,1", 1))
+       setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS", "3,3,0,2", 1))
       die("failed to select exact G17P compute-stream counts");
    const bool expect_execute =
       (test_case->predicate != 0) != test_case->inverted;
