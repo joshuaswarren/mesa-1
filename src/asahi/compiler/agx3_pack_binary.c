@@ -186,6 +186,22 @@ agx3_report_refusal(const agx_instr *I, unsigned line)
       goto fail;                                                               \
    } while (0)
 
+/*
+ * agx3_emit_texture_sample() screens an operand shape through some thirty
+ * gates before it encodes anything, and the caller reports only "no grounded
+ * AGX3 encoding for texture_sample". Two shapes that differ in one field --
+ * a cube array where the cube encodes, a register descriptor where the
+ * immediate one encodes -- then print the same line, so every guess about
+ * which field mattered costs a round trip to hardware. Name the gate.
+ */
+static bool
+agx3_tex_decline(const agx_instr *I, unsigned line)
+{
+   agx3_report_refusal_why(I, line, "texture operand gate");
+   return false;
+}
+
+
 static bool
 agx3_append(struct util_dynarray *emission, const uint8_t *bytes, uint8_t len)
 {
@@ -1824,7 +1840,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
    case AGX_GATHER_G: gather_component = AGX3_TEX_GATHER_G; break;
    case AGX_GATHER_B: gather_component = AGX3_TEX_GATHER_B; break;
    case AGX_GATHER_A: gather_component = AGX3_TEX_GATHER_A; break;
-   default: return false;
+   default: return agx3_tex_decline(I, __LINE__);
    }
    const bool immediate_lod =
       (explicit_lod || biased_lod) && I->src[1].type == AGX_INDEX_IMMEDIATE;
@@ -2026,11 +2042,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                       (cube && bias_min))))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
-      return false;
+      return agx3_tex_decline(I, __LINE__);
 
    /* The caller lowers additional required dependencies before staging. */
    if (wait_mask & (wait_mask - 1))
-      return false;
+      return agx3_tex_decline(I, __LINE__);
 
    const bool register_operands = !immediate &&
       (I->src[3].type == AGX_INDEX_REGISTER ||
@@ -2049,11 +2065,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       const unsigned coord_first = I->src[0].value;
       const unsigned coord_last = coord_first + (cube_array && !query_lod ? 8 : 6);
       if (coord_first < 2 || (coord_first < 16 && coord_last > 14))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
    } else if (cube &&
               (cem_scratch == NULL || (cem_scratch[0] & 1) ||
                cem_scratch[2] > 190)) {
-      return false;
+      return agx3_tex_decline(I, __LINE__);
    }
 
    /* Native register-indexed array and cube samples publish their coordinate /
@@ -2088,7 +2104,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
         three_d || cube || gradient_lod || bias_min || gradient_min ||
         query_lod || (explicit_lod && !immediate_lod) || register_bias ||
         register_offset || (bank_base & 7) || bank_base > 16))
-      return false;
+      return agx3_tex_decline(I, __LINE__);
    const uint16_t coord = (enc == AGX_ISA_ENCODING_AGX3B ||
                            native_staged_coords || explicit_lod ||
                            register_bias || array || three_d || cube ||
@@ -2123,7 +2139,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
               I->src[1].cache, minimum_last && I->src[1].discard, bytes,
               &len) ||
            !agx3_append(emission, bytes, len)))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       const bool bank6 = packed_array_word
          ? agx3_tex_stage_copy_hints(
               enc, 6, offset_base, stage_slot, shadow ? wait_mask : 0,
@@ -2134,13 +2150,13 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
               I->src[1].cache, !minimum_last && I->src[1].discard, bytes,
               &len);
       if (!bank6 || !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       if (shadow &&
           (!agx3_tex_pack_minimum(enc, I->src[1].value + 1, array_scratch,
                                   I->src[1].cache, I->src[1].discard, bytes,
                                   &len) ||
            !agx3_append(emission, bytes, len)))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    } else if (gradient_min && array && !cube) {
       if (!(packed_array_word
@@ -2153,7 +2169,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                     wait_mask, I->src[0].cache, I->src[0].discard,
                     I->src[1].cache, I->src[1].discard, bytes, &len)) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    } else if (bias_min && three_d && staged_packed_offset) {
       /* A 3D word carries the Z nibble where a 2D one carries the minimum,
@@ -2167,14 +2183,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                  I->src[1].cache, I->src[1].discard, bytes,
                                  &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    } else if (bias_min && !cube && !staged_packed_offset) {
       if (!agx3_tex_stage_bias_min(
              enc, I->src[1].value, I->src[1].value + 1, stage_slot, wait_mask,
              I->src[1].cache, I->src[1].discard, bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    } else if (gradient_min && !staged_packed_offset) {
       if (!agx3_tex_stage_typed_lod(
@@ -2182,14 +2198,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
              wait_mask, I->src[1].cache, I->src[1].discard,
              AGX3_TEX_LEVEL_MINIMUM, bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    } else if (staged_packed_offset) {
       if (!agx3_tex_stage_copy_hints(
              enc, 6, offset_base, stage_slot, wait_mask,
              I->src[5].cache, I->src[5].discard, bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    } else if (combined_array_lod) {
       if (!agx3_tex_stage_array_lod(
@@ -2197,7 +2213,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
              I->src[0].cache, I->src[0].discard,
              I->src[1].cache, I->src[1].discard, bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    } else if (((explicit_lod && !immediate_lod) || register_bias) &&
               !cube_register_lod) {
@@ -2205,7 +2221,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                              I->src[1].cache, I->src[1].discard,
                              bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       wait_mask = 0;
    }
 
@@ -2219,7 +2235,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
            enc, 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
            I->src[5].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
-      return false;
+      return agx3_tex_decline(I, __LINE__);
 
    if (cube) {
       /* Native cube sampling consumes CEM's normalized coordinates and face,
@@ -2228,7 +2244,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
        * join that transaction and SMP waits for the complete group. */
       const uint16_t staged_wait = (uint16_t)(1u << (stage_slot - 1));
       if (wait_mask && (!register_operands || wait_mask != staged_wait))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
 
       const uint16_t fixed_scratch[3] = {0, 14, 4};
       const uint16_t *scratch = fixed_cem ? fixed_scratch : cem_scratch;
@@ -2244,14 +2260,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                  axis == 2 && I->src[0].discard, bytes, &len);
          if (!packed ||
              !agx3_append(emission, bytes, len))
-            return false;
+            return agx3_tex_decline(I, __LINE__);
 
          if (axis == 0 &&
              (!(fixed_cem
                    ? agx3_tex_cube_cem_rcp(enc, bytes, &len)
                    : agx3_tex_cube_cem_rcp_to(enc, scratch[0], bytes, &len)) ||
               !agx3_append(emission, bytes, len)))
-            return false;
+            return agx3_tex_decline(I, __LINE__);
       }
 
       for (unsigned component = 0; component < 2; ++component) {
@@ -2263,7 +2279,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                  stage_slot, bytes, &len);
          if (!packed ||
              !agx3_append(emission, bytes, len))
-            return false;
+            return agx3_tex_decline(I, __LINE__);
       }
    } else if (!native_staged_coords) {
       if (!agx3_tex_stage_copy_hints(enc, coord, I->src[0].value, stage_slot,
@@ -2274,7 +2290,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                        I->src[0].discard,
                                     bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       if (!agx3_tex_stage_copy_hints(enc, coord + 2, I->src[0].value + 2,
                                     stage_slot, 0,
                                     enc == AGX_ISA_ENCODING_AGX3B &&
@@ -2283,7 +2299,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                        I->src[0].discard,
                                     bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
    }
 
    if (three_d &&
@@ -2291,7 +2307,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
            enc, coord + 4, I->src[0].value + 4, stage_slot, 0,
            I->src[0].cache, I->src[0].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
-      return false;
+      return agx3_tex_decline(I, __LINE__);
 
    /* The driver's noncube array ABI stages the layer into the sampler-private
     * bank and selects it with SMP f77=2.  Apple's direct f31/f37 form belongs
@@ -2305,7 +2321,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
            enc, I->src[0].value + 4, stage_slot, 0, I->src[0].cache,
            I->src[0].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
-      return false;
+      return agx3_tex_decline(I, __LINE__);
 
    if (cube) {
       const uint16_t face = fixed_cem ? 2 : cem_scratch[0] + 2;
@@ -2347,8 +2363,18 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
          packed = agx3_tex_stage_cube_z(enc, face, stage_slot, 0, false, true,
                                         bytes, &len);
       }
-      if (!packed || !agx3_append(emission, bytes, len))
+      if (!packed || !agx3_append(emission, bytes, len)) {
+         /* The cube staging forms name half-registers in operand fields of
+          * different widths, so a refusal here is about WHICH half the CEM
+          * scratch and the layer landed on, not about the sample's shape.
+          * Printing the shape alone sends the reader back to hardware. */
+         char why[96];
+         snprintf(why, sizeof(why),
+                  "cube staging face=half%u layer=half%u slot=%u", face,
+                  layer, stage_slot);
+         agx3_report_refusal_why(I, __LINE__, why);
          return false;
+      }
    }
 
    if (register_offset) {
@@ -2357,12 +2383,12 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
               enc, I->src[0].value + 4, array_scratch,
               I->src[0].cache, I->src[0].discard, bytes, &len) ||
            !agx3_append(emission, bytes, len)))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
       if (!agx3_tex_stage_gather_offset(
              enc, I->src[5].value + (shadow ? 2 : 0), array, array_scratch,
              stage_slot, I->src[5].cache, I->src[5].discard, bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
    }
 
    /* The comparison reference belongs to this sample's own staging group,
@@ -2375,14 +2401,14 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
            enc, coord + 4, I->src[5].value, stage_slot, 0, I->src[5].cache,
            staged_offset ? false : I->src[5].discard, bytes, &len) ||
         !agx3_append(emission, bytes, len)))
-      return false;
+      return agx3_tex_decline(I, __LINE__);
 
    if (staged_component_offset) {
       if (!agx3_tex_stage_offset_2d(
              enc, offset_base, offset_base + 2, stage_slot, 0,
              I->src[5].cache, I->src[5].discard, bytes, &len) ||
           !agx3_append(emission, bytes, len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
    }
 
    /* The gradient scalars follow the coordinates, in the interleaved order
@@ -2402,7 +2428,7 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                         0, I->src[1].cache, I->src[1].discard,
                                         bytes, &len) ||
              !agx3_append(emission, bytes, len))
-            return false;
+            return agx3_tex_decline(I, __LINE__);
       }
    }
 
@@ -2410,11 +2436,11 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
       uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len = 0;
       if (pixel_entry_offset == NULL ||
           !agx3_pixel_colour_entry(enc, entry, &entry_len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
 
       *pixel_entry_offset = emission->size;
       if (!agx3_append(emission, entry, entry_len))
-         return false;
+         return agx3_tex_decline(I, __LINE__);
    }
 
    const struct agx3_tex_sample_desc d = {
