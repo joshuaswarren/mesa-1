@@ -3029,6 +3029,28 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    libagx_tessellate(cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, info.mode,
                      POLY_TESS_MODE_COUNT, state);
 
+   /* HK_G17P_TG_PROBE=local|sg runs one threadgroup-memory probe in this
+    * dispatch stream, with the same internal precompiled record, immediately
+    * before the scan. Inert unless the variable is set; it is how the quarter-
+    * sized threadgroup window on this path was measured. */
+   {
+      const char *probe = getenv("HK_G17P_TG_PROBE");
+      if (probe) {
+         struct agx_ptr report = hk_pool_alloc(cmd, 8192, 4);
+         if (report.gpu) {
+            if (probe[0] == 's') {
+               libagx_g17p_local_sg_probe(cmd, agx_1d(1024),
+                                          AGX_BARRIER_ALL | AGX_PREGFX,
+                                          report.gpu);
+            } else {
+               libagx_g17p_local_probe(cmd, agx_1d(1024),
+                                       AGX_BARRIER_ALL | AGX_PREGFX,
+                                       report.gpu);
+            }
+         }
+      }
+   }
+
    libagx_prefix_sum_tess(cmd, agx_1d(1024), AGX_BARRIER_ALL | AGX_PREGFX,
                           state, c_prims, c_inv, c_prims || c_inv);
 
