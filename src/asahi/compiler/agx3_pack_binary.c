@@ -1703,9 +1703,23 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
     * bank. Native texture/image kernels publish ordinary GPR coordinates
     * with COPY on the same slot the instruction waits for. Keeping the source
     * retained also matches the native write kernel, whose address
-    * calculation may reuse it. */
-   if (!agx3_stage_copy_source(enc, bank, I->src[1].value, false, slot, 0,
-                               coord_bytes, &coord_len) ||
+    * calculation may reuse it.
+    *
+    * The scoreboard wait belongs on the FIRST staged COPY of the group, not
+    * on the first data COPY: the coordinate copies are emitted ahead of the
+    * data copies, so a wait carried by the data copy runs too late to protect
+    * the coordinate registers.  A coordinate produced by an outstanding
+    * async producer -- `imageStore(img, pc.coords.xy, ...)` compiles to
+    * `device_load ... slot 0` feeding image_write's src[1] directly -- was
+    * then copied into the staging bank before that load retired, so every
+    * store landed at the stale register contents (texel 0,0) regardless of
+    * the requested coordinate.  Every other staged producer in this file
+    * already waits on its first COPY: the texture-sample coordinate pair
+    * (agx3_emit_texture_sample), the ZS_EMIT pair (AGX_OPCODE_ZS_EMIT_AGX3),
+    * the UVSW transfer (agx3_emit_uvsw) and SAMPLE_MASK_AGX3.  Waiting here
+    * is also strictly conservative for the data copies, which follow. */
+   if (!agx3_stage_copy_source(enc, bank, I->src[1].value, false, slot,
+                               wait_mask, coord_bytes, &coord_len) ||
        !agx3_append(&staged, coord_bytes, coord_len) ||
        !agx3_stage_copy_source(enc, bank + 2, I->src[1].value + 2, false,
                                slot, 0, coord_bytes, &coord_len) ||
@@ -1728,8 +1742,7 @@ agx3_emit_storage_image_write(struct util_dynarray *emission,
       uint8_t bytes[AGX3_STAGE_MAX_LENGTH], len = 0;
       if (!agx3_stage_copy_source(enc, data_dest[c],
                                   I->src[0].value + 2 * c,
-                                  I->src[0].discard, slot,
-                                  c == 0 ? wait_mask : 0,
+                                  I->src[0].discard, slot, 0,
                                   bytes, &len) ||
           !agx3_append(&staged, bytes, len)) {
          if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
