@@ -390,6 +390,13 @@ struct hk_linked_shader {
     */
    bool sw_indexing;
 
+   /* True when sw_indexing is set purely because the topology carries
+    * adjacency, i.e. the bound program is still the hardware vertex shader
+    * and only fetches its own indices. The geometry/tessellation case, where
+    * the software vertex shader runs as a compute kernel, is a different
+    * shape and keeps sw_indexing with this clear. */
+   bool sw_indexing_hw_vs;
+
    /* Absolute uniform-half base selected by the fragment epilog key for its
     * dynamic blend constants. Zero means the standard half4 ABI. */
    uint16_t g17p_blend_constant_base;

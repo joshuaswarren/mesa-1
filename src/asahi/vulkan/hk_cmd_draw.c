@@ -3333,6 +3333,7 @@ hk_get_fast_linked_locked_vs(struct hk_device *dev, struct hk_shader *shader,
 
    /* XXX: Fix this higher up the stack */
    linked->sw_indexing = !key->prolog.hw || key->prolog.adjacency;
+   linked->sw_indexing_hw_vs = key->prolog.hw && key->prolog.adjacency;
    linked->b.uses_base_param |= linked->sw_indexing;
 
    _mesa_hash_table_insert(shader->linked.ht, key_clone, linked);
@@ -6327,8 +6328,14 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * the bound hardware vertex program: poly's geometry raster variant, or
     * the evaluation shader after the software or hardware tessellator. It
     * publishes its render state exactly like an ordinary draw's. */
+   /* An adjacency topology with no application geometry shader keeps the
+    * hardware vertex program and only makes it fetch its own indices, so it
+    * publishes render state exactly as a geometry or tessellation draw does.
+    * Excluding it left hk_flush_dynamic_state() refusing the draw, and every
+    * adjacency topology failed at vkEndCommandBuffer with
+    * VK_ERROR_FEATURE_NOT_PRESENT. */
    const bool g17p_transformed_path =
-      dev->dev.chip == AGX_CHIP_G17P && (geom || tess) && !adj;
+      dev->dev.chip == AGX_CHIP_G17P && (geom || tess || adj);
    if (desc->push_dirty)
       hk_cmd_buffer_flush_push_descriptors(cmd, desc);
 

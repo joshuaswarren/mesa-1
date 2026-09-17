@@ -1535,8 +1535,16 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
          BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
+      /* Software indexing is admitted when the bound program is still the
+       * hardware vertex shader and only fetches its own indices, which is
+       * what an adjacency topology without a geometry shader compiles to.
+       * Its extra state is the VERTEX_PARAMS uniform, which
+       * hk_flush_dynamic_state() already uploads for exactly this case. The
+       * geometry and tessellation shape, where the software vertex shader
+       * runs as a compute kernel, stays refused. */
       const bool ok =
-         !linked->sw_indexing && nr_attribs <= AGX_MAX_VBUFS &&
+         (!linked->sw_indexing || linked->sw_indexing_hw_vs) &&
+         nr_attribs <= AGX_MAX_VBUFS &&
          s->agx3_vdm_state_update.source_layout ==
             AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
 
