@@ -758,20 +758,24 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
       }
    }
    if (!samples && !image_reads) {
+      /* A shader with no texture instruction at all is the ordinary case and
+       * says nothing; reporting it once per compile buries the shaders that
+       * did have something to lower and did not get it. Report only when the
+       * shader has texture instructions this pass declined to count. */
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE)) {
-         unsigned tex = 0, intrinsics = 0;
+         unsigned tex = 0;
          nir_foreach_function_impl(impl, shader) {
             nir_foreach_block(block, impl) {
-               nir_foreach_instr(instr, block) {
+               nir_foreach_instr(instr, block)
                   tex += instr->type == nir_instr_type_tex;
-                  intrinsics += instr->type == nir_instr_type_intrinsic;
-               }
             }
          }
-         fprintf(stderr,
-                 "G17P indexed samplers: nothing to lower in stage %u "
-                 "(%u tex, %u intrinsics)\n",
-                 (unsigned)shader->info.stage, tex, intrinsics);
+         if (tex) {
+            fprintf(stderr,
+                    "G17P indexed samplers: %u texture instructions in stage "
+                    "%u, none admitted\n",
+                    tex, (unsigned)shader->info.stage);
+         }
       }
       return false;
    }
