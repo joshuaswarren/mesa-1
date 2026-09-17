@@ -9263,9 +9263,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool sample_coverage =
                I->sr == AGX_SR_INPUT_SAMPLE_MASK &&
                ctx->stage == MESA_SHADER_FRAGMENT;
+            /* A G17P tessellation-control program is a compute dispatch:
+             * hk_launch_tess() dispatches it, and hk_shader.c already selects
+             * the compute texture/sampler heaps for it on exactly that
+             * grounds ("Poly executes geometry variants through CDM, so they
+             * use the native indexed texture/sampler heaps just like compute
+             * shaders"). The stage label is a compiler-side artifact; the
+             * hardware program is the same CDM kind already witnessed here,
+             * so SR34/SR36 read the same subgroup state. Without this every
+             * subgroup op in a TCS refused the shader -- 99 of the 3,912
+             * dEQP-VK.subgroups.*tess_control mustpass cases -- which became
+             * reachable when tessellationShader was enabled by default. */
             const bool subgroup_stage =
                ctx->stage == MESA_SHADER_COMPUTE ||
                ctx->stage == MESA_SHADER_VERTEX ||
+               ctx->stage == MESA_SHADER_TESS_CTRL ||
                ctx->stage == MESA_SHADER_FRAGMENT;
             const bool active_index =
                I->sr == AGX_SR_ACTIVE_THREAD_INDEX_IN_SUBGROUP &&
