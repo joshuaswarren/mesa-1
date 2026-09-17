@@ -4113,12 +4113,24 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       /* The 32-bit form has grounded |x| and -|x|+1 encodings only; -|x|
        * takes the same bit route (robustness2.*.vertex_attribute_fetch.
        * no_fmt_qual.len_25{2,6}.*.1d.vert). */
+      /* The sign word belongs to the SOURCE's width. Materializing a half's
+       * modifier through a 32-bit mask and a 32-bit temporary produced
+       * `xor 4h, #0x80000000` into a 32-bit destination, which has no AGX3
+       * encoding at all: every SPIR-V OpFNegate on a 16-bit value under a
+       * float-controls preserve mode refused the whole shader
+       * (dEQP-VK.spirv_assembly.instruction.*.float_controls.fp16.input_args.
+       * negate_*_preserve*, 84 cases, while the fp32 rows passed).
+       *
+       * Absolute value and negation are also separate operations: |x| clears
+       * the sign and -x flips it, so an unconditional XOR is only correct
+       * when a negate is actually present. Apply each modifier that is set,
+       * and leave an unmodified move alone. */
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           I->op == AGX_OPCODE_FADD && !I->saturate &&
+          (I->src[0].abs || I->src[0].neg) &&
           ((I->dest[0].size == AGX_SIZE_16 &&
             (I->src[0].size == AGX_SIZE_16 ||
-             (I->src[0].size == AGX_SIZE_32 &&
-              (I->src[0].abs || I->src[0].neg)))) ||
+             I->src[0].size == AGX_SIZE_32)) ||
            (I->dest[0].size == AGX_SIZE_32 && I->src[0].size == AGX_SIZE_32 &&
             I->src[0].abs && I->src[0].neg)) &&
           I->src[0].type != AGX_INDEX_IMMEDIATE &&
@@ -4126,12 +4138,51 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
           ((I->src[1].value == 0 && I->src[1].neg) ||
            (I->src[1].value == agx_minifloat_encode(-0.0f) &&
             !I->src[1].neg && !I->src[1].abs))) {
+         const enum agx_size size = I->src[0].size;
+         const bool half = size == AGX_SIZE_16;
+         const unsigned bits = half ? 16 : 32;
+         const uint32_t sign_bit = half ? UINT32_C(0x8000) : UINT32_C(0x80000000);
+         const uint32_t magnitude_mask =
+            half ? UINT32_C(0x7fff) : UINT32_C(0x7fffffff);
          agx_index source = I->src[0];
+         const bool absolute = source.abs, negate = source.neg;
+         source.abs = false;
          source.neg = false;
-         agx_index sign = agx_mov_imm(&b, 32, UINT32_C(0x80000000));
-         agx_index flipped = agx_temp(ctx, AGX_SIZE_32);
-         agx_bitop_to(&b, flipped, source, sign, 0x6 /* XOR */);
-         I->src[0] = flipped;
+
+         if (absolute) {
+            agx_index mask = agx_mov_imm(&b, bits, magnitude_mask);
+            agx_index result = agx_temp(ctx, size);
+            agx_bitop_to(&b, result, source, mask, 0x8 /* AND */);
+            source = result;
+         }
+
+         /* A half FADD against the negative-zero minifloat has a native
+          * encoding only with the negate modifier still on its register
+          * source (agx3_alu_hadd_neg_negzero). Once the modifier has been
+          * applied to the bits the move is redundant anyway -- adding -0.0h
+          * to an exact half is the identity -- so write the destination
+          * directly and drop it. The 32-bit form keeps its move: that FADD
+          * encodes, and removing it would change denormal and NaN handling
+          * on a path that passes today. */
+         const bool fold_into_dest = half &&
+            I->dest[0].size == AGX_SIZE_16 && agx_channels(I->dest[0]) == 1 &&
+            agx_channels(I->src[0]) == 1 && I->nr_dests == 1;
+
+         if (negate) {
+            agx_index sign = agx_mov_imm(&b, bits, sign_bit);
+            agx_index result = (fold_into_dest && !absolute)
+                                  ? I->dest[0]
+                                  : agx_temp(ctx, size);
+            agx_bitop_to(&b, result, source, sign, 0x6 /* XOR */);
+            source = result;
+         }
+
+         if (fold_into_dest && negate && !absolute) {
+            agx_remove_instruction(I);
+            continue;
+         }
+
+         I->src[0] = source;
       }
 
       /* A fused control-flow comparison has no native nonzero-minifloat
