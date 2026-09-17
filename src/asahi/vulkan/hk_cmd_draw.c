@@ -2768,6 +2768,12 @@ hk_launch_tess_g17p(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    const uint32_t record_B = (quads ? 6 : 4) * sizeof(uint16_t);
    struct agx_grid grid_vs, grid_tcs, grid_factors;
 
+   /* An evaluation shader declaring isolines or point mode never reaches
+    * here: hk_g17p_tess_is_native() sent it to the software tessellator and
+    * its bound variant was lowered for that path. What can still reach here
+    * is a *control* shader that introduces point mode for an evaluation
+    * shader that did not declare it, which Vulkan permits and which the
+    * evaluation shader's own lowering could not anticipate. */
    if (!gfx->tess.params || gfx->tess.info.mode == TESS_PRIMITIVE_ISOLINES ||
        gfx->tess.info.points) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -6526,6 +6532,26 @@ hk_ia_update(struct hk_cmd_buffer *cmd, struct agx_draw draw,
    }
 }
 
+/*
+ * Whether this draw's tessellation runs on the G17P hardware tessellator.
+ *
+ * The decision is per pipeline, not per device: Apple's state record has no
+ * isoline and no point-mode encoding, so an evaluation shader declaring
+ * either keeps the software tessellator even with HK_G17P_NATIVE_TESS=1, and
+ * hk_compile_nir() compiled it that way. Keeping the two in one predicate is
+ * what makes the fallback safe -- the bound evaluation variant and the draw
+ * path always agree on which tessellator produced the coordinates.
+ */
+static bool
+hk_g17p_tess_is_native(const struct hk_cmd_buffer *cmd)
+{
+   const struct hk_device *dev = hk_cmd_buffer_device((struct hk_cmd_buffer *)cmd);
+   struct hk_api_shader *tes = cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL];
+
+   return dev->g17p_native_tess && tes &&
+          hk_any_variant(tes)->info.tess.g17p_native_domain;
+}
+
 static void
 hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
 {
@@ -6544,8 +6570,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    /* A tessellated draw with fewer vertices than one patch draws nothing.
     * The hardware tessellator takes whole patches, so filter it with the
     * other trivial draws before any state is published. */
-   if (dev->g17p_native_tess && !agx_is_indirect(draw_.b) &&
-       cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
+   if (hk_g17p_tess_is_native(cmd) && !agx_is_indirect(draw_.b) &&
        draw_.b.count[0] < dyn->ts.patch_control_points)
       return;
 
@@ -6627,7 +6652,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
    const bool software_index_fetch =
       cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
       (cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL] &&
-       !dev->g17p_native_tess);
+       !hk_g17p_tess_is_native(cmd));
    if (dev->dev.chip == AGX_CHIP_G17P && draw_.indexed &&
        !software_index_fetch) {
       uint64_t address;
@@ -6711,7 +6736,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
                       stat_c_prims, stat_c_inv);
       }
 
-      if (tess && dev->g17p_native_tess) {
+      if (tess && hk_g17p_tess_is_native(cmd)) {
          hk_launch_tess_g17p(cmd, ccs, draw);
          if (vk_command_buffer_has_error(&cmd->vk))
             return;
@@ -6786,7 +6811,7 @@ hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw_)
       }
 
       enum agx_primitive topology = cmd->state.gfx.topology;
-      const bool native_tess = tess && dev->g17p_native_tess;
+      const bool native_tess = tess && hk_g17p_tess_is_native(cmd);
       if (!native_tess &&
           !agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
