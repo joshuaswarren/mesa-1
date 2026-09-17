@@ -28,6 +28,7 @@
 #include <string.h>
 
 #include "hk_rt_pipeline_probe_spv.h"
+#include "hk_rt_pipeline_probe_features_spv.h"
 
 #define T8140_DEVICE_ID 0x8140
 
@@ -67,6 +68,7 @@ VK_FN(vkCreateShaderModule);
 VK_FN(vkDestroyShaderModule);
 VK_FN(vkCreatePipelineLayout);
 VK_FN(vkDestroyPipelineLayout);
+VK_FN(vkCreateComputePipelines);
 VK_FN(vkCreateRayTracingPipelinesKHR);
 VK_FN(vkGetRayTracingShaderGroupHandlesKHR);
 VK_FN(vkGetRayTracingShaderGroupStackSizeKHR);
@@ -269,6 +271,10 @@ main(void)
                                     physical_devices),
          "vkEnumeratePhysicalDevices(list)");
 
+   /* Prefer G17P, but take whatever Asahi device the shim exposes: the AGX2
+    * control arm (ASAHI_SHIM_CHIP unset or g13g) is not optional -- a refusal
+    * that reproduces on both arms is not an AGX3 bug.  The device is printed
+    * with the configuration below, so a log always says which arm it is. */
    VkPhysicalDevice physical = VK_NULL_HANDLE;
    VkPhysicalDeviceProperties properties;
    for (uint32_t i = 0; i < physical_count; ++i) {
@@ -278,9 +284,13 @@ main(void)
          break;
       }
    }
+   if (physical == VK_NULL_HANDLE && physical_count > 0) {
+      physical = physical_devices[0];
+      vkGetPhysicalDeviceProperties(physical, &properties);
+   }
    free(physical_devices);
    if (physical == VK_NULL_HANDLE)
-      die("T8140/G17P Vulkan device was not found");
+      die("no Vulkan device was found");
 
    VkPhysicalDeviceRayTracingPipelineFeaturesKHR rt_features = {
       .sType =
@@ -313,8 +323,9 @@ main(void)
    vkGetPhysicalDeviceProperties2(physical, &props2);
 
    /* Configuration first, before anything can fail or hang. */
-   printf("%s: device=%s launch=%ux%ux%u\n", prog, properties.deviceName,
-          LAUNCH_WIDTH, LAUNCH_HEIGHT, LAUNCH_DEPTH);
+   printf("%s: device=%s deviceID=0x%x launch=%ux%ux%u\n", prog,
+          properties.deviceName, properties.deviceID, LAUNCH_WIDTH,
+          LAUNCH_HEIGHT, LAUNCH_DEPTH);
    printf("%s: rayTracingPipeline=%u traceRaysIndirect=%u "
           "handleSize=%u baseAlignment=%u handleAlignment=%u "
           "maxRecursion=%u maxHitAttribute=%u\n",
@@ -402,6 +413,7 @@ main(void)
    LOAD_DEVICE(device, vkDestroyShaderModule);
    LOAD_DEVICE(device, vkCreatePipelineLayout);
    LOAD_DEVICE(device, vkDestroyPipelineLayout);
+   LOAD_DEVICE(device, vkCreateComputePipelines);
    LOAD_DEVICE(device, vkCreateRayTracingPipelinesKHR);
    LOAD_DEVICE(device, vkGetRayTracingShaderGroupHandlesKHR);
    LOAD_DEVICE(device, vkGetRayTracingShaderGroupStackSizeKHR);
@@ -425,13 +437,13 @@ main(void)
          .binding = 0,
          .descriptorType = VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR,
          .descriptorCount = 1,
-         .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+         .stageFlags = VK_SHADER_STAGE_ALL,
       },
       {
          .binding = 1,
          .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
          .descriptorCount = 1,
-         .stageFlags = VK_SHADER_STAGE_RAYGEN_BIT_KHR,
+         .stageFlags = VK_SHADER_STAGE_ALL,
       },
    };
    const VkDescriptorSetLayoutCreateInfo set_layout_info = {
@@ -575,6 +587,225 @@ main(void)
       if (rung != VK_NULL_HANDLE)
          vkDestroyPipeline(device, rung, NULL);
    }
+
+   /* Second ladder: the constructs dEQP-VK.ray_tracing_pipeline exercises that
+    * the six-stage ladder above does not reach.  The shaders above declare a
+    * callable stage but never call it, never read a hit system value, never
+    * terminate a ray from an any-hit shader, never declare a shaderRecordEXT
+    * block and never read gl_CullMaskEXT.  Each rung is its own pipeline and
+    * is printed BEFORE it is created, so a compiler gap names the construct. */
+   VkShaderModule call_rgen =
+      make_module(device, hk_rt_probe_call_rgen_spv,
+                  sizeof(hk_rt_probe_call_rgen_spv));
+   VkShaderModule sysval_rchit =
+      make_module(device, hk_rt_probe_sysval_rchit_spv,
+                  sizeof(hk_rt_probe_sysval_rchit_spv));
+   VkShaderModule terminate_rahit =
+      make_module(device, hk_rt_probe_terminate_rahit_spv,
+                  sizeof(hk_rt_probe_terminate_rahit_spv));
+   VkShaderModule record_rgen =
+      make_module(device, hk_rt_probe_record_rgen_spv,
+                  sizeof(hk_rt_probe_record_rgen_spv));
+   VkShaderModule record_rmiss =
+      make_module(device, hk_rt_probe_record_rmiss_spv,
+                  sizeof(hk_rt_probe_record_rmiss_spv));
+   VkShaderModule cullmask_rgen =
+      make_module(device, hk_rt_probe_cullmask_rgen_spv,
+                  sizeof(hk_rt_probe_cullmask_rgen_spv));
+   VkShaderModule cullmask_rmiss =
+      make_module(device, hk_rt_probe_cullmask_rmiss_spv,
+                  sizeof(hk_rt_probe_cullmask_rmiss_spv));
+   VkShaderModule rq_rchit =
+      make_module(device, hk_rt_probe_rq_rchit_spv,
+                  sizeof(hk_rt_probe_rq_rchit_spv));
+   VkShaderModule rqarray_rchit =
+      make_module(device, hk_rt_probe_rqarray_rchit_spv,
+                  sizeof(hk_rt_probe_rqarray_rchit_spv));
+
+#define RT_STAGE(bit, mod)                                                     \
+   {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,              \
+    .stage = (bit),                                                            \
+    .module = (mod),                                                           \
+    .pName = "main"}
+#define RT_GENERAL(idx)                                                        \
+   {.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,       \
+    .type = VK_RAY_TRACING_SHADER_GROUP_TYPE_GENERAL_KHR,                      \
+    .generalShader = (idx),                                                    \
+    .closestHitShader = UNUSED_SHADER,                                         \
+    .anyHitShader = UNUSED_SHADER,                                             \
+    .intersectionShader = UNUSED_SHADER}
+#define RT_TRIANGLES(chit, ahit)                                               \
+   {.sType = VK_STRUCTURE_TYPE_RAY_TRACING_SHADER_GROUP_CREATE_INFO_KHR,       \
+    .type = VK_RAY_TRACING_SHADER_GROUP_TYPE_TRIANGLES_HIT_GROUP_KHR,          \
+    .generalShader = UNUSED_SHADER,                                            \
+    .closestHitShader = (chit),                                                \
+    .anyHitShader = (ahit),                                                    \
+    .intersectionShader = UNUSED_SHADER}
+
+   const VkPipelineShaderStageCreateInfo call_stages[] = {
+      RT_STAGE(VK_SHADER_STAGE_RAYGEN_BIT_KHR, call_rgen),
+      RT_STAGE(VK_SHADER_STAGE_CALLABLE_BIT_KHR, rcall),
+   };
+   const VkRayTracingShaderGroupCreateInfoKHR call_groups[] = {
+      RT_GENERAL(0),
+      RT_GENERAL(1),
+   };
+
+   const VkPipelineShaderStageCreateInfo sysval_stages[] = {
+      RT_STAGE(VK_SHADER_STAGE_RAYGEN_BIT_KHR, rgen),
+      RT_STAGE(VK_SHADER_STAGE_MISS_BIT_KHR, rmiss),
+      RT_STAGE(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, sysval_rchit),
+   };
+   const VkRayTracingShaderGroupCreateInfoKHR sysval_groups[] = {
+      RT_GENERAL(0),
+      RT_GENERAL(1),
+      RT_TRIANGLES(2, UNUSED_SHADER),
+   };
+
+   const VkPipelineShaderStageCreateInfo terminate_stages[] = {
+      RT_STAGE(VK_SHADER_STAGE_RAYGEN_BIT_KHR, rgen),
+      RT_STAGE(VK_SHADER_STAGE_MISS_BIT_KHR, rmiss),
+      RT_STAGE(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, rchit),
+      RT_STAGE(VK_SHADER_STAGE_ANY_HIT_BIT_KHR, terminate_rahit),
+   };
+   const VkRayTracingShaderGroupCreateInfoKHR terminate_groups[] = {
+      RT_GENERAL(0),
+      RT_GENERAL(1),
+      RT_TRIANGLES(2, 3),
+   };
+
+   const VkPipelineShaderStageCreateInfo record_stages[] = {
+      RT_STAGE(VK_SHADER_STAGE_RAYGEN_BIT_KHR, record_rgen),
+      RT_STAGE(VK_SHADER_STAGE_MISS_BIT_KHR, record_rmiss),
+   };
+   const VkRayTracingShaderGroupCreateInfoKHR record_groups[] = {
+      RT_GENERAL(0),
+      RT_GENERAL(1),
+   };
+
+   /* A ray query INSIDE a ray-tracing-pipeline stage.  dEQP-VK.ray_query has a
+    * variant of nearly every case for each ray-tracing stage, so this is the
+    * larger half of what enabling this extension turns on. */
+   const VkPipelineShaderStageCreateInfo rq_stages[] = {
+      RT_STAGE(VK_SHADER_STAGE_RAYGEN_BIT_KHR, rgen),
+      RT_STAGE(VK_SHADER_STAGE_MISS_BIT_KHR, rmiss),
+      RT_STAGE(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, rq_rchit),
+   };
+   const VkRayTracingShaderGroupCreateInfoKHR rq_groups[] = {
+      RT_GENERAL(0),
+      RT_GENERAL(1),
+      RT_TRIANGLES(2, UNUSED_SHADER),
+   };
+
+   /* The shape the rayqueryterminate CTS cases compile: an ARRAY of ray
+    * queries indexed in a loop, plus rayQueryTerminateEXT. */
+   const VkPipelineShaderStageCreateInfo rqarray_stages[] = {
+      RT_STAGE(VK_SHADER_STAGE_RAYGEN_BIT_KHR, rgen),
+      RT_STAGE(VK_SHADER_STAGE_MISS_BIT_KHR, rmiss),
+      RT_STAGE(VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR, rqarray_rchit),
+   };
+   const VkRayTracingShaderGroupCreateInfoKHR rqarray_groups[] = {
+      RT_GENERAL(0),
+      RT_GENERAL(1),
+      RT_TRIANGLES(2, UNUSED_SHADER),
+   };
+
+   const VkPipelineShaderStageCreateInfo cullmask_stages[] = {
+      RT_STAGE(VK_SHADER_STAGE_RAYGEN_BIT_KHR, cullmask_rgen),
+      RT_STAGE(VK_SHADER_STAGE_MISS_BIT_KHR, cullmask_rmiss),
+   };
+   const VkRayTracingShaderGroupCreateInfoKHR cullmask_groups[] = {
+      RT_GENERAL(0),
+      RT_GENERAL(1),
+   };
+
+   const struct {
+      const char *name;
+      const VkPipelineShaderStageCreateInfo *stages;
+      uint32_t stage_count;
+      const VkRayTracingShaderGroupCreateInfoKHR *groups;
+      uint32_t group_count;
+   } features[] = {
+      {"executeCallableEXT", call_stages, 2, call_groups, 2},
+      {"hit system values", sysval_stages, 3, sysval_groups, 3},
+      {"terminateRayEXT in any-hit", terminate_stages, 4, terminate_groups, 3},
+      {"shaderRecordEXT block", record_stages, 2, record_groups, 2},
+      {"gl_CullMaskEXT", cullmask_stages, 2, cullmask_groups, 2},
+      {"ray query in closest-hit", rq_stages, 3, rq_groups, 3},
+      {"ray query array + terminate", rqarray_stages, 3, rqarray_groups, 3},
+   };
+
+   /* HK_RT_PROBE_ONLY=<substring> runs one feature rung.  A rung that takes
+    * the process down takes the rest of the ladder with it, so a bisected rerun
+    * has to be able to ask for exactly one. */
+   const char *only = getenv("HK_RT_PROBE_ONLY");
+
+   for (unsigned i = 0; i < sizeof(features) / sizeof(features[0]); ++i) {
+      if (only && !strstr(features[i].name, only)) {
+         printf("%s: feature %-28s SKIPPED (HK_RT_PROBE_ONLY)\n", prog,
+                features[i].name);
+         continue;
+      }
+
+      const VkRayTracingPipelineCreateInfoKHR feature_info = {
+         .sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
+         .stageCount = features[i].stage_count,
+         .pStages = features[i].stages,
+         .groupCount = features[i].group_count,
+         .pGroups = features[i].groups,
+         .maxPipelineRayRecursionDepth = 1,
+         .layout = layout,
+      };
+      VkPipeline feature_pipeline = VK_NULL_HANDLE;
+      printf("%s: feature %-28s creating...\n", prog, features[i].name);
+      fflush(stdout);
+      const VkResult feature_result = vkCreateRayTracingPipelinesKHR(
+         device, VK_NULL_HANDLE, VK_NULL_HANDLE, 1, &feature_info, NULL,
+         &feature_pipeline);
+      printf("%s: feature %-28s %s (%d)\n", prog, features[i].name,
+             feature_result == VK_SUCCESS ? "PASS" : "FAIL", feature_result);
+      fflush(stdout);
+      if (feature_result != VK_SUCCESS)
+         failures++;
+      if (feature_pipeline != VK_NULL_HANDLE)
+         vkDestroyPipeline(device, feature_pipeline, NULL);
+   }
+
+   /* Control, and it is the load-bearing one for the rung above: the SAME ray
+    * query in an ORDINARY compute pipeline, which is the path
+    * dEQP-VK.ray_query.*.comp.* takes and which measured 43/45 on Neo.  If
+    * this passes and the closest-hit rung does not, the difference is the
+    * megakernel path, not ray queries on G17P. */
+   {
+      VkShaderModule rq_comp = make_module(device, hk_rt_probe_rq_comp_spv,
+                                           sizeof(hk_rt_probe_rq_comp_spv));
+      const VkComputePipelineCreateInfo compute_info = {
+         .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+         .stage = RT_STAGE(VK_SHADER_STAGE_COMPUTE_BIT, rq_comp),
+         .layout = layout,
+      };
+      VkPipeline compute_pipeline = VK_NULL_HANDLE;
+      printf("%s: control %-28s creating...\n", prog, "ray query in compute");
+      fflush(stdout);
+      const VkResult compute_result = vkCreateComputePipelines(
+         device, VK_NULL_HANDLE, 1, &compute_info, NULL, &compute_pipeline);
+      printf("%s: control %-28s %s (%d)\n", prog, "ray query in compute",
+             compute_result == VK_SUCCESS ? "PASS" : "FAIL", compute_result);
+      fflush(stdout);
+      if (compute_result != VK_SUCCESS)
+         failures++;
+      if (compute_pipeline != VK_NULL_HANDLE)
+         vkDestroyPipeline(device, compute_pipeline, NULL);
+      vkDestroyShaderModule(device, rq_comp, NULL);
+   }
+
+   /* rayTracingPositionFetch is compiled for
+    * (hk_ray_tracing_pipeline.c:1422) but VK_KHR_ray_tracing_position_fetch is
+    * not in hk_physical_device.c's supported set, so the feature can never be
+    * enabled and gl_HitTriangleVertexPositionsEXT is unreachable.  NOT
+    * MEASURED, deliberately, rather than tested through a disabled feature. */
+   printf("%s: feature %-28s NOT MEASURED (extension unadvertised)\n", prog,
+          "position fetch");
 
    const VkRayTracingPipelineCreateInfoKHR pipeline_info = {
       .sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CREATE_INFO_KHR,
