@@ -1448,6 +1448,10 @@ hk_get_device_properties(const struct agx_device *dev,
       VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
       VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
       VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+      /* VK_KHR_dynamic_rendering_local_read is supported, and
+       * unifiedImageLayouts makes this layout interchangeable with the rest,
+       * so host copy has to accept it too. */
+      VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ,
       // VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
       VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
    };
