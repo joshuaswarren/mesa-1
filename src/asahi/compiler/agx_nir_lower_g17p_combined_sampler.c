@@ -1528,15 +1528,26 @@ agx_nir_lower_g17p_storage_image(
             nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
             /* The single-image state-0 route predates the general indexed
              * storage ABI. It is correct for an isolated image roundtrip, but
-             * it does not carry the resource metadata needed to order an
-             * image with buffer/global memory in one shader. The indexed path
-             * does, and is already used by the passing two-image memory-model
-             * variants, so leave cross-domain barriers for that lowering. */
+             * a shader memory barrier does not order its native state-0 image
+             * accesses at all -- the pairing of the barrier with buffer or
+             * global memory was never what mattered.
+             *
+             * Measured on G17P with dEQP-VK.memory_model.write_after_read:
+             * the image + buffer-guard variants pass only because the check
+             * below already routed them to the indexed lowering, and forcing
+             * those same 80 passing cases back onto the state-0 route fails
+             * all 80, deterministically, with nothing else changed. The
+             * image + workgroup-guard variants name only image and shared
+             * memory, so they stayed on the state-0 route and fail.
+             *
+             * The barrier instructions the two routes emit are identical, so
+             * WHY the native state-0 pair is unordered is not understood.
+             * Only that it is. Decline any barrier that names the image and
+             * leave ordered images to the indexed lowering. */
             if (intr->intrinsic == nir_intrinsic_barrier) {
                const nir_variable_mode modes =
                   nir_intrinsic_memory_modes(intr);
-               if ((modes & nir_var_image) &&
-                   (modes & (nir_var_mem_ssbo | nir_var_mem_global)))
+               if (modes & nir_var_image)
                   return false;
             }
             if (intr->intrinsic == nir_intrinsic_bindless_image_load) {

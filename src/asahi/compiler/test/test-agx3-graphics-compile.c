@@ -4707,6 +4707,20 @@ build_cs_storage_image(unsigned mode)
                   .memory_semantics = NIR_MEMORY_ACQ_REL,
                   .memory_modes = nir_var_image | nir_var_mem_ssbo);
    }
+   /* A memory-model write_after_read shader whose guard lives in workgroup
+    * memory names only image and shared memory in its release fence. The
+    * state-0 route cannot order the image either way. */
+   if (mode == 9) {
+      nir_barrier(&b, .memory_scope = SCOPE_WORKGROUP,
+                  .memory_semantics = NIR_MEMORY_RELEASE,
+                  .memory_modes = nir_var_image | nir_var_mem_shared);
+   }
+   /* An image-only barrier is the same defect with nothing else named. */
+   if (mode == 10) {
+      nir_barrier(&b, .memory_scope = SCOPE_DEVICE,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL,
+                  .memory_modes = nir_var_image);
+   }
    nir_bindless_image_store(
       &b, pbe, coord, zero,
       mode == 5 ? nir_imm_ivec4(&b, 9, 8, 7, 6) : value, zero,
@@ -4771,19 +4785,28 @@ test_storage_image_lowering(void)
          return false;
    }
 
-   /* Cross-domain barriers must stay on the general indexed storage path.
-    * The single-image state-0 lowering cannot describe that synchronization. */
-   nir_shader *nir = build_cs_storage_image(8);
-   struct agx_g17p_storage_image_binding binding = {
-      .texture_offset_B = UINT32_MAX,
-      .pbe_offset_B = UINT32_MAX,
-   };
-   const bool lowered = agx_nir_lower_g17p_storage_image(nir, &binding);
-   const bool ok = !lowered && binding.texture_offset_B == UINT32_MAX &&
-                   binding.pbe_offset_B == UINT32_MAX;
-   ralloc_free(nir);
-   if (!ok)
-      return false;
+   /* A barrier that names the image at all must stay on the general indexed
+    * storage path: measured on G17P, a memory barrier does not order the
+    * native state-0 image accesses, whatever else the barrier names. Mode 8
+    * pairs the image with buffer memory, mode 9 with workgroup memory -- the
+    * dEQP-VK.memory_model.write_after_read shape -- and mode 10 names the
+    * image alone. */
+   for (unsigned mode = 8; mode <= 10; ++mode) {
+      nir_shader *nir = build_cs_storage_image(mode);
+      struct agx_g17p_storage_image_binding binding = {
+         .texture_offset_B = UINT32_MAX,
+         .pbe_offset_B = UINT32_MAX,
+      };
+      const bool lowered = agx_nir_lower_g17p_storage_image(nir, &binding);
+      const bool ok = !lowered && binding.texture_offset_B == UINT32_MAX &&
+                      binding.pbe_offset_B == UINT32_MAX;
+      ralloc_free(nir);
+      if (!ok)
+         return false;
+   }
+
+   nir_shader *nir;
+   struct agx_g17p_storage_image_binding binding;
 
    /* Buffer-image lowering preserves its descriptor class while mapping the
     * coordinate to 2D.  A Gen9 linear buffer descriptor is valid through the
