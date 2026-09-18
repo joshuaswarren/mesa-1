@@ -130,29 +130,20 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
    if (util_format_is_compressed(p_format) && tiling != VK_IMAGE_TILING_OPTIMAL)
       return 0;
 
-   if (agx_chip_descriptor_generation(pdev->dev.chip) == 9 &&
-       hk_scaled_texture_format(p_format) != PIPE_FORMAT_NONE) {
-      /* Integer fetch plus float conversion is exact for 8/16-bit scaled
-       * formats. Linear filtering and attachment conversion are separate.
-       *
-       * Blit is deliberately absent: a blit between a scaled and a non-scaled
-       * format has no well-defined result, because one side stores integers
-       * and the other normalized values. radv and anv withhold every image
-       * feature from scaled formats for the same reason. */
-      features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
-      if (hk_uscaled_normalized_format(p_format) != PIPE_FORMAT_NONE)
-         features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
-      if (ail_pixel_format[hk_scaled_texture_format(p_format)].renderable) {
-         /* The dynamic scaled image-store lowering supports uniform 8/16-bit
-          * components. Packed scaled formats still use integer blit views. */
-         const unsigned bits = util_format_get_component_bits(
-            p_format, UTIL_FORMAT_COLORSPACE_RGB, 0);
-         if (bits == 8 || bits == 16)
-            features |= VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
-                        VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
-                        VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT;
-      }
-   }
+   /* No scaled format has an ail_pixel_format[] entry on any generation: the
+    * hardware does not sample them.  hk_scaled_texture_format() maps SSCALED
+    * to SINT and USCALED to UINT, and the image features above were granted on
+    * the strength of that emulation -- an integer fetch plus an int-to-float
+    * conversion in the shader.  Gate them on descriptor generation 9 and G13
+    * and G14 never saw them, so the whole scaled image-format surface existed
+    * on one generation only, which is not a hardware difference.
+    *
+    * Withdraw it.  radv and anv withhold every image feature from scaled
+    * formats; matching that makes the optional VK_FORMAT_*_[SU]SCALED_* image
+    * formats uniformly unsupported here, as they already are on G13 and G14.
+    * Vertex-buffer use of the same formats is unaffected: it does not come
+    * through this function.
+    */
 
    if (ail_pixel_format[p_format].texturable) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
