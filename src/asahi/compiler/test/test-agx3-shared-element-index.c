@@ -267,6 +267,71 @@ check_deferred_shared_lowering(void)
    return ok;
 }
 
+/*
+ * Check 3: a 64-bit shared access has no encodable form -- mem_access_size_align_cb
+ * caps shared accesses at 32 bits -- so it is split into 32-bit halves.  The
+ * element-index conversion scales by the access width, so the split has to
+ * happen first or the halves inherit an index divided by 8 where the 32-bit
+ * element index needs a division by 4.  Converting first addressed half the
+ * intended element and failed
+ * dEQP-VK.spirv_assembly.instruction.compute.workgroup_memory.{int64,uint64}
+ * while every narrower width passed.
+ */
+static bool
+check_64bit_split_before_conversion(unsigned byte_offset)
+{
+   nir_shader *nir = build(64, byte_offset);
+   agx_preprocess_nir_g17p(nir);
+   NIR_PASS(_, nir, nir_opt_constant_folding);
+   NIR_PASS(_, nir, nir_opt_dce);
+
+   const unsigned expected = byte_offset / 4;
+   unsigned loads = 0;
+   bool ok = true;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_load_shared)
+               continue;
+            loads++;
+
+            if (intr->def.bit_size != 32) {
+               fprintf(stderr,
+                       "64-bit shared load reached the encoder %u bits wide; "
+                       "shared accesses are capped at 32\n",
+                       intr->def.bit_size);
+               ok = false;
+               continue;
+            }
+
+            nir_src *off = nir_get_io_offset_src(intr);
+            if (!nir_src_is_const(*off)) {
+               fprintf(stderr, "64-bit shared load offset is not constant\n");
+               ok = false;
+               continue;
+            }
+
+            const uint64_t got = nir_src_as_uint(*off);
+            if (got != expected) {
+               fprintf(stderr,
+                       "64-bit shared load at byte %u: index %" PRIu64 ", "
+                       "expected the 32-bit element index %u (a conversion "
+                       "that ran before the split would give %u)\n",
+                       byte_offset, got, expected, byte_offset / 8);
+               ok = false;
+            }
+         }
+      }
+   }
+
+   ralloc_free(nir);
+   CHECK(loads == 1);
+   return ok;
+}
+
 int
 main(void)
 {
@@ -281,6 +346,9 @@ main(void)
    ok &= check_both_frontends_compile(32);
    ok &= check_both_frontends_compile(16);
    ok &= check_deferred_shared_lowering();
+   ok &= check_64bit_split_before_conversion(64);
+   ok &= check_64bit_split_before_conversion(128);
+   ok &= check_both_frontends_compile(64);
 
    glsl_type_singleton_decref();
 

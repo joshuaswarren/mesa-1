@@ -8605,6 +8605,22 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
     * G17P ordinary loads/stores use scalar-element indices; atomics retain
     * their byte-addressed encoding.
     */
+   /* The conversion below scales the shared byte offset by the access width,
+    * so any access that a later pass would split has to be split first.
+    * agx_compile_shader_nir() runs nir_lower_mem_access_bit_sizes over
+    * nir_var_mem_shared with mem_access_size_align_cb, which caps the width at
+    * 32 bits; without this a 64-bit access is divided by 8 and only then split
+    * into 32-bit halves, leaving each half addressing half its element.
+    * Accesses of 32 bits and narrower are not split, so they are unaffected.
+    */
+   if (g17p) {
+      nir_lower_mem_access_bit_sizes_options shared_split = {
+         .modes = nir_var_mem_shared,
+         .callback = mem_access_size_align_cb,
+      };
+      NIR_PASS(_, nir, nir_lower_mem_access_bit_sizes, &shared_split);
+   }
+
    NIR_PASS(_, nir, agx_nir_lower_shared_bitsize, g17p);
 
    /* A frontend that reaches this helper with `g17p` set owns the element-index
