@@ -2235,10 +2235,9 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
 static void
 hk_init_heap(const void *data)
 {
-   struct hk_cmd_buffer *cmd = (struct hk_cmd_buffer *)data;
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_device *dev = (struct hk_device *)data;
 
-   perf_debug(cmd, "Allocating heap");
+   perf_debug_dev(&dev->dev, "Allocating heap");
 
    size_t size = 128 * 1024 * 1024;
    dev->heap = agx_bo_create(&dev->dev, size, 0, 0, "Geometry heap");
@@ -2254,12 +2253,31 @@ hk_init_heap(const void *data)
    };
 }
 
+/*
+ * Allocating the geometry heap is a 128 MB agx_bo_create(), measured at 15.5 ms
+ * on G17P: the kernel has to find and zero the pages.  Every consumer of the
+ * heap is reached from a draw, so leaving the allocation to util_call_once()
+ * put those 15.5 ms inside the first vkCmdDraw() that used geometry or
+ * tessellation -- a stall in the middle of a render pass, and ~150x the cost of
+ * the same draw once warm (median 105 us).
+ *
+ * Nothing about the heap depends on the draw, only on the device, so the
+ * allocation can be forced as soon as we know the client has a stage that will
+ * need it.  hk_heap() keeps the util_call_once(), so correctness never depends
+ * on having predicted the stage.
+ */
+void
+hk_device_ensure_geometry_heap(struct hk_device *dev)
+{
+   util_call_once_data(&dev->heap_init_once, hk_init_heap, dev);
+}
+
 static uint64_t
 hk_heap(struct hk_cmd_buffer *cmd)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   util_call_once_data(&dev->heap_init_once, hk_init_heap, cmd);
+   util_call_once_data(&dev->heap_init_once, hk_init_heap, dev);
 
    /* We need to free all allocations after each command buffer execution */
    if (!cmd->uses_heap) {

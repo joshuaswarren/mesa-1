@@ -2977,6 +2977,24 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
    vk_shader_free(&dev->vk, pAllocator, &obj->vk);
 }
 
+/*
+ * A draw that runs geometry or tessellation allocates the 128 MB geometry heap,
+ * and until now that allocation was reached only from inside vkCmdDraw().  It
+ * costs 15.5 ms on G17P, so the first such draw in a process paid a 15.5 ms
+ * stall mid-render-pass while every later draw with the same shaders cost
+ * ~110 us.  The heap depends on nothing but the device, so pull it forward to
+ * the creation of the stage that will need it -- a creation-time allocation is
+ * where a client expects to pay for one.  hk_heap() keeps its own
+ * util_call_once(), so this is a warm-up, not a new requirement.
+ */
+static void
+hk_shader_prepare_device_for_stage(struct hk_device *dev,
+                                   mesa_shader_stage stage)
+{
+   if (stage == MESA_SHADER_GEOMETRY || stage == MESA_SHADER_TESS_EVAL)
+      hk_device_ensure_geometry_heap(dev);
+}
+
 VkResult
 hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
@@ -3309,6 +3327,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    if (sw_stage == MESA_SHADER_FRAGMENT && g17p_collapsed_sample_shading)
       hk_only_variant(obj)->info.fs.uses_sample_shading = true;
 
+   hk_shader_prepare_device_for_stage(dev, sw_stage);
+
    *shader_out = obj;
    return VK_SUCCESS;
 }
@@ -3622,6 +3642,8 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
          return result;
       }
    }
+
+   hk_shader_prepare_device_for_stage(dev, stage);
 
    *shader_out = &obj->vk;
    return VK_SUCCESS;
