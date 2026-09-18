@@ -146,7 +146,7 @@ internal_key_equal(const void *a_, const void *b_)
    const struct hk_internal_key *b = b_;
 
    return a->builder == b->builder && a->key_size == b->key_size &&
-          memcmp(a->key, b->key, a->key_size) == 0;
+          a->stop == b->stop && memcmp(a->key, b->key, a->key_size) == 0;
 }
 
 static VkResult

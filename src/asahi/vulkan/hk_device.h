@@ -36,6 +36,20 @@ typedef void (*hk_internal_builder_t)(struct nir_builder *b, const void *key);
 struct hk_internal_key {
    hk_internal_builder_t builder;
    size_t key_size;
+
+   /* A compilation input that changes the emitted binary but is not part of
+    * the caller's key bytes, so it has to be hashed alongside them: `stop`
+    * decides whether the part ends the shader or falls through to a footer
+    * the fast linker appends.
+    *
+    * internal_key_hash() hashes sizeof(struct hk_internal_key) + key_size
+    * bytes, which is wider than builder + key_size + the key data once a
+    * member sits between key_size and key[]. Every producer of this struct
+    * therefore zeroes the whole allocation, not just the header, so that no
+    * padding byte reaches the hash uninitialized.
+    */
+   bool stop;
+
    uint8_t key[];
 };
 

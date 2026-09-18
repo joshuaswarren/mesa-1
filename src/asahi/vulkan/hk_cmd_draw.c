@@ -2625,6 +2625,7 @@ hk_meta_shader(struct hk_device *dev, hk_internal_builder_t builder, void *data,
    size_t total_key_size = sizeof(struct hk_internal_key) + data_size;
 
    struct hk_internal_key *key = alloca(total_key_size);
+   memset(key, 0, total_key_size);
    key->builder = builder;
    key->key_size = data_size;
 
@@ -3392,8 +3393,10 @@ hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
    size_t total_key_size = sizeof(struct hk_internal_key) + data_size;
 
    struct hk_internal_key *key = alloca(total_key_size);
+   memset(key, 0, total_key_size);
    key->builder = builder;
    key->key_size = data_size;
+   key->stop = stop;
 
    if (data_size)
       memcpy(key->key, data, data_size);
