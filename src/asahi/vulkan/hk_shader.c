@@ -1755,6 +1755,76 @@ hk_lower_multiview_stage(mesa_shader_stage stage,
    }
 }
 
+/* G17P returns a wrong value from the hardware depth comparison on a subset of
+ * waves for an ARRAY shadow sample. Every driver-programmed input is verified
+ * correct -- sampler compare_enable/compare_func, the texture descriptor and
+ * its heap entry, the per-lane sampler and texture indices -- and the shader
+ * binary is bit-identical between passing and failing runs. metal-nt
+ * (-arch applegpu_g17p) compiled for the same shape shows our smp encoding is
+ * semantically equivalent to Apple's; the differing fields are the destination
+ * register, the scoreboard slot and kill hints, and setting the hints changes
+ * nothing. Apple issues its four samples on distinct slots, but forcing that
+ * does not help either, nor do waits, drain-all, staging retire, dedup,
+ * nopreamble, noopt, synchronous submission, the shader cache or small tiles.
+ * Bypassing the hardware comparison is the only thing that fixes it.
+ *
+ * The comparison function is dynamic, so read it from the sampler's packed
+ * word: descriptor offset 32, compare_func at bits 39..41, i.e. bits 7..9 of
+ * the aligned 32-bit word at offset 36. Two comparisons and a per-ordering
+ * truth table cover all eight functions.
+ */
+static bool
+hk_g17p_array_shadow_filter(const nir_instr *instr, UNUSED const void *data)
+{
+   if (instr->type != nir_instr_type_tex)
+      return false;
+   const nir_tex_instr *tex = nir_instr_as_tex(instr);
+   /* Cube and cube-array shadow samples are excluded: they go through CEM face
+    * selection, which this rewrite does not preserve -- catching them
+    * regressed texture.samplercubearrayshadow_fragment in the blast arm. They
+    * do not exhibit the defect either. */
+   return tex->is_shadow && tex->is_array && !tex->is_sparse &&
+          tex->sampler_dim != GLSL_SAMPLER_DIM_CUBE &&
+          (tex->op == nir_texop_tex || tex->op == nir_texop_txl) &&
+          nir_tex_instr_src_index(tex, nir_tex_src_comparator) >= 0 &&
+          nir_tex_instr_src_index(tex, nir_tex_src_texture_handle) >= 0;
+}
+
+static nir_def *
+hk_g17p_array_shadow_lower(nir_builder *b, nir_instr *instr, UNUSED void *data)
+{
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   const int hi = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+   const int ci = nir_tex_instr_src_index(tex, nir_tex_src_comparator);
+
+   b->cursor = nir_before_instr(instr);
+   nir_def *desc = nir_load_from_texture_handle_agx(b, tex->src[hi].src.ssa);
+   nir_def *word = nir_load_global_constant(
+      b, 1, 32, nir_iadd_imm(b, desc, 36), .align_mul = 4);
+   nir_def *func = nir_iand_imm(b, nir_ushr_imm(b, word, 7), 7);
+
+   nir_def *ref = tex->src[ci].src.ssa;
+   nir_tex_instr_remove_src(tex, ci);
+   tex->is_shadow = false;
+
+   b->cursor = nir_after_instr(instr);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_def *d = nir_channel(b, &tex->def, 0);
+
+   /* 0 Lequal, 1 Gequal, 2 Less, 3 Greater, 4 Equal, 5 NotEqual, 6 Always,
+    * 7 Never; Vulkan compares reference OP texel.
+    *   ref <  d -> 0b01100101 = 0x65
+    *   ref == d -> 0b01010011 = 0x53
+    *   ref >  d -> 0b01101010 = 0x6a
+    */
+   nir_def *lt = nir_flt(b, ref, d);
+   nir_def *eq = nir_feq(b, ref, d);
+   nir_def *mask = nir_bcsel(b, lt, nir_imm_int(b, 0x65),
+                             nir_bcsel(b, eq, nir_imm_int(b, 0x53),
+                                       nir_imm_int(b, 0x6a)));
+   return nir_b2f32(b, nir_ine_imm(b, nir_iand_imm(b, nir_ushr(b, mask, func), 1), 0));
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
@@ -2007,6 +2077,17 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_viewport_fs,
                nir_metadata_control_flow, NULL);
+   }
+
+   /* Opt-in diagnostic: G17P returns a wrong value from a hardware array
+    * shadow compare for a subset of waves, and every piece of driver state
+    * programmed for it verifies correct, so the root cause is not yet known.
+    * Comparing in the shader avoids it but gives up the hardware compare, so
+    * it stays off by default and the production path is unchanged. Enable
+    * with HK_PERFTEST=swarrayshadow. */
+   if (dev->dev.chip == AGX_CHIP_G17P && HK_PERF(dev, SWARRAYSHADOW)) {
+      NIR_PASS(_, nir, nir_shader_lower_instructions,
+               hk_g17p_array_shadow_filter, hk_g17p_array_shadow_lower, NULL);
    }
 
    if (agx_chip_descriptor_generation(dev->dev.chip) == 9) {
