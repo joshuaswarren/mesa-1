@@ -6627,10 +6627,40 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    /* Native id_blend_2x/4x uses the same class-12 lifetime for a single
     * target's unrolled sample loads/stores, acquiring read class 8 once
     * and write class 4 once. Keep the ordinary one-store path unchanged. */
-   if (!p.count ||
-       (p.count == 1 && p.targets[0] == 0 &&
-        !(ctx->key->fs.nr_samples > 1 && tile_loads &&
-          !ctx->key->g17p_emrt)))
+   const bool single_target_blend =
+      ctx->key->fs.nr_samples > 1 && tile_loads && !ctx->key->g17p_emrt;
+
+   /* A multisample eMRT epilog may have one resident partition and no other:
+    * hk spills a reloaded multisample attachment wider than
+    * AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE, which leaves exactly one
+    * eight-byte target in the tile and every other target in memory. Its tile
+    * side is the same one-target unrolled sample set as above -- one LSTCol
+    * per sample through the coverage register at partition zero, inside one
+    * class-12 bracket -- because the spilled targets are image stores that
+    * carry no pixel class at all.
+    *
+    * agx3_g17p_sample_store_protocol() admits that shape directly when it is
+    * resident, but only for a straight-line shader with no tile loads, and an
+    * eMRT epilog is never straight-line: the spilled attachments' image
+    * accesses bring their own control flow (19 to 43 blocks for the four- and
+    * eight-attachment VK_EXT_rasterization_order_attachment_access render
+    * passes). So neither protocol claimed it, the packer reached
+    * "tile_stores_left > 1 with no proven partition graph", and the whole
+    * epilog failed -- reported by hk as VK_ERROR_FEATURE_NOT_PRESENT from
+    * vkEndCommandBuffer.
+    *
+    * The multisample eMRT acquire below already emits one combined wait for
+    * the stored partitions and the release already ends at the final store,
+    * so no new class or instruction shape is introduced here; only
+    * p.count == 1 is new. The resident partition may also be loaded --
+    * agx_nir_lower_tilebuffer() preserves an existing-but-unwritten resident
+    * attachment of a multisample eMRT layout with a load/store pair -- and
+    * that combined acquire covers the read class too. */
+   const bool single_target_emrt =
+      ctx->key->fs.nr_samples > 1 && ctx->key->g17p_emrt;
+
+   if (!p.count || (p.count == 1 && p.targets[0] == 0 &&
+                    !single_target_blend && !single_target_emrt))
       return agx3_g17p_mrt_refused(__LINE__);
 
    /* A background of four or more targets keeps the constructors' ascending,
@@ -9334,10 +9364,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint8_t len = 0;
                const bool load = I->op == AGX_OPCODE_LD_TILE;
                /* A lone active sparse attachment retains its own classes;
-                * only logical target zero owns the class-8/class-4 pair. */
+                * only logical target zero owns the class-8/class-4 pair.
+                * An eMRT epilog is excluded: its combined acquire has already
+                * been emitted at the colour WAIT_PIX above, and splitting the
+                * lifetime again here would acquire class 8 and class 4 a
+                * second time inside it. */
                const bool single_blend =
                   g17p_mrt.count == 1 && g17p_mrt.targets[0] == 0 &&
-                  g17p_mrt.has_loads;
+                  g17p_mrt.has_loads && !ctx->key->g17p_emrt;
                const bool acquire = single_blend
                   ? (load ? first : g17p_mrt_stores_seen == 0)
                   : !g17p_mrt_acquired &&

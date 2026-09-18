@@ -440,6 +440,18 @@ if with_tests
   )
 
   test(
+    'asahi-g17p-emrt-sample-epilog',
+    executable(
+      'asahi-g17p-emrt-sample-epilog',
+      files('tests/test-agx-g17p-emrt-sample-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-mrt-quad',
     executable(
       'asahi-g17p-mrt-quad',
