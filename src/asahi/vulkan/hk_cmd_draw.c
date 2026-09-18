@@ -3497,9 +3497,14 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
       pixel.defer_monolithic_msaa = true;
       agx_nir_fs_epilog(b, &pixel);
 
+      struct agx_g17p_colour_layout layout;
+      agx_g17p_colour_layout_init(&layout, key->link.loc_written,
+                                  key->link.size_32, key->link.colour_comps,
+                                  key->link.packed_colour);
+
       NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
-      NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples, key->nr_samples,
-               key->link.loc_written);
+      NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples_layout,
+               key->nr_samples, &layout);
       bool opt_progress;
       do {
          opt_progress = false;

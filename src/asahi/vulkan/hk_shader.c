@@ -2363,19 +2363,48 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
 /* G17P unrolls per-sample fragment execution for a pipeline that fixes two or
  * four samples. Every sample's colours, depth and stencil need their own
  * export registers inside the register file.
+ *
+ * The fragment ABI gives each colour location a four-component slot, and the
+ * unroll repeats the whole set once per sample, so eight two-component
+ * targets at four samples ask for 276 halves of a 192-half file -- 128 of
+ * them for components the shader never writes. Pack the exports by what each
+ * location actually writes and the same fragment needs 148, which is what
+ * lets it run per sample at all. hk_compile_nir() lays out the same thing
+ * from the link info once the split has recorded it exactly.
  */
 static bool
 hk_g17p_unrolls_sample_shading(const nir_shader *nir,
                                const struct hk_fs_key *key)
 {
+   if (key->g17p_samples != 2 && key->g17p_samples != 4)
+      return false;
+
    uint8_t locations =
       (nir->info.outputs_written >> FRAG_RESULT_DATA0) & BITFIELD_MASK(8);
    if (nir->info.fs.color_is_dual_source)
       locations |= BITFIELD_BIT(1);
 
-   return (key->g17p_samples == 2 || key->g17p_samples == 4) &&
-          agx_g17p_sample_zs_base(key->g17p_samples, locations,
-                                  key->g17p_samples) <= AGX3B_NUM_REGS;
+   uint8_t gathered = 0, size_32 = 0;
+   uint32_t comps = 0;
+   agx_nir_gather_fs_colour_exports(nir, &gathered, &size_32, &comps);
+
+   /* Charge a location the gather did not see the ABI's whole slot, so this
+    * never admits a shader the exact layout would not fit. */
+   u_foreach_bit(loc, (unsigned)(locations & ~gathered)) {
+      comps |= 0xfu << (4 * loc);
+      size_32 |= BITFIELD_BIT(loc);
+   }
+
+   struct agx_g17p_colour_layout layout;
+
+   agx_g17p_colour_layout_init(&layout, locations, size_32, comps, false);
+   if (agx_g17p_sample_exports_end(&layout, key->g17p_samples) <=
+       AGX3B_NUM_REGS)
+      return true;
+
+   agx_g17p_colour_layout_init(&layout, locations, size_32, comps, true);
+   return agx_g17p_sample_exports_end(&layout, key->g17p_samples) <=
+          AGX3B_NUM_REGS;
 }
 
 static VkResult
@@ -2586,9 +2615,48 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
           * The linked epilog unrolls the same samples. */
          assert(key && (key->fs.g17p_samples == 2 ||
                         key->fs.g17p_samples == 4));
+
+         struct agx_fs_epilog_link_info *link = &shader->info.fs.epilog_key;
+         struct agx_g17p_colour_layout layout;
+
+         /* Pack the colours only where the ABI's slots do not fit the
+          * register file, which hk_g17p_unrolls_sample_shading() has already
+          * admitted this shader on. Every shape that fits keeps the layout
+          * and the code it has today. */
+         agx_g17p_colour_layout_init(&layout, link->loc_written,
+                                     link->size_32, link->colour_comps,
+                                     false);
+
+         if (agx_g17p_sample_exports_end(&layout, key->fs.g17p_samples) >
+             AGX3B_NUM_REGS) {
+            NIR_PASS(_, nir, agx_nir_pack_g17p_colour_exports, link);
+            agx_g17p_colour_layout_init(&layout, link->loc_written,
+                                        link->size_32, link->colour_comps,
+                                        true);
+         }
+
+         /* hk_g17p_unrolls_sample_shading() charges every location it could
+          * not read exactly the ABI's whole slot, so the layout the split
+          * recorded is never larger than the one it admitted. Fail the shader
+          * rather than name export registers outside the file if that ever
+          * stops holding: halves 192..255 fit the encoding but crash the
+          * co-processor. */
+         if (agx_g17p_sample_exports_end(&layout, key->fs.g17p_samples) >
+             AGX3B_NUM_REGS) {
+            assert(!"the gate admitted a fragment whose exports do not fit");
+            ralloc_free(nir);
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "G17P: %u-sample colour exports need %u halves "
+                             "of a %u-half register file",
+                             key->fs.g17p_samples,
+                             agx_g17p_sample_exports_end(&layout,
+                                                         key->fs.g17p_samples),
+                             (unsigned)AGX3B_NUM_REGS);
+         }
+
          NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
-         NIR_PASS(_, nir, agx_nir_unroll_g17p_samples, key->fs.g17p_samples,
-                  shader->info.fs.epilog_key.loc_written);
+         NIR_PASS(_, nir, agx_nir_unroll_g17p_samples_layout,
+                  key->fs.g17p_samples, &layout);
          nir->info.fs.uses_sample_shading = false;
       } else if (nir->info.fs.uses_sample_shading) {
          /* Ensure the sample mask is preserved in register */

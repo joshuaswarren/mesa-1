@@ -1850,6 +1850,34 @@ agx_ra(agx_context *ctx)
       }
    }
 
+   /* A multisample-array read packs its normalized layer beside another
+    * operand, and the packer reserves one transient word for it immediately
+    * above every register this allocation used -- the same "reserve above the
+    * allocation" shape as the CEM scratch, and the same failure: a fragment
+    * that reaches half 190 leaves nowhere to put the word and agx3_pack_binary
+    * refuses the whole shader. Measured on
+    * dEQP-VK.rasterization.rasterization_order_attachment_access.format_float.
+    * attachments_8_samples_4.*, whose eight input attachments at four samples
+    * allocate the entire file: observed=191 max_reg=191 base=192.
+    *
+    * Budget the word inside the file. ROUND_DOWN_TO(reg_file_alignment) below
+    * only lowers this further, so 184 leaves the word at half 186 at the very
+    * highest under either 8- or 16-half alignment. A fragment of this shape
+    * that used halves 184..191 now spills them instead; one that did not, and
+    * every fragment without such a read, keeps the whole file.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ctx->stage == MESA_SHADER_FRAGMENT && !ctx->is_preamble) {
+      agx_foreach_instr_global(ctx, I) {
+         if ((I->op == AGX_OPCODE_TEXTURE_LOAD ||
+              I->op == AGX_OPCODE_IMAGE_LOAD) &&
+             I->dim == AGX_DIM_2D_MS_ARRAY) {
+            max_possible_regs = MIN2(max_possible_regs, 184);
+            break;
+         }
+      }
+   }
+
    if (force_spilling) {
       /* Even when testing spilling, we need enough room for preloaded/exported
        * regs.

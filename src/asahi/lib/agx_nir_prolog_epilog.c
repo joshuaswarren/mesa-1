@@ -508,8 +508,33 @@ copy_colour(nir_builder *b, const struct agx_fs_epilog_key *key,
 {
    unsigned size = (key->link.size_32 & BITFIELD_BIT(in_loc)) ? 32 : 16;
 
-   nir_def *value =
-      nir_load_exported_agx(b, 4, size, .base = AGX_ABI_FOUT_COLOUR(in_loc));
+   struct agx_g17p_colour_layout layout;
+   agx_g17p_colour_layout_init(&layout, key->link.loc_written,
+                               key->link.size_32, key->link.colour_comps,
+                               key->link.packed_colour);
+
+   /* Packed colours hold only the components the main fragment exported.
+    * Everything past them is undefined in the API too, so read what is there
+    * and leave the rest undefined rather than reading the next location's
+    * registers -- a location with no components of its own shares its base
+    * with the next one. The ABI layout keeps all four components and is
+    * unchanged. */
+   const unsigned nr = layout.comps[in_loc];
+   nir_def *value = NULL;
+
+   if (nr > 0) {
+      value = nir_load_exported_agx(
+         b, nr, size, .base = agx_g17p_sample_colour_base(&layout, 0, in_loc));
+   }
+
+   if (nr < 4) {
+      nir_def *comps[4];
+
+      for (unsigned c = 0; c < 4; ++c)
+         comps[c] = c < nr ? nir_channel(b, value, c) : nir_undef(b, 1, size);
+
+      value = nir_vec(b, comps, 4);
+   }
 
    if (key->link.loc0_w_1 && in_loc == 0) {
       value =
@@ -1120,6 +1145,12 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    uint32_t one_f = (vec->bit_size == 32 ? fui(1.0) : _mesa_float_to_half(1.0));
    unsigned comp = nir_intrinsic_component(intr);
 
+   /* Record the whole write mask, including a W the loc0_w_1 case elides
+    * below: the epilog materializes that component into the loaded vector, so
+    * the slot has to be there to insert it into. */
+   info->colour_comps |=
+      (uint32_t)((nir_intrinsic_write_mask(intr) << comp) & 0xf) << (4 * loc);
+
    u_foreach_bit(c, nir_intrinsic_write_mask(intr)) {
       nir_scalar s = nir_scalar_resolved(vec, c);
       /* G17P's mixed-width MRT epilog cannot materialize the elided alpha
@@ -1192,6 +1223,121 @@ agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out)
 {
    return lower_fs_output_to_epilog(s, out, chip == AGX_CHIP_G17P);
+}
+
+static bool
+pack_colour_export(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_g17p_colour_layout *layout = data;
+
+   if (intr->intrinsic != nir_intrinsic_export_agx &&
+       intr->intrinsic != nir_intrinsic_load_exported_agx)
+      return false;
+
+   /* Depth, stencil and the masks live below the first colour. */
+   const unsigned base = nir_intrinsic_base(intr);
+   if (base < AGX_ABI_FOUT_COLOUR(0))
+      return false;
+
+   const unsigned loc = (base - AGX_ABI_FOUT_COLOUR(0)) / 8;
+   assert(loc < 8 && "colour exports name a render target");
+
+   /* Only the location's base moves; a component's place inside it does not */
+   const unsigned half = base - AGX_ABI_FOUT_COLOUR(loc);
+   nir_intrinsic_set_base(
+      intr, agx_g17p_sample_colour_base(layout, 0, loc) + half);
+
+   return true;
+}
+
+/*
+ * Move a fragment's colour exports onto the packed layout, which gives each
+ * location the components it writes instead of the ABI's four. Record it, so
+ * the epilog reads the registers the main fragment wrote.
+ */
+bool
+agx_nir_pack_g17p_colour_exports(nir_shader *s,
+                                 struct agx_fs_epilog_link_info *link)
+{
+   struct agx_g17p_colour_layout layout;
+   agx_g17p_colour_layout_init(&layout, link->loc_written, link->size_32,
+                               link->colour_comps, true);
+
+   link->packed_colour = true;
+
+   return nir_shader_intrinsics_pass(s, pack_colour_export,
+                                     nir_metadata_control_flow, &layout);
+}
+
+/*
+ * What lower_fs_output_to_epilog() would record for this shader, without
+ * lowering it. A caller deciding whether a fragment's per-sample exports can
+ * fit the register file needs the layout before the split happens.
+ *
+ * Anything this cannot account for is reported as a full four-component
+ * 32-bit location, which is the ABI's own slot, so the answer is never
+ * smaller than what the lowering goes on to produce.
+ */
+void
+agx_nir_gather_fs_colour_exports(const nir_shader *s_, uint8_t *loc_written,
+                                 uint8_t *size_32, uint32_t *colour_comps)
+{
+   nir_shader *s = (nir_shader *)s_;
+
+   *loc_written = 0;
+   *size_32 = 0;
+   *colour_comps = 0;
+
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_output)
+               continue;
+
+            nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+            unsigned location = sem.location;
+
+            if (location == FRAG_RESULT_COLOR)
+               location = FRAG_RESULT_DATA0;
+
+            /* Sample mask and depth/stencil do not go through the epilog */
+            if (location < FRAG_RESULT_DATA0)
+               continue;
+
+            if (!nir_src_is_const(intr->src[1])) {
+               /* The lowering requires a constant index. Give up exactly */
+               *loc_written = BITFIELD_MASK(8);
+               *size_32 = BITFIELD_MASK(8);
+               *colour_comps = ~0u;
+               return;
+            }
+
+            unsigned loc = (location - FRAG_RESULT_DATA0) +
+                           nir_src_as_uint(intr->src[1]);
+
+            if (sem.dual_source_blend_index)
+               loc = 1;
+
+            if (loc >= 8)
+               continue;
+
+            *loc_written |= BITFIELD_BIT(loc);
+
+            if (intr->src[0].ssa->bit_size == 32)
+               *size_32 |= BITFIELD_BIT(loc);
+
+            *colour_comps |=
+               (uint32_t)((nir_intrinsic_write_mask(intr)
+                           << nir_intrinsic_component(intr)) &
+                          0xf)
+               << (4 * loc);
+         }
+      }
+   }
 }
 
 /*

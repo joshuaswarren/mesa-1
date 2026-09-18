@@ -279,9 +279,20 @@ struct agx_fs_epilog_link_info {
     */
    bool sample_mask_after_force_early : 1;
 
-   unsigned padding : 1;
+   /* If set, the colour exports are packed by the components each location
+    * actually writes rather than laid out on the fragment ABI's
+    * four-component slots (struct agx_g17p_colour_layout). A G17P fragment
+    * unrolled per sample repeats this layout once per sample, so the packing
+    * is what decides whether its exports fit the register file.
+    */
+   unsigned packed_colour : 1;
+
+   /* Components each colour location exports, four bits per location. Only
+    * consulted for the packing above.
+    */
+   uint32_t colour_comps;
 };
-static_assert(sizeof(struct agx_fs_epilog_link_info) == 4, "packed");
+static_assert(sizeof(struct agx_fs_epilog_link_info) == 8, "packed");
 
 struct agx_fs_epilog_key {
    struct agx_fs_epilog_link_info link;
@@ -369,6 +380,18 @@ bool agx_nir_lower_fs_output_to_epilog_g17p(
    nir_shader *s, struct agx_fs_epilog_link_info *out);
 bool agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out);
+
+/* Pack the colour exports of a fragment already split for its epilog, so a
+ * G17P per-sample unroll costs only the components each location writes. */
+bool agx_nir_pack_g17p_colour_exports(nir_shader *s,
+                                      struct agx_fs_epilog_link_info *link);
+
+/* The colour layout the split above would record, read off an unlowered
+ * shader and rounded up wherever it cannot be read exactly. */
+void agx_nir_gather_fs_colour_exports(const nir_shader *s,
+                                      uint8_t *loc_written, uint8_t *size_32,
+                                      uint32_t *colour_comps);
+
 bool agx_nir_lower_g17p_1x_tile_samples(nir_shader *s);
 bool agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples);
 
