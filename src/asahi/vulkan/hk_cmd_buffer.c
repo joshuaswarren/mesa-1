@@ -1494,6 +1494,36 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             next_cf += b->count;
             continue;
          }
+         /* gl_PointCoord is the third hardware-generated coefficient source,
+          * beside FragCoord Z and gl_PrimitiveID: nir_lower_sysvals_to_varyings
+          * turns the system value into a VARYING_SLOT_PNTC input and
+          * agx_link_varyings_vs_fs() gives that binding
+          * AGX_COEFFICIENT_SOURCE_POINT_COORD with base slot 0, so it indexes
+          * no vertex output and needs no UVS word. The rasterizer supplies the
+          * sprite UV, selected by the Object Type nibble that
+          * translate_object_type() already sets to POINT_SPRITE_UV01 for point
+          * topology and that hk_g17p_emit_native_bind_tail() already packs into
+          * both face words. The CF entry is the same 4-byte encoding HAL200
+          * updateVaryingTable consumes for every other source, so nothing else
+          * in the native tail changes.
+          *
+          * agx_link_varyings_vs_fs() asserts base offset 0 and overwrites the
+          * base slot, so a partial read starting at .y has no correct encoding
+          * on any chip; keep it refused rather than rendering it wrong.
+          *
+          * The CF entry carries no topology or provoking selector, so this is
+          * not gated on point topology: a dynamic-topology pipeline may bind
+          * the same fragment shader for a triangle draw, where Vulkan leaves
+          * gl_PointCoord undefined. Refusing there would turn a legal draw
+          * into VK_ERROR_FEATURE_NOT_PRESENT for no conformance gain. */
+         if (b->slot == VARYING_SLOT_PNTC) {
+            if (b->offset != 0 || b->count > 2 || !b->smooth ||
+                (b->perspective && !has_rhw))
+               return false;
+            ++user_bindings;
+            next_cf += b->count;
+            continue;
+         }
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
                                 b->slot == VARYING_SLOT_LAYER ||
