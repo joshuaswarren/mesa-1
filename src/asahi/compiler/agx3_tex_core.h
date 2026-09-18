@@ -143,20 +143,26 @@ struct agx3_tex_fetch_desc {
     * register holding the residency code, at the half immediately after the
     * masked channels -- the same destination convention AGX2 uses.
     *
-    * Three fields carry it, isolated by compiling matched pairs that differ
+    * These fields were isolated by compiling matched pairs that differ
     * only in `sparse_sample`/`sparse_read` vs `sample`/`read`, with
     * `xcrun metal-nt -arch applegpu_g17p`
     * (MetalToolchain v27.1.5194.15, -platform_version macos 27.0 27.0):
     *
     *   f142 = 1     the residency request itself
     *   f120 = 1     set on every sparse access
-    *   f112 += 4    4 -> 8 on the driver operand profile, 8 -> 12 on
-    *                Apple's fragment profile
+    *   f112 += 4    NOT ENCODED.  Apple's bytes do move the operand profile,
+    *                but f112 is a scattered bitmask rather than a counter, so
+    *                "+4" drops profile bit 2 and sets bit 3 -- and on G17P
+    *                that makes every sparse fetch and every explicit-LOD
+    *                sparse sample fail.  The profile stays at its dense
+    *                value; see the note in agx3_tex_encode_sample() for the
+    *                measurement.
     *
     * Matched compute pairs, argument-buffer descriptors on both arms
     * (test/probes/g17p-sparse-residency.metal, k_ab_dense vs k_ab_sparse and
     * k_ab_dread vs k_ab_sread), differ in exactly those three fields plus
-    * register allocation and the group terminator:
+    * register allocation and the group terminator (the f112 move among them,
+    * which this encoder deliberately does not reproduce):
     *
     *   sample  dense  05800cb8b4000900920390010100802000800098
     *           sparse 2dc00c38bc000900920392010200802028c00018
@@ -364,9 +370,10 @@ struct agx3_tex_sample_desc {
    uint16_t offset_xyz;         /* immediate signed x/y/z nibbles */
    bool offset_register;        /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
-   /* See agx3_tex_fetch_desc::sparse; the sample form uses the same three
-    * fields, witnessed on 2D, 2D-array, 3D, cube, gather, immediate level and
-    * bias shapes and on both result widths. */
+   /* See agx3_tex_fetch_desc::sparse; the sample form uses the same fields,
+    * witnessed on 2D, 2D-array, 3D, cube, gather, immediate level and bias
+    * shapes and on both result widths, and likewise leaves the f112 operand
+    * profile alone. */
    bool sparse;
 };
 

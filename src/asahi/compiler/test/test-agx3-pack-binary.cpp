@@ -250,16 +250,10 @@ TEST_F(AGX3PackBinary, SparseResidencySampleEmitsTheWitnessedFields)
    }
 }
 
-/* Hardware showed the sparse FETCH form composes but does not execute
- * correctly: on Neo every sparse fetch/read case returned wrong data while
- * every sparse sample case passed, so agx3_tex_encode_fetch() now refuses
- * sparse and the packer refuses the shader. Only the dense arm is exercised
- * here. Restore the sparse arm with the encoder once a witness explains what
- * the fetch form needs beyond f142/f120/f112. */
 TEST_F(AGX3PackBinary, SparseResidencyFetchEmitsTheWitnessedFields)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
-   for (bool sparse : {false}) {
+   for (bool sparse : {false, true}) {
       agx_builder *b = builder(enc);
       b->shader->stage = MESA_SHADER_COMPUTE;
       agx_index dest = agx_register(16, AGX_SIZE_32);

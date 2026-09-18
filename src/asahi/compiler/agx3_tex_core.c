@@ -99,31 +99,10 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->multisample && (d->lod_x64 || d->register_lod)))
       return false;
 
-   /* Sparse residency on the FETCH/READ path is refused: it assembles, but it
-    * does not execute correctly.
-    *
-    * Measured on Neo (G17P, A18 Pro) over a 570-case 1-in-6 sample of
-    * dEQP-VK.sparse_resources.shader_intrinsics.*, with the sparse encoders
-    * otherwise enabled, the split is exact and falls along the two encoders:
-    *
-    *   pass: 2d_sparse_sample_implicit_lod 28, 2d_sparse_gather 27,
-    *         2d_sparse_sample_explicit_lod 4      -- all agx3_tex_sample_*
-    *   fail: 2d_sparse_fetch 29, 2d_sparse_read 27, 2d_array_sparse_read 28,
-    *         2d_array_sparse_fetch 27, cube_sparse_read 25,
-    *         cube_array_sparse_read 25            -- all this encoder
-    *
-    * Every sample-side case passes and every fetch-side case returns wrong
-    * data, so the three witnessed fields (f142, f120, f112+4) are sufficient
-    * for the sample form and are NOT sufficient here -- the fetch form needs
-    * something further that the dense-vs-sparse delta did not expose. This is
-    * not the ep4 tail gap noted above: the sample form takes ep4 too and
-    * passes.
-    *
-    * Refuse until a witness explains the difference. A clean refusal is a
-    * NotSupported or a pipeline-creation failure; emitting this form instead
-    * silently corrupts every sparse texel fetch.
-    */
-   if (d->sparse)
+   /* Sparse residency is witnessed on AGX3b only, and only for the ordinary
+    * (non-multisample) read.  metal-nt emits no sparse multisample form, and
+    * f142 is beyond the 8-byte AGX3c encoding entirely. */
+   if (d->sparse && (enc != AGX_ISA_ENCODING_AGX3B || d->multisample))
       return false;
 
    const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
@@ -161,7 +140,10 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
 
    base[nb++] = (struct agx3_field_kv)KV(103, tk);
    base[nb++] = (struct agx3_field_kv)KV(104, tk == AGX3_TEX_OPERAND_IMMEDIATE ? 1 : 2);
-   base[nb++] = (struct agx3_field_kv)KV(112, d->sparse ? 8 : 4);
+   /* The operand profile.  A sparse residency request does NOT change it: see
+    * the note on agx3_tex_sample_desc::sparse below, and
+    * agx3_tex_fetch_desc::sparse in the header. */
+   base[nb++] = (struct agx3_field_kv)KV(112, 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);
@@ -658,11 +640,43 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
     */
    if (operand_profile & 1)
       base[nb++] = (struct agx3_field_kv)KV(83, 4);
-   /* The sparse residency request raises this operand-profile field by four:
-    * 4 -> 8 on the driver profile, 8 -> 12 on Apple's fragment profile.  Both
-    * steps are witnessed; see agx3_tex_fetch_desc::sparse. */
-   base[nb++] = (struct agx3_field_kv)KV(
-      112, ((operand_profile & 2) ? 8 : 4) + (d->sparse ? 4 : 0));
+   /* The operand profile, which a sparse residency request does NOT change.
+    *
+    * f112 reads as a small integer but the generated AGX3b tables deposit it
+    * as a scattered bitmask: bit 0 must be zero, bits 5..2 land in instruction
+    * bits 99..96, and bits 1, 6, 7 and 8 land elsewhere again.  So the "+4"
+    * that matched-pair witnesses appear to show is not an increment of a
+    * counter -- it clears profile bit 2 and sets bit 3 instead.
+    *
+    * Dropping bit 2 breaks sparse residency on G17P.  Measured on Neo over the
+    * whole 3,420-case dEQP-VK.sparse_resources.shader_intrinsics family, one
+    * field at a time and nothing else changed:
+    *
+    *   fetch refused, sample +4 (origin/agx3)     360 Pass   1,640 Fail
+    *   fetch dense,   sample +4                 1,340 Pass     660 Fail
+    *   fetch dense,   sample dense              1,490 Pass     510 Fail
+    *
+    * and on a 30-case fetch probe (2d_sparse_fetch and 2d_sparse_read over
+    * r8/r32i/rgba8i and all four sizes), isolating this field alone:
+    *
+    *   fetch +4      0/30 Pass        fetch dense    30/30 Pass
+    *
+    * The final 510 are the layered sampled groups, which refuse at
+    * endCommandBuffer before any sparse instruction runs, identically before
+    * and after.
+    *
+    * The +4 fails per shape, not per encoder, which is why it read as a fetch
+    * problem when the sparse encoders landed: with it, every texel fetch and
+    * every explicit-LOD sample reports an unbacked page as resident and
+    * returns texels that do not match, while the automatic-LOD sample and the
+    * gather are correct.  (Both symptoms are what a zeroed destination would
+    * produce -- a zero residency code reads as resident -- but that reading is
+    * an inference; only the CTS outcomes above are measured.)  Apple's own
+    * `sparse_sample`/`sparse_read` bytes do carry bit 3 rather than bit 2; why
+    * their argument-buffer descriptors tolerate it and Honeykrisp's register
+    * and uniform descriptors do not is not yet understood.  Hardware decides,
+    * so the profile stays where the dense form puts it. */
+   base[nb++] = (struct agx3_field_kv)KV(112, (operand_profile & 2) ? 8 : 4);
    base[nb++] = (struct agx3_field_kv)KV(118, 3);
    base[nb++] = (struct agx3_field_kv)KV(119, 3);
    base[nb++] = (struct agx3_field_kv)KV(132, sk);

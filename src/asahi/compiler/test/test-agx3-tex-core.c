@@ -3651,14 +3651,20 @@ test_runtime_gather_witnesses(void)
  * exactly three field differences beyond register allocation and the group
  * terminator: f112 4 -> 8, f120 0 -> 1 and f142 0 -> 1.
  *
+ * This encoder reproduces two of those three.  It deliberately leaves f112 at
+ * its dense value, because moving it clears operand-profile bit 2 and G17P
+ * then fails every sparse fetch and every explicit-LOD sparse sample;
+ * agx3_tex_encode_sample() records the hardware measurement.  So byte 12
+ * below reads 01 on both arms, where Apple's sparse arm reads 02.
+ *
  * The goldens below are this encoder's bytes, which reproduce Apple's
- * through byte 15 and carry f120 at byte 17 bit 6.  They differ from Apple's
- * in three ep4 places -- the destination copy in f19's upper byte, f91, and
- * bits 154..159 -- and those three are not specific to sparse: the dense arms
- * below, and every other ep4 texture operation this encoder emits, differ
- * from Apple in exactly the same way.  See the KNOWN GAP note at the top of
- * agx3_tex_core.c.  What this test pins is therefore the sparse delta, which
- * is byte-identical to Apple's: byte 10 bit 1 (f142), byte 12 (f112 4 -> 8)
+ * through byte 15 apart from that and carry f120 at byte 17 bit 6.  They
+ * differ from Apple's in three further ep4 places -- the destination copy in
+ * f19's upper byte, f91, and bits 154..159 -- and those three are not
+ * specific to sparse: the dense arms below, and every other ep4 texture
+ * operation this encoder emits, differ from Apple in exactly the same way.
+ * See the KNOWN GAP note at the top of agx3_tex_core.c.  What this test pins
+ * is therefore the sparse delta this encoder does emit: byte 10 bit 1 (f142)
  * and byte 17 bit 6 (f120), and nothing else.
  */
 static int
@@ -3679,29 +3685,27 @@ test_sparse_residency(void)
    };
    CHECK(agx3_tex_encode_sample(enc, &sample, bytes, &length));
    CHECK(length == 20 &&
-         hex_eq(bytes, length, "2dc00c38bc000900920392010200802000400000"));
+         hex_eq(bytes, length, "2dc00c38bc000900920392010100802000400000"));
 
-   /* The dense sibling differs in exactly the three sparse fields: byte 10
-    * bit 1 (f142), byte 12 (f112 4 -> 8) and byte 17 bit 6 (f120). */
+   /* The dense sibling differs in exactly the two sparse fields this encoder
+    * emits: byte 10 bit 1 (f142) and byte 17 bit 6 (f120).  Byte 12, the
+    * operand profile, stays put. */
    struct agx3_tex_sample_desc dense = sample;
    dense.sparse = false;
    CHECK(agx3_tex_encode_sample(enc, &dense, bytes, &length));
    CHECK(length == 20 &&
          hex_eq(bytes, length, "2dc00c38bc000900920390010100802000000000"));
 
-   /* The texel fetch composes the same three fields, but hardware showed the
-    * result does not execute correctly -- every sparse fetch/read case on Neo
-    * returned wrong data while every sparse sample case passed -- so the fetch
-    * encoder now refuses. See the comment on the refusal in agx3_tex_core.c.
-    * Restore the byte-exact expectation together with the encoder once a
-    * witness explains what the fetch form needs beyond f142/f120/f112. */
+   /* The texel fetch carries the same two fields. */
    struct agx3_tex_fetch_desc fetch = {
       .dest = 10, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
       .slot = 1, .wait_mask = 1, .coord_kill = true, .final = false,
       .texture_kind = AGX3_TEX_OPERAND_UNIFORM, .texture_value = 24,
       .sparse = true,
    };
-   CHECK(!agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
+   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38b0001701900282000100002000400000"));
 
    struct agx3_tex_fetch_desc dense_fetch = fetch;
    dense_fetch.sparse = false;
@@ -3709,10 +3713,14 @@ test_sparse_residency(void)
    CHECK(length == 20 &&
          hex_eq(bytes, length, "2dc00c38b0001701900280000100002000000000"));
 
-   /* The decoder keeps its sparse axis: it must still recognise the form if it
-    * is met, even though the encoder now refuses to emit it. The dense fetch
-    * round-trips and reports no residency request. */
+   /* A sparse fetch round-trips through the strict decoder, and the decoded
+    * descriptor reports the residency request. */
+   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
    struct agx3_tex_fetch_desc decoded;
+   CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
+   CHECK(decoded.sparse && decoded.dest == 10 && decoded.mask == 15 &&
+         decoded.texture_kind == AGX3_TEX_OPERAND_UNIFORM &&
+         decoded.texture_value == 24);
    CHECK(agx3_tex_encode_fetch(enc, &dense_fetch, bytes, &length));
    CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
    CHECK(!decoded.sparse);
@@ -3730,7 +3738,7 @@ test_sparse_residency(void)
    immediate.sparse = true;
    CHECK(agx3_tex_encode_sample(enc, &immediate, bytes, &length));
    CHECK(length == 20 &&
-         hex_eq(bytes, length, "05800cb8b0000900000212000200000000400000"));
+         hex_eq(bytes, length, "05800cb8b0000900000212000100000000400000"));
 
    /* Negative: no AGX3c witness exists, and f142 is outside the AGX3c sample
     * entirely. */
