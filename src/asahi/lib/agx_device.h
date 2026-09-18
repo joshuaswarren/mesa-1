@@ -122,7 +122,8 @@ typedef struct {
                            uint32_t syncobj, uint64_t wait_value,
                            struct drm_asahi_gem_bind_op *ops,
                            uint32_t count);
-   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr);
+   void (*bo_mmap)(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+                   size_t length);
    ssize_t (*get_params)(struct agx_device *dev, void *buf, size_t size);
    int (*submit)(struct agx_device *dev, struct drm_asahi_submit *submit,
                  struct agx_submit_virt *virt);
@@ -387,8 +388,31 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
    return addr + dev->sparse_ro_offset;
 }
 
+/*
+ * `length` bounds a PLACED mapping.  Zero means the whole BO, which is what
+ * every ordinary map wants.
+ *
+ * A placed map may not be given the BO's size: agx_bo_cache_fetch() hands back
+ * BOs up to twice the requested size (agx_bo.c), so a VkDeviceMemory of n bytes
+ * can be backed by a BO of 2n, and mapping bo->size with MAP_FIXED at the
+ * address the application reserved would land on whatever the application put
+ * after its allocation.  VK_EXT_map_memory_placed requires exactly the memory
+ * object's range; dEQP-VK.memory.map_placed.* reserves guard pages
+ * immediately after it, fills them, and checks the pattern survives.
+ */
+/*
+ * Bytes mapped at `bo->_map`. Backends that map the whole BO may leave
+ * `_map_size` zero; everything that tears a mapping down must go through this
+ * rather than assuming `bo->size`. See the field comment in agx_bo.h.
+ */
+static inline size_t
+agx_bo_map_size(const struct agx_bo *bo)
+{
+   return bo->_map_size ?: bo->size;
+}
+
 static inline void *
-agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
+agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t length)
 {
    /* The BO cache deliberately preserves CPU mappings.  A Vulkan allocation
     * may therefore inherit a mapping from an earlier allocation even though
@@ -402,10 +426,11 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
    if (fixed_addr && bo->_map && bo->_map != fixed_addr) {
       bo->dev->ops.bo_munmap(bo->dev, bo);
       bo->_map = NULL;
+      bo->_map_size = 0;
    }
 
    if (!bo->_map)
-      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr);
+      bo->dev->ops.bo_mmap(bo->dev, bo, fixed_addr, fixed_addr ? length : 0);
 
    return bo->_map;
 }
@@ -413,7 +438,7 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr)
 static inline void *
 agx_bo_map(struct agx_bo *bo)
 {
-   return agx_bo_map_placed(bo, NULL);
+   return agx_bo_map_placed(bo, NULL, 0);
 }
 
 static inline bool
@@ -510,6 +535,13 @@ void agx_get_driver_uuid(void *uuid);
 unsigned agx_get_num_cores(const struct agx_device *dev);
 
 struct agx_device_key agx_gather_device_key(struct agx_device *dev);
+
+/* Native HAL200 graphics recording shared by G16G and G17P. */
+static inline bool
+agx_native_graphics(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G16G || dev->chip == AGX_CHIP_G17P;
+}
 
 struct agx_va *agx_va_alloc(struct agx_device *dev, uint64_t size_B,
                             uint64_t align_B, enum agx_va_flags flags,

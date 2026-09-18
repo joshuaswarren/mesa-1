@@ -7,9 +7,13 @@
 /* Bottom-up local scheduler to reduce register pressure */
 
 #include "util/dag.h"
+#include "util/u_debug.h"
 #include "util/sparse_bitset.h"
 #include "agx_compiler.h"
 #include "agx_opcodes.h"
+
+/* Diagnostic escape hatch for A/B testing the UVS store ordering below. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_stvary_noorder, "HK_STVARY_NOORDER", false)
 
 struct sched_ctx {
    /* Dependency graph */
@@ -58,6 +62,33 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx)
    /* Last memory store, to serialize loads and stores against */
    struct sched_node *memory_store = NULL;
 
+   /* Last unified-vertex-store write, to keep UVS writeout in program order.
+    *
+    * AGX3's UVSW is not a plain indexed write.  agx3_pack_binary.c copies
+    * each value into the staging file first and then emits the UVSW against
+    * it, and outside Apple's batched protocols the staging half and the
+    * scoreboard slot a store uses are picked from the store's position in
+    * the emission order (`next_uvs_slot` round-robin, `staging_half =
+    * 2 * (stage_slot - 1)`).  That fallback is what an unlinked vertex
+    * shader takes, because a run-time output index disqualifies every
+    * batched form.  Permuting the stores therefore permutes which of them
+    * share a staging generation, and the packer's slot bookkeeping does not
+    * model those generations, so the resulting hazards are invisible to it:
+    * on G17P this rendered a random subset of a tessellated+geometry draw's
+    * primitives per run.  st_vary carries no schedule class, so nothing else
+    * stops the reorder.  The stores sit at the end of the shader and each
+    * one already depends on its own value, so ordering them among themselves
+    * costs the scheduler essentially nothing (measured: identical
+    * instruction, GPR and spill counts; 10 bytes smaller code on the shader
+    * that exposed the bug).  AGX2 addresses the UVS directly and is left
+    * alone.
+    */
+   struct sched_node *vary_store = NULL;
+   const enum agx_isa_encoding enc = ctx->key->dev.encoding;
+   const bool order_vary_stores =
+      (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
+      !debug_get_option_agx_stvary_noorder();
+
    agx_foreach_instr_in_block(block, I) {
       /* Don't touch control flow */
       if (instr_after_logical_end(I))
@@ -100,6 +131,9 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx)
       /* Make sure side effects happen before a discard */
       if (discards)
          add_dep(node, memory_store);
+
+      if (order_vary_stores && I->op == AGX_OPCODE_ST_VARY)
+         serialize(node, &vary_store);
 
       if (dep == AGX_SCHEDULE_CLASS_PRELOAD)
          serialize(node, &preload);

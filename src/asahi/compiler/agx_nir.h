@@ -29,6 +29,12 @@ bool agx_nir_lower_layer(struct nir_shader *s);
 bool agx_nir_lower_clip_distance(struct nir_shader *s);
 bool agx_nir_lower_subgroups(struct nir_shader *s);
 bool agx_nir_lower_subgroups_g17p(struct nir_shader *s);
+
+/* AGX3 ldtg/sttg index threadgroup memory in scalar elements, scaled by the
+ * access width; NIR shared offsets are bytes.  Idempotent, so a frontend may
+ * run it as early as the optimizer can use it and agx_compile_shader_nir()
+ * still guarantees it for any AGX3 target. */
+bool agx_nir_lower_shared_element_index(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 
 bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
@@ -41,9 +47,14 @@ bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
 /* robust_formatless_images: formatless image loads have not been lowered for
  * view-bounds robustness and require it. */
+/* sparse_buffer_residency: ordinary texel-buffer reads must consult the
+ * software sparse residency map, because the descriptor names the primary
+ * mapping rather than the read-only shadow (hk_buffer_view.c). */
 bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
                                                unsigned generation,
-                                               bool robust_formatless_images);
+                                               bool robust_formatless_images,
+                                               uint64_t sparse_ro_offset,
+                                               bool sparse_buffer_residency);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
 bool agx_nir_lower_multisampled_image_store_for_generation(struct nir_shader *s,
                                                          unsigned generation);
@@ -58,6 +69,8 @@ bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
 /* G17P appends one native texture-heap index after the 64-byte texture/PBE
  * storage descriptor pair. Other generations retain their existing ABI. */
 #define AGX_G17P_STORAGE_HEAP_INDEX_OFFSET 64
+
+bool agx_nir_lower_g17p_bindless_storage(struct nir_shader *s);
 /* G17P storage descriptors reserve the following eight bytes for the two
  * texture-heap indices.  Image atomics keep their software address metadata
  * in a separate packed word after those indices, 40 bytes past the native PBE

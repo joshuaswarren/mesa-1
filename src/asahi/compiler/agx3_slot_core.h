@@ -38,7 +38,8 @@ extern "C" {
 #define AGX3_SLOT_TPS_HALF_TOKENS 32768u
 #define AGX3_SLOT_TEX_COORD_TOKEN                                        \
    (AGX3_SLOT_TPS_TOKEN_BASE + AGX3_SLOT_TPS_HALF_TOKENS)
-#define AGX3_SLOT_NUM_TOKENS (AGX3_SLOT_TEX_COORD_TOKEN + 1u)
+#define AGX3_SLOT_DYNAMIC_TPS_TOKEN (AGX3_SLOT_TEX_COORD_TOKEN + 1u)
+#define AGX3_SLOT_NUM_TOKENS (AGX3_SLOT_DYNAMIC_TPS_TOKEN + 1u)
 
 /* A 3D gradient+minimum sample reads six coordinate halves, fourteen LOD
  * halves, and two four-half descriptor operands. Keep the full dependency

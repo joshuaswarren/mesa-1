@@ -329,8 +329,12 @@ hk_CreateDescriptorSetLayout(VkDevice device,
                layout->binding[b].immutable_samplers[i];
 
             /* We zalloc the object, so it's safe to hash the whole thing */
-            if (sampler != NULL && sampler->vk.ycbcr_conversion != NULL)
-               BLAKE3_UPDATE_VALUE(sampler->vk.ycbcr_conversion->state);
+            if (sampler != NULL && sampler->vk.ycbcr_conversion != NULL) {
+               BLAKE3_UPDATE_VALUE(sampler->ycbcr);
+               BLAKE3_UPDATE_VALUE(sampler->min_filter);
+               BLAKE3_UPDATE_VALUE(sampler->mag_filter);
+               BLAKE3_UPDATE_VALUE(sampler->mip_lod_bias);
+            }
          }
       }
    }

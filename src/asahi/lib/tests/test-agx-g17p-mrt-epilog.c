@@ -47,7 +47,8 @@ test_r11g11b10_mrt_layout(void)
 
    bad = tib;
    bad.logical_format[1] = PIPE_FORMAT_R8G8B8A8_UNORM;
-   if (agx_g17p_classify_mrt(&bad) != AGX_G17P_MRT_NONE)
+   if (agx_g17p_classify_mrt(&bad) != AGX_G17P_MRT_MIXED ||
+       !agx_g17p_rt0_tile_layout_supported(&bad))
       return false;
 
    bad = tib;

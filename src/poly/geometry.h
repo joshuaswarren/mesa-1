@@ -526,6 +526,47 @@ poly_decomposed_prims_for_vertices_with_tess(enum mesa_prim prim, int vertices,
    }
 }
 
+/*
+ * Map an output vertex index of an adjacency-decomposed draw back to the input
+ * vertex it must read, having discarded the vertices only a geometry shader
+ * can see.
+ *
+ * This is the single source of truth for the four adjacency topologies.  The
+ * VS prolog reaches it through poly_map_to_line_adj() and friends in
+ * geometry.cl; the hardware index-buffer path in libagx calls it directly,
+ * because a G17P hardware vertex shader reads its invocation index from
+ * SR 0xdd and therefore never observes a remap the prolog performed.
+ */
+static inline unsigned
+poly_map_adj_vertex(unsigned id, enum mesa_prim prim)
+{
+   if (prim == MESA_PRIM_LINES_ADJACENCY) {
+      /* Sequence (1, 2), (5, 6), (9, 10), ... */
+      return ((id & ~1) * 2) + (id & 1) + 1;
+   } else if (prim == MESA_PRIM_LINE_STRIP_ADJACENCY) {
+      /* Sequence (1, 2), (2, 3), (4, 5), .. */
+      return (id / 2) + (id & 1) + 1;
+   } else if (prim == MESA_PRIM_TRIANGLE_STRIP_ADJACENCY) {
+      /* Sequence (0, 2, 4), (2, 6, 4), (4, 6, 8), (6, 10, 8). Dividing through
+       * by two this is a plain triangle strip, with odd triangles' winding
+       * order flipped. */
+      unsigned strip_prim = id / 3;
+      unsigned vtx = id % 3;
+
+      if ((strip_prim % 2) == 1) {
+         if (vtx == 1)
+            vtx = 2;
+         else if (vtx == 2)
+            vtx = 1;
+      }
+
+      return 2 * (strip_prim + vtx);
+   } else {
+      /* Adjacency lists just drop half the vertices: (0, 2, 4), (6, 8, 10) */
+      return id * 2;
+   }
+}
+
 #ifdef __OPENCL_VERSION__
 /*
  * Returns (work_group_scan_inclusive_add(x), work_group_sum(x)). Implemented

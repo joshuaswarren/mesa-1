@@ -1,0 +1,666 @@
+--- a/external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp
++++ b/external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp
+@@ -677,7 +677,7 @@
+ 	const vector<Attachment>&							getAttachments	(void) const { return m_attachments;	}
+ 	const vector<Subpass>&								getSubpasses	(void) const { return m_subpasses;		}
+ 	const vector<SubpassDependency>&					getDependencies	(void) const { return m_dependencies;	}
+-	const vector<VkInputAttachmentAspectReferenceKHR>	getInputAspects	(void) const { return m_inputAspects;	}
++	const vector<VkInputAttachmentAspectReferenceKHR>&	getInputAspects	(void) const { return m_inputAspects;	}
+ 
+ private:
+ 	const vector<Attachment>							m_attachments;
+@@ -5727,7 +5727,7 @@
+ 								{
+ 									const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 									{
+-										0u,
++										1u,
+ 										0u,
+ 										VK_IMAGE_ASPECT_COLOR_BIT
+ 									};
+@@ -5783,7 +5783,7 @@
+ 								{
+ 									const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 									{
+-										0u,
++										1u,
+ 										0u,
+ 										VK_IMAGE_ASPECT_COLOR_BIT
+ 									};
+@@ -5976,7 +5976,7 @@
+ 								{
+ 									const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 									{
+-										0u,
++										1u,
+ 										0u,
+ 										(isDepthAttachment ? (VkImageAspectFlags)VK_IMAGE_ASPECT_DEPTH_BIT : 0u)
+ 											| (isStencilAttachment ? (VkImageAspectFlags)VK_IMAGE_ASPECT_STENCIL_BIT : 0u)
+@@ -6034,7 +6034,7 @@
+ 								{
+ 									const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 									{
+-										0u,
++										1u,
+ 										0u,
+ 
+ 										(isDepthAttachment ? (VkImageAspectFlags)VK_IMAGE_ASPECT_DEPTH_BIT : 0u)
+@@ -6105,7 +6105,7 @@
+ 									{
+ 										const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 										{
+-											0u,
++											1u,
+ 											0u,
+ 
+ 											(isDepthAttachment ? (VkImageAspectFlags)VK_IMAGE_ASPECT_DEPTH_BIT : 0u)
+@@ -6172,7 +6172,7 @@
+ 									{
+ 										const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 										{
+-											0u,
++											1u,
+ 											0u,
+ 
+ 											(isDepthAttachment ? (VkImageAspectFlags)VK_IMAGE_ASPECT_DEPTH_BIT : 0u)
+@@ -6240,7 +6240,7 @@
+ 									{
+ 										const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 										{
+-											0u,
++											1u,
+ 											0u,
+ 
+ 											(isDepthAttachment ? (VkImageAspectFlags)VK_IMAGE_ASPECT_DEPTH_BIT : 0u)
+@@ -6307,7 +6307,7 @@
+ 									{
+ 										const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 										{
+-											0u,
++											1u,
+ 											0u,
+ 
+ 											(isDepthAttachment ? (VkImageAspectFlags)VK_IMAGE_ASPECT_DEPTH_BIT : 0u)
+diff --git a/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp b/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp
+index 1f9f618..e4ed05c 100644
+--- a/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp
++++ b/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp
+@@ -620,7 +620,7 @@ void downloadImage (const DeviceInterface&	vkd,
+ 				makeExtent3D(planeW, planeH, 1u),
+ 			};
+ 
+-			vkd.cmdCopyImageToBuffer(*cmdBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, **stagingBuffers[planeNdx], 1u, &copy);
++			vkd.cmdCopyImageToBuffer(*cmdBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, **stagingBuffers[planeNdx], 1u, &copy);
+ 		}
+ 		{
+ 			const VkBufferMemoryBarrier		postCopyBarrier	=
+
+diff --git a/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp b/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
+index d7e7260..a757755 100644
+--- a/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
++++ b/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
+@@ -1184,7 +1184,18 @@ TestStatus ClearColorImageTestInstance::iterate (void)
+ 
+ 	// Different clear color per range
+ 	for (std::size_t i = 0u; i < subresourceRanges.size(); ++i)
+-		m_vkd.cmdClearColorImage(*m_commandBuffer, *m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &m_params.clearValue[i].color, 1, &subresourceRanges[i]);
++	{
++		VkClearColorValue value = m_params.clearValue[i].color;
++		const std::string formatName = de::toString(getFormatStr(m_params.imageFormat));
++		for (unsigned c = 0; c < 4; ++c)
++		{
++			if (formatName.find("_SSCALED") != std::string::npos)
++				value.float32[c] = float(m_params.clearValue[i].color.int32[c]);
++			else if (formatName.find("_USCALED") != std::string::npos)
++				value.float32[c] = float(m_params.clearValue[i].color.uint32[c]);
++		}
++		m_vkd.cmdClearColorImage(*m_commandBuffer, *m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &subresourceRanges[i]);
++	}
+ 
+ 	pipelineImageBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,				// VkPipelineStageFlags		srcStageMask
+ 						 VK_PIPELINE_STAGE_TRANSFER_BIT,				// VkPipelineStageFlags		dstStageMask
+
+--- a/external/vulkancts/modules/vulkan/api/vktApiCopiesAndBlittingTests.cpp
++++ b/external/vulkancts/modules/vulkan/api/vktApiCopiesAndBlittingTests.cpp
+@@ -1784,8 +1784,6 @@
+ 	{
+ 		if (!(srcFormatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+ 			TCU_THROW(NotSupportedError, "Source format feature sampled image filter linear not supported");
+-		if (!(dstFormatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+-			TCU_THROW(NotSupportedError, "Destination format feature sampled image filter linear not supported");
+ 	}
+ 
+ 	// Create source image
+--- a/external/vulkancts/modules/vulkan/image/vktImageCompressionTranscodingSupport.cpp
++++ b/external/vulkancts/modules/vulkan/image/vktImageCompressionTranscodingSupport.cpp
+@@ -2351,12 +2351,19 @@
+ 	{
+ 		case SHADER_TYPE_COMPUTE:
+ 		{
+-			const std::string	imageTypeStr		= getShaderImageType(mapVkFormat(m_parameters.formatUncompressed), m_parameters.imageType);
+-			const std::string	formatQualifierStr	= getShaderImageFormatQualifier(mapVkFormat(m_parameters.formatUncompressed));
++			// Scaled Vulkan formats have floating-point shader values. TCU maps
++			// their CPU storage to integer formats, not their shader interface.
++			const bool scaled = std::string(getFormatName(m_parameters.formatUncompressed)).find("SCALED") != std::string::npos;
++			tcu::TextureFormat shaderFormat = mapVkFormat(m_parameters.formatUncompressed);
++			if (scaled)
++				shaderFormat.type = tcu::TextureFormat::FLOAT;
++			const std::string imageTypeStr = getShaderImageType(shaderFormat, m_parameters.imageType);
++			const std::string formatQualifierStr = scaled ? "" : ", " + getShaderImageFormatQualifier(shaderFormat);
+ 			std::ostringstream	src;
+ 			std::ostringstream	src_decompress;
+ 
+ 			src << glu::getGLSLVersionDeclaration(glu::GLSL_VERSION_450) << "\n"
++				<< (scaled ? "#extension GL_EXT_shader_image_load_formatted : require\n" : "")
+ 				<< "layout (local_size_x = 1, local_size_y = 1, local_size_z = 1) in;\n\n";
+ 			src_decompress << src.str();
+ 
+@@ -2364,8 +2371,8 @@
+ 			{
+ 				case OPERATION_IMAGE_LOAD:
+ 				{
+-					src << "layout (binding = 0, "<<formatQualifierStr<<") readonly uniform "<<imageTypeStr<<" u_image0;\n"
+-						<< "layout (binding = 1, "<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image1;\n\n"
++					src << "layout (binding = 0"<<formatQualifierStr<<") readonly uniform "<<imageTypeStr<<" u_image0;\n"
++						<< "layout (binding = 1"<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image1;\n\n"
+ 						<< "void main (void)\n"
+ 						<< "{\n"
+ 						<< "    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);\n"
+@@ -2377,8 +2384,8 @@
+ 
+ 				case OPERATION_TEXEL_FETCH:
+ 				{
+-					src << "layout (binding = 0) uniform "<<getGlslSamplerType(mapVkFormat(m_parameters.formatUncompressed), mapImageViewType(m_parameters.imageType))<<" u_image0;\n"
+-						<< "layout (binding = 1, "<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image1;\n\n"
++					src << "layout (binding = 0) uniform "<<getGlslSamplerType(shaderFormat, mapImageViewType(m_parameters.imageType))<<" u_image0;\n"
++						<< "layout (binding = 1"<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image1;\n\n"
+ 						<< "void main (void)\n"
+ 						<< "{\n"
+ 						<< "    ivec3 pos = ivec3(gl_GlobalInvocationID.xyz);\n"
+@@ -2390,8 +2397,8 @@
+ 
+ 				case OPERATION_TEXTURE:
+ 				{
+-					src << "layout (binding = 0) uniform "<<getGlslSamplerType(mapVkFormat(m_parameters.formatUncompressed), mapImageViewType(m_parameters.imageType))<<" u_image0;\n"
+-						<< "layout (binding = 1, "<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image1;\n\n"
++					src << "layout (binding = 0) uniform "<<getGlslSamplerType(shaderFormat, mapImageViewType(m_parameters.imageType))<<" u_image0;\n"
++						<< "layout (binding = 1"<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image1;\n\n"
+ 						<< "void main (void)\n"
+ 						<< "{\n"
+ 						<< "    const vec2 pixels_resolution = vec2(gl_NumWorkGroups.x - 1, gl_NumWorkGroups.y - 1);\n"
+@@ -2405,9 +2412,9 @@
+ 
+ 				case OPERATION_IMAGE_STORE:
+ 				{
+-					src << "layout (binding = 0, "<<formatQualifierStr<<") uniform "<<imageTypeStr<<"           u_image0;\n"
+-						<< "layout (binding = 1, "<<formatQualifierStr<<") readonly uniform "<<imageTypeStr<<"  u_image1;\n"
+-						<< "layout (binding = 2, "<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image2;\n\n"
++					src << "layout (binding = 0"<<formatQualifierStr<<") uniform "<<imageTypeStr<<"           u_image0;\n"
++						<< "layout (binding = 1"<<formatQualifierStr<<") readonly uniform "<<imageTypeStr<<"  u_image1;\n"
++						<< "layout (binding = 2"<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" u_image2;\n\n"
+ 						<< "void main (void)\n"
+ 						<< "{\n"
+ 						<< "    ivec2 pos = ivec2(gl_GlobalInvocationID.xy);\n"
+@@ -2422,10 +2429,10 @@
+ 					DE_ASSERT(false);
+ 			}
+ 
+-			src_decompress	<< "layout (binding = 0) uniform "<<getGlslSamplerType(mapVkFormat(m_parameters.formatUncompressed), mapImageViewType(m_parameters.imageType))<<" compressed_result;\n"
+-							<< "layout (binding = 1) uniform "<<getGlslSamplerType(mapVkFormat(m_parameters.formatUncompressed), mapImageViewType(m_parameters.imageType))<<" compressed_reference;\n"
+-							<< "layout (binding = 2, "<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" decompressed_result;\n"
+-							<< "layout (binding = 3, "<<formatQualifierStr<<") writeonly uniform "<<imageTypeStr<<" decompressed_reference;\n\n"
++			src_decompress	<< "layout (binding = 0) uniform "<<getGlslSamplerType(tcu::TextureFormat(tcu::TextureFormat::RGBA, tcu::TextureFormat::FLOAT), mapImageViewType(m_parameters.imageType))<<" compressed_result;\n"
++							<< "layout (binding = 1) uniform "<<getGlslSamplerType(tcu::TextureFormat(tcu::TextureFormat::RGBA, tcu::TextureFormat::FLOAT), mapImageViewType(m_parameters.imageType))<<" compressed_reference;\n"
++							<< "layout (binding = 2, rgba8) writeonly uniform image2D decompressed_result;\n"
++							<< "layout (binding = 3, rgba8) writeonly uniform image2D decompressed_reference;\n\n"
+ 							<< "void main (void)\n"
+ 							<< "{\n"
+ 							<< "    const vec2 pixels_resolution = vec2(gl_NumWorkGroups.xy);\n"
+
+--- a/external/vulkancts/modules/vulkan/tessellation/vktTessellationUtil.cpp
++++ b/external/vulkancts/modules/vulkan/tessellation/vktTessellationUtil.cpp
+@@ -311,7 +311,7 @@
+ 											   const VkRenderPass		renderPass,
+ 											   const VkFramebuffer		framebuffer)
+ {
+-	const VkRect2D renderArea = {{ 0, 0 }, { 0, 0 }};
++	const VkRect2D renderArea = {{ 0, 0 }, { 1, 1 }};
+ 
+ 	const VkRenderPassBeginInfo renderPassBeginInfo = {
+ 		VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,		// VkStructureType         sType;
+
+--- a/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp
++++ b/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp
+@@ -1009,10 +1009,10 @@
+ 
+ 	const double	a		= xOffset == vk::VK_CHROMA_LOCATION_COSITED_EVEN_KHR
+ 							? (i % 2 == 0 ? 0.0 : 0.5)
+-							: (i % 2 == 0 ? 0.25 : 0.75);
++							: (i % 2 == 0 ? 0.75 : 0.25);
+ 	const double	b		= yOffset == vk::VK_CHROMA_LOCATION_COSITED_EVEN_KHR
+ 							? (j % 2 == 0 ? 0.0 : 0.5)
+-							: (j % 2 == 0 ? 0.25 : 0.75);
++							: (j % 2 == 0 ? 0.75 : 0.25);
+ 
+ 	return linearInterpolate(filteringFormat, a, b,
+ 								lookupWrapped(access, conversionFormat, addressModeU, addressModeV, IVec2(subI, subJ)),
+--- a/external/vulkancts/modules/vulkan/spirv_assembly/vktSpvAsmVariablePointersTests.cpp
++++ b/external/vulkancts/modules/vulkan/spirv_assembly/vktSpvAsmVariablePointersTests.cpp
+@@ -660,11 +660,12 @@
+ 		"OpDecorate %outdata Binding 3					\n"
+ 
+ 		// Set the Block decoration
+-		"OpDecorate %outer_struct	Block				\n"
++		"OpDecorate %single_input_buffer	Block				\n"
+ 		"OpDecorate %input_buffer	Block				\n"
+ 		"OpDecorate %output_buffer	Block				\n"
+ 
+ 		// Set the Offsets
++		"OpMemberDecorate %single_input_buffer 0 Offset 0\n"
+ 		"OpMemberDecorate %output_buffer 0 Offset 0		\n"
+ 		"OpMemberDecorate %input_buffer  0 Offset 0		\n"
+ 		"OpMemberDecorate %input_buffer  1 Offset 256	\n"
+@@ -715,6 +716,7 @@
+ 		//   outer_struct a;
+ 		//   outer_struct b;
+ 		// }
++		"%single_input_buffer = OpTypeStruct %outer_struct\n"
+ 		"%input_buffer			= OpTypeStruct %outer_struct %outer_struct			\n"
+ 
+ 		// struct output_struct {
+@@ -726,6 +728,7 @@
+ 		// POINTER TYPES //
+ 		///////////////////
+ 		"%output_buffer_ptr		= OpTypePointer StorageBuffer %output_buffer		\n"
++		"%single_input_buffer_ptr = OpTypePointer StorageBuffer %single_input_buffer\n"
+ 		"%input_buffer_ptr		= OpTypePointer StorageBuffer %input_buffer			\n"
+ 		"%outer_struct_ptr		= OpTypePointer StorageBuffer %outer_struct			\n"
+ 		"%mat2x2_ptr			= OpTypePointer StorageBuffer %mat2x2_inner_struct	\n"
+@@ -739,8 +742,8 @@
+ 		// VARIABLES //
+ 		///////////////
+ 		"%id					= OpVariable %uvec3ptr			Input				\n"
+-		"%inputA				= OpVariable %outer_struct_ptr	StorageBuffer		\n"
+-		"%inputB				= OpVariable %outer_struct_ptr	StorageBuffer		\n"
++		"%inputA				= OpVariable %single_input_buffer_ptr	StorageBuffer		\n"
++		"%inputB				= OpVariable %single_input_buffer_ptr	StorageBuffer		\n"
+ 		"%inputC				= OpVariable %input_buffer_ptr	StorageBuffer		\n"
+ 		"%outdata				= OpVariable %output_buffer_ptr	StorageBuffer		\n"
+ 	);
+@@ -782,6 +785,10 @@
+ 		"%main					= OpFunction %void None %voidf\n"
+ 		"%label					= OpLabel\n"
+ 
++		// The single-member block wrapper preserves the input byte layout.
++		"%inputA_value = OpAccessChain %outer_struct_ptr %inputA %c_i32_0\n"
++		"%inputB_value = OpAccessChain %outer_struct_ptr %inputB %c_i32_0\n"
++
+ 		// Here are the 2 nested structures within InputC.
+ 		"%inputC_a				= OpAccessChain %outer_struct_ptr %inputC %c_i32_0\n"
+ 		"%inputC_b				= OpAccessChain %outer_struct_ptr %inputC %c_i32_1\n"
+@@ -818,8 +825,8 @@
+ 			const string extraCap					= isSingleInputBuffer	? "OpCapability VariablePointersStorageBuffer\n" : "OpCapability VariablePointers\n";
+ 			const vector<float>& selectedInput		= isSingleInputBuffer	? inputC										 : (selectInputA ? inputA : inputB);
+ 			const string bufferType					= isSingleInputBuffer	? "single_buffer_"								 : "two_buffers_";
+-			const string baseA						= isSingleInputBuffer	? "%inputC_a"									 : "%inputA";
+-			const string baseB						= isSingleInputBuffer	? "%inputC_b"									 : "%inputB";
++			const string baseA						= isSingleInputBuffer	? "%inputC_a"									 : "%inputA_value";
++			const string baseB						= isSingleInputBuffer	? "%inputC_b"									 : "%inputB_value";
+ 			const string selectedInputStr			= selectInputA			? "first_input"									 : "second_input";
+ 			const string spirvSelectInputA			= selectInputA			? "%c_bool_true"								 : "%c_bool_false";
+ 			const int outerStructIndex				= isSingleInputBuffer	? (selectInputA ? 0 : 1)						 : 0;
+--- a/framework/platform/CMakeLists.txt
++++ b/framework/platform/CMakeLists.txt
+@@ -71,10 +71,24 @@
+ 
+ 		if (DEQP_USE_WAYLAND)
+ 			add_definitions(-DDEQP_SUPPORT_WAYLAND=1)
+-			include_directories(lnx/wayland)
++			include_directories(lnx/wayland ${CMAKE_CURRENT_BINARY_DIR})
++			find_program(WAYLAND_SCANNER wayland-scanner NO_CMAKE_FIND_ROOT_PATH)
++			find_file(XDG_SHELL_XML xdg-shell.xml
++				PATHS /usr/share/wayland-protocols/stable/xdg-shell)
++			if (NOT WAYLAND_SCANNER OR NOT XDG_SHELL_XML)
++				message(FATAL_ERROR "xdg-shell requires wayland-scanner and wayland-protocols")
++			endif()
++			add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
++				COMMAND ${WAYLAND_SCANNER} client-header ${XDG_SHELL_XML} ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
++				DEPENDS ${XDG_SHELL_XML})
++			add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
++				COMMAND ${WAYLAND_SCANNER} private-code ${XDG_SHELL_XML} ${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
++				DEPENDS ${XDG_SHELL_XML})
+ 
+ 			set(TCUTIL_PLATFORM_SRCS
+ 				${TCUTIL_PLATFORM_SRCS}
++				${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-client-protocol.h
++				${CMAKE_CURRENT_BINARY_DIR}/xdg-shell-protocol.c
+ 				lnx/wayland/tcuLnxWayland.hpp
+ 				lnx/wayland/tcuLnxWayland.cpp
+ 				lnx/wayland/tcuLnxWaylandEglDisplayFactory.cpp
+--- a/framework/platform/lnx/wayland/tcuLnxWayland.hpp
++++ b/framework/platform/lnx/wayland/tcuLnxWayland.hpp
+@@ -32,6 +32,7 @@
+ 
+ #include <wayland-client.h>
+ #include <wayland-egl.h>
++#include "xdg-shell-client-protocol.h"
+ 
+ namespace tcu
+ {
+@@ -50,6 +51,7 @@
+ 	struct wl_compositor*	getCompositor			(void) { return m_compositor;	}
+ 	struct wl_shell*		getShell				(void) { return m_shell;		}
+ 
++	struct xdg_wm_base* getXdgShell(void) { return m_xdgShell; }
+ 	void					processEvents			(void);
+ 
+ protected:
+@@ -58,6 +60,7 @@
+ 	struct wl_registry*		m_registry;
+ 	struct wl_compositor*	m_compositor;
+ 	struct wl_shell*		m_shell;
++	struct xdg_wm_base* m_xdgShell;
+ 
+ private:
+ 							Display					(const Display&);
+@@ -68,6 +71,8 @@
+ 	static void				handleGlobal			(void* data, struct wl_registry* registry, uint32_t id, const char* interface, uint32_t version);
+ 	static void				handleGlobalRemove		(void* data, struct wl_registry* registry, uint32_t name);
+ };
++
++class EventPump;
+ 
+ class Window
+ {
+@@ -91,6 +96,9 @@
+ 	struct wl_egl_window*		m_window;
+ 	struct wl_surface*			m_surface;
+ 	struct wl_shell_surface*	m_shellSurface;
++	struct xdg_surface* m_xdgSurface;
++	struct xdg_toplevel* m_xdgToplevel;
++	EventPump* m_eventPump;
+ 	bool						m_visible;
+ 
+ private:
+--- a/framework/platform/lnx/wayland/tcuLnxWayland.cpp
++++ b/framework/platform/lnx/wayland/tcuLnxWayland.cpp
+@@ -28,6 +28,10 @@
+ #include "deMemory.h"
+ 
+ #include <stdio.h>
++#include <poll.h>
++#include <errno.h>
++#include "deThread.hpp"
++#include "deAtomic.h"
+ 
+ namespace tcu
+ {
+@@ -35,6 +39,76 @@
+ {
+ namespace wayland
+ {
++
++// Vulkan owns separate Wayland queues and may block in acquire/present for
++// many frames without returning to the platform event loop. Keep dispatching
++// the application's queue so configure acknowledgements and pongs are sent.
++class EventPump : public de::Thread
++{
++public:
++	explicit EventPump(struct wl_display* display) : m_display(display), m_stop(0) {}
++	~EventPump(void)
++	{
++		if (isStarted())
++		{
++			deAtomicCompareExchange32(&m_stop, 0, 1);
++			join();
++		}
++	}
++	void run(void)
++	{
++		while (!deAtomicCompareExchange32(&m_stop, 0, 0))
++		{
++			while (wl_display_prepare_read(m_display) != 0)
++				if (wl_display_dispatch_pending(m_display) < 0 ||
++					deAtomicCompareExchange32(&m_stop, 0, 0))
++					return;
++			const int flushed = wl_display_flush(m_display);
++			if (flushed < 0 && errno != EAGAIN)
++			{
++				wl_display_cancel_read(m_display);
++				return;
++			}
++			struct pollfd fd = { wl_display_get_fd(m_display),
++				(short)(POLLIN | (flushed < 0 ? POLLOUT : 0)), 0 };
++			const int ready = poll(&fd, 1, 100);
++			if (ready > 0 && (fd.revents & POLLIN))
++			{
++				if (wl_display_read_events(m_display) < 0)
++					return;
++			}
++			else
++			{
++				wl_display_cancel_read(m_display);
++				if ((ready < 0 && errno != EINTR) ||
++					(ready > 0 && (fd.revents & (POLLERR | POLLHUP | POLLNVAL))))
++					return;
++			}
++			if (wl_display_dispatch_pending(m_display) < 0)
++				return;
++		}
++	}
++private:
++	struct wl_display* m_display;
++	volatile deUint32 m_stop;
++};
++
++static void xdgPing(void*, struct xdg_wm_base* shell, uint32_t serial)
++{
++	xdg_wm_base_pong(shell, serial);
++}
++static const struct xdg_wm_base_listener xdgShellListener = { xdgPing };
++static void xdgConfigure(void*, struct xdg_surface* surface, uint32_t serial)
++{
++	xdg_surface_ack_configure(surface, serial);
++}
++static const struct xdg_surface_listener xdgSurfaceListener = { xdgConfigure };
++static void xdgToplevelConfigure(void*, struct xdg_toplevel*, int32_t, int32_t, struct wl_array*) {}
++static void xdgToplevelClose(void*) {}
++static void xdgToplevelCloseEvent(void* data, struct xdg_toplevel*) { xdgToplevelClose(data); }
++static const struct xdg_toplevel_listener xdgToplevelListener = {
++	xdgToplevelConfigure, xdgToplevelCloseEvent
++};
+ 
+ const struct wl_registry_listener Display::s_registryListener =
+ {
+@@ -56,7 +130,11 @@
+ 
+ 	if (!strcmp(interface, "wl_compositor"))
+ 		_this->m_compositor = static_cast<struct wl_compositor*>(wl_registry_bind(registry, id, &wl_compositor_interface, 3));
+-	/* Todo: when the xdg_shell protocol has stablized, we should move wl_shell to xdg_shell. */
++	if (!strcmp(interface, "xdg_wm_base"))
++	{
++		_this->m_xdgShell = static_cast<struct xdg_wm_base*>(wl_registry_bind(registry, id, &xdg_wm_base_interface, 1));
++		xdg_wm_base_add_listener(_this->m_xdgShell, &xdgShellListener, _this);
++	}
+ 	if (!strcmp(interface, "wl_shell"))
+ 		_this->m_shell = static_cast<struct wl_shell*>(wl_registry_bind(registry, id, &wl_shell_interface, 1));
+ }
+@@ -74,6 +152,7 @@
+ 	, m_registry	(DE_NULL)
+ 	, m_compositor	(DE_NULL)
+ 	, m_shell		(DE_NULL)
++	, m_xdgShell (DE_NULL)
+ {
+ 	try
+ 	{
+@@ -89,11 +168,13 @@
+ 		wl_display_roundtrip(m_display);
+ 		if (!m_compositor)
+ 			throw ResourceError("Failed to bind compositor", name, __FILE__, __LINE__);
+-		if (!m_shell)
++		if (!m_shell && !m_xdgShell)
+ 			throw ResourceError("Failed to bind shell", name, __FILE__, __LINE__);
+ 	}
+ 	catch (...)
+ 	{
++		if (m_xdgShell)
++			xdg_wm_base_destroy(m_xdgShell);
+ 		if (m_shell)
+ 			wl_shell_destroy(m_shell);
+ 
+@@ -112,6 +193,8 @@
+ 
+ Display::~Display (void)
+ {
++	if (m_xdgShell)
++		xdg_wm_base_destroy(m_xdgShell);
+ 	if (m_shell)
+ 		wl_shell_destroy(m_shell);
+ 
+@@ -127,10 +210,18 @@
+ 
+ void Display::processEvents (void)
+ {
++	wl_display_roundtrip(m_display);
+ }
+ 
+ Window::Window (Display& display, int width, int height)
+ 	: m_display		(display)
++	, m_window(DE_NULL)
++	, m_surface(DE_NULL)
++	, m_shellSurface(DE_NULL)
++	, m_xdgSurface(DE_NULL)
++	, m_xdgToplevel(DE_NULL)
++	, m_eventPump(DE_NULL)
++	, m_visible(false)
+ {
+ 	try
+ 	{
+@@ -138,6 +229,21 @@
+ 		if (!m_surface)
+ 			throw ResourceError("Failed to create ", "surface", __FILE__, __LINE__);
+ 
++		if (display.getXdgShell())
++		{
++			m_xdgSurface = xdg_wm_base_get_xdg_surface(display.getXdgShell(), m_surface);
++			TCU_CHECK(m_xdgSurface);
++			xdg_surface_add_listener(m_xdgSurface, &xdgSurfaceListener, this);
++			m_xdgToplevel = xdg_surface_get_toplevel(m_xdgSurface);
++			TCU_CHECK(m_xdgToplevel);
++			xdg_toplevel_add_listener(m_xdgToplevel, &xdgToplevelListener, this);
++			xdg_toplevel_set_title(m_xdgToplevel, "Vulkan CTS");
++			// Complete the initial configure handshake before attaching buffers.
++			wl_surface_commit(m_surface);
++			TCU_CHECK(wl_display_roundtrip(display.getDisplay()) >= 0);
++		}
++		else
++		{
+ 		m_shellSurface = wl_shell_get_shell_surface(display.getShell(), m_surface);
+ 		if (!m_shellSurface)
+ 			throw ResourceError("Failed to create ", "shell_surface", __FILE__, __LINE__);
+@@ -145,6 +251,7 @@
+ 		wl_shell_surface_add_listener(m_shellSurface, &s_shellSurfaceListener, this);
+ 		wl_shell_surface_set_title(m_shellSurface, "CTS for OpenGL (ES)");
+ 		wl_shell_surface_set_toplevel(m_shellSurface);
++		}
+ 
+ 		if (width == glu::RenderConfig::DONT_CARE)
+ 			width = DEFAULT_WINDOW_WIDTH;
+@@ -160,6 +267,8 @@
+ 		throw;
+ 	}
+ 	TCU_CHECK(m_window);
++	m_eventPump = new EventPump(display.getDisplay());
++	m_eventPump->start();
+ }
+ 
+ void Window::setVisibility (bool visible)
+@@ -179,6 +288,7 @@
+ 
+ void Window::processEvents (void)
+ {
++	m_display.processEvents();
+ }
+ 
+ void Window::handlePing (void* data, struct wl_shell_surface* shellSurface, uint32_t serial)
+@@ -204,6 +314,12 @@
+ 
+ Window::~Window (void)
+ {
++	// Join before destroying any proxy referenced by a dispatch callback.
++	delete m_eventPump;
++	if (m_xdgToplevel)
++		xdg_toplevel_destroy(m_xdgToplevel);
++	if (m_xdgSurface)
++		xdg_surface_destroy(m_xdgSurface);
+ 	if (m_window)
+ 		wl_egl_window_destroy(m_window);
+ 	if (m_shellSurface)
+--- a/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
++++ b/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
+@@ -539,7 +539,7 @@
+ 	, m_queue					(context.getUniversalQueue())
+ 	, m_queueFamilyIndex		(context.getUniversalQueueFamilyIndex())
+ 	, m_allocator				(context.getDefaultAllocator())
+-	, m_isAttachmentFormat		(getIsAttachmentFormat(params.imageFormat))
++	, m_isAttachmentFormat		(params.imageType != VK_IMAGE_TYPE_3D && getIsAttachmentFormat(params.imageFormat))
+ 	, m_imageUsageFlags			(getImageUsageFlags(params.imageFormat))
+ 	, m_imageAspectFlags		(getImageAspectFlags(params.imageFormat))
+ 	, m_imageFormatProperties	(getImageFormatProperties())
+--- a/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageTests.cpp
++++ b/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageTests.cpp
+@@ -110,8 +110,16 @@
+ 	std::ostringstream				vertexSrc;
+ 	std::ostringstream				fragmentSrc;
+ 	const char*						texCoordSwizzle	= DE_NULL;
+-	const tcu::TextureFormat		format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
++	tcu::TextureFormat			format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
+ 																						  : mapVkFormat(m_imageFormat);
++
++	// mapVkFormat describes integer backing bytes, not the sampled type.
++	// Scaled formats require float samplers; retain the CPU image/oracle and
++	// the original lookup scale/bias, changing only shader type generation.
++	const std::string formatName = getFormatName(m_imageFormat);
++	if (formatName.find("_USCALED") != std::string::npos ||
++		formatName.find("_SSCALED") != std::string::npos)
++		format.type = tcu::TextureFormat::FLOAT;
+ 
+ 	tcu::Vec4						lookupScale;
+ 	tcu::Vec4						lookupBias;
+--- a/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageViewTests.cpp
++++ b/external/vulkancts/modules/vulkan/pipeline/vktPipelineImageViewTests.cpp
+@@ -124,8 +124,16 @@
+ 	std::ostringstream				vertexSrc;
+ 	std::ostringstream				fragmentSrc;
+ 	const char*						texCoordSwizzle	= DE_NULL;
+-	const tcu::TextureFormat		format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
++	tcu::TextureFormat			format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
+ 																						  : mapVkFormat(m_imageFormat);
++
++	// mapVkFormat describes integer backing bytes, not the sampled type.
++	// Scaled formats require float samplers; retain the CPU image/oracle and
++	// the original lookup scale/bias, changing only shader type generation.
++	const std::string formatName = getFormatName(m_imageFormat);
++	if (formatName.find("_USCALED") != std::string::npos ||
++		formatName.find("_SSCALED") != std::string::npos)
++		format.type = tcu::TextureFormat::FLOAT;
+ 
+ 	tcu::Vec4						lookupScale;
+ 	tcu::Vec4						lookupBias;
+--- a/external/vulkancts/modules/vulkan/pipeline/vktPipelineSamplerTests.cpp
++++ b/external/vulkancts/modules/vulkan/pipeline/vktPipelineSamplerTests.cpp
+@@ -184,6 +184,14 @@
+ 	const char*						texCoordSwizzle	= DE_NULL;
+ 	tcu::TextureFormat				format			= (isCompressedFormat(m_imageFormat)) ? tcu::getUncompressedFormat(mapVkCompressedFormat(m_imageFormat))
+ 																						  : mapVkFormat(m_imageFormat);
++	// mapVkFormat describes integer backing bytes, not the sampled type.
++	// Scaled formats require float samplers; retain the CPU image/oracle and
++	// the original lookup scale/bias, changing only shader type generation.
++	const std::string formatName = getFormatName(m_imageFormat);
++	if (formatName.find("_USCALED") != std::string::npos ||
++		formatName.find("_SSCALED") != std::string::npos)
++		format.type = tcu::TextureFormat::FLOAT;
++
+ 	tcu::Vec4						lookupScale;
+ 	tcu::Vec4						lookupBias;
+ 

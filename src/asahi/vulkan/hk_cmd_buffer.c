@@ -146,6 +146,7 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    hk_descriptor_state_fini(cmd, &cmd->state.gfx.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
+   hk_descriptor_state_fini(cmd, &cmd->state.rt.descriptors);
 
    if (hk_g17p_upload_quarantine_enabled(dev)) {
       /* Diagnostic lifetime falsifier: neither ordinary/USC upload BOs nor
@@ -743,6 +744,21 @@ hk_cmd_buffer_emit_vdm_terminate(struct hk_cmd_buffer *cmd, void *current)
    return current;
 }
 
+
+/* See the macro in hk_cmd_buffer.h. Off unless HK_DEBUG names it, so this
+ * costs one relaxed load on a path that is already failing the submission. */
+void
+hk_trace_cmd_error(const char *file, unsigned line, VkResult error)
+{
+   static int enabled = -1;
+   if (enabled < 0) {
+      const char *debug = getenv("HK_DEBUG");
+      enabled = debug && strstr(debug, "cmderr") != NULL;
+   }
+   if (enabled)
+      mesa_loge("command buffer error %d set at %s:%u", (int)error, file, line);
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
                       const VkCommandBufferBeginInfo *pBeginInfo)
@@ -1021,6 +1037,11 @@ hk_CmdBindDescriptorSets2KHR(
       hk_bind_descriptor_sets(cmd, &cmd->state.cs.descriptors,
                               pBindDescriptorSetsInfo);
    }
+
+   if (pBindDescriptorSetsInfo->stageFlags & HK_RT_SHADER_STAGES) {
+      hk_bind_descriptor_sets(cmd, &cmd->state.rt.descriptors,
+                              pBindDescriptorSetsInfo);
+   }
 }
 
 static void
@@ -1043,6 +1064,9 @@ hk_CmdPushConstants2KHR(VkCommandBuffer commandBuffer,
 
    if (pPushConstantsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT)
       hk_push_constants(cmd, &cmd->state.cs.descriptors, pPushConstantsInfo);
+
+   if (pPushConstantsInfo->stageFlags & HK_RT_SHADER_STAGES)
+      hk_push_constants(cmd, &cmd->state.rt.descriptors, pPushConstantsInfo);
 }
 
 static struct hk_push_descriptor_set *
@@ -1101,6 +1125,11 @@ hk_CmdPushDescriptorSet2KHR(
 
    if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
       hk_push_descriptor_set(cmd, &cmd->state.cs.descriptors,
+                             pPushDescriptorSetInfo);
+   }
+
+   if (pPushDescriptorSetInfo->stageFlags & HK_RT_SHADER_STAGES) {
+      hk_push_descriptor_set(cmd, &cmd->state.rt.descriptors,
                              pPushDescriptorSetInfo);
    }
 }
@@ -1449,6 +1478,52 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             b->slot == VARYING_SLOT_CULL_PRIMITIVE + 1;
          const bool clip_slot = b->slot == VARYING_SLOT_CLIP_DIST0 ||
                                 b->slot == VARYING_SLOT_CLIP_DIST1;
+         /* gl_PrimitiveID that no vertex shader writes is not a UVS word at
+          * all: agx_link_varyings_vs_fs() gives its binding
+          * AGX_COEFFICIENT_SOURCE_PRIMITIVE_ID and asks the VDM to generate
+          * the value, which hk_flush_dynamic_state() already plumbs through
+          * generate_primitive_id. Admit it as a system coefficient beside
+          * FragCoord Z and 1/W -- scalar, flat, and indexing no vertex
+          * output. A VS-written gl_PrimitiveID would take the ordinary user
+          * word path instead and stays refused, having no witness. */
+         if (b->slot == VARYING_SLOT_PRIMITIVE_ID) {
+            if (gfx->linked_varyings.slots[VARYING_SLOT_PRIMITIVE_ID] ||
+                b->count != 1 || b->offset != 0 || b->smooth || b->perspective)
+               return false;
+            ++user_bindings;
+            next_cf += b->count;
+            continue;
+         }
+         /* gl_PointCoord is the third hardware-generated coefficient source,
+          * beside FragCoord Z and gl_PrimitiveID: nir_lower_sysvals_to_varyings
+          * turns the system value into a VARYING_SLOT_PNTC input and
+          * agx_link_varyings_vs_fs() gives that binding
+          * AGX_COEFFICIENT_SOURCE_POINT_COORD with base slot 0, so it indexes
+          * no vertex output and needs no UVS word. The rasterizer supplies the
+          * sprite UV, selected by the Object Type nibble that
+          * translate_object_type() already sets to POINT_SPRITE_UV01 for point
+          * topology and that hk_g17p_emit_native_bind_tail() already packs into
+          * both face words. The CF entry is the same 4-byte encoding HAL200
+          * updateVaryingTable consumes for every other source, so nothing else
+          * in the native tail changes.
+          *
+          * agx_link_varyings_vs_fs() asserts base offset 0 and overwrites the
+          * base slot, so a partial read starting at .y has no correct encoding
+          * on any chip; keep it refused rather than rendering it wrong.
+          *
+          * The CF entry carries no topology or provoking selector, so this is
+          * not gated on point topology: a dynamic-topology pipeline may bind
+          * the same fragment shader for a triangle draw, where Vulkan leaves
+          * gl_PointCoord undefined. Refusing there would turn a legal draw
+          * into VK_ERROR_FEATURE_NOT_PRESENT for no conformance gain. */
+         if (b->slot == VARYING_SLOT_PNTC) {
+            if (b->offset != 0 || b->count > 2 || !b->smooth ||
+                (b->perspective && !has_rhw))
+               return false;
+            ++user_bindings;
+            next_cf += b->count;
+            continue;
+         }
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
                                 b->slot == VARYING_SLOT_LAYER ||
@@ -1506,8 +1581,16 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
    if (s->info.stage == MESA_SHADER_VERTEX) {
       const unsigned nr_attribs = DIV_ROUND_UP(
          BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
+      /* Software indexing is admitted when the bound program is still the
+       * hardware vertex shader and only fetches its own indices, which is
+       * what an adjacency topology without a geometry shader compiles to.
+       * Its extra state is the VERTEX_PARAMS uniform, which
+       * hk_flush_dynamic_state() already uploads for exactly this case. The
+       * geometry and tessellation shape, where the software vertex shader
+       * runs as a compute kernel, stays refused. */
       const bool ok =
-         !linked->sw_indexing && nr_attribs <= AGX_MAX_VBUFS &&
+         (!linked->sw_indexing || linked->sw_indexing_hw_vs) &&
+         nr_attribs <= AGX_MAX_VBUFS &&
          s->agx3_vdm_state_update.source_layout ==
             AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
 

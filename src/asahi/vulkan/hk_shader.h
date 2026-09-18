@@ -23,6 +23,7 @@
 #include "hk_private.h"
 
 #include "nir_xfb_info.h"
+#include "nir.h"
 #include "shader_enums.h"
 #include "vk_pipeline_cache.h"
 
@@ -65,6 +66,26 @@ hk_tess_info_merge(struct hk_tess_info a, struct hk_tess_info b)
    return out;
 }
 
+/*
+ * Whether an evaluation shader's own domain is one Apple's G17P tessellation
+ * state record can express. The record carries a single patch-type bit for
+ * triangles and quads (docs/G17P_TESSELLATION_ABI.md 8.2); there is no
+ * isoline encoding and no point-mode encoding, so those domains keep the
+ * software tessellator even when the native path is selected.
+ *
+ * Vulkan lets either tessellation stage carry the execution modes, so a
+ * control shader can still introduce point mode for an evaluation shader
+ * that did not declare it. That case is caught at draw time; this predicate
+ * only decides which evaluation-shader lowering to compile.
+ */
+static inline bool
+hk_g17p_tes_domain_is_native(const struct shader_info *info)
+{
+   return !info->tess.point_mode &&
+          (info->tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES ||
+           info->tess._primitive_mode == TESS_PRIMITIVE_QUADS);
+}
+
 struct hk_shader_info {
    union {
       struct {
@@ -97,6 +118,15 @@ struct hk_shader_info {
          uint8_t tcs_nr_patch_outputs;
 
          struct hk_tess_info info;
+
+         /* Evaluation shaders only: this shader's own domain is one the G17P
+          * hardware tessellator can express (triangles or quads, no point
+          * mode) and the device is running the native path, so the hardware
+          * variant was lowered with poly_nir_lower_tes_native(). An isoline
+          * or point-mode evaluation shader keeps the software lowering even
+          * with HK_G17P_NATIVE_TESS=1, because Apple's tessellation state
+          * record has no encoding for either. */
+         bool g17p_native_domain;
       } tess;
 
       struct poly_gs_info gs;
@@ -249,6 +279,45 @@ hk_num_variants(mesa_shader_stage stage)
 }
 
 /*
+ * A G17P hardware vertex program whose UVS layout does not start at component
+ * zero with a four-component position group. The AGX3 packer admits a dense
+ * terminal output run only from five outputs up, a floor every position-
+ * writing shader clears through its four position components alone, so every
+ * shape below needs the sparse component-addressed staging protocol instead.
+ *
+ * `info` is the hardware shader being compiled and `sw_stage` the API stage it
+ * serves; `xfb_outputs` says whether the pipeline records transform feedback.
+ */
+static inline bool
+hk_g17p_sparse_vertex_outputs(const struct shader_info *info,
+                              mesa_shader_stage sw_stage, bool xfb_outputs)
+{
+   if (info->stage != MESA_SHADER_VERTEX)
+      return false;
+
+   return info->has_transform_feedback_varyings || xfb_outputs ||
+          sw_stage == MESA_SHADER_GEOMETRY ||
+          /* A raster-discard TES may write only point size, leaving the
+           * four position components absent just like an XFB raster VS. */
+          sw_stage == MESA_SHADER_TESS_EVAL ||
+          info->next_stage == MESA_SHADER_GEOMETRY ||
+          /* The hardware variant of a control-point vertex shader is never
+           * bound -- the software variant runs in compute -- but it is still
+           * compiled, and its UVS layout is as sparse as the geometry case
+           * above. Without this the AGX3 packer refuses it at st_vary #4 and
+           * takes every G17P tessellation pipeline with it. */
+          info->next_stage == MESA_SHADER_TESS_CTRL ||
+          /* A vertex shader may legally write no gl_Position at all. The
+           * four-entry UVS position group stays reserved, so its user
+           * varyings are a dense run based at AGX3_UVS_POSITION_ENTRIES --
+           * the same shape as the XFB and geometry cases -- but there are
+           * fewer than five of them, so the dense-run admission refuses the
+           * store at st_vary #4. That is the whole
+           * dEQP-VK.pipeline.*.no_position.basic.*.v0* family. */
+          !(info->outputs_written & VARYING_BIT_POS);
+}
+
+/*
  * An hk_api shader maps 1:1 to a VkShader object. An hk_api_shader may contain
  * multiple hardware hk_shader's, built at shader compile time. This complexity
  * implements the legacy geometry pipeline and native sample-count variants.
@@ -360,6 +429,13 @@ struct hk_linked_shader {
     */
    bool sw_indexing;
 
+   /* True when sw_indexing is set purely because the topology carries
+    * adjacency, i.e. the bound program is still the hardware vertex shader
+    * and only fetches its own indices. The geometry/tessellation case, where
+    * the software vertex shader runs as a compute kernel, is a different
+    * shape and keeps sw_indexing with this clear. */
+   bool sw_indexing_hw_vs;
+
    /* Absolute uniform-half base selected by the fragment epilog key for its
     * dynamic blend constants. Zero means the standard half4 ABI. */
    uint16_t g17p_blend_constant_base;
@@ -442,6 +518,11 @@ void hk_api_shader_destroy(struct vk_device *vk_dev,
 const nir_shader_compiler_options *
 hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
                    UNUSED const struct vk_pipeline_robustness_state *rs);
+
+struct spirv_to_nir_options
+hk_get_spirv_options(struct vk_physical_device *vk_pdev,
+                     UNUSED mesa_shader_stage stage,
+                     const struct vk_pipeline_robustness_state *rs);
 
 struct hk_api_shader *hk_meta_shader(struct hk_device *dev,
                                      hk_internal_builder_t builder, void *data,

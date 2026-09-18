@@ -460,6 +460,9 @@ lower_uvs_index(nir_builder *b, nir_intrinsic_instr *intrin, void *data)
    case nir_intrinsic_load_api_sample_mask_agx:
       return lower_sysval_to_root_table(b, intrin, draw.api_sample_mask);
 
+   case nir_intrinsic_load_alpha_to_coverage_agx:
+      return lower_sysval_to_root_table(b, intrin, draw.alpha_to_coverage);
+
    case nir_intrinsic_load_sample_positions_agx:
       return lower_sysval_to_root_table(b, intrin, draw.ppp_multisamplectl);
 
@@ -645,6 +648,27 @@ try_lower_intrin(nir_builder *b, nir_intrinsic_instr *intrin,
    case nir_intrinsic_image_deref_store_block_agx:
       return lower_image_intrin(b, intrin, ctx);
 
+   case nir_intrinsic_load_image_descriptor_word_agx: {
+      b->cursor = nir_instr_remove(&intrin->instr);
+      const struct hk_storage_image_descriptor_layout native =
+         hk_storage_image_descriptor_layout(ctx->descriptor_generation);
+      nir_def *word = load_resource_deref_desc(
+         b, 1, 32, nir_src_as_deref(intrin->src[0]), native.texture, ctx);
+      nir_def_rewrite_uses(&intrin->def, word);
+      return true;
+   }
+
+   case nir_intrinsic_load_texture_descriptor_word_agx: {
+      /* First word of the (plane 0) texture descriptor of a sampled image. */
+      b->cursor = nir_instr_remove(&intrin->instr);
+      const struct hk_sampled_image_descriptor_layout native =
+         hk_sampled_image_descriptor_layout(ctx->descriptor_generation);
+      nir_def *word = load_resource_deref_desc(
+         b, 1, 32, nir_src_as_deref(intrin->src[0]), native.texture, ctx);
+      nir_def_rewrite_uses(&intrin->def, word);
+      return true;
+   }
+
    case nir_intrinsic_load_num_workgroups: {
       b->cursor = nir_instr_remove(&intrin->instr);
 
@@ -738,6 +762,48 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
          plane_offset_B + offs, ctx);
 
       nir_alu_type T = nir_alu_type_get_base_type(tex->dest_type);
+      nir_def *kind = NULL;
+      if (ctx->descriptor_generation == 9 && T == nir_type_float) {
+         /* Look up the image independently: separate samplers have no
+          * format. */
+         kind = load_resource_deref_desc(
+            b, 1, 16, nir_src_as_deref(nir_src_for_ssa(texture)),
+            plane_offset_B + native.texture + 32 +
+               offsetof(struct hk_sampled_image_descriptor_sw, scaled_conversion), ctx);
+         /* An integer border (INT_OPAQUE_*, INT_CUSTOM) sampled as float
+          * names the texel value, so it is converted rather than
+          * reinterpreted; on a scaled view that is before the scale
+          * division below. */
+         nir_def *clamp_0 = load_resource_deref_desc(
+            b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),
+            plane_offset_B + native.clamp_0_sampler_index, ctx);
+         nir_def *is_int = nir_ine_imm(
+            b, nir_iand_imm(b, clamp_0, HK_BORDER_IS_INT_BIT), 0);
+         nir_def *as_int = nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, kind, 3), 1),
+                                     nir_i2f32(b, border), nir_u2f32(b, border));
+         border = nir_bcsel(b, is_int, as_int, border);
+      }
+      if (kind && !(tex->backend_flags & AGX_TEXTURE_FLAG_BORDER_UNFILTERED)) {
+         /* Scaled samples rescale the zero/one border probes as well as
+          * interior texels. Divide only their interpolation coefficient. */
+         nir_def *normalized = nir_ieq_imm(b, nir_iand_imm(b, kind, 3), 3);
+         nir_def *reciprocal = nir_bcsel(b,
+            nir_ine_imm(b, nir_iand_imm(b, kind, 4), 0),
+            nir_imm_float(b, 1.0 / 65535.0), nir_imm_float(b, 1.0 / 255.0));
+         reciprocal = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, kind, 128), 0),
+                                  nir_imm_float(b, 1.0 / 1023.0), reciprocal);
+         nir_def *channels[4];
+         for (unsigned c = 0; c < 4; ++c) {
+            nir_def *scaled = nir_iand(b, normalized,
+               nir_ine_imm(b, nir_iand_imm(b, kind, BITFIELD_BIT(3 + c)), 0));
+            channels[c] = nir_fmul(b, nir_channel(b, border, c),
+               nir_bcsel(b, scaled,
+                  nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, kind, BITFIELD_BIT(8 + c)), 0),
+                                nir_imm_float(b, 1.0 / 3.0), reciprocal),
+                  nir_imm_float(b, 1)));
+         }
+         border = nir_vec(b, channels, 4);
+      }
       border = nir_convert_to_bit_size(b, border, T, tex->def.bit_size);
 
       nir_def_replace(&tex->def, border);
@@ -764,6 +830,8 @@ lower_tex(nir_builder *b, nir_tex_instr *tex,
       nir_def *index = load_resource_deref_desc(
          b, 1, 16, nir_src_as_deref(nir_src_for_ssa(sampler)),
          plane_offset_B + offs, ctx);
+      if (clamp_to_0)
+         index = nir_iand_imm(b, index, HK_BORDER_IS_INT_BIT - 1);
 
       if (!clamp_to_0) {
          uint32_t set, binding;
@@ -1062,10 +1130,15 @@ lower_sparse_buffer_deref(nir_builder *b, nir_intrinsic_instr *intr,
       nir_def *resident_word = nir_load_global_constant(
          b, 1, 32, safe_map_addr, .align_mul = sizeof(uint32_t),
          .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
-      nir_def *resident_bit = nir_iand_imm(
-         b, nir_ushr(b, resident_word,
-                     nir_iand_imm(b, nir_u2u32(b, page), 31)),
-         1);
+      /* A variable MASK, not `(word >> (page & 31)) & 1`: that shape folds
+       * into a one-bit ubitfield_extract whose offset never gets AGX's shift
+       * mask back, so a buffer past the first bitmap word (512 KB) reads its
+       * residency from the raw page number.  See the same note in
+       * agx_nir_lower_texture.c's lower_sparse_buffer_texture(). */
+      nir_def *resident_bit = nir_iand(
+         b, resident_word,
+         nir_ishl(b, nir_imm_int(b, 1),
+                  nir_iand_imm(b, nir_u2u32(b, page), 31)));
       resident = nir_ior(
          b, nir_inot(b, has_map),
          nir_iand(b, page_in_range, nir_ine_imm(b, resident_bit, 0)));

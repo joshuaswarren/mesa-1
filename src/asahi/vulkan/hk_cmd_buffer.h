@@ -20,6 +20,8 @@
 #include "pool.h"
 #include "shader_enums.h"
 
+#include "asahi/genxml/agx3_cmdstream.h"
+
 #include "hk_private.h"
 #include "hk_conditional_render_core.h"
 #include "hk_shader.h"
@@ -45,6 +47,8 @@ struct hk_cmd_bo;
 struct hk_cmd_pool;
 struct hk_image_view;
 struct hk_push_descriptor_set;
+struct hk_ray_tracing_pipeline;
+struct hk_api_shader;
 struct hk_shader;
 struct hk_linked_shader;
 struct agx_usc_builder;
@@ -106,6 +110,12 @@ struct hk_root_descriptor_table {
          uint16_t rasterization_stream;
          uint16_t _pad6;
 
+         /* Alpha-to-coverage enable for fragment shaders that write the
+          * sample mask; they apply it before their own coverage update.
+          * Sysval fields must sit at 4-byte offsets (root table loads). */
+         uint16_t alpha_to_coverage;
+         uint16_t _pad7;
+
          /* Mapping from varying slots written by the last vertex stage to UVS
           * indices. This mapping must be compatible with the fragment shader.
           */
@@ -131,8 +141,27 @@ struct hk_root_descriptor_table {
           * geometry, which the geometry copy helper publishes as it is.  Both
           * are zero for every direct dispatch and for every other chip. */
          uint64_t grid_helper_geometry_addr;
+
+         /* Native G17P indirect dispatch whose argument buffer is a sparse
+          * residency buffer: the base of that buffer's residency bitmap (a
+          * struct hk_sparse_buffer_map_header followed by one bit per page),
+          * and zero otherwise.  When it is set, group_count_addr names the
+          * PRIMARY mapping rather than the read-only shadow, and the grid
+          * helper reads the bitmap to decide whether the arguments are
+          * resident, publishing a zero grid when they are not.  See
+          * hk_CmdDispatchIndirect() for why the shadow cannot be read
+          * directly here. */
+         uint64_t grid_helper_sparse_map_addr;
+
          uint32_t grid_helper_local_size[3];
          uint32_t _pad_grid_helper;
+
+         /* VK_KHR_ray_tracing_pipeline: device address of the
+          * VkTraceRaysIndirectCommand2KHR record the megakernel reads its
+          * shader binding tables and launch size from.  Zero for every
+          * ordinary compute dispatch; the ray-tracing megakernel is the only
+          * shader that loads it. */
+         uint64_t trace_rays_addr;
       } cs;
    };
 
@@ -148,6 +177,14 @@ struct hk_root_descriptor_table {
    /* Process-local on G17P; loaded through the root instead of cached code. */
    uint64_t printf_buffer_address;
 };
+
+/* The graphics arm is the larger of the two, so everything after the union --
+ * push constants, dynamic buffers, the printf address -- keeps its offset when
+ * a compute field is added. Growing the compute arm past it would move all of
+ * them at once, which no single change should do silently. */
+static_assert(sizeof(((struct hk_root_descriptor_table *)0)->cs) <=
+                 sizeof(((struct hk_root_descriptor_table *)0)->draw),
+              "compute root fields must not grow the root descriptor table");
 
 /* helper macro for computing root descriptor byte offsets */
 #define hk_root_descriptor_offset(member)                                      \
@@ -340,6 +377,23 @@ struct hk_compute_state {
    struct hk_api_shader *shader;
 };
 
+/*
+ * VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR state.  Descriptor sets and push
+ * constants bound to the ray-tracing bind point are separate from the compute
+ * ones, even though the pipeline executes as a compute shader: an application
+ * may bind a compute pipeline's sets between vkCmdBindPipeline and
+ * vkCmdTraceRaysKHR and neither may disturb the other.
+ */
+struct hk_ray_tracing_state {
+   struct hk_descriptor_state descriptors;
+   struct hk_ray_tracing_pipeline *pipeline;
+};
+
+#define HK_RT_SHADER_STAGES                                                    \
+   (VK_SHADER_STAGE_RAYGEN_BIT_KHR | VK_SHADER_STAGE_ANY_HIT_BIT_KHR |         \
+    VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR | VK_SHADER_STAGE_MISS_BIT_KHR |       \
+    VK_SHADER_STAGE_INTERSECTION_BIT_KHR | VK_SHADER_STAGE_CALLABLE_BIT_KHR)
+
 struct hk_cmd_push {
    void *map;
    uint64_t addr;
@@ -406,6 +460,15 @@ struct hk_cs {
     * later cache-flush request upgrades this record in place instead of
     * emitting two adjacent barriers. */
    void *weak_barrier_end;
+
+   /* AGX3 CDM: the value of current just after a standalone barrier that is
+    * the stream's *first* record. Apple's emitter only opens a stream with a
+    * barrier (the strong flush that makes a preceding render visible), so a
+    * stream is canonical on its own; but concatenating it after a stream that
+    * already ends in a barrier leaves two adjacent barriers with no launch
+    * between them, which Apple never emits. hk_cs_merge_cdm() uses this to
+    * fold the leading record into the destination's trailing one. */
+   void *leading_barrier_end;
 
    /* Whether there is more than just the root chunk */
    bool stream_linked;
@@ -538,19 +601,44 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
 
    if (inline_b) {
       uint8_t *dst = a->current;
-      memcpy(dst, b->start, b_size);
-      a->current = dst + b_size;
+
+      /* Two barriers with no launch between them is not a shape Apple's CDM
+       * emitter produces, and the G17P stream oracle rejects it. Within one
+       * stream hk_cdm_cache_flush() already strengthens the trailing record
+       * in place; do the same across a concatenation. b's leading barrier is
+       * the strong flush, so copying its word over a's trailing barrier is
+       * exactly that upgrade -- no encoder needed, and it removes a record
+       * rather than adding one. */
+      const bool b_opens_with_barrier =
+         b->leading_barrier_end &&
+         (uint8_t *)b->leading_barrier_end ==
+            (uint8_t *)b->start + AGX3_CDM_BARRIER_SIZE;
+      const bool a_ends_with_barrier =
+         ((uint8_t *)a->current == (uint8_t *)a->strong_flush_end ||
+          (uint8_t *)a->current == (uint8_t *)a->weak_barrier_end) &&
+         (uint8_t *)a->current - (uint8_t *)a->start >= AGX3_CDM_BARRIER_SIZE;
+      const size_t b_skip = (b_opens_with_barrier && a_ends_with_barrier)
+                               ? AGX3_CDM_BARRIER_SIZE
+                               : 0;
+      if (b_skip)
+         memcpy(dst - AGX3_CDM_BARRIER_SIZE, b->start, AGX3_CDM_BARRIER_SIZE);
+
+      memcpy(dst, (const uint8_t *)b->start + b_skip, b_size - b_skip);
+      a->current = dst + (b_size - b_skip);
 
       /* These markers point just past an emitted barrier. Preserve them in
        * the destination root so another adjacent merge still has an exact
-       * view of the stream tail. */
+       * view of the stream tail. A marker on the folded record maps onto the
+       * trailing record that absorbed it. */
       a->strong_flush_end =
          b->strong_flush_end
-            ? dst + ((uint8_t *)b->strong_flush_end - (uint8_t *)b->start)
+            ? dst + ((uint8_t *)b->strong_flush_end - (uint8_t *)b->start) -
+                 b_skip
             : NULL;
       a->weak_barrier_end =
          b->weak_barrier_end
-            ? dst + ((uint8_t *)b->weak_barrier_end - (uint8_t *)b->start)
+            ? dst + ((uint8_t *)b->weak_barrier_end - (uint8_t *)b->start) -
+                 b_skip
             : NULL;
    } else {
       void *link_end =
@@ -633,6 +721,7 @@ struct hk_cmd_buffer {
    struct {
       struct hk_graphics_state gfx;
       struct hk_compute_state cs;
+      struct hk_ray_tracing_state rt;
       struct hk_conditional_render_state conditional;
    } state;
 
@@ -1124,6 +1213,8 @@ hk_get_descriptors_state(struct hk_cmd_buffer *cmd,
       return &cmd->state.gfx.descriptors;
    case VK_PIPELINE_BIND_POINT_COMPUTE:
       return &cmd->state.cs.descriptors;
+   case VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR:
+      return &cmd->state.rt.descriptors;
    default:
       UNREACHABLE("Unhandled bind point");
    }
@@ -1191,6 +1282,10 @@ void hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 void hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
                  VkPipelineBindPoint bind_point);
 
+void hk_cmd_dispatch_rays(struct hk_cmd_buffer *cmd,
+                          struct hk_api_shader *shader, uint64_t record_addr,
+                          uint64_t group_count_addr, struct agx_grid grid);
+
 void hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer,
                                uint32_t invocations_x, uint32_t invocations_y,
                                uint32_t invocations_z);
@@ -1252,8 +1347,24 @@ void hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
  * stream until it reaches value. */
 void hk_g17p_meta_wait_addr(struct hk_cmd_buffer *cmd, uint64_t address,
                             uint32_t value);
+void hk_native_meta_copy_query(struct hk_cmd_buffer *cmd, uint64_t destination,
+                               uint64_t source, uint64_t availability,
+                               VkQueryResultFlags flags);
 
 void agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                          uint64_t attribs_read, struct agx_velem_key *keys);
 
 struct agx_robustness hk_prolog_robustness(struct hk_device *dev);
+
+/* A refusal during command recording reaches the application as one
+ * VK_ERROR_FEATURE_NOT_PRESENT out of vkEndCommandBuffer, with nothing to say
+ * which of the driver's three dozen refusal sites produced it -- so every such
+ * failure costs a bisect that the driver already knows the answer to.
+ * HK_DEBUG=cmderr names the file and line that set the error. */
+void hk_trace_cmd_error(const char *file, unsigned line, VkResult error);
+
+#undef vk_command_buffer_set_error
+#define vk_command_buffer_set_error(command_buffer, error)                     \
+   (hk_trace_cmd_error(__FILE__, __LINE__, (error)),                           \
+    __vk_command_buffer_set_error((command_buffer), (error), __FILE__,          \
+                                  __LINE__))

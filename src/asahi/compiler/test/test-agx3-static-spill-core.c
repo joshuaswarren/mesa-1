@@ -158,6 +158,19 @@ check_g17p_half_spills(void)
 int
 main(void)
 {
+   /* G16G Apple repeat-tps.metal: first read must preserve a[0] for a
+    * later dynamically indexed load. Unlike final reads, f27 is clear. */
+   static const uint8_t b_rld_retained[] = {
+      0x8c, 0x88, 0x11, 0x25, 0x00, 0x00, 0x00, 0x80,
+   };
+   const struct agx3_static_spill_load_desc b_rld_retained_d = {
+      .dest = 16, .tps_half = 8, .tps_live = true,
+      .width = AGX3_MEM_W32, .slot = 2, .slot_mirror = 6,
+      .wait_mask = 1u << 5,
+   };
+   check_load(AGX_ISA_ENCODING_AGX3B, &b_rld_retained_d, 1,
+              b_rld_retained, sizeof(b_rld_retained), true);
+
    static const uint8_t b_copy_h[] = {0x03, 0x14, 0x09, 0xc2};
    const struct agx3_static_spill_store_desc b_copy_h_d = {
       .tps_half = 0,

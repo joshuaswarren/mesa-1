@@ -22,6 +22,7 @@
 #include "agx_nir_lower_vbo.h"
 #include "glsl_types.h"
 #include "hk_instance.h"
+#include "hk_image.h"
 #include "hk_agx3_vdm_decode.h"
 #include "libagx.h"
 #include "nir.h"
@@ -130,7 +131,7 @@ hk_get_nir_options(struct vk_physical_device *vk_pdev, mesa_shader_stage stage,
    return &agx_nir_options;
 }
 
-static struct spirv_to_nir_options
+struct spirv_to_nir_options
 hk_get_spirv_options(struct vk_physical_device *vk_pdev,
                      UNUSED mesa_shader_stage stage,
                      const struct vk_pipeline_robustness_state *rs)
@@ -161,6 +162,59 @@ hk_has_scratch_sized_array(nir_shader *nir)
    }
 
    return false;
+}
+
+/*
+ * A fragment shader in a depth/stencil feedback loop samples the same depth
+ * attachment it renders to. Measured on G17P with a single draw and no
+ * barriers: subpassLoad() of the depth attachment returned this draw's own
+ * interpolated z instead of the pre-draw contents. With depth writes disabled
+ * the same read returns the clear correctly, so the input-attachment read path
+ * is sound -- what is wrong is that the fixed-function depth write lands
+ * before the shader's read.
+ *
+ * Forcing late-Z is not enough, because late-Z only moves the depth *test*.
+ * Writing gl_FragDepth moves the depth *write* into the shader
+ * (agx_nir_lower_discard_zs_emit turns a FRAG_RESULT_DEPTH store into
+ * store_zs_agx, emitted after the reads), which is why the same CTS cases pass
+ * at the sample counts where the test writes gl_FragDepth itself and fail at
+ * sample count 1 where it does not.
+ *
+ * gl_FragCoord.z is exactly the value fixed-function would have written: a
+ * depth round-trip probe on this hardware showed the interpolated value, the
+ * stored value and the vertex z bit-identical across every sample tested.
+ *
+ * This costs early depth, so it is gated on
+ * VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
+ * (hk_fs_key::zs_self_dep). A pipeline that declares that bit has already
+ * given up early depth by definition, so the production path is unchanged.
+ *
+ * Runs after nir_lower_io, so the write is emitted as a store_output.
+ */
+static void
+hk_fs_force_shader_depth_write(nir_shader *nir)
+{
+   /* A shader that already writes gl_FragDepth orders its own write. */
+   if (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
+      return;
+
+   /* Declaring early_fragment_tests is the application asking for the write to
+    * happen before the shader, and agx_nir_lower_discard_zs_emit() deletes the
+    * z store in that case. Leave it alone.
+    */
+   if (nir->info.fs.early_fragment_tests)
+      return;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+
+   nir_store_output(
+      &b, nir_channel(&b, nir_load_frag_coord(&b), 2), nir_imm_int(&b, 0),
+      .base = 0, .write_mask = 0x1, .component = 0,
+      .src_type = nir_type_float32,
+      .io_semantics = {.location = FRAG_RESULT_DEPTH, .num_slots = 1});
+
+   nir->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DEPTH);
 }
 
 void
@@ -195,6 +249,7 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
       };
 
       nir_lower_sysvals_to_varyings(nir, &sysvals_opts);
+
    }
 
    NIR_PASS(_, nir, nir_lower_system_values);
@@ -413,7 +468,9 @@ hk_hash_graphics_state(struct vk_physical_device *device,
    }
 
    if (state &&
-       (stages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT))) {
+       (stages & (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT |
+                  VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+                  VK_SHADER_STAGE_GEOMETRY_BIT))) {
       const bool is_multiview = state->mv->view_mask != 0;
       _mesa_blake3_update(&blake3_ctx, &is_multiview, sizeof(is_multiview));
    }
@@ -617,9 +674,9 @@ struct lower_ycbcr_state {
    struct vk_descriptor_set_layout *const *set_layouts;
 };
 
-static const struct vk_ycbcr_conversion_state *
-lookup_ycbcr_conversion(const void *_state, uint32_t set, uint32_t binding,
-                        uint32_t array_index)
+static const struct hk_sampler *
+lookup_ycbcr_sampler(const void *_state, uint32_t set, uint32_t binding,
+                     uint32_t array_index)
 {
    const struct lower_ycbcr_state *state = _state;
    assert(set < state->set_layout_count);
@@ -639,11 +696,406 @@ lookup_ycbcr_conversion(const void *_state, uint32_t set, uint32_t binding,
    const struct hk_sampler *sampler =
       bind_layout->immutable_samplers[array_index];
 
-   return sampler && sampler->vk.ycbcr_conversion
-             ? &sampler->vk.ycbcr_conversion->state
-             : NULL;
+   return sampler && sampler->vk.ycbcr_conversion ? sampler : NULL;
 }
 
+static const struct hk_sampler *
+lookup_packed_ycbcr_sampler(nir_tex_instr *tex, const void *state)
+{
+   int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (handle < 0)
+      return NULL;
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[handle].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   unsigned index = 0;
+   if (deref->deref_type == nir_deref_type_array) {
+      if (!nir_src_is_const(deref->arr.index))
+         return NULL;
+      index = nir_src_as_uint(deref->arr.index);
+   }
+   const struct hk_sampler *sampler = lookup_ycbcr_sampler(
+      state, var->data.descriptor_set, var->data.binding, index);
+   return sampler && hk_packed_ycbcr_bits(sampler->ycbcr.format) ? sampler : NULL;
+}
+
+/* API size queries return luma pixels. Run before adding private word queries. */
+static bool
+lower_packed_ycbcr_size(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   if (tex->op != nir_texop_txs || !lookup_packed_ycbcr_sampler(tex, state))
+      return false;
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *size = nir_vector_insert_imm(b, &tex->def,
+      nir_imul_imm(b, nir_channel(b, &tex->def, 0), 2), 0);
+   nir_def_rewrite_uses_after(&tex->def, size);
+   return true;
+}
+
+static nir_def *
+packed_ycbcr_word(nir_builder *b, nir_tex_instr *orig, nir_def *x,
+                  nir_def *y, nir_def *layer, nir_def *word_size)
+{
+   x = nir_imin(b, nir_imax(b, x, nir_imm_int(b, 0)),
+                  nir_iadd_imm(b, nir_channel(b, word_size, 0), -1));
+   nir_def *coord = layer ? nir_vec3(b, x, y, layer) : nir_vec2(b, x, y);
+   nir_tex_instr *fetch = nir_tex_instr_create(b->shader, 3);
+   fetch->op = nir_texop_txf;
+   fetch->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   fetch->is_array = orig->is_array;
+   fetch->dest_type = nir_type_float32;
+   fetch->coord_components = coord->num_components;
+   fetch->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref,
+      orig->src[nir_tex_instr_src_index(orig, nir_tex_src_texture_deref)].src.ssa);
+   fetch->src[1] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   fetch->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
+   nir_def_init(&fetch->instr, &fetch->def, 4, 32);
+   nir_builder_instr_insert(b, &fetch->instr);
+   return &fetch->def;
+}
+
+/* Reconstruct chroma at one luma centre. The outer explicit pass filters these
+ * reconstructed samples, including separately chosen luma/chroma filters. */
+static bool
+lower_packed_ycbcr_center(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   if (tex->op != nir_texop_txl)
+      return false;
+   const struct hk_sampler *sampler = lookup_packed_ycbcr_sampler(tex, state);
+   if (!sampler)
+      return false;
+   const struct vk_ycbcr_conversion_state *conversion = &sampler->ycbcr;
+   unsigned bits = hk_packed_ycbcr_bits(conversion->format);
+   bool first = hk_packed_ycbcr_luma_first(conversion->format);
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *word_size = nir_get_texture_size(b, tex);
+   nir_def *size = nir_vec2(b, nir_imul_imm(b, nir_channel(b, word_size, 0), 2),
+                             nir_channel(b, word_size, 1));
+   nir_def *coord = tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src.ssa;
+   nir_def *ij = nir_f2i32(b, nir_ffloor(b,
+      nir_fmul(b, nir_channels(b, coord, 3), nir_i2f32(b, size))));
+   ij = nir_imin(b, nir_imax(b, ij, nir_imm_int(b, 0)), nir_iadd_imm(b, size, -1));
+   nir_def *i = nir_channel(b, ij, 0), *j = nir_channel(b, ij, 1);
+   nir_def *layer = NULL;
+   if (tex->is_array) {
+      layer = nir_f2i32(b, nir_fround_even(b, nir_channel(b, coord, 2)));
+      layer = nir_imin(b, nir_imax(b, layer, nir_imm_int(b, 0)),
+                         nir_iadd_imm(b, nir_channel(b, word_size, 2), -1));
+   }
+   nir_def *word_x = nir_ishr_imm(b, i, 1);
+   nir_def *word = packed_ycbcr_word(b, tex, word_x, j, layer, word_size);
+   nir_def *y = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, i, 1), 0),
+      nir_channel(b, word, first ? 2 : 3), nir_channel(b, word, first ? 0 : 1));
+   nir_def *chroma = word;
+   if (conversion->chroma_filter == VK_FILTER_LINEAR) {
+      nir_def *x = nir_fmul_imm(b, nir_i2f32(b, i), 0.5);
+      if (conversion->chroma_offsets[0] == VK_CHROMA_LOCATION_MIDPOINT)
+         x = nir_fadd_imm(b, x, -0.25);
+      nir_def *base = nir_f2i32(b, nir_ffloor(b, x));
+      nir_def *a = packed_ycbcr_word(b, tex, base, j, layer, word_size);
+      nir_def *z = packed_ycbcr_word(b, tex, nir_iadd_imm(b, base, 1), j, layer, word_size);
+      chroma = nir_flrp(b, a, z, nir_ffract(b, x));
+      b->shader->info.flrp_lowered = false;
+   }
+   const float scale = bits == 8 ? 1.0f :
+      65535.0f / (((1u << bits) - 1u) << (16 - bits));
+   nir_def *raw[4] = {
+      nir_fmul_imm(b, nir_channel(b, chroma, first ? 3 : 2), scale),
+      nir_fmul_imm(b, y, scale),
+      nir_fmul_imm(b, nir_channel(b, chroma, first ? 1 : 0), scale),
+      nir_imm_float(b, 1),
+   };
+   nir_def *mapped[4];
+   for (unsigned c = 0; c < 4; ++c) {
+      VkComponentSwizzle sw = conversion->mapping[c];
+      mapped[c] = sw == VK_COMPONENT_SWIZZLE_ZERO ? nir_imm_float(b, 0) :
+                  sw == VK_COMPONENT_SWIZZLE_ONE ? nir_imm_float(b, 1) :
+                  raw[sw == VK_COMPONENT_SWIZZLE_IDENTITY ? c : sw - VK_COMPONENT_SWIZZLE_R];
+   }
+   nir_def *result = nir_vec(b, mapped, 4);
+   uint32_t bpcs[4] = {bits, bits, bits, bits};
+   if (conversion->ycbcr_model != VK_SAMPLER_YCBCR_MODEL_CONVERSION_RGB_IDENTITY)
+      result = nir_convert_ycbcr_to_rgb(b, conversion->ycbcr_model,
+                                      conversion->ycbcr_range, result, bpcs);
+   nir_def_replace(&tex->def, result);
+   return true;
+}
+
+static const struct vk_ycbcr_conversion_state *
+lookup_ycbcr_conversion(const void *state, uint32_t set, uint32_t binding,
+                        uint32_t array_index)
+{
+   const struct hk_sampler *sampler =
+      lookup_ycbcr_sampler(state, set, binding, array_index);
+   /* Packed images were reconstructed by the native word-sampling pass. */
+   return sampler && !hk_packed_ycbcr_bits(sampler->ycbcr.format) ? &sampler->ycbcr : NULL;
+}
+
+/* Reconstruct at full-resolution luma texel centres, then filter the converted
+ * values. The common YCbCr pass lowers each centre sample into plane accesses
+ * and colour conversion. YCbCr samplers use clamp-to-edge and a single mip. */
+static bool
+lower_ycbcr_explicit(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   switch (tex->op) {
+   case nir_texop_tex:
+   case nir_texop_txb:
+   case nir_texop_txl:
+   case nir_texop_txd:
+      break;
+   default:
+      return false;
+   }
+   const int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (handle < 0)
+      return false;
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[handle].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   unsigned index = 0;
+   if (deref->deref_type == nir_deref_type_array) {
+      if (!nir_src_is_const(deref->arr.index))
+         return false;
+      index = nir_src_as_uint(deref->arr.index);
+   }
+   const struct hk_sampler *sampler = lookup_ycbcr_sampler(
+      state, var->data.descriptor_set, var->data.binding, index);
+   if (!sampler || !sampler->ycbcr.force_explicit_reconstruction)
+      return false;
+
+   assert(tex->sampler_dim == GLSL_SAMPLER_DIM_2D);
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *size =
+      nir_u2f32(b, nir_channels(b, nir_get_texture_size(b, tex), 3));
+   if (hk_packed_ycbcr_bits(sampler->ycbcr.format))
+      size = nir_fmul(b, size, nir_imm_vec2(b, 2, 1));
+   nir_def *coord =
+      tex->src[nir_tex_instr_src_index(tex, nir_tex_src_coord)].src.ssa;
+   nir_def *uv = nir_fmul(b, nir_channels(b, coord, 3), size);
+   int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset >= 0)
+      uv = nir_fadd(b, uv, nir_i2f32(b, tex->src[offset].src.ssa));
+
+   nir_def *linear;
+   if (sampler->min_filter == sampler->mag_filter) {
+      linear = nir_imm_bool(b, sampler->min_filter == VK_FILTER_LINEAR);
+   } else {
+      nir_def *lod;
+      if (tex->op == nir_texop_txl) {
+         lod = tex->src[nir_tex_instr_src_index(tex, nir_tex_src_lod)].src.ssa;
+         lod = nir_fadd_imm(b, lod, sampler->mip_lod_bias);
+      } else if (tex->op == nir_texop_txd) {
+         nir_def *dx = nir_fmul(
+            b, size,
+            tex->src[nir_tex_instr_src_index(tex, nir_tex_src_ddx)].src.ssa);
+         nir_def *dy = nir_fmul(
+            b, size,
+            tex->src[nir_tex_instr_src_index(tex, nir_tex_src_ddy)].src.ssa);
+         lod = nir_ffma_imm12(
+            b,
+            nir_flog2(b, nir_fmax(b, nir_fdot(b, dx, dx), nir_fdot(b, dy, dy))),
+            0.5, sampler->mip_lod_bias);
+      } else {
+         lod = nir_get_texture_lod(b, tex);
+         if (tex->op == nir_texop_txb)
+            lod = nir_fadd(
+               b, lod,
+               tex->src[nir_tex_instr_src_index(tex, nir_tex_src_bias)].src.ssa);
+      }
+      linear =
+         nir_bcsel(b, nir_fle_imm(b, lod, 0.0),
+                   nir_imm_bool(b, sampler->mag_filter == VK_FILTER_LINEAR),
+                   nir_imm_bool(b, sampler->min_filter == VK_FILTER_LINEAR));
+   }
+
+   nir_def *pos = nir_bcsel(b, linear, nir_fadd_imm(b, uv, -0.5), uv);
+   nir_def *base = nir_ffloor(b, pos);
+   nir_def *weight =
+      nir_bcsel(b, linear, nir_ffract(b, pos), nir_imm_vec2(b, 0, 0));
+   nir_def *taps[4];
+   for (unsigned tap = 0; tap < 4; ++tap) {
+      nir_def *xy = nir_fadd(b, base, nir_imm_vec2(b, tap & 1, tap >> 1));
+      xy = nir_fmin(b, nir_fmax(b, xy, nir_imm_float(b, 0)),
+                    nir_fadd_imm(b, size, -1));
+      xy = nir_fdiv(b, nir_fadd_imm(b, xy, 0.5), size);
+      nir_def *center = tex->is_array ? nir_vec3(b, nir_channel(b, xy, 0),
+                                                 nir_channel(b, xy, 1),
+                                                 nir_channel(b, coord, 2))
+                                      : xy;
+      nir_def *lod_zero = nir_imm_float(b, 0);
+      nir_tex_instr *sample =
+         nir_instr_as_tex(nir_instr_clone(b->shader, &tex->instr));
+      /* Register cloned source uses before removing or rewriting them. */
+      nir_builder_instr_insert(b, &sample->instr);
+      for (int s = sample->num_srcs - 1; s >= 0; --s) {
+         switch (sample->src[s].src_type) {
+         case nir_tex_src_lod:
+         case nir_tex_src_bias:
+         case nir_tex_src_ddx:
+         case nir_tex_src_ddy:
+         case nir_tex_src_offset:
+            nir_tex_instr_remove_src(sample, s);
+            break;
+         case nir_tex_src_coord:
+            nir_src_rewrite(&sample->src[s].src, center);
+            break;
+         default:
+            break;
+         }
+      }
+      sample->op = nir_texop_txl;
+      nir_tex_instr_add_src(sample, nir_tex_src_lod, lod_zero);
+      taps[tap] = &sample->def;
+   }
+   nir_def *x = nir_channel(b, weight, 0), *y = nir_channel(b, weight, 1);
+   /* Frontend preprocessing may already have lowered the original flrps. */
+   b->shader->info.flrp_lowered = false;
+   nir_def *result = nir_flrp(b, nir_flrp(b, taps[0], taps[1], x),
+                              nir_flrp(b, taps[2], taps[3], x), y);
+   nir_def_replace(&tex->def, result);
+   return true;
+}
+
+/* Look up the conversion of a plane access produced by the common pass. */
+static const struct vk_ycbcr_conversion_state *
+plane_tex_conversion(nir_tex_instr *tex, const void *state, unsigned *plane)
+{
+   const int plane_src = nir_tex_instr_src_index(tex, nir_tex_src_plane);
+   const int deref_src = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (plane_src < 0 || deref_src < 0 || !nir_src_is_const(tex->src[plane_src].src))
+      return NULL;
+
+   nir_deref_instr *deref = nir_src_as_deref(tex->src[deref_src].src);
+   nir_variable *var = nir_deref_instr_get_variable(deref);
+   unsigned array_index = 0;
+   if (deref->deref_type != nir_deref_type_var) {
+      if (deref->deref_type != nir_deref_type_array ||
+          !nir_src_is_const(deref->arr.index))
+         return NULL;
+      array_index = nir_src_as_uint(deref->arr.index);
+   }
+   *plane = nir_src_as_uint(tex->src[plane_src].src);
+   return lookup_ycbcr_conversion(state, var->data.descriptor_set,
+                                  var->data.binding, array_index);
+}
+
+/* The texture unit filters 16-bit UNORM planes at 16-bit precision: a
+ * linear blend of two texels rounds to a whole code, half a code away from
+ * the exact result. Chroma reconstruction must keep the format's precision
+ * (the conversion tests bound it to a 2^-16 step), so blend 16-bit chroma
+ * planes in the shader from nearest fetches. Multi-planar images have one
+ * mip level and YCbCr samplers clamp to edge, so the blend of the four
+ * clamped neighbours at the sample position is the linear filter result. */
+static bool
+lower_ycbcr_chroma_blend(nir_builder *b, nir_tex_instr *tex, void *state)
+{
+   switch (tex->op) {
+   case nir_texop_tex:
+   case nir_texop_txb:
+   case nir_texop_txl:
+   case nir_texop_txd:
+      break;
+   default:
+      return false;
+   }
+   const int coord_src = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (coord_src < 0 || tex->sampler_dim != GLSL_SAMPLER_DIM_2D)
+      return false;
+
+   unsigned plane;
+   const struct vk_ycbcr_conversion_state *conversion =
+      plane_tex_conversion(tex, state, &plane);
+   if (!conversion || conversion->chroma_filter != VK_FILTER_LINEAR)
+      return false;
+   const struct vk_format_ycbcr_info *info =
+      vk_format_get_ycbcr_info(conversion->format);
+   assert(info && plane < info->n_planes);
+   if (!info->planes[plane].has_chroma)
+      return false;
+   switch (info->planes[plane].format) {
+   case VK_FORMAT_R16_UNORM:
+   case VK_FORMAT_R16G16_UNORM:
+      break;
+   default:
+      return false;
+   }
+
+   const int deref_src = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   nir_def *texture = tex->src[deref_src].src.ssa;
+   b->cursor = nir_before_instr(&tex->instr);
+
+   nir_tex_instr *txs = nir_tex_instr_create(b->shader, 2);
+   txs->op = nir_texop_txs;
+   txs->sampler_dim = tex->sampler_dim;
+   txs->is_array = tex->is_array;
+   txs->dest_type = nir_type_int32;
+   txs->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref, texture);
+   txs->src[1] = nir_tex_src_for_ssa(nir_tex_src_plane, nir_imm_int(b, plane));
+   nir_def_init(&txs->instr, &txs->def, nir_tex_instr_dest_size(txs), 32);
+   nir_builder_instr_insert(b, &txs->instr);
+   nir_def *size = nir_channels(b, &txs->def, 3);
+
+   /* The texture unit converts the coordinate to fixed point with
+    * subTexelPrecisionBits fractional bits before filtering. Do the same, so
+    * a sample that lies on a texel centre or boundary in that precision gets
+    * the exact weight rather than a rounding residue of the float scaling. */
+   nir_def *coord = tex->src[coord_src].src.ssa;
+   nir_def *pos = nir_fadd_imm(
+      b, nir_fmul(b, nir_channels(b, coord, 3), nir_i2f32(b, size)), -0.5);
+   pos = nir_fmul_imm(b, nir_fround_even(b, nir_fmul_imm(b, pos, 256.0)),
+                      1.0 / 256.0);
+   nir_def *base = nir_ffloor(b, pos);
+   nir_def *weight = nir_fsub(b, pos, base);
+   nir_def *ibase = nir_f2i32(b, base);
+   const int offset_src = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset_src >= 0)
+      ibase = nir_iadd(b, ibase, nir_channels(b, tex->src[offset_src].src.ssa, 3));
+
+   nir_def *layer = NULL;
+   if (tex->is_array) {
+      layer = nir_f2i32(b, nir_fround_even(b, nir_channel(b, coord, 2)));
+      layer = nir_imin(b, nir_imax(b, layer, nir_imm_int(b, 0)),
+                       nir_iadd_imm(b, nir_channel(b, &txs->def, 2), -1));
+   }
+
+   nir_def *taps[4];
+   for (unsigned tap = 0; tap < 4; ++tap) {
+      nir_def *xy = nir_iadd(b, ibase, nir_imm_ivec2(b, tap & 1, tap >> 1));
+      xy = nir_imin(b, nir_imax(b, xy, nir_imm_int(b, 0)),
+                    nir_iadd_imm(b, size, -1));
+      nir_def *texel = layer ? nir_vec3(b, nir_channel(b, xy, 0),
+                                        nir_channel(b, xy, 1), layer)
+                             : xy;
+      nir_tex_instr *fetch = nir_tex_instr_create(b->shader, 4);
+      fetch->op = nir_texop_txf;
+      fetch->sampler_dim = tex->sampler_dim;
+      fetch->is_array = tex->is_array;
+      fetch->dest_type = tex->dest_type;
+      fetch->coord_components = texel->num_components;
+      fetch->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref, texture);
+      fetch->src[1] = nir_tex_src_for_ssa(nir_tex_src_coord, texel);
+      fetch->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_int(b, 0));
+      fetch->src[3] = nir_tex_src_for_ssa(nir_tex_src_plane, nir_imm_int(b, plane));
+      nir_def_init(&fetch->instr, &fetch->def, tex->def.num_components,
+                   tex->def.bit_size);
+      nir_builder_instr_insert(b, &fetch->instr);
+      taps[tap] = &fetch->def;
+   }
+
+   nir_def *x = nir_channel(b, weight, 0), *y = nir_channel(b, weight, 1);
+   if (tex->def.bit_size != 32) {
+      x = nir_f2fN(b, x, tex->def.bit_size);
+      y = nir_f2fN(b, y, tex->def.bit_size);
+   }
+   b->shader->info.flrp_lowered = false;
+   nir_def *result = nir_flrp(b, nir_flrp(b, taps[0], taps[1], x),
+                              nir_flrp(b, taps[2], taps[3], x), y);
+   nir_def_replace(&tex->def, result);
+   return true;
+}
+
+/* hk_format_to_pipe_format samples X6R10/X4R12 planes through R16_UNORM.
+ * Restore their logical UNORM range before range expansion and YCbCr matrix
+ * conversion. The correction commutes with filtering; absent channels and
+ * alpha must retain their descriptor defaults. */
 static bool
 lower_ycbcr_plane_range(nir_builder *b, nir_tex_instr *tex, void *data)
 {
@@ -721,6 +1173,9 @@ glsl_type_size(const struct glsl_type *type, bool bindless)
  *
  * The "proper" implementation on AGX would use vertex amplification, but a
  * MacBook is not a VR headset.
+ *
+ * This must run on the last pre-rasterization stage, since that is the stage
+ * whose layer output the rasterizer consumes: see hk_lower_multiview_stage().
  */
 static void
 hk_lower_multiview(nir_shader *nir)
@@ -737,9 +1192,21 @@ hk_lower_multiview(nir_shader *nir)
       nir_fixup_deref_modes(nir);
    }
 
-   /* Now write the view index as the layer */
-   nir_builder b =
-      nir_builder_at(nir_after_impl(nir_shader_get_entrypoint(nir)));
+   /* Now write the view index as the layer.
+    *
+    * A geometry shader's EmitVertex snapshots the output variables, so the
+    * store has to precede them; the view index is a per-draw root constant,
+    * so hoisting it to the top of main is correct. Every other stage writes
+    * its outputs once, and on G17P the store must stay with them: a store
+    * separated from the terminal writeout bundle leaves
+    * agx3_g17p_vertex_output_count() with a partial bundle, and the packer
+    * then refuses the stranded UVS slot (agx3_pack_binary.c, "User-output
+    * graphs outside the qualified scalar shapes").
+    */
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir->info.stage == MESA_SHADER_GEOMETRY
+                                     ? nir_before_impl(impl)
+                                     : nir_after_impl(impl));
 
    nir_variable *layer =
       nir_variable_create(nir, nir_var_shader_out, glsl_uint_type(), NULL);
@@ -753,8 +1220,12 @@ hk_lower_multiview(nir_shader *nir)
 static nir_def *
 query_custom_border(nir_builder *b, nir_tex_instr *tex)
 {
-   return nir_build_texture_query(b, tex, nir_texop_custom_border_color_agx, 4,
-                                  tex->dest_type, false, false);
+   nir_def *border = nir_build_texture_query(
+      b, tex, nir_texop_custom_border_color_agx, 4, tex->dest_type, false, false);
+   if (tex->op == nir_texop_tg4)
+      nir_instr_as_tex(nir_def_instr(border))->backend_flags |=
+         AGX_TEXTURE_FLAG_BORDER_UNFILTERED;
+   return border;
 }
 
 static nir_def *
@@ -834,6 +1305,135 @@ static bool
 agx_nir_lower_custom_border(nir_shader *nir)
 {
    return nir_shader_tex_pass(nir, lower, nir_metadata_none, NULL);
+}
+
+/* Unformatted float images may name scaled views. Their native descriptor
+ * uses integer texels; the shader performs the Vulkan numerical conversion.
+ * The descriptor's existing type/channel fields avoid a new software ABI. */
+static bool
+lower_scaled_storage(nir_builder *b, nir_intrinsic_instr *intr, void *unused)
+{
+   const bool load = intr->intrinsic == nir_intrinsic_bindless_image_load;
+   const bool store = intr->intrinsic == nir_intrinsic_bindless_image_store;
+   if ((!load && !store) || nir_intrinsic_format(intr) != PIPE_FORMAT_NONE ||
+       (load ? nir_intrinsic_dest_type(intr)
+             : nir_intrinsic_src_type(intr)) != nir_type_float32)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *address = nir_load_from_texture_handle_agx(b, intr->src[0].ssa);
+   nir_def *header =
+      nir_load_global_constant(b, 1, 32, address, .align_mul = 4);
+   nir_def *type = nir_iand_imm(b, nir_ushr_imm(b, header, 13), 7);
+   nir_def *is_signed = nir_ieq_imm(b, type, AGX_TEXTURE_TYPE_SINT);
+   nir_def *is_integer = nir_ior(
+      b, is_signed, nir_ieq_imm(b, type, AGX_TEXTURE_TYPE_UINT));
+   if (load) {
+      b->cursor = nir_after_instr(&intr->instr);
+      nir_def *value = &intr->def;
+      nir_def *converted =
+         nir_bcsel(b, is_signed, nir_i2f32(b, value), nir_u2f32(b, value));
+      nir_def_rewrite_uses_after(
+         value, nir_bcsel(b, is_integer, converted, value));
+      return true;
+   }
+
+   nir_def *channels = nir_iand_imm(b, nir_ushr_imm(b, header, 6), 127);
+   nir_def *is_8 = nir_ior(
+      b, nir_ieq_imm(b, channels, AGX_CHANNELS_R8),
+      nir_ior(b, nir_ieq_imm(b, channels, AGX_CHANNELS_R8G8),
+              nir_ieq_imm(b, channels, AGX_CHANNELS_R8G8B8A8)));
+   nir_def *is_16 = nir_ior(
+      b, nir_ieq_imm(b, channels, AGX_CHANNELS_R16),
+      nir_ior(b, nir_ieq_imm(b, channels, AGX_CHANNELS_R16G16),
+              nir_ieq_imm(b, channels, AGX_CHANNELS_R16G16B16A16)));
+   nir_push_if(b, nir_iand(b, is_integer, nir_ior(b, is_8, is_16)));
+   {
+      nir_def *limit = nir_bcsel(b, is_8, nir_imm_float(b, 256),
+                                 nir_imm_float(b, 65536));
+      nir_def *signed_limit = nir_fmul_imm(b, limit, 0.5);
+      nir_def *upper = nir_fadd_imm(
+         b, nir_bcsel(b, is_signed, signed_limit, limit), -1);
+      nir_def *lower = nir_bcsel(b, is_signed, nir_fneg(b, signed_limit),
+                                 nir_imm_float(b, 0));
+      nir_def *rounded = nir_fround_even(b, intr->src[3].ssa);
+      nir_def *clamped = nir_fmin(b, nir_fmax(b, rounded, lower), upper);
+      nir_def *value = nir_bcsel(b, is_signed, nir_f2i32(b, clamped),
+                                 nir_f2u32(b, clamped));
+      nir_push_if(b, is_8);
+      for (unsigned wide = 0; wide < 2; ++wide) {
+         if (wide)
+            nir_push_else(b, NULL);
+         nir_intrinsic_instr *copy = nir_instr_as_intrinsic(
+            nir_instr_clone(b->shader, &intr->instr));
+         nir_builder_instr_insert(b, &copy->instr);
+         nir_src_rewrite(&copy->src[3], value);
+         /* The descriptor retains signedness and channel count. The typed
+          * intrinsic selects the matching raw I8/I16 staging instruction. */
+         nir_intrinsic_set_format(copy, wide ? PIPE_FORMAT_R16G16B16A16_UINT
+                                             : PIPE_FORMAT_R8G8B8A8_UINT);
+         nir_intrinsic_set_src_type(copy, nir_type_uint32);
+      }
+      nir_pop_if(b, NULL);
+   }
+   nir_push_else(b, NULL);
+   nir_builder_instr_insert(b, nir_instr_clone(b->shader, &intr->instr));
+   nir_pop_if(b, NULL);
+   nir_instr_remove(&intr->instr);
+   return true;
+}
+
+/* Image-view formats are dynamic descriptor state. Recover scaled samples
+ * from the integer descriptor result without changing ordinary float samples. */
+static bool
+lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
+{
+   if (tex->dest_type != nir_type_float32 || tex->is_shadow ||
+       tex->sampler_dim == GLSL_SAMPLER_DIM_BUF || tex->is_sparse)
+      return false;
+   switch (tex->op) {
+   case nir_texop_tex: case nir_texop_txb: case nir_texop_txl:
+   case nir_texop_txd: case nir_texop_txf: case nir_texop_txf_ms:
+   case nir_texop_tg4:
+      break;
+   default:
+      return false;
+   }
+   const int handle = nir_tex_instr_src_index(tex, nir_tex_src_texture_handle);
+   if (handle < 0)
+      return false;
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *desc = nir_load_from_texture_handle_agx(b, tex->src[handle].src.ssa);
+   const unsigned offset = 32 +
+      offsetof(struct hk_sampled_image_descriptor_sw, scaled_conversion);
+   nir_def *kind = nir_load_global_constant(b, 1, 16,
+      nir_iadd_imm(b, desc, offset), .align_mul = 2);
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *value = &tex->def;
+   nir_def *converted = nir_bcsel(b, nir_ieq_imm(b, kind, 1),
+      nir_i2f32(b, value), nir_u2f32(b, value));
+   nir_def *scale = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, kind, 4), 0),
+                             nir_imm_float(b, 65535), nir_imm_float(b, 255));
+   scale = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, kind, 128), 0),
+                     nir_imm_float(b, 1023), scale);
+   nir_def *factors[4];
+   for (unsigned c = 0; c < value->num_components; ++c) {
+      unsigned component = tex->op == nir_texop_tg4 ? tex->component : c;
+      factors[c] = nir_bcsel(b,
+         nir_ine_imm(b, nir_iand_imm(b, kind, BITFIELD_BIT(3 + component)), 0),
+         nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(
+            b, kind, BITFIELD_BIT(8 + component)), 0),
+            nir_imm_float(b, 3), scale),
+         nir_imm_float(b, 1));
+   }
+   nir_def *normalized = nir_fmul(b, value, nir_vec(b, factors, value->num_components));
+   if (tex->op == nir_texop_txf || tex->op == nir_texop_txf_ms || tex->op == nir_texop_tg4)
+      normalized = nir_fround_even(b, normalized);
+   converted = nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, kind, 3), 3),
+                           normalized, converted);
+   nir_def *result = nir_bcsel(b, nir_ine_imm(b, kind, 0), converted, value);
+   nir_def_rewrite_uses_after(value, result);
+   return true;
 }
 
 static nir_def *
@@ -949,10 +1549,190 @@ lower_subpass_dim(nir_builder *b, nir_tex_instr *tex, UNUSED void *_data)
    return true;
 }
 
+/* Native texel fetches are memory-safe but can alias another texel within
+ * the allocation. Enforce the Vulkan view bounds before narrowing coordinates
+ * or LODs for the hardware, and return zero for invalid fetches. */
+static bool
+hk_lower_native_robust_txf(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
+{
+   if (tex->op != nir_texop_txf && tex->op != nir_texop_txf_ms)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   const int coord_idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   const int lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   const int sample_idx = nir_tex_instr_src_index(tex, nir_tex_src_ms_index);
+   nir_def *coord = tex->src[coord_idx].src.ssa;
+   const unsigned components = tex->coord_components;
+   nir_def *size = nir_build_texture_query(b, tex, nir_texop_txs,
+                                           components, nir_type_uint32,
+                                           false, lod_idx >= 0);
+   if (lod_idx >= 0) {
+      nir_tex_instr *query = nir_instr_as_tex(nir_def_instr(size));
+      const int query_lod = nir_tex_instr_src_index(query, nir_tex_src_lod);
+      nir_src_rewrite(&query->src[query_lod].src, tex->src[lod_idx].src.ssa);
+   }
+   nir_def *valid = nir_ball(b, nir_ult(b, coord, size));
+   if (lod_idx >= 0 && tex->sampler_dim != GLSL_SAMPLER_DIM_BUF) {
+      nir_def *levels = nir_build_texture_query(b, tex, nir_texop_query_levels,
+                                               1, nir_type_uint32, false, false);
+      nir_def *lod = tex->src[lod_idx].src.ssa;
+      valid = nir_iand(b, valid, nir_ult(b, lod, levels));
+      nir_src_rewrite(&tex->src[lod_idx].src,
+                      nir_bcsel(b, valid, lod, nir_imm_int(b, 0)));
+   }
+   if (sample_idx >= 0) {
+      nir_def *samples = nir_build_texture_query(b, tex, nir_texop_texture_samples,
+                                                1, nir_type_uint32, false, false);
+      nir_def *sample = tex->src[sample_idx].src.ssa;
+      valid = nir_iand(b, valid, nir_ult(b, sample, samples));
+      nir_src_rewrite(&tex->src[sample_idx].src,
+                      nir_bcsel(b, valid, sample, nir_imm_int(b, 0)));
+   }
+   nir_src_rewrite(&tex->src[coord_idx].src,
+                   nir_bcsel(b, valid, coord, nir_imm_zero(b, components, 32)));
+   /* robustImageAccess2: an invalid fetch returns (0,0,0,1) for a view whose
+    * format has no alpha channel and (0,0,0,0) otherwise. The descriptor's
+    * alpha swizzle is the constant one exactly for alpha-less formats. */
+   nir_def *invalid_value = nir_imm_zero(b, tex->def.num_components,
+                                         tex->def.bit_size);
+   const int deref_idx = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+   if (tex->def.num_components == 4 && deref_idx >= 0) {
+      nir_def *word0 = nir_load_texture_descriptor_word_agx(
+         b, tex->src[deref_idx].src.ssa);
+      nir_def *swizzle_a = nir_ubitfield_extract_imm(b, word0, 25, 3);
+      nir_def *one = nir_alu_type_get_base_type(tex->dest_type) == nir_type_float
+                        ? nir_imm_floatN_t(b, 1, tex->def.bit_size)
+                        : nir_imm_intN_t(b, 1, tex->def.bit_size);
+      nir_def *alpha = nir_bcsel(b, nir_ieq_imm(b, swizzle_a, AGX_CHANNEL_1),
+                                 one, nir_imm_zero(b, 1, tex->def.bit_size));
+      invalid_value = nir_vector_insert_imm(b, invalid_value, alpha, 3);
+   }
+   b->cursor = nir_after_instr(&tex->instr);
+   nir_def *result = nir_bcsel(b, valid, &tex->def, invalid_value);
+   nir_def_rewrite_uses_after(&tex->def, result);
+   return true;
+}
+
+static bool
+should_lower_robust(const nir_intrinsic_instr *intr, const void *data)
+{
+   /* The hardware is robust, but our software image atomics are not. Unlike the
+    * GL driver, we don't use the common buffer image lowering, using the
+    * agx_nir_lower_texture lowering for robustImageAccess2 semantics.
+    */
+   if (data && *(const bool *)data &&
+       (intr->intrinsic == nir_intrinsic_image_deref_load ||
+        intr->intrinsic == nir_intrinsic_image_deref_store))
+      return true;
+
+   return intr->intrinsic == nir_intrinsic_image_deref_atomic ||
+          intr->intrinsic == nir_intrinsic_image_deref_atomic_swap;
+}
+
+/* robustImageAccess2 returns (0,0,0,1) out of bounds for a view whose format
+ * has no alpha channel and (0,0,0,0) otherwise. A load without a format
+ * qualifier reads that from the native texture descriptor: hk packs the
+ * format's swizzle into it, so the alpha swizzle is the constant one exactly
+ * for alpha-less formats, and the null descriptor swizzles alpha to zero. */
+static nir_def *
+hk_native_robust_oob_alpha(nir_builder *b, nir_intrinsic_instr *load,
+                           const void *data)
+{
+   const nir_alu_type type = nir_intrinsic_dest_type(load);
+   const unsigned bit_size = load->def.bit_size;
+   nir_def *zero = nir_imm_zero(b, 1, bit_size);
+   nir_def *one = nir_alu_type_get_base_type(type) == nir_type_float
+                     ? nir_imm_floatN_t(b, 1, bit_size)
+                     : nir_imm_intN_t(b, 1, bit_size);
+
+   /* The descriptor read is resolved by hk_nir_lower_descriptors, which runs
+    * after this pass; the wrap itself must precede descriptor lowering so
+    * the native read path's own coordinate clamp applies inside the branch. */
+   if (!(data && *(const bool *)data) ||
+       load->intrinsic != nir_intrinsic_image_deref_load)
+      return one;
+
+   nir_def *word0 = nir_load_image_descriptor_word_agx(b, load->src[0].ssa);
+   nir_def *swizzle_a = nir_ubitfield_extract_imm(b, word0, 25, 3);
+   return nir_bcsel(b, nir_ieq_imm(b, swizzle_a, AGX_CHANNEL_1), one, zero);
+}
+
+/* G16's qualified native offset forms cover immediate XYZ offsets and
+ * non-array explicit/bias LOD. Lower other shapes with NIR's coordinate
+ * arithmetic, preserving their LOD and array-layer semantics. */
+static bool
+hk_lower_native_texture_offset(const nir_instr *instr, UNUSED const void *data)
+{
+   const nir_tex_instr *tex = nir_instr_as_tex(instr);
+   const int offset = nir_tex_instr_src_index(tex, nir_tex_src_offset);
+   if (offset < 0)
+      return false;
+   return tex->op == nir_texop_txf ||
+          (tex->is_array && tex->op == nir_texop_txd) ||
+          (tex->op == nir_texop_tg4 &&
+           (tex->is_shadow || !nir_src_is_const(tex->src[offset].src)));
+}
+
+/* Use the existing coefficient interpolation at the selected sample's
+ * programmable location. Locations come from this draw's root descriptor. */
+static bool
+hk_lower_native_sample_barycentric(nir_builder *b, nir_intrinsic_instr *intr,
+                                  UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_barycentric_at_sample)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *packed = nir_load_sample_positions_agx(b);
+   nir_def *sample = nir_u2u32(b, intr->src[0].ssa);
+   nir_def *position = nir_ushr(b, packed, nir_imul_imm(b, sample, 8));
+   nir_def *offset[2];
+   for (unsigned c = 0; c < 2; ++c) {
+      nir_def *nibble = nir_iand_imm(b, nir_ushr_imm(b, position, c * 4), 15);
+      offset[c] = nir_fadd_imm(b, nir_fmul_imm(b, nir_u2f32(b, nibble),
+                                             1.0 / 16.0), -0.5);
+   }
+   nir_def_replace(&intr->def, nir_load_barycentric_at_offset(
+      b, intr->def.bit_size, nir_vec2(b, offset[0], offset[1]),
+      .interp_mode = nir_intrinsic_interp_mode(intr)));
+   return true;
+}
+
+/*
+ * ViewIndex reaches the rasterizer as the layer ID, so the ViewIndex -> Layer
+ * store belongs in the last pre-rasterization stage and nowhere else: a store
+ * in an earlier stage feeds the next shader stage instead of the rasterizer
+ * and is dropped. next_stage_mask is the exact next stage in the pipeline
+ * (vk_pipeline.c fills it from the sorted stage array, or FRAGMENT for the
+ * last geometry stage), so it identifies that stage without a separate
+ * stage-set query.
+ */
+static bool
+hk_lower_multiview_stage(mesa_shader_stage stage,
+                         VkShaderStageFlags next_stage_mask)
+{
+   const VkShaderStageFlags later_geom =
+      VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT |
+      VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT |
+      VK_SHADER_STAGE_GEOMETRY_BIT;
+
+   switch (stage) {
+   case MESA_SHADER_VERTEX:
+      return !(next_stage_mask & later_geom);
+   case MESA_SHADER_TESS_EVAL:
+      return !(next_stage_mask & VK_SHADER_STAGE_GEOMETRY_BIT);
+   case MESA_SHADER_GEOMETRY:
+      return true;
+   default:
+      return false;
+   }
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
-             uint32_t set_layout_count,
+             VkShaderStageFlags next_stage_mask, uint32_t set_layout_count,
              struct vk_descriptor_set_layout *const *set_layouts,
              enum hk_feature_key features)
 {
@@ -976,11 +1756,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_lower_wpos_center);
    }
 
-   /* XXX: should be last geometry stage, how do I get to that? */
-   if (nir->info.stage == MESA_SHADER_VERTEX) {
-      if (is_multiview)
-         hk_lower_multiview(nir);
-   }
+   if (is_multiview &&
+       hk_lower_multiview_stage(nir->info.stage, next_stage_mask))
+      hk_lower_multiview(nir);
 
    if (nir->info.stage == MESA_SHADER_TESS_EVAL) {
       NIR_PASS(_, nir, nir_lower_patch_vertices,
@@ -991,9 +1769,17 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       .set_layout_count = set_layout_count,
       .set_layouts = set_layouts,
    };
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_packed_ycbcr_size,
+            nir_metadata_control_flow, (void *)&ycbcr_state);
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_explicit,
+            nir_metadata_none, (void *)&ycbcr_state);
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_packed_ycbcr_center,
+            nir_metadata_none, (void *)&ycbcr_state);
    NIR_PASS(_, nir, nir_vk_lower_ycbcr_tex, lookup_ycbcr_conversion,
             &ycbcr_state);
-   if (dev->dev.chip == AGX_CHIP_G17P) {
+   NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_chroma_blend,
+            nir_metadata_none, (void *)&ycbcr_state);
+   if (agx_native_graphics(&dev->dev)) {
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_ycbcr_plane_range,
                nir_metadata_control_flow, (void *)&ycbcr_state);
    }
@@ -1013,6 +1799,9 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    const bool lower_g17p_robust_images =
       dev->dev.chip == AGX_CHIP_G17P &&
       rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT;
+   const bool native_robust_images =
+      dev->dev.chip == AGX_CHIP_G16G &&
+      rs->images != VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED_EXT;
 
    /* A G17P image load does not see a store made earlier in the same
     * invocation; forward the stored value. Run it before the robust lowering
@@ -1021,6 +1810,16 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, hk_nir_forward_image_stores, lower_g17p_robust_images);
    NIR_PASS(_, nir, hk_nir_lower_robust_image_access,
             lower_g17p_robust_images);
+   if (native_robust_images) {
+      NIR_PASS(_, nir, nir_lower_robust_access_cb, should_lower_robust,
+               hk_native_robust_oob_alpha, &native_robust_images);
+   }
+   if (native_robust_images) {
+      const nir_lower_tex_options offsets = {.lower_txf_offset = true};
+      NIR_PASS(_, nir, nir_lower_tex, &offsets);
+      NIR_PASS(_, nir, nir_shader_tex_pass, hk_lower_native_robust_txf,
+               nir_metadata_control_flow, NULL);
+   }
 
    /* We must do early lowering before hk_nir_lower_descriptors, since this will
     * create lod_bias instructions.
@@ -1057,7 +1856,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, agx_nir_lower_image_view_min_lod);
    }
 
-   if ((features & HK_FEAT_CUSTOM_BORDER) && !HK_PERF(dev, NOBORDER)) {
+   if (((features & HK_FEAT_CUSTOM_BORDER) || agx_native_graphics(&dev->dev)) &&
+       !HK_PERF(dev, NOBORDER)) {
       NIR_PASS(_, nir, agx_nir_lower_custom_border);
    }
 
@@ -1079,8 +1879,23 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
     * by the time the traversal reads a node through it, and before shared
     * memory is laid out, because the pass introduces shader temporaries that
     * nir_lower_vars_to_ssa still has to promote. */
-   if (nir->info.ray_queries > 0)
+   if (nir->info.ray_queries > 0) {
       NIR_PASS(_, nir, hk_nir_lower_ray_queries);
+
+      /* The pass replaces every ray-query variable with ordinary temporaries
+       * and lowers every rq_* intrinsic, so the source count is now stale.
+       * That is not cosmetic: the AGX3 backend refuses outright any shader
+       * whose info.ray_queries is nonzero (`agx_compile.c:8610-8613`), and it
+       * also derives uses_ray_traversal / ray_traversal_depth_nonzero from it
+       * (`:8776-8781`).  Measured on the g17p drm-shim: an ordinary ray-query
+       * compute pipeline already reaches agx_compile_shader_nir() with
+       * ray_queries == 0 -- refreshed somewhere downstream of this call -- so
+       * zeroing it here changes nothing for the path that measured 43/45 on
+       * Neo.  The ray-tracing megakernel gets no such refresh, and without
+       * this every ray query inside a ray-tracing-pipeline stage fails
+       * creation with "AGX backend cannot encode compute shader for G17P". */
+      nir->info.ray_queries = 0;
+   }
 
    /* Before inserting bounds checks, we want to do a fair bit of optimization.
     * lower_load_global_constant_offset_instr has special optimizations for
@@ -1168,12 +1983,20 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_control_flow, NULL);
    }
 
+   if (agx_chip_descriptor_generation(dev->dev.chip) == 9) {
+      NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_scaled_storage,
+               nir_metadata_none, NULL);
+      NIR_PASS(_, nir, nir_shader_tex_pass, lower_scaled_sample,
+               nir_metadata_control_flow, NULL);
+   }
+
    if (dev->dev.chip == AGX_CHIP_G17P) {
       /* hk_nir_lower_robust_image_access() leaves formatless loads to this
        * pass. */
       NIR_PASS(_, nir, agx_nir_lower_texture_with_buffer_metadata,
                agx_chip_descriptor_generation(dev->dev.chip),
-               lower_g17p_robust_images);
+               lower_g17p_robust_images, dev->dev.sparse_ro_offset,
+               dev->vk.enabled_features.sparseResidencyBuffer);
    } else {
       NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
                agx_chip_descriptor_generation(dev->dev.chip));
@@ -1670,17 +2493,36 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                candidate = nir_shader_clone(NULL, nir);
                if (candidate &&
                    agx_nir_lower_g17p_indexed_samplers(candidate)) {
-                  struct agx_g17p_indexed_storage_binding indexed_storage;
-                  const bool has_indexed_storage =
-                     agx_nir_lower_g17p_indexed_storage(candidate,
-                                                        &indexed_storage);
+                  /* Keep the storage image BINDLESS alongside indexed
+                   * samplers.
+                   *
+                   * agx_nir_lower_g17p_indexed_storage() rewrites the image
+                   * store to the immediate-slot form: image_write with a zero
+                   * base and a constant resource index, with the PBE
+                   * descriptor delivered through the launch's argument slots
+                   * by hk_agx3_g17p_indexed_storage_pointers()
+                   * (hk_cmd_dispatch.c).  Measured on G17P with the
+                   * image_2d_view_3d_image compute sampler cases: in that
+                   * combination the store lands nowhere at all -- the
+                   * destination reads back byte-identical to its pre-dispatch
+                   * clear -- at resource index 1 and at index 2 alike.  The
+                   * ordinary bindless image write, which the fragment stage
+                   * and every non-sampling compute shader already use on this
+                   * chip, stores correctly: 8 fail -> 0 fail, with 2823
+                   * neighbouring cases per-case identical.
+                   *
+                   * WHY the immediate-slot store fails here is NOT understood.
+                   * Only that it does, and that the bindless form does not.
+                   * The slot layout is a plausible suspect -- slots 0/1 carry
+                   * the texture and sampler heap bases that the shader
+                   * dereferences itself -- but that is a hypothesis, not a
+                   * measurement, and the driver does build a combined pointer
+                   * set for exactly this case rather than ignoring it.
+                   */
                   ralloc_free(nir);
                   nir = candidate;
                   shader->info.agx3_indexed_sampler_valid = true;
-                  shader->info.agx3_indexed_storage_valid =
-                     has_indexed_storage;
-                  if (has_indexed_storage)
-                     shader->info.agx3_indexed_storage = indexed_storage;
+                  shader->info.agx3_indexed_storage_valid = false;
                } else {
                   ralloc_free(candidate);
                   candidate = nir_shader_clone(NULL, nir);
@@ -1713,6 +2555,17 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
+      /* A shader that writes gl_SampleMask owns its coverage update. Apply
+       * draw-time alpha-to-coverage before that update so killed samples also
+       * skip depth/stencil tests, colour stores and occlusion accounting. */
+      if (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK)) {
+         nir_builder b = nir_builder_at(
+            nir_before_impl(nir_shader_get_entrypoint(nir)));
+         nir_def *enable =
+            nir_ine_imm(&b, nir_load_alpha_to_coverage_agx(&b), 0);
+         NIR_PASS(_, nir, nir_lower_alpha_to_coverage, false, enable);
+      }
+
       NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
                dev->dev.chip, &shader->info.fs.epilog_key);
       if (dev->dev.chip == AGX_CHIP_G17P)
@@ -1750,6 +2603,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
       }
 
+      /* Explicit interpolateAtSample() is not sample shading. Fold its
+       * single-sample clamp too, without cloning the per-pixel shader body
+       * or guessing a G17P samples-log2 special-register encoding. */
+      if (dev->dev.chip == AGX_CHIP_G17P && key->fs.g17p_samples)
+         NIR_PASS(_, nir, agx_nir_specialize_sample_count,
+                  key->fs.g17p_samples);
+
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
       /* G17P exposes the raster layer through the flat coefficient table.
        * SR28 is the compute grid-Z register and does not hold a fragment
@@ -1777,12 +2637,21 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          shader->info.tess.tcs_nr_patch_outputs =
             util_last_bit(nir->info.patch_outputs_written);
          shader->info.tess.tcs_output_stride = poly_tcs_output_stride(nir);
-      } else if (dev->g17p_native_tess && hw) {
-         /* G17P tessellates in hardware and runs the evaluation shader as the
-          * post-tessellation vertex program, which reads the patch and the
-          * coordinate from the tessellator. This destroys info so it needs to
-          * happen after the gather. */
-         NIR_PASS(_, nir, poly_nir_lower_tes_native);
+      } else if (dev->g17p_native_tess &&
+                 hk_g17p_tes_domain_is_native(&nir->info)) {
+         shader->info.tess.g17p_native_domain = true;
+         if (!hw) {
+            /* The software variant of a native-domain evaluation shader is
+             * never bound; compile it as usual so the pipeline still has one
+             * rather than refusing it. */
+            NIR_PASS(_, nir, poly_nir_lower_tes, hw);
+         } else {
+            /* G17P tessellates in hardware and runs the evaluation shader as
+             * the post-tessellation vertex program, which reads the patch and
+             * the coordinate from the tessellator. This destroys info so it
+             * needs to happen after the gather. */
+            NIR_PASS(_, nir, poly_nir_lower_tes_native);
+         }
       } else {
          /* This destroys info so it needs to happen after the gather */
          NIR_PASS(_, nir, poly_nir_lower_tes, hw);
@@ -1793,7 +2662,12 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
     * we have a geometry/tessellation shader, the hardware vertex (software
     * GS/TES) will handle this itself instead.
     */
-   if (sw_stage == MESA_SHADER_VERTEX && hw && !kill_psiz) {
+   if ((sw_stage == MESA_SHADER_VERTEX || sw_stage == MESA_SHADER_TESS_EVAL) &&
+       hw && !kill_psiz) {
+      /* An evaluation shader is the hardware vertex shader too, and with
+       * shader objects point mode may come from the control shader alone;
+       * HLSL domain shaders write no point size
+       * (shader_object.tessellation.hlsl.point_mode*). */
       NIR_PASS(_, nir, nir_lower_default_point_size);
    }
 
@@ -1904,14 +2778,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       .promote_textures = true,
       .g17p_sparse_vertex_outputs =
          dev->dev.chip == AGX_CHIP_G17P && hw &&
-         nir->info.stage == MESA_SHADER_VERTEX &&
-         (nir->info.has_transform_feedback_varyings ||
-          (xfb_info && xfb_info->output_count) ||
-          sw_stage == MESA_SHADER_GEOMETRY ||
-          /* A raster-discard TES may write only point size, leaving the
-           * four position components absent just like an XFB raster VS. */
-          sw_stage == MESA_SHADER_TESS_EVAL ||
-          nir->info.next_stage == MESA_SHADER_GEOMETRY),
+         hk_g17p_sparse_vertex_outputs(&nir->info, sw_stage,
+                                       xfb_info && xfb_info->output_count),
       /* G17P's Ioto resource program populates CProg before the main shader;
        * it does not execute AGX2's tex_state_store/sampler_state_store shader
        * preamble.  The bounded G17P descriptor lowerings above convert the
@@ -1969,7 +2837,14 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                 _mesa_shader_stage_to_string(sw_stage),
                 agx_chip_name(dev->dev.chip));
       ralloc_free(nir);
-      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+      /* This path is reached from vkCreateGraphicsPipelines,
+       * vkCreateComputePipelines and vkCreateShadersEXT.  None of the three
+       * lists VK_ERROR_FEATURE_NOT_PRESENT among its return codes, so the old
+       * value was outside the API contract for every caller.  The three legal
+       * sets intersect in OUT_OF_HOST_MEMORY, OUT_OF_DEVICE_MEMORY, UNKNOWN
+       * and VALIDATION_FAILED; UNKNOWN is the only one that describes a
+       * backend that cannot encode an otherwise valid shader. */
+      return vk_errorf(dev, VK_ERROR_UNKNOWN,
                        "AGX backend cannot encode shader for %s",
                        agx_chip_name(dev->dev.chip));
    }
@@ -2121,8 +2996,8 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    nir_shader *nir = info->nir;
 
    if (!nir->info.io_lowered) {
-      hk_lower_nir(dev, nir, info->robustness, false, info->set_layout_count,
-                   info->set_layouts, features);
+      hk_lower_nir(dev, nir, info->robustness, false, info->next_stage_mask,
+                   info->set_layout_count, info->set_layouts, features);
    }
 
    union hk_key key_tmp, *key = NULL;
@@ -2142,7 +3017,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
       sample_variants = dev->dev.chip == AGX_CHIP_G17P &&
          key_tmp.fs.g17p_samples == 0 &&
          (nir->info.fs.uses_sample_shading || key_tmp.fs.force_sample_shading ||
-          coverage_updates);
+          coverage_updates || agx_nir_needs_sample_count(nir));
    }
 
    size_t size = sizeof(struct hk_api_shader) +
@@ -2186,6 +3061,10 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
             nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
          nir_discard_if(&b, nir_imm_false(&b));
          nir->info.fs.uses_discard = true;
+
+         /* Late-Z alone only moves the depth test. Move the depth write too. */
+         if (!getenv("AGX_LATEZ_NOFORCE"))
+            hk_fs_force_shader_depth_write(nir);
       }
 
       if (!sample_variants)
@@ -2394,7 +3273,9 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
             ralloc_free(clone);
             ralloc_free(nir);
             hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
-            return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+            /* Same contract as above: not a legal code for any caller of
+             * hk_compile_shaders(). */
+            return vk_error(dev, VK_ERROR_UNKNOWN);
          }
          NIR_PASS(_, clone, agx_nir_lower_sample_intrinsics, false);
 
@@ -2554,7 +3435,8 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
       nir_shader *nir = info->nir;
 
       hk_lower_nir(dev, nir, info->robustness, is_multiview,
-                   info->set_layout_count, info->set_layouts, hk_features);
+                   info->next_stage_mask, info->set_layout_count,
+                   info->set_layouts, hk_features);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
          enum hk_nir_widen_16bit_varyings_mode mode = 0;
@@ -2614,6 +3496,19 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 
    nir_opt_varyings_bulk(shaders, shader_count, true, UINT32_MAX, UINT32_MAX,
                          nir_opts, NULL);
+
+   /* Only a complete pipeline known to have no fragment shader can fix an
+    * empty interpolation contract. A pre-raster library or shader object
+    * must retain draw-time UVS indices for its eventual fragment consumer. */
+   if (dev->dev.chip == AGX_CHIP_G17P && shader_count > 0 &&
+       hk_pipeline_has_no_fragment_shader(state)) {
+      nir_shader *last = shaders[shader_count - 1];
+      if (last->info.stage <= MESA_SHADER_GEOMETRY) {
+         last->info.known_interpolation_qualifiers = true;
+         last->info.linear_varyings = 0;
+         last->info.perspective_varyings = 0;
+      }
+   }
 
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =

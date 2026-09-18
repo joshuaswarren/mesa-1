@@ -435,6 +435,100 @@ test_native_f32_floor_ceil(void)
                             false, 1u << 6, false, false, bytes, &len));
 }
 
+/*
+ * Full-precision round-to-nearest-even: the same f32rint form with f43
+ * absent, the first line of the witness table beside the declaration.
+ *
+ * The select core encodes this operation too, but its encoding point holds
+ * the source in a six-bit field and refuses anything above r63. Register
+ * allocation reaches r64 in any shader with pressure, and the refusal
+ * rejects the whole shader, so this form has to cover the register file.
+ */
+static void
+test_native_f32_roundeven(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+
+   /* metal-nt -arch applegpu_g17p, o[i] = rint(a[i]): the floor/ceil witness
+    * with the mode field absent. */
+   assert(agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                                false, bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes, "\x2f\x00\x56\x00\x02\x00\xb0\x40\x00\x00", 10));
+
+   /* It differs from its siblings only in f43, so the mode really is the one
+    * field that separates them. */
+   uint8_t other[AGX3_ALU_MAX_LENGTH], olen;
+   assert(agx3_alu_f32floor(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                            AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                            false, other, &olen));
+   assert(olen == len && memcmp(other, bytes, 8) == 0 && other[8] != bytes[8]);
+   assert(agx3_alu_f32ceil(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                           AGX3_ALU_HINT_DISCARD, false, 1u << 5, false, false,
+                           other, &olen));
+   assert(olen == len && memcmp(other, bytes, 8) == 0 && other[8] != bytes[8]);
+
+   /* The family's modifiers, cache/lifetime hints and wait slots all reach
+    * this mode, exactly as they reach floor and ceil. */
+   assert(agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 4, 0,
+                                AGX3_ALU_HINT_CACHE, true, 1u << 5, false,
+                                false, bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes, "\x2f\x00\x56\x04\x03\x00\x92\x40\x00\x00", 10));
+   assert(agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 4, 4,
+                                AGX3_ALU_HINT_DISCARD, true, 1u << 0, false,
+                                false, bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes, "\x2f\x10\x54\x04\x03\x08\xb0\x40\x00\x00", 10));
+   assert(agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                AGX3_ALU_HINT_DISCARD, false, 1u << 5, false,
+                                true, bytes, &len));
+   assert(len == 10);
+   assert(!memcmp(bytes, "\x2f\x00\x56\x00\x02\x00\xb0\xc0\x00\x00", 10));
+
+   /* The point of the form. Every aligned 32-bit register pair this family
+    * addresses encodes here, with no gaps -- 96 registers, r0 through r95,
+    * the same reach agx3_alu_f32floor() and agx3_alu_f32ceil() already have
+    * and the same the 32-bit move form has. The select core's encoding point
+    * stops at r63 in both operands. */
+   for (uint16_t d = 0; d <= 190; d += 2) {
+      for (uint16_t s = 0; s <= 190; s += 2) {
+         assert(agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, d, s,
+                                      AGX3_ALU_HINT_DISCARD, false, 1u << 5,
+                                      false, false, bytes, &len));
+         assert(len == 10);
+      }
+   }
+   assert(!agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 192, 0,
+                                 AGX3_ALU_HINT_DISCARD, false, 0, false, false,
+                                 bytes, &len));
+   assert(!agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 0, 192,
+                                 AGX3_ALU_HINT_DISCARD, false, 0, false, false,
+                                 bytes, &len));
+
+   /* The exact shape the G17P robustness2 shaders refused: dest r59, source
+    * r64. (test-agx3-pack.c pins the select core's refusal of it.) */
+   assert(agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 118, 128,
+                                AGX3_ALU_HINT_DISCARD, false, 0, false, false,
+                                bytes, &len));
+   assert(len == 10);
+
+   /* Same guards as the rest of the family. */
+   assert(!agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 1, 0,
+                                 AGX3_ALU_HINT_NONE, false, 0, false, false,
+                                 bytes, &len));
+   assert(!agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 0, 1,
+                                 AGX3_ALU_HINT_NONE, false, 0, false, false,
+                                 bytes, &len));
+   assert(!agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3C, 0, 0,
+                                 AGX3_ALU_HINT_NONE, false, 0, false, false,
+                                 bytes, &len));
+   assert(!agx3_alu_f32roundeven(AGX_ISA_ENCODING_AGX3B, 0, 0,
+                                 AGX3_ALU_HINT_NONE, false, 1u << 6, false,
+                                 false, bytes, &len));
+}
+
 static void
 test_native_bit_nor(void)
 {
@@ -936,6 +1030,12 @@ static void test_u16_to_f32(void)
       {0,2,1,32,{0xa7,0x07,0x56,0x00,0x02,0x04,0xa4,0x20}},
       {2,3,1,0, {0xa7,0x07,0x54,0x02,0x02,0x06,0xa4,0x20}},
       {2,4,0,32,{0xa7,0x07,0x56,0x02,0x02,0x08,0x84,0x20}},
+      /* hiregs.metal / hiregs16.metal (96 live conversions): destinations
+       * and sources above half 127 use the same form, the source's high
+       * bit in byte 6. */
+      {132,88,1,0,{0xa7,0x07,0x54,0x84,0x02,0xb0,0xa4,0x20}},
+      {134,88,1,0,{0xa7,0x07,0x54,0x86,0x02,0xb0,0xa4,0x20}},
+      {70,162,1,0,{0xa7,0x07,0x54,0x46,0x02,0x44,0xa5,0x20}},
    };
    uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
    for(unsigned i=0;i<sizeof(v)/sizeof(v[0]);++i) {
@@ -946,10 +1046,11 @@ static void test_u16_to_f32(void)
    /* Independent literal bit decode: register halves, unsigned16 width,
     * source kill and all six wait bits. Adjacent source half is not consumed.
     */
-   for(unsigned d=0;d<128;d+=2) for(unsigned s=0;s<128;++s)
+   for(unsigned d=0;d<192;d+=2) for(unsigned s=0;s<192;++s)
       for(unsigned k=0;k<2;++k) for(unsigned w=0;w<64;++w) {
          assert(agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,d,s,k,w,bytes,&len));
-         assert(len==8 && bytes[3]==d && bytes[5]==(s<<1));
+         assert(len==8 && bytes[3]==d && bytes[5]==((s&0x7f)<<1) &&
+                (bytes[6]&1)==(s>>7));
          assert((bytes[6]&0x18)==0); /* source-width LUT[1]=0, U16 */
          assert(((bytes[6]>>5)&1)==k);
          assert((bytes[7]&0x40)==0); /* unsigned */
@@ -971,8 +1072,8 @@ static void test_u16_to_f32(void)
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3C,0,0,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX2,0,0,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,1,0,0,0,bytes,&len));
-   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,128,0,0,0,bytes,&len));
-   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,128,0,0,bytes,&len));
+   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,192,0,0,0,bytes,&len));
+   assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,192,0,0,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,0,0,64,bytes,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,0,0,0,NULL,&len));
    assert(!agx3_alu_u16_to_f32(AGX_ISA_ENCODING_AGX3B,0,0,0,0,bytes,NULL));
@@ -5419,6 +5520,7 @@ int main(void){
    test_native_f32_log2_exp2();
    test_native_f32_log2_exp2_modifiers();
    test_native_f32_floor_ceil();
+   test_native_f32_roundeven();
    test_native_high_float_registers();
    test_native_widen_half();
    test_native_half_add();

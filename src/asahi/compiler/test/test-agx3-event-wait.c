@@ -27,8 +27,14 @@ main(void)
       0x0f, 0x05, 0x54, 0x1a,
       0x1b, 0x04, 0x01, 0x08,
       0x67, 0x00, 0x54, 0x04, 0x00, 0x00, 0x00, 0x00,
-      /* Coherent LDDEV f77, matching the native atomic-load witness in
-       * test-agx3-mem-core.c. Polling must preserve ACCESS_COHERENT. */
+      /* lddev f77 is the coherent flag (agx3_mem_core.c, KV(77, d->coherent)),
+       * whose encoder LUT maps coherent=0 to raw 2 and coherent=1 to raw 4.
+       * This byte was pinned as 0x40 (coherent=0) while the compiler still
+       * dropped the bit -- i.e. the golden recorded a bug: the poll below is
+       * built with ACCESS_COHERENT | ACCESS_VOLATILE, and a non-coherent load
+       * may spin on a stale cached value forever. 1d7521a2e20 ("asahi: fix
+       * G17P Vulkan memory model images") made it honour the access flags, so
+       * the correct byte is 0x80 (coherent=1). */
       0x11, 0x00, 0x00, 0x80, 0x02, 0x00,
       0x0b, 0x01, 0x07, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
       0x0a, 0x05, 0x23, 0x03, 0x06, 0x00, 0x07, 0x00, 0x00, 0x00,

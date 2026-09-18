@@ -441,9 +441,9 @@ agx3_static_spill_decode_load(enum agx_isa_encoding enc, const uint8_t *bytes,
          d.slot_mirror = mirror;
          for (unsigned narrow = 0; narrow < 2; ++narrow) {
             d.narrow_extend = narrow;
-            for (unsigned structural = 0; structural < 2; ++structural) {
-               d.structural_flag = structural;
-               for (unsigned live = 0; live < 2; ++live) {
+             for (unsigned structural = 0; structural < 2; ++structural) {
+                d.structural_flag = structural;
+                for (unsigned live = 0; live < 2; ++live) {
                   d.tps_live = live;
                   uint8_t canonical[AGX3_STATIC_SPILL_MAX_LENGTH];
                   uint8_t canonical_length = 0;
@@ -452,9 +452,9 @@ agx3_static_spill_decode_load(enum agx_isa_encoding enc, const uint8_t *bytes,
                       canonical_length == length &&
                       memcmp(canonical, bytes, length) == 0) {
                      *out = d;
-                     return true;
-                  }
-               }
+                      return true;
+                   }
+                }
             }
          }
       }

@@ -487,8 +487,24 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
        * G17P's partial-MRT shaders already acquire/release only the classes
        * they write. Keep that native subset protocol unchanged.
        */
-      if (preserve_zero_mask && ctx.outputs_written == 0 && exists &&
-          !tib->spilled[i]) {
+      /* A multisample eMRT epilog has to store every partition. The packer's
+       * grounded combined-acquire form holds every stored partition's classes
+       * across the whole unrolled sample loop, and it fails closed on a
+       * multisample eMRT epilog that leaves a partition unstored
+       * (agx3_pack_binary.c). An attachment the fragment shader never writes
+       * has no store intrinsic for the zero-write-mask path above to rewrite,
+       * so preserve it here and keep the shape on the grounded path.
+       *
+       * Scoped to spilling multisample on purpose. The same unwritten
+       * attachment occurs without spilling -- a five-attachment pass writing
+       * four of them -- and passes on hardware today through the native
+       * partial-MRT subset protocol, which acquires only the classes it
+       * writes. Widening this unconditionally would perturb that. */
+      const bool emrt_multisample =
+         tib->nr_samples > 1 && agx_tilebuffer_spills(tib);
+
+      if (preserve_zero_mask && exists && !written && !tib->spilled[i] &&
+          (ctx.outputs_written == 0 || emrt_multisample)) {
          nir_function_impl *impl = nir_shader_get_entrypoint(shader);
          nir_builder b = nir_builder_at(nir_after_impl(impl));
          enum pipe_format logical = tib->logical_format[i];

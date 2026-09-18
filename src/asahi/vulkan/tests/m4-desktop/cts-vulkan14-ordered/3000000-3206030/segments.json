@@ -1,0 +1,370 @@
+[
+ {
+  "segment": "3000000-3010000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 59.75
+   }
+  ]
+ },
+ {
+  "segment": "3010000-3020000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 60.25
+   }
+  ]
+ },
+ {
+  "segment": "3020000-3030000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 60.75
+   }
+  ]
+ },
+ {
+  "segment": "3030000-3040000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 60.75
+   }
+  ]
+ },
+ {
+  "segment": "3040000-3050000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 61.0
+   }
+  ]
+ },
+ {
+  "segment": "3050000-3060000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.0,
+    "peak_c": 61.25
+   }
+  ]
+ },
+ {
+  "segment": "3060000-3070000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 61.0
+   }
+  ]
+ },
+ {
+  "segment": "3070000-3080000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 8543,
+     "Pass": 1457
+    },
+    "runner_seconds": 11.3,
+    "peak_c": 62.75
+   }
+  ]
+ },
+ {
+  "segment": "3080000-3090000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 8595,
+     "Pass": 1405
+    },
+    "runner_seconds": 11.5,
+    "peak_c": 63.0
+   }
+  ]
+ },
+ {
+  "segment": "3090000-3100000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 5272,
+     "Pass": 4728
+    },
+    "runner_seconds": 23.6,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "3100000-3110000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "Pass": 4910,
+     "NotSupported": 5090
+    },
+    "runner_seconds": 21.5,
+    "peak_c": 66.5
+   }
+  ]
+ },
+ {
+  "segment": "3110000-3120000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 9998,
+     "Pass": 2
+    },
+    "runner_seconds": 12.0,
+    "peak_c": 63.25
+   },
+   {
+    "dir": "run-attempt1-display-recovery",
+    "verdict": "no summary",
+    "jobs": null,
+    "counts": {},
+    "runner_seconds": null,
+    "peak_c": null
+   }
+  ]
+ },
+ {
+  "segment": "3120000-3130000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 9996,
+     "Pass": 4
+    },
+    "runner_seconds": 11.9,
+    "peak_c": 62.75
+   }
+  ]
+ },
+ {
+  "segment": "3130000-3140000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "process_failure",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 6590,
+     "Unrun": 3244,
+     "Pass": 105,
+     "Timeout": 7,
+     "Interrupted": 46,
+     "Fail": 8
+    },
+    "runner_seconds": 121.4,
+    "peak_c": 63.0
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "process_failure",
+    "jobs": 4,
+    "counts": {
+     "Unrun": 1442,
+     "NotSupported": 1802,
+     "Timeout": 2,
+     "Pass": 54,
+     "Interrupted": 5
+    },
+    "runner_seconds": 186.2,
+    "peak_c": 61.0
+   },
+   {
+    "dir": "run-recover2",
+    "verdict": "pass",
+    "jobs": 1,
+    "counts": {
+     "NotSupported": 1401,
+     "Pass": 36
+    },
+    "runner_seconds": 221.8,
+    "peak_c": 59.25
+   }
+  ]
+ },
+ {
+  "segment": "3140000-3150000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "NotSupported": 5215,
+     "Pass": 4769,
+     "Fail": 16
+    },
+    "runner_seconds": 27.5,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "3150000-3160000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "Pass": 5752,
+     "Fail": 48,
+     "NotSupported": 4200
+    },
+    "runner_seconds": 21.0,
+    "peak_c": 65.5
+   }
+  ]
+ },
+ {
+  "segment": "3160000-3170000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "Pass": 7120,
+     "NotSupported": 2880
+    },
+    "runner_seconds": 18.5,
+    "peak_c": 62.25
+   }
+  ]
+ },
+ {
+  "segment": "3170000-3180000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "Pass": 7752,
+     "NotSupported": 2248
+    },
+    "runner_seconds": 19.7,
+    "peak_c": 62.0
+   }
+  ]
+ },
+ {
+  "segment": "3180000-3190000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "Pass": 7376,
+     "NotSupported": 2624
+    },
+    "runner_seconds": 20.1,
+    "peak_c": 61.75
+   }
+  ]
+ },
+ {
+  "segment": "3190000-3200000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "Pass": 5040,
+     "NotSupported": 4960
+    },
+    "runner_seconds": 14.3,
+    "peak_c": 62.0
+   }
+  ]
+ },
+ {
+  "segment": "3200000-3206030",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "jobs": 20,
+    "counts": {
+     "Pass": 3086,
+     "NotSupported": 2944
+    },
+    "runner_seconds": 20.6,
+    "peak_c": 64.5
+   }
+  ]
+ }
+]

@@ -527,6 +527,98 @@ copy_colour(nir_builder *b, const struct agx_fs_epilog_key *key,
                     .src_type = nir_type_float | size);
 }
 
+/* Blend in the API format, then restore the wider physical store shape.
+ * Padding is never observable through a public view or image transfer. */
+static bool
+pad_blended_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_fs_epilog_key *key = data;
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location < FRAG_RESULT_DATA0 || sem.location > FRAG_RESULT_DATA7)
+      return false;
+
+   unsigned rt = sem.location - FRAG_RESULT_DATA0;
+   if (key->blend_formats[rt] == PIPE_FORMAT_NONE &&
+       key->scaled_formats[rt] == PIPE_FORMAT_NONE)
+      return false;
+
+   unsigned comps = util_format_get_nr_components(key->rt_formats[rt]);
+   if (intr->num_components >= comps)
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_src_rewrite(&intr->src[0], nir_pad_vector(b, intr->src[0].ssa, comps));
+   intr->num_components = comps;
+   return true;
+}
+
+/* Scaled Vulkan attachments have floating-point shader semantics and integer
+ * physical storage. Convert after blending and before tilebuffer lowering. */
+static bool
+convert_scaled_output(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   const struct agx_fs_epilog_key *key = data;
+   if (intr->intrinsic != nir_intrinsic_store_output)
+      return false;
+
+   const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+   if (sem.location < FRAG_RESULT_DATA0 || sem.location > FRAG_RESULT_DATA7)
+      return false;
+
+   const unsigned rt = sem.location - FRAG_RESULT_DATA0;
+   const enum pipe_format format = key->scaled_formats[rt];
+   if (format == PIPE_FORMAT_NONE)
+      return false;
+
+   const struct util_format_description *desc =
+      util_format_description(format);
+   const bool is_signed = desc->channel[0].type == UTIL_FORMAT_TYPE_SIGNED;
+   unsigned component_bits[4];
+   for (unsigned c = 0; c < intr->num_components; ++c) {
+      /* Meta fragment shaders may carry a fourth value into a three-component
+       * attachment. Constant format swizzles need no special range, so retain
+       * the format's uniform channel width for that otherwise-unobservable
+       * lane. Packed formats map all four logical components to real channels. */
+      const unsigned channel = desc->swizzle[c] < PIPE_SWIZZLE_0
+                                  ? desc->swizzle[c]
+                                  : 0;
+      if (desc->channel[channel].normalized ||
+          desc->channel[channel].type != desc->channel[0].type)
+         return false;
+
+      component_bits[c] = desc->channel[channel].size;
+      if (component_bits[c] == 0 || component_bits[c] >= 32)
+         return false;
+   }
+
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *upper_components[4];
+   nir_def *lower_components[4];
+   for (unsigned c = 0; c < intr->num_components; ++c) {
+      const unsigned bits = component_bits[c];
+      nir_def *limit = nir_imm_float(b, 1u << bits);
+      nir_def *signed_limit = nir_fmul_imm(b, limit, 0.5);
+      upper_components[c] = nir_fadd_imm(
+         b, is_signed ? signed_limit : limit, -1);
+      lower_components[c] =
+         is_signed ? nir_fneg(b, signed_limit) : nir_imm_float(b, 0);
+   }
+
+   nir_def *upper = nir_vec(b, upper_components, intr->num_components);
+   nir_def *lower = nir_vec(b, lower_components, intr->num_components);
+   nir_def *rounded = nir_fround_even(b, intr->src[0].ssa);
+   nir_def *clamped = nir_fmin(b, nir_fmax(b, rounded, lower), upper);
+   nir_src_rewrite(&intr->src[0],
+                   is_signed ? nir_f2i32(b, clamped)
+                             : nir_f2u32(b, clamped));
+   nir_intrinsic_set_src_type(intr, is_signed ? nir_type_int32
+                                               : nir_type_uint32);
+   return true;
+}
+
 void
 agx_nir_fs_epilog(nir_builder *b, const void *key_)
 {
@@ -586,6 +678,28 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       unsigned rt = rt_order[i];
       int location = key->remap[rt];
 
+      /* A write-disabled attachment stores its own tile value back; blending
+       * cannot express this for pure-integer formats (nir_lower_blend skips
+       * them: dynamic_rendering.*.local_read.interaction_with_color_write_
+       * enable on r32_uint). */
+      if ((key->preserve_rt & BITFIELD_BIT(rt)) &&
+          key->rt_formats[rt] != PIPE_FORMAT_NONE) {
+         nir_io_semantics sem = {
+            .location = FRAG_RESULT_DATA0 + rt,
+            .num_slots = 1,
+            .fb_fetch_output = true,
+         };
+         b->shader->info.outputs_read |= BITFIELD64_BIT(sem.location);
+         b->shader->info.fs.uses_fbfetch_output = true;
+         nir_def *dst = nir_load_output(b, 4, 32, nir_imm_int(b, 0),
+                                        .dest_type = nir_type_float32,
+                                        .io_semantics = sem);
+         nir_store_output(b, dst, nir_imm_int(b, 0),
+                          .io_semantics.location = FRAG_RESULT_DATA0 + rt,
+                          .src_type = nir_type_float32);
+         continue;
+      }
+
       /* Negative remaps indicate the attachment isn't written. */
       if (location >= 0 && key->link.loc_written & BITFIELD_BIT(location)) {
          copy_colour(b, key, rt, location, false);
@@ -625,7 +739,9 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             agx_unpack_blend_advanced(key->blend.rt[i].mode);
 
          opts.rt[i] = (nir_lower_blend_rt){
-            .format = key->rt_formats[i],
+            .format = key->blend_formats[i] != PIPE_FORMAT_NONE
+                         ? key->blend_formats[i]
+                         : key->rt_formats[i],
             .advanced_blend = true,
             .colormask = key->blend.rt[i].colormask,
             .blend_mode = blend.op,
@@ -638,7 +754,9 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             agx_unpack_blend_standard(key->blend.rt[i].mode);
 
          opts.rt[i] = (nir_lower_blend_rt){
-            .format = key->rt_formats[i],
+            .format = key->blend_formats[i] != PIPE_FORMAT_NONE
+                         ? key->blend_formats[i]
+                         : key->rt_formats[i],
 
             .rgb.src_factor = blend.rgb_src_factor,
             .rgb.dst_factor = blend.rgb_dst_factor,
@@ -699,9 +817,43 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
     * Combine them with alpha coverage before the one test-triggering update,
     * as Apple's G17P sample-mask + alpha-coverage fragment does. Applying the
     * mask only to the tile store would still update depth for killed samples.
-    * Early-tested shaders must not run the tests again. */
-   if (write_samples && !key->link.already_ran_zs) {
-      bool merged = false;
+    * Early-tested shaders must not run the tests again.
+    *
+    * At two and four samples the G17P depth/stencil write names the surviving
+    * samples in its own per-sample coverage words, so it already excludes the
+    * killed ones and needs no coverage update of its own. Issuing one anyway
+    * makes the hardware run the depth/stencil test on each surviving sample
+    * twice -- measured as four INCREMENT_AND_WRAP steps where the API asked
+    * for two, on renderpasses.*.multisample.d32_sfloat_s8_uint.samples_4. At
+    * one sample the write's word has no mask field at all, so there the kill
+    * is the only thing that can hold the test back, as
+    * fragment_operations.early_fragment.discard_no_early_fragment_tests_stencil
+    * depends on. A deferred epilog is cloned per sample after this point and
+    * coalesces its kills itself (agx_nir_hoist_g17p_zs_writes), so leave that
+    * shape alone. */
+   const bool zs_carries_write_samples =
+      (key->link.write_z || key->link.write_s) && key->nr_samples > 1 &&
+      !key->defer_monolithic_msaa;
+
+   /* already_ran_zs says the main shader has already triggered the
+    * depth/stencil tests, so the epilog must not trigger them again.  It does
+    * not say the main shader's coverage has been applied: a forced-early
+    * shader runs the tests at its start with only the API mask
+    * (hk_g17p_apply_api_mask_to_force_early) and exports the coverage its
+    * discards and SampleMask writes produced in FOUT_WRITE_SAMPLES for us.
+    * Gating this block on the flag dropped that mask on the floor and stored
+    * colour for killed samples -- query_pool.discard.early.*.{discard,
+    * sample_mask} saw white where the discard should have left the target
+    * untouched.
+    *
+    * Applying it here does not re-run the tests: lower_tests_zs() below
+    * substitutes 0 for load_shader_part_tests_zs_agx when already_ran_zs, and
+    * run_tests_after_last_discard() then builds `sample_mask killed, ~killed`,
+    * which kills without testing.  So keep the two decisions separate --
+    * always honour the exported coverage, and let the flag govern only
+    * whether the kill also triggers the tests. */
+   if (write_samples) {
+      bool kills = false;
       nir_foreach_block(block, b->impl) {
          nir_foreach_instr_safe(instr, block) {
             if (instr->type != nir_instr_type_intrinsic)
@@ -715,17 +867,35 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
             killed = nir_u2uN(&mask_b, killed, intr->src[0].ssa->bit_size);
             nir_src_rewrite(&intr->src[0],
                             nir_ior(&mask_b, intr->src[0].ssa, killed));
-            merged = true;
+            kills = true;
          }
       }
-      if (!merged) {
-         nir_builder mask_b =
-            nir_builder_at(nir_after_instr(nir_def_instr(write_samples)));
+      if (!kills && !zs_carries_write_samples) {
+         nir_instr *imported = nir_def_instr(write_samples);
+         nir_builder mask_b = nir_builder_at(nir_after_instr(imported));
+
+         /* Two builders sharing one insertion point emit in reverse order.
+          * `b` is parked on the imported mask itself whenever no colour was
+          * copied, so without carrying it past the kill everything `b`
+          * appends next -- the depth/stencil write below among it -- is
+          * threaded in *ahead* of the kill, and a coverage update after the
+          * write that triggered the tests is far too late. */
+         const bool b_shares_cursor = b->cursor.option == nir_cursor_after_instr &&
+                                      b->cursor.instr == imported;
+
          nir_demote_samples(&mask_b,
                             nir_ixor(&mask_b, write_samples,
                                       nir_imm_intN_t(&mask_b, ALL_SAMPLES, 16)));
+         if (b_shares_cursor)
+            b->cursor = mask_b.cursor;
+
+         kills = true;
       }
-      b->shader->info.fs.uses_discard = true;
+
+      /* Colour stores keep their own copy of the mask either way, through
+       * agx_nir_lower_tilebuffer. */
+      if (kills)
+         b->shader->info.fs.uses_discard = true;
    }
 
    /* Depth/stencil writes must be deferred until after all discards,
@@ -756,6 +926,10 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, nir_lower_alpha_to_one);
 
    NIR_PASS(_, b->shader, nir_lower_blend, &opts);
+   nir_shader_intrinsics_pass(b->shader, convert_scaled_output,
+                              nir_metadata_control_flow, (void *)key);
+   nir_shader_intrinsics_pass(b->shader, pad_blended_output,
+                              nir_metadata_control_flow, (void *)key);
 
    unsigned rt_spill = key->link.rt_spill_base;
    NIR_PASS(_, b->shader, agx_nir_lower_tilebuffer, &tib, colormasks, &rt_spill,
@@ -893,8 +1067,12 @@ lower_output_to_epilog(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       b->cursor = nir_before_instr(&intr->instr);
 
       nir_def *mask = nir_load_var(b, ctx->masked_samples);
-      nir_def *mask_2 =
-         nir_ixor(b, intr->src[0].ssa, nir_imm_intN_t(b, 0xff, 16));
+      /* The demoted-sample mask arrives as 16-bit from the sample-mask
+       * lowering but as 32-bit when it comes straight from gl_SampleMask
+       * (fragment_operations.early_fragment.samplemask_*). Coverage is eight
+       * bits, so narrow it before combining with the 16-bit accumulator. */
+      nir_def *demoted = nir_u2uN(b, intr->src[0].ssa, 16);
+      nir_def *mask_2 = nir_ixor(b, demoted, nir_imm_intN_t(b, 0xff, 16));
 
       mask = nir_iand(b, mask, mask_2);
       nir_store_var(b, ctx->masked_samples, mask, nir_component_mask(1));

@@ -79,6 +79,8 @@ agx_g17p_mrt_eot_selector(enum pipe_format format)
    case PIPE_FORMAT_B10G10R10A2_UINT:
    case PIPE_FORMAT_R5G6B5_UNORM:
    case PIPE_FORMAT_B5G6R5_UNORM:
+   case PIPE_FORMAT_A1B5G5R5_UNORM:
+   case PIPE_FORMAT_A1R5G5B5_UNORM:
    case PIPE_FORMAT_R5G5B5A1_UNORM:
    case PIPE_FORMAT_B5G5R5A1_UNORM:
    case PIPE_FORMAT_R5G5B5X1_UNORM:
@@ -101,9 +103,11 @@ agx_g17p_mrt_eot_selector(enum pipe_format format)
    case PIPE_FORMAT_R32G32_FLOAT:
    case PIPE_FORMAT_R32G32B32A32_FLOAT:
    case PIPE_FORMAT_R32G32B32X32_FLOAT:
-   /* RGB9E5 is packed into one raw R32 word before the tile store, and its
-    * PBE is likewise R32_UINT. Multi-target EOT therefore uses the grounded
-    * W32 integer selector rather than asking IMGWBLK to convert it again. */
+   /* RGB9E5 and R11G11B10 are packed into one raw R32 word before the tile
+    * store, and their PBE is likewise R32_UINT. Multi-target EOT therefore
+    * uses the grounded W32 integer selector rather than asking IMGWBLK to
+    * convert it again. */
+   case PIPE_FORMAT_R11G11B10_FLOAT:
    case PIPE_FORMAT_R9G9B9E5_FLOAT:
       return 0x35;
 
@@ -179,6 +183,8 @@ agx_g17p_configure_rt0_eot_key(enum pipe_format format,
    /* The packed 5551/4444 formats expand to four F16 tile lanes. The PBE
     * performs the final memory packing, so their EOT shape is two words just
     * like RGBA16F rather than the distinct three-lane RGB565 program. */
+   case PIPE_FORMAT_A1B5G5R5_UNORM:
+   case PIPE_FORMAT_A1R5G5B5_UNORM:
    case PIPE_FORMAT_R5G5B5A1_UNORM:
    case PIPE_FORMAT_B5G5R5A1_UNORM:
    case PIPE_FORMAT_R5G5B5X1_UNORM:

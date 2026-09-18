@@ -198,6 +198,97 @@ TEST_F(AGX3PackBinary, SingleSparseMultisampleBlendKeepsPartitionClass)
    }
 }
 
+/*
+ * Sparse texel residency reaches the packer as an eight-channel destination
+ * with a four-bit channel mask: agx_emit_texture reserves the extra register
+ * the instruction writes after the masked channels (agx_validate.c sizes a
+ * sparse texture result at eight channels), and agx_instr::mask is four bits
+ * wide, so the residency component never appears in it.
+ *
+ * Before this was admitted, both the filtered sample and the texel fetch
+ * refused outright, and the G17P refusal printer named exactly this shape:
+ * "texture_load [... chan=8 mask=0xf ...]".
+ */
+TEST_F(AGX3PackBinary, SparseResidencySampleEmitsTheWitnessedFields)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool sparse : {false, true}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index dest = agx_register(16, AGX_SIZE_32);
+      dest.channels_m1 = sparse ? 7 : 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0,
+         false, false, false, AGX_GATHER_NONE, sparse);
+      I->mask = 15;
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_FALSE(code.empty());
+
+      /* A sparse sample is the 20-byte ep4 form even with immediate
+       * descriptors, because f120 deposits instruction bit 142, past the
+       * 112-bit ep3 form. */
+      struct agx3_tex_sample_desc d = {};
+      d.dest = 16;
+      d.coord = 0;
+      d.width = AGX3_TEX_W32;
+      d.mask = 15;
+      d.lod = AGX3_TEX_LOD_LEVEL;
+      d.slot = 1;
+      d.wait_mask = 1;
+      d.compute_stage = true;
+      d.final = true;
+      d.sparse = sparse;
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      ASSERT_TRUE(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      EXPECT_EQ(len, sparse ? 20u : 14u);
+      EXPECT_NE(std::search(code.begin(), code.end(), bytes, bytes + len),
+                code.end());
+   }
+}
+
+TEST_F(AGX3PackBinary, SparseResidencyFetchEmitsTheWitnessedFields)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool sparse : {false, true}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_COMPUTE;
+      agx_index dest = agx_register(16, AGX_SIZE_32);
+      dest.channels_m1 = sparse ? 7 : 3;
+      agx_index coord = agx_register(8, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      auto *I = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), agx_null(), AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0,
+         false, false, false, AGX_GATHER_NONE, sparse);
+      I->op = AGX_OPCODE_TEXTURE_LOAD;
+      I->mask = 15;
+      agx_stop(b);
+      const auto code = pack(b);
+      ASSERT_FALSE(code.empty());
+
+      /* The emitted fetch decodes back through the strict decoder, and the
+       * residency request survives the round trip.  A sparse fetch is the
+       * 20-byte ep4 form even with an immediate descriptor, because f120
+       * deposits instruction bit 142, past the 112-bit ep3 form. */
+      const unsigned want = sparse ? 20u : 14u;
+      bool found = false;
+      for (size_t at = 0; at + want <= code.size() && !found; ++at) {
+         struct agx3_tex_fetch_desc decoded;
+         if (!agx3_tex_decode_fetch(enc, code.data() + at, want, &decoded))
+            continue;
+         if (decoded.dest != 16 || decoded.mask != 15)
+            continue;
+         EXPECT_EQ(decoded.sparse, sparse);
+         found = true;
+      }
+      EXPECT_TRUE(found);
+   }
+}
+
 TEST_F(AGX3PackBinary, MinimumLodStagesBiasLowAndMinimumHigh)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
@@ -508,6 +599,75 @@ TEST_F(AGX3PackBinary, StraightLineALU)
 
       EXPECT_EQ(pack(b), want);
    }
+}
+
+/* The compact register+minifloat multiply encodes an empty wait, one arbitrary
+ * slot, or the native slots1+2 pair -- nothing else. An operation that reads
+ * one async result and overwrites another waits two unrelated slots, and used
+ * to refuse the whole shader: that is what `mediump` dynamic array and matrix
+ * indexing in a vertex shader hits (dEQP-VK.glsl.indexing.*_dynamic_write_
+ * dynamic_*_read_vertex, whose multiply carries 0x24 or 0x0c). Retire the
+ * excess through the identity prelude and keep one wait fused, exactly as the
+ * compact ADD already does -- and leave an encodable mask alone. */
+TEST_F(AGX3PackBinary, MinifloatMultiplyRetiresUnencodableWaitCombination)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   const agx_index base = agx_register(16, AGX_SIZE_64);
+   const agx_index offset = agx_register(20, AGX_SIZE_32);
+   const uint16_t half = agx_minifloat_encode(0.5f);
+
+   /* Three round-robin loads take slots 6, 1 and 2 in that order. */
+   auto three_loads = [&](agx_builder *b) {
+      agx_device_load_to(b, agx_register(4, AGX_SIZE_32), base, offset,
+                         AGX_FORMAT_I32, 1, 0, false);
+      agx_device_load_to(b, agx_register(6, AGX_SIZE_32), base, offset,
+                         AGX_FORMAT_I32, 1, 0, false);
+      agx_device_load_to(b, agx_register(8, AGX_SIZE_32), base, offset,
+                         AGX_FORMAT_I32, 1, 0, false);
+   };
+
+   uint8_t prelude[AGX3_ALU_MAX_LENGTH], prelude_len = 0;
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 0x20u, prelude,
+                                           &prelude_len));
+
+   /* Reading slot 6's result into slot 2's register waits 0x22, which has no
+    * compact encoding. Slot 6 retires in the prelude, slot 2 stays fused. */
+   agx_builder *b = builder(enc);
+   three_loads(b);
+   agx_fmul_to(b, agx_register(8, AGX_SIZE_32), agx_register(4, AGX_SIZE_32),
+               agx_immediate_f(0.5f));
+   agx_stop(b);
+   const std::vector<uint8_t> code = pack(b);
+
+   uint8_t mul[AGX3_ALU_MAX_LENGTH], mul_len = 0;
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_narrow(enc, 8, 4, half, false, false,
+                                              false, AGX3_ALU_HINT_NONE, 0x2u,
+                                              mul, &mul_len));
+   std::vector<uint8_t> pair;
+   append(pair, prelude, prelude_len);
+   append(pair, mul, mul_len);
+   EXPECT_NE(std::search(code.begin(), code.end(), pair.begin(), pair.end()),
+             code.end());
+
+   /* Reading slot 1's result into slot 2's register waits the native 0x03
+    * pair: the multiply keeps both waits and gains no prelude. */
+   agx_builder *nb = builder(enc);
+   three_loads(nb);
+   agx_fmul_to(nb, agx_register(8, AGX_SIZE_32), agx_register(6, AGX_SIZE_32),
+               agx_immediate_f(0.5f));
+   agx_stop(nb);
+   const std::vector<uint8_t> native = pack(nb);
+
+   uint8_t native_mul[AGX3_ALU_MAX_LENGTH], native_mul_len = 0;
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_narrow(enc, 8, 6, half, false, false,
+                                              false, AGX3_ALU_HINT_NONE, 0x3u,
+                                              native_mul, &native_mul_len));
+   EXPECT_NE(std::search(native.begin(), native.end(), native_mul,
+                         native_mul + native_mul_len),
+             native.end());
+   EXPECT_EQ(std::search(native.begin(), native.end(), prelude,
+                         prelude + prelude_len),
+             native.end());
 }
 
 TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
@@ -2532,6 +2692,51 @@ TEST_F(AGX3PackBinary, WboitInfinityRepairUsesMixedWidthFsel)
    EXPECT_EQ(pack(b), want);
 }
 
+/* fmin/fmax lower to a tied fcmpsel with LTN/GTN. On AGX3B that is the
+ * native fsel.ep7 with condition 3/7 (IEEE minNum/maxNum): Apple's
+ * -fno-fast-math fmin/fmax emit 12031e0501c0 / 12031e0500c0 after two loads
+ * (wait slot 5); without a wait byte 5 carries no wait bits. The former
+ * generic-FSEL route rewrote LTN into GE with swapped selects
+ * (02013f0385020200, condition 5), which returns the NaN when src0 is NaN. */
+TEST_F(AGX3PackBinary, TiedF32MinMaxUsesNativeFselCondition)
+{
+   for (int m = 0; m < 2; ++m) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index a = agx_register(2, AGX_SIZE_32);
+      agx_index c = agx_register(4, AGX_SIZE_32);
+      a.discard = c.discard = true;
+      agx_index dest = agx_register(2, AGX_SIZE_32);
+      agx_fcmpsel_to(b, dest, a, c, a, c,
+                     m ? AGX_FCOND_GTN : AGX_FCOND_LTN);
+      agx_stop(b);
+
+      std::vector<uint8_t> want = {0x12, 0x03, 0x1e, 0x05,
+                                   (uint8_t)(m ? 0x00 : 0x01), 0x00,
+                                   0x0e, 0x00, 0x00, 0x00};
+      std::vector<uint8_t> got = pack(b);
+      EXPECT_EQ(got, want);
+      /* fsel.ep7: 6 bytes, condition field in byte 4 bit 0 (3 -> 1, 7 -> 0),
+       * compare/select registers tied (bytes 1 and 3). */
+      ASSERT_EQ(got.size(), 10u);
+      EXPECT_EQ(got[1] & 0x7e, 2);
+      EXPECT_EQ(got[3] & 0x7e, 4);
+   }
+}
+
+/* An untied LTN/GTN select has no NaN-correct grounded form: the packer must
+ * refuse it rather than rewrite the condition into an ordered GE/LE. */
+TEST_F(AGX3PackBinary, UntiedLtnFselIsRefused)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   agx_index a = agx_register(2, AGX_SIZE_32);
+   agx_index c = agx_register(4, AGX_SIZE_32);
+   agx_index other = agx_register(6, AGX_SIZE_32);
+   agx_index dest = agx_register(2, AGX_SIZE_32);
+   agx_fcmpsel_to(b, dest, a, c, a, other, AGX_FCOND_LTN);
+   agx_stop(b);
+   pack(b, false);
+}
+
 TEST_F(AGX3PackBinary, UpdateLightmapMixedWidthLtFsel)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -4498,14 +4703,24 @@ TEST_F(AGX3PackBinary, BallotCompareZero)
             }
             agx_stop(b);
 
+            /* The G17P simd integer `x != 0` ballot goes through the
+             * immediate form (`x > 0` unsigned): the register-zero form it
+             * used to take is measured wrong on hardware -- it returns a bogus
+             * mask and destroys the execution mask.  The quad ballot and AGX3C
+             * keep the inverted register-zero form they had. */
+            const bool immediate_ne =
+               !floating && !quad && enc == AGX_ISA_ENCODING_AGX3B;
             const struct agx3_subgroup_ballot_desc d = {
                .quad = (bool)quad,
                .type = floating ? AGX3_SUBGROUP_BALLOT_FLOAT
                                 : AGX3_SUBGROUP_BALLOT_INTEGER,
                .dest = 4,
                .src = 2,
-               .condition = (uint8_t)(floating ? 1 : 4),
-               .invert = !floating,
+               .compare_immediate = immediate_ne,
+               .compare_value = 0,
+               .condition =
+                  (uint8_t)(floating ? 1 : (immediate_ne ? AGX_ICOND_UGT : 4)),
+               .invert = !floating && !immediate_ne,
             };
             uint8_t subgroup[AGX3_SUBGROUP_MAX_LENGTH], subgroup_len = 0;
             ASSERT_TRUE(agx3_subgroup_encode_ballot(enc, &d, subgroup,
@@ -4531,10 +4746,25 @@ TEST_F(AGX3PackBinary, G17PBallotKeepsLiveMask)
                         agx_zero(), AGX_ICOND_UEQ, true);
       agx_stop(b);
 
-      std::vector<uint8_t> want = {
-         0x17, 0x07, 0x54, 0x00, 0x02, 0x08, 0x00,
-         uint8_t(discard ? 0xf8 : 0xb8), 0xa2, 0x12,
+      /* `x != 0` takes the immediate `x > 0` form on G17P (the register-zero
+       * form is measured wrong on hardware), and still carries the source's
+       * liveness so a ballot mask that is read again is not discarded. */
+      const struct agx3_subgroup_ballot_desc d = {
+         .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+         .dest = 0,
+         .src = 4,
+         .compare_immediate = true,
+         .compare_value = 0,
+         .src_live = !discard,
+         .condition = AGX_ICOND_UGT,
       };
+      uint8_t subgroup[AGX3_SUBGROUP_MAX_LENGTH], subgroup_len = 0;
+      ASSERT_TRUE(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d,
+                                              subgroup, &subgroup_len));
+      std::vector<uint8_t> want;
+      append(want, subgroup, subgroup_len);
+      /* The liveness bit is what this test is about: it must differ. */
+      EXPECT_EQ(subgroup_len >= 8, true);
       struct agx3_encoded_end end;
       ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
       append(want, end.bytes, end.length);
@@ -10864,6 +11094,53 @@ TEST_F(AGX3PackBinary, G17PUniformHalfMoveUsesNativeCopy)
    }
 }
 
+/*
+ * The same materialized move at 32 bits, with the destination register
+ * allocation actually gave it in a ray-query shader.
+ *
+ * Every dEQP-VK.ray_query case was refused on G17P with
+ *
+ *   agx3_pack_binary.c:11687: no grounded AGX3 encoding for bitop
+ *     [d32:reg134 s0=32:uni12 s1=16:imm#0 ... chan=1 mask=0x0 fmt=0 shift=0]
+ *
+ * because the compact four-byte `copy` names its destination in a seven-bit
+ * field and truncates at half 127, while these shaders' pressure put the
+ * destinations at halves 134-154. Apple's compiler encodes exactly those
+ * destinations in the ten-byte ep1 -- see the metal-nt witnesses quoted in
+ * agx3_copy_core.c -- so the fix is the encoding point, not a restriction on
+ * where the value may live.
+ */
+TEST_F(AGX3PackBinary, G17PUniformWordMoveReachesHighDestinations)
+{
+   for (unsigned dest : {2u, 126u, 128u, 134u, 154u, 254u}) {
+      for (unsigned uniform : {8u, 12u, 18u}) {
+         agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+         agx_bitop_to(b, agx_register(dest, AGX_SIZE_32),
+                      agx_uniform(uniform, AGX_SIZE_32), agx_zero(),
+                      AGX3_SEL_TT_MOV);
+         agx_stop(b);
+
+         uint8_t bytes[AGX3_COPY_MAX_LENGTH], len = 0;
+         std::vector<uint8_t> want;
+         ASSERT_TRUE(agx3_copy_encode_uniform_to_reg32(
+            AGX_ISA_ENCODING_AGX3B, dest, uniform, bytes, &len))
+            << "dest half=" << dest << " uniform=" << uniform;
+         EXPECT_EQ(len, dest < AGX3_COPY_REG16_DEST_HALVES ? 4u : 10u)
+            << "dest half=" << dest;
+         append(want, bytes, len);
+         struct agx3_encoded_end end;
+         ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+         append(want, end.bytes, end.length);
+
+         std::vector<uint8_t> got = pack(b);
+         EXPECT_FALSE(got.empty())
+            << "refused dest half=" << dest << " uniform=" << uniform;
+         EXPECT_EQ(got, want)
+            << "dest half=" << dest << " uniform=" << uniform;
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PPaddedUniformHalfStoreUsesNativeDwordCopy)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
@@ -15790,10 +16067,16 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
          EXPECT_NE(std::search(code.begin(), code.end(), read_coords,
                                read_coords + sizeof(read_coords)),
                    code.end());
+         /* The scoreboard wait is carried by the FIRST staged copy, which is
+          * the first coordinate copy -- not the first data copy. Waiting on a
+          * data copy runs after the coordinates have already been staged, so a
+          * coordinate coming straight from an outstanding async producer was
+          * copied before that producer retired and the store landed at texel
+          * (0,0) (agx3_pack_binary.c, agx3_emit_storage_image_write). */
          std::vector<uint8_t> coordinates;
          uint8_t coordinate[AGX3_STAGE_MAX_LENGTH], coordinate_len = 0;
          ASSERT_TRUE(agx3_stage_copy_source(
-            AGX_ISA_ENCODING_AGX3B, 0, 0, false, 1, 0,
+            AGX_ISA_ENCODING_AGX3B, 0, 0, false, 1, 1,
             coordinate, &coordinate_len));
          append(coordinates, coordinate, coordinate_len);
          ASSERT_TRUE(agx3_stage_copy_source(
@@ -15806,16 +16089,17 @@ TEST_F(AGX3PackBinary, StorageImageRoundtripAcceptsCoherentAndRejectsShapes)
          const auto first = std::search(code.begin(), code.end(), imgwci,
                                         imgwci + sizeof(imgwci));
          ASSERT_NE(first, code.end());
-         /* The native witness consumes the image-load scoreboard signal once:
-          * the first data-staging COPY waits on slot 1, while the remaining
-          * components only join the same slot-1 staging transaction. */
+         /* The native witness consumes the image-load scoreboard signal once,
+          * on the first staged copy of the whole run. The coordinate copies
+          * come first and carry it (above), so every data-staging COPY only
+          * joins the same slot-1 staging transaction. */
          const unsigned data_dest[4] = {4, 6, 12, 14};
          std::vector<uint8_t> staging;
          for (unsigned c = 0; c < 4; ++c) {
             uint8_t copy[AGX3_STAGE_MAX_LENGTH], len = 0;
             ASSERT_TRUE(agx3_stage_copy_source(
-               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 1,
-               c == 0 ? 1 : 0, copy, &len));
+               AGX_ISA_ENCODING_AGX3B, data_dest[c], 4 + 2 * c, false, 1, 0,
+               copy, &len));
             append(staging, copy, len);
          }
          ASSERT_GE(std::distance(code.begin(), first), staging.size());

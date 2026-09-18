@@ -291,6 +291,101 @@ libagx_d3d12_predicate(global uint32_t *out, constant uint32_t *in,
 }
 
 /*
+ * Materialise an adjacency decomposition as a real index buffer.
+ *
+ * The software-indexing path strips a draw's index/offset information and has
+ * the VS prolog remap gl_VertexIndex instead.  That never works on G17P: a
+ * hardware vertex shader reads its invocation index from SR 0xdd directly
+ * (agx_compile.c, nir_intrinsic_load_vertex_id), so it never observes the
+ * AGX_ABI_VIN_VERTEX_ID the prolog exported, and every adjacency draw fetched
+ * attributes at in[i] instead of in[map(i)].
+ *
+ * Writing the mapped -- and, for an indexed draw, already-resolved -- indices
+ * into a buffer lets the hardware input assembler perform the remap, which is
+ * the one path the vertex stage does observe.  first_vertex is folded in here
+ * so the resulting draw needs no index bias of its own.
+ */
+KERNEL(64)
+libagx_write_adj_indices(global uint *out, uint64_t index_buffer,
+                         uint index_buffer_range_el, uint count,
+                         uint index_size_B, uint first_vertex,
+                         enum mesa_prim prim)
+{
+   uint i = cl_global_id.x;
+   if (i >= count)
+      return;
+
+   uint src = poly_map_adj_vertex(i, prim);
+
+   out[i] = first_vertex + (index_size_B
+                               ? poly_load_index(index_buffer,
+                                                 index_buffer_range_el, src,
+                                                 index_size_B)
+                               : src);
+}
+
+/*
+ * The indirect form of libagx_write_adj_indices.  The output index count is
+ * not known until the GPU has read the indirect command, so the index buffer
+ * is allocated from the geometry heap and named by an indexed indirect draw,
+ * exactly as the primitive-restart unroll does.
+ */
+KERNEL(1024)
+libagx_write_adj_indices_indirect(global struct poly_heap *heap,
+                                  constant uint *in_draw,
+                                  global uint *out_draw, uint64_t index_buffer,
+                                  uint index_buffer_range_el,
+                                  uint index_size_B, enum mesa_prim prim)
+{
+   uint tid = cl_local_id.x;
+
+   /* VkDrawIndirectCommand and VkDrawIndexedIndirectCommand agree on their
+    * first three words; only the tail differs. */
+   uint count = libagx_remap_adj_count(in_draw[0], prim);
+   uint instances = in_draw[1];
+   uint first = in_draw[2];
+   uint vertex_offset = index_size_B ? in_draw[3] : 0;
+   uint first_instance = index_size_B ? in_draw[4] : in_draw[3];
+
+   local uint offs_sh;
+   local uint ok_sh;
+
+   if (tid == 0) {
+      uint offs = 0;
+      uint ok = count > 0 && poly_heap_try_alloc_offs(heap, count * 4, &offs);
+
+      offs_sh = offs;
+      ok_sh = ok;
+
+      /* An exhausted heap draws nothing rather than writing through an
+       * invalid address, matching the restart unroll's behaviour. */
+      out_draw[0] = ok ? count : 0;
+      out_draw[1] = instances;
+      out_draw[2] = ok ? (offs / 4) : 0;
+      out_draw[3] = 0; /* vertexOffset, folded into the indices below */
+      out_draw[4] = first_instance;
+   }
+
+   barrier(CLK_LOCAL_MEM_FENCE);
+
+   if (!ok_sh)
+      return;
+
+   global uint *out = (global uint *)(heap->base + offs_sh);
+
+   for (uint i = tid; i < count; i += 1024) {
+      uint src = poly_map_adj_vertex(i, prim);
+
+      out[i] =
+         index_size_B
+            ? vertex_offset + poly_load_index(
+                                 index_buffer + (uint64_t)first * index_size_B,
+                                 index_buffer_range_el, src, index_size_B)
+            : first + src;
+   }
+}
+
+/*
  * Indexing/offseting is in software if necessary so we strip all
  * indexing/offset information.
  */
@@ -474,4 +569,57 @@ libagx_draw_robust_index(global uint32_t *vdm, global struct poly_heap *heap,
                                 draw_state_context_offset,
                                 render_state_emitted != 0, empty_draw_jump);
    }
+}
+
+/*
+ * VK_KHR_ray_tracing_pipeline indirect trace rays.
+ *
+ * The megakernel reads its launch size out of a VkTraceRaysIndirectCommand2KHR
+ * record, and the command stream needs the same launch expressed as
+ * threadgroups.  Neither is known on the host for an indirect trace, so one
+ * invocation reads the application's three dimensions and publishes both.
+ *
+ * `out_record_dims` is the address of the `width` member of a record the driver
+ * assembled on the host (vkCmdTraceRaysIndirectKHR, whose indirect buffer holds
+ * only the dimensions), or zero when the application supplied the whole record
+ * itself (vkCmdTraceRaysIndirect2KHR).
+ */
+KERNEL(1)
+libagx_trace_rays_indirect_setup(global uint32_t *out_record_dims,
+                                 global VkDispatchIndirectCommand *out_groups,
+                                 constant uint32_t *in_dims,
+                                 uint32_t local_size_x_log2)
+{
+   uint32_t width = in_dims[0];
+   uint32_t height = in_dims[1];
+   uint32_t depth = in_dims[2];
+
+   if (out_record_dims) {
+      out_record_dims[0] = width;
+      out_record_dims[1] = height;
+      out_record_dims[2] = depth;
+   }
+
+   /* The megakernel bounds-checks its own launch id, so a partial trailing
+    * workgroup retires without tracing.
+    *
+    * The workgroup size is a power of two the driver owns, so this rounds up
+    * with a shift rather than a division: an integer divide by a runtime value
+    * is the one arithmetic form most likely to need an encoding this backend
+    * does not have, and there is no reason to risk it for a constant. */
+   /* Round up WITHOUT the (width + mask) form: that wraps for any width above
+    * 0xFFFFFFE0 and silently launches zero workgroups.  maxRayDispatchInvocation-
+    * Count is 2^30, so a conforming application cannot reach it -- but the
+    * width comes out of a device buffer nothing validates, and a wrap here is
+    * a whole trace that quietly does not happen.  The host side computes the
+    * same thing the same way (hk_rt_launch_group_count), and
+    * test-hk-ray-tracing-core pins the two together at the top of the range;
+    * the first version of this kernel used the wrapping form and that test is
+    * what caught it. */
+   const uint32_t mask = (1u << local_size_x_log2) - 1u;
+   *out_groups = (VkDispatchIndirectCommand){
+      .x = (width >> local_size_x_log2) + ((width & mask) ? 1u : 0u),
+      .y = height,
+      .z = depth,
+   };
 }

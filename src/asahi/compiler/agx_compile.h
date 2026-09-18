@@ -335,6 +335,10 @@ struct agx_fs_shader_key {
 };
 
 struct agx_device_key {
+   /* Some native AGX3 contracts differ between G16G and G17P despite sharing
+    * the instruction encoding, notably formatted PBE store inputs. */
+   enum agx_chip chip;
+
    /*
     * Binary encoding of the instruction set to emit.
     *

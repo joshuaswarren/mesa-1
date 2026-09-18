@@ -52,9 +52,13 @@ check_format(enum pipe_format format, unsigned components, unsigned count)
    invalid = tib;
    invalid.nr_samples = 3;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
+   /* A layered layout is not a native quad/RGBA32 candidate -- those builtins
+    * are 2D-only and the paths above screen it out -- but it is no longer
+    * refused outright. It falls through to the general mixed-format programs,
+    * which carry the layer wire and an array EOT. */
    invalid = tib;
    invalid.layered = true;
-   assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
+   assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_MIXED);
 
    struct agx_fs_epilog_key epilog = {.link.loc_written = (1u << count) - 1,
                                       .link.size_32 = (1u << count) - 1,

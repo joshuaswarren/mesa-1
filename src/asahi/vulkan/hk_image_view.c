@@ -23,6 +23,7 @@
 
 enum hk_desc_usage {
    HK_DESC_USAGE_SAMPLED,
+   HK_DESC_USAGE_SAMPLED_FILTERABLE,
    HK_DESC_USAGE_STORAGE,
    HK_DESC_USAGE_INPUT,
    HK_DESC_USAGE_BG_EOT,
@@ -142,6 +143,21 @@ struct hk_3d {
    unsigned x, y, z;
 };
 
+/* A texel block wider or taller than one pixel means the API extent and the
+ * layout's element grid differ, so a view that does not share the block has to
+ * divide the extent down.  Block-compressed formats are the usual case, but
+ * the single-plane 4:2:2 formats are blocked (2x1) without being compressed --
+ * util_format_is_compressed() is false for them.  Testing the block itself
+ * covers both; it is what the extent arithmetic below actually needs.
+ */
+static bool
+format_is_blocked(enum pipe_format format)
+{
+   return util_format_get_blockwidth(format) > 1 ||
+          util_format_get_blockheight(format) > 1 ||
+          util_format_get_blockdepth(format) > 1;
+}
+
 static struct hk_3d
 view_denominator(struct hk_image_view *view)
 {
@@ -149,12 +165,12 @@ view_denominator(struct hk_image_view *view)
    enum pipe_format img_format =
       hk_format_to_pipe_format(view->vk.image->format);
 
-   if (util_format_is_compressed(view_format)) {
+   if (format_is_blocked(view_format)) {
       /*
-       * We can do an uncompressed view of a compressed image but not the other
+       * We can do an unblocked view of a blocked image but not the other
        * way around.
        */
-      assert(util_format_is_compressed(img_format));
+      assert(format_is_blocked(img_format));
       assert(util_format_get_blockwidth(img_format) ==
              util_format_get_blockwidth(view_format));
       assert(util_format_get_blockheight(img_format) ==
@@ -165,12 +181,12 @@ view_denominator(struct hk_image_view *view)
       return (struct hk_3d){1, 1, 1};
    }
 
-   if (!util_format_is_compressed(img_format)) {
-      /* Both formats uncompressed */
+   if (!format_is_blocked(img_format)) {
+      /* Both formats have 1x1 blocks */
       return (struct hk_3d){1, 1, 1};
    }
 
-   /* Else, img is compressed but view is not */
+   /* Else, img is blocked but view is not */
    return (struct hk_3d){
       util_format_get_blockwidth(img_format),
       util_format_get_blockheight(img_format),
@@ -209,12 +225,41 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
    struct ail_layout *layout = &plane->layout;
    uint64_t base_addr = hk_image_base_address(image, image_plane);
 
-   bool cubes_to_2d = usage != HK_DESC_USAGE_SAMPLED;
+   const bool sampled_like = usage == HK_DESC_USAGE_SAMPLED ||
+                             usage == HK_DESC_USAGE_SAMPLED_FILTERABLE;
+   bool cubes_to_2d = !sampled_like;
 
    unsigned level = view->vk.base_mip_level;
    unsigned layer = view->vk.base_array_layer;
 
    enum pipe_format p_format = format_for_plane(view, view_plane);
+   const unsigned packed_ycbcr = agx_native_graphics(&dev->dev)
+      ? hk_packed_ycbcr_bits(view->vk.format) : 0;
+   if (packed_ycbcr)
+      p_format = packed_ycbcr == 8 ? PIPE_FORMAT_R8G8B8A8_UNORM :
+                                    PIPE_FORMAT_R16G16B16A16_UNORM;
+   const bool padded_rgb = agx_native_graphics(&dev->dev) &&
+                          hk_padded_image_format(p_format) != p_format;
+   if (padded_rgb)
+      p_format = hk_padded_image_format(p_format);
+   if (agx_native_graphics(&dev->dev)) {
+      enum pipe_format integer = hk_scaled_texture_format(p_format);
+      enum pipe_format normalized = hk_uscaled_normalized_format(p_format);
+      if (usage == HK_DESC_USAGE_SAMPLED_FILTERABLE &&
+          normalized != PIPE_FORMAT_NONE) {
+         p_format = normalized;
+         integer = PIPE_FORMAT_NONE;
+      }
+      /* Scaled formats sample through an integer descriptor and a shader
+       * conversion.  The normalized descriptor that used to serve sampled
+       * views -- a UNORM read rescaled in the shader -- produced the wrong
+       * texel for every scaled format measured, so it is gone; see
+       * hk_descriptor_set.c.  Background tile reloads and storage views
+       * always wanted the integer physical values anyway, or a later partial
+       * render saturates untouched USCALED pixels. */
+      if (integer != PIPE_FORMAT_NONE)
+         p_format = integer;
+   }
    const struct util_format_description *desc =
       util_format_description(p_format);
 
@@ -226,6 +271,16 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
       desc->swizzle[2],
       desc->swizzle[3],
    };
+
+   /* A three-component image is stored in a four-component physical format,
+    * so the padded channel is whatever the allocation happened to contain.
+    * The API format has no alpha, and Vulkan requires a sampled texel with no
+    * alpha channel to read one.  Taking the swizzle from the physical format
+    * returns the padding instead, which is why every sampled RGB/BGR format
+    * mismatched.  Force it back.
+    */
+   if (padded_rgb && sampled_like)
+      format_swizzle[3] = PIPE_SWIZZLE_1;
 
    /* Different APIs have different depth/stencil swizzle rules. Vulkan expects
     * R001 behaviour, override here because Mesa's format table is not that.
@@ -291,6 +346,9 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
          cfg.first_level = level;
          cfg.last_level = level + view->vk.level_count - 1;
       }
+
+      if (packed_ycbcr)
+         cfg.width = DIV_ROUND_UP(cfg.width, 2);
 
       /* To implement sparse resident textures, the hardware texture descriptor
        * can instead point to a secondary page table controlled in userspace.
@@ -390,6 +448,12 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
    unsigned layer = view->vk.base_array_layer;
 
    enum pipe_format p_format = format_for_plane(view, view_plane);
+   if (agx_native_graphics(&dev->dev)) {
+      p_format = hk_padded_image_format(p_format);
+      enum pipe_format integer = hk_scaled_texture_format(p_format);
+      if (integer != PIPE_FORMAT_NONE)
+         p_format = integer;
+   }
 
    bool eot =
       usage == HK_DESC_USAGE_BG_EOT || usage == HK_DESC_USAGE_LAYERED_BG_EOT;
@@ -635,6 +699,18 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             &view->planes[p].sampled_heap_index);
          if (result != VK_SUCCESS)
             return result;
+         view->planes[p].filterable_valid =
+            hk_uscaled_normalized_format(hk_padded_image_format(
+               hk_format_to_pipe_format(view->vk.format))) != PIPE_FORMAT_NONE &&
+            pack_texture(dev, view, p, HK_DESC_USAGE_SAMPLED_FILTERABLE,
+                         &view->planes[p].sampled_filterable);
+         if (view->planes[p].filterable_valid) {
+            result = hk_descriptor_table_add(
+               dev, &dev->sampled_images, &view->planes[p].sampled_filterable,
+               32, &view->planes[p].filterable_heap_index);
+            if (result != VK_SUCCESS)
+               return result;
+         }
          if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
             result = hk_descriptor_table_add(
                dev, &dev->sampled_images, &view->planes[p].ro_storage, 32,

@@ -141,6 +141,26 @@ enum agx_submission_model {
  * the same offsets. */
 #define AGX_G17P_MAX_BYTES_PER_SAMPLE (128)
 
+/* On a G17P tile that no colour-writing geometry covered, the background
+ * program -- clear or reload alike -- delivers only the low eight bytes of
+ * each sample when the tilebuffer is multisampled. Measured on an A18 Pro:
+ * with a sixteen-byte sample at 2x or 4x, such a texel reads back with its
+ * upper eight bytes zero, while the same background program keeps the whole
+ * sample on a tile a draw did cover -- including the pixels of that tile the
+ * draw's scissor rejected. Eight-byte and narrower samples are unaffected at
+ * every sample count, layer count and image size measured, and so is a
+ * single-sample sixteen-byte target.
+ *
+ * Above this bound a load-op clear is emitted as a full-area draw instead,
+ * which covers every tile and keeps the target in the tilebuffer. A reloaded
+ * attachment has no such draw and spills. A multiview render has a second,
+ * separate defect that the full-area draw does not cover --
+ * dEQP-VK.multiview.multisample.no_queries.max_multi_view_view_count, 32
+ * views of RGBA32F at 4x, whose clear value is all zeroes so the background
+ * clear cannot be what it observes -- and spills too.
+ */
+#define AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE (8)
+
 #ifndef __OPENCL_VERSION__
 
 #include <stdbool.h>

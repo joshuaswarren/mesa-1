@@ -647,7 +647,17 @@ asahi_g17p_compute_validate(
          break;
 
       case AGX3_CDM_RECORD_STREAM_TERMINATE:
-         if (need_barrier || (!local.launches && !local.sstt_flushes) ||
+         /* A stream whose only record is the opening strong flush is a real
+          * shape, not an empty stream: hk_CmdPipelineBarrier2() emits exactly
+          * that for an API-declared HOST_READ dependency when the command
+          * buffer records no other compute work, and it is what makes a
+          * preceding fragment store visible to the CPU (Mesa 6aae441547b,
+          * qualified on hardware).  It reaches submission alone whenever the
+          * neighbouring control streams are render ones, so it cannot be
+          * merged into a compute stream that has launches. */
+         if (need_barrier ||
+             (!local.launches && !local.sstt_flushes &&
+              !local.prologue_barriers) ||
              (!followed_link &&
               cursor + record.length != compute->cdm_ctrl_stream_end))
             return fail_at(cursor, "compute terminator is not final");

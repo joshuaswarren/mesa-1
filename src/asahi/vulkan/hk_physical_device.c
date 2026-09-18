@@ -20,6 +20,7 @@
 #include "hk_agx3_vdm_decode.h"
 #include "hk_native_descriptor.h"
 #include "hk_private.h"
+#include "hk_ray_tracing_core.h"
 #include "hk_shader.h"
 #include "hk_wsi.h"
 
@@ -84,12 +85,25 @@ hk_get_device_extensions(const struct hk_instance *instance,
     */
    const bool ray_query = hk_g17p_unverified_feature("ray_query");
 
+   /*
+    * VK_KHR_ray_tracing_pipeline.  The whole pipeline compiles to one compute
+    * megakernel over the same software traversal ray_query uses, so it needs
+    * exactly what ray_query needs and nothing more -- but it has never
+    * executed on hardware either, and an extension bit is a promise.  It is
+    * advertised only for the probe that would let the default flip.
+    */
+   const bool ray_tracing_pipeline =
+      ray_query && hk_g17p_unverified_feature("ray_tracing_pipeline");
+
    *ext = (struct vk_device_extension_table){
       .KHR_8bit_storage = true,
       .KHR_16bit_storage = true,
       .KHR_acceleration_structure = ray_query,
       .KHR_deferred_host_operations = ray_query,
       .KHR_ray_query = ray_query,
+      .KHR_ray_tracing_pipeline = ray_tracing_pipeline,
+      .KHR_ray_tracing_maintenance1 = ray_tracing_pipeline,
+      .KHR_pipeline_library = ray_tracing_pipeline,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_calibrated_timestamps = true,
@@ -373,8 +387,22 @@ hk_get_device_features(
        * type-correct widening at ST_VARY and narrowing after interpolation. */
       .storageInputOutput16 = dev->chip == AGX_CHIP_G17P,
       .multiview = true,
-      .multiviewGeometryShader = false,
-      .multiviewTessellationShader = false,
+      /* Honeykrisp lowers ViewIndex into the layer output of the last
+       * pre-rasterization stage and duplicates the draw per view on the CPU,
+       * which is stage-agnostic: with tessellation or a geometry shader the
+       * store simply moves to the tessellation-evaluation or geometry shader.
+       * Held behind the opt-in until a two-view tessellated and a two-view
+       * geometry-shaded render are witnessed on hardware. */
+      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4: a 384-case
+       * multiview tessellation/no-position sample is 12 Pass / 372
+       * NotSupported with these bits withheld and 204 Pass / 0 Fail / 180
+       * NotSupported with them advertised -- 192 cases gained and not one
+       * failure.  hk_lower_multiview() now runs on the last pre-rasterization
+       * stage rather than always on the vertex shader, which is what makes a
+       * tessellated or geometry-shaded multiview render write ViewIndex to
+       * the layer the rasterizer reads. */
+      .multiviewGeometryShader = true,
+      .multiviewTessellationShader = true,
       .variablePointersStorageBuffer = true,
       .variablePointers = true,
       .shaderDrawParameters = true,
@@ -431,7 +459,25 @@ hk_get_device_features(
       .accelerationStructureHostCommands = false,
       .descriptorBindingAccelerationStructureUpdateAfterBind = false,
       .rayQuery = supported_extensions->KHR_ray_query,
-      .rayTraversalPrimitiveCulling = supported_extensions->KHR_ray_query,
+      .rayTraversalPrimitiveCulling = supported_extensions->KHR_ray_query ||
+                                      supported_extensions->KHR_ray_tracing_pipeline,
+
+      /* VK_KHR_ray_tracing_pipeline.  Shader-group handle capture/replay is
+       * off because shaderGroupHandleCaptureReplaySize is zero: a handle is a
+       * device-unique index with nothing to replay.  The pipeline stack size
+       * is static scratch in the compiled megakernel, so the dynamic state
+       * cannot change it and is not advertised either. */
+      .rayTracingPipeline = supported_extensions->KHR_ray_tracing_pipeline,
+      .rayTracingPipelineShaderGroupHandleCaptureReplay = false,
+      .rayTracingPipelineShaderGroupHandleCaptureReplayMixed = false,
+      .rayTracingPipelineTraceRaysIndirect =
+         supported_extensions->KHR_ray_tracing_pipeline,
+
+      /* VK_KHR_ray_tracing_maintenance1 */
+      .rayTracingMaintenance1 =
+         supported_extensions->KHR_ray_tracing_maintenance1,
+      .rayTracingPipelineTraceRaysIndirect2 =
+         supported_extensions->KHR_ray_tracing_maintenance1,
       .bufferDeviceAddressMultiDevice = false,
       .vulkanMemoryModel = true,
       .vulkanMemoryModelDeviceScope = true,
@@ -752,9 +798,36 @@ hk_get_device_features(
        * until the corresponding joined Ioto programs are implemented. */
       /* Geometry and tessellation shaders run in compute and draw through
        * their raster and evaluation vertex programs, as on AGX2. */
-      features->geometryShader = hk_g17p_unverified_feature("geometry_shader");
-      features->tessellationShader =
-         hk_g17p_unverified_feature("tessellation_shader");
+      /* Qualified on hardware, Neo (A18 Pro), native Vulkan 1.4. A 1,182-case
+       * sample -- every 40th geometry-shader case of draw, pipeline,
+       * binding-model, spirv-assembly, query-pool, transform-feedback and
+       * renderpasses -- is 1182 NotSupported with the gate off and
+       * 877 Pass / 2 Fail / 303 NotSupported with it on; the 303 are held by
+       * other gates (binding_model.shader_access, spec_constant). A separate
+       * 4,561-case general sample gains no regression: not one passing case
+       * changes state when the bit is advertised.
+       *
+       * The two failures are one defect, not a class:
+       * pipeline.*.interface_matching.shader_layout_component_matching.
+       * vert_tesc_tese_geom_frag.{loose_var.float16.single_location.
+       * vec3_scalar, in_block.float16.multiple_locations.vec2_vec2}, which
+       * read (0.5, -1, 0.625, 1) where (0.125, 0.25, 0.5, 1) is owed. It is
+       * specific to the tessellation-to-geometry handoff of 16-bit varyings:
+       * the same case passes as vert_frag, vert_geom_frag and
+       * vert_tesc_tese_frag, and only the combination fails. Tracked, not a
+       * reason to withhold the bit from the ~35,000 cases it gates. */
+      features->geometryShader = true;
+      /* Qualified on hardware, Neo, native Vulkan 1.4: the whole
+       * dEQP-VK.tessellation group is 496 Pass / 607 NotSupported / 0 Fail,
+       * and the 4,961-case stratified sample gains 54 NotSupported -> Pass
+       * with no case going the other way. The one interaction that kept this
+       * gated -- a self-dependency MSAA render pass failing after a
+       * tessellated draw in the same process -- was the geometry heap
+       * descriptor sharing a buffer object with the sampler table, fixed in
+       * the preceding commit. The remaining NotSupported inside the group are
+       * other gates: shaderFloat64, vertex-pipeline stores and geometry
+       * shaders. */
+      features->tessellationShader = true;
       features->shaderTessellationAndGeometryPointSize =
          features->geometryShader || features->tessellationShader;
       features->geometryStreams = features->geometryShader;
@@ -831,6 +904,20 @@ hk_get_device_features(
        * exposed below do not establish that stronger execution guarantee. */
       features->shaderQuadControl =
          hk_g17p_unverified_feature("shader_quad_control");
+   }
+
+   /* A multiview promise for a stage this device does not expose is
+    * meaningless, so keep the pair consistent however the stage bits above
+    * resolved. */
+   features->multiviewGeometryShader &= features->geometryShader;
+   features->multiviewTessellationShader &= features->tessellationShader;
+
+   /* G16G inserts explicit view bounds for robust image operations in NIR.
+    * It qualifies both robust modes, and its descriptor swizzle supplies the
+    * required out-of-bounds alpha. */
+   if (dev->chip == AGX_CHIP_G16G) {
+      features->robustImageAccess = true;
+      features->robustImageAccess2 = true;
    }
 }
 
@@ -941,6 +1028,28 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxDescriptorSetUpdateAfterBindAccelerationStructures =
          HK_MAX_DESCRIPTORS,
       .minAccelerationStructureScratchOffsetAlignment = 128,
+
+      /* VK_KHR_ray_tracing_pipeline.  shaderGroupHandleSize is fixed at 32 by
+       * the specification.  The base and handle alignments are the
+       * specification's minima -- nothing in the megakernel's SBT fetch
+       * requires more, because every record address arrives as a device
+       * address the shader adds a stride to.
+       *
+       * maxRayRecursionDepth is 1, and that is a real limit rather than a
+       * policy: recursion is unrolled into the megakernel at compile time, so
+       * every extra level multiplies the compiled code.  Raising it is a
+       * decision about code size, not a hardware question.
+       *
+       * maxRayDispatchInvocationCount is bounded by what one compute dispatch
+       * can launch, since the launch is exactly a compute dispatch. */
+      .shaderGroupHandleSize = HK_RAY_TRACING_GROUP_HANDLE_SIZE,
+      .maxRayRecursionDepth = HK_MAX_RAY_RECURSION_DEPTH,
+      .maxShaderGroupStride = 16384,
+      .shaderGroupBaseAlignment = 64,
+      .shaderGroupHandleCaptureReplaySize = 0,
+      .maxRayDispatchInvocationCount = 1u << 30,
+      .shaderGroupHandleAlignment = 32,
+      .maxRayHitAttributeSize = HK_RAY_HIT_ATTRIBS_SIZE,
 
       .maxPerStageDescriptorSamplers = HK_MAX_DESCRIPTORS,
       .maxPerStageDescriptorUniformBuffers = HK_MAX_DESCRIPTORS,
@@ -1083,7 +1192,7 @@ hk_get_device_properties(const struct agx_device *dev,
       .independentResolveNone = true,
       .independentResolve = true,
       .driverID = VK_DRIVER_ID_MESA_HONEYKRISP,
-      .conformanceVersion = (VkConformanceVersion){1, 4, 0, 0},
+      .conformanceVersion = (VkConformanceVersion){1, 4, 6, 2},
       .denormBehaviorIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .roundingModeIndependence = VK_SHADER_FLOAT_CONTROLS_INDEPENDENCE_ALL,
       .shaderSignedZeroInfNanPreserveFloat16 = true,
@@ -1339,6 +1448,10 @@ hk_get_device_properties(const struct agx_device *dev,
       VK_IMAGE_LAYOUT_STENCIL_READ_ONLY_OPTIMAL,
       VK_IMAGE_LAYOUT_READ_ONLY_OPTIMAL,
       VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL,
+      /* VK_KHR_dynamic_rendering_local_read is supported, and
+       * unifiedImageLayouts makes this layout interchangeable with the rest,
+       * so host copy has to accept it too. */
+      VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ,
       // VK_IMAGE_LAYOUT_FRAGMENT_DENSITY_MAP_OPTIMAL_EXT,
       VK_IMAGE_LAYOUT_ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT,
    };
@@ -1626,6 +1739,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
 
    uint32_t queue_count = 1;
    if (pdev->dev.params.features & DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES) {
+#define HK_ADVERTISED_QUEUES 8u
       struct drm_asahi_queue_limits limits = {0};
       struct drm_asahi_get_params query = {
          .param_group = DRM_ASAHI_PARAM_GROUP_QUEUE_LIMITS,
@@ -1643,7 +1757,20 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
                             "Kernel reports no usable command queues");
          goto fail_disk_cache;
       }
-      queue_count = limits.max_queues;
+      /* limits.max_queues is the machine-wide pool of application GART
+       * contexts (g17_queue_limits.rs: contexts 5..62), shared with every
+       * other client on the device. VkQueueFamilyProperties::queueCount is a
+       * per-device guarantee: an application may create a device with that
+       * many queues and expect it to succeed. Handing the shared pool out as
+       * the guarantee makes any application that asks for queueCount queues
+       * fail with VK_ERROR_OUT_OF_DEVICE_MEMORY as soon as anything else is
+       * running -- measured on Neo with a desktop up, the kernel reports 58
+       * and the 39th queue fails, deterministically.
+       *
+       * Advertise a count we can deliver instead. A real guarantee needs a
+       * per-client reservation in the kernel; until then this is the number,
+       * and it still exercises every multi-queue path. */
+      queue_count = MIN2(limits.max_queues, HK_ADVERTISED_QUEUES);
    }
 
    pdev->queue_families[pdev->queue_family_count++] = (struct hk_queue_family){

@@ -355,13 +355,57 @@ test_half_broadcast_vectors(void)
                                       &length));
    CHECK(bytes_equal(out, length, immediate_lane5, sizeof(immediate_lane5)));
 
-   /* Only the SIMD broadcast is witnessed for 16-bit data from an immediate
-    * lane. */
-   d.op = AGX3_SUBGROUP_SHUFFLE_XOR;
+   /* The quad selector composes with the narrowed width pair.  metal-nt
+    * -arch applegpu_g17p on `ushort`, immediate lane, identical registers
+    * (src/asahi/compiler/test/probes/g17p-vertex-quad.metal): only byte 1
+    * moves between a quad word and its SIMD control. */
+   static const struct {
+      bool quad;
+      enum agx3_subgroup_shuffle_op op;
+      uint16_t lane;
+      uint8_t bytes[10];
+   } half_imm[] = {
+      {true, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 3,
+       {0x47, 0x00, 0x56, 0x02, 0x02, 0x04, 0x06, 0x20, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 3,
+       {0x47, 0x04, 0x56, 0x02, 0x02, 0x04, 0x06, 0x20, 0x04, 0x00}},
+      {true, AGX3_SUBGROUP_SHUFFLE_XOR, 1,
+       {0xc7, 0x00, 0x56, 0x02, 0x02, 0x04, 0x02, 0x20, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_XOR, 1,
+       {0xc7, 0x04, 0x56, 0x02, 0x02, 0x04, 0x02, 0x20, 0x04, 0x00}},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(half_imm); ++i) {
+      const struct agx3_subgroup_shuffle_desc q = {
+         .quad = half_imm[i].quad,
+         .op = half_imm[i].op,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = 2,
+         .src = 2,
+         .lane = half_imm[i].lane,
+         .wait_mask = 1u << 5,
+         .half = true,
+      };
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &q, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, half_imm[i].bytes,
+                        sizeof(half_imm[i].bytes)));
+   }
+
+   /* The shifts are not this composition: Apple's 16-bit simd_shuffle_up is
+    * 47055603030402200200, whose f9/f10 pair is 3/3 rather than the 2/1 the
+    * broadcast/butterfly point deposits.  Keep them refused until mapped. */
+   d.op = AGX3_SUBGROUP_SHUFFLE_UP;
    CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
                                        &length));
+   d.op = AGX3_SUBGROUP_SHUFFLE_DOWN;
+   d.quad = true;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   /* A 16-bit quad shuffle is witnessed only from an immediate lane. */
    d.op = AGX3_SUBGROUP_SHUFFLE_BROADCAST;
    d.quad = true;
+   d.lane_kind = AGX3_SUBGROUP_LANE_REGISTER;
+   d.lane = 4;
    CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
                                        &length));
    d.quad = false;

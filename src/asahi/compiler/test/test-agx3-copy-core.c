@@ -250,6 +250,91 @@ main(void)
    CHECK(!agx3_copy_encode_uniform_to_reg32(AGX_ISA_ENCODING_AGX3B, 4, 512,
                                             out, &len));
 
+   /*
+    * A destination at or above half 128 does not fit the compact four-byte
+    * point's seven-bit f2 and moves to the ten-byte ep1, the way Apple's own
+    * compiler moves it. metal-nt -arch applegpu_g17p, on a 100-value
+    * loop-carried register rotation and on a uniform-chain readback at the
+    * same pressure, puts destinations 18..126 in ep0 and 128..190 in ep1 and
+    * never widens for a high SOURCE -- its ep0 copies carry sources up to
+    * 148. Two of those instructions verbatim:
+    *
+    *   copy r67, r10.kill  3b 15 0f 00 02 10 00 00 00 00   f2=134 f16=20
+    *   copy r95, r59.kill  fb 77 4f 00 02 10 00 00 00 00   f2=190 f16=118
+    *
+    * The destination deposit below is byte-identical to those: half 134 is
+    * byte 0 = 0x3b with byte 5 bit 4 set, half 190 is byte 0 = 0xfb with the
+    * same byte 5 bit, and only the source-kind and source-index bytes differ.
+    *
+    * Ray-query shaders are what reach it. agx_lower_uniform_sources()
+    * materializes a move for every generic-ALU uniform source, and under
+    * their register pressure register allocation placed those destinations
+    * at halves 134-154, so every ray-query shader was refused.
+    */
+   static const struct copy_vec wide[] = {
+      {AGX_ISA_ENCODING_AGX3B, 128, 8,
+       {0x0b, 0x09, 0x07, 0x00, 0x82, 0x10, 0x00, 0x00, 0x00, 0x00}, 10},
+      {AGX_ISA_ENCODING_AGX3B, 134, 14,
+       {0x3b, 0x0f, 0x07, 0x00, 0x82, 0x10, 0x00, 0x00, 0x00, 0x00}, 10},
+      {AGX_ISA_ENCODING_AGX3B, 136, 18,
+       {0x4b, 0x13, 0x07, 0x00, 0x82, 0x10, 0x00, 0x00, 0x00, 0x00}, 10},
+      {AGX_ISA_ENCODING_AGX3B, 154, 12,
+       {0xdb, 0x0d, 0x07, 0x00, 0x82, 0x10, 0x00, 0x00, 0x00, 0x00}, 10},
+      {AGX_ISA_ENCODING_AGX3B, 190, 12,
+       {0xfb, 0x0d, 0x47, 0x00, 0x82, 0x10, 0x00, 0x00, 0x00, 0x00}, 10},
+      {AGX_ISA_ENCODING_AGX3B, 254, 510,
+       {0xfb, 0x7f, 0xcf, 0x00, 0x82, 0x11, 0x00, 0x00, 0x00, 0x00}, 10},
+   };
+   for (unsigned i = 0; i < sizeof(wide) / sizeof(wide[0]); ++i) {
+      const struct copy_vec *v = &wide[i];
+      uint8_t w[AGX3_COPY_MAX_LENGTH];
+      uint8_t wl = 0;
+      memset(w, 0xcd, sizeof(w));
+      CHECK(agx3_copy_encode_uniform_to_reg32(v->enc, v->dest_half,
+                                              v->uniform_half, w, &wl));
+      CHECK(wl == v->length);
+      if (wl != v->length)
+         continue;
+      if (memcmp(w, v->bytes, wl) != 0) {
+         ++failures;
+         fprintf(stderr, "FAIL wide vector %u (r%u <- u%u): got", i,
+                 v->dest_half, v->uniform_half);
+         for (unsigned b = 0; b < wl; ++b)
+            fprintf(stderr, " %02x", w[b]);
+         fprintf(stderr, ", want");
+         for (unsigned b = 0; b < v->length; ++b)
+            fprintf(stderr, " %02x", v->bytes[b]);
+         fprintf(stderr, "\n");
+      }
+      ++checks;
+   }
+
+   /* The split is exactly the seven-bit boundary, from both sides: the last
+    * half the compact point can name stays four bytes, the first one it
+    * cannot becomes ten. A regression either way shows up here rather than as
+    * a whole refused shader. */
+   CHECK(agx3_copy_encode_uniform_to_reg32(
+            AGX_ISA_ENCODING_AGX3B, AGX3_COPY_REG16_DEST_HALVES - 2, 12, out,
+            &len) &&
+         len == 4);
+   CHECK(agx3_copy_encode_uniform_to_reg32(
+            AGX_ISA_ENCODING_AGX3B, AGX3_COPY_REG16_DEST_HALVES, 12, out,
+            &len) &&
+         len == 10);
+
+   /* A high uniform SOURCE is encodable at the compact point, as Apple's own
+    * ep0 copies with sources past 128 show; it must not drag the instruction
+    * to the wide form. */
+   CHECK(agx3_copy_encode_uniform_to_reg32(AGX_ISA_ENCODING_AGX3B, 4, 500,
+                                           out, &len) &&
+         len == 4);
+
+   /* AGX3c has a copy.ep1 of its own and its tables accept the same wide
+    * destinations, but no G17S witness establishes it. Keep it failing closed
+    * rather than assuming the AGX3b result carries over. */
+   CHECK(!agx3_copy_encode_uniform_to_reg32(AGX_ISA_ENCODING_AGX3C, 134, 12,
+                                            out, &len));
+
    /* AGX2 has no `copy`; its move is a bitop that reads the uniform file. */
    CHECK(!agx3_copy_encode_uniform_to_reg32(AGX_ISA_ENCODING_AGX2, 4, 4, out,
                                             &len));

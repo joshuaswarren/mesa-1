@@ -364,9 +364,9 @@ compile_load_in_branch(enum agx_isa_encoding encoding)
 /*
  * An atomic at a UNIFORM address. nir_opt_uniform_atomics() would rewrite this
  * into "one elected lane performs the whole subgroup's operation", which needs
- * ACTIVE_THREAD_INDEX_IN_SUBGROUP and TOTAL_ACTIVE_THREADS_IN_SUBGROUP -- two
- * special registers whose AGX3 numbers are not witnessed. That pass is
- * therefore skipped on AGX3, and this must compile as a plain per-lane atomic.
+ * ACTIVE_THREAD_INDEX_IN_SUBGROUP and TOTAL_ACTIVE_THREADS_IN_SUBGROUP (AGX3
+ * SR 34/36, witnessed 2026-09-16). That pass is still skipped on AGX3 pending
+ * a CTS campaign, so this must compile as a plain per-lane atomic.
  */
 static bool
 compile_uniform_atomic(enum agx_isa_encoding encoding)

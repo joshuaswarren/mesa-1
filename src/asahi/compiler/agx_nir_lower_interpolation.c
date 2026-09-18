@@ -62,9 +62,37 @@ static nir_def *
 interpolate_at_offset(nir_builder *b, nir_def *cf, nir_def *offset,
                       bool perspective, bool native)
 {
-   /* Get the coordinate of the pixel within the tile */
-   nir_def *pixel_coords = nir_load_pixel_coord(b);
-   nir_def *tile_offs = nir_umod_imm(b, pixel_coords, 32);
+   /* Get the coordinate of the pixel within the tile.
+    *
+    * On G17P the pixel-coordinate special register disagrees with the
+    * interpolated fragment position once the framebuffer is multisampled, so
+    * every offset interpolation lands somewhere other than the pixel it is
+    * being evaluated for.  Measured on hardware: sourcing the coordinate from
+    * the register fails all 28 cases of
+    * dEQP-VK.pipeline.*.multisample_interpolation.offset_interpolate_at_pixel_center
+    * at 2x and 4x, and sourcing it from the interpolated position passes all
+    * 28 with no other multisample interpolation case changing.  Only that
+    * family compares this path against a hardware-interpolated value; the
+    * others compare two results that share the error, which is why they never
+    * caught it.
+    *
+    * What the register actually holds under multisampling is NOT established.
+    * Sample-unit readings were tested and refuted: halving X, halving Y and
+    * halving both still fail all 28 cases at both sample counts, so it is not
+    * a power-of-two scale.  Until it is understood, take the coordinate from
+    * the position varying, which is the value the hardware interpolator
+    * itself agrees with.  Gated on the same flag the native constant-plane
+    * marker uses, which hk sets for AGX_CHIP_G17P; AGX2 is conformant on the
+    * register path and keeps it, as do the D3D12 and host-test callers.
+    */
+   nir_def *tile_offs;
+   if (native) {
+      nir_def *fc = nir_trim_vector(b, nir_load_frag_coord(b), 2);
+      tile_offs = nir_u2u16(b, nir_umod_imm(b, nir_f2u32(b, nir_ffloor(b, fc)), 32));
+   } else {
+      nir_def *pixel_coords = nir_load_pixel_coord(b);
+      tile_offs = nir_umod_imm(b, pixel_coords, 32);
+   }
 
    /* Convert to float, getting the center of the pixel */
    nir_def *center = nir_fadd_imm(b, nir_u2f32(b, tile_offs), 0.5);

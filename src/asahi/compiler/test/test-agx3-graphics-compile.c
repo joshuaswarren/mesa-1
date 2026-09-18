@@ -1241,6 +1241,7 @@ test_g17p_divergent_quad_loop(void)
    };
    nir_shader *nir = build_fs_divergent_quad_loop();
    struct agx_shader_key key = {
+      .dev.chip = AGX_CHIP_G17P,
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,
       .no_preamble = true,
    };
@@ -1305,6 +1306,7 @@ test_g17p_alpha_coverage_boundary(void)
    };
    nir_shader *nir = build_fs_alpha_coverage_boundary();
    struct agx_shader_key key = {
+      .dev.chip = AGX_CHIP_G17P,
       .dev.encoding = AGX_ISA_ENCODING_AGX3B,
       .no_preamble = true,
    };
@@ -1928,9 +1930,19 @@ test_g17p_halfword_tile_widening(void)
    return true;
 }
 
-/* Three blended RGBA32 targets need 24 payload halves live at their stores,
- * but a fragment reading the tile stores from halves 0..15 only. The shader
- * must be refused, not abort register allocation. */
+/* Three blended RGBA32 targets need 24 payload halves live at their stores.
+ * This was once beyond the tile-store bank and refused; 46eeb53ec49 ("asahi:
+ * complete native G17P three-target blend and subset epilogs") implemented it
+ * against Apple's witnessed register bank, and agx3_tile_store_bank() now
+ * returns 32 for this shape -- see its comment recording that Apple's own
+ * blending fragments store three RGBA32Float targets from halves0..23. So the
+ * shader must now COMPILE, and register allocation must find an assignment.
+ *
+ * NOTE: this no longer gives agx3_tile_store_payloads_fit() negative coverage.
+ * Re-establishing that needs a shape whose demand genuinely exceeds the bank
+ * the function computes for it, grounded in an Apple witness rather than
+ * assumed -- asserting a refusal for a shape the hardware supports would be
+ * worse than having no negative case. */
 static bool
 test_g17p_blended_payloads_beyond_bank(void)
 {
@@ -1957,11 +1969,13 @@ test_g17p_blended_payloads_beyond_bank(void)
    };
    struct agx_shader_part part;
    memset(&part, 0xa5, sizeof(part));
-   const struct agx_shader_part cleared = {0};
-   const bool ok = !agx_compile_shader_nir(nir, &key, &part) &&
-                   !memcmp(&part, &cleared, sizeof(part));
+   const bool ok = agx_compile_shader_nir(nir, &key, &part) &&
+                   part.binary != NULL && part.info.binary_size > 0;
    if (!ok)
-      fprintf(stderr, "G17P blend beyond the tile store bank was not refused\n");
+      fprintf(stderr,
+              "G17P three-target RGBA32 blend was not compiled\n");
+   if (part.binary)
+      free(part.binary);
    ralloc_free(nir);
    return ok;
 }
@@ -2619,7 +2633,7 @@ test_g17p_formatless_robust_image_load(void)
             nir_store_ssbo(&b, load, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                            .write_mask = 15, .align_mul = 16);
             b.shader->info.num_ssbos = 1;
-            agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, robust);
+            agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, robust, 0, false);
 
             /* The surviving read is clamped by a select on the predicate. */
             bool clamped = false;
@@ -2715,7 +2729,7 @@ test_g17p_robust_texel_fetch_value(void)
       nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                      .write_mask = 15, .align_mul = 16);
       b.shader->info.num_ssbos = 1;
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, true);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, true, 0, false);
 
       struct formatless_load_fixture f = {0};
       const uint64_t word0 = 2 | (2 << 4) |
@@ -2844,7 +2858,7 @@ test_g17p_buffer_metadata(void)
       nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                      .write_mask = 15, .align_mul = 16);
       b.shader->info.num_ssbos = 1;
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0, false);
 
       struct buffer_metadata_fixture f = {
          .elements = cases[c].elements, .tail = cases[c].tail,
@@ -2927,7 +2941,7 @@ test_g17p_buffer_image_metadata(void)
          .image_dim = GLSL_SAMPLER_DIM_BUF,
          .format = PIPE_FORMAT_R8G8B8A8_UINT, .src_type = nir_type_uint32,
          .access = ACCESS_NON_READABLE);
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0, false);
       struct buffer_metadata_fixture f = {.elements = 16384, .tail = tail};
       bool progress;
       do {
@@ -4693,6 +4707,20 @@ build_cs_storage_image(unsigned mode)
                   .memory_semantics = NIR_MEMORY_ACQ_REL,
                   .memory_modes = nir_var_image | nir_var_mem_ssbo);
    }
+   /* A memory-model write_after_read shader whose guard lives in workgroup
+    * memory names only image and shared memory in its release fence. The
+    * state-0 route cannot order the image either way. */
+   if (mode == 9) {
+      nir_barrier(&b, .memory_scope = SCOPE_WORKGROUP,
+                  .memory_semantics = NIR_MEMORY_RELEASE,
+                  .memory_modes = nir_var_image | nir_var_mem_shared);
+   }
+   /* An image-only barrier is the same defect with nothing else named. */
+   if (mode == 10) {
+      nir_barrier(&b, .memory_scope = SCOPE_DEVICE,
+                  .memory_semantics = NIR_MEMORY_ACQ_REL,
+                  .memory_modes = nir_var_image);
+   }
    nir_bindless_image_store(
       &b, pbe, coord, zero,
       mode == 5 ? nir_imm_ivec4(&b, 9, 8, 7, 6) : value, zero,
@@ -4757,19 +4785,28 @@ test_storage_image_lowering(void)
          return false;
    }
 
-   /* Cross-domain barriers must stay on the general indexed storage path.
-    * The single-image state-0 lowering cannot describe that synchronization. */
-   nir_shader *nir = build_cs_storage_image(8);
-   struct agx_g17p_storage_image_binding binding = {
-      .texture_offset_B = UINT32_MAX,
-      .pbe_offset_B = UINT32_MAX,
-   };
-   const bool lowered = agx_nir_lower_g17p_storage_image(nir, &binding);
-   const bool ok = !lowered && binding.texture_offset_B == UINT32_MAX &&
-                   binding.pbe_offset_B == UINT32_MAX;
-   ralloc_free(nir);
-   if (!ok)
-      return false;
+   /* A barrier that names the image at all must stay on the general indexed
+    * storage path: measured on G17P, a memory barrier does not order the
+    * native state-0 image accesses, whatever else the barrier names. Mode 8
+    * pairs the image with buffer memory, mode 9 with workgroup memory -- the
+    * dEQP-VK.memory_model.write_after_read shape -- and mode 10 names the
+    * image alone. */
+   for (unsigned mode = 8; mode <= 10; ++mode) {
+      nir_shader *nir = build_cs_storage_image(mode);
+      struct agx_g17p_storage_image_binding binding = {
+         .texture_offset_B = UINT32_MAX,
+         .pbe_offset_B = UINT32_MAX,
+      };
+      const bool lowered = agx_nir_lower_g17p_storage_image(nir, &binding);
+      const bool ok = !lowered && binding.texture_offset_B == UINT32_MAX &&
+                      binding.pbe_offset_B == UINT32_MAX;
+      ralloc_free(nir);
+      if (!ok)
+         return false;
+   }
+
+   nir_shader *nir;
+   struct agx_g17p_storage_image_binding binding;
 
    /* Buffer-image lowering preserves its descriptor class while mapping the
     * coordinate to 2D.  A Gen9 linear buffer descriptor is valid through the
@@ -5298,7 +5335,7 @@ test_buffer_fetch_r32_store(void)
       nir_channel(&b, value, 0), zero, .image_dim = GLSL_SAMPLER_DIM_2D,
       .format = PIPE_FORMAT_R32_UINT, .src_type = nir_type_uint32,
       .access = ACCESS_NON_READABLE);
-   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0, false);
    struct buffer_metadata_fixture fixture = {.elements = 64};
    bool progress;
    do {
@@ -5369,7 +5406,7 @@ test_buffer_fetch_unorm_store_fallback(void)
       .format = PIPE_FORMAT_R8G8B8A8_UNORM, .src_type = nir_type_float32,
       .access = ACCESS_NON_READABLE);
 
-   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0, false);
    struct buffer_metadata_fixture fixture = {.elements = 64};
    bool progress;
    do {
@@ -8140,9 +8177,11 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_sample_zs_writes = 2, .nr_samples = 2},
    {"fs-depth-stencil-write-4x", build_fs_depth_stencil, true,
     .g17p_only = true, .expected_g17p_sample_zs_writes = 1, .nr_samples = 4},
-   /* Such a write to samples known only at run time has no witnessed word. */
-   {"fs-depth-dynamic-samples-4x", build_fs_depth_dynamic_samples, false,
-    .g17p_only = true, .nr_samples = 4},
+   /* A write to samples known only at run time takes the same per-sample
+    * words, with the run-time predicate ANDed into each coverage nibble. */
+   {"fs-depth-dynamic-samples-4x", build_fs_depth_dynamic_samples, true,
+    .g17p_only = true, .expected_g17p_sample_mask_input = true,
+    .expected_g17p_sample_zs_writes = 4, .nr_samples = 4},
 };
 
 static bool
@@ -8286,9 +8325,11 @@ run_case(const struct agx3_graphics_case *c, enum agx_isa_encoding enc)
 
       if (result && enc == AGX_ISA_ENCODING_AGX3B && c->nr_samples > 1 &&
           c->expected_g17p_sample_zs_writes) {
+         const bool depth_only = c->build == build_fs_depth ||
+                                 c->build == build_fs_depth_dynamic_samples;
          result = g17p_sample_zs_protocol(
             &part, c->expected_g17p_sample_zs_writes,
-            c->build != build_fs_stencil, c->build != build_fs_depth);
+            c->build != build_fs_stencil, !depth_only);
          if (!result)
             fprintf(stderr, "%s %s: per-sample depth/stencil protocol "
                             "mismatch\n",

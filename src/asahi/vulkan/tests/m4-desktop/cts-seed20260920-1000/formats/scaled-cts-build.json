@@ -1,0 +1,24 @@
+{
+  "source": "/home/council/dev/dirtyroom_m4/reference/vk-gl-cts-1.0.2.6",
+  "source_commit": "6b3bca439862e986409ffd76e857ada0cc7c9080",
+  "patch_sha256": "63086190586a97fd58988f229d8c9367ca655bda04f17634fde029d631f5e6af",
+  "original_binary_sha256": "d296ca5f77238367933e88b99babefe050e841d3c7e1fbcb6e95e4d424814b06",
+  "source_sha256": {
+    "external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp": "3502f8b5493c9170d4083db0f7b4954fe4d10ba02a4b1793fa6f7435ff86c509",
+    "external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp": "91f5500c1dcc17b8e3ff8361f244aa2290dfbf30e0e8261967646826431aa733",
+    "external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp": "d3212ea1213fe78932fdc3f6327822acbbad96a88e236903eca50f282631d394",
+    "external/vulkancts/modules/vulkan/api/vktApiCopiesAndBlittingTests.cpp": "60830e6e78e59659ae1a2199728e698fe00c196ac12e71318cbd0bc07b442412",
+    "external/vulkancts/modules/vulkan/image/vktImageCompressionTranscodingSupport.cpp": "72a8bba82c72da862b4b4cf2e8416bbbff8fe584bf2f347c42db04d03b370b15",
+    "external/vulkancts/modules/vulkan/tessellation/vktTessellationUtil.cpp": "4eac7613f96fd68c3af2005c27fa3db61a5e9267b86b3957e76e1cf27aa8401d",
+    "external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp": "5a3cf1105c352f541a7fd9b2f52b27f9c09fe4b5cd32ef600cb3b76cf8818a04",
+    "external/vulkancts/modules/vulkan/spirv_assembly/vktSpvAsmVariablePointersTests.cpp": "7089bf380e36b32b1d11243b3ef55a72cba5f3176a7d540362a4309e5ef6182b",
+    "framework/platform/CMakeLists.txt": "b27f780e8de5142538751fd510ece300bcc65034b91a51edb4789f411c9bbe1c",
+    "framework/platform/lnx/wayland/tcuLnxWayland.hpp": "9e4bc58dba6dbb6bd45624fe9c23a614b3b53487eb957e321afb74ed728de637",
+    "framework/platform/lnx/wayland/tcuLnxWayland.cpp": "a1e412de07d2dfdf34719438f5aff9aae9e0ebb1fe17fef7e5d67618d8117206",
+    "external/vulkancts/modules/vulkan/pipeline/vktPipelineImageTests.cpp": "742c2961aa8f448b31b8beef9709b8a9fd96cfd41b72ebb34a20f5ac555eceeb",
+    "external/vulkancts/modules/vulkan/pipeline/vktPipelineImageViewTests.cpp": "9a5d0151922106e12f017a5c36396ed6efe269b1c2a80d98d05062035b81f605",
+    "external/vulkancts/modules/vulkan/pipeline/vktPipelineSamplerTests.cpp": "017a629c82affac0bfb84ef588c90178c4341414c69ded05cb30c1cc9d208bec"
+  },
+  "diagnostic_binary_sha256": "fc874d5c805cfa5c4055b3f4c3c4dc02b0e0bdea43454222432270b77159c904",
+  "restored": true
+}

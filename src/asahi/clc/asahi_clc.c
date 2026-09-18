@@ -271,6 +271,16 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_mipmap_unorm8x4_odd") ||
           !strcmp(func->name, "libagx_resolve_unorm8x4") ||
           !strcmp(func->name, "libagx_predicate_indirect") ||
+          /* VK_KHR_ray_tracing_pipeline's indirect trace-rays setup.  One
+           * invocation, three constant loads, three global stores and a shift
+           * -- no atomics, no barriers, no printf, no scratch.  Its ARITHMETIC
+           * has a host oracle (test-hk-ray-tracing-core's launch
+           * decomposition, which the direct path uses for the same numbers);
+           * its MACHINE CODE has never executed, exactly like the rest of the
+           * ray-tracing-pipeline path it serves, which is why that whole path
+           * is behind HK_G17P_UNVERIFIED_FEATURES.  Do not read this entry as
+           * a claim that it runs. */
+          !strcmp(func->name, "libagx_trace_rays_indirect_setup") ||
           !strcmp(func->name, "libagx_draw_indirect_byte_count") ||
           !strcmp(func->name, "libagx_conditional_render") ||
           !strcmp(func->name, "libagx_draw_robust_index") ||
@@ -298,7 +308,25 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_tess_tri") ||
           !strcmp(func->name, "libagx_tess_quad") ||
           !strcmp(func->name, "libagx_prefix_sum_tess") ||
-          !strcmp(func->name, "libagx_draw_without_adj");
+          !strcmp(func->name, "libagx_g17p_local_probe") ||
+          !strcmp(func->name, "libagx_g17p_local_sg_probe") ||
+          !strcmp(func->name, "libagx_draw_without_adj") ||
+          /* Materialises an adjacency decomposition as an index buffer, which
+           * is the only remap a G17P hardware vertex shader observes: it reads
+           * its invocation index from SR 0xdd, never the prolog's exported
+           * AGX_ABI_VIN_VERTEX_ID.  One invocation per output index, one call
+           * to poly_map_adj_vertex(), at most one index-buffer load and one
+           * global store -- no atomics, barriers, printf or scratch, and the
+           * same poly_load_index() the already-qualified
+           * libagx_draw_without_adj uses.  Its ARITHMETIC has a host oracle:
+           * test-poly-adj-map checks poly_map_adj_vertex() against the
+           * per-topology sequences for all four adjacency primitives. */
+          !strcmp(func->name, "libagx_write_adj_indices") ||
+          /* Its indirect form.  Same mapping and the same index load, plus a
+           * heap allocation and one barrier -- both already qualified here by
+           * libagx_unroll_restart, which allocates from the same heap with the
+           * same printf-free poly_heap_try_alloc_offs(). */
+          !strcmp(func->name, "libagx_write_adj_indices_indirect");
 }
 
 /* Like nir_precomp_print_binary_map, but programs the target does not support
@@ -481,6 +509,10 @@ main(int argc, char **argv)
             key.dev.encoding = !strcmp(*target, "g17p")
                                   ? AGX_ISA_ENCODING_AGX3B
                                   : AGX_ISA_ENCODING_AGX2;
+            key.dev.chip = !strcmp(*target, "g17p")
+                              ? AGX_CHIP_G17P
+                              : !strcmp(*target, "g13x") ? AGX_CHIP_G13X
+                                                          : AGX_CHIP_G13G;
 
             if (has_atomic) {
                key.dev.needs_g13x_coherency =

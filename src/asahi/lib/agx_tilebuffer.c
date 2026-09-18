@@ -26,6 +26,16 @@
  */
 #define MAX_BYTES_PER_SAMPLE (64)
 
+/* USC Shared::sample_stride_in_8_bytes is a four-bit field (cmdbuf.xml), so
+ * the record cannot name a sample wider than 15 * 8 bytes however large the
+ * imageblock is. G17P's shaders do address 128 -- Apple's own eight-target
+ * fragments store at tile offsets 0..112 -- but there is no witness for the
+ * record at that size, and eight 16-byte targets pack 0x10 into a field that
+ * holds 0xf. Keep the layout inside what the record can hold and spill the
+ * remainder, which is the same mechanism every other over-large layout uses.
+ */
+#define MAX_ENCODABLE_BYTES_PER_SAMPLE (15 * 8)
+
 /* Minimum tile size in pixels, architectural. */
 #define MIN_TILE_SIZE_PX (16 * 16)
 
@@ -111,7 +121,8 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
       .max_samples_per_tile = max_samples_per_tile,
    };
    const unsigned max_bytes_per_sample =
-      max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE;
+      MIN2(max_sample_size_B ? max_sample_size_B : MAX_BYTES_PER_SAMPLE,
+           MAX_ENCODABLE_BYTES_PER_SAMPLE);
    const unsigned tile_capacity =
       max_bytes_per_tile ? max_bytes_per_tile : MAX_BYTES_PER_TILE;
 
@@ -226,6 +237,8 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
    agx_pack(&tib->usc, USC_SHARED, cfg) {
       if (tib->nr_samples > 0) {
          cfg.uses_shared_memory = true;
+         assert(tib->sample_size_B <= MAX_ENCODABLE_BYTES_PER_SAMPLE &&
+                "the layout must stay inside the record's four-bit field");
          cfg.sample_stride_in_8_bytes = tib->sample_size_B / 8;
          cfg.sample_count = tib->nr_samples;
          cfg.bytes_per_threadgroup = agx_tilebuffer_total_size(tib);
@@ -501,12 +514,21 @@ agx_g17p_rt0_tile_layout_supported(const struct agx_tilebuffer_layout *tib)
  * builtin, whose targets differ only in a per-format IMGWBLK selector, and a
  * background program without pixel transactions. Each target keeps its own
  * tile offset, so admit any unspilled layout whose formats all have a grounded
- * selector. */
+ * selector.
+ *
+ * Layered layouts are admitted on the same terms. The earlier `!tib->layered`
+ * clause was the scope of what had been captured -- only the 2D builtin family
+ * was on hand -- and not a hardware limit: Apple's factory emits the same
+ * program for a 2D-ARRAY attachment, differing only in that it also publishes
+ * the layer wire, and its per-target selector is still the only
+ * format-dependent byte. Those texts are now recorded for two through eight
+ * targets in agx3_g17p_array_eot.h, which is the full range this function
+ * admits. */
 static enum agx_g17p_mrt_layout
 agx_g17p_classify_mixed_mrt(const struct agx_tilebuffer_layout *tib,
                             unsigned active_count)
 {
-   bool mixed = !tib->layered && active_count >= 2 &&
+   bool mixed = active_count >= 2 &&
                 active_count <= AGX_MAX_RENDER_TARGETS;
    BITSET_DECLARE(occupied_B, 256) = {0};
    for (unsigned rt = 0; rt < active_count; ++rt) {
@@ -514,6 +536,8 @@ agx_g17p_classify_mixed_mrt(const struct agx_tilebuffer_layout *tib,
       const unsigned size_B = format_size_B(tib->logical_format[rt]);
       mixed &= !tib->spilled[rt] &&
                agx_g17p_mrt_eot_selector(tib->logical_format[rt]) != 0 &&
+               !(tib->logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT &&
+                 tib->nr_samples != 1) &&
                size_B && offset_B + size_B <= tib->sample_size_B;
       if (!mixed)
          break;

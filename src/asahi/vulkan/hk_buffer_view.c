@@ -9,6 +9,8 @@
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/bitscan.h"
+#include "util/u_debug.h"
+#include "util/u_math.h"
 #include "util/format/u_format.h"
 #include "util/format/u_formats.h"
 
@@ -98,6 +100,35 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
    uint64_t head_offset_B = view->vk.offset & ~0xf;
    uint64_t rw_base = hk_buffer_address_rw(buffer, 0) + head_offset_B;
    uint64_t ro_base = hk_buffer_address_ro(buffer, 0) + head_offset_B;
+
+   /* Which mapping the sampled texel-buffer descriptor addresses on G17P.
+    *
+    * The read-only shadow at +sparse_ro_offset is the mechanism every other
+    * read-only descriptor uses to get sparseResidencyNonResidentStrict for
+    * free: an unbound page reads as zero there.  For a texel buffer G17P
+    * cannot rely on it, so the descriptor names the primary mapping and the
+    * shader masks a non-resident texel to zero from the residency bitmap
+    * instead -- one address and one residency source for both the sparse
+    * fetch and the ordinary read.  See buffer_texel_resident() in
+    * agx_nir_lower_texture.c.
+    *
+    * The environment variable restores the shadow for A/B measurement only.
+    * It is a diagnostic, never a shipping configuration: with the shadow the
+    * shader's residency lookup indexes from the wrong base and every page
+    * reads non-resident.
+    *
+    * For a non-sparse buffer hk_buffer_address() returns the same address
+    * either way (the shadow only exists for buffer->va != NULL), so this
+    * cannot move an ordinary texel buffer.
+    */
+   static int ro_alias = -1;
+   if (unlikely(ro_alias < 0)) {
+      ro_alias =
+         debug_get_bool_option("HK_G17P_SPARSE_TEXEL_RO_ALIAS", false) ? 1 : 0;
+   }
+   const bool g17p = device->dev.chip == AGX_CHIP_G17P;
+   const uint64_t sampled_base = (g17p && !ro_alias) ? rw_base : ro_base;
+
    uint32_t tail_offset_B = view->vk.offset & 0xf;
    uint32_t tail_offset_el = tail_offset_B / util_format_get_blocksize(format);
    assert(tail_offset_el * util_format_get_blocksize(format) == tail_offset_B &&
@@ -121,7 +152,7 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       texture.height = DIV_ROUND_UP(view->vk.elements, texture.width);
       texture.first_level = texture.last_level = 0;
 
-      texture.address = ro_base;
+      texture.address = sampled_base;
       texture.buffer_size_sw = view->vk.elements;
       texture.buffer_offset_sw = tail_offset_el;
 
@@ -133,12 +164,38 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       texture.stride =
          (texture.width * util_format_get_blocksize(format)) - 16;
    }
-   if (device->dev.chip == AGX_CHIP_G17P) {
+   if (g17p) {
+      /* A sparse-resident buffer carries a per-page residency bitmap, and the
+       * buffer texture descriptor has no hardware sparse mode to report
+       * residency with, so a sparse texel fetch reads that bitmap instead.
+       * Pack the map and the element size the shader needs to find the page;
+       * see AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET.  A non-power-of-two
+       * element size (the emulated RGB32 layout) takes the raw load path,
+       * which claims residency anyway, so leave the word zero for it. */
+      uint32_t sparse = 0;
+      const unsigned blocksize_B = util_format_get_blocksize(format);
+      if (buffer && buffer->sparse_map &&
+          util_is_power_of_two_nonzero(blocksize_B)) {
+         const uint64_t map_page = buffer->sparse_map->va->addr / AIL_PAGESIZE;
+         assert((buffer->sparse_map->va->addr % AIL_PAGESIZE) == 0);
+         /* The packed field leaves 28 bits for the map page.  Fail loudly
+          * rather than silently truncating if the VA layout ever outgrows it;
+          * a wrong map address would read residency from arbitrary memory. */
+         if (map_page < (1u << (32 - AGX_G17P_BUFFER_TEXTURE_SPARSE_MAP_SHIFT))) {
+            sparse = (uint32_t)(map_page
+                                << AGX_G17P_BUFFER_TEXTURE_SPARSE_MAP_SHIFT) |
+                     (uint32_t)util_logbase2(blocksize_B);
+         } else {
+            assert(!"sparse residency map outside the packed VA range");
+         }
+      }
+
       view->buffer_metadata = (struct hk_g17p_buffer_texture_metadata){
          .elements = view->vk.elements,
          .offset_el = tail_offset_el,
-         .address = ro_base,
+         .address = sampled_base,
          .rgb32 = texture.channels == AGX_CHANNELS_R32G32B32_EMULATED,
+         .sparse = sparse,
       };
       /* Gen9 has no AGX2 software tail fields. The shader consumes the
        * explicit metadata, while hardware sees the aligned base texture.
@@ -206,7 +263,7 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
     * index.  Without this the index stays 0 and every texel-buffer fetch
     * resolves to the null texture.  Mirrors hk_image_view.c's per-plane
     * hk_descriptor_table_add(). */
-   if (device->dev.chip == AGX_CHIP_G17P) {
+   if (g17p) {
       VkResult result = hk_descriptor_table_add(
          device, &device->sampled_images, &view->tex,
          hk_texture_descriptor_size(generation), &view->sampled_heap_index);

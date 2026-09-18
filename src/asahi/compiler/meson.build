@@ -525,6 +525,20 @@ if with_tests
   )
 
   test(
+    'agx-interp-pixel-source',
+    executable(
+      'agx_interp_pixel_source_test',
+      files('test/test-agx-interp-pixel-source.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_copy_core',
     executable(
       'agx3_copy_core_test',
@@ -694,6 +708,19 @@ if with_tests
     executable(
       'agx3_workgroup_test',
       files('test/test-agx3-workgroup.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_shared_element_index',
+    executable(
+      'agx3_shared_element_index_test',
+      files('test/test-agx3-shared-element-index.c'),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],

@@ -40,7 +40,8 @@ struct vk_ycbcr_conversion_state {
    VkChromaLocation chroma_offsets[2];
    VkFilter chroma_filter;
    bool chroma_reconstruction;
-   uint8_t _pad[3];
+   bool force_explicit_reconstruction;
+   uint8_t _pad[2];
 };
 PRAGMA_DIAGNOSTIC_POP
 

@@ -55,9 +55,30 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
 {
    if (d == NULL || out == NULL || length == NULL)
       return false;
-   if (d->half ? enc != AGX_ISA_ENCODING_AGX3B || d->quad ||
+   /*
+    * 16-bit data narrows the width pair, and the quad selector is a different
+    * field of the same immediate-lane encoding point, so the two compose.
+    * metal-nt -arch applegpu_g17p, one kernel per operation on `ushort`
+    * (src/asahi/compiler/test/probes/g17p-vertex-quad.metal), lane immediate,
+    * same registers, nothing else moving:
+    *
+    *   quad_broadcast(a, 3)      47005602020406200400   quadshfl
+    *   simd_broadcast(a, 3)      47045602020406200400   simdbcast
+    *   quad_shuffle_xor(a, 1)    c7005602020402200400   quadbfly
+    *   simd_shuffle_xor(a, 1)    c7045602020402200400   simdbfly
+    *
+    * Only byte 1 moves between a quad word and its SIMD control, which is the
+    * same selector the 32-bit words in the immediate-lane block below carry.
+    * The shifts are NOT admitted here: Apple's 16-bit simd_shuffle_up is
+    * 47055603030402200200, whose f9/f10 pair is 3/3 rather than the 2/1 this
+    * composition would deposit, so that form needs its own mapping.
+    */
+   const bool half_shuffle_op = d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST ||
+                                d->op == AGX3_SUBGROUP_SHUFFLE_XOR;
+   if (d->half ? enc != AGX_ISA_ENCODING_AGX3B ||
                     (d->lane_kind != AGX3_SUBGROUP_LANE_REGISTER &&
-                     d->op != AGX3_SUBGROUP_SHUFFLE_BROADCAST) ||
+                     !half_shuffle_op) ||
+                    (d->quad && d->lane_kind != AGX3_SUBGROUP_LANE_IMMEDIATE) ||
                     d->dest >= 192 || d->src >= 192
                : !valid_reg(enc, d->dest) || !valid_reg(enc, d->src))
       return false;

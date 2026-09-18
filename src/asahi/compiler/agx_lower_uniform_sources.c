@@ -141,14 +141,55 @@ agx_lower_uniform_sources(agx_context *ctx)
 
       agx_builder b = agx_init_builder(ctx, agx_before_instr(at));
 
+      /* A tied compare-select (fmin/fmax lowered to fcmpsel(a, b, a, b)) is
+       * grounded on AGX3 only while its compared and selected sources stay the
+       * same register. Materialize a uniform once per instruction and reuse
+       * the copy for every source that named the same uniform. */
+      agx_index materialized_from[8] = {0};
+      agx_index materialized_to[8] = {0};
+      unsigned materialized = 0;
+
       agx_foreach_src(I, s) {
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
              !agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                         I->src[s].value, I->src[s].size)) {
-
             agx_index idx = I->src[s];
             idx.abs = idx.neg = false;
-            agx_replace_src(I, s, agx_mov(&b, idx));
+            bool reused = false;
+            for (unsigned m = 0; m < materialized; ++m) {
+               if (agx_is_equiv(materialized_from[m], idx) &&
+                   materialized_from[m].size == idx.size) {
+                  agx_replace_src(I, s, materialized_to[m]);
+                  reused = true;
+                  break;
+               }
+            }
+            if (reused)
+               continue;
+            if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                idx.size == AGX_SIZE_16) {
+               /* Native uniform copies fetch an aligned word. Extract the
+                * requested half through an SSA split, so RA can coalesce
+                * it without reading the neighbouring half as the value.
+                */
+               agx_index word = agx_mov(&b, agx_uniform(idx.value & ~1u,
+                                                      AGX_SIZE_32));
+               agx_instr *split = agx_split(&b, 2, word);
+               split->dest[0] = agx_temp(ctx, AGX_SIZE_16);
+               split->dest[1] = agx_temp(ctx, AGX_SIZE_16);
+               agx_replace_src(I, s, split->dest[idx.value & 1]);
+               if (materialized < ARRAY_SIZE(materialized_from)) {
+                  materialized_from[materialized] = idx;
+                  materialized_to[materialized++] = split->dest[idx.value & 1];
+               }
+            } else {
+               agx_index copy = agx_mov(&b, idx);
+               agx_replace_src(I, s, copy);
+               if (materialized < ARRAY_SIZE(materialized_from)) {
+                  materialized_from[materialized] = idx;
+                  materialized_to[materialized++] = copy;
+               }
+            }
          }
       }
    }

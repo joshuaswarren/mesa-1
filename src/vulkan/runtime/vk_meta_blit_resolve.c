@@ -23,6 +23,15 @@
 
 #include "vk_meta_private.h"
 
+/* The driver asks for combined blit descriptors; the environment variable
+ * remains as an override for bisecting. */
+static inline bool
+vk_meta_use_combined_blit_descriptors(const struct vk_meta_device *meta)
+{
+   return meta->use_combined_blit_descriptors ||
+          debug_get_bool_option("VK_META_BLIT_COMBINED_PUSH", false);
+}
+
 #include "vk_command_buffer.h"
 #include "vk_device.h"
 #include "vk_format.h"
@@ -41,6 +50,9 @@ struct vk_meta_blit_key {
    bool stencil_as_discard;
    VkFormat dst_format;
    VkImageAspectFlags aspects;
+   /* Part of the key: it changes the shader's descriptor bindings, so a
+    * pipeline built one way must not be reused the other. */
+   bool combined_descriptors;
 };
 
 static enum glsl_sampler_dim
@@ -315,11 +327,10 @@ build_blit_shader(const struct vk_meta_blit_key *key)
       nir_variable *texture = nir_variable_create(b->shader, nir_var_uniform,
                                                   texture_type, tex_name);
       texture->data.descriptor_set = 0;
-      texture->data.binding =
-         debug_get_bool_option("VK_META_BLIT_COMBINED_PUSH", false)
-            ? BLIT_DESC_BINDING_SAMPLER
-            : aspect_to_tex_binding(aspect);
+      texture->data.binding = aspect_to_tex_binding(aspect);
       nir_deref_instr *t = nir_build_deref_var(b, texture);
+      /* A combined descriptor carries its own sampler. */
+      nir_deref_instr *samp = key->combined_descriptors ? t : s;
 
       nir_def *val;
       const bool constant_color_diagnostic =
@@ -337,7 +348,7 @@ build_blit_shader(const struct vk_meta_blit_key *key)
                            nir_imm_float(b, 1.0f));
       } else if (resolve_mode == VK_RESOLVE_MODE_NONE) {
          val = nir_tex(b, src_coord, .lod = nir_imm_float(b, 0),
-                       .texture_deref = t, .sampler_deref = s);
+                       .texture_deref = t, .sampler_deref = samp);
       } else {
          val = build_tex_resolve(b, t, nir_f2u32(b, src_coord),
                                  key->src_samples, resolve_mode);
@@ -370,18 +381,30 @@ get_blit_pipeline_layout(struct vk_device *device,
 {
    enum vk_meta_object_key_type key = VK_META_OBJECT_KEY_BLIT;
 
-   if (debug_get_bool_option("VK_META_BLIT_COMBINED_PUSH", false)) {
-      const VkDescriptorSetLayoutBinding binding = {
-         .binding = BLIT_DESC_BINDING_SAMPLER,
+   if (vk_meta_use_combined_blit_descriptors(meta)) {
+      /* One combined binding per aspect.  A depth/stencil blit pushes two
+       * descriptors in the same call, so they cannot share a binding. */
+      const VkDescriptorSetLayoutBinding binding[] = {{
+         .binding = BLIT_DESC_BINDING_COLOR,
          .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
          .descriptorCount = 1,
          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
-      };
+      }, {
+         .binding = BLIT_DESC_BINDING_DEPTH,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      }, {
+         .binding = BLIT_DESC_BINDING_STENCIL,
+         .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+         .descriptorCount = 1,
+         .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
+      }};
       const VkDescriptorSetLayoutCreateInfo desc_info = {
          .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
          .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
-         .bindingCount = 1,
-         .pBindings = &binding,
+         .bindingCount = ARRAY_SIZE(binding),
+         .pBindings = binding,
       };
       const VkPushConstantRange push_range = {
          .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT,
@@ -580,10 +603,11 @@ do_blit(struct vk_command_buffer *cmd,
    uint32_t desc_count = 0;
    VkDescriptorImageInfo image_infos[3];
    VkWriteDescriptorSet desc_writes[3];
+   /* Every aspect must agree with the layout, which declares one combined
+    * binding per aspect.  Restricting this to colour left a depth/stencil
+    * blit pushing plain sampled images into combined bindings. */
    const bool combined_push_diagnostic =
-      debug_get_bool_option("VK_META_BLIT_COMBINED_PUSH", false) &&
-      src_subres.aspectMask == VK_IMAGE_ASPECT_COLOR_BIT &&
-      sampler != VK_NULL_HANDLE;
+      vk_meta_use_combined_blit_descriptors(meta) && sampler != VK_NULL_HANDLE;
 
    if (sampler != VK_NULL_HANDLE && !combined_push_diagnostic) {
       image_infos[desc_count] = (VkDescriptorImageInfo) {
@@ -637,9 +661,7 @@ do_blit(struct vk_command_buffer *cmd,
       };
       desc_writes[desc_count] = (VkWriteDescriptorSet) {
          .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-         .dstBinding = combined_push_diagnostic
-                          ? BLIT_DESC_BINDING_SAMPLER
-                          : aspect_to_tex_binding(aspect),
+         .dstBinding = aspect_to_tex_binding(aspect),
          .descriptorType = combined_push_diagnostic
                               ? VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER
                               : VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -659,6 +681,7 @@ do_blit(struct vk_command_buffer *cmd,
 
    while (aspects_left) {
       key->aspects = aspects_left;
+      key->combined_descriptors = combined_push_diagnostic;
 
       /* If we need to write stencil via iterative discard, it has to be
        * written by itself because otherwise the discards would also throw

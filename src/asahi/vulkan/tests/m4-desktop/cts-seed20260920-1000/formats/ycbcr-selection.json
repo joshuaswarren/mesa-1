@@ -1,0 +1,135 @@
+[
+  {
+    "index": 35,
+    "case": "dEQP-VK.ycbcr.conversion.b10x6g10x6r10x6g10x6_422_unorm_4pack16_khr.color_conversion.ycbcr_2020_itu_full_tiling_linear_cosited",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-seed20-pump",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b10x6g10x6r10x6g10x6_422_unorm_4pack16_khr.color_conversion.ycbcr_2020_itu_full_tiling_linear_cosited",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T214621610720Z-cts-seed20-qualified-000/cts/035/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789335983.6065865,
+    "message": "Format doesn&apos;t support YCbCr conversions at vktYCbCrConversionTests.cpp:1951",
+    "returncode": 0,
+    "seconds": 0.10372950799998648,
+    "finished_unix": 1789335983.7152061,
+    "pid": 3464
+  },
+  {
+    "index": 314,
+    "case": "dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-seed20-pump",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T214634590274Z-cts-seed20-qualified-207/cts/314/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789335999.9488153,
+    "message": "Format doesn&apos;t support YCbCr conversions at vktYCbCrConversionTests.cpp:1951",
+    "returncode": 0,
+    "seconds": 0.13800877200000627,
+    "finished_unix": 1789336000.0969415,
+    "pid": 4223
+  },
+  {
+    "index": 542,
+    "case": "dEQP-VK.ycbcr.conversion.b8g8r8g8_422_unorm_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear_disjoint",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-seed20-pump",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b8g8r8g8_422_unorm_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear_disjoint",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T214647879457Z-cts-seed20-qualified-429/cts/542/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789336014.5752265,
+    "message": "Format doesn&apos;t support YCbCr conversions at vktYCbCrConversionTests.cpp:1951",
+    "returncode": 0,
+    "seconds": 0.12477035300000239,
+    "finished_unix": 1789336014.7065554,
+    "pid": 4868
+  },
+  {
+    "index": 603,
+    "case": "dEQP-VK.ycbcr.conversion.g16b16g16r16_422_unorm_khr.chroma_reconstruction.linear.explicit_linear_cosited_tiling_optimal_disjoint",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-seed20-pump",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.g16b16g16r16_422_unorm_khr.chroma_reconstruction.linear.explicit_linear_cosited_tiling_optimal_disjoint",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T214647879457Z-cts-seed20-qualified-429/cts/603/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789336017.5338244,
+    "message": "Format doesn&apos;t support YCbCr conversions at vktYCbCrConversionTests.cpp:1951",
+    "returncode": 0,
+    "seconds": 0.141812103999996,
+    "finished_unix": 1789336017.6816003,
+    "pid": 5020
+  },
+  {
+    "index": 643,
+    "case": "dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.linear.explicit_nearest_tiling_optimal_swapped_chroma",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-seed20-pump",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.linear.explicit_nearest_tiling_optimal_swapped_chroma",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T214701111684Z-cts-seed20-qualified-636/cts/643/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789336022.2480357,
+    "message": "Format doesn&apos;t support YCbCr conversions at vktYCbCrConversionTests.cpp:1951",
+    "returncode": 0,
+    "seconds": 0.22519684499999926,
+    "finished_unix": 1789336022.4820511,
+    "pid": 5139
+  },
+  {
+    "index": 798,
+    "case": "dEQP-VK.ycbcr.format.g16b16g16r16_422_unorm_khr.fragment_optimal",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-seed20-pump",
+      "--deqp-case=dEQP-VK.ycbcr.format.g16b16g16r16_422_unorm_khr.fragment_optimal",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T214701111684Z-cts-seed20-qualified-636/cts/798/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789336028.6405318,
+    "message": "YCbCr conversion is not supported for format at vktYCbCrUtil.cpp:218",
+    "returncode": 0,
+    "seconds": 0.11862932300002171,
+    "finished_unix": 1789336028.7641568,
+    "pid": 5542
+  },
+  {
+    "index": 921,
+    "case": "dEQP-VK.ycbcr.conversion.g10x6b10x6g10x6r10x6_422_unorm_4pack16_khr.chroma_reconstruction.nearest.default_linear_midpoint_tiling_optimal_disjoint",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-seed20-pump",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.g10x6b10x6g10x6r10x6_422_unorm_4pack16_khr.chroma_reconstruction.nearest.default_linear_midpoint_tiling_optimal_disjoint",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T214731838870Z-cts-seed20-qualified-858/cts/921/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789336055.5489445,
+    "message": "Format doesn&apos;t support YCbCr conversions at vktYCbCrConversionTests.cpp:1951",
+    "returncode": 0,
+    "seconds": 0.1778930819999971,
+    "finished_unix": 1789336055.7349102,
+    "pid": 5917
+  }
+]

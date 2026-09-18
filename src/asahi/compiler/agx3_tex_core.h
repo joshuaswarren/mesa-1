@@ -137,6 +137,50 @@ struct agx3_tex_fetch_desc {
     */
    uint16_t lod_x64;
    bool register_lod;
+   /*
+    * Sparse residency (VK_KHR_sparse_*, OpImageSparse*).  The instruction
+    * writes its masked result channels as usual and then one extra 32-bit
+    * register holding the residency code, at the half immediately after the
+    * masked channels -- the same destination convention AGX2 uses.
+    *
+    * These fields were isolated by compiling matched pairs that differ
+    * only in `sparse_sample`/`sparse_read` vs `sample`/`read`, with
+    * `xcrun metal-nt -arch applegpu_g17p`
+    * (MetalToolchain v27.1.5194.15, -platform_version macos 27.0 27.0):
+    *
+    *   f142 = 1     the residency request itself
+    *   f120 = 1     set on every sparse access
+    *   f112 += 4    NOT ENCODED.  Apple's bytes do move the operand profile,
+    *                but f112 is a scattered bitmask rather than a counter, so
+    *                "+4" drops profile bit 2 and sets bit 3 -- and on G17P
+    *                that makes every sparse fetch and every explicit-LOD
+    *                sparse sample fail.  The profile stays at its dense
+    *                value; see the note in agx3_tex_encode_sample() for the
+    *                measurement.
+    *
+    * Matched compute pairs, argument-buffer descriptors on both arms
+    * (test/probes/g17p-sparse-residency.metal, k_ab_dense vs k_ab_sparse and
+    * k_ab_dread vs k_ab_sread), differ in exactly those three fields plus
+    * register allocation and the group terminator (the f112 move among them,
+    * which this encoder deliberately does not reproduce):
+    *
+    *   sample  dense  05800cb8b4000900920390010100802000800098
+    *           sparse 2dc00c38bc000900920392010200802028c00018
+    *   fetch   dense  05800cb8b0001701900280000100002000800098
+    *           sparse 2dc00c38b0001701900282000200002028c00018
+    *
+    * The residency register is read straight back by the `bit_andc` that
+    * follows: with a W32 result at half 10 and mask 15 it names half 18, with
+    * a W32 result at half 0 and mask 1 it names half 2, and with a W16 result
+    * at half 0 and mask 15 it names half 4 -- dest + channels * halves.
+    *
+    * f120 deposits instruction bit 142, past the 112-bit ep3 form, so the
+    * composer refuses a sparse ep3 instruction outright and a sparse
+    * operation is always the 20-byte ep4 form -- even when both descriptors
+    * are immediate, where the dense sibling stays 14 bytes.  (f142 itself
+    * deposits bit 81 and would fit either form.)  Only AGX3b is witnessed.
+    */
+   bool sparse;
 };
 
 bool agx3_tex_encode_fetch(enum agx_isa_encoding enc,
@@ -326,6 +370,11 @@ struct agx3_tex_sample_desc {
    uint16_t offset_xyz;         /* immediate signed x/y/z nibbles */
    bool offset_register;        /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
+   /* See agx3_tex_fetch_desc::sparse; the sample form uses the same fields,
+    * witnessed on 2D, 2D-array, 3D, cube, gather, immediate level and bias
+    * shapes and on both result widths, and likewise leaves the f112 operand
+    * profile alone. */
+   bool sparse;
 };
 
 /* Pack a scalar LOD into native texture operand bank 6. This bank is separate

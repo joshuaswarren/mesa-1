@@ -1,0 +1,15 @@
+{
+  "source": "/home/council/dev/dirtyroom_m4/reference/vk-gl-cts-1.0.2.6",
+  "source_commit": "6b3bca439862e986409ffd76e857ada0cc7c9080",
+  "patch_sha256": "0cfc13bbba0c131c9f637e31eeb88e1e42d0dc6d7306bb4744179ff7378ccfd2",
+  "original_binary_sha256": "d296ca5f77238367933e88b99babefe050e841d3c7e1fbcb6e95e4d424814b06",
+  "source_sha256": {
+    "external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp": "3502f8b5493c9170d4083db0f7b4954fe4d10ba02a4b1793fa6f7435ff86c509",
+    "external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp": "91f5500c1dcc17b8e3ff8361f244aa2290dfbf30e0e8261967646826431aa733",
+    "external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp": "d3212ea1213fe78932fdc3f6327822acbbad96a88e236903eca50f282631d394",
+    "external/vulkancts/modules/vulkan/api/vktApiCopiesAndBlittingTests.cpp": "60830e6e78e59659ae1a2199728e698fe00c196ac12e71318cbd0bc07b442412",
+    "external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp": "5a3cf1105c352f541a7fd9b2f52b27f9c09fe4b5cd32ef600cb3b76cf8818a04"
+  },
+  "diagnostic_binary_sha256": "508c28b97c82c2981032dd627a3187a5662cd06da0fedef03d1f2070f492186d",
+  "restored": true
+}

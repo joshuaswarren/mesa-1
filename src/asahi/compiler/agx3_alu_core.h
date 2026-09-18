@@ -900,6 +900,24 @@ bool agx3_alu_f32ceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                       uint16_t wait_mask, bool src_neg, bool src_abs,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/*
+ * Round-to-nearest-even is the same form with f43 absent, the first line of
+ * the witness table above.
+ *
+ * The select core also encodes a 32-bit roundeven, through
+ * agx3_pack_f32_rint_reg(), but that encoding point deposits its source in a
+ * six-bit field and so refuses any source above r63. Register allocation puts
+ * one there in any shader with real pressure, and the refusal is fatal: the
+ * whole shader is rejected and pipeline creation fails. This form carries the
+ * family's full eight-bit register fields, its source modifiers and its wait
+ * slots, so it covers the register file.
+ */
+bool agx3_alu_f32roundeven(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, enum agx3_alu_hint hint,
+                           bool dest_cache, uint16_t wait_mask, bool src_neg,
+                           bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                           uint8_t *len);
+
 bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4],
                                   const enum agx3_alu_hint hints[4],

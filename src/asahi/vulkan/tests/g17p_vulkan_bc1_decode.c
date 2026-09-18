@@ -886,13 +886,18 @@ main(void)
           * Upload and readback must emit one launch per slice, never one per
           * compressed block.  The old nested block copy recorded nine
           * launches for this tiny image and 65,536 for one 1024x1024 slice. */
+         /* The trailing strong-barrier counts are the host-read cache
+          * flushes hk_CmdPipelineBarrier2() emits for the readback
+          * (6aae441547b); they strengthen the preceding launch's own tail
+          * barrier rather than adding a record, so the launch contract
+          * above is what the first two fields still pin. */
          if (setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS",
 #ifdef G17P_COMPRESSED_READBACK
                     /* Two-slice upload + sample + two-slice readback. */
-                    "5,5,0,0",
+                    "5,5,0,2",
 #else
                     /* Two-slice upload + sample. */
-                    "3,3,0,0",
+                    "3,3,0,1",
 #endif
                     1))
             die("failed to select exact compressed 3D stream counts");

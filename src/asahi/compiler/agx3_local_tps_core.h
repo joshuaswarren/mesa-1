@@ -90,6 +90,7 @@ struct agx3_tps_desc {
    bool value_kill;      /* store only */
    bool narrow_extend;
    bool structural_bit53;
+   bool retain_tps; /* load only: later reads may alias this location */
    uint8_t slot; /* load only */
    uint16_t wait_mask;
 };

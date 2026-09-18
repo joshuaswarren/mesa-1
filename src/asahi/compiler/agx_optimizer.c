@@ -78,15 +78,17 @@ agx_compose_float_src(agx_index to, agx_index from)
 }
 
 /* AGX3's grounded fmin/fmax encoding requires the compared values to remain
- * tied to the selected values. Inlining a minifloat into only the comparison
- * breaks that identity and needlessly turns a native min/max into a general
- * FSEL. Keep the shared SSA value explicit through register allocation. */
+ * tied to the selected values. Inlining an immediate into only one side (a
+ * minifloat into the comparison, or raw bits that fit an integer immediate,
+ * such as +0.0, into the selection) breaks that identity, and the resulting
+ * general FSEL has no NaN-correct grounded form. Keep the shared SSA value
+ * explicit on both sides through register allocation. */
 static bool
 agx_preserve_g17p_tied_fcmpsel(agx_context *ctx, agx_instr *I, unsigned src)
 {
    return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_FCMPSEL && src < 2 &&
-          agx_is_equiv(I->src[src], I->src[src + 2]);
+          I->op == AGX_OPCODE_FCMPSEL && src < 4 &&
+          agx_is_equiv(I->src[src], I->src[src ^ 2]);
 }
 
 /*
@@ -239,6 +241,21 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           I->op == AGX_OPCODE_IADD && I->nr_srcs == 2 &&
           I->src[1 - s].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
+      /* G17P's arithmetic shift right takes its shifted VALUE in a register.
+       * Only the count (source 1) has an immediate form -- `sra` is what
+       * `metal-nt -arch applegpu_g17p` emits for `(-7) >> x`, and it first
+       * spends an LDIMM to put the -7 in a register
+       * (test/probes/g17p-shift-immediate-value.metal, kernel immneg_reg:
+       * `1cf922fe1e0cff0f` ldimm then `a7015408000400d8e200` sra reg,reg;
+       * decoded in test/probes/README-g17p-deep-loops-and-shift-immediates.md).
+       * Folding the constant into source 0 leaves a shape with no encoding
+       * at all -- agx3_select_core.c's AGX3_SEL_OP_ASR requires two plain
+       * 32-bit registers -- and the packer then refuses the whole shader.
+       * Keep the MOV so selection reproduces Apple's ldimm+sra pair. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_ASR && s == 0)
          continue;
 
       agx_instr *def = defs[src.value];
@@ -797,8 +814,17 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
     * ballot the lanes where it is zero: the witnessed simd_broadcast_first()
     * form.
     */
+   /* `x != N` for a nonzero N has no immediate form, and the register-zero
+    * equality form it would otherwise take is measured wrong on G17P (see
+    * agx3_emit_subgroup_ballot). Ballot the opposite compare instead, exactly
+    * as for a register operand below. */
+   const bool agx3_inverted_eq_imm =
+      def->op == AGX_OPCODE_ICMP && def->invert_cond &&
+      (def->icond == AGX_ICOND_UEQ || def->icond == AGX_ICOND_SEQ) &&
+      def->src[1].type == AGX_INDEX_IMMEDIATE && def->src[1].value != 0;
+
    if (!quad && ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       def->src[1].type != AGX_INDEX_IMMEDIATE) {
+       (def->src[1].type != AGX_INDEX_IMMEDIATE || agx3_inverted_eq_imm)) {
       agx_index opposite = agx_temp(ctx, AGX_SIZE_16);
 
       if (def->op == AGX_OPCODE_ICMP) {

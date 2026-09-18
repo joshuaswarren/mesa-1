@@ -36,6 +36,20 @@ typedef void (*hk_internal_builder_t)(struct nir_builder *b, const void *key);
 struct hk_internal_key {
    hk_internal_builder_t builder;
    size_t key_size;
+
+   /* A compilation input that changes the emitted binary but is not part of
+    * the caller's key bytes, so it has to be hashed alongside them: `stop`
+    * decides whether the part ends the shader or falls through to a footer
+    * the fast linker appends.
+    *
+    * internal_key_hash() hashes sizeof(struct hk_internal_key) + key_size
+    * bytes, which is wider than builder + key_size + the key data once a
+    * member sits between key_size and key[]. Every producer of this struct
+    * therefore zeroes the whole allocation, not just the header, so that no
+    * padding byte reaches the hash uninitialized.
+    */
+   bool stop;
+
    uint8_t key[];
 };
 
@@ -88,6 +102,13 @@ struct hk_device {
    simple_mtx_t radix_sort_lock;
    struct agx_bg_eot_cache bg_eot;
 
+   /* VK_KHR_ray_tracing_pipeline shader group handles.  A handle is one
+    * device-unique index, so a handle captured from a pipeline library keeps
+    * naming the same group in every pipeline that imports the library.  It
+    * starts at one: zero is the value an unwritten shader binding table
+    * record has, and no group may collide with it. */
+   uint32_t rt_group_handle_alloc;
+
    /* Device-lifetime templates for precompiled G17P meta compute programs.
     * The libagx programs and their executable BOs have the same lifetime. */
    struct {
@@ -98,7 +119,18 @@ struct hk_device {
    } g17p_compute_program_cache;
 
    struct {
+      /* Immutable for the device's lifetime: the native texel-fetch sampler
+       * table. Its address is published to the GPU as a sampler table base by
+       * every G17P background reload program, so nothing that any subsystem
+       * writes at draw time may share this buffer object. */
       struct agx_bo *bo;
+
+      /* The geometry/tessellation heap descriptor. hk_init_heap() writes it
+       * from the CPU on the first tessellated or geometry-shaded draw, and the
+       * libagx bump allocator then atomically updates poly_heap::bottom from
+       * the GPU on every such draw. Kept in its own buffer object so that
+       * mutation cannot reach the sampler table above. */
+      struct agx_bo *heap_bo;
       uint64_t heap;
    } rodata;
 
@@ -133,6 +165,13 @@ struct hk_device {
    /* The same contract for an indirect-local grid, which an earlier kernel
     * already wrote as a launch geometry: this helper copies it. */
    struct hk_api_shader *g17p_geometry_copy_helper;
+
+   /* The same contract again, for an indirect-global grid whose arguments
+    * live in a sparse residency buffer: identical except that it consults the
+    * buffer's residency bitmap and publishes a zero grid for arguments in a
+    * non-resident page.  Kept as its own program so the ordinary indirect
+    * dispatch path records exactly the code it recorded before. */
+   struct hk_api_shader *g17p_grid_helper_sparse;
 
    /* Indirected for common secondary emulation */
    struct vk_device_dispatch_table cmd_dispatch;

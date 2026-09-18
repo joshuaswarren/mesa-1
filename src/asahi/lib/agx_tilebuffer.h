@@ -161,6 +161,8 @@ agx_g17p_sample_zs_base(unsigned nr_samples, uint8_t loc_written,
           4 * (sample - 1);
 }
 
+bool agx_nir_needs_sample_count(const struct nir_shader *shader);
+bool agx_nir_specialize_sample_count(struct nir_shader *shader, unsigned samples);
 bool agx_nir_unroll_g17p_samples(struct nir_shader *shader,
                                  unsigned nr_samples, uint8_t loc_written);
 

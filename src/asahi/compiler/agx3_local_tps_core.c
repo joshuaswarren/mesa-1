@@ -212,7 +212,7 @@ tps_overrides(const struct agx3_tps_desc *d, bool is_load,
 }
 
 static unsigned
-tps_baseline(enum agx_isa_encoding enc, bool is_load,
+tps_baseline(enum agx_isa_encoding enc, bool is_load, bool retain_tps,
              struct agx3_field_kv *base)
 {
    unsigned n = 0;
@@ -220,7 +220,7 @@ tps_baseline(enum agx_isa_encoding enc, bool is_load,
    base[n++] = (struct agx3_field_kv)KV(38, 1);
    base[n++] = (struct agx3_field_kv)KV(39, 1);
    if (is_load)
-      base[n++] = (struct agx3_field_kv)KV(66, 1);
+      base[n++] = (struct agx3_field_kv)KV(66, !retain_tps);
    if (enc == AGX_ISA_ENCODING_AGX3C)
       base[n++] = (struct agx3_field_kv)KV(44, is_load ? 109 : 190);
    return n;
@@ -235,7 +235,7 @@ tps_form(enum agx_isa_encoding enc, const struct agx3_tps_desc *d,
       return false;
 
    struct agx3_field_kv base[5];
-   const unsigned nbase = tps_baseline(enc, is_load, base);
+   const unsigned nbase = tps_baseline(enc, is_load, d->retain_tps, base);
    struct agx3_field_kv ov[32];
    const unsigned n = tps_overrides(d, is_load, ov);
    return agx3_bind_compose(enc, is_load ? "ldtps" : "sttps", ep, base,
