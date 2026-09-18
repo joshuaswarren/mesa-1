@@ -67,6 +67,37 @@ has_sample_mask(nir_shader *s)
    return false;
 }
 
+/*
+ * The hardware skips a fragment shader with side effects outright when the
+ * depth test is NEVER, so the driver does not program NEVER at all: hk forces
+ * the depth comparison to ALWAYS whenever a side-effecting shader is drawn
+ * under VK_COMPARE_OP_NEVER (hk_cmd_draw.c, draw.force_never_in_shader, in
+ * both the common FRAGMENT_FACE path and the native HAL200 depth words) and
+ * expects the shader to emulate the test instead.
+ *
+ * 7fb60c4c813 emulated it by adding NaN to the synthesized FragDepth write.
+ * 53aac78d1aa replaced that write with an all-live sample mask and dropped the
+ * NaN with it; df3c8c45508 brought a pass-through FragDepth write back for
+ * G17P but not the bias. Nothing has emulated the test since, so every
+ * fragment passed a test the API asked to fail and the colour was written.
+ *
+ * Demote at the very end of the shader instead, after every side effect has
+ * executed: the stores land, the colour write does not. This does not depend
+ * on NaN comparison semantics in the depth unit, and it is a no-op for every
+ * other draw, where load_depth_never_agx reads zero.
+ */
+static void
+emulate_depth_never(nir_shader *s)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+
+   nir_demote_if(&b, nir_ine_imm(&b, nir_load_depth_never_agx(&b), 0));
+   s->info.fs.uses_discard = true;
+
+   nir_progress(true, impl, nir_metadata_none);
+}
+
 struct sidefx_state {
    bool done;
    bool g17p;
@@ -138,6 +169,9 @@ agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p)
 
       insert_late_test(&b, g17p);
    }
+
+   if (g17p)
+      emulate_depth_never(s);
 
    return true;
 }
