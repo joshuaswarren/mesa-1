@@ -1038,9 +1038,19 @@ hk_bind_builder_finish(struct hk_bind_builder *b)
 
    /* Submit everything to the kernel at once */
    if (b->result == VK_SUCCESS && b->binds.size > 0) {
-      int ret = b->dev->dev.ops.bo_bind(
-         &b->dev->dev, b->binds.data,
-         util_dynarray_num_elements(&b->binds, struct drm_asahi_gem_bind_op));
+      const unsigned op_count =
+         util_dynarray_num_elements(&b->binds, struct drm_asahi_gem_bind_op);
+
+      /* One op per hardware tile plus its read-only shadow, so a large
+       * layered mip chain submits thousands.  The kernel copies and stages
+       * the whole batch, so the op count is what decides whether this bind
+       * can be satisfied when memory is tight -- print it when asked, rather
+       * than leaving a VM_BIND ENOMEM with no size attached to it. */
+      perf_debug_dev(&b->dev->dev, "Sparse bind batch: %u ops (%u bytes)",
+                     op_count, (unsigned)b->binds.size);
+
+      int ret = b->dev->dev.ops.bo_bind(&b->dev->dev, b->binds.data,
+                                        op_count);
       if (ret) {
          const int error = errno ? errno : EIO;
          b->result = vk_errorf(
