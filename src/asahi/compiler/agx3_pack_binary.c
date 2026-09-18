@@ -8855,15 +8855,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * no conflicting live bank the allocator returns the base bank
              * and emits no retirement, so the encoding is unchanged.
              *
-             * Background, clear and end-of-tile programs keep their single
-             * witnessed bank. Giving them the allocator moves the bytes of
-             * Apple's builtin multi-target EOT text (asahi-g17p-mrt-mixed's
-             * r11g11b10x2 golden changes, same length, different staging
-             * halves), and no hardware witness grounds the other placement
-             * yet. */
-            const bool staged_bank_reads =
-               staged && !(ctx->stage == MESA_SHADER_FRAGMENT &&
-                           ctx->key->fs.ignore_tib_dependencies);
+             * Background, clear and end-of-tile programs need it too. A
+             * multi-target background reloads one texel fetch per attachment
+             * with nothing tracking the bank an earlier fetch still consumes,
+             * so a later fetch restages halves 0..3 under it and that
+             * attachment reloads another target's coordinates. */
+            const bool staged_bank_reads = staged;
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
             const uint16_t fetch_wait =
