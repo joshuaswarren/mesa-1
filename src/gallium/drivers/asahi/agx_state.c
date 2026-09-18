@@ -1776,8 +1776,11 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
          compiled->g17p_texture_resources
             ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS
             : 0;
+      /* G17P's Ioto loader moves uniform dwords: lay the ranges out so
+       * that each starts at an even half and covers an even count. */
       NIR_PASS(_, nir, agx_nir_layout_uniforms, compiled,
-               &key.reserved_preamble, uniform_base);
+               &key.reserved_preamble, uniform_base,
+               dev->chip == AGX_CHIP_G17P);
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
