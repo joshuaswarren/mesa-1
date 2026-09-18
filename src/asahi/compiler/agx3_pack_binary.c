@@ -8829,19 +8829,41 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 I->op == AGX_OPCODE_IMAGE_LOAD) &&
                (I->dim == AGX_DIM_2D || I->dim == AGX_DIM_2D_ARRAY ||
                 I->dim == AGX_DIM_3D);
-            /* Compute kernels and API fragment functions stage outstanding
-             * reads in disjoint banks (see agx3_emit_texture_fetch()).
-             * Background and clear programs keep their single bank. */
             /* A fetch whose level is a live register, which is the shape
              * whose level stages into the sampler-private bank. */
             const bool register_fetch_lod =
                I->op == AGX_OPCODE_TEXTURE_LOAD &&
                I->lod_mode == AGX_LOD_MODE_LOD_MIN &&
                I->src[1].type == AGX_INDEX_REGISTER;
+            /* A staged read consumes, and kills, its coordinate bank
+             * asynchronously, so every stage that stages coordinates needs
+             * the bank allocator -- not only the kernel and API-fragment
+             * stages it was first written for.
+             *
+             * A vertex texel fetch always stages (see
+             * vertex_fetch_stages_coordinates above) but used to pass no
+             * `banks`, so every fetch in the shader republished halves 0..3
+             * with nothing tracking the read still consuming them. Measured
+             * on G17P in a ycbcr.conversion.chroma_reconstruction vertex
+             * shader with three fetches: the third restaged halves 0..3
+             * while slot 6 -- the second fetch -- was still outstanding, so
+             * the second tap sampled the third's coordinates. Scheduling
+             * only decided whether the fetches overlapped, which is why
+             * AGX_MESA_DEBUG=nosched hid it.
+             *
+             * Wherever at most one read is in flight this is a no-op: with
+             * no conflicting live bank the allocator returns the base bank
+             * and emits no retirement, so the encoding is unchanged.
+             *
+             * Background, clear and end-of-tile programs keep their single
+             * witnessed bank. Giving them the allocator moves the bytes of
+             * Apple's builtin multi-target EOT text (asahi-g17p-mrt-mixed's
+             * r11g11b10x2 golden changes, same length, different staging
+             * halves), and no hardware witness grounds the other placement
+             * yet. */
             const bool staged_bank_reads =
-               agx3_stage_runs_as_kernel(ctx->stage) ||
-               (ctx->stage == MESA_SHADER_FRAGMENT &&
-                !ctx->key->fs.ignore_tib_dependencies);
+               staged && !(ctx->stage == MESA_SHADER_FRAGMENT &&
+                           ctx->key->fs.ignore_tib_dependencies);
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
             const uint16_t fetch_wait =
