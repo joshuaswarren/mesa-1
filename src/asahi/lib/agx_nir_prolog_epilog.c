@@ -835,7 +835,24 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       (key->link.write_z || key->link.write_s) && key->nr_samples > 1 &&
       !key->defer_monolithic_msaa;
 
-   if (write_samples && !key->link.already_ran_zs) {
+   /* already_ran_zs says the main shader has already triggered the
+    * depth/stencil tests, so the epilog must not trigger them again.  It does
+    * not say the main shader's coverage has been applied: a forced-early
+    * shader runs the tests at its start with only the API mask
+    * (hk_g17p_apply_api_mask_to_force_early) and exports the coverage its
+    * discards and SampleMask writes produced in FOUT_WRITE_SAMPLES for us.
+    * Gating this block on the flag dropped that mask on the floor and stored
+    * colour for killed samples -- query_pool.discard.early.*.{discard,
+    * sample_mask} saw white where the discard should have left the target
+    * untouched.
+    *
+    * Applying it here does not re-run the tests: lower_tests_zs() below
+    * substitutes 0 for load_shader_part_tests_zs_agx when already_ran_zs, and
+    * run_tests_after_last_discard() then builds `sample_mask killed, ~killed`,
+    * which kills without testing.  So keep the two decisions separate --
+    * always honour the exported coverage, and let the flag govern only
+    * whether the kill also triggers the tests. */
+   if (write_samples) {
       bool kills = false;
       nir_foreach_block(block, b->impl) {
          nir_foreach_instr_safe(instr, block) {
