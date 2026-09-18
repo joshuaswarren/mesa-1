@@ -2586,7 +2586,8 @@ agx_drop_for_unusable_program(struct agx_context *ctx,
 static bool
 agx_drop_for_null_g17p_program(struct agx_context *ctx,
                                struct agx_compiled_shader *cs,
-                               uint64_t program, const char *stage)
+                               uint64_t program, const char *stage,
+                               const char *why)
 {
    if (program)
       return false;
@@ -2598,9 +2599,9 @@ agx_drop_for_null_g17p_program(struct agx_context *ctx,
          cs->refusal_reported = true;
 
       mesa_loge("asahi: dropping work: no G17P %s program could be built for "
-                "this draw. This is a driver gap; submitting a null program "
-                "address faults the GPU.",
-                stage);
+                "this draw: %s. This is a driver gap; submitting a null "
+                "program address faults the GPU.",
+                stage, why ? why : "unknown refusal");
    }
 
    return true;
@@ -3801,17 +3802,31 @@ agx_bind_g17p_preamble(const struct agx_shader_info *info, const void *binary,
           info->main_offset + info->main_size <= info->preamble_offset;
 }
 
+/*
+ * Every refusal below names its condition through `why`, so a null program
+ * reported by agx_drop_for_null_g17p_program() says which of the dozen
+ * fail-closed checks fired instead of leaving the reader to instrument the
+ * driver and reproduce the draw.
+ */
+#define G17P_REFUSE(reason)                                                    \
+   do {                                                                        \
+      if (why)                                                                 \
+         *why = (reason);                                                      \
+      return 0;                                                                \
+   } while (0)
+
 static uint32_t
 agx_build_g17p_graphics_program(struct agx_batch *batch,
                                 struct agx_compiled_shader *cs,
                                 struct agx_linked_shader *linked,
-                                uint64_t *full_va)
+                                uint64_t *full_va, const char **why)
 {
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
    struct agx_ioto_preshader_desc preamble;
-   if (!linked || !linked->bo || !linked->bo->va || !linked->size ||
-       !agx_bind_g17p_preamble(&cs->b.info, cs->b.binary, cs->bo, &preamble))
-      return 0;
+   if (!linked || !linked->bo || !linked->bo->va || !linked->size)
+      G17P_REFUSE("the linked program has no executable");
+   if (!agx_bind_g17p_preamble(&cs->b.info, cs->b.binary, cs->bo, &preamble))
+      G17P_REFUSE("the preamble cannot be bound");
    const struct agx_ioto_preshader_desc *preshader =
       cs->b.info.has_preamble ? &preamble : NULL;
 
@@ -3826,13 +3841,17 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
         cs->g17p_texture_resources));
 
    if (batch->texture_count[stage] && !resource_pair)
-      return 0;
+      G17P_REFUSE("textures are bound but the program reserves no "
+                  "texture/sampler pointer pair");
    if (resource_pair) {
-      if (!batch->stage_uniforms[stage].texture_base ||
-          !batch->samplers[stage] ||
-          (batch->ctx->stage[stage].custom_borders &&
-           !cs->g17p_custom_border_emulation))
-         return 0;
+      if (!batch->stage_uniforms[stage].texture_base)
+         G17P_REFUSE("no texture table is uploaded for the stage");
+      if (!batch->samplers[stage])
+         G17P_REFUSE("no sampler table is uploaded for the stage");
+      if (batch->ctx->stage[stage].custom_borders &&
+          !cs->g17p_custom_border_emulation)
+         G17P_REFUSE("custom border colours are bound but the program "
+                     "has no border emulation");
       const uint64_t pointers[2] = {
          batch->stage_uniforms[stage].texture_base,
          batch->samplers[stage],
@@ -3840,7 +3859,7 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       const uint64_t pointer_va = agx_pool_upload_aligned(
          &batch->pool, pointers, sizeof(pointers), 8);
       if (!pointer_va)
-         return 0;
+         G17P_REFUSE("the texture/sampler pointer pair could not be uploaded");
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = 0,
          .size_halfs = 8,
@@ -3857,7 +3876,8 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
        * or draw-parameter range here would corrupt vertex fetches. */
       if (resource_pair && stage == MESA_SHADER_VERTEX &&
           push->uniform < AGX_ABI_G17P_TEXTURE_POINTER_HALFS)
-         return 0;
+         G17P_REFUSE("a textured vertex program pushes a uniform range "
+                     "below the texture/sampler pointer pair");
 
       /* Draw parameters are intentionally absent for draws whose shader does
        * not consume them. This is the same omission as the legacy builder. */
@@ -3875,7 +3895,7 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       if (blend_constants) {
          uint16_t blend_base;
          if (!agx_g17p_fragment_blend_constant_base(cs, &blend_base))
-            return 0;
+            G17P_REFUSE("the fragment blend constants have no native base");
          start = blend_base;
       } else if (resource_pair && start < 8) {
          const unsigned end = start + length;
@@ -3893,12 +3913,17 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       if ((length & 1) && push->table == AGX_SYSVAL_STAGE(stage)) {
          if ((uint64_t)push->offset + ((uint64_t)length + 1) * 2 >
              sizeof(struct agx_stage_uniforms))
-            return 0;
+            G17P_REFUSE("a 16-bit stage sysval sits at the end of the stage "
+                        "table and cannot be padded to a dword");
          ++length;
       }
-      if (!table || (start & 1) || (length & 1) ||
-          count == ARRAY_SIZE(ranges))
-         return 0;
+      if (!table)
+         G17P_REFUSE("a pushed sysval table is not uploaded");
+      if ((start & 1) || (length & 1))
+         G17P_REFUSE("a pushed uniform range is not dword aligned");
+      if (count == ARRAY_SIZE(ranges))
+         G17P_REFUSE("the program pushes more uniform ranges than the Ioto "
+                     "composer accepts (AGX3_G17P_GRAPHICS_MAX_RANGES)");
 
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = start,
@@ -3911,10 +3936,12 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       const struct agx_rodata *rodata = &cs->b.info.rodata;
       const uint64_t size_B = (uint64_t)rodata->size_16 * 2;
       if (!cs->bo || !cs->bo->va || (rodata->base_uniform & 1) ||
-          (rodata->size_16 & 1) || count == ARRAY_SIZE(ranges) ||
-          rodata->offset > cs->bo->size ||
+          (rodata->size_16 & 1) || rodata->offset > cs->bo->size ||
           size_B > cs->bo->size - rodata->offset)
-         return 0;
+         G17P_REFUSE("the promoted constant range is malformed");
+      if (count == ARRAY_SIZE(ranges))
+         G17P_REFUSE("the promoted constants do not fit beside the pushed "
+                     "uniform ranges (AGX3_G17P_GRAPHICS_MAX_RANGES)");
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = rodata->base_uniform,
          .size_halfs = rodata->size_16,
@@ -3925,16 +3952,19 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
    size_t capacity;
    if (!agx3_g17p_graphics_program_bound_with_preshader(
           dev->chip, ranges, count, preshader, &capacity))
-      return 0;
+      G17P_REFUSE("the uniform ranges exceed the Ioto program bound");
 
    struct agx_bo *program_bo = NULL;
    struct agx_ptr t = agx_pool_alloc_aligned_with_bo(
       &batch->pipeline_pool, capacity, AGX_IOTO_PROGRAM_ALIGNMENT,
       &program_bo);
-   if (!t.cpu || !program_bo || !agx_va_in_usc_window(dev, t.gpu) ||
-       !agx_va_in_usc_window(dev,
-                            linked->bo->va->addr + linked->entry_offset))
-      return 0;
+   if (!t.cpu || !program_bo)
+      G17P_REFUSE("the program could not be allocated in the pipeline pool");
+   if (!agx_va_in_usc_window(dev, t.gpu))
+      G17P_REFUSE("the program lies outside the USC window");
+   if (!agx_va_in_usc_window(dev,
+                             linked->bo->va->addr + linked->entry_offset))
+      G17P_REFUSE("the shader binary lies outside the USC window");
 
    const uint32_t pass_type =
       cs->stage == MESA_SHADER_FRAGMENT
@@ -3962,31 +3992,34 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       },
    };
    struct agx3_g17p_graphics_program program;
-   if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &program) ||
-       program.length > capacity)
-      return 0;
+   if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &program))
+      G17P_REFUSE("the Ioto composer refused the program descriptor");
+   if (program.length > capacity)
+      G17P_REFUSE("the composed program overflows its allocation");
 
    memcpy(t.cpu, program.bytes, program.length);
    if (agx_bo_sync_for_device(program_bo,
                               t.gpu - program_bo->va->addr,
                               program.length))
-      return 0;
+      G17P_REFUSE("the program could not be synced for the device");
    if (full_va)
       *full_va = t.gpu;
    return agx_usc_addr(dev, t.gpu);
 }
 
+#undef G17P_REFUSE
+
 static uint32_t
 agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
                    struct agx_linked_shader *linked,
                    mesa_shader_stage phys_stage, unsigned variable_shared_mem,
-                   size_t max_subgroups, uint64_t *full_va)
+                   size_t max_subgroups, uint64_t *full_va, const char **why)
 {
    struct agx_context *ctx = batch->ctx;
    struct agx_device *dev = agx_device(ctx->base.screen);
 
    if (dev->chip == AGX_CHIP_G17P && phys_stage != MESA_SHADER_COMPUTE)
-      return agx_build_g17p_graphics_program(batch, cs, linked, full_va);
+      return agx_build_g17p_graphics_program(batch, cs, linked, full_va, why);
 
    unsigned constant_push_ranges = DIV_ROUND_UP(cs->b.info.rodata.size_16, 64);
 
@@ -5387,10 +5420,12 @@ agx_g17p_emit_bind_state(struct agx_batch *batch, uint8_t *out,
       return NULL;
 
    uint64_t fragment_program = 0;
+   const char *fragment_why = NULL;
    agx_build_pipeline(batch, ctx->fs, ctx->linked.fs,
-                      MESA_SHADER_FRAGMENT, 0, 0, &fragment_program);
+                      MESA_SHADER_FRAGMENT, 0, 0, &fragment_program,
+                      &fragment_why);
    if (agx_drop_for_null_g17p_program(ctx, ctx->fs, fragment_program,
-                                      "fragment"))
+                                      "fragment", fragment_why))
       return NULL;
 
    const struct agx_ppp_hal200_fragment_fields fs_fields = {
@@ -5641,13 +5676,15 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
 
    if (dev->chip == AGX_CHIP_G17P || IS_DIRTY(VS) || varyings_dirty) {
       uint64_t pipeline = 0;
+      const char *vertex_why = NULL;
       const uint32_t packed_pipeline =
          agx_build_pipeline(batch, vs,
                             ctx->gs ? ctx->linked.gs_copy : ctx->linked.vs,
-                            MESA_SHADER_VERTEX, 0, 0, &pipeline);
+                            MESA_SHADER_VERTEX, 0, 0, &pipeline, &vertex_why);
 
       if (dev->chip == AGX_CHIP_G17P) {
-         if (agx_drop_for_null_g17p_program(ctx, vs, pipeline, "vertex"))
+         if (agx_drop_for_null_g17p_program(ctx, vs, pipeline, "vertex",
+                                            vertex_why))
             return NULL;
 
          /* Native G17P uses thread-invariant IPR/spill byte footprints here,
@@ -5892,7 +5929,8 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
 
       agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_1, cfg) {
          cfg.pipeline = agx_build_pipeline(batch, ctx->fs, ctx->linked.fs,
-                                           MESA_SHADER_FRAGMENT, 0, 0, NULL);
+                                           MESA_SHADER_FRAGMENT, 0, 0, NULL,
+                                           NULL);
       }
 
       agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_2, cfg) {
@@ -7844,7 +7882,7 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
 
    uint32_t usc = agx_build_pipeline(batch, cs, linked, MESA_SHADER_COMPUTE,
                                      variable_shared_mem, subgroups_per_core,
-                                     NULL);
+                                     NULL, NULL);
 
    if (cs)
       agx_batch_add_bo(batch, cs->bo);
