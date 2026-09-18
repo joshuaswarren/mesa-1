@@ -554,13 +554,69 @@ union drm_asahi_cmd {
    struct drm_asahi_cmd_render render;
 };
 
+/*
+ * These are diagnostic knobs, read once per process.
+ *
+ * Every one of them sat on the submit path and was re-read on EVERY
+ * vkQueueSubmit: two inside hk_g17p_write_range_candidates() before its chip
+ * check, a third beside its caller, and two more beside the ioctl. getenv() is
+ * a linear scan of the environment block, so that is five scans per submission
+ * to answer five questions whose answers cannot change after startup.
+ */
+static bool
+hk_g17p_debug_flag(const char *name)
+{
+   const char *value = getenv(name);
+   return value != NULL;
+}
+
+static bool
+hk_g17p_dump_write_ranges(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_DUMP_WRITE_RANGES");
+   return cached;
+}
+
+static bool
+hk_g17p_native_write_spans(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_NATIVE_WRITE_SPANS");
+   return cached;
+}
+
+static bool
+hk_g17p_abort_before_ioctl(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_ABORT_BEFORE_IOCTL");
+   return cached;
+}
+
+static bool
+hk_g17p_submit_dmb(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_SUBMIT_DMB");
+   return cached;
+}
+
 static bool
 hk_g17p_write_range_candidates(struct hk_device *dev,
                                struct drm_asahi_attachment spans[2])
 {
-   const bool dump = getenv("HK_G17P_DUMP_WRITE_RANGES") != NULL;
-   const bool synthesize = getenv("HK_G17P_NATIVE_WRITE_SPANS") != NULL;
-   if (dev->dev.chip != AGX_CHIP_G17P || (!dump && !synthesize))
+   /* Chip check first: on anything but G17P this returns without touching the
+    * environment at all. */
+   if (dev->dev.chip != AGX_CHIP_G17P)
+      return false;
+   const bool dump = hk_g17p_dump_write_ranges();
+   const bool synthesize = hk_g17p_native_write_spans();
+   if (!dump && !synthesize)
       return false;
 
    uint64_t main_start = UINT64_MAX, main_end = 0;
@@ -646,8 +702,7 @@ asahi_append_fragment_attachments(struct hk_device *dev,
       hk_g17p_write_range_candidates(dev, writable_spans);
    struct hk_drm_attachment_set synthetic;
    const struct hk_drm_attachment_set *set = &cs->fragment_attachments;
-   if (getenv("HK_G17P_NATIVE_WRITE_SPANS") != NULL &&
-       have_writable_spans) {
+   if (hk_g17p_native_write_spans() && have_writable_spans) {
       hk_drm_attachment_set_init(&synthetic);
       synthetic.list[0] = writable_spans[0];
       synthetic.list[1] = writable_spans[1];
@@ -716,8 +771,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
 {
    struct agx_submit_virt virt = {.ring_idx = ring_idx};
 
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       getenv("HK_G17P_ABORT_BEFORE_IOCTL") != NULL) {
+   if (dev->dev.chip == AGX_CHIP_G17P && hk_g17p_abort_before_ioctl()) {
       fprintf(stderr,
               "G17P diagnostic: aborting before DRM_IOCTL_ASAHI_SUBMIT\n");
       return vk_device_set_lost(&dev->vk,
@@ -734,8 +788,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    /* G17P command, VIT, and HAL200 bind-state uploads use write-combined GEM
     * mappings.  Diagnose whether the GPU can observe a doorbell before those
     * CPU stores have drained, without changing the default submission path. */
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       getenv("HK_G17P_SUBMIT_DMB") != NULL)
+   if (dev->dev.chip == AGX_CHIP_G17P && hk_g17p_submit_dmb())
       __sync_synchronize();
 
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
