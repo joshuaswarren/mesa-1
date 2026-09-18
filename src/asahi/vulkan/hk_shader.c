@@ -3149,8 +3149,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
          nir->info.fs.uses_discard = true;
 
          /* Late-Z alone only moves the depth test. Move the depth write too. */
-         if (!getenv("AGX_LATEZ_NOFORCE"))
-            hk_fs_force_shader_depth_write(nir);
+         hk_fs_force_shader_depth_write(nir);
       }
 
       if (!sample_variants)

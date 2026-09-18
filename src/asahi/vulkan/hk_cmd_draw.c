@@ -3183,8 +3183,13 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * before the scan. Inert unless the variable is set; it is how the quarter-
     * sized threadgroup window on this path was measured. */
    {
-      const char *probe = getenv("HK_G17P_TG_PROBE");
-      if (probe) {
+      static const char *probe;
+      static bool probe_read;
+      if (unlikely(!probe_read)) {
+         probe = getenv("HK_G17P_TG_PROBE");
+         probe_read = true;
+      }
+      if (unlikely(probe != NULL)) {
          struct agx_ptr report = hk_pool_alloc(cmd, 8192, 4);
          if (report.gpu) {
             if (probe[0] == 's') {
