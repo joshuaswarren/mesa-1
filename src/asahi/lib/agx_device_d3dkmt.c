@@ -2182,6 +2182,7 @@ d3dkmt_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
    }
 
    bo->_map = lock.pData;
+   bo->_map_size = bo->size;
    agx_bo_read_set_changed(dev);
 }
 

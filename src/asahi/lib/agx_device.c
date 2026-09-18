@@ -81,7 +81,8 @@ asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
 void
 agx_drm_bo_munmap(struct agx_device *dev, struct agx_bo *bo)
 {
-   munmap(bo->_map, bo->size);
+   munmap(bo->_map, agx_bo_map_size(bo));
+   bo->_map_size = 0;
 }
 
 int
@@ -459,10 +460,12 @@ agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
    }
 
    flags = MAP_SHARED | (fixed_addr ? MAP_FIXED : 0);
-   bo->_map = os_mmap(fixed_addr, length ?: bo->size, PROT_READ | PROT_WRITE,
+   bo->_map_size = length ?: bo->size;
+   bo->_map = os_mmap(fixed_addr, bo->_map_size, PROT_READ | PROT_WRITE,
                       flags, dev->fd, gem_mmap_offset.offset);
    if (bo->_map == MAP_FAILED) {
       bo->_map = NULL;
+      bo->_map_size = 0;
       fprintf(stderr,
               "mmap failed: result=%p size=0x%llx fd=%i offset=0x%llx %m\n",
               bo->_map, (long long)bo->size, dev->fd,

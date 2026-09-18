@@ -400,6 +400,17 @@ agx_rw_addr_to_ro(struct agx_device *dev, uint64_t addr)
  * object's range; dEQP-VK.memory.map_placed.* reserves guard pages
  * immediately after it, fills them, and checks the pattern survives.
  */
+/*
+ * Bytes mapped at `bo->_map`. Backends that map the whole BO may leave
+ * `_map_size` zero; everything that tears a mapping down must go through this
+ * rather than assuming `bo->size`. See the field comment in agx_bo.h.
+ */
+static inline size_t
+agx_bo_map_size(const struct agx_bo *bo)
+{
+   return bo->_map_size ?: bo->size;
+}
+
 static inline void *
 agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t length)
 {
@@ -415,6 +426,7 @@ agx_bo_map_placed(struct agx_bo *bo, void *fixed_addr, size_t length)
    if (fixed_addr && bo->_map && bo->_map != fixed_addr) {
       bo->dev->ops.bo_munmap(bo->dev, bo);
       bo->_map = NULL;
+      bo->_map_size = 0;
    }
 
    if (!bo->_map)

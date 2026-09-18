@@ -395,17 +395,24 @@ hk_UnmapMemory2KHR(VkDevice device,
    if (pMemoryUnmapInfo->flags & VK_MEMORY_UNMAP_RESERVE_BIT_EXT) {
       VK_FROM_HANDLE(hk_device, dev, device);
 
-      void *err = mmap(mem->bo->_map, mem->bo->size, PROT_NONE,
+      /* Reserve exactly what was mapped. A placed map covers the
+       * VkDeviceMemory's allocationSize, not the cached BO's size, and
+       * PROT_NONE'ing the difference lands on address space the application
+       * reserved for itself -- the guard pages dEQP-VK.memory.map_placed.*
+       * fills and reads back. */
+      void *err = mmap(mem->bo->_map, agx_bo_map_size(mem->bo), PROT_NONE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
       if (err == MAP_FAILED) {
          return vk_errorf(dev, VK_ERROR_MEMORY_MAP_FAILED,
                           "Failed to map over original mapping");
       }
       mem->bo->_map = NULL;
+      mem->bo->_map_size = 0;
    } else {
       if (mem->bo->_map) {
-         munmap(mem->bo->_map, mem->bo->size);
+         munmap(mem->bo->_map, agx_bo_map_size(mem->bo));
          mem->bo->_map = NULL;
+         mem->bo->_map_size = 0;
       }
    }
 
