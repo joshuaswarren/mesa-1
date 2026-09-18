@@ -1327,10 +1327,13 @@ test_g17p_basic_graphics_program(void)
    }
    resource.uniform_ranges = firefox_indexed_vertex;
 
-   /* The complete vertex worst case: the six above plus a gl_DrawID range.
-    * The Ioto loader bounds a program by load chunks and body size, never by
-    * how many ranges produced them, so the driver budget must admit all seven
-    * or a legal program is refused fail-closed. */
+   /* The complete Honeykrisp vertex worst case: the six above plus a
+    * gl_DrawID range. The Ioto loader bounds a program by load chunks and
+    * body size, never by how many ranges produced them, so the driver budget
+    * must admit all seven or a legal program is refused fail-closed. (The GL
+    * driver's collector is data-dependent and needs more -- Firefox's
+    * WebRender vertex shaders push nine -- so the budget is no longer exactly
+    * seven; it only has to be at least this.) */
    const struct agx3_ioto_uniform_range firefox_drawid_vertex[] = {
       {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
       {.start_halfs = 8, .size_halfs = 24, .address = 0x2000},
@@ -1340,7 +1343,7 @@ test_g17p_basic_graphics_program(void)
       {.start_halfs = 56, .size_halfs = 16, .address = 0x5000},
       {.start_halfs = 72, .size_halfs = 2, .address = 0x6000},
    };
-   CHECK(ARRAY_SIZE(firefox_drawid_vertex) == HK_AGX3_G17P_GRAPHICS_MAX_RANGES);
+   CHECK(ARRAY_SIZE(firefox_drawid_vertex) <= HK_AGX3_G17P_GRAPHICS_MAX_RANGES);
    size_t drawid_bound = 0;
    CHECK(hk_agx3_g17p_graphics_program_bound(
       AGX_CHIP_G17P, firefox_drawid_vertex,

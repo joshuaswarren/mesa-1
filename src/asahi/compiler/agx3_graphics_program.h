@@ -15,12 +15,25 @@
  * produced them. So this only has to cover every range the driver's collector
  * can emit, and a value below that refuses a legal program fail-closed.
  *
- * A vertex program is the worst case and can request all seven: VBO bases,
- * VBO clamps, draw parameters, draw ID, indexed texture/sampler heaps,
- * descriptor root, and promoted constants. Firefox/WebGL proves six of those,
- * every one but the draw ID. HK_AGX3_G17P_GRAPHICS_MAX_RANGES aliases this
- * value and hk_cmd_buffer.c static-asserts it against the collector. */
-#define AGX3_G17P_GRAPHICS_MAX_RANGES 7u
+ * Honeykrisp's collector is fixed-shape and needs at most seven for a vertex
+ * program: VBO bases, VBO clamps, draw parameters, draw ID, indexed
+ * texture/sampler heaps, descriptor root, and promoted constants
+ * (hk_cmd_buffer.c static-asserts that against
+ * HK_AGX3_G17P_GRAPHICS_MAX_RANGES, which aliases this value).
+ *
+ * The GL driver's collector is not fixed-shape: agx_nir_layout_uniforms()
+ * pushes one range per contiguous run of system values of one element size,
+ * so the count depends on which sysvals a shader reads. Firefox's WebRender
+ * vertex shaders on the J700 need eight or nine -- the texture/sampler
+ * pointer pair, VBO bases, VBO clamps, draw parameters, the stage table's
+ * texture and UBO bases, the UBO size, two 16-bit root sysvals, and for some
+ * variants promoted constants -- and a budget of seven refused every one of
+ * them ("no G17P vertex program could be built for this draw"), leaving GPU
+ * WebRender black. Thirty-two covers the GL collector's realistic worst case
+ * (every root and stage-table field a vertex shader can read, each split by
+ * element size) with room to spare; the chunk and body bounds below remain
+ * the real limits and are still enforced per program. */
+#define AGX3_G17P_GRAPHICS_MAX_RANGES 32u
 #define AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 #define AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE \
    (2u * AGX_IOTO_LOAD_LDIMM_MAX_SIZE)

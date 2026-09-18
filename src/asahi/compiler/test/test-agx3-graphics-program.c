@@ -724,6 +724,89 @@ main(void)
       CHECK(relocated_size == reference.length);
       CHECK(memcmp(relocated, reference.bytes, reference.length) == 0);
    }
+   /* Firefox's WebRender through the GL driver (J700, 2026-09-18) reaches a
+    * nine-source vertex shape that a seven-range budget refused outright:
+    * the texture/sampler pointer pair, six attributes' VBO bases and clamps,
+    * draw parameters, the stage table's texture and UBO bases, the UBO size,
+    * two 16-bit root sysvals, and two halves of promoted constants.  The
+    * loader bounds a program by chunks and body size, never by range count,
+    * so the ninth source must compose like the first. */
+   struct agx3_ioto_uniform_range webrender_vertex_ranges[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 8, .size_halfs = 24, .address = 0x2048},
+      {.start_halfs = 32, .size_halfs = 12, .address = 0x2148},
+      {.start_halfs = 44, .size_halfs = 4, .address = 0x3000},
+      {.start_halfs = 48, .size_halfs = 8, .address = 0x4000},
+      {.start_halfs = 56, .size_halfs = 2, .address = 0x4108},
+      {.start_halfs = 58, .size_halfs = 2, .address = 0x2260},
+      {.start_halfs = 60, .size_halfs = 2, .address = 0x2270},
+      {.start_halfs = 62, .size_halfs = 2, .address = 0x5000},
+   };
+   const size_t webrender_vertex_range_count =
+      sizeof(webrender_vertex_ranges) / sizeof(webrender_vertex_ranges[0]);
+   CHECK(webrender_vertex_range_count > 7);
+   CHECK(webrender_vertex_range_count <= AGX3_G17P_GRAPHICS_MAX_RANGES);
+   struct agx3_g17p_graphics_program_desc webrender_vertex_desc = {
+      .program_va = UINT64_C(0x10000500000),
+      .shader_va = UINT64_C(0x100006003c0),
+      .uniform_ranges = webrender_vertex_ranges,
+      .uniform_range_count = webrender_vertex_range_count,
+      .shader_binary_size = 640,
+      .nr_gprs = 24,
+   };
+   struct agx3_g17p_graphics_program webrender_vertex_program;
+   size_t webrender_vertex_bound = 0;
+   CHECK(agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, webrender_vertex_ranges, webrender_vertex_range_count,
+      &webrender_vertex_bound));
+   CHECK(agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &webrender_vertex_desc, &webrender_vertex_program));
+   CHECK(webrender_vertex_program.length <= webrender_vertex_bound);
+   CHECK(webrender_vertex_program.length <=
+         AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE);
+   const struct agx3_g17p_graphics_program webrender_vertex_baseline =
+      webrender_vertex_program;
+   for (unsigned i = 0; i < webrender_vertex_range_count; ++i) {
+      webrender_vertex_ranges[i].address += 0x40;
+      CHECK(agx3_g17p_graphics_program_generate(
+         AGX_CHIP_G17P, &webrender_vertex_desc, &webrender_vertex_program));
+      CHECK(webrender_vertex_program.length ==
+            webrender_vertex_baseline.length);
+      CHECK(memcmp(webrender_vertex_program.bytes,
+                   webrender_vertex_baseline.bytes,
+                   webrender_vertex_program.length) != 0);
+      webrender_vertex_ranges[i].address -= 0x40;
+   }
+
+   /* The budget is still a budget: one past it is refused, and the refusal
+    * leaves the caller's program untouched. */
+   struct agx3_ioto_uniform_range
+      over_budget[AGX3_G17P_GRAPHICS_MAX_RANGES + 1];
+   for (unsigned i = 0; i < AGX3_G17P_GRAPHICS_MAX_RANGES + 1; ++i) {
+      over_budget[i] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 2 * i, .size_halfs = 2, .address = 0x8000 + 0x10 * i,
+      };
+   }
+   struct agx3_g17p_graphics_program_desc over_budget_desc =
+      webrender_vertex_desc;
+   over_budget_desc.uniform_ranges = over_budget;
+   over_budget_desc.uniform_range_count = AGX3_G17P_GRAPHICS_MAX_RANGES + 1;
+   size_t over_budget_bound = 0;
+   CHECK(!agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, over_budget, AGX3_G17P_GRAPHICS_MAX_RANGES + 1,
+      &over_budget_bound));
+   struct agx3_g17p_graphics_program untouched = webrender_vertex_baseline;
+   CHECK(!agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &over_budget_desc, &untouched));
+   CHECK(memcmp(&untouched, &webrender_vertex_baseline,
+                sizeof(untouched)) == 0);
+   over_budget_desc.uniform_range_count = AGX3_G17P_GRAPHICS_MAX_RANGES;
+   CHECK(agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, over_budget, AGX3_G17P_GRAPHICS_MAX_RANGES,
+      &over_budget_bound));
+   CHECK(agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &over_budget_desc, &untouched));
+   CHECK(untouched.length <= over_budget_bound);
 
    uint64_t clear_spec = 0, reload_spec = 0, none_spec = 0;
    CHECK(agx3_g17p_rt0_bg_resource_spec(
