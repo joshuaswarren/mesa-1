@@ -613,14 +613,22 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
       static_assert(sizeof(struct hk_native_pbe_descriptor) ==
                        AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE,
                     "native PBE table stride");
+      /* A layered pass stores through the 2D-ARRAY block image store, so its
+       * targets need the array-shaped PBE descriptor. The plain BG/EOT
+       * descriptor is deliberately flattened to one layer -- pack_pbe() forces
+       * layers = 1 for HK_DESC_USAGE_BG_EOT -- and handing it to an array
+       * store writes the wrong surface. This mirrors the single-target path.
+       */
       struct hk_native_pbe_descriptor pbe_arguments[HK_MAX_RTS] = {0};
       for (unsigned rt = 0; rt < count; ++rt) {
-         if (!views[rt]->planes[0].eot_pbe_valid) {
+         if (!(key.tib.layered ? views[rt]->planes[0].layered_eot_pbe_valid
+                               : views[rt]->planes[0].eot_pbe_valid)) {
             vk_command_buffer_set_error(&cmd->vk,
                                         VK_ERROR_FORMAT_NOT_SUPPORTED);
             return (struct hk_bg_eot){0};
          }
-         pbe_arguments[rt] = views[rt]->planes[0].eot;
+         pbe_arguments[rt] = key.tib.layered ? views[rt]->planes[0].layered_eot
+                                             : views[rt]->planes[0].eot;
       }
 
       const uint64_t pbe_argument_va = hk_pool_upload(
@@ -692,7 +700,9 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
                        "native texture table stride");
          struct hk_native_texture_descriptor textures[2 * HK_MAX_RTS - 1] = {0};
          for (unsigned rt = 0; rt < reloads; ++rt)
-            textures[2 * rt] = views[rt]->planes[0].background;
+            textures[2 * rt] = key.tib.layered
+                                  ? views[rt]->planes[0].layered_background
+                                  : views[rt]->planes[0].background;
          const uint64_t texture_va = hk_pool_upload(
             cmd, textures, (2 * reloads - 1) * AGX_TEXTURE_GEN9_LENGTH,
             AGX_TEXTURE_GEN9_LENGTH);

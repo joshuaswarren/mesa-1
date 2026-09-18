@@ -53,8 +53,21 @@ agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
                             32 + 44 * (bin->info.agx3_staging_halfs / 8) &&
                          bin->info.nr_gprs == 8 &&
                          bin->info.agx3_staging_known;
+   /* The 2D-ARRAY multi-target program of two to eight targets. It carries the
+    * layer wire in addition to the XY tile origin, so it has a longer common
+    * lead and a 54-byte tail each, and Apple's metadata asks for five GPR
+    * dwords rather than four. See agx3_g17p_array_eot.h. */
+   const bool array_mrt = bin && bin->info.agx3_staging_halfs >= 16 &&
+                          bin->info.agx3_staging_halfs <=
+                             8 * AGX_MAX_RENDER_TARGETS &&
+                          bin->info.agx3_staging_halfs % 8 == 0 &&
+                          bin->info.binary_size ==
+                             42 + 54 * (bin->info.agx3_staging_halfs / 8) &&
+                          bin->info.nr_gprs == 10 &&
+                          bin->info.agx3_staging_known;
    return bin && bin->binary &&
-          (rt0 || native_84_rt0 || rgba8_mrt || wboit_mrt || raw32_mrt) &&
+          (rt0 || native_84_rt0 || rgba8_mrt || wboit_mrt || raw32_mrt ||
+           array_mrt) &&
           bin->info.main_offset == 0 &&
           bin->info.main_size == bin->info.binary_size &&
           !bin->info.scratch_size && bin->info.agx3_staging_known;

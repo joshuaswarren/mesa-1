@@ -34,6 +34,7 @@
 #include "agx3_falu_mod_core.h"
 #include "agx3_fltnorm_core.h"
 #include "agx3_funop_core.h"
+#include "agx3_g17p_array_eot.h"
 #include "agx3_g17p_quad_eot.h"
 #include "agx3_iadd_core.h"
 #include "agx3_isel_core.h"
@@ -7077,6 +7078,175 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
                       (stride == 4 && stores == 4)) ? stores : 0;
 }
 
+/* What a register currently holds, for the layered end-of-tile matcher. The
+ * coordinate sources are tracked by role rather than by register number,
+ * because register allocation reuses a system register's slot for a later tile
+ * offset once the coordinate triple has been assembled. */
+enum agx3_g17p_eot_role {
+   AGX3_G17P_EOT_ROLE_NONE = 0,
+   AGX3_G17P_EOT_ROLE_X,
+   AGX3_G17P_EOT_ROLE_Y,
+   AGX3_G17P_EOT_ROLE_LAYER,
+};
+
+/* The layered sibling of agx3_g17p_multi_eot_count().
+ *
+ * Apple's builtin end-of-tile factory emits a distinct program for 2D-ARRAY
+ * attachments: it publishes the layer alongside the XY tile origin, so each
+ * block store takes a three-component coordinate vector and AGX_DIM_2D_ARRAY.
+ * The generic AGX3 packer has no encoding for an array block image store at
+ * all -- it reports "no grounded AGX3 encoding for block_image_store ... dim=3"
+ * -- so substituting the native text is the only way such a program can exist.
+ * agx3_g17p_layered_eot_kind() already does this for one target; this
+ * recognizes the same shape with two through eight.
+ *
+ * Registers are tracked rather than positionally fixed, because scheduling is
+ * free to interleave the per-target offset constants with the stores.
+ */
+static unsigned
+agx3_g17p_array_multi_eot_count(const agx_context *ctx, const char **why)
+{
+   const unsigned count = ctx->key->g17p_mrt_eot_count;
+
+#define REJECT(reason)                                                         \
+   do {                                                                        \
+      if (why)                                                                 \
+         *why = (reason);                                                      \
+      return 0;                                                                \
+   } while (0)
+
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_COMPUTE || ctx->is_preamble ||
+       ctx->key->no_stop || list_length(&ctx->blocks) != 1)
+      REJECT("not a single-block G17P compute end-of-tile shader");
+
+   if (count < 2 || count > AGX_MAX_RTS)
+      REJECT("key does not name two to eight mixed targets");
+
+   /* values[r]: the immediate r holds, or UINT_MAX. role[r]: which coordinate
+    * source r currently carries. Both are ordinary forward dataflow, so a
+    * register that is reused after its value is dead simply takes its new
+    * meaning from the instruction that rewrites it. */
+   unsigned values[256];
+   uint8_t role[256];
+   for (unsigned i = 0; i < ARRAY_SIZE(values); ++i) {
+      values[i] = UINT_MAX;
+      role[i] = AGX3_G17P_EOT_ROLE_NONE;
+   }
+
+   unsigned coords = UINT_MAX, stores = 0;
+   bool stopped = false;
+
+   agx_foreach_instr_global(ctx, I) {
+      if (stopped)
+         REJECT("instruction after stop");
+
+      if (I->op == AGX_OPCODE_STOP) {
+         stopped = true;
+         continue;
+      }
+
+      if (I->op != AGX_OPCODE_BLOCK_IMAGE_STORE) {
+         /* Every producer writes one whole aligned 32-bit register. */
+         if (I->nr_dests != 1 || !agx3_src_is_register(I->dest[0]) ||
+             I->dest[0].size != AGX_SIZE_32 || agx_channels(I->dest[0]) != 1 ||
+             I->dest[0].value >= ARRAY_SIZE(values) || I->dest[0].value % 2)
+            REJECT("unexpected destination shape");
+
+         const unsigned reg = I->dest[0].value;
+
+         values[reg] = UINT_MAX;
+         role[reg] = AGX3_G17P_EOT_ROLE_NONE;
+
+         switch (I->op) {
+         case AGX_OPCODE_GET_SR:
+            if (I->nr_srcs)
+               REJECT("get_sr with sources");
+            if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_X)
+               role[reg] = AGX3_G17P_EOT_ROLE_X;
+            else if (I->sr == AGX_SR_THREAD_POSITION_IN_GRID_Y)
+               role[reg] = AGX3_G17P_EOT_ROLE_Y;
+            else if (I->sr == AGX_SR_THREADGROUP_POSITION_IN_GRID_Z)
+               role[reg] = AGX3_G17P_EOT_ROLE_LAYER;
+            else
+               REJECT("unexpected system register");
+            break;
+
+         case AGX_OPCODE_MOV_IMM:
+            if (I->nr_srcs || I->imm >= AGX_G17P_MAX_BYTES_PER_SAMPLE)
+               REJECT("immediate is not a tile offset");
+            values[reg] = I->imm;
+            break;
+
+         case AGX_OPCODE_BITOP: {
+            /* The register move that assembles the coordinate triple. */
+            if ((I->truth_table & 0xfu) != AGX3_SEL_TT_MOV || I->saturate ||
+                I->nr_srcs != 2 || !agx3_src_is_register(I->src[0]) ||
+                I->src[0].abs || I->src[0].neg ||
+                I->src[0].size != AGX_SIZE_32 ||
+                agx_channels(I->src[0]) != 1 ||
+                I->src[0].value >= ARRAY_SIZE(values) ||
+                I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].value != 0)
+               REJECT("bitop is not a plain register move");
+
+            /* A move carries both meanings of its source. */
+            const unsigned src = I->src[0].value;
+            values[reg] = values[src];
+            role[reg] = role[src];
+            break;
+         }
+
+         default:
+            REJECT("unexpected opcode");
+         }
+
+         continue;
+      }
+
+      if (stores >= count || I->nr_dests || I->nr_srcs != 4 ||
+          !agx3_g17p_mrt_eot_store_format_ok(
+             I->format, ctx->key->g17p_mrt_eot_selectors[stores]) ||
+          I->dim != AGX_DIM_2D_ARRAY || !I->explicit_coords ||
+          I->src[0].type != AGX_INDEX_IMMEDIATE || I->src[0].value != 0 ||
+          I->src[0].size != AGX_SIZE_16 ||
+          I->src[1].type != AGX_INDEX_IMMEDIATE ||
+          I->src[1].value != stores || I->src[1].size != AGX_SIZE_16 ||
+          !agx3_src_is_register(I->src[2]) || I->src[2].abs || I->src[2].neg ||
+          I->src[2].size != AGX_SIZE_32 || agx_channels(I->src[2]) != 1 ||
+          I->src[2].value >= ARRAY_SIZE(values) ||
+          !agx3_src_is_register(I->src[3]) || I->src[3].abs || I->src[3].neg ||
+          I->src[3].size != AGX_SIZE_32 || agx_channels(I->src[3]) != 3 ||
+          I->src[3].value + 4 >= ARRAY_SIZE(values))
+         REJECT("store is not a native array end-of-tile store");
+
+      /* Every target stores through one coordinate triple holding the grid X,
+       * grid Y and layer, in that order. Checking the roles here also rejects
+       * any program that overwrote one of them between two stores. */
+      const unsigned base = I->src[3].value;
+      if (coords == UINT_MAX)
+         coords = base;
+
+      if (base != coords || role[base] != AGX3_G17P_EOT_ROLE_X ||
+          role[base + 2] != AGX3_G17P_EOT_ROLE_Y ||
+          role[base + 4] != AGX3_G17P_EOT_ROLE_LAYER)
+         REJECT("coordinate triple is not (grid x, grid y, layer)");
+
+      /* The offset reaches the program through its offset uniform, so it only
+       * has to be a tile offset this shader established. */
+      if (values[I->src[2].value] == UINT_MAX)
+         REJECT("store offset is not a known immediate");
+
+      stores++;
+   }
+
+   if (!stopped || stores != count)
+      REJECT("target count does not match the key");
+
+#undef REJECT
+
+   return stores;
+}
+
 static enum agx3_alu_hint
 agx3_post_ra_hint(agx_index index)
 {
@@ -7094,6 +7264,52 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const unsigned initial_size = emission->size;
    ctx->agx3_staging_known = true;
    ctx->agx3_fltnorm_start = false;
+
+   /* A layered mixed-format end-of-tile program. Apple's array builtin differs
+    * from the 2D one only in publishing the layer wire, and its per-target
+    * IMGWBLK lane-class selector is the sole format-dependent byte, exactly as
+    * in the 2D family. A multisample array attachment (BTNF dimension 8)
+    * differs from the array text only in those selectors, whose low nibble
+    * becomes the multisample dimension class 0 -- the same rule the one-target
+    * layered program applies above. Unlike the 2D family it needs no
+    * PACK_IMGWIR wire-width change; see agx3_g17p_array_eot.h. */
+   const char *array_eot_why = NULL;
+   const unsigned array_eot_count =
+      agx3_g17p_array_multi_eot_count(ctx, &array_eot_why);
+   if (array_eot_count) {
+      const uint8_t *text = agx3_g17p_array_eot[array_eot_count].text;
+      const unsigned size = agx3_g17p_array_eot[array_eot_count].size;
+      const bool multisample = ctx->key->g17p_rt0_eot_multisample;
+      uint8_t program[sizeof(agx3_g17p_array_eot_8)];
+
+      assert(size <= sizeof(program));
+      memcpy(program, text, size);
+
+      for (unsigned rt = 0; rt < array_eot_count; ++rt) {
+         const uint8_t selector = ctx->key->g17p_mrt_eot_selectors[rt];
+         program[agx3_g17p_array_eot[array_eot_count].selector[rt]] =
+            multisample ? (selector & 0xf0) : selector;
+      }
+
+      /* The matched synthetic graph used registers that are absent from the
+       * replacement, so its register count does not describe what will run.
+       * Apple's metadata for the array builtin asks for five GPR dwords and
+       * sixteen staging bytes per target. */
+      ctx->max_reg = 9;
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs,
+                                     8 * array_eot_count);
+
+      /* Six or more targets exceed agx3_append's 8-bit length. */
+      memcpy(util_dynarray_grow_bytes(emission, 1, size), program, size);
+      return true;
+   }
+
+   if (array_eot_why &&
+       debug_get_bool_option("AGX_G17P_ARRAY_EOT_TRACE", false)) {
+      fprintf(stderr, "G17P array EOT not matched: %s (key count=%u)\n",
+              array_eot_why, ctx->key->g17p_mrt_eot_count);
+      agx_print_shader(ctx, stderr);
+   }
 
    const unsigned multi_eot_count = agx3_g17p_multi_eot_count(ctx);
    if (multi_eot_count) {

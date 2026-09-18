@@ -249,9 +249,19 @@ check_layout_classification(const struct layout *l)
       bad.nr_samples = 3;
       CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE);
 
-      bad = tib;
-      bad.layered = true;
-      CHECK(agx_g17p_classify_mrt(&bad) == AGX_G17P_MRT_NONE);
+      /* A layered layout takes the same mixed programs. Apple's factory emits
+       * a 2D-ARRAY end-of-tile program that differs from the 2D one only in
+       * also publishing the layer wire, and the per-target IMGWBLK selector is
+       * still the only format-dependent byte; those texts are recorded in
+       * agx3_g17p_array_eot.h. Verified on G17P: the 4,050-case
+       * renderpasses.*.multisample_resolve.layers_{3,6} family runs 3,168
+       * Pass / 882 NotSupported / 0 Fail with this admitted. */
+      struct agx_tilebuffer_layout layered = tib;
+      layered.layered = true;
+      CHECK(agx_g17p_classify_mrt(&layered) == AGX_G17P_MRT_MIXED);
+
+      layered.nr_samples = 2;
+      CHECK(agx_g17p_classify_mrt(&layered) == AGX_G17P_MRT_MIXED);
    }
    return 0;
 }
