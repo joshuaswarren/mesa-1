@@ -164,6 +164,59 @@ hk_has_scratch_sized_array(nir_shader *nir)
    return false;
 }
 
+/*
+ * A fragment shader in a depth/stencil feedback loop samples the same depth
+ * attachment it renders to. Measured on G17P with a single draw and no
+ * barriers: subpassLoad() of the depth attachment returned this draw's own
+ * interpolated z instead of the pre-draw contents. With depth writes disabled
+ * the same read returns the clear correctly, so the input-attachment read path
+ * is sound -- what is wrong is that the fixed-function depth write lands
+ * before the shader's read.
+ *
+ * Forcing late-Z is not enough, because late-Z only moves the depth *test*.
+ * Writing gl_FragDepth moves the depth *write* into the shader
+ * (agx_nir_lower_discard_zs_emit turns a FRAG_RESULT_DEPTH store into
+ * store_zs_agx, emitted after the reads), which is why the same CTS cases pass
+ * at the sample counts where the test writes gl_FragDepth itself and fail at
+ * sample count 1 where it does not.
+ *
+ * gl_FragCoord.z is exactly the value fixed-function would have written: a
+ * depth round-trip probe on this hardware showed the interpolated value, the
+ * stored value and the vertex z bit-identical across every sample tested.
+ *
+ * This costs early depth, so it is gated on
+ * VK_PIPELINE_CREATE_2_DEPTH_STENCIL_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT
+ * (hk_fs_key::zs_self_dep). A pipeline that declares that bit has already
+ * given up early depth by definition, so the production path is unchanged.
+ *
+ * Runs after nir_lower_io, so the write is emitted as a store_output.
+ */
+static void
+hk_fs_force_shader_depth_write(nir_shader *nir)
+{
+   /* A shader that already writes gl_FragDepth orders its own write. */
+   if (nir->info.outputs_written & BITFIELD64_BIT(FRAG_RESULT_DEPTH))
+      return;
+
+   /* Declaring early_fragment_tests is the application asking for the write to
+    * happen before the shader, and agx_nir_lower_discard_zs_emit() deletes the
+    * z store in that case. Leave it alone.
+    */
+   if (nir->info.fs.early_fragment_tests)
+      return;
+
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+
+   nir_store_output(
+      &b, nir_channel(&b, nir_load_frag_coord(&b), 2), nir_imm_int(&b, 0),
+      .base = 0, .write_mask = 0x1, .component = 0,
+      .src_type = nir_type_float32,
+      .io_semantics = {.location = FRAG_RESULT_DEPTH, .num_slots = 1});
+
+   nir->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DEPTH);
+}
+
 void
 hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
 {
@@ -196,6 +249,7 @@ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
       };
 
       nir_lower_sysvals_to_varyings(nir, &sysvals_opts);
+
    }
 
    NIR_PASS(_, nir, nir_lower_system_values);
@@ -3007,6 +3061,10 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
             nir_builder_at(nir_before_impl(nir_shader_get_entrypoint(nir)));
          nir_discard_if(&b, nir_imm_false(&b));
          nir->info.fs.uses_discard = true;
+
+         /* Late-Z alone only moves the depth test. Move the depth write too. */
+         if (!getenv("AGX_LATEZ_NOFORCE"))
+            hk_fs_force_shader_depth_write(nir);
       }
 
       if (!sample_variants)
