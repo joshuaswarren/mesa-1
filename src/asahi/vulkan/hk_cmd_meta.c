@@ -2521,9 +2521,15 @@ hk_g17p_buffer_upload_desc(struct hk_device *dev, const struct hk_image *image,
    const struct ail_layout *layout = &image->planes[plane].layout;
    return (struct hk_g17p_buffer_to_image_copy){
       .chip = dev->dev.chip,
-      /* The raw compute path does not need an EOT-capable format, but the
-       * shared validity gate does.  Every format admitted by the narrow raw
-       * planner is renderable on G17P. */
+      /* The raw compute path writes the image with a compute kernel, so it
+       * needs no EOT-capable format at all; it reuses the shared gate only for
+       * that gate's dimension, layer and mip checks, and the gate insists on a
+       * renderable format for the graphics fallback's sake.  Pass it as true
+       * here so the rest of those checks still run.  This is also why
+       * single-plane 4:2:2 uploads have to come through this path at all: no
+       * subsampled pipe format has an ail_pixel_format[] entry, so none of them
+       * is renderable, and the graphics path refuses the copy outright with
+       * VK_ERROR_FEATURE_NOT_PRESENT. */
       .plane_format_renderable = true,
       .format = format,
       .layout = info->dstImageLayout,

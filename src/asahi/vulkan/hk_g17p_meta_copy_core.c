@@ -407,9 +407,18 @@ hk_g17p_uncompressed_upload_format(VkFormat format)
 
    /* This path copies raw format elements and never interprets their colour
     * channels.  Admit every ordinary power-of-two format through 16 bytes;
-    * the caller separately excludes depth/stencil and multi-plane images. */
-   return vk_format_get_blockwidth(format) == 1 &&
-          vk_format_get_blockheight(format) == 1 &&
+    * the caller separately excludes depth/stencil and multi-plane images.
+    *
+    * A single-plane 4:2:2 element is an ordinary element too -- one 2x1 pixel
+    * block of eight bytes -- and ail lays those images out on that same grid
+    * (ail_initialize_linear/miptree size every level with
+    * util_format_get_nblocksx, and the linear assert admits
+    * UTIL_FORMAT_LAYOUT_SUBSAMPLED), so the raw copy walks it unchanged once
+    * the region is converted to elements below.  Block-compressed formats are
+    * excluded: hk_CmdCopyBufferToImage2 routes them to their own planner
+    * before reaching this one.
+    */
+   return !vk_format_is_block_compressed(format) &&
           (block_B == 1 || block_B == 2 || block_B == 4 || block_B == 8 ||
            block_B == 16);
 }
@@ -443,10 +452,32 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
    if (width > UINT32_MAX / height)
       return false;
 
-   const uint32_t row_el =
+   /* Everything below this point counts elements, not pixels.  For every plain
+    * format the block is 1x1 and the two are the same; for a single-plane
+    * 4:2:2 format one element spans two pixels horizontally.  Vulkan requires
+    * the image offset to be block-aligned, and bufferRowLength/
+    * bufferImageHeight -- which are in pixels -- to be block multiples too, so
+    * reject anything that is not rather than silently rounding it. */
+   const uint32_t block_w = vk_format_get_blockwidth(copy->format);
+   const uint32_t block_h = vk_format_get_blockheight(copy->format);
+   if (!block_w || !block_h ||
+       (copy->image_offset.x % block_w) || (copy->image_offset.y % block_h) ||
+       (copy->buffer_row_length && copy->buffer_row_length % block_w) ||
+       (copy->buffer_image_height && copy->buffer_image_height % block_h))
+      return false;
+
+   const uint32_t row_px =
       copy->buffer_row_length ? copy->buffer_row_length : width;
-   const uint32_t image_height =
+   const uint32_t image_height_px =
       copy->buffer_image_height ? copy->buffer_image_height : height;
+   /* A copy covers whole elements: an extent that stops mid-element still
+    * transfers the element it touches, exactly as the compressed planner
+    * above rounds its block counts up. */
+   const uint32_t width_el = ((uint64_t)width + block_w - 1) / block_w;
+   const uint32_t height_el = ((uint64_t)height + block_h - 1) / block_h;
+   const uint32_t row_el = ((uint64_t)row_px + block_w - 1) / block_w;
+   const uint32_t image_height_el =
+      ((uint64_t)image_height_px + block_h - 1) / block_h;
    const bool volume = copy->image_type == VK_IMAGE_TYPE_3D;
    const uint32_t first_slice =
       volume ? copy->image_offset.z : copy->base_array_layer;
@@ -458,21 +489,21 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
 
    uint64_t row_B, slice_B, span = 0, term;
    if (!hk_u64_mul(row_el, block_B, &row_B) || row_B > UINT32_MAX ||
-       !hk_u64_mul(image_height, row_B, &slice_B) ||
+       !hk_u64_mul(image_height_el, row_B, &slice_B) ||
        !hk_u64_mul(slice_count - 1, slice_B, &span) ||
-       !hk_u64_mul(height - 1, row_B, &term) ||
+       !hk_u64_mul(height_el - 1, row_B, &term) ||
        !hk_u64_add(span, term, &span) ||
-       !hk_u64_mul(width, block_B, &term) ||
+       !hk_u64_mul(width_el, block_B, &term) ||
        !hk_u64_add(span, term, &span) || buffer_offset > buffer_size ||
        span > buffer_size - buffer_offset)
       return false;
 
    *plan = (struct hk_g17p_uncompressed_copy_plan){
       .block_size_B = block_B,
-      .base_x_el = copy->image_offset.x,
-      .base_y_el = copy->image_offset.y,
-      .width_el = width,
-      .height_el = height,
+      .base_x_el = (uint32_t)copy->image_offset.x / block_w,
+      .base_y_el = (uint32_t)copy->image_offset.y / block_h,
+      .width_el = width_el,
+      .height_el = height_el,
       .first_slice = first_slice,
       .slice_count = slice_count,
       .buffer_row_stride_B = row_B,
