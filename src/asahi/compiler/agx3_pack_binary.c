@@ -10237,6 +10237,38 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
+         /* A 32-bit roundeven had no handler here and fell through to the
+          * select core, whose f32rint encoding point holds its source in a
+          * six-bit field and therefore refuses any source above r63. That is
+          * not a rare shape: hk lowers every float texture result through a
+          * scaled-view recovery whose integer fetch ends in fround_even, and
+          * one unrolled loop of texelFetch() puts those sources well past
+          * r63. A refusal is fatal -- the shader does not compile and
+          * vkCreateComputePipelines fails -- so it cost 106 robustness2
+          * cases. Use the f32rint form family that floor and ceil already
+          * use, which carries the family's full register fields, its f30/f31
+          * source modifiers and its wait slots. Shapes this does not claim
+          * keep their existing route. */
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             I->op == AGX_OPCODE_ROUNDEVEN &&
+             I->nr_dests == 1 && I->nr_srcs == 1 && !I->saturate &&
+             agx3_src_is_register(I->dest[0]) && !I->dest[0].memory &&
+             I->dest[0].size == AGX_SIZE_32 &&
+             agx_channels(I->dest[0]) == 1 &&
+             agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
+             I->src[0].size == AGX_SIZE_32 &&
+             agx_channels(I->src[0]) == 1 && !I->src[0].kill &&
+             !(I->src[0].cache && I->src[0].discard)) {
+            const agx_index dest = I->dest[0], src = I->src[0];
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (!agx3_alu_f32roundeven(enc, dest.value, src.value,
+                                       agx3_post_ra_hint(src), dest.cache,
+                                       wait, src.neg, src.abs, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          if (I->op == AGX_OPCODE_BITTEST_SELECT_AGX3) {
             struct agx3_bittest_desc d = {
                .dest = I->dest[0].value,
