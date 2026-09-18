@@ -4315,14 +4315,48 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       switch (I->icond) {
       case AGX_ICOND_UEQ:
          /* Apple's immediate equality form is grounded for the direct
-          * predicate.  Keep != 0 on the older register-zero form, whose
-          * inverted encoding is independently witnessed. */
-         compare_immediate = !I->invert_cond;
+          * predicate.
+          *
+          * MEASURED on G17P (A18 Pro): the register-zero equality form -- the
+          * one `x != 0` used to take -- is wrong.  A compute shader whose only
+          * subgroup op is simd_ballot(x != 0) returns a bogus mask AND loses
+          * its execution mask: 31 of 32 lanes stop retiring their stores from
+          * the ballot onwards.  The same shader on the immediate form
+          * (`x == 0`, `x < 5`) keeps all 32 lanes and returns the right mask.
+          * `x != 0` is exactly `x > 0` unsigned, so route the inverted sense
+          * through the immediate form the hardware agrees with.
+          *
+          * A nonzero immediate cannot be inverted this way; agx_optimizer
+          * keeps that shape out of here by balloting the opposite compare.
+          * The 16-bit quad ballot returns above on its own witnessed inverted
+          * encoding, and the immediate form is grounded for AGX3B alone.
+          */
+         if (I->invert_cond) {
+            if (!quad && enc == AGX_ISA_ENCODING_AGX3B) {
+               if (compare_value != 0)
+                  return false;
+               compare_immediate = true;
+               condition = AGX_ICOND_UGT;
+               break;
+            }
+            /* The 16-bit quad ballot and AGX3C keep the form they had. */
+            compare_immediate = false;
+            condition = 4;
+            break;
+         }
+         compare_immediate = true;
          condition = 4;
          break;
       case AGX_ICOND_SEQ:
          if (compare_value != 0)
             return false;
+         /* Signed equality against zero is unsigned equality against zero, so
+          * the same remap applies rather than the broken register-zero form. */
+         if (!quad && enc == AGX_ISA_ENCODING_AGX3B) {
+            compare_immediate = true;
+            condition = I->invert_cond ? AGX_ICOND_UGT : 4;
+            break;
+         }
          condition = 4;
          break;
       case AGX_ICOND_SLT:

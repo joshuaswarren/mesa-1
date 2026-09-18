@@ -814,8 +814,17 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
     * ballot the lanes where it is zero: the witnessed simd_broadcast_first()
     * form.
     */
+   /* `x != N` for a nonzero N has no immediate form, and the register-zero
+    * equality form it would otherwise take is measured wrong on G17P (see
+    * agx3_emit_subgroup_ballot). Ballot the opposite compare instead, exactly
+    * as for a register operand below. */
+   const bool agx3_inverted_eq_imm =
+      def->op == AGX_OPCODE_ICMP && def->invert_cond &&
+      (def->icond == AGX_ICOND_UEQ || def->icond == AGX_ICOND_SEQ) &&
+      def->src[1].type == AGX_INDEX_IMMEDIATE && def->src[1].value != 0;
+
    if (!quad && ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       def->src[1].type != AGX_INDEX_IMMEDIATE) {
+       (def->src[1].type != AGX_INDEX_IMMEDIATE || agx3_inverted_eq_imm)) {
       agx_index opposite = agx_temp(ctx, AGX_SIZE_16);
 
       if (def->op == AGX_OPCODE_ICMP) {

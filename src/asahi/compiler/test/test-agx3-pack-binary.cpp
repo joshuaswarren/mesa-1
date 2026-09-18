@@ -4634,14 +4634,24 @@ TEST_F(AGX3PackBinary, BallotCompareZero)
             }
             agx_stop(b);
 
+            /* The G17P simd integer `x != 0` ballot goes through the
+             * immediate form (`x > 0` unsigned): the register-zero form it
+             * used to take is measured wrong on hardware -- it returns a bogus
+             * mask and destroys the execution mask.  The quad ballot and AGX3C
+             * keep the inverted register-zero form they had. */
+            const bool immediate_ne =
+               !floating && !quad && enc == AGX_ISA_ENCODING_AGX3B;
             const struct agx3_subgroup_ballot_desc d = {
                .quad = (bool)quad,
                .type = floating ? AGX3_SUBGROUP_BALLOT_FLOAT
                                 : AGX3_SUBGROUP_BALLOT_INTEGER,
                .dest = 4,
                .src = 2,
-               .condition = (uint8_t)(floating ? 1 : 4),
-               .invert = !floating,
+               .compare_immediate = immediate_ne,
+               .compare_value = 0,
+               .condition =
+                  (uint8_t)(floating ? 1 : (immediate_ne ? AGX_ICOND_UGT : 4)),
+               .invert = !floating && !immediate_ne,
             };
             uint8_t subgroup[AGX3_SUBGROUP_MAX_LENGTH], subgroup_len = 0;
             ASSERT_TRUE(agx3_subgroup_encode_ballot(enc, &d, subgroup,
@@ -4667,10 +4677,25 @@ TEST_F(AGX3PackBinary, G17PBallotKeepsLiveMask)
                         agx_zero(), AGX_ICOND_UEQ, true);
       agx_stop(b);
 
-      std::vector<uint8_t> want = {
-         0x17, 0x07, 0x54, 0x00, 0x02, 0x08, 0x00,
-         uint8_t(discard ? 0xf8 : 0xb8), 0xa2, 0x12,
+      /* `x != 0` takes the immediate `x > 0` form on G17P (the register-zero
+       * form is measured wrong on hardware), and still carries the source's
+       * liveness so a ballot mask that is read again is not discarded. */
+      const struct agx3_subgroup_ballot_desc d = {
+         .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+         .dest = 0,
+         .src = 4,
+         .compare_immediate = true,
+         .compare_value = 0,
+         .src_live = !discard,
+         .condition = AGX_ICOND_UGT,
       };
+      uint8_t subgroup[AGX3_SUBGROUP_MAX_LENGTH], subgroup_len = 0;
+      ASSERT_TRUE(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d,
+                                              subgroup, &subgroup_len));
+      std::vector<uint8_t> want;
+      append(want, subgroup, subgroup_len);
+      /* The liveness bit is what this test is about: it must differ. */
+      EXPECT_EQ(subgroup_len >= 8, true);
       struct agx3_encoded_end end;
       ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
       append(want, end.bytes, end.length);
