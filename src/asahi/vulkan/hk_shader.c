@@ -1406,8 +1406,34 @@ lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
    nir_def *desc = nir_load_from_texture_handle_agx(b, tex->src[handle].src.ssa);
    const unsigned offset = 32 +
       offsetof(struct hk_sampled_image_descriptor_sw, scaled_conversion);
-   nir_def *kind = nir_load_global_constant(b, 1, 16,
-      nir_iadd_imm(b, desc, offset), .align_mul = 2);
+   /* Read scaled_conversion through an aligned 32-bit load.
+    *
+    * MEASURED on G17P: as a 16-bit load at descriptor offset 50 this returned
+    * the offset-40 word -- sampler_index, the application sampler heap index
+    * plus its +28 bias, so kind came back as 29 instead of 0 -- on a subset of
+    * waves. A non-zero kind sends an already-float sample through u2f32(), and
+    * the affected lanes returned exactly u2f32(bits(value)).
+    *
+    * The 16-bit form lowers to a load_constant_agx whose offset cannot fold
+    * into the scaled index, so the offset is added to the descriptor-set base
+    * and the load issues against a general-register base rather than the
+    * uniform-register one the other descriptor reads use. Reading the field as
+    * the upper half of the aligned 32-bit word at offset 48 (min_lod_uint16
+    * occupies 48..49, scaled_conversion 50..51) restores the folded, uniform
+    * base form and fixes it.
+    *
+    * Note this does not fully explain the hardware behaviour: sampled_heap_index
+    * at offset 68 is likewise not eight-byte aligned and reads correctly, so
+    * alignment alone is not the discriminator. The fix is justified by
+    * measurement, not by a complete model, and other narrow descriptor reads
+    * (clamp_0 at 42, the lod fields at 44/46) have not been audited for this.
+    */
+   nir_def *pair = nir_load_global_constant(b, 1, 32,
+      nir_iadd_imm(b, desc,
+                   32 + offsetof(struct hk_sampled_image_descriptor_sw,
+                                 min_lod_uint16)),
+      .align_mul = 4);
+   nir_def *kind = nir_u2u16(b, nir_ushr_imm(b, pair, 16));
    b->cursor = nir_after_instr(&tex->instr);
    nir_def *value = &tex->def;
    nir_def *converted = nir_bcsel(b, nir_ieq_imm(b, kind, 1),
