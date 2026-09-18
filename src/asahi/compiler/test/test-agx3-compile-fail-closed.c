@@ -596,6 +596,58 @@ check_g17p_subgroup_quad_compute(bool valid_lane)
    return valid;
 }
 
+/*
+ * A quad broadcast whose lane is a REGISTER rather than an immediate has no
+ * 16-bit encoding: agx3_subgroup_encode_shuffle() narrows the width pair only
+ * on the immediate-lane word, and no Apple witness exists for a narrow
+ * register-lane quad shuffle.  Every
+ * dEQP-VK.subgroups.quad.compute.subgroupquadbroadcast_nonconst_* case on a
+ * scalar 8-bit, 16-bit or boolean type reached that shape -- 8-bit values and
+ * booleans live in 16-bit registers -- and the refusal failed the WHOLE
+ * shader:
+ *
+ *   agx3_pack_binary.c: no grounded AGX3 encoding for quad_shuffle
+ *     [d16:reg13 s0=16:reg13 s1=32:reg2 ...]
+ *   hk: vkCreateComputePipelines refused pipeline 0 of 1: VK_ERROR_UNKNOWN
+ *
+ * measured on Neo (G17P, A18 Pro).  The backend widens that shape to the
+ * 32-bit register-lane form, which is the same one nir_lower_subgroups
+ * already produces for the narrow VECTOR types that passed all along.  Both
+ * widths have to compile.
+ */
+static bool
+check_g17p_quad_broadcast_dynamic_lane(unsigned bits)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P dynamic quad broadcast");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *value = nir_load_global(&b, 1, bits, nir_imm_int64(&b, 0x1000),
+                                    .align_mul = sizeof(uint32_t));
+   nir_def *lane = nir_iand_imm(
+      &b, nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1004),
+                          .align_mul = sizeof(uint32_t)),
+      3);
+   nir_def *broadcast = nir_quad_broadcast(&b, value, lane);
+   nir_store_global(&b, nir_u2u32(&b, broadcast), nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   free(part.binary);
+   ralloc_free(b.shader);
+
+   if (!compiled)
+      fprintf(stderr, "G17P %u-bit quad broadcast from a register lane was "
+                      "refused\n", bits);
+   return compiled;
+}
+
 static bool
 check_device_shuffle_compute(enum agx_isa_encoding encoding)
 {
@@ -2411,7 +2463,9 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--subgroup-quad-only")) {
       const bool valid = check_g17p_subgroup_quad_compute(true) &&
-                         check_g17p_subgroup_quad_compute(false);
+                         check_g17p_subgroup_quad_compute(false) &&
+                         check_g17p_quad_broadcast_dynamic_lane(16) &&
+                         check_g17p_quad_broadcast_dynamic_lane(32);
       fprintf(stderr, "G17P subgroup quad: %s\n", valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
@@ -2564,6 +2618,9 @@ main(int argc, char **argv)
       return 1;
    if (!check_g17p_subgroup_quad_compute(true) ||
        !check_g17p_subgroup_quad_compute(false))
+      return 1;
+   if (!check_g17p_quad_broadcast_dynamic_lane(16) ||
+       !check_g17p_quad_broadcast_dynamic_lane(32))
       return 1;
 
    if (!check_g17p_shared_byte_vectors())

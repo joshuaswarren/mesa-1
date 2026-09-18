@@ -3112,9 +3112,48 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       /* TODO: Check if we're actually inside divergent control flow */
       b->shader->any_quad_divergent_shuffle |= b->shader->any_cf;
 
+      const agx_index data = agx_src_index(&instr->src[0]);
+      const agx_index lane = agx_src_index(&instr->src[1]);
+
+      /*
+       * A 16-bit quad shuffle is encodable only from an IMMEDIATE lane. That
+       * word narrows its width pair (f10 = f24 = 1) and carries the quad
+       * selector in a different field, so the two compose; the register-lane
+       * word does not, and agx3_subgroup_encode_shuffle() has no witness for
+       * it and refuses. A dynamic lane over 16-bit data therefore had no
+       * encoding at all, and the refusal took the whole shader down rather
+       * than just the instruction.
+       *
+       * MEASURED on Neo (G17P, A18 Pro) at agx3 a0b77f09611, running
+       * dEQP-VK.subgroups.quad.compute.subgroupquadbroadcast_nonconst_float16_t
+       * with AGX_MESA_DEBUG=refuse:
+       *
+       *   agx3_pack_binary.c:10028: no grounded AGX3 encoding for quad_shuffle
+       *     [d16:reg13 s0=16:reg13 s1=32:reg2 ...]
+       *   AGX3 refused shader during binary packing
+       *   hk: vkCreateComputePipelines refused pipeline 0 of 1: VK_ERROR_UNKNOWN
+       *
+       * Any quad broadcast whose lane is not a compile-time constant lands
+       * here; s1 above is r1, the register agx_lower_divergent_shuffle()
+       * reserves for a shuffle index under divergent control flow.
+       *
+       * Widen to the 32-bit register-lane form, which is exactly the shape
+       * nir_lower_subgroups already hands us for 8- and 16-bit VECTORS -- it
+       * bitcasts them to 32 bits before scalarising, which is why f16vec2 and
+       * i8vec4 pass today while the scalars did not. Booleans and 8-bit
+       * values already live in 16-bit registers, so this covers them too.
+       * AGX2 is untouched: it has its own packer and its own witnesses.
+       */
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+          data.size == AGX_SIZE_16 && agx_channels(data) == 1 &&
+          lane.type != AGX_INDEX_IMMEDIATE) {
+         agx_index shuffled = agx_temp(b->shader, AGX_SIZE_32);
+         agx_quad_shuffle_to(b, shuffled, agx_pad_to_32(b, data), lane);
+         return agx_subdivide_to(b, dst, shuffled, 0);
+      }
+
       /* Lane ID guaranteed to be uniform */
-      return agx_quad_shuffle_to(b, dst, agx_src_index(&instr->src[0]),
-                                 agx_src_index(&instr->src[1]));
+      return agx_quad_shuffle_to(b, dst, data, lane);
    }
 
    case nir_intrinsic_quad_swap_horizontal: {
