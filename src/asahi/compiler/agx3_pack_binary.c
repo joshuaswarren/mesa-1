@@ -8948,7 +8948,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                }
                if (!agx3_retire_slots_noop(emission, enc, wait))
                   AGX3_REFUSE(I);
-               if (ctx->key->g17p_emrt && !g17p_mrt_acquired) {
+               /* The single combined acquire ahead of the stores is the
+                * multisample eMRT form: Apple's 2x/4x multi-target fragments
+                * hold every stored partition's classes across the whole
+                * unrolled sample loop. A one-sample fragment brackets each
+                * partition around its own tile access instead, which is what
+                * the LLDCol/LSTCol path below emits, so leave the classes
+                * unacquired here and let it do that. Anything else -- a
+                * multisample eMRT epilog that does not store every partition
+                * -- still fails closed. */
+               if (ctx->key->g17p_emrt && !g17p_mrt_acquired &&
+                   g17p_mrt.multisample) {
                   uint8_t bytes[AGX3_PIXEL_MAX_LENGTH], len;
                   if (!g17p_mrt.multisample_combined ||
                       !agx3_pixel_wait(enc, g17p_mrt.combined_classes, 0,

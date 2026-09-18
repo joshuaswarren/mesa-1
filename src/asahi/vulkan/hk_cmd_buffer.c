@@ -1478,6 +1478,22 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
             b->slot == VARYING_SLOT_CULL_PRIMITIVE + 1;
          const bool clip_slot = b->slot == VARYING_SLOT_CLIP_DIST0 ||
                                 b->slot == VARYING_SLOT_CLIP_DIST1;
+         /* gl_PrimitiveID that no vertex shader writes is not a UVS word at
+          * all: agx_link_varyings_vs_fs() gives its binding
+          * AGX_COEFFICIENT_SOURCE_PRIMITIVE_ID and asks the VDM to generate
+          * the value, which hk_flush_dynamic_state() already plumbs through
+          * generate_primitive_id. Admit it as a system coefficient beside
+          * FragCoord Z and 1/W -- scalar, flat, and indexing no vertex
+          * output. A VS-written gl_PrimitiveID would take the ordinary user
+          * word path instead and stays refused, having no witness. */
+         if (b->slot == VARYING_SLOT_PRIMITIVE_ID) {
+            if (gfx->linked_varyings.slots[VARYING_SLOT_PRIMITIVE_ID] ||
+                b->count != 1 || b->offset != 0 || b->smooth || b->perspective)
+               return false;
+            ++user_bindings;
+            next_cf += b->count;
+            continue;
+         }
          const bool user_slot = (b->slot >= VARYING_SLOT_VAR0 &&
                                  b->slot <= VARYING_SLOT_VAR31) ||
                                 b->slot == VARYING_SLOT_LAYER ||
