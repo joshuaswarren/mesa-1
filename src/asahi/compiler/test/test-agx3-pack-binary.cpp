@@ -601,6 +601,75 @@ TEST_F(AGX3PackBinary, StraightLineALU)
    }
 }
 
+/* The compact register+minifloat multiply encodes an empty wait, one arbitrary
+ * slot, or the native slots1+2 pair -- nothing else. An operation that reads
+ * one async result and overwrites another waits two unrelated slots, and used
+ * to refuse the whole shader: that is what `mediump` dynamic array and matrix
+ * indexing in a vertex shader hits (dEQP-VK.glsl.indexing.*_dynamic_write_
+ * dynamic_*_read_vertex, whose multiply carries 0x24 or 0x0c). Retire the
+ * excess through the identity prelude and keep one wait fused, exactly as the
+ * compact ADD already does -- and leave an encodable mask alone. */
+TEST_F(AGX3PackBinary, MinifloatMultiplyRetiresUnencodableWaitCombination)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   const agx_index base = agx_register(16, AGX_SIZE_64);
+   const agx_index offset = agx_register(20, AGX_SIZE_32);
+   const uint16_t half = agx_minifloat_encode(0.5f);
+
+   /* Three round-robin loads take slots 6, 1 and 2 in that order. */
+   auto three_loads = [&](agx_builder *b) {
+      agx_device_load_to(b, agx_register(4, AGX_SIZE_32), base, offset,
+                         AGX_FORMAT_I32, 1, 0, false);
+      agx_device_load_to(b, agx_register(6, AGX_SIZE_32), base, offset,
+                         AGX_FORMAT_I32, 1, 0, false);
+      agx_device_load_to(b, agx_register(8, AGX_SIZE_32), base, offset,
+                         AGX_FORMAT_I32, 1, 0, false);
+   };
+
+   uint8_t prelude[AGX3_ALU_MAX_LENGTH], prelude_len = 0;
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 0x20u, prelude,
+                                           &prelude_len));
+
+   /* Reading slot 6's result into slot 2's register waits 0x22, which has no
+    * compact encoding. Slot 6 retires in the prelude, slot 2 stays fused. */
+   agx_builder *b = builder(enc);
+   three_loads(b);
+   agx_fmul_to(b, agx_register(8, AGX_SIZE_32), agx_register(4, AGX_SIZE_32),
+               agx_immediate_f(0.5f));
+   agx_stop(b);
+   const std::vector<uint8_t> code = pack(b);
+
+   uint8_t mul[AGX3_ALU_MAX_LENGTH], mul_len = 0;
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_narrow(enc, 8, 4, half, false, false,
+                                              false, AGX3_ALU_HINT_NONE, 0x2u,
+                                              mul, &mul_len));
+   std::vector<uint8_t> pair;
+   append(pair, prelude, prelude_len);
+   append(pair, mul, mul_len);
+   EXPECT_NE(std::search(code.begin(), code.end(), pair.begin(), pair.end()),
+             code.end());
+
+   /* Reading slot 1's result into slot 2's register waits the native 0x03
+    * pair: the multiply keeps both waits and gains no prelude. */
+   agx_builder *nb = builder(enc);
+   three_loads(nb);
+   agx_fmul_to(nb, agx_register(8, AGX_SIZE_32), agx_register(6, AGX_SIZE_32),
+               agx_immediate_f(0.5f));
+   agx_stop(nb);
+   const std::vector<uint8_t> native = pack(nb);
+
+   uint8_t native_mul[AGX3_ALU_MAX_LENGTH], native_mul_len = 0;
+   ASSERT_TRUE(agx3_alu_fmul_minifloat_narrow(enc, 8, 6, half, false, false,
+                                              false, AGX3_ALU_HINT_NONE, 0x3u,
+                                              native_mul, &native_mul_len));
+   EXPECT_NE(std::search(native.begin(), native.end(), native_mul,
+                         native_mul + native_mul_len),
+             native.end());
+   EXPECT_EQ(std::search(native.begin(), native.end(), prelude,
+                         prelude + prelude_len),
+             native.end());
+}
+
 TEST_F(AGX3PackBinary, G17PRG16IntegerEOTUsesExactNativeI16Program)
 {
    key.g17p_rt0_eot_words = 1;

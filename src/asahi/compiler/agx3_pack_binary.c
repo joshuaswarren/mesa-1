@@ -4956,6 +4956,47 @@ agx3_retire_slots_noop(struct util_dynarray *emission, enum agx_isa_encoding enc
           agx3_append(emission, bytes, len);
 }
 
+/* The COMPACT register+minifloat ALU forms -- agx3_alu_fadd_minifloat(),
+ * agx3_alu_fadd_minifloat_mod() at ep1 (unsaturated) and every
+ * agx3_alu_fmul_minifloat_narrow() form -- accept only an empty wait, ONE
+ * arbitrary slot, or the native slots1+2 pair 0x03. Swept over all 64 masks,
+ * each of those encoders takes exactly {0x00, 0x01, 0x02, 0x03, 0x04, 0x08,
+ * 0x10, 0x20}; the long forms (fadd_abs_*, saturating fadd_minifloat_mod)
+ * take all 64.
+ *
+ * An operation that has to wait on two unrelated producers therefore has no
+ * single compact encoding. Refusing it refuses the whole shader, which is what
+ * `mediump` dynamic array and matrix indexing in a vertex shader hit: the
+ * first `coords * 0.5` of the if-else-tree-lowered dynamic write reads one
+ * async result and overwrites another, and reaches the packer with the mask
+ * 0x24 or 0x0c. That refused three of the 760 dEQP-VK.glsl.indexing.* cases
+ * -- tmp_array.vec4 and matrix_subscript.mat4 dynamic_write_dynamic_loop_read,
+ * and matrix_subscript.mat3x2 dynamic_write_dynamic_read, all _vertex --
+ * as VK_ERROR_FEATURE_NOT_PRESENT out of vkCreateGraphicsPipelines.
+ *
+ * Retire the excess generations through the grounded identity prelude and keep
+ * one wait fused on the operation itself. Waiting early is semantically safe,
+ * and the extra instruction is emitted only for a mask that has no encoding at
+ * all -- a single slot and the native pair still encode in one instruction, so
+ * no shader that packs today gains an instruction. */
+static bool
+agx3_fuse_compact_minifloat_wait(struct util_dynarray *emission,
+                                 enum agx_isa_encoding enc, uint16_t *wait)
+{
+   const uint16_t mask = *wait;
+
+   /* Already encodable: empty, a single slot, or the native pair. */
+   if (mask == 3 || !(mask & (mask - 1)))
+      return true;
+
+   const uint16_t fused = mask & (uint16_t)-mask;
+   if (!agx3_retire_slots_noop(emission, enc, mask & (uint16_t)~fused))
+      return false;
+
+   *wait = fused;
+   return true;
+}
+
 /* Sampler-private staging groups 0/8/16 (see the note in
  * agx3_emit_texture_sample). Take the lowest group whose previous user has
  * retired; when all three still hold in-flight operations, retire group 0's
@@ -13068,9 +13109,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
             bool encoded;
             if (!multiply && !reg.abs && (I->saturate || reg.neg)) {
+               /* Saturation selects the long ep2, which carries all six wait
+                * bits; a bare negation stays on the compact ep1. */
+               uint16_t encoded_wait = wait;
+               if (!I->saturate &&
+                   !agx3_fuse_compact_minifloat_wait(emission, enc,
+                                                     &encoded_wait))
+                  AGX3_REFUSE(I);
                encoded = agx3_alu_fadd_minifloat_mod(
                   enc, I->dest[0].value, reg.value, imm.value, reg.neg,
-                  I->saturate, agx3_post_ra_hint(reg), wait, bytes, &len);
+                  I->saturate, agx3_post_ra_hint(reg), encoded_wait, bytes,
+                  &len);
             } else if (multiply) {
                /* The recovered six-byte minifloat endpoint fixes bits 32:33.
                 * Treating bit 33 as an ABS modifier produced wrong values on
@@ -13096,32 +13145,31 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      AGX3_REFUSE(I);
                   continue;
                }
+               /* Every grounded minifloat multiply is a compact form, at both
+                * destination widths, so a multi-slot wait needs the identity
+                * prelude here exactly as it does on the compact ADD below. */
+               uint16_t encoded_wait = wait;
+               if (!agx3_fuse_compact_minifloat_wait(emission, enc,
+                                                     &encoded_wait))
+                  AGX3_REFUSE(I);
                encoded = agx3_alu_fmul_minifloat_narrow(
                   enc, I->dest[0].value, reg.value, imm.value,
                   I->dest[0].cache, false,
                   I->dest[0].size == AGX_SIZE_16, agx3_post_ra_hint(reg),
-                  wait, bytes, &len);
+                  encoded_wait, bytes, &len);
             } else if (reg.abs) {
                encoded = agx3_alu_fadd_abs_minifloat(
                   enc, I->dest[0].value, reg.value, imm.value,
                   I->dest[0].cache, reg.neg, I->saturate,
                   agx3_post_ra_hint(reg), wait, bytes, &len);
             } else {
+               /* A real sky shader reaches this operation with one source
+                * dependency and an independent write-after-write dependency
+                * on its retained destination. */
                uint16_t encoded_wait = wait;
-               /* The compact minifloat ADD carries one arbitrary wait or
-                * the native slots1+2 pair.  A real sky shader reaches this
-                * operation with one source dependency and an independent
-                * write-after-write dependency on its retained destination.
-                * Retire only the excess generations through the grounded
-                * identity prelude and keep one wait fused on the ADD. */
-               if (encoded_wait != 3 &&
-                   (encoded_wait & (encoded_wait - 1))) {
-                  const uint16_t fused_wait = encoded_wait & -encoded_wait;
-                  if (!agx3_retire_slots_noop(
-                         emission, enc, encoded_wait & ~fused_wait))
-                     AGX3_REFUSE(I);
-                  encoded_wait = fused_wait;
-               }
+               if (!agx3_fuse_compact_minifloat_wait(emission, enc,
+                                                     &encoded_wait))
+                  AGX3_REFUSE(I);
                encoded = agx3_alu_fadd_minifloat(
                   enc, I->dest[0].value, reg.value, imm.value,
                   I->dest[0].cache, agx3_post_ra_hint(reg), encoded_wait,
