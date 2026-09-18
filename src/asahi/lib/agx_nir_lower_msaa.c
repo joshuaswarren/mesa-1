@@ -234,11 +234,11 @@ specialize_g17p_sample_copy(nir_cf_list *copy,
  * each sample gets its own: sample i of every location follows all locations
  * of the samples before it. Depth and stencil of every sample after the first
  * follow all colours, four halves per sample. Both parts must be unrolled with
- * the same count and written locations.
+ * the same count and the same colour layout.
  */
 bool
-agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
-                            uint8_t loc_written)
+agx_nir_unroll_g17p_samples_layout(nir_shader *shader, unsigned nr_samples,
+                                   const struct agx_g17p_colour_layout *layout)
 {
    assert(shader->info.stage == MESA_SHADER_FRAGMENT);
    assert(nr_samples == 2 || nr_samples == 4);
@@ -282,9 +282,9 @@ agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
       const struct g17p_sample_copy sample = {
          .active_samples = nir_imm_intN_t(&b, BITFIELD_BIT(i), 16),
          .samples_log2 = samples_log2,
-         .colour_offset = i * agx_g17p_sample_colour_stride(loc_written),
-         .zs_base = i ? agx_g17p_sample_zs_base(nr_samples, loc_written, i)
-                      : 0,
+         .colour_offset = i * layout->stride,
+         .zs_base =
+            i ? agx_g17p_sample_zs_base_layout(layout, nr_samples, i) : 0,
       };
 
       nir_cf_list copy;
@@ -347,6 +347,16 @@ agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
    util_dynarray_fini(&exports);
 
    return nir_progress(true, impl, nir_metadata_none);
+}
+
+bool
+agx_nir_unroll_g17p_samples(nir_shader *shader, unsigned nr_samples,
+                            uint8_t loc_written)
+{
+   struct agx_g17p_colour_layout layout;
+   agx_g17p_colour_layout_init(&layout, loc_written, 0, 0, false);
+
+   return agx_nir_unroll_g17p_samples_layout(shader, nr_samples, &layout);
 }
 
 static bool movable_zs_source(nir_def *def);

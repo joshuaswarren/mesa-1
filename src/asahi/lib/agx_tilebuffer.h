@@ -11,6 +11,7 @@
 #include "drm-uapi/asahi_drm.h"
 #include "agx_abi.h"
 #include "util/bitscan.h"
+#include "util/macros.h"
 #include "util/format/u_formats.h"
 #include "agx_chip.h"
 #include "agx_pack.h"
@@ -161,10 +162,101 @@ agx_g17p_sample_zs_base(unsigned nr_samples, uint8_t loc_written,
           4 * (sample - 1);
 }
 
+/* Where each colour location's components sit in the export registers of one
+ * sample of a G17P fragment unrolled per sample.
+ *
+ * The fragment ABI gives every location a four-component slot, which is what
+ * a location that writes fewer components still costs once the slot is
+ * repeated for each sample. Eight two-component 32-bit targets at four
+ * samples need 276 halves that way, and G17P's register file is 192 -- the
+ * draw is refused for want of registers the shader never writes. The packed
+ * layout gives each location only the components it exports, which brings the
+ * same fragment to 148 halves. Both layouts describe the same thing, so the
+ * unroll and the epilog share this one description of it.
+ */
+struct agx_g17p_colour_layout {
+   /* Halves from AGX_ABI_FOUT_COLOUR(0) to this location's first component */
+   uint8_t offset[8];
+
+   /* Components this location occupies, zero if it exports none */
+   uint8_t comps[8];
+
+   /* Halves one sample's colours occupy in total */
+   uint16_t stride;
+};
+
+/* `colour_comps` holds the components each location exports, four bits per
+ * location, as agx_fs_epilog_link_info records them. It is only consulted for
+ * the packed layout; the ABI layout is fixed by the loc_written mask alone.
+ */
+static inline void
+agx_g17p_colour_layout_init(struct agx_g17p_colour_layout *l,
+                            uint8_t loc_written, uint8_t size_32,
+                            uint32_t colour_comps, bool packed)
+{
+   unsigned offset = 0;
+
+   for (unsigned loc = 0; loc < 8; ++loc) {
+      const bool written = loc_written & BITFIELD_BIT(loc);
+
+      if (packed) {
+         /* Each component is preloaded and exported on its own, so a 32-bit
+          * location has to start on an even half like any register pair. */
+         const unsigned halves_per_comp =
+            (size_32 & BITFIELD_BIT(loc)) ? 2 : 1;
+         const unsigned comps =
+            written ? util_last_bit((colour_comps >> (4 * loc)) & 0xf) : 0;
+
+         offset = ALIGN_POT(offset, halves_per_comp);
+         l->offset[loc] = offset;
+         l->comps[loc] = comps;
+         offset += comps * halves_per_comp;
+      } else {
+         l->offset[loc] = AGX_ABI_FOUT_COLOUR(loc) - AGX_ABI_FOUT_COLOUR(0);
+         l->comps[loc] = 4;
+      }
+   }
+
+   /* Every sample repeats the layout, and AGX_ABI_FOUT_COLOUR(0) is even, so
+    * an even stride is what keeps each sample's pairs aligned too. */
+   l->stride =
+      packed ? ALIGN_POT(offset, 2) : agx_g17p_sample_colour_stride(loc_written);
+}
+
+/* Export base of location `loc`'s first component for sample `sample`. */
+static inline unsigned
+agx_g17p_sample_colour_base(const struct agx_g17p_colour_layout *l,
+                            unsigned sample, unsigned loc)
+{
+   return AGX_ABI_FOUT_COLOUR(0) + (sample * l->stride) + l->offset[loc];
+}
+
+/* As agx_g17p_sample_zs_base, for a laid-out fragment. */
+static inline unsigned
+agx_g17p_sample_zs_base_layout(const struct agx_g17p_colour_layout *l,
+                               unsigned nr_samples, unsigned sample)
+{
+   return AGX_ABI_FOUT_COLOUR(0) + (nr_samples * l->stride) +
+          4 * (sample - 1);
+}
+
+/* Halves of export registers the whole unrolled fragment needs. Passing the
+ * sample count as the sample index names the half one past the last sample's
+ * stencil, which is exactly the count of halves used. */
+static inline unsigned
+agx_g17p_sample_exports_end(const struct agx_g17p_colour_layout *l,
+                            unsigned nr_samples)
+{
+   return agx_g17p_sample_zs_base_layout(l, nr_samples, nr_samples);
+}
+
 bool agx_nir_needs_sample_count(const struct nir_shader *shader);
 bool agx_nir_specialize_sample_count(struct nir_shader *shader, unsigned samples);
 bool agx_nir_unroll_g17p_samples(struct nir_shader *shader,
                                  unsigned nr_samples, uint8_t loc_written);
+bool agx_nir_unroll_g17p_samples_layout(
+   struct nir_shader *shader, unsigned nr_samples,
+   const struct agx_g17p_colour_layout *layout);
 
 bool agx_nir_hoist_g17p_zs_writes(struct nir_shader *shader);
 

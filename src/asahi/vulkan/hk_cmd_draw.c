@@ -2235,10 +2235,9 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
 static void
 hk_init_heap(const void *data)
 {
-   struct hk_cmd_buffer *cmd = (struct hk_cmd_buffer *)data;
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_device *dev = (struct hk_device *)data;
 
-   perf_debug(cmd, "Allocating heap");
+   perf_debug_dev(&dev->dev, "Allocating heap");
 
    size_t size = 128 * 1024 * 1024;
    dev->heap = agx_bo_create(&dev->dev, size, 0, 0, "Geometry heap");
@@ -2254,12 +2253,31 @@ hk_init_heap(const void *data)
    };
 }
 
+/*
+ * Allocating the geometry heap is a 128 MB agx_bo_create(), measured at 15.5 ms
+ * on G17P: the kernel has to find and zero the pages.  Every consumer of the
+ * heap is reached from a draw, so leaving the allocation to util_call_once()
+ * put those 15.5 ms inside the first vkCmdDraw() that used geometry or
+ * tessellation -- a stall in the middle of a render pass, and ~150x the cost of
+ * the same draw once warm (median 105 us).
+ *
+ * Nothing about the heap depends on the draw, only on the device, so the
+ * allocation can be forced as soon as we know the client has a stage that will
+ * need it.  hk_heap() keeps the util_call_once(), so correctness never depends
+ * on having predicted the stage.
+ */
+void
+hk_device_ensure_geometry_heap(struct hk_device *dev)
+{
+   util_call_once_data(&dev->heap_init_once, hk_init_heap, dev);
+}
+
 static uint64_t
 hk_heap(struct hk_cmd_buffer *cmd)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   util_call_once_data(&dev->heap_init_once, hk_init_heap, cmd);
+   util_call_once_data(&dev->heap_init_once, hk_init_heap, dev);
 
    /* We need to free all allocations after each command buffer execution */
    if (!cmd->uses_heap) {
@@ -3165,8 +3183,13 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * before the scan. Inert unless the variable is set; it is how the quarter-
     * sized threadgroup window on this path was measured. */
    {
-      const char *probe = getenv("HK_G17P_TG_PROBE");
-      if (probe) {
+      static const char *probe;
+      static bool probe_read;
+      if (unlikely(!probe_read)) {
+         probe = getenv("HK_G17P_TG_PROBE");
+         probe_read = true;
+      }
+      if (unlikely(probe != NULL)) {
          struct agx_ptr report = hk_pool_alloc(cmd, 8192, 4);
          if (report.gpu) {
             if (probe[0] == 's') {
@@ -3479,9 +3502,14 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
       pixel.defer_monolithic_msaa = true;
       agx_nir_fs_epilog(b, &pixel);
 
+      struct agx_g17p_colour_layout layout;
+      agx_g17p_colour_layout_init(&layout, key->link.loc_written,
+                                  key->link.size_32, key->link.colour_comps,
+                                  key->link.packed_colour);
+
       NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
-      NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples, key->nr_samples,
-               key->link.loc_written);
+      NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples_layout,
+               key->nr_samples, &layout);
       bool opt_progress;
       do {
          opt_progress = false;
@@ -4552,8 +4580,42 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
       /* Apple G17P shader metadata leaves bit26 clear for texture gradients,
        * storage writes, framebuffer fetch, sample-rate execution, and shadows.
-       * Multisampled depth/depth-stencil variants set it. */
+       * Multisampled depth/depth-stencil variants set it.
+       *
+       * A shader that takes implicit quad derivatives still needs it on this
+       * stack. Triangle merging shades a 2x2 quad straddling the shared edge
+       * of two primitives once, with its lanes interpolated from two different
+       * plane equations, so an implicit-LOD sample on that quad derives its
+       * mip level across the seam.
+       *
+       * Measured on G17P, 2026-09-18: without this term all 30
+       * dEQP-VK.texture.mipmap.{2d,3d,cubemap}.projected.* cases fail and
+       * every invalid pixel lies exactly on the shared diagonal of the test's
+       * two triangles (31/31 in the decoded error mask of
+       * 2d.projected.nearest_linear_clamp); with it, all 30 pass and the 18
+       * basic/affine siblings are unchanged. Those siblings pass either way
+       * because both of their triangles carry the same affine texcoord map, so
+       * the cross-seam derivative equals the correct one.
+       *
+       * AGX2 never had the defect: agx_compile.c derives disable_tri_merging
+       * from needs_coarse_quad_helper_invocations, which nir_gather_info sets
+       * for every implicit-derivative texture op; agx_linker.c ORs it across
+       * the shader parts into the linked FRAGMENT_CONTROL bit 26; and
+       * hk_flush_ppp_state() merges that word into the secondary control.
+       * G17P never reaches it -- the draw path calls hk_flush_ppp_state() only
+       * `if (!g17p_native_bind_tail_emitted)` -- so the whole control comes
+       * from this record instead, and agx_ppp_hal200_fragment_controls_pack()
+       * deliberately masks bit 26 out of the original and rebuilds it from the
+       * three fields below. The helper-invocation term was dropped in that
+       * re-derivation and nothing else carried it.
+       *
+       * Whether Apple's own driver disables merging here or keeps quads
+       * coherent some other way is NOT established; only that this stack needs
+       * the bit. Kept narrower than the linker's bit 26, which also fires on
+       * memory writes and wide subgroup intrinsics -- neither needs quad
+       * coherence, and Apple's metadata leaves bit 26 clear for both. */
       .shader_tri_merge_disable =
+         fs->b.info.needs_quad_derivatives ||
          (render->tilebuffer.nr_samples > 1 &&
           fs->info.fs.epilog_key.write_z) ||
          debug_get_bool_option("HK_G17P_FORCE_TRI_MERGE_DISABLE", false),

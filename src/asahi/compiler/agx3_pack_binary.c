@@ -2069,9 +2069,15 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                      * samplerCubeArrayShadow. Admitting only the cube
                      * refuses the array fragments, which then fail to link
                      * while every offline gate stays green. A bias with a
-                     * minimum is witnessed for the cube only. */
+                     * minimum is witnessed for the cube only. A noncube
+                     * array comparison gradient stages its four scalars in
+                     * banks 8..14 and keeps the layer on PACK_SMPIR bank 6
+                     * and the reference at bank 4, so nothing it publishes
+                     * collides; the same shape in a pre-raster stage, which
+                     * this term never covered, already reached the encoder. */
                     !((explicit_lod && !immediate_lod) || register_bias ||
-                      (cube && bias_min))))) ||
+                      (cube && bias_min) ||
+                      (array && !cube && gradient_lod))))) ||
        (gather && (I->lod_mode != AGX_LOD_MODE_AUTO_LOD || three_d ||
                    enc != AGX_ISA_ENCODING_AGX3B)))
       return agx3_tex_decline(I, __LINE__);
