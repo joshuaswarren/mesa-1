@@ -6238,6 +6238,32 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
                                  nir_fneg(b, r), r);
       nir_def *result = nir_fmul(b, nir_fsinc_agx3(b, r), r);
       nir_def *small = cosine ? nir_imm_float(b, 1) : x;
+
+      /* sin x ~= x near zero, but handing the argument back verbatim performs
+       * no arithmetic, so nothing ever flushes it.  Every fp32 denormal is far
+       * below this threshold, so under DenormFlushToZero the passthrough
+       * returns the very denormal the execution mode promises to flush --
+       * dEQP-VK.spirv_assembly.instruction.compute.float_controls.fp32
+       * .input_args.sin_denorm_flush_to_zero and its _vert/_frag twins.
+       * Cosine is immune because its small-angle value is the constant 1.0.
+       *
+       * Canonicalize instead of selecting zero: sin x ~= x is a real
+       * approximation for normal small arguments and must be kept.  NIR drops
+       * the canonicalize when the mode is off, or when a consumer would flush
+       * the value anyway, and lowers what is left to a multiply by one, which
+       * the ALU flushes like any other arithmetic.
+       *
+       * This flushes at fp32.  A 16-bit sine is widened to fp32 above, so an
+       * fp16 denormal argument is a normal fp32 value here and reappears when
+       * the result is narrowed below; fp16 would need the flush after that
+       * conversion.  shaderDenormFlushToZeroFloat16 is not advertised, so
+       * nothing reaches that path today -- but it would bite the moment it is.
+       */
+      if (!cosine &&
+          nir_is_denorm_flush_to_zero(
+             b->shader->info.float_controls_execution_mode, bits))
+         small = nir_fcanonicalize(b, small);
+
       result = nir_bcsel(b, nir_flt_imm(b, nir_fabs(b, x), 0x1p-12f),
                         small, result);
       /* Past the range the three-piece reduction can resolve there is no
