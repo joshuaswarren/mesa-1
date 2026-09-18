@@ -453,7 +453,7 @@ region_has_bank_constrained_value(const struct ra_ctx *rctx, unsigned base,
  */
 static unsigned
 find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
-                          BITSET_WORD *already_evicted)
+                          BITSET_WORD *already_evicted, unsigned cap)
 {
    assert(util_is_power_of_two_or_zero(size) && "precondition");
    assert((rctx->bound[RA_GPR] % size) == 0 &&
@@ -464,8 +464,9 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
 
    unsigned best_base = ~0;
    unsigned best_moves = invert ? 0 : ~0;
+   unsigned bound = MIN2(cap, rctx->bound[RA_GPR]);
 
-   for (unsigned base = 0; base + size <= rctx->bound[RA_GPR]; base += size) {
+   for (unsigned base = 0; base + size <= bound; base += size) {
       /* The first k registers are preallocated and unevictable, so must be
        * skipped. By itself, this does not pose a problem. We are allocating n
        * registers, but this region has at most n-k free.  Since there are at
@@ -519,6 +520,13 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
       }
    }
 
+   /* A capped search is a preference, not a requirement: the caller only
+    * narrows the file so a half victim's relocation stays inside the seven-bit
+    * COPY destination.  If nothing fits down there, fall back to the whole
+    * file rather than failing allocation outright. */
+   if (best_base == ~0u && bound < rctx->bound[RA_GPR])
+      return find_best_region_to_evict(rctx, size, already_evicted, ~0u);
+
    assert(best_base < rctx->bound[RA_GPR] &&
           "not enough registers (should have spilled already)");
    return best_base;
@@ -560,18 +568,22 @@ insert_copy(struct ra_ctx *rctx, struct util_dynarray *copies, unsigned new_reg,
    }
 }
 
-static unsigned
+/* Chooses a region of `count` halves inside [minimum, limit) that
+ * assign_regs_by_copying() can free by relocating whole values.  Returns false
+ * when no such region exists, which the caller retries with the half-victim
+ * restriction lifted before it gives up. */
+static bool
 find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
                         unsigned limit, bool avoid_half_copies,
-                        unsigned *span_out)
+                        unsigned *base_out, unsigned *span_out)
 {
    unsigned best = ~0u, best_moves = ~0u, best_span = 0;
 
-   /* agx3_copy_encode_reg16() refuses a destination at or above half 128, and
-    * every relocation find_best_region_to_evict() can choose lies below
-    * rctx->bound[RA_GPR].  A half victim can therefore only become unencodable
-    * on a register file that actually reaches half 128.  Below that the
-    * restriction rejects regions to avoid a copy that cannot exist. */
+   /* agx3_copy_encode_reg16() refuses a destination at or above half 128, so a
+    * half victim is only awkward on a register file that actually reaches that
+    * far; below it the restriction rejects regions to avoid a copy that cannot
+    * exist.  Where it does apply it is a preference: find_best_region_to_evict()
+    * keeps the relocation encodable, and the caller retries without it. */
    bool avoid_half = avoid_half_copies &&
                      rctx->bound[RA_GPR] > AGX3_COPY_REG16_DEST_HALVES;
 
@@ -625,21 +637,12 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
          break;
    }
 
-   /* Not a refusal path.  assign_regs_by_copying() feeds this result straight
-    * into BITSET_SET_COUNT() and reg_to_ssa[], so returning ~0u is an
-    * out-of-bounds write rather than a bad register choice: a build where
-    * NDEBUG removes assertions would corrupt memory silently.  Fail the same
-    * way in every build instead of only in debug. */
-   if (best >= limit || !best_span) {
-      fprintf(stderr,
-              "agx: no constrained region for count=%u minimum=%u limit=%u "
-              "bound=%u\n",
-              count, minimum, limit, rctx->bound[RA_GPR]);
-      abort();
-   }
+   if (best >= limit || !best_span)
+      return false;
 
    *span_out = best_span;
-   return best;
+   *base_out = best;
+   return true;
 }
 
 static unsigned
@@ -655,11 +658,30 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
    size_t nr_blocked = 1;
 
    if (minimum > 0 || limit < rctx->bound[RA_GPR]) {
-      unsigned count = rctx->ncomps[dest.value], span;
-      unsigned base = find_constrained_region(
-         rctx, count, minimum, limit,
-         I != NULL && rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B,
-         &span);
+      unsigned count = rctx->ncomps[dest.value], span, base;
+      bool agx3b =
+         I != NULL && rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
+
+      /* Prefer a region with no half victim: relocating one is bounded by the
+       * seven-bit COPY destination.  When the constrained window holds nothing
+       * else -- eight-target MRT packs the low bank solid -- take the half
+       * victim anyway and let find_best_region_to_evict() keep its new home
+       * under AGX3_COPY_REG16_DEST_HALVES. */
+      if (!find_constrained_region(rctx, count, minimum, limit, agx3b, &base,
+                                   &span) &&
+          !(agx3b && find_constrained_region(rctx, count, minimum, limit, false,
+                                             &base, &span))) {
+         /* Not a refusal path.  The result feeds straight into
+          * BITSET_SET_COUNT() and reg_to_ssa[], so continuing with a bad base
+          * is an out-of-bounds write rather than a poor register choice: a
+          * build where NDEBUG removes assertions would corrupt memory
+          * silently.  Fail the same way in every build instead. */
+         fprintf(stderr,
+                 "agx: no constrained region for count=%u minimum=%u limit=%u "
+                 "bound=%u\n",
+                 count, minimum, limit, rctx->bound[RA_GPR]);
+         abort();
+      }
       nr_blocked = 0;
       for (unsigned reg = base; reg < base + span;) {
          if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
@@ -706,7 +728,15 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
       /* We need to shuffle some variables to make room. Look for a range of
        * the register file that is partially blocked.
        */
-      unsigned new_reg = find_best_region_to_evict(rctx, nr, clobbered);
+      /* Every iteration but the first emits insert_copy() for this value.  A
+       * 16-bit copy has a seven-bit destination, so its new home must stay
+       * below AGX3_COPY_REG16_DEST_HALVES on a file that reaches that far. */
+      unsigned cap = ~0u;
+      if (ssa != dest.value && rctx->sizes[ssa] == AGX_SIZE_16 &&
+          rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         cap = AGX3_COPY_REG16_DEST_HALVES;
+
+      unsigned new_reg = find_best_region_to_evict(rctx, nr, clobbered, cap);
 
       /* Blocked registers need to get reassigned. Add them to the worklist. */
       for (unsigned i = 0; i < nr; ++i) {
@@ -1655,16 +1685,14 @@ agx_lower_agx3b_atomic_returns(agx_context *ctx)
 unsigned
 agx3_tile_store_bank(agx_context *ctx)
 {
-   /* Native G17P conditional image-write plus two-target MRT uses half24
-    * for its F16 tile payload. Its memory epilog owns the high-bank form. */
-   if (ctx->key->g17p_emrt && ctx->agx3_mrt_tile_ops_ordered &&
-       list_length(&ctx->blocks) > 1)
-      return 32;
    /* Native raw32 stores need simultaneously live payloads. Their
     * exact ordinary/BG witnesses use GPR halves0..31 with f13=0. This expands
     * only the admitted two-to-four RGBA32 or four R32 payload bank. */
    unsigned quad_stores = 0, quad_width = 0, quad_mask = 0;
    BITSET_DECLARE(tile_offsets, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
+   /* Halves of payload the stores need live together, counted once per colour
+    * target: a target stored for several samples reuses one register vector. */
+   unsigned payload_halves = 0, payload_align = 1;
    bool tile_loads = false;
    bool quad_tile =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
@@ -1673,8 +1701,15 @@ agx3_tile_store_bank(agx_context *ctx)
       list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, I) {
       if (I->op == AGX_OPCODE_ST_TILE) {
-         if (I->pixel_offset < AGX_G17P_MAX_BYTES_PER_SAMPLE)
+         if (I->pixel_offset < AGX_G17P_MAX_BYTES_PER_SAMPLE) {
+            if (!BITSET_TEST(tile_offsets, I->pixel_offset) &&
+                I->src[0].type == AGX_INDEX_NORMAL) {
+               unsigned halves = agx_index_size_16(I->src[0]);
+               payload_halves += halves;
+               payload_align = MAX2(payload_align, halves);
+            }
             BITSET_SET(tile_offsets, I->pixel_offset);
+         }
          unsigned width = I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
          quad_tile &= width && (!quad_width || quad_width == width) &&
             I->format == AGX_FORMAT_I32 && !I->explicit_coords &&
@@ -1705,6 +1740,29 @@ agx3_tile_store_bank(agx_context *ctx)
     * use that bank even with fewer targets: id_blend_4x stores RGBA8 from
     * half28, and half2_sample4 stores SINT16/F16 from halves28..0. */
    const unsigned targets = BITSET_COUNT(tile_offsets);
+
+   /* Native G17P conditional image-write plus two-target MRT uses half24 for
+    * its F16 tile payload, and its memory epilog owns the high-bank form, so
+    * the ordered eMRT path stores from halves 0..31.
+    *
+    * That bank does not hold four 128-bit payloads.  Each is eight halves and
+    * naturally aligned, and the reserved prefix sits inside the first slot, so
+    * halves 0..7 cannot carry one: the bank's real capacity is three, and RA
+    * aborted with `no constrained region for count=8 minimum=0 limit=32` on
+    * dEQP-VK.renderpasses.*.multisample_resolve.r32g32b32a32_uint.
+    * max_attachments_8_samples_2, whose eMRT epilog stores four RGBA32 targets
+    * at two samples -- halves 8..31 each held an unevictable payload and the
+    * only free region began at the reserved half.
+    *
+    * So size the bank by what the stores actually need, prefix included, and
+    * widen to the same halves 0..63 the plain MRT bank below already uses past
+    * four targets rather than inventing a third bank. */
+   if (ctx->key->g17p_emrt && ctx->agx3_mrt_tile_ops_ordered &&
+       list_length(&ctx->blocks) > 1) {
+      const unsigned prefix = ALIGN_POT(reserved_size(ctx), payload_align);
+      return prefix + payload_halves > 32 ? 64 : 32;
+   }
+
    const bool mrt_bank =
       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
       ctx->stage == MESA_SHADER_FRAGMENT &&
