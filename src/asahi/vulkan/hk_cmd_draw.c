@@ -742,6 +742,35 @@ hk_build_g17p_mixed_bg_eot(struct hk_cmd_buffer *cmd,
    };
 }
 
+/* The native dual- and multi-target background and EOT programs carry one op
+ * for every target: agx3_g17p_rt0_bg_program_generate() selects a single
+ * RELOAD/CLEAR/CLEAR_RELOAD program, and the EOT builtin stores every target
+ * it names. A layout whose live targets do not share one op -- an attachment
+ * that is not stored beside one that is, or a clear beside a reload -- cannot
+ * be expressed that way, which is what the multi/dual guards below refuse.
+ *
+ * The mixed builder can express it: it groups targets into LOAD, then CLEAR,
+ * then STORE, drops the untouched ones, and carries each target's own tile
+ * offset and PBE descriptor. Route there rather than refusing. */
+static bool
+hk_g17p_bg_eot_ops_uniform(const struct agx_bg_eot_key *key)
+{
+   bool seen = false;
+   enum agx_bg_eot_op first = AGX_BG_EOT_NONE;
+
+   for (unsigned rt = 0; rt < ARRAY_SIZE(key->tib.logical_format); ++rt) {
+      if (key->tib.logical_format[rt] == PIPE_FORMAT_NONE)
+         continue;
+      if (!seen) {
+         first = key->op[rt];
+         seen = true;
+      } else if (key->op[rt] != first) {
+         return false;
+      }
+   }
+   return true;
+}
+
 static struct hk_bg_eot
 hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                      struct agx_bg_eot_key *key,
@@ -750,7 +779,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    if (agx_tilebuffer_spills(&key->tib) ||
-       agx_g17p_classify_mrt(&key->tib) == AGX_G17P_MRT_MIXED)
+       agx_g17p_classify_mrt(&key->tib) == AGX_G17P_MRT_MIXED ||
+       !hk_g17p_bg_eot_ops_uniform(key))
       return hk_build_g17p_mixed_bg_eot(cmd, key, info, store);
 
    /* Vulkan keeps unused colour attachments as holes in the logical array.
@@ -871,6 +901,20 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       for (unsigned rt = 0; rt < attachment_count; ++rt) {
          if (info->colorAttachmentCount < attachment_count ||
              key->op[rt] != op || op == AGX_BG_EOT_NONE) {
+            /* DIAGNOSTIC: name the refusal the way the rt0 guard above does.
+             * These two guards refuse silently, which is why this bucket had
+             * no driver-side evidence at all. */
+            mesa_loge("G17P %s multi-MRT guard declined: rt%u op=%u op0=%u "
+                      "ops=%u%u%u%u%u%u%u%u count=%u attachments=%u mrt=%u "
+                      "samples=%u sample_size=%uB",
+                      store ? "EOT" : "background", rt, (unsigned)key->op[rt],
+                      (unsigned)op, (unsigned)key->op[0], (unsigned)key->op[1],
+                      (unsigned)key->op[2], (unsigned)key->op[3],
+                      (unsigned)key->op[4], (unsigned)key->op[5],
+                      (unsigned)key->op[6], (unsigned)key->op[7],
+                      attachment_count, info->colorAttachmentCount,
+                      (unsigned)mrt, key->tib.nr_samples,
+                      key->tib.sample_size_B);
             vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
             return (struct hk_bg_eot){0};
          }
@@ -878,6 +922,11 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
    if (dual_mrt_active &&
        (key->op[1] != op || info->colorAttachmentCount < 2)) {
+      mesa_loge("G17P %s dual-MRT guard declined: op0=%u op1=%u "
+                "attachments=%u mrt=%u samples=%u sample_size=%uB",
+                store ? "EOT" : "background", (unsigned)op,
+                (unsigned)key->op[1], info->colorAttachmentCount,
+                (unsigned)mrt, key->tib.nr_samples, key->tib.sample_size_B);
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return (struct hk_bg_eot){0};
    }
