@@ -7204,12 +7204,26 @@ agx3_sink_vertex_outputs(agx_context *ctx)
  * packer independently proves the partition graph before selecting the
  * corresponding pixel classes.
  */
+/* Every exit from agx3_order_g17p_mrt_tile_ops() reports under AGX_DBG_REFUSE.
+ * Failing to set agx3_mrt_tile_ops_ordered makes agx3_g17p_mrt_protocol()
+ * decline, which fails the shader in the packer and surfaces to the
+ * application as VK_ERROR_FEATURE_NOT_PRESENT from vkEndCommandBuffer.  When
+ * these exits were silent, that chain gave no indication which clause had
+ * refused. */
+#define AGX3_ORDER_REFUSE()                                                    \
+   do {                                                                        \
+      if (agx_compiler_debug & AGX_DBG_REFUSE)                                 \
+         fprintf(stderr, "G17P MRT order refused at %s:%u\n", __FILE__,        \
+                 __LINE__);                                                    \
+      return false;                                                            \
+   } while (0)
+
 static bool
 agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 {
    if (ctx->key->g17p_emrt && ctx->key->secondary &&
        ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       ctx->stage == MESA_SHADER_FRAGMENT && ctx->key->fs.nr_samples > 1 &&
+       ctx->stage == MESA_SHADER_FRAGMENT && ctx->key->fs.nr_samples >= 1 &&
        list_length(&ctx->blocks) > 1) {
       /* Keep each sample within its block. Sorting stores before that
        * group's final anchor preserves SSA dominance and never moves a
@@ -7225,11 +7239,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
                if (I->op != AGX_OPCODE_ST_TILE)
                   continue;
                if (count == ARRAY_SIZE(group))
-                  return false;
+                  AGX3_ORDER_REFUSE();
                group[count++] = I;
             }
             if (count % partitions)
-               return false;
+               AGX3_ORDER_REFUSE();
             for (unsigned base = 0; base < count; base += partitions) {
                struct list_head *anchor = group[base + partitions - 1]->link.next;
                for (unsigned i = base; i < base + partitions; ++i) {
@@ -7255,7 +7269,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
             if (agx_compiler_debug & AGX_DBG_REFUSE)
                fprintf(stderr, "G17P eMRT store order refused: offset=%u previous=%u\n",
                        I->pixel_offset, previous);
-            return false;
+            AGX3_ORDER_REFUSE();
          }
          previous = I->pixel_offset ? I->pixel_offset : UINT_MAX;
          stores++;
@@ -7264,7 +7278,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          if (agx_compiler_debug & AGX_DBG_REFUSE)
             fprintf(stderr, "G17P eMRT group refused: stores=%u last=%u\n",
                     stores, previous);
-         return false;
+         AGX3_ORDER_REFUSE();
       }
       ctx->agx3_mrt_tile_ops_ordered = true;
       return true;
@@ -7274,7 +7288,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
        list_length(&ctx->blocks) != 1)
-      return false;
+      AGX3_ORDER_REFUSE();
 
    /* A multisample epilog stores every target through the coverage word
     * register (agx_nir_lower_g17p_tile_samples). */
@@ -7300,7 +7314,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          case AGX_OPCODE_WAIT_PIX:
             if (I->writeout == 1) {
                if (depth_ops != 0 || colour_started)
-                  return false;
+                  AGX3_ORDER_REFUSE();
                depth_ops = 1;
                break;
             }
@@ -7309,7 +7323,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
              * same lifetime even when its whole layout fits in the tile. */
             if (depth_ops == 1 ||
                 (depth_ops == 2 && !(ctx->key->g17p_emrt && multisample_stores)))
-               return false;
+               AGX3_ORDER_REFUSE();
             if (!first_wait)
                first_wait = I;
             break;
@@ -7318,12 +7332,12 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
              * sample inside the same class-1 transaction. */
             if (depth_ops != 1 && depth_ops != 2 &&
                 !(ctx->key->g17p_emrt && multisample_stores && depth_ops == 3))
-               return false;
+               AGX3_ORDER_REFUSE();
             depth_ops = 2;
             break;
          case AGX_OPCODE_SIGNAL_PIX:
             if (depth_ops != 2 || I->writeout != 1)
-               return false;
+               AGX3_ORDER_REFUSE();
             depth_ops = 3;
             break;
          case AGX_OPCODE_FLTNORM_AGX3:
@@ -7337,7 +7351,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
              * so it does not disturb the class protocol. Admit it only there;
              * between tile ops it would kill samples mid-transaction. */
             if (colour_started || depth_ops || sample_masks++)
-               return false;
+               AGX3_ORDER_REFUSE();
             break;
          case AGX_OPCODE_ST_TILE:
             if (store_count >= ARRAY_SIZE(stores) || I->nr_dests != 0 ||
@@ -7349,11 +7363,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
                      : I->src[1].type == AGX_INDEX_IMMEDIATE &&
                           I->src[1].value == 0xff) ||
                 !agx_is_null(I->src[2]))
-               return false;
+               AGX3_ORDER_REFUSE();
             if (!multisample_stores) {
                for (unsigned i = 0; i < store_count; ++i) {
                   if (stores[i]->pixel_offset == I->pixel_offset)
-                     return false;
+                     AGX3_ORDER_REFUSE();
                }
             }
             stores[store_count++] = I;
@@ -7367,18 +7381,18 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
                      : I->src[0].type == AGX_INDEX_IMMEDIATE &&
                           I->src[0].value == 0xff) ||
                 !agx_is_null(I->src[1]))
-               return false;
+               AGX3_ORDER_REFUSE();
             if (!multisample_stores) {
                for (unsigned i = 0; i < load_count; ++i) {
                   if (loads[i]->pixel_offset == I->pixel_offset)
-                     return false;
+                     AGX3_ORDER_REFUSE();
                }
             }
             loads[load_count++] = I;
             break;
          case AGX_OPCODE_STOP:
             if (stop)
-               return false;
+               AGX3_ORDER_REFUSE();
             stop = I;
             break;
          default:
@@ -7388,7 +7402,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
                           "G17P MRT order: unexpected %s between tile ops\n",
                           agx_opcodes_info[I->op].name);
                }
-               return false;
+               AGX3_ORDER_REFUSE();
             }
             break;
          }
@@ -7406,7 +7420,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
    for (unsigned i = 0; i < store_count; ++i) {
       const unsigned offset = stores[i]->pixel_offset;
       if (offset >= AGX_G17P_MAX_BYTES_PER_SAMPLE)
-         return false;
+         AGX3_ORDER_REFUSE();
       BITSET_SET(written, offset);
       unkeyed_store |= !BITSET_TEST(partitions, offset);
    }
@@ -7426,7 +7440,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        (!lone_sparse_store &&
         store_count < (subset && !only_partition0 ? 1 : 2)) ||
        (depth_ops && depth_ops != 3))
-      return false;
+      AGX3_ORDER_REFUSE();
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
     * ordinary colour transactions, including two/three RGBA32 targets. Other
@@ -7449,11 +7463,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          rgba8 &= stores[i]->format == AGX_FORMAT_U8NORM &&
                   stores[i]->mask == 15 && stores[i]->pixel_offset == 4 * i;
       if (ctx->key->g17p_mrt_bg || store_count >= 4 || rgba32 || rgba8)
-         return false;
+         AGX3_ORDER_REFUSE();
    }
 
    if (load_count && !first_wait)
-      return false;
+      AGX3_ORDER_REFUSE();
 
    /* Native acquires and loads higher partitions first.  Move only the tile
     * loads themselves; their SSA consumers stay in place and RA extends the
@@ -7482,7 +7496,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          store_count == partition_count * ctx->key->fs.nr_samples
             ? ctx->key->fs.nr_samples : 1;
       if (load_count % samples)
-         return false;
+         AGX3_ORDER_REFUSE();
 
       const unsigned group_size = load_count / samples;
       for (unsigned group = 0; group < samples; ++group) {
@@ -7498,7 +7512,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
          if (ordered) {
             for (unsigned i = 0; group > 0 && i < group_size; ++i) {
                if (group_loads[i]->pixel_offset != loads[i]->pixel_offset)
-                  return false;
+                  AGX3_ORDER_REFUSE();
             }
             continue;
          }
@@ -7516,7 +7530,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 
             if (group > 0 &&
                 group_loads[i]->pixel_offset != loads[i]->pixel_offset)
-               return false;
+               AGX3_ORDER_REFUSE();
          }
 
          for (unsigned i = 0; i < group_size; ++i) {
@@ -7537,7 +7551,7 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       store_count == partition_count * ctx->key->fs.nr_samples;
    if (multisample_stores && store_count != partition_count &&
        !unrolled_samples)
-      return false;
+      AGX3_ORDER_REFUSE();
 
    const unsigned group_count = unrolled_samples
                                    ? ctx->key->fs.nr_samples : 1;
@@ -7560,11 +7574,11 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 
          if (unrolled_samples && group > 0 &&
              group_stores[i]->pixel_offset != stores[i]->pixel_offset)
-            return false;
+            AGX3_ORDER_REFUSE();
       }
    }
    if (stores[store_count - 1]->pixel_offset != 0 && !subset)
-      return false;
+      AGX3_ORDER_REFUSE();
 
    if (unrolled_samples) {
       /* Keep each sample's payload calculation and stores together. Moving
