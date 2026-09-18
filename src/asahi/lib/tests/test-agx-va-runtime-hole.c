@@ -479,15 +479,72 @@ test_g17p_vdm_command_alias_heap(void)
    assert(0x200000 + 2 * command_bo_size < ((uint64_t)native_tvb_pages[6] + 4) * 0x8000);
    assert(AGX_G17P_VDM_ALIAS_OFFSET_START == 0x800000);
 
-   const unsigned capacity = AGX_G17P_VDM_ALIAS_SIZE / command_bo_size;
+   /* Kernel g17_resources.rs reserves its own arenas in every client root
+    * and refuses (EINVAL) a user bind that overlaps one. The heap is the
+    * window minus those arenas, never the whole window. */
+   const uint64_t capacity_bytes = agx_g17p_vdm_alias_heap_capacity();
+   assert(capacity_bytes < AGX_G17P_VDM_ALIAS_SIZE);
+   assert(capacity_bytes ==
+          AGX_G17P_VDM_ALIAS_SIZE -
+             (AGX_G17P_KERNEL_RENDER_USER_ALIAS_END -
+              AGX_G17P_KERNEL_RENDER_USER_ALIAS_START) -
+             (AGX_G17P_KERNEL_TVB_GROWTH_END -
+              AGX_G17P_KERNEL_TVB_GROWTH_START) -
+             (AGX_G17P_KERNEL_TVB_PAIR1_END - AGX_G17P_KERNEL_TVB_PAIR1_START) -
+             (AGX_G17P_KERNEL_RT_DYNAMIC_END - AGX_G17P_KERNEL_RT_DYNAMIC_START));
+   assert(heap.free_size == capacity_bytes - command_bo_size);
+
+   /* Firefox (WebRender + WebGL) holds 32 batches x (512-KiB encoder +
+    * 256-KiB pool alias) = exactly the 24 MiB below the render-state alias
+    * arena; the next command BO must continue above the arena, not into it. */
+   const uint64_t arena_start =
+      AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RENDER_USER_ALIAS_START;
+   const uint64_t arena_end =
+      AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RENDER_USER_ALIAS_END;
+   assert(agx_g17p_vdm_alias_kernel_reserved(arena_start, PAGE));
+   assert(agx_g17p_vdm_alias_kernel_reserved(arena_start - PAGE, PAGE + 1));
+   assert(!agx_g17p_vdm_alias_kernel_reserved(arena_start - PAGE, PAGE));
+   assert(!agx_g17p_vdm_alias_kernel_reserved(arena_end, PAGE));
+   assert(!agx_g17p_vdm_alias_kernel_reserved(arena_start, 0));
+
+   /* The free regions between the arenas, low to high. Two of them are not
+    * multiples of a command BO, so the heap ends with that much unusable tail
+    * rather than zero. */
+   const uint64_t free_regions[][2] = {
+      {AGX_G17P_VDM_ALIAS_BASE, arena_start},
+      {arena_end, AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_GROWTH_START},
+      {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_GROWTH_END,
+       AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_PAIR1_START},
+      {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_PAIR1_END,
+       AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RT_DYNAMIC_START},
+      {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RT_DYNAMIC_END,
+       AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END},
+   };
+   unsigned capacity = 0;
+   uint64_t unusable = 0;
+   for (unsigned r = 0; r < sizeof(free_regions) / sizeof(free_regions[0]); ++r) {
+      const uint64_t bytes = free_regions[r][1] - free_regions[r][0];
+      capacity += bytes / command_bo_size;
+      unusable += bytes % command_bo_size;
+   }
+   assert(capacity_bytes == 0x1800000 + 0x1e00000 + 0x7918000 + 0x3418000 + 0xa8000000);
+   assert(capacity == 192 + 240 + 968 + 416 + 21504);
+
+   const uint64_t below_arena = (arena_start - AGX_G17P_VDM_ALIAS_BASE) / command_bo_size;
    uint64_t last = first;
    for (unsigned i = 1; i < capacity; ++i) {
       last = util_vma_heap_alloc(&heap, command_bo_size, PAGE);
       assert(last != 0);
       assert(agx_g17p_vdm_alias_range_valid(last, command_bo_size));
+      assert(!agx_g17p_vdm_alias_kernel_reserved(last, command_bo_size));
+      if (i < below_arena)
+         assert(last + command_bo_size <= arena_start);
+      else if (i == below_arena)
+         assert(last == arena_end);
    }
    assert(last + command_bo_size ==
           AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END);
+   assert(heap.free_size == unusable);
    assert(util_vma_heap_alloc(&heap, command_bo_size, PAGE) == 0);
 
    util_vma_heap_free(&heap, first, command_bo_size);

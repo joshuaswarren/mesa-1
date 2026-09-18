@@ -123,6 +123,26 @@ struct agx_g17p_vdm_alias {
    uint64_t address;
 };
 
+/* Name the condition before the assertion fires: an exhausted window and a
+ * bind the kernel refused look identical from the caller. */
+static void
+agx_g17p_vdm_alias_report(const char *what, struct agx_bo *bo, uint64_t alias,
+                          int ret)
+{
+   const char *reason =
+      !alias ? "the compact VDM alias window is exhausted"
+      : agx_g17p_vdm_alias_kernel_reserved(alias, bo->size)
+         ? "the address is a kernel-reserved arena (the table in "
+           "agx_va_runtime_hole.h is out of step with g17_resources.rs)"
+         : "the kernel refused the bind";
+   fprintf(stderr,
+           "asahi: no G17P VDM alias for the %s BO %#llx (%#llx bytes) at "
+           "%#llx (ret=%d): %s\n",
+           what, (unsigned long long)bo->va->addr,
+           (unsigned long long)bo->size, (unsigned long long)alias, ret,
+           reason);
+}
+
 uint64_t
 agx_batch_get_g17p_vdm_alias(struct agx_batch *batch, struct agx_bo *bo,
                              uint64_t address)
@@ -148,6 +168,8 @@ agx_batch_get_g17p_vdm_alias(struct agx_batch *batch, struct agx_bo *bo,
       const uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
       const int ret = alias ? agx_bo_bind(dev, bo, alias, bo->size, 0, flags)
                             : -1;
+      if (!alias || ret)
+         agx_g17p_vdm_alias_report("batch", bo, alias, ret);
       assert(alias && ret == 0);
       if (!alias || ret)
          return 0;
@@ -171,6 +193,8 @@ agx_encoder_bind_vdm_alias(struct agx_device *dev, struct agx_encoder *encoder)
    const int ret = alias ? agx_bo_bind(dev, encoder->bo, alias,
                                       encoder->bo->size, 0, flags)
                          : -1;
+   if (!alias || ret)
+      agx_g17p_vdm_alias_report("encoder", encoder->bo, alias, ret);
    assert(alias && ret == 0);
    if (!alias || ret)
       return;
