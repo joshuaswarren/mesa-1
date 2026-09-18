@@ -243,6 +243,27 @@ hk_CreateSampler(VkDevice device,
    sampler->mip_lod_bias = info->mipLodBias;
    if (sampler->vk.ycbcr_conversion) {
       sampler->ycbcr = sampler->vk.ycbcr_conversion->state;
+      /* This is a lowering switch on our private copy of the conversion
+       * state, not an echo of the API's forceExplicitReconstruction, and it
+       * stays even though G17P no longer advertises either
+       * CHROMA_RECONSTRUCTION_EXPLICIT bit for these formats.
+       *
+       * On G17P a packed 4:2:2 view is programmed as a plain four-component
+       * word texture -- R8G8B8A8_UNORM or R16G16B16A16_UNORM, see
+       * hk_image_view.c -- because the texture unit does not reconstruct
+       * these formats for us.  Every luma and chroma sample therefore comes
+       * out of hk_shader.c's lowering, and that lowering is reached only
+       * through lower_ycbcr_explicit(), which this flag gates:
+       * lower_packed_ycbcr_center() fires on the txl taps that pass emits,
+       * and the common nir_vk_lower_ycbcr_tex() deliberately skips packed
+       * formats.  Clear the flag and an application's texture() would sample
+       * raw packed words as RGBA with no conversion at all.
+       *
+       * Withdrawing the format features is therefore not a promise that we
+       * stopped reconstructing at luma texel centres; it is a statement that
+       * we no longer guarantee it, which is what "reconstruction is
+       * implementation-defined" means.
+       */
       if (agx_native_graphics(&dev->dev) && hk_packed_ycbcr_bits(sampler->ycbcr.format))
          sampler->ycbcr.force_explicit_reconstruction = true;
       /* Explicit nearest chroma maps luma (i,j) to (i/2,j/2), independent

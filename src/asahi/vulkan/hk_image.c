@@ -39,6 +39,32 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
 {
    VkFormatFeatureFlags2 features = 0;
 
+   /* G17P reconstructs single-plane interleaved 4:2:2 in the shader rather
+    * than in the texture unit (hk_image_view.c programs these views as plain
+    * four-component words), so it can honour chroma-reconstruction features
+    * that the generic path below cannot, and it used to advertise all of
+    * them.  Explicit reconstruction is withdrawn.
+    *
+    * Advertising CHROMA_RECONSTRUCTION_EXPLICIT is what makes a conformance
+    * run evaluate this driver against the explicit reference, and the
+    * explicit 4:2:2 reference in VK-GL-CTS is wrong for COSITED_EVEN: at even
+    * luma index it weights the chroma sample at subI + 1, one chroma texel
+    * right of the texel COSITED_EVEN co-sites with that luma texel.  We do
+    * not carry a capability whose only effect is to select a broken
+    * reference.  MIDPOINT_CHROMA_SAMPLES and SEPARATE_RECONSTRUCTION_FILTER
+    * go with it: both only describe how chroma is reconstructed, and the
+    * remaining COSITED_EVEN path is reconstructed implicitly as far as the
+    * API is concerned.
+    *
+    * Note this is NOT bit-for-bit what the generic path below computes for
+    * these formats.  There n_planes == 1 and the single plane's
+    * denominator_scales are {1, 1} (vk_format.c, y_plane(...)), so
+    * cosited_chroma stays false and neither chroma-location bit is added at
+    * all.  That reading is not reconciled with M1/M2 conformance and has not
+    * been measured on M1/M2 hardware, so do not copy it here on the strength
+    * of code inspection alone.  COSITED_EVEN is kept because it is what this
+    * driver actually implements and passes.
+    */
    if (agx_native_graphics(&pdev->dev) && hk_packed_ycbcr_bits(vk_format)) {
       if (tiling != VK_IMAGE_TILING_OPTIMAL && tiling != VK_IMAGE_TILING_LINEAR)
          return 0;
@@ -47,11 +73,7 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
              VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
              VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
              VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT |
-             VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT |
-             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT |
-             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_SEPARATE_RECONSTRUCTION_FILTER_BIT |
-             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_CHROMA_RECONSTRUCTION_EXPLICIT_BIT |
-             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_CHROMA_RECONSTRUCTION_EXPLICIT_FORCEABLE_BIT;
+             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT;
    }
 
    /* This optional format needs hacks for opaque black, so hide for
