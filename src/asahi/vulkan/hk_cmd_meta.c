@@ -747,7 +747,13 @@ aspect_format(VkFormat fmt, VkImageAspectFlags aspect)
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(fmt);
 
-   if (ycbcr_info) {
+   /* A single-plane YCbCr format -- the interleaved 4:2:2 families -- is still
+    * a YCbCr format, but its one plane is addressed by COLOR, not PLANE_0, so
+    * it has no plane aspect to translate. Answer with the format itself.
+    * Falling into the switch reached UNREACHABLE(), which a release build
+    * compiles to __builtin_unreachable(): the caller then continued on an
+    * undefined VkFormat rather than trapping. */
+   if (ycbcr_info && ycbcr_info->n_planes > 1) {
       switch (aspect) {
       case VK_IMAGE_ASPECT_PLANE_0_BIT:
          return ycbcr_info->planes[0].format;
