@@ -1421,16 +1421,36 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
 
       const unsigned plain_coords =
          (ms_2d || ms_array || array) ? 2 : agx_channels(I->src[0]);
+      /* The staging COPY carries exactly one wait bit, so a fetch whose
+       * operands are produced on two scoreboard slots had no encoding at all
+       * and the packer refused the whole shader.
+       *
+       * Retire the extra slots by repeating the first coordinate copy, one
+       * outstanding bit each. Every repeat writes the same staging register
+       * from the same source, so the last one -- issued once every slot has
+       * retired -- leaves the correct value, whichever slot produced the
+       * coordinate. A fetch waiting on one slot or none emits exactly what it
+       * emitted before, so no shader that already encoded is affected. */
+      uint16_t pending_wait = staging_wait;
       for (unsigned i = 0; i < plain_coords; i++) {
+       const unsigned reps =
+          (i == 0) ? MAX2(util_bitcount(pending_wait), 1u) : 1u;
+       for (unsigned rep = 0; rep < reps; rep++) {
+         uint16_t wait_bit = 0;
+         if (pending_wait) {
+            wait_bit = (uint16_t)(pending_wait & (~pending_wait + 1u));
+            pending_wait &= (uint16_t)~wait_bit;
+         }
          uint8_t copy[AGX3_TEX_MAX_LENGTH], copy_len = 0;
          if (!agx3_tex_stage_copy_hints(enc, staging_coord + 2 * i,
                                   I->src[0].value + 2 * i,
-                                  staging_slot, i == 0 ? staging_wait : 0,
+                                  staging_slot, wait_bit,
                                   enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
                                   enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard,
                                   copy, &copy_len) ||
              !agx3_append(emission, copy, copy_len))
             return false;
+       }
       }
 
       /* Apple stages a plain 2D fragment texel fetch's level after its
