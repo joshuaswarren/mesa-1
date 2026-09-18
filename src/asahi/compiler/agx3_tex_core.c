@@ -565,8 +565,15 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
           * operand at all, so it composes with the cube array's witnessed
           * face+layer word exactly as it already does with a plain cube. */
          !(d->lod == AGX3_TEX_LOD_LEVEL && d->lod_x64 == 0) &&
-         !(d->array && !d->cube && d->min_lod &&
-           (d->lod == AGX3_TEX_LOD_GRADIENT || d->min_lod_register)) &&
+         /* A noncube array comparison gradient, with or without a minimum.
+          * The four staged scalars and f139 = 5 compose with the packed
+          * layer exactly as they do without the comparison, and the same
+          * descriptor from a pre-raster stage -- which `vertex_stage` above
+          * already exempts -- encodes byte for byte identically, because
+          * nothing in this encoder reads the stage for a gradient. */
+         !(d->array && !d->cube &&
+           (d->lod == AGX3_TEX_LOD_GRADIENT ||
+            (d->min_lod && d->min_lod_register))) &&
          !(d->cube && !d->array &&
            (d->lod == AGX3_TEX_LOD_REGISTER ||
             (d->min_lod && d->lod == AGX3_TEX_LOD_BIAS_REGISTER))))))

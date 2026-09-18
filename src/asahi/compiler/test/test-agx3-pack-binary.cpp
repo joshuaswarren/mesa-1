@@ -13871,10 +13871,12 @@ TEST_F(AGX3PackBinary, IndexedShadowLevelZeroKeepsNativeHandles)
          nir_builder_instr_insert(&b, &tex->instr);
          nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000),
                            .align_mul = 4);
-         /* A comparison cube also stages a register level beside its face
-          * (depthcube sample_compare(level(reg))); an immediate nonzero level
-          * and a comparison array's register level have no native form. */
-         const bool native = level == 0 || (cube && level == 2);
+         /* A comparison stages a register level beside the operand its
+          * dimension already owns -- the cube beside its face, the noncube
+          * array beside its layer -- so both are native. An immediate
+          * nonzero level is not: it would have to share SMP's immediate
+          * slot with that same operand. */
+         const bool native = level == 0 || level == 2;
          EXPECT_EQ(agx_nir_lower_g17p_indexed_samplers(b.shader), native);
          if (native) {
             const int texture = nir_tex_instr_src_index(tex, nir_tex_src_texture_offset);
@@ -13884,6 +13886,61 @@ TEST_F(AGX3PackBinary, IndexedShadowLevelZeroKeepsNativeHandles)
             EXPECT_EQ(nir_src_bit_size(tex->src[texture].src), 64);
             EXPECT_EQ(nir_src_bit_size(tex->src[sampler].src), 64);
          }
+         ralloc_free(b.shader);
+      }
+   }
+}
+
+TEST_F(AGX3PackBinary, IndexedShadowGradientAndRegisterBiasKeepNativeHandles)
+{
+   /* kind 0: per-lane bias, kind 1: constant bias, kind 2: gradient. */
+   for (bool cube : {false, true}) {
+      for (unsigned kind = 0; kind < 3; ++kind) {
+         const bool grad = kind == 2;
+         nir_builder b = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "indexed shadow lod");
+         nir_def *image =
+            nir_bindless_image_agx(&b, nir_imm_int(&b, 72), .desc_set = 1);
+         nir_def *smp = nir_bindless_sampler_agx(
+            &b, nir_imm_int(&b, 104), nir_imm_intN_t(&b, 3, 16),
+            .desc_set = 1);
+         nir_tex_instr *tex = nir_tex_instr_create(b.shader, grad ? 6 : 5);
+         tex->op = grad ? nir_texop_txd : nir_texop_txb;
+         tex->sampler_dim = cube ? GLSL_SAMPLER_DIM_CUBE : GLSL_SAMPLER_DIM_2D;
+         tex->is_array = !cube;
+         tex->is_shadow = true;
+         tex->is_new_style_shadow = true;
+         tex->dest_type = nir_type_float32;
+         tex->coord_components = 3;
+         tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord,
+                                           nir_imm_vec3(&b, .5, .25, 1));
+         tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_texture_handle, image);
+         tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_sampler_handle, smp);
+         tex->src[3] = nir_tex_src_for_ssa(nir_tex_src_comparator,
+                                           nir_imm_float(&b, .5));
+         if (grad) {
+            nir_def *d = nir_load_global_constant(
+               &b, 2, 32, nir_imm_int64(&b, 0x10000), .align_mul = 8);
+            tex->src[4] = nir_tex_src_for_ssa(nir_tex_src_ddx, d);
+            tex->src[5] = nir_tex_src_for_ssa(nir_tex_src_ddy, d);
+         } else {
+            tex->src[4] = nir_tex_src_for_ssa(
+               nir_tex_src_bias,
+               kind == 0 ? nir_load_global_constant(
+                              &b, 1, 32, nir_imm_int64(&b, 0x10000),
+                              .align_mul = 4)
+                         : nir_imm_float(&b, .5));
+         }
+         nir_def_init(&tex->instr, &tex->def, 1, 32);
+         nir_builder_instr_insert(&b, &tex->instr);
+         nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x20000),
+                          .align_mul = 4);
+         /* A per-lane bias is published beside the layer or CEM's face, so
+          * both dimensions take it; a constant one would have to share SMP's
+          * immediate slot with that same operand. The gradient composes with
+          * the packed layer, and the cube has no gradient form at all. */
+         const bool native = grad ? !cube : kind == 0;
+         EXPECT_EQ(agx_nir_lower_g17p_indexed_samplers(b.shader), native);
          ralloc_free(b.shader);
       }
    }

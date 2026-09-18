@@ -79,12 +79,24 @@ g17p_sample_shape(const nir_tex_instr *tex)
       (nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0 ||
        nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0);
    const int level_src = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+   const int bias_src = nir_tex_instr_src_index(tex, nir_tex_src_bias);
    /* Native G17P compute depthcube/depth2d_array sample_compare(level(0))
     * keeps the ordinary face/layer staging and selects SMP f139=2. */
    const bool shadow_level_zero = tex->is_shadow && !cube_array &&
       tex->op == nir_texop_txl && level_src >= 0 &&
       nir_src_is_const(tex->src[level_src].src) &&
       nir_src_as_float(tex->src[level_src].src) == 0.0;
+   /* A per-lane level or bias is published beside the operand its dimension
+    * already owns -- the layer for a noncube array (agx3_tex_stage_array_lod),
+    * CEM's face for a cube (agx3_tex_stage_cube_lod) -- so it is the runtime
+    * value, not a constant, that the comparison forms admit. A constant level
+    * or bias would instead have to share SMP's immediate f29/f43 slot with
+    * that same operand, which is the collision agx3_emit_texture_sample()
+    * declines. */
+   const bool register_level = tex->op == nir_texop_txl && level_src >= 0 &&
+      !nir_src_is_const(tex->src[level_src].src);
+   const bool register_bias = tex->op == nir_texop_txb && bias_src >= 0 &&
+      !nir_src_is_const(tex->src[bias_src].src);
 
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
        tex->op != nir_texop_txl && tex->op != nir_texop_txd &&
@@ -119,7 +131,8 @@ g17p_sample_shape(const nir_tex_instr *tex)
             tex->op == nir_texop_txl) &&
          !(tex->op == nir_texop_txb &&
            (!tex->is_shadow ||
-            nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0) &&
+            nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0 ||
+            register_bias) &&
            !(tex->is_shadow && cube_array)))) ||
        /* Sparse residency rides on the ordinary sample: the encoder sets
         * three extra fields and the instruction writes one more register.
@@ -163,8 +176,22 @@ g17p_sample_shape(const nir_tex_instr *tex)
           nir_src_bit_size(tex->src[comparator].src) != 32 ||
           (tex->is_array && !offset_array && tex->op != nir_texop_tex &&
            tex->op != nir_texop_tg4 &&
-           !(tex->op == nir_texop_txd && minimum >= 0) &&
            !(tex->op == nir_texop_txb && packed_bias_min >= 0) &&
+           /* GLSL's remaining comparison LOD shapes for an array depth
+            * sampler: textureLod and texture(..., bias) on
+            * sampler1DArrayShadow, and textureGrad on sampler1DArrayShadow
+            * and sampler2DArrayShadow -- a gradient now with or without a
+            * minimum. Each stages its scalar in a word the packer has
+            * emitted since the colour forms landed: the level or bias beside
+            * the layer, the gradient in banks 8..14 with the layer still on
+            * PACK_SMPIR bank 6. Only this gate held them back, and refusing
+            * them here does not fall back to anything -- the pass is
+            * all-or-nothing per shader, so every texture instruction in the
+            * shader then reached the packer as a software-heap bindless
+            * handle, which has no AGX3 encoding, and the pipeline failed
+            * with VK_ERROR_UNKNOWN. */
+           !register_level && !register_bias &&
+           tex->op != nir_texop_txd &&
            !shadow_level_zero))
          return false;
    }
