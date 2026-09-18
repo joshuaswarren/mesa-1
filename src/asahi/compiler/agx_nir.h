@@ -47,10 +47,14 @@ bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
 /* robust_formatless_images: formatless image loads have not been lowered for
  * view-bounds robustness and require it. */
+/* sparse_buffer_residency: ordinary texel-buffer reads must consult the
+ * software sparse residency map, because the descriptor names the primary
+ * mapping rather than the read-only shadow (hk_buffer_view.c). */
 bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
                                                unsigned generation,
                                                bool robust_formatless_images,
-                                               uint64_t sparse_ro_offset);
+                                               uint64_t sparse_ro_offset,
+                                               bool sparse_buffer_residency);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
 bool agx_nir_lower_multisampled_image_store_for_generation(struct nir_shader *s,
                                                          unsigned generation);
