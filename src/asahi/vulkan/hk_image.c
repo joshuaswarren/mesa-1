@@ -291,8 +291,44 @@ hk_get_image_format_features(struct hk_physical_device *pdev,
          VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT;
    }
 
-   if (agx_native_graphics(&pdev->dev) && ycbcr_info->n_planes > 1)
-      features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_CHROMA_RECONSTRUCTION_EXPLICIT_FORCEABLE_BIT;
+   /* G17P used to add CHROMA_RECONSTRUCTION_EXPLICIT_FORCEABLE here, and only
+    * G17P: agx_native_graphics() is G16G/G17P, so M1/M2 reach these formats
+    * without it and every explicit_* conformance case is NotSupported there.
+    *
+    * That bit is the sole route into VK-GL-CTS's explicit reconstruction
+    * reference, and both of its routines are wrong.  reconstructLinearX-
+    * ChromaSample() treats its constant as the weight of the first chroma
+    * sample; reconstructLinearXYChromaSample() hands the same constants to
+    * linearInterpolate(), which weights the second.  So the X-only routine is
+    * wrong at COSITED_EVEN and the XY routine is wrong at MIDPOINT in either
+    * axis -- which is exactly the failing set: 4:2:2 cosited, and 4:2:0
+    * cosited_midpoint / midpoint_cosited / midpoint_midpoint, with
+    * cosited_cosited passing.
+    *
+    * We are not giving this up because we cannot do it.  G17P's explicit
+    * multi-plane reconstruction is correct: over 171 logged failing sample
+    * points the driver matched the Vulkan spec reconstruction 171/171 and the
+    * as-written CTS value 0/171, while the reference's own bounds contained
+    * the as-written value 171/171 and the spec value 0/171.  The same
+    * instrument scored 248/248 on packed 4:2:2 before it was extended here.
+    * We are giving up claiming a capability whose only effect is to select a
+    * proven-wrong reference, and matching what M1/M2 report.
+    *
+    * The cost is real and deliberate: 512 conformance cases that pass today
+    * become NotSupported, alongside the 512 that fail.  Nothing outside
+    * ycbcr.conversion.*.chroma_reconstruction moves -- of the 53,768
+    * multi-plane YCbCr cases, exactly 1,024 request explicit reconstruction.
+    *
+    * Nothing is needed on the sampler side.  Unlike packed single-plane,
+    * whose views are programmed as plain four-component word textures so
+    * hk_sampler.c must force the shader lowering on, multi-plane views are
+    * real YCbCr views: hk_sampler.c's forcing is gated on
+    * hk_packed_ycbcr_bits(), which is 0 here, so multi-plane only ever
+    * reconstructed explicitly when an application asked.  Withdrawing the bit
+    * makes that request illegal, lower_ycbcr_explicit() stops firing, and the
+    * common implicit path takes over -- the path the 1,536 default_* cases
+    * already exercise and pass.
+    */
 
    if (cosited_chroma)
       features |= VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT;
