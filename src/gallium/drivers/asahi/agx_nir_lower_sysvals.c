@@ -337,10 +337,11 @@ find_push_range_containing(struct agx_compiled_shader *shader, uint8_t table,
 
 static unsigned
 lay_out_table(struct agx_compiled_shader *shader, struct table_state *state,
-              unsigned table_index, unsigned uniform)
+              unsigned table_index, unsigned uniform, bool dword_ranges)
 {
+   const unsigned table_halfs = sizeof(state->pushed) * 8;
    unsigned start, end;
-   BITSET_FOREACH_RANGE(start, end, state->pushed, sizeof(state->pushed) * 8) {
+   BITSET_FOREACH_RANGE(start, end, state->pushed, table_halfs) {
       unsigned range_start = start;
 
       do {
@@ -356,8 +357,17 @@ lay_out_table(struct agx_compiled_shader *shader, struct table_state *state,
               ++range_end)
             ;
 
-         /* Now make the range with the given size (naturally aligned) */
-         uniform = ALIGN_POT(uniform, size);
+         /* Now make the range with the given size (naturally aligned).
+          *
+          * G17P's Ioto loader moves uniform dwords, so on that chip a range
+          * must also start at an even half and cover an even number of them.
+          * The natural alignment of a 16-bit run is one half, which put the
+          * run after a three-texture handle range at an odd uniform and had
+          * the draw refused ("a pushed uniform range is not dword aligned").
+          * Align the destination to a dword and pad the length to one; the
+          * extra half is a harmless copy of the neighbouring table byte pair.
+          */
+         uniform = ALIGN_POT(uniform, dword_ranges ? MAX2(size, 2) : size);
 
          assert((shader->push_range_count < ARRAY_SIZE(shader->push)) &&
                 "AGX_MAX_PUSH_RANGES must be an upper bound");
@@ -367,14 +377,22 @@ lay_out_table(struct agx_compiled_shader *shader, struct table_state *state,
           */
          range_start = ROUND_DOWN_TO(range_start, 4 / 2);
 
+         /* Every table is a packed struct of an even size, so padding the
+          * pushed run to a dword never reads past the uploaded table. */
+         unsigned pushed_end = range_end;
+         if (dword_ranges) {
+            pushed_end = ALIGN_POT(range_end, 2);
+            assert(pushed_end <= table_halfs);
+         }
+
          shader->push[shader->push_range_count++] = (struct agx_push_range){
             .uniform = uniform,
             .table = table_index,
             .offset = range_start * 2 /* bytes, not elements */,
-            .length = (range_end - range_start),
+            .length = (pushed_end - range_start),
          };
 
-         uniform += (range_end - range_start);
+         uniform += (pushed_end - range_start);
          range_start = range_end;
       } while (range_start < end);
    }
@@ -383,7 +401,8 @@ lay_out_table(struct agx_compiled_shader *shader, struct table_state *state,
 }
 
 static unsigned
-lay_out_uniforms(struct agx_compiled_shader *shader, struct state *state)
+lay_out_uniforms(struct agx_compiled_shader *shader, struct state *state,
+                 bool dword_ranges)
 {
    unsigned uniform = state->uniform_base;
 
@@ -461,7 +480,8 @@ lay_out_uniforms(struct agx_compiled_shader *shader, struct state *state)
     * uniform goes to the bindless texture base.
     */
    for (int t = AGX_NUM_SYSVAL_TABLES - 1; t >= 0; --t)
-      uniform = lay_out_table(shader, &state->tables[t], t, uniform);
+      uniform = lay_out_table(shader, &state->tables[t], t, uniform,
+                              dword_ranges);
 
    /* Step 4: Fill in the loads */
    util_dynarray_foreach(&state->loads, nir_intrinsic_instr *, intr_) {
@@ -523,7 +543,8 @@ agx_nir_lower_sysvals(nir_shader *shader, mesa_shader_stage desc_stage,
 bool
 agx_nir_layout_uniforms(nir_shader *shader,
                         struct agx_compiled_shader *compiled,
-                        unsigned *push_size, unsigned uniform_base)
+                        unsigned *push_size, unsigned uniform_base,
+                        bool dword_ranges)
 {
    struct state state = {
       .stage = compiled->stage,
@@ -534,7 +555,7 @@ agx_nir_layout_uniforms(nir_shader *shader,
    nir_shader_intrinsics_pass(shader, record_loads, nir_metadata_control_flow,
                               &state);
 
-   *push_size = lay_out_uniforms(compiled, &state);
+   *push_size = lay_out_uniforms(compiled, &state, dword_ranges);
 
    util_dynarray_fini(&state.loads);
 
