@@ -13,6 +13,7 @@
 #include "agx_bg_eot.h"
 #include "agx_helpers.h"
 #include "agx_scratch.h"
+#include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_table.h"
 #include "hk_entrypoints.h"
@@ -391,6 +392,96 @@ hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
 }
 
 /*
+ * Residency of one byte of a sparse residency buffer, read from that buffer's
+ * live bitmap exactly the way hk_g17p_sparse_buffer_copy() and
+ * lower_sparse_buffer_deref() read it: a header carrying the resource base and
+ * the page count, followed by one bit per AIL page.  Reading it in the shader
+ * rather than at record time is what lets a sparse bind submitted after the
+ * command buffer was recorded still affect this dispatch.
+ *
+ * Every dereference is funnelled through the zero page when the value that
+ * produced it is not trustworthy, so no branch is needed and no load can fault.
+ */
+static nir_def *
+hk_g17p_page_resident(nir_builder *b, nir_def *safe_map, nir_def *has_map,
+                      nir_def *resource_base, nir_def *page_count,
+                      nir_def *addr)
+{
+   static_assert(AIL_PAGESIZE == (1u << 14), "update shader lookup");
+   nir_def *page = nir_ushr_imm(b, nir_isub(b, addr, resource_base), 14);
+   nir_def *in_range = nir_ult(b, page, nir_u2u64(b, page_count));
+   nir_def *valid = nir_iand(b, has_map, in_range);
+
+   nir_def *word_addr = nir_iadd_imm(
+      b,
+      nir_iadd(b, safe_map,
+               nir_imul_imm(b, nir_ushr_imm(b, page, 5), sizeof(uint32_t))),
+      sizeof(struct hk_sparse_buffer_map_header));
+   nir_def *safe_word_addr = nir_bcsel(
+      b, valid, word_addr, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+   nir_def *word = nir_load_global(b, 1, 32, safe_word_addr,
+                                   .align_mul = sizeof(uint32_t));
+   /* Test the bit with a variable MASK, not `(word >> (page & 31)) & 1`.
+    * nir_opt_algebraic drops the `& 31` because NIR defines a shift to mask
+    * its count, agx_nir_fuse_algebraic_late then folds the result into
+    * ubitfield_extract(word, page, 1), and that pass runs before
+    * agx_nir_lower_algebraic_late puts AGX's shift mask back -- so the raw
+    * page number would reach the hardware as the extract offset.  Same shape,
+    * same reason, as lower_sparse_buffer_deref() and
+    * lower_sparse_buffer_texture(); an argument buffer past 512 KB would
+    * otherwise read its residency from an arbitrary bit. */
+   nir_def *mask =
+      nir_ishl(b, nir_imm_int(b, 1), nir_iand_imm(b, nir_u2u32(b, page), 31));
+
+   return nir_iand(b, in_range, nir_ine_imm(b, nir_iand(b, word, mask), 0));
+}
+
+/*
+ * Residency of a whole VkDispatchIndirectCommand.
+ *
+ * The record is twelve bytes at a four-byte-aligned offset, so it can straddle
+ * a page boundary: at offset 16376 or 16380 within a 16 KiB page its tail lives
+ * in the next one.  Testing only the first page there would let the z or y
+ * count come from the scratch page, which is exactly the arbitrary grid this
+ * lookup exists to prevent, so test the last byte as well.  Where both bytes
+ * share a page the second lookup reads the same word and costs one load.
+ */
+static nir_def *
+hk_g17p_grid_helper_resident(nir_builder *b, nir_def *root, nir_def *grid_addr)
+{
+   nir_def *map_addr = nir_load_global(
+      b, 1, 64,
+      nir_iadd_imm(b, root,
+                   hk_root_descriptor_offset(cs.grid_helper_sparse_map_addr)),
+      .align_mul = 8);
+   nir_def *has_map = nir_ine_imm(b, map_addr, 0);
+   nir_def *safe_map = nir_bcsel(b, has_map, map_addr,
+                                 nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+
+   nir_def *resource_base = nir_load_global(
+      b, 1, 64,
+      nir_iadd_imm(b, safe_map,
+                   offsetof(struct hk_sparse_buffer_map_header,
+                            resource_base)),
+      .align_mul = alignof(uint64_t));
+   nir_def *page_count = nir_load_global(
+      b, 1, 32,
+      nir_iadd_imm(b, safe_map,
+                   offsetof(struct hk_sparse_buffer_map_header, page_count)),
+      .align_mul = alignof(uint32_t));
+
+   nir_def *first = hk_g17p_page_resident(b, safe_map, has_map, resource_base,
+                                          page_count, grid_addr);
+   nir_def *last = hk_g17p_page_resident(
+      b, safe_map, has_map, resource_base, page_count,
+      nir_iadd_imm(b, grid_addr, sizeof(VkDispatchIndirectCommand) - 1));
+
+   /* No bitmap means this is not a sparse residency buffer, so every byte of
+    * it is there to be read. */
+   return nir_ior(b, nir_inot(b, has_map), nir_iand(b, first, last));
+}
+
+/*
  * The native G17P indirect-compute grid helper.
  *
  * A native indirect dispatch is two CDM records: a direct-shaped main launch
@@ -416,11 +507,14 @@ hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
 static struct hk_api_shader *
 hk_build_g17p_grid_helper(struct hk_device *dev,
                           const VkAllocationCallbacks *pAllocator,
-                          bool copy_geometry)
+                          bool copy_geometry, bool sparse)
 {
+   assert(!(copy_geometry && sparse));
+
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options,
       copy_geometry ? "G17P indirect geometry copy"
+      : sparse      ? "G17P indirect grid helper (sparse)"
                     : "G17P indirect grid helper");
    b.shader->info.workgroup_size[0] = 1;
    b.shader->info.workgroup_size[1] = 1;
@@ -455,6 +549,17 @@ hk_build_g17p_grid_helper(struct hk_device *dev,
 
       /* VkDispatchIndirectCommand is exactly three u32 threadgroup counts. */
       nir_def *groups = nir_load_global(&b, 3, 32, grid_addr, .align_mul = 4);
+
+      /* sparseResidencyNonResidentStrict is advertised, so arguments in an
+       * unbound page must read as zero.  The primary mapping sends those
+       * reads to the scratch page instead, so substitute the zero grid here
+       * rather than relying on the read-only shadow. */
+      if (sparse) {
+         nir_def *resident =
+            hk_g17p_grid_helper_resident(&b, root, grid_addr);
+         groups = nir_bcsel(&b, resident, groups, nir_imm_zero(&b, 3, 32));
+      }
+
       global = nir_imul(&b, groups, local);
    }
 
@@ -481,13 +586,27 @@ hk_init_g17p_grid_helper(struct hk_device *dev,
    if (dev->dev.chip != AGX_CHIP_G17P)
       return;
 
-   dev->g17p_grid_helper = hk_build_g17p_grid_helper(dev, pAllocator, false);
+   dev->g17p_grid_helper =
+      hk_build_g17p_grid_helper(dev, pAllocator, false, false);
    dev->g17p_geometry_copy_helper =
-      hk_build_g17p_grid_helper(dev, pAllocator, true);
+      hk_build_g17p_grid_helper(dev, pAllocator, true, false);
 
    /* A refusal is not fatal: it costs indirect dispatch, not the device. */
    if (!dev->g17p_grid_helper || !dev->g17p_geometry_copy_helper)
       mesa_logw("G17P indirect compute unavailable: grid helper refused");
+
+   /* Only a sparse residency buffer can carry a residency bitmap, so only a
+    * device that enabled the feature can ever select this helper.  Compiling
+    * it unconditionally cost every vkCreateDevice about 2.5 ms -- 32 device
+    * create/destroy cycles went from 419 ms to 499 ms, measured on G17P -- for
+    * a program most devices never launch. */
+   if (!dev->vk.enabled_features.sparseResidencyBuffer)
+      return;
+
+   dev->g17p_grid_helper_sparse =
+      hk_build_g17p_grid_helper(dev, pAllocator, false, true);
+   if (!dev->g17p_grid_helper_sparse)
+      mesa_logw("G17P sparse indirect compute unavailable: helper refused");
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -782,6 +901,11 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
 
    if (dev->g17p_geometry_copy_helper) {
       hk_api_shader_destroy(&dev->vk, &dev->g17p_geometry_copy_helper->vk,
+                            pAllocator);
+   }
+
+   if (dev->g17p_grid_helper_sparse) {
+      hk_api_shader_destroy(&dev->vk, &dev->g17p_grid_helper_sparse->vk,
                             pAllocator);
    }
 

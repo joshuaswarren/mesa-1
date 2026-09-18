@@ -152,6 +152,13 @@ struct hk_device {
     * already wrote as a launch geometry: this helper copies it. */
    struct hk_api_shader *g17p_geometry_copy_helper;
 
+   /* The same contract again, for an indirect-global grid whose arguments
+    * live in a sparse residency buffer: identical except that it consults the
+    * buffer's residency bitmap and publishes a zero grid for arguments in a
+    * non-resident page.  Kept as its own program so the ordinary indirect
+    * dispatch path records exactly the code it recorded before. */
+   struct hk_api_shader *g17p_grid_helper_sparse;
+
    /* Indirected for common secondary emulation */
    struct vk_device_dispatch_table cmd_dispatch;
 

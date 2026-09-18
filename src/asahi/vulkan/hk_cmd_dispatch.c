@@ -762,10 +762,13 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
  * geometry, written by an earlier kernel, which the copy helper publishes.
  */
 static struct hk_shader *
-hk_g17p_indirect_helper(struct hk_device *dev, struct agx_grid grid)
+hk_g17p_indirect_helper(struct hk_device *dev, struct agx_grid grid,
+                        uint64_t sparse_map_addr)
 {
    struct hk_api_shader *helper =
-      grid.mode == AGX_CDM_MODE_INDIRECT_GLOBAL ? dev->g17p_grid_helper
+      grid.mode == AGX_CDM_MODE_INDIRECT_GLOBAL
+         ? (sparse_map_addr ? dev->g17p_grid_helper_sparse
+                            : dev->g17p_grid_helper)
       : grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL
          ? dev->g17p_geometry_copy_helper
          : NULL;
@@ -775,11 +778,13 @@ hk_g17p_indirect_helper(struct hk_device *dev, struct agx_grid grid)
 
 static bool
 hk_g17p_indirect_launch_supported(struct hk_device *dev, struct agx_grid grid,
-                                  struct agx_workgroup local_size)
+                                  struct agx_workgroup local_size,
+                                  uint64_t sparse_map_addr)
 {
    /* Without a helper program there is nothing to publish the geometry, so
     * refuse rather than record a launch whose dimensions never arrive. */
-   struct hk_shader *helper = hk_g17p_indirect_helper(dev, grid);
+   struct hk_shader *helper =
+      hk_g17p_indirect_helper(dev, grid, sparse_map_addr);
    if (grid.ptr == 0 || (grid.ptr & 3) != 0 ||
        !hk_g17p_compute_shader_supported(helper,
                                          helper ? helper->only_linked : NULL))
@@ -803,12 +808,13 @@ hk_g17p_indirect_launch_supported(struct hk_device *dev, struct agx_grid grid,
 static bool
 hk_g17p_append_indirect_launch(
    struct hk_cmd_buffer *cmd, struct agx_grid grid,
-   struct agx_workgroup local_size,
+   struct agx_workgroup local_size, uint64_t sparse_map_addr,
    const struct hk_agx3_g17p_compute_program *program,
    struct agx3_compute_dispatch_sink *sink)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   struct hk_shader *helper_s = hk_g17p_indirect_helper(dev, grid);
+   struct hk_shader *helper_s =
+      hk_g17p_indirect_helper(dev, grid, sparse_map_addr);
 
    /* The six-u32 block the helper publishes and the main record consumes.
     * It lives in the command buffer's own pool, so it is allocated per
@@ -833,6 +839,10 @@ hk_g17p_append_indirect_launch(
       cmd->state.cs.descriptors.root;
    helper_root.cs.group_count_addr = grid.ptr;
    helper_root.cs.grid_helper_geometry_addr = geometry.gpu;
+   /* Authoritative here rather than whatever the copied root carries: an
+    * internal or precompiled launch must never inherit an application
+    * dispatch's residency bitmap. */
+   helper_root.cs.grid_helper_sparse_map_addr = sparse_map_addr;
    helper_root.cs.grid_helper_local_size[0] = local_size.x;
    helper_root.cs.grid_helper_local_size[1] = local_size.y;
    helper_root.cs.grid_helper_local_size[2] = local_size.z;
@@ -921,7 +931,8 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       .y = prog->b.workgroup.y,
       .z = prog->b.workgroup.z,
    };
-   if (indirect && !hk_g17p_indirect_launch_supported(dev, grid, local_size)) {
+   if (indirect &&
+       !hk_g17p_indirect_launch_supported(dev, grid, local_size, 0)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
@@ -1025,7 +1036,7 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
          .data = (uint8_t *)cs->current,
          .capacity = (uint8_t *)cs->end - (uint8_t *)cs->current,
       };
-      if (!hk_g17p_append_indirect_launch(cmd, grid, local_size, &program,
+      if (!hk_g17p_append_indirect_launch(cmd, grid, local_size, 0, &program,
                                           &sink))
          return;
 
@@ -1095,9 +1106,19 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       return;
    }
 
+   const bool internal_graphics = s->info.stage != MESA_SHADER_COMPUTE;
+
+   /* Only an application compute dispatch can name a sparse argument buffer;
+    * an internal graphics kernel's indirect grid is a driver record. */
+   const uint64_t sparse_map_addr =
+      internal_graphics
+         ? 0
+         : cmd->state.cs.descriptors.root.cs.grid_helper_sparse_map_addr;
+
    const bool indirect = agx_is_indirect(grid);
    if (indirect) {
-      if (!hk_g17p_indirect_launch_supported(dev, grid, local_size)) {
+      if (!hk_g17p_indirect_launch_supported(dev, grid, local_size,
+                                             sparse_map_addr)) {
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -1105,8 +1126,6 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
               grid.count[2] == 0) {
       return;
    }
-
-   const bool internal_graphics = s->info.stage != MESA_SHADER_COMPUTE;
 
    if (!internal_graphics && s->data_size != 0) {
       const uint64_t constant_data = hk_pool_upload(
@@ -1473,8 +1492,8 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    };
 
    if (indirect) {
-      if (!hk_g17p_append_indirect_launch(cmd, grid, local_size, &program,
-                                          &sink))
+      if (!hk_g17p_append_indirect_launch(cmd, grid, local_size,
+                                          sparse_map_addr, &program, &sink))
          return;
 
       cs->current = (uint32_t *)((uint8_t *)cs->current + sink.length);
@@ -1668,6 +1687,7 @@ hk_cmd_dispatch_unaligned(VkCommandBuffer commandBuffer, uint32_t invocations_x,
    };
    desc->root.cs.group_count_addr =
       hk_pool_upload(cmd, &group_count, sizeof(group_count), 8);
+   desc->root.cs.grid_helper_sparse_map_addr = 0;
 
    dispatch_grid(cmd, agx_3d(invocations_x, invocations_y, invocations_z),
                  true);
@@ -1699,6 +1719,7 @@ hk_CmdDispatchBase(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
 
    desc->root.cs.group_count_addr =
       hk_pool_upload(cmd, &group_count, sizeof(group_count), 8);
+   desc->root.cs.grid_helper_sparse_map_addr = 0;
 
    dispatch(cmd, agx_3d(groupCountX, groupCountY, groupCountZ));
 }
@@ -1733,6 +1754,7 @@ hk_cmd_dispatch_rays(struct hk_cmd_buffer *cmd, struct hk_api_shader *shader,
    desc->root.cs.base_group[1] = 0;
    desc->root.cs.base_group[2] = 0;
    desc->root.cs.group_count_addr = group_count_addr;
+   desc->root.cs.grid_helper_sparse_map_addr = 0;
    desc->root.cs.trace_rays_addr = record_addr;
    desc->root_dirty = true;
 
@@ -1761,9 +1783,52 @@ hk_CmdDispatchIndirect(VkCommandBuffer commandBuffer, VkBuffer _buffer,
    desc->root.cs.base_group[1] = 0;
    desc->root.cs.base_group[2] = 0;
 
-   uint64_t dispatch_addr = hk_buffer_address(buffer, offset, true);
+   /* Arguments are normally read through the sparse read-only shadow, so that
+    * a sparse resident buffer honours sparseResidencyNonResidentStrict: an
+    * unbound page reads as zero there, and a zero grid launches nothing.
+    *
+    * On G17P that shadow cannot be read here.  A read through the shadow does
+    * not reliably return data written through the primary mapping in the same
+    * submission.  Measured by forcing hk_g17p_sparse_buffer_copy() to read
+    * resident pages through the shadow as well, over five runs of
+    * dEQP-VK.sparse_resources.buffer.ssbo.sparse_residency: buffer_size_2_10
+    * and _2_16 failed 5/5, and _2_20 failed 1/5.  The same build passes 3/3
+    * unforced, and an added strong CDM cache-flush record does not cure it.
+    * The mechanism is not established; what is established is that the value
+    * read back is not dependable.
+    *
+    * Indirect dispatch is where this was measured, not the only place it can
+    * bite.  The storage-buffer lowering and the sparse buffer copy both read
+    * resident pages through the primary mapping and consult the residency
+    * bitmap, so neither is exposed.  hk_CmdDrawIndirect(),
+    * hk_CmdDrawIndexedIndirect(), hk_CmdDrawIndirectCount() and conditional
+    * rendering do still hand the shadow address to the hardware, which reads
+    * the record from it, so the same unreliable read is latent on those paths.
+    * They have not been probed: a draw whose indirect arguments come from an
+    * unbound page is the same unbounded-work hazard this change exists to
+    * remove, and is not something to demonstrate on a shared machine.
+    *
+    * So do what they do: name the primary mapping and hand the grid helper the
+    * bitmap, which substitutes a zero grid for a non-resident page and keeps
+    * the strictness promise.  A sparse buffer without residency has no bitmap;
+    * every page an application may legally read from it is bound.
+    */
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* A residency bitmap is only useful with the helper that reads it. That
+    * helper is built for devices that enabled sparseResidencyBuffer, which is
+    * the only way to create a buffer carrying a bitmap; if it is somehow
+    * absent, keep the old behaviour rather than refusing the dispatch. */
+   const bool have_sparse_helper = dev->g17p_grid_helper_sparse != NULL;
+   const bool use_primary =
+      dev->dev.chip == AGX_CHIP_G17P && buffer->va &&
+      (!buffer->sparse_map || have_sparse_helper);
+
+   uint64_t dispatch_addr = hk_buffer_address(buffer, offset, !use_primary);
    assert(dispatch_addr != 0);
 
    desc->root.cs.group_count_addr = dispatch_addr;
+   desc->root.cs.grid_helper_sparse_map_addr =
+      (use_primary && buffer->sparse_map) ? buffer->sparse_map->va->addr : 0;
    dispatch(cmd, agx_grid_indirect(dispatch_addr));
 }

@@ -141,6 +141,18 @@ struct hk_root_descriptor_table {
           * geometry, which the geometry copy helper publishes as it is.  Both
           * are zero for every direct dispatch and for every other chip. */
          uint64_t grid_helper_geometry_addr;
+
+         /* Native G17P indirect dispatch whose argument buffer is a sparse
+          * residency buffer: the base of that buffer's residency bitmap (a
+          * struct hk_sparse_buffer_map_header followed by one bit per page),
+          * and zero otherwise.  When it is set, group_count_addr names the
+          * PRIMARY mapping rather than the read-only shadow, and the grid
+          * helper reads the bitmap to decide whether the arguments are
+          * resident, publishing a zero grid when they are not.  See
+          * hk_CmdDispatchIndirect() for why the shadow cannot be read
+          * directly here. */
+         uint64_t grid_helper_sparse_map_addr;
+
          uint32_t grid_helper_local_size[3];
          uint32_t _pad_grid_helper;
 
@@ -165,6 +177,14 @@ struct hk_root_descriptor_table {
    /* Process-local on G17P; loaded through the root instead of cached code. */
    uint64_t printf_buffer_address;
 };
+
+/* The graphics arm is the larger of the two, so everything after the union --
+ * push constants, dynamic buffers, the printf address -- keeps its offset when
+ * a compute field is added. Growing the compute arm past it would move all of
+ * them at once, which no single change should do silently. */
+static_assert(sizeof(((struct hk_root_descriptor_table *)0)->cs) <=
+                 sizeof(((struct hk_root_descriptor_table *)0)->draw),
+              "compute root fields must not grow the root descriptor table");
 
 /* helper macro for computing root descriptor byte offsets */
 #define hk_root_descriptor_offset(member)                                      \
