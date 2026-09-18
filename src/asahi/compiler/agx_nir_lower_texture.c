@@ -9,6 +9,7 @@
 #include "compiler/nir/nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "agx_nir.h"
+#include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
 #include "agx_nir_texture.h"
 #include "glsl_types.h"
@@ -24,6 +25,11 @@ struct agx_texture_lower_options {
    bool buffer_metadata;
    /* Formatless image loads still need view-bounds robustness. */
    bool robust_formatless_images;
+   /* Offset between a sparse resource's read/write mapping and its read-only
+    * alias; see agx_device::sparse_ro_offset.  A buffer texture descriptor
+    * addresses the alias, and the residency map is indexed from the primary
+    * mapping, so the sparse texel fetch has to take it back off. */
+   uint64_t sparse_ro_offset;
 };
 
 static nir_def *
@@ -161,6 +167,148 @@ lower_tex_crawl(nir_builder *b, nir_instr *instr, void *data)
 
    nir_def_rewrite_uses(&tex->def, nir_trim_vector(b, res, nr_comps));
    nir_instr_remove(instr);
+   return true;
+}
+
+/*
+ * Sparse residency for a texel buffer.
+ *
+ * A sparse texel fetch on an IMAGE gets its residency code from the hardware,
+ * because hk_image_view.c puts the texture descriptor in AGX_IMAGE_MODE_SPARSE
+ * and points it at a page table.  A texel BUFFER never gets that treatment:
+ * hk_buffer_view.c builds a plain linear 2D texture over the buffer's
+ * read-only alias, so the texture unit has nothing to report residency from
+ * and answers "resident" for every page, bound or not.  Measured on Neo (G17P,
+ * A18 Pro): with the hardware sparse fetch emitted,
+ * dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.
+ * uniform_texel_buffer_sparse_fetch_size_2_{10,16,24}_r32ui{,_strict} passed
+ * only the two size_2_10 cases, whose buffer is a single page and therefore
+ * fully resident; every case with an unbound page failed.
+ *
+ * So take the residency from the same per-page bitmap the sparse SSBO path
+ * reads (lower_sparse_buffer_deref() in hk_nir_lower_descriptors.c) and drop
+ * the hardware residency request.  That also keeps this shape away from the
+ * AGX3 sparse fetch encoder, whose refusal is recorded in
+ * src/asahi/isa/README-agx3-packer-limits.md.
+ */
+static bool
+lower_sparse_buffer_texture(nir_builder *b, nir_instr *instr, void *data)
+{
+   const struct agx_texture_lower_options *options = data;
+
+   if (instr->type != nir_instr_type_tex)
+      return false;
+
+   nir_tex_instr *tex = nir_instr_as_tex(instr);
+   if (!tex->is_sparse || tex->sampler_dim != GLSL_SAMPLER_DIM_BUF)
+      return false;
+
+   const int coord_idx = nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (coord_idx < 0)
+      return false;
+
+   b->cursor = nir_before_instr(instr);
+
+   nir_def *desc = texture_descriptor_ptr(b, tex);
+   nir_def *coord = tex->src[coord_idx].src.ssa;
+
+   nir_def *sparse = load_buffer_metadata(
+      b, desc, AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET, 32);
+   nir_def *map_page =
+      nir_ushr_imm(b, sparse, AGX_G17P_BUFFER_TEXTURE_SPARSE_MAP_SHIFT);
+   nir_def *elsize_log2 =
+      nir_iand_imm(b, sparse, AGX_G17P_BUFFER_TEXTURE_SPARSE_ELSIZE_MASK);
+   nir_def *has_map = nir_ine_imm(b, map_page, 0);
+
+   /* Every global load below is speculative: without a map they address the
+    * zero page rather than whatever the packed word happens to hold. */
+   static_assert(AIL_PAGESIZE == (1u << 14), "update the page shift");
+   nir_def *map_base = nir_ishl_imm(b, nir_u2u64(b, map_page), 14);
+   nir_def *safe_map_base = nir_bcsel(b, has_map, map_base,
+                                      nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+   nir_def *resource_base = nir_load_global_constant(
+      b, 1, 64,
+      nir_iadd_imm(b, safe_map_base, AGX_SPARSE_BUFFER_MAP_RESOURCE_BASE_OFFSET),
+      .align_mul = 8, .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
+   nir_def *page_count = nir_load_global_constant(
+      b, 1, 32,
+      nir_iadd_imm(b, safe_map_base, AGX_SPARSE_BUFFER_MAP_PAGE_COUNT_OFFSET),
+      .align_mul = 4, .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
+
+   /* The element the fetch addresses, in the resource's own bytes. The
+    * descriptor's address is the read-only alias of the view's base. */
+   nir_def *elements =
+      load_buffer_metadata(b, desc, AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET, 32);
+   nir_def *tail =
+      load_buffer_metadata(b, desc, AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET, 32);
+   nir_def *oob = nir_uge(b, coord, elements);
+   nir_def *element = nir_iadd(b, coord, tail);
+   nir_def *view_base = nir_iand_imm(
+      b, load_buffer_metadata(b, desc, AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET,
+                              64),
+      ~options->sparse_ro_offset);
+   nir_def *access =
+      nir_iadd(b, view_base, nir_ishl(b, nir_u2u64(b, element), elsize_log2));
+   nir_def *page = nir_ushr_imm(b, nir_isub(b, access, resource_base), 14);
+   nir_def *in_range = nir_ult(b, page, nir_u2u64(b, page_count));
+
+   nir_def *word_addr = nir_iadd_imm(
+      b, nir_iadd(b, map_base, nir_ishl_imm(b, nir_ushr_imm(b, page, 5), 2)),
+      AGX_SPARSE_BUFFER_MAP_BITMAP_OFFSET);
+   nir_def *safe_word_addr =
+      nir_bcsel(b, nir_iand(b, has_map, in_range), word_addr,
+                nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+   nir_def *word = nir_load_global_constant(
+      b, 1, 32, safe_word_addr, .align_mul = 4,
+      .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
+   /* Test the bit with a variable MASK, not `(word >> (page & 31)) & 1`.
+    *
+    * That shape is folded by agx_nir_fuse_algebraic_late into
+    * ubitfield_extract(word, page, 1) -- nir_opt_algebraic has already
+    * dropped the `& 31`, because NIR defines a shift to mask its count --
+    * and that fuse pass runs BEFORE agx_nir_lower_algebraic_late, whose
+    * lower_sm5_shift is what puts the mask back for AGX, and which covers
+    * only ishl/ishr/ushr, never the fused extract.  So the raw page number
+    * reaches the hardware as the extract's offset.
+    *
+    * Confirmed in the compiled NIR (`ubitfield_extract %86, %73, 1` with %73
+    * the unmasked page) and on Neo (G17P, A18 Pro): masking the count to
+    * 0..15, which NIR cannot remove, passes
+    * uniform_texel_buffer_sparse_fetch_size_2_24_r32ui, and masking to 0..31,
+    * which it does remove, fails it -- the 16 MB buffer spans 1024 pages, so
+    * every page past 31 read back non-resident.  A variable mask keeps the
+    * count on an ishl, which lower_sm5_shift does mask.  See
+    * src/asahi/isa/README-agx3-packer-limits.md.
+    */
+   nir_def *bit = nir_iand(
+      b, word,
+      nir_ishl(b, nir_imm_int(b, 1), nir_iand_imm(b, nir_u2u32(b, page), 31)));
+
+   /* An out-of-bounds fetch returns a defined zero texel through hardware
+    * robustness, so call it resident rather than inventing a page for it. */
+   nir_def *resident = nir_ior(
+      b, nir_ior(b, oob, nir_inot(b, has_map)),
+      nir_iand(b, in_range, nir_ine_imm(b, bit, 0)));
+
+   /* AGX_RESIDENT is the resident code; agx_nir_lower_texture's
+    * is_sparse_texels_resident lowering tests bit 0. */
+   nir_def *code = nir_bcsel(b, resident, nir_imm_int(b, AGX_RESIDENT),
+                             nir_imm_int(b, AGX_RESIDENT ^ 1));
+
+   /* Drop the hardware residency request and re-attach ours. */
+   const unsigned dense = tex->def.num_components - 1;
+   tex->is_sparse = false;
+   tex->def.num_components = dense;
+
+   b->cursor = nir_after_instr(instr);
+
+   nir_def *comps[NIR_MAX_VEC_COMPONENTS];
+   for (unsigned i = 0; i < dense; ++i)
+      comps[i] = nir_channel(b, &tex->def, i);
+   comps[dense] = nir_u2uN(b, code, tex->def.bit_size);
+
+   nir_def *full = nir_vec(b, comps, dense + 1);
+   nir_def_rewrite_uses_after(&tex->def, full);
    return true;
 }
 
@@ -1250,12 +1398,12 @@ agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
 
 static bool
 lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
-              bool robust_formatless_images)
+              bool robust_formatless_images, uint64_t sparse_ro_offset)
 {
    bool progress = false;
    const bool gen9 = generation == 9;
    const struct agx_texture_lower_options options = {
-      gen9, buffer_metadata, robust_formatless_images,
+      gen9, buffer_metadata, robust_formatless_images, sparse_ro_offset,
    };
 
    nir_tex_src_type_constraints tex_constraints = {
@@ -1285,6 +1433,14 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
     * lower_regular_texture. This is required for correctness.
     */
    NIR_PASS(progress, s, nir_opt_constant_folding);
+
+   /* A sparse texel-buffer fetch takes its residency from software, so de-
+    * sparse it before lower_buffer_texture() turns it into a 2D fetch. */
+   if (buffer_metadata) {
+      NIR_PASS(progress, s, nir_shader_instructions_pass,
+               lower_sparse_buffer_texture, nir_metadata_control_flow,
+               (void *)&options);
+   }
 
    /* Lower texture sources after legalizing types (as the lowering depends on
     * 16-bit multisample indices) but before lowering queries (as the lowering
@@ -1328,14 +1484,16 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
 bool
 agx_nir_lower_texture_for_generation(nir_shader *s, unsigned generation)
 {
-   return lower_texture(s, generation, false, false);
+   return lower_texture(s, generation, false, false, 0);
 }
 
 bool
 agx_nir_lower_texture_with_buffer_metadata(nir_shader *s, unsigned generation,
-                                           bool robust_formatless_images)
+                                           bool robust_formatless_images,
+                                           uint64_t sparse_ro_offset)
 {
-   return lower_texture(s, generation, true, robust_formatless_images);
+   return lower_texture(s, generation, true, robust_formatless_images,
+                        sparse_ro_offset);
 }
 
 bool

@@ -380,6 +380,9 @@ check_buffer_metadata(void)
    assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
       struct hk_g17p_buffer_texture_metadata, rgb32) ==
       AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, sparse) ==
+      AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET);
    assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + sizeof(metadata) ==
           AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE);
    uint8_t descriptor[AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE] = {0};

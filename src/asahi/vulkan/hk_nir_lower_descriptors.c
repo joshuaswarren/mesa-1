@@ -1130,10 +1130,15 @@ lower_sparse_buffer_deref(nir_builder *b, nir_intrinsic_instr *intr,
       nir_def *resident_word = nir_load_global_constant(
          b, 1, 32, safe_map_addr, .align_mul = sizeof(uint32_t),
          .access = ACCESS_CAN_REORDER | ACCESS_CAN_SPECULATE);
-      nir_def *resident_bit = nir_iand_imm(
-         b, nir_ushr(b, resident_word,
-                     nir_iand_imm(b, nir_u2u32(b, page), 31)),
-         1);
+      /* A variable MASK, not `(word >> (page & 31)) & 1`: that shape folds
+       * into a one-bit ubitfield_extract whose offset never gets AGX's shift
+       * mask back, so a buffer past the first bitmap word (512 KB) reads its
+       * residency from the raw page number.  See the same note in
+       * agx_nir_lower_texture.c's lower_sparse_buffer_texture(). */
+      nir_def *resident_bit = nir_iand(
+         b, resident_word,
+         nir_ishl(b, nir_imm_int(b, 1),
+                  nir_iand_imm(b, nir_u2u32(b, page), 31)));
       resident = nir_ior(
          b, nir_inot(b, has_map),
          nir_iand(b, page_in_range, nir_ine_imm(b, resident_bit, 0)));

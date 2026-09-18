@@ -2633,7 +2633,7 @@ test_g17p_formatless_robust_image_load(void)
             nir_store_ssbo(&b, load, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                            .write_mask = 15, .align_mul = 16);
             b.shader->info.num_ssbos = 1;
-            agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, robust);
+            agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, robust, 0);
 
             /* The surviving read is clamped by a select on the predicate. */
             bool clamped = false;
@@ -2729,7 +2729,7 @@ test_g17p_robust_texel_fetch_value(void)
       nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                      .write_mask = 15, .align_mul = 16);
       b.shader->info.num_ssbos = 1;
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, true);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, true, 0);
 
       struct formatless_load_fixture f = {0};
       const uint64_t word0 = 2 | (2 << 4) |
@@ -2858,7 +2858,7 @@ test_g17p_buffer_metadata(void)
       nir_store_ssbo(&b, &tex->def, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
                      .write_mask = 15, .align_mul = 16);
       b.shader->info.num_ssbos = 1;
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0);
 
       struct buffer_metadata_fixture f = {
          .elements = cases[c].elements, .tail = cases[c].tail,
@@ -2941,7 +2941,7 @@ test_g17p_buffer_image_metadata(void)
          .image_dim = GLSL_SAMPLER_DIM_BUF,
          .format = PIPE_FORMAT_R8G8B8A8_UINT, .src_type = nir_type_uint32,
          .access = ACCESS_NON_READABLE);
-      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+      agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0);
       struct buffer_metadata_fixture f = {.elements = 16384, .tail = tail};
       bool progress;
       do {
@@ -5235,7 +5235,7 @@ test_buffer_fetch_r32_store(void)
       nir_channel(&b, value, 0), zero, .image_dim = GLSL_SAMPLER_DIM_2D,
       .format = PIPE_FORMAT_R32_UINT, .src_type = nir_type_uint32,
       .access = ACCESS_NON_READABLE);
-   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0);
    struct buffer_metadata_fixture fixture = {.elements = 64};
    bool progress;
    do {
@@ -5306,7 +5306,7 @@ test_buffer_fetch_unorm_store_fallback(void)
       .format = PIPE_FORMAT_R8G8B8A8_UNORM, .src_type = nir_type_float32,
       .access = ACCESS_NON_READABLE);
 
-   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false);
+   agx_nir_lower_texture_with_buffer_metadata(b.shader, 9, false, 0);
    struct buffer_metadata_fixture fixture = {.elements = 64};
    bool progress;
    do {

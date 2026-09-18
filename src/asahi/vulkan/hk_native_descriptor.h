@@ -64,7 +64,8 @@ struct hk_g17p_buffer_texture_metadata {
    uint32_t offset_el;
    uint64_t address;
    uint32_t rgb32;
-   uint32_t reserved;
+   /* See AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET in agx_abi.h. */
+   uint32_t sparse;
 };
 
 struct hk_sampled_image_descriptor_layout {

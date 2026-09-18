@@ -1,5 +1,180 @@
 # AGX3 (G17P) shader packer: what it cannot encode yet
 
+## The sparse texel-buffer fetch, and a shift that lost its mask, 2026-09-17
+
+`dEQP-VK.sparse_resources.buffer.texel_buffers.sparse_residency.uniform_texel_buffer_sparse_fetch_size_2_{10,16,24}_r32ui{,_strict}`
+-- six cases -- refused with
+
+```
+agx3_pack_binary.c:8588: no grounded AGX3 encoding for texture_load
+  [d32:reg16 s0=32:reg12x2 s1=16:imm#0 s2=16:imm#0 s3=64:reg8 s4=16:imm#0
+   s5=16:null0 cond=0 nest=0 chan=8 mask=0xf fmt=0 shift=0 dim=2 lod=6]
+```
+
+They now pass, 6/6, and the fix is not in the packer at all.
+
+### The refused shape, field by field
+
+`texture_load`'s six sources are coordinates, LOD, bindless base, texture,
+sampler, shadow/offset (`agx_opcodes.py`). So:
+
+| field | value | meaning |
+| --- | --- | --- |
+| `d32:reg16`, `chan=8` | eight 32-bit channels at r16 | a *sparse* destination: `agx_emit_texture` reserves 8 channels for a sparse read and 4 otherwise, and the residency word lands after the masked ones |
+| `s0=32:reg12x2` | two 32-bit coordinates | `dim=2` is `AGX_DIM_2D`; a texel *buffer* is lowered to a 16384-wide linear 2D texture, so the 1D index arrives as (x, y) |
+| `s1=16:imm#0` | level 0 | `lod=6` is `AGX_LOD_MODE_LOD_MIN`, the explicit-level fetch mode, with the level as an immediate |
+| `s2=16:imm#0` | no bindless heap base | the G17P descriptor path does not use the AGX2 base/index pair |
+| `s3=64:reg8` | the texture operand | a 64-bit *register* descriptor: G17P's run-time texture-heap index, the ordinary Honeykrisp path |
+| `s4=16:imm#0` | sampler state 0 | a fetch takes no sampler |
+| `s5=16:null0` | absent | no shadow reference and no coordinate offset |
+| `mask=0xf` | RGBA | sparse reads are unmasked (`agx_compile.c`: `masked = ... && !instr->is_sparse`), so all four channels are requested even though this shader uses none of them |
+
+`I->sparse` is not printed by `agx3_report_refusal_why()`; `chan=8` with
+`mask=0xf` is what gives it away. Everything else in that shape is a shape the
+packer already encodes.
+
+The refusal is `fetch_ok()`'s blanket `if (d->sparse) return false;` in
+`agx3_tex_core.c`, added the same day with the sparse *sample* encoding. Its
+comment is correct about what it measured and is kept.
+
+### What the CTS cases actually test, and why the encoder was not the answer
+
+The six shaders (SPIR-V assembly, `vktSparseResourcesBufferSparseResidency.cpp`)
+do `OpImageSparseFetch`, take **only** `OpImageSparseTexelsResident` from the
+result, and store 1 or 0 per texel. They never look at the texel. So they test
+one thing: does a sparse texel-buffer fetch report residency correctly.
+
+Lifting the refusal and emitting the form (`AGX3_SPARSE_FETCH_PROBE=1`, a
+temporary knob, since removed) took them from 0/6 to 2/6 on Neo (G17P, A18
+Pro). The two that passed are both `size_2_10`: a 1024-byte buffer rounds up to
+one 16 KB page, the whole buffer is resident, and "resident everywhere" is the
+right answer by accident. Every case with an unbound page failed.
+
+That is the whole story of the hardware residency here. `hk_image_view.c` puts
+an image's texture descriptor in `AGX_IMAGE_MODE_SPARSE` and points it at a
+page table; `hk_buffer_view.c` builds a plain linear 2D texture over the
+buffer's read-only alias and never does. The texture unit has nothing to report
+residency *from* for a texel buffer, so it answers "resident" for every page.
+Asking the hardware was never going to work, whatever the encoding.
+
+So `lower_sparse_buffer_texture()` (`agx_nir_lower_texture.c`) now takes the
+residency from the same per-page bitmap the sparse SSBO path reads
+(`lower_sparse_buffer_deref()` in `hk_nir_lower_descriptors.c`), clears
+`tex->is_sparse`, and re-attaches the computed code as the result's last
+component. The buffer shape no longer reaches the sparse fetch encoder at all,
+and `fetch_ok()`'s refusal stands untouched for images.
+
+The descriptor carries what the shader needs in the word that was `reserved`:
+`AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET`, the map's page in bits 4..31 and
+log2 of the element size in bits 0..3.
+
+### A one-bit extract whose shift count lost its mask
+
+With that in place the two `size_2_16` cases passed and both `size_2_24` still
+failed, and the reason is worth more than this test.
+
+`(word >> (page & 31)) & 1` is the obvious way to read a bit out of a bitmap,
+and `agx_nir_fuse_algebraic_late`'s `fuse_ubfe` miscompiles it.  It folds the
+shape into `ubitfield_extract(word, <count>, 1)` -- and `nir_op_ubitfield_extract`
+is *poison* when `offset + bits` exceeds the type width (`nir_opcodes.py`:
+"undefined per the spec").  `nir_op_ubfe` is the opcode that masks its offset,
+and AGX does not set `has_bfe`.  The `ushr` being fused had no such restriction,
+and `agx_nir_lower_algebraic_late`'s `lower_sm5_shift`, which puts NIR's mask
+back for AGX's unmasking shifts, runs **after** this pass (`agx_compile.c`:6656
+before 6672) and covers only `ishl`/`ishr`/`ushr`.  By the time the shape is
+fused the `& 31` is already gone from the shift count, so the raw page number
+becomes the extract's offset. In the compiled NIR for the failing shader:
+
+```
+%73 = extr_agx %49, %56, %6 (0xe), %12 (0x0)     <- the page, 0..1023
+%87 = ubitfield_extract %86, %73, %17 (0x1)      <- offset unmasked
+```
+
+Measured on Neo, same shader, one line changed:
+
+| bit test | `size_2_16` (4 pages) | `size_2_24` (1024 pages) |
+| --- | --- | --- |
+| `(word >> (page & 31)) & 1` | pass | **fail** |
+| `(word >> (page & 15)) & 1` | pass | pass |
+| `(word >> (page & 7)) & 1`  | pass | pass |
+| `(word >> (page & 3)) & 1`  | pass | pass |
+| `word & (1 << (page & 31))` | pass | pass |
+
+Every mask is a power of two minus one, so all of them preserve the count's
+parity and therefore the alternating residency pattern the test expects. Only
+`& 31` is dropped before the fusion; that is the one that fails, and it fails
+exactly where the page number passes 31. The word itself was proven correct by
+a separate arm that answered from `word == 0x55555555` and passed, and the page
+number by an arm that answered from `page & 1` and passed.
+
+The extract itself is **not** at fault, and an earlier reading that G17P's
+`bfeil` returns the wrong bit once a register offset reaches 16 is **wrong**.
+Carrying the mask into the fusion, and changing nothing else, makes the same
+shader emit `iand %73, 0x1f` ahead of the same `ubitfield_extract` and
+`uniform_texel_buffer_sparse_fetch_size_2_24_r32ui` **pass** on Neo -- so the
+extract is correct at every offset in range, over all 1024 pages, and only the
+lost mask was ever wrong.  It also explains why the same idiom compiles
+correctly in `build_sparse_buffer_copy_shader()` (`hk_cmd_meta.c`), whose
+`ssbo.sparse_residency.buffer_size_2_24` passes: `fuse_ubfe` is a pattern match,
+not a guarantee, and it does not fire on every shader that writes the idiom.
+
+The production form is now `word & (1 << (page & 31))`: a variable *mask*
+keeps the count on an `ishl`, which `lower_sm5_shift` does mask. Both readers
+of the sparse bitmap use it. On Neo that also moved
+`dEQP-VK.sparse_resources.buffer.ssbo.sparse_residency.non_resident_buffer_strict_copy_dest_alloc_partial_16777216`
+from Fail to Pass -- a sparse SSBO larger than 512 KB has always read its
+residency from an unmasked page number.
+
+The general fix is to mask the offset in `fuse_ubfe` for a non-constant count,
+which costs one `iand` only in the shaders that need it; a constant count was
+folded in range before the pass runs.  That is made separately, and it fixes
+every shader that writes this idiom rather than the two readers here.  Note that
+a shift count past the type width is *undefined* in GLSL and SPIR-V, so this
+reaches applications only through driver-internal lowerings that rely on NIR's
+masking rule -- which is precisely what both sparse-residency readers did.
+
+### The Apple witnesses, and a correction to the sparse field table
+
+`metal-nt -arch applegpu_g17p -platform_version macos 27.0 27.0`, matched
+compute kernels, round-tripped through `decomp` (see `README-metal-witness.md`;
+Apple's unencodable tail bits 154..159 are zeroed before decoding).  The MSL is
+`src/asahi/compiler/test/probes/g17p-sparse-read-witness.metal` and
+`g17p-bit-extract-witness.metal`, each carrying its own invocation and bytes:
+
+```
+k_2d_dread   (dense, immediate texture)   05800cb8b0001701000000000100          ep3
+k_2d_sread   (sparse) first smp           2dc00c38b000170190028200020000202 8c00018  ep4
+k_idx_dread  (dense, indexed, one read)   05a00cb8b0001701000280000100002800a00098
+k_idx_dread2 (dense, indexed, two reads)  05d00c38b0001701000280000100002800d00018
+                                          25c20cb830011701000280000100002820c00098
+```
+
+Two corrections to the sparse field table recorded with
+`agx3_tex_fetch_desc::sparse`:
+
+* **f120 is not a sparse bit.** Both SMPs of `k_idx_dread2`, a *dense* kernel
+  with two indexed `texture2d<uint>::read` calls, decode with `120:1`, while
+  the single-read `k_idx_dread` has it clear. What it does mean is not
+  established here. The residency request isolated by the matched pairs is
+  f142.
+* **f147 = 2 -> 0 is the final-texture-op marker, not sparseness.** It is
+  already modelled as `agx3_tex_fetch_desc::final`. It moved in the original
+  matched pair because Apple's `sparse_read` kernel contains a *second* SMP:
+  it emits the hardware sparse read, then an `icmp`/`cndst`/`bn` guarded block
+  holding a coordinate rescale and a second, single-channel read of a
+  different descriptor, then `bit_andc` on the residency register. The first
+  SMP of two is not final. `k_idx_dread2` shows the same 0/2 pair across two
+  dense reads.
+
+f112 += 4 on a sparse access still holds, and f142 remains the only field in
+these witnesses that is set by sparseness alone.
+
+Two things the encoder still leaves zero on every ep4 texture op, dense and
+sparse, are unchanged and still unexplained: f19's upper byte (a copy of the
+destination half in every Apple witness) and f91 (set for a 32-bit result).
+Neither can be the sparse fetch's problem: the production indexed-texture path
+is ep4, omits both, and passes.
+
 ## Texture offset qualification and vertex LOD follow-up, 2026-09-13
 
 The first hardware run passed 68 of 71 primary cases. The three failures were

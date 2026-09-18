@@ -9,6 +9,7 @@
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "util/bitscan.h"
+#include "util/u_math.h"
 #include "util/format/u_format.h"
 #include "util/format/u_formats.h"
 
@@ -134,11 +135,37 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
          (texture.width * util_format_get_blocksize(format)) - 16;
    }
    if (device->dev.chip == AGX_CHIP_G17P) {
+      /* A sparse-resident buffer carries a per-page residency bitmap, and the
+       * buffer texture descriptor has no hardware sparse mode to report
+       * residency with, so a sparse texel fetch reads that bitmap instead.
+       * Pack the map and the element size the shader needs to find the page;
+       * see AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET.  A non-power-of-two
+       * element size (the emulated RGB32 layout) takes the raw load path,
+       * which claims residency anyway, so leave the word zero for it. */
+      uint32_t sparse = 0;
+      const unsigned blocksize_B = util_format_get_blocksize(format);
+      if (buffer && buffer->sparse_map &&
+          util_is_power_of_two_nonzero(blocksize_B)) {
+         const uint64_t map_page = buffer->sparse_map->va->addr / AIL_PAGESIZE;
+         assert((buffer->sparse_map->va->addr % AIL_PAGESIZE) == 0);
+         /* The packed field leaves 28 bits for the map page.  Fail loudly
+          * rather than silently truncating if the VA layout ever outgrows it;
+          * a wrong map address would read residency from arbitrary memory. */
+         if (map_page < (1u << (32 - AGX_G17P_BUFFER_TEXTURE_SPARSE_MAP_SHIFT))) {
+            sparse = (uint32_t)(map_page
+                                << AGX_G17P_BUFFER_TEXTURE_SPARSE_MAP_SHIFT) |
+                     (uint32_t)util_logbase2(blocksize_B);
+         } else {
+            assert(!"sparse residency map outside the packed VA range");
+         }
+      }
+
       view->buffer_metadata = (struct hk_g17p_buffer_texture_metadata){
          .elements = view->vk.elements,
          .offset_el = tail_offset_el,
          .address = ro_base,
          .rgb32 = texture.channels == AGX_CHANNELS_R32G32B32_EMULATED,
+         .sparse = sparse,
       };
       /* Gen9 has no AGX2 software tail fields. The shader consumes the
        * explicit metadata, while hardware sees the aligned base texture.

@@ -49,7 +49,8 @@ bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generat
  * view-bounds robustness and require it. */
 bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
                                                unsigned generation,
-                                               bool robust_formatless_images);
+                                               bool robust_formatless_images,
+                                               uint64_t sparse_ro_offset);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
 bool agx_nir_lower_multisampled_image_store_for_generation(struct nir_shader *s,
                                                          unsigned generation);
