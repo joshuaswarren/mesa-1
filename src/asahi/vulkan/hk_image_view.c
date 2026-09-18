@@ -143,6 +143,21 @@ struct hk_3d {
    unsigned x, y, z;
 };
 
+/* A texel block wider or taller than one pixel means the API extent and the
+ * layout's element grid differ, so a view that does not share the block has to
+ * divide the extent down.  Block-compressed formats are the usual case, but
+ * the single-plane 4:2:2 formats are blocked (2x1) without being compressed --
+ * util_format_is_compressed() is false for them.  Testing the block itself
+ * covers both; it is what the extent arithmetic below actually needs.
+ */
+static bool
+format_is_blocked(enum pipe_format format)
+{
+   return util_format_get_blockwidth(format) > 1 ||
+          util_format_get_blockheight(format) > 1 ||
+          util_format_get_blockdepth(format) > 1;
+}
+
 static struct hk_3d
 view_denominator(struct hk_image_view *view)
 {
@@ -150,12 +165,12 @@ view_denominator(struct hk_image_view *view)
    enum pipe_format img_format =
       hk_format_to_pipe_format(view->vk.image->format);
 
-   if (util_format_is_compressed(view_format)) {
+   if (format_is_blocked(view_format)) {
       /*
-       * We can do an uncompressed view of a compressed image but not the other
+       * We can do an unblocked view of a blocked image but not the other
        * way around.
        */
-      assert(util_format_is_compressed(img_format));
+      assert(format_is_blocked(img_format));
       assert(util_format_get_blockwidth(img_format) ==
              util_format_get_blockwidth(view_format));
       assert(util_format_get_blockheight(img_format) ==
@@ -166,12 +181,12 @@ view_denominator(struct hk_image_view *view)
       return (struct hk_3d){1, 1, 1};
    }
 
-   if (!util_format_is_compressed(img_format)) {
-      /* Both formats uncompressed */
+   if (!format_is_blocked(img_format)) {
+      /* Both formats have 1x1 blocks */
       return (struct hk_3d){1, 1, 1};
    }
 
-   /* Else, img is compressed but view is not */
+   /* Else, img is blocked but view is not */
    return (struct hk_3d){
       util_format_get_blockwidth(img_format),
       util_format_get_blockheight(img_format),

@@ -816,6 +816,22 @@ canonical_format_pipe(enum pipe_format fmt)
    return map[channels];
 }
 
+/* An uncompressed view of a blocked image has its extent divided by the block
+ * (hk_image_view.c:view_denominator), and that path addresses one layer of one
+ * level at a time.  Copies of such an image therefore have to be issued layer
+ * by layer.  Block-compressed formats are the familiar case; the single-plane
+ * 4:2:2 formats are 2x1-blocked without being compressed, so test the block
+ * rather than util_format_is_compressed().
+ */
+static bool
+hk_copy_format_is_blocked(VkFormat fmt)
+{
+   const enum pipe_format p = hk_format_to_pipe_format(fmt);
+   return util_format_get_blockwidth(p) > 1 ||
+          util_format_get_blockheight(p) > 1 ||
+          util_format_get_blockdepth(p) > 1;
+}
+
 static VkFormat
 canonical_format(VkFormat fmt)
 {
@@ -1287,8 +1303,7 @@ hk_meta_copy_image_to_buffer2(struct vk_command_buffer *cmd,
       return;
    }
 
-   bool per_layer =
-      util_format_is_compressed(hk_format_to_pipe_format(image->format));
+   bool per_layer = hk_copy_format_is_blocked(image->format);
 
    for (unsigned i = 0; i < pCopyBufferInfo->regionCount; ++i) {
       const VkBufferImageCopy2 *region = &pCopyBufferInfo->pRegions[i];
@@ -1503,8 +1518,7 @@ hk_meta_copy_buffer_to_image2(struct vk_command_buffer *cmd,
       return;
    }
 
-   bool per_layer =
-      util_format_is_compressed(hk_format_to_pipe_format(image->format));
+   bool per_layer = hk_copy_format_is_blocked(image->format);
 
    for (unsigned r = 0; r < info->regionCount; ++r) {
       const VkBufferImageCopy2 *region = &info->pRegions[r];
@@ -1658,9 +1672,8 @@ hk_meta_copy_image2(struct vk_command_buffer *cmd, struct vk_meta_device *meta,
       return;
    }
 
-   bool per_layer =
-      util_format_is_compressed(hk_format_to_pipe_format(src_image->format)) ||
-      util_format_is_compressed(hk_format_to_pipe_format(dst_image->format));
+   bool per_layer = hk_copy_format_is_blocked(src_image->format) ||
+                    hk_copy_format_is_blocked(dst_image->format);
 
    for (unsigned r = 0; r < info->regionCount; ++r) {
       const VkImageCopy2 *region = &info->pRegions[r];
