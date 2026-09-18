@@ -1125,7 +1125,8 @@ bool agx_nir_lower_sysvals(nir_shader *shader, mesa_shader_stage desc_stage,
 
 bool agx_nir_layout_uniforms(nir_shader *shader,
                              struct agx_compiled_shader *compiled,
-                             unsigned *push_size, unsigned uniform_base);
+                             unsigned *push_size, unsigned uniform_base,
+                             bool dword_ranges);
 
 struct agx_lower_bindings_options {
    bool *uses_bindless_samplers;
