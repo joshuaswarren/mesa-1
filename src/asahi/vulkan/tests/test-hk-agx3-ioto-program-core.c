@@ -1325,14 +1325,27 @@ test_g17p_basic_graphics_program(void)
    CHECK(!hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P,
                                                        &resource, &program));
 
-   /* One range beyond the budget stays refused: the budget is derived from
-    * the collector, not a soft hint. */
-   struct agx3_ioto_uniform_range over_budget[
+   /* An eighth range is legal: the GL driver's WebRender vertex programs
+    * push eight or nine, and the loader never counts ranges. */
+   struct agx3_ioto_uniform_range eight_ranges[
       ARRAY_SIZE(firefox_drawid_vertex) + 1];
-   memcpy(over_budget, firefox_drawid_vertex, sizeof(firefox_drawid_vertex));
-   over_budget[ARRAY_SIZE(firefox_drawid_vertex)] =
+   memcpy(eight_ranges, firefox_drawid_vertex, sizeof(firefox_drawid_vertex));
+   eight_ranges[ARRAY_SIZE(firefox_drawid_vertex)] =
       (struct agx3_ioto_uniform_range){
          .start_halfs = 80, .size_halfs = 2, .address = 0x7000};
+   size_t eight_bound = 0;
+   CHECK(hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, eight_ranges, ARRAY_SIZE(eight_ranges), &eight_bound));
+   CHECK(eight_bound > drawid_bound);
+
+   /* One range beyond the budget stays refused: the budget is a real
+    * capacity of the composer's workspace, not a soft hint. */
+   struct agx3_ioto_uniform_range over_budget[
+      HK_AGX3_G17P_GRAPHICS_MAX_RANGES + 1];
+   for (unsigned i = 0; i < ARRAY_SIZE(over_budget); ++i) {
+      over_budget[i] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 2 * i, .size_halfs = 2, .address = 0x7000 + 0x10 * i};
+   }
    size_t over_bound = 789;
    CHECK(!hk_agx3_g17p_graphics_program_bound(
       AGX_CHIP_G17P, over_budget, ARRAY_SIZE(over_budget), &over_bound));
