@@ -101,6 +101,16 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       VkFormatFeatureFlags2 rgb = VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
          VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
       const enum pipe_format integer = hk_scaled_texture_format(padded);
+
+      /* A scaled format reaches this block only because it is three-component
+       * and therefore padded. Everything this block would grant it rests on
+       * the integer-fetch-plus-convert emulation that the withdrawal below
+       * removed for every other component count, so withhold it here too and
+       * leave these formats uniformly unsupported as images, as they are on
+       * G13 and G14. */
+      if (integer != PIPE_FORMAT_NONE)
+         return 0;
+
       const enum pipe_format storage =
          integer != PIPE_FORMAT_NONE ? integer : padded;
       /* vkCmdBlitImage between a scaled and a non-scaled format has no
