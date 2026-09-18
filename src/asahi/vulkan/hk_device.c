@@ -53,8 +53,6 @@ static const struct debug_named_value hk_perf_options[] = {
    {"nobarrier", HK_PERF_NOBARRIER,"Ignore pipeline barriers"},
    {"batch",     HK_PERF_BATCH,    "Batch submissions"},
    {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
-   {"swarrayshadow", HK_PERF_SWARRAYSHADOW,
-    "G17P: compare array shadow samples in the shader (diagnostic)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
