@@ -4570,8 +4570,42 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
       /* Apple G17P shader metadata leaves bit26 clear for texture gradients,
        * storage writes, framebuffer fetch, sample-rate execution, and shadows.
-       * Multisampled depth/depth-stencil variants set it. */
+       * Multisampled depth/depth-stencil variants set it.
+       *
+       * A shader that takes implicit quad derivatives still needs it on this
+       * stack. Triangle merging shades a 2x2 quad straddling the shared edge
+       * of two primitives once, with its lanes interpolated from two different
+       * plane equations, so an implicit-LOD sample on that quad derives its
+       * mip level across the seam.
+       *
+       * Measured on G17P, 2026-09-18: without this term all 30
+       * dEQP-VK.texture.mipmap.{2d,3d,cubemap}.projected.* cases fail and
+       * every invalid pixel lies exactly on the shared diagonal of the test's
+       * two triangles (31/31 in the decoded error mask of
+       * 2d.projected.nearest_linear_clamp); with it, all 30 pass and the 18
+       * basic/affine siblings are unchanged. Those siblings pass either way
+       * because both of their triangles carry the same affine texcoord map, so
+       * the cross-seam derivative equals the correct one.
+       *
+       * AGX2 never had the defect: agx_compile.c derives disable_tri_merging
+       * from needs_coarse_quad_helper_invocations, which nir_gather_info sets
+       * for every implicit-derivative texture op; agx_linker.c ORs it across
+       * the shader parts into the linked FRAGMENT_CONTROL bit 26; and
+       * hk_flush_ppp_state() merges that word into the secondary control.
+       * G17P never reaches it -- the draw path calls hk_flush_ppp_state() only
+       * `if (!g17p_native_bind_tail_emitted)` -- so the whole control comes
+       * from this record instead, and agx_ppp_hal200_fragment_controls_pack()
+       * deliberately masks bit 26 out of the original and rebuilds it from the
+       * three fields below. The helper-invocation term was dropped in that
+       * re-derivation and nothing else carried it.
+       *
+       * Whether Apple's own driver disables merging here or keeps quads
+       * coherent some other way is NOT established; only that this stack needs
+       * the bit. Kept narrower than the linker's bit 26, which also fires on
+       * memory writes and wide subgroup intrinsics -- neither needs quad
+       * coherence, and Apple's metadata leaves bit 26 clear for both. */
       .shader_tri_merge_disable =
+         fs->b.info.needs_quad_derivatives ||
          (render->tilebuffer.nr_samples > 1 &&
           fs->info.fs.epilog_key.write_z) ||
          debug_get_bool_option("HK_G17P_FORCE_TRI_MERGE_DISABLE", false),
