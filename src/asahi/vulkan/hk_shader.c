@@ -2783,7 +2783,14 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                 _mesa_shader_stage_to_string(sw_stage),
                 agx_chip_name(dev->dev.chip));
       ralloc_free(nir);
-      return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
+      /* This path is reached from vkCreateGraphicsPipelines,
+       * vkCreateComputePipelines and vkCreateShadersEXT.  None of the three
+       * lists VK_ERROR_FEATURE_NOT_PRESENT among its return codes, so the old
+       * value was outside the API contract for every caller.  The three legal
+       * sets intersect in OUT_OF_HOST_MEMORY, OUT_OF_DEVICE_MEMORY, UNKNOWN
+       * and VALIDATION_FAILED; UNKNOWN is the only one that describes a
+       * backend that cannot encode an otherwise valid shader. */
+      return vk_errorf(dev, VK_ERROR_UNKNOWN,
                        "AGX backend cannot encode shader for %s",
                        agx_chip_name(dev->dev.chip));
    }
@@ -3208,7 +3215,9 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
             ralloc_free(clone);
             ralloc_free(nir);
             hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
-            return vk_error(dev, VK_ERROR_FEATURE_NOT_PRESENT);
+            /* Same contract as above: not a legal code for any caller of
+             * hk_compile_shaders(). */
+            return vk_error(dev, VK_ERROR_UNKNOWN);
          }
          NIR_PASS(_, clone, agx_nir_lower_sample_intrinsics, false);
 
