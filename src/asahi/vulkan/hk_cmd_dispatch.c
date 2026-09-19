@@ -50,6 +50,9 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
 
    if (HK_PERF(dev, NOCDMBARRIER)) {
       /* Perftest only: launch with no cache maintenance at all. */
+   } else if (HK_PERF(dev, DESIGNEDUSCCDMBARRIER)) {
+      /* Perftest only: designed set {4,5,6,8} + USC cache invalidate. */
+      cs->current = agx_cdm_barrier_designed_usc(cs->current);
    } else if (HK_PERF(dev, USCCDMBARRIER)) {
       /* Perftest only: keep the USC cache invalidate, drop the rest. */
       cs->current = agx_cdm_barrier_usc(cs->current);

@@ -450,6 +450,30 @@ agx_cdm_barrier_usc(GLOBAL uint32_t *out)
    return out;
 }
 
+/*
+ * G13X candidate reduction: the designed set {unk_4, unk_5, unk_6, unk_8}
+ * (the bits that held mlx-omarchy pinned digests 48/48 in the termA
+ * battery) plus the USC cache invalidate (covers uniform/texture-state
+ * changes between launches; measured 4.6 us/launch of the 20.4 us
+ * sink+cache cost on real dependent chains). The full-sink unk_0..unk_19
+ * block (PBE/texture cache maintenance, measured 15.8 us/launch) is
+ * dropped. Perftest arm designedusccdmbarrier; NOT a default-emission
+ * proposal until it holds both decode legs and the digest protocol.
+ */
+static inline GLOBAL uint32_t *
+agx_cdm_barrier_designed_usc(GLOBAL uint32_t *out)
+{
+   agx_push(out, CDM_BARRIER, cfg) {
+      cfg.unk_4 = true;
+      cfg.unk_5 = true;
+      cfg.unk_6 = true;
+      cfg.unk_8 = true;
+      cfg.usc_cache_inval = true;
+   }
+
+   return out;
+}
+
 static inline GLOBAL uint32_t *
 agx_vdm_return(GLOBAL uint32_t *out)
 {
