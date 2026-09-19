@@ -5,6 +5,8 @@
 
 #include "hk_drm_render_core.h"
 
+#include "asahi/lib/agx_zls_pixels.h"
+
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,9 +42,8 @@ hk_drm_g17p_zls_pixels(uint32_t width, uint32_t height,
                                     stencil_meta))
       return 0;
 
-   assert(width >= 1 && width <= 0x8000);
-   assert(height >= 1 && height <= 0x8000);
-   return (width - 1) | ((height - 1) << 15);
+   return agx_zls_pixels(AGX_CHIP_G17P, width, height, depth_base, depth_meta,
+                         stencil_base, stencil_meta);
 }
 
 uint32_t
@@ -55,10 +56,9 @@ hk_drm_m5_zls_pixels(uint32_t width, uint32_t height,
       return 0;
 
    /* Native M5 D32 256x256 publishes 0x00ff00ff, unlike the G17P
-    * 15-bit packing (0x007f80ff). Live M5 admission remains 256x256. */
-   assert(width >= 1 && width <= 0x10000);
-   assert(height >= 1 && height <= 0x10000);
-   return (width - 1) | ((height - 1) << 16);
+    * 15-bit packing (0x007f80ff). */
+   return agx_zls_pixels(AGX_CHIP_G17G, width, height, depth_base, depth_meta,
+                         stencil_base, stencil_meta);
 }
 
 uint32_t

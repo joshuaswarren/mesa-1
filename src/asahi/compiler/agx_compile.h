@@ -404,9 +404,13 @@ struct agx_shader_key {
     * independently grounded only for the two-word R32G32 UINT layout. */
    bool g17p_rt0_eot_i32_selector_75;
 
-   /* Exact G17G native single-sample, single-layer RGBA8 RT0 builtin.
-    * Its PBE table and tile byte offset occupy uniform halves 0..5. */
-   bool g17g_rt0_eot_rgba8;
+   /* Authorize the G17G native single-sample, single-layer RT0 builtin. The
+    * program itself is picked by the store-shape fields above, which describe
+    * Mesa's lowered imageblock store rather than a GPU generation: Apple's
+    * builtin factory maps an attachment key to the same format class on both
+    * G17P and G17G. Its PBE table and tile byte offset occupy uniform
+    * halves 0..5. */
+   bool g17g_rt0_eot;
 
    /* Authorize the exact two-partition packed R11G11B10 EOT. Its post-RA
     * graph is otherwise indistinguishable from unsupported dual-I32 layouts. */

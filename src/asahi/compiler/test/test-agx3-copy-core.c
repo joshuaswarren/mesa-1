@@ -244,8 +244,10 @@ main(void)
       uint8_t o[AGX3_COPY_MAX_LENGTH];
       uint8_t l = 0;
       CHECK(agx3_copy_encode_reg_to_uniform(
-         AGX_ISA_ENCODING_AGX3B, 4, 0, true, o, &l));
+         AGX_ISA_ENCODING_AGX3B, 4, 0, true, 0, o, &l));
       CHECK(l == 4 && memcmp(o, apple, 4) == 0);
+      CHECK(!agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3B, 4, 0, true, 1, o, &l));
 
       /* First pair beyond ep0's seven-bit destination uses Apple's extended
        * constant-program COPY and preserves the upper destination bits. */
@@ -253,17 +255,41 @@ main(void)
          0x0b, 0x03, 0x0f, 0x00, 0x42, 0x10, 0x00, 0x00, 0x60, 0x00,
       };
       CHECK(agx3_copy_encode_reg_to_uniform(
-         AGX_ISA_ENCODING_AGX3B, 128, 2, true, o, &l));
+         AGX_ISA_ENCODING_AGX3B, 128, 2, true, 0, o, &l));
       CHECK(l == 10 && memcmp(o, extended, 10) == 0);
 
       CHECK(!agx3_copy_encode_reg_to_uniform(
-         AGX_ISA_ENCODING_AGX3B, 511, 0, true, o, &l));
+         AGX_ISA_ENCODING_AGX3B, 511, 0, true, 0, o, &l));
       CHECK(!agx3_copy_encode_reg_to_uniform(
-         AGX_ISA_ENCODING_AGX3B, 4, 256, true, o, &l));
+         AGX_ISA_ENCODING_AGX3B, 4, 256, true, 0, o, &l));
       CHECK(!agx3_copy_encode_reg_to_uniform(
-         AGX_ISA_ENCODING_AGX3C, 4, 0, true, o, &l));
+         AGX_ISA_ENCODING_AGX2, 4, 0, true, 0, o, &l));
+
+      /* Apple Metal, applegpu_g17g: the fragment preamble's copy of the
+       * freshly loaded r0 pair into uniform pair 4, waiting for slot 1
+       * (gpu/m5-fragment-depth-reference.metal, five identical witnesses).
+       * The AGX3c form is ep1 with f42 and carries its own wait. */
+      static const uint8_t g17g[8] = {0x23, 0x04, 0x07, 0x02,
+                                      0x56, 0xa0, 0xa4, 0x0a};
+      CHECK(agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3C, 4, 0, true, 1u << 0, o, &l));
+      CHECK(l == 8 && memcmp(o, g17g, 8) == 0);
+      static const uint8_t g17g_nowait[8] = {0x23, 0x00, 0x07, 0x02,
+                                             0x56, 0xa0, 0xa4, 0x0a};
+      CHECK(agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3C, 4, 0, true, 0, o, &l));
+      CHECK(l == 8 && memcmp(o, g17g_nowait, 8) == 0);
+      /* Above half 127 the same form deposits f3's upper bits (the
+       * geometry preamble publishes its pointer table up to half 148). */
+      static const uint8_t g17g_high[8] = {0xa3, 0x00, 0x0f, 0x02,
+                                           0x56, 0xa0, 0xa4, 0x0a};
+      CHECK(agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3C, 148, 0, true, 0, o, &l));
+      CHECK(l == 8 && memcmp(o, g17g_high, 8) == 0);
       CHECK(!agx3_copy_encode_reg_to_uniform(
-         AGX_ISA_ENCODING_AGX2, 4, 0, true, o, &l));
+         AGX_ISA_ENCODING_AGX3C, 511, 0, true, 0, o, &l));
+      CHECK(!agx3_copy_encode_reg_to_uniform(
+         AGX_ISA_ENCODING_AGX3C, 4, 0, true, 1u << 8, o, &l));
    }
 
    /* Fail closed outside the witnessed domain. */

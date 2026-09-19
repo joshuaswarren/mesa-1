@@ -350,12 +350,27 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 {
    const bool g17g = cache->dev->chip == AGX_CHIP_G17G;
    if (g17g) {
-      const enum pipe_format format = util_format_linear(key->tib.logical_format[0]);
+      /* The compiler substitutes Apple's 78-byte native text for the G17G RT0
+       * store, and it has that text for a U8NORM imageblock only, so the gate
+       * is the block store's physical format rather than a list of logical
+       * ones. Within U8NORM the text does not vary with the logical format:
+       * the component count and the RGBA/BGRA byte order are properties of
+       * the PBE descriptor that the Ioto program binds, not of the shader.
+       * Apple's own builtin factory emits byte-identical U8NORM programs for
+       * R8_UNORM and RGBA8 (see the selector notes above agx3_rt0_eot_kind),
+       * and diffing Apple's M5 render state between an RGBA8 and an R32F
+       * target moved no PPP record, only the program word and the PBE. sRGB
+       * passes because the loop below rewrites it to U8NORM. R11G11B10 keeps
+       * its RG11B10F physical here (the raw-word rewrite is G17P only) and
+       * is refused, as is every format whose text has not been witnessed:
+       * the compiler would fail those shaders anyway, and refusing up front
+       * keeps the fallback explicit.
+       */
       if (key->op[0] != AGX_EOT_STORE || key->tib.nr_samples != 1 ||
           key->tib.layered || key->tib.spilled[0] ||
           agx_tilebuffer_offset_B(&key->tib, 0) != 0 ||
-          (format != PIPE_FORMAT_R8G8B8A8_UNORM &&
-           format != PIPE_FORMAT_B8G8R8A8_UNORM))
+          !agx_g17g_rt0_eot_physical_format_supported(
+             agx_tilebuffer_physical_format(&key->tib, 0)))
          return NULL;
 
       for (unsigned rt = 1; rt < ARRAY_SIZE(key->op); ++rt) {
@@ -457,14 +472,19 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       .dev = agx_gather_device_key(cache->dev),
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P || g17g,
-      .g17g_rt0_eot_rgba8 = g17g,
+      .g17g_rt0_eot = g17g,
    };
 
-   if (cache->dev->chip == AGX_CHIP_G17P) {
+   if (cache->dev->chip == AGX_CHIP_G17P || g17g) {
+      /* The store shape is a property of the logical format, not of the GPU:
+       * it says how many imageblock words the target occupies and which raw
+       * store the tilebuffer lowering leaves behind. Both generations pick
+       * their native program from it. */
       agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
                                     &compiler_key);
-      compiler_key.g17p_rt0_eot_multisample = store_multisample;
    }
+   if (cache->dev->chip == AGX_CHIP_G17P)
+      compiler_key.g17p_rt0_eot_multisample = store_multisample;
 
    compiler_key.g17p_r11g11b10_mrt_eot =
       cache->dev->chip == AGX_CHIP_G17P &&

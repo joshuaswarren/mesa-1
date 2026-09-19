@@ -4415,8 +4415,12 @@ test_g17p_multisample_eot_block_store(void)
 static bool
 test_g17g_eot_block_store(void)
 {
-   /* Independent applegpu_g17g native factory witness, not G17P bytes. */
-   static const uint8_t expected[] = {
+   /* Independent applegpu_g17g native factory witnesses, one per imageblock
+    * format class, not G17P bytes. They differ only in the class field the
+    * factory writes at text offsets 69 and 71; see
+    * compiler/test/probes/README-g17g-native-rt0-eot.md.
+    */
+   static const uint8_t u8norm[] = {
       0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
       0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
       0x28,0x01,0xa0,0x0a,0x27,0x06,0x04,0x0a,
@@ -4428,50 +4432,167 @@ test_g17g_eot_block_store(void)
       0x15,0x00,0x24,0x00,0xa0,0x22,0x00,0xe0,
       0x00,0x55,0x0e,0x00,0x00,0x00,
    };
+   static const uint8_t i16[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+      0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
+      0x28,0x01,0xa0,0x0a,0x27,0x06,0x04,0x0a,
+      0x21,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
+      0x01,0x02,0x37,0x08,0x04,0x0a,0x21,0x00,
+      0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
+      0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
+      0x00,0x00,0x4a,0x30,0x18,0x00,0x25,0x04,
+      0x15,0x00,0x24,0x00,0xa0,0x22,0x00,0x20,
+      0x00,0x55,0x0e,0x00,0x00,0x00,
+   };
+   static const uint8_t i32[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+      0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
+      0x28,0x01,0xa0,0x0a,0x27,0x06,0x04,0x0a,
+      0x21,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
+      0x01,0x02,0x37,0x08,0x04,0x0a,0x21,0x00,
+      0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
+      0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
+      0x00,0x00,0x4a,0x30,0x18,0x00,0x25,0x04,
+      0x15,0x00,0x24,0x00,0xa0,0x22,0x00,0x60,
+      0x00,0x55,0x0e,0x00,0x00,0x00,
+   };
+   static const uint8_t i8[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+      0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
+      0x28,0x01,0xa0,0x0a,0x27,0x06,0x04,0x0a,
+      0x21,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
+      0x01,0x02,0x37,0x08,0x04,0x0a,0x21,0x00,
+      0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
+      0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
+      0x00,0x00,0x4a,0x30,0x18,0x00,0x25,0x04,
+      0x15,0x00,0x24,0x00,0xa0,0x22,0x00,0xa0,
+      0x00,0x55,0x0e,0x00,0x00,0x00,
+   };
+   static const uint8_t norm16[] = {
+      0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+      0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
+      0x28,0x01,0xa0,0x0a,0x27,0x06,0x04,0x0a,
+      0x21,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
+      0x01,0x02,0x37,0x08,0x04,0x0a,0x21,0x00,
+      0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
+      0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
+      0x00,0x00,0x4a,0x30,0x18,0x00,0x25,0x04,
+      0x15,0x00,0x24,0x00,0xa0,0x2a,0x00,0x20,
+      0x00,0x55,0x0e,0x00,0x00,0x00,
+   };
+
+   /* Each admitted case names the store the tilebuffer lowering leaves behind
+    * and the shape flags the driver derives from the logical format, and the
+    * exact native text it must be replaced by.
+    */
+   static const struct {
+      const char *name;
+      enum pipe_format format;
+      uint8_t words;
+      bool rgb565, norm16_selector_95, i32_key;
+      const uint8_t *expected;
+   } admitted[] = {
+      {"RGBA8 U8NORM", PIPE_FORMAT_R8_UNORM, 0, false, false, false, u8norm},
+      {"S8NORM", PIPE_FORMAT_R8_SNORM, 0, false, false, false, u8norm},
+      {"RGB10A2", PIPE_FORMAT_R10G10B10A2_UNORM, 0, false, false, false,
+       u8norm},
+      {"R16 integer", PIPE_FORMAT_R16_UINT, 1, false, false, false, i16},
+      {"R16F", PIPE_FORMAT_R16_FLOAT, 1, false, false, false, i16},
+      {"RGBA16F pair", PIPE_FORMAT_R16_FLOAT, 2, false, false, false, i16},
+      {"R32F", PIPE_FORMAT_R32_UINT, 1, false, false, true, i32},
+      {"RG32 pair", PIPE_FORMAT_R32_UINT, 2, false, false, true, i32},
+      {"B5G6R5", PIPE_FORMAT_R16_UINT, 2, true, false, false, i32},
+      {"R8_UINT", PIPE_FORMAT_R8_UINT, 1, false, false, false, i8},
+      {"R16_UNORM", PIPE_FORMAT_R16_UNORM, 1, false, true, false, norm16},
+   };
+
    bool ok = true;
-   for (unsigned variant = 0; variant < 9; ++variant) {
+   for (unsigned i = 0; i < ARRAY_SIZE(admitted); ++i) {
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_COMPUTE, &agx_nir_options, "G17G RT0 EOT");
-      nir_def *coords =
-         nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
-      if (variant == 4)
-         coords = nir_undef(&b, 1, 16);
-      else if (variant == 7)
-         coords = nir_vec3(&b, nir_channel(&b, coords, 0),
-                           nir_channel(&b, coords, 1), nir_imm_int(&b, 0));
-
       nir_image_store_block_agx(
-         &b, nir_imm_intN_t(&b, variant == 2 ? 1 : 0, 16),
-         nir_imm_int(&b, variant == 3 ? 4 : 0), coords,
-         .format = variant == 5 ? PIPE_FORMAT_R8_SNORM :
-                   variant == 6 ? PIPE_FORMAT_R16_FLOAT : PIPE_FORMAT_R8_UNORM,
-         .image_dim = GLSL_SAMPLER_DIM_2D,
-         .image_array = variant == 7, .explicit_coord = variant != 4);
+         &b, nir_imm_intN_t(&b, 0, 16), nir_imm_int(&b, 0),
+         nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2),
+         .format = admitted[i].format, .image_dim = GLSL_SAMPLER_DIM_2D,
+         .image_array = false, .explicit_coord = true);
       agx_preprocess_nir(b.shader);
       struct agx_shader_key key = {
          .dev.encoding = AGX_ISA_ENCODING_AGX3C,
          .no_preamble = true,
-         .g17g_rt0_eot_rgba8 = variant != 1,
-         .g17p_rt0_eot_words = variant == 8 ? 1 : 0,
+         .g17g_rt0_eot = true,
+         .g17p_rt0_eot_words = admitted[i].words,
+         .g17p_rt0_eot_rgb565 = admitted[i].rgb565,
+         .g17p_rt0_eot_norm16_selector_95 = admitted[i].norm16_selector_95,
+         .g17p_rt0_eot_i32 = admitted[i].i32_key,
       };
       struct agx_shader_part part = {0};
       const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
-      bool pass = !compiled;
-      if (variant == 0) {
-         pass = compiled && part.info.binary_size == sizeof(expected) &&
-                part.info.main_offset == 0 &&
-                part.info.main_size == sizeof(expected) &&
-                part.info.nr_gprs == 8 && part.info.agx3_staging_known &&
-                part.info.agx3_staging_halfs == 8 &&
-                memcmp(part.binary, expected, sizeof(expected)) == 0;
+      const bool pass =
+         compiled && part.info.binary_size == sizeof(u8norm) &&
+         part.info.main_offset == 0 &&
+         part.info.main_size == sizeof(u8norm) && part.info.nr_gprs == 8 &&
+         part.info.agx3_staging_known && part.info.agx3_staging_halfs == 8 &&
+         memcmp(part.binary, admitted[i].expected, sizeof(u8norm)) == 0;
+      if (!pass) {
+         fprintf(stderr, "G17G native EOT %s failed: compiled=%u size=%u\n",
+                 admitted[i].name, compiled, part.info.binary_size);
+         if (compiled && part.binary) {
+            for (unsigned j = 0; j < part.info.binary_size; ++j)
+               fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[j]);
+            fputc('\n', stderr);
+         }
       }
-      if (!pass)
-         fprintf(stderr, "G17G native EOT variant %u failed: compiled=%u size=%u\n",
-                 variant, compiled, part.info.binary_size);
       ok &= pass;
       free(part.binary);
       ralloc_free(b.shader);
    }
+
+   /* Rejection boundaries. Every one of these changes something the native
+    * program hard-codes -- the attachment index, the tile byte offset, the
+    * coordinate shape, the dimension -- or asks for a class whose G17G text
+    * has not been witnessed.
+    */
+   for (unsigned variant = 0; variant < 8; ++variant) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17G RT0 EOT");
+      nir_def *coords =
+         nir_trim_vector(&b, nir_load_global_invocation_id(&b, 32), 2);
+      if (variant == 2)
+         coords = nir_undef(&b, 1, 16);
+      else if (variant == 3)
+         coords = nir_vec3(&b, nir_channel(&b, coords, 0),
+                           nir_channel(&b, coords, 1), nir_imm_int(&b, 0));
+
+      nir_image_store_block_agx(
+         &b, nir_imm_intN_t(&b, variant == 0 ? 1 : 0, 16),
+         nir_imm_int(&b, variant == 1 ? 4 : 0), coords,
+         .format = variant >= 5 ? PIPE_FORMAT_R16_UINT : PIPE_FORMAT_R8_UNORM,
+         .image_dim = GLSL_SAMPLER_DIM_2D,
+         .image_array = variant == 3, .explicit_coord = variant != 2);
+      agx_preprocess_nir(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3C,
+         .no_preamble = true,
+         /* variant 4: the compiler must not substitute anything without the
+          * driver's explicit G17G authorization. */
+         .g17g_rt0_eot = variant != 4,
+         /* variants 5-7: an I16 store with no word count is ambiguous, and
+          * the two signed builtins have no G17G sibling. */
+         .g17p_rt0_eot_words = variant == 5 ? 0 : 2,
+         .g17p_rt0_eot_i16_signed_two_words = variant == 6,
+         .g17p_r11g11b10_mrt_eot = variant == 7,
+      };
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+      if (compiled) {
+         fprintf(stderr, "G17G native EOT rejection %u was accepted\n",
+                 variant);
+         ok = false;
+      }
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+
    return ok;
 }
 
@@ -6487,6 +6608,426 @@ g17p_depth_protocol(const struct agx_shader_part *part, uint8_t variant)
    return false;
 }
 
+/* Compile one vertex shader for one encoding and report whether it was
+ * accepted, dumping the bytes under AGX3_DUMP_BINARY. `expected` pins the
+ * whole binary as hex when given: these are this compiler's own bytes, so
+ * that a change in what the shapes below emit is a deliberate edit here;
+ * the instruction forms inside are the Apple-witnessed ones asserted by the
+ * core tests. */
+static bool
+compile_vs_g17g(const char *name, nir_shader *nir, enum agx_isa_encoding enc,
+                bool expect_ok, const char *expected)
+{
+   struct agx_shader_key key = {
+      .dev.encoding = enc,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part);
+   bool pass = ok == expect_ok;
+   if (ok && expected) {
+      const size_t expected_size = strlen(expected) / 2;
+      pass = pass && part.binary && part.info.binary_size == expected_size;
+      for (unsigned i = 0; pass && i < expected_size; ++i) {
+         unsigned byte;
+         pass = sscanf(expected + 2 * i, "%2x", &byte) == 1 &&
+                ((const uint8_t *)part.binary)[i] == byte;
+      }
+   }
+   if (!pass || getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr, "%s (%s): %s size=%u bytes=", name,
+              enc == AGX_ISA_ENCODING_AGX3C ? "agx3c" : "agx3b",
+              ok ? "compiled" : "refused", part.info.binary_size);
+      for (unsigned i = 0; part.binary && i < part.info.binary_size; ++i)
+         fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[i]);
+      fprintf(stderr, "\n");
+   }
+   free(part.binary);
+   ralloc_free(nir);
+   return pass;
+}
+
+/* The fragment twin of compile_vs_g17g. A fragment program reaching the
+ * packer has already been through agx_nir_lower_texture and the tilebuffer
+ * lowering, so it needs the tilebuffer dependency relaxation the background
+ * programs use; nothing else differs. */
+static bool
+compile_fs_g17g(const char *name, nir_shader *nir, bool expect_ok,
+                struct agx_shader_info *info_out)
+{
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3C,
+      .fs.ignore_tib_dependencies = true,
+      .no_preamble = true,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part);
+   if (info_out)
+      *info_out = part.info;
+   if (ok != expect_ok || getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr, "%s (agx3c): %s size=%u halfs=%u known=%u bytes=", name,
+              ok ? "compiled" : "refused", part.info.binary_size,
+              part.info.agx3_staging_halfs, part.info.agx3_staging_known);
+      for (unsigned i = 0; part.binary && i < part.info.binary_size; ++i)
+         fprintf(stderr, "%02x", ((const uint8_t *)part.binary)[i]);
+      fprintf(stderr, "\n");
+   }
+   free(part.binary);
+   ralloc_free(nir);
+   return ok == expect_ok;
+}
+
+/*
+ * A 2D-array texel fetch. This is what u_blitter emits for a level-preserving
+ * array copy, and what the KHR-GL30.ext_texture_shadow_lod fragments carry
+ * alongside their array shadow lookups -- the 2D form of the fetch whose
+ * staging bank already had to be widened once for the runtime level.
+ * Apple's own G17G array fetch stages x into staging
+ * half 0 and y into half 2, then names the layer's *general* register in the
+ * sample (f31), so the layer never occupies a staging half.
+ */
+static nir_shader *
+build_fs_g17g_array_fetch(bool runtime_lod)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17G 2D array texel fetch FS");
+   b.shader->info.internal = true;
+
+   nir_def *pixel = nir_u2u32(&b, nir_load_pixel_coord(&b));
+   nir_def *x = nir_channel(&b, pixel, 0);
+   nir_def *y = nir_channel(&b, pixel, 1);
+   nir_def *coord = nir_vec3(&b, x, y, nir_ushr_imm(&b, x, 3));
+   nir_def *lod =
+      runtime_lod ? nir_ushr_imm(&b, y, 4) : nir_imm_int(&b, 0);
+   nir_def *texel =
+      nir_txf(&b, coord, .lod = lod, .dim = GLSL_SAMPLER_DIM_2D,
+              .is_array = true, .dest_type = nir_type_float32,
+              .backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP);
+
+   fs_store_colour(&b, texel);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   nir_shader *nir = fs_finish(&b);
+   NIR_PASS(_, nir, agx_nir_lower_texture);
+   return nir;
+}
+
+static bool
+test_g17g_array_fetch(void)
+{
+   struct agx_shader_info constant = {0}, runtime = {0};
+   bool ok = compile_fs_g17g("g17g array fetch, level 0",
+                             build_fs_g17g_array_fetch(false), true, &constant);
+   ok &= compile_fs_g17g("g17g array fetch, runtime level",
+                         build_fs_g17g_array_fetch(true), true, &runtime);
+   /* Both shapes stage two coordinate words; the runtime level publishes its
+    * word into bank 6 of the same block, so neither may claim fewer than the
+    * eight halves the sampler reads. */
+   ok &= constant.agx3_staging_known && constant.agx3_staging_halfs >= 8;
+   ok &= runtime.agx3_staging_known && runtime.agx3_staging_halfs >= 8;
+   return ok;
+}
+
+/*
+ * A cube shadow lookup with an explicit level, in the two shapes the CTS and
+ * the hardware probe respectively use. KHR-GL30.ext_texture_shadow_lod's
+ * fragment is
+ *
+ *   textureLod(samplerCubeShadow, v_texCoord, v_lodShadowRef.x)
+ *
+ * -- the direction, the comparison reference and the level are all
+ * interpolated, so CEM, the reference copy and the level staging each run per
+ * lane. The probe that passes on hardware takes all three from uniforms. Emit
+ * both and read the difference.
+ */
+static nir_shader *
+build_fs_g17g_cube_shadow_lod(bool per_lane, bool cube_array)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17G cube shadow textureLod");
+   b.shader->info.internal = true;
+
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *varying = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   nir_def *coord = nir_trim_vector(&b, varying, cube_array ? 4 : 3);
+   nir_def *reference = cube_array
+      ? nir_load_preamble(&b, 1, 32, .base = 4)
+      : nir_channel(&b, varying, 3);
+   nir_def *lod;
+   if (per_lane) {
+      nir_def *second = nir_load_interpolated_input(
+         &b, 1, 32, bary, nir_imm_int(&b, 0), .base = 1, .component = 0,
+         .io_semantics.location = VARYING_SLOT_VAR1,
+         .io_semantics.num_slots = 1);
+      lod = second;
+   } else {
+      lod = nir_load_preamble(&b, 1, 32, .base = 0);
+   }
+
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 3);
+   tex->op = nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
+   tex->is_array = cube_array;
+   tex->is_shadow = true;
+   tex->is_new_style_shadow = true;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = cube_array ? 4 : 3;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_comparator, reference);
+   tex->src[2] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
+   nir_def_init(&tex->instr, &tex->def, 1, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+
+   nir_def *value = nir_vec4(&b, &tex->def, &tex->def, &tex->def, &tex->def);
+   fs_store_colour(&b, value);
+   b.shader->info.inputs_read =
+      BITFIELD64_BIT(VARYING_SLOT_VAR0) |
+      (per_lane ? BITFIELD64_BIT(VARYING_SLOT_VAR1) : 0);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture);
+   nir_shader *nir = fs_finish(&b);
+   NIR_PASS(_, nir, agx_nir_lower_texture);
+   return nir;
+}
+
+static bool
+test_g17g_cube_shadow_lod(void)
+{
+   struct agx_shader_info uniform = {0}, per_lane = {0};
+   struct agx_shader_info array = {0};
+   bool ok = compile_fs_g17g("g17g cube shadow, uniform level",
+                             build_fs_g17g_cube_shadow_lod(false, false), true,
+                             &uniform);
+   ok &= compile_fs_g17g("g17g cube shadow, per-lane level",
+                         build_fs_g17g_cube_shadow_lod(true, false), true,
+                         &per_lane);
+   /* A cube array would need the bindless descriptor handle the driver
+    * supplies, which this synthetic NIR has no way to provide
+    * (texture_descriptor_ptr asserts on it); its encoding is pinned by the
+    * byte-exact vectors in test-agx3-tex-core.c and by the CTS cases. */
+   (void)array;
+   return ok;
+}
+
+/*
+ * The transform-feedback programs' float selects: `a < -1.0 ? 0.0 : v` and
+ * `a < 2.0 ? v : w`. On G17G the first is Apple's `fself32` and the second
+ * `fseli32` with a minifloat comparand (gpu/m5-xfb-alu8-, -alu10-reference);
+ * both used to fall through to the general select, which admits only a
+ * register or an exact-zero comparand there. The first is also the vertex
+ * shader of KHR-GL30.buffer_objects.triangles, refused on the M5 as
+ * `fcmpsel [d32:reg12 s0=32:reg28.discard s1=16:imm#176 s2=16:imm#0
+ * s3=32:reg8.cache cond=1]` before this dispatch existed.
+ */
+static nir_shader *
+build_vs_g17g_float_selects(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "G17G float select VS");
+
+   nir_def *base = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *index = nir_load_vertex_id(&b);
+   nir_def *attr = nir_load_agx(&b, 4, 32, base, index, .access = 0, .base = 0,
+                                .format = PIPE_FORMAT_R32_UINT,
+                                .sign_extend = false);
+   nir_def *a = nir_channel(&b, attr, 0);
+   nir_def *v = nir_channel(&b, attr, 1);
+   nir_def *w = nir_channel(&b, attr, 2);
+   nir_def *zero_or_v = nir_bcsel(&b, nir_flt(&b, a, nir_imm_float(&b, -1.0f)),
+                                  nir_imm_float(&b, 0.0f), v);
+   nir_def *v_or_w = nir_bcsel(&b, nir_flt(&b, a, nir_imm_float(&b, 2.0f)), v, w);
+   nir_def *pos[4] = {zero_or_v, v_or_w, nir_imm_float(&b, 0.0f),
+                      nir_imm_float(&b, 1.0f)};
+   for (unsigned c = 0; c < 4; ++c)
+      nir_store_uvs_agx(&b, pos[c], nir_imm_intN_t(&b, c, 16));
+
+   b.shader->info.outputs_written = VARYING_BIT_POS;
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
+/*
+ * The shape a transform-feedback vertex shader reduces to: an integer vertex
+ * id converted to float, added to a constant, and stored as both a captured
+ * varying and the position. On hardware this refuses with
+ *
+ *   no grounded AGX3 encoding for fadd
+ *     [d32:reg2 s0=32:reg0.cache s1=16:reg2.discard chan=1]
+ *
+ * -- a 32-bit add with a 16-bit operand, which agx3_emit_alu() has no form
+ * for.
+ *
+ * This reproduces on the host, so the gap can be closed without a hardware
+ * cycle: the 16-bit operand is the `u2f32` of the vertex id meeting a 32-bit
+ * constant, and nothing in the driver's VS lowering chain is needed to
+ * provoke it. Asserted as a rejection per this file's convention, so that
+ * grounding it later is a deliberate change to this table rather than a
+ * silent drift.
+ *
+ * Fix it by widening rather than by inventing an encoding: AGX3 has no
+ * witnessed 32-bit fadd with a 16-bit operand, and `upconvert_uvs_value()`
+ * in agx_nir_lower_uvs.c already sets the precedent of converting before the
+ * store. Blocks every KHR-GL30.transform_feedback case.
+ */
+static nir_shader *
+build_vs_g17g_xfb_add(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "G17G xfb add VS");
+
+   nir_def *v = nir_u2f32(&b, nir_load_vertex_id(&b));
+   nir_def *captured = nir_fadd(&b, v, nir_imm_float(&b, 100.0f));
+
+   nir_store_uvs_agx(&b, captured, nir_imm_intN_t(&b, 4, 16));
+   nir_def *pos[4] = {nir_imm_float(&b, 0.0f), nir_imm_float(&b, 0.0f),
+                      nir_imm_float(&b, 0.0f), nir_imm_float(&b, 1.0f)};
+   for (unsigned c = 0; c < 4; ++c)
+      nir_store_uvs_agx(&b, pos[c], nir_imm_intN_t(&b, c, 16));
+
+   b.shader->info.outputs_written = VARYING_BIT_POS | VARYING_BIT_VAR(0);
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
+static bool
+test_g17g_xfb_add(void)
+{
+   /* Compiles once agx_opt_compact_constants() stops narrowing a constant
+    * that feeds a full-width AGX3 float op. */
+   return compile_vs_g17g("g17g-xfb-add", build_vs_g17g_xfb_add(),
+                          AGX_ISA_ENCODING_AGX3C, true, NULL);
+}
+
+static bool
+test_g17g_float_selects(void)
+{
+   /* rld, lddev, then the two selects: fseli32 r2 = (r0 < 2.0) ? r1 : r2
+    * [2288070a2300a00a10900a602300] and fself32 r0 = (r0 < -1.0) ? 0.0 : r1
+    * [2200030b2300a00214ac4a2000004000], the loads' constants and uvsw. */
+   return compile_vs_g17g(
+      "g17g-float-selects", build_vs_g17g_float_selects(),
+      AGX_ISA_ENCODING_AGX3C, true,
+      "0cdd10060f000300682a00c04100800000002288070a2300a00a10900a602300"
+      "2200030b2300a00214ac4a20000040001c80023e0000000c0b022104350733002400"
+      "a0021b000000330207022281a402350a33002440a00a2300070a2282a40a35113300"
+      "2480a012330007022283a40a3520330024c0a01a0e000000");
+}
+
+/*
+ * A normalized 8-bit vertex attribute, as agx_nir_lower_vbo hands it to the
+ * backend: an R8 interchange load whose index counts bytes, with the
+ * tight stride folded into the load's shift. G17G loads the element at
+ * its own width and unpacks it with `normflt`
+ * (gpu/m5-xfb-alu7-, -alu12-reference); G17P still has no witness and
+ * keeps refusing it. The tight RGBA8 case is the vertex shader of
+ * KHR-GL30.glsl_noperspective.functionaltest, refused on the M5 as
+ * `device_load [d32:reg24 s0=64:uni4 s1=32:reg10.abs chan=4 mask=0xf fmt=4
+ * shift=2]` -- the `.abs` is the ordinary zero-extended index every vertex
+ * fetch carries, the format was the refusal.
+ */
+static nir_shader *
+build_vs_norm8_attribute(unsigned components, bool snorm, unsigned stride)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "AGX3 normalized byte attribute VS");
+
+   nir_def *base = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *index = nir_load_vertex_id(&b);
+   unsigned shift = 0;
+   if (stride == 2 || stride == 4)
+      shift = util_logbase2(stride);
+   else if (stride != 1)
+      index = nir_imul_imm(&b, index, stride);
+   nir_def *attr = nir_load_constant_agx(
+      &b, components, 32, base, index, .access = 0, .base = shift,
+      .format = snorm ? PIPE_FORMAT_R8_SNORM : PIPE_FORMAT_R8_UNORM,
+      .sign_extend = false);
+
+   for (unsigned c = 0; c < 4; ++c) {
+      nir_def *value = c < components ? nir_channel(&b, attr, c)
+                                      : nir_imm_float(&b, c == 3 ? 1.0f : 0.0f);
+      nir_store_uvs_agx(&b, value, nir_imm_intN_t(&b, c, 16));
+   }
+
+   b.shader->info.outputs_written = VARYING_BIT_POS;
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
+static bool
+test_g17g_norm8_attribute(void)
+{
+   bool ok = true;
+   /* Apple's shapes: uchar4 word, uchar2 half, uchar byte; unorm and snorm.
+    * rld, lddev W32 of the word, normflt of its low then high half
+    * [2708001a2d00a80ad000 / 2701001a2d00a812d000; the snorm pair ends
+    * ...5002], the four uvsw writes. */
+   ok &= compile_vs_g17g(
+      "norm8 rgba8-unorm tight", build_vs_norm8_attribute(4, false, 4),
+      AGX_ISA_ENCODING_AGX3C, true,
+      "0cdd10060f000300082200c04100800000002708001a2d00a80ad0002701001a2d00"
+      "a812d000a700041a2500a30220812100b700041a2500a302a0812100a700041a2500"
+      "a30a20822100b700041a2500a30aa08221000b102104350433002400a00233020722"
+      "2281a402350933002440a00a2300072a2282a40a351233002480a0123302072a2283"
+      "a40a3523330024c0a01a0e000000");
+   ok &= compile_vs_g17g(
+      "norm8 rgba8-snorm tight", build_vs_norm8_attribute(4, true, 4),
+      AGX_ISA_ENCODING_AGX3C, true,
+      "0cdd10060f000300082200c04100800000002708001a2d00a80a50022701001a2d00"
+      "a8125002a700041a2500a30220812100b700041a2500a302a0812100a700041a2500"
+      "a30a20822100b700041a2500a30aa08221000b102104350433002400a00233020722"
+      "2281a402350933002440a00a2300072a2282a40a351233002480a0123302072a2283"
+      "a40a3523330024c0a01a0e000000");
+   /* lddev W16 of the half, one two-lane normflt. */
+   ok &= compile_vs_g17g(
+      "norm8 rg8-unorm tight", build_vs_norm8_attribute(2, false, 2),
+      AGX_ISA_ENCODING_AGX3C, true,
+      "0cdd10060700030008220080c100800000002708001a2d00a802d0000b0021043504"
+      "33002400a002330207022281a402350933002440a00a0b000000230007022282a40a"
+      "351233002480a0120c80023e0000000c330007022283a40a3523330024c0a01a0e00"
+      "0000");
+   /* lddev W8 of the byte, one single-lane normflt [2708001a2d00a802c000]. */
+   ok &= compile_vs_g17g(
+      "norm8 r8-unorm tight", build_vs_norm8_attribute(1, false, 1),
+      AGX_ISA_ENCODING_AGX3C, true,
+      "0cdd100607000300082200a04104800000002708001a2d00a802c0000b0021043504"
+      "33002400a0020b000000330007022281a402350933002440a00a230007022282a40a"
+      "351233002480a0120c80023e0000000c330007022283a40a3523330024c0a01a0e00"
+      "0000");
+   /* Interleaved: one imad rescales the byte index to the element width
+    * before the load [2704041a2100a10228010a000102 = imad r1, r1, #4, #0,
+    * then the same word load and unpacks as the tight case]. */
+   ok &= compile_vs_g17g(
+      "norm8 rgba8-unorm stride 16", build_vs_norm8_attribute(4, false, 16),
+      AGX_ISA_ENCODING_AGX3C, true,
+      "0cdd10062704041a2100a10228010a0001020f000300080200c04100800000002708"
+      "001a2d00a80ad0002701001a2d00a812d000a700041a2500a30220812100b700041a"
+      "2500a302a0812100a700041a2500a30a20822100b700041a2500a30aa08221000b10"
+      "2104350433002400a002330207222281a402350933002440a00a2300072a2282a40a"
+      "351233002480a0123302072a2283a40a3523330024c0a01a0e000000");
+   ok &= compile_vs_g17g(
+      "norm8 rg8-unorm stride 12", build_vs_norm8_attribute(2, false, 12),
+      AGX_ISA_ENCODING_AGX3C, true,
+      "0cdd10062704041a2100a102a8010a0001020700030008020080c100800000002708"
+      "001a2d00a802d0000b002104350433002400a002330207022281a402350933002440"
+      "a00a0b000000230007022282a40a351233002480a0120c80023e0000000c33000702"
+      "2283a40a3523330024c0a01a0e000000");
+   /* No register index reaches a word at a five-byte stride, and no
+    * three-byte load is witnessed. */
+   ok &= compile_vs_g17g("norm8 rgba8-unorm stride 5",
+                         build_vs_norm8_attribute(4, false, 5),
+                         AGX_ISA_ENCODING_AGX3C, false, NULL);
+   ok &= compile_vs_g17g("norm8 rgb8-unorm tight",
+                         build_vs_norm8_attribute(3, false, 3),
+                         AGX_ISA_ENCODING_AGX3C, false, NULL);
+   /* G17P: unchanged, the normalized device load has no witness. */
+   ok &= compile_vs_g17g("norm8 rgba8-unorm tight",
+                         build_vs_norm8_attribute(4, false, 4),
+                         AGX_ISA_ENCODING_AGX3B, false, NULL);
+   return ok;
+}
+
 static const struct agx3_graphics_case cases[] = {
    {"fs-zink-minifloat-abs-fma", build_fs_zink_minifloat_abs_fma,
     true, .g17p_only = true},
@@ -7268,6 +7809,11 @@ main(int argc, char **argv)
       }                                                                        \
    } while (0)
 
+   RUN(test_g17g_array_fetch);
+   RUN(test_g17g_cube_shadow_lod);
+   RUN(test_g17g_float_selects);
+   RUN(test_g17g_xfb_add);
+   RUN(test_g17g_norm8_attribute);
    RUN(test_g17p_eot_block_store);
    RUN(test_g17p_layered_eot_block_store);
    RUN(test_g17p_multisample_eot_block_store);

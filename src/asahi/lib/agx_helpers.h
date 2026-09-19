@@ -7,6 +7,7 @@
 
 #include <stdbool.h>
 #include "asahi/compiler/agx_compile.h"
+#include "agx_zls_pixels.h"
 #include "asahi/layout/layout.h"
 #include "agx_abi.h"
 #include "agx_pack.h"
@@ -110,7 +111,6 @@ struct agx_zls {
    bool z_load, z_store;
    bool s_load, s_store;
 };
-
 static inline void
 agx_pack_zls_control(struct agx_zls_control_packed *packed,
                      const struct ail_layout *z, const struct ail_layout *s,

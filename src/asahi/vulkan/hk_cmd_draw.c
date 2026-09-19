@@ -4205,8 +4205,13 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
          .point_size_output = hw_vs->info.uvs.osel.opaque[0] == 0x40000,
          .vertex_varying_components = color_varying ? 4 : 0,
          .fragment_varying_components = color_varying ? 4 : 0,
-         .flat_varying = color_varying && !color->smooth,
-         .depth_less_write = depth_less_write,
+         .interpolation = !color_varying || color->smooth
+                             ? AGX_PPP_HAL300_SMOOTH
+                             : AGX_PPP_HAL300_FLAT,
+         /* VkCompareOp and the record share the never..always order. */
+         .depth_active = depth_less_write,
+         .depth_compare = depth_less_write ? VK_COMPARE_OP_LESS : 0,
+         .depth_write = depth_less_write,
       };
       struct agx_ppp_hal300_graphics_core state;
       if (!agx_ppp_hal300_graphics_core_pack(dev->dev.chip, &fields, &state)) {

@@ -407,6 +407,10 @@ uint16_t agx_sampler_heap_add(struct agx_device *dev,
                               struct agx_sampler_heap *heap,
                               struct agx_sampler_packed *sampler);
 
+/* agx_launch_gs_prerast() issues at most five: vertex-as-compute, geometry
+ * count, prefix sum, pre-GS and the geometry shader itself. */
+#define AGX_MAX_CDM_DISPATCHES 8
+
 struct agx_encoder {
    struct agx_bo *bo;
    uint64_t g17p_vdm_alias;
@@ -426,6 +430,20 @@ struct agx_batch {
    /* PIPE_CLEAR_* bitmask */
    uint32_t clear, draw, load, resolve, feedback;
    bool initialized;
+
+   /* Set when a descriptor or state in this batch has no proven native
+    * encoding on the current chip. Nothing from the batch may reach the
+    * hardware; agx_batch_submit drops it without a context reset.
+    */
+   bool native_rejected;
+
+   /* Draws the G17G profile refused. A batch whose render carries none of its
+    * draws has nothing valid to rasterize: its VDM stream never received
+    * them, and submitting it anyway fails UAPI translation with a silent
+    * EINVAL. A batch with no refusals and no draws is an ordinary clear and
+    * still needs its render. */
+   unsigned draws_refused;
+
 
    uint64_t uploaded_clear_color[PIPE_MAX_COLOR_BUFS];
    union pipe_color_union clear_color[PIPE_MAX_COLOR_BUFS];
@@ -486,6 +504,19 @@ struct agx_batch {
     */
    struct agx_encoder vdm;
    struct agx_encoder cdm;
+
+   /* The native M5 compute profile covers one dispatch per command: its
+    * captured control stream is a single launch, its grid, a barrier and the
+    * terminator, and the descriptor carries one dispatch identity, one
+    * submission index and one pair of dispatch stamps. A geometry-shader or
+    * transform-feedback prepass issues several launches, so on AGX3c each one
+    * is terminated where it ends and submitted as its own command, in order.
+    * Byte offsets into cdm.bo; empty on every other part, where the whole
+    * stream is submitted once. */
+   struct {
+      uint32_t start, end;
+   } cdm_dispatch[AGX_MAX_CDM_DISPATCHES];
+   unsigned cdm_dispatch_count;
 
    /* Scissor and depth-bias descriptors, uploaded at GPU time */
    struct util_dynarray scissor, depth_bias;
@@ -552,9 +583,23 @@ struct asahi_fs_shader_key {
 };
 static_assert(sizeof(struct asahi_fs_shader_key) == 40, "no holes");
 
+/* The geometry copy program is a hardware vertex shader compiled before the
+ * fragment shader is known, so it normally reads its UVS indices from
+ * uniforms. AGX3's UVSW takes only an immediate index (every native G17P and
+ * G17G vertex program), so on those chips the copy program is compiled per
+ * fragment interpolation layout: the same flat/linear masks the draw-time
+ * link uses, so both sides derive one UVS layout. */
+struct asahi_gs_shader_key {
+   uint64_t flat_varyings;
+   uint64_t linear_varyings;
+   uint64_t link_uvs;
+};
+static_assert(sizeof(struct asahi_gs_shader_key) == 24, "no holes");
+
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;
    struct asahi_fs_shader_key fs;
+   struct asahi_gs_shader_key gs;
 };
 
 enum agx_dirty {
@@ -1080,6 +1125,9 @@ struct agx_lower_bindings_options {
    bool *uses_bindless_samplers;
    bool g17p_plain_txf_crawl;
    bool g17p_native_sampler_handles;
+   /* Keep a crawled texture bindful when its index fits the state table:
+    * the handle serves the descriptor read, the operation names the entry. */
+   bool table_index_crawls;
    unsigned bindful_sampler_count;
 };
 

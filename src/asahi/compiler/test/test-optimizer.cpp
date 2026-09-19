@@ -304,10 +304,12 @@ TEST_F(Optimizer, G17PDoesNotFoldTheSelectSlotOfAnUntiedFcmpsel)
 
 TEST_F(Optimizer, G17PPreservesWideningBeforeWidthMatchedIntegerALU)
 {
+   for (unsigned e = 0; e < 2; ++e) {
    agx_builder *actual = agx_test_builder(mem_ctx);
    agx_builder *expected = agx_test_builder(mem_ctx);
    struct agx_shader_key key = {};
-   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.dev.encoding =
+      e ? AGX_ISA_ENCODING_AGX3C : AGX_ISA_ENCODING_AGX3B;
    actual->shader->key = &key;
    expected->shader->key = &key;
 
@@ -331,6 +333,7 @@ TEST_F(Optimizer, G17PPreservesWideningBeforeWidthMatchedIntegerALU)
 
    agx_optimize_and_dce(actual->shader);
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+   }
 }
 
 TEST_F(Optimizer, FusedFABSNEG)

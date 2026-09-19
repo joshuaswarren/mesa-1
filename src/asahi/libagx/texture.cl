@@ -465,6 +465,40 @@ libagx_texture_levels_gen10(constant struct agx_texture_gen10_packed *ptr)
                                           : (d.last_level - d.first_level) + 1;
 }
 
+/*
+ * The same workaround against a Gen10 descriptor. Without it a G17G texel
+ * fetch unpacked its descriptor with the AGX2 field positions, read a
+ * nonsense level range, and translated every fetch into the out-of-bounds
+ * coordinate -- which is how the depth blitter, whose fragment shader is one
+ * txf, wrote nothing at all.
+ */
+uint
+libagx_lower_txf_robustness_gen10(constant struct agx_texture_gen10_packed *ptr,
+                            bool check_lod, ushort lod, bool check_min_lod,
+                            ushort min_lod, bool check_layer, uint layer,
+                            uint x)
+{
+   agx_unpack(NULL, ptr, TEXTURE_GEN10, d);
+
+   bool valid = true;
+
+   if (check_lod)
+      valid &= lod <= (d.last_level - d.first_level);
+
+   if (check_min_lod)
+      valid &= lod >= min_lod;
+
+   if (check_layer) {
+      bool linear = (d.layout == AGX_LAYOUT_LINEAR);
+      valid &= layer < (linear ? d.depth_linear : d.depth);
+   }
+
+   /* The maximum tail offset is 0xF so by returning 0xFFF0 for out-of-bounds we
+    * stay under 0xFFFF and keep robustness after offsetting.
+    */
+   return valid ? x : 0xFFF0;
+}
+
 uint
 libagx_lower_txf_robustness_gen9(constant struct agx_texture_gen9_packed *ptr,
                             bool check_lod, ushort lod, bool check_min_lod,

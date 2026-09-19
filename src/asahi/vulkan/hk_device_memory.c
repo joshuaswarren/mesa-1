@@ -17,6 +17,7 @@
 #include "vk_common_entrypoints.h"
 
 #include <inttypes.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 
 /* Supports opaque fd only */
@@ -376,6 +377,11 @@ hk_MapMemory2KHR(VkDevice device, const VkMemoryMapInfoKHR *pMemoryMapInfo,
 
    assert(!fixed_addr || mem->map == fixed_addr);
    *ppData = mem->map + offset;
+
+   if (dev->dev.chip == AGX_CHIP_G17G && getenv("HK_M5_MEMORY_TRACE"))
+      fprintf(stderr, "M5_MEMORY_MAP gpu=%" PRIx64 " cpu=%p size=%" PRIu64
+              " offset=%" PRIu64 " flags=%x\n",
+              mem->bo->va->addr, *ppData, size, offset, mem->bo->flags);
 
    return VK_SUCCESS;
 }

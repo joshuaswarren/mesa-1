@@ -151,6 +151,72 @@ agx3_falu_add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
    return true;
 }
 
+bool
+agx3_falu_add_imm_runtime(uint16_t dest, uint16_t src0, uint8_t minifloat,
+                          const struct agx3_falu_mods *m,
+                          const struct agx3_falu_runtime *runtime,
+                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   if (!m || !runtime || !out || !len || (dest & 1) || dest >= 256 ||
+       (src0 & 1) || src0 >= 256 || m->src0_16 ||
+       m->src1_abs || m->src1_neg || m->src1_16 || m->addend_abs ||
+       m->addend_neg || m->saturate || (runtime->cache[0] && runtime->discard[0]))
+      return false;
+
+   static const struct agx3_field_kv add_imm_c[] = {
+      KV(9, 2),  KV(10, 2), KV(25, 1), KV(26, 2), KV(42, 2),
+      KV(43, 2), KV(50, 3), KV(51, 48)};
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(2, dest);
+   ov[n++] = (struct agx3_field_kv)KV(35, src0);
+   ov[n++] = (struct agx3_field_kv)KV(17, minifloat);
+   ov[n++] = (struct agx3_field_kv)KV(47, m->src0_abs ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(48, m->src0_neg ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(14, 0);
+   ov[n++] = (struct agx3_field_kv)KV(11, runtime->dest_cache);
+   ov[n++] = (struct agx3_field_kv)KV(44, runtime->cache[0]);
+   ov[n++] = (struct agx3_field_kv)KV(46, runtime->discard[0]);
+   for (unsigned i = 0; i < 8; ++i)
+      ov[n++] = (struct agx3_field_kv)KV(52 + i, (runtime->wait_mask >> i) & 1);
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "f32add", 3, add_imm_c,
+                            sizeof(add_imm_c) / sizeof(add_imm_c[0]), ov, n,
+                            out, len);
+}
+
+bool
+agx3_falu_mul_imm_runtime(uint16_t dest, uint16_t src0, uint8_t minifloat,
+                          const struct agx3_falu_mods *m,
+                          const struct agx3_falu_runtime *runtime,
+                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
+{
+   if (!m || !runtime || !out || !len || (dest & 1) || dest >= 256 ||
+       (src0 & 1) || src0 >= 256 || m->src0_16 || m->src0_neg ||
+       m->src1_abs || m->src1_neg || m->src1_16 || m->addend_abs ||
+       m->addend_neg || m->saturate || (runtime->cache[0] && runtime->discard[0]))
+      return false;
+
+   static const struct agx3_field_kv mul_imm_c[] = {
+      KV(9, 2),  KV(10, 2), KV(25, 1), KV(26, 2), KV(42, 2), KV(43, 2),
+      KV(60, 2), KV(74, 2), KV(78, 3), KV(79, 62)};
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(2, dest);
+   ov[n++] = (struct agx3_field_kv)KV(35, src0);
+   ov[n++] = (struct agx3_field_kv)KV(17, minifloat);
+   ov[n++] = (struct agx3_field_kv)KV(47, m->src0_abs ? 1 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(48, 0);
+   ov[n++] = (struct agx3_field_kv)KV(14, 0);
+   ov[n++] = (struct agx3_field_kv)KV(11, runtime->dest_cache);
+   ov[n++] = (struct agx3_field_kv)KV(44, runtime->cache[0]);
+   ov[n++] = (struct agx3_field_kv)KV(46, runtime->discard[0]);
+   for (unsigned i = 0; i < 8; ++i)
+      ov[n++] = (struct agx3_field_kv)KV(80 + i, (runtime->wait_mask >> i) & 1);
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "f32mul", 3, mul_imm_c,
+                            sizeof(mul_imm_c) / sizeof(mul_imm_c[0]), ov, n,
+                            out, len);
+}
+
 /* Apple lowers float-to-half conversion to f32add with a16-bit destination
  * and the exact negative-zero minifloat in the other input. This preserves
  * signed zero and rounds only once; half4 witnesses include odd halves. */

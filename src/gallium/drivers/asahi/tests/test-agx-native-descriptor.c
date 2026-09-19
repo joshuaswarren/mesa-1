@@ -149,11 +149,22 @@ test_g17p_txf_sampler(void)
    CHECK(agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17P, &sampler));
    CHECK(memcmp(&sampler, expected, sizeof(expected)) == 0);
 
+   /* G17G packs the same fetch sampler as a Gen5 record (the generation
+    * hk_pack_native_sampler emits for G17G); the first textured pass on the
+    * M5 (KHR-GL30.texture_lod_basic) ran with it. */
+   static const uint8_t expected_g17g[AGX_GALLIUM_SAMPLER_AGX3_SIZE] = {
+      0x00, 0x00, 0x0f, 0x68, 0x1b, 0x04, 0x00, 0x00,
+   };
    memset(&sampler, 0xa5, sizeof(sampler));
-   CHECK(!agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17G, &sampler));
-   CHECK(memcmp(&sampler,
-                &(struct agx_gallium_sampler_descriptor){0},
-                sizeof(sampler)) == 0);
+   CHECK(agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17G, &sampler));
+   if (memcmp(&sampler, expected_g17g, sizeof(expected_g17g)) != 0) {
+      const uint8_t *b = (const uint8_t *)&sampler;
+      fprintf(stderr, "G17G txf sampler bytes:");
+      for (unsigned i = 0; i < sizeof(expected_g17g); ++i)
+         fprintf(stderr, " %02x", b[i]);
+      fprintf(stderr, "\n");
+   }
+   CHECK(memcmp(&sampler, expected_g17g, sizeof(expected_g17g)) == 0);
    CHECK(!agx_gallium_pack_g17p_txf_sampler(AGX_CHIP_G17P, NULL));
 }
 
@@ -173,30 +184,40 @@ test_g17p_sampler_handles(void)
        AGX_GALLIUM_G17P_API_SAMPLERS},
    };
 
-   for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
-      uint16_t native = UINT16_MAX;
-      CHECK(agx_gallium_g17p_sampler_handle(AGX_CHIP_G17P, cases[i].api,
-                                            &native));
-      CHECK(native == cases[i].native);
+   /* G17G shares the G17P sampler table layout: the M5 fragment texturing
+    * reference (gpu/m5-texture-abi-reference.metal) shows the same
+    * resource pair, and its API samplers follow the fetch sampler at slot 0
+    * the same way. */
+   static const enum agx_chip chips[] = {AGX_CHIP_G17P, AGX_CHIP_G17G};
+   for (unsigned c = 0; c < ARRAY_SIZE(chips); ++c) {
+      for (unsigned i = 0; i < ARRAY_SIZE(cases); ++i) {
+         uint16_t native = UINT16_MAX;
+         CHECK(agx_gallium_g17p_sampler_handle(chips[c], cases[i].api,
+                                               &native));
+         CHECK(native == cases[i].native);
 
-      uint16_t custom = UINT16_MAX;
-      CHECK(agx_gallium_g17p_custom_border_handle(
-         AGX_CHIP_G17P, cases[i].api, &custom));
-      CHECK(custom == AGX_GALLIUM_G17P_CUSTOM_BORDER_BASE + cases[i].api);
+         uint16_t custom = UINT16_MAX;
+         CHECK(agx_gallium_g17p_custom_border_handle(
+            chips[c], cases[i].api, &custom));
+         CHECK(custom == AGX_GALLIUM_G17P_CUSTOM_BORDER_BASE + cases[i].api);
+      }
+
+      uint16_t untouched = 0x5555;
+      CHECK(!agx_gallium_g17p_sampler_handle(
+         chips[c], AGX_GALLIUM_G17P_API_SAMPLERS, &untouched));
+      CHECK(untouched == 0x5555);
+      CHECK(!agx_gallium_g17p_sampler_handle(chips[c], 0, NULL));
+      CHECK(!agx_gallium_g17p_custom_border_handle(
+         chips[c], AGX_GALLIUM_G17P_API_SAMPLERS, &untouched));
+      CHECK(untouched == 0x5555);
+      CHECK(!agx_gallium_g17p_custom_border_handle(chips[c], 0, NULL));
    }
 
    uint16_t untouched = 0x5555;
-   CHECK(!agx_gallium_g17p_sampler_handle(
-      AGX_CHIP_G17P, AGX_GALLIUM_G17P_API_SAMPLERS, &untouched));
-   CHECK(untouched == 0x5555);
-   CHECK(!agx_gallium_g17p_sampler_handle(AGX_CHIP_G17G, 0, &untouched));
-   CHECK(!agx_gallium_g17p_sampler_handle(AGX_CHIP_G17P, 0, NULL));
-   CHECK(!agx_gallium_g17p_custom_border_handle(
-      AGX_CHIP_G17P, AGX_GALLIUM_G17P_API_SAMPLERS, &untouched));
-   CHECK(untouched == 0x5555);
-   CHECK(!agx_gallium_g17p_custom_border_handle(AGX_CHIP_G17G, 0,
+   CHECK(!agx_gallium_g17p_sampler_handle(AGX_CHIP_G13G, 0, &untouched));
+   CHECK(!agx_gallium_g17p_custom_border_handle(AGX_CHIP_G13G, 0,
                                                  &untouched));
-   CHECK(!agx_gallium_g17p_custom_border_handle(AGX_CHIP_G17P, 0, NULL));
+   CHECK(untouched == 0x5555);
 }
 
 static void

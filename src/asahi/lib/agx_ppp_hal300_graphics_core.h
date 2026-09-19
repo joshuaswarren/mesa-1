@@ -17,11 +17,80 @@ struct agx_ppp_hal300_graphics_fields {
    uint64_t varying_table;
    unsigned cf_binding_count;
    unsigned cull_mode;
-   /* Native pass values: 0 opaque, 1 translucent. Punch-through also needs
-    * coverage state and is not supported by this profile yet. */
+   /*
+    * Set when the render has no colour attachment. Two things move with it,
+    * both from controlled colour-free renders on 25G76: the interpolated
+    * varying count moves from the first byte of the count word to the
+    * third, and the ISP record's last word goes from 0x0001ffff to zero.
+    * Witnessed with four noperspective varyings and a discarding shader
+    * (count word 0x00040000), the exact shape the depth-format conformance
+    * tests draw with, and with no varyings at all (count word zero).
+    *
+    * A flat colour-free varying has no witness and is not admitted here.
+    * A colour-free shader that writes depth is carried by
+    * fragment_writes_depth below.
+    */
+   bool no_color_attachment;
+   /*
+    * ISP pass type: 0 opaque, 1 translucent, 2 punch through. A controlled
+    * capture of a discarding fragment shader on 25G76
+    * (gpu/m5-state-matrix-reference.m, mode "discard") emitted word1
+    * 0x44000200 against the opaque baseline's 0x00000200: the pass type in
+    * bits 29..31 and, alongside it, the fragment control's own
+    * disable-triangle-merging bit 26. That bit is a property of the shader,
+    * not of the pass type, so it is carried separately rather than derived.
+    */
    unsigned fragment_pass;
+   bool disable_tri_merging;
+   /*
+    * The fragment shader writes gl_FragDepth, so the depth value is the
+    * shader's rather than the rasterizer's. Two things move with it, both
+    * from a controlled 25G76 render whose fragment function returns a
+    * [[depth(any)]] struct (gpu/m5-state-matrix-reference.m mode
+    * "depth-only-zout") against one whose depth comes from interpolation:
+    * the fragment program's VDM pipeline template takes 0x40, and both of
+    * the ISP record's early-test words drop 0x00c00000, which is the
+    * hardware being told it may no longer resolve depth before the shader
+    * runs. Writing stencil from the shader is a separate axis with no
+    * witness and is not carried here.
+    */
+   bool fragment_writes_depth;
    bool front_face_ccw;
    bool point_size_output;
+   /*
+    * Words in the vertex shader's clip-distance UVS group, zero for none.
+    * Captured on 25G76 (gpu/m5-state-matrix-reference.m, mode "clipdist")
+    * against the identical colour render in the same session: the UVS
+    * record's first word gains bit 0 and its word count gains one, where
+    * the captured shader exports a single clip distance. Nothing else in
+    * the graphics state moves, and the same count appears twice in the VDM
+    * prefix. That count is a word total -- position contributes four and
+    * each varying component one -- so a wider group adds its own width the
+    * same way; only the one-word group is captured.
+    */
+   unsigned clip_distance_words;
+   /*
+    * The primitive the rasterizer draws. Triangles are the zero default.
+    * Points were captured in isolation on 25G76
+    * (gpu/m5-state-matrix-reference.m, mode "points") against the identical
+    * colour render in the same session: the depth/stencil record's control
+    * word and the ISP record's first word each gain 0x04000000, and both of
+    * the ISP record's early-test words gain 0x40000000. Nothing else in the
+    * graphics state moves -- the point-size output and the extra vertex
+    * component it adds are already carried by point_size_output, and the
+    * capture confirms both are set for a point draw.
+    *
+    * The ISP word's 0x04000000 is the same bit disable_tri_merging sets, so
+    * the two are OR'd rather than added: merging triangles is meaningless
+    * for points and the hardware is told so either way.
+    *
+    * Lines have their own oracle mode but no capture yet, so only points and
+    * triangles are admitted.
+    */
+   enum agx_ppp_hal300_object_type {
+      AGX_PPP_HAL300_TRIANGLES = 0,
+      AGX_PPP_HAL300_POINTS = 1,
+   } object_type;
    /* Vertex exports and fragment interpolation are independent. A fragment
     * shader may leave the vertex shader's output unused. Counts are scalar
     * 32-bit UVS slots, not source-language vectors or CF bindings. The
@@ -29,9 +98,67 @@ struct agx_ppp_hal300_graphics_fields {
     * reads only a subvector; its offset is carried by the VIT separately. */
    unsigned vertex_varying_components;
    unsigned fragment_varying_components;
-   bool flat_varying;
-   bool depth_less_write;
+   /*
+    * How the fragment varyings are interpolated. This record's first word
+    * separates flat from interpolated only: four smooth components encode
+    * 0x00000004 and four flat ones 0x00000400, and a controlled
+    * noperspective render encodes 0x00000004 as well, identical to smooth.
+    * The perspective-versus-linear distinction is carried per binding by
+    * the varying table's shade model, which the linker already writes, so
+    * noperspective needs nothing here.
+    *
+    * (A colour-free render was observed with 0x00040000 in this word. That
+    * is not interpolation -- its varying is ordinary smooth -- and it is
+    * not understood yet, so no caller may request it.)
+    */
+   enum agx_ppp_hal300_interpolation {
+      AGX_PPP_HAL300_SMOOTH = 0,
+      AGX_PPP_HAL300_FLAT = 1,
+      AGX_PPP_HAL300_LINEAR = 2,
+   } interpolation;
+   /*
+    * Depth and stencil state, decoded from a controlled M5/25G76 capture
+    * matrix (gpu/m5-state-matrix-reference.m, one render per comparison):
+    *
+    *   face word = (compare << 24) | (depth_write ? 0 : 0x200000) | 0xf00
+    *
+    * with compare in the order never, less, equal, lequal, greater,
+    * notequal, gequal, always -- the same order as PIPE_FUNC_*. The
+    * driver's previous no-depth constant 0x07200f00 is exactly
+    * "always, writes off" under that rule, and its D32 LESS/write
+    * constant 0x01000f00 is "less, writes on", so both existing witnessed
+    * values fall out of the decode rather than being special cases.
+    *
+    * The control word carries 0x40000 while the depth unit is inactive
+    * (comparison always with writes off) and 0x80000 while stencil is
+    * active; a render with a depth attachment but no depth-stencil state
+    * is byte-identical to one with no attachment at all.
+    */
+   /*
+    * Set while a depth-stencil state governs the draw. Cleared -- the
+    * zero-initialized default -- encodes the inactive depth unit, which is
+    * byte-identical whether or not a depth attachment is bound: a render
+    * with a D32 attachment and no depth-stencil state produced exactly the
+    * no-attachment record in the capture matrix.
+    */
+   bool depth_active;
+   uint8_t depth_compare;
+   bool depth_write;
+   bool stencil_active;
+   /*
+    * Stencil word = (op bits << 24) | (reference << 16) | (read << 8) |
+    * write, witnessed for the always/replace and equal/keep pairs the
+    * capture matrix drew. Only those two operation encodings are grounded,
+    * so a caller asking for another one is refused.
+    */
+   uint32_t front_stencil;
+   uint32_t back_stencil;
 };
+
+/* The two grounded stencil operation encodings. */
+#define AGX_PPP_HAL300_STENCIL_KEEP_ALWAYS UINT32_C(0x0e000000)
+#define AGX_PPP_HAL300_STENCIL_REPLACE_ALWAYS UINT32_C(0x0e000000)
+#define AGX_PPP_HAL300_STENCIL_KEEP_EQUAL UINT32_C(0x04000000)
 
 struct agx_ppp_hal300_graphics_core {
    uint8_t bytes[AGX_PPP_HAL300_GRAPHICS_BYTES];

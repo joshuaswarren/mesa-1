@@ -257,6 +257,15 @@ lower(nir_builder *b, nir_instr *instr, void *data)
           !force_bindless)
          return progress;
 
+      /* G17G's native fetches with a run-time level are bindful: the
+       * instruction names the texture state entry and only the level and
+       * layer clamps read the descriptor. Keep that shape here; the handle
+       * added below feeds the crawl alone (AGX_TEXTURE_FLAG_TABLE_INDEX). */
+      if (options->table_index_crawls &&
+          tex->texture_index < AGX_NUM_TEXTURE_STATE_REGS &&
+          nir_tex_instr_src_index(tex, nir_tex_src_texture_offset) == -1)
+         tex->backend_flags |= AGX_TEXTURE_FLAG_TABLE_INDEX;
+
       /* Otherwise, lower to bindless. Could be optimized. */
       nir_def *index = nir_steal_tex_src(tex, nir_tex_src_texture_offset);
       if (!index)

@@ -20,6 +20,7 @@
 #include "util/u_dynarray.h"
 #include "agx_builder.h"
 #include "agx_compiler.h"
+#include "agx_nir_texture.h"
 #include "agx_debug.h"
 #include "agx_nir.h"
 #include "agx_opcodes.h"
@@ -1023,6 +1024,55 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
     * Metal has no fragment stencil-output expression from which to ground its
     * staged operand contract.
     */
+   /* G17G stages the same two dwords through depthf with a mode field
+    * (agx3_zs_core.c). Apple's fragments (gpu/m5-fragment-zs-constant-
+    * reference.metal, -depth-) fold the target-sample nibble read from SR 2
+    * as sr2 + (sr2 << 8) in the low half of the first dword, put
+    * 0xff00 | stencil in its high half (0xff5a / 0xff01 for constant
+    * stencil 0x5a / 1, 0xff00 when only depth is written) and publish the
+    * saturated fp32 depth as the second dword. Build the vector as halves
+    * so the allocator keeps the word and the depth one contiguous pair. */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) {
+      agx_index sr2 = agx_temp(b->shader, AGX_SIZE_16);
+      agx_get_coverage_1x_agx3_to(b, sr2);
+      agx_index shifted = agx_iadd(b, agx_immediate(0), sr2, 4);
+      agx_index low = agx_iadd(b, sr2, shifted, 4);
+      agx_index high;
+      if (write_s) {
+         agx_index masked = agx_and(b, s, agx_immediate(0xff));
+         high = agx_iadd(b, masked, agx_mov_imm(b, 16, 0xff00), 0);
+      } else {
+         high = agx_mov_imm(b, 16, 0xff00);
+      }
+
+      agx_index word;
+      if (write_z) {
+         agx_index depth;
+         if (nir_src_is_const(instr->src[1])) {
+            const float value = nir_src_as_float(instr->src[1]);
+            depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
+         } else {
+            depth = agx_temp(b->shader, AGX_SIZE_32);
+            agx_fmov_to(b, depth, z)->saturate = true;
+         }
+         agx_index depth_lo = agx_temp(b->shader, AGX_SIZE_16);
+         agx_index depth_hi = agx_temp(b->shader, AGX_SIZE_16);
+         agx_subdivide_to(b, depth_lo, depth, 0);
+         agx_subdivide_to(b, depth_hi, depth, 1);
+         agx_index parts[4] = {low, high, depth_lo, depth_hi};
+         word = agx_vec_temp(b->shader, AGX_SIZE_16, 4);
+         agx_emit_collect_to(b, word, 4, parts);
+      } else {
+         word = agx_vec2(b, low, high);
+      }
+
+      b->shader->out->writes_sample_mask = true;
+      agx_wait_pixel_mask(b, 0x1);
+      agx_instr *I = agx_zs_emit_agx3(b, word, base);
+      agx_signal_pix(b, 0x1);
+      return I;
+   }
+
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && write_z &&
        !write_s) {
       agx_index sr2 = agx_temp(b->shader, AGX_SIZE_16);
@@ -1171,6 +1221,137 @@ nir_is_coherent(nir_intrinsic_instr *instr)
    return nir_intrinsic_access(instr) & (ACCESS_COHERENT | ACCESS_VOLATILE);
 }
 
+/*
+ * The G17G normalized-byte attribute fetch. Apple loads the attribute at its
+ * own width -- a word for four bytes, a half for two, a byte for one -- and
+ * unpacks each 16-bit register with `normflt`, two lanes at a time
+ * (gpu/m5-xfb-alu12-reference.metal: uchar4 is `lddev` W32 then normflt of
+ * h4 and h5, uchar2 `lddev` W16, uchar `lddev` W8; the alu7 kernels are the
+ * unorm and snorm unpacks on an already-loaded word). The vertex lowering
+ * indexes 8-bit interchange elements, so the word and half loads want the
+ * index in their own units: an offset of the form `x * factor` under the
+ * load's shift is a byte stride of `factor << shift`, and one imad rescales
+ * `x` when the element width divides it. Three-byte elements have no
+ * witnessed load, and a stride the element does not divide has no register
+ * index; both stay refused.
+ */
+static bool
+agx_emit_norm8_load_g17g(agx_builder *b, agx_index dest,
+                         nir_intrinsic_instr *instr, enum agx_format fmt,
+                         agx_index addr, agx_index offset, unsigned shift,
+                         bool coherent)
+{
+   const unsigned nr = instr->def.num_components;
+   if (nr != 1 && nr != 2 && nr != 4)
+      return false;
+
+   const unsigned elem_shift = nr == 4 ? 2 : nr == 2 ? 1 : 0;
+   agx_index index = offset;
+   unsigned index_shift = shift;
+
+   if (elem_shift) {
+      /* `el * stride`, which NIR spells as a shift for a power of two. */
+      nir_scalar x = nir_scalar_resolved(instr->src[1].ssa, 0);
+      uint64_t factor = 1;
+      if (nir_scalar_is_alu(x) && nir_scalar_alu_op(x) == nir_op_imul) {
+         for (unsigned i = 0; i < 2; ++i) {
+            nir_scalar f = nir_scalar_chase_alu_src(x, i);
+            if (!nir_scalar_is_const(f))
+               continue;
+            factor = nir_scalar_as_uint(f);
+            x = nir_scalar_chase_alu_src(x, 1 - i);
+            break;
+         }
+      } else if (nir_scalar_is_alu(x) && nir_scalar_alu_op(x) == nir_op_ishl) {
+         /* The late SM5 lowering masks every shift amount (`iand b, 31`)
+          * and nothing folds the constant back afterwards. */
+         nir_scalar amount = nir_scalar_chase_alu_src(x, 1);
+         uint64_t bits = 32;
+         if (nir_scalar_is_const(amount)) {
+            bits = nir_scalar_as_uint(amount);
+         } else if (nir_scalar_is_alu(amount) &&
+                    nir_scalar_alu_op(amount) == nir_op_iand &&
+                    nir_scalar_is_const(nir_scalar_chase_alu_src(amount, 0)) &&
+                    nir_scalar_is_const(nir_scalar_chase_alu_src(amount, 1))) {
+            bits = nir_scalar_as_uint(nir_scalar_chase_alu_src(amount, 0)) &
+                   nir_scalar_as_uint(nir_scalar_chase_alu_src(amount, 1));
+         }
+         if (bits < 32) {
+            factor = UINT64_C(1) << bits;
+            x = nir_scalar_chase_alu_src(x, 0);
+         }
+      } else if (nir_scalar_is_alu(x) &&
+                 nir_scalar_alu_op(x) == nir_op_imadshl_agx) {
+         /* agx_nir_fuse_algebraic_late's strength reductions: `x << s` as
+          * imadshl(0, 1, x, s) and `x * (m + 2^s)` as imadshl(x, m, x, s). */
+         nir_scalar a = nir_scalar_chase_alu_src(x, 0);
+         nir_scalar m = nir_scalar_chase_alu_src(x, 1);
+         nir_scalar c = nir_scalar_chase_alu_src(x, 2);
+         nir_scalar s = nir_scalar_chase_alu_src(x, 3);
+         if (nir_scalar_is_const(m) && nir_scalar_is_const(s) &&
+             nir_scalar_as_uint(s) < 32) {
+            const uint64_t shifted = UINT64_C(1) << nir_scalar_as_uint(s);
+            if (nir_scalar_is_const(a) &&
+                nir_scalar_as_uint(a) * nir_scalar_as_uint(m) == 0) {
+               factor = shifted;
+               x = c;
+            } else if (nir_scalar_equal(a, c)) {
+               factor = nir_scalar_as_uint(m) + shifted;
+               x = a;
+            }
+         }
+      }
+
+      const uint64_t stride = factor << shift;
+      const uint64_t scale = stride >> elem_shift;
+      if ((stride & BITFIELD_MASK(elem_shift)) || scale == 0 ||
+          scale > UINT8_MAX || x.def->bit_size != 32)
+         return false;
+
+      index = agx_def_index(x.def);
+      if (x.def->num_components > 1)
+         index = agx_emit_extract(b, index, x.comp);
+      if (scale != 1) {
+         agx_index scaled = agx_temp(b->shader, AGX_SIZE_32);
+         agx_imad_to(b, scaled, index, agx_immediate(scale), agx_immediate(0),
+                     0);
+         index = scaled;
+      }
+      if (!nir_intrinsic_sign_extend(instr))
+         index = agx_abs(index);
+      index_shift = 0;
+   }
+
+   /* A full register keeps the narrow payloads on an even half, which is
+    * where a scalar byte load writes; only the low half is read after a
+    * half or byte load. */
+   agx_index payload = agx_temp(b->shader, AGX_SIZE_32);
+   const enum agx_format raw = nr == 4 ? AGX_FORMAT_I32
+                               : nr == 2 ? AGX_FORMAT_I16
+                                         : AGX_FORMAT_I8;
+   agx_device_load_to(b, payload, addr, index, raw, 1, index_shift, coherent);
+
+   agx_index channels[4] = {agx_null()};
+   for (unsigned i = 0; i < DIV_ROUND_UP(nr, 2); ++i) {
+      agx_index half = agx_temp(b->shader, AGX_SIZE_16);
+      agx_subdivide_to(b, half, payload, i);
+
+      const unsigned lanes = MIN2(2u, nr - i * 2);
+      agx_index pair = agx_temp(b->shader, AGX_SIZE_32);
+      pair.channels_m1 = lanes - 1;
+      agx_normflt_agx3_to(b, pair, half, fmt);
+
+      agx_index unpacked[2] = {agx_null()};
+      agx_emit_split(b, unpacked, pair, lanes);
+      for (unsigned c = 0; c < lanes; ++c)
+         channels[i * 2 + c] = unpacked[c];
+   }
+
+   agx_emit_collect_to(b, dest, nr, channels);
+   agx_emit_cached_split(b, dest, nr);
+   return true;
+}
+
 static void
 agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
 {
@@ -1191,6 +1372,17 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
    /* Zero-extend offset if we're not sign-extending */
    if (!nir_intrinsic_sign_extend(instr))
       offset = agx_abs(offset);
+
+   /* G17G fetches a normalized 8-bit attribute raw and unpacks it with
+    * `normflt`, the way Apple spells unpack_unorm4x8_to_float on a loaded
+    * word (gpu/m5-xfb-alu7-, -alu12-reference.metal); the AGX3 device load
+    * has no normalized format of its own. */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       (fmt == AGX_FORMAT_U8NORM || fmt == AGX_FORMAT_S8NORM) &&
+       dest.size == AGX_SIZE_32 && packed_count == 0 && !index_bytes &&
+       agx_emit_norm8_load_g17g(b, dest, instr, fmt, addr, offset, shift,
+                                nir_is_coherent(instr)))
+      return;
 
    /* AGX3 memory traffic is raw. Convert a normalized packed texel with
     * the same native instruction used by tile loads, after its real load. */
@@ -4312,12 +4504,18 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
          break;
 
       case nir_tex_src_backend2:
-         /* G17P's texture offset is an immediate in SMP, with signed
-          * x/y nibbles and a third z nibble for 3D. Keep the constant from
+         /* The texture offset is an immediate in SMP, with signed x/y
+          * nibbles and a third z nibble for 3D. Keep the constant from
           * agx_nir_lower_texture in that form instead of materializing a GPR
-          * that the native instruction does not read.
+          * that the native instruction does not read. G17G spells it the
+          * same way -- its own `t.sample(s, uv, int2(1, 2))` witness carries
+          * f43 = 33 with f51 and f141, and so do its depth2d_array
+          * comparisons (gpu/m5-shadow-array-offset-reference.metal) -- so
+          * materializing the constant there only produced an operand shape
+          * the packer had no witness for.
           */
-         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+              b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
              nir_src_is_const(instr->src[i].src) &&
              (instr->op == nir_texop_tg4 ||
               nir_src_as_uint(instr->src[i].src) <= 0xfff)) {
@@ -4376,6 +4574,12 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
          break;
 
       case nir_tex_src_texture_handle:
+         if (instr->backend_flags & AGX_TEXTURE_FLAG_TABLE_INDEX) {
+            /* The handle fed the descriptor crawl; the operation itself is
+             * bindful, as G17G's native fragment fetches are. */
+            texture = agx_immediate(instr->texture_index);
+            break;
+         }
          texture =
             agx_translate_bindless_handle(b, &instr->src[i].src, &bindless);
          break;
@@ -4476,11 +4680,19 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
       packed_offset.type == AGX_INDEX_IMMEDIATE
          ? (uint16_t)packed_offset.value : 0;
 
-   const bool g17p_split_offset =
-      b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   /* G17G spells a constant offset the same way, including alongside a
+    * comparison: its own depth2d_array comparisons with int2(1, 2)
+    * (gpu/m5-shadow-array-offset-reference.metal) carry the packed nibble
+    * pair in the instruction and leave source 5 to the comparator alone.
+    * Keeping the pair collected on AGX3C handed the packer a two-channel
+    * source it accepts only for a gather with a runtime offset, so every
+    * textureOffset on a shadow sampler was refused. */
+   const bool split_constant_offset =
+      (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
       packed_offset.type == AGX_INDEX_IMMEDIATE;
 
-   if (g17p_split_offset && !agx_is_null(compare))
+   if (split_constant_offset && !agx_is_null(compare))
       packed_offset = agx_null();
 
    if (!agx_is_null(compare) && !agx_is_null(packed_offset)) {
@@ -4504,8 +4716,8 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
       offset_present, !agx_is_null(compare),
       instr->op == nir_texop_lod, agx_gather_for_nir(instr), instr->is_sparse);
 
-   /* The packer reads the G17P offset from the instruction, not from src[5],
-    * so it survives being split away from the comparator above. */
+   /* The packer reads the constant offset from the instruction, not from
+    * src[5], so it survives being split away from the comparator above. */
    I->offset_xyz = offset_xyz;
 
    if (instr->op == nir_texop_txf || instr->op == nir_texop_txf_ms) {
@@ -6408,6 +6620,18 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       }
    }
 #endif
+
+   /* There is no AGX3 disassembler, so dump the bytes instead: this is the
+    * only way to see what the packer actually emitted for a shader that
+    * compiles but renders wrongly, and the scratch decoder reads it
+    * directly. */
+   if (dump_shaders && ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2) {
+      fprintf(stdout, "agx3 binary (%u bytes):\n",
+              (unsigned)(binary->size - offset));
+      for (unsigned i = offset; i < binary->size; ++i)
+         fprintf(stdout, "%02x", ((const uint8_t *)binary->data)[i]);
+      fprintf(stdout, "\n\n");
+   }
 
    if ((dump_shaders || selftest) &&
        ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2) {

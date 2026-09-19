@@ -162,6 +162,10 @@ bool agx_ioto_g17g_no_resource_program_compose(
 enum agx_ioto_g17g_program_stage {
    AGX_IOTO_G17G_PROGRAM_VERTEX,
    AGX_IOTO_G17G_PROGRAM_FRAGMENT,
+   /* A fragment that owns its coverage -- a punch-through pass, where the
+    * shader may discard and so decides the sample mask itself. It differs
+    * from the ordinary fragment in one bit of the pixel release record. */
+   AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT,
    AGX_IOTO_G17G_PROGRAM_EOT,
    AGX_IOTO_G17G_PROGRAM_BACKGROUND,
    AGX_IOTO_G17G_PROGRAM_COMPUTE,

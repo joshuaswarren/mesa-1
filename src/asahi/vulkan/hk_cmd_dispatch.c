@@ -1425,6 +1425,14 @@ hk_dispatch_g17g_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
+   if (hk_g17p_launch_trace_enabled()) {
+      for (size_t i = 0; i < range_count; ++i)
+         fprintf(stderr, "M5_COMPUTE_UNIFORMS program=%" PRIx64
+                 " start=%u count=%u address=%" PRIx64 "\n",
+                 program_bo->va->addr, ranges[i].start_halfs,
+                 ranges[i].size_halfs, ranges[i].address);
+   }
+
    const struct agx3_g17p_graphics_program_desc desc = {
       .program_va = program_bo->va->addr, .shader_va = shader_va,
       .uniform_ranges = ranges, .uniform_range_count = range_count,

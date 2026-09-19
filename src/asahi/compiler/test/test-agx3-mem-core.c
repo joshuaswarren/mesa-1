@@ -119,7 +119,7 @@ main(void)
          .idx_kill = true,
          .slot = 6,
          .wait_mask = 1,
-         .agx3b_last_load = true,
+         .last_load = true,
       };
       uint8_t out[AGX3_MEM_MAX_LENGTH];
       uint8_t len = 0;
@@ -132,12 +132,68 @@ main(void)
          pass++;
       }
 
-      if (agx3_mem_encode_load(AGX_ISA_ENCODING_AGX3C, &d, out, &len) ||
-          agx3_mem_encode_store(AGX_ISA_ENCODING_AGX3B, &d, out, &len)) {
-         fprintf(stderr, "FAIL G17P final-load guard\n");
+      if (agx3_mem_encode_store(AGX_ISA_ENCODING_AGX3B, &d, out, &len) ||
+          agx3_mem_encode_store(AGX_ISA_ENCODING_AGX3C, &d, out, &len)) {
+         fprintf(stderr, "FAIL final-load store guard\n");
          fail++;
       } else {
          pass += 2;
+      }
+   }
+
+   /* Apple Metal, applegpu_g17g (gpu/m5-xfb-alu-reference.metal). The final
+    * LDDEV of a program is the 14-byte ep2 form with f82=2; every earlier
+    * load keeps the 8-byte ep0 form. Same descriptor fields otherwise. */
+   {
+      static const struct {
+         const char *name;
+         uint16_t data, base, idx_reg;
+         uint8_t width, mask, shift, slot;
+         uint16_t wait;
+         bool last;
+         uint8_t nbytes;
+         uint8_t bytes[14];
+      } vecs[] = {
+         /* m5_xfb_load_uint4_indexed: out[id] = table[index[id]] */
+         {"index[id]", 0, 4, 8, AGX3_MEM_W32, 1, 2, 8, 1, false, 8,
+          {0x0f, 0x04, 0x03, 0x08, 0x18, 0x22, 0x10, 0x40}},
+         {"table[index]", 0, 0, 0, AGX3_MEM_W32, 15, 4, 8, 0x80, true, 14,
+          {0x0f, 0x00, 0x03, 0x00, 0x78, 0x0a, 0x10, 0x80, 0x41, 0x20, 0x80,
+           0x00, 0x00, 0x00}},
+         /* m5_xfb_imad64: a[id] then b[id] */
+         {"a[id]", 2, 0, 4, AGX3_MEM_W32, 1, 2, 8, 1, false, 8,
+          {0x1f, 0x00, 0x03, 0x04, 0x18, 0x22, 0x10, 0x40}},
+         {"b[id]", 0, 4, 4, AGX3_MEM_W32, 1, 2, 8, 0, true, 14,
+          {0x0f, 0x04, 0x03, 0x04, 0x18, 0x02, 0x10, 0xc0, 0x41, 0x00, 0x80,
+           0x00, 0x00, 0x00}},
+         /* m5_xfb_ctz: a 16-bit element, sole load */
+         {"ushort a[id]", 2, 0, 0, AGX3_MEM_W16, 1, 1, 8, 1, true, 14,
+          {0x17, 0x00, 0x03, 0x00, 0x18, 0x22, 0x10, 0x80, 0xc1, 0x00, 0x80,
+           0x00, 0x00, 0x00}},
+      };
+      for (size_t i = 0; i < sizeof(vecs) / sizeof(vecs[0]); ++i) {
+         struct agx3_mem_desc d = {
+            .data = vecs[i].data,
+            .width = (enum agx3_mem_width)vecs[i].width,
+            .mask = vecs[i].mask,
+            .shift = vecs[i].shift,
+            .base_is_uniform = true,
+            .base = vecs[i].base,
+            .idx_kind = AGX3_MEM_IDX_REG,
+            .idx_reg = vecs[i].idx_reg,
+            .slot = vecs[i].slot,
+            .wait_mask = vecs[i].wait,
+            .last_load = vecs[i].last,
+         };
+         uint8_t out[AGX3_MEM_MAX_LENGTH];
+         uint8_t len = 0;
+         if (!agx3_mem_encode_load(AGX_ISA_ENCODING_AGX3C, &d, out, &len) ||
+             len != vecs[i].nbytes || memcmp(out, vecs[i].bytes, len)) {
+            fprintf(stderr, "FAIL G17G %s load\n", vecs[i].name);
+            fail++;
+         } else {
+            pass++;
+         }
       }
    }
 
@@ -149,7 +205,7 @@ main(void)
       struct agx3_mem_desc d={.data=0,.width=AGX3_MEM_W32,.mask=1,
          .base_is_uniform=true,.base=4,.idx_kind=AGX3_MEM_IDX_REG,
          .idx_reg=0,.idx_kill=true,.shift=0,.slot=6,.wait_mask=32,
-         .agx3b_last_load=true};
+         .last_load=true};
       uint8_t out[AGX3_MEM_MAX_LENGTH],len=0;
       if(!agx3_mem_encode_load(AGX_ISA_ENCODING_AGX3B,&d,out,&len)||
          len!=sizeof(expected)||memcmp(out,expected,len)){
@@ -176,7 +232,7 @@ main(void)
          .idx_reg = 0,
          .slot = 6,
          .wait_mask = 1,
-         .agx3b_last_load = true,
+         .last_load = true,
       };
       uint8_t out[AGX3_MEM_MAX_LENGTH], len = 0;
       if (!agx3_mem_encode_load(AGX_ISA_ENCODING_AGX3B, &d, out, &len) ||

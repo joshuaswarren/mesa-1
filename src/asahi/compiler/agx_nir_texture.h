@@ -11,6 +11,12 @@
 /* Indicates that the sampler should be overriden to clamp to 0 instead of 1 */
 #define AGX_TEXTURE_FLAG_CLAMP_TO_0 (1 << 1)
 
+/* The texture handle serves the descriptor crawl only; the texture operation
+ * itself names its texture state table entry by immediate index. G17G's
+ * native fragment fetches are bindful this way while the level and layer
+ * clamps still read the descriptor. */
+#define AGX_TEXTURE_FLAG_TABLE_INDEX (1 << 2)
+
 /* Texel buffers lowered to (at most) 16384x16384 2D textures */
 #define AGX_TEXTURE_BUFFER_WIDTH      16384
 #define AGX_TEXTURE_BUFFER_MAX_HEIGHT 16384

@@ -349,6 +349,127 @@ bool agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
 bool agx3_alu_mov16(enum agx_isa_encoding enc, uint16_t dest, uint32_t bits,
                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                      uint8_t *len);
+
+/* G17G half-register forms, witnessed byte-exact by Apple's own compiler
+ * (gpu/m5-shift-add16-reference.metal, gpu/m5-fragment-zs-constant-
+ * reference.metal). Waits are the eight-slot mask, bit i for slot i + 1. */
+bool agx3_alu_mov16_gpu1(uint16_t dest, bool dest_cache, uint32_t bits,
+                         uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                         uint8_t *len);
+/* dest(16) = src0 + (src1(16) << shift); src0 is a half register or an
+ * immediate 0..15. Shifts 0, 2 and 4 are witnessed; 1 and 3 sit inside the
+ * same LUT range Apple's G17P corpus emits. */
+bool agx3_alu_iadd16_gpu1(uint16_t dest, bool dest_cache, bool src0_immediate,
+                          uint16_t src0, enum agx3_alu_hint src0_hint,
+                          uint16_t src1, enum agx3_alu_hint src1_hint,
+                          unsigned shift, uint16_t wait_mask,
+                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+/* G17G find-top-one (NIR ufind_msb): the index of the highest set bit of a
+ * 32-bit register, or of a 16-bit half into a 16-bit result. Apple's clz
+ * kernels (gpu/m5-xfb-alu3-reference.metal) keep the source cached and the
+ * destination cached; only the slot-8 wait is witnessed. */
+bool agx3_alu_ft1_gpu1(uint16_t dest, uint16_t src, bool half,
+                       enum agx3_alu_hint hint, bool dest_cache,
+                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                       uint8_t *len);
+/* G17G float compare selecting between two small 16-bit immediates
+ * (`fseli16`): dest(16) = (src0(32) cond src1) ? if_true : if_false, where
+ * src1 is an 8-bit minifloat immediate or a 32-bit register. Witnessed for
+ * lt and ge, immediates 0..7, and the slot-8 wait
+ * (gpu/m5-xfb-alu-reference.metal, -alu3-, -alu4-). */
+/* G17G's mixed constant/register 16-bit float select; see agx3_alu_core.c. */
+bool agx3_alu_fcmp_select16_const_reg_gpu1(
+   uint16_t dest, uint16_t src0, enum agx3_alu_hint src0_hint,
+   uint8_t compare_minifloat, uint8_t if_true_constant,
+   uint16_t if_false_register, unsigned condition, uint16_t wait_mask,
+   uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+bool agx3_alu_fcmp_bool16_gpu1(uint16_t dest, uint16_t src0,
+                               enum agx3_alu_hint src0_hint,
+                               bool src1_is_register, uint16_t src1,
+                               bool src1_kill, uint8_t if_true,
+                               uint8_t if_false, unsigned condition,
+                               uint16_t wait_mask,
+                               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/*
+ * G17G 32-bit float compare-select, dest(32) = (cmp0 cond cmp1) ? sel0 : sel1.
+ *
+ * GPU1 splits the select by what it selects. Two registers are `fseli32`
+ * (ep4, 14 bytes, opcode f77=76); a float constant on either side is
+ * `fself32` (ep4, 16 bytes, opcode f85=74), whose selected immediates are
+ * minifloats. The comparand is a 32-bit register or a minifloat immediate on
+ * both. Every field below is pinned by an Apple applegpu_g17g kernel
+ * (gpu/m5-xfb-alu7-, -alu8-, -alu10-, -alu11-reference.metal), reproduced
+ * byte for byte in test-agx3-alu-core.c:
+ *
+ *   fseli32   select(w, v, a < -1.0f)     2200074a2300a00214ac8a602040
+ *             a < 2.0f / a < 0.5f / a < 0.0f    f32 = 64 / 32 / 0
+ *             a >= 1.0f  eq  gt  le          f86 = 5, 0, 2, 6 (agx_fcond)
+ *             a != 1.0f  = eq with the two registers exchanged
+ *             select(w, v, a < b)          2200074a2300a0029401a1602040
+ *             a >= b / a == b              f33 register, f40 = 2
+ *   fself32   select(v, 0.0f, a < -1.0f)   2200032a2300a00214ac4a200000c000
+ *             select(v, 1.0f / 2.0f, ...)  f51 = 48 / 64
+ *             select(1.0f, v, ...)         f68 = 48, register in f52
+ *             a >= 1.0f  eq  gt  le  ne    f94 = 5, 0, 2, 6, and eq exchanged
+ *             select(0.0f, v, a < b)       2200032a2300a0021402a1080000c000
+ *             select(v, 0.0f, a < 0.0f)    f34 = 0
+ *
+ * Both selected operands as constants is not this instruction: Apple emits a
+ * half result (`fself16`) and widens it, so that shape stays refused. The
+ * comparand fields carry no abs/neg on GPU1 and only the slot-8 wait is
+ * witnessed; the encoder writes the full eight-bit mask like every other
+ * GPU1 form. f11 is the destination-cache hint (fragment-depth witnesses
+ * 2200072a2b00a0021400a1602040 / 2200074a2b00a0021400a1600440 set it on a
+ * result the next instruction reads).
+ */
+struct agx3_fsel32_gpu1_desc {
+   uint16_t dest;
+   bool dest_cache;
+
+   uint16_t cmp0; /* 32-bit register, first comparand */
+   enum agx3_alu_hint cmp0_hint;
+
+   bool cmp1_immediate; /* the second comparand is an 8-bit minifloat */
+   uint16_t cmp1;       /* 32-bit register, or the minifloat */
+   enum agx3_alu_hint cmp1_hint;
+
+   /* sel[0] is taken when the comparison holds. An immediate selected
+    * operand is a minifloat and moves the instruction to `fself32`. */
+   bool sel_immediate[2];
+   uint16_t sel[2];
+   enum agx3_alu_hint sel_hint[2];
+
+   unsigned condition; /* enum agx_fcond: eq 0, lt 1, gt 2, ge 5, le 6 */
+   uint16_t wait_mask;
+};
+
+bool agx3_alu_fcmp_select32_gpu1(const struct agx3_fsel32_gpu1_desc *d,
+                                 uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                 uint8_t *len);
+/* dest(16) = src0(16) & ~src1(16): Apple's ctz `bit_andc h3, h3, h2`
+ * (gpu/m5-xfb-alu3-reference.metal). */
+bool agx3_alu_bit_andc16_gpu1(uint16_t dest, bool dest_cache, uint16_t src0,
+                              enum agx3_alu_hint hint0, uint16_t src1,
+                              enum agx3_alu_hint hint1, uint16_t wait_mask,
+                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+/* dest(16) = src0(16) op src1(16) for AND, OR and XOR: the same operand
+ * fields on each mnemonic's second encoding point, Apple applegpu_g17g
+ * (gpu/m5-xfb-alu9-reference.metal):
+ *   a & b   3b 03 07 00 30 20 a4 02 84 00
+ *   a | b   3b 03 07 00 32 28 a4 02 84 00
+ *   a ^ b   3b 03 06 00 32 28 a4 02 84 00   both sources dead, wait8 */
+bool agx3_alu_bit_reg16_gpu1(enum agx3_alu_op op, uint16_t dest,
+                             bool dest_cache, uint16_t src0,
+                             enum agx3_alu_hint hint0, uint16_t src1,
+                             enum agx3_alu_hint hint1, uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+/* dest(16) = src(16) & immediate. Only AND is witnessed on G17G. */
+bool agx3_alu_bit_imm_gpu1(enum agx3_alu_op op, uint16_t dest, bool dest_cache,
+                           uint16_t src, uint8_t immediate,
+                           enum agx3_alu_hint hint, uint16_t wait_mask,
+                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 bool agx3_alu_fmul_mixed(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t f32, uint16_t f16,
                           enum agx3_alu_hint hint32, enum agx3_alu_hint hint16,

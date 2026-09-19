@@ -46,6 +46,16 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       return false;
    }
 
+   /* The G17G subtract and saturate forms are witnessed only with two
+    * 32-bit register operands and no shift; the 32-bit signedness bits only
+    * alongside saturation. */
+   const bool g17g_wide_pair = !agx3b && d->src_a_is_register &&
+                               !d->src_a_16 && !d->src_16 && d->shift == 0;
+   if ((d->subtract || d->saturate) && !g17g_wide_pair)
+      return false;
+   if ((d->src_a_sign_extend_32 || d->sign_extend_32) && !d->saturate)
+      return false;
+
    const struct agx3_field_kv baseline_b[] = {
       KV(9, 2), KV(10, 2), KV(23, 1), KV(24, 1), KV(38, 2), KV(42, 1),
    };
@@ -68,7 +78,8 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     */
    const struct agx3_field_kv baseline_c_reg[] = {
       KV(9, 2),  KV(10, 2), KV(23, 2), KV(24, d->src_a_16 ? 1 : 2),
-      KV(38, 2), KV(39, d->src_16 ? 1 : 2), KV(44, 3), KV(45, 80),
+      KV(38, 2), KV(39, d->src_16 ? 1 : 2), KV(44, 3),
+      KV(45, d->subtract ? 100 : 80),
    };
    const struct agx3_field_kv baseline_c[] = {
       KV(9, 2),  KV(10, 2), KV(23, 1), KV(24, 1),
@@ -93,30 +104,38 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       /* Liveness, not baseline: see the note in the header. */
       ov[n++] = (struct agx3_field_kv)KV(27, d->src_a_kill ? 1 : 0);
       ov[n++] = (struct agx3_field_kv)KV(42, d->src_kill ? 1 : 0);
-      if (d->src_a_sign_extend)
+      if (d->src_a_sign_extend || d->src_a_sign_extend_32)
          ov[n++] = (struct agx3_field_kv)KV(28, 1);
    }
    else
       ov[n++] = (struct agx3_field_kv)KV(15, d->immediate);
-   /* f42 is source liveness for both immediate and register slot A.
-    * In particular, an address add must preserve an ID used by later stores.
-    * Keep the separately witnessed AGX3c baseline unchanged here. */
-   if (agx3b && !d->src_a_is_register)
+   /* f42 is source liveness for both immediate and register slot A, on both
+    * encodings. In particular, an address add must preserve an ID used by
+    * later stores. The AGX3c baseline above pins it the way its witness
+    * happened to be, and a 32-bit register move -- which is this add with a
+    * zero addend -- then killed a register the shader still reads: a
+    * `vec4(texture(s, uv).r)` broadcast is two moves off one sampled
+    * register, and every reader after the first saw a dead one. Apple's own
+    * G17S corpus carries iadd32 with f42 set and clear. */
+   if (!d->src_a_is_register)
       ov[n++] = (struct agx3_field_kv)KV(42, d->src_kill ? 1 : 0);
    ov[n++] = (struct agx3_field_kv)KV(31, d->src);
    if (!d->src_a_is_register)
       ov[n++] = (struct agx3_field_kv)KV(39, d->src_16 ? 1 : 2);
-   if (d->sign_extend)
+   if (d->sign_extend || d->sign_extend_32)
       ov[n++] = (struct agx3_field_kv)KV(43, 1);
    if (d->shift)
       ov[n++] = (struct agx3_field_kv)KV(agx3b ? 54 : 55, d->shift);
+   else if (d->saturate)
+      ov[n++] = (struct agx3_field_kv)KV(54, 1);
    for (unsigned i = 0; i < slots; ++i) {
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV((agx3b ? 45 : 46) + i, 1);
    }
 
-   return agx3_bind_compose(encoding, agx3b ? "iadd" : "iadd32", 0, baseline,
-                            nbaseline, ov, n, out, len);
+   return agx3_bind_compose(encoding,
+                            agx3b ? "iadd" : (d->subtract ? "isub32" : "iadd32"),
+                            0, baseline, nbaseline, ov, n, out, len);
 }
 
 bool
@@ -173,9 +192,24 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    /* M5's imadd32 has the same integer operand classes, with a separate
     * fourteen-byte encoding and eight producer slots. Narrow and widening
     * forms require independent M5 witnesses. */
-   if (m5 && (d->dest_16 || d->dest_64 || d->src_a_16 ||
-              d->multiplier_16 || d->src_c_16 || d->src_c_64 ||
-              d->src_a_sign_extend || d->multiplier_sign_extend ||
+   /* M5's 32x32->64 form is `imadd64` (f10=3, f60=85): a register
+    * multiplier with an immediate or a 64-bit register addend, both operands
+    * zero-extended. Witnessed byte-exactly against applegpu_g17g
+    * (gpu/m5-xfb-alu-reference.metal):
+    *
+    *   ulong(a)*ulong(b) + 12    2f 00 04 03 21 00 a9 02 a8 80 21 30
+    *   ulong(a)*ulong(b) + c     2f 02 04 22 21 00 a9 02 a8 81 20 48
+    *   ulong(a)*ulong(b)         2f 00 04 02 21 00 a9 02 a8 80 20 30
+    *   long(a)*long(b)           2f 00 04 02 21 08 a9 02 a8 80 20 b0   f28, f43
+    *
+    * The addend-free product is the immediate form adding #0 (identical
+    * bytes); a product signed on one side only has no witness. */
+   if (m5 && (d->dest_16 || d->src_a_16 ||
+              d->multiplier_16 || d->src_c_16 ||
+              (d->src_c_64 && !d->dest_64) ||
+              (d->dest_64 && (!d->multiplier_is_register || d->no_addend)) ||
+              (d->dest_64 ? d->src_a_sign_extend != d->multiplier_sign_extend
+                          : (d->src_a_sign_extend || d->multiplier_sign_extend)) ||
               d->src_c_sign_extend))
       return false;
 
@@ -348,7 +382,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
       ov[n++] = (struct agx3_field_kv)KV(58, 1);
    if (m5) {
       ov[n++] = (struct agx3_field_kv)KV(59, 3);
-      ov[n++] = (struct agx3_field_kv)KV(60, 84);
+      ov[n++] = (struct agx3_field_kv)KV(60, d->dest_64 ? 85 : 84);
    }
    for (unsigned i = 0; i < (m5 ? 8 : 6); ++i) {
       if (d->wait_mask & (1u << i))
@@ -361,6 +395,9 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d->negate_addend && (d->no_addend || m5))
       return false;
 
-   return agx3_bind_compose(encoding, m5 ? "imadd32" : (d->negate_addend ? "imsub" : "imadd"), 0,
-                            baseline, nbaseline, ov, n, out, len);
+   return agx3_bind_compose(
+      encoding,
+      m5 ? (d->dest_64 ? "imadd64" : "imadd32")
+         : (d->negate_addend ? "imsub" : "imadd"),
+      0, baseline, nbaseline, ov, n, out, len);
 }

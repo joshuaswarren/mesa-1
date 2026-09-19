@@ -40,6 +40,17 @@ libagx_spv = custom_target(
     '-I' + join_paths(meson.current_source_dir(), 'shaders'),
     '-I' + join_paths(meson.current_build_dir(), '../genxml'),
     cl_args,
+    # libagx is a shipped, precompiled, cached artifact, so build it with
+    # release semantics whatever the enclosing build type is. libcl's assert()
+    # expands to printf + abort, and AGX3 refuses any shader still carrying
+    # load_printf_buffer_address, because the printf buffer is process-local
+    # and baking its address into cached machine code would poison the cache.
+    # Without this, which precompiled kernels exist on an AGX3 part depends on
+    # -Db_ndebug: this tree builds debugoptimized, so the geometry prefix sum
+    # and the blit/fill kernels were silently absent on G17G. Deliberate
+    # overflow guards that must survive a release build do not use assert()
+    # and are unaffected.
+    '-DNDEBUG',
     ],
   depends : [agx_pack],
   depfile : 'libagx_shaders.h.d',

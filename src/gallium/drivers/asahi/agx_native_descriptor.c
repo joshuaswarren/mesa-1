@@ -8,6 +8,7 @@
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx_pbe_agx3_core.h"
+#include "util/log.h"
 
 #include <string.h>
 
@@ -58,6 +59,22 @@ agx_gallium_pack_g17p_txf_sampler(
       return false;
 
    memset(out, 0, sizeof(*out));
+   if (chip == AGX_CHIP_G17G) {
+      /* The same texel-fetch state in G17G's Gen5 record, as
+       * hk_pack_native_txf_sampler() and the G17G tile reload use it: the
+       * compare-mode selector is set even without a comparison. */
+      agx_pack(out->opaque, SAMPLER_GEN5, cfg) {
+         cfg.minimum_lod = 0.0f;
+         cfg.maximum_lod = INFINITY;
+         cfg.maximum_anisotropy = 1;
+         cfg.mip_filter = AGX_MIP_FILTER_NEAREST;
+         cfg.wrap_s = cfg.wrap_t = cfg.wrap_r = AGX_WRAP_CLAMP_TO_BORDER;
+         cfg.compare_mode = true;
+         cfg.compare_func = AGX_COMPARE_FUNC_LEQUAL;
+         cfg.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+      }
+      return true;
+   }
    if (chip != AGX_CHIP_G17P)
       return false;
 
@@ -84,7 +101,8 @@ bool
 agx_gallium_g17p_sampler_handle(enum agx_chip chip, unsigned api_sampler,
                                 uint16_t *native_handle)
 {
-   if (chip != AGX_CHIP_G17P || api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
+   if ((chip != AGX_CHIP_G17P && chip != AGX_CHIP_G17G) ||
+       api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
        !native_handle)
       return false;
 
@@ -97,7 +115,8 @@ agx_gallium_g17p_custom_border_handle(enum agx_chip chip,
                                       unsigned api_sampler,
                                       uint16_t *native_handle)
 {
-   if (chip != AGX_CHIP_G17P || api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
+   if ((chip != AGX_CHIP_G17P && chip != AGX_CHIP_G17G) ||
+       api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
        !native_handle)
       return false;
 
@@ -277,6 +296,11 @@ agx_gallium_pack_native_texture(
          .depth = semantic->layout == AGX_LAYOUT_LINEAR ? 1 : semantic->depth,
          .page_aligned_layers = semantic->page_aligned_layers,
          .extended = extended,
+         /* Gen10 keeps this word for compression metadata only. A captured
+          * *uncompressed* mipmapped array leaves it zero, so the Gen9 habit
+          * of publishing an end VA here does not carry over: on a compressed
+          * image the metadata simply follows the image data, which is why
+          * its value happens to equal address + layer_stride * layers. */
          .acceleration_buffer =
             semantic->compressed && semantic->extended
                ? semantic->acceleration_buffer
@@ -374,30 +398,44 @@ agx_gallium_pack_native_pbe(
       agx3_generation == AGX_PBE_AGX3_GENERATION_9 &&
       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY &&
       legacy->layers > 1;
-   if ((!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
-       (legacy->layout == AGX_LAYOUT_LINEAR &&
-        (agx3_generation != AGX_PBE_AGX3_GENERATION_9 || legacy->level != 0 ||
-         legacy->levels != 1 || legacy->unk_mipmapped)) ||
-       (legacy->layout != AGX_LAYOUT_LINEAR &&
-        legacy->layout != AGX_LAYOUT_TWIDDLED &&
-        legacy->layout != AGX_LAYOUT_GPU) ||
-       legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
-       legacy->samples != AGX_SAMPLE_COUNT_2 || legacy->compressed ||
-       legacy->mode != AGX_IMAGE_MODE_NORMAL ||
-       (!array && legacy->layers != 1) ||
-       (agx3_generation != AGX_PBE_AGX3_GENERATION_9 &&
-        (legacy->level != 0 || legacy->levels != 1 ||
-         legacy->unk_mipmapped)) ||
-       legacy->srgb || legacy->extended ||
-       (legacy->layout == AGX_LAYOUT_LINEAR
-           ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
-           : legacy->stride != 0) ||
-       legacy->acceleration_buffer || legacy->depth_linear != 1 ||
-       legacy->layer_stride_linear || legacy->level_offset_sw ||
-       legacy->aligned_width_msaa_sw || legacy->sample_count_log2_sw ||
-       legacy->tile_width_sw != 1 || legacy->tile_height_sw != 1 ||
-       legacy->layer_stride_sw || legacy->buffer_offset_sw)
+   /* Name the first unproven axis: a rejected store is otherwise
+    * indistinguishable from every other one in a conformance log. */
+   const char *unproven =
+      (!array && legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ? "dimension"
+      : (legacy->layout == AGX_LAYOUT_LINEAR &&
+         (agx3_generation != AGX_PBE_AGX3_GENERATION_9 ||
+          legacy->level != 0 || legacy->levels != 1 || legacy->unk_mipmapped))
+         ? "linear layout"
+      : (legacy->layout != AGX_LAYOUT_LINEAR &&
+         legacy->layout != AGX_LAYOUT_TWIDDLED &&
+         legacy->layout != AGX_LAYOUT_GPU) ? "layout"
+      : (legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical) ? "orientation"
+      : legacy->samples != AGX_SAMPLE_COUNT_2 ? "multisample"
+      : legacy->compressed ? "compression"
+      : legacy->mode != AGX_IMAGE_MODE_NORMAL ? "image mode"
+      : (!array && legacy->layers != 1) ? "layers"
+      : (agx3_generation != AGX_PBE_AGX3_GENERATION_9 &&
+         (legacy->level != 0 || legacy->levels != 1 || legacy->unk_mipmapped))
+         ? "mip level"
+      : legacy->srgb ? "sRGB"
+      : legacy->extended ? "extended word"
+      : (legacy->layout == AGX_LAYOUT_LINEAR
+            ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
+            : legacy->stride != 0) ? "stride"
+      : (legacy->acceleration_buffer || legacy->depth_linear != 1 ||
+         legacy->layer_stride_linear || legacy->level_offset_sw ||
+         legacy->aligned_width_msaa_sw || legacy->sample_count_log2_sw ||
+         legacy->tile_width_sw != 1 || legacy->tile_height_sw != 1 ||
+         legacy->layer_stride_sw || legacy->buffer_offset_sw) ? "software sideband"
+      : NULL;
+   if (unproven) {
+      mesa_loge("asahi: native PBE refused: %s (channels=%u type=%u "
+                "layout=%u %ux%u level=%u levels=%u mipmapped=%u)",
+                unproven, legacy->channels, legacy->type, legacy->layout,
+                legacy->width, legacy->height, legacy->level, legacy->levels,
+                legacy->unk_mipmapped);
       return false;
+   }
 
    const struct agx_pbe_agx3_2d_fields fields = {
       .layout = legacy->layout,

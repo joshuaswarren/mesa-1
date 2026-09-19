@@ -105,6 +105,14 @@ struct agx3_tex_fetch_desc {
    bool coord_kill;
    bool final;          /* witnessed final texture-op marker */
    bool array;          /* 2D array: layer in the register after the pair */
+   /*
+    * G17G names a non-multisample array fetch's layer in the sample itself
+    * rather than staging it into PACK_SMPIR's operand bank the way G17P
+    * does: f77 = 1 with f37 = 3 selects the register form and f31 carries
+    * the layer's own half. This is that half; it is read only for AGX3c
+    * array fetches. Witnesses in gpu/m5-fetch-array-lod-reference.metal.
+    */
+   uint16_t layer_half;
    bool multisample;    /* 2D MS read; sample/layer may be staged separately */
    bool staged_sample;  /* MS sample and optional array layer in staging half4 */
    bool three_d;        /* G17P 3D read: third contiguous integer coordinate */
@@ -288,10 +296,11 @@ struct agx3_tex_sample_desc {
    bool final;          /* witnessed final texture-op marker */
    /* f156 terminates a fragment sample group. Fresh G17P two/three-sample
     * pipelines clear it on every earlier SMP and set it only on the final
-    * ordinary sample. Explicit-gradient samples sit outside the group and
-    * reject both flags. These explicit aggregate-group flags are G17P-only;
-    * leaving both clear preserves the independently witnessed per-op encoding
-    * in every other stage/ISA. */
+    * ordinary sample, and G17G's plain 2D fragment samples do the same
+    * (gpu/m5-shadow-2d-reference.metal, gpu/m5-texture-abi-reference.metal).
+    * Explicit-gradient samples sit outside the group and reject both flags.
+    * Leaving both clear preserves the independently witnessed per-op
+    * encoding in every other stage/shape. */
    bool sample_group_nonterminal;
    bool sample_group_end;
    /* Vertex explicit-LOD samples use the same SMP fields and operand staging
@@ -308,7 +317,10 @@ struct agx3_tex_sample_desc {
    bool texture_kill;
    bool sampler_kill;
    enum agx3_tex_gather gather; /* textureGather component, or NONE */
-   bool shadow;                 /* compare against the scalar in bank 4 */
+   /* Compare against the scalar staged at +4 of the coordinate block (bank 4
+    * for the block at `coord` = 0; G17G rotates the block per in-flight
+    * sample, see agx3_emit_texture_sample). */
+   bool shadow;
    /* G17P f146 queries LOD, with f74 clear. X is clamped, Y unclamped.
     * Array queries take no layer and encode immediate layer zero. */
    bool query_lod;
@@ -357,6 +369,19 @@ bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
                               bool lod_cache, bool lod_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+bool agx3_tex_normalize_cube_array_layer(enum agx_isa_encoding enc,
+                                         uint16_t dest, uint16_t layer,
+                                         bool layer_cache, bool layer_discard,
+                                         uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                         uint8_t *len);
+
+bool agx3_tex_stage_cube_z_lod(enum agx_isa_encoding enc, bool cube_array,
+                               uint16_t z, uint16_t lod, uint8_t slot,
+                               uint16_t wait_mask, bool z_cache,
+                               bool z_discard, bool lod_cache,
+                               bool lod_discard,
+                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 /* Run one axis of the native cube-coordinate calculation.  Three axes with
  * the fixed reciprocal between axis 0 and 1 are required before sampling. */
 bool agx3_tex_cube_cem_calc(enum agx_isa_encoding enc, uint16_t x,
@@ -383,6 +408,12 @@ bool agx3_tex_cube_cem_finalize_to(
    enum agx_isa_encoding enc, uint8_t component, uint16_t reciprocal,
    uint16_t axis_value, uint8_t slot,
    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Build the G17G per-lane level/bias word in a 32-bit register rather than
+ * in staging bank 6, for a COPY into a rotated staging block. */
+bool agx3_tex_pack_lod_word(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src, bool src_cache, bool src_discard,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Publish the face calculated by CEM for a native cube sample. */
 bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,

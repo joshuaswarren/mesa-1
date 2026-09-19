@@ -466,10 +466,15 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
          continue;
 
       /* AGX2 can carry the zero-extension modifier on integer arithmetic and
-       * compare-select, but the grounded G17P forms are width-matched.
-       * Preserve the explicit 16-to-32 move so the AGX3 packer emits its
-       * witnessed COPY-low plus CLR-high sequence first. */
-      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       * compare-select, but the grounded G17P and G17G forms are both
+       * width-matched. Preserve the explicit 16-to-32 move so the AGX3
+       * packer emits its witnessed COPY-low plus CLR-high sequence first.
+       * G17G reached this through the Gen10 texture-descriptor crawl, whose
+       * level field is a half extract: folding the widening left an
+       * `and d32, h5, r8` the packer has no encoding for, and the whole
+       * fragment program -- the depth blitter's -- was dropped. */
+      if (ctx->key && (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+                       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
           def->src[0].size == AGX_SIZE_16 && src.size == AGX_SIZE_32 &&
           (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD ||
            I->op == AGX_OPCODE_ICMP || I->op == AGX_OPCODE_ICMPSEL ||

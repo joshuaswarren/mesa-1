@@ -8,6 +8,7 @@
  */
 #include "agx3_alu_core.h"
 #include "agx3_falu_mod_core.h"
+#include "agx3_pack.h"
 #include "agx3_alu_core_vectors.c"
 #include <stdio.h>
 #include <string.h>
@@ -171,13 +172,58 @@ test_native_f32_rcp_rsqrt(void)
                         false, 1u << 5, half, &hlen));
    assert(hlen != len || memcmp(half, rcp, len) != 0);
 
-   /* A 32-bit operand pair is aligned, and only AGX3b is witnessed. */
+   /* A 32-bit operand pair is aligned. */
    assert(!agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3B, 1, 0, AGX3_ALU_HINT_NONE,
                            false, 0, bytes, &len));
    assert(!agx3_alu_f32rsqrt(AGX_ISA_ENCODING_AGX3B, 0, 1, AGX3_ALU_HINT_NONE,
                              false, 0, bytes, &len));
+
+   /* G17G's reciprocal is Apple's own, from the cube major axis of
+    * gpu/m5-shadow-array-cube-reference.metal: the same form with the Gen10
+    * root pair and eight producer slots. The reciprocal is the one piece of
+    * cube coordinate arithmetic that is an ordinary ALU instruction, so it
+    * lives here rather than beside CEM. */
+   static const uint8_t gpu1_rcp[] = {0x27, 0x00, 0x04, 0x18, 0x2a,
+                                      0x20, 0xa1, 0x02, 0x30, 0x00};
+   assert(agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3C, 0, 0,
+                          AGX3_ALU_HINT_DISCARD, true, 0, bytes, &len));
+   assert(len == sizeof(gpu1_rcp) && !memcmp(bytes, gpu1_rcp, len));
+   assert(agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE,
+                          false, 1u << 7, bytes, &len));
    assert(!agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE,
-                           false, 0, bytes, &len));
+                           false, 1u << 8, bytes, &len));
+   assert(!agx3_alu_f32rcp(AGX_ISA_ENCODING_AGX3B, 0, 0, AGX3_ALU_HINT_NONE,
+                           false, 1u << 6, bytes, &len));
+   assert(!agx3_alu_f32rsqrt(AGX_ISA_ENCODING_AGX3C, 0, 0, AGX3_ALU_HINT_NONE,
+                             false, 0, bytes, &len));
+
+   /* G17G's mixed constant/register 16-bit select, from Apple's own vector
+    * select() kernels (gpu/m5-mixed-select3-reference.metal). Neither the
+    * two-constant fseli16 form nor the two-register fsel32 one can express
+    * `cond ? 1 : x`, which is what a lowered boolean blend produces. */
+   static const uint8_t mixsel_lt[] = {0x22, 0x00, 0x05, 0x0a, 0x23, 0x00,
+                                       0xa0, 0x02, 0x14, 0x80, 0x4e, 0x60,
+                                       0x21, 0x04, 0x80, 0x00};
+   static const uint8_t mixsel_ge[] = {0x22, 0x00, 0x05, 0x0a, 0x23, 0x00,
+                                       0xa0, 0x02, 0x14, 0x80, 0x4e, 0x24,
+                                       0x21, 0x04, 0x80, 0x00};
+   assert(agx3_alu_fcmp_select16_const_reg_gpu1(
+      0, 0, AGX3_ALU_HINT_DISCARD, 0, 1, 10, 1, 128, bytes, &len));
+   assert(len == sizeof(mixsel_lt) && !memcmp(bytes, mixsel_lt, len));
+   assert(agx3_alu_fcmp_select16_const_reg_gpu1(
+      0, 0, AGX3_ALU_HINT_DISCARD, 0, 1, 10, 5, 128, bytes, &len));
+   assert(len == sizeof(mixsel_ge) && !memcmp(bytes, mixsel_ge, len));
+   /* The selected constant is three bits and the register is aligned; a
+    * condition outside the witnessed five, and a wait on any slot but
+    * eight, stay closed. */
+   assert(!agx3_alu_fcmp_select16_const_reg_gpu1(
+      0, 0, AGX3_ALU_HINT_DISCARD, 0, 8, 10, 1, 128, bytes, &len));
+   assert(!agx3_alu_fcmp_select16_const_reg_gpu1(
+      0, 0, AGX3_ALU_HINT_DISCARD, 0, 1, 11, 1, 128, bytes, &len));
+   assert(!agx3_alu_fcmp_select16_const_reg_gpu1(
+      0, 0, AGX3_ALU_HINT_DISCARD, 0, 1, 10, 3, 128, bytes, &len));
+   assert(!agx3_alu_fcmp_select16_const_reg_gpu1(
+      0, 0, AGX3_ALU_HINT_DISCARD, 0, 1, 10, 1, 32, bytes, &len));
 }
 
 /*
@@ -1097,6 +1143,145 @@ static void test_half_uv(void)
    assert(!agx3_alu_mov16(AGX_ISA_ENCODING_AGX3B,256,0x1800,0,out,&size));
    assert(!agx3_alu_mov16(AGX_ISA_ENCODING_AGX3B,2,0x10000,0,out,&size));
    assert(!agx3_alu_mov16(AGX_ISA_ENCODING_AGX3B,2,0x1800,1,out,&size));
+
+   /* G17G half forms, Apple applegpu_g17g (gpu/m5-shift-add16-reference.metal
+    * and the depth/stencil writers of gpu/m5-fragment-zs-constant-
+    * reference.metal / gpu/m5-fragment-depth-reference.metal). */
+   const struct {unsigned d; bool cache; unsigned bits; const char *hex;} g17g_moves[] = {
+      {1,true,0xff00,"048026001c0c0700"}, {1,true,0xff5a,"04da26001c0c0700"},
+      {1,true,0xff01,"048126001c0c0700"},
+   };
+   for (unsigned i=0;i<sizeof(g17g_moves)/sizeof(g17g_moves[0]);++i) {
+      assert(agx3_alu_mov16_gpu1(g17g_moves[i].d,g17g_moves[i].cache,g17g_moves[i].bits,0,out,&size));
+      exact(out,size,g17g_moves[i].hex);
+   }
+   assert(!agx3_alu_mov16_gpu1(256,false,0x1800,0,out,&size));
+   assert(!agx3_alu_mov16_gpu1(2,false,0x10000,0,out,&size));
+   assert(!agx3_alu_mov16_gpu1(2,false,0x1800,0x100,out,&size));
+   const struct {
+      unsigned d; bool cache, imm; unsigned s0; enum agx3_alu_hint h0;
+      unsigned s1; enum agx3_alu_hint h1; unsigned shift, wait; const char *hex;
+   } g17g_adds[] = {
+      /* ushort a + b, a + (b << 4), a + (b << 2), v + (v << 4), 0 + (a << 4) */
+      {2,false,false,3,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_DISCARD,0,0x80,"3f0304182100a302a0002100"},
+      {2,false,false,2,AGX3_ALU_HINT_DISCARD,3,AGX3_ALU_HINT_DISCARD,4,0x80,"3f0204182100a302e0002000"},
+      {2,false,false,2,AGX3_ALU_HINT_DISCARD,3,AGX3_ALU_HINT_DISCARD,2,0x80,"3f0204182100a302e0002500"},
+      {2,false,false,2,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_DISCARD,4,0x80,"3f0204182100a302a0002000"},
+      {2,false,true,0,AGX3_ALU_HINT_NONE,2,AGX3_ALU_HINT_DISCARD,4,0x80,"3f0004182500a302a0002000"},
+      /* the coverage word of a depth writer: r2h = 0 + (r2l << 4) waiting
+       * the SR read on slot 1, then r0l = r2l + (r2h << 4) */
+      {5,true,true,0,AGX3_ALU_HINT_NONE,4,AGX3_ALU_HINT_CACHE,4,0x1,"270404192d00a30a20011000"},
+      {0,true,false,4,AGX3_ALU_HINT_DISCARD,5,AGX3_ALU_HINT_DISCARD,4,0,"270004382900a30260012000"},
+   };
+   for (unsigned i=0;i<sizeof(g17g_adds)/sizeof(g17g_adds[0]);++i) {
+      assert(agx3_alu_iadd16_gpu1(g17g_adds[i].d,g17g_adds[i].cache,g17g_adds[i].imm,g17g_adds[i].s0,
+                                  g17g_adds[i].h0,g17g_adds[i].s1,g17g_adds[i].h1,g17g_adds[i].shift,
+                                  g17g_adds[i].wait,out,&size));
+      exact(out,size,g17g_adds[i].hex);
+   }
+   assert(!agx3_alu_iadd16_gpu1(2,false,true,16,AGX3_ALU_HINT_NONE,2,AGX3_ALU_HINT_NONE,4,0,out,&size));
+   assert(!agx3_alu_iadd16_gpu1(2,false,false,2,AGX3_ALU_HINT_NONE,2,AGX3_ALU_HINT_NONE,5,0,out,&size));
+   assert(!agx3_alu_iadd16_gpu1(256,false,false,2,AGX3_ALU_HINT_NONE,2,AGX3_ALU_HINT_NONE,0,0,out,&size));
+
+   /* G17G integer-to-float, Apple applegpu_g17g
+    * (gpu/m5-xfb-alu7-reference.metal): float(uint/int) and half(uint/int),
+    * dead source waiting for slot 8. */
+   {
+      static const uint8_t u32f[] = {0x2f,0x00,0x00,0x02,0x22,0x80,0xaf,0x02,0x28,0x00};
+      static const uint8_t i32f[] = {0x2f,0x00,0x00,0x02,0x22,0x80,0xaf,0x02,0x68,0x00};
+      static const uint8_t u32h[] = {0x3f,0x02,0x00,0x00,0x22,0x80,0xaf,0x02,0x28,0x00};
+      static const uint8_t i32h[] = {0x3f,0x02,0x00,0x00,0x22,0x80,0xaf,0x02,0x68,0x00};
+      assert(agx3_alu_int_to_float(AGX_ISA_ENCODING_AGX3C,0,0,false,AGX3_ALU_HINT_DISCARD,0x80,out,&size));
+      assert(size==sizeof(u32f) && !memcmp(out,u32f,size));
+      assert(agx3_alu_int_to_float(AGX_ISA_ENCODING_AGX3C,0,0,true,AGX3_ALU_HINT_DISCARD,0x80,out,&size));
+      assert(size==sizeof(i32f) && !memcmp(out,i32f,size));
+      assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3C,2,2,false,AGX3_ALU_HINT_DISCARD,false,0x80,out,&size));
+      assert(size==sizeof(u32h) && !memcmp(out,u32h,size));
+      assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3C,2,2,true,AGX3_ALU_HINT_DISCARD,false,0x80,out,&size));
+      assert(size==sizeof(i32h) && !memcmp(out,i32h,size));
+      assert(!agx3_alu_int_to_float(AGX_ISA_ENCODING_AGX3C,0,0,false,AGX3_ALU_HINT_DISCARD,0x100,out,&size));
+   }
+
+   /* G17G half and-not, Apple applegpu_g17g ctz kernel
+    * (gpu/m5-xfb-alu3-reference.metal): bit_andc h3 (cached) = h3 (dead)
+    * & ~h2 (cached). */
+   {
+      static const uint8_t andc16[] = {0x33,0x03,0x06,0x01,0x3a,0x20,0xa2,0x02,0x84,0x00};
+      assert(agx3_alu_bit_andc16_gpu1(3,true,3,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_CACHE,0,out,&size));
+      assert(size==sizeof(andc16) && !memcmp(out,andc16,size));
+      assert(!agx3_alu_bit_andc16_gpu1(3,true,3,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_CACHE,0x100,out,&size));
+
+      /* Half AND/OR/XOR over registers (gpu/m5-xfb-alu9-reference.metal):
+       * h2 = h3 op h2, both sources dead, waiting for slot 8. */
+      static const struct { enum agx3_alu_op op; uint8_t bytes[10]; } r16[] = {
+         {AGX3_ALU_BAND, {0x3b,0x03,0x07,0x00,0x30,0x20,0xa4,0x02,0x84,0x00}},
+         {AGX3_ALU_BOR,  {0x3b,0x03,0x07,0x00,0x32,0x28,0xa4,0x02,0x84,0x00}},
+         {AGX3_ALU_BXOR, {0x3b,0x03,0x06,0x00,0x32,0x28,0xa4,0x02,0x84,0x00}},
+      };
+      for (unsigned i = 0; i < 3; ++i) {
+         assert(agx3_alu_bit_reg16_gpu1(r16[i].op,2,false,3,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_DISCARD,0x80,out,&size));
+         assert(size==10 && !memcmp(out,r16[i].bytes,10));
+      }
+      assert(!agx3_alu_bit_reg16_gpu1(AGX3_ALU_BNOT,2,false,3,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_DISCARD,0x80,out,&size));
+   }
+
+   /* G17G find-top-one, Apple applegpu_g17g clz kernels
+    * (gpu/m5-xfb-alu3-reference.metal). */
+   {
+      static const uint8_t ft1_u32[] = {0x2f,0x80,0x00,0x1a,0x2a,0x00,0xab,0x0a,0x08,0x00};
+      static const uint8_t ft1_u16[] = {0x3f,0x83,0x00,0x18,0x2a,0x00,0xab,0x02,0x00,0x00};
+      assert(agx3_alu_ft1_gpu1(4,0,false,AGX3_ALU_HINT_CACHE,true,0x80,out,&size));
+      assert(size==sizeof(ft1_u32) && !memcmp(out,ft1_u32,size));
+      assert(agx3_alu_ft1_gpu1(2,3,true,AGX3_ALU_HINT_CACHE,true,0x80,out,&size));
+      assert(size==sizeof(ft1_u16) && !memcmp(out,ft1_u16,size));
+      assert(!agx3_alu_ft1_gpu1(4,1,false,AGX3_ALU_HINT_CACHE,true,0x80,out,&size));
+      assert(!agx3_alu_ft1_gpu1(4,0,false,AGX3_ALU_HINT_CACHE,true,0x40,out,&size));
+   }
+
+   /* G17G float compare to a 16-bit boolean (gpu/m5-xfb-alu-reference.metal,
+    * -alu3-, -alu4-): minifloat and register comparands, lt and ge, the
+    * selected constants 1/0, 3/7 and 0/1. */
+   {
+      static const struct {
+         bool reg; uint16_t src1; bool kill; uint8_t t, f; unsigned cond;
+         uint8_t bytes[16];
+      } sel[] = {
+         {false, 0xb0, false, 1, 0, 1,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0xac,0x4e,0x58,0x01,0x00,0x80,0x00}},
+         {false, 0x40, false, 1, 0, 5,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0x90,0x4e,0x1c,0x01,0x00,0x80,0x00}},
+         {false, 0x00, false, 1, 0, 1,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0x80,0x4e,0x58,0x01,0x00,0x80,0x00}},
+         {false, 0x30, false, 3, 7, 1,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0x8c,0x4e,0x58,0x27,0x02,0x80,0x00}},
+         {false, 0x30, false, 0, 1, 1,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0x8c,0x4a,0x58,0x05,0x00,0x80,0x00}},
+         {true, 4, true, 1, 0, 1,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0x01,0x65,0x58,0x01,0x00,0x80,0x00}},
+         {false, 0x30, false, 1, 0, 0,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0x8c,0x4e,0x18,0x01,0x00,0x80,0x00}},
+         {false, 0x30, false, 0, 1, 0,
+          {0x32,0x02,0x05,0x0a,0x23,0x00,0xa0,0x02,0x14,0x8c,0x4a,0x18,0x05,0x00,0x80,0x00}},
+         {false, 0x30, false, 1, 0, 2,
+          {0x32,0x02,0x45,0x0a,0x23,0x00,0xa0,0x02,0x14,0x8c,0x4e,0x18,0x01,0x00,0x80,0x00}},
+         {false, 0x30, false, 1, 0, 6,
+          {0x32,0x02,0x45,0x0a,0x23,0x00,0xa0,0x02,0x14,0x8c,0x4e,0x1c,0x01,0x00,0x80,0x00}},
+      };
+      for (unsigned i = 0; i < sizeof(sel)/sizeof(sel[0]); ++i) {
+         assert(agx3_alu_fcmp_bool16_gpu1(2,2,AGX3_ALU_HINT_DISCARD,sel[i].reg,sel[i].src1,sel[i].kill,
+                                          sel[i].t,sel[i].f,sel[i].cond,0x80,out,&size));
+         assert(size==16 && !memcmp(out,sel[i].bytes,16));
+      }
+      assert(!agx3_alu_fcmp_bool16_gpu1(2,2,AGX3_ALU_HINT_DISCARD,false,0xb0,false,1,0,3,0x80,out,&size));
+      assert(!agx3_alu_fcmp_bool16_gpu1(2,2,AGX3_ALU_HINT_DISCARD,false,0xb0,false,8,0,1,0x80,out,&size));
+      assert(!agx3_alu_fcmp_bool16_gpu1(2,3,AGX3_ALU_HINT_DISCARD,false,0xb0,false,1,0,1,0x80,out,&size));
+      assert(!agx3_alu_fcmp_bool16_gpu1(2,2,AGX3_ALU_HINT_DISCARD,false,0xb0,false,1,0,1,0x01,out,&size));
+   }
+   /* r0h = r0l & 255 in Apple's varying-stencil fragment */
+   assert(agx3_alu_bit_imm_gpu1(AGX3_ALU_BAND,1,true,0,255,AGX3_ALU_HINT_DISCARD,0,out,&size));
+   exact(out,size,"230007013820a302c4bf");
+   assert(!agx3_alu_bit_imm_gpu1(AGX3_ALU_BOR,1,true,0,255,AGX3_ALU_HINT_DISCARD,0,out,&size));
+   assert(!agx3_alu_bit_imm_gpu1(AGX3_ALU_BAND,256,true,0,255,AGX3_ALU_HINT_DISCARD,0,out,&size));
    assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,1,0,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,out,&size));
    assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,1,4,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,out,&size));
    assert(!agx3_alu_fmul_mixed(AGX_ISA_ENCODING_AGX3B,0,0,256,AGX3_ALU_HINT_DISCARD,AGX3_ALU_HINT_DISCARD,false,0,out,&size));
@@ -1684,8 +1869,9 @@ static void test_i32_to_f16(void)
    assert(agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 2, 0, true,
                               AGX3_ALU_HINT_NONE, true, 1, out, &len));
    exact(out, len, "a717540203008860");
+   /* G17G is witnessed above; a ninth wait slot is still out of range. */
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3C, 0, 2, false,
-                               AGX3_ALU_HINT_NONE, false, 0, out, &len));
+                               AGX3_ALU_HINT_NONE, false, 0x100, out, &len));
    assert(!agx3_alu_i32_to_f16(AGX_ISA_ENCODING_AGX3B, 0, 3, false,
                                AGX3_ALU_HINT_NONE, false, 0, out, &len));
    /* A CACHED source used to be refused; f27 carries it, the way f29 carries
@@ -4406,6 +4592,30 @@ test_native_reciprocal_widths(void)
    }
    assert(forms == 6144);
 
+   /* G17G composes the same cross-product over eight producer slots. */
+   unsigned gpu1_forms = 0;
+   for (unsigned dest_half = 0; dest_half < 2; ++dest_half) {
+      for (unsigned src_half = 0; src_half < 2; ++src_half) {
+         for (unsigned modifiers = 0; modifiers < 4; ++modifiers) {
+            for (unsigned hint = 0; hint <= AGX3_ALU_HINT_CACHE; ++hint) {
+               for (unsigned dest_cache = 0; dest_cache < 2; ++dest_cache) {
+                  for (unsigned wait = 0; wait < 256; ++wait) {
+                     assert(agx3_alu_rcp(
+                        AGX_ISA_ENCODING_AGX3C, dest_half ? 127 : 126,
+                        src_half ? 127 : 126, dest_half, src_half,
+                        modifiers & 1, modifiers & 2,
+                        (enum agx3_alu_hint)hint, dest_cache, wait, bytes,
+                        &len));
+                     assert(len == 10);
+                     ++gpu1_forms;
+                  }
+               }
+            }
+         }
+      }
+   }
+   assert(gpu1_forms == 24576);
+
    /* The register fields accept [0, 191]; 192 is where Apple's tables stop,
     * and where the refusal now is.  This positive case has to run before the
     * refusal sweep below, which checks that a refusal leaves `len` alone. */
@@ -4417,7 +4627,7 @@ test_native_reciprocal_widths(void)
    memset(bytes, 0xa5, sizeof(bytes));
    len = 0xa5;
    assert(!agx3_alu_rcp(
-      AGX_ISA_ENCODING_AGX3C, 0, 0, false, true, false, false,
+      AGX_ISA_ENCODING_AGX3C, 192, 0, false, true, false, false,
       AGX3_ALU_HINT_NONE, false, 0, bytes, &len));
    assert(!agx3_alu_rcp(
       AGX_ISA_ENCODING_AGX3B, 192, 0, true, true, false, false,
@@ -4838,32 +5048,133 @@ static void test_gpu1_modified_add(void)
 
 static void test_gpu1_float_compare_select(void)
 {
-   /* Native GPU1 fseli32.ep4 composer vectors: gears' 0 < x ? y : 0,
-    * reversed comparison, reversed alternatives, and upper registers/waits.
-    * These check instruction encoding, not hardware shader semantics. */
-   const uint8_t expected[4][14] = {
-      {0x32,0x02,0x47,0x6a,0x23,0x00,0xa0,0x1a,0x14,0x80,0x0a,0x08,0x1a,0x00},
-      {0x32,0x02,0x07,0x6a,0x23,0x00,0xa0,0x1a,0x14,0x80,0x0a,0x48,0x1a,0x00},
-      {0x32,0x02,0x47,0x6b,0x23,0x00,0xa0,0x1a,0x14,0x80,0x4a,0x00,0x04,0x01},
-      {0xb2,0x84,0x4f,0xea,0x2b,0x80,0xa1,0x3a,0x30,0x80,0x0a,0x08,0x9a,0x40},
+   /* Apple applegpu_g17g 32-bit float selects, one kernel per row
+    * (gpu/m5-xfb-alu7-, -alu8-, -alu10-, -alu11-reference.metal). The
+    * comparand `a` is r2 or r4, the selected registers v/w are r0/r2; every
+    * source is dead after the select and the load it waits on signals slot
+    * 8. `fseli32` selects two registers, `fself32` a register and a
+    * minifloat constant. Two constants are refused: Apple emits `fself16`
+    * plus a widen for `select(0.0f, 1.0f, ...)`. */
+   enum { D = AGX3_ALU_HINT_DISCARD, N = AGX3_ALU_HINT_NONE };
+   static const struct {
+      const char *kernel;
+      struct agx3_fsel32_gpu1_desc d;
+      const char *bytes;
+   } vectors[] = {
+      /* fseli32: select(w, v, a OP k) and select(w, v, a OP b). */
+      {"alu8 fsel_reg_reg  a < -1.0", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=176,.sel={0,4},.sel_hint={D,D},.condition=1,.wait_mask=0x80},
+       "2200074a2300a00214ac8a602040"},
+      {"alu10 fsel_lt_two  a < 2.0", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=64,.sel={0,4},.sel_hint={D,D},.condition=1,.wait_mask=0x80},
+       "2200074a2300a00214908a602040"},
+      {"alu10 fsel_lt_half  a < 0.5", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=32,.sel={0,4},.sel_hint={D,D},.condition=1,.wait_mask=0x80},
+       "2200074a2300a00214888a602040"},
+      {"alu11 fsel_lt_zero  a < 0.0", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=0,.sel={0,4},.sel_hint={D,D},.condition=1,.wait_mask=0x80},
+       "2200074a2300a00214808a602040"},
+      {"alu10 fsel_ge_one", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=48,.sel={0,4},.sel_hint={D,D},.condition=5,.wait_mask=0x80},
+       "2200074a2300a002148c8a242040"},
+      {"alu10 fsel_eq_one", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=48,.sel={0,4},.sel_hint={D,D},.condition=0,.wait_mask=0x80},
+       "2200074a2300a002148c8a202040"},
+      {"alu10 fsel_gt_one", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=48,.sel={0,4},.sel_hint={D,D},.condition=2,.wait_mask=0x80},
+       "2200474a2300a002148c8a202040"},
+      {"alu10 fsel_le_one", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=48,.sel={0,4},.sel_hint={D,D},.condition=6,.wait_mask=0x80},
+       "2200474a2300a002148c8a242040"},
+      /* a != 1.0 is equality with the two registers exchanged. */
+      {"alu10 fsel_ne_one", {.cmp0=8,.cmp0_hint=D,.cmp1_immediate=true,
+        .cmp1=48,.sel={4,0},.sel_hint={D,D},.condition=0,.wait_mask=0x80},
+       "2200074a2300a002168c8a200040"},
+      {"alu10 fsel_reg_lt_reg", {.cmp0=8,.cmp0_hint=D,.cmp1=6,.cmp1_hint=D,
+        .sel={0,4},.sel_hint={D,D},.condition=1,.wait_mask=0x80},
+       "2200074a2300a0029401a1602040"},
+      {"alu11 fsel_reg_ge_reg", {.cmp0=8,.cmp0_hint=D,.cmp1=6,.cmp1_hint=D,
+        .sel={0,4},.sel_hint={D,D},.condition=5,.wait_mask=0x80},
+       "2200074a2300a0029401a1242040"},
+      {"alu11 fsel_reg_eq_reg", {.cmp0=8,.cmp0_hint=D,.cmp1=6,.cmp1_hint=D,
+        .sel={0,4},.sel_hint={D,D},.condition=0,.wait_mask=0x80},
+       "2200074a2300a0029401a1202040"},
+      /* Apple's [[depth(any)]] fragment reads the result again: f11. */
+      {"fragment-depth select, result cached", {.dest_cache=true,.cmp0=4,
+        .cmp0_hint=D,.cmp1=0,.cmp1_hint=D,.sel={0,4},.sel_hint={D,D},
+        .condition=1,.wait_mask=0x80},
+       "2200072a2b00a0021400a1602040"},
+      /* fself32: a minifloat on either side of the select. */
+      {"alu8 fsel_zero_reg  select(v, 0.0, a < -1.0)", {.cmp0=4,.cmp0_hint=D,
+        .cmp1_immediate=true,.cmp1=176,.sel_immediate={true,false},.sel={0,0},
+        .sel_hint={N,D},.condition=1,.wait_mask=0x80},
+       "2200032a2300a00214ac4a200000c000"},
+      {"alu10 fself_one_reg  select(v, 1.0, ...)", {.cmp0=4,.cmp0_hint=D,
+        .cmp1_immediate=true,.cmp1=176,.sel_immediate={true,false},.sel={48,0},
+        .sel_hint={N,D},.condition=1,.wait_mask=0x80},
+       "2200032a2300a00234ac4a201000c000"},
+      {"alu10 fself_two_reg  select(v, 2.0, ...)", {.cmp0=4,.cmp0_hint=D,
+        .cmp1_immediate=true,.cmp1=176,.sel_immediate={true,false},.sel={64,0},
+        .sel_hint={N,D},.condition=1,.wait_mask=0x80},
+       "2200032a2300a00214ac4a204000c000"},
+      {"alu10 fself_reg_one  select(1.0, v, ...)", {.cmp0=4,.cmp0_hint=D,
+        .cmp1_immediate=true,.cmp1=176,.sel_immediate={false,true},.sel={0,48},
+        .sel_hint={D,N},.condition=1,.wait_mask=0x80},
+       "2200032a2300a00214ac8a080006c000"},
+      {"alu10 fself_zero_reg_zerocmp  a < 0.0", {.cmp0=4,.cmp0_hint=D,
+        .cmp1_immediate=true,.cmp1=0,.sel_immediate={true,false},.sel={0,0},
+        .sel_hint={N,D},.condition=1,.wait_mask=0x80},
+       "2200032a2300a00214804a200000c000"},
+      {"alu11 fself_ge", {.cmp0=4,.cmp0_hint=D,.cmp1_immediate=true,.cmp1=48,
+        .sel_immediate={true,false},.sel={0,0},.sel_hint={N,D},.condition=5,
+        .wait_mask=0x80},
+       "2200032a2300a002148c4a2000808000"},
+      {"alu11 fself_eq", {.cmp0=4,.cmp0_hint=D,.cmp1_immediate=true,.cmp1=48,
+        .sel_immediate={true,false},.sel={0,0},.sel_hint={N,D},.condition=0,
+        .wait_mask=0x80},
+       "2200032a2300a002148c4a2000008000"},
+      {"alu11 fself_gt", {.cmp0=4,.cmp0_hint=D,.cmp1_immediate=true,.cmp1=48,
+        .sel_immediate={true,false},.sel={0,0},.sel_hint={N,D},.condition=2,
+        .wait_mask=0x80},
+       "2200432a2300a002148c4a2000008000"},
+      {"alu11 fself_le", {.cmp0=4,.cmp0_hint=D,.cmp1_immediate=true,.cmp1=48,
+        .sel_immediate={true,false},.sel={0,0},.sel_hint={N,D},.condition=6,
+        .wait_mask=0x80},
+       "2200432a2300a002148c4a2000808000"},
+      {"alu11 fself_ne  = eq exchanged", {.cmp0=4,.cmp0_hint=D,
+        .cmp1_immediate=true,.cmp1=48,.sel_immediate={false,true},.sel={0,0},
+        .sel_hint={D,N},.condition=0,.wait_mask=0x80},
+       "2200032a2300a002148c8a0800008000"},
+      {"alu11 fself_zero_reg_immcmp  select(0.0, v, a < 1.0)", {.cmp0=4,
+        .cmp0_hint=D,.cmp1_immediate=true,.cmp1=48,.sel_immediate={false,true},
+        .sel={0,0},.sel_hint={D,N},.condition=1,.wait_mask=0x80},
+       "2200032a2300a002148c8a080000c000"},
+      {"alu10 fself_reg_zero_regcmp  select(0.0, v, a < b)", {.cmp0=4,
+        .cmp0_hint=D,.cmp1=8,.cmp1_hint=D,.sel_immediate={false,true},.sel={0,0},
+        .sel_hint={D,N},.condition=1,.wait_mask=0x80},
+       "2200032a2300a0021402a1080000c000"},
+      {"alu10 fself_two_reg_regcmp  select(v, 2.0, a < b)", {.cmp0=4,
+        .cmp0_hint=D,.cmp1=8,.cmp1_hint=D,.sel_immediate={true,false},.sel={64,0},
+        .sel_hint={N,D},.condition=1,.wait_mask=0x80},
+       "2200032a2300a002140261204000c000"},
    };
-   const bool no_abs[2] = {false, false};
    uint8_t out[AGX3_ALU_MAX_LENGTH], len;
-   for (unsigned i = 0; i < 4; ++i) {
-      const uint16_t src[4] = {
-         i == 3 ? 188 : 14, 0, i == 2 ? 0 : i == 3 ? 186 : 26,
-         i == 2 ? 26 : 0,
-      };
-      const bool immediate[2] = {i == 2, i != 2};
-      const enum agx3_alu_hint hints[4] = {
-         i == 3 ? AGX3_ALU_HINT_CACHE : AGX3_ALU_HINT_DISCARD,
-         AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE,
-      };
-      assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
-         i == 3 ? 190 : 14, src, true, no_abs, no_abs, immediate, hints,
-         i == 1 ? 1 : 2, false, i == 3, i == 3 ? 0x81 : 0, out, &len));
-      assert(len == sizeof(expected[i]) && !memcmp(out, expected[i], len));
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      assert(agx3_alu_fcmp_select32_gpu1(&vectors[i].d, out, &len));
+      exact(out, len, vectors[i].bytes);
    }
+
+   /* The general select's GPU1 branch lands on the same forms: gears'
+    * `0 < x ? y : 0` is the register/zero shape above with its comparison
+    * reversed. Mesa's selected immediates are integers, so only zero
+    * reaches the minifloat-reading `fself32`. */
+   const bool no_abs[2] = {false, false};
+   const uint16_t gears[4] = {4, 0, 0, 0};
+   const bool gears_imm[2] = {true, false};
+   const enum agx3_alu_hint gears_hints[4] = {D, N, N, D};
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C, 0, gears, true,
+      no_abs, no_abs, gears_imm, gears_hints, 1, false, false, 0x80, out, &len));
+   exact(out, len, "2200032a2300a00214804a200000c000");
    uint16_t src[4] = {14, 0, 26, 0};
    const bool immediate[2] = {false, true};
    const enum agx3_alu_hint hints[4] = {0};
@@ -4872,6 +5183,33 @@ static void test_gpu1_float_compare_select(void)
    src[3] = 1; /* A minifloat payload is not an integer result immediate. */
    assert(!agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
       14, src, true, no_abs, no_abs, immediate, hints, 2, false, false, 0, out, &len));
+
+   /* Rejection boundaries of the core itself. */
+   struct agx3_fsel32_gpu1_desc bad = vectors[13].d;
+   bad.sel_immediate[1] = true;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len)); /* two constants */
+   bad = vectors[13].d; bad.condition = 3;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len));
+   bad = vectors[13].d; bad.condition = 7; /* the NaN-true relations */
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len));
+   bad = vectors[13].d; bad.dest = 1;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len));
+   bad = vectors[13].d; bad.cmp0 = 3;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len));
+   bad = vectors[13].d; bad.cmp1 = 256;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len));
+   bad = vectors[13].d; bad.sel[0] = 256;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len));
+   bad = vectors[13].d; bad.sel_hint[0] = D;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len)); /* hint on a constant */
+   bad = vectors[13].d; bad.wait_mask = 0x100;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len));
+   bad = vectors[0].d; bad.sel[1] = 5;
+   assert(!agx3_alu_fcmp_select32_gpu1(&bad, out, &len)); /* odd register */
+   assert(!agx3_alu_fcmp_select32_gpu1(NULL, out, &len));
+   puts("GPU1 fseli32/fself32: 26 Apple applegpu_g17g witnesses byte-exact; "
+        "two constants, unwitnessed relations, odd registers, out-of-range "
+        "constants, hinted constants and slot-9 waits refused PASS");
 }
 
 static void
@@ -5124,6 +5462,74 @@ test_native_isub_shift(void)
                                       &len));
 }
 
+
+/*
+ * G17G's reg/reg integer add and bitops carry their own lifetimes.
+ *
+ * Reaching these through the generic select template instead pinned the
+ * specimen's first-operand discard and its wait on slot 8 as if both were
+ * form constants, so a register read a second time after the add read dead.
+ * That template is `agx3_pack_iadd_u32_reg_reg`'s Apple G17G/G17S replay,
+ * and this encoder reproduces it byte for byte when it is given that
+ * specimen's own lifetimes and wait -- which is what says the only bits that
+ * moved are the ones describing them. The corpus
+ * (`agx3_compose_corpus_vectors.c`) carries Apple iadd32 and bitop
+ * instructions with each combination of f27/f42 set and clear.
+ */
+static void
+test_gpu1_integer_reg_lifetimes(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   const uint16_t src[2] = {0, 4};
+
+   struct agx3_encoded_iadd_u32_reg_reg canonical;
+   assert(agx3_pack_iadd_u32_reg_reg(AGX_ISA_ENCODING_AGX3C, 4, 0, 4,
+                                     &canonical));
+
+   const enum agx3_alu_hint specimen[2] = {AGX3_ALU_HINT_DISCARD,
+                                           AGX3_ALU_HINT_NONE};
+   assert(agx3_alu_integer_reg(AGX_ISA_ENCODING_AGX3C, AGX3_ALU_IADD, 4, src,
+                               specimen, 1u << 7, bytes, &len));
+   assert(len == canonical.length &&
+          !memcmp(bytes, canonical.bytes, canonical.length));
+
+   /* Every other combination differs from it, and from each other. */
+   uint8_t seen[9][AGX3_ALU_MAX_LENGTH];
+   unsigned n = 0;
+   for (unsigned h0 = 0; h0 <= AGX3_ALU_HINT_CACHE; ++h0) {
+      for (unsigned h1 = 0; h1 <= AGX3_ALU_HINT_CACHE; ++h1) {
+         const enum agx3_alu_hint hints[2] = {(enum agx3_alu_hint)h0,
+                                              (enum agx3_alu_hint)h1};
+         assert(agx3_alu_integer_reg(AGX_ISA_ENCODING_AGX3C, AGX3_ALU_IADD, 4,
+                                     src, hints, 0, bytes, &len));
+         assert(len == canonical.length);
+         /* No combination reproduces the pinned wait. */
+         assert(memcmp(bytes, canonical.bytes, len) != 0);
+         for (unsigned i = 0; i < n; ++i)
+            assert(memcmp(bytes, seen[i], len) != 0);
+         memcpy(seen[n++], bytes, len);
+      }
+   }
+
+   for (unsigned h0 = 0; h0 <= AGX3_ALU_HINT_CACHE; ++h0) {
+      const enum agx3_alu_hint hints[2] = {(enum agx3_alu_hint)h0,
+                                           AGX3_ALU_HINT_NONE};
+      uint8_t band[AGX3_ALU_MAX_LENGTH];
+      uint8_t band_len = 0;
+      assert(agx3_alu_bit_reg(AGX_ISA_ENCODING_AGX3C, AGX3_ALU_BAND, 4, src,
+                              hints, 0, band, &band_len));
+      if (h0 > 0)
+         assert(memcmp(band, seen[0], band_len) != 0);
+   }
+
+   /* G17G's shifted subtract and narrow bitops are unwitnessed. */
+   const enum agx3_alu_hint dd[2] = {AGX3_ALU_HINT_DISCARD,
+                                     AGX3_ALU_HINT_DISCARD};
+   assert(!agx3_alu_integer_reg_shift(AGX_ISA_ENCODING_AGX3C, AGX3_ALU_ISUB,
+                                      0, src, dd, 1, 0, bytes, &len));
+   assert(!agx3_alu_bit_reg16(AGX_ISA_ENCODING_AGX3C, AGX3_ALU_BAND, 1, src,
+                              dd, 0, bytes, &len));
+}
 
 /*
  * The compare-select's absolute-value sources.
@@ -5465,6 +5871,7 @@ int main(void){
    test_native_sqrt_step_absolute();
    test_native_fmul_minifloat_narrow();
    test_native_isub_shift();
+   test_gpu1_integer_reg_lifetimes();
    test_native_fcmp_select_absolute();
    test_native_f32_log2_exp2();
    test_native_f32_log2_exp2_modifiers();

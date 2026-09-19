@@ -209,18 +209,32 @@ g17g_graphics_program_generate(
        !desc->shader_binary_size ||
        !desc->nr_gprs || desc->nr_gprs > 256 || desc->scratch_size ||
        !desc->compiler_d_valid || desc->compiler_d > 256 ||
-       desc->writes_sample_mask || desc->colour_partitions > 1 ||
+       (desc->writes_sample_mask && !desc->fragment) ||
+       desc->colour_partitions > 1 ||
        (!desc->fragment && desc->colour_partitions) ||
+       /* A render with no colour attachment has an empty imageblock. Apple's
+        * own colour-free render emits the same fragment SPECLM spelling as a
+        * colour one -- both carry 1700002c00001808 -- so the sample size may
+        * be zero as well as the witnessed eight bytes. Other tile sizes and
+        * sample counts still need their own native evidence. */
        (desc->fragment &&
-        (desc->imageblock.sample_size_B != 8 ||
+        ((desc->imageblock.sample_size_B != 8 &&
+          desc->imageblock.sample_size_B != 32 &&
+          desc->imageblock.sample_size_B != 0) ||
          desc->imageblock.nr_samples != 1 ||
          desc->imageblock.tile_size_px != 32 * 32)) ||
        !agx3_g17g_graphics_program_bound(chip, desc->uniform_ranges,
                                           desc->uniform_range_count, &bound))
       return false;
 
-   /* Preserve the independently captured M5 physical imageblock spelling.
-    * Other tile sizes and sample counts need their own native evidence. */
+   /* The captured M5 physical imageblock spelling. Byte 7 is the imageblock
+    * sample size in bytes: three native fragment renders taken in one session
+    * publish 1700002c00001808 for one RGBA8 attachment and 1700002c00001820
+    * for eight, and nothing else in the record moves. Bytes 0..6 -- which are
+    * the per-tile-shape seed in HAL200's spelling -- are identical across
+    * both, so Apple keeps the 32x32 tile for 32-byte samples rather than
+    * halving it, landing on exactly the 32 KiB structural bound. Other tile
+    * sizes and sample counts still need their own native evidence. */
    static const uint8_t speclm[2][AGX_IOTO_SPECLM_SIZE] = {
       {0x07,0x00,0x00,0x0c,0x00,0x00,0x00,0x00},
       {0x17,0x00,0x00,0x2c,0x00,0x00,0x18,0x08},
@@ -245,6 +259,11 @@ g17g_graphics_program_generate(
       .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
    };
    memcpy(tail.bytes, speclm[desc->fragment], AGX_IOTO_SPECLM_SIZE);
+   if (desc->fragment && desc->imageblock.sample_size_B) {
+      /* A colour-free render keeps the eight-byte spelling: Apple's own one
+       * publishes the same record as a single-attachment render. */
+      tail.bytes[7] = (uint8_t)desc->imageblock.sample_size_B;
+   }
    if (!agx_ioto_state_pack_ldshdr(
           chip, &ldshdr, tail.bytes + AGX_IOTO_SPECLM_SIZE,
           AGX_IOTO_LDSHDR_SIZE) ||
@@ -288,9 +307,14 @@ agx3_g17g_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    struct agx3_g17p_graphics_program *program)
 {
-   return desc && g17g_graphics_program_generate(
-      chip, desc, desc->fragment ? AGX_IOTO_G17G_PROGRAM_FRAGMENT
-                                  : AGX_IOTO_G17G_PROGRAM_VERTEX, program);
+   /* A fragment that owns its coverage releases the pixel differently; see
+    * AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT. */
+   const enum agx_ioto_g17g_program_stage stage =
+      !desc                      ? AGX_IOTO_G17G_PROGRAM_VERTEX
+      : !desc->fragment          ? AGX_IOTO_G17G_PROGRAM_VERTEX
+      : desc->writes_sample_mask ? AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT
+                                 : AGX_IOTO_G17G_PROGRAM_FRAGMENT;
+   return desc && g17g_graphics_program_generate(chip, desc, stage, program);
 }
 
 bool

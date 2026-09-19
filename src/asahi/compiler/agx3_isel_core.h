@@ -60,6 +60,13 @@
  * it for a 16-bit boolean result even though both selected values are
  * immediates. The compact native wait selector represents one slot or slots1+2;
  * other producer combinations must be retired separately before this form.
+ *
+ * GPU1 (applegpu_g17g) witnesses from gpu/m5-xfb-alu8-reference.metal pin a
+ * ushort comparand against the immediate 2 with a word result -- selecting a
+ * register or zero, and two registers -- plus the uint-comparand twin. All
+ * three store their result directly and carry f11=0 whatever the selected
+ * operands, so on GPU1 f11 is the destination-cache hint (as in every other
+ * GPU1 form with the f9/f10/f2/f11 header), not a mixed-selection flag.
  */
 
 #pragma once
@@ -102,8 +109,19 @@ struct agx3_isel_desc {
     * their separate native encoding. */
    bool cmp1_immediate;
    bool cmp_16;
+
+   /* GPU1 widens a half-register second comparand against a full-register
+    * first comparand inside the select: f39 takes the immediate/narrow value
+    * and f43 selects sign extension. Witnessed on applegpu_g17g from
+    * `uint >= uint(ushort)` (zero extension) and `int < int(short)`
+    * (sign extension); Apple puts the wide comparand first and reverses the
+    * condition when the source had them the other way round. */
+   bool cmp1_16;
+   bool cmp1_sign_extend;
    bool explicit_hints;
-   bool dest_cache; /* f12: result is consumed through the register cache */
+   /* The result is consumed through the register cache: f12 on GPU0, f11 on
+    * GPU1. */
+   bool dest_cache;
    bool cache[4];
    bool discard[4];
 

@@ -307,12 +307,15 @@ main(void)
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B, &d, out, &len));
    /* Zink's M5 robust vertex fetch: r8 = vertex_id > limit ? 0 : r0.
     * Bytes are independently composed from the AGX3c iseli32 table. They
-    * are an encoding regression, not a native execution witness.
+    * are an encoding regression, not a native execution witness. They were
+    * composed with f11 set; that field is the GPU1 destination-cache hint
+    * (the fetch consumes r8), so the descriptor now says so explicitly.
     */
    struct agx3_isel_desc m5 = {
       .dest = 16, .cmp0 = 4, .cmp1 = 10, .cond = AGX3_ISEL_ICOND_ULT,
       .true_kind = AGX3_ISEL_IMMEDIATE, .false_kind = AGX3_ISEL_REGISTER,
       .sel_true = 0, .sel_false = 0, .explicit_hints = true,
+      .dest_cache = true,
       .cache = {false, true, false, false},
       .discard = {true, false, false, true}, .wait_mask = 2,
    };
@@ -426,6 +429,27 @@ main(void)
          .cond=AGX3_ISEL_ICOND_ULT,.false_kind=AGX3_ISEL_IMMEDIATE,
          .sel_true=1,.discard={true,true,true}},
        {0x0a,0x05,0x1d,0x0f,0x82,0x01,0x05,0x00,0x20,0x80},10},
+      /* Apple applegpu_g17g, gpu/m5-xfb-alu8-reference.metal: a ushort
+       * comparand against the immediate 2 with a word result, selecting a
+       * register or zero and then two registers, plus the uint-comparand
+       * twin. Beyond the boolean 0/1 immediates above these are the only
+       * grounded half-comparand immediates, and all three store their
+       * result directly (f11=0). */
+      {"native M5 half EQ two word register/zero", {.dest=0,.cmp_16=true,
+         .cmp0=4,.cmp1=2,.cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=0,.sel_false=0,
+         .discard={true,false,true,false},.wait_mask=128},
+       {0x22,0x00,0x07,0x2a,0x27,0x00,0xa4,0x02,0x81,0x00,0x82,0x4c,0x00,0x10},14},
+      {"native M5 half EQ two word register/register", {.dest=0,.cmp_16=true,
+         .cmp0=8,.cmp1=2,.cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,
+         .sel_true=0,.sel_false=4,.discard={true,false,true,true},
+         .wait_mask=128},
+       {0x22,0x00,0x07,0x4a,0x27,0x00,0xa4,0x02,0x81,0x00,0x82,0x44,0x20,0x18},14},
+      {"native M5 word EQ two word register/zero", {.dest=0,
+         .cmp0=4,.cmp1=2,.cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=0,.sel_false=0,
+         .discard={true,false,true,false},.wait_mask=128},
+       {0x22,0x00,0x07,0x2a,0x27,0x00,0xac,0x02,0x81,0x00,0x82,0x0c,0x00,0x10},14},
    };
    for (unsigned i=0; i<sizeof(half_vectors)/sizeof(half_vectors[0]); ++i) {
       CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&half_vectors[i].d,out,&len));
@@ -442,6 +466,85 @@ main(void)
    CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    m5.sel_true = 256;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+
+   /* The half comparand against 2 is grounded only as witnessed: equality,
+    * an immediate, a word result. Its neighbours stay refused. */
+   const unsigned nhalf = sizeof(half_vectors) / sizeof(half_vectors[0]);
+   const struct agx3_isel_desc *half_two = &half_vectors[nhalf - 3].d;
+   m5 = *half_two;
+   m5.cmp1 = 3;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5 = *half_two;
+   m5.cond = AGX3_ISEL_ICOND_ULT;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5 = *half_two;
+   m5.cmp1_immediate = false;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5 = *half_two;
+   m5.dest_16 = true;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5 = half_vectors[nhalf - 2].d;
+   m5.cmp1 = 3;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+
+   /* GPU1 f11 is the destination-cache hint: with the word-comparand witness
+    * kept live through the cache only that bit (bit 35, byte 4) changes. */
+   const struct agx3_isel_desc *word_two = &half_vectors[nhalf - 1].d;
+   m5 = *word_two;
+   m5.dest_cache = true;
+   CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   CHECK(len == 14 && out[4] == 0x2f &&
+         !memcmp(out, half_vectors[nhalf - 1].bytes, 4) &&
+         !memcmp(out + 5, half_vectors[nhalf - 1].bytes + 5, 9));
+
+   /* Apple applegpu_g17g, gpu/m5-mixed-compare-reference.metal: the same
+    * `a.x < b.z ? a.y : a.w` lane compiled with b as uint4 and as ushort4.
+    * The ushort comparand stays a half register (r8l) and only f39 changes,
+    * the field an 8-bit immediate comparand also sets: GPU1 widens a narrow
+    * second comparand inside the select. The signed kernels of the same
+    * reference set f43 (decoded from their ep1, ep3 and ep4 bytes) and
+    * nothing else, and Apple reverses the condition to keep the wide
+    * comparand first. */
+   static const struct isel_vec mixed_vectors[] = {
+      {"native M5 uint < uint register", {.dest=4,.cmp0=6,.cmp1=22,
+         .cond=AGX3_ISEL_ICOND_ULT,.sel_true=8,.sel_false=12,
+         .cache={true,false,true,false},.discard={false,true,false,true}},
+       {0x22,0x87,0x17,0x17,0x02,0x88,0x05,0x00,0x80,0x0c},10},
+      {"native M5 uint < uint(ushort) half register", {.dest=4,.cmp0=6,
+         .cmp1=16,.cmp1_16=true,.cond=AGX3_ISEL_ICOND_ULT,.sel_true=8,
+         .sel_false=12,.cache={true,false,true,false},
+         .discard={false,true,false,true}},
+       {0x22,0x87,0x17,0x10,0x02,0x88,0x05,0x00,0x80,0x0c},10},
+   };
+   for (unsigned i=0; i<sizeof(mixed_vectors)/sizeof(mixed_vectors[0]); ++i) {
+      CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&mixed_vectors[i].d,out,&len));
+      CHECK(len == mixed_vectors[i].length && !memcmp(out,mixed_vectors[i].bytes,len));
+   }
+   m5 = mixed_vectors[1].d;
+   m5.cmp1_sign_extend = true;
+   CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   CHECK(len == 10 && (out[7] & 0x08));
+   m5 = mixed_vectors[1].d;
+   m5.cmp_16 = true;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5 = mixed_vectors[1].d;
+   m5.cmp1_immediate = true;
+   m5.cmp1 = 1;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5 = mixed_vectors[1].d;
+   m5.cmp1 = 18;
+   CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5.cmp1 = 17;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5.cmp1 = 256;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   m5 = mixed_vectors[0].d;
+   m5.cmp1_sign_extend = true;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+   /* G17P has no such witness. */
+   m5 = mixed_vectors[1].d;
+   m5.explicit_hints = true;
+   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3B,&m5,out,&len));
 
    /* Fresh G17P bit_select and bit_negate witnesses. These establish the
     * mask-test condition and selected float sign bits independently of trig. */

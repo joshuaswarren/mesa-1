@@ -50,7 +50,16 @@ main(void)
    for (unsigned i = 0; i < sizeof(golden); ++i)
       CHECK(out.bytes[i] == (i == 127 ? 0x20 : golden[i]));
    const struct agx_ppp_hal300_graphics_core translucent = out;
-   for (unsigned pass = 2; pass < 8; ++pass) {
+
+   /* Punch through is witnessed (see the discard render below); the two
+    * pass types above it are not, and a caller asking for one is refused
+    * without touching the caller's buffer. */
+   f.fragment_pass = 2;
+   CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   for (unsigned i = 0; i < sizeof(golden); ++i)
+      CHECK(out.bytes[i] == (i == 127 ? 0x40 : golden[i]));
+   out = translucent;
+   for (unsigned pass = 3; pass < 8; ++pass) {
       f.fragment_pass = pass;
       CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
       CHECK(memcmp(&out, &translucent, sizeof(out)) == 0);
@@ -99,6 +108,20 @@ main(void)
       0x02000062, 0x200, 0x07e00000, 0x07e00000, 0x1ffff,
       0x00840002, 0, 0x80, 0x00800000, 0x480, 0x400, 0, 0,
    };
+   /* Native 25G76 colour-free render whose fragment function returns a
+    * [[depth(any)]] struct: the pipeline template takes 0x40 and both ISP
+    * early-test words drop 0x00c00000. Its varying-count word, pass type and
+    * last ISP word are the colour-free and punch-through axes, checked
+    * separately; this vector isolates the depth write. */
+   const uint32_t zout_words[] = {
+      0x10100000, 4, 0, 0, 0,
+      0x01000000, 0x00020100, 0x4c0, 0, 0x01000040, 0x5c1c, 0,
+      1, 0x7aa, 0xe2e00000, 0xf0c00000, 0x23020, 0x1ffff,
+      0x0c280000, 0x50000, 0, 0, 9,
+      0x020000e0, 0x40200, 0x07200f00, 0x07200f00, 0x0e000000, 0x0e000000, 0,
+      0x02000062, 0x200, 0x07200000, 0x07200000, 0x1ffff,
+      0x00840002, 0, 0x80, 0x00800000, 0x480, 0x400, 0, 0,
+   };
    const uint32_t flat_depth_words[] = {
       0x10100000, 0x400, 0, 0, 0,
       0x01000000, 0x00010100, 0x480, 0, 0x01000000, 0x6e1c, 0,
@@ -121,14 +144,162 @@ main(void)
    CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    for (unsigned i = 0; i < sizeof(out.bytes); ++i)
       CHECK(out.bytes[i] == (uint8_t)(color_words[i / 4] >> (8 * (i % 4))));
+   /* Only the depth write moves, against the colour reference above. */
+   f.fragment_writes_depth = true;
+   CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
+   for (unsigned i = 0; i < sizeof(out.bytes); ++i)
+      CHECK(out.bytes[i] == (uint8_t)(zout_words[i / 4] >> (8 * (i % 4))));
+   f.fragment_writes_depth = false;
+
    f.fragment_program = UINT64_C(0x100001b8700);
    f.varying_table = UINT64_C(0x10000000480);
    f.cf_binding_count = 1;
-   f.flat_varying = true;
-   f.depth_less_write = true;
+   f.interpolation = AGX_PPP_HAL300_FLAT;
+   f.depth_active = true;
+   f.depth_compare = 1; /* less */
+   f.depth_write = true;
    CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    for (unsigned i = 0; i < sizeof(out.bytes); ++i)
       CHECK(out.bytes[i] == (uint8_t)(flat_depth_words[i / 4] >> (8 * (i % 4))));
+
+   /* One controlled render per depth comparison, from
+    * gpu/m5-state-matrix-reference.m on 25G76. The face word is the only
+    * thing that moves, and the two constants this driver already shipped
+    * (always/no-write and less/write) are two rows of the same table.
+    *
+    * Seven of the eight rows are captured directly. lequal is not: its
+    * render was queued when the guest's serial link dropped. It is included
+    * because the other seven exhaust every other value of a three-bit field
+    * and lequal is the one comparison left, so the table is closed by
+    * enumeration rather than by extrapolation. Capture it when the next
+    * guest is up and this comment goes away. */
+   {
+      static const struct { uint8_t compare; uint32_t face; } matrix[] = {
+         {0 /* never */, 0x00000f00},    {1 /* less */, 0x01000f00},
+         {2 /* equal */, 0x02000f00},    {3 /* lequal */, 0x03000f00},
+         {4 /* greater */, 0x04000f00},  {5 /* notequal */, 0x05000f00},
+         {6 /* gequal */, 0x06000f00},   {7 /* always */, 0x07000f00},
+      };
+      struct agx_ppp_hal300_graphics_core probe;
+      for (unsigned i = 0; i < sizeof(matrix) / sizeof(matrix[0]); ++i) {
+         struct agx_ppp_hal300_graphics_fields d = f;
+         d.depth_active = true;
+         d.depth_compare = matrix[i].compare;
+         d.depth_write = true;
+         CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+         const uint8_t *face = probe.bytes + probe.offsets[4] + 8;
+         const uint32_t got = face[0] | (face[1] << 8) | (face[2] << 16) |
+                              ((uint32_t)face[3] << 24);
+         CHECK(got == matrix[i].face);
+         const uint8_t *control = probe.bytes + probe.offsets[4] + 4;
+         CHECK((control[2] & 0x4) == 0);
+
+
+         /* Writes off sets 0x200000; an always/no-write render is the
+          * inactive depth unit the no-attachment path already encodes. */
+         d.depth_write = false;
+         CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+         face = probe.bytes + probe.offsets[4] + 8;
+         const uint32_t nowrite = face[0] | (face[1] << 8) | (face[2] << 16) |
+                                  ((uint32_t)face[3] << 24);
+         CHECK(nowrite == (matrix[i].face | 0x00200000));
+         /* The test being enabled is what clears 0x40000, whatever the
+          * comparison is: dz-always-nw carries 0x200 on hardware. */
+         control = probe.bytes + probe.offsets[4] + 4;
+         CHECK((control[2] & 0x4) == 0);
+      }
+
+      /* Stencil sets 0x80000 and replaces the two keep/always words. */
+      struct agx_ppp_hal300_graphics_fields d = f;
+      d.depth_active = false;
+      d.depth_compare = 0;
+      d.depth_write = false;
+      d.stencil_active = true;
+      d.front_stencil = d.back_stencil = 0x0e02ffff;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+      const uint8_t *control = probe.bytes + probe.offsets[4] + 4;
+      CHECK((control[2] & 0xc) == 0xc);
+      const uint8_t *stencil = probe.bytes + probe.offsets[4] + 16;
+      CHECK(stencil[0] == 0xff && stencil[1] == 0xff && stencil[2] == 0x02 &&
+            stencil[3] == 0x0e);
+
+      d.depth_active = true;
+      d.depth_compare = 8;
+      CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+      /* A comparison without an active depth unit is refused. */
+      d.depth_active = false;
+      d.depth_compare = 1;
+      CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+   }
+
+   /* Punch through, from the discarding-shader render of the capture
+    * matrix: pass 2 in bits 29..31 with the shader's own
+    * disable-triangle-merging bit 26 beside it. */
+   {
+      struct agx_ppp_hal300_graphics_fields d = f;
+      struct agx_ppp_hal300_graphics_core probe;
+      d.fragment_pass = 2;
+      d.disable_tri_merging = true;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+      const uint8_t *isp = probe.bytes + probe.offsets[5] + 4;
+      const uint32_t word = isp[0] | (isp[1] << 8) | (isp[2] << 16) |
+                            ((uint32_t)isp[3] << 24);
+      CHECK(word == 0x44000200);
+
+      /* The two halves are independent: neither implies the other. */
+      d.disable_tri_merging = false;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+      isp = probe.bytes + probe.offsets[5] + 4;
+      CHECK((isp[3] & 0xe0) == 0x40 && (isp[3] & 0x04) == 0);
+
+      d.fragment_pass = 3;
+      CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+   }
+
+   /* A controlled noperspective render encodes this word exactly like a
+    * smooth one; only flat moves the count into the second byte. */
+   {
+      struct agx_ppp_hal300_graphics_fields d = f;
+      struct agx_ppp_hal300_graphics_core probe;
+      d.interpolation = AGX_PPP_HAL300_LINEAR;
+      d.cf_binding_count = 1;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+      const uint8_t *counts = probe.bytes + probe.offsets[0] + 4;
+      CHECK(counts[0] == d.fragment_varying_components && counts[1] == 0 &&
+            counts[2] == 0);
+      d.interpolation = AGX_PPP_HAL300_FLAT;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+      counts = probe.bytes + probe.offsets[0] + 4;
+      CHECK(counts[0] == 0 && counts[1] == d.fragment_varying_components);
+      d.interpolation = (enum agx_ppp_hal300_interpolation)3;
+      CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+   }
+
+   /* A colour-free render, from the capture that matches the conformance
+    * draw exactly: four noperspective varyings and a discarding shader. */
+   {
+      struct agx_ppp_hal300_graphics_fields d = f;
+      struct agx_ppp_hal300_graphics_core probe;
+      d.no_color_attachment = true;
+      d.interpolation = AGX_PPP_HAL300_LINEAR;
+      d.cf_binding_count = 1;
+      d.fragment_pass = 2;
+      d.disable_tri_merging = true;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+      const uint8_t *counts = probe.bytes + probe.offsets[0] + 4;
+      CHECK(counts[0] == 0 && counts[1] == 0 &&
+            counts[2] == d.fragment_varying_components);
+      const uint8_t *isp = probe.bytes + probe.offsets[5] + 4;
+      const uint32_t word = isp[0] | (isp[1] << 8) | (isp[2] << 16) |
+                            ((uint32_t)isp[3] << 24);
+      CHECK(word == 0x44000200);
+      const uint8_t *last = probe.bytes + probe.offsets[5] + 16;
+      CHECK(last[0] == 0 && last[1] == 0 && last[2] == 0);
+
+      /* A flat colour-free varying has no witness. */
+      d.interpolation = AGX_PPP_HAL300_FLAT;
+      CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &d, &probe));
+   }
 
    const struct agx_ppp_hal300_graphics_core color_before = out;
    f.varying_table++;
@@ -142,7 +313,7 @@ main(void)
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    f.cf_binding_count = 3;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
-   f.flat_varying = false;
+   f.interpolation = AGX_PPP_HAL300_SMOOTH;
    f.cf_binding_count = 4;
    CHECK(!agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
    f.cf_binding_count = 1;
@@ -164,6 +335,35 @@ main(void)
       CHECK(out.bytes[i] == 0); /* No VIT pointer or CF binding count. */
    CHECK(out.bytes[78] == 5); /* PSIZ and color vertex outputs. */
    CHECK(out.bytes[88] == 9); /* All vertex output words stay live. */
+
+   /* A clip-distance group is the UVS record's bit 0 and its own words in
+    * the live count. Captured on 25G76 against the identical colour render:
+    * four varyings and one clip distance publish word 1 = 0x00010001 and a
+    * live count of nine, with no point size. */
+   {
+      struct agx_ppp_hal300_graphics_fields cd = {
+         .fragment_program = UINT64_C(0x10000170700),
+         .vertex_varying_components = 4,
+         .clip_distance_words = 1,
+      };
+      struct agx_ppp_hal300_graphics_core cd_out;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &cd, &cd_out));
+      CHECK(cd_out.bytes[76] == 1); /* Clip-distance group selected. */
+      CHECK(cd_out.bytes[78] == 1); /* Colour outputs, no point size. */
+      CHECK(cd_out.bytes[88] == 9); /* 4 position + 4 varying + 1 clip. */
+
+      cd.point_size_output = true;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &cd, &cd_out));
+      CHECK(cd_out.bytes[76] == 1);
+      CHECK(cd_out.bytes[78] == 5);
+      CHECK(cd_out.bytes[88] == 10);
+
+      cd.point_size_output = false;
+      cd.clip_distance_words = 0;
+      CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &cd, &cd_out));
+      CHECK(cd_out.bytes[76] == 0);
+      CHECK(cd_out.bytes[88] == 8);
+   }
    const struct agx_ppp_hal300_graphics_core unused_before = out;
    f.fragment_varying_components = 4;
    f.vertex_varying_components = 0;
@@ -184,7 +384,7 @@ main(void)
             .point_size_output = true,
             .vertex_varying_components = count,
             .fragment_varying_components = count,
-            .flat_varying = flat,
+            .interpolation = flat ? AGX_PPP_HAL300_FLAT : AGX_PPP_HAL300_SMOOTH,
          };
          CHECK(agx_ppp_hal300_graphics_core_pack(AGX_CHIP_G17G, &f, &out));
          for (unsigned i = 0; i < sizeof(out.bytes); ++i) {

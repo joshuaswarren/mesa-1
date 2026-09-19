@@ -1450,6 +1450,19 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) && !zres && !sres)
       c->isp_bgobjdepth = fui(1.0f);
 
+   /* Neither AGX3 generation publishes the ISP's depth/stencil dimensions the
+    * way AGX2 does, and the two do not agree with each other either, so take
+    * the packing from the shared witness rather than the AGX2 struct. The
+    * Gallium path had been publishing G17P's 15-bit pair on G17G, which the
+    * kernel's M5 depth admission refused as soon as a render actually carried
+    * a depth attachment. */
+   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
+      c->isp_zls_pixels =
+         agx_zls_pixels(dev->chip, c->width_px, c->height_px, c->depth.base,
+                        c->depth.comp_base, c->stencil.base,
+                        c->stencil.comp_base);
+   }
+
    if ((dev->debug & AGX_DBG_NOCLUSTER) && dev->chip != AGX_CHIP_G17P)
       c->flags |= DRM_ASAHI_RENDER_NO_VERTEX_CLUSTERING;
 
@@ -1473,6 +1486,23 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    c->partial_eot.usc = pipeline_store.usc | 4;
 
    agx_tilebuffer_set_drm_cmd(c, tib);
+
+   /* The depth/stencil half of the render command is the part the M5 kernel
+    * validates and the part no CTS failure can otherwise be read from. */
+   if (dev->debug & AGX_DBG_FAULTTRACE) {
+      fprintf(stderr,
+              "M5_RENDER %ux%u cbufs=%u zs=%s zls=%#llx pixels=%#x "
+              "clear=%#x depth=%#llx/%#llx stencil=%#llx/%#llx "
+              "load=%#x clear_mask=%#x resolve=%#x\n",
+              c->width_px, c->height_px, framebuffer->nr_cbufs,
+              util_format_name(framebuffer->zsbuf.format),
+              (unsigned long long)c->zls_ctrl, c->isp_zls_pixels,
+              c->isp_bgobjdepth, (unsigned long long)c->depth.base,
+              (unsigned long long)c->depth.comp_base,
+              (unsigned long long)c->stencil.base,
+              (unsigned long long)c->stencil.comp_base, batch->load,
+              batch->clear, batch->resolve);
+   }
 
    c->samples = tib->nr_samples;
    c->layers = MAX2(util_framebuffer_get_num_layers(framebuffer), 1);
@@ -1987,7 +2017,16 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
     * Asking nir_lower_tex to add it again manufactures a register-biased
     * texture operation, including for shadow samplers, and applies the bias
     * twice. Keep the Gen4 software path; G17P consumes the descriptor field
-    * packed by agx_upload_samplers(). */
+    * packed by agx_upload_samplers().
+    *
+    * G17G is deliberately NOT included, though SAMPLER_GEN5 has the same
+    * lod_bias field and hk_compile_nir() uses the sampler generation rather
+    * than the ISA encoding. Measured on hardware (v178): moving G17G to the
+    * descriptor bias costs texture_lod_bias.texture_lod_bias_all and one
+    * ext_texture_shadow_lod case, 850 -> 848. The shapes it produces are
+    * closer to Apple's -- constant levels fold to immediates -- but something
+    * else on this part still depends on the software bias, so it stays until
+    * that is understood. */
    ctx->support_lod_bias =
       !(flags & PIPE_CONTEXT_NO_LOD_BIAS) &&
       agx_chip_isa_encoding(dev->chip) != AGX_ISA_ENCODING_AGX3B;

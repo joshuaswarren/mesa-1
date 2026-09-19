@@ -342,8 +342,11 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
       }
 
    case AGX_OPCODE_ZS_EMIT_AGX3:
-      assert(s == 0 && I->zs == 1);
-      return 4;
+      /* Two staged dwords: the coverage/stencil word and, when depth is
+       * written, the fp32 depth. G17P stages depth only; G17G also stages
+       * stencil alone. */
+      assert(s == 0 && (I->zs & 3) != 0);
+      return (I->zs & 1) ? 4 : 2;
 
    case AGX_OPCODE_IMAGE_WRITE:
       if (s == 0)
@@ -397,12 +400,15 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
             return 1;
          }
       } else if (s == 5) {
-         /* G17P immediate offsets live in I->offset_xyz, leaving src[5]
-          * to the comparator. Runtime gather offsets instead occupy a full
-          * 32-bit value, appended after the comparator when present. */
+         /* An AGX3 immediate offset lives in I->offset_xyz, leaving src[5]
+          * to the comparator, on G17G as well as G17P. Runtime gather
+          * offsets instead occupy a full 32-bit value, appended after the
+          * comparator when present. */
+         const bool agx3_split_offset =
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C;
          const bool offset_in_src =
-            I->offset && !(ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-                           I->shadow && I->offset_xyz);
+            I->offset && !(agx3_split_offset && I->shadow && I->offset_xyz);
          return 2 * ((!!I->shadow) + (!!offset_in_src));
       } else {
          return size;

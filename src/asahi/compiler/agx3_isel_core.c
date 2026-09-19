@@ -260,14 +260,30 @@ encode_explicit(const struct agx3_isel_desc *d,
 
 /* GPU1 separates integer and floating-point selects. These field locations
  * come from its own encoder table, not the GPU0 isel layout. Native M5
- * ushort kernels witness odd/even half results and half comparisons to 0/1.
+ * ushort kernels witness odd/even half results and half comparisons to 0/1,
+ * and gpu/m5-xfb-alu8-reference.metal a half comparison to 2 with a word
+ * result.
  */
 static bool
 encode_gpu1(const struct agx3_isel_desc *d,
               uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
 {
-   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 > 1 ||
+   /* A half comparand is witnessed only against an equality immediate: 0
+    * and 1 in both result widths, and 2 with a word result (applegpu_g17g,
+    * `select(0u, v, k == 2)` and `select(w, v, k == 2)` for ushort k). f30
+    * is the same 8-bit deposit in every form, but only those values are
+    * grounded, so anything larger stays refused. */
+   const unsigned half_imm_max = d->dest_16 ? 1 : 2;
+   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 > half_imm_max ||
                      d->cond != AGX3_ISEL_ICOND_EQ))
+      return false;
+   /* A narrow second comparand widens into a full-width comparison only.
+    * Apple's kernels load each ushort lane into its own register, so every
+    * witnessed narrow comparand is a low half; odd halves stay refused. */
+   if (d->cmp1_16 && (d->cmp_16 || d->cmp1_immediate || (d->cmp1 & 1) ||
+                      !reg16_ok(d->cmp1)))
+      return false;
+   if (d->cmp1_sign_extend && !d->cmp1_16)
       return false;
    const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
    const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
@@ -286,12 +302,20 @@ encode_gpu1(const struct agx3_isel_desc *d,
 
    const struct agx3_field_kv base[] = {
       KV(9, 2), KV(10, d->dest_16 ? 1 : 2),
-      /* Native half comparands/results retain f11=0 for mixed selections. */
-      KV(11, !d->dest_16 && !d->cmp_16 && ti != fi),
+      /* f11 is the destination-cache hint, as in every other GPU1 form
+       * sharing this f9/f10/f2/f11 header (iadd32's `16 + 16` witness
+       * carries f11=1 with a live result; cbs, copies and funops write it
+       * from dest_cache too). The three m5-xfb-alu8 selects store their
+       * result directly and carry f11=0 whatever the selected-operand mix,
+       * including the word-comparand register/zero shape the earlier
+       * "mixed selection" reading of this field set to 1 -- the same
+       * correction GPU0's f12 received. */
+      KV(11, d->dest_cache),
       KV(23, 2), KV(24, d->cmp_16 ? 1 : 2),
       /* Native ushort equality sets f28 with its half comparator. */
       KV(28, d->cmp_16), KV(38, d->cmp1_immediate ? 1 : 2),
-      KV(39, d->cmp1_immediate ? 1 : 2),
+      KV(39, (d->cmp1_immediate || d->cmp1_16) ? 1 : 2),
+      KV(43, d->cmp1_sign_extend),
       KV(53, ti ? 1 : 2), KV(54, d->dest_16 ? 1 : 2),
       KV(67, fi ? 1 : 2), KV(68, d->dest_16 ? 1 : 2),
       KV(72, 3), KV(73, d->dest_16 ? 96 : 97),
@@ -332,6 +356,11 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
       return false;
 
    if (encoding != AGX_ISA_ENCODING_AGX3B && encoding != AGX_ISA_ENCODING_AGX3C)
+      return false;
+
+   /* Only GPU1 has witnessed a widened narrow comparand. */
+   if ((d->cmp1_16 || d->cmp1_sign_extend) &&
+       encoding != AGX_ISA_ENCODING_AGX3C)
       return false;
 
    /* The register comparands share a width; immediates carry no register. */

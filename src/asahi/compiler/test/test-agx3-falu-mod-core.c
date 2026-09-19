@@ -121,6 +121,65 @@ add_runtime_vectors(void)
          fail++;
       }
    }
+   /* G17G immediate-operand adds, Apple applegpu_g17g
+    * (gpu/m5-xfb-alu4-reference.metal): `a + 2.0` and `fabs(a) + 0.5`, the
+    * dead source waiting for the load in slot 8. */
+   {
+      static const struct {
+         uint8_t minifloat; bool abs, neg; uint8_t bytes[12];
+      } g17g[] = {
+         {0x40, false, false, {0x29,0x00,0x04,0x0a,0x22,0x20,0xac,0x02,0x01,0x08,0x11,0x00}},
+         {0x20, true,  false, {0x29,0x00,0x04,0x4a,0x22,0x20,0xac,0x02,0x01,0x08,0x10,0x40}},
+         {0x20, false, true,  {0x29,0x00,0x24,0x4a,0x22,0x20,0xac,0x02,0x01,0x08,0x10,0x00}},
+         {0x20, true,  true,  {0x29,0x00,0x24,0x4a,0x22,0x20,0xac,0x02,0x01,0x08,0x10,0x40}},
+      };
+      for (unsigned i = 0; i < sizeof(g17g)/sizeof(g17g[0]); ++i) {
+         struct agx3_falu_mods im = {.src0_abs = g17g[i].abs, .src0_neg = g17g[i].neg};
+         struct agx3_falu_runtime irt = {.discard = {true}, .wait_mask = 0x80};
+         uint8_t o[16], l = 0;
+         if (!agx3_falu_add_imm_runtime(0, 0, g17g[i].minifloat, &im, &irt,
+                                        o, &l) ||
+             l != 12 || memcmp(o, g17g[i].bytes, 12)) {
+            fprintf(stderr, "G17G immediate ADD vector %u failed\n", i);
+            fail++;
+         }
+      }
+      /* G17G immediate-operand multiplies (gpu/m5-xfb-alu4-reference.metal,
+       * -alu6-): `a * 2.0`, `fabs(a) * 2.0` and `-fabs(a) * 2.0`, the last
+       * folded into the constant's sign. */
+      static const struct {
+         uint8_t minifloat; bool abs; uint8_t bytes[14];
+      } g17g_mul[] = {
+         {0x40, false, {0x29,0x00,0x05,0x10,0x22,0x80,0xac,0x02,0x0b,0x00,0x20,0x00,0x00,0x10}},
+         {0x40, true,  {0x29,0x00,0x05,0x10,0x22,0x80,0xac,0x02,0x0b,0x00,0x20,0x08,0x00,0x10}},
+         {0xc0, true,  {0x29,0x00,0x05,0x10,0x22,0x80,0xad,0x02,0x0b,0x00,0x20,0x08,0x00,0x10}},
+      };
+      for (unsigned i = 0; i < sizeof(g17g_mul)/sizeof(g17g_mul[0]); ++i) {
+         struct agx3_falu_mods mm = {.src0_abs = g17g_mul[i].abs};
+         struct agx3_falu_runtime mrt = {.discard = {true}, .wait_mask = 0x80};
+         uint8_t o[16], l = 0;
+         if (!agx3_falu_mul_imm_runtime(0, 0, g17g_mul[i].minifloat, &mm, &mrt,
+                                        o, &l) ||
+             l != 14 || memcmp(o, g17g_mul[i].bytes, 14)) {
+            fprintf(stderr, "G17G immediate MUL vector %u failed\n", i);
+            fail++;
+         }
+      }
+      {
+         struct agx3_falu_mods mm = {.src0_neg = true};
+         struct agx3_falu_runtime mrt = {.wait_mask = 0x80};
+         uint8_t o[16], l = 0;
+         fail += agx3_falu_mul_imm_runtime(0, 0, 0x40, &mm, &mrt, o, &l);
+      }
+
+      struct agx3_falu_mods im = {.saturate = true};
+      struct agx3_falu_runtime irt = {.wait_mask = 0x80};
+      uint8_t o[16], l = 0;
+      fail += agx3_falu_add_imm_runtime(0, 0, 0x80, &im, &irt, o, &l);
+      im = (struct agx3_falu_mods){0};
+      fail += agx3_falu_add_imm_runtime(1, 0, 0x80, &im, &irt, o, &l);
+   }
+
    struct agx3_falu_mods m = {.src0_neg=true, .src1_abs=true};
    struct agx3_falu_runtime rt = {.wait_mask=63};
    uint8_t out[16], length = 0;

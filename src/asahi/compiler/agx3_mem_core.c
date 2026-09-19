@@ -119,15 +119,16 @@ agx3_mem_encode_load_form(enum agx_isa_encoding enc,
    struct agx3_field_kv base[7];
    unsigned nbase;
    mem_baseline(enc, true, base, &nbase);
-   if (d->agx3b_last_load) {
-      if (enc != AGX_ISA_ENCODING_AGX3B)
-         return false;
+   if (d->last_load && enc == AGX_ISA_ENCODING_AGX3B)
       base[nbase++] = (struct agx3_field_kv)KV(79, 2);
-   }
 
    struct agx3_field_kv ov[32];
    unsigned n = common_overrides(d, /*off*/ 76, /*shift*/ 75, /*mask*/ 73, ov);
    ov[n++] = (struct agx3_field_kv)KV(12, d->slot);
+   /* Only ep2/ep5 carry f82; the other forms fail the compose and the
+    * caller's form order lands on ep2 like Apple's emitter. */
+   if (d->last_load && enc == AGX_ISA_ENCODING_AGX3C)
+      ov[n++] = (struct agx3_field_kv)KV(82, 2);
 
    return agx3_bind_compose(enc, "lddev", ep, base, nbase, ov, n, out, len);
 }
@@ -155,7 +156,7 @@ bool
 agx3_mem_encode_store(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
                       uint8_t out[AGX3_MEM_MAX_LENGTH], uint8_t *len)
 {
-   if (!common_ok(d) || d->agx3b_last_load)
+   if (!common_ok(d) || d->last_load)
       return false;
 
    struct agx3_field_kv base[6];

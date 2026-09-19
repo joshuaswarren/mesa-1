@@ -86,7 +86,7 @@ bool agx3_copy_encode_reg16(enum agx_isa_encoding encoding, uint16_t dest_half,
  */
 bool agx3_copy_encode_reg_to_uniform(enum agx_isa_encoding encoding,
                                      uint16_t uniform_half, uint16_t src_half,
-                                     bool kill,
+                                     bool kill, uint16_t wait_mask,
                                      uint8_t out[AGX3_COPY_MAX_LENGTH],
                                      uint8_t *len);
 

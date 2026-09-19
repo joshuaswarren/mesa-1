@@ -5485,6 +5485,20 @@ optimize_varyings(nir_shader *producer, nir_shader *consumer, bool spirv,
 }
 
 /*
+ * Mark a shader whose varyings nothing consumes as having known interpolation
+ * qualifiers. The flag means "the producer knows how the consumer will
+ * interpolate it", which no consumer satisfies vacuously, and the masks are
+ * empty because a slot nobody reads is not smooth or linear.
+ */
+static void
+nir_set_pre_rasterization_interpolation(nir_shader *nir)
+{
+   nir->info.known_interpolation_qualifiers = true;
+   nir->info.linear_varyings = 0;
+   nir->info.perspective_varyings = 0;
+}
+
+/*
  * Full service varying optimizer. This takes a list of shaders to link in order
  * of stage and a driver-specific optimization callback for a single stage. It
  * then calls nir_opt_varyings and associated passes across all the shaders in
@@ -5511,6 +5525,12 @@ nir_opt_varyings_bulk(nir_shader **shaders, uint32_t num_shaders, bool spirv,
        * linked/unlinked code paths. Honeykrisp depends on this.
        */
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+
+      /* A lone pre-rasterization shader has no varying consumer either; see
+       * the same reasoning at the end of this function.
+       */
+      if (nir->info.stage != MESA_SHADER_FRAGMENT)
+         nir_set_pre_rasterization_interpolation(nir);
       return;
    }
 
@@ -5605,5 +5625,14 @@ nir_opt_varyings_bulk(nir_shader **shaders, uint32_t num_shaders, bool spirv,
 
       producer->info.linear_varyings = fs->info.linear_varyings;
       producer->info.perspective_varyings = fs->info.perspective_varyings;
+   } else {
+      /* A program that ends before rasterization has no consumer for its user
+       * varyings -- only transform feedback and the fixed-function outputs are
+       * observable -- so how they would be interpolated is known vacuously,
+       * and every slot is trivially flat. Leaving the flag false is not the
+       * conservative choice: it denies the backend the inlined UVS indices and
+       * forces the dynamic-index store form instead.
+       */
+      nir_set_pre_rasterization_interpolation(fs);
    }
 }

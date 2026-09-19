@@ -296,6 +296,23 @@ if with_tests
   )
 
   test(
+    'asahi-agx-g17g-tile-format-gate',
+    executable(
+      'asahi-agx-g17g-tile-format-gate',
+      files('tests/test-agx-g17g-tile-format-gate.c'),
+      include_directories : [
+        inc_include, inc_src, inc_asahi, libasahi_lib_includes,
+        include_directories('../libagx'),
+      ],
+      dependencies : [
+        idep_nir, idep_mesautil, idep_libagx_shaders_h, idep_agx_pack,
+      ],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-agx-linker-container',
     executable(
       'asahi-agx-linker-container',

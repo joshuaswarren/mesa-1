@@ -62,9 +62,12 @@ struct agx3_mem_desc {
    uint8_t slot;       /* load only: 1..6 (agx3b) / 1..8 (agx3c) */
    uint16_t wait_mask; /* bit i sets wait slot i */
 
-   /* AGX3b f79=2. Apple's vertex corpus sets this on the final LDDEV and only
-    * the final LDDEV; no AGX3c or store witness carries it. */
-   bool agx3b_last_load;
+   /* Apple marks the final LDDEV of a program, and only that one: AGX3b with
+    * f79=2 (vertex corpus), AGX3c with f82=2, which only the 14-byte ep2/ep5
+    * forms carry (every metal-nt G17G kernel, vertex, fragment and preamble
+    * in gpu/m5-*-reference; a two-load kernel emits the 8-byte form then the
+    * marked one). No store witness carries either. */
+   bool last_load;
 };
 
 bool agx3_mem_encode_load(enum agx_isa_encoding enc,

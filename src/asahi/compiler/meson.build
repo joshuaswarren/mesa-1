@@ -337,6 +337,7 @@ if with_tests
         'agx3_compose/agx3b_tables.c',
         'agx3_compose/agx3c_tables.c',
         'agx3_binder.c',
+        'agx3_pack.c',
         'test/test-agx3-alu-core.c',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args, '-UNDEBUG'],

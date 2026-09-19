@@ -39,6 +39,8 @@ agx_disk_cache_compute_key(struct disk_cache *cache,
       key_size = sizeof(shader_key->vs);
    else if (uncompiled->type == MESA_SHADER_FRAGMENT)
       key_size = sizeof(shader_key->fs);
+   else if (uncompiled->type == MESA_SHADER_GEOMETRY)
+      key_size = sizeof(shader_key->gs);
    else
       key_size = 0;
 

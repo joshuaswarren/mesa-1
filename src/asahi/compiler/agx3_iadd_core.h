@@ -91,6 +91,25 @@ struct agx3_iadd_desc {
     * the second. */
    bool dest_cache;
    uint16_t wait_mask; /* bit i waits scoreboard slot i + 1 */
+   /*
+    * G17G only, both slots 32-bit registers, no shift. `subtract` is Apple's
+    * `isub32` (root f45=100 instead of 80): slot B is subtracted. `saturate`
+    * is f54=1 in place of the shift field. With saturation the 32-bit
+    * operands carry their own signedness in f28 (slot A) and f43 (slot B):
+    * `addsat`/`subsat` over int set both, over uint neither, and the plain
+    * `a - b` sets none. Witnessed byte-exactly against applegpu_g17g
+    * (gpu/m5-xfb-alu-reference.metal, -alu2-, -alu3-):
+    *
+    *   subsat(uint)   2f 00 04 1a 25 00 a2 02 18 81 20 00   f45=100 f54=1
+    *   subsat(int)    2f 00 04 1a 25 08 a2 02 18 81 60 00   + f28=1 f43=1
+    *   addsat(uint)   2f 00 04 1a 21 00 a3 02 38 81 20 00   f45=80 f54=1
+    *   addsat(int)    2f 00 04 1a 21 00 a3 02 38 81 e0 00   + f28=1 f43=1
+    *   a - b          2f 00 04 1a 25 00 a2 02 08 81 21 00   f45=100
+    */
+   bool subtract;
+   bool saturate;
+   bool src_a_sign_extend_32; /* f28 on a 32-bit slot A (saturating only) */
+   bool sign_extend_32;       /* f43 on a 32-bit slot B (saturating only) */
 };
 
 bool agx3_iadd_encode(enum agx_isa_encoding encoding,

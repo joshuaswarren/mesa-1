@@ -53,6 +53,40 @@ test_g17g_programs(void)
       CHECK(output.length == (fragment ? 90 : 84));
       CHECK(memcmp(output.bytes, expected_tail[fragment], 28) == 0);
 
+      /* Eight RGBA8 attachments make the imageblock sample size 32 bytes.
+       * Apple's native eight-target render publishes the same SPECLM as the
+       * one-target render with byte 7 alone moved 0x08 -> 0x20, keeping the
+       * 32x32 tile at exactly the 32 KiB bound. */
+      if (fragment) {
+         struct agx3_g17p_graphics_program_desc mrt = desc;
+         mrt.imageblock.sample_size_B = 32;
+         struct agx3_g17p_graphics_program mrt_output;
+         CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &mrt,
+                                                    &mrt_output));
+         uint8_t expected_mrt[28];
+         memcpy(expected_mrt, expected_tail[1], sizeof(expected_mrt));
+         expected_mrt[7] = 0x20;
+         CHECK(mrt_output.length == output.length);
+         CHECK(memcmp(mrt_output.bytes, expected_mrt, 28) == 0);
+
+         /* A colour-free render keeps the eight-byte spelling. */
+         struct agx3_g17p_graphics_program_desc bare = desc;
+         bare.imageblock.sample_size_B = 0;
+         struct agx3_g17p_graphics_program bare_output;
+         CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &bare,
+                                                    &bare_output));
+         CHECK(memcmp(bare_output.bytes, expected_tail[1], 28) == 0);
+
+         /* Every other sample size is still unwitnessed. */
+         const uint8_t ungrounded[] = {4, 12, 16, 24, 40, 64};
+         for (unsigned i = 0; i < sizeof(ungrounded); ++i) {
+            struct agx3_g17p_graphics_program_desc bad = desc;
+            bad.imageblock.sample_size_B = ungrounded[i];
+            CHECK(!agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &bad,
+                                                        &mrt_output));
+         }
+      }
+
       const uint32_t original_size = desc.shader_binary_size;
       desc.shader_binary_size = 512;
       CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &desc, &output));

@@ -741,6 +741,18 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
       }
    }
 
+   if (agx_device(pipe->screen)->debug & AGX_DBG_FAULTTRACE) {
+      fprintf(stderr,
+              "M5_BLIT %s %ux%u L%u -> %s %ux%u L%u mask=%#x filter=%u "
+              "scissor=%u samples=%u->%u\n",
+              util_format_name(info->src.format), info->src.box.width,
+              info->src.box.height, info->src.level,
+              util_format_name(info->dst.format), info->dst.box.width,
+              info->dst.box.height, info->dst.level, info->mask, info->filter,
+              info->scissor_enable, info->src.resource->nr_samples,
+              info->dst.resource->nr_samples);
+   }
+
    if (info->render_condition_enable && !agx_render_condition_check(ctx))
       return;
 
@@ -784,6 +796,8 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
       ctx, ctx->blitter,
       ASAHI_BLIT |
          (info->render_condition_enable ? 0 : ASAHI_DISABLE_RENDER_COND));
+   if (agx_device(pipe->screen)->debug & AGX_DBG_FAULTTRACE)
+      fprintf(stderr, "M5_BLIT entering u_blitter\n");
    util_blitter_blit(ctx->blitter, info, NULL);
 
    /* The first DRI drawable validation seeds its private MSAA colourbuffer

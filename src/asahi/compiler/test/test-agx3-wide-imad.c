@@ -347,12 +347,21 @@ test_domain_is_closed(void)
    wide_c.src_c_16 = true;
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3B, &wide_c, out, &len));
 
-   /* Only the AGX3b form is witnessed. */
+   /* The AGX3c `imadd64` is witnessed with an immediate or a 64-bit
+    * register addend (test-agx3-iadd-core.c); the addend-free pure multiply
+    * and the sign-extending variants still fail closed there. */
    struct agx3_imad_desc agx3c = {
       .dest = 0, .dest_64 = true, .src_a = 0,
       .multiplier_is_register = true, .multiplier_reg = 2, .no_addend = true,
    };
    CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &agx3c, out, &len));
+   agx3c.no_addend = false;
+   agx3c.addend_is_immediate = true;
+   CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &agx3c, out, &len));
+   agx3c.src_a_sign_extend = true;
+   CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &agx3c, out, &len));
+   agx3c.multiplier_sign_extend = true;
+   CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &agx3c, out, &len));
 }
 
 /*

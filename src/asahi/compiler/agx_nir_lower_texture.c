@@ -273,6 +273,7 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    nir_tex_instr *tex = nir_instr_as_tex(instr);
    const struct agx_texture_lower_options *options = data;
    const bool gen9 = options && options->gen9;
+   const bool gen10 = options && options->gen10;
    b->cursor = nir_before_instr(instr);
 
    if (nir_tex_instr_is_query(tex) && tex->op != nir_texop_lod)
@@ -333,8 +334,9 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
 
       nir_def *(*lower)(nir_builder *, nir_def *, nir_def *, nir_def *,
                          nir_def *, nir_def *, nir_def *, nir_def *, nir_def *) =
-         data && *(const bool *)data ? libagx_lower_txf_robustness_gen9
-                                    : libagx_lower_txf_robustness;
+         gen10   ? libagx_lower_txf_robustness_gen10
+         : gen9  ? libagx_lower_txf_robustness_gen9
+                 : libagx_lower_txf_robustness;
       nir_def *replaced = lower(
          b, texture_descriptor_ptr(b, tex),
          nir_imm_bool(b, has_nonzero_lod(tex)), lod,
@@ -632,7 +634,8 @@ lower_1d_image(nir_builder *b, nir_intrinsic_instr *intr)
  * libagx_lower_txf_robustness for more info.
  */
 static bool
-lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr, bool gen9)
+lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr,
+                            bool gen9, bool gen10)
 {
    if (nir_intrinsic_access(intr) & ACCESS_IN_BOUNDS)
       return false;
@@ -657,7 +660,9 @@ lower_image_load_robustness(nir_builder *b, nir_intrinsic_instr *intr, bool gen9
    /* image_load is effectively the same as txf, reuse the txf lower */
    nir_def *(*lower)(nir_builder *, nir_def *, nir_def *, nir_def *,
                       nir_def *, nir_def *, nir_def *, nir_def *, nir_def *) =
-      gen9 ? libagx_lower_txf_robustness_gen9 : libagx_lower_txf_robustness;
+      gen10   ? libagx_lower_txf_robustness_gen10
+      : gen9  ? libagx_lower_txf_robustness_gen9
+              : libagx_lower_txf_robustness;
    nir_def *replaced = lower(
       b, nir_load_from_texture_handle_agx(b, intr->src[0].ssa),
       nir_imm_bool(b, false /* lower LOD */), lod,
@@ -674,6 +679,7 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    b->cursor = nir_before_instr(&intr->instr);
    const struct agx_texture_lower_options *options = data;
    const bool gen9 = options && options->gen9;
+   const bool gen10 = options && options->gen10;
 
    switch (intr->intrinsic) {
    case nir_intrinsic_image_load:
@@ -687,7 +693,7 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       if (intr->intrinsic == nir_intrinsic_image_load ||
           intr->intrinsic == nir_intrinsic_bindless_image_load ||
           intr->intrinsic == nir_intrinsic_bindless_image_sparse_load) {
-         lower_image_load_robustness(b, intr, gen9);
+         lower_image_load_robustness(b, intr, gen9, gen10);
       }
 
       switch (nir_intrinsic_image_dim(intr)) {

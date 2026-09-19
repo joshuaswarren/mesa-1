@@ -17,6 +17,11 @@ agx_g17p_rt0_pbe_format(enum pipe_format format)
              : util_format_linear(format);
 }
 
+/* The shape of the RT0 end-of-tile store follows from the logical format
+ * alone -- how many imageblock words it occupies and which raw store the
+ * tilebuffer lowering leaves behind -- so both AGX3 generations configure it
+ * the same way. Only the native program text differs between them.
+ */
 void
 agx_g17p_configure_rt0_eot_key(enum pipe_format format,
                                struct agx_shader_key *key)

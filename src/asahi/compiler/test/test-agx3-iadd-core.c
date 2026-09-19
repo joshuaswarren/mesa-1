@@ -731,25 +731,28 @@ main(void)
     * the top one, exactly as AGX3b's signals slot 6.
     */
    {
+      /* Apple's source is dead in each of these, which is f42 -- liveness,
+       * not a form constant. The encoder reproduces the witness when it is
+       * told so, and the live variant below differs in that bit alone. */
       static const struct {
          const char *name;
          struct agx3_iadd_desc d;
          uint8_t bytes[12];
       } cvec[] = {
          {"u32 shift0", {.dest = 0, .immediate = 7, .src = 0,
-                         .wait_mask = 1u << 7},
+                         .src_kill = true, .wait_mask = 1u << 7},
           {0x2f, 0x03, 0x04, 0x3a, 0x25, 0x00, 0xa3, 0x02, 0x20, 0x80, 0x21,
            0x00}},
          {"u32 shift2", {.dest = 0, .immediate = 7, .src = 0, .shift = 2,
-                         .wait_mask = 1u << 7},
+                         .src_kill = true, .wait_mask = 1u << 7},
           {0x2f, 0x03, 0x04, 0x3a, 0x25, 0x00, 0xa3, 0x02, 0x20, 0x80, 0x25,
            0x00}},
          {"u16 shift2", {.dest = 0, .immediate = 7, .src = 0, .src_16 = true,
-                         .shift = 2, .wait_mask = 1u << 7},
+                         .shift = 2, .src_kill = true, .wait_mask = 1u << 7},
           {0x2f, 0x03, 0x04, 0x3a, 0x25, 0x00, 0xa3, 0x02, 0x20, 0x00, 0x25,
            0x00}},
          {"s16 shift2", {.dest = 0, .immediate = 7, .src = 0, .src_16 = true,
-                         .sign_extend = true, .shift = 2,
+                         .sign_extend = true, .shift = 2, .src_kill = true,
                          .wait_mask = 1u << 7},
           {0x2f, 0x03, 0x04, 0x3a, 0x25, 0x00, 0xa3, 0x02, 0x20, 0x00, 0xa5,
            0x00}},
@@ -766,10 +769,160 @@ main(void)
          }
       }
 
+      /* A live source clears f42 and changes nothing else. A 32-bit
+       * register move is exactly this add with a zero addend, so pinning
+       * the bit killed a register the shader still reads. */
+      {
+         struct agx3_iadd_desc live = cvec[0].d;
+         live.src_kill = false;
+         uint8_t lo[AGX3_IADD_MAX_LENGTH];
+         uint8_t ll = 0;
+         CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &live, lo, &ll));
+         CHECK(ll == 12);
+         ++checks;
+         if (ll != 12 || memcmp(lo, cvec[0].bytes, 12) == 0) {
+            ++failures;
+            fprintf(stderr, "FAIL agx3c u32 live source\n");
+         }
+      }
+
       /* AGX3c has eight slots, so bit 8 is still out of range. */
       struct agx3_iadd_desc bad = {.dest = 0, .immediate = 7, .src = 0,
                                    .wait_mask = 1u << 8};
       CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+   }
+
+   /*
+    * AGX3c subtract and saturate over two 32-bit registers, Apple Metal for
+    * applegpu_g17g (gpu/m5-xfb-alu-reference.metal, -alu2-, -alu3-). Slot A
+    * is r0 (dead), slot B is r2 (dead), the result lands in r0 and every
+    * operand waits for the load in slot 8.
+    */
+   {
+      static const struct {
+         const char *name;
+         struct agx3_iadd_desc d;
+         uint8_t bytes[12];
+      } gvec[] = {
+         {"subsat(uint)",
+          {.src_a_is_register = true, .src_a_reg = 0, .src_a_kill = true,
+           .src = 4, .src_kill = true, .subtract = true, .saturate = true,
+           .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x1a, 0x25, 0x00, 0xa2, 0x02, 0x18, 0x81, 0x20,
+           0x00}},
+         {"subsat(int)",
+          {.src_a_is_register = true, .src_a_reg = 0, .src_a_kill = true,
+           .src = 4, .src_kill = true, .subtract = true, .saturate = true,
+           .src_a_sign_extend_32 = true, .sign_extend_32 = true,
+           .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x1a, 0x25, 0x08, 0xa2, 0x02, 0x18, 0x81, 0x60,
+           0x00}},
+         {"addsat(uint)",
+          {.src_a_is_register = true, .src_a_reg = 0, .src_a_kill = true,
+           .src = 4, .src_kill = true, .saturate = true,
+           .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x1a, 0x21, 0x00, 0xa3, 0x02, 0x38, 0x81, 0x20,
+           0x00}},
+         {"addsat(int)",
+          {.src_a_is_register = true, .src_a_reg = 0, .src_a_kill = true,
+           .src = 4, .src_kill = true, .saturate = true,
+           .src_a_sign_extend_32 = true, .sign_extend_32 = true,
+           .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x1a, 0x21, 0x00, 0xa3, 0x02, 0x38, 0x81, 0xe0,
+           0x00}},
+         {"a - b",
+          {.src_a_is_register = true, .src_a_reg = 0, .src_a_kill = true,
+           .src = 4, .src_kill = true, .subtract = true,
+           .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x1a, 0x25, 0x00, 0xa2, 0x02, 0x08, 0x81, 0x21,
+           0x00}},
+      };
+      for (unsigned i = 0; i < sizeof(gvec) / sizeof(gvec[0]); ++i) {
+         uint8_t co[AGX3_IADD_MAX_LENGTH];
+         uint8_t cl = 0;
+         CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &gvec[i].d, co, &cl));
+         ++checks;
+         if (cl != 12 || memcmp(co, gvec[i].bytes, 12) != 0) {
+            ++failures;
+            fprintf(stderr, "FAIL agx3c %s\n", gvec[i].name);
+         }
+      }
+
+      /* Unwitnessed neighbours stay closed: G17P, a narrow operand, a
+       * shifted subtract, signedness without saturation. */
+      struct agx3_iadd_desc bad = gvec[0].d;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &bad, out, &len));
+      bad = gvec[0].d;
+      bad.src_16 = true;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+      bad = gvec[4].d;
+      bad.shift = 2;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+      bad = gvec[4].d;
+      bad.sign_extend_32 = true;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+   }
+
+   /*
+    * AGX3c 32x32->64 multiply-add, Apple Metal for applegpu_g17g
+    * (gpu/m5-xfb-alu-reference.metal): `ulong(a) * ulong(b) + 12` and
+    * `ulong(a) * ulong(b) + c`, every operand dead, waiting for slot 8.
+    */
+   {
+      static const struct {
+         const char *name;
+         struct agx3_imad_desc d;
+         uint8_t bytes[12];
+      } wvec[] = {
+         {"imadd64 imm",
+          {.dest = 0, .dest_64 = true, .src_a = 0, .src_a_kill = true,
+           .multiplier_is_register = true, .multiplier_reg = 2,
+           .multiplier_kill = true, .addend_is_immediate = true,
+           .addend_immediate = 12, .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x03, 0x21, 0x00, 0xa9, 0x02, 0xa8, 0x80, 0x21,
+           0x30}},
+         {"imadd64 reg",
+          {.dest = 0, .dest_64 = true, .src_a = 10, .src_a_kill = true,
+           .multiplier_is_register = true, .multiplier_reg = 6,
+           .multiplier_kill = true, .src_c = 0, .src_c_64 = true,
+           .src_c_kill = true, .wait_mask = 1u << 7},
+          {0x2f, 0x02, 0x04, 0x22, 0x21, 0x00, 0xa9, 0x02, 0xa8, 0x81, 0x20,
+           0x48}},
+         /* gpu/m5-xfb-alu5-reference.metal: the addend-free product and the
+          * signed product. */
+         {"imadd64 pure",
+          {.dest = 0, .dest_64 = true, .src_a = 0, .src_a_kill = true,
+           .multiplier_is_register = true, .multiplier_reg = 2,
+           .multiplier_kill = true, .addend_is_immediate = true,
+           .addend_immediate = 0, .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x02, 0x21, 0x00, 0xa9, 0x02, 0xa8, 0x80, 0x20,
+           0x30}},
+         {"imadd64 signed",
+          {.dest = 0, .dest_64 = true, .src_a = 0, .src_a_kill = true,
+           .src_a_sign_extend = true, .multiplier_is_register = true,
+           .multiplier_reg = 2, .multiplier_kill = true,
+           .multiplier_sign_extend = true, .addend_is_immediate = true,
+           .addend_immediate = 0, .wait_mask = 1u << 7},
+          {0x2f, 0x00, 0x04, 0x02, 0x21, 0x08, 0xa9, 0x02, 0xa8, 0x80, 0x20,
+           0xb0}},
+      };
+      for (unsigned i = 0; i < sizeof(wvec) / sizeof(wvec[0]); ++i) {
+         uint8_t co[AGX3_IADD_MAX_LENGTH];
+         uint8_t cl = 0;
+         CHECK(agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &wvec[i].d, co, &cl));
+         ++checks;
+         if (cl != 12 || memcmp(co, wvec[i].bytes, 12) != 0) {
+            ++failures;
+            fprintf(stderr, "FAIL agx3c %s\n", wvec[i].name);
+         }
+      }
+      struct agx3_imad_desc bad = wvec[0].d;
+      bad.src_a_sign_extend = true;
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+      bad = wvec[0].d;
+      bad.multiplier_is_register = false;
+      bad.multiplier = 3;
+      CHECK(!agx3_imad_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
    }
 
    /*

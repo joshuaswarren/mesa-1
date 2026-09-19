@@ -223,7 +223,12 @@ test_fail_closed(void)
    d.slot = 1;
    d.wait_mask = 3;
    CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3B, &d));
+   /* Slot eight is G17G's; the compute argument-buffer read waits on it in
+    * the ten-byte form, which an immediate texture now reaches as well. */
    d.wait_mask = 0x80;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(length == 10);
+   d.wait_mask = 0x100;
    CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
 
    d.wait_mask = 0;
@@ -434,6 +439,97 @@ test_sample_witnesses(void)
         .coord_kill = true, .final = true},
        "05800cb8b0000000010010000100",
        "0f061600418060290118010000000000008000000000"},
+      /* The same implicit-LOD sample once per result mask. Apple's own
+       * applegpu_g17g compiler emits all fifteen from
+       * `gpu/m5-sample-mask-reference.metal`, and across them nothing moves
+       * but f75: the masks that name one channel take Apple's destination
+       * register 2, the rest register 0. GL fragment shaders reach the
+       * narrow ones constantly -- vec4(texture(s, uv).rgb, 1.0) is mask 7 --
+       * and AGX3C used to admit only 1, 3, 8, 12 and 15. */
+      {"ts_auto implicit LOD mask 1 (x)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca090000000010010000100",
+       "0f061600418000210118010000000000008000000000"},
+      {"ts_auto implicit LOD mask 2 (y)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 2,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca890000000010010000100",
+       "0f061600418020210118010000000000008000000000"},
+      {"ts_auto implicit LOD mask 3 (xy)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 3,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca8b0000000010010000100",
+       "0f061600418020290118010000000000008000000000"},
+      {"ts_auto implicit LOD mask 4 (z)",
+       {.dest = 2, .coord = 0, .width = AGX3_TEX_W32, .mask = 4,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "0d800cb090000000010010000100",
+       "1f061600418040210118010000000000008000000000"},
+      {"ts_auto implicit LOD mask 5 (xz)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 5,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca090000000010050000100",
+       "0f061600418000210318010000000000008000000000"},
+      {"ts_auto implicit LOD mask 6 (yz)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 6,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca890000000010050000100",
+       "0f061600418020210318010000000000008000000000"},
+      {"ts_auto implicit LOD mask 7 (xyz)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 7,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb0b0000000010010000100",
+       "0f061600418040290118010000000000008000000000"},
+      {"ts_auto implicit LOD mask 8 (w)",
+       {.dest = 2, .coord = 0, .width = AGX3_TEX_W32, .mask = 8,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "0d800cb890000000010010000100",
+       "1f061600418060210118010000000000008000000000"},
+      {"ts_auto implicit LOD mask 9 (xw)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 9,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca0b0000000010010000100",
+       "0f061600418000290118010000000000008000000000"},
+      {"ts_auto implicit LOD mask 10 (yw)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 10,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb090000000010050000100",
+       "0f061600418040210318010000000000008000000000"},
+      {"ts_auto implicit LOD mask 11 (xyw)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 11,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca8b0000000010050000100",
+       "0f061600418020290318010000000000008000000000"},
+      {"ts_auto implicit LOD mask 12 (zw)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 12,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb890000000010050000100",
+       "0f061600418060210318010000000000008000000000"},
+      {"ts_auto implicit LOD mask 13 (xzw)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 13,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800ca0b0000000010050000100",
+       "0f061600418000290318010000000000008000000000"},
+      {"ts_auto implicit LOD mask 14 (yzw)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 14,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "05800cb0b0000000010050000100",
+       "0f061600418040290318010000000000008000000000"},
       /* Apple's G17P texture.sample offset differential sets f141/f51 and
        * packs signed x/y nibbles in f43. These three result shapes prove the
        * offset fields are orthogonal to both width and mask:
@@ -478,6 +574,46 @@ test_sample_witnesses(void)
         .wait_mask = 1, .coord_kill = true, .final = true,
         .three_d = true},
        "05800cb8b0003900000010080100", NULL},
+      /* G17G's own cube comparisons (gpu/m5-shadow-array-cube-reference.metal,
+       * metal-nt -arch applegpu_g17g). The fragment ones terminate their
+       * sample group; the vertex one does not. Every witness compares, so a
+       * G17G cube sample without a comparison stays refused. */
+      {"gpu1 cube comparison implicit LOD",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .texture = 0, .sampler = 1, .lod = AGX3_TEX_LOD_AUTO, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true, .shadow = true,
+        .cube = true, .sample_group_end = true},
+       NULL, "0f04160045810121010002000000"},
+      {"gpu1 cube comparison bias(reg)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .texture = 0, .sampler = 1, .lod = AGX3_TEX_LOD_BIAS_REGISTER,
+        .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+        .shadow = true, .cube = true, .sample_group_end = true},
+       NULL, "0f04160041810321010002000000"},
+      {"gpu1 cube comparison level(reg)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .texture = 0, .sampler = 1, .lod = AGX3_TEX_LOD_REGISTER, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true, .shadow = true,
+        .cube = true, .sample_group_end = true},
+       NULL, "0f05160041810221010002000000"},
+      {"gpu1 cube-array comparison implicit LOD",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .texture = 0, .sampler = 1, .lod = AGX3_TEX_LOD_AUTO, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true, .shadow = true,
+        .cube = true, .array = true, .sample_group_end = true},
+       NULL, "0f04160045810321010002000000"},
+      {"gpu1 cube-array comparison level(reg)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .texture = 0, .sampler = 1, .lod = AGX3_TEX_LOD_REGISTER, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true, .shadow = true,
+        .cube = true, .array = true, .sample_group_end = true},
+       NULL, "0f05160041810021010802000000"},
+      {"gpu1 vertex cube-array comparison level(reg)",
+       {.dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .texture = 0, .sampler = 0, .lod = AGX3_TEX_LOD_REGISTER, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true, .shadow = true,
+        .cube = true, .array = true, .vertex_stage = true},
+       NULL, "4f05120041800021010802000000"},
       {"native cube implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
@@ -553,13 +689,17 @@ test_sample_witnesses(void)
    uint8_t bytes[AGX3_TEX_MAX_LENGTH];
    uint8_t length;
    for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
-      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &v[i].d, bytes,
-                                   &length));
-      CHECK(length == 14 && hex_eq(bytes, length, v[i].hex_b));
+      /* A shape witnessed on only one encoding names only that one. */
+      if (v[i].hex_b != NULL) {
+         CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &v[i].d, bytes,
+                                      &length));
+         CHECK(length == 14 && hex_eq(bytes, length, v[i].hex_b));
+      }
       if (v[i].hex_c != NULL) {
          CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &v[i].d, bytes,
                                       &length));
-         CHECK(length == 22 && hex_eq(bytes, length, v[i].hex_c));
+         CHECK((length == 22 || length == 14) &&
+               hex_eq(bytes, length, v[i].hex_c));
       }
    }
 
@@ -629,15 +769,19 @@ test_sample_witnesses(void)
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &abi_sample,
                                  bytes, &length));
 
-   /* The bias form is G17P-only, refuses a value past the 12-bit field, and
-    * refuses a zero bias, which Apple emits as the plain implicit sample. */
+   /* The plain 2D bias form is witnessed on both encodings (see
+    * test_g17g_sample_lod_witnesses for G17G); it refuses a value past the
+    * 12-bit field, and refuses a zero bias, which Apple emits as the plain
+    * implicit sample. */
    struct agx3_tex_sample_desc bad = {
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
       .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
       .coord_kill = true, .final = true,
    };
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bad, bytes,
-                                 &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bad, bytes,
+                                &length));
+   CHECK(length == 22 &&
+         hex_eq(bytes, length, "0f051600458060290100010020000000008000000000"));
    bad.lod_x64 = 0;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
@@ -1001,14 +1145,19 @@ test_gradient_and_register_bias(void)
    bad_shadow.sample_abi = AGX3_TEX_SAMPLE_ABI_APPLE_FRAGMENT;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad_shadow, bytes,
                                  &length));
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &shadow, bytes,
-                                 &length));
+   /* The plain 2D comparison is witnessed on G17G in its compact form
+    * (test_g17g_sample_lod_witnesses). */
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &shadow, bytes,
+                                &length));
+   CHECK(length == 10 && hex_eq(bytes, length, "0f071600418000210018"));
 
-   /* Both forms are AGX3b-only and neither carries an immediate LOD. */
+   /* The gradient is AGX3b-only; the per-lane bias is witnessed on G17G too
+    * and neither carries an immediate LOD. */
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &grad, bytes,
                                  &length));
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bias_reg, bytes,
-                                 &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &bias_reg, bytes,
+                                &length));
+   CHECK(length == 22);
    struct agx3_tex_sample_desc bad = grad;
    bad.lod_x64 = 32;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
@@ -1191,10 +1340,14 @@ test_sample_fail_closed(void)
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d = good;
    d.offset = true;
-   /* Offset (0, 0) is the plain form in native, and AGX3c has no witness. */
+   /* Offset (0, 0) is the plain form in native on both encodings. The G17G
+    * 2D immediate offset itself is witnessed (test_g17g_sample_lod_witnesses)
+    * with the same f43/f51/f141 fields as AGX3B. */
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
-   d.offset_xyz = 0xf1;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   d.offset_xyz = 0xf1;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(length == 22);
    /* The driver stages the layer, leaving separate immediate fields for
     * level and offset. The direct Apple-fragment profile still collides. */
    d.lod = AGX3_TEX_LOD_LEVEL;
@@ -1223,13 +1376,18 @@ test_sample_fail_closed(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d.offset_xyz = 0x1000;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
+   /* G17G terminates its final fragment sample (a lone immediate level is
+    * witnessed with f156) and, like G17P, clears it on the earlier plain 2D
+    * members of a group (gpu/m5-shadow-2d-reference.metal); a member marked
+    * both nonterminal and terminal is contradictory on either. */
    d = good;
    d.sample_group_end = true;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
    d = good;
    d.sample_group_nonterminal = true;
-   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
    d.sample_group_end = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d = good;
    d.lod = AGX3_TEX_LOD_GRADIENT;
@@ -1971,12 +2129,14 @@ test_fetch_lod(void)
    CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
    CHECK(len == sizeof(dynamic) && !memcmp(b, dynamic, len));
 
-   /* An immediate level and a per-lane level are mutually exclusive, and the
-    * per-lane form has no AGX3c witness. */
+   /* An immediate level and a per-lane level are mutually exclusive. The
+    * per-lane form's AGX3c witness is the fragment read(coord, level) in
+    * gpu/m5-fetch-lod-reference.metal, checked byte-exact below. */
    d.lod_x64 = 64;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
    d.lod_x64 = 0;
-   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, b, &len));
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &d, b, &len));
+   CHECK(len == 10);
    d.register_lod = false;
    d.lod_x64 = 2048;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, b, &len));
@@ -2138,30 +2298,119 @@ test_cube_coordinate_stage(void)
       AGX_ISA_ENCODING_AGX3B, 6, 1, 0, false, true, bytes, &len));
    CHECK(len == sizeof(native_shadow_array) &&
          !memcmp(bytes, native_shadow_array, len));
-   CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3C, 2, 1, 0,
-                                false, true, bytes, &len));
+   /* G17G carries a cube sample's per-lane level in this same publication,
+    * paired with the cube Z -- and for a cube array, with the combined
+    * face-and-layer word. Apple's own depthcube and depthcube_array
+    * sample_compare with level(reg) (gpu/m5-shadow-array-cube-reference,
+    * text-16 and text-08 of the extracted corpus). Staging the level
+    * separately instead made every lane read level zero. */
+   static const uint8_t g17g_cube_z_lod[] = {
+      0x37,0x02,0x00,0x0a,0x25,0x00,0xaa,0x0a,0xc0,0x00,0x60,0x30,0x09,0x00,
+   };
+   CHECK(agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3C, false, 2, 3, 1, 0,
+                                   false, true, false, true, bytes, &len));
+   CHECK(len == sizeof(g17g_cube_z_lod) &&
+         !memcmp(bytes, g17g_cube_z_lod, len));
+   static const uint8_t g17g_cube_array_z_lod[] = {
+      0x37,0x02,0x00,0x4a,0x25,0x00,0xaa,0x0a,0xc0,0x02,0x61,0x40,0x29,0x00,
+   };
+   CHECK(agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3C, true, 20, 11, 1, 0,
+                                   false, true, false, true, bytes, &len));
+   CHECK(len == sizeof(g17g_cube_array_z_lod) &&
+         !memcmp(bytes, g17g_cube_array_z_lod, len));
+   /* Before that publication, a G17G cube-array comparison normalizes its
+    * integer layer into a general register -- the one PACK_SMPIR in this
+    * file whose destination is a GPR (f9 = 2, f56 = 3) rather than the
+    * staging file. Apple's depthcube_array fragment, text-08. */
+   static const uint8_t g17g_cube_array_normalize[] = {
+      0x27,0x00,0x00,0x9a,0x2d,0x00,0xaa,0x12,0x00,0x00,0x40,0x30,0x81,0x00,
+   };
+   CHECK(agx3_tex_normalize_cube_array_layer(AGX_ISA_ENCODING_AGX3C, 8, 16,
+                                             false, true, bytes, &len));
+   CHECK(len == sizeof(g17g_cube_array_normalize) &&
+         !memcmp(bytes, g17g_cube_array_normalize, len));
+   CHECK(!agx3_tex_normalize_cube_array_layer(AGX_ISA_ENCODING_AGX3B, 8, 16,
+                                              false, true, bytes, &len));
+   CHECK(!agx3_tex_normalize_cube_array_layer(AGX_ISA_ENCODING_AGX3C, 9, 16,
+                                              false, true, bytes, &len));
+
+   /* G17P has no witness for the pair, and a cube array's word operand must
+    * stay even. */
+   CHECK(!agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3B, false, 2, 3, 1, 0,
+                                    false, true, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3C, true, 21, 11, 1, 0,
+                                    false, true, false, true, bytes, &len));
+
+   /* The G17G forms of both stagers are witnessed below (the shadow
+    * array/cube set); only the G17P misalignments stay closed here. */
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 3, 1, 0,
                                 false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
                                 true, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_array_shadow(
-      AGX_ISA_ENCODING_AGX3C, 6, 1, 0, false, true, bytes, &len));
-   CHECK(!agx3_tex_stage_cube_array_shadow(
       AGX_ISA_ENCODING_AGX3B, 7, 1, 0, false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_array_shadow(
       AGX_ISA_ENCODING_AGX3B, 6, 1, 0, true, true, bytes, &len));
-   CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3C, 4, 6, 20, 0,
-                                 false, bytes, &len));
+   /* G17G runs the identical pipeline. Apple's own depthcube fragment
+    * (gpu/m5-shadow-array-cube-reference.metal, text-14) keeps XYZ in
+    * halves 4/6/14 and the three axes in 0/8/4, reciprocates the major axis
+    * in place, then finalizes both face coordinates onto slot 1. The major
+    * axis takes Gen10's shorter alternative -- two bytes shorter in field
+    * terms, same 14-byte instruction -- and carries no axis selector. */
+   static const uint8_t gpu1_cem[3][14] = {
+      {0x27,0x02,0x00,0x0a,0x21,0x90,0xa2,0x02,0x04,0x84,0x1f,0x00,0x00,0xc0},
+      {0x27,0x02,0x00,0x0a,0x29,0xb0,0xa2,0x12,0x04,0x84,0x1f,0x00,0x00,0xc0},
+      {0x27,0x02,0x00,0x0a,0x29,0xb0,0xa2,0x0a,0x04,0x06,0xe7,0x00,0x00,0xc0},
+   };
+   const uint16_t gpu1_dest[3] = {0, 8, 4};
+   for (unsigned axis = 0; axis < 3; ++axis) {
+      CHECK(agx3_tex_cube_cem_calc_to(AGX_ISA_ENCODING_AGX3C, 4, 6, 14,
+                                      gpu1_dest[axis], axis, axis == 2,
+                                      bytes, &len));
+      CHECK(len == sizeof(gpu1_cem[axis]) &&
+            !memcmp(bytes, gpu1_cem[axis], len));
+   }
+   static const uint8_t gpu1_rcp[10] = {
+      0x27,0x00,0x04,0x18,0x2a,0x20,0xa1,0x02,0x30,0x00,
+   };
+   CHECK(agx3_tex_cube_cem_rcp_to(AGX_ISA_ENCODING_AGX3C, 0, bytes, &len));
+   CHECK(len == sizeof(gpu1_rcp) && !memcmp(bytes, gpu1_rcp, len));
+   static const uint8_t gpu1_finalize[2][12] = {
+      {0x09,0x09,0x2e,0x81,0x23,0xa0,0x42,0x00,0x00,0x02,0x02,0x00},
+      {0x19,0x05,0x3e,0x01,0x23,0xa0,0x42,0x00,0x00,0x02,0x02,0x00},
+   };
+   for (unsigned component = 0; component < 2; ++component) {
+      CHECK(agx3_tex_cube_cem_finalize_to(
+         AGX_ISA_ENCODING_AGX3C, component, 0, gpu1_dest[component + 1], 1,
+         bytes, &len));
+      CHECK(len == sizeof(gpu1_finalize[component]) &&
+            !memcmp(bytes, gpu1_finalize[component], len));
+   }
+   /* The driver's own fixed-scratch ABI composes on G17G too, and its
+    * discarded component-1 finalizer keeps the G17P bytes: the transaction
+    * lifetime bit sits in the same place in both encodings. */
+   CHECK(agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3C, 16, 18, 20, 1, false,
+                                bytes, &len));
+   CHECK(agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3C, 1, true, bytes,
+                                    &len));
+   CHECK(len == sizeof(finalize[1]) && !memcmp(bytes, finalize[1], len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 4, 6, 20, 0,
                                  true, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 128, 6, 20, 0,
                                  false, bytes, &len));
-   CHECK(!agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3C, 0, false,
-                                     bytes, &len));
+   CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3C, 128, 6, 20, 0,
+                                 false, bytes, &len));
    CHECK(!agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3B, 0, true,
                                      bytes, &len));
    CHECK(!agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3B, 2, false,
                                      bytes, &len));
+   /* Both encodings group their finalizers through a three-bit selector. */
+   CHECK(!agx3_tex_cube_cem_finalize_to(AGX_ISA_ENCODING_AGX3B, 0, 0, 8, 7,
+                                        bytes, &len));
+   CHECK(agx3_tex_cube_cem_finalize_to(AGX_ISA_ENCODING_AGX3C, 0, 0, 8, 7,
+                                       bytes, &len));
+   CHECK(!agx3_tex_cube_cem_finalize_to(AGX_ISA_ENCODING_AGX3C, 0, 0, 8, 8,
+                                        bytes, &len));
    return 0;
 }
 
@@ -2298,8 +2547,37 @@ test_multisample_sample_stage(void)
                                    false, false, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 3, 0,
                                    false, true, bytes, &len));
-   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 4, 0,
+   /* G17G publishes the same operand, with its own baseline and eight wait
+    * slots (gpu/m5-ms-read-reference.metal: Apple's constant sample index
+    * takes f15 and a constant-buffer one f17, while Mesa's GPR keeps f16). */
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 4, 0,
+                                  false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "2700002a2500aa0a00004a300800"));
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 4, 0x80,
+                                  false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 4, 0x100,
                                    false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3C, 128, 0,
+                                   false, true, bytes, &len));
+   /* The G17G multisample read itself: the staged-sample form with f76 = 2,
+    * colour and depth. The multisample ARRAY read takes the literal layer
+    * form and stays closed with the ordinary array fetch. */
+   {
+      struct agx3_tex_fetch_desc ms = {
+         .width = AGX3_TEX_W32, .mask = 15, .slot = 1, .wait_mask = 1,
+         .coord_kill = true, .final = true, .multisample = true,
+         .staged_sample = true, .sampler_value = 1,
+      };
+      uint8_t msb[AGX3_TEX_MAX_LENGTH], mslen;
+      CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &ms, msb, &mslen));
+      CHECK(hex_eq(msb, mslen, "0f041a0045816129010802000000"));
+      ms.mask = 1;
+      CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &ms, msb, &mslen));
+      CHECK(hex_eq(msb, mslen, "0f041a0045810121010802000000"));
+      ms.mask = 15;
+      ms.array = true;
+      CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &ms, msb, &mslen));
+   }
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0x40,
                                    false, true, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 4, 0,
@@ -2580,8 +2858,8 @@ test_offset_witnesses(void)
    d.lod_x64 = 0;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
 
-   /* Native 3D offsets use a third nibble. Cubes and AGX3c remain closed;
-    * native folds the all-zero offset to a plain sample. */
+   /* Native 3D offsets use a third nibble. Cubes remain closed and native
+    * folds the all-zero offset to a plain sample. */
    d = base;
    d.offset = true;
    d.offset_xyz = 0;
@@ -2593,6 +2871,8 @@ test_offset_witnesses(void)
    d.cube = true;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes, &length));
    d.cube = false;
+   /* This row carries Apple's fragment ABI, which stays AGX3b-only; the
+    * G17G driver-ABI offset is covered by test_g17g_sample_lod_witnesses. */
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &d, bytes, &length));
    return 0;
 }
@@ -2830,6 +3110,47 @@ test_m5_indexed_reads(void)
    CHECK(agx3_tex_stage_array_layer(AGX_ISA_ENCODING_AGX3C, 4, 8, 0,
                                   false, true, bytes, &length));
    CHECK(hex_eq(bytes, length, "3700002a2507aa0a000040308100"));
+
+   /* A bindful G17G array fetch does not stage its layer: the sample names
+    * the layer's own half. Apple's own fragments, with the layer in half 15,
+    * 16, 17 or 12 (gpu/m5-fetch-array-lod-reference.metal and
+    * m5-fetch-array-lod2-reference.metal). */
+   struct agx3_tex_fetch_desc a = {
+      .width = AGX3_TEX_W32, .mask = 15, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .array = true,
+      .register_lod = true, .layer_half = 15,
+   };
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &a, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f051a0045806129011802000f00"));
+   a.sampler_value = 1;
+   a.layer_half = 16;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &a, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f051a0045816129011802001000"));
+   a.mask = 1;
+   a.layer_half = 15;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &a, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f051a0045810121011802000f00"));
+   a.mask = 15;
+   a.layer_half = 17;
+   a.final = false;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &a, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f051a0045016129011802001100"));
+   /* Level zero adds f51 and drops the published level. */
+   a.final = true;
+   a.register_lod = false;
+   a.layer_half = 12;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &a, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f071a0045816329010804000c00"));
+   a.mask = 1;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &a, bytes, &length));
+   CHECK(hex_eq(bytes, length, "0f071a0045810321010804000c00"));
+   /* A non-zero immediate level takes a longer page Apple alone witnesses,
+    * and the layer half is bounded like every other register operand. */
+   a.lod_x64 = 64;
+   CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &a));
+   a.lod_x64 = 0;
+   a.layer_half = 192;
+   CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &a));
    d.lod_x64 = 64;
    CHECK(rejected_and_cleared(AGX_ISA_ENCODING_AGX3C, &d));
    d.lod_x64 = 0;
@@ -3117,7 +3438,9 @@ test_indexed_offset_witnesses(void)
    CHECK(agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 12, 13, 6, 0,
                                    false, true, false, true, bytes, &length));
    CHECK(hex_eq(bytes, length, "1705540600183400f0e42500"));
-   CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3C, 12, 13, 6, 0,
+   /* The G17G form is witnessed (layer 8, level 9, slot 1, below); a ninth
+    * slot is still out of its range. */
+   CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3C, 12, 13, 9, 0,
                                     false, true, false, true, bytes, &length));
    CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 128, 13, 6, 0,
                                     false, true, false, true, bytes, &length));
@@ -3334,10 +3657,460 @@ test_runtime_gather_witnesses(void)
    return 0;
 }
 
+/*
+ * G17G (AGX3C) 2D sample LOD, offset and comparison witnesses. Fifteen
+ * fragment render pipelines (gpu/m5-sample-lod-reference.metal) compiled by
+ * Apple's offline translator for applegpu_g17g (MetalToolchain v27.1.5194.15,
+ * -arch applegpu_g17g); the sample bytes were read straight from the native
+ * text sections and recomposed byte-exact through the AGX3C tables. Every
+ * form carries the AGX3B field values on top of the implicit-LOD control:
+ * bias(reg) f139=3, level(reg) f139=4, bias(k) f139=1/f37/f29=k*64,
+ * level(k) f139=2/f37/f29, offset f43/f51/f141, comparison f143/f75=1/no f74.
+ * Depth comparisons without an offset take the compact ten-byte form.
+ */
+static int
+test_g17g_sample_lod_witnesses(void)
+{
+   struct gvec {
+      const char *name;
+      struct agx3_tex_sample_desc d;
+      const char *hex;
+   };
+   static const struct gvec v[] = {
+      {"t.sample(s, uv)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "0f061600418060290118010000000000008000000000"},
+      {"t.sample(s, uv, bias(reg))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "0f061600458061290118010000000000008000000000"},
+      {"t.sample(s, uv, level(reg))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "0f071600458060290118010000000000008000000000"},
+      {"t.sample(s, uv, bias(0.5f))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true},
+       "0f051600458060290100010020000000008000000000"},
+      /* A lone fragment immediate level terminates its own group on G17G
+       * (f156 set), unlike the compute t_base witness; the stream packer
+       * supplies sample_group_end for AGX3C fragment programs. */
+      {"t.sample(s, uv, level(2.0f))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 128, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .sample_group_end = true},
+       "0f041600418060290100010080000000008000000000"},
+      {"t.sample(s, uv, int2(1, 2))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .offset = true, .offset_xyz = 0x21},
+       "0f061600418063290118010000802100008000000000"},
+      {"t.sample(s, uv, bias(reg), int2(1, 2))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .offset = true, .offset_xyz = 0x21},
+       "0f061600458060290100030000802100008000000000"},
+      {"depth.sample_compare(s, uv, r)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .shadow = true},
+       "0f071600418000210018"},
+      {"depth.sample_compare(s, uv, r, bias(reg))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_BIAS_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .shadow = true},
+       "0f071600458001210018"},
+      {"depth.sample_compare(s, uv, r, level(reg))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .shadow = true},
+       "0f041600418001210018"},
+      {"depth.sample_compare(s, uv, r, int2(1, 2))",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
+        .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .shadow = true,
+        .offset = true, .offset_xyz = 0x21},
+       "0f071600418003210118010000802100000000000000"},
+   };
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t length;
+   for (unsigned i = 0; i < sizeof(v) / sizeof(v[0]); ++i) {
+      if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &v[i].d, bytes,
+                                  &length)) {
+         fprintf(stderr, "G17G sample witness refused: %s\n", v[i].name);
+         return 1;
+      }
+      if (!(length == strlen(v[i].hex) / 2 && hex_eq(bytes, length, v[i].hex))) {
+         fprintf(stderr, "G17G sample witness mismatch: %s\n", v[i].name);
+         return 1;
+      }
+      ++checks;
+   }
+
+   /* The per-lane level and bias publication, identical for every G17G
+    * form witnessed (half 6, slot 1, discarded source, float kind). */
+   CHECK(agx3_tex_stage_lod(AGX_ISA_ENCODING_AGX3C, 6, 1, 0, false, true,
+                            bytes, &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "3702002a2500aa0a000040301000"));
+   CHECK(!agx3_tex_stage_lod(AGX_ISA_ENCODING_AGX3C, 6, 1, 0, true, false,
+                             bytes, &length));
+   /* The integer kind publishes a fetch level from one half
+    * (gpu/m5-fetch-lod-varying-reference.metal: a uint level clamped to 16
+    * bits and a ushort level stage identically apart from the half). */
+   CHECK(agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3C, 2, 1, 0, false,
+                                  true, AGX3_TEX_LEVEL_INTEGER, bytes,
+                                  &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "3702000a2500aa0a000040301100"));
+   CHECK(agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3C, 0, 1, 0, false,
+                                  true, AGX3_TEX_LEVEL_INTEGER, bytes,
+                                  &length));
+   CHECK(length == 14 && hex_eq(bytes, length, "3700000a2500aa0a000040301100"));
+   CHECK(!agx3_tex_stage_typed_lod(AGX_ISA_ENCODING_AGX3C, 2, 1, 0, false,
+                                   true, AGX3_TEX_LEVEL_MINIMUM, bytes,
+                                   &length));
+
+   /* G17G depth2d_array comparisons and vertex-stage samples
+    * (gpu/m5-shadow-array-cube-reference.metal): the implicit form is the
+    * ten-byte ep1 comparison with the staged layer, a register level or
+    * bias moves to the fourteen-byte ep2 form, the vertex stage drops f156
+    * and its 2D register level is the 22-byte ep3 form. */
+   {
+      static const struct {
+         const char *name;
+         struct agx3_tex_sample_desc d;
+         const char *hex;
+      } sv[] = {
+         {"depth2d_array sample_compare", {.width=AGX3_TEX_W32,.mask=1,
+            .sampler=1,.slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .shadow=true,.array=true}, "0f041600458103210018"},
+         {"depth2d_array level(reg)", {.width=AGX3_TEX_W32,.mask=1,
+            .sampler=1,.slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .shadow=true,.array=true,.lod=AGX3_TEX_LOD_REGISTER},
+          "0f05160041810021010002000000"},
+         {"depth2d_array bias(reg)", {.width=AGX3_TEX_W32,.mask=1,
+            .sampler=1,.slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .shadow=true,.array=true,.lod=AGX3_TEX_LOD_BIAS_REGISTER},
+          "0f04160041810121010002000000"},
+         {"vertex depth2d_array level(reg)", {.dest=8,.width=AGX3_TEX_W32,
+            .mask=1,.slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .shadow=true,.array=true,.vertex_stage=true,
+            .lod=AGX3_TEX_LOD_REGISTER}, "4f05120041800021010002000000"},
+         {"vertex texture2d level(reg)", {.dest=8,.width=AGX3_TEX_W32,
+            .mask=15,.slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .vertex_stage=true,.lod=AGX3_TEX_LOD_REGISTER},
+          "4f071200458060290118010000000000008000000000"},
+      };
+      for (unsigned i = 0; i < sizeof(sv) / sizeof(sv[0]); ++i) {
+         if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &sv[i].d, bytes,
+                                     &length)) {
+            fprintf(stderr, "G17G array witness refused: %s\n", sv[i].name);
+            return 1;
+         }
+         if (!(length == strlen(sv[i].hex) / 2 &&
+               hex_eq(bytes, length, sv[i].hex))) {
+            fprintf(stderr, "G17G array witness mismatch: %s\n", sv[i].name);
+            return 1;
+         }
+         ++checks;
+      }
+      /* Their staged operands: layer 8 with level/bias half 9, the cube
+       * face publication and the cube-array face/layer word. */
+      CHECK(agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3C, 8, 9, 1, 0, false,
+                                     true, false, true, bytes, &length));
+      CHECK(length == 14 && hex_eq(bytes, length, "3700004a2500aa0a400260302100"));
+      CHECK(agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3C, 2, 1, 0, false, true,
+                                  bytes, &length));
+      CHECK(length == 14 && hex_eq(bytes, length, "3702000a2500aa0a00005a300900"));
+      CHECK(agx3_tex_stage_cube_array_shadow(AGX_ISA_ENCODING_AGX3C, 6, 1, 0,
+                                             false, true, bytes, &length));
+      CHECK(length == 14 && hex_eq(bytes, length, "3703000a2500aa0a800060300100"));
+      /* The G17G cube witnesses all compare, over immediate descriptor
+       * operands, at the implicit LOD or a per-lane level/bias. A cube
+       * sample outside that -- no comparison, an immediate level, a texel
+       * offset -- stays refused rather than extrapolated. */
+      struct agx3_tex_sample_desc cube = sv[0].d;
+      cube.cube = true;
+      CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &cube, bytes,
+                                   &length));
+
+      struct agx3_tex_sample_desc closed_cube = cube;
+      closed_cube.shadow = false;
+      closed_cube.mask = 15;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed_cube, bytes,
+                                    &length));
+
+      closed_cube = cube;
+      closed_cube.lod = AGX3_TEX_LOD_LEVEL;
+      closed_cube.lod_x64 = 128;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed_cube, bytes,
+                                    &length));
+
+      closed_cube = cube;
+      closed_cube.offset = true;
+      closed_cube.offset_xyz = 0xf1;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed_cube, bytes,
+                                    &length));
+   }
+
+   /* Several in-flight G17G comparisons (gpu/m5-shadow-2d-reference.metal,
+    * the KHR-GL30 texture_repeat_mode depth fragment: three sample_compare
+    * calls against 0.3 / 0.5 / 0.8). Apple stages each sample into its own
+    * eight-half block -- coordinates at +0/+2, reference at +4, bias at +6
+    * -- names the block with f19 = 0 / 8 / 16, waits on the block's own
+    * staging slot, and clears f156 and f150 on every member but the last.
+    * The SMPs themselves issued on result slots 1 / 1 / 2; the packer keys
+    * both the block and the wait on the sample's own slot, so its second
+    * and third samples differ from these bytes in the issue-slot fields
+    * alone (2f071208cd0001410018 / 1f071610558001630018 for the bias
+    * forms). The level-zero comparison is the eight-byte ep0 form; its
+    * staged-layer twin keeps ep1. */
+   {
+      static const struct {
+         const char *name;
+         struct agx3_tex_sample_desc d;
+         const char *hex;
+      } mv[] = {
+         {"three sample_compare #1", {.width=AGX3_TEX_W32,.mask=1,.slot=1,
+            .wait_mask=1,.coord_kill=true,.shadow=true,
+            .sample_group_nonterminal=true}, "0f071200410000210018"},
+         {"three sample_compare #2", {.dest=4,.coord=8,.width=AGX3_TEX_W32,
+            .mask=1,.slot=1,.wait_mask=2,.coord_kill=true,.shadow=true,
+            .sample_group_nonterminal=true}, "2f071208410000410018"},
+         {"three sample_compare #3", {.dest=2,.coord=16,.width=AGX3_TEX_W32,
+            .mask=1,.slot=2,.wait_mask=4,.coord_kill=true,.final=true,
+            .shadow=true}, "1f071610c98000610018"},
+         {"three sample_compare bias(reg) #1", {.width=AGX3_TEX_W32,.mask=1,
+            .slot=1,.wait_mask=1,.coord_kill=true,.shadow=true,
+            .lod=AGX3_TEX_LOD_BIAS_REGISTER,.sample_group_nonterminal=true},
+          "0f071200450001210018"},
+         {"three sample_compare bias(reg) #2", {.dest=4,.coord=8,
+            .width=AGX3_TEX_W32,.mask=1,.slot=1,.wait_mask=2,.coord_kill=true,
+            .shadow=true,.lod=AGX3_TEX_LOD_BIAS_REGISTER,
+            .sample_group_nonterminal=true}, "2f071208450001410018"},
+         {"three sample_compare bias(reg) #3", {.dest=2,.coord=16,
+            .width=AGX3_TEX_W32,.mask=1,.slot=2,.wait_mask=4,.coord_kill=true,
+            .final=true,.shadow=true,.lod=AGX3_TEX_LOD_BIAS_REGISTER},
+          "1f071610cd8001610018"},
+         {"packer: bias(reg) #2 on its own slot", {.dest=4,.coord=8,
+            .width=AGX3_TEX_W32,.mask=1,.slot=2,.wait_mask=2,.coord_kill=true,
+            .shadow=true,.lod=AGX3_TEX_LOD_BIAS_REGISTER,
+            .sample_group_nonterminal=true}, "2f071208cd0001410018"},
+         {"packer: bias(reg) #3 on its own slot", {.dest=2,.coord=16,
+            .width=AGX3_TEX_W32,.mask=1,.slot=3,.wait_mask=4,.coord_kill=true,
+            .final=true,.shadow=true,.lod=AGX3_TEX_LOD_BIAS_REGISTER},
+          "1f071610558001630018"},
+         {"sample_compare level(0)", {.width=AGX3_TEX_W32,.mask=1,.slot=1,
+            .wait_mask=1,.coord_kill=true,.final=true,.shadow=true,
+            .lod=AGX3_TEX_LOD_LEVEL,.sample_group_end=true},
+          "0f05160040800021"},
+         {"depth2d_array sample_compare level(0)", {.width=AGX3_TEX_W32,
+            .mask=1,.slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .shadow=true,.array=true,.lod=AGX3_TEX_LOD_LEVEL,
+            .sample_group_end=true}, "0f051600458000210008"},
+         /* Apple's two-texture colour fragment (gpu/m5-texture-abi-
+          * reference.metal) clears the same two fields on its first sample
+          * and leaves the shared coordinate block alive (f27 = 0). */
+         {"two_textures #1", {.width=AGX3_TEX_W32,.mask=15,.slot=2,
+            .wait_mask=1,.sample_group_nonterminal=true},
+          "0f060200c90060290118010000000000008000000000"},
+      };
+      for (unsigned i = 0; i < sizeof(mv) / sizeof(mv[0]); ++i) {
+         if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &mv[i].d, bytes,
+                                     &length)) {
+            fprintf(stderr, "G17G group witness refused: %s\n", mv[i].name);
+            return 1;
+         }
+         if (!(length == strlen(mv[i].hex) / 2 &&
+               hex_eq(bytes, length, mv[i].hex))) {
+            fprintf(stderr, "G17G group witness mismatch: %s\n", mv[i].name);
+            return 1;
+         }
+         ++checks;
+      }
+      /* A nonzero comparison level, a nonterminal array member and a
+       * member marked both nonterminal and terminal have no witness. */
+      struct agx3_tex_sample_desc closed = mv[8].d;
+      closed.lod_x64 = 64;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                    &length));
+      closed = mv[0].d;
+      closed.array = true;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                    &length));
+      closed = mv[0].d;
+      closed.sample_group_end = true;
+      CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                    &length));
+
+      /* The block copies: one coordinate pair into blocks 0, 8 and 16 on
+       * slots 1, 2 and 3, f25 while the pair is still needed and f27 on its
+       * last block, and the bias(reg) twin's three block words. */
+      static const struct {
+         uint16_t dest, src;
+         uint8_t slot;
+         bool keep;
+         const char *hex;
+      } cv[] = {
+         {0, 2, 1, true, "0b822104"},   {2, 0, 1, true, "1b802104"},
+         {8, 2, 2, true, "238207022281a412"},
+         {10, 0, 2, true, "338007022281a412"},
+         {16, 2, 3, false, "a30207022682a402"},
+         {18, 0, 3, false, "b30007022682a402"},
+         {0, 4, 1, true, "0b842104"},   {2, 2, 1, true, "1b822104"},
+         {6, 0, 1, true, "3b802104"},
+         {8, 4, 2, true, "2380070a2281a412"},
+         {10, 2, 2, true, "338207022281a412"},
+         {14, 0, 2, true, "338007022281a41a"},
+         {16, 4, 3, false, "a300070a2682a402"},
+         {18, 2, 3, false, "b30207022682a402"},
+         {22, 0, 3, false, "b30007022682a40a"},
+      };
+      for (unsigned i = 0; i < sizeof(cv) / sizeof(cv[0]); ++i) {
+         CHECK(agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3C, cv[i].dest,
+                                         cv[i].src, cv[i].slot, 0, cv[i].keep,
+                                         !cv[i].keep, bytes, &length));
+         CHECK(length == strlen(cv[i].hex) / 2 &&
+               hex_eq(bytes, length, cv[i].hex));
+      }
+      /* Neither hint and both hints are unwitnessed on G17G. */
+      CHECK(!agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3C, 0, 2, 1, 0,
+                                       false, false, bytes, &length));
+      CHECK(!agx3_tex_stage_copy_hints(AGX_ISA_ENCODING_AGX3C, 0, 2, 1, 0,
+                                       true, true, bytes, &length));
+
+      /* The bias word relay: packed once into r0 from half 6, then copied
+       * into each block above. The register destination must be an even
+       * half below 128; the bank-6 stager is unchanged. */
+      CHECK(agx3_tex_pack_lod_word(AGX_ISA_ENCODING_AGX3C, 0, 6, false, true,
+                                   bytes, &length));
+      CHECK(length == 14 &&
+            hex_eq(bytes, length, "2702003a2d00aa02000040301000"));
+      CHECK(!agx3_tex_pack_lod_word(AGX_ISA_ENCODING_AGX3C, 1, 6, false, true,
+                                    bytes, &length));
+      CHECK(!agx3_tex_pack_lod_word(AGX_ISA_ENCODING_AGX3C, 128, 6, false,
+                                    true, bytes, &length));
+      CHECK(!agx3_tex_pack_lod_word(AGX_ISA_ENCODING_AGX3C, 0, 6, false, false,
+                                    bytes, &length));
+      CHECK(!agx3_tex_pack_lod_word(AGX_ISA_ENCODING_AGX3B, 0, 6, false, true,
+                                    bytes, &length));
+      CHECK(agx3_tex_stage_lod(AGX_ISA_ENCODING_AGX3C, 6, 1, 0, false, true,
+                               bytes, &length));
+      CHECK(length == 14 &&
+            hex_eq(bytes, length, "3702002a2500aa0a000040301000"));
+   }
+
+   /* G17G fragment fetches (gpu/m5-fetch-lod-reference.metal): a run-time
+    * level takes the ten-byte form with f139 = 4 and no immediate, a
+    * constant level 1 the fourteen-byte form with f29 = 64, a depth2d read
+    * carries mask x, and an argument-buffer texture names its descriptor
+    * through a uniform pair. Apple's fragment fetches name sampler 1. */
+   {
+      static const struct {
+         const char *name;
+         struct agx3_tex_fetch_desc d;
+         const char *hex;
+      } fv[] = {
+         {"read(coord, level)", {.width=AGX3_TEX_W32,.mask=15,.slot=1,
+            .wait_mask=1,.coord_kill=true,.final=true,.sampler_value=1,
+            .register_lod=true}, "0f051a00418161290018"},
+         {"depth.read(coord, level)", {.width=AGX3_TEX_W32,.mask=1,.slot=1,
+            .wait_mask=1,.coord_kill=true,.final=true,.sampler_value=1,
+            .register_lod=true}, "0f051a00418101210018"},
+         {"depth.read(coord)", {.width=AGX3_TEX_W32,.mask=1,.slot=1,
+            .wait_mask=1,.coord_kill=true,.final=true,.sampler_value=1},
+          "0f061a0040810021"},
+         {"read(coord, 1)", {.width=AGX3_TEX_W32,.mask=15,.slot=1,
+            .wait_mask=1,.coord_kill=true,.final=true,.sampler_value=1,
+            .lod_x64=64}, "0f061a0041816029010000004000"},
+         {"argument read(coord, level)", {.width=AGX3_TEX_W32,.mask=15,
+            .slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .sampler_value=1,.texture_kind=AGX3_TEX_OPERAND_UNIFORM,
+            .texture_value=16,.register_lod=true}, "0f051a00418161280818"},
+         {"argument depth.read(coord)", {.width=AGX3_TEX_W32,.mask=1,
+            .slot=1,.wait_mask=1,.coord_kill=true,.final=true,
+            .sampler_value=1,.texture_kind=AGX3_TEX_OPERAND_UNIFORM,
+            .texture_value=12}, "0f061a0040e10020"},
+         /* Compute texture3d<float>::read(uint3), whole vector and .x
+          * (gpu/m5-xfb-alu-reference.metal): the 2D fetch with the 3D
+          * selector, sampler 0. */
+         {"texture3d read(coord)", {.width=AGX3_TEX_W32,.mask=15,.slot=1,
+            .wait_mask=1,.coord_kill=true,.final=true,.three_d=true},
+          "0f061a0044806329"},
+         {"texture3d read(coord).x", {.width=AGX3_TEX_W32,.mask=1,.slot=1,
+            .wait_mask=1,.coord_kill=true,.final=true,.three_d=true},
+          "0f061a0044800321"},
+      };
+      for (unsigned i = 0; i < sizeof(fv) / sizeof(fv[0]); ++i) {
+         if (!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &fv[i].d, bytes,
+                                    &length)) {
+            fprintf(stderr, "G17G fetch witness refused: %s\n", fv[i].name);
+            return 1;
+         }
+         if (!(length == strlen(fv[i].hex) / 2 &&
+               hex_eq(bytes, length, fv[i].hex))) {
+            fprintf(stderr, "G17G fetch witness mismatch: %s\n", fv[i].name);
+            return 1;
+         }
+         ++checks;
+      }
+      struct agx3_tex_fetch_desc closed_fetch = fv[0].d;
+      closed_fetch.lod_x64 = 64;
+      CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &closed_fetch,
+                                   bytes, &length));
+      closed_fetch = fv[0].d;
+      closed_fetch.multisample = true;
+      CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &closed_fetch,
+                                   bytes, &length));
+   }
+
+   /* Shapes without a G17G witness stay refused there. */
+   struct agx3_tex_sample_desc closed = v[1].d;
+   closed.lod = AGX3_TEX_LOD_GRADIENT;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                 &length));
+   closed = v[1].d;
+   closed.array = true;
+   closed.cube = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                 &length));
+   closed = v[1].d;
+   closed.three_d = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                 &length));
+   /* The level-zero comparison is witnessed (0f05160040800021, see the
+    * group block above); a nonzero comparison level is not. */
+   closed = v[7].d;
+   closed.lod = AGX3_TEX_LOD_LEVEL;
+   closed.sample_group_end = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                &length));
+   CHECK(length == 8 && hex_eq(bytes, length, "0f05160040800021"));
+   closed.lod_x64 = 64;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                 &length));
+   closed = v[1].d;
+   closed.vertex_stage = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                 &length));
+   closed = v[1].d;
+   closed.texture_kind = AGX3_TEX_OPERAND_UNIFORM;
+   closed.texture_value = 24;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &closed, bytes,
+                                 &length));
+   return 0;
+}
+
 int
 main(void)
 {
-   if (test_m5_array_sample() || test_runtime_gather_witnesses() ||
+   if (test_g17g_sample_lod_witnesses() ||
+       test_m5_array_sample() || test_runtime_gather_witnesses() ||
        test_minimum_lod_witnesses() || test_register_lod() || test_fetch_lod() ||
        test_register_array_layer() || test_cube_coordinate_stage() ||
        test_multisample_fetch() ||

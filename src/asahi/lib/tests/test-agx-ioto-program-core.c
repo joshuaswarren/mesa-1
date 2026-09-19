@@ -986,9 +986,26 @@ test_g17g_graphics_no_resource_programs(void)
       0x0b,0x24,0x09,0x04,
    };
    static const uint8_t background_suffix[] = {7, 0x10, 0, 4, 0, 0, 14, 0, 0, 0};
-   for (unsigned stage = 0; stage < 4; ++stage) {
-      const uint8_t *base = stage == 0 ? vertex : fragment;
-      const size_t suffix = (stage == 1 || stage == 3) ? 10 : 4;
+   /* Native M5 punch-through fragment Ioto, captured from the `discard` mode
+    * of gpu/m5-state-matrix-reference.m: one bit of the release record
+    * against the opaque fragment above, nothing else. */
+   static const uint8_t coverage_suffix[] = {0x97, 0x17, 0, 4, 0, 0, 14, 0, 0, 0};
+   static const enum agx_ioto_g17g_program_stage stages[] = {
+      AGX_IOTO_G17G_PROGRAM_VERTEX,
+      AGX_IOTO_G17G_PROGRAM_FRAGMENT,
+      AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT,
+      AGX_IOTO_G17G_PROGRAM_EOT,
+      AGX_IOTO_G17G_PROGRAM_BACKGROUND,
+   };
+   for (unsigned index = 0; index < ARRAY_SIZE(stages); ++index) {
+      const enum agx_ioto_g17g_program_stage stage = stages[index];
+      const bool vertex_stage = stage == AGX_IOTO_G17G_PROGRAM_VERTEX;
+      const bool releases_pixel =
+         stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
+         stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT ||
+         stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND;
+      const uint8_t *base = vertex_stage ? vertex : fragment;
+      const size_t suffix = releases_pixel ? 10 : 4;
       const size_t size = sizeof(body) + 80 + suffix;
       struct agx_ioto_state_tail_output tail = {
          .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
@@ -1004,8 +1021,10 @@ test_g17g_graphics_no_resource_programs(void)
       CHECK(memcmp(output, body, 16) == 0);
       CHECK(memcmp(output + 16, base, 80) == 0);
       CHECK(memcmp(output + 96, body + 16, 4) == 0);
-      const uint8_t *expected_suffix = stage == 3 ? background_suffix
-         : base + (stage == 0 ? sizeof(vertex) : sizeof(fragment)) - suffix;
+      const uint8_t *expected_suffix =
+         stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND ? background_suffix
+         : stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT ? coverage_suffix
+         : base + (vertex_stage ? sizeof(vertex) : sizeof(fragment)) - suffix;
       CHECK(memcmp(output + 100, expected_suffix, suffix) == 0);
       for (size_t i = size; i < sizeof(output); ++i)
          CHECK(output[i] == 0xa5);

@@ -621,6 +621,7 @@ agx_ioto_g17g_resource_program_compose(
    if (!output || !written ||
        (stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
         stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
+        stage != AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT &&
         stage != AGX_IOTO_G17G_PROGRAM_EOT &&
         stage != AGX_IOTO_G17G_PROGRAM_BACKGROUND &&
         stage != AGX_IOTO_G17G_PROGRAM_COMPUTE))
@@ -641,7 +642,21 @@ agx_ioto_g17g_resource_program_compose(
    const size_t prefix_size = AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
                              AGX_IOTO_G17S_MINIMAL_PROFILE_LOADER_SIZE;
    const bool pixel_release = stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
+                              stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT ||
                               stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND;
+   if (stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT) {
+      /* Native M5 punch-through fragment Ioto releases with 971700040000
+       * where an opaque one releases with 9f1700040000: one bit, cleared
+       * because the shader owns the sample mask rather than the fixed
+       * function. Captured 2026-09-14 from gpu/m5-state-matrix-reference.m
+       * mode `discard` (a fragment that discards where red > 0.5) against
+       * mode `color-load`; every other byte of the two programs beyond the
+       * shader's own uniform copies is identical. This mirrors G17P, where
+       * the same distinction clears bit 0 of the 0x2f3 release descriptor.
+       */
+      static const uint8_t coverage_pixrel[] = {0x97, 0x17, 0, 4, 0, 0};
+      memcpy(base + prefix_size, coverage_pixrel, sizeof(coverage_pixrel));
+   }
    if (stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND) {
       /* Native M5 main/partial background Ioto at +0x19e releases with
        * 071000040000, unlike ordinary fragment 9f1700040000. The native

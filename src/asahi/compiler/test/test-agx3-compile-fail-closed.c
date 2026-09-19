@@ -1013,10 +1013,10 @@ check_preamble_compute(enum agx_isa_encoding encoding)
    key.promote_textures = true;
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
-   const bool valid = encoding == AGX_ISA_ENCODING_AGX3B
-                         ? compiled && part.binary != NULL &&
-                              part.info.has_preamble && part.info.binary_size > 8
-                         : !compiled && part.binary == NULL;
+   /* Both G17P and G17G have a witnessed reg-to-uniform copy (the G17G one
+    * is every Metal fragment preamble's pointer publication). */
+   const bool valid = compiled && part.binary != NULL &&
+                      part.info.has_preamble && part.info.binary_size > 8;
    if (!valid)
       fprintf(stderr, "AGX3 generated 64-bit preamble write failed\n");
 
