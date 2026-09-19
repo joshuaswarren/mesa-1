@@ -2038,6 +2038,24 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       return agx_bfeil_to(b, dst, i0, s0, s1, m);
    }
 
+   case nir_op_ubfe: {
+      /* SM5 semantics: offset and width are both taken modulo 32. The width is
+       * a constant here because agx_nir_fuse_algebraic_late is the only thing
+       * that forms ubfe (has_bfe is not advertised, so NIR never generates
+       * it), and that pass masks the offset for the same reason
+       * ubitfield_extract needed it: bfeil does not wrap on the hardware.
+       */
+      unsigned m = nir_alu_src_as_uint(instr->src[2]) & 0x1F;
+
+      /* Unlike ubitfield_extract, a width of zero reads as zero here rather
+       * than meaning "all 32 bits", so it cannot share the masking above.
+       */
+      if (m == 0)
+         return agx_mov_imm_to(b, dst, 0);
+
+      return agx_bfeil_to(b, dst, i0, s0, s1, m);
+   }
+
    case nir_op_bcsel:
       return agx_icmpsel_to(b, dst, s0, i0, s2, s1, AGX_ICOND_UEQ);
 
@@ -3523,11 +3541,28 @@ agx_preprocess_nir(nir_shader *nir)
    if (!nir)
       return;
 
-   /* Lower VK_KHR_cooperative_matrix to the G13 HW matrix instruction before
-    * vars_to_scratch can spill the 8x8 cmat temps. AGX_SIMDMAT=0 skips it.
+   /* Lower VK_KHR_cooperative_matrix before vars_to_scratch can spill the cmat
+    * temps. The G13 matrix tile spans all 32 lanes of a subgroup, so the HW
+    * path requires fully-populated subgroups: compute stage, static workgroup
+    * size, size a multiple of 32. Everything else lowers through the software
+    * path (agx_nir_lower_cmat.c) -- a valid shader is never rejected. Opt-in
+    * via AGX_SIMDMAT=1 (default off).
     */
-   if (agx_simdmat_enabled())
-      NIR_PASS(_, nir, agx_nir_lower_simdmat, 32);
+   if (agx_simdmat_enabled()) {
+      bool full_subgroups =
+         nir->info.stage == MESA_SHADER_COMPUTE &&
+         !nir->info.workgroup_size_variable &&
+         nir->info.workgroup_size[0] && nir->info.workgroup_size[1] &&
+         nir->info.workgroup_size[2] &&
+         (((uint64_t)nir->info.workgroup_size[0] *
+              nir->info.workgroup_size[1] * nir->info.workgroup_size[2]) %
+          32) == 0;
+
+      if (full_subgroups)
+         NIR_PASS(_, nir, agx_nir_lower_simdmat, 32);
+      else
+         NIR_PASS(_, nir, agx_nir_lower_cmat);
+   }
 
    NIR_PASS(_, nir, nir_lower_vars_to_ssa);
 
