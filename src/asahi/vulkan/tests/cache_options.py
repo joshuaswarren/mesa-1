@@ -26,19 +26,20 @@ def inspect(options):
 
 def main():
     base, advertised = inspect({})
-    assert not advertised, "cooperative matrices must be opt-in"
-    assert inspect({"AGX_SIMDMAT": "0"}) == (base, False)
-    enabled, advertised = inspect({"AGX_SIMDMAT": "1"})
-    assert advertised and all(a != b for a, b in zip(base, enabled))
-    seen = {enabled}
+    assert advertised, "cooperative matrices must be on by default"
+    off, advertised = inspect({"AGX_SIMDMAT": "0"})
+    assert not advertised and all(a != b for a, b in zip(base, off))
+    assert inspect({"AGX_SIMDMAT": "1"}) == (base, True), \
+        "AGX_SIMDMAT=1 is the default and must not change the cache identity"
+    seen = {base}
     for option in OPTIONS[1:]:
-        changed, advertised = inspect({"AGX_SIMDMAT": "1", option: "1"})
-        assert advertised and all(a != b for a, b in zip(enabled, changed)), option
+        changed, advertised = inspect({option: "1"})
+        assert advertised and all(a != b for a, b in zip(base, changed)), option
         assert changed not in seen, option
         seen.add(changed)
-        assert inspect({"AGX_SIMDMAT": "1", option: ""}) == (changed, True)
-    assert inspect({}) == (base, False), "unsetting options must restore identity"
-    print("PASS: opt-in advertisement and cache identities track compiler options")
+        assert inspect({option: ""}) == (changed, True)
+    assert inspect({}) == (base, True), "unsetting options must restore identity"
+    print("PASS: default-on advertisement and cache identities track compiler options")
 
 
 if __name__ == "__main__":

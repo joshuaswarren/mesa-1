@@ -36,7 +36,7 @@
  * what Apple's own mul_mm emits), fmadd16 with fp16 A/B. fp32 A/B with an fp16
  * accumulator is not advertised and not lowered.
  *
- * Opt-in via AGX_SIMDMAT=1 (default off). The hardware tile needs ALL 32
+ * On by default; AGX_SIMDMAT=0 disables it. The hardware tile needs ALL 32
  * lanes of a subgroup, so this path is only correct when every subgroup of
  * the dispatch is fully populated: the caller (agx_preprocess_nir) routes
  * here only for compute shaders with a static workgroup size that is a
