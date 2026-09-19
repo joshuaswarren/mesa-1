@@ -379,8 +379,25 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
       // cfg.unk_20 = true;
       // cfg.unk_24 = true; if clustered?
       if (chip == AGX_CHIP_G13X) {
+         /* G13X (t600x, M1 Pro/Max, G13C cores; agx_device.c maps
+          * generation 13 + multi-cluster here): the designed pre-sink
+          * set {4,5,6,8} was measured on t6001-test-host (12-round interleaved,
+          * pins 48/48, suite 22694 green): short +13.0% but ctx1053
+          * -3.17% -- the KV-stream leg regresses. Keep the full sink
+          * on G13X until a set that holds both legs is found. */
          cfg.unk_4 = true;
          // cfg.unk_26 = true;
+      }
+      if (chip == AGX_CHIP_G13G) {
+         /* G13G (t8103, M1): the kitchen-sink bits below cost ~10 us per
+          * dispatch in real dependent compute chains (Qwen decode: ~2.1 ms
+          * of a ~9.8 ms token). Bits 4-8 hold the mlx-omarchy pinned
+          * generated-ID digests (48/48 interleaved runs, both legs) and
+          * the omarchy runtime suite (22 cases / 6189 assertions), and
+          * measure +3.05% ctx1053 decode on m1-test-host. Other chips keep the
+          * full sink until measured there. */
+         cfg.unk_4 = true;
+         cfg.unk_7 = true;
       }
 
       /* With multiple launches in the same CDM stream, we can get cache
@@ -390,26 +407,28 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
        * let's just set these after every launch to be safe. We can revisit in
        * the future when we figure out what the bits mean.
        */
-      cfg.unk_0 = true;
-      cfg.unk_1 = true;
-      cfg.unk_2 = true;
-      cfg.usc_cache_inval = true;
-      cfg.unk_4 = true;
-      cfg.unk_5 = true;
-      cfg.unk_6 = true;
-      cfg.unk_7 = true;
-      cfg.unk_8 = true;
-      cfg.unk_9 = true;
-      cfg.unk_10 = true;
-      cfg.unk_11 = true;
-      cfg.unk_12 = true;
-      cfg.unk_13 = true;
-      cfg.unk_14 = true;
-      cfg.unk_15 = true;
-      cfg.unk_16 = true;
-      cfg.unk_17 = true;
-      cfg.unk_18 = true;
-      cfg.unk_19 = true;
+      if (chip != AGX_CHIP_G13G) {
+         cfg.unk_0 = true;
+         cfg.unk_1 = true;
+         cfg.unk_2 = true;
+         cfg.usc_cache_inval = true;
+         cfg.unk_4 = true;
+         cfg.unk_5 = true;
+         cfg.unk_6 = true;
+         cfg.unk_7 = true;
+         cfg.unk_8 = true;
+         cfg.unk_9 = true;
+         cfg.unk_10 = true;
+         cfg.unk_11 = true;
+         cfg.unk_12 = true;
+         cfg.unk_13 = true;
+         cfg.unk_14 = true;
+         cfg.unk_15 = true;
+         cfg.unk_16 = true;
+         cfg.unk_17 = true;
+         cfg.unk_18 = true;
+         cfg.unk_19 = true;
+      }
    }
 
    return out;
