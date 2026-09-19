@@ -378,6 +378,27 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       /* Trim to format as required by hardware */
       value = nir_trim_vector(b, intr->src[0].ssa, comps);
 
+      /* An RGBX/BGRX target lives in a 4-channel tile whose fourth channel
+       * reaches memory (the PBE has no constant swizzle source).  Write 1.0
+       * there so the X byte is 0xff rather than whatever the tile held: a
+       * display firmware that blends the byte as alpha (Apple H17P) otherwise
+       * shows the frame scaled by it.
+       */
+      const struct util_format_description *ldesc =
+         util_format_description(logical_format);
+      const bool x_alpha =
+         comps == 3 && ldesc->nr_channels == 4 &&
+         ldesc->channel[3].type == UTIL_FORMAT_TYPE_VOID &&
+         util_format_get_nr_components(format) == 4 &&
+         !util_format_is_pure_integer(logical_format) && !lower_r11g11b10;
+
+      if (x_alpha) {
+         value = nir_vec4(b, nir_channel(b, value, 0), nir_channel(b, value, 1),
+                          nir_channel(b, value, 2),
+                          nir_imm_floatN_t(b, 1.0, value->bit_size));
+         write_mask |= BITFIELD_BIT(3);
+      }
+
       if (tib->spilled[rt]) {
          store_memory(b, ctx->bindless_base, tib->nr_samples, logical_format,
                       rt, value, ctx->write_samples);
@@ -388,7 +409,13 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
             format = lowered_format;
             write_mask = 1;
          } else if (lower_srgb) {
-            value = convert_srgb(b, value, comps, true);
+            nir_def *rgb = convert_srgb(b, nir_trim_vector(b, value, comps),
+                                        comps, true);
+            value = x_alpha ? nir_vec4(b, nir_channel(b, rgb, 0),
+                                       nir_channel(b, rgb, 1),
+                                       nir_channel(b, rgb, 2),
+                                       nir_imm_floatN_t(b, 1.0, rgb->bit_size))
+                            : rgb;
             format = lowered_format;
          }
 

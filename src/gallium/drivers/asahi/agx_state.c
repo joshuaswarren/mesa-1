@@ -1538,6 +1538,15 @@ agx_batch_upload_pbe(struct agx_batch *batch,
             cfg.swizzle_a = i;
       }
 
+      /* RGBX/BGRX: the fourth memory channel is void, so the loop leaves
+       * swizzle_a at 0 and the byte takes tile channel 0 (red).  Point it at
+       * the tile's alpha instead, which agx_nir_lower_tilebuffer fills with
+       * 1.0 for these formats, so X scans out as 0xff.
+       */
+      if (desc->nr_channels == 4 &&
+          desc->channel[3].type == UTIL_FORMAT_TYPE_VOID)
+         cfg.swizzle_a = 3;
+
       cfg.buffer = agx_map_texture_gpu(tex, layer);
       cfg.unk_mipmapped = tex->mipmapped;
 
