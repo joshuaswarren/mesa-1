@@ -3545,8 +3545,8 @@ agx_preprocess_nir(nir_shader *nir)
     * temps. The G13 matrix tile spans all 32 lanes of a subgroup, so the HW
     * path requires fully-populated subgroups: compute stage, static workgroup
     * size, size a multiple of 32. Everything else lowers through the software
-    * path (agx_nir_lower_cmat.c) -- a valid shader is never rejected. Opt-in
-    * via AGX_SIMDMAT=1 (default off).
+    * path (agx_nir_lower_cmat.c) -- a valid shader is never rejected. On by
+    * default; AGX_SIMDMAT=0 disables it.
     */
    if (agx_simdmat_enabled()) {
       bool full_subgroups =
