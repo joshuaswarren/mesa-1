@@ -223,14 +223,22 @@ lower_load_store(nir_builder *b, struct hash_table *tm, nir_intrinsic_instr *int
             nir_def *minor = colmaj ? lr : lc;
             nir_deref_instr *it;
             /* Component index = row_bytes / tsz + minor, with the row counted
-             * in pointer elements (major includes the Stride multiply). The
-             * division is by a constant and exact whenever the row stride is
-             * component-aligned, which the cooperative matrix memory alignment
-             * rules require; for width-matched buffers it folds to
-             * major*nvec + minor. No byte-width accesses are emitted. */
-            nir_def *row_comps = nir_udiv_imm(
-               b, nir_imul_imm(b, major, scalar_bytes * nvec), tsz);
-            nir_def *flat = nir_iadd(b, row_comps, minor);
+             * in pointer elements (major includes the Stride multiply). For
+             * width-matched buffers (scalar_bytes == tsz, the common case)
+             * this is exactly major*nvec + minor with no division; keep that
+             * form -- the address arithmetic is the matmul's #1 cost (pt7)
+             * and the rescaled udiv does not fold back at the NIR level.
+             * Narrow pointers take the rescaled form: the division is by a
+             * constant and exact whenever the row stride is component-aligned,
+             * which the cooperative matrix memory alignment rules require. */
+            nir_def *flat;
+            if (width_matched) {
+               flat = nir_iadd(b, nir_imul_imm(b, major, nvec), minor);
+            } else {
+               nir_def *row_comps = nir_udiv_imm(
+                  b, nir_imul_imm(b, major, scalar_bytes * nvec), tsz);
+               flat = nir_iadd(b, row_comps, minor);
+            }
             it = nir_build_deref_ptr_as_array(b, sdref, flat);
             /* INLINE Q4_0 DECODE (env-gated, A-operand): instead of loading f16,
              * decode a quantized weight directly from a 4-byte-aligned padded-Q4_0
