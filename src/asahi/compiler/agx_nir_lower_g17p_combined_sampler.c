@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdlib.h>
 #include <stdio.h>
 #include "agx_compiler.h"
 #include "agx_debug.h"
@@ -15,6 +16,26 @@
 #include "nir_builder.h"
 
 #include <stdio.h>
+
+/* Diagnostic (AGX_G17P_FORCE_SAMPLER_INDEX=<n>): publish the sampler heap index as a
+ * wave-uniform scalar instead of a per-lane value. G17P returns the raw texel
+ * with no depth comparison applied, for whole 32-lane waves at a time, on the
+ * last of four indexed array-shadow samples; the texture index is read
+ * correctly in the same sample, so the two descriptor paths behave
+ * differently. Pinning the heap index to a constant removes the per-lane index path
+ * entirely and tells a bad sampler index apart from a bad comparison. This is only semantically
+ * valid where the index is already dynamically uniform, so it is a diagnostic,
+ * never a production path. */
+static int
+agx3_g17p_forced_sampler_index(void)
+{
+   static int value = -2;
+   if (value == -2) {
+      const char *e = getenv("AGX_G17P_FORCE_SAMPLER_INDEX");
+      value = (e && e[0]) ? atoi(e) : -1;
+   }
+   return value;
+}
 
 /* Pre-raster graphics stages have no implicit derivatives. Their Poly
  * compute variants use the same native explicit-LOD texture operations. */
@@ -914,6 +935,9 @@ agx_nir_lower_g17p_indexed_samplers(nir_shader *shader)
                nir_def *sampler_index = nir_usub_sat(
                   &b, nir_u2u32(&b, sampler),
                   nir_imm_int(&b, AGX_G17P_BINDLESS_SAMPLER_BASE_INDEX));
+               if (agx3_g17p_forced_sampler_index() >= 0)
+                  sampler_index =
+                     nir_imm_int(&b, agx3_g17p_forced_sampler_index());
                sampler_index = nir_u2u64(&b, sampler_index);
                nir_steal_tex_src(tex, nir_tex_src_sampler_handle);
                nir_tex_instr_add_src(tex, nir_tex_src_sampler_handle, sampler_index);

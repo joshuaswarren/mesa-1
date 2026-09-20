@@ -150,7 +150,7 @@ test_g17p_axfb_alias_is_reserved_from_usc(void)
                     UINT64_C(0x10002000000),
                  "kernel AXFB alias start");
    static_assert(AGX_G17P_RENDER_AUX_ALIAS_END ==
-                    UINT64_C(0x10002020000),
+                    UINT64_C(0x10002400000),
                  "kernel AXFB alias end");
    assert(rejected_stk_va >= AGX_G17P_RENDER_AUX_ALIAS_START);
    assert(rejected_stk_va + PAGE <= AGX_G17P_RENDER_AUX_ALIAS_END);

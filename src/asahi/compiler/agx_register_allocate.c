@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "util/bitset.h"
 #include "util/macros.h"
 #include "util/sparse_bitset.h"
@@ -341,16 +342,60 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
    return max_demand;
 }
 
+/*
+ * Diagnostic (AGX_G17P_BAN_REGS="lo:hi", HALF-register units): keep the
+ * allocator off a range of GPRs where it has any choice.
+ *
+ * Bug #1's clean and dirty allocations differ in two places at once -- the last
+ * sample's destination and its texture-handle pair move together when the
+ * register ceiling changes, so the ceiling cannot separate them. This can:
+ * banning one range at a time moves exactly one of them.
+ *
+ * Best effort by construction. The scan below runs once honouring the ban and,
+ * if that finds nothing, again ignoring it, so a banned range can never turn a
+ * successful allocation into a spill and change the shader for unrelated
+ * reasons.
+ */
+static bool
+agx_reg_banned(enum ra_class cls, unsigned reg, unsigned count)
+{
+   static int lo = -2, hi = -2;
+
+   if (cls != RA_GPR)
+      return false;
+
+   if (lo == -2) {
+      const char *v = getenv("AGX_G17P_BAN_REGS");
+      lo = hi = -1;
+      if (v && v[0]) {
+         lo = atoi(v);
+         const char *colon = strchr(v, ':');
+         hi = colon ? atoi(colon + 1) : lo;
+      }
+   }
+
+   if (lo < 0)
+      return false;
+
+   /* Overlap between [reg, reg+count) and [lo, hi]. */
+   return (int)(reg + count - 1) >= lo && (int)reg <= hi;
+}
+
 static bool
 find_regs_simple(struct ra_ctx *rctx, enum ra_class cls, unsigned count,
                  unsigned align, unsigned minimum, unsigned limit,
                  unsigned *out)
 {
-   for (unsigned reg = ALIGN_POT(minimum, align); reg + count <= limit;
-        reg += align) {
-      if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
-         *out = reg;
-         return true;
+   for (unsigned pass = 0; pass < 2; ++pass) {
+      for (unsigned reg = ALIGN_POT(minimum, align); reg + count <= limit;
+           reg += align) {
+         if (pass == 0 && agx_reg_banned(cls, reg, count))
+            continue;
+
+         if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
+            *out = reg;
+            return true;
+         }
       }
    }
 
@@ -2168,6 +2213,37 @@ agx_ra(agx_context *ctx)
    /* Or, we can bound tightly for debugging */
    if (agx_compiler_debug & AGX_DBG_DEMAND)
       max_regs = ALIGN_POT(MAX2(demand, 12), reg_file_alignment);
+
+   /* Diagnostic (AGX_G17P_MAX_REGS=<n>): force the allocator's register
+    * ceiling to a specific value, and (AGX_G17P_TRACE_REGS=1) print what the
+    * default rounding chose.
+    *
+    * `max_regs` is the one line AGX_DBG_DEMAND changes, and on G17P the bound
+    * it is compared against comes from a G13G-era occupancy table used
+    * unconditionally (agx_performance.c). Both the tight bound (DEMAND) and
+    * the maximal bound (spill/is_helper) leave the array-shadow defect absent
+    * while the occupancy-rounded default reproduces it, so the ceiling itself
+    * is the variable. This sweeps it. */
+   {
+      static int forced = -2;
+      if (forced == -2) {
+         const char *v = getenv("AGX_G17P_MAX_REGS");
+         forced = (v && v[0]) ? atoi(v) : -1;
+      }
+      if (forced > 0) {
+         unsigned want = ALIGN_POT(MAX2((unsigned)forced, 12u),
+                                   reg_file_alignment);
+         max_regs = MIN2(want, max_possible_regs);
+      }
+   }
+
+   if (getenv("AGX_G17P_TRACE_REGS")) {
+      fprintf(stderr,
+              "G17Pregs stage=%u demand=%u max_regs=%u max_possible=%u "
+              "align=%u\n",
+              (unsigned)ctx->stage, demand, max_regs, max_possible_regs,
+              reg_file_alignment);
+   }
 
    /* ...but not too tightly */
    assert((max_regs % reg_file_alignment) == 0 && "occupancy limits aligned");

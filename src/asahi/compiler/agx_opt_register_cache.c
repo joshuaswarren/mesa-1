@@ -4,9 +4,62 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdlib.h>
 #include "util/bitset.h"
 #include "agx_compiler.h"
 #include "shader_enums.h"
+
+/*
+ * Diagnostic (AGX_G17P_NO_ASYNC_DISCARD=1): do not put the register-cache
+ * "last use / may evict" hint (.discard) on the sources of an ASYNCHRONOUS
+ * instruction.
+ *
+ * This pass derives .discard purely from post-RA register liveness, which
+ * models every instruction as reading its sources at issue. A texture or image
+ * operation does not: it is issued, the shader runs on, and the texture unit
+ * reads the operands it was not handed a private copy of at some later point,
+ * signalling its scoreboard slot when the result lands.
+ *
+ * Coordinates are immune because they are staged -- explicit copies publish
+ * them into the sampler's private bank before the sample issues, so the
+ * discard hint applies to the copy, not to the asynchronous read. The shadow
+ * COMPARATOR is not staged. It stays a plain GPR operand of the SMP, so it is
+ * the one operand whose register the texture unit must still read after the
+ * instruction has issued -- and the only one whose eviction the shader can
+ * authorise while that read is outstanding.
+ *
+ * In dEQP-VK.glsl.opaque_type_indexing.sampler.dynamically_uniform.fragment.
+ * sampler1darrayshadow all four lookups share one comparator register, so only
+ * the LAST sample's comparator is a last use and only it is marked ^r3. Every
+ * recorded failure of that test is lookup 3, returning the correct texel of
+ * the correct sampler uncompared.
+ */
+static bool
+agx_no_async_discard(void)
+{
+   static int cached = -1;
+   if (cached < 0) {
+      const char *v = getenv("AGX_G17P_NO_ASYNC_DISCARD");
+      cached = (v && *v && *v != '0') ? 1 : 0;
+   }
+   return cached;
+}
+
+/* Instructions whose operands the hardware reads after issue, rather than
+ * latching them when the instruction is dispatched. */
+static bool
+agx_reads_sources_late(const agx_instr *I)
+{
+   switch (I->op) {
+   case AGX_OPCODE_TEXTURE_SAMPLE:
+   case AGX_OPCODE_TEXTURE_LOAD:
+   case AGX_OPCODE_IMAGE_LOAD:
+   case AGX_OPCODE_IMAGE_WRITE:
+      return true;
+   default:
+      return false;
+   }
+}
 
 static void
 postra_liveness_ins(BITSET_WORD *live, agx_instr *I)
@@ -133,7 +186,9 @@ agx_opt_register_cache(agx_context *ctx)
             /* Handling divergent blocks would require physical CFG awareness.
              * Just bail for now, skipping this pass won't affect correctness.
              */
-            I->src[s].discard = lu && !block->divergent;
+            I->src[s].discard = lu && !block->divergent &&
+                                !(agx_no_async_discard() &&
+                                  agx_reads_sources_late(I));
 
             /* Mark any source read by an ALU instruction in the same block as
              * wanting a .cache hint. This is better than just marking

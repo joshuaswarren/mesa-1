@@ -633,7 +633,49 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
        * For txf, we drop out-of-bounds components rather than clamp, see the
        * above txf robustness workaround.
        */
-      if (!(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP) && !is_txf) {
+      /* Diagnostic (AGX_G17P_NO_LAYER_CLAMP=1): skip the software array-layer
+       * clamp.
+       *
+       * nir_get_texture_size() here lowers to loading and DECODING the packed
+       * texture descriptor -- the ushr/iand/extr/bcsel chain -- once per
+       * indexed array sample, purely to learn the layer count. On the CTS
+       * 4-lookup array-shadow shape that is the bulk of the shader: ours is
+       * 1792 bytes with 17 device loads and ~79 iadd/isel, where Apple's
+       * compiler emits 316 bytes with ZERO device loads for the same source.
+       * Metal just passes the layer.
+       *
+       * This measures the headroom and asks whether G17P clamps the layer in
+       * hardware. If it does, the production path should set NO_CLAMP and the
+       * whole chain disappears. */
+      /* G17P clamps the array layer in hardware, so the software clamp is
+       * dead weight there. nir_get_texture_size() lowers to loading and
+       * DECODING the packed descriptor -- once per indexed array sample --
+       * purely to learn the layer count, and on the CTS 4-lookup array-shadow
+       * shape that is most of the shader: 1812 bytes with 17 device loads and
+       * ~79 iadd/isel, where Apple's compiler emits 316 bytes with ZERO device
+       * loads from the same source. Dropping it takes that shader to 990.
+       *
+       * Verified on hardware with a multi-layer reproducer that reads a
+       * distinct texel per layer, so it detects which layer was sampled:
+       * 4- and 8-layer images, requested layers 0/1/3/4/7/100/100000, all
+       * return the correctly clamped layer with this disabled. An unclamped
+       * read would wrap or read out of bounds; layer 9 of 4 returns layer 3,
+       * not layer 1.
+       *
+       * AGX_G17P_LAYER_CLAMP=1 forces the software clamp back for A/B. */
+      bool skip_layer_clamp = options && options->gen9;
+      {
+         static int force = -1;
+         if (force < 0) {
+            const char *v = getenv("AGX_G17P_LAYER_CLAMP");
+            force = (v && v[0] && v[0] != '0') ? 1 : 0;
+         }
+         if (force)
+            skip_layer_clamp = false;
+      }
+
+      if (!(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP) && !is_txf &&
+          !skip_layer_clamp) {
          nir_def *txs = nir_get_texture_size(b, tex);
          nir_def *nr_layers = nir_channel(b, txs, lidx);
          nir_def *max_layer = nir_iadd_imm(b, nr_layers, -1);

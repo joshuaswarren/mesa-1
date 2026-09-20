@@ -5023,6 +5023,99 @@ agx3_fuse_compact_minifloat_wait(struct util_dynarray *emission,
    return true;
 }
 
+/* Diagnostic (opt-in, AGX_G17P_STAGING_DRAIN=1): a staged sample consumes its
+ * sampler-private coordinate/reference banks asynchronously after issue, so a
+ * later sample restaging the same bank before the earlier one retires replays
+ * the newest operands into the older sample. Shapes that cannot relocate their
+ * bank (array, 3D, cube, gradient...) all stage into bank 0, and the only
+ * protection is the retire below -- which is keyed on a scoreboard model that
+ * tracks registers, not staging banks. This knob forces the full drain so the
+ * missed-drain hypothesis can be tested on hardware. It serializes samples and
+ * is NOT a production path. */
+static bool
+agx3_g17p_force_staging_drain(void)
+{
+   static int value = -1;
+   if (value < 0) {
+      const char *s = getenv("AGX_G17P_STAGING_DRAIN");
+      value = (s && s[0] && s[0] != '0') ? 1 : 0;
+   }
+   return value == 1;
+}
+
+/* Diagnostic (AGX_G17P_DRAIN_TAIL=1): retire every scoreboard generation at
+ * the end of a shader part, rather than only the ones the packer's own
+ * `outstanding` ledger still believes are live.
+ *
+ * The production tail drain trusts that ledger. Any place where a slot was
+ * marked retired without the wait actually reaching the emitted bytes leaves
+ * the ledger clean while the hardware generation is still in flight, and the
+ * epilog part then reads the ABI registers early. This knob is blind to the
+ * ledger and so cannot share that failure mode: if a mis-tracked generation is
+ * the mechanism, this closes it. It costs one instruction per part and is a
+ * diagnostic, not a production path. */
+static bool
+agx3_g17p_drain_tail(void)
+{
+   static int value = -1;
+   if (value < 0) {
+      const char *s = getenv("AGX_G17P_DRAIN_TAIL");
+      value = (s && s[0] && s[0] != '0') ? 1 : 0;
+   }
+   return value == 1;
+}
+
+/* Diagnostic (AGX_G17P_SINGLE_WAIT=1): give every instruction at most one
+ * scoreboard wait. AGX3 has no wait instruction -- the fence is a field inside
+ * each instruction -- and the witnessed encodings carry one generation. */
+static int
+agx3_g17p_single_wait_mode(void)
+{
+   static int value = -1;
+   if (value < 0) {
+      const char *e = getenv("AGX_G17P_SINGLE_WAIT");
+      value = (e && e[0]) ? atoi(e) : 0;
+   }
+   return value;
+}
+
+static bool
+agx3_g17p_single_wait(void)
+{
+   return agx3_g17p_single_wait_mode() == 1;
+}
+
+/* Diagnostic (AGX_G17P_TRACE_SLOTS=1): print the scoreboard slot and wait mask
+ * the AGX3 planner assigned to every instruction. agx_insert_waits() is an
+ * AGX2-only pass, so this planner is the only thing that orders an async
+ * result against its consumers on G17P. */
+static bool
+agx3_g17p_trace_slots(void)
+{
+   static int value = -1;
+   if (value < 0) {
+      const char *e = getenv("AGX_G17P_TRACE_SLOTS");
+      value = (e && e[0] && e[0] != '0') ? 1 : 0;
+   }
+   return value == 1;
+}
+
+/* Diagnostic (AGX_G17P_NO_SAMPLE_GROUP=1): G17P fragment SMPs are emitted as
+ * one group -- f156 cleared on every member but the last, which terminates it.
+ * The last member of a four-sample array-shadow group is exactly the lookup
+ * that returns an uncompared texel, so take the grouping away and give every
+ * sample the lone-sample encoding it would get on its own. */
+static bool
+agx3_g17p_no_sample_group(void)
+{
+   static int value = -1;
+   if (value < 0) {
+      const char *e = getenv("AGX_G17P_NO_SAMPLE_GROUP");
+      value = (e && e[0] && e[0] != '0') ? 1 : 0;
+   }
+   return value == 1;
+}
+
 /* Sampler-private staging groups 0/8/16 (see the note in
  * agx3_emit_texture_sample). Take the lowest group whose previous user has
  * retired; when all three still hold in-flight operations, retire group 0's
@@ -7764,6 +7857,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    struct util_dynarray fixups;
    uint16_t outstanding = 0;
+   /* Subset of `outstanding` whose generations belong to texture samples. */
+   uint16_t sample_slots_live = 0;
    /* Result slot of the sample currently occupying each sampler-private
     * staging group (half-registers 0, 8 and 16). A group is free once a
     * wait has retired that slot; see agx3_emit_texture_sample. */
@@ -7918,7 +8013,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * every earlier group member and set it only on the final member, including
     * an all-explicit-LEVEL group. Explicit gradients are outside the group.
     * Other stages and AGX3C keep their existing per-op encodings. */
-   const bool g17p_sample_group = enc == AGX_ISA_ENCODING_AGX3B &&
+   const bool g17p_sample_group = !agx3_g17p_no_sample_group() &&
+                                  enc == AGX_ISA_ENCODING_AGX3B &&
                                   ctx->stage == MESA_SHADER_FRAGMENT &&
                                   sample_group_members_left > 1;
 
@@ -8526,9 +8622,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          const unsigned instr_index = k;
          const uint8_t slot = res[k].slot;
-         const uint16_t wait = res[k].wait_mask;
+         uint16_t wait = res[k].wait_mask;
          const uint8_t native_coord_slot = native_coord_slots[instr_index];
          k++;
+
+         if (agx3_g17p_trace_slots())
+            fprintf(stderr, "G17Pslot %-3u %-22s slot=%u wait=0x%02x\n",
+                    instr_index, agx_opcodes_info[I->op].name, slot, wait);
 
          /* A wait retires its slots before this instruction issues its own. */
          outstanding &= (uint16_t)~wait;
@@ -8538,6 +8638,54 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          /* Give every control-flow boundary an empty scoreboard, rather
           * than refusing the shader when something is still in flight. */
+         /* An instruction waiting on two live slot generations is not a
+          * grounded hardware form: the slot planner's own ISEL note records
+          * that it "intermittently consumes one result early", and fixes it
+          * only for the device-load diamond by pinning preferred slots. Do it
+          * generally -- retire every generation but one through the existing
+          * carrier, so the instruction carries the single wait the witnessed
+          * encodings use. Instructions that already lower their own multi-slot
+          * dependencies (textures, atomics, control flow) are left alone. */
+         /* Mode 2: move the wait off a BITOP entirely, onto the existing
+          * band-identity carrier. The XOR register swap that lowers a post-RA
+          * cycle is the only opcode the failing sampler1darrayshadow shader has
+          * and the passing sampler2darrayshadow shader does not, and lookup 3's
+          * result is what comes out of it. Its wait IS planned and IS encoded
+          * (probed: wait 0x08 -> byte[6]=0x20), so this asks the remaining
+          * question: whether the hardware honours a wait field on a BITOP that
+          * reads a texture destination. */
+         /* Modes 5 and 6 split mode 2 by which half of the wait mask is
+          * moved onto the carrier. Probing agx3_alu_bit_reg shows a BITOP
+          * encodes its 6-bit wait in TWO separate places: slots 1-3 land in
+          * byte[5] bits 5..7, slots 4-6 land in byte[7] bits 5..7, and byte[6]
+          * is untouched. If only one of those halves is actually read by the
+          * hardware, moving just that half onto a carrier should recover all
+          * of mode 2's benefit and the other half should be worth nothing.
+          *   5 = move only slots 4-6 (mask 0x38), keep 1-3 inline
+          *   6 = move only slots 1-3 (mask 0x07), keep 4-6 inline */
+         {
+            const int swm = agx3_g17p_single_wait_mode();
+            if ((swm == 2 || swm == 5 || swm == 6) &&
+                I->op == AGX_OPCODE_BITOP && wait != 0) {
+               const uint16_t move = swm == 5   ? (uint16_t)(wait & 0x38)
+                                     : swm == 6 ? (uint16_t)(wait & 0x07)
+                                                : wait;
+               if (move) {
+                  if (!agx3_retire_slots_noop(emission, enc, move))
+                     AGX3_REFUSE(I);
+                  wait &= (uint16_t)~move;
+               }
+            }
+         }
+         if (agx3_g17p_single_wait() && !agx3_is_cf_op(I) &&
+             (wait & (uint16_t)(wait - 1))) {
+            const uint16_t keep = wait & (uint16_t)-wait;
+            if (!agx3_retire_slots_noop(emission, enc,
+                                        (uint16_t)(wait & ~keep)))
+               AGX3_REFUSE(I);
+            wait = keep;
+         }
+
          uint16_t cf_wait = wait;
          uint16_t cf_outstanding = outstanding_here;
          if (agx3_is_cf_op(I)) {
@@ -8958,6 +9106,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * so a later fetch restages halves 0..3 under it and that
              * attachment reloads another target's coordinates. */
             const bool staged_bank_reads = staged;
+            if (slot)
+               sample_slots_live |= (uint16_t)(1u << (slot - 1));
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
             const uint16_t fetch_wait =
@@ -9014,6 +9164,75 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_TEXTURE_SAMPLE) {
+            /* Diagnostic (AGX_G17P_DRAIN_BEFORE_SAMPLE=1): retire every
+             * outstanding scoreboard generation immediately before each
+             * sample.
+             *
+             * Motivated by the oracle, not by guesswork. Apple's compiler, on
+             * the exact CTS shape (.gpu-handoff/oracle/g.metal), emits ONE
+             * pack_smpir followed by four back-to-back smp. We emit FOUR
+             * pack_smpir, one per sample, interleaved with staging. If
+             * pack_smpir publishes SHARED sampler-index state, re-issuing it
+             * while an earlier sample is still in flight would corrupt a
+             * sample's index -- and the victim would be the last one issued,
+             * which is exactly what bug #1 does. Draining here serialises
+             * that publication. */
+            {
+               /* DEFAULT ON. A texture sample's planned scoreboard wait is
+                * retired on a carrier instruction instead of being encoded in
+                * the sample's own staging copies, whose wait field does not
+                * take effect on G17P.
+                *
+                * Evidence: with the wait left in the copy, the CTS case
+                * dEQP-VK.glsl.opaque_type_indexing.sampler.dynamically_uniform
+                * .fragment.sampler1darrayshadow fails 18 runs in 20 and the
+                * standalone reproducer fails ~270/300. Moving exactly that
+                * wait onto a carrier -- two instructions, +20 bytes on a 1792
+                * byte shader -- makes both 0 for 300 and 30/30. The emitted
+                * difference is precisely two copies losing byte[4] bit 0x80,
+                * their wait bit, plus the two carriers.
+                *
+                * Set AGX_G17P_DRAIN_BEFORE_SAMPLE=0 to restore the old
+                * behaviour for A/B; 1 drains everything outstanding, 2 only
+                * previous samples' generations. */
+               static int drain = -1;
+               if (drain < 0) {
+                  const char *v = getenv("AGX_G17P_DRAIN_BEFORE_SAMPLE");
+                  drain = (v && v[0]) ? atoi(v) : 3;
+               }
+               /* 1 = retire everything outstanding (correct but a big hammer).
+                * 2 = retire only the generations held by PREVIOUS TEXTURE
+                *     SAMPLES, which is the minimum the shared-publication
+                *     story requires: sample N must not publish its index
+                *     while sample N-1 is still using the shared state. */
+               /* 3 = retire only this sample's OWN planned wait, on a
+                *     carrier, and clear it. That is the minimal form: the
+                *     sample's staging copies are what would otherwise carry
+                *     the wait in their own encoding, and that field is the
+                *     one that does not take effect. Measured identical to
+                *     mode 1 on the CTS shape (both add exactly the two
+                *     carriers for the two samples whose wait is non-zero)
+                *     without serialising unrelated outstanding work. */
+               /* A LOD query is not a staged sample: it has its own operand
+                * and slot protocol, and retiring its wait here regressed all
+                * 45 dEQP-VK.glsl.texture_functions.query.texturequerylod
+                * cases while fixing the one array-shadow case. Leave it
+                * alone. */
+               const bool staged_sample = !I->query_lod;
+               const uint16_t live =
+                  !staged_sample ? 0
+                  : drain == 3 ? wait
+                  : drain == 2 ? (uint16_t)(outstanding_here & sample_slots_live)
+                  : drain == 1 ? (uint16_t)(wait | outstanding_here)
+                               : 0;
+               if (live) {
+                  if (!agx3_retire_slots_noop(emission, enc, live))
+                     AGX3_REFUSE(I);
+                  wait &= (uint16_t)~live;
+                  outstanding &= (uint16_t)~live;
+                  sample_slots_live &= (uint16_t)~live;
+               }
+            }
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
             assert(texture_samples_remaining > 0);
@@ -9128,6 +9347,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   uint16_t retire = 0;
                   for (unsigned g = 0; g < 3; ++g)
                      retire |= (uint16_t)(outstanding_here & busy[g]);
+                  if (agx3_g17p_force_staging_drain())
+                     retire = (uint16_t)(busy[0] | busy[1] | busy[2]);
+                  if (agx3_g17p_force_staging_drain())
+                     fprintf(stderr,
+                             "G17Pstage dim=%u shadow=%u slot=%u wait=0x%x "
+                             "outst_here=0x%x grp=[%u,%u,%u] busy=[0x%x,0x%x,0x%x] "
+                             "retire=0x%x bank_base=%u rot=%u\n",
+                             I->dim, I->shadow, slot, wait, outstanding_here,
+                             stage_group_slot[0], stage_group_slot[1],
+                             stage_group_slot[2], busy[0], busy[1], busy[2],
+                             retire, bank_base, rotatable_staging);
                   if (retire) {
                      if (!agx3_retire_slots_noop(emission, enc, retire))
                         AGX3_REFUSE(I);
@@ -14220,6 +14450,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * epilog cannot know that upstream slot, so finish only the still-live
     * async work at this boundary. Constant-colour parts and parts with real
     * in-part consumers add no instructions. */
+   if (agx3_g17p_drain_tail() && !ctx->is_preamble) {
+      if (!agx3_retire_slots_noop(emission, enc, 0x3f))
+         goto fail;
+      outstanding = 0;
+   }
+
    if (ctx->key->no_stop && !ctx->is_preamble && outstanding != 0 &&
        !agx3_retire_slots_noop(emission, enc, outstanding))
       goto fail;

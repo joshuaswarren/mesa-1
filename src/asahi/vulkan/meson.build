@@ -1761,6 +1761,20 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Standalone reduction of the Chromium/three.js keyframes workload: a
+    # large 4x-MSAA depth render with enough repeated geometry to force the
+    # parameter/partial-render paths, replayed for thousands of bounded frames.
+    executable(
+      'g17p-vulkan-keyframes-repro',
+      files('tests/g17p_vulkan_msaa_depth_test.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
+                '-DG17P_KEYFRAMES_REPRO=1', '-DWIDTH=1760u',
+                '-DHEIGHT=1232u'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Isolates the multisample resolve: a clear-only pass with no draw at all,
     # plus full-screen quads at 1x and Nx.
     executable(

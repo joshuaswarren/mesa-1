@@ -43,9 +43,13 @@ struct disasm_spec {
    unsigned length_bit;
    unsigned length_short;
    unsigned length_long;
-   BITSET_WORD mask[4];
-   BITSET_WORD exact[4];
-   BITSET_WORD known[4];
+   /* AGX3 instructions reach 20 bytes, i.e. 160 bits = 5 words. These were
+    * 4 words, so every field of a 20-byte instruction living above bit 127
+    * was matched and printed out of bounds. Brace-initialised table rows
+    * zero-fill the added word. */
+   BITSET_WORD mask[5];
+   BITSET_WORD exact[5];
+   BITSET_WORD known[5];
 };
 
 static void
@@ -195,14 +199,17 @@ _disassemble_instr(BITSET_WORD *code, FILE *fp, struct disasm_spec *specs,
                    unsigned nr_specs, size_t available, unsigned offset,
                    bool verbose)
 {
-   BITSET_WORD tmp[4] = {0};
+   /* 5 words: a 20-byte instruction is 160 bits. At 4 words the print
+    * callbacks for smp_ep4 and nop_ep9 read masked[4], one past the end of
+    * the array, which is why decoding a 20-byte smp was non-deterministic. */
+   BITSET_WORD tmp[5] = {0};
    size_t copy_size = MIN2(available, sizeof(tmp));
 
    memcpy(tmp, code, copy_size);
    struct disasm_spec *spec = NULL;
    unsigned n = 0;
    bool match = false;
-   BITSET_WORD masked[4] = {0};
+   BITSET_WORD masked[5] = {0};
 
    for (unsigned i = 0; i < nr_specs; ++i) {
       spec = &specs[i];
@@ -221,9 +228,16 @@ _disassemble_instr(BITSET_WORD *code, FILE *fp, struct disasm_spec *specs,
       for (unsigned i = 0; i < ARRAY_SIZE(tmp); ++i) {
          masked[i] = tmp[i];
 
-         uint32_t bytes_left = (n - (i * 4));
-         if (bytes_left < 4) {
-            masked[i] &= ((1 << (bytes_left * 8)) - 1);
+         /* `n - i*4` is unsigned: once i*4 passes n it wrapped to a huge
+          * value, the mask was skipped, and bytes belonging to the NEXT
+          * instruction stayed in masked[] to be reported as unknown bits. */
+         const unsigned base = i * 4;
+         if (base >= n) {
+            masked[i] = 0;
+         } else {
+            const unsigned bytes_left = n - base;
+            if (bytes_left < 4)
+               masked[i] &= ((UINT32_C(1) << (bytes_left * 8)) - 1);
          }
 
          if ((masked[i] & spec->mask[i]) != spec->exact[i]) {
@@ -239,7 +253,7 @@ _disassemble_instr(BITSET_WORD *code, FILE *fp, struct disasm_spec *specs,
    struct disasm_ctx ctx = {.fp = fp};
 
    if (match) {
-      BITSET_WORD unknown[4];
+      BITSET_WORD unknown[5];
       __bitset_andnot(unknown, masked, spec->known, ARRAY_SIZE(masked));
       int i;
       BITSET_FOREACH_SET(i, unknown, n * 8) {

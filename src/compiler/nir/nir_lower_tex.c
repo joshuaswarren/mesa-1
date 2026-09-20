@@ -38,6 +38,7 @@
  *     according to a specific YUV color space and range.
  */
 
+#include <stdlib.h>
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_builtin_builder.h"
@@ -210,8 +211,45 @@ lower_1d(nir_builder *b, nir_tex_instr *tex)
       /* We want to fetch texel 0 along the Y-axis. To do so, we sample at 0.5
        * to get texel 0 with correct handling of wrap modes.
        */
-      nir_def *y = nir_imm_floatN_t(b, tex->op == nir_texop_txf ? 0.0 : 0.5,
+      /* Diagnostic (AGX_LOWER_1D_Y): the Y we sample at is a constant, and a
+       * height-1 image maps every y in [0,1) to texel 0 under all wrap modes,
+       * so the exact value is free. G17P returns 0.501961 == 128/255 == 0.5
+       * quantised to 8 bits for the last lookup of
+       * dEQP-VK.glsl.opaque_type_indexing.sampler.dynamically_uniform.
+       * fragment.sampler1darrayshadow, and that test's texel happens to be
+       * 0.5 too -- so the wrong value is consistent BOTH with the texel and
+       * with this inserted coordinate leaking out. Moving it apart tells the
+       * two candidates apart in one run. Inert unless set. */
+      double y_const = 0.5;
+      {
+         static double cached = -1.0;
+         if (cached < 0.0) {
+            const char *e = getenv("AGX_LOWER_1D_Y");
+            cached = (e && e[0]) ? atof(e) : 0.5;
+         }
+         y_const = cached;
+      }
+      nir_def *y = nir_imm_floatN_t(b, tex->op == nir_texop_txf ? 0.0 : y_const,
                                     coords->bit_size);
+      /* Diagnostic (AGX_LOWER_1D_Y_FROM_X=1): take Y from the X coordinate
+       * instead of materialising an immediate. The image is one texel high, so
+       * every Y selects texel row 0 and the result is unchanged; what changes
+       * is that the middle coordinate component now has interpolated
+       * provenance like the other two, instead of being a mov_imm constant
+       * that is live across every sample in the shader. That is the only
+       * remaining difference between sampler1darrayshadow (fails) and
+       * sampler2darrayshadow (passes), whose texture descriptors are
+       * byte-identical and whose Y value is irrelevant (0.25/0.75 leave the
+       * wrong value at exactly 0.501961). */
+      if (tex->op != nir_texop_txf && coords->num_components >= 1) {
+         static int from_x = -1;
+         if (from_x < 0) {
+            const char *e = getenv("AGX_LOWER_1D_Y_FROM_X");
+            from_x = (e && e[0] && e[0] != '0') ? 1 : 0;
+         }
+         if (from_x)
+            y = nir_channel(b, coords, 0);
+      }
 
       tex->coord_components++;
 

@@ -365,7 +365,7 @@ static unsigned invalid_vm_binds;
 
 /* Mirrors AGX_G17P_RENDER_AUX_ALIAS_* in agx_va_runtime_hole.h. */
 #define SHIM_G17P_RENDER_AUX_ALIAS_START UINT64_C(0x10002000000)
-#define SHIM_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002020000)
+#define SHIM_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002400000)
 
 static unsigned usc_window_binds;
 static uint64_t usc_window_bytes;

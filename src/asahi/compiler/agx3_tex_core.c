@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdlib.h>
 #include "agx3_tex_core.h"
 
 #include "agx3_alu_core.h"
@@ -17,6 +18,31 @@ one_or_zero(uint16_t value)
 {
    return (value & (value - 1)) == 0;
 }
+
+/* Apple's applegpu_g17p compiler sets two bits in EVERY SMP it emits -- bit
+ * 117 and bit 123 -- in every shape witnessed with metal-nt: a plain indexed
+ * 2D colour sample, an indexed depth2d sample_compare, and the four-lookup
+ * indexed depth2d_array sample_compare that is the exact shape of
+ * dEQP-VK.glsl.opaque_type_indexing.sampler.dynamically_uniform.fragment.
+ * sampler1darrayshadow. No smp encoding point in AGX3b.xml models either bit,
+ * at any length, so this packer has never emitted them and the disassembler
+ * reports them as "Unknown bit set". They fall in the sampler/texture
+ * descriptor field groups (f88..f108 and f117..f137, which mirror each other
+ * at +29). An earlier comparison concluded our SMP encoding was semantically
+ * equivalent to Apple's; that comparison enumerated the XML field list, which
+ * does not model these bits, so it could not have seen them. Opt-in
+ * (AGX_G17P_APPLE_SMP=1) while the hardware effect is under test. */
+static bool
+agx3_apple_smp_descriptor_bits(void)
+{
+   static int value = -1;
+   if (value < 0) {
+      const char *s = getenv("AGX_G17P_APPLE_SMP");
+      value = (s && s[0] && s[0] != '0') ? 1 : 0;
+   }
+   return value == 1;
+}
+
 
 /*
  * KNOWN GAP, not specific to sparse: the 20-byte ep4 form carries three
@@ -828,6 +854,14 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
       memset(out, 0, AGX3_TEX_MAX_LENGTH);
       *len = 0;
       return false;
+   }
+
+   /* See agx3_apple_smp_descriptor_bits(): the two descriptor-group bits
+    * Apple sets in every SMP. Only the 20-byte encoding point is wide
+    * enough to hold them. */
+   if (agx3_apple_smp_descriptor_bits() && *len == 20) {
+      out[14] |= 0x20; /* bit 117 */
+      out[15] |= 0x08; /* bit 123 */
    }
    return true;
 }

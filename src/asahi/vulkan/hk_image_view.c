@@ -699,6 +699,18 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             &view->planes[p].sampled_heap_index);
          if (result != VK_SUCCESS)
             return result;
+         if (getenv("HK_DUMP_TEXDESC")) {
+            const uint8_t *d = (const uint8_t *)&view->planes[p].sampled;
+            fprintf(stderr, "HKTEXDESC viewtype=%u fmt=%u w=%u h=%u d=%u "
+                    "layers=%u levels=%u heap=%u bytes=",
+                    view->vk.view_type, view->vk.format,
+                    image->vk.extent.width, image->vk.extent.height,
+                    image->vk.extent.depth, view->vk.layer_count,
+                    view->vk.level_count, view->planes[p].sampled_heap_index);
+            for (unsigned i = 0; i < 32; ++i)
+               fprintf(stderr, "%02x", d[i]);
+            fprintf(stderr, "\n");
+         }
          view->planes[p].filterable_valid =
             hk_uscaled_normalized_format(hk_padded_image_format(
                hk_format_to_pipe_format(view->vk.format))) != PIPE_FORMAT_NONE &&
@@ -708,8 +720,12 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             result = hk_descriptor_table_add(
                dev, &dev->sampled_images, &view->planes[p].sampled_filterable,
                32, &view->planes[p].filterable_heap_index);
-            if (result != VK_SUCCESS)
+            if (result != VK_SUCCESS) {
+               /* Nothing was reserved, so the destroy path must not try to
+                * release an index we do not own. */
+               view->planes[p].filterable_valid = false;
                return result;
+            }
          }
          if (view->vk.usage & VK_IMAGE_USAGE_STORAGE_BIT) {
             result = hk_descriptor_table_add(
@@ -786,6 +802,16 @@ hk_DestroyImageView(VkDevice _device, VkImageView imageView,
          if (view->planes[p].sampled_heap_index)
             hk_descriptor_table_remove(dev, &dev->sampled_images,
                                         view->planes[p].sampled_heap_index);
+         /* The filterable descriptor was reserved in hk_image_view_init but
+          * never released here, leaking one sampled_images entry per view
+          * whose format has a uscaled-normalized equivalent. The table only
+          * grows (doubling to max_alloc, then VK_ERROR_OUT_OF_HOST_MEMORY),
+          * so a long run creating many views eventually cannot create any
+          * more. Keyed on filterable_valid rather than a nonzero index
+          * because index 0 is a valid descriptor index. */
+         if (view->planes[p].filterable_valid)
+            hk_descriptor_table_remove(dev, &dev->sampled_images,
+                                        view->planes[p].filterable_heap_index);
       }
    }
 
