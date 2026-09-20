@@ -1,0 +1,5 @@
+drivers/libvulkan_asahi-e167.so: OK
+drivers/libvulkan_asahi-fckey.so: OK
+bin/mathrepro: OK
+probe/sin-denorm-default-v2.spv: OK
+probe/sin-denorm-ftz-v2.spv: OK
