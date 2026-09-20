@@ -9,7 +9,13 @@
 # tests: agx_tests native aarch64: 61/61 PASS (includes 6 new LowerMathTest)
 # driver: /tmp/mesa-fckey-095cb/src/build-aarch64/src/asahi/vulkan/libvulkan_asahi.so
 #         sha256 55c3bd4aa61286907e75cc986574b47aeaa491898d0e469f38268ae5f54ebf50 (62.7 MB, unstripped)
-# icd:    jw14m2-fckey-icd.json (loader-proven shape: file_format_version 1.0.1 mandatory)
+# icd:    jw14m2-fckey-icd.json (candidate, sha256 55c3bd4a...) +
+#         jw14m2-e167-icd.json (matched baseline e1677564284, sha256 f52f1cf1...)
+#         A/B via VK_DRIVER_FILES=<icd>: same silicon, single-commit causal delta (sin FTZ keying).
+#         probe run: no flock inside the probe script - Main holds the M2 lock read-only fd9 and
+#         invokes mathrepro directly or the probe driver inside the held-lock environment;
+#         MATHREPRO=/tmp/mesa-fckey-095cb/bin/mathrepro (native build, headers OK, -lvulkan).
+# baseline: /tmp/mesa-fckey-095cb/src-e167/build-aarch64-e167/src/asahi/vulkan/libvulkan_asahi.so
+#         sha256 f52f1cf10bb8f496b192690dbc19dec72039d95911904823cab47010ceda70f3 (62.7 MB, unstripped)
 # NOT done (per authority): no GPU probe, no install, no pacman, no system files, no ldconfig, no reboot.
-# window note: probe script hardcodes flock /tmp/m1-gpu.lock — Main adapts for the M2 lock path
-#              before any device run; caps re-capture on the fork build comes first in the same window.
+# window order: caps re-capture on the candidate build first (fork DFTZ32 still declared), then probe A/B.

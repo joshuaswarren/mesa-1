@@ -8,6 +8,10 @@ run happens in a Main-owned GPU window.
 
 usage: sin-denorm-probe.py <icd.json> <tag> [--env K=V ...]
 (reuses the precise-math mathrepro harness; build.sh assembles the .spv)
+
+Locking: none here. The caller holds the host lock (read-only fd9 on M2) and
+invokes this script inside it; MATHREPRO defaults to the native binary built
+in the isolated build dir.
 """
 import json, os, subprocess, sys
 import numpy as np
@@ -20,6 +24,7 @@ NAMED = [
     (0x00000001, "pos_smallest_subnormal"),
     (0x007fffff, "pos_largest_subnormal"),
     (0x80000001, "neg_smallest_subnormal"),
+    (0x807fffff, "neg_largest_subnormal"),
     (0x80000000, "neg_zero"),
     (0x00000000, "pos_zero"),
     (0x00800000, "flt_min"),
@@ -46,13 +51,16 @@ def run(spv):
     arm = spv.replace("sin-denorm-", "").replace(".spv", "")
     outbin = inbin.replace("in-", f"out-{tag}-{arm}-")
     r = subprocess.run(
-        ["flock", "/tmp/m1-gpu.lock",
-         os.environ.get("MATHREPRO", "mathrepro"),
+        [os.environ.get("MATHREPRO",
+                        "/tmp/mesa-fckey-095cb/bin/mathrepro"),
          os.path.join(here, spv), inbin, outbin, str(n * 4), "1"],
         env=env, capture_output=True, text=True, timeout=120)
     if r.returncode != 0:
         print(r.stdout, r.stderr)
         sys.exit(r.returncode)
+    got = os.path.getsize(outbin)
+    if got != n * 4:
+        sys.exit(f"{arm}: output length {got} != expected {n * 4}")
     device_line = r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ""
     out = np.fromfile(outbin, dtype=np.uint32)
     return out, device_line
