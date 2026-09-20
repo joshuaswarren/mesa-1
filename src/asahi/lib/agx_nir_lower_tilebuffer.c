@@ -386,12 +386,21 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          def = load_memory(b, ctx->bindless_base, tib->nr_samples,
                            intr->num_components, bit_size, rt, logical_format);
       } else {
+         /* G17P has no grounded half-width tile load of an RGB10A2 tile
+          * (ld_tile d16 fmt=RGB10A2 is refused, which drops every blended
+          * mediump draw into a 10-bit target). Load it at 32 bits and narrow
+          * explicitly. */
+         const bool widen_rgb10a2 =
+            ctx->lower_g17p_formats && bit_size != 32 &&
+            (enum ail_isa_format)format == AIL_ISA_FORMAT_RGB10A2;
+
          def = load_tilebuffer(b, tib, intr->num_components,
-                               lower_r11g11b10 ? 32 : bit_size, rt, format,
-                               logical_format);
+                               (lower_r11g11b10 || widen_rgb10a2) ? 32
+                                                                  : bit_size,
+                               rt, format, logical_format);
 
          /* The native unpack produces f32 lanes. */
-         if (lower_r11g11b10 && bit_size != 32)
+         if ((lower_r11g11b10 || widen_rgb10a2) && bit_size != 32)
             def = nir_f2f16(b, def);
       }
 
