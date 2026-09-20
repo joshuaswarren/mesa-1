@@ -183,6 +183,14 @@ agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
           def->src[0].size == AGX_SIZE_16)
          continue;
 
+      /* G17P's grounded f32 multiply into a half destination takes plain
+       * registers only. Keep |x| or -x as its own move in front of such a
+       * multiply rather than inventing an unencodable modified form. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          ins->op == AGX_OPCODE_FMUL && ins->dest[0].size == AGX_SIZE_16 &&
+          src.size == AGX_SIZE_32 && (def->src[0].abs || def->src[0].neg))
+         continue;
+
       ins->src[s] = agx_compose_float_src(src, def->src[0]);
    }
 }
@@ -423,6 +431,15 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
    if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        I->dest[0].size == AGX_SIZE_32 && use->dest[0].size == AGX_SIZE_16 &&
        I->op != AGX_OPCODE_FMUL)
+      return false;
+
+   /* ...and that narrowing FMUL takes plain registers only: a multiply that
+    * already carries |x| or -x on a source keeps its explicit f32-to-f16
+    * move (Skia's conic/quad edge shaders narrow abs(f) * rsqrt(g)). */
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->op == AGX_OPCODE_FMUL && I->dest[0].size == AGX_SIZE_32 &&
+       use->dest[0].size == AGX_SIZE_16 &&
+       (I->src[0].abs || I->src[0].neg || I->src[1].abs || I->src[1].neg))
       return false;
 
    /* saturate(saturate(x)) = saturate(x) */
