@@ -1,0 +1,53 @@
+; v2: SSBO variables are Block-decorated structs with runtime arrays
+; (v1 was rejected by vtn: StorageBuffer variables must be struct+Block).
+; sin probe, default execution modes (control arm).
+; binding 0: input SSBO  struct { uint bits[]; }  - float bit patterns
+; binding 1: output SSBO struct { uint bits[]; }  - sin() result bits
+; Build: build.sh (spirv-as + mandatory spirv-val)
+               OpCapability Shader
+      %glsl  = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %id %inp %out
+               OpExecutionMode %main LocalSize 64 1 1
+               OpSource GLSL 450
+               OpDecorate %id BuiltIn GlobalInvocationId
+               OpDecorate %in_arr ArrayStride 4
+               OpDecorate %InStruct Block
+               OpMemberDecorate %InStruct 0 Offset 0
+               OpDecorate %inp DescriptorSet 0
+               OpDecorate %inp Binding 0
+               OpDecorate %out_arr ArrayStride 4
+               OpDecorate %OutStruct Block
+               OpMemberDecorate %OutStruct 0 Offset 0
+               OpDecorate %out DescriptorSet 0
+               OpDecorate %out Binding 1
+       %void = OpTypeVoid
+        %fnt = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+     %uvec3  = OpTypeVector %uint 3
+%up_uvec3    = OpTypePointer Input %uvec3
+    %in_arr  = OpTypeRuntimeArray %uint
+   %InStruct = OpTypeStruct %in_arr
+   %out_arr  = OpTypeRuntimeArray %uint
+  %OutStruct = OpTypeStruct %out_arr
+     %up_in  = OpTypePointer StorageBuffer %InStruct
+    %up_out  = OpTypePointer StorageBuffer %OutStruct
+    %up_uint = OpTypePointer StorageBuffer %uint
+       %inp  = OpVariable %up_in StorageBuffer
+       %out  = OpVariable %up_out StorageBuffer
+        %id  = OpVariable %up_uvec3 Input
+   %zero_u   = OpConstant %uint 0
+       %main = OpFunction %void None %fnt
+      %entry = OpLabel
+        %lid = OpLoad %uvec3 %id
+          %i = OpCompositeExtract %uint %lid 0
+       %iptr = OpAccessChain %up_uint %inp %zero_u %i
+       %bits = OpLoad %uint %iptr
+          %x = OpBitcast %float %bits
+        %sin = OpExtInst %float %glsl Sin %x
+      %sbits = OpBitcast %uint %sin
+       %optr = OpAccessChain %up_uint %out %zero_u %i
+               OpStore %optr %sbits
+               OpReturn
+               OpFunctionEnd

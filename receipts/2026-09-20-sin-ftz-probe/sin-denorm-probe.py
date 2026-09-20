@@ -48,7 +48,7 @@ bits.tofile(inbin)
 env = dict(os.environ, VK_ICD_FILENAMES=icd, **extra_env)
 
 def run(spv):
-    arm = spv.replace("sin-denorm-", "").replace(".spv", "")
+    arm = spv.replace("sin-denorm-", "").replace("-v2", "").replace(".spv", "")
     outbin = inbin.replace("in-", f"out-{tag}-{arm}-")
     r = subprocess.run(
         [os.environ.get("MATHREPRO",
@@ -65,8 +65,8 @@ def run(spv):
     out = np.fromfile(outbin, dtype=np.uint32)
     return out, device_line
 
-out_default, dev_d = run("sin-denorm-default.spv")
-out_ftz, dev_f = run("sin-denorm-ftz.spv")
+out_default, dev_d = run("sin-denorm-default-v2.spv")
+out_ftz, dev_f = run("sin-denorm-ftz-v2.spv")
 
 result = {
     "tag": tag,
