@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/tmp/jw14-sin-ftz-main-v2/sin-denorm-probe.py", line 68, in <module>
+    out_default, dev_d = run("sin-denorm-default-v2.spv")
+                         ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/tmp/jw14-sin-ftz-main-v2/sin-denorm-probe.py", line 61, in run
+    got = os.path.getsize(outbin)
+  File "<frozen genericpath>", line 86, in getsize
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/jw14-sout-e167-default-ftz-maout-e167-default-v2/out-e167-default-e167.bin'

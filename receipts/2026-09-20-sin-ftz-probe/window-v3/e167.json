@@ -1,0 +1,60 @@
+{
+ "tag": "e167",
+ "device_lines": {
+  "default": "device: Apple M2 Max (G14C B1) driver 26.2.99",
+  "ftz": "device: Apple M2 Max (G14C B1) driver 26.2.99"
+ },
+ "inputs": {
+  "pos_smallest_subnormal": "0x00000001",
+  "pos_largest_subnormal": "0x007fffff",
+  "neg_smallest_subnormal": "0x80000001",
+  "neg_largest_subnormal": "0x807fffff",
+  "neg_zero": "0x80000000",
+  "pos_zero": "0x00000000",
+  "flt_min": "0x00800000",
+  "norm_1e-8": "0x33800000",
+  "one": "0x3f800000",
+  "ln2": "0x3f317218",
+  "pos_inf": "0x7f800000",
+  "neg_inf": "0xff800000",
+  "qnan": "0x7fc00000"
+ },
+ "default_out": {
+  "pos_smallest_subnormal": "0x00000001",
+  "pos_largest_subnormal": "0x007fffff",
+  "neg_smallest_subnormal": "0x80000001",
+  "neg_largest_subnormal": "0x807fffff",
+  "neg_zero": "0x80000000",
+  "pos_zero": "0x00000000",
+  "flt_min": "0x00000000",
+  "norm_1e-8": "0x33800000",
+  "one": "0x3f576aa4",
+  "ln2": "0x3f2392f7",
+  "pos_inf": "0x7fc00000",
+  "neg_inf": "0x7fc00000",
+  "qnan": "0x7fc00000"
+ },
+ "ftz_out": {
+  "pos_smallest_subnormal": "0x00000001",
+  "pos_largest_subnormal": "0x007fffff",
+  "neg_smallest_subnormal": "0x80000001",
+  "neg_largest_subnormal": "0x807fffff",
+  "neg_zero": "0x80000000",
+  "pos_zero": "0x00000000",
+  "flt_min": "0x00000000",
+  "norm_1e-8": "0x33800000",
+  "one": "0x3f576aa4",
+  "ln2": "0x3f2392f7",
+  "pos_inf": "0x7fc00000",
+  "neg_inf": "0x7fc00000",
+  "qnan": "0x7fc00000"
+ },
+ "EXPECTED": {
+  "note": "recorded CPU-side 2026-09-20 from the keyed-emission contract; NOT a device claim - device run pending in a Main-owned window",
+  "subnormals_default": "out bits == input bits (argument leaks through the zero-compare select)",
+  "subnormals_ftz": "out bits == input & 0x80000000 (sign-preserving flushed zero)",
+  "pos_zero_neg_zero": "identical in both arms (select returns the argument/zero)",
+  "normals_and_specials": "identical across arms (keying touches only the zero-compare path)"
+ },
+ "mathrepro": "/tmp/mesa-fckey-095cb/bin/mathrepro"
+}

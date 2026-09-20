@@ -49,7 +49,7 @@ env = dict(os.environ, VK_ICD_FILENAMES=icd, **extra_env)
 
 def run(spv):
     arm = spv.replace("sin-denorm-", "").replace("-v2", "").replace(".spv", "")
-    outbin = inbin.replace("in-", f"out-{tag}-{arm}-")
+    outbin = os.path.join(here, f"out-{tag}-{arm}.bin")
     r = subprocess.run(
         [os.environ.get("MATHREPRO",
                         "/tmp/mesa-fckey-095cb/bin/mathrepro"),

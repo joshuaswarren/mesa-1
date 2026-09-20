@@ -1,0 +1,6 @@
+ device: Apple M2 Max (G14C B1) driver 26.2.99
+SPIR-V parsing FAILED:
+    In file ../src/compiler/spirv/vtn_variables.c:2165
+    Variables in the StorageBuffer storage class must have a struct type with the Block decoration
+    292 bytes into the SPIR-V binary
+

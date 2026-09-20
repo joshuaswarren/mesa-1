@@ -1,0 +1,8 @@
+{
+  "file_format_version": "1.0.1",
+  "ICD": {
+    "library_path": "/tmp/mesa-fckey-095cb/src/build-aarch64/src/asahi/vulkan/libvulkan_asahi.so",
+    "api_version": "1.4.359"
+  },
+  "library_arch": "64"
+}

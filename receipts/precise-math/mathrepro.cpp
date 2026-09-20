@@ -203,7 +203,15 @@ int main(int argc, char** argv) {
                 ms[ms.size() / 2], ms.front(), ms.back(), reps);
   }
   std::ofstream of(argv[3], std::ios::binary);
+  if (!of) {
+    std::fprintf(stderr, "cannot open output %s\n", argv[3]);
+    std::exit(3);
+  }
   of.write((const char*)bout.map, out_bytes);
+  if (!of) {
+    std::fprintf(stderr, "short write to output %s\n", argv[3]);
+    std::exit(3);
+  }
   vkDeviceWaitIdle(dev);
   return 0;
 }
