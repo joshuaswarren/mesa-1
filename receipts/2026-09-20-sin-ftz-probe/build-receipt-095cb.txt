@@ -1,0 +1,15 @@
+# native aarch64 build of hk/fdiv-fckey @ 807d9d86828 (sin FTZ keying + probe receipts)
+# host: jw14m2-linux (Omarchy Asahi, Apple M2 Max T6021 G14C B1), CPU-only, 2026-09-20
+# dir: /tmp/mesa-fckey-095cb (isolated; pre-checked absent; never overwritten)
+# source: git archive 807d9d86828 from dev-box worktree /home/joshuawarren/src/mesa-fckey
+# venv (inside build dir, no system/pacman changes): meson 1.12.0 ninja 1.13.2 mako pyyaml packaging
+# config: -Dvulkan-drivers=asahi -Dgallium-drivers= -Dplatforms=[] -Dbuild-tests=true -Dllvm=enabled
+#         LLVMSPIRVLib 22.1.0.0 (system, reused), libdrm 2.4.134 (system, reused), gcc 16.1.1 / g++ 16.1.1
+# flags: CFLAGS unset; zero -mcpu / -march=native occurrences in build.ninja (generic armv8-a => M1-loadable)
+# tests: agx_tests native aarch64: 61/61 PASS (includes 6 new LowerMathTest)
+# driver: /tmp/mesa-fckey-095cb/src/build-aarch64/src/asahi/vulkan/libvulkan_asahi.so
+#         sha256 55c3bd4aa61286907e75cc986574b47aeaa491898d0e469f38268ae5f54ebf50 (62.7 MB, unstripped)
+# icd:    jw14m2-fckey-icd.json (loader-proven shape: file_format_version 1.0.1 mandatory)
+# NOT done (per authority): no GPU probe, no install, no pacman, no system files, no ldconfig, no reboot.
+# window note: probe script hardcodes flock /tmp/m1-gpu.lock — Main adapts for the M2 lock path
+#              before any device run; caps re-capture on the fork build comes first in the same window.
