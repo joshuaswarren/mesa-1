@@ -1,0 +1,40 @@
+; sin probe, DenormFlushToZero fp32 declared.
+; binding 0: input SSBO  uint32 float bit patterns
+; binding 1: output SSBO uint32 sin() result bits
+; Build: spirv-as --target-env vulkan1.1 sin-denorm-ftz.spvasm -o sin-denorm-ftz.spv
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %id
+               OpExecutionMode %main LocalSize 64 1 1
+               OpExecutionMode %main DenormFlushToZero 32
+               OpSource GLSL 450
+               OpDecorate %id BuiltIn GlobalInvocationId
+               OpDecorate %inp DescriptorSet 0
+               OpDecorate %inp Binding 0
+               OpDecorate %out DescriptorSet 0
+               OpDecorate %out Binding 1
+       %void = OpTypeVoid
+        %fnt = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+     %uintfn = OpTypeFunction %uint %uint
+     %uvec3  = OpTypeVector %uint 3
+%up_uvec3    = OpTypePointer Input %uvec3
+%up_uint     = OpTypePointer StorageBuffer %uint
+       %inp  = OpVariable %up_uint StorageBuffer
+       %out  = OpVariable %up_uint StorageBuffer
+        %id   = OpVariable %up_uvec3 Input
+     %glsl    = OpExtInstImport "GLSL.std.450"
+       %main  = OpFunction %void None %fnt
+      %entry  = OpLabel
+        %lid  = OpLoad %uvec3 %id
+         %i   = OpCompositeExtract %uint %lid 0
+      %iptr   = OpInBoundsAccessChain %up_uint %inp %i
+       %bits  = OpLoad %uint %iptr
+         %x   = OpBitcast %float %bits
+       %sin   = OpExtInst %float %glsl Sin %x
+     %sbits   = OpBitcast %uint %sin
+      %optr   = OpInBoundsAccessChain %up_uint %out %i
+               OpStore %optr %sbits
+               OpReturn
+               OpFunctionEnd
