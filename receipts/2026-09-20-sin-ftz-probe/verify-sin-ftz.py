@@ -52,5 +52,5 @@ for i, x in enumerate(inputs):
 
 for f in fails:
     print("FAIL:", f)
-print(f"{64 * 4} words asserted across 4 legs; {len(fails)} failures")
+print(f"{64} words per leg x 4 legs = {64 * 4} words total; {len(fails)} failures")
 sys.exit(1 if fails else 0)

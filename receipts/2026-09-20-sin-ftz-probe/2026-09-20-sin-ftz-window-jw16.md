@@ -30,7 +30,7 @@ both modules OK; lock inode verified 12; agx_tests 61/61 native on jw16.
 ## Result (OpGLSL450.sin, 64 lanes, SSBO-loaded bit patterns)
 
 Semantic assert (in-window, `window-jw16-attempt2-green/semantic-assert.txt`):
-**256 words x 4 legs, 0 failures.** Key rows (full dumps
+**64 words per leg x 4 legs = 256 words total, 0 failures.** Key rows (full dumps
 `jw16-ab/probe/jw16-{fckey,e167}.json`):
 
 | input | e167 default | e167 FTZ | fckey default | fckey FTZ |
