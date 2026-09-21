@@ -55,7 +55,6 @@ hk_get_device_extensions(const struct hk_instance *instance,
       .KHR_bind_memory2 = true,
       .KHR_buffer_device_address = true,
       .KHR_calibrated_timestamps = true,
-      .KHR_cooperative_matrix = agx_simdmat_enabled(),
       .KHR_copy_commands2 = true,
       .KHR_create_renderpass2 = true,
       .KHR_dedicated_allocation = true,
@@ -239,9 +238,6 @@ hk_get_device_features(
    struct vk_features *features)
 {
    *features = (struct vk_features){
-      .cooperativeMatrix = agx_simdmat_enabled(),
-      .cooperativeMatrixRobustBufferAccess = false,
-
       /* Vulkan 1.0 */
       .robustBufferAccess = true,
       .fullDrawIndexUint32 = true,
@@ -824,8 +820,6 @@ hk_get_device_properties(const struct agx_device *dev,
 
       /* Vulkan 1.1 properties */
       .subgroupSize = 32,
-      .cooperativeMatrixSupportedStages =
-         agx_simdmat_enabled() ? VK_SHADER_STAGE_COMPUTE_BIT : 0,
       .subgroupSupportedStages =
          VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_ALL_GRAPHICS,
       .subgroupSupportedOperations =
@@ -1523,48 +1517,4 @@ hk_GetPhysicalDeviceMultisamplePropertiesEXT(
    } else {
       pMultisampleProperties->maxSampleLocationGridSize = (VkExtent2D){0, 0};
    }
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
-   VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount,
-   VkCooperativeMatrixPropertiesKHR *pProperties)
-{
-   VK_FROM_HANDLE(hk_physical_device, pdev, physicalDevice);
-   (void)pdev;
-   VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties,
-                          pPropertyCount);
-
-   if (agx_simdmat_enabled()) {
-      /* G13 hardware 8x8x8 matrix MAC (simd_matrix_fmadd16/32). The unit
-       * takes fp16 or fp32 A/B and accumulates in fp32 (fmadd32) or fp16
-       * (fmadd16); 16x16x16 is a 2x2x2 tiling of 8x8x8 ops in
-       * agx_nir_lower_simdmat.c.
-       */
-      static const struct {
-         VkComponentTypeKHR ab, c;
-      } types[] = {
-         {VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
-         {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
-         {VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
-      };
-      for (unsigned n = 8; n <= 16; n *= 2) {
-         for (unsigned t = 0; t < ARRAY_SIZE(types); t++) {
-            vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p)
-            {
-               p->MSize = n;
-               p->NSize = n;
-               p->KSize = n;
-               p->AType = types[t].ab;
-               p->BType = types[t].ab;
-               p->CType = types[t].c;
-               p->ResultType = types[t].c;
-               p->saturatingAccumulation = VK_FALSE;
-               p->scope = VK_SCOPE_SUBGROUP_KHR;
-            }
-         }
-      }
-   }
-
-   return vk_outarray_status(&out);
 }

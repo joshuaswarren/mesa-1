@@ -1096,8 +1096,6 @@ bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader);
-bool agx_nir_lower_simdmat(nir_shader *shader, unsigned subgroup_size);
-bool agx_nir_lower_cmat(nir_shader *shader);
 bool agx_nir_lower_frag_sidefx(nir_shader *s);
 
 struct agx_cycle_estimate {
