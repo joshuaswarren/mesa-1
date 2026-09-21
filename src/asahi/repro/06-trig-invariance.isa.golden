@@ -1,0 +1,798 @@
+   0: 0000                   <unknown instr>
+XXX error here
+   2: 807f                   <unknown instr>
+XXX error here
+# XXX: Unknown bit set 64
+# XXX: Unknown bit set 78
+   4: 82ffffff0000803fd157   csel     $# 32-bit must be expected, but got raw 127
+r63# XXX: Invalid value 0x1fff for float, -3.875# missing hint, r96, u188, flt
+XXX error here
+   e: 27fc                   <unknown instr>
+XXX error here
+  10: ffff                   <unknown instr>
+XXX error here
+  12: 7f00                   <unknown instr>
+XXX error here
+  14: 83f9                   <unknown instr>
+XXX error here
+  16: 223f                   <unknown instr>
+XXX error here
+  18: db0f                   <unknown instr>
+XXX error here
+  1a: c93f                   <unknown instr>
+XXX error here
+  1c: c0dd                   <unknown instr>
+XXX error here
+  1e: 34f5                   <unknown instr>
+XXX error here
+  20: 2915444e0000           lstore   r5, u2l, r2l, rg11b10f_rtz, none
+  26: c07f                   <unknown instr>
+XXX error here
+  28: 00008000               jmp_incomplete 128
+  2c: 6e83                   <unknown instr>
+XXX error here
+  2e: f9a2                   <unknown instr>
+XXX error here
+  30: 9995                   <unknown instr>
+XXX error here
+# XXX: Unknown bit set 49
+# XXX: Unknown bit set 50
+# XXX: Unknown bit set 51
+# XXX: Unknown bit set 53
+# XXX: Unknown bit set 56
+# XXX: Unknown bit set 58
+# XXX: Unknown bit set 59
+# XXX: Unknown bit set 63
+  32: 62db000000802ebd       ldimm    # 32-bit must be expected, but got raw 237
+r118, 2147483648
+XXX error here
+  3a: 3bb3                   <unknown instr>
+XXX error here
+# XXX: Unknown bit set 27
+  3c: e6e99dbf0000           hadd    # XXX: Invalid value 0xd3 for dhalf# XXX: Invalid value 0x79d for half 0.171875, sat
+XXX error here
+  42: 80ff                   <unknown instr>
+XXX error here
+  44: 3baa                   <unknown instr>
+XXX error here
+  46: b83f                   <unknown instr>
+XXX error here
+  48: ffff                   <unknown instr>
+XXX error here
+  4a: ff7f                   <unknown instr>
+XXX error here
+  4c: 4190                   <unknown instr>
+XXX error here
+  4e: 433c                   <unknown instr>
+XXX error here
+  50: 0000                   <unknown instr>
+XXX error here
+  52: 00f4                   <unknown instr>
+XXX error here
+  54: 0000                   <unknown instr>
+XXX error here
+  56: 804a                   <unknown instr>
+XXX error here
+  58: f304                   <unknown instr>
+XXX error here
+  5a: b53f                   <unknown instr>
+XXX error here
+  5c: a883                   <unknown instr>
+XXX error here
+# XXX: Unknown bit set 30
+  5e: 71b6ab6351fec5e9fc341a7a smpi     r13h_r14l# XXX: Invalid value 0x1c for heap, r8h, r116h, r53h, r113h_r114l_r114h_r115l_r115h, r45l_r45h_r46l, shadow, rw, coherent, sparse, kill, XXX: Unknown enum value 14, xz, lod_grad_min, XXX: Unknown enum value 4, b
+XXX error here
+  6a: 7433                   <unknown instr>
+XXX error here
+# XXX: Unknown bit set 27
+  6c: 666999bb               hadd    # XXX: Invalid value 0xd2 for dhalf# XXX: Invalid value 0x399 for half 0.171875, sat
+XXX error here
+# XXX: Unknown bit set 17
+# XXX: Unknown bit set 18
+# XXX: Unknown bit set 21
+# XXX: Unknown bit set 22
+# XXX: Unknown bit set 23
+# XXX: Unknown bit set 25
+# XXX: Unknown bit set 57
+  70: ed2cf7a6f8e0813e       load     ts44, du14, 544751145, b
+XXX error here
+  78: 0000                   <unknown instr>
+XXX error here
+  7a: 801f                   <unknown instr>
+XXX error here
+  7c: e4e9                   <unknown instr>
+XXX error here
+# XXX: Unknown bit set 47
+  7e: aabce75d25bf           fadd     $r111l, # 32-bit must be expected, but got raw 487
+u243.abs.neg, # 32-bit must be expected, but got raw 213
+r106
+XXX error here
+  84: 1a3c2839               fmul     r15l, u20l.neg, 0.046875
+  88: 0000                   <unknown instr>
+XXX error here
+  8a: 007f                   <unknown instr>
+XXX error here
+  8c: f968                   <unknown instr>
+XXX error here
+  8e: d3b7                   <unknown instr>
+XXX error here
+  90: e335                   <unknown instr>
+XXX error here
+  92: a33d                   <unknown instr>
+XXX error here
+# XXX: Unknown bit set 46
+# XXX: Unknown bit set 47
+  94: e6e91dc05ee4           hadd    # XXX: Invalid value 0x2d3 for dhalf 7.25# XXX: Invalid value 0x5ec for half, sat
+XXX error here
+  9a: 1bb3                   <unknown instr>
+XXX error here
+  9c: 889c                   <unknown instr>
+XXX error here
+  9e: dc32                   <unknown instr>
+XXX error here
+  a0: 83fa                   <unknown instr>
+XXX error here
+  a2: 703a                   <unknown instr>
+XXX error here
+  a4: 2871                   doorbell 113
+  a6: dbb1                   <unknown instr>
+XXX error here
+  a8: 398e                   <unknown instr>
+XXX error here
+  aa: e33d                   <unknown instr>
+XXX error here
+  ac: abaa                   <unknown instr>
+XXX error here
+  ae: 2ab2d9899d3d           fadd     r108h, # 32-bit must be expected, but got raw 473
+u236.neg, u172.neg
+XXX error here
+  b4: cdcc                   <unknown instr>
+XXX error here
+  b6: 4c3e                   <unknown instr>
+XXX error here
+  b8: 6070                   <unknown instr>
+XXX error here
+  ba: a532                   <unknown instr>
+XXX error here
+  bc: abaa                   <unknown instr>
+XXX error here
+  be: aabeabaaaa3e           fadd     $r111h, $# 32-bit must be expected, but got raw 235
+r117.neg, $r85.neg
+XXX error here
+  c4: 8c2e                   <unknown instr>
+XXX error here
+  c6: ba3d2549123e           ffma     $r15, u18h.neg, u18l, 1.875
+  cc: 00000000               jmp_incomplete 0
+  d0: 00000000               jmp_incomplete 0
+  d4: 0100                   <unknown instr>
+XXX error here
+  d6: 00000400               jmp_incomplete 4
+  da: 00000100               jmp_incomplete 1
+  de: 00000000               jmp_incomplete 0
+  e2: 0020                   <unknown instr>
+XXX error here
+  e4: 00000000               jmp_incomplete 0
+  e8: 0000                   <unknown instr>
+XXX error here
+  ea: 1020                   <unknown instr>
+XXX error here
+  ec: 00000000               jmp_incomplete 0
+  f0: 00000000               jmp_incomplete 0
+  f4: 00000000               jmp_incomplete 0
+  f8: 00000000               jmp_incomplete 0
+  fc: 00000000               jmp_incomplete 0
+ 100: 62000000               ldimm    r0l, 0
+ 104: 05090c0d60c01200       load     r1, du54, 0, i32, x, a
+ 10c: 72091004               mov      r2, thread_in_grid_x
+ 110: 3800                   wait     a
+ 112: 522844222c00           if       r2, ^r1, 1, ult
+ 118: 20c018110000           jmp_none 4376
+ 11e: 0509440c70c01200       load     r1, du58, r2.sx, i32, x, a
+ 126: 0519004d70c01200       load     r3, du56, 0, i32, x, b
+ 12e: 3800                   wait     a
+ 130: 3801                   wait     b
+ 132: 9a8542622400           fmul     $r1, r1, r3
+ 138: 2a8d42060002           fadd     r3, r1.abs, -0.0
+ 13e: 42a842e61a00           if       r1.abs, u23, 1, fgte
+ 144: 20c09a030000           jmp_none 922
+ 14a: ae91006028170000       shr      $r4, $r3, 23
+ 152: 8e1148ee03010000       isub     $r4, r4.sx, 126
+ 15a: ae95008028050000       shr      $r5, $r4, 5
+ 162: 92198a420094a1b8       csel     $r6, $r5, 4, u10, u5, slt
+ 16a: 92198a32009ac1a4       csel     $r6, $r5, 3, u13, r6, slt
+ 172: 92198a220000c1a4       csel     $r6, $r5, 2, 0, r6, slt
+ 17a: 921d8a42008a21b9       csel     $r7, $r5, 4, u5, u9, slt
+ 182: 921d8a320094e1a4       csel     $r7, $r5, 3, u10, r7, slt
+ 18a: 92218a120000a1b9       csel     $r8, $r5, 1, 0, u13, slt
+ 192: 921d8a220050e0a4       csel     $r7, $r5, 2, r8, r7, slt
+ 19a: fe1148f28100           and      $r4, r4, 31
+ 1a0: ae1900c024880200       shl      $r6, r6, $r4
+ 1a8: 8e211f8868000000       isub     $r8, 31, $r4.sx
+ 1b0: fe2150f28100           and      $r8, r8, 31
+ 1b6: aea500e028900200       shr      $r9, $r7, $r8
+ 1be: aea5002025010000       shr      $r9, r9, 1
+ 1c6: fe194c2ae500           or       $r6, r6, r9
+ 1cc: 92258a420092c1b9       csel     $r9, $r5, 4, u9, u14, slt
+ 1d4: 92258a32008a21a5       csel     $r9, $r5, 3, u5, r9, slt
+ 1dc: 92298a12009a41b9       csel     $r10, $r5, 1, u13, u10, slt
+ 1e4: 92258a22005420a5       csel     $r9, $r5, 2, r10, r9, slt
+ 1ec: ae1d00e024880200       shl      $r7, r7, $r4
+ 1f4: aea9002029900200       shr      $r10, $r9, $r8
+ 1fc: aea9004025010000       shr      $r10, r10, 1
+ 204: fe1d4e4ae500           or       $r7, r7, r10
+ 20a: fe2946c29800           and      $r10, r3, u6
+ 210: fe29548ad900           or       $r10, r10, u12
+ 216: ae29004025080000       shl      $r10, r10, 8
+ 21e: 1e3394e228000000       imul     dr12, $r10, $r7
+ 226: 922d8a42009ca1ba       csel     $r11, $r5, 4, u14, u21, slt
+ 22e: 922d8a32009261a5       csel     $r11, $r5, 3, u9, r11, slt
+ 236: 92318a120094a1b8       csel     $r12, $r5, 1, u10, u5, slt
+ 23e: 922d8a22005860a5       csel     $r11, $r5, 2, r12, r11, slt
+ 246: ae25002025880200       shl      $r9, r9, $r4
+ 24e: aeb1006029900200       shr      $r12, $r11, $r8
+ 256: aeb1008025010000       shr      $r12, r12, 1
+ 25e: fe25528ae500           or       $r9, r9, r12
+ 264: 1e3b942229000000       imul     dr14, $r10, $r9
+ 26c: 92318a4200aa41bb       csel     $r12, $r5, 4, u21, u26, slt
+ 274: 92318a32009c81a5       csel     $r12, $r5, 3, u14, r12, slt
+ 27c: 92398a12008a21b9       csel     $r14, $r5, 1, u5, u9, slt
+ 284: 92154a22005c80a5       csel     $r5, r5, 2, r14, r12, slt
+ 28c: ae11006025480200       shl      $r4, r11, r4
+ 294: ae9500a024500200       shr      $r5, r5, r8
+ 29c: ae9500a024010000       shr      $r5, r5, 1
+ 2a4: fe1148aae400           or       $r4, r4, r5
+ 2aa: 1e43948224000000       imul     dr16, $r10, r4
+ 2b2: 9e11942665a20600       imadd    $r4, $r10.sx, r9.sx, $r17.sx
+ 2ba: 9e1594e6649e0600       imadd    $r5, $r10.sx, r7.sx, $r15.sx
+ 2c2: 921d882226010130       csel     $r7, $r4, r17, 1, 0, ult
+ 2ca: 8e1d8ae664000000       iadd     $r7, $r5.sx, r7.sx
+ 2d2: 9e1954c6645a0600       imadd    $r6, r10.sx, r6.sx, r13.sx
+ 2da: 92218ea228010130       csel     $r8, $r7, $r5, 1, 0, ult
+ 2e2: 8e194c0665000000       iadd     $r6, r6.sx, r8.sx
+ 2ea: 92154ae225010130       csel     $r5, r5, r15, 1, 0, ult
+ 2f2: 8e154ca664000000       iadd     $r5, r6.sx, r5.sx
+ 2fa: ae9900e0281f0000       shr      $r6, $r7, 31
+ 302: 8e154ca664000000       iadd     $r5, r6.sx, r5.sx
+ 30a: 8e1900e868000000       isub     $r6, 0, $r7.sx
+ 312: 9221880200001110       csel     $r8, $r4, 0, 0, 1, ieq
+ 31a: 8e194c0e65000000       isub     $r6, r6.sx, r8.sx
+ 322: 8e21008868000000       isub     $r8, 0, $r4.sx
+ 32a: 92118e02005080a4       csel     $r4, $r7, 0, r8, r4, slt
+ 332: 92198e02004ce0a8       csel     $r6, $r7, 0, r6, $r7, slt
+ 33a: be218c0e0000           ffs      $r8, $r6
+ 340: fe21500ac200           or       $r8, r8, 32
+ 346: be25880e0000           ffs      $r9, $r4
+ 34c: 92215202255200c5       csel     $r8, r9, r8, r9, r8, sgt
+ 354: 8e21507e01000000       isub     $r8, r8.sx, 23
+ 35c: 92215002005000d0       csel     $r8, r8, 0, r8, 0, sgt
+ 364: fe2590f28300           and      $r9, $r8, 63
+ 36a: 8e29920e02000000       isub     $r10, $r9.sx, 32
+ 372: 8e2d004869000000       isub     $r11, 0, $r10.sx
+ 37a: 92295462255460c5       csel     $r10, r10, r11, r10, r11, sgt
+ 382: fe2d92f28100           and      $r11, $r9, 31
+ 388: aeb1008028960200       shr      $r12, $r4, $r11
+ 390: fe2954f28100           and      $r10, r10, 31
+ 396: ae3500c028940200       shl      $r13, $r6, $r10
+ 39e: fe3158aae500           or       $r12, r12, r13
+ 3a4: aeb500c028940200       shr      $r13, $r6, $r10
+ 3ac: 923192020258a025       csel     $r12, $r9, 32, r12, r13, ult
+ 3b4: 9231920200888005       csel     $r12, $r9, 0, $r4, r12, ieq
+ 3bc: ae2d001000560200       shl      $r11, 1, r11
+ 3c4: 922d920202560030       csel     $r11, $r9, 32, r11, 0, ult
+ 3cc: aeb5001000940200       shr      $r13, 1, $r10
+ 3d4: ae29001000540200       shl      $r10, 1, r10
+ 3dc: 92299202025a4025       csel     $r10, $r9, 32, r13, r10, ult
+ 3e4: 9239920200016105       csel     $r14, $r9, 0, 1, r11, ieq
+ 3ec: 923d520200004105       csel     $r15, r9, 0, 0, r10, ieq
+ 3f4: ae259ce629010000       extr     $r9, $r14, $r15, 1, 0
+ 3fc: fe299c0a8000           mov      $r10, $r14
+ 402: fe2d9e0a8000           mov      $r11, $r15
+ 408: 8e2b541b00000000       isub     $dr10, dr10, 1
+ 410: fe298842a500           and      $r10, $r4, r10
+ 416: fe2d8c62a500           and      $r11, $r6, r11
+ 41c: aeb59e1600000000       asr      $r13, $r15, 1, 0, 0
+ 424: 9202942229010110       csel     $r0h, $r10, $r9, 1, 0, ieq
+ 42c: 920296a229410010       csel     $r0h, $r11, $r13, r0h, 0, ieq
+ 434: 9240500200001110       csel     $r16l, r8, 0, 0, 1, ieq
+ 43c: 9202410000000106       csel     $r0h, r0h, 0, 0, r16l, ieq
+ 444: fe1148c2a500           and      $r4, r4, r14
+ 44a: fe194ce2a500           and      $r6, r6, r15
+ 450: 92114c82244c8044       csel     $r4, r6, r4, r6, r4, ugt
+ 458: 9218524225010130       csel     $r6l, r9, r10, 1, 0, ult
+ 460: 921896a2294c0010       csel     $r6l, $r11, $r13, r6l, 0, ieq
+ 468: 92185a622501c1a4       csel     $r6l, r13, r11, 1, r6l, slt
+ 470: 9202480200001104       csel     $r0h, r4, 0, 0, r0h, ieq
+ 478: 92114c0000001110       csel     $r4, r6l, 0, 0, 1, ieq
+ 480: 9211410000481010       csel     $r4, r0h, 0, r4, 1, ieq
+ 488: 0e11588664000000       iadd     r4, r12.sx, r4.sx
+ 490: be990a042500           u32_to_f $r6, r8, rte
+ 496: 8a194cd2               exp2     $r6, r6
+ 49a: be910a842400           u32_to_f $r4, r4, rte
+ 4a0: 9a9148c22400           fmul     $r4, r4, r6
+ 4a6: 92194e02009e01b0       csel     $r6, r7, 0, u15, 0, slt
+ 4ae: 9a9148021801           fmul     $r4, r4, u32
+ 4b4: fe1148ca6400           xor      $r4, r4, r6
+ 4ba: 8e1900a868000000       isub     $r6, 0, $r5.sx
+ 4c2: 02158202004ca024       csel     r5, $r1, 0.0, r6, r5, flt
+ 4ca: aa99880a0002           fadd     $r6, $r4.neg, -0.0
+ 4d0: 02114202004c8024       csel     r4, r1, 0.0, r6, r4, flt
+ 4d8: 621900000000           ldimm    r6, 0
+ 4de: 420a00000000           else     0.0, 0.0, 1, feq
+ 4e4: 1a9182e21800           fmul     r4, $r1, u7
+ 4ea: 8a9148020300           rint     $r4, r4
+ 4f0: 9a9588021a00           fmul     $r5, $r4, u16
+ 4f6: ba99880a19420200       ffma     $r6, $r4.neg, u8, r1
+ 4fe: aa9d8ca2a800           fadd     $r7, $r6, $r5.neg
+ 504: aaa18ec2a800           fadd     $r8, $r7, $r6.neg
+ 50a: aaa58e02a900           fadd     $r9, $r7, $r8.neg
+ 510: aa994c22a500           fadd     $r6, r6, r9.neg
+ 516: aaa18a0aa500           fadd     $r8, $r5.neg, r8.neg
+ 51c: aa994c022500           fadd     $r6, r6, r8
+ 522: ba9588021a4a0a00       ffma     $r5, $r4, u16, r5.neg
+ 52a: aa954ca2a400           fadd     $r5, r6, r5.neg
+ 530: ba9548ca1b4a0200       ffma     $r5, r4.neg, u30, r5
+ 538: 9a998ee21800           fmul     $r6, $r7, u7
+ 53e: baa18ee2188c0a00       ffma     $r8, $r7, u7, $r6.neg
+ 546: ba954ae218500200       ffma     $r5, r5, u7, r8
+ 54e: ba954e22194a0201       ffma     $r5, r7, u41, r5
+ 556: aa9d8ca22800           fadd     $r7, $r6, $r5
+ 55c: aa998ec2a400           fadd     $r6, $r7, r6.neg
+ 562: aa954ac2a400           fadd     $r5, r5, r6.neg
+ 568: be9109802400           f_to_s32 $r4, r4, rtz
+ 56e: 7e194a0a8000           mov      r6, r5
+ 574: 7e15480a8000           mov      r5, r4
+ 57a: 7e114e0a8000           mov      r4, r7
+ 580: 520e00000000           pop_exec 1
+ 586: 9a9d88822800           fmul     $r7, $r4, $r4
+ 58c: 9aa18e221a00           fmul     $r8, $r7, u17
+ 592: 9aa58e021901           fmul     $r9, $r7, u40
+ 598: baa98e221a900a00       ffma     $r10, $r7, u17, $r8.neg
+ 5a0: aaa554222500           fadd     $r9, r10, r9
+ 5a6: baa98882288e0a00       ffma     $r10, $r4, $r4, $r7.neg
+ 5ae: 9aa954221a00           fmul     $r10, r10, u17
+ 5b4: aaa552422500           fadd     $r9, r9, r10
+ 5ba: 9aa988021900           fmul     $r10, $r4, u8
+ 5c0: baad880219940a00       ffma     $r11, $r4, u8, $r10.neg
+ 5c8: baad88021a560200       ffma     $r11, $r4, u16, r11
+ 5d0: baad8c0219560200       ffma     $r11, $r6, u8, r11
+ 5d8: 9a994ce21801           fmul     $r6, r6, u39
+ 5de: ba994c8228520200       ffma     $r6, r6, $r4, r9
+ 5e6: baa5b8e128b20100       ffma     $r9, u28, $r7, u25
+ 5ee: baa552e228864100       ffma     $r9, r9, $r7, u35
+ 5f6: baa552e228ba0100       ffma     $r9, r9, $r7, u29
+ 5fe: baa552e2288c4100       ffma     $r9, r9, $r7, u38
+ 606: baa552e228844100       ffma     $r9, r9, $r7, u34
+ 60e: 9a9148e22800           fmul     $r4, r4, $r7
+ 614: ba91482225560200       ffma     $r4, r4, r9, r11
+ 61c: aaa530002900           fadd     $r9, 1.0, $r8
+ 622: aaad92020302           fadd     $r11, $r9, -1.0
+ 628: aaa15062a500           fadd     $r8, r8, r11.neg
+ 62e: baad96e128b60104       ffma     $r11, u43, $r7, u27
+ 636: baad56e2288a4100       ffma     $r11, r11, $r7, u37
+ 63e: baad56e228944100       ffma     $r11, r11, $r7, u42
+ 646: baad56e228824100       ffma     $r11, r11, $r7, u33
+ 64e: baad56e228be0100       ffma     $r11, r11, $r7, u31
+ 656: 9a9d4ee22400           fmul     $r7, r7, r7
+ 65c: 9a9d4e622500           fmul     $r7, r7, r11
+ 662: aa9950c22400           fadd     $r6, r8, r6
+ 668: aa994ce22400           fadd     $r6, r6, r7
+ 66e: aa9952c22400           fadd     $r6, r9, r6
+ 674: aa9154822400           fadd     $r4, r10, r4
+ 67a: fe1d8a128000           and      $r7, $r5, 1
+ 680: 92114e020048c004       csel     $r4, r7, 0, r4, r6, ieq
+ 688: fe154a228000           and      $r5, r5, 2
+ 68e: aa99880a0002           fadd     $r6, $r4.neg, -0.0
+ 694: 92114a020048c004       csel     $r4, r5, 0, r4, r6, ieq
+ 69c: 8211824618486039       csel     $r4, $r1.abs, u2, r4, u11, flt
+ 6a4: fe1582e29900           and      $r5, $r1, u15
+ 6aa: 02114202004a8004       csel     r4, r1, 0.0, r5, r4, feq
+ 6b2: 42a842e61a00           if       r1.abs, u23, 1, fgte
+ 6b8: 20c09a030000           jmp_none 922
+ 6be: ae95006028170000       shr      $r5, $r3, 23
+ 6c6: 8e154aee03010000       isub     $r5, r5.sx, 126
+ 6ce: ae9900a028050000       shr      $r6, $r5, 5
+ 6d6: 921d8c420094a1b8       csel     $r7, $r6, 4, u10, u5, slt
+ 6de: 921d8c32009ae1a4       csel     $r7, $r6, 3, u13, r7, slt
+ 6e6: 921d8c220000e1a4       csel     $r7, $r6, 2, 0, r7, slt
+ 6ee: 92218c42008a21b9       csel     $r8, $r6, 4, u5, u9, slt
+ 6f6: 92218c32009401a5       csel     $r8, $r6, 3, u10, r8, slt
+ 6fe: 92258c120000a1b9       csel     $r9, $r6, 1, 0, u13, slt
+ 706: 92218c22005200a5       csel     $r8, $r6, 2, r9, r8, slt
+ 70e: fe154af28100           and      $r5, r5, 31
+ 714: ae1d00e0248a0200       shl      $r7, r7, $r5
+ 71c: 8e251fa868000000       isub     $r9, 31, $r5.sx
+ 724: fe2552f28100           and      $r9, r9, 31
+ 72a: aea9000029920200       shr      $r10, $r8, $r9
+ 732: aea9004025010000       shr      $r10, r10, 1
+ 73a: fe1d4e4ae500           or       $r7, r7, r10
+ 740: 92298c420092c1b9       csel     $r10, $r6, 4, u9, u14, slt
+ 748: 92298c32008a41a5       csel     $r10, $r6, 3, u5, r10, slt
+ 750: 922d8c12009a41b9       csel     $r11, $r6, 1, u13, u10, slt
+ 758: 92298c22005640a5       csel     $r10, $r6, 2, r11, r10, slt
+ 760: ae210000258a0200       shl      $r8, r8, $r5
+ 768: aead004029920200       shr      $r11, $r10, $r9
+ 770: aead006025010000       shr      $r11, r11, 1
+ 778: fe21506ae500           or       $r8, r8, r11
+ 77e: fe0d46c29800           and      $r3, r3, u6
+ 784: fe0d468ad900           or       $r3, r3, u12
+ 78a: ae0d006024080000       shl      $r3, r3, 8
+ 792: 1e33860229000000       imul     dr12, $r3, $r8
+ 79a: 922d8c42009ca1ba       csel     $r11, $r6, 4, u14, u21, slt
+ 7a2: 922d8c32009261a5       csel     $r11, $r6, 3, u9, r11, slt
+ 7aa: 92318c120094a1b8       csel     $r12, $r6, 1, u10, u5, slt
+ 7b2: 922d8c22005860a5       csel     $r11, $r6, 2, r12, r11, slt
+ 7ba: ae290040258a0200       shl      $r10, r10, $r5
+ 7c2: aeb1006029920200       shr      $r12, $r11, $r9
+ 7ca: aeb1008025010000       shr      $r12, r12, 1
+ 7d2: fe29548ae500           or       $r10, r10, r12
+ 7d8: 1e3b864229000000       imul     dr14, $r3, $r10
+ 7e0: 92318c4200aa41bb       csel     $r12, $r6, 4, u21, u26, slt
+ 7e8: 92318c32009c81a5       csel     $r12, $r6, 3, u14, r12, slt
+ 7f0: 92398c12008a21b9       csel     $r14, $r6, 1, u5, u9, slt
+ 7f8: 92194c22005c80a5       csel     $r6, r6, 2, r14, r12, slt
+ 800: ae150060254a0200       shl      $r5, r11, r5
+ 808: ae9900c024520200       shr      $r6, r6, r9
+ 810: ae9900c024010000       shr      $r6, r6, 1
+ 818: fe154acae400           or       $r5, r5, r6
+ 81e: 1e4386a224000000       imul     dr16, $r3, r5
+ 826: 9e15864665a20600       imadd    $r5, $r3.sx, r10.sx, $r17.sx
+ 82e: 9e198606659e0600       imadd    $r6, $r3.sx, r8.sx, $r15.sx
+ 836: 92218a2226010130       csel     $r8, $r5, r17, 1, 0, ult
+ 83e: 8e218c0665000000       iadd     $r8, $r6.sx, r8.sx
+ 846: 9e0d46e6645a0600       imadd    $r3, r3.sx, r7.sx, r13.sx
+ 84e: 921d90c228010130       csel     $r7, $r8, $r6, 1, 0, ult
+ 856: 8e0d46e664000000       iadd     $r3, r3.sx, r7.sx
+ 85e: 92194ce225010130       csel     $r6, r6, r15, 1, 0, ult
+ 866: 8e0d46c664000000       iadd     $r3, r3.sx, r6.sx
+ 86e: ae990000291f0000       shr      $r6, $r8, 31
+ 876: 8e0d4c6664000000       iadd     $r3, r6.sx, r3.sx
+ 87e: 8e19000869000000       isub     $r6, 0, $r8.sx
+ 886: 921d8a0200001110       csel     $r7, $r5, 0, 0, 1, ieq
+ 88e: 8e194cee64000000       isub     $r6, r6.sx, r7.sx
+ 896: 8e1d00a868000000       isub     $r7, 0, $r5.sx
+ 89e: 92159002004ea0a4       csel     $r5, $r8, 0, r7, r5, slt
+ 8a6: 92199002004c00a9       csel     $r6, $r8, 0, r6, $r8, slt
+ 8ae: be1d8c0e0000           ffs      $r7, $r6
+ 8b4: fe1d4e0ac200           or       $r7, r7, 32
+ 8ba: be258a0e0000           ffs      $r9, $r5
+ 8c0: 921d52e22452e0c4       csel     $r7, r9, r7, r9, r7, sgt
+ 8c8: 8e1d4e7e01000000       isub     $r7, r7.sx, 23
+ 8d0: 921d4e02004e00d0       csel     $r7, r7, 0, r7, 0, sgt
+ 8d8: fe258ef28300           and      $r9, $r7, 63
+ 8de: 8e29920e02000000       isub     $r10, $r9.sx, 32
+ 8e6: 8e2d004869000000       isub     $r11, 0, $r10.sx
+ 8ee: 92295462255460c5       csel     $r10, r10, r11, r10, r11, sgt
+ 8f6: fe2d92f28100           and      $r11, $r9, 31
+ 8fc: aeb100a028960200       shr      $r12, $r5, $r11
+ 904: fe2954f28100           and      $r10, r10, 31
+ 90a: ae3500c028940200       shl      $r13, $r6, $r10
+ 912: fe3158aae500           or       $r12, r12, r13
+ 918: aeb500c028940200       shr      $r13, $r6, $r10
+ 920: 923192020258a025       csel     $r12, $r9, 32, r12, r13, ult
+ 928: 92319202008a8005       csel     $r12, $r9, 0, $r5, r12, ieq
+ 930: ae2d001000560200       shl      $r11, 1, r11
+ 938: 922d920202560030       csel     $r11, $r9, 32, r11, 0, ult
+ 940: aeb5001000940200       shr      $r13, 1, $r10
+ 948: ae29001000540200       shl      $r10, 1, r10
+ 950: 92299202025a4025       csel     $r10, $r9, 32, r13, r10, ult
+ 958: 9239920200016105       csel     $r14, $r9, 0, 1, r11, ieq
+ 960: 923d520200004105       csel     $r15, r9, 0, 0, r10, ieq
+ 968: ae259ce629010000       extr     $r9, $r14, $r15, 1, 0
+ 970: fe299c0a8000           mov      $r10, $r14
+ 976: fe2d9e0a8000           mov      $r11, $r15
+ 97c: 8e2b541b00000000       isub     $dr10, dr10, 1
+ 984: fe298a42a500           and      $r10, $r5, r10
+ 98a: fe2d8c62a500           and      $r11, $r6, r11
+ 990: aeb59e1600000000       asr      $r13, $r15, 1, 0, 0
+ 998: 9202942229010110       csel     $r0h, $r10, $r9, 1, 0, ieq
+ 9a0: 920296a229410010       csel     $r0h, $r11, $r13, r0h, 0, ieq
+ 9a8: 92404e0200001110       csel     $r16l, r7, 0, 0, 1, ieq
+ 9b0: 9202410000000106       csel     $r0h, r0h, 0, 0, r16l, ieq
+ 9b8: fe154ac2a500           and      $r5, r5, r14
+ 9be: fe194ce2a500           and      $r6, r6, r15
+ 9c4: 92154ca2244ca044       csel     $r5, r6, r5, r6, r5, ugt
+ 9cc: 9218524225010130       csel     $r6l, r9, r10, 1, 0, ult
+ 9d4: 921896a2294c0010       csel     $r6l, $r11, $r13, r6l, 0, ieq
+ 9dc: 92185a622501c1a4       csel     $r6l, r13, r11, 1, r6l, slt
+ 9e4: 92024a0200001104       csel     $r0h, r5, 0, 0, r0h, ieq
+ 9ec: 92154c0000001110       csel     $r5, r6l, 0, 0, 1, ieq
+ 9f4: 92154100004a1010       csel     $r5, r0h, 0, r5, 1, ieq
+ 9fc: 0e1558a664000000       iadd     r5, r12.sx, r5.sx
+ a04: be990ae42400           u32_to_f $r6, r7, rte
+ a0a: 8a194cd2               exp2     $r6, r6
+ a0e: be950aa42400           u32_to_f $r5, r5, rte
+ a14: 9a954ac22400           fmul     $r5, r5, r6
+ a1a: 92195002009e01b0       csel     $r6, r8, 0, u15, 0, slt
+ a22: 9a954a021801           fmul     $r5, r5, u32
+ a28: fe154aca6400           xor      $r5, r5, r6
+ a2e: 8e19006868000000       isub     $r6, 0, $r3.sx
+ a36: 020d8202004c6024       csel     r3, $r1, 0.0, r6, r3, flt
+ a3e: aa998a0a0002           fadd     $r6, $r5.neg, -0.0
+ a44: 02154202004ca024       csel     r5, r1, 0.0, r6, r5, flt
+ a4c: 621900000000           ldimm    r6, 0
+ a52: 420a00000000           else     0.0, 0.0, 1, feq
+ a58: 1a8d82e21800           fmul     r3, $r1, u7
+ a5e: 8a8d46020300           rint     $r3, r3
+ a64: 9a9586021a00           fmul     $r5, $r3, u16
+ a6a: ba99860a19420200       ffma     $r6, $r3.neg, u8, r1
+ a72: aa9d8ca2a800           fadd     $r7, $r6, $r5.neg
+ a78: aaa18ec2a800           fadd     $r8, $r7, $r6.neg
+ a7e: aaa58e02a900           fadd     $r9, $r7, $r8.neg
+ a84: aa994c22a500           fadd     $r6, r6, r9.neg
+ a8a: aaa18a0aa500           fadd     $r8, $r5.neg, r8.neg
+ a90: aa994c022500           fadd     $r6, r6, r8
+ a96: ba9586021a4a0a00       ffma     $r5, $r3, u16, r5.neg
+ a9e: aa954ca2a400           fadd     $r5, r6, r5.neg
+ aa4: ba9546ca1b4a0200       ffma     $r5, r3.neg, u30, r5
+ aac: 9a998ee21800           fmul     $r6, $r7, u7
+ ab2: baa18ee2188c0a00       ffma     $r8, $r7, u7, $r6.neg
+ aba: ba954ae218500200       ffma     $r5, r5, u7, r8
+ ac2: ba954e22194a0201       ffma     $r5, r7, u41, r5
+ aca: aa9d8ca22800           fadd     $r7, $r6, $r5
+ ad0: aa998ec2a400           fadd     $r6, $r7, r6.neg
+ ad6: aa954ac2a400           fadd     $r5, r5, r6.neg
+ adc: 3e8d09602400           f_to_s32 r3, r3, rtz
+ ae2: 7e194a0a8000           mov      r6, r5
+ ae8: 7e154e0a8000           mov      r5, r7
+ aee: 520e00000000           pop_exec 1
+ af4: 9a9d8aa22800           fmul     $r7, $r5, $r5
+ afa: baa18aa2288e0a00       ffma     $r8, $r5, $r5, $r7.neg
+ b02: baa5b8e128b20100       ffma     $r9, u28, $r7, u25
+ b0a: baa552e228864100       ffma     $r9, r9, $r7, u35
+ b12: baa552e228ba0100       ffma     $r9, r9, $r7, u29
+ b1a: baa552e2288c4100       ffma     $r9, r9, $r7, u38
+ b22: baa552e228844100       ffma     $r9, r9, $r7, u34
+ b2a: 9aa98a021900           fmul     $r10, $r5, u8
+ b30: baad8a0219940a00       ffma     $r11, $r5, u8, $r10.neg
+ b38: baad8a021a560200       ffma     $r11, $r5, u16, r11
+ b40: baad8c0219560200       ffma     $r11, $r6, u8, r11
+ b48: 9ab18ae22800           fmul     $r12, $r5, $r7
+ b4e: baa5582225560200       ffma     $r9, r12, r9, r11
+ b56: aaa554222500           fadd     $r9, r10, r9
+ b5c: baa996e128b60104       ffma     $r10, u43, $r7, u27
+ b64: baa954e2288a4100       ffma     $r10, r10, $r7, u37
+ b6c: baa954e228944100       ffma     $r10, r10, $r7, u42
+ b74: baa954e228824100       ffma     $r10, r10, $r7, u33
+ b7c: baa954e228be0100       ffma     $r10, r10, $r7, u31
+ b84: 9aad8e221a00           fmul     $r11, $r7, u17
+ b8a: bab18e221a960a00       ffma     $r12, $r7, u17, $r11.neg
+ b92: 9ab58e021901           fmul     $r13, $r7, u40
+ b98: aab158a22500           fadd     $r12, r12, r13
+ b9e: 9aa150221a00           fmul     $r8, r8, u17
+ ba4: aaa158022500           fadd     $r8, r12, r8
+ baa: 9a994ce21801           fmul     $r6, r6, u39
+ bb0: ba954ca224500200       ffma     $r5, r6, r5, r8
+ bb8: aa9930602900           fadd     $r6, 1.0, $r11
+ bbe: aaa18c020302           fadd     $r8, $r6, -1.0
+ bc4: aaa15602a500           fadd     $r8, r11, r8.neg
+ bca: aa9550a22400           fadd     $r5, r8, r5
+ bd0: 9a9d4ee22400           fmul     $r7, r7, r7
+ bd6: 9a9d4e422500           fmul     $r7, r7, r10
+ bdc: aa954ae22400           fadd     $r5, r5, r7
+ be2: aa954ca22400           fadd     $r5, r6, r5
+ be8: 8e0d461600000000       iadd     $r3, r3.sx, 1
+ bf0: fe1986128000           and      $r6, $r3, 1
+ bf6: 92154c020052a004       csel     $r5, r6, 0, r9, r5, ieq
+ bfe: aa998a0a0002           fadd     $r6, $r5.neg, -0.0
+ c04: fe0d46228000           and      $r3, r3, 2
+ c0a: 920d4602004ac004       csel     $r3, r3, 0, r5, r6, ieq
+ c12: 820d824618466039       csel     $r3, $r1.abs, u2, r3, u11, flt
+ c1a: fe1582c29800           and      $r5, $r1, u6
+ c20: fe154a8ad800           or       $r5, r5, u4
+ c26: 9a998a020200           fmul     $r6, $r5, 0.5
+ c2c: 8219b0a1284ca028       csel     $r6, u24, $r5, r6, $r5, flt
+ c34: 8215b0a124010130       csel     $r5, u24, r5, 1, 0, flt
+ c3c: ae9d002028170000       shr      $r7, $r1, 23
+ c44: 8e1d4efe03010000       isub     $r7, r7.sx, 127
+ c4c: 0e154ae664000000       iadd     r5, r5.sx, r7.sx
+ c54: aa994c020302           fadd     $r6, r6, -1.0
+ c5a: aa9d00c02804           fadd     $r7, 2.0, $r6
+ c60: aaa18e020003           fadd     $r8, $r7, -2.0
+ c66: aaa18c02a500           fadd     $r8, $r6, r8.neg
+ c6c: fe258ce1a800           and      $r9, u6, $r7
+ c72: fe25528ad800           or       $r9, r9, u4
+ c78: 8a299282               rcp      $r10, $r9
+ c7c: ba2d924a2930           ffma     $r11, $r9.neg, $r10, 1.0
+ c82: baa9564225540200       ffma     $r10, r11, r10, r10
+ c8a: ba2d924a2930           ffma     $r11, $r9.neg, $r10, 1.0
+ c90: baa9564225540200       ffma     $r10, r11, r10, r10
+ c98: ba2d924a2930           ffma     $r11, $r9.neg, $r10, 1.0
+ c9e: fe3194429a00           and      $r12, $r10, u18
+ ca4: 8e3158c65a000000       iadd     $r12, r12.sx, u22.sx
+ cac: 9ab192822500           fmul     $r12, $r9, r12
+ cb2: fe3594c29800           and      $r13, $r10, u6
+ cb8: 9ab998020200           fmul     $r14, $r12, 0.5
+ cbe: 92355a02005c8009       csel     $r13, r13, 0, r14, $r12, ieq
+ cc6: fe3994128000           and      $r14, $r10, 1
+ ccc: 92025c0200001110       csel     $r0h, r14, 0, 0, 1, ieq
+ cd4: 8238986229810010       csel     $r14l, $r12, $r11, $r0h, 0, feq
+ cdc: 82029a62a9410010       csel     $r0h, $r13, $r11.neg, r0h, 0, feq
+ ce4: 92395c0000001110       csel     $r14, r14l, 0, 0, 1, ieq
+ cec: 823158622901c125       csel     $r12, r12, $r11, 1, r14, flt
+ cf4: 8e29548665000000       iadd     $r10, r10.sx, r12.sx
+ cfc: 9231410000001110       csel     $r12, r0h, 0, 0, 1, ieq
+ d04: 822d5a62a5018125       csel     $r11, r13, r11.neg, 1, r12, flt
+ d0c: 8e29546e65000000       isub     $r10, r10.sx, r11.sx
+ d14: fe2d8e829a00           and      $r11, $r7, u20
+ d1a: aeb1006029170000       shr      $r12, $r11, 23
+ d22: 8e35008869000000       isub     $r13, 0, $r12.sx
+ d2a: 8e39884569000000       iadd     $r14, u4.sx, $r10.sx
+ d32: 9e355a86595c0600       imadd    $r13, r13.sx, u12.sx, r14.sx
+ d3a: 8e393f8869040000       isub     $r14, 127, $r12.sx
+ d42: 9202882125010130       csel     $r0h, u4, r9, 1, 0, ult
+ d4a: 92029c6218410010       csel     $r0h, $r14, u3, r0h, 0, ieq
+ d52: 92254100005a0010       csel     $r9, r0h, 0, r13, 0, ieq
+ d5a: 92259c62180021a5       csel     $r9, $r14, u3, 0, r9, slt
+ d62: aea9004025170000       shr      $r10, r10, 23
+ d6a: 8e295c4665000000       iadd     $r10, r14.sx, r10.sx
+ d72: 92a554f2035240b80003   csel     $r9, r10, 255, r9, u2, slt
+ d7c: 92a598f2030021050003   csel     $r9, $r12, 255, 0, r9, ieq
+ d86: 9225580200842105       csel     $r9, r12, 0, u2, r9, ieq
+ d8e: fe2988e96800           xor      $r10, u4, $r7
+ d94: fe2954e29900           and      $r10, r10, u15
+ d9a: fe25524ae500           or       $r9, r9, r10
+ da0: 9225846125962125       csel     $r9, u2, r11, u11, r9, ult
+ da8: ba298e2a2930           ffma     $r10, $r7.neg, $r9, 1.0
+ dae: baa5542225520200       ffma     $r9, r10, r9, r9
+ db6: 9aa98c222900           fmul     $r10, $r6, $r9
+ dbc: baad94ea288c0200       ffma     $r11, $r10.neg, $r7, $r6
+ dc4: baa9562229540200       ffma     $r10, r11, $r9, r10
+ dcc: ba9994ea244c0200       ffma     $r6, $r10.neg, r7, r6
+ dd4: 9a9d94022500           fmul     $r7, $r10, r8
+ dda: aa994ce2a400           fadd     $r6, r6, r7.neg
+ de0: 9a994c222500           fmul     $r6, r6, r9
+ de6: 9a9d94422900           fmul     $r7, $r10, $r10
+ dec: baa19442298e0a00       ffma     $r8, $r10, $r10, $r7.neg
+ df4: 9aa594e22800           fmul     $r9, $r10, $r7
+ dfa: baad94e228920a00       ffma     $r11, $r10, $r7, $r9.neg
+ e02: 9aa194022500           fmul     $r8, $r10, r8
+ e08: aaa156022500           fadd     $r8, r11, r8
+ e0e: 9aad8c820001           fmul     $r11, $r6, 3.0
+ e14: baa156e228500200       ffma     $r8, r11, $r7, r8
+ e1c: baad9ce128a64104       ffma     $r11, u46, $r7, u51
+ e24: baad56e228984100       ffma     $r11, r11, $r7, u44
+ e2c: baad56e228a84100       ffma     $r11, r11, $r7, u52
+ e34: baad56e2289e4100       ffma     $r11, r11, $r7, u47
+ e3c: ba9d4e62259a4100       ffma     $r7, r7, r11, u45
+ e44: aaada4e12804           fadd     $r11, u50, $r7
+ e4a: aab196221a01           fadd     $r12, $r11, u49
+ e50: aa9d4e82a500           fadd     $r7, r7, r12.neg
+ e56: 9ab192622900           fmul     $r12, $r9, $r11
+ e5c: bab5926229980a00       ffma     $r13, $r9, $r11, $r12.neg
+ e64: 9a9d52e22400           fmul     $r7, r9, r7
+ e6a: aa9d5ae22400           fadd     $r7, r13, r7
+ e70: 9aa150622500           fmul     $r8, r8, r11
+ e76: aa9d4e022500           fadd     $r7, r7, r8
+ e7c: 9aa154020001           fmul     $r8, r10, 2.0
+ e82: 9aa590621a00           fmul     $r9, $r8, u19
+ e88: baa990621a920a00       ffma     $r10, $r8, u19, $r9.neg
+ e90: baa150021a540201       ffma     $r8, r8, u48, r10
+ e98: 9aa900802504           fmul     $r10, 2.0, r12
+ e9e: 9aad94621a00           fmul     $r11, $r10, u19
+ ea4: baa954621a960a00       ffma     $r10, r10, u19, $r11.neg
+ eac: 9a994c020001           fmul     $r6, r6, 2.0
+ eb2: 9a9d00e02404           fmul     $r7, 2.0, r7
+ eb8: aa994ce22400           fadd     $r6, r6, r7
+ ebe: ba994c621a500200       ffma     $r6, r6, u19, r8
+ ec6: aa994c422500           fadd     $r6, r6, r10
+ ecc: be950ba42400           s32_to_f $r5, r5, rte
+ ed2: aa9d8a222900           fadd     $r7, $r5, $r9
+ ed8: aa958ea2a400           fadd     $r5, $r7, r5.neg
+ ede: aa9552a2a400           fadd     $r5, r9, r5.neg
+ ee4: aaa18e622900           fadd     $r8, $r7, $r11
+ eea: aa9d90e2a400           fadd     $r7, $r8, r7.neg
+ ef0: aa9d56e2a400           fadd     $r7, r11, r7.neg
+ ef6: aa954ae22400           fadd     $r5, r5, r7
+ efc: aa954ac22400           fadd     $r5, r5, r6
+ f02: aa9550a22400           fadd     $r5, r8, r5
+ f08: fe1982829a00           and      $r6, $r1, u20
+ f0e: 921d842128964138       csel     $r7, u2, $r1, u11, u2, ult
+ f16: 92194c8219a4e124       csel     $r6, r6, u12, u18, r7, ult
+ f1e: 8e1d82465a000000       iadd     $r7, $r1.sx, u18.sx
+ f26: 92954e82184ac0240001   csel     $r5, r7, u36, r5, r6, ult
+ f30: ba8d466224308000       ffma     $r3, r3, r3, -1.0
+ f38: ba8d488224460200       ffma     $r3, r4, r4, r3
+ f40: 9a8542020200           fmul     $r1, r1, 0.5
+ f46: 8a0542d2               exp2     $r1, r1
+ f4a: ba8d4622288a0200       ffma     $r3, r3, $r1, $r5
+ f52: ba054a222430           ffma     $r1, r5, r1, 1.0
+ f58: fe118c21a800           and      $r4, u6, $r1
+ f5e: fe11488ad800           or       $r4, r4, u4
+ f64: fe158c81a800           and      $r5, u6, $r4
+ f6a: fe154a8ad800           or       $r5, r5, u4
+ f70: 8a198a82               rcp      $r6, $r5
+ f74: ba1d8aca2830           ffma     $r7, $r5.neg, $r6, 1.0
+ f7a: ba994ec2244c0200       ffma     $r6, r7, r6, r6
+ f82: ba1d8aca2830           ffma     $r7, $r5.neg, $r6, 1.0
+ f88: ba994ec2244c0200       ffma     $r6, r7, r6, r6
+ f90: ba1d8aca2830           ffma     $r7, $r5.neg, $r6, 1.0
+ f96: fe218c429a00           and      $r8, $r6, u18
+ f9c: 8e2150c65a000000       iadd     $r8, r8.sx, u22.sx
+ fa4: 9aa18a022500           fmul     $r8, $r5, r8
+ faa: fe258cc29800           and      $r9, $r6, u6
+ fb0: 9aa990020200           fmul     $r10, $r8, 0.5
+ fb6: 9225520200540009       csel     $r9, r9, 0, r10, $r8, ieq
+ fbe: fe298c128000           and      $r10, $r6, 1
+ fc4: 9202540200001110       csel     $r0h, r10, 0, 0, 1, ieq
+ fcc: 822890e228810010       csel     $r10l, $r8, $r7, $r0h, 0, feq
+ fd4: 820292e2a8410010       csel     $r0h, $r9, $r7.neg, r0h, 0, feq
+ fdc: 9229540000001110       csel     $r10, r10l, 0, 0, 1, ieq
+ fe4: 822150e228014125       csel     $r8, r8, $r7, 1, r10, flt
+ fec: 8e194c0665000000       iadd     $r6, r6.sx, r8.sx
+ ff4: 9221410000001110       csel     $r8, r0h, 0, 0, 1, ieq
+ ffc: 821d52e2a4010125       csel     $r7, r9, r7.neg, 1, r8, flt
+1004: 8e194cee64000000       isub     $r6, r6.sx, r7.sx
+100c: 8e1d88c568000000       iadd     $r7, u4.sx, $r6.sx
+1014: fe2188829a00           and      $r8, $r4, u20
+101a: aea5000029170000       shr      $r9, $r8, 23
+1022: 8e29002869000000       isub     $r10, 0, $r9.sx
+102a: 9e1d5486594e0600       imadd    $r7, r10.sx, u12.sx, r7.sx
+1032: 8e293f2869040000       isub     $r10, 127, $r9.sx
+103a: 920288a124010130       csel     $r0h, u4, r5, 1, 0, ult
+1042: 9202946218410010       csel     $r0h, $r10, u3, r0h, 0, ieq
+104a: 92154100004e0010       csel     $r5, r0h, 0, r7, 0, ieq
+1052: 921594621800a1a4       csel     $r5, $r10, u3, 0, r5, slt
+105a: ae9900c024170000       shr      $r6, r6, 23
+1062: 8e1954c664000000       iadd     $r6, r10.sx, r6.sx
+106a: 92954cf2034a40b80003   csel     $r5, r6, 255, r5, u2, slt
+1074: 929592f20300a1040003   csel     $r5, $r9, 255, 0, r5, ieq
+107e: 921552020084a104       csel     $r5, r9, 0, u2, r5, ieq
+1086: fe1988896800           xor      $r6, u4, $r4
+108c: fe194ce29900           and      $r6, r6, u15
+1092: fe154acae400           or       $r5, r5, r6
+1098: 921584012596a124       csel     $r5, u2, r8, u11, r5, ult
+10a0: ba1988aa2830           ffma     $r6, $r4.neg, $r5, 1.0
+10a6: ba954ca2244a0200       ffma     $r5, r6, r5, r5
+10ae: fe198c61a800           and      $r6, u6, $r3
+10b4: fe194c8ad800           or       $r6, r6, u4
+10ba: 9a9d8ca22800           fmul     $r7, $r6, $r5
+10c0: baa188ea288c0200       ffma     $r8, $r4.neg, $r7, $r6
+10c8: ba9550a2244e0200       ffma     $r5, r8, r5, r7
+10d0: ba9d88aa288c0200       ffma     $r7, $r4.neg, $r5, $r6
+10d8: fe218a429a00           and      $r8, $r5, u18
+10de: 8e2150c65a000000       iadd     $r8, r8.sx, u22.sx
+10e6: 9aa188022500           fmul     $r8, $r4, r8
+10ec: 9aa590020200           fmul     $r9, $r8, 0.5
+10f2: fe298ac29800           and      $r10, $r5, u6
+10f8: 9225540200520009       csel     $r9, r10, 0, r9, $r8, ieq
+1100: fe298a128000           and      $r10, $r5, 1
+1106: 9202540200001110       csel     $r0h, r10, 0, 0, 1, ieq
+110e: 822890e228810010       csel     $r10l, $r8, $r7, $r0h, 0, feq
+1116: 820292e2a8410010       csel     $r0h, $r9, $r7.neg, r0h, 0, feq
+111e: 9229540000001110       csel     $r10, r10l, 0, 0, 1, ieq
+1126: 822150e228014125       csel     $r8, r8, $r7, 1, r10, flt
+112e: 8e154a0665000000       iadd     $r5, r5.sx, r8.sx
+1136: 9221410000001110       csel     $r8, r0h, 0, 0, 1, ieq
+113e: 821d52e2a4010125       csel     $r7, r9, r7.neg, 1, r8, flt
+1146: 8e154aee64000000       isub     $r5, r5.sx, r7.sx
+114e: fe1d86829a00           and      $r7, $r3, u20
+1154: aea100e028170000       shr      $r8, $r7, 23
+115c: fe2582829a00           and      $r9, $r1, u20
+1162: aea9002029170000       shr      $r10, $r9, 23
+116a: 8e2d904e69000000       isub     $r11, $r8.sx, $r10.sx
+1172: 9e319686598a0600       imadd    $r12, $r11.sx, u12.sx, $r5.sx
+117a: 92024c8224010130       csel     $r0h, r6, r4, 1, 0, ult
+1182: 9202966218410010       csel     $r0h, $r11, u3, r0h, 0, ieq
+118a: 9211410000580010       csel     $r4, r0h, 0, r12, 0, ieq
+1192: 92119662180081a4       csel     $r4, $r11, u3, 0, r4, slt
+119a: ae9500a024170000       shr      $r5, r5, 23
+11a2: 8e1556a664000000       iadd     $r5, r11.sx, r5.sx
+11aa: 92914af2034840b80003   csel     $r4, r5, 255, r4, u2, slt
+11b4: 928294f2030101100003   csel     $r0h, $r10, 255, 1, 0, ieq
+11be: 929194f2030081040003   csel     $r4, $r10, 255, 0, r4, ieq
+11c8: 9211900200008104       csel     $r4, $r8, 0, 0, r4, ieq
+11d0: 929190f2038481040003   csel     $r4, $r8, 255, u2, r4, ieq
+11da: 9211940200848104       csel     $r4, $r10, 0, u2, r4, ieq
+11e2: fe05462a6400           xor      $r1, r3, r1
+11e8: fe0542e29900           and      $r1, r1, u15
+11ee: fe05482ae400           or       $r1, r4, r1
+11f4: 920d4e22254e2045       csel     $r3, r7, r9, r7, r9, ugt
+11fc: 9211904225904045       csel     $r4, $r8, r10, $r8, r10, ugt
+1204: 928250f2034100100003   csel     $r0h, r8, 255, r0h, 0, ieq
+120e: 9202480200011104       csel     $r0h, r4, 0, 1, r0h, ieq
+1216: 9211410000426019       csel     $r4, r0h, 0, r1, u11, ieq
+121e: 1205846124968124       csel     r1, u2, r3, u11, r4, ult
+1226: 4509480c70c01200       store    r1, du60, r2.sx, i32, x, a
+122e: 3800                   wait     a
+1230: 520e00000000           pop_exec 1
+1236: 8800                   stop
