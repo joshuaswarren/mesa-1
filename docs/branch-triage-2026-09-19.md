@@ -82,7 +82,7 @@ then showed the barrier is load-bearing memory ordering, closing the whole
 amortize-the-barrier lever family. `hk/cdm-g13x-178` is the sole unmeasured
 candidate.
 
-## Ranked benchmark queue (for a later t6001-test-host lane under /tmp/m1-gpu.lock)
+## Ranked benchmark queue (for a later t6001-test-host lane under /tmp/gpu.lock)
 
 1. **hk/cdm-g13x-178 — the only unmeasured branch and the only one that could
    still hold both legs.** Designed set {4,5,6,8} alone wins short +13%
