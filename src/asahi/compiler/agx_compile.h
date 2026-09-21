@@ -7,6 +7,7 @@
 
 #include "compiler/nir/nir.h"
 #include "util/shader_stats.h"
+#include "util/u_debug.h"
 #include "util/u_dynarray.h"
 #include "util/u_tristate.h"
 #include "shader_enums.h"
@@ -317,6 +318,13 @@ struct agx_shader_key {
 uint64_t agx_gather_texcoords(nir_shader *nir);
 
 void agx_preprocess_nir(nir_shader *nir);
+
+/* Experimental VK_KHR_cooperative_matrix support; AGX_SIMDMAT=1 opts in. */
+static inline bool
+agx_simdmat_enabled(void)
+{
+   return debug_get_bool_option("AGX_SIMDMAT", false);
+}
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
 bool agx_nir_lower_interpolation(nir_shader *s);
@@ -347,7 +355,6 @@ agx_round_registers(unsigned halfregs)
 }
 
 static const nir_shader_compiler_options agx_nir_options = {
-   .lower_fdiv = true,
    .float_mul_add16 = nir_float_muladd_support_has_ffma | nir_float_muladd_support_fuse,
    .float_mul_add32 = nir_float_muladd_support_has_ffma | nir_float_muladd_support_fuse,
    .lower_flrp16 = true,
