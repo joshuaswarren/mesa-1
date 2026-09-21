@@ -1,0 +1,35 @@
+// Copyright 2026 Joshua Warren
+// SPDX-License-Identifier: MIT
+//
+// 06 - trig lowering invariance
+
+#version 450
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer Input {
+    float values[];
+} input_data;
+
+layout(set = 0, binding = 1, std430) writeonly buffer Output {
+    float values[];
+} output_data;
+
+layout(push_constant) uniform Params {
+    uint n;
+    float scale;
+} params;
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= params.n) return;
+
+    float x = input_data.values[tid] * params.scale;
+    float s = sin(x);
+    float c = cos(x);
+    float l = log2(x);
+    float e = exp2(x * 0.5);
+    float one = 1.0;
+    float trig_id = fma(s, s, fma(c, c, -one));
+    float fp = (fma(trig_id, e, l)) / (fma(l, e, one));
+    output_data.values[tid] = fp;
+}
