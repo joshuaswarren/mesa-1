@@ -6111,6 +6111,54 @@ TEST_F(AGX3PackBinary, TextureFetch2DLod2Immediate)
    EXPECT_EQ(pack(b), want);
 }
 
+TEST_F(AGX3PackBinary, TextureFetchRepeatedWaitKeepsCoordinateUntilFinalCopy)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   key.fs.nr_samples = 4;
+
+   /* Two independent asynchronous producers supply x and y. The staged
+    * fetch therefore repeats x once per producer wait. Only the second x
+    * COPY may discard it; otherwise that COPY rereads a killed coordinate. */
+   const agx_index base = agx_uniform(16, AGX_SIZE_64);
+   agx_device_load_to(b, agx_register(12, AGX_SIZE_32), base,
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 0, false);
+   agx_device_load_to(b, agx_register(14, AGX_SIZE_32), base,
+                      agx_immediate(4), AGX_FORMAT_I32, 1, 0, false);
+   agx_mov_imm_to(b, agx_register(16, AGX_SIZE_32), 0);
+
+   agx_index dest = agx_register(24, AGX_SIZE_32);
+   agx_index coord = agx_register(12, AGX_SIZE_32);
+   agx_index texture = agx_register(6, AGX_SIZE_32);
+   dest.channels_m1 = 3;
+   coord.channels_m1 = 2;
+   coord.discard = true;
+   agx_instr *I = agx_texture_sample_to(
+      b, dest, coord, agx_immediate(0), agx_uniform(8, AGX_SIZE_64), texture,
+      agx_immediate(0), agx_null(), AGX_DIM_2D_MS_ARRAY,
+      AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE, false);
+   I->op = AGX_OPCODE_TEXTURE_LOAD;
+   I->mask = 15;
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> copies;
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 12, 1, 1, false, false,
+                                         bytes, &len));
+   append(copies, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 12, 1, 2, false, true,
+                                         bytes, &len));
+   append(copies, bytes, len);
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 14, 1, 0, false, true,
+                                         bytes, &len));
+   append(copies, bytes, len);
+
+   const std::vector<uint8_t> code = pack(b);
+   EXPECT_NE(std::search(code.begin(), code.end(), copies.begin(), copies.end()),
+             code.end());
+}
+
 TEST_F(AGX3PackBinary, TextureFetch3DBindlessStagesThirdCoordinate)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;

@@ -867,7 +867,26 @@ agx_optimizer_bitop(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (def->op == AGX_OPCODE_NOT) {
          const unsigned truth_table =
             util_lut2_invert_source(I->truth_table, s);
+         agx_index other = I->src[1 - s];
+         if (other.type == AGX_INDEX_NORMAL) {
+            const agx_instr *other_def = defs[other.value];
+            if (other_def && other_def->op == AGX_OPCODE_NOT &&
+                other_def->src[0].size == AGX_SIZE_32)
+               other = other_def->src[0];
+         }
+         /* Enable the witnessed uniform forms. Keep the existing restriction
+          * for register-only expressions until their generated code is
+          * profitable as well as their encoding being supported.
+          */
+         const bool native_uniform_word =
+            I->dest[0].size == AGX_SIZE_32 &&
+            I->src[0].size == AGX_SIZE_32 &&
+            I->src[1].size == AGX_SIZE_32 &&
+            def->src[0].size == AGX_SIZE_32 &&
+            (def->src[0].type == AGX_INDEX_UNIFORM ||
+             other.type == AGX_INDEX_UNIFORM);
          if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+             !native_uniform_word &&
              truth_table != AGX3_SEL_TT_AND &&
              truth_table != AGX3_SEL_TT_OR &&
              truth_table != AGX3_SEL_TT_XOR &&

@@ -38,17 +38,17 @@ main(void)
     * 3474e39a65f602e913af23900d0205bd436c8c930dc4fa6f3571e539ae9437cd.
     *
     * This is the exact Mesa-ABI form of the same witnessed operations.  It
-    * differs in register assignment and has one extra uniform move because
-    * libagx receives its six arguments in contiguous uniform halves. */
+    * differs in register assignment and argument placement. Native uniform
+    * IMAD avoids the old multiplicand copy. This fingerprint uses the current
+    * Mesa ABI; the encoder's independent native-byte tests cover that form. */
    static const uint8_t expected[] = {
       0x0c, 0xa0, 0x10, 0x06, 0x1c, 0xa1, 0x10, 0x26,
-      0x2b, 0x04, 0x01, 0x08, 0x9f, 0x30, 0x54, 0x00,
-      0x02, 0x04, 0x10, 0x00, 0xd0, 0x2f, 0x2a, 0x00,
-      0x4b, 0x06, 0x01, 0x08, 0x5b, 0x08, 0x01, 0x08,
-      0x6b, 0x0a, 0x01, 0x08, 0x7b, 0x0c, 0x01, 0x08,
-      0xe7, 0x00, 0x54, 0x08, 0x00, 0x00, 0x20, 0x00,
-      0x17, 0x00, 0x00, 0x10, 0x10, 0x00, 0x0e, 0x00,
-      0x00, 0x00,
+      0x9f, 0x30, 0x54, 0x00, 0x02, 0x20, 0x08, 0x00,
+      0xd0, 0x2f, 0x28, 0x00, 0x4b, 0x12, 0x01, 0x08,
+      0x5b, 0x14, 0x01, 0x08, 0x6b, 0x16, 0x01, 0x08,
+      0x7b, 0x18, 0x01, 0x08, 0xe7, 0x00, 0x54, 0x08,
+      0x03, 0x00, 0x20, 0x00, 0x17, 0x00, 0x00, 0x10,
+      0x10, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
@@ -170,8 +170,8 @@ main(void)
    static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(copy_image_info->preamble_offset == 0);
    CHECK(copy_image_info->main_offset == 0);
-   CHECK(copy_image_info->main_size == 1670);
-   CHECK(copy_image_info->binary_size == 1670);
+   CHECK(copy_image_info->main_size == 1606);
+   CHECK(copy_image_info->binary_size == 1606);
    CHECK(copy_image_info->nr_gprs == 22);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
    CHECK(copy_image_info->push_count == 42);
@@ -242,8 +242,8 @@ main(void)
       (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
    CHECK(mipmap_info->preamble_offset == 0);
    CHECK(mipmap_info->main_offset == 0);
-   CHECK(mipmap_info->main_size == 3234);
-   CHECK(mipmap_info->binary_size == 3234);
+   CHECK(mipmap_info->main_size == 3190);
+   CHECK(mipmap_info->binary_size == 3190);
    CHECK(mipmap_info->nr_gprs == 38);
    CHECK(mipmap_info->nr_preamble_gprs == 0);
    CHECK(mipmap_info->push_count == 28);
@@ -277,8 +277,8 @@ main(void)
       (const uint8_t *)odd_mipmap_blob + sizeof(*odd_mipmap_info);
    CHECK(odd_mipmap_info->preamble_offset == 0);
    CHECK(odd_mipmap_info->main_offset == 0);
-   CHECK(odd_mipmap_info->main_size == 3474);
-   CHECK(odd_mipmap_info->binary_size == 3474);
+   CHECK(odd_mipmap_info->main_size == 3442);
+   CHECK(odd_mipmap_info->binary_size == 3442);
    CHECK(odd_mipmap_info->nr_gprs == 36);
    CHECK(odd_mipmap_info->nr_preamble_gprs == 0);
    CHECK(odd_mipmap_info->push_count == 28);
@@ -418,8 +418,8 @@ main(void)
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(xfb_info->preamble_offset == 0);
    CHECK(xfb_info->main_offset == 0);
-   CHECK(xfb_info->main_size == 172);
-   CHECK(xfb_info->binary_size == 172);
+   CHECK(xfb_info->main_size == 168);
+   CHECK(xfb_info->binary_size == 168);
    CHECK(xfb_info->nr_gprs == 12);
    CHECK(xfb_info->push_count == 4);
    CHECK(xfb_info->workgroup_size[0] == 4);
@@ -484,9 +484,9 @@ main(void)
        * dependent wait carriers while keeping adjacent producers overlapped. */
       {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
        {1024, 1, 1}, 4, UINT64_C(0xf620f3d617876470)},
-      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
+      {LIBAGX_COPY_QUERY, 0, 890, 890, 24, 25, {32, 1, 1}, 0,
        UINT64_C(0x28b92f478b1714d4)},
-      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
+      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 82, 82, 8, 10, {1, 1, 1}, 0,
        UINT64_C(0xd292b1db166dd1e9)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(statistics); ++i) {
@@ -536,8 +536,8 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } predicate[] = {
-      {LIBAGX_PREDICATE_INDIRECT_0, 642, UINT64_C(0xd312d6837034a3df)},
-      {LIBAGX_PREDICATE_INDIRECT_1, 784, UINT64_C(0xa7af1ba09fd87252)},
+      {LIBAGX_PREDICATE_INDIRECT_0, 622, UINT64_C(0xd312d6837034a3df)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 760, UINT64_C(0xa7af1ba09fd87252)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
       const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
@@ -656,8 +656,8 @@ main(void)
       (const uint8_t *)factors_blob + sizeof(*factors_info);
    CHECK(factors_info->preamble_offset == 0);
    CHECK(factors_info->main_offset == 0);
-   CHECK(factors_info->main_size == 1518);
-   CHECK(factors_info->binary_size == 1518);
+   CHECK(factors_info->main_size == 1510);
+   CHECK(factors_info->binary_size == 1510);
    CHECK(factors_info->nr_gprs == 28);
    CHECK(factors_info->nr_preamble_gprs == 0);
    CHECK(factors_info->push_count == 10);

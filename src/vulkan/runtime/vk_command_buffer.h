@@ -200,6 +200,11 @@ struct vk_command_buffer {
     * Used by the common vk_pipeline implementation
     */
    VkShaderStageFlags pipeline_shader_stages;
+
+   /* Common graphics pipelines are immutable.  The pipeline binder retains
+    * exact identity so a rebind can skip work when none of that pipeline's
+    * static states changed. */
+   const struct vk_pipeline *last_graphics_pipeline;
 };
 
 VK_DEFINE_HANDLE_CASTS(vk_command_buffer, base, VkCommandBuffer,

@@ -31,12 +31,9 @@ agx3_g17p_compute_state_tail(
    if (!tail_ok)
       return false;
 
-   struct agx_ioto_state spectpr;
    if (!desc->compiler_d_valid ||
-       !agx_ioto_g17p_compiler_spectpr_build(desc->scratch_size,
-                                             desc->compiler_d, &spectpr) ||
-       !agx_ioto_state_pack_spectpr(
-          AGX_CHIP_G17P, &spectpr,
+       !agx_ioto_g17p_compiler_spectpr_pack(
+          desc->scratch_size, desc->compiler_d,
           staged.bytes + AGX_IOTO_SPECLM_SIZE + AGX_IOTO_LDSHDR_SIZE,
           AGX_IOTO_SPECTPR_SIZE))
       return false;
@@ -61,7 +58,7 @@ agx3_g17p_compute_program_generate(
    struct agx3_g17p_compute_program staged = {0};
    size_t written = 0;
    if (!desc->uniform_range_count) {
-      if (!agx_ioto_g17p_no_resource_program_compose(
+      if (!agx_ioto_g17p_no_resource_program_compose_trusted(
              desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
              &written))
          return false;
@@ -96,7 +93,7 @@ agx3_g17p_compute_program_generate(
       if (!agx3_ioto_uniform_program_body_generate(
              chip, &load_desc, workspace, &body_size, &copy_offset) ||
           copy_offset > body_size ||
-          !agx_ioto_g17p_resource_program_compose(
+          !agx_ioto_g17p_resource_program_compose_trusted(
              desc->program_va, body, copy_offset, body + copy_offset,
              body_size - copy_offset, &tail, staged.bytes,
              sizeof(staged.bytes), &written))

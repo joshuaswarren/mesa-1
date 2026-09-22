@@ -516,6 +516,14 @@ test_g17p_no_resource_program(void)
    CHECK(memcmp(output, expected, sizeof(expected)) == 0);
    CHECK(output[sizeof(expected)] == 0xa5);
 
+   uint8_t trusted[sizeof(expected)];
+   size_t trusted_written = 0;
+   CHECK(agx_ioto_g17p_no_resource_program_compose_trusted(
+      UINT64_C(0x10001990240), &tail, trusted, sizeof(trusted),
+      &trusted_written));
+   CHECK(trusted_written == sizeof(expected));
+   CHECK(memcmp(trusted, expected, sizeof(expected)) == 0);
+
    uint8_t before[sizeof(output)];
    memset(before, 0xa5, sizeof(before));
    memcpy(output, before, sizeof(output));
@@ -532,6 +540,8 @@ test_g17p_no_resource_program(void)
 
    tail.length--;
    CHECK(!agx_ioto_g17p_no_resource_program_compose(
+      UINT64_C(0x10001990240), &tail, output, sizeof(expected), &written));
+   CHECK(!agx_ioto_g17p_no_resource_program_compose_trusted(
       UINT64_C(0x10001990240), &tail, output, sizeof(expected), &written));
    CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 23);
    tail.length++;
@@ -582,6 +592,14 @@ test_g17p_fragment_no_resource_program(void)
    CHECK(written == sizeof(expected));
    CHECK(memcmp(output, expected, sizeof(expected)) == 0);
    CHECK(output[sizeof(expected)] == 0xa5);
+
+   uint8_t trusted[sizeof(expected)];
+   size_t trusted_written = 0;
+   CHECK(agx_ioto_g17p_fragment_no_resource_program_compose_trusted(
+      UINT64_C(0x10000130640), &tail, 1, trusted, sizeof(trusted),
+      &trusted_written));
+   CHECK(trusted_written == sizeof(expected));
+   CHECK(memcmp(trusted, expected, sizeof(expected)) == 0);
 
    /* applegpu_g17p metadata makes the consumed colour classes observable in
     * exactly one PIXREL descriptor: p0=0x2f3, p0+p1=0x2c3, p0+p1+p2=0x203,

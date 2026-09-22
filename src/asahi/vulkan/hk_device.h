@@ -29,7 +29,10 @@
 #include "vk_queue.h"
 
 struct hk_physical_device;
+struct hk_shader_binary_cache_entry;
 struct vk_pipeline_cache;
+
+#define HK_SHADER_BINARY_CACHE_MAX 16
 
 typedef void (*hk_internal_builder_t)(struct nir_builder *b, const void *key);
 
@@ -118,12 +121,42 @@ struct hk_device {
       uint64_t misses;
    } g17p_compute_program_cache;
 
+   /* Immutable diagnostic selection. Never rescan the process environment
+    * from render-pass, draw, dispatch, or per-program publication paths. */
+   struct {
+      bool trace;
+      bool aggregate;
+      bool fault_trace;
+      bool prefault_stack;
+      bool prefault_driver;
+      bool prefault_main;
+      bool prefault_ioto;
+      bool prefault_streams;
+   } g17p_shader_perf;
+
+   struct {
+      bool launch_trace;
+      bool draw_trace;
+      bool compact_ioto_trace;
+      bool graphics_ioto_cache_stats;
+      bool nonpoint_no_psiz;
+      bool hal200_about_flags1;
+      bool force_tri_merge_disable;
+   } g17p_diagnostics;
+
    struct {
       /* Immutable for the device's lifetime: the native texel-fetch sampler
        * table. Its address is published to the GPU as a sampler table base by
        * every G17P background reload program, so nothing that any subsystem
        * writes at draw time may share this buffer object. */
       struct agx_bo *bo;
+
+      /* G17P texture and sampler heaps are allocated at full capacity during
+       * device creation, so their VAs never move.  Keep the pair in immutable
+       * device-owned storage: uploading it per draw makes its address part of
+       * every indexed-texture Ioto key and defeats program reuse. */
+      struct agx_bo *indexed_heap_pointers_bo;
+      uint64_t indexed_heap_pointers;
 
       /* The geometry/tessellation heap descriptor. hk_init_heap() writes it
        * from the CPU on the first tessellated or geometry-shaded draw, and the
@@ -138,6 +171,15 @@ struct hk_device {
    struct hk_internal_shaders kernels;
    struct hk_api_shader *null_fs;
 
+   /* A small device-owned cache of authenticated immutable shader payloads.
+    * Every API create still gets a distinct vk_shader wrapper and distinct
+    * mutable link caches. */
+   struct {
+      simple_mtx_t lock;
+      struct hk_shader_binary_cache_entry
+         *entries[HK_SHADER_BINARY_CACHE_MAX];
+   } shader_binary_cache;
+
    /* Device-wide compact VDM backing. Command buffers from different pools
     * suballocate immutable spans from the same finite G17P aperture. */
    struct {
@@ -149,6 +191,10 @@ struct hk_device {
        * either address from being recycled before device destruction. */
       struct list_head quarantined_bos;
       struct list_head quarantined_vdm_allocations;
+      /* Opt-in Ioto-only lifetime falsifier. Unlike the broad command-upload
+       * quarantine, this retains only executable arena BOs whose addresses
+       * were embedded in submitted VDM streams. */
+      struct util_dynarray quarantined_ioto_bos;
    } vdm;
 
    /* Native G17P indirect compute grid helper.  A compact indirect helper
@@ -202,6 +248,9 @@ struct hk_device {
 };
 
 void hk_g17p_compute_program_cache_finish(struct hk_device *dev);
+bool hk_g17p_compute_program_cache_prewarm(struct hk_device *dev,
+                                           enum libagx_program program,
+                                           size_t data_size);
 
 VK_DEFINE_HANDLE_CASTS(hk_device, vk.base, VkDevice, VK_OBJECT_TYPE_DEVICE)
 
@@ -209,7 +258,7 @@ enum hk_perftest {
    HK_PERF_NOTESS = BITFIELD_BIT(0),
    HK_PERF_NOBORDER = BITFIELD_BIT(1),
    HK_PERF_NOBARRIER = BITFIELD_BIT(2),
-   HK_PERF_BATCH = BITFIELD_BIT(3),
+   HK_PERF_NOBATCH = BITFIELD_BIT(3),
    HK_PERF_NOROBUST = BITFIELD_BIT(4),
 };
 

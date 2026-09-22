@@ -211,6 +211,7 @@ struct hk_shader {
    struct {
       simple_mtx_t lock;
       struct hash_table *ht;
+      bool lazy_ht;
    } linked;
 
    /* If there's only a single possibly linked variant, direct pointer. TODO:
@@ -325,6 +326,10 @@ hk_g17p_sparse_vertex_outputs(const struct shader_info *info,
 struct hk_api_shader {
    struct vk_shader vk;
 
+   /* Non-NULL only for a fresh API wrapper borrowing immutable deserialized
+    * code/data from the device's bounded binary cache. */
+   struct hk_shader_binary_cache_entry *binary_cache_entry;
+
    /* Is this an internal passthrough geometry shader? */
    bool is_passthrough;
 
@@ -333,6 +338,9 @@ struct hk_api_shader {
 
    struct hk_shader variants[];
 };
+
+void hk_shader_binary_cache_finish(struct hk_device *dev);
+bool hk_shader_ensure_link_ht_locked(struct hk_shader *shader);
 
 static inline unsigned
 hk_api_num_variants(const struct hk_api_shader *obj)
@@ -423,6 +431,21 @@ hk_pre_gs_variant(struct hk_api_shader *obj)
 
 struct hk_linked_shader {
    struct agx_linked_shader b;
+
+   /* Immutable G17P compute-program templates keyed by uniform-range shape.
+    * Entries are published lock-free while command buffers record in
+    * parallel and are released with this linked executable. */
+   void *g17p_compute_templates;
+
+   /* Immutable AGX3 graphics-IOTO templates.  Per-draw command-buffer
+    * programs relocate only their absolute uniform addresses. */
+   void *g17p_graphics_templates;
+
+   /* Directly owned immutable CPU setup templates for the compact-root path.
+    * Vertex has one structural identity. Fragment entries are indexed by the
+    * finite imageblock/blend/spill domain, never by draw-varying addresses. */
+   void *g17p_graphics_vertex_setup;
+   void *g17p_graphics_fragment_setups;
 
    /* True if the VS prolog uses software indexing, either for geom/tess or
     * adjacency primitives.

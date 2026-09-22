@@ -58,6 +58,26 @@ bool agx3_ioto_load_from_abi_buffer_native(
    struct agx_ioto_load_workspace workspace,
    struct agx_ioto_load_allocation *allocation);
 
+/* Emit one persistent-root range without embedding its source address in
+ * executable bytes.  root_base_half names the preloaded root pointer;
+ * pointer_offset selects a qword in that root containing the actual source
+ * VA.  The emitted straight-line sequence loads that pointer, consumes it in
+ * one or more dependent LDDEVs, and copies every dword to its final uniform.
+ * It is allocation-free and may be concatenated for every structural range. */
+bool agx3_ioto_load_indirect_uniform_range(
+   enum agx_chip chip, uint16_t root_base_half, int16_t pointer_offset,
+   uint16_t uniform_half, uint16_t size_halfs, void *output, size_t capacity,
+   size_t *written);
+
+/* External setup runs after LDSHDR, which does not preserve the launcher's
+ * ordinary GPRs.  This form reads the root pointer from a CProg-uniform qword
+ * previously written by the launcher, then uses the same qualified two-level
+ * LDDEV schedule as the ordinary-GPR form above. */
+bool agx3_ioto_load_indirect_uniform_range_from_uniform_root(
+   enum agx_chip chip, uint16_t root_base_half, int16_t pointer_offset,
+   uint16_t uniform_half, uint16_t size_halfs, void *output, size_t capacity,
+   size_t *written);
+
 #ifdef __cplusplus
 }
 #endif

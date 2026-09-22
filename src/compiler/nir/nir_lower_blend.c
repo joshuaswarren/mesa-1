@@ -953,10 +953,13 @@ nir_color_blend(nir_builder *b, nir_def *src, nir_def *src1, nir_def *dst,
       bconst = nir_load_blend_const_color_rgba(b);
    }
 
-   if (src->bit_size == 16) {
+   if (src->bit_size == 16)
       bconst = nir_f2f16(b, bconst);
-      src1 = nir_f2f16(b, src1);
-   }
+
+   /* Dual-source outputs may use different shader precisions.  Blend factors
+    * combine both colours, so normalize colour 1 to colour 0's arithmetic
+    * precision before building variable-width ALU instructions. */
+   src1 = nir_f2fN(b, src1, src->bit_size);
 
    /* The input colours need to be clamped to the format. Contrary to the
     * OpenGL/Vulkan specs, it really is the inputs that get clamped and not the

@@ -79,6 +79,7 @@ struct hk_agx3_g17p_graphics_program_desc {
    bool writes_sample_mask;
    uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
+   bool preloaded_root;
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
@@ -104,6 +105,8 @@ struct hk_agx3_g17p_graphics_program_desc {
  */
 #define HK_AGX3_G17P_GRAPHICS_MAX_RANGES AGX3_G17P_GRAPHICS_MAX_RANGES
 #define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
+#define HK_AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE \
+   AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE
 
 bool hk_agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
@@ -113,6 +116,44 @@ struct hk_agx3_g17p_graphics_program {
    uint8_t bytes[HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
+
+bool hk_agx3_g17p_graphics_root_prefix_generate(
+   enum agx_chip chip, uint64_t root_va,
+   struct agx3_g17p_graphics_root_prefix *prefix);
+
+bool hk_agx3_g17p_graphics_external_setup_suffix_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc, void *output,
+   size_t capacity, size_t *written);
+
+bool hk_agx3_g17p_graphics_external_launcher_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);
+
+bool hk_agx3_g17p_graphics_external_launcher_template_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc, uint64_t setup_va,
+   struct agx3_g17p_graphics_external_launcher_template *launcher);
+
+bool hk_agx3_g17p_graphics_external_launcher_template_relocate(
+   enum agx_chip chip,
+   const struct agx3_g17p_graphics_external_launcher_template *launcher,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);
+
+bool hk_agx3_g17p_graphics_program_template_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program_template *program);
+
+bool hk_agx3_g17p_graphics_program_template_relocate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *template_desc,
+   const struct hk_agx3_g17p_graphics_program_desc *target_desc,
+   const struct agx3_g17p_graphics_program_template *program,
+   void *output, size_t capacity, uint16_t *written);
 
 #define HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX 28u
 
@@ -196,6 +237,12 @@ bool hk_agx3_g17p_fragment_blend_constants_range(
 bool hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program);
+
+/* Direct command-buffer-private writer. Output may be modified on failure and
+ * must remain unpublished until success; `written` is unchanged on failure. */
+bool hk_agx3_g17p_basic_graphics_program_write_unpublished(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   void *output, size_t capacity, size_t *written);
 
 enum hk_agx3_g17p_rt0_bg_op {
    HK_AGX3_G17P_RT0_BG_CLEAR,

@@ -972,11 +972,22 @@ struct vk_dynamic_graphics_state {
    /** MESA_VK_DYNAMIC_COLOR_ATTACHMENT_MAP */
    struct vk_color_attachment_location_state cal;
 
+   /* Monotonic identity for the values above.  Drivers may use this to
+    * validate unpublished, command-buffer-local state prepared between API
+    * commands.  Dirty bits are insufficient for that purpose because a bit
+    * may already be set when the value changes again. */
+   uint64_t generation;
+
    /** For pipelines, which bits of dynamic state are set */
    BITSET_DECLARE(set, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
 
    /** For command buffers, which bits of dynamic state have changed */
    BITSET_DECLARE(dirty, MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
+
+   /** Command-buffer state changed since the last complete graphics-pipeline
+    * bind.  Unlike dirty, this is not consumed by driver emission. */
+   BITSET_DECLARE(changed_since_pipeline_bind,
+                  MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
 };
 
 /***/

@@ -70,6 +70,7 @@
 #include "util/hash_table.h"
 #include "util/macros.h"
 #include "util/mesa-blake3.h"
+#include "util/os_time.h"
 #include "util/simple_mtx.h"
 #include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
@@ -89,6 +90,58 @@ struct hk_fs_key {
 
    uint8_t pad;
 };
+
+static struct {
+   bool initialized;
+   bool enabled;
+   uint64_t total_ns;
+   uint64_t min_ns;
+   uint64_t max_ns;
+   uint64_t total_bytes;
+   uint32_t count;
+} hk_shader_perf_import_trace;
+
+struct hk_shader_binary_cache_entry {
+   uint8_t *binary;
+   size_t binary_size;
+   uint32_t binary_version;
+   struct hk_api_shader *shader;
+
+   /* Protected by hk_device::shader_binary_cache.lock.  The cache owns one
+    * reference and each live API wrapper owns one. */
+   uint32_t refcount;
+};
+
+static void
+hk_shader_perf_import_dump(void)
+{
+   if (!hk_shader_perf_import_trace.count)
+      return;
+   fprintf(stderr,
+           "HK_SHADER_PERF binary-import count=%u bytes=%" PRIu64
+           " total_ns=%" PRIu64 " min_ns=%" PRIu64 " max_ns=%" PRIu64
+           "\n",
+           hk_shader_perf_import_trace.count,
+           hk_shader_perf_import_trace.total_bytes,
+           hk_shader_perf_import_trace.total_ns,
+           hk_shader_perf_import_trace.min_ns,
+           hk_shader_perf_import_trace.max_ns);
+}
+
+static bool
+hk_shader_perf_import_enabled(void)
+{
+   if (!hk_shader_perf_import_trace.initialized) {
+      hk_shader_perf_import_trace.initialized = true;
+      hk_shader_perf_import_trace.enabled =
+         debug_get_bool_option("HK_SHADER_PERF_TRACE", false);
+      if (hk_shader_perf_import_trace.enabled) {
+         hk_shader_perf_import_trace.min_ns = UINT64_MAX;
+         atexit(hk_shader_perf_import_dump);
+      }
+   }
+   return hk_shader_perf_import_trace.enabled;
+}
 static_assert(sizeof(struct hk_fs_key) == 4, "packed");
 
 struct hk_vs_key {
@@ -2123,6 +2176,28 @@ hk_init_link_ht(struct hk_shader *shader, mesa_shader_stage sw_stage)
                                       : VK_SUCCESS;
 }
 
+bool
+hk_shader_ensure_link_ht_locked(struct hk_shader *shader)
+{
+   simple_mtx_assert_locked(&shader->linked.lock);
+
+   if (shader->linked.ht)
+      return true;
+   if (!shader->linked.lazy_ht)
+      return false;
+
+   if (shader->info.stage == MESA_SHADER_VERTEX)
+      shader->linked.ht = hk_fast_link_key_vs_table_create(NULL);
+   else if (shader->info.stage == MESA_SHADER_FRAGMENT)
+      shader->linked.ht = hk_fast_link_key_fs_table_create(NULL);
+   else
+      return false;
+
+   if (shader->linked.ht)
+      shader->linked.lazy_ht = false;
+   return shader->linked.ht != NULL;
+}
+
 static bool
 lower_uniforms(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
@@ -3032,16 +3107,21 @@ static const struct vk_shader_ops hk_shader_ops;
 static void
 hk_destroy_linked_shader(struct hk_device *dev, struct hk_linked_shader *linked)
 {
+   hk_g17p_linked_compute_cache_finish(linked);
+   hk_g17p_linked_graphics_cache_finish(dev, linked);
    agx_bo_unreference(&dev->dev, linked->b.bo);
    ralloc_free(linked);
 }
 
 static void
-hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
+hk_shader_destroy(struct hk_device *dev, struct hk_shader *s,
+                  bool owns_payload)
 {
-   free((void *)s->code_ptr);
-   free((void *)s->data_ptr);
-   agx_bo_unreference(&dev->dev, s->bo);
+   if (owns_payload) {
+      free((void *)s->code_ptr);
+      free((void *)s->data_ptr);
+      agx_bo_unreference(&dev->dev, s->bo);
+   }
 
    simple_mtx_destroy(&s->linked.lock);
 
@@ -3056,6 +3136,30 @@ hk_shader_destroy(struct hk_device *dev, struct hk_shader *s)
    }
 }
 
+static void
+hk_shader_binary_cache_entry_destroy(
+   struct hk_device *dev, struct hk_shader_binary_cache_entry *entry)
+{
+   hk_api_shader_destroy(&dev->vk, &entry->shader->vk, NULL);
+   free(entry->binary);
+   free(entry);
+}
+
+static void
+hk_shader_binary_cache_entry_unref(
+   struct hk_device *dev, struct hk_shader_binary_cache_entry *entry)
+{
+   bool destroy;
+
+   simple_mtx_lock(&dev->shader_binary_cache.lock);
+   assert(entry->refcount > 0);
+   destroy = --entry->refcount == 0;
+   simple_mtx_unlock(&dev->shader_binary_cache.lock);
+
+   if (destroy)
+      hk_shader_binary_cache_entry_destroy(dev, entry);
+}
+
 void
 hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
                       const VkAllocationCallbacks *pAllocator)
@@ -3064,11 +3168,30 @@ hk_api_shader_destroy(struct vk_device *vk_dev, struct vk_shader *vk_shader,
    struct hk_api_shader *obj =
       container_of(vk_shader, struct hk_api_shader, vk);
 
+   const bool owns_payload = obj->binary_cache_entry == NULL;
+
    hk_foreach_variant(obj, shader) {
-      hk_shader_destroy(dev, shader);
+      hk_shader_destroy(dev, shader, owns_payload);
    }
 
+   if (obj->binary_cache_entry)
+      hk_shader_binary_cache_entry_unref(dev, obj->binary_cache_entry);
+
    vk_shader_free(&dev->vk, pAllocator, &obj->vk);
+}
+
+void
+hk_shader_binary_cache_finish(struct hk_device *dev)
+{
+   for (unsigned i = 0; i < HK_SHADER_BINARY_CACHE_MAX; ++i) {
+      struct hk_shader_binary_cache_entry *entry =
+         dev->shader_binary_cache.entries[i];
+      dev->shader_binary_cache.entries[i] = NULL;
+      if (entry)
+         hk_shader_binary_cache_entry_unref(dev, entry);
+   }
+
+   simple_mtx_destroy(&dev->shader_binary_cache.lock);
 }
 
 /*
@@ -3670,8 +3793,6 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    if (result != VK_SUCCESS)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   simple_mtx_init(&shader->linked.lock, mtx_plain);
-
    shader->b.info = b_info;
    shader->info = info;
    shader->agx3_vdm_state_update = agx3_vdm_state_update;
@@ -3683,9 +3804,11 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    if (shader->code_ptr == NULL)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   shader->data_ptr = malloc(data_size);
-   if (shader->data_ptr == NULL)
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   if (data_size > 0) {
+      shader->data_ptr = malloc(data_size);
+      if (shader->data_ptr == NULL)
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
 
    blob_copy_bytes(blob, (void *)shader->code_ptr, shader->code_size);
    blob_copy_bytes(blob, (void *)shader->data_ptr, shader->data_size);
@@ -3698,10 +3821,11 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
 }
 
 static VkResult
-hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
-                          uint32_t binary_version,
-                          const VkAllocationCallbacks *pAllocator,
-                          struct vk_shader **shader_out)
+hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
+                               struct blob_reader *blob,
+                               uint32_t binary_version,
+                               const VkAllocationCallbacks *pAllocator,
+                               struct vk_shader **shader_out)
 {
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
 
@@ -3740,6 +3864,192 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
 
    *shader_out = &obj->vk;
    return VK_SUCCESS;
+}
+
+static struct hk_shader_binary_cache_entry *
+hk_shader_binary_cache_find_locked(struct hk_device *dev,
+                                   const void *binary, size_t binary_size,
+                                   uint32_t binary_version)
+{
+   for (unsigned i = 0; i < HK_SHADER_BINARY_CACHE_MAX; ++i) {
+      struct hk_shader_binary_cache_entry *entry =
+         dev->shader_binary_cache.entries[i];
+
+      if (entry && entry->binary_version == binary_version &&
+          entry->binary_size == binary_size &&
+          memcmp(entry->binary, binary, binary_size) == 0)
+         return entry;
+   }
+
+   return NULL;
+}
+
+static bool
+hk_shader_binary_payload_cacheable(struct hk_api_shader *obj)
+{
+   /* A cached payload is immutable CPU code/data only.  Hardware allocations
+    * and eager linked variants keep their existing per-object ownership. */
+   hk_foreach_variant(obj, shader) {
+      if (shader->bo || shader->only_linked || !shader->linked.ht)
+         return false;
+   }
+
+   return true;
+}
+
+static VkResult
+hk_shader_binary_cache_clone(struct hk_device *dev,
+                             struct hk_shader_binary_cache_entry *entry,
+                             const VkAllocationCallbacks *pAllocator,
+                             struct vk_shader **shader_out)
+{
+   const struct hk_api_shader *src_obj = entry->shader;
+   const size_t size = sizeof(struct hk_api_shader) +
+                       sizeof(struct hk_shader) *
+                          hk_api_num_variants(src_obj);
+   struct hk_api_shader *obj =
+      vk_shader_zalloc(&dev->vk, &hk_shader_ops, src_obj->vk.stage,
+                       pAllocator, size);
+   if (!obj) {
+      hk_shader_binary_cache_entry_unref(dev, entry);
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
+
+   obj->is_passthrough = src_obj->is_passthrough;
+   obj->g17p_sample_variants = src_obj->g17p_sample_variants;
+   obj->binary_cache_entry = entry;
+
+   for (unsigned i = 0; i < hk_api_num_variants(src_obj); ++i) {
+      struct hk_shader *dst = &obj->variants[i];
+      const struct hk_shader *src = &src_obj->variants[i];
+
+      *dst = *src;
+      memset(&dst->linked, 0, sizeof(dst->linked));
+      dst->only_linked = NULL;
+      dst->bo = NULL;
+      simple_mtx_init(&dst->linked.lock, mtx_plain);
+      dst->linked.lazy_ht = true;
+   }
+
+   *shader_out = &obj->vk;
+   return VK_SUCCESS;
+}
+
+static VkResult
+hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
+                          uint32_t binary_version,
+                          const VkAllocationCallbacks *pAllocator,
+                          struct vk_shader **shader_out)
+{
+   struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
+   const bool trace = hk_shader_perf_import_enabled();
+   const uint64_t start = trace ? os_time_get_nano() : 0;
+   const size_t bytes = (size_t)(blob->end - blob->current);
+   const void *binary = blob->current;
+   const size_t binary_size = bytes;
+
+   /* This callback is used by both standalone shader-binary import and the
+    * pipeline cache.  Only the former has a vk_shader_bin_header immediately
+    * before blob->current.  Compare the exact driver payload for cache hits;
+    * the common Vulkan layer has already validated standalone binaries with
+    * BLAKE3, and a second hash here would only repeat work.  This also keeps
+    * pipeline-cache readers from accessing memory before their allocation. */
+
+   simple_mtx_lock(&dev->shader_binary_cache.lock);
+   struct hk_shader_binary_cache_entry *entry =
+      hk_shader_binary_cache_find_locked(dev, binary, binary_size,
+                                         binary_version);
+   if (entry)
+      entry->refcount++;
+   simple_mtx_unlock(&dev->shader_binary_cache.lock);
+
+   VkResult result;
+   if (entry) {
+      blob->current = blob->end;
+      result = hk_shader_binary_cache_clone(dev, entry, pAllocator, shader_out);
+   } else {
+      struct blob_reader template_blob = *blob;
+      struct vk_shader *template_vk = NULL;
+      result = hk_deserialize_api_shader_impl(
+         vk_dev, &template_blob, binary_version, NULL, &template_vk);
+
+      struct hk_api_shader *template_obj = result == VK_SUCCESS
+         ? container_of(template_vk, struct hk_api_shader, vk)
+         : NULL;
+      if (result == VK_SUCCESS &&
+          hk_shader_binary_payload_cacheable(template_obj)) {
+         struct hk_shader_binary_cache_entry *new_entry =
+            calloc(1, sizeof(*new_entry));
+         if (new_entry)
+            new_entry->binary = malloc(binary_size);
+         if (new_entry && !new_entry->binary) {
+            free(new_entry);
+            new_entry = NULL;
+         }
+
+         if (new_entry && new_entry->binary) {
+            memcpy(new_entry->binary, binary, binary_size);
+            new_entry->binary_size = binary_size;
+            new_entry->binary_version = binary_version;
+            new_entry->shader = template_obj;
+            new_entry->refcount = 2; /* cache plus the wrapper below */
+
+            simple_mtx_lock(&dev->shader_binary_cache.lock);
+            entry = hk_shader_binary_cache_find_locked(
+               dev, binary, binary_size, binary_version);
+            if (entry) {
+               entry->refcount++;
+            } else {
+               for (unsigned i = 0; i < HK_SHADER_BINARY_CACHE_MAX; ++i) {
+                  if (!dev->shader_binary_cache.entries[i]) {
+                     dev->shader_binary_cache.entries[i] = new_entry;
+                     entry = new_entry;
+                     new_entry = NULL;
+                     break;
+                  }
+               }
+            }
+            simple_mtx_unlock(&dev->shader_binary_cache.lock);
+         }
+
+         if (new_entry) {
+            hk_shader_binary_cache_entry_destroy(dev, new_entry);
+            new_entry = NULL;
+            template_obj = NULL;
+         } else if (entry && entry->shader != template_obj) {
+            hk_api_shader_destroy(vk_dev, &template_obj->vk, NULL);
+            template_obj = NULL;
+         }
+
+         if (entry) {
+            blob->current = blob->end;
+            result = hk_shader_binary_cache_clone(
+               dev, entry, pAllocator, shader_out);
+         } else {
+            if (template_obj)
+               hk_api_shader_destroy(vk_dev, &template_obj->vk, NULL);
+            result = hk_deserialize_api_shader_impl(
+               vk_dev, blob, binary_version, pAllocator, shader_out);
+         }
+      } else if (result == VK_SUCCESS) {
+         hk_api_shader_destroy(vk_dev, template_vk, NULL);
+         result = hk_deserialize_api_shader_impl(
+            vk_dev, blob, binary_version, pAllocator, shader_out);
+      }
+   }
+
+   if (trace) {
+      uint64_t elapsed = os_time_get_nano() - start;
+      hk_shader_perf_import_trace.count++;
+      hk_shader_perf_import_trace.total_bytes += bytes;
+      hk_shader_perf_import_trace.total_ns += elapsed;
+      hk_shader_perf_import_trace.min_ns =
+         MIN2(hk_shader_perf_import_trace.min_ns, elapsed);
+      hk_shader_perf_import_trace.max_ns =
+         MAX2(hk_shader_perf_import_trace.max_ns, elapsed);
+   }
+
+   return result;
 }
 
 static void
@@ -4196,8 +4506,10 @@ hk_fast_link(struct hk_device *dev, bool fragment, struct hk_shader *main,
    /* HAL200 consumes the joined Ioto program built at command-recording time.
     * The legacy USC list below is not part of that contract. */
    if (agx_chip_command_stream_generation(dev->dev.chip) !=
-       AGX_CS_GENERATION_AGX2)
+       AGX_CS_GENERATION_AGX2) {
+      hk_g17p_prewarm_linked_compute_shader(dev, main, s);
       return s;
+   }
 
    /* Now that we've linked, bake the USC words to bind this program */
    struct agx_usc_builder b = agx_usc_builder(s->usc.data, sizeof(s->usc.data));

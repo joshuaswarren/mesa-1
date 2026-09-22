@@ -52,6 +52,8 @@
 #include "agx3_subgroup_core.h"
 #include "agx3_tex_core.h"
 #include "agx3_tile_core.h"
+#include "agx3_uniform_alu.h"
+#include "agx3_uniform_integer_instr.h"
 #include "agx3_vary_core.h"
 #include "agx3_writeout_core.h"
 #include "agx_compiler.h"
@@ -526,11 +528,83 @@ agx3_mod_src_any_width(agx_index s)
 }
 
 /*
- * Route a modifier-carrying float add/mul/fma through the long-form modifier
- * encoder. Returns 1 if it emitted the instruction, 0 if this is not a
- * modifier-bearing float op (the caller should use the ordinary path), or -1
- * if it is one but out of the grounded domain (fail the shader).
+ * Route native uniform arithmetic before the existing register-only paths.
+ * Return 1 on emission, 0 for other instructions, and -1 on an invalid operand.
  */
+static int
+agx3_try_uniform_integer(struct util_dynarray *emission,
+                         enum agx_isa_encoding enc, const agx_instr *I,
+                         unsigned wait)
+{
+   struct agx3_uniform_integer_desc d;
+   if (enc != AGX_ISA_ENCODING_AGX3B ||
+       !agx3_uniform_integer_instruction(I, true, &d))
+      return 0;
+   if (wait >= 64)
+      return -1;
+   d.wait_mask = wait;
+   uint8_t bytes[16], length;
+   if (!agx3_uniform_integer_encode(enc, &d, bytes, &length))
+      return -1;
+   memcpy(util_dynarray_grow_bytes(emission, 1, length), bytes, length);
+   return 1;
+}
+
+static int
+agx3_try_uniform_float(struct util_dynarray *emission,
+                       enum agx_isa_encoding enc, const agx_instr *I, unsigned wait)
+{
+   const bool half = I->op == AGX_OPCODE_HADD || I->op == AGX_OPCODE_HMUL ||
+                     I->op == AGX_OPCODE_HFMA;
+   if (enc != AGX_ISA_ENCODING_AGX3B ||
+       (!half && I->op != AGX_OPCODE_FADD && I->op != AGX_OPCODE_FMUL &&
+        I->op != AGX_OPCODE_FFMA))
+      return 0;
+   bool uniform = false;
+   agx_foreach_src(I, s)
+      uniform |= I->src[s].type == AGX_INDEX_UNIFORM;
+   if (!uniform)
+      return 0;
+
+   const bool fma = I->op == AGX_OPCODE_FFMA || I->op == AGX_OPCODE_HFMA;
+   const bool add = I->op == AGX_OPCODE_FADD || I->op == AGX_OPCODE_HADD;
+   const unsigned count = fma ? 3 : 2;
+   const enum agx_size size = half ? AGX_SIZE_16 : AGX_SIZE_32;
+   if (I->nr_dests != 1 || I->nr_srcs != count ||
+       !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+       I->dest[0].size != size || agx_channels(I->dest[0]) != 1)
+      return -1;
+
+   struct agx3_uniform_float_src src[3] = {0};
+   for (unsigned s = 0; s < count; ++s) {
+      const agx_index v = I->src[s];
+      if (v.memory || v.kill || agx_channels(v) != 1 ||
+          (v.type != AGX_INDEX_IMMEDIATE && v.size != size))
+         return -1;
+      src[s] = (struct agx3_uniform_float_src){
+         .kind = v.type == AGX_INDEX_UNIFORM ? AGX3_FLOAT_UNIFORM :
+                 v.type == AGX_INDEX_IMMEDIATE ? AGX3_FLOAT_IMMEDIATE :
+                 agx3_src_is_register(v) ? AGX3_FLOAT_REGISTER : 0,
+         .value = v.value,
+         .abs = v.abs, .neg = v.neg,
+         .cache = v.cache, .discard = v.discard,
+      };
+   }
+   const enum agx3_uniform_float_op op = fma ? AGX3_UNIFORM_FMA :
+                                           add ? AGX3_UNIFORM_FADD : AGX3_UNIFORM_FMUL;
+   uint8_t bytes[16], length;
+   bool ok = half
+      ? agx3_uniform_half_encode(enc, op, I->dest[0].value, src,
+                                 I->saturate, I->dest[0].cache, wait, bytes, &length)
+      : agx3_uniform_float_encode(enc, op, I->dest[0].value, src,
+                                  I->saturate, I->dest[0].cache, wait, bytes, &length);
+   if (!ok)
+      return -1;
+   memcpy(util_dynarray_grow_bytes(emission, 1, length), bytes, length);
+   return 1;
+}
+
+/* Same return convention for modified register-source arithmetic. */
 static int
 agx3_try_float_modifier(struct util_dynarray *emission,
                         enum agx_isa_encoding enc, const agx_instr *I, unsigned wait)
@@ -1429,6 +1503,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
        * outstanding bit each. Every repeat writes the same staging register
        * from the same source, so the last one -- issued once every slot has
        * retired -- leaves the correct value, whichever slot produced the
+       * coordinate. Keep that source alive until its final repeat: marking an
+       * earlier COPY as the last use lets the next COPY reread a killed
        * coordinate. A fetch waiting on one slot or none emits exactly what it
        * emitted before, so no shader that already encoded is affected. */
       uint16_t pending_wait = staging_wait;
@@ -1446,7 +1522,8 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
                                   I->src[0].value + 2 * i,
                                   staging_slot, wait_bit,
                                   enc == AGX_ISA_ENCODING_AGX3B && I->src[0].cache,
-                                  enc != AGX_ISA_ENCODING_AGX3B || I->src[0].discard,
+                                  enc != AGX_ISA_ENCODING_AGX3B ||
+                                     (I->src[0].discard && rep + 1 == reps),
                                   copy, &copy_len) ||
              !agx3_append(emission, copy, copy_len))
             return false;
@@ -10693,6 +10770,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * composer, which would have deposited the multiplier into a
           * register field.
           */
+         const int uniform_integer = agx3_try_uniform_integer(emission, enc, I, wait);
+         if (uniform_integer < 0)
+            AGX3_REFUSE(I);
+         if (uniform_integer > 0)
+            continue;
+
          if (I->op == AGX_OPCODE_IMAD && I->nr_dests == 1 && I->nr_srcs >= 3 &&
              I->shift == 0 && !I->saturate &&
              agx3_src_is_register(I->dest[0]) &&
@@ -10864,6 +10947,48 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    agx3_append(emission, bytes, len))
                   continue;
             }
+         }
+
+         /* Keep the uniform half of a native tied min/max in the uniform file.
+          * Canonicalize just as the register/minifloat path below does. */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
+             !I->saturate &&
+             (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
+             (I->src[0].type == AGX_INDEX_UNIFORM || I->src[1].type == AGX_INDEX_UNIFORM)) {
+            const unsigned u = I->src[0].type == AGX_INDEX_UNIFORM ? 0 : 1;
+            const agx_index uniform = I->src[u], reg = I->src[u ^ 1];
+            const bool half = I->dest[0].size == AGX_SIZE_16;
+            if (!agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+                agx_channels(I->dest[0]) != 1 ||
+                (!half && I->dest[0].size != AGX_SIZE_32) ||
+                !agx3_src_is_register(reg) ||
+                !agx_is_equiv(I->src[0], I->src[2]) ||
+                !agx_is_equiv(I->src[1], I->src[3]))
+               AGX3_REFUSE(I);
+            for (unsigned i = 0; i < 4; ++i) {
+               if (I->src[i].size != I->dest[0].size ||
+                   agx_channels(I->src[i]) != 1 || I->src[i].memory ||
+                   I->src[i].abs || I->src[i].neg || I->src[i].kill ||
+                   I->src[i].cache != I->src[i ^ 2].cache ||
+                   I->src[i].discard != I->src[i ^ 2].discard)
+                  AGX3_REFUSE(I);
+            }
+            if (uniform.cache || uniform.discard)
+               AGX3_REFUSE(I);
+            uint16_t fsel_wait = wait;
+            if (fsel_wait & (fsel_wait - 1)) {
+               if (!agx3_retire_select_waits(emission, enc, I, fsel_wait))
+                  AGX3_REFUSE(I);
+               fsel_wait = 0;
+            }
+            uint8_t bytes[16], length;
+            if (!agx3_uniform_minmax_encode(enc, I->dest[0].value, reg.value,
+                    uniform.value, half, I->fcond == AGX_FCOND_GTN,
+                    reg.cache, reg.discard, I->dest[0].cache, fsel_wait, bytes, &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            continue;
          }
 
          /*
@@ -12679,6 +12804,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
             continue;
          }
+
+         /* Native uniform arithmetic avoids per-use COPY temporaries while
+          * preserving the existing GPR dependency mask. Uniform reads do not
+          * acquire register cache/discard hints. */
+         const int uniform_float = agx3_try_uniform_float(emission, enc, I, wait);
+         if (uniform_float > 0)
+            continue;
+         if (uniform_float < 0)
+            AGX3_REFUSE(I);
 
          /* Constant propagation can expose a float add whose two operands
           * are exact minifloats after scheduling. Fold it to the ordinary

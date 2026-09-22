@@ -1079,6 +1079,16 @@ test_g17p_basic_graphics_program(void)
    }
    resource.uniform_ranges = two_attribs_and_set;
 
+   /* Resource graphics programs validate their aligned placement VA but do
+    * not encode it. This permits a command-buffer-local semantic cache to
+    * reuse one published program at its original address. */
+   struct hk_agx3_g17p_graphics_program_desc moved_resource = resource;
+   moved_resource.program_va += 0x2000;
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &moved_resource, &program));
+   CHECK(program.length == three_range_program.length);
+   CHECK(memcmp(program.bytes, three_range_program.bytes, program.length) == 0);
+
    /* Exact Omarchy shell fragment interface: native texture/sampler heap
     * pointers in halves0..7, root plus three descriptor-set pointers in
     * halves12..27, and the linked epilog's relocated blend constants in

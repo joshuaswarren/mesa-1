@@ -4,6 +4,7 @@
  */
 #include "agx_builder.h"
 #include "agx_compiler.h"
+#include "agx3_uniform_integer_instr.h"
 
 /*
  * Not all instructions can take uniforms. Memory instructions can take
@@ -28,6 +29,27 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
       (encoding == AGX_ISA_ENCODING_AGX2 || !(value & 3));
 
    switch (op) {
+   case AGX_OPCODE_FCMPSEL:
+      if (encoding == AGX_ISA_ENCODING_AGX3B)
+         return src_index < 4 && value < 512 &&
+                (size == AGX_SIZE_16 || (size == AGX_SIZE_32 && !(value & 1)));
+      return encoding == AGX_ISA_ENCODING_AGX2 && !is_64;
+   case AGX_OPCODE_HADD:
+   case AGX_OPCODE_HMUL:
+   case AGX_OPCODE_HFMA:
+      if (encoding == AGX_ISA_ENCODING_AGX3B)
+         return size == AGX_SIZE_16 && value < 512 &&
+                src_index < (op == AGX_OPCODE_HFMA ? 3 : 2);
+      return encoding == AGX_ISA_ENCODING_AGX2 && !is_64;
+   case AGX_OPCODE_FADD:
+   case AGX_OPCODE_FMUL:
+   case AGX_OPCODE_FFMA:
+      /* Apple G17P/G16G arithmetic reads aligned f32 uniforms directly.
+       * The instruction-level check below retains copies for mixed widths. */
+      if (encoding == AGX_ISA_ENCODING_AGX3B)
+         return size == AGX_SIZE_32 && value < 512 && !(value & 1) &&
+                src_index < (op == AGX_OPCODE_FFMA ? 3 : 2);
+      return encoding == AGX_ISA_ENCODING_AGX2 && !is_64;
    case AGX_OPCODE_FLTNORM_AGX3:
       /* G17P colour packing has native uniform operands in both lanes.
        * Preserve aligned float32 sources instead of allocating temporary
@@ -106,15 +128,8 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
       /* We would fail validation otherwise */
       return true;
    default:
-      /* Generic ALU.  AGX2 can read the uniform file directly here; AGX3
-       * cannot -- its ALU operands are register-or-immediate only
-       * (agx3_pack_binary.c:141-145 agx3_src_is_register, and the whole
-       * agx3_sel_instr operand form has no uniform encoding).  Every
-       * AGX_INDEX_UNIFORM the AGX3 packer does accept is a memory-op base,
-       * texture heap, or subgroup source, all named explicitly above.  So on
-       * AGX3 the generic case must be lowered to a move, or the shader is
-       * refused at pack time with no way to recover.
-       */
+      /* Keep copies for operands not yet supported by the AGX3 packer.
+       * This is a compiler limitation, not an ISA-wide uniform restriction. */
       if (encoding != AGX_ISA_ENCODING_AGX2)
          return false;
 
@@ -127,6 +142,49 @@ agx_lower_uniform_sources(agx_context *ctx)
 {
    agx_foreach_instr_global_safe(ctx, I) {
       agx_instr *at = I;
+      struct agx3_uniform_integer_desc integer_desc;
+      const bool native_integer =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         agx3_uniform_integer_instruction(I, false, &integer_desc);
+      bool copy_float_uniforms = false;
+      unsigned first_uniform = UINT_MAX;
+      const bool half_float = I->op == AGX_OPCODE_HADD ||
+                              I->op == AGX_OPCODE_HMUL || I->op == AGX_OPCODE_HFMA;
+      const bool full_float = I->op == AGX_OPCODE_FADD ||
+                              I->op == AGX_OPCODE_FMUL || I->op == AGX_OPCODE_FFMA;
+      bool native_minmax = I->op == AGX_OPCODE_FCMPSEL && I->nr_dests == 1 &&
+                           I->nr_srcs == 4 && !I->saturate && !I->invert_cond &&
+                           (I->fcond == AGX_FCOND_LTN || I->fcond == AGX_FCOND_GTN) &&
+                           agx_is_equiv(I->src[0], I->src[2]) &&
+                           agx_is_equiv(I->src[1], I->src[3]);
+      if (native_minmax) {
+         agx_foreach_src(I, s) {
+            native_minmax &= I->src[s].type != AGX_INDEX_IMMEDIATE &&
+                             I->src[s].size == I->dest[0].size &&
+                             !I->src[s].abs && !I->src[s].neg;
+         }
+      }
+      const bool both_minmax_uniform = native_minmax &&
+         I->src[0].type == AGX_INDEX_UNIFORM && I->src[1].type == AGX_INDEX_UNIFORM;
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          (half_float || full_float)) {
+         const enum agx_size size = half_float ? AGX_SIZE_16 : AGX_SIZE_32;
+         copy_float_uniforms = I->nr_dests != 1 ||
+                               I->dest[0].size != size || (half_float && I->saturate);
+         bool has_gpr = false;
+         agx_foreach_src(I, s) {
+            if (I->src[s].type != AGX_INDEX_IMMEDIATE)
+               copy_float_uniforms |= I->src[s].size != size;
+            if (half_float)
+               copy_float_uniforms |= I->src[s].abs || I->src[s].neg;
+            has_gpr |= I->src[s].type != AGX_INDEX_UNIFORM &&
+                       I->src[s].type != AGX_INDEX_IMMEDIATE;
+            if (first_uniform == UINT_MAX && I->src[s].type == AGX_INDEX_UNIFORM)
+               first_uniform = s;
+         }
+         if (has_gpr)
+            first_uniform = UINT_MAX;
+      }
 
       /* Exports end the block and admit no instruction between them; place
        * their materialized sources before the first export of the run. */
@@ -150,9 +208,20 @@ agx_lower_uniform_sources(agx_context *ctx)
       unsigned materialized = 0;
 
       agx_foreach_src(I, s) {
+         const bool copy_minmax = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+            I->op == AGX_OPCODE_FCMPSEL &&
+            (!native_minmax || (both_minmax_uniform && !(s & 1)));
+         /* Apple may precompute abs(uniform) in its constant program. The
+          * native main-program witness proves negation only on an FMA addend;
+          * retain materialization for the other modified uniform operands. */
+         const bool copy_float_modifier =
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && full_float &&
+            (I->src[s].abs ||
+             (I->src[s].neg && !(I->op == AGX_OPCODE_FFMA && s == 2)));
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
-             !agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
-                                        I->src[s].value, I->src[s].size)) {
+             (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
+              !(native_integer || agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+                                         I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];
             idx.abs = idx.neg = false;
             bool reused = false;

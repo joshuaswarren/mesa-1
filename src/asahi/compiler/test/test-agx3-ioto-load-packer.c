@@ -75,6 +75,7 @@ static bool
 test_target_gate(void)
 {
    struct agx3_ioto_load_packer packer;
+   struct agx_ioto_load_emit_ops ops;
    for (size_t i = 0; i < ARRAY_SIZE(gpu0_targets); ++i) {
       CHECK(agx3_ioto_load_absolute_packer_ready(gpu0_targets[i]));
       CHECK(agx3_ioto_load_packer_init(&packer, gpu0_targets[i]));
@@ -88,6 +89,9 @@ test_target_gate(void)
    CHECK(!agx3_ioto_load_absolute_packer_ready(AGX_CHIP_G14G));
    CHECK(!agx3_ioto_load_absolute_packer_ready(AGX_CHIP_G15P));
    CHECK(!agx3_ioto_load_packer_init(&packer, AGX_CHIP_UNKNOWN));
+   CHECK(agx3_ioto_load_packer_init(&packer, AGX_CHIP_G17P));
+   agx3_ioto_load_packer_ops(&packer, &ops);
+   CHECK(ops.trusted_records);
    return true;
 }
 
@@ -204,6 +208,34 @@ test_copy_records(void)
                  * are pinned by Apple bytes (add3 + the G17S body). */
                 (uint8_t[]){0xb3, 0x0a, 0x0f, 0x7a, 0x36, 0xa0, 0xa5, 0x0a},
                 8) == 0);
+
+   /* The production AGX3B wide-copy specialization must remain exactly the
+    * same encoder as the authoritative table composer for every register
+    * value it admits. */
+   static const struct agx3_field_kv baseline[] = {
+      {9, 3}, {10, 2}, {23, 2}, {24, 2}, {27, 1},
+   };
+   CHECK(agx3_ioto_load_packer_init(&packer, AGX_CHIP_G17P));
+   agx3_ioto_load_packer_ops(&packer, &ops);
+   load.count_dwords = 1;
+   for (unsigned destination = 128; destination < 256; ++destination) {
+      for (unsigned source = 0; source < 256; ++source) {
+         const struct agx3_field_kv overrides[] = {
+            {3, destination}, {16, source},
+         };
+         uint8_t expected[32] = {0}, expected_length = 0;
+         load.native_slot_half = destination;
+         load.data.half = source;
+         CHECK(ops.pack_copy(ops.context, AGX_CHIP_G17P, &load, 0, 3, &raw));
+         CHECK(agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "copy", 1,
+                                 baseline, ARRAY_SIZE(baseline), overrides,
+                                 ARRAY_SIZE(overrides), expected,
+                                 &expected_length));
+         CHECK(raw.kind == AGX_IOTO_LOAD_RAW_COPY_EP1);
+         CHECK(raw.length == expected_length);
+         CHECK(memcmp(raw.bytes, expected, expected_length) == 0);
+      }
+   }
    return true;
 }
 

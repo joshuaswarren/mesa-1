@@ -30,6 +30,9 @@ extern "C" {
 #define AGX_IOTO_G17P_DEFAULT_PROFILE_SUFFIX_SIZE  10u
 #define AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE     90u
 #define AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE 86u
+/* Two root LDIMMs, two high-uniform carrier COPYs, state/profile, and the
+ * external request prelude plus long branch currently occupy 124 bytes. */
+#define AGX_IOTO_G17P_EXTERNAL_LAUNCHER_MAX_SIZE   128u
 #define AGX_IOTO_G17P_RT0_CLEAR_PROGRAM_SIZE       140u
 #define AGX_IOTO_G17P_WBOIT_MRT_CLEAR_PROGRAM_SIZE 158u
 #define AGX_IOTO_G17P_RGBA8_MRT_CLEAR_PROGRAM_SIZE 170u
@@ -146,6 +149,9 @@ bool agx_ioto_g17p_direct_add3_program_compose(
 bool agx_ioto_g17p_no_resource_program_compose(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
    void *output, size_t capacity, size_t *written);
+bool agx_ioto_g17p_no_resource_program_compose_trusted(
+   uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
+   void *output, size_t capacity, size_t *written);
 
 /* Compose the ordinary no-resource G17P fragment-stage program captured in
  * every valid EXP-G1a vary0-class run.  Unlike compute and vertex programs,
@@ -154,6 +160,9 @@ bool agx_ioto_g17p_no_resource_program_compose(
  * colour_classes names consumed synchronization partitions (bits 0..2),
  * independent of the number or physical placement of colour attachments. */
 bool agx_ioto_g17p_fragment_no_resource_program_compose(
+   uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
+   unsigned colour_classes, void *output, size_t capacity, size_t *written);
+bool agx_ioto_g17p_fragment_no_resource_program_compose_trusted(
    uint64_t program_va, const struct agx_ioto_state_tail_output *packed_tail,
    unsigned colour_classes, void *output, size_t capacity, size_t *written);
 
@@ -168,10 +177,26 @@ bool agx_ioto_g17p_resource_program_compose(
    const struct agx_ioto_state_tail_output *packed_tail, void *output,
    size_t capacity, size_t *written);
 
+/* Fast forms for state tails and bodies produced transactionally by the
+ * in-tree HAL200 scheduler/packers. They preserve destination, capacity,
+ * exact-length, and nonzero-shader checks but skip decoding those
+ * just-produced records a second time. Never use these on serialized,
+ * application-controlled, or otherwise untrusted bytes. */
+bool agx_ioto_g17p_resource_program_compose_trusted(
+   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
+   const void *copies, size_t copies_size,
+   const struct agx_ioto_state_tail_output *packed_tail, void *output,
+   size_t capacity, size_t *written);
+
 /* The resource-bearing fragment form has the same scheduled loads, shader
  * tail, profile prefix and COPY body, but closes with PIXREL instead of the
  * vertex/compute SETPROFILECTL suffix. */
 bool agx_ioto_g17p_fragment_resource_program_compose(
+   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
+   const void *copies, size_t copies_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   unsigned colour_classes, void *output, size_t capacity, size_t *written);
+bool agx_ioto_g17p_fragment_resource_program_compose_trusted(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail,
@@ -185,6 +210,33 @@ bool agx_ioto_g17p_coverage_fragment_program_compose(
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail,
    unsigned colour_classes, void *output, size_t capacity, size_t *written);
+bool agx_ioto_g17p_coverage_fragment_program_compose_trusted(
+   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
+   const void *copies, size_t copies_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   unsigned colour_classes, void *output, size_t capacity, size_t *written);
+
+/* Split form of the same G17P graphics resource program. The launcher owns
+ * the draw-varying root prefix and shader-state records, then enters one
+ * immutable external constant-calculation suffix. The suffix owns the
+ * linked-shader setup body and the exact stage terminal protocol. Neither
+ * function publishes partial output on failure. */
+bool agx_ioto_g17p_external_setup_launcher_compose(
+   uint64_t program_va, const void *root_prefix, size_t root_prefix_size,
+   const struct agx_ioto_state_tail_output *packed_tail, uint64_t setup_va,
+   void *output, size_t capacity, size_t *written);
+
+/* Same layout for a root prefix and state tail generated immediately by the
+ * in-tree packers.  Skips re-decoding those trusted bytes and emits the fixed
+ * G17P request prelude directly.  Never pass serialized/application bytes. */
+bool agx_ioto_g17p_external_setup_launcher_compose_trusted(
+   uint64_t program_va, const void *root_prefix, size_t root_prefix_size,
+   const struct agx_ioto_state_tail_output *packed_tail, uint64_t setup_va,
+   void *output, size_t capacity, size_t *written);
+
+bool agx_ioto_g17p_external_setup_suffix_compose(
+   const void *body, size_t body_size, bool fragment, bool coverage,
+   unsigned colour_classes, void *output, size_t capacity, size_t *written);
 
 /* Internal background clear/reload programs with no shader pixel-dependency
  * operations use the native BG PIXREL descriptor 0x200, not ordinary FS
@@ -192,6 +244,11 @@ bool agx_ioto_g17p_coverage_fragment_program_compose(
  * resource composers. This is not a general replacement for fragment state.
  */
 bool agx_ioto_g17p_background_resource_program_compose(
+   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
+   const void *copies, size_t copies_size,
+   const struct agx_ioto_state_tail_output *packed_tail, void *output,
+   size_t capacity, size_t *written);
+bool agx_ioto_g17p_background_resource_program_compose_trusted(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,
    const struct agx_ioto_state_tail_output *packed_tail, void *output,

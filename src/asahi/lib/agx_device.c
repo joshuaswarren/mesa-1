@@ -820,6 +820,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
    dev->debug =
       debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
 
+   /* Chromium may sanitize the driver's aggregate debug variable when it
+    * respawns its sandboxed GPU process, while the narrowly scoped HK_G17P_*
+    * controls survive (the draw/submit traces use the same route).  Preserve
+    * a dedicated opt-in for the failure-only decoder so a reproduced device
+    * loss cannot silently discard the payload we armed it to capture. */
+   if (debug_get_bool_option("HK_G17P_FAULTTRACE", false))
+      dev->debug |= AGX_DBG_FAULTTRACE;
+
    ssize_t params_size = -1;
 
    /*

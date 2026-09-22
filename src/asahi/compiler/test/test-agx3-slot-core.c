@@ -403,6 +403,55 @@ int main(void)
       CHECK(r[3].wait_mask == 1);
    }
 
+   /* Dependency ordering is unchanged when a token is renamed across the
+    * GPR, static TPS, and special-token boundaries. In the second region the
+    * highest token appears only as a payload source, never a destination. */
+   {
+      const uint16_t tokens[] = {
+         0, AGX3_SLOT_GPR_TOKENS - 1, AGX3_SLOT_TPS_TOKEN_BASE,
+         AGX3_SLOT_TEX_COORD_TOKEN - 1, AGX3_SLOT_TEX_COORD_TOKEN,
+         AGX3_SLOT_DYNAMIC_TPS_TOKEN,
+      };
+      for (unsigned t = 0; t < sizeof(tokens) / sizeof(tokens[0]); ++t) {
+         const uint16_t token = tokens[t];
+         struct agx3_slot_instr producer = ld(token), store = stdev(token);
+         producer.preferred_slot = 1;
+         store.preferred_slot = 2;
+         struct agx3_slot_instr p[] = {producer, store, mov(token)};
+         CHECK(agx3_slot_assign(p, 3, 6, r));
+         CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+         CHECK(r[1].slot == 2 && r[1].wait_mask == 1);
+         CHECK(r[2].slot == 0 && r[2].wait_mask == 2);
+
+         struct agx3_slot_instr texture = ld(7);
+         texture.preferred_slot = 1;
+         texture.transient_slots = 1u << 1;
+         struct agx3_slot_instr q[] = {store, texture, mov(token), st(7)};
+         CHECK(agx3_slot_assign(q, 4, 6, r));
+         CHECK(r[0].slot == 2 && r[0].wait_mask == 0);
+         CHECK(r[1].slot == 1 && r[1].wait_mask == 2);
+         CHECK(r[2].slot == 0 && r[2].wait_mask == 0);
+         CHECK(r[3].slot == 0 && r[3].wait_mask == 1);
+      }
+   }
+
+   /* Rejecting a malformed later instruction preserves the completed output
+    * prefix, even when the bounds prepass encounters it before assignment. */
+   {
+      struct agx3_slot_instr p[] = {ld(0), st(AGX3_SLOT_NUM_TOKENS)};
+      memset(r, 0, sizeof(r));
+      r[1].slot = 8;
+      r[1].wait_mask = 0xff;
+      CHECK(!agx3_slot_assign(p, 2, 6, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+      CHECK(r[1].slot == 8 && r[1].wait_mask == 0xff);
+      p[1].nr_srcs = AGX3_SLOT_MAX_REGS + 1;
+      CHECK(!agx3_slot_assign(p, 2, 6, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+      CHECK(r[1].slot == 8 && r[1].wait_mask == 0xff);
+      CHECK(agx3_slot_assign(p, 0, 6, r));
+   }
+
    /* Malformed inputs. */
    CHECK(!agx3_slot_assign(NULL, 1, 6, r));
    { struct agx3_slot_instr p=ld(0); CHECK(!agx3_slot_assign(&p,1,0,r)); CHECK(!agx3_slot_assign(&p,1,9,r)); }

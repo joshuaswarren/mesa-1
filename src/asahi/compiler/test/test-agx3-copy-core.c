@@ -11,6 +11,8 @@
 
 #include "agx3_copy_core.h"
 
+#include "agx3_binder.h"
+
 #include "util/macros.h"
 
 #include <stdio.h>
@@ -27,6 +29,27 @@ static unsigned failures;
          ++failures;                                                           \
       }                                                                        \
    } while (0)
+
+static bool
+reference_reg_to_uniform(uint16_t uniform_half, uint16_t src_half, bool kill,
+                         uint8_t out[AGX3_COPY_MAX_LENGTH], uint8_t *len)
+{
+   const struct agx3_field_kv compact[] = {
+      {9, 3}, {10, 2}, {23, 2}, {24, 2},
+   };
+   const struct agx3_field_kv extended[] = {
+      {9, 3}, {10, 2}, {23, 2}, {24, 2}, {39, 1},
+   };
+   const struct agx3_field_kv overrides[] = {
+      {3, uniform_half}, {16, src_half}, {27, kill},
+   };
+   const bool wide = uniform_half >= 128;
+   return agx3_bind_compose(
+      AGX_ISA_ENCODING_AGX3B, "copy", wide ? 1 : 0,
+      wide ? extended : compact,
+      wide ? ARRAY_SIZE(extended) : ARRAY_SIZE(compact), overrides,
+      ARRAY_SIZE(overrides), out, len);
+}
 
 struct copy_vec {
    enum agx_isa_encoding enc;
@@ -231,6 +254,44 @@ main(void)
          AGX_ISA_ENCODING_AGX3C, 4, 0, true, o, &l));
       CHECK(!agx3_copy_encode_reg_to_uniform(
          AGX_ISA_ENCODING_AGX2, 4, 0, true, o, &l));
+
+      /* Both direct packers must remain byte-identical to the authoritative
+       * table composer over the complete aligned CProg/GPR domain. */
+      bool mismatch_reported = false;
+      for (uint16_t dest = 0; dest < 512; dest += 2) {
+         for (uint16_t src = 0; src < 256; src += 2) {
+            for (unsigned kill = 0; kill < 2; ++kill) {
+               uint8_t fast[AGX3_COPY_MAX_LENGTH] = {0};
+               uint8_t reference[AGX3_COPY_MAX_LENGTH] = {0};
+               uint8_t fast_len = 0, reference_len = 0;
+               const bool match =
+                  agx3_copy_encode_reg_to_uniform(
+                     AGX_ISA_ENCODING_AGX3B, dest, src, kill, fast,
+                     &fast_len) &&
+                  reference_reg_to_uniform(dest, src, kill, reference,
+                                            &reference_len) &&
+                  fast_len == reference_len &&
+                  memcmp(fast, reference, fast_len) == 0;
+               ++checks;
+               if (!match) {
+                  ++failures;
+                  if (!mismatch_reported) {
+                     fprintf(stderr,
+                             "FAIL reg-to-uniform exhaustive u%u <- r%u "
+                             "kill=%u: fast_len=%u reference_len=%u\n  fast:",
+                             dest, src, kill, fast_len, reference_len);
+                     for (unsigned b = 0; b < fast_len; ++b)
+                        fprintf(stderr, " %02x", fast[b]);
+                     fprintf(stderr, "\n  reference:");
+                     for (unsigned b = 0; b < reference_len; ++b)
+                        fprintf(stderr, " %02x", reference[b]);
+                     fprintf(stderr, "\n");
+                     mismatch_reported = true;
+                  }
+               }
+            }
+         }
+      }
    }
 
    /* Fail closed outside the witnessed domain. */

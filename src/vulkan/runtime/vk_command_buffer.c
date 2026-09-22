@@ -77,6 +77,7 @@ vk_command_buffer_reset(struct vk_command_buffer *command_buffer)
    vk_dynamic_graphics_state_clear(&command_buffer->dynamic_graphics_state);
    command_buffer->state = MESA_VK_COMMAND_BUFFER_STATE_INITIAL;
    command_buffer->record_result = VK_SUCCESS;
+   command_buffer->last_graphics_pipeline = NULL;
    vk_command_buffer_reset_render_pass(command_buffer);
    if (command_buffer->cmd_queue.ctx)
       vk_cmd_queue_reset(&command_buffer->cmd_queue);

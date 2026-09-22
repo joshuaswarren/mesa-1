@@ -175,6 +175,7 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       /* Restore the dynamic state */
+      cmd->vk.last_graphics_pipeline = NULL;
       assert(save->dynamic.vi == &cmd->state.gfx._dynamic_vi);
       assert(save->dynamic.ms.sample_locations == &cmd->state.gfx._dynamic_sl);
       cmd->vk.dynamic_graphics_state = save->dynamic;

@@ -13,6 +13,7 @@
 
 #define HK_CMD_BO_SIZE     1024 * 128
 #define HK_CMD_POOL_BO_MAX 32
+#define HK_G17P_CMD_POOL_MAIN_BO_MAX 256
 
 enum hk_cmd_bo_type {
    HK_CMD_BO_MAIN,

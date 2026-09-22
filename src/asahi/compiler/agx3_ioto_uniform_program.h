@@ -35,6 +35,13 @@ struct agx3_ioto_uniform_program_desc {
    uint8_t initial_gpr_dwords;
    bool fast_path_enabled;
 
+   /* Optional caller-owned 64-bit base, materialized before entering this
+    * body.  Ranges at/above preloaded_base_address reuse it without emitting
+    * LDIMM and the base survives every complete loader round. */
+   bool preloaded_base_valid;
+   uint16_t preloaded_base_half;
+   uint64_t preloaded_base_address;
+
    struct agx_ioto_state_tail tail;
    uint16_t profile_payload0;
    uint16_t profile_payload1;
@@ -54,6 +61,9 @@ struct agx3_ioto_uniform_program_workspace {
    size_t sort_capacity;
    struct agx_ioto_load_cache_entry *cache;
    size_t cache_capacity;
+   struct agx_ioto_load_relocation *relocations;
+   size_t relocation_capacity;
+   size_t *relocation_count;
 };
 
 /* Conservative body-scratch bound for the validated ranges.  The returned

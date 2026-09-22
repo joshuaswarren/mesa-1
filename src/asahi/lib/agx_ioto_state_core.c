@@ -335,13 +335,13 @@ agx_ioto_state_pack_record(enum agx_chip chip,
       staged[i * 2 + 1] = (uint8_t)(words[i] >> 8);
    }
 
-   struct agx_ioto_record record;
-   size_t consumed = 0;
-   if (!agx_ioto_validate_kind(chip, kind, staged, size, &record, &consumed) ||
-       consumed != size || record.length != size)
-      return false;
-
-   memcpy(output, record.bytes, size);
+   /* encode() has already validated every semantic field and writes the
+    * fixed opcode bits for this exact kind.  Re-decoding the bytes here only
+    * repeats the same prefix checks and copies them through a temporary
+    * record.  The decoder remains the independent oracle in the exhaustive
+    * packer tests and for externally supplied streams. */
+   (void)kind;
+   memcpy(output, staged, size);
    return true;
 }
 
@@ -571,6 +571,35 @@ agx_ioto_g17p_compute_ldshdr_build(
 }
 
 bool
+agx_ioto_g17p_compiler_ldshdr_pack(
+   uint64_t shader_va, uint32_t fetch_span, void *output, size_t capacity)
+{
+   if (!output || capacity < AGX_IOTO_LDSHDR_SIZE || fetch_span > 3 ||
+       shader_va > UINT64_C(0xffffffffffff) ||
+       (shader_va & UINT64_C(0x3f)) != 0)
+      return false;
+
+   /* Specialize agx_ioto_state_encode_ldshdr(GPU0) for the compiler state,
+    * whose only nonzero semantic fields are f0/f1 and required f23. */
+   const uint16_t words[5] = {
+      UINT16_C(0x0177),
+      UINT16_C(0x002a) | (uint16_t)(((shader_va >> 6) & 0x1ff) << 7),
+      (uint16_t)(shader_va >> 15),
+      (uint16_t)(shader_va >> 31),
+      (uint16_t)(((shader_va >> 47) & 1) |
+                 ((uint16_t)agx_ioto_e4[fetch_span] << 1)),
+   };
+   uint8_t staged[AGX_IOTO_LDSHDR_SIZE];
+   for (unsigned i = 0; i < 5; ++i) {
+      staged[2 * i] = (uint8_t)words[i];
+      staged[2 * i + 1] = (uint8_t)(words[i] >> 8);
+   }
+
+   memcpy(output, staged, sizeof(staged));
+   return true;
+}
+
+bool
 agx_ioto_g17p_runtime_compute_tail_build(
    uint64_t shader_va, enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1,
    struct agx_ioto_state_tail_output *output)
@@ -645,27 +674,69 @@ agx_ioto_g17p_runtime_compute_tail_build_shared(
    return true;
 }
 
+static bool
+agx_ioto_g17p_compiler_spectpr_values(uint32_t spill_bytes,
+                                      uint32_t d_value,
+                                      uint16_t *spill_quads,
+                                      uint16_t *d_rounded)
+{
+   if (!spill_quads || !d_rounded ||
+       spill_bytes > (uint32_t)UINT16_MAX * 4 ||
+       d_value > UINT32_MAX - 3)
+      return false;
+
+   *spill_quads = (uint16_t)((spill_bytes + 3) >> 2);
+   *d_rounded =
+      (uint16_t)(((((uint64_t)d_value + 3) >> 2) + 1) & UINT64_C(0xffe));
+   return true;
+}
+
 bool
 agx_ioto_g17p_compiler_spectpr_build(
    uint32_t spill_bytes, uint32_t d_value, struct agx_ioto_state *state)
 {
-   if (!state || spill_bytes > UINT32_MAX - 3 || d_value > UINT32_MAX - 3)
+   uint16_t spill_quads, d_rounded;
+   if (!state || !agx_ioto_g17p_compiler_spectpr_values(
+                    spill_bytes, d_value, &spill_quads, &d_rounded))
       return false;
 
-   const uint16_t spill_quads = (uint16_t)((spill_bytes + 3) >> 2);
-   const uint16_t d_rounded =
-      (uint16_t)(((((uint64_t)d_value + 3) >> 2) + 1) & UINT64_C(0xffe));
    struct agx_ioto_state staged = {0};
    staged.f[20] = spill_quads;
    staged.f[21] = spill_quads;
    staged.f[22] = d_rounded;
 
-   uint8_t packed[AGX_IOTO_SPECTPR_SIZE];
-   if (!agx_ioto_state_pack_spectpr(AGX_CHIP_G17P, &staged, packed,
-                                    sizeof(packed)))
+   *state = staged;
+   return true;
+}
+
+bool
+agx_ioto_g17p_compiler_spectpr_pack(
+   uint32_t spill_bytes, uint32_t d_value, void *output, size_t capacity)
+{
+   uint16_t spill_quads, d_rounded;
+   if (!output || capacity < AGX_IOTO_SPECTPR_SIZE ||
+       !agx_ioto_g17p_compiler_spectpr_values(
+          spill_bytes, d_value, &spill_quads, &d_rounded))
       return false;
 
-   *state = staged;
+   /* Specialize agx_ioto_state_encode_spectpr(GPU0) for the compiler state,
+    * whose only nonzero semantic fields are f20/f21/f22. */
+   const uint16_t words[5] = {
+      UINT16_C(0x00f7),
+      UINT16_C(0x002a) | (uint16_t)((d_rounded & 2) << 14),
+      (uint16_t)(((d_rounded >> 2) & 0x3ff) |
+                 ((spill_quads & 0x3f) << 10)),
+      (uint16_t)(((spill_quads >> 6) & 0x3ff) |
+                 ((spill_quads & 0x3f) << 10)),
+      (uint16_t)((spill_quads >> 6) & 0x3ff),
+   };
+   uint8_t staged[AGX_IOTO_SPECTPR_SIZE];
+   for (unsigned i = 0; i < 5; ++i) {
+      staged[2 * i] = (uint8_t)words[i];
+      staged[2 * i + 1] = (uint8_t)(words[i] >> 8);
+   }
+
+   memcpy(output, staged, sizeof(staged));
    return true;
 }
 

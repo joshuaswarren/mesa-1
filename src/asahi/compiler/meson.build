@@ -55,6 +55,8 @@ libasahi_agx_files = files(
   'agx3_graphics_program.h',
   'agx3_tex_core.c',
   'agx3_falu_mod_core.c',
+  'agx3_uniform_alu.c',
+  'agx3_uniform_integer.c',
   'agx3_vary_core.c',
   'agx3_tile_core.c',
   'agx3_pixel_core.c',
@@ -639,6 +641,9 @@ if with_tests
          'test/test-repair-ssa.cpp',
          'test/test-agx3-pack-binary.cpp',
          'test/test-agx3-sr.cpp',
+         'test/test-agx3-uniform-alu.cpp',
+         'test/test-agx3-integer-fusion.cpp',
+         'test/test-agx3-integer-lowering.cpp',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
@@ -647,6 +652,30 @@ if with_tests
     ),
     suite : ['asahi'],
     protocol : 'gtest',
+  )
+
+  test(
+    'agx3_uniform_integer',
+    executable(
+      'agx3_uniform_integer_test',
+      files('test/test-agx3-uniform-integer.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_optimization_corpus',
+    executable(
+      'agx3_optimization_corpus_test',
+      files('test/test-agx3-optimization-corpus.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      dependencies : [idep_nir, idep_agx_opcodes_h, idep_agx_builder_h, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
   )
 
   test(
@@ -877,6 +906,7 @@ if with_tests
       'agx3_graphics_program_test',
       files(
         'agx3_graphics_program.c',
+        'agx3_copy_core.c',
         'agx3_ioto_uniform_program.c',
         'agx3_ioto_load_packer.c',
         'agx3_mem_core.c',

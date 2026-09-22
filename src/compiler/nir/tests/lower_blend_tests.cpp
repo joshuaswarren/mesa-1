@@ -92,6 +92,25 @@ TEST_F(nir_lower_blend_test, hardmix_threshold_f32)
             {0, 1, 1, 1});
 }
 
+TEST_F(nir_lower_blend_test, dual_source_mixed_precision)
+{
+   nir_def *src = nir_imm_vec4(b, 0.25, 0.5, 0.75, 1.0);
+   nir_def *src1 = nir_f2f16(b, nir_imm_vec4(b, 0.0, 0.0, 0.0, 0.5));
+   nir_def *dst = nir_imm_vec4(b, 0.75, 0.5, 0.25, 1.0);
+
+   nir_lower_blend_rt rt = {};
+   rt.format = PIPE_FORMAT_B8G8R8A8_UNORM;
+   rt.rgb.func = PIPE_BLEND_ADD;
+   rt.rgb.src_factor = PIPE_BLENDFACTOR_ONE;
+   rt.rgb.dst_factor = PIPE_BLENDFACTOR_INV_SRC1_ALPHA;
+   rt.alpha = rt.rgb;
+   rt.colormask = 0xf;
+
+   nir_def *result = nir_color_blend(b, src, src1, dst, &rt, false);
+   ASSERT_EQ(result->bit_size, 32);
+   nir_validate_shader(b->shader, "mixed-precision dual-source blend");
+}
+
 TEST_F(nir_lower_blend_test, hardmix_threshold_unorm8)
 {
    evaluate(32, PIPE_FORMAT_R8G8B8A8_UNORM, half_color, boundary_color,

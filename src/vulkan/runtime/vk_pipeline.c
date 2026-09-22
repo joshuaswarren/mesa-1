@@ -1252,6 +1252,26 @@ vk_graphics_pipeline_cmd_bind(struct vk_command_buffer *cmd_buffer,
       assert(!(pipeline->flags & VK_PIPELINE_CREATE_2_LIBRARY_BIT_KHR));
       gfx_pipeline = container_of(pipeline, struct vk_graphics_pipeline, base);
 
+      /* Rebinding an identical immutable pipeline is a complete no-op when
+       * no intervening command changed state which is static in this
+       * pipeline.  Changes to states this pipeline declared dynamic do not
+       * require rebinding its shaders or walking its fixed-state snapshot. */
+      if (cmd_buffer->last_graphics_pipeline == pipeline) {
+         bool static_state_changed = false;
+         for (unsigned i = 0;
+              i < BITSET_WORDS(MESA_VK_DYNAMIC_GRAPHICS_STATE_ENUM_MAX);
+              ++i) {
+            if (cmd_buffer->dynamic_graphics_state
+                   .changed_since_pipeline_bind[i] &
+                gfx_pipeline->linked.dynamic.set[i]) {
+               static_state_changed = true;
+               break;
+            }
+         }
+         if (likely(!static_state_changed))
+            return;
+      }
+
       for (uint32_t i = 0; i < gfx_pipeline->stage_count; i++) {
          struct vk_shader *shader = gfx_pipeline->stages[i].shader;
          stage_shader[shader->stage] = shader;
@@ -1282,8 +1302,12 @@ vk_graphics_pipeline_cmd_bind(struct vk_command_buffer *cmd_buffer,
       cmd_buffer->pipeline_shader_stages |= vk_stages;
       ops->cmd_set_dynamic_graphics_state(cmd_buffer,
                                           &gfx_pipeline->linked.dynamic);
+      cmd_buffer->last_graphics_pipeline = pipeline;
+      BITSET_ZERO(cmd_buffer->dynamic_graphics_state
+                     .changed_since_pipeline_bind);
    } else {
       cmd_buffer->pipeline_shader_stages &= ~vk_stages;
+      cmd_buffer->last_graphics_pipeline = NULL;
    }
 }
 

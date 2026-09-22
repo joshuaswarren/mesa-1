@@ -445,21 +445,58 @@ vk_shader_deserialize(struct vk_device *device,
    assert(blob.current == (uint8_t *)data + sizeof(header));
    blob.end = (uint8_t *)data + data_size;
 
-   blake3_hasher blake3_ctx;
-   _mesa_blake3_init(&blake3_ctx);
+   bool validated = false;
+   simple_mtx_lock(&device->shader_binary_validation.lock);
+   for (unsigned i = 0; i < VK_SHADER_BINARY_VALIDATION_CACHE_MAX; ++i) {
+      const struct vk_shader_binary_validation_cache_entry *entry =
+         &device->shader_binary_validation.entries[i];
+      if (entry->size == data_size &&
+          memcmp(entry->digest, header.blake3, sizeof(header.blake3)) == 0 &&
+          memcmp(entry->data, data, data_size) == 0) {
+         validated = true;
+         break;
+      }
+   }
+   simple_mtx_unlock(&device->shader_binary_validation.lock);
 
-   /* Hash the header with a zero BLAKE3 */
-   struct vk_shader_bin_header blake3_header = header;
-   memset(blake3_header.blake3, 0, sizeof(blake3_header.blake3));
-   _mesa_blake3_update(&blake3_ctx, &blake3_header, sizeof(blake3_header));
+   if (!validated) {
+      blake3_hasher blake3_ctx;
+      _mesa_blake3_init(&blake3_ctx);
 
-   /* Hash the serialized data */
-   _mesa_blake3_update(&blake3_ctx, (uint8_t *)data + sizeof(header),
-                     data_size - sizeof(header));
+      /* Hash the header with a zero BLAKE3 */
+      struct vk_shader_bin_header blake3_header = header;
+      memset(blake3_header.blake3, 0, sizeof(blake3_header.blake3));
+      _mesa_blake3_update(&blake3_ctx, &blake3_header,
+                          sizeof(blake3_header));
 
-   _mesa_blake3_final(&blake3_ctx, ref_header.blake3);
-   if (memcmp(header.blake3, ref_header.blake3, sizeof(header.blake3)))
-      return vk_error(device, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+      /* Hash the serialized data */
+      _mesa_blake3_update(&blake3_ctx, (uint8_t *)data + sizeof(header),
+                          data_size - sizeof(header));
+
+      _mesa_blake3_final(&blake3_ctx, ref_header.blake3);
+      if (memcmp(header.blake3, ref_header.blake3, sizeof(header.blake3)))
+         return vk_error(device, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+
+      /* Keep the cache finite in both entry count and bytes.  Large binaries
+       * take the normal validation path rather than displacing megabytes of
+       * device-lifetime memory. */
+      if (data_size <= 256 * 1024) {
+         uint8_t *copy = malloc(data_size);
+         if (copy) {
+            memcpy(copy, data, data_size);
+            simple_mtx_lock(&device->shader_binary_validation.lock);
+            unsigned slot = device->shader_binary_validation.next++ %
+                            VK_SHADER_BINARY_VALIDATION_CACHE_MAX;
+            struct vk_shader_binary_validation_cache_entry *entry =
+               &device->shader_binary_validation.entries[slot];
+            free(entry->data);
+            entry->data = copy;
+            entry->size = data_size;
+            memcpy(entry->digest, header.blake3, sizeof(entry->digest));
+            simple_mtx_unlock(&device->shader_binary_validation.lock);
+         }
+      }
+   }
 
    /* We've now verified that the header matches and that the data has the
     * right BLAKE3 hash so it's safe to call into the driver.
@@ -728,12 +765,15 @@ vk_common_DestroyShaderEXT(VkDevice _device,
    vk_shader_destroy(device, shader, pAllocator);
 }
 
-VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR __attribute__((hot)) void VKAPI_CALL
 vk_common_CmdBindShadersEXT(VkCommandBuffer commandBuffer,
                             uint32_t stageCount,
                             const VkShaderStageFlagBits *pStages,
                             const VkShaderEXT *pShaders)
 {
+   if (stageCount == 0)
+      return;
+
    VK_FROM_HANDLE(vk_command_buffer, cmd_buffer, commandBuffer);
    struct vk_device *device = cmd_buffer->base.device;
    const struct vk_device_shader_ops *ops = device->shader_ops;
@@ -748,9 +788,30 @@ vk_common_CmdBindShadersEXT(VkCommandBuffer commandBuffer,
       shaders[i] = pShaders != NULL ? vk_shader_from_handle(pShaders[i]) : NULL;
    }
 
-   vk_cmd_unbind_pipelines_for_stages(cmd_buffer, vk_stages);
-   if (vk_stages & ~VK_SHADER_STAGE_COMPUTE_BIT)
-      vk_cmd_set_rp_attachments(cmd_buffer, ~0);
+   /* Shader objects usually bind into a command buffer with no pipeline.
+    * Keep that common path local instead of taking the cold out-of-line
+    * pipeline-unbind path, which repeats this exact stage intersection. */
+   if (vk_stages & cmd_buffer->pipeline_shader_stages)
+      vk_cmd_unbind_pipelines_for_stages(cmd_buffer, vk_stages);
+
+   if (vk_stages & ~VK_SHADER_STAGE_COMPUTE_BIT) {
+      struct vk_dynamic_graphics_state *dyn =
+         &cmd_buffer->dynamic_graphics_state;
+      const enum vk_rp_attachment_flags attachments = ~0;
+
+      /* Inline the tiny state transition on this latency-sensitive path. */
+      if (!BITSET_TEST(dyn->set, MESA_VK_DYNAMIC_RP_ATTACHMENTS) ||
+          dyn->rp.attachments != attachments) {
+         dyn->rp.attachments = attachments;
+         BITSET_SET(dyn->set, MESA_VK_DYNAMIC_RP_ATTACHMENTS);
+         BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_RP_ATTACHMENTS);
+         BITSET_SET(dyn->changed_since_pipeline_bind,
+                    MESA_VK_DYNAMIC_RP_ATTACHMENTS);
+         dyn->generation++;
+      }
+   }
 
    ops->cmd_bind_shaders(cmd_buffer, stageCount, stages, shaders);
+   STACK_ARRAY_FINISH(shaders);
+   STACK_ARRAY_FINISH(stages);
 }

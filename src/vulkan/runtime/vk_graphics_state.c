@@ -2140,6 +2140,9 @@ vk_dynamic_graphics_state_fill(struct vk_dynamic_graphics_state *dyn,
       assert((dst)->state == (value));                      \
       BITSET_SET(dst->set, MESA_VK_DYNAMIC_##STATE);        \
       BITSET_SET(dst->dirty, MESA_VK_DYNAMIC_##STATE);      \
+      BITSET_SET(dst->changed_since_pipeline_bind,          \
+                 MESA_VK_DYNAMIC_##STATE);                  \
+      (dst)->generation++;                                  \
    }                                                        \
 } while(0)
 
@@ -2155,6 +2158,9 @@ vk_dynamic_graphics_state_fill(struct vk_dynamic_graphics_state *dyn,
       memcpy((dst)->state + start, src, __state_size);            \
       BITSET_SET(dst->set, MESA_VK_DYNAMIC_##STATE);              \
       BITSET_SET(dst->dirty, MESA_VK_DYNAMIC_##STATE);            \
+      BITSET_SET(dst->changed_since_pipeline_bind,                 \
+                 MESA_VK_DYNAMIC_##STATE);                         \
+      (dst)->generation++;                                        \
    }                                                              \
 } while(0)
 
@@ -2447,6 +2453,10 @@ vk_common_CmdSetVertexInputEXT(VkCommandBuffer commandBuffer,
    BITSET_SET(dyn->set, MESA_VK_DYNAMIC_VI_BINDING_STRIDES);
    BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_VI);
    BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_VI_BINDING_STRIDES);
+   BITSET_SET(dyn->changed_since_pipeline_bind, MESA_VK_DYNAMIC_VI);
+   BITSET_SET(dyn->changed_since_pipeline_bind,
+              MESA_VK_DYNAMIC_VI_BINDING_STRIDES);
+   dyn->generation++;
 }
 
 void

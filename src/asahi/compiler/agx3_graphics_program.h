@@ -21,6 +21,16 @@
  * value and hk_cmd_buffer.c static-asserts it against the collector. */
 #define AGX3_G17P_GRAPHICS_MAX_RANGES 7u
 #define AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
+#define AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE \
+   (2u * AGX_IOTO_LOAD_LDIMM_MAX_SIZE)
+#define AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE \
+   AGX_IOTO_G17P_EXTERNAL_LAUNCHER_MAX_SIZE
+#define AGX3_G17P_GRAPHICS_ROOT_BASE_HALF 0u
+#define AGX3_G17P_GRAPHICS_ROOT_GPR_DWORDS 2u
+/* The launcher carries its 64-bit root through LDSHDR in the final four
+ * CProg halves.  External setup is used only when the linked shader does not
+ * consume this range; every other shader stays on the qualified inline form. */
+#define AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF 508u
 
 struct agx3_g17p_graphics_program_desc {
    uint64_t program_va;
@@ -36,12 +46,70 @@ struct agx3_g17p_graphics_program_desc {
    bool writes_sample_mask;
    uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
+
+   /* Persistent setup programs receive their command-buffer-owned root base
+    * in r0:r1 from a compact launcher. Each range address is then an offset
+    * of a source-VA qword in that root, and setup performs the execution-time
+    * second-level dereference. Ordinary programs leave this false and
+    * materialize every absolute range themselves. */
+   bool preloaded_root;
 };
 
 struct agx3_g17p_graphics_program {
    uint8_t bytes[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
    uint16_t length;
 };
+
+struct agx3_g17p_graphics_program_template {
+   struct agx3_g17p_graphics_program program;
+   struct agx_ioto_load_relocation
+      relocations[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
+   uint16_t relocation_count;
+};
+
+struct agx3_g17p_graphics_root_prefix {
+   uint8_t bytes[AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE];
+   uint8_t length;
+};
+
+/* Linked-shader-owned launcher bytes.  Only the root LDIMMs at the front and
+ * the PC-relative branch at the end vary per recorded draw. */
+struct agx3_g17p_graphics_external_launcher_template {
+   uint8_t bytes[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+   uint8_t length;
+   uint8_t root_prefix_length;
+   uint8_t branch_offset;
+};
+
+/* Materialize the command-buffer-owned root-record address in r0:r1.  The
+ * immutable shader-owned setup template follows inline: G17P's long B is a
+ * constant-calculation suffix, not a legal entry transfer before LDSHDR. */
+bool agx3_g17p_graphics_root_prefix_generate(
+   enum agx_chip chip, uint64_t root_va,
+   struct agx3_g17p_graphics_root_prefix *prefix);
+
+/* Build the shader-owned constant-calculation suffix and its small per-draw
+ * launcher. The suffix receives r0:r1 from the launcher and contains no
+ * draw-varying address. */
+bool agx3_g17p_graphics_external_setup_suffix_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   void *output, size_t capacity, size_t *written);
+
+bool agx3_g17p_graphics_external_launcher_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);
+
+bool agx3_g17p_graphics_external_launcher_template_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   uint64_t setup_va,
+   struct agx3_g17p_graphics_external_launcher_template *launcher);
+
+bool agx3_g17p_graphics_external_launcher_template_relocate(
+   enum agx_chip chip,
+   const struct agx3_g17p_graphics_external_launcher_template *launcher,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);
 
 enum agx3_g17p_rt0_bg_op {
    AGX3_G17P_RT0_BG_CLEAR,
@@ -136,6 +204,28 @@ bool agx3_g17p_graphics_program_bound(
 bool agx3_g17p_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    struct agx3_g17p_graphics_program *program);
+
+/* Generate an immutable program plus exact LDIMM relocation sites, then copy
+ * it for another descriptor whose absolute ranges preserve the same loader
+ * cache topology.  Relocation fails closed if any instruction changes size. */
+bool agx3_g17p_graphics_program_template_generate(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program_template *program);
+
+bool agx3_g17p_graphics_program_template_relocate(
+   enum agx_chip chip,
+   const struct agx3_g17p_graphics_program_desc *template_desc,
+   const struct agx3_g17p_graphics_program_desc *target_desc,
+   const struct agx3_g17p_graphics_program_template *program,
+   void *output, size_t capacity, uint16_t *written);
+
+/* Write directly into command-buffer-private, unpublished storage. Unlike the
+ * transactional object API above, output may be modified when this returns
+ * false; `written` is unchanged. The caller must not publish the storage until
+ * success. */
+bool agx3_g17p_graphics_program_write_unpublished(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   void *output, size_t capacity, size_t *written);
 
 /* HAL200 native texture/sampler pointers occupy uniform halves 0..7.  Select
  * the first even eight-half range after every main-shader uniform and rodata

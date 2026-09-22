@@ -223,6 +223,62 @@ test_bounds_and_cohorts(void)
 }
 
 static bool
+test_preloaded_base_survives_rollover(void)
+{
+   /* Sixty-four four-dword loads cannot fit in one temporary-register round.
+    * The ordinary program must therefore materialize this address more than
+    * once, while a launcher-owned r0:r1 base must survive every rollover and
+    * leave no address relocations anywhere in the body. */
+   static const struct agx3_ioto_uniform_range range = {
+      .start_halfs = 0,
+      .size_halfs = 512,
+      .address = 0x100,
+   };
+   struct {
+      uint8_t body[8192];
+      struct agx_ioto_inflight_load loads[128];
+      struct agx_ioto_inflight_load sort[128];
+      struct agx_ioto_load_cache_entry cache[128];
+      struct agx_ioto_load_relocation relocations[128];
+   } f;
+   struct agx3_ioto_uniform_program_workspace ws = {
+      .body = f.body,
+      .body_capacity = sizeof(f.body),
+      .loads = f.loads,
+      .load_capacity = ARRAY_SIZE(f.loads),
+      .sort = f.sort,
+      .sort_capacity = ARRAY_SIZE(f.sort),
+      .cache = f.cache,
+      .cache_capacity = ARRAY_SIZE(f.cache),
+      .relocations = f.relocations,
+      .relocation_capacity = ARRAY_SIZE(f.relocations),
+   };
+   struct agx3_ioto_uniform_program_desc desc =
+      program_desc(AGX_CHIP_G17P, &range, 1);
+   size_t written = SIZE_MAX, copy_offset = SIZE_MAX;
+   size_t relocations = SIZE_MAX;
+   ws.relocation_count = &relocations;
+
+   memset(&f, 0xa5, sizeof(f));
+   CHECK(agx3_ioto_uniform_program_body_generate(
+      AGX_CHIP_G17P, &desc, ws, &written, &copy_offset));
+   CHECK(written > copy_offset);
+   CHECK(relocations > 1);
+
+   memset(&f, 0xa5, sizeof(f));
+   desc.initial_gpr_dwords = 2;
+   desc.preloaded_base_valid = true;
+   desc.preloaded_base_half = 0;
+   desc.preloaded_base_address = 0;
+   written = copy_offset = relocations = SIZE_MAX;
+   CHECK(agx3_ioto_uniform_program_body_generate(
+      AGX_CHIP_G17P, &desc, ws, &written, &copy_offset));
+   CHECK(written > copy_offset);
+   CHECK(relocations == 0);
+   return true;
+}
+
+static bool
 generate_fails_unchanged(enum agx_chip chip,
                          struct agx3_ioto_uniform_program_desc *desc,
                          struct agx3_ioto_uniform_program_workspace ws,
@@ -309,7 +365,8 @@ int
 main(void)
 {
    if (!test_exact_uniform_program() || !test_g17p_background_clear_body() ||
-       !test_bounds_and_cohorts() || !test_fail_closed())
+       !test_bounds_and_cohorts() ||
+       !test_preloaded_base_survives_rollover() || !test_fail_closed())
       return 1;
 
    printf("agx3_ioto_uniform_program: %u checks passed\n", checks);

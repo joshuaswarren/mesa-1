@@ -46,12 +46,42 @@
 #include <fcntl.h>
 #include <xf86drm.h>
 
+static bool
+hk_g17p_prewarm_poly_kernels(struct hk_device *dev)
+{
+#define PREWARM(program, args)                                                \
+   do {                                                                        \
+      if (!hk_g17p_compute_program_cache_prewarm(                              \
+             dev, program, sizeof(struct args)))                               \
+         return false;                                                         \
+   } while (0)
+
+   PREWARM(LIBAGX_GS_SETUP_INDIRECT, libagx_gs_setup_indirect_args);
+   PREWARM(LIBAGX_PREFIX_SUM_GEOM, libagx_prefix_sum_geom_args);
+   PREWARM(LIBAGX_PREFIX_SUM_TESS_0, libagx_prefix_sum_tess_args);
+   PREWARM(LIBAGX_PREFIX_SUM_TESS_1, libagx_prefix_sum_tess_args);
+   PREWARM(LIBAGX_TESS_SETUP_INDIRECT, libagx_tess_setup_indirect_args);
+   PREWARM(LIBAGX_TESS_SETUP_INDIRECT_HW,
+           libagx_tess_setup_indirect_hw_args);
+   PREWARM(LIBAGX_TESS_FACTORS_HALF, libagx_tess_factors_half_args);
+   PREWARM(LIBAGX_TESS_ISOLINE_0, libagx_tess_isoline_args);
+   PREWARM(LIBAGX_TESS_ISOLINE_1, libagx_tess_isoline_args);
+   PREWARM(LIBAGX_TESS_TRI_0, libagx_tess_tri_args);
+   PREWARM(LIBAGX_TESS_TRI_1, libagx_tess_tri_args);
+   PREWARM(LIBAGX_TESS_QUAD_0, libagx_tess_quad_args);
+   PREWARM(LIBAGX_TESS_QUAD_1, libagx_tess_quad_args);
+
+#undef PREWARM
+
+   return true;
+}
+
 /* clang-format off */
 static const struct debug_named_value hk_perf_options[] = {
    {"notess",    HK_PERF_NOTESS,   "Skip draws with tessellation"},
    {"noborder",  HK_PERF_NOBORDER, "Disable custom border colour emulation"},
    {"nobarrier", HK_PERF_NOBARRIER,"Ignore pipeline barriers"},
-   {"batch",     HK_PERF_BATCH,    "Batch submissions"},
+   {"nobatch",   HK_PERF_NOBATCH,  "Disable submission batching"},
    {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
    DEBUG_NAMED_VALUE_END
 };
@@ -106,6 +136,27 @@ hk_upload_rodata(struct hk_device *dev)
    memcpy(map + offs, &txf, sampler_size);
    offs += sampler_size;
 
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      const uint64_t pointers[2] = {
+         dev->sampled_images.bo->va->addr,
+         dev->samplers.table.bo->va->addr,
+      };
+
+      dev->rodata.indexed_heap_pointers_bo =
+         agx_bo_create(&dev->dev, sizeof(pointers), 0, 0,
+                       "Indexed descriptor heap pointers");
+      if (!dev->rodata.indexed_heap_pointers_bo) {
+         agx_bo_unreference(&dev->dev, dev->rodata.bo);
+         dev->rodata.bo = NULL;
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+
+      memcpy(agx_bo_map(dev->rodata.indexed_heap_pointers_bo), pointers,
+             sizeof(pointers));
+      dev->rodata.indexed_heap_pointers =
+         dev->rodata.indexed_heap_pointers_bo->va->addr;
+   }
+
    /* The heap descriptor is NOT read-only data: hk_init_heap() writes it from
     * the CPU on the first tessellated or geometry-shaded draw, and the libagx
     * allocator then atomically bumps poly_heap::bottom from the GPU on every
@@ -120,6 +171,9 @@ hk_upload_rodata(struct hk_device *dev)
    dev->rodata.heap_bo = agx_bo_create(&dev->dev, sizeof(struct poly_heap), 0,
                                        0, "Geometry heap descriptor");
    if (!dev->rodata.heap_bo) {
+      agx_bo_unreference(&dev->dev,
+                         dev->rodata.indexed_heap_pointers_bo);
+      dev->rodata.indexed_heap_pointers_bo = NULL;
       agx_bo_unreference(&dev->dev, dev->rodata.bo);
       dev->rodata.bo = NULL;
       return VK_ERROR_OUT_OF_HOST_MEMORY;
@@ -746,6 +800,49 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_rodata;
    }
 
+   dev->g17p_compute_program_cache.report_stats =
+      debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
+   dev->g17p_shader_perf.trace =
+      debug_get_bool_option("HK_SHADER_PERF_TRACE", false);
+   dev->g17p_shader_perf.aggregate =
+      debug_get_bool_option("HK_SHADER_PERF_AGGREGATE", false);
+   dev->g17p_shader_perf.fault_trace =
+      debug_get_bool_option("HK_SHADER_PERF_FAULT_TRACE", false);
+   dev->g17p_shader_perf.prefault_stack =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STACK", false);
+   dev->g17p_shader_perf.prefault_driver =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_DRIVER", false);
+   dev->g17p_shader_perf.prefault_main =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_MAIN", false);
+   dev->g17p_shader_perf.prefault_ioto =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_IOTO", false);
+   dev->g17p_shader_perf.prefault_streams =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STREAMS", false);
+   dev->g17p_diagnostics.launch_trace =
+      debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
+   dev->g17p_diagnostics.draw_trace =
+      debug_get_bool_option("HK_G17P_DRAW_TRACE", false);
+   dev->g17p_diagnostics.compact_ioto_trace =
+      debug_get_bool_option("HK_G17P_COMPACT_IOTO_TRACE", false);
+   dev->g17p_diagnostics.graphics_ioto_cache_stats =
+      debug_get_bool_option("HK_G17P_GRAPHICS_IOTO_CACHE_STATS", false);
+   dev->g17p_diagnostics.nonpoint_no_psiz =
+      debug_get_bool_option("HK_G17P_NONPOINT_NO_PSIZ", false);
+   dev->g17p_diagnostics.hal200_about_flags1 =
+      debug_get_bool_option("HK_G17P_HAL200_ABOUT_FLAGS1", false);
+   dev->g17p_diagnostics.force_tri_merge_disable =
+      debug_get_bool_option("HK_G17P_FORCE_TRI_MERGE_DISABLE", false);
+
+   /* Geometry and tessellation are advertised core functionality on G17P.
+    * Upload their immutable internal kernels with the device instead of
+    * making the first vkCmdDraw that needs each kernel serialize on the
+    * cache lock and allocate its executable image. */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       !hk_g17p_prewarm_poly_kernels(dev)) {
+      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      goto fail_bg_eot;
+   }
+
    result = hk_init_internal_shaders(&dev->prolog_epilog);
    if (result != VK_SUCCESS)
       goto fail_bg_eot;
@@ -780,9 +877,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
 
-   dev->g17p_compute_program_cache.report_stats =
-      debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
-
    /* Precompile an empty fragment shader that can be used to handle API-level
     * null fragment shaders. We do this at device-time to make binds cheap.
     * Regardless, compiling this shader should be fast.
@@ -808,7 +902,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    list_inithead(&dev->vdm.slabs);
    list_inithead(&dev->vdm.quarantined_bos);
    list_inithead(&dev->vdm.quarantined_vdm_allocations);
+   util_dynarray_init(&dev->vdm.quarantined_ioto_bos, NULL);
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
+   simple_mtx_init(&dev->shader_binary_cache.lock, mtx_plain);
    agx_scratch_init(&dev->dev, &dev->scratch.vs);
    agx_scratch_init(&dev->dev, &dev->scratch.fs);
    agx_scratch_init(&dev->dev, &dev->scratch.cs);
@@ -837,6 +933,7 @@ fail_bg_eot:
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_rodata:
    agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
 fail_queries:
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
@@ -869,6 +966,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    u_rwlock_destroy(&dev->external_bos.lock);
 
    hk_device_finish_meta(dev);
+   hk_shader_binary_cache_finish(dev);
    hk_g17p_compute_program_cache_finish(dev);
    hk_device_finish_accel_struct_state(dev);
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
@@ -914,6 +1012,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       hk_descriptor_table_finish(dev, &dev->sampled_images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
    agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);

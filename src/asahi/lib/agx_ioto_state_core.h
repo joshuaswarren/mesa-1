@@ -116,6 +116,13 @@ bool agx_ioto_g17s_minimal_compute_tail_build(
 bool agx_ioto_g17p_compute_ldshdr_build(
    uint64_t shader_va, struct agx_ioto_state *state);
 
+/* Pack the minimal G17P LDSHDR used by compiler-generated graphics and
+ * compute programs directly. This is equivalent to the semantic state with
+ * only f0=shader_va, f1=fetch_span and required f23=1 populated. `output` is
+ * unchanged on failure. */
+bool agx_ioto_g17p_compiler_ldshdr_pack(
+   uint64_t shader_va, uint32_t fetch_span, void *output, size_t capacity);
+
 /* Raw LDSHDR f1 values from three explicitly MIT-licensed, output-positive
  * G17P compute witnesses. The names identify those witnesses; they do not
  * assign inferred hardware semantics to the anonymous field. */
@@ -146,6 +153,12 @@ bool agx_ioto_g17p_runtime_compute_tail_build_shared(
  * scratch_size: the runtime may subsequently overwrite f10/f11/f20/f22. */
 bool agx_ioto_g17p_compiler_spectpr_build(
    uint32_t spill_bytes, uint32_t d_value, struct agx_ioto_state *state);
+
+/* Pack those same compiler fields directly into the exact G17P SPECTPR
+ * record. This is equivalent to build + generic pack without materializing a
+ * 27-field semantic state. `output` is unchanged on failure. */
+bool agx_ioto_g17p_compiler_spectpr_pack(
+   uint32_t spill_bytes, uint32_t d_value, void *output, size_t capacity);
 
 #ifdef __cplusplus
 }

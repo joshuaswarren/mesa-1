@@ -71,7 +71,9 @@ bool agx_ioto_preshader_program_size(uint32_t start, uint32_t end32,
 /*
  * Pack the target-family long B or BL form.  The constant-calculation suffix
  * calls this with link=false; BL is used by the separate profile-state loader.
- * Addresses must be even and fit in 48 bits.  `out` is unchanged on failure.
+ * `target_va` is the 48-bit two's-complement PC-relative byte displacement,
+ * represented modulo 2^48 and aligned to a halfword. `out` is unchanged on
+ * failure.
  */
 bool
 agx_ioto_preshader_pack_branch(enum agx_chip chip, uint64_t target_va,
