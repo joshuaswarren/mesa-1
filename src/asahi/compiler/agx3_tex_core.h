@@ -145,6 +145,50 @@ struct agx3_tex_fetch_desc {
     */
    uint16_t lod_x64;
    bool register_lod;
+   /*
+    * Sparse residency (VK_KHR_sparse_*, OpImageSparse*).  The instruction
+    * writes its masked result channels as usual and then one extra 32-bit
+    * register holding the residency code, at the half immediately after the
+    * masked channels -- the same destination convention AGX2 uses.
+    *
+    * These fields were isolated by compiling matched pairs that differ
+    * only in `sparse_sample`/`sparse_read` vs `sample`/`read`, with
+    * `xcrun metal-nt -arch applegpu_g17p`
+    * (MetalToolchain v27.1.5194.15, -platform_version macos 27.0 27.0):
+    *
+    *   f142 = 1     the residency request itself
+    *   f120 = 1     set on every sparse access
+    *   f112 += 4    NOT ENCODED.  Apple's bytes do move the operand profile,
+    *                but f112 is a scattered bitmask rather than a counter, so
+    *                "+4" drops profile bit 2 and sets bit 3 -- and on G17P
+    *                that makes every sparse fetch and every explicit-LOD
+    *                sparse sample fail.  The profile stays at its dense
+    *                value; see the note in agx3_tex_encode_sample() for the
+    *                measurement.
+    *
+    * Matched compute pairs, argument-buffer descriptors on both arms
+    * (test/probes/g17p-sparse-residency.metal, k_ab_dense vs k_ab_sparse and
+    * k_ab_dread vs k_ab_sread), differ in exactly those three fields plus
+    * register allocation and the group terminator (the f112 move among them,
+    * which this encoder deliberately does not reproduce):
+    *
+    *   sample  dense  05800cb8b4000900920390010100802000800098
+    *           sparse 2dc00c38bc000900920392010200802028c00018
+    *   fetch   dense  05800cb8b0001701900280000100002000800098
+    *           sparse 2dc00c38b0001701900282000200002028c00018
+    *
+    * The residency register is read straight back by the `bit_andc` that
+    * follows: with a W32 result at half 10 and mask 15 it names half 18, with
+    * a W32 result at half 0 and mask 1 it names half 2, and with a W16 result
+    * at half 0 and mask 15 it names half 4 -- dest + channels * halves.
+    *
+    * f120 deposits instruction bit 142, past the 112-bit ep3 form, so the
+    * composer refuses a sparse ep3 instruction outright and a sparse
+    * operation is always the 20-byte ep4 form -- even when both descriptors
+    * are immediate, where the dense sibling stays 14 bytes.  (f142 itself
+    * deposits bit 81 and would fit either form.)  Only AGX3b is witnessed.
+    */
+   bool sparse;
 };
 
 bool agx3_tex_encode_fetch(enum agx_isa_encoding enc,
@@ -289,6 +333,11 @@ struct agx3_tex_sample_desc {
    /* G17P f140=2 consumes a native bank-6 minimum, combined with the
     * half-float bias or published beside explicit gradients. */
    bool min_lod;
+   /* A 2D-array comparison with a bias reads its minimum from the GPR
+    * agx3_tex_pack_minimum() fills instead (f37=2, f30, f41). */
+   bool min_lod_register;
+   uint16_t min_lod_value;
+   bool min_lod_kill;
    uint16_t lod_x64;    /* level * 64 when LEVEL, bias * 64 when BIAS */
    uint8_t slot;
    uint16_t wait_mask;  /* zero or one compactly encodable dependency */
@@ -306,6 +355,9 @@ struct agx3_tex_sample_desc {
    /* Vertex explicit-LOD samples use the same SMP fields and operand staging
     * as fragment samples, but never carry fragment group terminator f156. */
    bool vertex_stage;
+   /* Compute samples likewise stage exactly as fragment samples do, and
+    * likewise never carry f156. */
+   bool compute_stage;
    bool array;           /* array sample; shadow layers use PACK_SMPIR */
    uint16_t array_layer; /* 32-bit layer half-register, even and <=254 */
    bool three_d;        /* 3D level: third contiguous f32 coordinate, G17P */
@@ -324,10 +376,17 @@ struct agx3_tex_sample_desc {
    /* G17P f146 queries LOD, with f74 clear. X is clamped, Y unclamped.
     * Array queries take no layer and encode immediate layer zero. */
    bool query_lod;
-   bool offset;                 /* signed nibble-packed 2D texel offset */
-   uint16_t offset_xyz;           /* signed x/y/z nibbles, z only for 3D */
-   bool offset_register;         /* runtime gather offset staged in bank 6 */
+   bool offset;                 /* coordinate offset is present */
+   bool offset_staged;          /* f141=2 reads PACK_SMPIR offset banks */
+   bool offset_staged_array;    /* staged word also contains array layer */
+   uint16_t offset_xyz;         /* immediate signed x/y/z nibbles */
+   bool offset_register;        /* runtime gather offset staged in bank 6 */
    enum agx3_tex_sample_abi sample_abi;
+   /* See agx3_tex_fetch_desc::sparse; the sample form uses the same fields,
+    * witnessed on 2D, 2D-array, 3D, cube, gather, immediate level and bias
+    * shapes and on both result widths, and likewise leaves the f112 operand
+    * profile alone. */
+   bool sparse;
 };
 
 /* Pack a scalar LOD into native texture operand bank 6. This bank is separate
@@ -340,6 +399,57 @@ bool agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src,
                               bool src_cache, bool src_discard,
                               enum agx3_tex_level_kind kind,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* The `_at` stagers publish the operands of a read whose coordinates are
+ * staged at half `bank` (0 or 16) into bank + 6 instead of bank 6. */
+/* CEM's selected face together with a per-lane level or bias: the same
+ * two-operand word as agx3_tex_stage_array_lod with the cube selector.
+ * Apple's `depthcube.sample_compare(s, dir, ref, level(v))` fragment emits
+ * exactly 1705540600040c00f0c01100 for discarded face r1 and level half 3. */
+bool agx3_tex_stage_cube_z_lod(enum agx_isa_encoding enc, uint16_t z,
+                               uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                               bool z_cache, bool z_discard, bool lod_cache,
+                               bool lod_discard,
+                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+/* Cube-array comparison with a per-lane level or bias: the face+level word
+ * above with the three cube-array selectors (f51 = 2, f55 = 1, f75 = 12).
+ * Apple's `depthcube_array.sample_compare(s, dir, layer, ref, level(v))`
+ * fragment emits exactly 1705540600040c00f0c21700 for face r1 and level
+ * half 3, both discarded, on slot 1. */
+bool agx3_tex_stage_cube_array_z_lod(enum agx_isa_encoding enc, uint16_t z,
+                                     uint16_t lod, uint8_t slot,
+                                     uint16_t wait_mask, bool z_cache,
+                                     bool z_discard, bool lod_cache,
+                                     bool lod_discard,
+                                     uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                     uint8_t *len);
+/* The auxiliary integer layer publication that accompanies that word: the
+ * array-layer PACK_SMPIR (f74 = 4) with f5 = 0, f9 = 4 and three fixed bits
+ * the binder does not model. Apple emits 1705540003200000f0880400 for a
+ * discarded layer at half 16 on slot 1; its uniform-level preambles use the
+ * same f5/f9/fixed-bit pattern with the FLOAT kind. `src` is a half index. */
+bool agx3_tex_stage_aux_layer(enum agx_isa_encoding enc, uint16_t src,
+                              uint8_t slot, uint16_t wait_mask,
+                              bool src_cache, bool src_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+/* The same publication into a rotated staging group: `bank` is 6, 14 or 22,
+ * the level operand of groups 0, 8 and 16. Apple's second in-flight fragment
+ * texel fetch stages its level at bank 14 (PACK_SMPIR f5 = 14). */
+bool agx3_tex_stage_typed_lod_bank(enum agx_isa_encoding enc, uint16_t bank,
+                                   uint16_t src, uint8_t slot,
+                                   uint16_t wait_mask, bool src_cache,
+                                   bool src_discard,
+                                   enum agx3_tex_level_kind kind,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
+
+bool agx3_tex_stage_typed_lod_at(enum agx_isa_encoding enc, uint16_t bank,
+                                 uint16_t src, uint8_t slot,
+                                 uint16_t wait_mask, bool src_cache,
+                                 bool src_discard,
+                                 enum agx3_tex_level_kind kind,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                 uint8_t *len);
 
 bool agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
                             uint16_t minimum, uint8_t slot, uint16_t wait_mask,
@@ -357,10 +467,26 @@ bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
                                    uint8_t slot, bool cache, bool discard,
                                    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+/* PACK_IMGWIR publishes an image write's layer register to staging half
+ * `dest` (6 in bank 0), with the same operand fields as PACK_SMPIR's array
+ * layer. */
+bool agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
+                                      uint16_t dest,
+                                      uint8_t slot, uint16_t wait_mask,
+                                      bool src_cache, bool src_discard,
+                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                      uint8_t *len);
+
 bool agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                 uint8_t slot, uint16_t wait_mask,
                                 bool src_cache, bool src_discard,
                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+bool agx3_tex_stage_array_layer_at(enum agx_isa_encoding enc, uint16_t bank,
+                                   uint16_t src, uint8_t slot,
+                                   uint16_t wait_mask, bool src_cache,
+                                   bool src_discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
 
 /* Publish the layer and per-lane half-float LOD together into operand bank 6. */
 bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
@@ -369,18 +495,57 @@ bool agx3_tex_stage_array_lod(enum agx_isa_encoding enc, uint16_t layer,
                               bool lod_cache, bool lod_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+bool agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc,
+                                      uint16_t layer, uint8_t slot,
+                                      uint16_t wait_mask, bool layer_cache,
+                                      bool layer_discard,
+                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                      uint8_t *len);
+
 bool agx3_tex_normalize_cube_array_layer(enum agx_isa_encoding enc,
                                          uint16_t dest, uint16_t layer,
                                          bool layer_cache, bool layer_discard,
                                          uint8_t out[AGX3_TEX_MAX_LENGTH],
                                          uint8_t *len);
 
-bool agx3_tex_stage_cube_z_lod(enum agx_isa_encoding enc, bool cube_array,
+bool agx3_tex_stage_cube_z_lod_g17g(enum agx_isa_encoding enc, bool cube_array,
                                uint16_t z, uint16_t lod, uint8_t slot,
                                uint16_t wait_mask, bool z_cache,
                                bool z_discard, bool lod_cache,
                                bool lod_discard,
                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish a 2D-array bias sample's minimum LOD at half 4, beside the layer and
+ * bias staged in bank 6. */
+bool agx3_tex_stage_array_minimum_lod(enum agx_isa_encoding enc, uint16_t src,
+                                      uint8_t slot, uint16_t wait_mask,
+                                      bool src_cache, bool src_discard,
+                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                      uint8_t *len);
+
+/* Publish a 2D-array gradient sample's layer and minimum LOD into bank 6. */
+bool agx3_tex_stage_array_minimum_gradient(
+   enum agx_isa_encoding enc, uint16_t layer, uint16_t minimum, uint8_t slot,
+   uint16_t wait_mask, bool layer_cache, bool layer_discard,
+   bool minimum_cache, bool minimum_discard,
+   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* The texel-fetch variant packs a full uint LOD beside the array layer. */
+bool agx3_tex_stage_array_integer_lod(
+   enum agx_isa_encoding enc, uint16_t layer, uint16_t lod, uint8_t slot,
+   uint16_t wait_mask, bool layer_cache, bool layer_discard, bool lod_cache,
+   bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+bool agx3_tex_stage_array_integer_lod_at(
+   enum agx_isa_encoding enc, uint16_t bank, uint16_t layer, uint16_t lod,
+   uint8_t slot, uint16_t wait_mask, bool layer_cache, bool layer_discard,
+   bool lod_cache, bool lod_discard, uint8_t out[AGX3_TEX_MAX_LENGTH],
+   uint8_t *len);
+
+/* Publish a runtime signed 2D coordinate offset into operand bank 6. */
+bool agx3_tex_stage_offset_2d(enum agx_isa_encoding enc, uint16_t x,
+                              uint16_t y, uint8_t slot, uint16_t wait_mask,
+                              bool source_cache, bool source_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Run one axis of the native cube-coordinate calculation.  Three axes with
  * the fixed reciprocal between axis 0 and 1 are required before sampling. */
@@ -421,13 +586,32 @@ bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
                            bool src_cache, bool src_discard,
                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
-/* Publish CEM's face together with a 32-bit cube-array comparison layer. */
-bool agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc,
-                                      uint16_t layer, uint8_t slot,
-                                      uint16_t wait_mask, bool layer_cache,
-                                      bool layer_discard,
-                                      uint8_t out[AGX3_TEX_MAX_LENGTH],
-                                      uint8_t *len);
+/* Publish CEM's face at half `face` together with the 16-bit cube-array
+ * layer at half `layer`. */
+bool agx3_tex_stage_cube_array_layer(enum agx_isa_encoding enc, uint16_t face,
+                                     uint16_t layer, uint8_t slot,
+                                     uint16_t wait_mask, bool layer_cache,
+                                     bool layer_discard,
+                                     uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                     uint8_t *len);
+
+/* Publish CEM's face with a 16-bit float register level or bias. The face
+ * half is always consumed. */
+bool agx3_tex_stage_cube_lod(enum agx_isa_encoding enc, uint16_t face,
+                             uint16_t lod, uint8_t slot, uint16_t wait_mask,
+                             bool lod_cache, bool lod_discard,
+                             uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Publish CEM's face, a 16-bit float register level or bias and a cube-array
+ * layer already packed into the 32-bit GPR `packed_layer` by
+ * agx3_tex_pack_ms_array_layer(). The face and the packed word are always
+ * consumed. */
+bool agx3_tex_stage_cube_array_lod(enum agx_isa_encoding enc, uint16_t face,
+                                   uint16_t lod, uint16_t packed_layer,
+                                   uint8_t slot, uint16_t wait_mask,
+                                   bool lod_cache, bool lod_discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
 
 /* Publish a register-valued integer 2D-MS sample index into the sampler
  * operand bank. The following MS fetch uses the sample-0 instruction form;
@@ -436,6 +620,27 @@ bool agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                               uint16_t wait_mask, bool src_cache,
                               bool src_discard,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* Pack CEM's face alone into the 32-bit GPR `dest` for a biased cube sample
+ * with a minimum LOD. The face half is always consumed. */
+bool agx3_tex_pack_cube_face(enum agx_isa_encoding enc, uint16_t face,
+                             uint16_t dest, uint8_t out[AGX3_TEX_MAX_LENGTH],
+                             uint8_t *len);
+
+/* Publish a cube sample's minimum LOD and bias into bank 6 beside the face
+ * agx3_tex_pack_cube_face() packed into `packed_face`. */
+bool agx3_tex_stage_cube_bias_min(enum agx_isa_encoding enc, uint16_t bias,
+                                  uint16_t minimum, uint16_t packed_face,
+                                  uint8_t slot, uint16_t wait_mask,
+                                  bool src_cache, bool src_discard,
+                                  uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                  uint8_t *len);
+
+/* Pack a 16-bit float minimum LOD into the 32-bit GPR `dest` for a 2D-array
+ * comparison sample, which stages its reference in half 4. */
+bool agx3_tex_pack_minimum(enum agx_isa_encoding enc, uint16_t src,
+                           uint16_t dest, bool cache, bool discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 bool agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                  uint16_t dest, bool cache, bool discard,
@@ -469,12 +674,26 @@ bool agx3_tex_encode_sample(enum agx_isa_encoding enc,
  * The existing native-witness wrapper retains its fixed base/slot choices. */
 #define AGX3_IMAGE_WRITE_LENGTH 16u
 
+/* The texture type an image write addresses. A layered write stages its
+ * layer through agx3_tex_stage_image_write_layer(); a 3D write stages z as a
+ * third coordinate. */
+enum agx3_image_write_dim {
+   AGX3_IMAGE_WRITE_2D = 0,
+   AGX3_IMAGE_WRITE_2D_ARRAY,
+   AGX3_IMAGE_WRITE_3D,
+};
+
 struct agx3_image_write_desc {
    uint16_t wait_mask;
+   /* Staging half of the first coordinate (f5), a multiple of 8, and the
+    * slot this imgwci signals when done (f12); a zero slot means slot 1. */
+   uint16_t staging_bank;
+   uint8_t result_slot;
    enum agx3_tex_operand_kind image_kind;
    uint16_t image_value;
    bool image_kill;
    bool normalized;
+   enum agx3_image_write_dim dim;
 };
 
 /* Explicit PBE heap base in uniform halves, native descriptor index in

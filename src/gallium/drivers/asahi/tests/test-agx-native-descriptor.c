@@ -308,6 +308,28 @@ test_agx3_pbe(void)
                                   &expected));
    CHECK(memcmp(native.opaque, expected.bytes, sizeof(expected.bytes)) == 0);
 
+   /* Persisting an MSAA attachment uses the native multisample PBE codec,
+    * retaining the logical extent and encoding the sample count separately. */
+   for (unsigned samples = 2; samples <= 4; samples *= 2) {
+      struct AGX_PBE msaa = rt;
+      msaa.dimension = AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
+      msaa.samples = samples == 4 ? AGX_SAMPLE_COUNT_4 : AGX_SAMPLE_COUNT_2;
+      CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9,
+                                         &native, &msaa));
+      CHECK(agx_pbe_agx3_2d_multisample_pack(
+         AGX_PBE_AGX3_GENERATION_9, &fields, samples, &expected));
+      CHECK(memcmp(native.opaque, expected.bytes, sizeof(expected.bytes)) == 0);
+      CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10,
+                                          &native, &msaa));
+      msaa.levels = 2;
+      CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9,
+                                          &native, &msaa));
+      msaa.levels = 1;
+      msaa.samples = AGX_SAMPLE_COUNT_8;
+      CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9,
+                                          &native, &msaa));
+   }
+
    /* Native gl_fbo_readback's full-size render target. The width/height split
     * is pinned by the G17P PBE capture corpus, including independent 8192x8,
     * 100x60 and 40x24 witnesses; this checks the exact EOT descriptor the
@@ -536,10 +558,9 @@ test_native_packers(void)
                 sizeof(gen9_plain_2d_bytes)) == 0);
    CHECK(memcmp(&plain_aligned, &plain_unaligned, sizeof(plain_aligned)) == 0);
 
-   /* A18 Pro EXP-0015 type_cube.  Unlike an ordinary uncompressed texture,
-    * native Gen9 cube descriptors carry the end VA of the six-face range in
-    * word 2 and word1 bit 27.  This is the exact descriptor Gallium's
-    * samplerCube path must produce before a fragment may execute. */
+   /* A18 Pro EXP-0015 type_cube has compression enabled in bit 59.
+    * Preserve its captured bytes and represent that compression state;
+    * uncompressed cube views are checked separately below. */
    static const uint8_t gen9_cube_bytes[32] = {
       0x26, 0x0a, 0x88, 0xf6, 0x00, 0x3c, 0x00, 0x08,
       0x50, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x00, 0x80,
@@ -553,14 +574,14 @@ test_native_packers(void)
    cube.height = 16;
    cube.address = UINT64_C(0x1000001c500);
    cube.extended = true;
+   cube.compressed = true;
    cube.acceleration_buffer = UINT64_C(0x1000001dd00);
    CHECK(agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
    CHECK(memcmp(native.opaque, gen9_cube_bytes, sizeof(gen9_cube_bytes)) == 0);
 
-   /* A18 Pro EXP-0015 arr_2: a two-layer 16x16 GPU-layout array advances the
-    * secondary VA by two 0x400-byte layers.  Word1 bit 27 marks the same live
-    * extended payload as the cube form above. */
+   /* A18 Pro EXP-0015 arr_2 also has compression enabled. Its secondary VA
+    * follows the two 0x400-byte layers in this captured allocation. */
    static const uint8_t gen9_array2_bytes[32] = {
       0x23, 0x0a, 0x88, 0xf6, 0x00, 0x3c, 0x00, 0x08,
       0x50, 0x1c, 0x00, 0x00, 0x10, 0x40, 0x00, 0x80,
@@ -575,6 +596,7 @@ test_native_packers(void)
    array2.depth = 2;
    array2.address = UINT64_C(0x1000001c500);
    array2.extended = true;
+   array2.compressed = true;
    array2.acceleration_buffer = UINT64_C(0x1000001cd00);
    CHECK(agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &array2));
@@ -591,8 +613,9 @@ test_native_packers(void)
    array2_aligned.opaque[3] ^= BITFIELD_BIT(30);
    CHECK(memcmp(&array2_aligned, &native, sizeof(array2_aligned)) == 0);
 
-   /* A18 Pro EXP-0015 mip_2: two levels make a plain 2D descriptor extended
-    * even when the caller did not redundantly set semantic.extended. */
+   /* A18 Pro EXP-0015 mip_2 has both the mip-level and compression bits set.
+    * Keep the captured bytes unchanged and represent its compression state;
+    * uncompressed mip views are checked separately below. */
    static const uint8_t gen9_mip2_bytes[32] = {
       0x22, 0x0a, 0x88, 0xf6, 0x00, 0x3c, 0x00, 0x0c,
       0x50, 0x1c, 0x00, 0x00, 0x10, 0x00, 0x00, 0x80,
@@ -605,6 +628,7 @@ test_native_packers(void)
    mip2.height = 16;
    mip2.address = UINT64_C(0x1000001c500);
    mip2.last_level = 1;
+   mip2.compressed = true;
    mip2.acceleration_buffer = UINT64_C(0x1000001cb80);
    CHECK(agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &mip2));
@@ -632,7 +656,7 @@ test_native_packers(void)
    CHECK(!agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
    cube.extended = true;
-   cube.compressed = true;
+   cube.acceleration_buffer = 0;
    CHECK(!agx_gallium_pack_native_texture(
       AGX_DESCRIPTOR_GENERATION_9, &native, &cube));
 
@@ -797,6 +821,70 @@ test_native_packers(void)
       AGX_DESCRIPTOR_GENERATION_UNKNOWN, &native_pbe, &pbe_semantic));
 }
 
+static void
+test_gen9_uncompressed_mip_views(void)
+{
+   /* An uncompressed miptree must not enable compression metadata reads.
+    * Include the base-only render-target reload view used by GL CTS. */
+   const unsigned first[] = {0, 0, 2};
+   const unsigned last[] = {0, 5, 5};
+   for (unsigned i = 0; i < ARRAY_SIZE(first); ++i) {
+      struct AGX_TEXTURE semantic = {AGX_TEXTURE_header};
+      semantic.dimension = AGX_TEXTURE_DIMENSION_2D;
+      semantic.layout = AGX_LAYOUT_GPU;
+      semantic.width = 49;
+      semantic.height = 23;
+      semantic.depth = 1;
+      semantic.address = UINT64_C(0x5fffe4c000);
+      semantic.acceleration_buffer = UINT64_C(0x5fffe50000);
+      semantic.unk_mipmapped = true;
+      semantic.first_level = first[i];
+      semantic.last_level = last[i];
+      semantic.page_aligned_layers = true;
+      struct agx_gallium_texture_descriptor native;
+      CHECK(agx_gallium_pack_native_texture(
+         AGX_DESCRIPTOR_GENERATION_9, &native, &semantic));
+      struct AGX_TEXTURE_GEN9 decoded;
+      CHECK(AGX_TEXTURE_GEN9_unpack(NULL, (const uint8_t *)native.opaque,
+                                     &decoded));
+      CHECK(!decoded.compressed);
+      CHECK(decoded.has_levels && decoded.extended);
+      CHECK(decoded.first_level == first[i] && decoded.last_level == last[i]);
+   }
+}
+
+static void
+test_gen9_uncompressed_dimensions(void)
+{
+   const enum agx_texture_dimension dimensions[] = {
+      AGX_TEXTURE_DIMENSION_2D_ARRAY,
+      AGX_TEXTURE_DIMENSION_3D,
+      AGX_TEXTURE_DIMENSION_CUBE,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(dimensions); ++i) {
+      struct AGX_TEXTURE semantic = {AGX_TEXTURE_header};
+      semantic.dimension = dimensions[i];
+      semantic.layout = AGX_LAYOUT_GPU;
+      semantic.channels = AGX_CHANNELS_R16;
+      semantic.type = AGX_TEXTURE_TYPE_UNORM;
+      semantic.width = semantic.height = 128;
+      semantic.depth = dimensions[i] == AGX_TEXTURE_DIMENSION_CUBE ? 1 : 4;
+      semantic.address = UINT64_C(0x5ffff20000);
+      semantic.acceleration_buffer = UINT64_C(0x5ffff40000);
+      semantic.extended = true;
+      semantic.page_aligned_layers = true;
+      struct agx_gallium_texture_descriptor native;
+      CHECK(agx_gallium_pack_native_texture(
+         AGX_DESCRIPTOR_GENERATION_9, &native, &semantic));
+      struct AGX_TEXTURE_GEN9 decoded;
+      CHECK(AGX_TEXTURE_GEN9_unpack(NULL, (const uint8_t *)native.opaque,
+                                     &decoded));
+      CHECK(!decoded.compressed);
+      CHECK(decoded.dimension == dimensions[i] && decoded.extended);
+      CHECK(decoded.depth == semantic.depth);
+   }
+}
+
 int
 main(void)
 {
@@ -805,6 +893,8 @@ main(void)
    test_g17p_txf_sampler();
    test_g17p_sampler_handles();
    test_standard_border_colours();
+   test_gen9_uncompressed_mip_views();
+   test_gen9_uncompressed_dimensions();
    test_native_packers();
    test_agx3_pbe();
    printf("Gallium AGX native descriptors: %u checks passed\n", checks);

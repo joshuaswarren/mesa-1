@@ -226,38 +226,42 @@ gl_hypr_mixed_draw = executable(
   build_by_default : false,
 )
 
-test(
-  'asahi-g17p-gl-hypr-mixed-draw-software-control',
-  gl_hypr_mixed_draw,
-  args : [
-    files('hypr-0.56.1-tex300.vert'),
-    files('hypr-0.56.1-border-rounded.frag'),
-  ],
-  env : [
-    'EGL_PLATFORM=surfaceless',
-    'LIBGL_ALWAYS_SOFTWARE=true',
-  ],
-  suite : ['asahi'],
-)
-
-test(
-  'asahi-g17p-gl-hypr-mixed-draw-shim-submit',
-  prog_python,
-  args : [
-    files('run-gl-shim.py'),
-    libasahi_noop_drm_shim,
-    libegl,
-    libgallium_dri,
+foreach mode : ['tight', 'api-barrier']
+  test(
+    'asahi-g17p-gl-hypr-mixed-draw-software-control-' + mode,
     gl_hypr_mixed_draw,
-    files('hypr-0.56.1-tex300.vert'),
-    files('hypr-0.56.1-border-rounded.frag'),
-  ],
-  env : [
-    'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
-    'MESA_SHADER_CACHE_DISABLE=true',
-  ],
-  suite : ['asahi'],
-)
+    args : [
+      files('hypr-0.56.1-tex300.vert'),
+      files('hypr-0.56.1-border-rounded.frag'),
+      '--' + mode,
+    ],
+    env : [
+      'EGL_PLATFORM=surfaceless',
+      'LIBGL_ALWAYS_SOFTWARE=true',
+    ],
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-gl-hypr-mixed-draw-shim-submit-' + mode,
+    prog_python,
+    args : [
+      files('run-gl-shim.py'),
+      libasahi_noop_drm_shim,
+      libegl,
+      libgallium_dri,
+      gl_hypr_mixed_draw,
+      files('hypr-0.56.1-tex300.vert'),
+      files('hypr-0.56.1-border-rounded.frag'),
+      '--' + mode,
+    ],
+    env : [
+      'ASAHI_SHIM_VALIDATE_G17P_STREAM=1',
+      'MESA_SHADER_CACHE_DISABLE=true',
+    ],
+    suite : ['asahi'],
+  )
+endforeach
 
 gl_multi_viewport = executable(
   'asahi-g17p-gl-multi-viewport',
@@ -277,6 +281,337 @@ gl_rgb32_fbo = executable(
     cc.find_library('GL'),
   ],
   build_by_default : false,
+)
+
+gl_stencil_blit = executable(
+  'asahi-g17p-gl-stencil-blit',
+  files('test-g17p-gl-stencil-blit.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-stencil-blit-software-control',
+  gl_stencil_blit,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_default_framebuffer = executable(
+  'asahi-g17p-gl-default-framebuffer',
+  files('test-g17p-gl-default-framebuffer.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('X11'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-default-framebuffer-software-control',
+  gl_default_framebuffer,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_array_shadow = executable(
+  'asahi-g17p-gl-array-shadow',
+  files('test-g17p-gl-array-shadow.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-array-shadow-software-control',
+  gl_array_shadow,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_lod_bias = executable(
+  'asahi-g17p-gl-lod-bias',
+  files('test-g17p-gl-lod-bias.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-lod-bias-software-control',
+  gl_lod_bias,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_msaa_resolve = executable(
+  'asahi-g17p-gl-msaa-resolve',
+  files('test-g17p-gl-msaa-resolve.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-msaa-resolve-software-control',
+  gl_msaa_resolve,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_xfb_interleaved = executable(
+  'asahi-g17p-gl-xfb-interleaved',
+  files('test-g17p-gl-xfb-interleaved.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-xfb-interleaved-software-control',
+  gl_xfb_interleaved,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_xfb_streams = executable(
+  'asahi-g17p-gl-xfb-streams',
+  files('test-g17p-gl-xfb-streams.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+    cc.find_library('m'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-xfb-streams-software-control',
+  gl_xfb_streams,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_xfb_geometry = executable(
+  'asahi-g17p-gl-xfb-geometry',
+  files('test-g17p-gl-xfb-geometry.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-xfb-geometry-software-control',
+  gl_xfb_geometry,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_xfb_overflow_query = executable(
+  'asahi-g17p-gl-xfb-overflow-query',
+  files('test-g17p-gl-xfb-overflow-query.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-xfb-overflow-query-software-control',
+  gl_xfb_overflow_query,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_vertex_flat_varying = executable(
+  'asahi-g17p-gl-vertex-flat-varying',
+  files('test-g17p-gl-vertex-flat-varying.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-vertex-flat-varying-software-control',
+  gl_vertex_flat_varying,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g13g-gl-vertex-flat-varying-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_vertex_flat_varying,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+gl_texture_swizzle = executable(
+  'asahi-g17p-gl-texture-swizzle',
+  files('test-g17p-gl-texture-swizzle.c'),
+  dependencies : [
+    cc.find_library('EGL'),
+    cc.find_library('GL'),
+  ],
+  build_by_default : false,
+)
+
+test(
+  'asahi-g17p-gl-texture-swizzle-software-control',
+  gl_texture_swizzle,
+  env : [
+    'EGL_PLATFORM=surfaceless',
+    'LIBGL_ALWAYS_SOFTWARE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g13g-gl-xfb-geometry-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_geometry,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g13g-gl-xfb-overflow-query-shim-control',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_overflow_query,
+  ],
+  env : [
+    'ASAHI_SHIM_CHIP=g13g',
+    'ASAHI_GL_EXPECT_RENDERER=G13G',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-xfb-overflow-query-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_overflow_query,
+  ],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-xfb-geometry-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_geometry,
+  ],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
+)
+
+test(
+  'asahi-g17p-gl-xfb-streams-shim-submit',
+  prog_python,
+  args : [
+    files('run-gl-shim.py'),
+    libasahi_noop_drm_shim,
+    libegl,
+    libgallium_dri,
+    gl_xfb_streams,
+  ],
+  env : [
+    'ASAHI_SHIM_G17P_EXPECT_VALID_STREAM=1',
+    'MESA_SHADER_CACHE_DISABLE=true',
+  ],
+  suite : ['asahi'],
 )
 
 test(

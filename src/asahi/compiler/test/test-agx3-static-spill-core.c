@@ -6,6 +6,7 @@
 #include "agx3_static_spill_core.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static unsigned checks;
@@ -74,9 +75,102 @@ check_load(enum agx_isa_encoding enc,
    }
 }
 
+static void
+hex_bytes(const char *hex, uint8_t *out, uint8_t *length)
+{
+   uint8_t n = 0;
+   for (; hex[0] && hex[1]; hex += 2) {
+      const char pair[3] = {hex[0], hex[1], 0};
+      out[n++] = (uint8_t)strtoul(pair, NULL, 16);
+   }
+   *length = n;
+}
+
+/*
+ * applegpu_g17p's own spills of 16-bit temporaries. metal-nt -arch
+ * applegpu_g17p on kernels holding 100 live ushort3, 260 live ushort and 260
+ * live half temporaries; Apple splits a ushort3 into a W32 pair and a W16
+ * half. Every one of the 842 static copies and reloads in those kernels that
+ * carries no source-cache (copy f25) or live-TPS (rld f27 clear) bit
+ * re-encodes byte for byte through the automatic form choice; these are one of
+ * each shape, plus two of the reloads that keep their cell live.
+ */
+static void
+check_g17p_half_spills(void)
+{
+   const struct {
+      const char *hex;
+      struct agx3_static_spill_store_desc d;
+      uint8_t ep;
+   } stores[] = {
+      {"930e07002e1000080000",
+       {.tps_half = 147, .src = 15, .width = AGX3_MEM_W16, .slot = 3}, 1},
+      {"53064f00221000040000",
+       {.tps_half = 170, .src = 6, .width = AGX3_MEM_W16, .src_kill = true,
+        .slot = 2}, 1},
+      {"631887002e1000140000",
+       {.tps_half = 205, .src = 25, .width = AGX3_MEM_W16, .slot = 6}, 1},
+      {"4b054f00229000040000",
+       {.tps_half = 168, .src = 4, .width = AGX3_MEM_W32, .src_kill = true,
+        .slot = 2, .wait_mask = 1u << 2}, 1},
+   };
+   const struct {
+      const char *hex;
+      struct agx3_static_spill_load_desc d;
+      uint8_t ep;
+   } loads[] = {
+      {"14fc0800",
+       {.dest = 2, .tps_half = 124, .width = AGX3_MEM_W16, .slot = 1,
+        .slot_mirror = 1}, 0},
+      {"14aa092602000000",
+       {.dest = 2, .tps_half = 170, .width = AGX3_MEM_W16, .slot = 2}, 1},
+      {"14ae192002000000",
+       {.dest = 2, .tps_half = 174, .width = AGX3_MEM_W16, .slot = 2,
+        .slot_mirror = 2}, 1},
+      {"14fe090000000040",
+       {.dest = 2, .tps_half = 126, .width = AGX3_MEM_W16, .slot = 1,
+        .slot_mirror = 1, .wait_mask = 1u << 4}, 1},
+      {"0ca8192102000000",
+       {.dest = 0, .tps_half = 168, .width = AGX3_MEM_W32, .slot = 2,
+        .slot_mirror = 2}, 1},
+      /* Reloads of a cell that is reloaded again before it is written. */
+      {"14901420",
+       {.dest = 3, .tps_half = 16, .width = AGX3_MEM_W16, .slot = 2,
+        .slot_mirror = 2, .tps_live = true}, 0},
+      {"148c112000200000",
+       {.dest = 2, .tps_half = 12, .width = AGX3_MEM_W16, .slot = 2,
+        .slot_mirror = 2, .wait_mask = 1, .tps_live = true}, 1},
+   };
+
+   uint8_t bytes[AGX3_STATIC_SPILL_MAX_LENGTH], length;
+   for (unsigned i = 0; i < sizeof(stores) / sizeof(stores[0]); ++i) {
+      hex_bytes(stores[i].hex, bytes, &length);
+      check_store(AGX_ISA_ENCODING_AGX3B, &stores[i].d, stores[i].ep, bytes,
+                  length, true);
+   }
+   for (unsigned i = 0; i < sizeof(loads) / sizeof(loads[0]); ++i) {
+      hex_bytes(loads[i].hex, bytes, &length);
+      check_load(AGX_ISA_ENCODING_AGX3B, &loads[i].d, loads[i].ep, bytes,
+                 length, true);
+   }
+}
+
 int
 main(void)
 {
+   /* G16G Apple repeat-tps.metal: first read must preserve a[0] for a
+    * later dynamically indexed load. Unlike final reads, f27 is clear. */
+   static const uint8_t b_rld_retained[] = {
+      0x8c, 0x88, 0x11, 0x25, 0x00, 0x00, 0x00, 0x80,
+   };
+   const struct agx3_static_spill_load_desc b_rld_retained_d = {
+      .dest = 16, .tps_half = 8, .tps_live = true,
+      .width = AGX3_MEM_W32, .slot = 2, .slot_mirror = 6,
+      .wait_mask = 1u << 5,
+   };
+   check_load(AGX_ISA_ENCODING_AGX3B, &b_rld_retained_d, 1,
+              b_rld_retained, sizeof(b_rld_retained), true);
+
    static const uint8_t b_copy_h[] = {0x03, 0x14, 0x09, 0xc2};
    const struct agx3_static_spill_store_desc b_copy_h_d = {
       .tps_half = 0,
@@ -158,6 +252,23 @@ main(void)
    };
    check_load(AGX_ISA_ENCODING_AGX3B, &b_atomic_return_rld_d, 1,
               b_atomic_return_rld, sizeof(b_atomic_return_rld), true);
+
+   /* The same return in a kernel that also spills a thread-private array:
+    * the old value sits above the spill frame at TPS half 130, and this
+    * reload is scheduled on slot 1. */
+   static const uint8_t b_atomic_return_rld_130[] = {
+      0x0c, 0x82, 0x19, 0x05, 0x02, 0x20, 0x00, 0x00,
+   };
+   const struct agx3_static_spill_load_desc b_atomic_return_rld_130_d = {
+      .dest = 0,
+      .tps_half = 130,
+      .width = AGX3_MEM_W32,
+      .slot = 1,
+      .slot_mirror = 6,
+      .wait_mask = 1,
+   };
+   check_load(AGX_ISA_ENCODING_AGX3B, &b_atomic_return_rld_130_d, 1,
+              b_atomic_return_rld_130, sizeof(b_atomic_return_rld_130), true);
 
    static const uint8_t c_copy_h[] = {
       0x2b, 0x00, 0x07, 0x10, 0x26, 0x00, 0xa0, 0x02,
@@ -272,13 +383,15 @@ main(void)
    CHECK(!agx3_static_spill_decode_load(AGX_ISA_ENCODING_AGX3C, c_rld_w,
                                         sizeof(c_rld_w), NULL));
 
+   check_g17p_half_spills();
+
    if (failures != 0) {
       fprintf(stderr, "agx3_static_spill_core: %u/%u checks failed\n", failures,
               checks);
       return 1;
    }
 
-   printf("agx3_static_spill_core: 11 Apple copy/rld vectors and all %u "
+   printf("agx3_static_spill_core: 22 Apple copy/rld vectors and all %u "
           "checks passed\n",
           checks);
    return 0;

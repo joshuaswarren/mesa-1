@@ -59,7 +59,7 @@ struct agx_ioto_form {
  * Fixed bits and lengths are kept as a literal transcription of the recovered
  * gpu0/gpu1 encoder graph.  Unlisted bits are opaque and are never rewritten.
  */
-static const struct agx_ioto_form agx_ioto_forms[] = {
+static const struct agx_ioto_form agx_ioto_gpu0_forms[] = {
    FORM1(NOP_EP0, GPU0, 2, FW(0, 0x0006, 0x001f)),
    FORM2(NOP_EP1, GPU0, 4, FW(0, 0x001e, 0x001f),
          FW(1, 0x0100, 0x0f00)),
@@ -100,6 +100,9 @@ static const struct agx_ioto_form agx_ioto_forms[] = {
    FORM1(CNDRET_EP0, GPU0, 4, FW(0, 0x028f, 0x07ff)),
    FORM1(SETPROFILECTL_EP0, GPU0, 4, FW(0, 0x03f7, 0x07ff)),
 
+};
+
+static const struct agx_ioto_form agx_ioto_gpu1_forms[] = {
    FORM1(NOP_EP0, GPU1, 2, FW(0, 0x0006, 0x001f)),
    FORM2(NOP_EP1, GPU1, 4, FW(0, 0x001e, 0x001f),
          FW(1, 0x0000, 0x0f80)),
@@ -220,13 +223,29 @@ agx_ioto_target_supported(enum agx_chip chip)
 }
 
 static const struct agx_ioto_form *
+agx_ioto_encoding_forms(enum agx_ioto_encoding encoding, size_t *count)
+{
+   switch (encoding) {
+   case AGX_IOTO_ENCODING_GPU0:
+      *count = sizeof(agx_ioto_gpu0_forms) / sizeof(agx_ioto_gpu0_forms[0]);
+      return agx_ioto_gpu0_forms;
+   case AGX_IOTO_ENCODING_GPU1:
+      *count = sizeof(agx_ioto_gpu1_forms) / sizeof(agx_ioto_gpu1_forms[0]);
+      return agx_ioto_gpu1_forms;
+   default:
+      *count = 0;
+      return NULL;
+   }
+}
+
+static const struct agx_ioto_form *
 agx_ioto_find_form(enum agx_ioto_encoding encoding, enum agx_ioto_kind kind)
 {
-   for (size_t i = 0; i < sizeof(agx_ioto_forms) / sizeof(agx_ioto_forms[0]);
-        ++i) {
-      if (agx_ioto_forms[i].encoding == encoding &&
-          agx_ioto_forms[i].kind == kind)
-         return &agx_ioto_forms[i];
+   size_t count;
+   const struct agx_ioto_form *forms = agx_ioto_encoding_forms(encoding, &count);
+   for (size_t i = 0; i < count; ++i) {
+      if (forms[i].kind == kind)
+         return &forms[i];
    }
 
    return NULL;
@@ -322,10 +341,15 @@ agx_ioto_decode_one(enum agx_chip chip, const void *stream, size_t available,
    const struct agx_ioto_form *match = NULL;
    bool incomplete_match = false;
 
-   for (size_t i = 0; i < sizeof(agx_ioto_forms) / sizeof(agx_ioto_forms[0]);
-        ++i) {
-      const struct agx_ioto_form *form = &agx_ioto_forms[i];
-      if (form->encoding != encoding ||
+   size_t count;
+   const struct agx_ioto_form *forms = agx_ioto_encoding_forms(encoding, &count);
+   for (size_t i = 0; i < count; ++i) {
+      const struct agx_ioto_form *form = &forms[i];
+      /* Every form begins with a word-zero opcode predicate. Reject using
+       * the first available byte before checking longer prefixes. Keep all
+       * candidates: ambiguous and truncated streams must still fail. */
+      if (((bytes[0] ^ form->fixed[0].value) &
+           form->fixed[0].mask & 0xff) != 0 ||
           !agx_ioto_prefix_matches(form, bytes, available))
          continue;
 
@@ -350,6 +374,23 @@ static bool
 agx_ioto_program_gpu0(enum agx_chip chip)
 {
    return agx_ioto_target_encoding(chip) == AGX_IOTO_ENCODING_GPU0;
+}
+
+/* Low byte of a G17P fragment PIXREL descriptor: bit 1 set, each colour class
+ * field either wholly released or wholly consumed, and at least one consumed.
+ */
+static bool
+agx_ioto_g17p_fragment_release(uint8_t low)
+{
+   if (!(low & 0x02) || (low & 0xfc) == 0xfc)
+      return false;
+
+   for (unsigned c = 0; c < 3; ++c) {
+      const unsigned field = (low >> (2 + 2 * c)) & 0x3;
+      if (field != 0 && field != 0x3)
+         return false;
+   }
+   return true;
 }
 
 static void
@@ -398,21 +439,19 @@ agx_ioto_decode_program_record(enum agx_chip chip, const void *stream,
    /* G17P's ordinary, coverage and background fragment releases are GPU0-only
     * six-byte encodings emitted by the bounded program composers. They are
     * not the GPU1 PIXREL form in the public record table, so the boundary is
-    * carried by an exact payload list rather than a mask.
+    * carried by the exact descriptor family rather than a mask.
     *
-    * Byte three selects the release variant and the colour partition count.
-    * hk_agx3_g17p_basic_graphics_program_generate() emits, for one, two and
-    * three partitions, 0xf3/0xc3/0x03 ordinary and 0xf2/0xc2/0x02 coverage --
-    * the set asserted by test_g17p_basic_graphics_program_partitions() -- plus
-    * 0x00 for the bounded clear/reload background release. Listing only the
-    * single-partition pair left every multi-partition fragment program
-    * undecodable: a vkQuake world frame renders through two colour partitions,
-    * so its release is 0xc3 and a program walk lost its boundary there. */
+    * Bytes three and four hold the release descriptor. 0x200 is the bounded
+    * clear/reload background release. A fragment release starts from 0x2ff
+    * and clears the 0x0c, 0x30 or 0xc0 field of each colour class it consumes,
+    * and coverage additionally clears bit 0. applegpu_g17p fragments writing
+    * each subset of two to four colour targets, with and without a sample
+    * mask, carry exactly these descriptors, 0x2f3 through 0x202. Accepting
+    * only the all-partition forms left subset fragments undecodable, so a
+    * program walk lost its boundary there. */
    if (chip == AGX_CHIP_G17P && available >= 6 && bytes[0] == 0x07 &&
        bytes[1] == 0x02 && bytes[2] == 0x54 &&
-       (bytes[3] == 0xf3 || bytes[3] == 0xc3 || bytes[3] == 0x03 ||
-        bytes[3] == 0xf2 || bytes[3] == 0xc2 || bytes[3] == 0x02 ||
-        bytes[3] == 0x00) &&
+       (bytes[3] == 0x00 || agx_ioto_g17p_fragment_release(bytes[3])) &&
        bytes[4] == 0x02 &&
        bytes[5] == 0x00) {
       out->kind = AGX_IOTO_PROGRAM_RECORD_IOTO;

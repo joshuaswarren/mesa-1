@@ -95,6 +95,82 @@ hk_g17p_tile_address_config_init(
 }
 
 bool
+hk_g17p_copy_aspect_plan(VkImageAspectFlags src, VkImageAspectFlags dst,
+                         struct hk_g17p_copy_aspect_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+   if (!plan)
+      return false;
+
+   const VkImageAspectFlags color = VK_IMAGE_ASPECT_COLOR_BIT;
+   const VkImageAspectFlags depth = VK_IMAGE_ASPECT_DEPTH_BIT;
+   const VkImageAspectFlags stencil = VK_IMAGE_ASPECT_STENCIL_BIT;
+   const bool src_single = src == color || src == depth || src == stencil;
+   const bool dst_single = dst == color || dst == depth || dst == stencil;
+   if (src == (depth | stencil) && dst == src) {
+      *plan = (struct hk_g17p_copy_aspect_plan){
+         .count = 2, .src = {depth, stencil}, .dst = {depth, stencil},
+      };
+   } else if (src_single && dst_single &&
+              (src == dst || src == color || dst == color)) {
+      *plan = (struct hk_g17p_copy_aspect_plan){
+         .count = 1, .src = {src}, .dst = {dst},
+      };
+   } else {
+      return false;
+   }
+   return true;
+}
+
+bool
+hk_g17p_image_copy_element_plan(
+   VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
+   struct hk_g17p_image_copy_element_plan *plan)
+{
+   if (plan)
+      memset(plan, 0, sizeof(*plan));
+
+   const uint32_t src_block_B = vk_format_get_blocksize(src_format);
+   const uint32_t dst_block_B = vk_format_get_blocksize(dst_format);
+   const uint32_t src_block_w = vk_format_get_blockwidth(src_format);
+   const uint32_t src_block_h = vk_format_get_blockheight(src_format);
+   const uint32_t dst_block_w = vk_format_get_blockwidth(dst_format);
+   const uint32_t dst_block_h = vk_format_get_blockheight(dst_format);
+   if (!plan || !region || !src_block_B || src_block_B != dst_block_B ||
+       !src_block_w || !src_block_h || !dst_block_w || !dst_block_h ||
+       region->srcOffset.x < 0 || region->srcOffset.y < 0 ||
+       region->dstOffset.x < 0 || region->dstOffset.y < 0 ||
+       !region->extent.width || !region->extent.height)
+      return false;
+
+   *plan = (struct hk_g17p_image_copy_element_plan){
+      .block_size_B = src_block_B,
+      .src_x_el = (uint32_t)region->srcOffset.x / src_block_w,
+      .src_y_el = (uint32_t)region->srcOffset.y / src_block_h,
+      .dst_x_el = (uint32_t)region->dstOffset.x / dst_block_w,
+      .dst_y_el = (uint32_t)region->dstOffset.y / dst_block_h,
+      .width_el = DIV_ROUND_UP(region->extent.width, src_block_w),
+      .height_el = DIV_ROUND_UP(region->extent.height, src_block_h),
+   };
+   return true;
+}
+
+bool
+hk_g17p_image_copy_storage_block(uint32_t api_block_B, uint32_t src_storage_B,
+                                 uint32_t dst_storage_B, uint32_t *storage_B)
+{
+   if (storage_B)
+      *storage_B = 0;
+   if (!storage_B || !api_block_B || src_storage_B != dst_storage_B ||
+       src_storage_B < api_block_B)
+      return false;
+
+   *storage_B = src_storage_B;
+   return true;
+}
+
+bool
 hk_g17p_transfer_dst_layout_supported(VkImageLayout layout)
 {
    return layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL ||
@@ -241,10 +317,13 @@ hk_g17p_compressed_copy_plan(
       return false;
    }
 
+   /* A copy covers whole blocks. As on AGX2, whose compute copy converts
+    * the region with util_format_get_nblocks{x,y}, an extent that is not a
+    * multiple of the block and does not reach the level edge still copies
+    * every block it touches. The offset is block-aligned and the extent stays
+    * inside the level, so the rounded-up blocks stay inside it too. */
    if (x >= mip_w || y >= mip_h || width > mip_w - x ||
        height > mip_h - y || (x % block_w) || (y % block_h) ||
-       ((width % block_w) && x + width != mip_w) ||
-       ((height % block_h) && y + height != mip_h) ||
        (copy->buffer_row_length &&
         (copy->buffer_row_length < width ||
          copy->buffer_row_length % block_w)) ||
@@ -327,15 +406,21 @@ hk_g17p_uncompressed_upload_format(VkFormat format)
    const uint32_t block_B = vk_format_get_blocksize(format);
 
    /* This path copies raw format elements and never interprets their colour
-    * channels.  Admit every ordinary 1-, 2-, and 4-byte format instead of a
-    * semantic allowlist; the caller separately excludes depth/stencil and
-    * multi-plane images.  R32G32_UINT also needs the raw path because G17P's
-    * graphics upload does not preserve untouched array layers for that view.
-    * Other 8-byte formats remain unqualified and stay on the graphics path. */
-   return vk_format_get_blockwidth(format) == 1 &&
-          vk_format_get_blockheight(format) == 1 &&
-          (block_B == 1 || block_B == 2 || block_B == 4 ||
-           format == VK_FORMAT_R32G32_UINT);
+    * channels.  Admit every ordinary power-of-two format through 16 bytes;
+    * the caller separately excludes depth/stencil and multi-plane images.
+    *
+    * A single-plane 4:2:2 element is an ordinary element too -- one 2x1 pixel
+    * block of eight bytes -- and ail lays those images out on that same grid
+    * (ail_initialize_linear/miptree size every level with
+    * util_format_get_nblocksx, and the linear assert admits
+    * UTIL_FORMAT_LAYOUT_SUBSAMPLED), so the raw copy walks it unchanged once
+    * the region is converted to elements below.  Block-compressed formats are
+    * excluded: hk_CmdCopyBufferToImage2 routes them to their own planner
+    * before reaching this one.
+    */
+   return !vk_format_is_block_compressed(format) &&
+          (block_B == 1 || block_B == 2 || block_B == 4 || block_B == 8 ||
+           block_B == 16);
 }
 
 bool
@@ -357,7 +442,8 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
       return false;
 
    const uint32_t block_B = vk_format_get_blocksize(copy->format);
-   if ((block_B != 1 && block_B != 2 && block_B != 4 && block_B != 8) ||
+   if ((block_B != 1 && block_B != 2 && block_B != 4 && block_B != 8 &&
+        block_B != 16) ||
        buffer_offset % block_B)
       return false;
 
@@ -366,10 +452,32 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
    if (width > UINT32_MAX / height)
       return false;
 
-   const uint32_t row_el =
+   /* Everything below this point counts elements, not pixels.  For every plain
+    * format the block is 1x1 and the two are the same; for a single-plane
+    * 4:2:2 format one element spans two pixels horizontally.  Vulkan requires
+    * the image offset to be block-aligned, and bufferRowLength/
+    * bufferImageHeight -- which are in pixels -- to be block multiples too, so
+    * reject anything that is not rather than silently rounding it. */
+   const uint32_t block_w = vk_format_get_blockwidth(copy->format);
+   const uint32_t block_h = vk_format_get_blockheight(copy->format);
+   if (!block_w || !block_h ||
+       (copy->image_offset.x % block_w) || (copy->image_offset.y % block_h) ||
+       (copy->buffer_row_length && copy->buffer_row_length % block_w) ||
+       (copy->buffer_image_height && copy->buffer_image_height % block_h))
+      return false;
+
+   const uint32_t row_px =
       copy->buffer_row_length ? copy->buffer_row_length : width;
-   const uint32_t image_height =
+   const uint32_t image_height_px =
       copy->buffer_image_height ? copy->buffer_image_height : height;
+   /* A copy covers whole elements: an extent that stops mid-element still
+    * transfers the element it touches, exactly as the compressed planner
+    * above rounds its block counts up. */
+   const uint32_t width_el = ((uint64_t)width + block_w - 1) / block_w;
+   const uint32_t height_el = ((uint64_t)height + block_h - 1) / block_h;
+   const uint32_t row_el = ((uint64_t)row_px + block_w - 1) / block_w;
+   const uint32_t image_height_el =
+      ((uint64_t)image_height_px + block_h - 1) / block_h;
    const bool volume = copy->image_type == VK_IMAGE_TYPE_3D;
    const uint32_t first_slice =
       volume ? copy->image_offset.z : copy->base_array_layer;
@@ -381,21 +489,21 @@ hk_g17p_uncompressed_buffer_to_image_copy_plan(
 
    uint64_t row_B, slice_B, span = 0, term;
    if (!hk_u64_mul(row_el, block_B, &row_B) || row_B > UINT32_MAX ||
-       !hk_u64_mul(image_height, row_B, &slice_B) ||
+       !hk_u64_mul(image_height_el, row_B, &slice_B) ||
        !hk_u64_mul(slice_count - 1, slice_B, &span) ||
-       !hk_u64_mul(height - 1, row_B, &term) ||
+       !hk_u64_mul(height_el - 1, row_B, &term) ||
        !hk_u64_add(span, term, &span) ||
-       !hk_u64_mul(width, block_B, &term) ||
+       !hk_u64_mul(width_el, block_B, &term) ||
        !hk_u64_add(span, term, &span) || buffer_offset > buffer_size ||
        span > buffer_size - buffer_offset)
       return false;
 
    *plan = (struct hk_g17p_uncompressed_copy_plan){
       .block_size_B = block_B,
-      .base_x_el = copy->image_offset.x,
-      .base_y_el = copy->image_offset.y,
-      .width_el = width,
-      .height_el = height,
+      .base_x_el = (uint32_t)copy->image_offset.x / block_w,
+      .base_y_el = (uint32_t)copy->image_offset.y / block_h,
+      .width_el = width_el,
+      .height_el = height_el,
       .first_slice = first_slice,
       .slice_count = slice_count,
       .buffer_row_stride_B = row_B,
@@ -531,14 +639,22 @@ hk_g17p_image_copy_slice(enum agx_chip chip, VkImageType src_type,
 
    const bool src_3d = src_type == VK_IMAGE_TYPE_3D;
    const bool dst_3d = dst_type == VK_IMAGE_TYPE_3D;
-   const bool valid_types =
-      (src_type == VK_IMAGE_TYPE_2D || src_3d) &&
-      (dst_type == VK_IMAGE_TYPE_2D || dst_3d);
+   const bool src_1d_or_2d = src_type == VK_IMAGE_TYPE_1D ||
+                             src_type == VK_IMAGE_TYPE_2D;
+   const bool dst_1d_or_2d = dst_type == VK_IMAGE_TYPE_1D ||
+                             dst_type == VK_IMAGE_TYPE_2D;
+   const bool valid_types = (src_1d_or_2d || src_3d) &&
+                            (dst_1d_or_2d || dst_3d);
    const bool same_type = src_type == dst_type;
-   const bool two_d_three_d = (src_type == VK_IMAGE_TYPE_2D && dst_3d) ||
-                              (dst_type == VK_IMAGE_TYPE_2D && src_3d);
+   const bool one_d_two_d =
+      ((src_type == VK_IMAGE_TYPE_1D && dst_type == VK_IMAGE_TYPE_2D) ||
+       (dst_type == VK_IMAGE_TYPE_1D && src_type == VK_IMAGE_TYPE_2D)) &&
+      src_layers == 1 && dst_layers == 1;
+   const bool two_d_three_d = (src_1d_or_2d && dst_3d) ||
+                              (dst_1d_or_2d && src_3d);
+   const bool valid_pair = same_type || one_d_two_d || two_d_three_d;
    if (chip != AGX_CHIP_G17P || !region || !out || !valid_types ||
-       (!same_type && !two_d_three_d) || src_layers == 0 ||
+       !valid_pair || src_layers == 0 ||
        src_layers != dst_layers || slice >= src_layers ||
        ((src_3d || dst_3d) && region->extent.depth != src_layers) ||
        (!src_3d && !dst_3d && region->extent.depth != 1) ||

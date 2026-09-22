@@ -77,6 +77,27 @@ struct hk_g17p_tile_address_config {
    uint32_t tile_height_log2;
 };
 
+struct hk_g17p_image_copy_element_plan {
+   uint32_t block_size_B;
+   uint32_t src_x_el;
+   uint32_t src_y_el;
+   uint32_t dst_x_el;
+   uint32_t dst_y_el;
+   uint32_t width_el;
+   uint32_t height_el;
+};
+
+struct hk_g17p_copy_aspect_plan {
+   unsigned count;
+   VkImageAspectFlags src[2];
+   VkImageAspectFlags dst[2];
+};
+
+/* Keep combined depth/stencil copies plane-wise; maintenance8 also permits
+ * a single depth or stencil aspect to copy raw bits to/from a color aspect. */
+bool hk_g17p_copy_aspect_plan(VkImageAspectFlags src, VkImageAspectFlags dst,
+                              struct hk_g17p_copy_aspect_plan *plan);
+
 /* Reduce AIL's power-of-two tile geometry once on the CPU. G17P transfer tiles
  * are at most 128 elements per axis. Raw copy and mip kernels consume this
  * form so every element uses shifts and a seven-bit Morton encoder instead of
@@ -84,6 +105,26 @@ struct hk_g17p_tile_address_config {
 bool hk_g17p_tile_address_config_init(
    uint32_t stride_el, uint32_t tile_width_el, uint32_t tile_height_el,
    struct hk_g17p_tile_address_config *config);
+
+/* Convert one Vulkan image-copy region to raw source-format elements. Vulkan
+ * defines compressed/uncompressed compatible copies in the source format's
+ * block geometry, while each endpoint keeps its own offset geometry. */
+bool hk_g17p_image_copy_element_plan(
+   VkFormat src_format, VkFormat dst_format, const VkImageCopy2 *region,
+   struct hk_g17p_image_copy_element_plan *plan);
+
+/* A raw copy moves storage, so its element is the physical one.  Three-
+ * component images are stored four-component on the native path, so the API
+ * block size (3, 6 or 12 bytes) is smaller than the element the tiled
+ * addressing indexes; using it copies only three quarters of the surface.
+ * Compressed pairs and every non-padded format already agree.  Fails when the
+ * two endpoints disagree or either is narrower than the API block, so a new
+ * format cannot silently reintroduce the mismatch.
+ */
+bool hk_g17p_image_copy_storage_block(uint32_t api_block_B,
+                                      uint32_t src_storage_B,
+                                      uint32_t dst_storage_B,
+                                      uint32_t *storage_B);
 
 /* The three layouts vkCmdCopyBufferToImage accepts as dstImageLayout:
  * VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_GENERAL and

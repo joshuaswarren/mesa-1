@@ -34,7 +34,7 @@ struct ctx {
    nir_def *layer, *viewport;
    nir_cursor after_layer_viewport;
    struct agx_unlinked_uvs_layout *layout;
-   enum agx_chip chip;
+   bool layer_as_varying;
 };
 
 static enum uvs_group
@@ -110,7 +110,7 @@ lower(nir_builder *b, nir_intrinsic_instr *intr, void *data)
     * reads it. nir_opt_varyings marks the fixed-function-only case with
     * no_varying; emitting both stores there disagrees with Apple's native UVS
     * layout and overstates the VertexProgramVariant output size. */
-   if (sem.location != VARYING_SLOT_LAYER &&
+   if ((sem.location != VARYING_SLOT_LAYER || ctx->layer_as_varying) &&
        (sem.location != VARYING_SLOT_VIEWPORT || !sem.no_varying))
       nir_store_uvs_agx(b, value, index);
 
@@ -156,12 +156,9 @@ write_layer_viewport_sysval(struct ctx *ctx)
    nir_def *layer = ctx->layer ? nir_u2u16(&b, ctx->layer) : zero;
    nir_def *viewport = ctx->viewport ? nir_u2u16(&b, ctx->viewport) : zero;
 
-   /* Apple's G17P compiler places render_target_array_index in the high
-    * half and viewport_array_index in the low half of the shared scalar.
-    * The established AGX2 ABI uses the opposite order. */
-   nir_def *packed = ctx->chip == AGX_CHIP_G17P
-                        ? nir_pack_32_2x16_split(&b, viewport, layer)
-                        : nir_pack_32_2x16_split(&b, layer, viewport);
+   /* render_target_array_index is the low half and viewport_array_index the
+    * high half on every generation, G17P included. */
+   nir_def *packed = nir_pack_32_2x16_split(&b, layer, viewport);
 
    nir_store_uvs_agx(
       &b, packed,
@@ -197,8 +194,25 @@ gather_components(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
+agx_nir_lower_default_layer(nir_shader *s)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(s);
+   if (s->info.outputs_written & VARYING_BIT_LAYER)
+      return nir_no_progress(impl);
+
+   nir_builder b = nir_builder_at(nir_after_impl(impl));
+   nir_store_output(&b, nir_imm_int(&b, 0), nir_imm_int(&b, 0),
+                    .src_type = nir_type_uint32,
+                    .io_semantics = {.location = VARYING_SLOT_LAYER,
+                                     .num_slots = 1},
+                    .write_mask = 1);
+   s->info.outputs_written |= VARYING_BIT_LAYER;
+   return nir_progress(true, impl, nir_metadata_control_flow);
+}
+
+bool
 agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout,
-                  enum agx_chip chip)
+                  bool layer_as_varying)
 {
    bool progress = false;
 
@@ -220,7 +234,8 @@ agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout,
 
    for (unsigned i = 0; i < ARRAY_SIZE(layout->components); ++i) {
       if (i != VARYING_SLOT_POS && i != VARYING_SLOT_PSIZ &&
-          i != VARYING_SLOT_LAYER && layout->components[i]) {
+          (i != VARYING_SLOT_LAYER || layer_as_varying) &&
+          layout->components[i]) {
 
          layout->written |= BITFIELD64_BIT(i);
          sizes[UVS_VARYINGS] += layout->components[i];
@@ -237,7 +252,10 @@ agx_nir_lower_uvs(nir_shader *s, struct agx_unlinked_uvs_layout *layout,
    layout->user_size = sizes[UVS_VARYINGS];
 
    /* Now lower in terms of the unlinked layout */
-   struct ctx ctx = {.layout = layout, .chip = chip};
+   struct ctx ctx = {
+      .layout = layout,
+      .layer_as_varying = layer_as_varying,
+   };
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower,
             nir_metadata_control_flow, &ctx);
 

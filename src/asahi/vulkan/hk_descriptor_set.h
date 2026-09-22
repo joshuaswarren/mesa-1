@@ -25,9 +25,11 @@ struct hk_sampled_image_descriptor_sw {
    uint16_t sampler_index;
 
    /* Negative if there is no border colour, else the clamp=0 sampler index used
-    * for custom border colour emulation.
+    * for custom border colour emulation. Bit 14 marks an integer-typed
+    * border (VkBorderColor INT variants); indices stay below it.
     */
    int16_t clamp_0_sampler_index_or_negative;
+#define HK_BORDER_IS_INT_BIT (1 << 14)
 
    /* We want LOD bias and min LOD together as fp16 in this order and 32-bit
     * aligned. This lets us keep everything vectorized on the shader side, since
@@ -38,7 +40,12 @@ struct hk_sampled_image_descriptor_sw {
 
    /* This is only used for txf, it can be separate from the other stuff */
    uint16_t min_lod_uint16;
-   uint16_t pad;
+   /* Low two bits: 0 = none, 1 = SINT, 2 = UINT, 3 = normalized USCALED.
+    * For kind 3, bit 2 selects 16 rather than 8 bits, and bits 3..6 mark
+    * swizzled output channels to rescale (constant zero/one stay unchanged).
+    * Bit 7 selects packed 10:10:10:2; bits 8..11 mark its swizzled 2-bit
+    * channels. */
+   uint16_t scaled_conversion;
    /* TODO: This should probably be a heap! */
    uint32_t border[4];
    /* Native G17P global texture index; the descriptor's size is unchanged. */
@@ -71,7 +78,12 @@ static_assert(sizeof(struct hk_storage_image_descriptor) == 80,
 struct hk_buffer_address {
    uint64_t base_addr;
    uint32_t size;
-   uint32_t zero; /* Must be zero! */
+   /*
+    * G17P sparse-buffer descriptors store the page number of the residency
+    * map here. Descriptor lowering consumes it and restores the address
+    * format's required zero byte offset before explicit-I/O lowering.
+    */
+   uint32_t sparse_map_page;
 };
 
 struct hk_descriptor_pool {

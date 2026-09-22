@@ -79,7 +79,36 @@ narrow_runtime_vectors(void)
       }
    }
    printf("M5 native f32-to-f16: six Apple half/saturate/slot-8 vectors: %u failures\n",fail);
-   return fail;
+
+   /* blend/native/negpack3.py: half4(1.0 - x) and half4(-x - 1.0). */
+   const struct {
+      uint16_t dest, src;
+      uint8_t minifloat, bytes[6];
+   } sub[] = {
+      {0, 0, 48, {0x01,0xb1,0x14,0x01,0x80,0x08}},
+      {1, 2, 48, {0x01,0xb1,0x14,0x03,0x84,0x08}},
+      {0, 0, 176, {0x01,0xb1,0x1c,0x01,0x80,0x08}},
+      {1, 2, 176, {0x01,0xb1,0x1c,0x03,0x84,0x08}},
+   };
+   unsigned sub_fail = 0;
+   for (unsigned i = 0; i < sizeof(sub) / sizeof(sub[0]); ++i) {
+      struct agx3_falu_runtime srt = {.discard = {true}};
+      uint8_t sbytes[16], slength;
+      if (!agx3_falu_narrow_imm_sub_f32(AGX_ISA_ENCODING_AGX3B, sub[i].dest,
+                                        sub[i].minifloat, sub[i].src, &srt,
+                                        sbytes, &slength) ||
+          slength != 6 || memcmp(sbytes, sub[i].bytes, 6)) {
+         fprintf(stderr, "native narrowing subtract vector %u failed\n", i);
+         sub_fail++;
+      }
+   }
+   struct agx3_falu_runtime srt = {.cache = {true}, .discard = {true}};
+   sub_fail += agx3_falu_narrow_imm_sub_f32(AGX_ISA_ENCODING_AGX3B, 0, 0x80,
+                                            0, &srt, bytes, &length);
+   sub_fail += agx3_falu_narrow_imm_sub_f32(AGX_ISA_ENCODING_AGX3B, 0, 0x80,
+                                            1, &rt, bytes, &length);
+   printf("native minifloat-minus-f32 to f16: %u failures\n", sub_fail);
+   return fail + sub_fail;
 }
 
 static unsigned

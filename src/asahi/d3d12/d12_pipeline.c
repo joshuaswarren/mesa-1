@@ -2416,7 +2416,7 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, false);
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
-      NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      NIR_PASS(_, nir, agx_nir_lower_interpolation, false);
 
       /* The passes above may introduce driver-owned sysvals. */
       NIR_PASS(_, nir, d12_dxil_lower_root_mask, api_sample_mask);
@@ -2436,7 +2436,7 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
       NIR_PASS(_, nir, agx_nir_lower_monolithic_msaa,
                MAX2(tib->nr_samples, 1));
-      NIR_PASS(_, nir, agx_nir_lower_interpolation);
+      NIR_PASS(_, nir, agx_nir_lower_interpolation, false);
       /* The passes above can introduce driver-owned sysvals
        * (api_sample_mask, shader_part_tests_zs); rerun the lowering that
        * resolves them. No-op when none appeared.
@@ -2495,7 +2495,7 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
       if (cull_distance_size)
          *cull_distance_size = nir->info.cull_distance_array_size;
-      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs, device->dev.chip);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs);
 
       /* Indexed output stores read their UVS index through
        * load_uvs_index_agx, which the driver must lower. Honeykrisp
@@ -2589,7 +2589,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
                NULL);
       NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
 
-      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs, device->dev.chip);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs);
 
       struct agx_varyings_vs linked = {0};
       agx_assign_uvs(&linked, uvs, 0, 0);

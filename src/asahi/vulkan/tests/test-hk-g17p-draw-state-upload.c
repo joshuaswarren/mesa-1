@@ -39,7 +39,7 @@ int main(void)
    uint8_t retained[3][256], saved[3][256], group[128], viewport[40];
    struct hk_g17p_bind_state_upload uploads[3];
    const uint32_t counts[] = {2, 0x20000, 0};
-   const uint32_t bases[] = {0x800000, 0x800100, 0x820000};
+   const uint32_t bases[] = {0x800000, 0x2000000, 0xffffff00};
    for (unsigned draw = 0; draw < 3; ++draw) {
       memset(retained[draw], 0xa5, sizeof(retained[draw]));
       memset(group, 0x10 + draw, sizeof(group));
@@ -50,6 +50,7 @@ int main(void)
       assert(agx_vdm_hal200_bind_tail_unpack(AGX_CHIP_G17P,
              uploads[draw].tail.bytes, uploads[draw].tail.length, decoded));
       assert(decoded[0].context_offset == bases[draw] + HK_G17P_VARYING_RECORD_OFFSET);
+      assert(decoded[4].control == 0xa00);
       const uint32_t expected[5] = {0x10040000, counts[draw], 0, 0, 0};
       assert(!memcmp(retained[draw] + HK_G17P_VARYING_RECORD_OFFSET,
                      expected, sizeof(expected)));
@@ -95,8 +96,8 @@ int main(void)
    }
    assert(indices[0][4] == 0 && indices[1][4] == 1 && indices[2][4] == 0);
    assert(pointers[0] != pointers[1] && pointers[1] != pointers[2]);
-   const uint64_t bad[] = {0, 3, 0x7ffffc, 0x800001, 0x1fffffc,
-                          0x2000000, 0x1000200000, 0x10000000000, UINT64_MAX};
+   const uint64_t bad[] = {0, 3, 0x7ffffc, 0x800001, 0xfffffffc,
+                          UINT64_C(1) << 32, 0x1000200000, 0x10000000000, UINT64_MAX};
    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
       uint32_t untouched = 0xdeadbeef;
       assert(!hk_g17p_upload_bind_state(retained[0], sizeof(retained[0]),
@@ -121,6 +122,11 @@ int main(void)
       0x12, 0x34, &uploads[0]));
    assert(uploads[0].pairs[0].context_offset == bases[0] + 128 + 72);
    assert(uploads[0].pairs[5].context_offset == bases[0] + 128);
+   /* The viewport slot's PPP size follows the payload: 18 words, not 10. */
+   assert(uploads[0].pairs[4].control == 0x1200);
+   uint32_t multi_tail_control;
+   memcpy(&multi_tail_control, uploads[0].tail.bytes + 4 + 8 * 4 + 4, 4);
+   assert(multi_tail_control == 0x1200);
    const uint32_t multi_varyings[5] = {0x10040000, 0x12, 0x34, 0, 0};
    assert(!memcmp(multi + 128 + 72, multi_varyings,
                   sizeof(multi_varyings)));
@@ -133,7 +139,7 @@ int main(void)
    assert(indices[0][4] == 0);
    assert(multi_indices[4] == 1 && multi_indices[6] == 1);
 
-   assert(hk_g17p_draw_state_range_valid(0x1fffff8, 8));
-   assert(!hk_g17p_draw_state_range_valid(0x1fffff8, 9));
+   assert(hk_g17p_draw_state_range_valid(0xfffffff8, 8));
+   assert(!hk_g17p_draw_state_range_valid(0xfffffff8, 9));
    puts("immutable G17P draw state: per-draw smooth/linear/zero counts, Bind0 parity, aliases, retained records and transactional guards PASS");
 }

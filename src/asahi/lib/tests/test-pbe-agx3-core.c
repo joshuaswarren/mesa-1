@@ -164,6 +164,36 @@ check_exact_generation_vectors(void)
 }
 
 static int
+check_gen9_srgb_vector(void)
+{
+   /* The ordinary 2D packet with word1 bit 61: StateFields' store conversion
+    * for a gamma-encoded format. Gen10 has no recovered placement. */
+   struct agx_pbe_agx3_2d_fields fields = {
+      .layout = 2,
+      .channels = 0x28,
+      .swizzle_g = 1,
+      .swizzle_b = 2,
+      .swizzle_a = 3,
+      .width = 256,
+      .height = 128,
+      .buffer = UINT64_C(0x0000123456789ab0),
+      .srgb = true,
+   };
+   struct agx_pbe_agx3_descriptor packed;
+   struct agx_pbe_agx3_2d_fields decoded;
+   CHECK(agx_pbe_agx3_2d_pack(9, &fields, &packed));
+   CHECK(packed.bytes[15] == 0x20);
+   CHECK(agx_pbe_agx3_2d_unpack(9, packed.bytes, packed.length, &decoded));
+   CHECK(decoded.srgb);
+   fields.srgb = false;
+   CHECK(agx_pbe_agx3_2d_pack(9, &fields, &packed));
+   CHECK(packed.bytes[15] == 0x00);
+   fields.srgb = true;
+   CHECK(!agx_pbe_agx3_2d_pack(10, &fields, &packed));
+   return 0;
+}
+
+static int
 check_exact_gen9_array_vector(void)
 {
    /* PBEStateEncoderGen9<HAL200> keeps the ordinary 2D words, changes the
@@ -198,8 +228,64 @@ check_exact_gen9_array_vector(void)
    bad.stride_B = 1024;
    CHECK(!agx_pbe_agx3_2d_array_pack(9, &bad, 2, &packed));
    CHECK(!agx_pbe_agx3_2d_array_pack(10, &fields, 2, &packed));
-   CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 1, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 0, &packed));
    CHECK(!agx_pbe_agx3_2d_array_pack(9, &fields, 65537, &packed));
+
+   /* A one-layer array texture keeps the array dimension; StateFields'
+    * layers-1 deposit is simply zero. */
+   uint8_t one_layer[32];
+   memcpy(one_layer, expected, sizeof(one_layer));
+   one_layer[13] = 0x01;
+   CHECK(agx_pbe_agx3_2d_array_pack(9, &fields, 1, &packed));
+   CHECK(memcmp(packed.bytes, one_layer, sizeof(one_layer)) == 0);
+
+   /* A 3D texture is the same packet with dimension 5 and depth-1 in the
+    * layer field. */
+   uint8_t three_d[32];
+   memcpy(three_d, expected, sizeof(three_d));
+   three_d[0] = 0x25;
+   three_d[13] = 0x71;
+   CHECK(agx_pbe_agx3_3d_pack(9, &fields, 8, &packed));
+   CHECK(packed.length == sizeof(three_d));
+   CHECK(memcmp(packed.bytes, three_d, sizeof(three_d)) == 0);
+   CHECK(!agx_pbe_agx3_3d_pack(9, &bad, 8, &packed));
+   CHECK(!agx_pbe_agx3_3d_pack(10, &fields, 8, &packed));
+   CHECK(!agx_pbe_agx3_3d_pack(9, &fields, 0, &packed));
+   CHECK(!agx_pbe_agx3_3d_pack(9, &fields, 65537, &packed));
+
+   /* Mipmapped layered targets add the 2D mip extension unchanged. */
+   struct agx_pbe_agx3_descriptor plain;
+   CHECK(agx_pbe_agx3_3d_mip_pack(9, &fields, 8, 0, 1, &plain));
+   CHECK(memcmp(plain.bytes, three_d, sizeof(three_d)) == 0);
+   for (unsigned levels = 1; levels <= 16; ++levels) {
+      for (unsigned level = 0; level < levels; ++level) {
+         for (unsigned array = 0; array < 2; ++array) {
+            const uint8_t *base = array ? expected : three_d;
+            CHECK(array ? agx_pbe_agx3_2d_array_mip_pack(9, &fields, 2, level,
+                                                         levels, &packed)
+                        : agx_pbe_agx3_3d_mip_pack(9, &fields, 8, level,
+                                                   levels, &packed));
+            for (unsigned i = 0; i < 32; ++i) {
+               uint8_t expect = base[i];
+               if (levels > 1) {
+                  if (i == 7)
+                     expect |= 4;
+                  if (i == 15)
+                     expect |= 128;
+                  if (i == 21)
+                     expect = level * 16;
+                  if (i == 22)
+                     expect = levels - 1;
+               }
+               CHECK(packed.bytes[i] == expect);
+            }
+         }
+      }
+   }
+   CHECK(!agx_pbe_agx3_3d_mip_pack(9, &fields, 8, 1, 1, &packed));
+   CHECK(!agx_pbe_agx3_3d_mip_pack(9, &fields, 8, 0, 17, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_mip_pack(9, &fields, 2, 0, 0, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_mip_pack(9, &bad, 2, 0, 2, &packed));
    return 0;
 }
 
@@ -345,7 +431,8 @@ check_fail_closed_axes(void)
    fields.buffer = UINT64_C(0x1000);
    CHECK(agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_9, &fields, &packed));
    for (unsigned bit = 52; bit < 256; ++bit) {
-      if (bit >= 64 && bit < 108)
+      /* The address, and the sRGB store conversion at bit 125. */
+      if ((bit >= 64 && bit < 108) || bit == 125)
          continue;
       uint8_t malformed[AGX_PBE_AGX3_DESCRIPTOR_LENGTH];
       struct agx_pbe_agx3_2d_fields decoded;
@@ -535,6 +622,68 @@ check_gen9_multisample_vector(void)
    return 0;
 }
 
+static int
+check_gen9_array_multisample_vector(void)
+{
+   const struct agx_pbe_agx3_2d_fields fields = {
+      .layout = 2,
+      .channels = 0x28,
+      .type = 0,
+      .swizzle_r = 0,
+      .swizzle_g = 1,
+      .swizzle_b = 2,
+      .swizzle_a = 3,
+      .width = 256,
+      .height = 128,
+      .buffer = UINT64_C(0x0000123456789ab0),
+      .page_aligned_layers = true,
+   };
+   static const uint8_t expected_2x[32] = {
+      0x28, 0x0a, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x00,
+      0xab, 0x89, 0x67, 0x45, 0x23, 0xb1, 0x00, 0x10,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t expected_4x[32] = {
+      0x28, 0x0a, 0xe4, 0xff, 0xc0, 0x1f, 0x00, 0x01,
+      0xab, 0x89, 0x67, 0x45, 0x23, 0xb1, 0x00, 0x10,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+
+   struct agx_pbe_agx3_descriptor packed;
+   CHECK(agx_pbe_agx3_2d_array_multisample_pack(9, &fields, 12, 2,
+                                                &packed));
+   CHECK(memcmp(packed.bytes, expected_2x, sizeof(expected_2x)) == 0);
+   CHECK(agx_pbe_agx3_2d_array_multisample_pack(9, &fields, 12, 4,
+                                                &packed));
+   CHECK(memcmp(packed.bytes, expected_4x, sizeof(expected_4x)) == 0);
+
+   const unsigned bad_samples[] = {0, 1, 3, 8, 16};
+   for (unsigned i = 0; i < sizeof(bad_samples) / sizeof(bad_samples[0]);
+        ++i) {
+      memset(&packed, 0xa5, sizeof(packed));
+      CHECK(!agx_pbe_agx3_2d_array_multisample_pack(
+         9, &fields, 12, bad_samples[i], &packed));
+      CHECK(memcmp(&packed, &(struct agx_pbe_agx3_descriptor){0},
+                   sizeof(packed)) == 0);
+   }
+
+   struct agx_pbe_agx3_2d_fields linear = fields;
+   linear.layout = 0;
+   linear.stride_B = 1024;
+   CHECK(!agx_pbe_agx3_2d_array_multisample_pack(9, &linear, 12, 4,
+                                                 &packed));
+   CHECK(!agx_pbe_agx3_2d_array_multisample_pack(10, &fields, 12, 4,
+                                                 &packed));
+   CHECK(!agx_pbe_agx3_2d_array_multisample_pack(9, &fields, 0, 4,
+                                                 &packed));
+   CHECK(!agx_pbe_agx3_2d_array_multisample_pack(9, &fields, 65537, 4,
+                                                 &packed));
+   CHECK(!agx_pbe_agx3_2d_array_multisample_pack(9, NULL, 12, 4, &packed));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -543,8 +692,10 @@ main(void)
        check_gen10_linear() ||
        check_exhaustive_format_axes() ||
        check_dimension_and_address_bits() || check_fail_closed_axes() ||
+       check_gen9_srgb_vector() ||
        check_gen9_single_layer_packet() || check_gen9_native_mips() ||
-       check_gen9_multisample_vector())
+       check_gen9_multisample_vector() ||
+       check_gen9_array_multisample_vector())
       return 1;
 
    printf("agx_pbe_agx3_core: %u checks passed\n", checks);

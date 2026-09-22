@@ -18,9 +18,9 @@ dump(const char *name, enum pipe_format format,
 {
    if (!getenv("AGX3_DUMP_BINARY"))
       return;
-   printf("quad-%s format=%u gprs=%u staging=%u partitions=%u bytes=", name,
+   printf("quad-%s format=%u gprs=%u staging=%u classes=%#x bytes=", name,
           format, part->info.nr_gprs, part->info.agx3_staging_halfs,
-          part->info.agx3_colour_link.colour_partitions);
+          part->info.agx3_colour_link.colour_classes);
    for (unsigned i = 0; i < part->info.main_size; ++i)
       printf("%02x", ((uint8_t *)part->binary)[part->info.main_offset + i]);
    puts("");
@@ -50,11 +50,15 @@ check_format(enum pipe_format format, unsigned components, unsigned count)
    invalid.logical_format[count] = format;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
    invalid = tib;
-   invalid.nr_samples = 2;
+   invalid.nr_samples = 3;
    assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
+   /* A layered layout is not a native quad/RGBA32 candidate -- those builtins
+    * are 2D-only and the paths above screen it out -- but it is no longer
+    * refused outright. It falls through to the general mixed-format programs,
+    * which carry the layer wire and an array EOT. */
    invalid = tib;
    invalid.layered = true;
-   assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_NONE);
+   assert(agx_g17p_classify_mrt(&invalid) == AGX_G17P_MRT_MIXED);
 
    struct agx_fs_epilog_key epilog = {.link.loc_written = (1u << count) - 1,
                                       .link.size_32 = (1u << count) - 1,
@@ -78,7 +82,8 @@ check_format(enum pipe_format format, unsigned components, unsigned count)
                                 .secondary = true};
    struct agx_shader_part part = {0};
    assert(agx_compile_shader_nir(b.shader, &key, &part));
-   assert(part.info.agx3_colour_link.colour_partitions == MIN2(count, 3));
+   assert(part.info.agx3_colour_link.colour_classes ==
+          BITFIELD_MASK(MIN2(count, 3)));
    assert(part.info.agx3_colour_link.entry_emitted);
    assert(!part.info.scratch_size);
    dump("epilog", format, &part);

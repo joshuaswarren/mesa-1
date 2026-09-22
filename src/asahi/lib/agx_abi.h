@@ -48,6 +48,21 @@
  * using texture state place the ordinary vertex ABI after this prefix. */
 #define AGX_ABI_G17P_TEXTURE_POINTER_HALFS 8
 
+/* AGX3 threadgroup accesses take their base from uniform half 8, which
+ * agx_emit_local_store/load hard-code and which the hardware preloads -- no
+ * driver path ever writes it.  A shader that places its own uniforms over
+ * that half therefore destroys its shared-memory base, silently: the stores
+ * land nowhere and the loads read zero.
+ *
+ * API shaders are unaffected because their pushes are small, but precompiled
+ * kernel arguments start at half 0 and run past it (libagx_unroll_restart's
+ * are 26 halves), which is why a geometry shader plus primitive restart drew
+ * nothing.  Precompiled AGX3 kernels therefore place their arguments above
+ * both the texture-pointer prefix and this half.  Four-half aligned so 64-bit
+ * arguments keep their uniform-pair alignment. */
+#define AGX_ABI_AGX3_THREADGROUP_BASE_HALF 8
+#define AGX_ABI_AGX3_PRECOMP_ARG_HALFS 12
+
 #define AGX_ABI_FUNI_EMRT_HEAP (0)
 #define AGX_ABI_FUNI_BLEND_R   (AGX_ABI_FUNI_EMRT_HEAP + 4)
 #define AGX_ABI_FUNI_BLEND_G   (AGX_ABI_FUNI_BLEND_R + 2)
@@ -68,9 +83,33 @@
 /* Honeykrisp G17P texel-buffer metadata follows the native texture/PBE and
  * heap-index records. These are software ABI fields, not Gen9 hardware bits.
  */
+#define AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET 32
 #define AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET 72
 #define AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET 72
 #define AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET 76
 #define AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET 80
 #define AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET 88
+/* Sparse residency for a texel buffer.  G17P's buffer texture descriptor is
+ * never put in AGX_IMAGE_MODE_SPARSE (hk_buffer_view.c builds a plain linear
+ * 2D texture), so the hardware has no residency to report for one.  A sparse
+ * texel fetch therefore reads its residency from the same per-page bitmap the
+ * sparse SSBO path uses, and this word carries the two things the shader needs
+ * that the rest of the record does not already hold:
+ *
+ *   bits 0..3    log2 of the view's element size in bytes
+ *   bits 4..31   the residency map's address >> AIL_PAGESIZE_LOG2
+ *
+ * Zero means "no sparse map" -- an ordinary buffer, or a format whose element
+ * size is not a power of two -- and the fetch reports resident.
+ */
+#define AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET 92
+#define AGX_G17P_BUFFER_TEXTURE_SPARSE_ELSIZE_MASK 0xfu
+#define AGX_G17P_BUFFER_TEXTURE_SPARSE_MAP_SHIFT 4
 #define AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE 96
+
+/* Layout of struct hk_sparse_buffer_map_header (hk_buffer.h), which both the
+ * sparse SSBO lowering and the sparse texel fetch read from the shader.
+ * Static-asserted against the struct there. */
+#define AGX_SPARSE_BUFFER_MAP_RESOURCE_BASE_OFFSET 0
+#define AGX_SPARSE_BUFFER_MAP_PAGE_COUNT_OFFSET 8
+#define AGX_SPARSE_BUFFER_MAP_BITMAP_OFFSET 16

@@ -1,0 +1,974 @@
+[
+ {
+  "segment": "1200000-1210000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4868,
+   "NotSupported": 5132
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 80.77407200300149,
+  "evidence": "20260915T211246185416Z-cts-2m-r5-s01"
+ },
+ {
+  "segment": "1210000-1220000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4748,
+   "NotSupported": 5252
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 60.51722707799854,
+  "evidence": "20260915T211413515466Z-cts-2m-r5-s02"
+ },
+ {
+  "segment": "1220000-1230000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4878,
+   "NotSupported": 5122
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 29.75324904000081,
+  "evidence": "20260915T211520665340Z-cts-2m-r5-s03"
+ },
+ {
+  "segment": "1230000-1240000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4842,
+   "NotSupported": 5158
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 33.77812545599954,
+  "evidence": "20260915T211557009251Z-cts-2m-r5-s04"
+ },
+ {
+  "segment": "1240000-1250000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4956,
+   "NotSupported": 5044
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 35.98918059400239,
+  "evidence": "20260915T211637368435Z-cts-2m-r5-s05"
+ },
+ {
+  "segment": "1250000-1260000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3812,
+   "NotSupported": 6188
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 33.353421021998656,
+  "evidence": "20260915T211719771621Z-cts-2m-r5-s06"
+ },
+ {
+  "segment": "1260000-1270000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4868,
+   "NotSupported": 5132
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 67.52692862600088,
+  "evidence": "20260915T211800804555Z-cts-2m-r5-s07"
+ },
+ {
+  "segment": "1270000-1280000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4870,
+   "NotSupported": 5130
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 71.56758781900135,
+  "evidence": "20260915T211914825656Z-cts-2m-r5-s08"
+ },
+ {
+  "segment": "1280000-1290000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4637,
+   "NotSupported": 5363
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.576589348998823,
+  "evidence": "20260915T212033067699Z-cts-2m-r5-s09"
+ },
+ {
+  "segment": "1290000-1300000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4883,
+   "NotSupported": 5117
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 32.06904803999714,
+  "evidence": "20260915T212106016060Z-cts-2m-r5-s10"
+ },
+ {
+  "segment": "1300000-1310000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3984,
+   "NotSupported": 6013,
+   "Interrupted": 3
+  },
+  "guard_verdict": "process_failure",
+  "runner_seconds": 45.0627786139994,
+  "evidence": "20260915T212144793558Z-cts-2m-r5-s11"
+ },
+ {
+  "segment": "1300000-1310000",
+  "attempt": "run-recover1",
+  "counts": {
+   "NotSupported": 2,
+   "Pass": 1
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 0.6088783820014214,
+  "evidence": "20260915T212646057908Z-cts-2m-r5-s11-recover"
+ },
+ {
+  "segment": "1310000-1320000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 7397,
+   "Pass": 2602,
+   "QualityWarning": 1
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 72.9318164949982,
+  "evidence": "20260915T212653814510Z-cts-2m-r5-s12"
+ },
+ {
+  "segment": "1320000-1330000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 7462,
+   "Pass": 2538
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 16.987486402002105,
+  "evidence": "20260915T212813473743Z-cts-2m-r5-s13"
+ },
+ {
+  "segment": "1330000-1340000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5825,
+   "Pass": 4175
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 21.63592772300035,
+  "evidence": "20260915T212836574631Z-cts-2m-r5-s14"
+ },
+ {
+  "segment": "1340000-1350000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 4955,
+   "Pass": 5045
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 23.36646235599983,
+  "evidence": "20260915T212904543084Z-cts-2m-r5-s15"
+ },
+ {
+  "segment": "1350000-1360000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 5347,
+   "NotSupported": 4653
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 24.190781339999376,
+  "evidence": "20260915T212934008872Z-cts-2m-r5-s16"
+ },
+ {
+  "segment": "1360000-1370000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5852,
+   "Pass": 4148
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 20.374599360999127,
+  "evidence": "20260915T213004486484Z-cts-2m-r5-s17"
+ },
+ {
+  "segment": "1370000-1380000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5858,
+   "Pass": 4142
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 20.348835298002086,
+  "evidence": "20260915T213031272017Z-cts-2m-r5-s18"
+ },
+ {
+  "segment": "1380000-1390000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5852,
+   "Pass": 4148
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 20.77000174999921,
+  "evidence": "20260915T213057860513Z-cts-2m-r5-s19"
+ },
+ {
+  "segment": "1390000-1400000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 6363,
+   "Pass": 3637
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 19.145348322002974,
+  "evidence": "20260915T213124785936Z-cts-2m-r5-s20"
+ },
+ {
+  "segment": "1400000-1410000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5872,
+   "Pass": 4128
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 20.385346360999392,
+  "evidence": "20260915T213150252647Z-cts-2m-r5-s21"
+ },
+ {
+  "segment": "1410000-1420000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5868,
+   "Pass": 4132
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 20.369352161997085,
+  "evidence": "20260915T213217152900Z-cts-2m-r5-s22"
+ },
+ {
+  "segment": "1420000-1430000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5354,
+   "Pass": 4641,
+   "Fail": 5
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 25.784961295998073,
+  "evidence": "20260915T213243784901Z-cts-2m-r5-s23"
+ },
+ {
+  "segment": "1430000-1440000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3185,
+   "NotSupported": 6810,
+   "Fail": 5
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 17.745423110998672,
+  "evidence": "20260915T213316807701Z-cts-2m-r5-s24"
+ },
+ {
+  "segment": "1440000-1450000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3169,
+   "NotSupported": 6820,
+   "Fail": 11
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 17.95198195299963,
+  "evidence": "20260915T213340832460Z-cts-2m-r5-s25"
+ },
+ {
+  "segment": "1450000-1460000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3311,
+   "NotSupported": 6680,
+   "Fail": 9
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 20.115917750001245,
+  "evidence": "20260915T213404957403Z-cts-2m-r5-s26"
+ },
+ {
+  "segment": "1460000-1470000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3435,
+   "NotSupported": 6565
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 23.349866098000348,
+  "evidence": "20260915T213431290162Z-cts-2m-r5-s27"
+ },
+ {
+  "segment": "1470000-1480000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 2216,
+   "NotSupported": 7768,
+   "Fail": 16
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 16.7514033189982,
+  "evidence": "20260915T213500761651Z-cts-2m-r5-s28"
+ },
+ {
+  "segment": "1480000-1490000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 6666,
+   "Pass": 3334
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 18.174700313997164,
+  "evidence": "20260915T213523669040Z-cts-2m-r5-s29"
+ },
+ {
+  "segment": "1490000-1500000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 8049,
+   "Pass": 1951
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 27.59048339400033,
+  "evidence": "20260915T213548238927Z-cts-2m-r5-s30"
+ },
+ {
+  "segment": "1500000-1510000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 3188,
+   "Pass": 6812
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 43.31558624700119,
+  "evidence": "20260915T213621920201Z-cts-2m-r5-s31"
+ },
+ {
+  "segment": "1510000-1520000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 35.214827984000294,
+  "evidence": "20260915T214104821976Z-cts-2m-r5-s32"
+ },
+ {
+  "segment": "1510000-1520000",
+  "attempt": "run-attempt1-thermal-refusal",
+  "counts": null,
+  "guard_verdict": null,
+  "runner_seconds": null,
+  "evidence": ""
+ },
+ {
+  "segment": "1520000-1530000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 35.42742498899679,
+  "evidence": "20260915T214146053225Z-cts-2m-r5-s33"
+ },
+ {
+  "segment": "1530000-1540000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 31.587362711001333,
+  "evidence": "20260915T214227445711Z-cts-2m-r5-s34"
+ },
+ {
+  "segment": "1540000-1550000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 28.16777697100042,
+  "evidence": "20260915T214304900490Z-cts-2m-r5-s35"
+ },
+ {
+  "segment": "1550000-1560000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 28.170550058999652,
+  "evidence": "20260915T214339093483Z-cts-2m-r5-s36"
+ },
+ {
+  "segment": "1560000-1570000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 759,
+   "Unrun": 9144,
+   "Interrupted": 22,
+   "NotSupported": 75
+  },
+  "guard_verdict": "gpu_timeout",
+  "runner_seconds": null,
+  "evidence": "20260915T214413108699Z-cts-2m-r5-s37"
+ },
+ {
+  "segment": "1560000-1570000",
+  "attempt": "run-recover1",
+  "counts": {
+   "Pass": 814,
+   "Unrun": 8213,
+   "Interrupted": 12,
+   "NotSupported": 127
+  },
+  "guard_verdict": "gpu_timeout",
+  "runner_seconds": null,
+  "evidence": "20260915T214831561089Z-cts-2m-r5-s37-recover"
+ },
+ {
+  "segment": "1560000-1570000",
+  "attempt": "run-recover2",
+  "counts": {
+   "Pass": 7840,
+   "NotSupported": 1326
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 36.529340132000016,
+  "evidence": "20260915T222147999479Z-cts-2m-r5-s37-recover2"
+ },
+ {
+  "segment": "1570000-1580000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 7290,
+   "NotSupported": 2710
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 41.540860426,
+  "evidence": "20260915T214922413170Z-cts-2m-r5-s38"
+ },
+ {
+  "segment": "1580000-1590000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 6920,
+   "Unrun": 2759,
+   "Interrupted": 24,
+   "NotSupported": 287,
+   "Timeout": 10
+  },
+  "guard_verdict": "process_failure",
+  "runner_seconds": 107.733880682,
+  "evidence": "20260915T215012687621Z-cts-2m-r5-s39"
+ },
+ {
+  "segment": "1580000-1590000",
+  "attempt": "run-recover1",
+  "counts": {
+   "Pass": 2650,
+   "NotSupported": 114
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 7.864514199000041,
+  "evidence": "20260915T215356570393Z-cts-2m-r5-s39-recover"
+ },
+ {
+  "segment": "1580000-1590000",
+  "attempt": "run-recover2-dual",
+  "counts": {
+   "Pass": 28,
+   "NotSupported": 1
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 235.66365003599998,
+  "evidence": "20260915T215410241528Z-cts-2m-r5-s39-dual"
+ },
+ {
+  "segment": "1590000-1600000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3270,
+   "NotSupported": 6730
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 25.035211250999964,
+  "evidence": "20260915T215814671617Z-cts-2m-r5-s40"
+ },
+ {
+  "segment": "1600000-1610000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 6292,
+   "Pass": 3708
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 19.56500244999995,
+  "evidence": "20260915T215846384292Z-cts-2m-r5-s41"
+ },
+ {
+  "segment": "1610000-1620000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 6048,
+   "Pass": 3952
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 33.55540419299996,
+  "evidence": "20260915T215912548114Z-cts-2m-r5-s42"
+ },
+ {
+  "segment": "1620000-1630000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 1864,
+   "Pass": 8136
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 87.67925688599996,
+  "evidence": "20260915T215952510030Z-cts-2m-r5-s43"
+ },
+ {
+  "segment": "1630000-1640000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 32.411146183999904,
+  "evidence": "20260915T220127063800Z-cts-2m-r5-s44"
+ },
+ {
+  "segment": "1640000-1650000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 32.39243036300002,
+  "evidence": "20260915T220205881180Z-cts-2m-r5-s45"
+ },
+ {
+  "segment": "1650000-1660000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 28.559363249999933,
+  "evidence": "20260915T220244588956Z-cts-2m-r5-s46"
+ },
+ {
+  "segment": "1660000-1670000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.22075840399998,
+  "evidence": "20260915T220319448230Z-cts-2m-r5-s47"
+ },
+ {
+  "segment": "1670000-1680000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 10000
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 25.76238828700002,
+  "evidence": "20260915T220351642254Z-cts-2m-r5-s48"
+ },
+ {
+  "segment": "1680000-1690000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 9985,
+   "NotSupported": 15
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 32.861683958000015,
+  "evidence": "20260915T222233474530Z-cts-2m-r5-s49"
+ },
+ {
+  "segment": "1690000-1700000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3868,
+   "NotSupported": 6132
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 30.22705257499996,
+  "evidence": "20260915T222313450188Z-cts-2m-r5-s50"
+ },
+ {
+  "segment": "1700000-1710000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5191,
+   "Pass": 4809
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 52.152450149,
+  "evidence": "20260915T222350656324Z-cts-2m-r5-s51"
+ },
+ {
+  "segment": "1710000-1720000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5494,
+   "Pass": 4506
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 161.59719619300006,
+  "evidence": "20260915T222449230287Z-cts-2m-r5-s52"
+ },
+ {
+  "segment": "1720000-1730000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 7128,
+   "Pass": 2872
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 38.931125839999936,
+  "evidence": "20260915T222737408411Z-cts-2m-r5-s53"
+ },
+ {
+  "segment": "1730000-1740000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4391,
+   "NotSupported": 5609
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 163.94599167499996,
+  "evidence": "20260915T222822965464Z-cts-2m-r5-s54"
+ },
+ {
+  "segment": "1740000-1750000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 2744,
+   "NotSupported": 7256
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 34.33201417299995,
+  "evidence": "20260915T223113681770Z-cts-2m-r5-s55"
+ },
+ {
+  "segment": "1750000-1760000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4217,
+   "NotSupported": 5783
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 43.114132337,
+  "evidence": "20260915T223154456848Z-cts-2m-r5-s56"
+ },
+ {
+  "segment": "1760000-1770000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 4594,
+   "Pass": 5406
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 169.01330715000006,
+  "evidence": "20260915T223244414076Z-cts-2m-r5-s57"
+ },
+ {
+  "segment": "1770000-1780000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 7717,
+   "Unrun": 1736,
+   "Interrupted": 27,
+   "NotSupported": 511,
+   "Timeout": 9
+  },
+  "guard_verdict": "process_failure",
+  "runner_seconds": 122.07017878400006,
+  "evidence": "20260915T223540732328Z-cts-2m-r5-s58"
+ },
+ {
+  "segment": "1770000-1780000",
+  "attempt": "run-recover1",
+  "counts": {
+   "Pass": 1662,
+   "NotSupported": 87
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 8.451873659000285,
+  "evidence": "20260915T225328091045Z-cts-2m-r5-s58-recover"
+ },
+ {
+  "segment": "1770000-1780000",
+  "attempt": "run-recover2-dual",
+  "counts": {
+   "Pass": 23
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 241.30715696300012,
+  "evidence": "20260915T225341204115Z-cts-2m-r5-s58-dual"
+ },
+ {
+  "segment": "1780000-1790000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3804,
+   "NotSupported": 6196
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 42.49684666300027,
+  "evidence": "20260915T225750634496Z-cts-2m-r5-s59"
+ },
+ {
+  "segment": "1790000-1800000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3708,
+   "NotSupported": 6292
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 31.394843545000185,
+  "evidence": "20260915T225839542209Z-cts-2m-r5-s60"
+ },
+ {
+  "segment": "1800000-1810000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5116,
+   "Pass": 4884
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 49.84091091299979,
+  "evidence": "20260915T225917145339Z-cts-2m-r5-s61"
+ },
+ {
+  "segment": "1810000-1820000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4873,
+   "NotSupported": 5127
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 51.330127257000186,
+  "evidence": "20260915T230013417935Z-cts-2m-r5-s62"
+ },
+ {
+  "segment": "1820000-1830000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4340,
+   "NotSupported": 5660
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 69.93762879199994,
+  "evidence": "20260915T230111059346Z-cts-2m-r5-s63"
+ },
+ {
+  "segment": "1830000-1840000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4852,
+   "NotSupported": 5148
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 71.99278523800012,
+  "evidence": "20260915T230227328216Z-cts-2m-r5-s64"
+ },
+ {
+  "segment": "1840000-1850000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4860,
+   "NotSupported": 5140
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 48.85734270900002,
+  "evidence": "20260915T230345745492Z-cts-2m-r5-s65"
+ },
+ {
+  "segment": "1850000-1860000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4356,
+   "NotSupported": 5644
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 69.35238790499989,
+  "evidence": "20260915T230440837222Z-cts-2m-r5-s66"
+ },
+ {
+  "segment": "1860000-1870000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4862,
+   "NotSupported": 5138
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 61.97088603400016,
+  "evidence": "20260915T230556543230Z-cts-2m-r5-s67"
+ },
+ {
+  "segment": "1870000-1880000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4628,
+   "NotSupported": 5372
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 33.97616865400005,
+  "evidence": "20260915T230704646336Z-cts-2m-r5-s68"
+ },
+ {
+  "segment": "1880000-1890000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 4892,
+   "NotSupported": 5108
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 41.86495132800019,
+  "evidence": "20260915T230744693216Z-cts-2m-r5-s69"
+ },
+ {
+  "segment": "1890000-1900000",
+  "attempt": "run",
+  "counts": {
+   "Pass": 3925,
+   "NotSupported": 6074,
+   "Fail": 1
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 42.75440292600024,
+  "evidence": "20260915T230832907269Z-cts-2m-r5-s70"
+ },
+ {
+  "segment": "1900000-1910000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 6875,
+   "Pass": 3125
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 158.19070550100014,
+  "evidence": "20260915T230921957884Z-cts-2m-r5-s71"
+ },
+ {
+  "segment": "1910000-1920000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 6687,
+   "Pass": 3313
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 23.562597663999895,
+  "evidence": "20260915T231207858209Z-cts-2m-r5-s72"
+ },
+ {
+  "segment": "1920000-1930000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5860,
+   "Pass": 4140
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.79844799600005,
+  "evidence": "20260915T231238031837Z-cts-2m-r5-s73"
+ },
+ {
+  "segment": "1930000-1940000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 3730,
+   "Pass": 6270
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 35.26046917599979,
+  "evidence": "20260915T231311531243Z-cts-2m-r5-s74"
+ },
+ {
+  "segment": "1940000-1950000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5860,
+   "Pass": 4140
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.975882370999898,
+  "evidence": "20260915T231353587508Z-cts-2m-r5-s75"
+ },
+ {
+  "segment": "1950000-1960000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5880,
+   "Pass": 4120
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.588142980000157,
+  "evidence": "20260915T231427420965Z-cts-2m-r5-s76"
+ },
+ {
+  "segment": "1960000-1970000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5850,
+   "Pass": 4150
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.772307769000236,
+  "evidence": "20260915T231502244308Z-cts-2m-r5-s77"
+ },
+ {
+  "segment": "1970000-1980000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 6365,
+   "Pass": 3635
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 23.542788191,
+  "evidence": "20260915T231535681325Z-cts-2m-r5-s78"
+ },
+ {
+  "segment": "1980000-1990000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5850,
+   "Pass": 4150
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.605647546,
+  "evidence": "20260915T231605708889Z-cts-2m-r5-s79"
+ },
+ {
+  "segment": "1990000-2000000",
+  "attempt": "run",
+  "counts": {
+   "NotSupported": 5860,
+   "Pass": 4140
+  },
+  "guard_verdict": "pass",
+  "runner_seconds": 26.599760842999785,
+  "evidence": "20260915T231639170943Z-cts-2m-r5-s80"
+ }
+]

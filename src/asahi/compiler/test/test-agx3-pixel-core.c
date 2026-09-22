@@ -67,6 +67,20 @@ main(void)
    expect_refused("AGX2 colour entry",
                   agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX2, b, &len));
 
+   /* metal-nt -arch applegpu_g17p fragment storing the result of
+    * atomic_fetch_add_explicit(): class 4 without the colour selector
+    * before the atomic, a barrier after its reload. */
+   expect("AGX3b returning-atomic class",
+          agx3_pixel_atomic_acquire(AGX_ISA_ENCODING_AGX3B, b, &len), b, len,
+          "870254040000");
+   expect("AGX3b returning-atomic barrier",
+          agx3_pixel_atomic_barrier(AGX_ISA_ENCODING_AGX3B, b, &len), b, len,
+          "070454c40800");
+   expect_refused("AGX3c returning-atomic class",
+                  agx3_pixel_atomic_acquire(AGX_ISA_ENCODING_AGX3C, b, &len));
+   expect_refused("AGX3c returning-atomic barrier",
+                  agx3_pixel_atomic_barrier(AGX_ISA_ENCODING_AGX3C, b, &len));
+
    /* Native multi-RT shaders allocate two pixel classes per tile partition.
     * Prove the architectural mapping independently of any workload layout. */
    static const struct {
@@ -101,6 +115,9 @@ main(void)
       {12, "8702540c0800"},  {16, "870254100800"},  {32, "870254200800"},
       {48, "870254300800"},  {60, "8702543c0800"},  {64, "870254400800"},
       {128, "870254800800"}, {192, "870254c00800"},
+      /* Every class of partitions 0..2 at once: 2x/4x store-only fragments
+       * of three to eight targets. */
+      {252, "870254fc0800"},
    };
 
    for (unsigned i = 0; i < sizeof(b_wait) / sizeof(b_wait[0]); ++i) {
@@ -124,7 +141,7 @@ main(void)
       {192, false, "070254c00000"}, {0, true, "070254000200"},
       {1, true, "070254010200"},   {12, true, "0702540c0200"},
       {48, true, "070254300200"},  {60, true, "0702543c0200"},
-      {192, true, "070254c00200"},
+      {192, true, "070254c00200"}, {252, true, "070254fc0200"},
    };
 
    for (unsigned i = 0; i < sizeof(b_rel) / sizeof(b_rel[0]); ++i) {

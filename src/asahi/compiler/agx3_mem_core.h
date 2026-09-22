@@ -68,6 +68,13 @@ struct agx3_mem_desc {
     * in gpu/m5-*-reference; a two-load kernel emits the 8-byte form then the
     * marked one). No store witness carries either. */
    bool last_load;
+   /* Atomic/coherent access qualifier. Apple's AGX3 encoders expose this as
+    * f77 on loads and f75 on stores. */
+   bool coherent;
+
+   /* AGX3b f79=2. Apple's vertex corpus sets this on the final LDDEV and only
+    * the final LDDEV; no AGX3c or store witness carries it. */
+   bool agx3b_last_load;
 };
 
 bool agx3_mem_encode_load(enum agx_isa_encoding enc,

@@ -545,23 +545,38 @@ check_program_records(void)
       0x67, 0x00, 0x12, 0x34, 0x56, 0x78, 0x9a,
       0xbc, 0xde, 0xf0, 0x24, 0x68, 0xac, 0xe0,
    };
-   /* Byte three carries the release variant and the colour partition count.
-    * The composer emits ordinary 0xf3/0xc3/0x03 and coverage 0xf2/0xc2/0x02
-    * for one, two and three partitions, plus 0x00 for the bounded background
-    * release; decoding must admit the whole set, not just one partition. */
+   /* Bytes three and four carry the release descriptor. applegpu_g17p
+    * fragments consuming colour classes {0}, {1}, {2}, {0,1}, {0,2}, {1,2} and
+    * {0,1,2} release 0x2f3/0x2cf/0x23f/0x2c3/0x233/0x20f/0x203, coverage
+    * clears bit 0, and 0x200 is the bounded background release; decoding must
+    * admit the whole family. */
    static const uint8_t g17p_pixrel[][6] = {
       {0x07, 0x02, 0x54, 0xf3, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xcf, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x3f, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0xc3, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x33, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x0f, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0x03, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0xf2, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xce, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x3e, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0xc2, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x32, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0x0e, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0x02, 0x02, 0x00},
       {0x07, 0x02, 0x54, 0x00, 0x02, 0x00},
    };
-   /* A partition byte the composer never emits must still lose the walk
-    * rather than be silently accepted as a release. */
-   static const uint8_t g17p_not_pixrel[6] = {0x07, 0x02, 0x54,
-                                              0xc4, 0x02, 0x00};
+   /* Descriptors no program carries -- a split class field, a missing bit 1,
+    * or no consumed class -- must still lose the walk rather than be silently
+    * accepted as a release. */
+   static const uint8_t g17p_not_pixrel[][6] = {
+      {0x07, 0x02, 0x54, 0xc4, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xc7, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xf1, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xff, 0x02, 0x00},
+      {0x07, 0x02, 0x54, 0xfe, 0x02, 0x00},
+   };
 
    for (unsigned i = 0; i < sizeof(g17p_pixrel) / sizeof(g17p_pixrel[0]);
         ++i) {
@@ -578,12 +593,13 @@ check_program_records(void)
          &consumed));
    }
 
-   {
+   for (unsigned i = 0;
+        i < sizeof(g17p_not_pixrel) / sizeof(g17p_not_pixrel[0]); ++i) {
       struct agx_ioto_program_record record;
       size_t consumed = 99;
-      CHECK(!agx_ioto_decode_program_record(AGX_CHIP_G17P, g17p_not_pixrel,
-                                            sizeof(g17p_not_pixrel), &record,
-                                            &consumed));
+      CHECK(!agx_ioto_decode_program_record(AGX_CHIP_G17P, g17p_not_pixrel[i],
+                                            sizeof(g17p_not_pixrel[i]),
+                                            &record, &consumed));
    }
 
    for (size_t i = 0; i < sizeof(all_targets) / sizeof(all_targets[0]); ++i) {

@@ -4,6 +4,7 @@
  */
 
 #include "agx_bg_eot.h"
+#include "agx_g17p_wide_mrt_eot.h"
 #include "util/simple_mtx.h"
 #include "util/u_debug.h"
 #include "agx_compile.h"
@@ -42,16 +43,31 @@ agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
    const bool wboit_mrt = bin && bin->info.binary_size == 238 &&
                           bin->info.nr_gprs == 8 &&
                           bin->info.agx3_staging_halfs == 16;
-   const bool raw32_mrt = bin &&
-                         (bin->info.agx3_staging_halfs == 16 ||
-                          bin->info.agx3_staging_halfs == 24 ||
-                          bin->info.agx3_staging_halfs == 32) &&
+   /* The multi-target program of two to eight targets, eight staging halves
+    * and one 44-byte tail each. */
+   const bool raw32_mrt = bin && bin->info.agx3_staging_halfs >= 16 &&
+                         bin->info.agx3_staging_halfs <=
+                            8 * AGX_MAX_RENDER_TARGETS &&
+                         bin->info.agx3_staging_halfs % 8 == 0 &&
                          bin->info.binary_size ==
                             32 + 44 * (bin->info.agx3_staging_halfs / 8) &&
                          bin->info.nr_gprs == 8 &&
                          bin->info.agx3_staging_known;
+   /* The 2D-ARRAY multi-target program of two to eight targets. It carries the
+    * layer wire in addition to the XY tile origin, so it has a longer common
+    * lead and a 54-byte tail each, and Apple's metadata asks for five GPR
+    * dwords rather than four. See agx3_g17p_array_eot.h. */
+   const bool array_mrt = bin && bin->info.agx3_staging_halfs >= 16 &&
+                          bin->info.agx3_staging_halfs <=
+                             8 * AGX_MAX_RENDER_TARGETS &&
+                          bin->info.agx3_staging_halfs % 8 == 0 &&
+                          bin->info.binary_size ==
+                             42 + 54 * (bin->info.agx3_staging_halfs / 8) &&
+                          bin->info.nr_gprs == 10 &&
+                          bin->info.agx3_staging_known;
    return bin && bin->binary &&
-          (rt0 || native_84_rt0 || rgba8_mrt || wboit_mrt || raw32_mrt) &&
+          (rt0 || native_84_rt0 || rgba8_mrt || wboit_mrt || raw32_mrt ||
+           array_mrt) &&
           bin->info.main_offset == 0 &&
           bin->info.main_size == bin->info.binary_size &&
           !bin->info.scratch_size && bin->info.agx3_staging_known;
@@ -77,8 +93,15 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
        (main_offset != 0 &&
         main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
        main_offset > bin->info.binary_size ||
-       bin->info.main_size > bin->info.binary_size - main_offset)
+       bin->info.main_size > bin->info.binary_size - main_offset) {
+      mesa_loge("asahi: G17P %s program geometry is unproven: binary=%u "
+                "main=%u@%u preamble=%u rodata=%u",
+                bin->info.stage == MESA_SHADER_COMPUTE ? "end-of-tile"
+                                                       : "background",
+                bin->info.binary_size, bin->info.main_size, main_offset,
+                bin->info.has_preamble, bin->info.rodata.size_16);
       return false;
+   }
 
    const size_t size = lead_size + block_size;
    uint8_t *image = malloc(size);
@@ -228,6 +251,9 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
    struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);
    struct agx_shader_part bin;
    if (!agx_compile_shader_nir(shader, key, &bin)) {
+      mesa_loge("asahi: the %s shader did not compile for this chip",
+                shader->info.stage == MESA_SHADER_COMPUTE ? "end-of-tile"
+                                                          : "background");
       ralloc_free(shader);
       ralloc_free(res);
       return NULL;
@@ -314,10 +340,23 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
       .fs.ignore_tib_dependencies = true,
+      /* G17P multisample backgrounds store through the coverage register. */
+      .fs.nr_samples =
+         cache->dev->chip == AGX_CHIP_G17P ? key->tib.nr_samples : 0,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P ||
                      cache->dev->chip == AGX_CHIP_G17G,
    };
+
+   /* The multi-target background protocol is keyed, not inferred: without
+    * this the packer sees a bare run of tile stores, refuses the shader and
+    * the draw is dropped. Vulkan says so through mixed_mrt; GL reaches the
+    * same shapes through an ordinary draw-buffer mask, and
+    * KHR-GL30.draw_buffers clears eight RGBA8 targets at once. */
+   unsigned background_targets = 0;
+   for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+      background_targets += key->op[rt] != AGX_BG_EOT_NONE;
+   compiler_key.g17p_mrt_bg = key->mixed_mrt || background_targets > 1;
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_BG_EOT_NONE)
@@ -377,6 +416,40 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          if (key->op[rt] != AGX_BG_EOT_NONE)
             return NULL;
       }
+   }
+
+   const unsigned rgba8_mask = agx_g17p_rgba8_mrt_mask(&key->tib);
+   const unsigned active_count = util_bitcount(rgba8_mask);
+   if (cache->dev->chip == AGX_CHIP_G17P && rgba8_mask) {
+      /* EOT partitions are physical offset/sample-stride quotients, not
+       * fragment synchronization classes. All these compact offsets stay
+       * in partition zero; native PBEs and offset arguments use active order. */
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+         if (key->op[rt] != ((rgba8_mask & BITFIELD_BIT(rt))
+                              ? AGX_EOT_STORE : AGX_BG_EOT_NONE))
+            return NULL;
+      }
+      struct agx_g17p_wide_mrt_eot native;
+      if (!agx_g17p_wide_mrt_eot_get(active_count, &native))
+         return NULL;
+      struct agx_shader_part bin = {
+         .binary = (void *)native.code,
+         .info = {
+            .stage = MESA_SHADER_COMPUTE,
+            .binary_size = native.size,
+            .main_size = native.size,
+            .nr_gprs = 8,
+            .agx3_staging_known = true,
+            .agx3_staging_halfs = native.staging_halfs,
+         },
+      };
+      struct agx_bg_eot_shader *res = rzalloc(cache->ht, struct agx_bg_eot_shader);
+      if (!res || !agx_g17p_upload_bg_eot(cache, &bin, res)) {
+         ralloc_free(res);
+         return NULL;
+      }
+      res->info = bin.info;
+      return res;
    }
 
    nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_COMPUTE,
@@ -446,7 +519,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
       enum pipe_format physical =
          agx_tilebuffer_physical_format(&key->tib, rt);
       if (cache->dev->chip == AGX_CHIP_G17P &&
-          key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT) {
+          (key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT ||
+           key->tib.logical_format[rt] == PIPE_FORMAT_R9G9B9E5_FLOAT)) {
          /* G17P keeps packed-float tiles as one raw 32-bit word. The matching
           * PBE descriptor also uses R32_UINT to preserve those exact bits. */
          physical = PIPE_FORMAT_R32_UINT;
@@ -482,6 +556,28 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
        * their native program from it. */
       agx_g17p_configure_rt0_eot_key(key->tib.logical_format[0],
                                     &compiler_key);
+      compiler_key.g17p_rt0_eot_multisample = store_multisample;
+
+      /* A mixed layout storing several targets uses the multi-target
+       * builtin, selecting each target's IMGWBLK tail by its format. A
+       * single stored target keeps its format's own program. */
+      /* Counted whatever named the layout. A GL draw-buffer mask reaches the
+       * same several-target store as a Vulkan mixed layout; the selectors
+       * come from each target's own logical format either way. */
+      unsigned stores = 0;
+      for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+         stores += key->op[rt] == AGX_EOT_STORE;
+
+      if (stores > 1 &&
+          stores <= ARRAY_SIZE(compiler_key.g17p_mrt_eot_selectors)) {
+         for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
+            if (key->op[rt] == AGX_EOT_STORE) {
+               compiler_key.g17p_mrt_eot_selectors
+                  [compiler_key.g17p_mrt_eot_count++] =
+                  agx_g17p_mrt_eot_selector(key->tib.logical_format[rt]);
+            }
+         }
+      }
    }
    if (cache->dev->chip == AGX_CHIP_G17P)
       compiler_key.g17p_rt0_eot_multisample = store_multisample;
@@ -565,6 +661,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
 
    const uint32_t *bin = cache->dev->libagx_programs[program];
    if (!bin) {
+      mesa_loge("asahi: libagx program %u is not built for this chip", program);
       ralloc_free(p);
       return NULL;
    }
@@ -572,6 +669,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
    const void *binary = (const uint8_t *)bin + sizeof(*info);
 
    p->info = *info;
+   p->rodata_offset = 0;
 
    assert(info->main_offset == 0 || program != LIBAGX_HELPER);
 
@@ -583,17 +681,30 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       const size_t lead_size = 0x340;
       const size_t main_span = MAX2(info->main_size, info->binary_size);
       const size_t block_size = agx3_code_block_size(main_span);
-      if (!block_size || block_size > SIZE_MAX - lead_size ||
+      /* Promoted constants live in the binary and are published as a uniform
+       * range beside the kernel's arguments, the same way the legacy USC path
+       * maps them with agx_usc_immediates(). They are carried in this image
+       * so one allocation still holds the whole program. */
+      const size_t rodata_size = (size_t)info->rodata.size_16 * 2;
+      const size_t rodata_pad = rodata_size ? ALIGN_POT(rodata_size, 16) : 0;
+      if (!block_size || block_size > SIZE_MAX - lead_size - rodata_pad ||
           info->main_offset > info->binary_size ||
           info->main_size > info->binary_size - info->main_offset ||
-          info->preamble_offset || info->nr_preamble_gprs ||
-          info->rodata.size_16) {
+          (rodata_size &&
+           (info->rodata.offset > info->binary_size ||
+            rodata_size > info->binary_size - info->rodata.offset)) ||
+          info->preamble_offset || info->nr_preamble_gprs) {
+         mesa_loge("asahi: libagx program %u has no G17P launch shape: "
+                   "main %u@%u of %u, preamble %u/%u, rodata %u",
+                   program, info->main_size, info->main_offset,
+                   info->binary_size, info->preamble_offset,
+                   info->nr_preamble_gprs, info->rodata.size_16);
          ralloc_free(p);
          return NULL;
       }
 
-      const size_t size = lead_size + block_size;
-      uint8_t *image = malloc(size);
+      const size_t size = lead_size + block_size + rodata_pad;
+      uint8_t *image = calloc(1, size);
       if (!image) {
          ralloc_free(p);
          return NULL;
@@ -603,6 +714,11 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
          image + lead_size, block_size,
          (const uint8_t *)binary + info->main_offset, info->main_size,
          main_span, NULL, false);
+      if (rodata_size) {
+         memcpy(image + lead_size + block_size,
+                (const uint8_t *)binary + info->rodata.offset, rodata_size);
+         p->rodata_offset = lead_size + block_size;
+      }
       p->ptr = built
          ? agx_pool_upload_aligned_with_bo(&cache->pool, image, size, 128,
                                            &p->bo)

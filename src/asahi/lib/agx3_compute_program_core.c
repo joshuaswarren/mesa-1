@@ -18,6 +18,12 @@ _Static_assert(AGX3_G17P_DIRECT_ADD3_DISPATCH_SIZE ==
 _Static_assert(AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE ==
                   AGX3_CDM_DIRECT_LAUNCH_SIZE + AGX3_CDM_BARRIER_SIZE,
                "G17P native dispatch size must cover launch plus barrier");
+_Static_assert(AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE ==
+                  AGX3_CDM_INDIRECT_LAUNCH_SIZE,
+               "G17P indirect launch must be the grounded compact record");
+_Static_assert(AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE ==
+                  AGX3_CDM_INDIRECT_LAUNCH_SIZE + AGX3_CDM_BARRIER_SIZE,
+               "G17P indirect dispatch size must cover launch plus barrier");
 _Static_assert(AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE == 72,
                "G17P indirect dispatch must cover the 44+28-byte pair");
 
@@ -292,6 +298,71 @@ agx3_g17p_store_native_program_pointer(uint8_t *packed, uint64_t program_va)
       UINT32_C(0x40000000) | (uint32_t)((program_va >> 40) & 0xff));
 }
 
+/* The six-word indirect launch.  Words 0..3 are the same program header the
+ * direct record uses; mode 2 then replaces the direct record's own three
+ * global and three local size words with words 4..5, the 48-bit address of a
+ * six-u32 grid the GPU reads for itself (three global THREAD counts followed
+ * by three local sizes).  That is why the record is 24 bytes where the direct
+ * one is 40: the pinned performEnqueueKernel emitter at G17P 0x216ac876c
+ * stores exactly these six words and advances its write cursor by 0x18. */
+static bool
+agx3_g17p_native_indirect_launch_pack(
+   const struct agx3_compute_program *program, uint64_t geometry_va,
+   uint8_t packed[AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE])
+{
+   if (!packed)
+      return false;
+
+   memset(packed, 0, AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE);
+   if (!program || program->chip != AGX_CHIP_G17P ||
+       !program->g17p_native_compute_live_bound || program->program_va == 0 ||
+       program->program_va > UINT64_C(0xffffffffffff) ||
+       (program->program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
+       !geometry_va || geometry_va >= (UINT64_C(1) << 48) ||
+       (geometry_va & 3) != 0 ||
+       program->launch_template.word0 >= (UINT32_C(1) << 27) ||
+       program->launch_template.word1 >= (UINT32_C(1) << 22))
+      return false;
+
+   agx3_cmdstream_store_le32(
+      packed, program->launch_template.word0 | AGX3_G17P_NATIVE_INDIRECT_MODE);
+   agx3_cmdstream_store_le32(
+      packed + 4,
+      (uint32_t)(((program->program_va >> 38) & 0x3ff) << 22) |
+         program->launch_template.word1);
+   agx3_g17p_store_native_program_pointer(packed + 8, program->program_va);
+   agx3_cmdstream_store_le32(packed + 16, (uint32_t)(geometry_va >> 32));
+   agx3_cmdstream_store_le32(packed + 20, (uint32_t)geometry_va);
+   return true;
+}
+
+bool
+agx3_g17p_native_indirect_compute_launch_append(
+   const struct agx3_compute_program *program, uint64_t geometry_va,
+   uint8_t barrier_flags, struct agx3_compute_dispatch_sink *sink)
+{
+   if (!sink || (sink->capacity != 0 && !sink->data) ||
+       sink->length > sink->capacity ||
+       AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE > sink->capacity - sink->length)
+      return false;
+
+   uint8_t staged[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE];
+   if (!agx3_g17p_native_indirect_launch_pack(program, geometry_va, staged))
+      return false;
+
+   const struct agx3_cdm_barrier_info barrier = {
+      .chip = AGX_CHIP_G17P,
+      .flags = barrier_flags,
+   };
+   if (!agx3_cdm_barrier_pack(&barrier,
+                              staged + AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE))
+      return false;
+
+   memcpy(sink->data + sink->length, staged, sizeof(staged));
+   sink->length += sizeof(staged);
+   return true;
+}
+
 bool
 agx3_g17p_native_indirect_compute_dispatch_append(
    const struct agx3_compute_program *program,
@@ -332,21 +403,11 @@ agx3_g17p_native_indirect_compute_dispatch_append(
           dispatch->helper_program, &helper_grid, &helper_sink))
       return false;
 
-   uint8_t *main = staged + helper_sink.length;
-   agx3_cmdstream_store_le32(
-      main, program->launch_template.word0 | AGX3_G17P_NATIVE_INDIRECT_MODE);
-   agx3_cmdstream_store_le32(
-      main + 4,
-      (uint32_t)(((program->program_va >> 38) & 0x3ff) << 22) |
-         program->launch_template.word1);
-   agx3_g17p_store_native_program_pointer(main + 8, program->program_va);
-   agx3_cmdstream_store_le32(main + 16, (uint32_t)(dispatch->geometry_va >> 32));
-   agx3_cmdstream_store_le32(main + 20, (uint32_t)dispatch->geometry_va);
-   const struct agx3_cdm_barrier_info barrier = {
-      .chip = AGX_CHIP_G17P,
-      .flags = 0,
-   };
-   if (!agx3_cdm_barrier_pack(&barrier, main + 24))
+   /* Exactly the standalone record, appended after the helper: there is one
+    * encoder for the six words so the coupled and uncoupled forms cannot
+    * drift apart. */
+   if (!agx3_g17p_native_indirect_compute_launch_append(
+          program, dispatch->geometry_va, 0, &helper_sink))
       return false;
 
    memcpy(sink->data + sink->length, staged, sizeof(staged));

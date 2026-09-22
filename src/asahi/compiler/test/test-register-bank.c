@@ -15,6 +15,7 @@ struct fixture {
    BITSET_DECLARE(used, AGX_NUM_REGS);
    BITSET_DECLARE(low_gpr, 512);
    BITSET_DECLARE(texture_gpr, 512);
+   BITSET_DECLARE(tex_low128, 512);
    BITSET_DECLARE(log2_gpr, 512);
    BITSET_DECLARE(high_gpr, 512);
    unsigned variables, high_water, memory_count;
@@ -35,6 +36,7 @@ init(struct fixture *f, unsigned bound, unsigned reserved)
       .ncomps = f->widths, .sizes = f->sizes, .classes = f->classes,
       .used_regs[RA_GPR] = f->used, .bound[RA_GPR] = bound,
       .low_gpr = f->low_gpr, .texture_gpr = f->texture_gpr,
+      .tex_low128 = f->tex_low128,
       .tile_gpr_limit = 16,
       .log2_gpr = f->log2_gpr,
       .high_gpr = f->high_gpr,
@@ -111,6 +113,9 @@ main(void)
       .op = AGX_OPCODE_COLLECT, .dest = &constrained, .nr_dests = 1,
    };
    assert(dest_limit(&f.ra, &producer, 0) == 256);
+   BITSET_SET(f.tex_low128, constrained.value);
+   assert(dest_limit(&f.ra, &producer, 0) == 128);
+   BITSET_CLEAR(f.tex_low128, constrained.value);
    BITSET_SET(f.texture_gpr, constrained.value);
    assert(dest_limit(&f.ra, &producer, 0) == 128);
    BITSET_SET(f.low_gpr, constrained.value);

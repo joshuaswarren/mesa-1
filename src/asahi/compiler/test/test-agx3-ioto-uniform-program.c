@@ -98,7 +98,7 @@ test_exact_uniform_program(void)
    };
    static const uint8_t gpu0_body[] = {
       0x0c, 0x20, 0x1c, 0x00, 0x67, 0x00, 0x54, 0x04, 0x00, 0x00, 0x00, 0x00,
-      0x19, 0x00, 0x00, 0x40, 0x22, 0x00, 0x06, 0x08, 0x06, 0x00, 0x06, 0x00,
+      0x59, 0x00, 0x00, 0x40, 0x22, 0x00, 0x06, 0x08, 0x06, 0x00, 0x06, 0x00,
       0x06, 0x00, 0xab, 0x04, 0x09, 0x04, 0xbb, 0x06, 0x09, 0x04,
    };
    static const uint8_t gpu1_body[] = {
@@ -164,7 +164,7 @@ test_g17p_background_clear_body(void)
    static const uint8_t expected[] = {
       0x0c, 0x80, 0x02, 0x00, 0x00, 0x00, 0x46, 0x00, 0x1c, 0x80, 0x02,
       0x00, 0x04, 0x00, 0x00, 0x00, 0x67, 0x00, 0x54, 0x04, 0x00, 0x00,
-      0x00, 0x00, 0x17, 0x00, 0x00, 0x40, 0x22, 0x00, 0x06, 0x08, 0x06,
+      0x00, 0x00, 0x57, 0x00, 0x00, 0x40, 0x22, 0x00, 0x06, 0x08, 0x06,
       0x00, 0x06, 0x00, 0x06, 0x00, 0x2b, 0x04, 0x09, 0x04, 0x3b, 0x06,
       0x09, 0x04, 0x4b, 0x08, 0x09, 0x04, 0x5b, 0x0a, 0x09, 0x04,
    };
@@ -219,6 +219,62 @@ test_bounds_and_cohorts(void)
    CHECK(agx3_ioto_uniform_program_body_bound(AGX_CHIP_G17G, NULL, 0, &bytes,
                                               &chunks));
    CHECK(bytes == 0 && chunks == 0);
+   return true;
+}
+
+static bool
+test_preloaded_base_survives_rollover(void)
+{
+   /* Sixty-four four-dword loads cannot fit in one temporary-register round.
+    * The ordinary program must therefore materialize this address more than
+    * once, while a launcher-owned r0:r1 base must survive every rollover and
+    * leave no address relocations anywhere in the body. */
+   static const struct agx3_ioto_uniform_range range = {
+      .start_halfs = 0,
+      .size_halfs = 512,
+      .address = 0x100,
+   };
+   struct {
+      uint8_t body[8192];
+      struct agx_ioto_inflight_load loads[128];
+      struct agx_ioto_inflight_load sort[128];
+      struct agx_ioto_load_cache_entry cache[128];
+      struct agx_ioto_load_relocation relocations[128];
+   } f;
+   struct agx3_ioto_uniform_program_workspace ws = {
+      .body = f.body,
+      .body_capacity = sizeof(f.body),
+      .loads = f.loads,
+      .load_capacity = ARRAY_SIZE(f.loads),
+      .sort = f.sort,
+      .sort_capacity = ARRAY_SIZE(f.sort),
+      .cache = f.cache,
+      .cache_capacity = ARRAY_SIZE(f.cache),
+      .relocations = f.relocations,
+      .relocation_capacity = ARRAY_SIZE(f.relocations),
+   };
+   struct agx3_ioto_uniform_program_desc desc =
+      program_desc(AGX_CHIP_G17P, &range, 1);
+   size_t written = SIZE_MAX, copy_offset = SIZE_MAX;
+   size_t relocations = SIZE_MAX;
+   ws.relocation_count = &relocations;
+
+   memset(&f, 0xa5, sizeof(f));
+   CHECK(agx3_ioto_uniform_program_body_generate(
+      AGX_CHIP_G17P, &desc, ws, &written, &copy_offset));
+   CHECK(written > copy_offset);
+   CHECK(relocations > 1);
+
+   memset(&f, 0xa5, sizeof(f));
+   desc.initial_gpr_dwords = 2;
+   desc.preloaded_base_valid = true;
+   desc.preloaded_base_half = 0;
+   desc.preloaded_base_address = 0;
+   written = copy_offset = relocations = SIZE_MAX;
+   CHECK(agx3_ioto_uniform_program_body_generate(
+      AGX_CHIP_G17P, &desc, ws, &written, &copy_offset));
+   CHECK(written > copy_offset);
+   CHECK(relocations == 0);
    return true;
 }
 
@@ -309,7 +365,8 @@ int
 main(void)
 {
    if (!test_exact_uniform_program() || !test_g17p_background_clear_body() ||
-       !test_bounds_and_cohorts() || !test_fail_closed())
+       !test_bounds_and_cohorts() ||
+       !test_preloaded_base_survives_rollover() || !test_fail_closed())
       return 1;
 
    printf("agx3_ioto_uniform_program: %u checks passed\n", checks);

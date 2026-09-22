@@ -43,6 +43,7 @@ VK_FN(vkCreateSwapchainKHR);
 VK_FN(vkDestroySwapchainKHR);
 VK_FN(vkCreateSemaphore);
 VK_FN(vkDestroySemaphore);
+VK_FN(vkGetSemaphoreFdKHR);
 VK_FN(vkCreateFence);
 VK_FN(vkDestroyFence);
 VK_FN(vkAcquireNextImageKHR);
@@ -376,10 +377,16 @@ main(int argc, char **argv)
       .queueCount = 1,
       .pQueuePriorities = &priority,
    };
-   const char *const device_extensions[] = {
+   const char *device_extensions[3] = {
       VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-      VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME,
    };
+   uint32_t device_extension_count = 1;
+   if (release_failure)
+      device_extensions[device_extension_count++] =
+         VK_KHR_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME;
+   if (empty_submit_failure)
+      device_extensions[device_extension_count++] =
+         VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME;
    const VkPhysicalDeviceSwapchainMaintenance1FeaturesKHR maintenance1 = {
       .sType =
          VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_KHR,
@@ -390,7 +397,7 @@ main(int argc, char **argv)
       .pNext = release_failure ? &maintenance1 : NULL,
       .queueCreateInfoCount = 1,
       .pQueueCreateInfos = &queue_info,
-      .enabledExtensionCount = release_failure ? 2 : 1,
+      .enabledExtensionCount = device_extension_count,
       .ppEnabledExtensionNames = device_extensions,
    };
    VkDevice device;
@@ -403,6 +410,8 @@ main(int argc, char **argv)
    LOAD_DEVICE(device, vkDestroySwapchainKHR);
    LOAD_DEVICE(device, vkCreateSemaphore);
    LOAD_DEVICE(device, vkDestroySemaphore);
+   if (empty_submit_failure)
+      LOAD_DEVICE(device, vkGetSemaphoreFdKHR);
    LOAD_DEVICE(device, vkCreateFence);
    LOAD_DEVICE(device, vkDestroyFence);
    LOAD_DEVICE(device, vkAcquireNextImageKHR);
@@ -440,7 +449,14 @@ main(int argc, char **argv)
    VkSemaphore acquired, render_done, held_acquired = VK_NULL_HANDLE;
    check(vkCreateSemaphore(device, &semaphore_info, NULL, &acquired),
          "vkCreateSemaphore(acquired)");
-   check(vkCreateSemaphore(device, &semaphore_info, NULL, &render_done),
+   const VkExportSemaphoreCreateInfo export_info = {
+      .sType = VK_STRUCTURE_TYPE_EXPORT_SEMAPHORE_CREATE_INFO,
+      .handleTypes = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+   };
+   VkSemaphoreCreateInfo render_done_info = semaphore_info;
+   if (empty_submit_failure)
+      render_done_info.pNext = &export_info;
+   check(vkCreateSemaphore(device, &render_done_info, NULL, &render_done),
          "vkCreateSemaphore(render_done)");
    if (present_failure) {
       check(vkCreateSemaphore(device, &semaphore_info, NULL, &held_acquired),
@@ -680,6 +696,37 @@ main(int argc, char **argv)
          return EXIT_FAILURE;
       }
 
+      /* The failed submit never signaled render_done. Neither presenting it
+       * nor exporting it may wait for a payload that can no longer arrive. */
+      VkResult present_result = VK_SUCCESS;
+      const VkPresentInfoKHR lost_present = {
+         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
+         .waitSemaphoreCount = 1,
+         .pWaitSemaphores = &render_done,
+         .swapchainCount = 1,
+         .pSwapchains = &swapchain,
+         .pImageIndices = &image_index,
+         .pResults = &present_result,
+      };
+      puts(TEST_NAME ": checking present after device loss");
+      fflush(stdout);
+      result = vkQueuePresentKHR(queue, &lost_present);
+      if (result != VK_ERROR_DEVICE_LOST ||
+          present_result != VK_ERROR_DEVICE_LOST)
+         die("present after device loss did not return device loss");
+
+      const VkSemaphoreGetFdInfoKHR get_fd_info = {
+         .sType = VK_STRUCTURE_TYPE_SEMAPHORE_GET_FD_INFO_KHR,
+         .semaphore = render_done,
+         .handleType = VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT,
+      };
+      int fd = -1;
+      puts(TEST_NAME ": checking semaphore export after device loss");
+      fflush(stdout);
+      result = vkGetSemaphoreFdKHR(device, &get_fd_info, &fd);
+      if (result != VK_ERROR_DEVICE_LOST || fd != -1)
+         die("semaphore export after device loss did not return device loss");
+
       vkDestroySemaphore(device, render_done, NULL);
       vkDestroySemaphore(device, acquired, NULL);
       vkDestroySwapchainKHR(device, swapchain, NULL);
@@ -688,7 +735,8 @@ main(int argc, char **argv)
       vkDestroyInstance(instance, NULL);
       dlclose(loader);
       printf(TEST_NAME ": PASS — failed empty-submit sync transfer was "
-                       "propagated as device loss; teardown completed\n");
+                       "propagated as device loss; present and semaphore "
+                       "export returned device loss; teardown completed\n");
       return EXIT_SUCCESS;
    }
 

@@ -35,6 +35,19 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * shifted adds witness 1..4; shift 0 is the unshifted form. */
    if (d->shift > 4 || d->wait_mask >= (1u << slots))
       return false;
+   if ((d->src_a_cache || d->src_cache) && !agx3b)
+      return false;
+   if ((d->saturate || d->src_a_cache) && !d->src_a_is_register)
+      return false;
+   if (d->src_cache && !d->src_a_is_register)
+      return false;
+   if ((d->src_a_cache && d->src_a_kill) || (d->src_cache && d->src_kill))
+      return false;
+   /* Saturation is witnessed at full width with matching signedness only. */
+   if (d->saturate &&
+       (d->src_a_16 || d->src_16 || d->shift ||
+        d->src_a_sign_extend != d->sign_extend))
+      return false;
    if (d->src_a_is_register) {
       if (d->immediate != 0)
          return false;
@@ -51,7 +64,7 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * alongside saturation. */
    const bool g17g_wide_pair = !agx3b && d->src_a_is_register &&
                                !d->src_a_16 && !d->src_16 && d->shift == 0;
-   if ((d->subtract || d->saturate) && !g17g_wide_pair)
+   if (!agx3b && (d->subtract || d->saturate) && !g17g_wide_pair)
       return false;
    if ((d->src_a_sign_extend_32 || d->sign_extend_32) && !d->saturate)
       return false;
@@ -95,7 +108,7 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       : agx3b ? sizeof(baseline_b) / sizeof(baseline_b[0])
               : sizeof(baseline_c) / sizeof(baseline_c[0]);
 
-   struct agx3_field_kv ov[20];
+   struct agx3_field_kv ov[24];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, d->dest);
    ov[n++] = (struct agx3_field_kv)KV(11, d->dest_cache ? 1 : 0);
@@ -106,6 +119,12 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       ov[n++] = (struct agx3_field_kv)KV(42, d->src_kill ? 1 : 0);
       if (d->src_a_sign_extend || d->src_a_sign_extend_32)
          ov[n++] = (struct agx3_field_kv)KV(28, 1);
+      if (d->src_a_cache)
+         ov[n++] = (struct agx3_field_kv)KV(25, 1);
+      if (d->src_cache)
+         ov[n++] = (struct agx3_field_kv)KV(40, 1);
+      if (d->saturate && agx3b)
+         ov[n++] = (struct agx3_field_kv)KV(53, 1);
    }
    else
       ov[n++] = (struct agx3_field_kv)KV(15, d->immediate);
@@ -126,7 +145,7 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
       ov[n++] = (struct agx3_field_kv)KV(43, 1);
    if (d->shift)
       ov[n++] = (struct agx3_field_kv)KV(agx3b ? 54 : 55, d->shift);
-   else if (d->saturate)
+   else if (d->saturate && !agx3b)
       ov[n++] = (struct agx3_field_kv)KV(54, 1);
    for (unsigned i = 0; i < slots; ++i) {
       if (d->wait_mask & (1u << i))
@@ -134,7 +153,7 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
    }
 
    return agx3_bind_compose(encoding,
-                            agx3b ? "iadd" : (d->subtract ? "isub32" : "iadd32"),
+                            agx3b ? (d->subtract ? "isub" : "iadd") : (d->subtract ? "isub32" : "iadd32"),
                             0, baseline, nbaseline, ov, n, out, len);
 }
 
@@ -243,39 +262,41 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
    if (d->no_addend &&
        (d->src_c || d->src_c_16 || d->src_c_64 || d->src_c_sign_extend))
       return false;
-   /* Sign extension is meaningful for 16->32 as well as 32->64 products.
-    * The grounded 16->32 form is specifically a paired-half pure multiply;
-    * its native witnesses are both-signed and both-unsigned, not mixed. */
-   const bool widening_half_product =
-      !d->dest_16 && !d->dest_64 && d->src_a_16 &&
-      d->multiplier_is_register && d->multiplier_16 && d->no_addend;
    if (d->dest_64) {
       /* A 32->64 product widens operands that are already 32-bit, so a narrow
        * operand carrying the bit is unwitnessed here. */
       if ((d->src_a_sign_extend && d->src_a_16) ||
           (d->multiplier_sign_extend && d->multiplier_16))
          return false;
-   } else if (widening_half_product) {
-      /* Paired-half pure multiply into a 32-bit result: the native witnesses
-       * are both-signed and both-unsigned, never mixed. */
-      if (d->src_a_sign_extend != d->multiplier_sign_extend)
-         return false;
-   } else {
-      /* Any other 32-bit product.  "A 32-bit product does not widen anything"
-       * only holds when the operand is itself 32 bits; a 16-bit multiplicand
-       * widens by exactly one step and Apple sets f28 for it:
+   } else if (!d->dest_16) {
+      /* A 32-bit product widens each 16-bit operand by exactly one step, by
+       * that operand's own bit: f28 for slot A, f43 for a slot-B register.
+       * A 32-bit operand widens nothing and carries neither.
        *
        *   int(short  a) * 129 + int(short  c)
        *      9f 00 56 00 02 02 04 02 10 2a 66 00     f24 = 1, f28 = 1
        *   int(ushort a) * 129 + int(ushort c)
        *      9f 00 56 00 02 02 04 02 10 2a 22 00     f24 = 1, f28 = 0
+       *   int(short) * int(ushort), unsigned slot A
+       *      9f 00 56 00 02 00 04 00 10 26 1a 00     f43 = 1 alone
+       *   int(ushort) * int(short), unsigned slot B
+       *      9f 00 56 00 02 00 04 00 10 26 0e 00     f28 = 1 alone
+       *   int a * int(short b)
+       *      9f 00 56 00 02 00 10 00 50 26 1a 00     f24 = 2, f39 = 1, f43 = 1
+       *   int(short a) * int(short b) + int c
+       *      9f 00 56 00 02 08 14 00 10 2f 3e 00     f54 = 2
+       *   int(short a) * 129 + int c
+       *      9f 00 56 00 02 08 04 02 10 2b 26 00     f54 = 2
        *
-       * so gate slot A's bit on slot A being narrow. No witness exercises a
-       * narrow register multiplier with a 32-bit result outside the paired-
-       * half form above, so the multiplier's bit still fails closed. */
-      if (d->src_a_sign_extend && !d->src_a_16)
+       * A half multiplier appears only with no addend or a 32-bit register
+       * addend, and no narrow operand appears with an immediate addend. */
+      if ((d->src_a_sign_extend && !d->src_a_16) ||
+          (d->multiplier_sign_extend && !d->multiplier_16))
          return false;
-      if (d->multiplier_sign_extend)
+      if ((d->src_a_16 || d->multiplier_16) && d->addend_is_immediate)
+         return false;
+      if (d->multiplier_16 && !d->no_addend &&
+          (d->src_c_16 || d->src_c_64))
          return false;
    }
    /* The 8-bit immediate multiplier has no sign-extend bit of its own. */

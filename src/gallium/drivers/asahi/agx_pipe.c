@@ -2013,23 +2013,17 @@ agx_create_context(struct pipe_screen *screen, void *priv, unsigned flags)
    /* By default all samples are enabled */
    ctx->sample_mask = ~0;
 
-   /* HAL200's native sampler descriptor carries the API sampler-state bias.
-    * Asking nir_lower_tex to add it again manufactures a register-biased
-    * texture operation, including for shadow samplers, and applies the bias
-    * twice. Keep the Gen4 software path; G17P consumes the descriptor field
-    * packed by agx_upload_samplers().
-    *
-    * G17G is deliberately NOT included, though SAMPLER_GEN5 has the same
-    * lod_bias field and hk_compile_nir() uses the sampler generation rather
-    * than the ISA encoding. Measured on hardware (v178): moving G17G to the
-    * descriptor bias costs texture_lod_bias.texture_lod_bias_all and one
-    * ext_texture_shadow_lod case, 850 -> 848. The shapes it produces are
-    * closer to Apple's -- constant levels fold to immediates -- but something
-    * else on this part still depends on the software bias, so it stays until
-    * that is understood. */
-   ctx->support_lod_bias =
-      !(flags & PIPE_CONTEXT_NO_LOD_BIAS) &&
-      agx_chip_isa_encoding(dev->chip) != AGX_ISA_ENCODING_AGX3B;
+   /* The sampler descriptor's level-of-detail bias is an eleven-bit field in
+    * 1/64 steps, and the hardware quantises the level it finally samples at to
+    * 1/64 as well. Rounding the API bias into the descriptor therefore costs a
+    * step the hardware was going to take anyway, and the two compound: a
+    * sampler bias of 0.629921 and a shader bias of 1.889764 should sample at
+    * 2.519685 and sampled at 2.500000, two steps low, which is what
+    * KHR-GL30.texture_lod_bias.texture_lod_bias_all reports. Summing the two
+    * biases in floating point first leaves the hardware's single step, so
+    * every chip takes nir_lower_tex's software path and no descriptor carries
+    * the bias. */
+   ctx->support_lod_bias = !(flags & PIPE_CONTEXT_NO_LOD_BIAS);
    ctx->robust = (flags & PIPE_CONTEXT_ROBUST_BUFFER_ACCESS);
 
    agx_scratch_init(agx_device(screen), &ctx->scratch_vs);

@@ -1,0 +1,135 @@
+[
+  {
+    "index": 0,
+    "case": "dEQP-VK.ycbcr.conversion.b10x6g10x6r10x6g10x6_422_unorm_4pack16_khr.color_conversion.ycbcr_2020_itu_full_tiling_linear_cosited",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b10x6g10x6r10x6g10x6_422_unorm_4pack16_khr.color_conversion.ycbcr_2020_itu_full_tiling_linear_cosited",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223046084797Z-packed-ycbcr-v3-000/cts/000/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "Pass",
+    "started_unix": 1789338647.158808,
+    "message": "Pass",
+    "returncode": 0,
+    "seconds": 0.10819987200011383,
+    "finished_unix": 1789338647.2731245,
+    "pid": 17225
+  },
+  {
+    "index": 1,
+    "case": "dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223046084797Z-packed-ycbcr-v3-000/cts/001/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "Pass",
+    "started_unix": 1789338647.283434,
+    "message": "Pass",
+    "returncode": 0,
+    "seconds": 0.10755637300007947,
+    "finished_unix": 1789338647.3968089,
+    "pid": 17227
+  },
+  {
+    "index": 2,
+    "case": "dEQP-VK.ycbcr.conversion.b8g8r8g8_422_unorm_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear_disjoint",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b8g8r8g8_422_unorm_khr.chroma_reconstruction.nearest.explicit_linear_midpoint_tiling_linear_disjoint",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223046084797Z-packed-ycbcr-v3-000/cts/002/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789338647.4074755,
+    "message": "Format doesn&apos;t disjoint planes at vktYCbCrConversionTests.cpp:1969",
+    "returncode": 0,
+    "seconds": 0.05552181799976097,
+    "finished_unix": 1789338647.4687514,
+    "pid": 17230
+  },
+  {
+    "index": 3,
+    "case": "dEQP-VK.ycbcr.conversion.g16b16g16r16_422_unorm_khr.chroma_reconstruction.linear.explicit_linear_cosited_tiling_optimal_disjoint",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.g16b16g16r16_422_unorm_khr.chroma_reconstruction.linear.explicit_linear_cosited_tiling_optimal_disjoint",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223046084797Z-packed-ycbcr-v3-000/cts/003/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789338647.4794023,
+    "message": "Format doesn&apos;t disjoint planes at vktYCbCrConversionTests.cpp:1969",
+    "returncode": 0,
+    "seconds": 0.055593645999579167,
+    "finished_unix": 1789338647.5398347,
+    "pid": 17232
+  },
+  {
+    "index": 4,
+    "case": "dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.linear.explicit_nearest_tiling_optimal_swapped_chroma",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.b12x4g12x4r12x4g12x4_422_unorm_4pack16_khr.chroma_reconstruction.linear.explicit_nearest_tiling_optimal_swapped_chroma",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223046084797Z-packed-ycbcr-v3-000/cts/004/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "Pass",
+    "started_unix": 1789338647.5505064,
+    "message": "Pass",
+    "returncode": 0,
+    "seconds": 0.15786097899990637,
+    "finished_unix": 1789338647.7139258,
+    "pid": 17234
+  },
+  {
+    "index": 5,
+    "case": "dEQP-VK.ycbcr.format.g16b16g16r16_422_unorm_khr.fragment_optimal",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.format.g16b16g16r16_422_unorm_khr.fragment_optimal",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223046084797Z-packed-ycbcr-v3-000/cts/005/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "Pass",
+    "started_unix": 1789338647.7256408,
+    "message": "All samples passed",
+    "returncode": 0,
+    "seconds": 0.10766505199990206,
+    "finished_unix": 1789338647.8390305,
+    "pid": 17238
+  },
+  {
+    "index": 6,
+    "case": "dEQP-VK.ycbcr.conversion.g10x6b10x6g10x6r10x6_422_unorm_4pack16_khr.chroma_reconstruction.nearest.default_linear_midpoint_tiling_optimal_disjoint",
+    "argv": [
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "--deqp-case=dEQP-VK.ycbcr.conversion.g10x6b10x6g10x6r10x6_422_unorm_4pack16_khr.chroma_reconstruction.nearest.default_linear_midpoint_tiling_optimal_disjoint",
+      "--deqp-log-images=disable",
+      "--deqp-log-shader-sources=disable",
+      "--deqp-log-filename=/root/asahi-evidence/20260913T223046084797Z-packed-ycbcr-v3-000/cts/006/result.qpa"
+    ],
+    "boot_id": "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    "status": "NotSupported",
+    "started_unix": 1789338647.8517542,
+    "message": "Format doesn&apos;t disjoint planes at vktYCbCrConversionTests.cpp:1969",
+    "returncode": 0,
+    "seconds": 0.055532293999931426,
+    "finished_unix": 1789338647.9120429,
+    "pid": 17241
+  }
+]

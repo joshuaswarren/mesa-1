@@ -137,7 +137,9 @@ agx3_ioto_uniform_program_body_generate(
           desc != NULL ? desc->range_count : 0, &body_bound, &chunk_count) ||
        body_bound > workspace.body_capacity ||
        (workspace.body_capacity != 0 && workspace.body == NULL) ||
-       workspace_overlaps(workspace))
+       workspace_overlaps(workspace) ||
+       (workspace.relocation_capacity && !workspace.relocations) ||
+       (workspace.relocations && !workspace.relocation_count))
       return false;
 
    (void)chunk_count;
@@ -150,6 +152,14 @@ agx3_ioto_uniform_program_body_generate(
           workspace.cache_capacity, desc->initial_gpr_dwords,
           desc->fast_path_enabled,
           agx_ioto_load_target_encoding(chip) == AGX_IOTO_LOAD_ENCODING_GPU0))
+      return false;
+
+   core.relocations = workspace.relocations;
+   core.relocation_capacity = workspace.relocation_capacity;
+   if (desc->preloaded_base_valid &&
+       !agx_ioto_load_core_set_fixed_base(
+          &core, desc->preloaded_base_address,
+          desc->preloaded_base_half))
       return false;
 
    const struct agx_ioto_load_workspace sort = {
@@ -188,17 +198,10 @@ agx3_ioto_uniform_program_body_generate(
    if (!agx3_ioto_load_finish_round_native(&core, true, sort))
       return false;
 
-   /* finishRound may have already copied earlier rounds before recycling
-    * temporaries, and extended native COPY records are not always four bytes.
-    * Find the actual final suffix by decoding emitted record boundaries. */
-   size_t staged_copy_offset;
-   if (!agx_ioto_program_copy_suffix_offset(chip, workspace.body,
-                                             core.sink.length,
-                                             &staged_copy_offset))
-      return false;
-
    *written = core.sink.length;
-   *copy_offset = staged_copy_offset;
+   *copy_offset = core.copy_suffix_offset;
+   if (workspace.relocations)
+      *workspace.relocation_count = core.relocation_count;
    return true;
 }
 

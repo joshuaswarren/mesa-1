@@ -131,7 +131,11 @@ pass(agx_context *ctx, void *memctx)
       assert(info->nr_promotable_uses > 0);
 
       /* Try to assign a uniform */
-      unsigned uniform = ALIGN_POT(ctx->out->push_count, info->align_16);
+      /* Native Ioto publishes 32-bit uniform words. Align the beginning of
+       * the constant range even when its first constant is only 16 bits. */
+      unsigned range_align = ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+                             i == 0 ? MAX2(info->align_16, 2) : info->align_16;
+      unsigned uniform = ALIGN_POT(ctx->out->push_count, range_align);
       unsigned new_count = uniform + info->align_16;
       if (new_count > AGX_NUM_UNIFORMS)
          break;
@@ -154,6 +158,14 @@ pass(agx_context *ctx, void *memctx)
       memcpy(&ctx->rodata[uniform_offs], &info->value, size_B);
 
       ctx->out->rodata.size_16 = new_count - ctx->out->rodata.base_uniform;
+   }
+
+   /* Keep the trailing half inside the owned constant blob and uniform
+    * allocation; the native uploader cannot load half of a 32-bit word. */
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+       (ctx->out->rodata.size_16 & 1)) {
+      ctx->rodata[ctx->out->rodata.size_16++] = 0;
+      ctx->out->push_count++;
    }
 
    /* Promote in the IR */

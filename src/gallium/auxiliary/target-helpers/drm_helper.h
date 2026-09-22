@@ -417,12 +417,25 @@ DRM_DRIVER_DESCRIPTOR_STUB(lima)
 
 #ifdef GALLIUM_ZINK
 #include "zink/zink_public.h"
+#ifdef GALLIUM_KMSRO
+#include "loader/loader.h"
+#include "kmsro/drm/kmsro_drm_public.h"
+#endif
 
 static struct pipe_screen *
 pipe_zink_create_screen(int fd, const struct pipe_screen_config *config)
 {
    struct pipe_screen *screen;
-   screen = zink_drm_create_screen(fd, config, NULL);
+#ifdef GALLIUM_KMSRO
+   /* A display-only DRM node has no Vulkan device to match. Keep the requested
+    * Zink renderer, but use kmsro to allocate scanout and select its compatible
+    * render node. Falling back to swrast loses the GBM front-buffer protocol.
+    */
+   if (!loader_is_device_render_capable(fd))
+      screen = kmsro_drm_screen_create_zink(fd, config);
+   else
+#endif
+      screen = zink_drm_create_screen(fd, config, NULL);
    return screen ? debug_screen_wrap(screen) : NULL;
 }
 

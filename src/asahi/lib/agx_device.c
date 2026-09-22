@@ -83,7 +83,8 @@ asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
 void
 agx_drm_bo_munmap(struct agx_device *dev, struct agx_bo *bo)
 {
-   munmap(bo->_map, bo->size);
+   munmap(bo->_map, agx_bo_map_size(bo));
+   bo->_map_size = 0;
 }
 
 int
@@ -445,7 +446,8 @@ agx_bo_alloc(struct agx_device *dev, size_t size, size_t align,
 }
 
 static void
-agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
+agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr,
+            size_t length)
 {
    assert(bo->_map == NULL && "not double mapped");
 
@@ -460,10 +462,12 @@ agx_bo_mmap(struct agx_device *dev, struct agx_bo *bo, void *fixed_addr)
    }
 
    flags = MAP_SHARED | (fixed_addr ? MAP_FIXED : 0);
-   bo->_map = os_mmap(fixed_addr, bo->size, PROT_READ | PROT_WRITE, flags,
-                      dev->fd, gem_mmap_offset.offset);
+   bo->_map_size = length ?: bo->size;
+   bo->_map = os_mmap(fixed_addr, bo->_map_size, PROT_READ | PROT_WRITE,
+                      flags, dev->fd, gem_mmap_offset.offset);
    if (bo->_map == MAP_FAILED) {
       bo->_map = NULL;
+      bo->_map_size = 0;
       fprintf(stderr,
               "mmap failed: result=%p size=0x%llx fd=%i offset=0x%llx %m\n",
               bo->_map, (long long)bo->size, dev->fd,
@@ -817,6 +821,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
 {
    dev->debug =
       debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
+
+   /* Chromium may sanitize the driver's aggregate debug variable when it
+    * respawns its sandboxed GPU process, while the narrowly scoped HK_G17P_*
+    * controls survive (the draw/submit traces use the same route).  Preserve
+    * a dedicated opt-in for the failure-only decoder so a reproduced device
+    * loss cannot silently discard the payload we armed it to capture. */
+   if (debug_get_bool_option("HK_G17P_FAULTTRACE", false))
+      dev->debug |= AGX_DBG_FAULTTRACE;
 
    ssize_t params_size = -1;
 
@@ -1318,6 +1330,18 @@ agx_open_device(void *memctx, struct agx_device *dev)
       return false;
    }
 
+   /* Keep captured addresses unavailable to ordinary allocations between
+    * capture and replay. Reserve after all fixed firmware/alias holes, and
+    * only for G17P using the common allocator; other winsyses own their VA. */
+   if (dev->chip == AGX_CHIP_G17P && dev->ops.va_alloc == NULL) {
+      dev->replay_heap_initialized = agx_capture_replay_heap_init(
+         &dev->main_heap, &dev->replay_heap, user_size);
+      if (!dev->replay_heap_initialized) {
+         fprintf(stderr, "Failed to reserve capture/replay GPU VA\n");
+         return false;
+      }
+   }
+
    if (dev->ops.va_init != NULL &&
        !dev->ops.va_init(dev, user_start, user_size, dev->shader_base,
                          shader_size)) {
@@ -1535,6 +1559,8 @@ agx_close_device(struct agx_device *dev)
    util_sparse_array_finish(&dev->bo_map);
    agxdecode_destroy_context(dev->agxdecode);
 
+   if (dev->replay_heap_initialized)
+      util_vma_heap_finish(&dev->replay_heap);
    util_vma_heap_finish(&dev->main_heap);
    util_vma_heap_finish(&dev->usc_heap);
    if (dev->chip == AGX_CHIP_G17P)
@@ -1788,6 +1814,7 @@ agx_gather_device_key(struct agx_device *dev)
                    dev->params.num_dies > 1;
 
    return (struct agx_device_key){
+      .chip = dev->chip,
       .encoding = agx_chip_isa_encoding(dev->chip),
       .needs_g13x_coherency = u_tristate_make(g13x_coh),
       .soft_fault = agx_has_soft_fault(dev),

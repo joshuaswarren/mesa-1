@@ -5,6 +5,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include "util/bitset.h"
 #include "util/macros.h"
 #include "util/sparse_bitset.h"
@@ -126,9 +127,14 @@ struct ra_ctx {
    /* SSA values read by G17P's 192-half f32log2 operand domain. */
    BITSET_WORD *log2_gpr;
 
-   /* SSA cube-coordinate vectors that must stay above CEM's fixed scratch
-    * register bank. */
+   /* SSA coordinates that must stay above CEM's fixed scratch register bank
+    * or a fully occupied MRT store bank. */
    BITSET_WORD *high_gpr;
+
+   /* Values that must be allocated below half 128: coordinates of a
+    * cube-array sample with a register LOD (the fused layer/face/LOD
+    * PACK_SMPIR operand carries a seven-bit layer register). */
+   BITSET_WORD *tex_low128;
 };
 
 /*
@@ -140,14 +146,7 @@ struct ra_ctx {
 static unsigned
 reserved_size(agx_context *ctx)
 {
-   if (ctx->has_spill_pcopy_reserved)
-      return 8;
-   else if (ctx->any_quad_divergent_shuffle)
-      return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
-   else if (ctx->any_cf)
-      return 1;
-   else
-      return 0;
+   return agx_reserved_registers(ctx);
 }
 
 UNUSED static void
@@ -343,16 +342,60 @@ agx_calc_register_demand(agx_context *ctx, bool remat)
    return max_demand;
 }
 
+/*
+ * Diagnostic (AGX_G17P_BAN_REGS="lo:hi", HALF-register units): keep the
+ * allocator off a range of GPRs where it has any choice.
+ *
+ * Bug #1's clean and dirty allocations differ in two places at once -- the last
+ * sample's destination and its texture-handle pair move together when the
+ * register ceiling changes, so the ceiling cannot separate them. This can:
+ * banning one range at a time moves exactly one of them.
+ *
+ * Best effort by construction. The scan below runs once honouring the ban and,
+ * if that finds nothing, again ignoring it, so a banned range can never turn a
+ * successful allocation into a spill and change the shader for unrelated
+ * reasons.
+ */
+static bool
+agx_reg_banned(enum ra_class cls, unsigned reg, unsigned count)
+{
+   static int lo = -2, hi = -2;
+
+   if (cls != RA_GPR)
+      return false;
+
+   if (lo == -2) {
+      const char *v = getenv("AGX_G17P_BAN_REGS");
+      lo = hi = -1;
+      if (v && v[0]) {
+         lo = atoi(v);
+         const char *colon = strchr(v, ':');
+         hi = colon ? atoi(colon + 1) : lo;
+      }
+   }
+
+   if (lo < 0)
+      return false;
+
+   /* Overlap between [reg, reg+count) and [lo, hi]. */
+   return (int)(reg + count - 1) >= lo && (int)reg <= hi;
+}
+
 static bool
 find_regs_simple(struct ra_ctx *rctx, enum ra_class cls, unsigned count,
                  unsigned align, unsigned minimum, unsigned limit,
                  unsigned *out)
 {
-   for (unsigned reg = ALIGN_POT(minimum, align); reg + count <= limit;
-        reg += align) {
-      if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
-         *out = reg;
-         return true;
+   for (unsigned pass = 0; pass < 2; ++pass) {
+      for (unsigned reg = ALIGN_POT(minimum, align); reg + count <= limit;
+           reg += align) {
+         if (pass == 0 && agx_reg_banned(cls, reg, count))
+            continue;
+
+         if (!BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count)) {
+            *out = reg;
+            return true;
+         }
       }
    }
 
@@ -364,11 +407,18 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
 {
    enum ra_class cls = ra_class_for_index(I->dest[d]);
    unsigned limit = rctx->bound[cls];
-   /* G17P TEX encodes a seven-bit half-register destination. Coordinate and
-    * other staged sources are bounded separately through texture_gpr below. */
+   /* G17P TEX encodes a seven-bit half-register destination, for image
+    * reads as for texture reads. Coordinate and other staged sources are
+    * bounded separately through texture_gpr below. */
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       (I->op == AGX_OPCODE_TEXTURE_SAMPLE || I->op == AGX_OPCODE_TEXTURE_LOAD))
+       (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+        I->op == AGX_OPCODE_TEXTURE_LOAD || I->op == AGX_OPCODE_IMAGE_LOAD))
       limit = MIN2(limit, 128);
+   /* A move from the uniform file packs to a G17P COPY, which names a
+    * seven-bit destination like the half COPY. */
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_UNIFORM)
+      limit = MIN2(limit, AGX3_COPY_REG16_DEST_HALVES);
    if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        BITSET_TEST(rctx->low_gpr, I->dest[d].value))
       limit = MIN2(limit, rctx->tile_gpr_limit);
@@ -381,6 +431,11 @@ dest_limit(const struct ra_ctx *rctx, const agx_instr *I, unsigned d)
        (I->op == AGX_OPCODE_LOG2 ||
         BITSET_TEST(rctx->log2_gpr, I->dest[d].value)))
       limit = MIN2(limit, 192);
+   if (rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ra_class_for_index(I->dest[d]) == RA_GPR &&
+       rctx->tex_low128 &&
+       BITSET_TEST(rctx->tex_low128, I->dest[d].value))
+      limit = MIN2(limit, 128);
    return limit;
 }
 
@@ -443,7 +498,7 @@ region_has_bank_constrained_value(const struct ra_ctx *rctx, unsigned base,
  */
 static unsigned
 find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
-                          BITSET_WORD *already_evicted)
+                          BITSET_WORD *already_evicted, unsigned cap)
 {
    assert(util_is_power_of_two_or_zero(size) && "precondition");
    assert((rctx->bound[RA_GPR] % size) == 0 &&
@@ -454,8 +509,9 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
 
    unsigned best_base = ~0;
    unsigned best_moves = invert ? 0 : ~0;
+   unsigned bound = MIN2(cap, rctx->bound[RA_GPR]);
 
-   for (unsigned base = 0; base + size <= rctx->bound[RA_GPR]; base += size) {
+   for (unsigned base = 0; base + size <= bound; base += size) {
       /* The first k registers are preallocated and unevictable, so must be
        * skipped. By itself, this does not pose a problem. We are allocating n
        * registers, but this region has at most n-k free.  Since there are at
@@ -509,6 +565,13 @@ find_best_region_to_evict(struct ra_ctx *rctx, unsigned size,
       }
    }
 
+   /* A capped search is a preference, not a requirement: the caller only
+    * narrows the file so a half victim's relocation stays inside the seven-bit
+    * COPY destination.  If nothing fits down there, fall back to the whole
+    * file rather than failing allocation outright. */
+   if (best_base == ~0u && bound < rctx->bound[RA_GPR])
+      return find_best_region_to_evict(rctx, size, already_evicted, ~0u);
+
    assert(best_base < rctx->bound[RA_GPR] &&
           "not enough registers (should have spilled already)");
    return best_base;
@@ -550,18 +613,22 @@ insert_copy(struct ra_ctx *rctx, struct util_dynarray *copies, unsigned new_reg,
    }
 }
 
-static unsigned
+/* Chooses a region of `count` halves inside [minimum, limit) that
+ * assign_regs_by_copying() can free by relocating whole values.  Returns false
+ * when no such region exists, which the caller retries with the half-victim
+ * restriction lifted before it gives up. */
+static bool
 find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
                         unsigned limit, bool avoid_half_copies,
-                        unsigned *span_out)
+                        unsigned *base_out, unsigned *span_out)
 {
    unsigned best = ~0u, best_moves = ~0u, best_span = 0;
 
-   /* agx3_copy_encode_reg16() refuses a destination at or above half 128, and
-    * every relocation find_best_region_to_evict() can choose lies below
-    * rctx->bound[RA_GPR].  A half victim can therefore only become unencodable
-    * on a register file that actually reaches half 128.  Below that the
-    * restriction rejects regions to avoid a copy that cannot exist. */
+   /* agx3_copy_encode_reg16() refuses a destination at or above half 128, so a
+    * half victim is only awkward on a register file that actually reaches that
+    * far; below it the restriction rejects regions to avoid a copy that cannot
+    * exist.  Where it does apply it is a preference: find_best_region_to_evict()
+    * keeps the relocation encodable, and the caller retries without it. */
    bool avoid_half = avoid_half_copies &&
                      rctx->bound[RA_GPR] > AGX3_COPY_REG16_DEST_HALVES;
 
@@ -615,21 +682,12 @@ find_constrained_region(struct ra_ctx *rctx, unsigned count, unsigned minimum,
          break;
    }
 
-   /* Not a refusal path.  assign_regs_by_copying() feeds this result straight
-    * into BITSET_SET_COUNT() and reg_to_ssa[], so returning ~0u is an
-    * out-of-bounds write rather than a bad register choice: a build where
-    * NDEBUG removes assertions would corrupt memory silently.  Fail the same
-    * way in every build instead of only in debug. */
-   if (best >= limit || !best_span) {
-      fprintf(stderr,
-              "agx: no constrained region for count=%u minimum=%u limit=%u "
-              "bound=%u\n",
-              count, minimum, limit, rctx->bound[RA_GPR]);
-      abort();
-   }
+   if (best >= limit || !best_span)
+      return false;
 
    *span_out = best_span;
-   return best;
+   *base_out = best;
+   return true;
 }
 
 static unsigned
@@ -645,11 +703,30 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
    size_t nr_blocked = 1;
 
    if (minimum > 0 || limit < rctx->bound[RA_GPR]) {
-      unsigned count = rctx->ncomps[dest.value], span;
-      unsigned base = find_constrained_region(
-         rctx, count, minimum, limit,
-         I != NULL && rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B,
-         &span);
+      unsigned count = rctx->ncomps[dest.value], span, base;
+      bool agx3b =
+         I != NULL && rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
+
+      /* Prefer a region with no half victim: relocating one is bounded by the
+       * seven-bit COPY destination.  When the constrained window holds nothing
+       * else -- eight-target MRT packs the low bank solid -- take the half
+       * victim anyway and let find_best_region_to_evict() keep its new home
+       * under AGX3_COPY_REG16_DEST_HALVES. */
+      if (!find_constrained_region(rctx, count, minimum, limit, agx3b, &base,
+                                   &span) &&
+          !(agx3b && find_constrained_region(rctx, count, minimum, limit, false,
+                                             &base, &span))) {
+         /* Not a refusal path.  The result feeds straight into
+          * BITSET_SET_COUNT() and reg_to_ssa[], so continuing with a bad base
+          * is an out-of-bounds write rather than a poor register choice: a
+          * build where NDEBUG removes assertions would corrupt memory
+          * silently.  Fail the same way in every build instead. */
+         fprintf(stderr,
+                 "agx: no constrained region for count=%u minimum=%u limit=%u "
+                 "bound=%u\n",
+                 count, minimum, limit, rctx->bound[RA_GPR]);
+         abort();
+      }
       nr_blocked = 0;
       for (unsigned reg = base; reg < base + span;) {
          if (!BITSET_TEST(rctx->used_regs[RA_GPR], reg)) {
@@ -696,7 +773,15 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
       /* We need to shuffle some variables to make room. Look for a range of
        * the register file that is partially blocked.
        */
-      unsigned new_reg = find_best_region_to_evict(rctx, nr, clobbered);
+      /* Every iteration but the first emits insert_copy() for this value.  A
+       * 16-bit copy has a seven-bit destination, so its new home must stay
+       * below AGX3_COPY_REG16_DEST_HALVES on a file that reaches that far. */
+      unsigned cap = ~0u;
+      if (ssa != dest.value && rctx->sizes[ssa] == AGX_SIZE_16 &&
+          rctx->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         cap = AGX3_COPY_REG16_DEST_HALVES;
+
+      unsigned new_reg = find_best_region_to_evict(rctx, nr, clobbered, cap);
 
       /* Blocked registers need to get reassigned. Add them to the worklist. */
       for (unsigned i = 0; i < nr; ++i) {
@@ -1256,7 +1341,8 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
     *
     * To ensure that, the region must be aligned and cover the destination.
     */
-   if (region_base == region_end || dest_end > dest_limit(rctx, I, 0) ||
+   if (region_base == region_end || region_base < dest_minimum(rctx, I, 0) ||
+       dest_end > dest_limit(rctx, I, 0) ||
        (rctx->ssa_to_reg[I->src[first_source].value] & (dest_size - 1)) ||
        ((region_end < dest_end) &&
         BITSET_TEST_RANGE(rctx->used_regs[RA_GPR], region_end, dest_end)))
@@ -1640,6 +1726,104 @@ agx_lower_agx3b_atomic_returns(agx_context *ctx)
    }
 }
 
+/* The GPR halves a G17P fragment's tile stores read their payloads from. */
+unsigned
+agx3_tile_store_bank(agx_context *ctx)
+{
+   /* Native raw32 stores need simultaneously live payloads. Their
+    * exact ordinary/BG witnesses use GPR halves0..31 with f13=0. This expands
+    * only the admitted two-to-four RGBA32 or four R32 payload bank. */
+   unsigned quad_stores = 0, quad_width = 0, quad_mask = 0;
+   BITSET_DECLARE(tile_offsets, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
+   /* Halves of payload the stores need live together, counted once per colour
+    * target: a target stored for several samples reuses one register vector. */
+   unsigned payload_halves = 0, payload_align = 1;
+   bool tile_loads = false;
+   bool quad_tile =
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      ctx->stage == MESA_SHADER_FRAGMENT &&
+      (ctx->key->secondary || ctx->key->fs.ignore_tib_dependencies) &&
+      list_length(&ctx->blocks) == 1;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op == AGX_OPCODE_ST_TILE) {
+         if (I->pixel_offset < AGX_G17P_MAX_BYTES_PER_SAMPLE) {
+            if (!BITSET_TEST(tile_offsets, I->pixel_offset) &&
+                I->src[0].type == AGX_INDEX_NORMAL) {
+               unsigned halves = agx_index_size_16(I->src[0]);
+               payload_halves += halves;
+               payload_align = MAX2(payload_align, halves);
+            }
+            BITSET_SET(tile_offsets, I->pixel_offset);
+         }
+         unsigned width = I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
+         quad_tile &= width && (!quad_width || quad_width == width) &&
+            I->format == AGX_FORMAT_I32 && !I->explicit_coords &&
+            I->nr_srcs == 3 && I->src[1].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1].value == 0xff && agx_is_null(I->src[2]);
+         quad_width = width;
+         if (!width || I->pixel_offset % width || I->pixel_offset / width >= 4 ||
+             (quad_mask & BITFIELD_BIT(I->pixel_offset / width))) {
+            quad_tile = false;
+         } else {
+            quad_mask |= BITFIELD_BIT(I->pixel_offset / width);
+         }
+         quad_stores++;
+      } else if (I->op == AGX_OPCODE_LD_TILE) {
+         quad_tile = false;
+         tile_loads = true;
+      }
+   }
+   const bool raw32_bank = quad_tile && quad_stores >= 2 && quad_stores <= 4 &&
+      (quad_width == 16 || quad_stores == 4) &&
+      quad_mask == BITFIELD_MASK(quad_stores);
+   /* Apple's store-only fragments of three or more targets and multi-target
+    * BG builtins of other formats store every width from the same bank:
+    * halves 0..31 for up to four targets and 0..63 for more. Its blending
+    * fragments of three or more targets do too: three RGBA32Float targets
+    * store from halves0..23, eight RGBA16Float targets from halves0..31, and
+    * five from0..19. Per-sample native witnesses
+    * use that bank even with fewer targets: id_blend_4x stores RGBA8 from
+    * half28, and half2_sample4 stores SINT16/F16 from halves28..0. */
+   const unsigned targets = BITSET_COUNT(tile_offsets);
+
+   /* Native G17P conditional image-write plus two-target MRT uses half24 for
+    * its F16 tile payload, and its memory epilog owns the high-bank form, so
+    * the ordered eMRT path stores from halves 0..31.
+    *
+    * That bank does not hold four 128-bit payloads.  Each is eight halves and
+    * naturally aligned, and the reserved prefix sits inside the first slot, so
+    * halves 0..7 cannot carry one: the bank's real capacity is three, and RA
+    * aborted with `no constrained region for count=8 minimum=0 limit=32` on
+    * dEQP-VK.renderpasses.*.multisample_resolve.r32g32b32a32_uint.
+    * max_attachments_8_samples_2, whose eMRT epilog stores four RGBA32 targets
+    * at two samples -- halves 8..31 each held an unevictable payload and the
+    * only free region began at the reserved half.
+    *
+    * So size the bank by what the stores actually need, prefix included, and
+    * widen to the same halves 0..63 the plain MRT bank below already uses past
+    * four targets rather than inventing a third bank. */
+   if (ctx->key->g17p_emrt && ctx->agx3_mrt_tile_ops_ordered &&
+       list_length(&ctx->blocks) > 1) {
+      const unsigned prefix = ALIGN_POT(reserved_size(ctx), payload_align);
+      return prefix + payload_halves > 32 ? 64 : 32;
+   }
+
+   const bool mrt_bank =
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      ctx->stage == MESA_SHADER_FRAGMENT &&
+      (!tile_loads || targets >= 3) &&
+      targets >= (ctx->key->g17p_mrt_bg ? 2 : 3) &&
+      targets <= AGX_MAX_RTS &&
+      (ctx->key->secondary || ctx->key->g17p_mrt_bg);
+   const bool sample_bank =
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      ctx->stage == MESA_SHADER_FRAGMENT && ctx->key->secondary &&
+      ctx->agx3_mrt_tile_ops_ordered && ctx->key->fs.nr_samples > 1 &&
+      targets >= 2;
+   return mrt_bank && targets > 4 ? 64
+          : raw32_bank || mrt_bank || sample_bank ? 32 : 16;
+}
+
 void
 agx_ra(agx_context *ctx)
 {
@@ -1670,6 +1854,73 @@ agx_ra(agx_context *ctx)
 
       max_possible_regs =
          agx_max_registers_for_occupancy(threads_per_workgroup);
+   }
+
+   /* G17P's register file is 192 halves. Halves 192..255 still fit its
+    * 8-bit register fields but are not general registers: a copy into half
+    * 204 crashed the GPU co-processor. applegpu_g17p holding 60 live float4
+    * or uint4 temporaries never names a register above half 191 and spills
+    * the rest to thread-private storage, so bound the file there and spill
+    * the same way.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      max_possible_regs = MIN2(max_possible_regs, AGX3B_NUM_REGS);
+
+   /* A cube-array sample whose texture or sampler descriptor is a register
+    * publishes CEM's face through agx3_tex_stage_cube_array_layer(), which
+    * names it in the seven-bit f30 operand. The plain cube's cube_z and
+    * cube_lod forms carry an eighth bit and reach half 255; this one stops
+    * at half 127. The packer reserves the CEM scratch immediately ABOVE
+    * whatever this allocation used, so a shader that reaches half 126 puts
+    * the face at half 128 and the entire pipeline is refused -- measured as
+    * VK_ERROR_FEATURE_NOT_PRESENT with "cube staging face=half128" on
+    * dEQP-VK.pipeline.*.image.*.view_type.cube_array.*.count_8.*, where the
+    * GLSL sampler array is indexed by a loop counter.
+    *
+    * Budget the scratch inside the file instead. The bound must survive the
+    * ROUND_DOWN_TO(reg_file_alignment) below, which is 8 or 16 halves, so
+    * use a multiple of both: the scratch then ends at half 126 at the
+    * latest. Shaders of this exact shape lose the halves above 112 and spill
+    * instead; every other shader keeps the full file.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      agx_foreach_instr_global(ctx, I) {
+         if (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
+             I->dim == AGX_DIM_CUBE_ARRAY && I->nr_srcs == 6 &&
+             (I->src[3].type != AGX_INDEX_IMMEDIATE ||
+              I->src[4].type != AGX_INDEX_IMMEDIATE)) {
+            max_possible_regs = MIN2(max_possible_regs, 112);
+            break;
+         }
+      }
+   }
+
+   /* A multisample-array read packs its normalized layer beside another
+    * operand, and the packer reserves one transient word for it immediately
+    * above every register this allocation used -- the same "reserve above the
+    * allocation" shape as the CEM scratch, and the same failure: a fragment
+    * that reaches half 190 leaves nowhere to put the word and agx3_pack_binary
+    * refuses the whole shader. Measured on
+    * dEQP-VK.rasterization.rasterization_order_attachment_access.format_float.
+    * attachments_8_samples_4.*, whose eight input attachments at four samples
+    * allocate the entire file: observed=191 max_reg=191 base=192.
+    *
+    * Budget the word inside the file. ROUND_DOWN_TO(reg_file_alignment) below
+    * only lowers this further, so 184 leaves the word at half 186 at the very
+    * highest under either 8- or 16-half alignment. A fragment of this shape
+    * that used halves 184..191 now spills them instead; one that did not, and
+    * every fragment without such a read, keeps the whole file.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ctx->stage == MESA_SHADER_FRAGMENT && !ctx->is_preamble) {
+      agx_foreach_instr_global(ctx, I) {
+         if ((I->op == AGX_OPCODE_TEXTURE_LOAD ||
+              I->op == AGX_OPCODE_IMAGE_LOAD) &&
+             I->dim == AGX_DIM_2D_MS_ARRAY) {
+            max_possible_regs = MIN2(max_possible_regs, 184);
+            break;
+         }
+      }
    }
 
    if (force_spilling) {
@@ -1714,6 +1965,7 @@ agx_ra(agx_context *ctx)
    unsigned effective_demand = agx_calc_register_demand(ctx, false);
    bool spilling = (effective_demand > max_possible_regs);
    bool remat = false;
+   const unsigned full_budget = max_possible_regs;
 
    /* If we need multiple waves, see if we can rematerialize constants to save
     * waves. If we only have a single wave regardless, this is pointless.
@@ -1723,16 +1975,22 @@ agx_ra(agx_context *ctx)
 
       /* Worst-case assume we need 6 16-bit registers for constants, for a
        * four-source cmpsel where 3 sources are 32-bit constants. Rounded to
-       * ensure live-range splitting works.
+       * ensure live-range splitting works. The remat-only spiller also keeps
+       * RA's reserved low bank free (four halves on AGX3, two before), so the
+       * slack must grow with it or the remat-only pass cannot meet its budget
+       * (ssbo.phys.layout.random.8bit.nested_structs_arrays.20 asserted
+       * "must have remat something").
        */
-      if ((effective_demand_remat + 6) < effective_demand) {
+      const unsigned remat_slack =
+         4 + MAX2(2, agx_reserved_registers(ctx));
+      if ((effective_demand_remat + remat_slack) < effective_demand) {
          unsigned l = agx_round_registers(
-            align(agx_round_registers(effective_demand_remat + 6), 16));
+            align(agx_round_registers(effective_demand_remat + remat_slack), 16));
 
          /* Only rematerialize if it actually lets us save a wave */
          if (l < agx_round_registers(effective_demand)) {
             remat = true;
-            max_possible_regs = l;
+            max_possible_regs = MIN2(l, max_possible_regs);
          }
       }
    }
@@ -1742,6 +2000,17 @@ agx_ra(agx_context *ctx)
              "internal shaders are unspillable");
 
       agx_spill(ctx, max_possible_regs, remat);
+
+      if (remat && ctx->remat_fallback_spilled) {
+         /* The wave-saving remat-only pass could not meet its estimated
+          * budget and spilled to scratch; finish under the full budget. */
+         max_possible_regs = full_budget;
+         remat = false;
+         spilling = true;
+         agx_compute_liveness(ctx);
+         if (agx_calc_register_demand(ctx, false) > max_possible_regs)
+            agx_spill(ctx, max_possible_regs, false);
+      }
 
       /* After spilling, recalculate liveness and demand */
       agx_compute_liveness(ctx);
@@ -1775,43 +2044,14 @@ agx_ra(agx_context *ctx)
    enum agx_size *sizes = calloc(ctx->alloc, sizeof(enum agx_size));
    BITSET_WORD *visited = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *low_gpr = BITSET_CALLOC(ctx->alloc);
+   unsigned *split_source = calloc(ctx->alloc, sizeof(unsigned));
    BITSET_WORD *texture_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *log2_gpr = BITSET_CALLOC(ctx->alloc);
    BITSET_WORD *high_gpr = BITSET_CALLOC(ctx->alloc);
+   BITSET_WORD *tex_low128 = BITSET_CALLOC(ctx->alloc);
    unsigned max_ncomps = 1;
 
-   /* Native raw32 stores need simultaneously live payloads. Their
-    * exact ordinary/BG witnesses use GPR halves0..31 with f13=0. This expands
-    * only the admitted two-to-four RGBA32 or four R32 payload bank. */
-   unsigned quad_stores = 0, quad_width = 0, quad_mask = 0;
-   bool quad_tile =
-      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-      ctx->stage == MESA_SHADER_FRAGMENT &&
-      (ctx->key->secondary || ctx->key->fs.ignore_tib_dependencies) &&
-      list_length(&ctx->blocks) == 1;
-   agx_foreach_instr_global(ctx, I) {
-      if (I->op == AGX_OPCODE_ST_TILE) {
-         unsigned width = I->mask == 15 ? 16 : I->mask == 1 ? 4 : 0;
-         quad_tile &= width && (!quad_width || quad_width == width) &&
-            I->format == AGX_FORMAT_I32 && !I->explicit_coords &&
-            I->nr_srcs == 3 && I->src[1].type == AGX_INDEX_IMMEDIATE &&
-            I->src[1].value == 0xff && agx_is_null(I->src[2]);
-         quad_width = width;
-         if (!width || I->pixel_offset % width || I->pixel_offset / width >= 4 ||
-             (quad_mask & BITFIELD_BIT(I->pixel_offset / width))) {
-            quad_tile = false;
-         } else {
-            quad_mask |= BITFIELD_BIT(I->pixel_offset / width);
-         }
-         quad_stores++;
-      } else if (I->op == AGX_OPCODE_LD_TILE) {
-         quad_tile = false;
-      }
-   }
-   const bool raw32_bank = quad_tile && quad_stores >= 2 && quad_stores <= 4 &&
-      (quad_width == 16 || quad_stores == 4) &&
-      quad_mask == BITFIELD_MASK(quad_stores);
-   const unsigned tile_gpr_limit = raw32_bank ? 32 : 16;
+   const unsigned tile_gpr_limit = agx3_tile_store_bank(ctx);
 
    agx_foreach_instr_global(ctx, I) {
       /* Native G17P sinc and its fused quadrant selects use the bounded
@@ -1825,9 +2065,20 @@ agx_ra(agx_context *ctx)
             BITSET_SET(texture_gpr, I->dest[d].value);
       }
 
+      /* A split channel takes its vector's register, so a tile store of one
+       * channel constrains the whole vector: a per-sample reload of a scalar
+       * target stores channel 0 of each texel fetch. */
+      if (I->op == AGX_OPCODE_SPLIT && I->src[0].type == AGX_INDEX_NORMAL) {
+         agx_foreach_ssa_dest(I, d)
+            split_source[I->dest[d].value] = I->src[0].value + 1;
+      }
+
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL)
+          I->op == AGX_OPCODE_ST_TILE && I->src[0].type == AGX_INDEX_NORMAL) {
          BITSET_SET(low_gpr, I->src[0].value);
+         if (split_source[I->src[0].value])
+            BITSET_SET(low_gpr, split_source[I->src[0].value] - 1);
+      }
 
       /* G17P publishes sampled coordinates through COPY, whose source field
        * has seven bits and no high-bit extension. CEM has the same source
@@ -1851,6 +2102,18 @@ agx_ra(agx_context *ctx)
             BITSET_SET(texture_gpr, I->src[5].value);
       }
 
+      /* imgwci stages its data and coordinates through the same seven-bit
+       * COPY sources and names its PBE index register in a seven-bit field.
+       */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IMAGE_WRITE) {
+         for (unsigned s = 0; s < I->nr_srcs; ++s) {
+            if ((s == 0 || s == 1 || s == 4) &&
+                I->src[s].type == AGX_INDEX_NORMAL)
+               BITSET_SET(texture_gpr, I->src[s].value);
+         }
+      }
+
       /* Both the result and source operands of G17P f32log2 are bounded to
        * halves 0..191 by the recovered native form. dest_limit handles the
        * instruction result directly; mark the defining SSA of its source so
@@ -1868,6 +2131,16 @@ agx_ra(agx_context *ctx)
           (I->dim == AGX_DIM_CUBE || I->dim == AGX_DIM_CUBE_ARRAY) &&
           I->src[0].type == AGX_INDEX_NORMAL)
          BITSET_SET(high_gpr, I->src[0].value);
+
+      /* agx3_tex_stage_cube_array_lod encodes the layer register (coords + 6
+       * halves) in seven bits; keep such coordinate vectors below half 128. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->dim == AGX_DIM_CUBE_ARRAY &&
+          I->src[0].type == AGX_INDEX_NORMAL && I->nr_srcs > 1 &&
+          I->src[1].type == AGX_INDEX_NORMAL &&
+          (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+           I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS))
+         BITSET_SET(tex_low128, I->src[0].value);
 
       /* Record collects/phis so we can coalesce when assigning */
       if (I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_PHI ||
@@ -1887,6 +2160,27 @@ agx_ra(agx_context *ctx)
          classes[v] = ra_class_for_index(I->dest[d]);
 
          max_ncomps = MAX2(max_ncomps, ncomps[v]);
+      }
+   }
+
+   /* The ordered eight-target RGBA8 reload keeps sixteen packed halves live
+    * until its terminal tile stores. Its shared texture coordinates are also
+    * bank-constrained, so the shuffler cannot evict them from that low bank.
+    * Place those coordinates above it from the outset, within their existing
+    * seven-bit COPY domain. This does not relax the tile or texture encodings.
+    */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       ctx->agx3_mrt_tile_ops_ordered) {
+      unsigned tile_halfs = 0;
+      for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
+         if (BITSET_TEST(low_gpr, ssa))
+            tile_halfs += ncomps[ssa];
+      }
+      if (tile_halfs >= 16) {
+         for (unsigned ssa = 0; ssa < ctx->alloc; ++ssa) {
+            if (BITSET_TEST(texture_gpr, ssa) && !BITSET_TEST(low_gpr, ssa))
+               BITSET_SET(high_gpr, ssa);
+         }
       }
    }
 
@@ -1911,11 +2205,45 @@ agx_ra(agx_context *ctx)
    if (ctx->key->is_helper || force_spilling)
       max_regs = max_possible_regs;
 
+   /* Occupancy rounding must not reach past a smaller register file. */
+   max_regs = MIN2(max_regs, max_possible_regs);
+
    max_regs = ROUND_DOWN_TO(max_regs, reg_file_alignment);
 
    /* Or, we can bound tightly for debugging */
    if (agx_compiler_debug & AGX_DBG_DEMAND)
       max_regs = ALIGN_POT(MAX2(demand, 12), reg_file_alignment);
+
+   /* Diagnostic (AGX_G17P_MAX_REGS=<n>): force the allocator's register
+    * ceiling to a specific value, and (AGX_G17P_TRACE_REGS=1) print what the
+    * default rounding chose.
+    *
+    * `max_regs` is the one line AGX_DBG_DEMAND changes, and on G17P the bound
+    * it is compared against comes from a G13G-era occupancy table used
+    * unconditionally (agx_performance.c). Both the tight bound (DEMAND) and
+    * the maximal bound (spill/is_helper) leave the array-shadow defect absent
+    * while the occupancy-rounded default reproduces it, so the ceiling itself
+    * is the variable. This sweeps it. */
+   {
+      static int forced = -2;
+      if (forced == -2) {
+         const char *v = getenv("AGX_G17P_MAX_REGS");
+         forced = (v && v[0]) ? atoi(v) : -1;
+      }
+      if (forced > 0) {
+         unsigned want = ALIGN_POT(MAX2((unsigned)forced, 12u),
+                                   reg_file_alignment);
+         max_regs = MIN2(want, max_possible_regs);
+      }
+   }
+
+   if (getenv("AGX_G17P_TRACE_REGS")) {
+      fprintf(stderr,
+              "G17Pregs stage=%u demand=%u max_regs=%u max_possible=%u "
+              "align=%u\n",
+              (unsigned)ctx->stage, demand, max_regs, max_possible_regs,
+              reg_file_alignment);
+   }
 
    /* ...but not too tightly */
    assert((max_regs % reg_file_alignment) == 0 && "occupancy limits aligned");
@@ -1943,6 +2271,7 @@ agx_ra(agx_context *ctx)
          .texture_gpr = texture_gpr,
          .log2_gpr = log2_gpr,
          .high_gpr = high_gpr,
+         .tex_low128 = tex_low128,
          .bound[RA_GPR] = max_regs,
          .bound[RA_MEM] = AGX_NUM_MODELED_REGS,
          .count[RA_GPR] = &reg_count,
@@ -2102,9 +2431,11 @@ agx_ra(agx_context *ctx)
 
    free(phi_web);
    free(low_gpr);
+   free(split_source);
    free(texture_gpr);
    free(log2_gpr);
    free(high_gpr);
+   free(tex_low128);
    free(src_to_collect_phi);
    free(ncomps);
    free(ncomps_unrounded);

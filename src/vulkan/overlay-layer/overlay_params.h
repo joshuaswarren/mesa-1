@@ -38,6 +38,10 @@ extern "C" {
    OVERLAY_PARAM_BOOL(fps)                           \
    OVERLAY_PARAM_BOOL(frame)                         \
    OVERLAY_PARAM_BOOL(frame_timing)                  \
+   OVERLAY_PARAM_BOOL(begin_cmdbuf_timing)           \
+   OVERLAY_PARAM_BOOL(end_cmdbuf_timing)             \
+   OVERLAY_PARAM_BOOL(draw_timing)                   \
+   OVERLAY_PARAM_BOOL(submit_timing)                 \
    OVERLAY_PARAM_BOOL(submit)                        \
    OVERLAY_PARAM_BOOL(draw)                          \
    OVERLAY_PARAM_BOOL(draw_indexed)                  \
@@ -45,6 +49,8 @@ extern "C" {
    OVERLAY_PARAM_BOOL(draw_indexed_indirect)         \
    OVERLAY_PARAM_BOOL(draw_indirect_count)           \
    OVERLAY_PARAM_BOOL(draw_indexed_indirect_count)   \
+   OVERLAY_PARAM_BOOL(draw_multi)                    \
+   OVERLAY_PARAM_BOOL(draw_multi_indexed)            \
    OVERLAY_PARAM_BOOL(dispatch)                      \
    OVERLAY_PARAM_BOOL(dispatch_indirect)             \
    OVERLAY_PARAM_BOOL(pipeline_graphics)             \

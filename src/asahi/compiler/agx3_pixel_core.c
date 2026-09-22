@@ -90,6 +90,58 @@ agx3_pixel_colour_entry(enum agx_isa_encoding enc,
    return true;
 }
 
+/* metal-nt -arch applegpu_g17p, a fragment function with no colour writes
+ * storing the result of atomic_fetch_add_explicit():
+ *
+ *   870254040000                  pixwait, class 4
+ *   6721540000810000004600002000  atomicdev
+ *   2c80192160800000              rld of the returned value
+ *   070454c40800                  barrier
+ *
+ * The same function discarding the result emits the atomicdev alone. */
+bool
+agx3_pixel_atomic_acquire(enum agx_isa_encoding enc,
+                          uint8_t out[AGX3_PIXEL_MAX_LENGTH], uint8_t *len)
+{
+   if (out == NULL || len == NULL)
+      return false;
+   memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   const struct agx3_field_kv fields[] = {KV(14, 4)};
+   if (!agx3_bind_compose(enc, "pixwait", 0, fields, NELEM(fields), NULL, 0,
+                          out, len)) {
+      memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
+   return true;
+}
+
+bool
+agx3_pixel_atomic_barrier(enum agx_isa_encoding enc,
+                          uint8_t out[AGX3_PIXEL_MAX_LENGTH], uint8_t *len)
+{
+   if (out == NULL || len == NULL)
+      return false;
+   memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   const struct agx3_field_kv fields[] = {KV(24, 1), KV(30, 3), KV(39, 1)};
+   if (!agx3_bind_compose(enc, "barrier", 0, fields, NELEM(fields), NULL, 0,
+                          out, len) ||
+       *len != AGX3_PIXEL_MAX_LENGTH) {
+      memset(out, 0, AGX3_PIXEL_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
+   return true;
+}
+
 bool
 agx3_pixel_colour_partition_classes(unsigned partition,
                                     uint32_t *read_class,
@@ -114,8 +166,8 @@ agx3_pixel_wait(enum agx_isa_encoding enc, uint32_t writeout,
 {
    /* Every writeout mask Apple's fragment corpus emitted on pixwait, less the
     * f15-gated shader-entry form (512). */
-   static const uint32_t witnessed[] = {1,  4,  8,  12, 16, 32,
-                                        48, 60, 64, 128, 192};
+   static const uint32_t witnessed[] = {1,  4,  8,   12,  16, 32,
+                                        48, 60, 64, 128, 192, 252};
 
    if (out == NULL || len == NULL)
       return false;
@@ -151,9 +203,9 @@ agx3_pixel_release(enum agx_isa_encoding enc, uint32_t writeout, bool last,
                    uint16_t wait_mask, uint8_t out[AGX3_PIXEL_MAX_LENGTH],
                    uint8_t *len)
 {
-   /* The witnessed pixrel descriptors are exactly {0,1,12,48,60,192} with an
-    * optional 0x200 "final release" bit. */
-   static const uint32_t witnessed[] = {0, 1, 12, 48, 60, 192};
+   /* The witnessed pixrel descriptors are exactly {0,1,12,48,60,192,252}
+    * with an optional 0x200 "final release" bit. */
+   static const uint32_t witnessed[] = {0, 1, 12, 48, 60, 192, 252};
 
    if (out == NULL || len == NULL)
       return false;

@@ -42,8 +42,9 @@ struct agx_linked_shader {
    bool g17p_compiler_d_valid;
    uint32_t g17p_compiler_d;
 
-   /* Compiler-proven number of active G17P colour-tile partitions. */
-   uint8_t g17p_colour_partitions;
+   /* Compiler-proven G17P colour pixel classes consumed by the linked parts,
+    * bit n for the tile partitions n, n + 3, ... */
+   uint8_t g17p_colour_classes;
 
    /* Set if the linked SW vertex shader reads base vertex/instance. The VS
     * prolog can read base instance even when the API VS does not, which is why
@@ -131,6 +132,9 @@ struct agx_fs_prolog_key {
 
    /* If we discard, whether we need to run Z/S tests */
    bool run_zs_tests;
+
+   /* G17P rasterization samples its coverage updates are compiled for */
+   uint8_t nr_samples;
 
    /* If we emulate cull distance, the base offset for our allocated coefficient
     * registers so we don't interfere with the main shader.
@@ -275,9 +279,20 @@ struct agx_fs_epilog_link_info {
     */
    bool sample_mask_after_force_early : 1;
 
-   unsigned padding : 1;
+   /* If set, the colour exports are packed by the components each location
+    * actually writes rather than laid out on the fragment ABI's
+    * four-component slots (struct agx_g17p_colour_layout). A G17P fragment
+    * unrolled per sample repeats this layout once per sample, so the packing
+    * is what decides whether its exports fit the register file.
+    */
+   unsigned packed_colour : 1;
+
+   /* Components each colour location exports, four bits per location. Only
+    * consulted for the packing above.
+    */
+   uint32_t colour_comps;
 };
-static_assert(sizeof(struct agx_fs_epilog_link_info) == 4, "packed");
+static_assert(sizeof(struct agx_fs_epilog_link_info) == 8, "packed");
 
 struct agx_fs_epilog_key {
    struct agx_fs_epilog_link_info link;
@@ -298,17 +313,45 @@ struct agx_fs_epilog_key {
 
    /* Tilebuffer configuration */
    enum pipe_format rt_formats[8];
+   /* Optional API format when the tile storage has additional channels. */
+   enum pipe_format blend_formats[8];
+   /* Optional scaled API format stored through an integer tilebuffer. */
+   enum pipe_format scaled_formats[8];
    uint8_t nr_samples;
+   /* agx_tilebuffer_layout::max_sample_size_B of the render pass. */
+   uint8_t max_sample_size_B;
+   uint16_t max_bytes_per_tile;
+   uint16_t max_samples_per_tile;
    bool force_small_tile;
    bool preserve_zero_mask;
    bool lower_srgb;
    bool lower_r11g11b10;
+   bool native_spills;
+   /* Absolute uniform-half address of the private native spill table. */
+   uint16_t emrt_heap_base;
+
+   /* G17P's pre-main MOVMSK also runs depth/stencil tests. For late-tests
+    * shaders, defer the API sample mask to the epilog so it can be combined
+    * with shader and alpha-to-coverage masks before any output is committed.
+    */
+   bool defer_api_sample_mask;
+   uint8_t api_sample_mask;
+
+   /* Leave pixel-shaded MSAA lowering to a caller that will unroll the
+    * per-sample epilog itself. Used by the G17P sample-shaded path.
+    */
+   bool defer_monolithic_msaa;
 
    /* Absolute uniform-half base for dynamic blend constants. Zero selects
     * the standard fragment ABI at AGX_ABI_FUNI_BLEND_R. HAL200 resource
     * pointers occupy that standard range, so a linked G17P epilog may place
     * the constants after the main shader's uniform footprint instead. */
    uint16_t blend_constant_base;
+
+   /* Render targets whose tile value must be stored back unchanged (colour
+    * write disabled while raster coverage still makes the tile nonempty).
+    * Independent of blending, so it also holds for pure-integer formats. */
+   uint8_t preserve_rt;
 };
 
 /* Apply framebuffer rules which are properties of the hardware generation,
@@ -338,6 +381,18 @@ bool agx_nir_lower_fs_output_to_epilog_g17p(
    nir_shader *s, struct agx_fs_epilog_link_info *out);
 bool agx_nir_lower_fs_output_to_epilog_for_device(
    nir_shader *s, enum agx_chip chip, struct agx_fs_epilog_link_info *out);
+
+/* Pack the colour exports of a fragment already split for its epilog, so a
+ * G17P per-sample unroll costs only the components each location writes. */
+bool agx_nir_pack_g17p_colour_exports(nir_shader *s,
+                                      struct agx_fs_epilog_link_info *link);
+
+/* The colour layout the split above would record, read off an unlowered
+ * shader and rounded up wherever it cannot be read exactly. */
+void agx_nir_gather_fs_colour_exports(const nir_shader *s,
+                                      uint8_t *loc_written, uint8_t *size_32,
+                                      uint32_t *colour_comps);
+
 bool agx_nir_lower_g17p_1x_tile_samples(nir_shader *s);
 bool agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples);
 

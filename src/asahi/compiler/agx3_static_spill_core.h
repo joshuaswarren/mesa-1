@@ -56,6 +56,10 @@ struct agx3_static_spill_load_desc {
     * f11 and f41 (AGX3b) / f44 (AGX3c). */
    bool narrow_extend;
    bool structural_flag;
+
+   /* The TPS cell is read again before it is next written. Clears f27, the
+    * reload's last-use bit, which applegpu_g17p sets on every other reload. */
+   bool tps_live;
 };
 
 bool agx3_static_spill_encode_store(

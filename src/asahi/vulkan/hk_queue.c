@@ -19,6 +19,8 @@
 #include "agx_bo.h"
 #include "agx_device.h"
 #include "agx_pack.h"
+#include "asahi/genxml/agx3_cmdstream.h"
+#include "agx_vdm_hal200_bind_tail_core.h"
 #include "decode.h"
 #include "hk_cmd_buffer.h"
 #include "hk_device.h"
@@ -52,6 +54,18 @@ hk_agxdecode_trace_armed(void)
    return arm_file == NULL || arm_file[0] == '\0' ||
           access(arm_file, F_OK) == 0;
 }
+
+#define HK_G17P_FAULTTRACE_STREAM_MAGIC UINT64_C(0x314d414552545346)
+
+struct hk_g17p_faulttrace_stream_header {
+   uint64_t magic;
+   uint64_t submitted_full;
+   uint64_t submitted_base;
+   uint32_t stream_size;
+   uint32_t snapshot_size;
+   uint32_t draws;
+   uint32_t publications;
+};
 
 /*
  * We need to specially handle submits with no control streams. The kernel
@@ -216,20 +230,17 @@ asahi_g17p_vdm_bisect(struct hk_device *dev, struct hk_cs *cs, size_t len)
       }
    }
 
-   static const uint32_t controls[] = {
-      UINT32_C(0x700), UINT32_C(0x500), UINT32_C(0x700), UINT32_C(0x500),
-      UINT32_C(0xa00), UINT32_C(0x300), UINT32_C(0x200), UINT32_C(0x200),
-   };
    const unsigned pair_count = stage >= 4 ? MIN2((unsigned)(stage - 3), 8) : 0;
    for (unsigned i = 0; i < pair_count; ++i) {
       uint32_t address, control;
       const size_t offset = 44 + (8 * i);
       memcpy(&address, (uint8_t *)cs->start + offset, 4);
       memcpy(&control, (uint8_t *)cs->start + offset + 4, 4);
-      if (address == 0 || (address & 3) != 0 || control != controls[i]) {
+      if (address == 0 || (address & 3) != 0 ||
+          !agx_vdm_hal200_bind_control_valid(i, control)) {
          mesa_loge("HK_G17P_VDM_BISECT=%d bind[%u] mismatch: addr=%#x "
-                   "control=%#x expected=%#x",
-                   stage, i, address, control, controls[i]);
+                   "control=%#x",
+                   stage, i, address, control);
          return len;
       }
    }
@@ -264,6 +275,7 @@ asahi_g17p_vdm_bisect(struct hk_device *dev, struct hk_cs *cs, size_t len)
 
 static void
 hk_g17p_trace_render_command(const struct hk_device *dev,
+                              const struct hk_cs *cs,
                               const struct drm_asahi_cmd_render *c)
 {
    static int enabled = -1;
@@ -282,7 +294,8 @@ hk_g17p_trace_render_command(const struct hk_device *dev,
            " scissor=%#" PRIx64 " dbias=%#" PRIx64
            " zls=%#" PRIx64 " zls-pixels=%#x ppp=%#x msaa=%#" PRIx64
            " bg=%#x/%#x eot=%#x/%#x partial-bg=%#x/%#x "
-           "partial-eot=%#x/%#x sampler=%#" PRIx64 "/%u\n",
+           "partial-eot=%#x/%#x sampler=%#" PRIx64 "/%u "
+           "draw-calls=%u draws=%u flushes=%u merged=%u\n",
            c->flags, c->width_px, c->height_px, c->layers, c->samples,
            c->sample_size_B, c->utile_width_px, c->utile_height_px,
            (uint64_t)c->vdm_ctrl_stream_base, (uint64_t)c->isp_scissor_base,
@@ -291,13 +304,15 @@ hk_g17p_trace_render_command(const struct hk_device *dev,
            c->bg.usc, c->bg.rsrc_spec, c->eot.usc, c->eot.rsrc_spec,
            c->partial_bg.usc, c->partial_bg.rsrc_spec, c->partial_eot.usc,
            c->partial_eot.rsrc_spec, (uint64_t)c->sampler_heap,
-           c->sampler_count);
+           c->sampler_count, cs->stats.calls, cs->stats.cmds,
+           cs->stats.flushes, cs->stats.merged);
    fflush(stderr);
 }
 
 static void
 asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
-                       struct drm_asahi_cmd_render *c)
+                       struct drm_asahi_cmd_render *c,
+                       struct util_dynarray *faulttrace_extra)
 {
    size_t len = cs->stream_linked ? hk_cs_root_size(dev->dev.chip, false)
                                   : (cs->current - cs->start);
@@ -535,7 +550,34 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       fflush(stderr);
    }
 
-   hk_g17p_trace_render_command(dev, c);
+   if ((dev->dev.debug & AGX_DBG_FAULTTRACE) && faulttrace_extra) {
+      const struct hk_g17p_faulttrace_stream_header header = {
+         .magic = HK_G17P_FAULTTRACE_STREAM_MAGIC,
+         .submitted_full = submitted_full,
+         .submitted_base = c->vdm_ctrl_stream_base,
+         .stream_size = cs->stream_linked ? 0 : len,
+         .snapshot_size = cs->g17p_faulttrace_snapshots.size,
+         .draws = cs->stats.cmds,
+         .publications = cs->g17p_state_publications,
+      };
+      const size_t total = sizeof(header) + header.stream_size +
+                           header.snapshot_size;
+      uint8_t *record =
+         util_dynarray_grow_bytes(faulttrace_extra, 1, total);
+      if (record) {
+         memcpy(record, &header, sizeof(header));
+         record += sizeof(header);
+         if (header.stream_size) {
+            memcpy(record, submitted_start, header.stream_size);
+            record += header.stream_size;
+         }
+         if (header.snapshot_size)
+            memcpy(record, cs->g17p_faulttrace_snapshots.data,
+                   header.snapshot_size);
+      }
+   }
+
+   hk_g17p_trace_render_command(dev, cs, c);
 }
 
 static void
@@ -563,13 +605,69 @@ union drm_asahi_cmd {
    struct drm_asahi_cmd_render render;
 };
 
+/*
+ * These are diagnostic knobs, read once per process.
+ *
+ * Every one of them sat on the submit path and was re-read on EVERY
+ * vkQueueSubmit: two inside hk_g17p_write_range_candidates() before its chip
+ * check, a third beside its caller, and two more beside the ioctl. getenv() is
+ * a linear scan of the environment block, so that is five scans per submission
+ * to answer five questions whose answers cannot change after startup.
+ */
+static bool
+hk_g17p_debug_flag(const char *name)
+{
+   const char *value = getenv(name);
+   return value != NULL;
+}
+
+static bool
+hk_g17p_dump_write_ranges(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_DUMP_WRITE_RANGES");
+   return cached;
+}
+
+static bool
+hk_g17p_native_write_spans(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_NATIVE_WRITE_SPANS");
+   return cached;
+}
+
+static bool
+hk_g17p_abort_before_ioctl(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_ABORT_BEFORE_IOCTL");
+   return cached;
+}
+
+static bool
+hk_g17p_submit_dmb(void)
+{
+   static int cached = -1;
+   if (unlikely(cached < 0))
+      cached = hk_g17p_debug_flag("HK_G17P_SUBMIT_DMB");
+   return cached;
+}
+
 static bool
 hk_g17p_write_range_candidates(struct hk_device *dev,
                                struct drm_asahi_attachment spans[2])
 {
-   const bool dump = getenv("HK_G17P_DUMP_WRITE_RANGES") != NULL;
-   const bool synthesize = getenv("HK_G17P_NATIVE_WRITE_SPANS") != NULL;
-   if (dev->dev.chip != AGX_CHIP_G17P || (!dump && !synthesize))
+   /* Chip check first: on anything but G17P this returns without touching the
+    * environment at all. */
+   if (dev->dev.chip != AGX_CHIP_G17P)
+      return false;
+   const bool dump = hk_g17p_dump_write_ranges();
+   const bool synthesize = hk_g17p_native_write_spans();
+   if (!dump && !synthesize)
       return false;
 
    uint64_t main_start = UINT64_MAX, main_end = 0;
@@ -626,6 +724,26 @@ hk_g17p_write_range_candidates(struct hk_device *dev,
 }
 
 static void
+asahi_append_compute_attachments(struct hk_device *dev,
+                                 struct util_dynarray *payload,
+                                 const struct hk_cs *cs)
+{
+   const struct hk_drm_attachment_set *set = &cs->compute_attachments;
+   const uint32_t count = MIN2(set->count, dev->dev.params.max_attachments);
+   const struct drm_asahi_cmd_header header = {
+      .cmd_type = DRM_ASAHI_SET_COMPUTE_ATTACHMENTS,
+      .size = count * sizeof(set->list[0]),
+      .vdm_barrier = DRM_ASAHI_BARRIER_NONE,
+      .cdm_barrier = DRM_ASAHI_BARRIER_NONE,
+   };
+   /* Clear the preceding command's list even for an attachmentless dispatch. */
+   util_dynarray_append(payload, header);
+   if (count)
+      util_dynarray_append_array(payload, struct drm_asahi_attachment,
+                                 set->list, count);
+}
+
+static void
 asahi_append_fragment_attachments(struct hk_device *dev,
                                   struct util_dynarray *payload,
                                   const struct hk_cs *cs)
@@ -635,8 +753,7 @@ asahi_append_fragment_attachments(struct hk_device *dev,
       hk_g17p_write_range_candidates(dev, writable_spans);
    struct hk_drm_attachment_set synthetic;
    const struct hk_drm_attachment_set *set = &cs->fragment_attachments;
-   if (getenv("HK_G17P_NATIVE_WRITE_SPANS") != NULL &&
-       have_writable_spans) {
+   if (hk_g17p_native_write_spans() && have_writable_spans) {
       hk_drm_attachment_set_init(&synthetic);
       synthetic.list[0] = writable_spans[0];
       synthetic.list[1] = writable_spans[1];
@@ -674,16 +791,16 @@ asahi_append_fragment_attachments(struct hk_device *dev,
    }
 }
 
-/* XXX: Batching multiple commands per submission is causing rare (7ppm) flakes
- * on the CTS once lossless compression is enabled. This needs to be
- * investigated before we can reenable this mechanism. We are likely missing a
- * cache flush or barrier somewhere.
+/* Submit all ordered control streams together up to the kernel's advertised
+ * limit.  Splitting every stream into a separate ioctl serializes real games
+ * at the queue boundary; keep single-stream submission only as an explicit
+ * diagnostic control.
  */
 static inline unsigned
 max_commands_per_submit(struct hk_device *dev)
 {
    return hk_drm_submit_command_limit(
-      HK_PERF(dev, BATCH), dev->dev.params.max_commands_per_submission);
+      !HK_PERF(dev, NOBATCH), dev->dev.params.max_commands_per_submission);
 }
 
 /* One aggregate line per Vulkan queue submit.  Unlike the per-stream launch
@@ -711,8 +828,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
       return vk_device_set_lost(&dev->vk, "M5 diagnostic pre-submit abort");
    }
 
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       getenv("HK_G17P_ABORT_BEFORE_IOCTL") != NULL) {
+   if (dev->dev.chip == AGX_CHIP_G17P && hk_g17p_abort_before_ioctl()) {
       fprintf(stderr,
               "G17P diagnostic: aborting before DRM_IOCTL_ASAHI_SUBMIT\n");
       return vk_device_set_lost(&dev->vk,
@@ -729,8 +845,7 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    /* G17P command, VIT, and HAL200 bind-state uploads use write-combined GEM
     * mappings.  Diagnose whether the GPU can observe a doorbell before those
     * CPU stores have drained, without changing the default submission path. */
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       getenv("HK_G17P_SUBMIT_DMB") != NULL)
+   if (dev->dev.chip == AGX_CHIP_G17P && hk_g17p_submit_dmb())
       __sync_synchronize();
 
    int ret = dev->dev.ops.submit(&dev->dev, submit, &virt);
@@ -745,6 +860,364 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
    return VK_SUCCESS;
 }
 
+/* Decode the exact ioctl slice that failed while all command-buffer BOs are
+ * still alive.  AGX_DBG_FAULTTRACE already makes libagx retain the allocation
+ * map, but until now nothing consumed that map: the ordinary trace runs before
+ * submission and the failed payload was freed on return.  Keep this strictly
+ * diagnostic and failure-only so production submission timing is unchanged. */
+static void
+hk_g17p_faulttrace_capture(struct hk_device *dev, struct hk_queue *queue,
+                           const void *cmdbuf, size_t cmdbuf_size,
+                           const void *extra, size_t extra_size)
+{
+   if (!(dev->dev.debug & AGX_DBG_FAULTTRACE) || cmdbuf_size == 0)
+      return;
+
+   struct hk_g17p_faulttrace_payload *slot =
+      &queue->g17p_faulttrace[queue->g17p_faulttrace_head];
+   void *data = malloc(cmdbuf_size);
+   if (!data)
+      return;
+
+   void *extra_data = extra_size ? malloc(extra_size) : NULL;
+   if (extra_size && !extra_data) {
+      free(data);
+      return;
+   }
+
+   memcpy(data, cmdbuf, cmdbuf_size);
+   if (extra_size)
+      memcpy(extra_data, extra, extra_size);
+   free(slot->data);
+   free(slot->extra);
+   slot->data = data;
+   slot->size = cmdbuf_size;
+   slot->extra = extra_data;
+   slot->extra_size = extra_size;
+   slot->sequence = ++queue->g17p_faulttrace_sequence;
+   queue->g17p_faulttrace_head =
+      (queue->g17p_faulttrace_head + 1) % HK_G17P_FAULTTRACE_HISTORY;
+   queue->g17p_faulttrace_count =
+      MIN2(queue->g17p_faulttrace_count + 1, HK_G17P_FAULTTRACE_HISTORY);
+}
+
+enum hk_g17p_faulttrace_compare_status {
+   HK_G17P_COMPARE_MATCH,
+   HK_G17P_COMPARE_MISMATCH,
+   HK_G17P_COMPARE_UNAVAILABLE,
+   HK_G17P_COMPARE_NOMEM,
+};
+
+static enum hk_g17p_faulttrace_compare_status
+hk_g17p_faulttrace_compare_bytes(struct agxdecode_ctx *ctx, uint64_t va,
+                                 const void *expected, size_t size,
+                                 size_t *first_mismatch)
+{
+   if (!size)
+      return HK_G17P_COMPARE_MATCH;
+
+   uint8_t *current = malloc(size);
+   if (!current)
+      return HK_G17P_COMPARE_NOMEM;
+   if (!agxdecode_copy_gpu_mem(ctx, va, size, current)) {
+      free(current);
+      return HK_G17P_COMPARE_UNAVAILABLE;
+   }
+
+   const uint8_t *recorded = expected;
+   for (size_t i = 0; i < size; ++i) {
+      if (current[i] != recorded[i]) {
+         *first_mismatch = i;
+         free(current);
+         return HK_G17P_COMPARE_MISMATCH;
+      }
+   }
+   free(current);
+   return HK_G17P_COMPARE_MATCH;
+}
+
+static const char *
+hk_g17p_faulttrace_compare_name(enum hk_g17p_faulttrace_compare_status status)
+{
+   switch (status) {
+   case HK_G17P_COMPARE_MATCH: return "match";
+   case HK_G17P_COMPARE_MISMATCH: return "mismatch";
+   case HK_G17P_COMPARE_UNAVAILABLE: return "unavailable";
+   case HK_G17P_COMPARE_NOMEM: return "nomem";
+   }
+   UNREACHABLE("invalid faulttrace comparison status");
+}
+
+static void
+hk_g17p_faulttrace_log_address(struct agxdecode_ctx *ctx, uint64_t sequence,
+                               unsigned stream, unsigned snapshot,
+                               const char *name, unsigned index,
+                               uint64_t address)
+{
+   if (!address)
+      return;
+
+   uint64_t allocation_base = 0;
+   size_t allocation_size = 0;
+   const bool mapped = agxdecode_gpu_mem_bounds(
+      ctx, address, &allocation_base, &allocation_size);
+   fprintf(stderr,
+           "G17P faulttrace root address: sequence=%" PRIu64
+           " stream=%u snapshot=%u field=%s index=%u address=%" PRIx64
+           " mapped=%u base=%" PRIx64 " allocation-size=%zu\n",
+           sequence, stream, snapshot, name, index, address, mapped,
+           allocation_base, allocation_size);
+}
+
+static void
+hk_g17p_faulttrace_compare_live(struct hk_device *dev,
+                                const struct hk_g17p_faulttrace_payload *slot)
+{
+   const uint8_t *at = slot->extra;
+   const uint8_t *end = at + slot->extra_size;
+   unsigned stream_index = 0;
+
+   while ((size_t)(end - at) >=
+          sizeof(struct hk_g17p_faulttrace_stream_header)) {
+      struct hk_g17p_faulttrace_stream_header stream;
+      memcpy(&stream, at, sizeof(stream));
+      at += sizeof(stream);
+      if (stream.magic != HK_G17P_FAULTTRACE_STREAM_MAGIC ||
+          stream.stream_size > (size_t)(end - at))
+         break;
+      at += stream.stream_size;
+      if (stream.snapshot_size > (size_t)(end - at))
+         break;
+
+      const uint8_t *snapshot_end = at + stream.snapshot_size;
+      unsigned snapshot_index = 0;
+      while ((size_t)(snapshot_end - at) >=
+             sizeof(struct hk_g17p_faulttrace_snapshot_header)) {
+         struct hk_g17p_faulttrace_snapshot_header snapshot;
+         memcpy(&snapshot, at, sizeof(snapshot));
+         at += sizeof(snapshot);
+         const size_t sizes[] = {
+            snapshot.ioto_size, snapshot.linked_size,
+            snapshot.main_size, snapshot.root_size,
+         };
+         size_t total = 0;
+         bool overflow = false;
+         for (unsigned i = 0; i < ARRAY_SIZE(sizes); ++i) {
+            if (sizes[i] > SIZE_MAX - total) {
+               overflow = true;
+               break;
+            }
+            total += sizes[i];
+         }
+         for (unsigned set = 0; set < HK_MAX_SETS && !overflow; ++set) {
+            if (snapshot.descriptor_capture_size[set] > SIZE_MAX - total) {
+               overflow = true;
+               break;
+            }
+            total += snapshot.descriptor_capture_size[set];
+         }
+         if (snapshot.magic != HK_G17P_FAULTTRACE_SNAPSHOT_MAGIC || overflow ||
+             total > (size_t)(snapshot_end - at))
+            break;
+
+         const uint8_t *ioto = at;
+         const uint8_t *linked = ioto + snapshot.ioto_size;
+         const uint8_t *main = linked + snapshot.linked_size;
+         const uint8_t *root = main + snapshot.main_size;
+         const uint8_t *descriptors = root + snapshot.root_size;
+         size_t ioto_at = 0, linked_at = 0, root_at = 0;
+         const enum hk_g17p_faulttrace_compare_status ioto_status =
+            hk_g17p_faulttrace_compare_bytes(
+               dev->dev.agxdecode, snapshot.program_va, ioto,
+               snapshot.ioto_size, &ioto_at);
+         const enum hk_g17p_faulttrace_compare_status linked_status =
+            hk_g17p_faulttrace_compare_bytes(
+               dev->dev.agxdecode, snapshot.shader_va, linked,
+               snapshot.linked_size, &linked_at);
+         const enum hk_g17p_faulttrace_compare_status root_status =
+            hk_g17p_faulttrace_compare_bytes(
+               dev->dev.agxdecode, snapshot.root_va, root,
+               snapshot.root_size, &root_at);
+         fprintf(stderr,
+                 "G17P faulttrace live: sequence=%" PRIu64
+                 " stream=%u snapshot=%u program=%" PRIx64
+                 " shader=%" PRIx64 " root=%" PRIx64
+                 " ioto=%s@%#zx linked=%s@%#zx root=%s@%#zx\n",
+                 slot->sequence, stream_index, snapshot_index,
+                 snapshot.program_va, snapshot.shader_va, snapshot.root_va,
+                 hk_g17p_faulttrace_compare_name(ioto_status), ioto_at,
+                 hk_g17p_faulttrace_compare_name(linked_status), linked_at,
+                 hk_g17p_faulttrace_compare_name(root_status), root_at);
+
+         if (root_status == HK_G17P_COMPARE_MATCH &&
+             snapshot.root_size == sizeof(struct hk_root_descriptor_table)) {
+            struct hk_root_descriptor_table launch_root;
+            memcpy(&launch_root, root, sizeof(launch_root));
+
+#define LOG_ROOT_ADDRESS(name, index, address)                                 \
+   hk_g17p_faulttrace_log_address(dev->dev.agxdecode, slot->sequence,          \
+                                  stream_index, snapshot_index, name, index,   \
+                                  address)
+            LOG_ROOT_ADDRESS("root", 0, launch_root.root_desc_addr);
+            for (unsigned i = 0; i < HK_MAX_SETS; ++i)
+               LOG_ROOT_ADDRESS("set", i, launch_root.sets[i]);
+            for (unsigned i = 0; i < AGX_MAX_VBUFS; ++i)
+               LOG_ROOT_ADDRESS("attrib", i,
+                                launch_root.draw.attrib_base[i]);
+            LOG_ROOT_ADDRESS("vertex-params", 0,
+                             launch_root.draw.vertex_params);
+            LOG_ROOT_ADDRESS("tess-params", 0,
+                             launch_root.draw.tess_params);
+            LOG_ROOT_ADDRESS("geometry-params", 0,
+                             launch_root.draw.geometry_params);
+            LOG_ROOT_ADDRESS("pipeline-stats", 0,
+                             launch_root.draw.pipeline_stats);
+            LOG_ROOT_ADDRESS("vs-constant", 0,
+                             launch_root.draw.vs_constant_data_addr);
+            LOG_ROOT_ADDRESS("fs-constant", 0,
+                             launch_root.draw.fs_constant_data_addr);
+            for (unsigned i = 0; i < HK_MAX_DYNAMIC_BUFFERS; ++i)
+               LOG_ROOT_ADDRESS("dynamic-buffer", i,
+                                launch_root.dynamic_buffers[i].base_addr);
+            LOG_ROOT_ADDRESS("printf", 0,
+                             launch_root.printf_buffer_address);
+#undef LOG_ROOT_ADDRESS
+         }
+
+         for (unsigned set = 0; set < HK_MAX_SETS; ++set) {
+            const size_t captured = snapshot.descriptor_capture_size[set];
+            if (!snapshot.descriptor_va[set] &&
+                !snapshot.descriptor_size[set] && !captured)
+               continue;
+
+            size_t descriptor_at = 0;
+            const enum hk_g17p_faulttrace_compare_status descriptor_status =
+               captured
+                  ? hk_g17p_faulttrace_compare_bytes(
+                       dev->dev.agxdecode, snapshot.descriptor_va[set],
+                       descriptors, captured, &descriptor_at)
+                  : HK_G17P_COMPARE_UNAVAILABLE;
+            fprintf(stderr,
+                    "G17P faulttrace descriptor: sequence=%" PRIu64
+                    " stream=%u snapshot=%u set=%u va=%" PRIx64
+                    " size=%u captured=%zu live=%s@%#zx\n",
+                    slot->sequence, stream_index, snapshot_index, set,
+                    snapshot.descriptor_va[set],
+                    snapshot.descriptor_size[set], captured,
+                    hk_g17p_faulttrace_compare_name(descriptor_status),
+                    descriptor_at);
+
+            for (size_t byte = 0; byte + sizeof(uint64_t) <= captured;
+                 byte += sizeof(uint64_t)) {
+               uint64_t word, allocation_base = 0, allocation_base_shift4 = 0;
+               size_t allocation_size = 0, allocation_size_shift4 = 0;
+               memcpy(&word, descriptors + byte, sizeof(word));
+               if (!word)
+                  continue;
+
+               const bool mapped = agxdecode_gpu_mem_bounds(
+                  dev->dev.agxdecode, word, &allocation_base,
+                  &allocation_size);
+               const bool mapped_shift4 = word <= (UINT64_MAX >> 4) &&
+                  agxdecode_gpu_mem_bounds(dev->dev.agxdecode, word << 4,
+                                           &allocation_base_shift4,
+                                           &allocation_size_shift4);
+               fprintf(stderr,
+                       "G17P faulttrace descriptor word: sequence=%" PRIu64
+                       " stream=%u snapshot=%u set=%u offset=%#zx"
+                       " value=%" PRIx64 " mapped=%u base=%" PRIx64
+                       " allocation-size=%zu shifted4=%u shifted4-base=%" PRIx64
+                       " shifted4-allocation-size=%zu\n",
+                       slot->sequence, stream_index, snapshot_index, set,
+                       byte, word, mapped, allocation_base,
+                       allocation_size, mapped_shift4,
+                       allocation_base_shift4, allocation_size_shift4);
+            }
+            descriptors += captured;
+         }
+         at += total;
+         snapshot_index++;
+      }
+      at = snapshot_end;
+      stream_index++;
+   }
+}
+
+static void
+hk_g17p_faulttrace_decode_history(struct hk_device *dev,
+                                  struct hk_queue *queue)
+{
+   if (!(dev->dev.debug & AGX_DBG_FAULTTRACE))
+      return;
+
+   const unsigned first =
+      (queue->g17p_faulttrace_head + HK_G17P_FAULTTRACE_HISTORY -
+       queue->g17p_faulttrace_count) % HK_G17P_FAULTTRACE_HISTORY;
+
+   /* Persist every exact graphics snapshot before verbose decoding.  A
+    * watchdog reboot follows the causal firmware fault within seconds, and
+    * active camera motion can leave more than a hundred later small submits
+    * to decode.  Losing the raw causal record to diagnostic output ordering
+    * would make the reproducer non-actionable. */
+   const char *raw_base = getenv("AGXDECODE_DUMP_FILE");
+   if (!raw_base || !raw_base[0] || !strcmp(raw_base, "stderr"))
+      raw_base = "/tmp/hk-g17p-faulttrace";
+   for (unsigned i = 0; i < queue->g17p_faulttrace_count; ++i) {
+      const unsigned index = (first + i) % HK_G17P_FAULTTRACE_HISTORY;
+      const struct hk_g17p_faulttrace_payload *slot =
+         &queue->g17p_faulttrace[index];
+      if (!slot->extra || !slot->extra_size)
+         continue;
+
+      char path[1024];
+      snprintf(path, sizeof(path), "%s.raw.%ld.%04" PRIu64, raw_base,
+               (long)getpid(), slot->sequence);
+      FILE *file = fopen(path, "wb");
+      if (file) {
+         const size_t written = fwrite(slot->extra, 1, slot->extra_size, file);
+         if (written == slot->extra_size)
+            fsync(fileno(file));
+         fclose(file);
+         fprintf(stderr,
+                 "G17P faulttrace: raw history sequence=%" PRIu64
+                 " path=%s bytes=%zu written=%zu\n",
+                 slot->sequence, path, slot->extra_size, written);
+      } else {
+         fprintf(stderr,
+                 "G17P faulttrace: raw history sequence=%" PRIu64
+                 " open failed path=%s errno=%d\n",
+                 slot->sequence, path, errno);
+      }
+   }
+
+   for (unsigned i = 0; i < queue->g17p_faulttrace_count; ++i) {
+      const unsigned index = (first + i) % HK_G17P_FAULTTRACE_HISTORY;
+      const struct hk_g17p_faulttrace_payload *slot =
+         &queue->g17p_faulttrace[index];
+      if (!slot->data || !slot->size)
+         continue;
+
+      struct util_dynarray payload;
+      util_dynarray_init(&payload, NULL);
+      void *copy = util_dynarray_grow_bytes(&payload, 1, slot->size);
+      if (copy) {
+         memcpy(copy, slot->data, slot->size);
+         fprintf(stderr,
+                 "G17P faulttrace: decoding history %u/%u sequence=%" PRIu64
+                 " payload=%zu bytes\n",
+                 i + 1, queue->g17p_faulttrace_count, slot->sequence,
+                 slot->size);
+         agxdecode_drm_cmdbuf(dev->dev.agxdecode, &dev->dev.params, &payload,
+                              true);
+         agxdecode_next_frame();
+      }
+      util_dynarray_fini(&payload);
+
+      if (slot->extra && slot->extra_size)
+         hk_g17p_faulttrace_compare_live(dev, slot);
+   }
+}
+
 /*
  * The kernel/firmware jointly impose a limit on commands per submit ioctl, but
  * we can build up arbitrarily large command buffers. We handle this here by
@@ -752,8 +1225,9 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
  * bounds.
  */
 static VkResult
-queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
-                    unsigned command_count, unsigned ring_idx)
+queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
+                    struct drm_asahi_submit *submit, unsigned command_count,
+                    unsigned ring_idx)
 {
    uint8_t *cmdbuf = (uint8_t *)(uintptr_t)submit->cmdbuf;
    uint32_t offs = 0;
@@ -839,9 +1313,13 @@ queue_submit_looped(struct hk_device *dev, struct drm_asahi_submit *submit,
          .out_sync_count = has_out_syncs ? submit->out_sync_count : 0,
       };
 
+      hk_g17p_faulttrace_capture(dev, queue, cmdbuf + base_offs,
+                                 offs - base_offs, NULL, 0);
       VkResult result = queue_submit_single(dev, &submit_ioctl, ring_idx);
-      if (result != VK_SUCCESS)
+      if (result != VK_SUCCESS) {
+         hk_g17p_faulttrace_decode_history(dev, queue);
          return result;
+      }
 
       submitted_cdm += cdm_count;
       submitted_vdm += vdm_count;
@@ -855,6 +1333,7 @@ struct hk_bind_builder {
    struct hk_device *dev;
    struct vk_object_base *obj_base;
    struct agx_va *va;
+   struct hk_buffer *buffer;
    struct hk_image *image;
 
    /* State */
@@ -870,12 +1349,14 @@ struct hk_bind_builder {
 
 static inline struct hk_bind_builder
 hk_bind_builder(struct hk_device *dev, struct vk_object_base *obj_base,
-                struct agx_va *va, struct hk_image *image)
+                struct agx_va *va, struct hk_buffer *buffer,
+                struct hk_image *image)
 {
    struct hk_bind_builder b = {
       .dev = dev,
       .obj_base = obj_base,
       .va = va,
+      .buffer = buffer,
       .image = image,
    };
 
@@ -927,6 +1408,50 @@ hk_flush_bind(struct hk_bind_builder *b)
    }
 
    util_dynarray_append(&b->binds, op);
+
+   return VK_SUCCESS;
+}
+
+static VkResult
+hk_sparse_buffer_map_commit(struct hk_bind_builder *b)
+{
+   if (!b->buffer || !b->buffer->sparse_map)
+      return VK_SUCCESS;
+
+   struct hk_sparse_buffer_map_header *header =
+      agx_bo_map(b->buffer->sparse_map);
+   uint32_t *map = (uint32_t *)(header + 1);
+   struct drm_asahi_gem_bind_op *ops = b->binds.data;
+   const unsigned count = util_dynarray_num_elements(
+      &b->binds, struct drm_asahi_gem_bind_op);
+   assert((count % 2) == 0);
+
+   for (unsigned i = 0; i < count; i += 2) {
+      const struct drm_asahi_gem_bind_op *op = &ops[i];
+      assert(op->addr >= b->va->addr);
+      const uint64_t first = (op->addr - b->va->addr) / AIL_PAGESIZE;
+      const uint64_t pages = DIV_ROUND_UP(op->range, AIL_PAGESIZE);
+      const bool resident =
+         op->handle != b->dev->dev.scratch_bo->uapi_handle;
+
+      for (uint64_t page = 0; page < pages; ++page) {
+         if (first + page >= b->buffer->sparse_map_entries)
+            break;
+
+         const uint64_t target = first + page;
+         const uint32_t mask = BITFIELD_BIT(target & 31);
+         if (resident)
+            map[target >> 5] |= mask;
+         else
+            map[target >> 5] &= ~mask;
+      }
+   }
+
+   if (agx_bo_sync_for_device(b->buffer->sparse_map, 0,
+                              b->buffer->sparse_map->size)) {
+      return vk_errorf(b->dev, VK_ERROR_DEVICE_LOST,
+                       "Sparse buffer residency map upload failed");
+   }
 
    return VK_SUCCESS;
 }
@@ -986,9 +1511,19 @@ hk_bind_builder_finish(struct hk_bind_builder *b)
 
    /* Submit everything to the kernel at once */
    if (b->result == VK_SUCCESS && b->binds.size > 0) {
-      int ret = b->dev->dev.ops.bo_bind(
-         &b->dev->dev, b->binds.data,
-         util_dynarray_num_elements(&b->binds, struct drm_asahi_gem_bind_op));
+      const unsigned op_count =
+         util_dynarray_num_elements(&b->binds, struct drm_asahi_gem_bind_op);
+
+      /* One op per hardware tile plus its read-only shadow, so a large
+       * layered mip chain submits thousands.  The kernel copies and stages
+       * the whole batch, so the op count is what decides whether this bind
+       * can be satisfied when memory is tight -- print it when asked, rather
+       * than leaving a VM_BIND ENOMEM with no size attached to it. */
+      perf_debug_dev(&b->dev->dev, "Sparse bind batch: %u ops (%u bytes)",
+                     op_count, (unsigned)b->binds.size);
+
+      int ret = b->dev->dev.ops.bo_bind(&b->dev->dev, b->binds.data,
+                                        op_count);
       if (ret) {
          const int error = errno ? errno : EIO;
          b->result = vk_errorf(
@@ -996,7 +1531,9 @@ hk_bind_builder_finish(struct hk_bind_builder *b)
             error == ENOMEM ? VK_ERROR_OUT_OF_DEVICE_MEMORY : VK_ERROR_UNKNOWN,
             "Sparse VM_BIND batch failed: %s", strerror(error));
       } else {
-         hk_sparse_image_map_commit(b);
+         b->result = hk_sparse_buffer_map_commit(b);
+         if (b->result == VK_SUCCESS)
+            hk_sparse_image_map_commit(b);
       }
    }
 
@@ -1037,7 +1574,7 @@ hk_sparse_buffer_bind_memory(struct hk_device *device,
    VK_FROM_HANDLE(hk_buffer, buffer, bind->buffer);
 
    struct hk_bind_builder b =
-      hk_bind_builder(device, &buffer->vk.base, buffer->va, NULL);
+      hk_bind_builder(device, &buffer->vk.base, buffer->va, buffer, NULL);
 
    for (uint32_t i = 0; i < bind->bindCount; ++i) {
       struct hk_device_memory *cur_mem = NULL;
@@ -1059,7 +1596,8 @@ hk_sparse_image_opaque_bind_memory(
    VK_FROM_HANDLE(hk_image, image, bind->image);
 
    struct hk_bind_builder b =
-      hk_bind_builder(device, &image->vk.base, image->planes[0].va, image);
+      hk_bind_builder(device, &image->vk.base, image->planes[0].va, NULL,
+                      image);
 
    for (uint32_t i = 0; i < bind->bindCount; ++i) {
       struct hk_device_memory *mem = NULL;
@@ -1139,7 +1677,8 @@ hk_sparse_image_bind_memory(struct hk_device *device,
    struct ail_layout *layout = &image->planes[0].layout;
 
    struct hk_bind_builder b =
-      hk_bind_builder(device, &image->vk.base, image->planes[0].va, image);
+      hk_bind_builder(device, &image->vk.base, image->planes[0].va, NULL,
+                      image);
 
    for (uint32_t i = 0; i < bind->bindCount; ++i) {
       struct hk_device_memory *mem = NULL;
@@ -1219,10 +1758,32 @@ hk_queue_submit_bind_sparse_memory(struct hk_device *device,
    return VK_SUCCESS;
 }
 
+static bool
+hk_sparse_submission_updates_sstt(const struct vk_queue_submit *submission)
+{
+   for (uint32_t i = 0; i < submission->image_opaque_bind_count; ++i) {
+      VK_FROM_HANDLE(hk_image, image, submission->image_opaque_binds[i].image);
+      if (submission->image_opaque_binds[i].bindCount &&
+          image->planes[0].sparse_map)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < submission->image_bind_count; ++i) {
+      VK_FROM_HANDLE(hk_image, image, submission->image_binds[i].image);
+      if (submission->image_binds[i].bindCount &&
+          image->planes[0].sparse_map)
+         return true;
+   }
+
+   return false;
+}
+
 static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
 {
+   bool flush_sstt = false;
+
    /* TODO: Support asynchronous sparse queue? */
    if (submit->buffer_bind_count || submit->image_bind_count ||
        submit->image_opaque_bind_count) {
@@ -1230,9 +1791,12 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       VkResult result = hk_queue_submit_bind_sparse_memory(dev, submit);
       if (result != VK_SUCCESS)
          return result;
+
+      flush_sstt = dev->dev.chip == AGX_CHIP_G17P &&
+                   hk_sparse_submission_updates_sstt(submit);
    }
 
-   unsigned command_count = 0;
+   unsigned command_count = flush_sstt ? 1 : 0;
 
    /* Gather the number of individual commands to submit up front */
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
@@ -1296,9 +1860,27 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
    /* Now setup the command structs */
    struct util_dynarray payload = UTIL_DYNARRAY_INIT;
+   struct util_dynarray faulttrace_extra = UTIL_DYNARRAY_INIT;
 
    unsigned nr_vdm = 0, nr_cdm = 0;
    unsigned nr_draws = 0, nr_dispatches = 0, nr_flushes = 0, nr_merged = 0;
+
+   if (flush_sstt) {
+      assert(queue->g17p_sstt_flush_bo);
+      const struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
+      const struct drm_asahi_cmd_compute cmd = {
+         .cdm_ctrl_stream_base = queue->g17p_sstt_flush_bo->va->addr,
+         .cdm_ctrl_stream_end =
+            queue->g17p_sstt_flush_bo->va->addr +
+            AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE +
+            AGX3_CDM_STREAM_TERMINATE_SIZE,
+      };
+
+      util_dynarray_append(&payload, header);
+      util_dynarray_append(&payload, cmd);
+      nr_cdm++;
+      nr_flushes++;
+   }
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
@@ -1319,6 +1901,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             assert(cs->stats.cmds > 0 || cs->stats.flushes > 0 ||
                    cs->timestamp.end.handle);
 
+            asahi_append_compute_attachments(dev, &payload, cs);
             util_dynarray_append(&payload, header);
             struct drm_asahi_cmd_compute cmd;
             asahi_fill_cdm_command(dev, cs, &cmd);
@@ -1338,7 +1921,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             util_dynarray_append(&payload, header);
 
             struct drm_asahi_cmd_render cmd;
-            asahi_fill_vdm_command(dev, cs, &cmd);
+            asahi_fill_vdm_command(dev, cs, &cmd, &faulttrace_extra);
             util_dynarray_append(&payload, cmd);
             nr_vdm++;
             nr_draws += cs->stats.cmds;
@@ -1381,14 +1964,20 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
    VkResult result;
    if (command_count <= max_commands_per_submit(dev)) {
+      hk_g17p_faulttrace_capture(dev, queue, payload.data, payload.size,
+                                 faulttrace_extra.data,
+                                 faulttrace_extra.size);
       result =
          queue_submit_single(dev, &submit_ioctl, queue->drm.virt_ring_idx);
+      if (result != VK_SUCCESS)
+         hk_g17p_faulttrace_decode_history(dev, queue);
    } else {
-      result = queue_submit_looped(dev, &submit_ioctl, command_count,
+      result = queue_submit_looped(dev, queue, &submit_ioctl, command_count,
                                    queue->drm.virt_ring_idx);
    }
 
    util_dynarray_fini(&payload);
+   util_dynarray_fini(&faulttrace_extra);
    return result;
 }
 
@@ -1518,14 +2107,39 @@ hk_queue_init(struct hk_device *dev, const VkDeviceQueueCreateInfo *pCreateInfo,
     * reusing point 1 lets it return before the first submit has completed. */
    queue->drm.timeline_value = initial_value;
 
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       dev->vk.enabled_features.sparseBinding) {
+      queue->g17p_sstt_flush_bo =
+         agx_bo_create(&dev->dev, AIL_PAGESIZE, 0, 0, "SSTT flush stream");
+      if (!queue->g17p_sstt_flush_bo) {
+         hk_queue_finish(dev, queue);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+
+      uint8_t *stream = agx_bo_map(queue->g17p_sstt_flush_bo);
+      if (!stream ||
+          !agx3_cdm_sstt_flush_invalidate_pack(AGX_CHIP_G17P, stream) ||
+          !agx3_cdm_stream_terminate_pack(
+             AGX_CHIP_G17P,
+             stream + AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE)) {
+         hk_queue_finish(dev, queue);
+         return vk_error(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY);
+      }
+   }
+
    return VK_SUCCESS;
 }
 
 void
 hk_queue_finish(struct hk_device *dev, struct hk_queue *queue)
 {
+   for (unsigned i = 0; i < HK_G17P_FAULTTRACE_HISTORY; ++i) {
+      free(queue->g17p_faulttrace[i].data);
+      free(queue->g17p_faulttrace[i].extra);
+   }
    drmSyncobjDestroy(dev->dev.fd, queue->drm.syncobj);
    agx_destroy_command_queue(&dev->dev, queue->drm.id);
+   agx_bo_unreference(&dev->dev, queue->g17p_sstt_flush_bo);
    vk_queue_finish(&queue->vk);
    vk_free(&dev->vk.alloc, queue);
 }

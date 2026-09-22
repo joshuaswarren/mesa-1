@@ -75,6 +75,7 @@ agx_vdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
                 : AGX_VDM_INDEX_LIST_INDIRECT_INDEXED_MAX_LENGTH - 4;
       struct agx_vdm_state_update_info state_update;
       struct agx_vdm_index_list_indirect_indexed_info indirect_indexed;
+      struct agx_vdm_tessellation_state_info tessellation_state;
       const bool is_state_update =
          available >= AGX_VDM_STATE_UPDATE_LENGTH &&
          agx_vdm_state_update_unpack(chip, bytes, AGX_VDM_STATE_UPDATE_LENGTH,
@@ -84,14 +85,26 @@ agx_vdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
          agx_vdm_index_list_indirect_indexed_unpack(
             chip, bytes, indirect_indexed_length, &indirect_indexed);
 
+      const bool is_tessellation_state =
+         available >= AGX_VDM_TESSELLATION_STATE_LENGTH &&
+         agx_vdm_tessellation_state_unpack(chip, bytes,
+                                           AGX_VDM_TESSELLATION_STATE_LENGTH,
+                                           &tessellation_state);
+
       /* The indexed-indirect form starts with its exact 8-byte restart State
        * Update.  Require a unique complete grammar match rather than treating
        * that prefix as a standalone state record. */
-      if ((unsigned)is_state_update + (unsigned)is_indirect_indexed != 1)
+      if ((unsigned)is_state_update + (unsigned)is_indirect_indexed +
+             (unsigned)is_tessellation_state !=
+          1)
          return false;
 
       record->chip = chip;
-      if (is_state_update) {
+      if (is_tessellation_state) {
+         record->kind = AGX_VDM_RECORD_TESSELLATION_STATE;
+         record->length = AGX_VDM_TESSELLATION_STATE_LENGTH;
+         record->data.tessellation_state = tessellation_state;
+      } else if (is_state_update) {
          record->kind = AGX_VDM_RECORD_STATE_UPDATE;
          record->length = AGX_VDM_STATE_UPDATE_LENGTH;
          record->data.state_update = state_update;
@@ -164,14 +177,22 @@ agx_vdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
    }
 
    case 5:
-      if (available < AGX_VDM_TESSELLATE_DIRECT_LENGTH ||
-          !agx_vdm_tessellate_direct_unpack(
+      if (available >= AGX_VDM_TESSELLATE_DIRECT_LENGTH &&
+          agx_vdm_tessellate_direct_unpack(
              chip, bytes, AGX_VDM_TESSELLATE_DIRECT_LENGTH,
-             &record->data.tessellate_direct))
+             &record->data.tessellate_direct)) {
+         record->kind = AGX_VDM_RECORD_TESSELLATE_DIRECT;
+         record->length = AGX_VDM_TESSELLATE_DIRECT_LENGTH;
+      } else if (available >= AGX_VDM_TESSELLATE_INDIRECT_LENGTH &&
+                 agx_vdm_tessellate_indirect_unpack(
+                    chip, bytes, AGX_VDM_TESSELLATE_INDIRECT_LENGTH,
+                    &record->data.tessellate_indirect)) {
+         record->kind = AGX_VDM_RECORD_TESSELLATE_INDIRECT;
+         record->length = AGX_VDM_TESSELLATE_INDIRECT_LENGTH;
+      } else {
          return false;
+      }
 
-      record->kind = AGX_VDM_RECORD_TESSELLATE_DIRECT;
-      record->length = AGX_VDM_TESSELLATE_DIRECT_LENGTH;
       record->chip = chip;
       return true;
 

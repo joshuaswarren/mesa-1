@@ -19,6 +19,7 @@ hk_files = files(
   'hk_cmd_dispatch.c',
   'hk_cmd_draw.c',
   'hk_cmd_meta.c',
+  'hk_cmd_trace_rays.c',
   'hk_cmd_pool.c',
   'hk_cmd_pool.h',
   'hk_descriptor_set.h',
@@ -72,13 +73,21 @@ hk_files = files(
   'hk_image_view.h',
   'hk_instance.c',
   'hk_instance.h',
+  'hk_nir_forward_image_stores.c',
+  'hk_nir_forward_image_stores.h',
   'hk_nir_lower_descriptors.c',
   'hk_nir_lower_ray_queries.c',
   'hk_nir_lower_robust_image.c',
   'hk_nir_lower_robust_image.h',
   'hk_nir_passthrough_gs.c',
   'hk_nir_ray_tracing.c',
+  'hk_ray_tracing_core.c',
+  'hk_ray_tracing_core.h',
+  'hk_ray_tracing_pipeline.c',
+  'hk_ray_tracing_pipeline.h',
   'hk_nir_ray_tracing.h',
+  'hk_nir_widen_16bit_varyings.c',
+  'hk_nir_widen_16bit_varyings.h',
   'hk_native_descriptor.h',
   'hk_native_descriptor_pack.c',
   'hk_native_descriptor_pack.h',
@@ -104,6 +113,25 @@ hk_files = files(
 )
 
 if with_tests
+  test(
+    'hk_shader_variants',
+    executable(
+      'hk_shader_variants_test',
+      files('tests/test-hk-shader-variants.c'),
+      include_directories : [
+        include_directories('.', '../libagx', '../../gallium/include',
+                            '../../gallium/auxiliary', '../../vulkan/runtime',
+                            '../../vulkan/util', '../../vulkan/wsi',
+                            '../../compiler/spirv', '../../virtio/virtio-gpu',
+                            '../../virtio/vdrm'),
+        inc_include, inc_src, inc_asahi,
+      ],
+      dependencies : [idep_nir, idep_mesautil, idep_libagx,
+                      idep_libagx_shaders_h, idep_agx_pack],
+    ),
+    suite : ['asahi'],
+  )
+
   if host_machine.system() == 'linux'
     hk_sparse_format_properties = executable(
       'hk-sparse-format-properties',
@@ -113,6 +141,20 @@ if with_tests
       c_args : [c_msvc_compat_args],
     )
   endif
+
+  test(
+    'hk_ray_tracing_core',
+    executable(
+      'hk_ray_tracing_core_test',
+      files('tests/test-hk-ray-tracing-core.c',
+            'hk_ray_tracing_core.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
 
   test(
     'hk_bvh_depth_core',
@@ -136,6 +178,34 @@ if with_tests
             'hk_nir_ray_tracing.c'),
       include_directories : [include_directories('.'), inc_include, inc_src],
       dependencies : [idep_nir, idep_mesautil, idep_vulkan_runtime_headers],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_nir_forward_image_stores',
+    executable(
+      'hk_nir_forward_image_stores_test',
+      files('tests/test-hk-nir-forward-image-stores.c',
+            'hk_nir_forward_image_stores.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_nir_widen_16bit_varyings',
+    executable(
+      'hk_nir_widen_16bit_varyings_test',
+      files('tests/test-hk-nir-widen-16bit-varyings.c',
+            'hk_nir_widen_16bit_varyings.c'),
+      include_directories : [include_directories('.'), inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil],
       c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     ),
@@ -223,6 +293,34 @@ if with_tests
     executable(
       'hk_cmd_lifetime_test',
       files('tests/test-hk-cmd-lifetime.c', 'hk_cmd_lifetime.c'),
+      include_directories : [
+        inc_gallium,
+        inc_gallium_aux,
+        inc_include,
+        inc_src,
+        inc_asahi,
+        inc_virtio_gpu,
+        inc_virtio_vdrm,
+      ],
+      dependencies : [
+        idep_nir,
+        idep_mesautil,
+        idep_libagx,
+        idep_libagx_shaders_h,
+        idep_vulkan_runtime_headers,
+        idep_vulkan_util_headers,
+      ],
+      c_args : [c_msvc_compat_args, '-Wno-error=pointer-arith'],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_cdm_inline_merge',
+    executable(
+      'hk_cdm_inline_merge_test',
+      files('tests/test-hk-cdm-inline-merge.c', 'hk_drm_render_core.c'),
       include_directories : [
         inc_gallium,
         inc_gallium_aux,
@@ -393,6 +491,7 @@ if with_tests
             'hk_agx3_ioto_program_core.c',
             '../compiler/agx3_compute_program.c',
             '../compiler/agx3_graphics_program.c',
+            '../compiler/agx3_copy_core.c',
             '../compiler/agx3_ioto_uniform_program.c',
             '../compiler/agx3_ioto_load_packer.c',
             '../compiler/agx3_mem_core.c',
@@ -683,6 +782,15 @@ if with_tests
       'asahi-submit-g17p-render',
       files('tests/asahi_submit_g17p_render.c'),
       include_directories : [inc_include],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    g17p_attachmentless_record = executable(
+      'g17p-attachmentless-record',
+      files('tests/g17p_attachmentless_record.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
       gnu_symbol_visibility : 'hidden',
     )
@@ -1617,8 +1725,6 @@ if with_tests
     )
 
     # Unresolved multisample colour store, then a per-sample texelFetch back.
-    # Needs HK_G17P_MSAA=1 and HK_G17P_UNVERIFIED_FEATURES=msaa_store; the
-    # binary says so and exits non-zero rather than skipping.
     executable(
       'g17p-vulkan-msaa-store-fetch2',
       files('tests/g17p_vulkan_msaa_store_fetch.c'),
@@ -1638,8 +1744,7 @@ if with_tests
     )
 
     # Multisample depth attachment: per-sample depth testing, and the ZLS
-    # store/load round trip across two render passes. Needs HK_G17P_MSAA=1 and
-    # HK_G17P_UNVERIFIED_FEATURES=msaa_depth.
+    # store/load round trip across two render passes.
     executable(
       'g17p-vulkan-msaa-depth2',
       files('tests/g17p_vulkan_msaa_depth_test.c'),
@@ -1658,9 +1763,22 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Standalone reduction of the Chromium/three.js keyframes workload: a
+    # large 4x-MSAA depth render with enough repeated geometry to force the
+    # parameter/partial-render paths, replayed for thousands of bounded frames.
+    executable(
+      'g17p-vulkan-keyframes-repro',
+      files('tests/g17p_vulkan_msaa_depth_test.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_MSAA_SAMPLES=4',
+                '-DG17P_KEYFRAMES_REPRO=1', '-DWIDTH=1760u',
+                '-DHEIGHT=1232u'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Isolates the multisample resolve: a clear-only pass with no draw at all,
-    # plus full-screen quads at 1x and Nx. Needs HK_G17P_MSAA=1. Pair it with
-    # AGX_SPECLM_SAMPLE_CODE.
+    # plus full-screen quads at 1x and Nx.
     executable(
       'g17p-vulkan-msaa-resolve2',
       files('tests/g17p_vulkan_msaa_resolve_probe.c'),
@@ -2275,6 +2393,20 @@ if with_tests
     # Generic encodability probe: takes SPIR-V paths on the command line and
     # reports whether vkCreateComputePipelines accepts each one. This is the
     # tool that measures README-agx3-packer-limits.md's matrix.
+    # VK_KHR_ray_tracing_pipeline host-side probe.  Compiles every ray
+    # tracing stage into the megakernel, imports a pipeline library, and
+    # records all three trace-rays forms under the no-op drm-shim.  It
+    # executes nothing; see docs/G17P_RAYTRACING_PIPELINE_ABI.md for what a
+    # pass does and does not establish.
+    executable(
+      'hk-rt-pipeline-probe',
+      files('tests/hk_rt_pipeline_probe.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     executable(
       'g17p-vulkan-graphics-probe',
       files('tests/g17p_vulkan_graphics_probe.c'),
@@ -2594,6 +2726,15 @@ if with_tests
     )
 
     executable(
+      'g17p-vulkan-workgroup-shared-1024',
+      files('tests/g17p_vulkan_compute_min.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args, '-DG17P_WORKGROUP_SHARED_1024=1'],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
       'g17p-vulkan-compute-atomic2d',
       files('tests/g17p_vulkan_compute_min.c'),
       include_directories : [inc_include],
@@ -2603,6 +2744,24 @@ if with_tests
     )
 
     executable(
+      'g17p_vulkan_blit_scaled',
+      files('tests/g17p_vulkan_blit_scaled.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    executable(
+      'g17p-vulkan-copy-rgb24',
+      files('tests/g17p_vulkan_copy_rgb24.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+  executable(
       'g17p-vulkan-image-copy-subregion',
       files('tests/g17p_vulkan_image_copy_subregion.c'),
       include_directories : [inc_include],

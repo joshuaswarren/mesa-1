@@ -1,0 +1,97 @@
+diff --git a/external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp b/external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp
+index 68faea6..fbed2db 100644
+--- a/external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp
++++ b/external/vulkancts/modules/vulkan/renderpass/vktRenderPassTests.cpp
+@@ -677,7 +677,7 @@ public:
+ 	const vector<Attachment>&							getAttachments	(void) const { return m_attachments;	}
+ 	const vector<Subpass>&								getSubpasses	(void) const { return m_subpasses;		}
+ 	const vector<SubpassDependency>&					getDependencies	(void) const { return m_dependencies;	}
+-	const vector<VkInputAttachmentAspectReferenceKHR>	getInputAspects	(void) const { return m_inputAspects;	}
++	const vector<VkInputAttachmentAspectReferenceKHR>&	getInputAspects	(void) const { return m_inputAspects;	}
+ 
+ private:
+ 	const vector<Attachment>							m_attachments;
+@@ -5727,7 +5727,7 @@ void addFormatTests (tcu::TestCaseGroup* group, AllocationKind allocationKind)
+ 								{
+ 									const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 									{
+-										0u,
++										1u,
+ 										0u,
+ 										VK_IMAGE_ASPECT_COLOR_BIT
+ 									};
+@@ -5783,7 +5783,7 @@ void addFormatTests (tcu::TestCaseGroup* group, AllocationKind allocationKind)
+ 								{
+ 									const VkInputAttachmentAspectReferenceKHR inputAspect =
+ 									{
+-										0u,
++										1u,
+ 										0u,
+ 										VK_IMAGE_ASPECT_COLOR_BIT
+ 									};
+
+diff --git a/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp b/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp
+index 1f9f618..e4ed05c 100644
+--- a/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp
++++ b/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrUtil.cpp
+@@ -620,7 +620,7 @@ void downloadImage (const DeviceInterface&	vkd,
+ 				makeExtent3D(planeW, planeH, 1u),
+ 			};
+ 
+-			vkd.cmdCopyImageToBuffer(*cmdBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, **stagingBuffers[planeNdx], 1u, &copy);
++			vkd.cmdCopyImageToBuffer(*cmdBuffer, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, **stagingBuffers[planeNdx], 1u, &copy);
+ 		}
+ 		{
+ 			const VkBufferMemoryBarrier		postCopyBarrier	=
+
+diff --git a/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp b/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
+index d7e7260..a757755 100644
+--- a/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
++++ b/external/vulkancts/modules/vulkan/api/vktApiImageClearingTests.cpp
+@@ -1184,7 +1184,18 @@ TestStatus ClearColorImageTestInstance::iterate (void)
+ 
+ 	// Different clear color per range
+ 	for (std::size_t i = 0u; i < subresourceRanges.size(); ++i)
+-		m_vkd.cmdClearColorImage(*m_commandBuffer, *m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &m_params.clearValue[i].color, 1, &subresourceRanges[i]);
++	{
++		VkClearColorValue value = m_params.clearValue[i].color;
++		const std::string formatName = de::toString(getFormatStr(m_params.imageFormat));
++		for (unsigned c = 0; c < 4; ++c)
++		{
++			if (formatName.find("_SSCALED") != std::string::npos)
++				value.float32[c] = float(m_params.clearValue[i].color.int32[c]);
++			else if (formatName.find("_USCALED") != std::string::npos)
++				value.float32[c] = float(m_params.clearValue[i].color.uint32[c]);
++		}
++		m_vkd.cmdClearColorImage(*m_commandBuffer, *m_image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &value, 1, &subresourceRanges[i]);
++	}
+ 
+ 	pipelineImageBarrier(VK_PIPELINE_STAGE_TRANSFER_BIT,				// VkPipelineStageFlags		srcStageMask
+ 						 VK_PIPELINE_STAGE_TRANSFER_BIT,				// VkPipelineStageFlags		dstStageMask
+
+--- a/external/vulkancts/modules/vulkan/api/vktApiCopiesAndBlittingTests.cpp
++++ b/external/vulkancts/modules/vulkan/api/vktApiCopiesAndBlittingTests.cpp
+@@ -1784,8 +1784,6 @@
+ 	{
+ 		if (!(srcFormatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+ 			TCU_THROW(NotSupportedError, "Source format feature sampled image filter linear not supported");
+-		if (!(dstFormatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+-			TCU_THROW(NotSupportedError, "Destination format feature sampled image filter linear not supported");
+ 	}
+ 
+ 	// Create source image
+--- a/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp
++++ b/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp
+@@ -1009,10 +1009,10 @@
+ 
+ 	const double	a		= xOffset == vk::VK_CHROMA_LOCATION_COSITED_EVEN_KHR
+ 							? (i % 2 == 0 ? 0.0 : 0.5)
+-							: (i % 2 == 0 ? 0.25 : 0.75);
++							: (i % 2 == 0 ? 0.75 : 0.25);
+ 	const double	b		= yOffset == vk::VK_CHROMA_LOCATION_COSITED_EVEN_KHR
+ 							? (j % 2 == 0 ? 0.0 : 0.5)
+-							: (j % 2 == 0 ? 0.25 : 0.75);
++							: (j % 2 == 0 ? 0.75 : 0.25);
+ 
+ 	return linearInterpolate(filteringFormat, a, b,
+ 								lookupWrapped(access, conversionFormat, addressModeU, addressModeV, IVec2(subI, subJ)),

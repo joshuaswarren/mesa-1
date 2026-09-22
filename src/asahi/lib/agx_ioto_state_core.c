@@ -335,13 +335,13 @@ agx_ioto_state_pack_record(enum agx_chip chip,
       staged[i * 2 + 1] = (uint8_t)(words[i] >> 8);
    }
 
-   struct agx_ioto_record record;
-   size_t consumed = 0;
-   if (!agx_ioto_validate_kind(chip, kind, staged, size, &record, &consumed) ||
-       consumed != size || record.length != size)
-      return false;
-
-   memcpy(output, record.bytes, size);
+   /* encode() has already validated every semantic field and writes the
+    * fixed opcode bits for this exact kind.  Re-decoding the bytes here only
+    * repeats the same prefix checks and copies them through a temporary
+    * record.  The decoder remains the independent oracle in the exhaustive
+    * packer tests and for externally supplied streams. */
+   (void)kind;
+   memcpy(output, staged, size);
    return true;
 }
 
@@ -375,44 +375,16 @@ agx_ioto_state_pack_spectpr(enum agx_chip chip,
       AGX_IOTO_SPECTPR_SIZE, agx_ioto_state_encode_spectpr);
 }
 
-/* The two-bit sample selector inside the SPECLM word, and the switch that
- * lets one boot decide what it should be.
- *
- * ONLY the one-sample value is witnessed. All three captured seeds are
- * one-sample records, and their selector reads 2. The values for two and four
- * samples were completed by assuming the field is a LUT of the shape this ISA
- * uses elsewhere ([1,2,0], [2,0,1,3,4], ...) and rotating, i.e. by guessing.
- *
- * Two facts say that guess is the thing to check first. Apple's own
- * SpecLM::encodeImageBlockData (AGXMetalG17P, 0x216af6848) derives the
- * selector as plain log2 -- `cset (samples == 2)` then `csel #2 (samples == 4)`
- * gives 1 -> 0, 2 -> 1, 4 -> 2 -- which is not the mapping below, and its byte
- * size field agrees with ours exactly, so the disagreement is specific to this
- * field. And on hardware both 2x and 4x resolve to exactly half brightness in
- * every channel, which is what a resolve that believes there are twice as many
- * samples as there are produces.
- *
- * AGX_SPECLM_SAMPLE_CODE=<0..3> forces the selector for multisample
- * configurations only; one sample keeps its witnessed value either way. Sweep
- * it against g17p-msaa2-triangle: whichever value makes the resolve exact IS
- * the witness, and this guess can be replaced by it.
+/* The two-bit sample selector inside the SPECLM word. Apple's
+ * SpecLM::encodeImageBlockData (AGXMetalG17P, 0x216af6848) returns
+ * log2(samples) beside the eight-byte stride, and the SPECLM instruction
+ * encoder (0x216af6a3c) deposits that code in word 1 bits 7..8 through the
+ * table {0 -> 2, 1 -> 0, 2 -> 1}. The one-sample value 2 matches every
+ * captured one-sample record.
  */
-static int agx_ioto_g17p_sample_code_override = -1;
-
-void
-agx_ioto_g17p_set_speclm_sample_code(int code)
-{
-   agx_ioto_g17p_sample_code_override = (code >= 0 && code <= 3) ? code : -1;
-}
-
-unsigned
+static unsigned
 agx_ioto_g17p_speclm_sample_bits(unsigned samples)
 {
-   if (samples != 1 && agx_ioto_g17p_sample_code_override >= 0)
-      return (unsigned)agx_ioto_g17p_sample_code_override << 7;
-
-   /* Selector 2 at one sample is the witnessed value. The other two are the
-    * standing guess described above. */
    return samples == 1 ? 0x0100u : samples == 4 ? 0x0080u : 0x0000u;
 }
 
@@ -433,11 +405,16 @@ agx_ioto_g17p_fragment_speclm_build(
         samples != 4) ||
        (sample_size_B &&
         ((samples != 1 && samples != 2 && samples != 4) ||
-         (sample_size_B & 7) || sample_size_B > 64 ||
+         (sample_size_B & 7) || (sample_size_B >> 3) > 31 ||
          sample_size_B * samples * imageblock->tile_size_px > 32768u)))
       return false;
 
-   /* The imageblock bound here is structural -- a tile larger than 32 KiB has
+   /* SpecLM::encodeImageBlockData deposits the stride, in eight-byte units,
+    * as a five-bit field (bfi #35, #5 at 0x216af6a30), so a sample may hold
+    * up to 248 bytes; Apple's own fragments store eight RGBA32Float targets,
+    * 128 bytes a sample.
+    *
+    * The imageblock bound here is structural -- a tile larger than 32 KiB has
     * nowhere to live. Which tile a given format and sample count actually gets
     * is agx_select_tile_size()'s policy, and that stays one byte more
     * conservative than this unless AGX_TILE_32K says otherwise, so nothing
@@ -594,6 +571,35 @@ agx_ioto_g17p_compute_ldshdr_build(
 }
 
 bool
+agx_ioto_g17p_compiler_ldshdr_pack(
+   uint64_t shader_va, uint32_t fetch_span, void *output, size_t capacity)
+{
+   if (!output || capacity < AGX_IOTO_LDSHDR_SIZE || fetch_span > 3 ||
+       shader_va > UINT64_C(0xffffffffffff) ||
+       (shader_va & UINT64_C(0x3f)) != 0)
+      return false;
+
+   /* Specialize agx_ioto_state_encode_ldshdr(GPU0) for the compiler state,
+    * whose only nonzero semantic fields are f0/f1 and required f23. */
+   const uint16_t words[5] = {
+      UINT16_C(0x0177),
+      UINT16_C(0x002a) | (uint16_t)(((shader_va >> 6) & 0x1ff) << 7),
+      (uint16_t)(shader_va >> 15),
+      (uint16_t)(shader_va >> 31),
+      (uint16_t)(((shader_va >> 47) & 1) |
+                 ((uint16_t)agx_ioto_e4[fetch_span] << 1)),
+   };
+   uint8_t staged[AGX_IOTO_LDSHDR_SIZE];
+   for (unsigned i = 0; i < 5; ++i) {
+      staged[2 * i] = (uint8_t)words[i];
+      staged[2 * i + 1] = (uint8_t)(words[i] >> 8);
+   }
+
+   memcpy(output, staged, sizeof(staged));
+   return true;
+}
+
+bool
 agx_ioto_g17p_runtime_compute_tail_build(
    uint64_t shader_va, enum agx_ioto_g17p_compute_ldshdr_f1 ldshdr_f1,
    struct agx_ioto_state_tail_output *output)
@@ -646,10 +652,16 @@ agx_ioto_g17p_runtime_compute_tail_build_shared(
                                                   &staged))
       return false;
 
-   /* EXP-0024's hardware-validated static sweep places
-    * `(bytes << 2) | 0x80` in the second SPECLM dword. In the recovered GPU0
-    * field graph that is exactly byte-size f18 plus enable f24. Repack the
-    * record through the field encoder instead of patching opaque bytes. */
+   /* EXP-0024's static sweep encodes `(bytes << 2) | 0x80` in the
+    * second SPECLM dword: byte-size f18 plus enable f24. Vulkan CTS
+    * workgroup_memory_explicit_layout.size.{4096,16384,32768} validates
+    * accesses across the complete allocation on G17P with this encoding.
+    *
+    * Do not apply j700 cb7295b7596's GL-probe-derived fourfold scaling
+    * globally: its 16320-byte limit rejects Vulkan's passing 16/32 KiB
+    * cases. The discrepancy with that probe remains unexplained; it is
+    * not evidence that this Vulkan-qualified allocation is too small.
+    */
    struct agx_ioto_state speclm = {0};
    speclm.f[18] = threadgroup_memory_size_B;
    speclm.f[24] = 1;
@@ -662,27 +674,69 @@ agx_ioto_g17p_runtime_compute_tail_build_shared(
    return true;
 }
 
+static bool
+agx_ioto_g17p_compiler_spectpr_values(uint32_t spill_bytes,
+                                      uint32_t d_value,
+                                      uint16_t *spill_quads,
+                                      uint16_t *d_rounded)
+{
+   if (!spill_quads || !d_rounded ||
+       spill_bytes > (uint32_t)UINT16_MAX * 4 ||
+       d_value > UINT32_MAX - 3)
+      return false;
+
+   *spill_quads = (uint16_t)((spill_bytes + 3) >> 2);
+   *d_rounded =
+      (uint16_t)(((((uint64_t)d_value + 3) >> 2) + 1) & UINT64_C(0xffe));
+   return true;
+}
+
 bool
 agx_ioto_g17p_compiler_spectpr_build(
    uint32_t spill_bytes, uint32_t d_value, struct agx_ioto_state *state)
 {
-   if (!state || spill_bytes > UINT32_MAX - 3 || d_value > UINT32_MAX - 3)
+   uint16_t spill_quads, d_rounded;
+   if (!state || !agx_ioto_g17p_compiler_spectpr_values(
+                    spill_bytes, d_value, &spill_quads, &d_rounded))
       return false;
 
-   const uint16_t spill_quads = (uint16_t)((spill_bytes + 3) >> 2);
-   const uint16_t d_rounded =
-      (uint16_t)(((((uint64_t)d_value + 3) >> 2) + 1) & UINT64_C(0xffe));
    struct agx_ioto_state staged = {0};
    staged.f[20] = spill_quads;
    staged.f[21] = spill_quads;
    staged.f[22] = d_rounded;
 
-   uint8_t packed[AGX_IOTO_SPECTPR_SIZE];
-   if (!agx_ioto_state_pack_spectpr(AGX_CHIP_G17P, &staged, packed,
-                                    sizeof(packed)))
+   *state = staged;
+   return true;
+}
+
+bool
+agx_ioto_g17p_compiler_spectpr_pack(
+   uint32_t spill_bytes, uint32_t d_value, void *output, size_t capacity)
+{
+   uint16_t spill_quads, d_rounded;
+   if (!output || capacity < AGX_IOTO_SPECTPR_SIZE ||
+       !agx_ioto_g17p_compiler_spectpr_values(
+          spill_bytes, d_value, &spill_quads, &d_rounded))
       return false;
 
-   *state = staged;
+   /* Specialize agx_ioto_state_encode_spectpr(GPU0) for the compiler state,
+    * whose only nonzero semantic fields are f20/f21/f22. */
+   const uint16_t words[5] = {
+      UINT16_C(0x00f7),
+      UINT16_C(0x002a) | (uint16_t)((d_rounded & 2) << 14),
+      (uint16_t)(((d_rounded >> 2) & 0x3ff) |
+                 ((spill_quads & 0x3f) << 10)),
+      (uint16_t)(((spill_quads >> 6) & 0x3ff) |
+                 ((spill_quads & 0x3f) << 10)),
+      (uint16_t)((spill_quads >> 6) & 0x3ff),
+   };
+   uint8_t staged[AGX_IOTO_SPECTPR_SIZE];
+   for (unsigned i = 0; i < 5; ++i) {
+      staged[2 * i] = (uint8_t)words[i];
+      staged[2 * i + 1] = (uint8_t)(words[i] >> 8);
+   }
+
+   memcpy(output, staged, sizeof(staged));
    return true;
 }
 

@@ -15,12 +15,12 @@
 #define AGX_G17_RUNTIME_GRAPH_VA_START UINT64_C(0x7000000000)
 #define AGX_G17_RUNTIME_GRAPH_VA_END   UINT64_C(0x7100000000)
 
-/* T8140's four pair/generation AXFB aliases are installed by the kernel in
+/* T8140's channel-owned AXFB aliases are installed by the kernel in
  * every render-capable client root.  This range falls inside G17P's 4-GiB USC
  * heap, so userspace must remove it from the allocator before creating any
  * shader BOs. */
 #define AGX_G17P_RENDER_AUX_ALIAS_START UINT64_C(0x10002000000)
-#define AGX_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002020000)
+#define AGX_G17P_RENDER_AUX_ALIAS_END   UINT64_C(0x10002400000)
 
 /* G17P's compact VDM pointer is a 39-bit offset from 0x1000000000.
  * Keep the ordinary allocation and sparse-shadow windows below this exclusive
@@ -61,10 +61,13 @@
 /* Native TVB blocks are sparse 128-KiB mappings with 32-KiB page IDs
  * 0x11..0xc7. Their last range ends at compact 0x658000; the fixed scene,
  * discard and status mappings also live below this bound. Start command BOs
- * at +8 MiB, above the complete retained render pool, and retain the native
- * exclusive +32 MiB command-field limit. */
+ * at +8 MiB, above the complete retained render pool. Bind-tail and draw-state
+ * records carry unsigned 32-bit context offsets; PPP/stream pointers are wider.
+ * Use that narrowest encoding's entire range, rather than limiting live command
+ * BOs to the original bring-up window's 24 MiB. This reserves virtual addresses,
+ * not backing memory: BO storage and page tables are allocated on demand. */
 #define AGX_G17P_VDM_ALIAS_OFFSET_START UINT64_C(0x00800000)
-#define AGX_G17P_VDM_ALIAS_OFFSET_END   UINT64_C(0x02000000)
+#define AGX_G17P_VDM_ALIAS_OFFSET_END   (UINT64_C(1) << 32)
 #define AGX_G17P_VDM_ALIAS_BASE                                         \
    (AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_START)
 #define AGX_G17P_VDM_ALIAS_SIZE                                         \
@@ -92,6 +95,9 @@ bool agx_va_overlaps_runtime_graph_hole(enum agx_chip chip, uint64_t addr,
                                         uint64_t size);
 
 bool agx_g17p_vdm_alias_heap_init(struct util_vma_heap *heap);
+bool agx_capture_replay_heap_init(struct util_vma_heap *main_heap,
+                                  struct util_vma_heap *replay_heap,
+                                  uint64_t user_size);
 bool agx_g17p_vdm_alias_range_valid(uint64_t addr, uint64_t size);
 bool agx_g17p_vdm_alias_compact(uint64_t addr, uint32_t *offset);
 

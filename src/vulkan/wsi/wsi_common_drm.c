@@ -947,6 +947,8 @@ static const uint32_t wsi_explicit_sync_free_levels[] = {
    (WSI_ES_STATE_RELEASE_MATERIALIZED),
 };
 
+static int wsi_explicit_sync_trace_count;
+
 static void
 wsi_drm_images_explicit_sync_state(struct vk_device *device, int count, uint32_t *indices,
                                    struct wsi_image **images, uint32_t *flags)
@@ -1029,6 +1031,12 @@ wsi_drm_wait_for_explicit_sync_release(struct wsi_swapchain *chain,
    STACK_ARRAY(uint32_t, flags, image_count);
    VK_FROM_HANDLE(vk_device, device, chain->device);
    int ret = 0;
+   const unsigned trace_id = (WSI_DEBUG & WSI_DEBUG_SYNC) ?
+      p_atomic_inc_return(&wsi_explicit_sync_trace_count) : 0;
+   const bool trace = trace_id > 0 && trace_id <= 4096;
+   const uint64_t trace_start_ns = trace ? os_time_get_nano() : 0;
+   uint32_t selected_level = UINT32_MAX;
+   bool selected = false;
 
    /* We don't need to wait for the merged timeline on the CPU,
     * only on the GPU side of things.
@@ -1070,6 +1078,8 @@ wsi_drm_wait_for_explicit_sync_release(struct wsi_swapchain *chain,
              images[indices[i]]->present_serial < present_serial) {
             *image_index = indices[i];
             present_serial = images[indices[i]]->present_serial;
+            selected_level = free_level_idx;
+            selected = true;
          }
       }
       if (present_serial != UINT64_MAX)
@@ -1092,7 +1102,42 @@ wsi_drm_wait_for_explicit_sync_release(struct wsi_swapchain *chain,
       goto done;
 
    *image_index = indices[first_signalled];
+   selected = true;
 done:
+   if (trace) {
+      char line[1024];
+      int offset = snprintf(line, sizeof(line),
+                            "MESA-WSI-SYNC acquire=%u result=%d selected=%s",
+                            trace_id, ret, selected ? "yes" : "no");
+      if (selected && offset > 0 && (size_t)offset < sizeof(line)) {
+         offset += snprintf(line + offset, sizeof(line) - offset,
+                            " image=%u level=%s",
+                            *image_index,
+                            selected_level == UINT32_MAX ? "wait" :
+                            selected_level == 0 ? "free" :
+                            selected_level == 1 ? "acquire-ready" :
+                            selected_level == 2 ? "released" : "materialized");
+      }
+      if (offset > 0 && (size_t)offset < sizeof(line))
+         offset += snprintf(line + offset, sizeof(line) - offset,
+                            " candidates=");
+      for (uint32_t i = 0;
+           i < unacquired_image_count && i < 8 &&
+           offset > 0 && (size_t)offset < sizeof(line);
+           i++) {
+         offset += snprintf(line + offset, sizeof(line) - offset,
+                            "%s%u:%x@%llu",
+                            i ? "," : "", indices[i], flags[i],
+                            (unsigned long long)images[indices[i]]->present_serial);
+      }
+      if (offset > 0 && (size_t)offset < sizeof(line))
+         snprintf(line + offset, sizeof(line) - offset,
+                  " cpu_us=%llu",
+                  (unsigned long long)((os_time_get_nano() - trace_start_ns) /
+                                       1000));
+      fprintf(stderr, "%s\n", line);
+   }
+
    STACK_ARRAY_FINISH(flags);
    STACK_ARRAY_FINISH(indices);
    STACK_ARRAY_FINISH(points);

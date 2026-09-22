@@ -233,6 +233,37 @@ main(void)
    CHECK(check_device(AGX_ISA_ENCODING_AGX3C, uniform_index, c_uidx,
                       sizeof(c_uidx)) == 0);
 
+   /* applegpu_g17p returned `atomic_fetch_add_explicit` from a uniform-base
+    * atomic_uint, alone and after a 64-element thread-private array. Alone,
+    * the old value is published to TPS half 0; with the array spilled below
+    * it, to TPS half 130, just above the spill frame. Nothing else differs.
+    */
+   struct agx3_device_atomic_desc tps_return = {
+      .op = AGX3_ATOMIC_ADD,
+      .value_kill = true,
+      .exec_masked = true,
+      .returns_value = true,
+      .slot = 1,
+      .base_kind = AGX3_ATOMIC_BASE_UNIFORM,
+      .index_kind = AGX3_ATOMIC_INDEX_IMMEDIATE,
+   };
+   static const uint8_t b_tps_return_0[] =
+      {0x67,0x11,0x54,0x00,0x00,0x00,0x00,0x00,0x00,0x42,0x00,0x00,0x20,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, tps_return, b_tps_return_0,
+                      sizeof(b_tps_return_0)) == 0);
+   tps_return.result_tps_half = 130;
+   static const uint8_t b_tps_return_130[] =
+      {0x67,0x11,0x54,0x41,0x00,0x00,0x00,0x00,0x00,0x42,0x00,0x00,0x20,0x00};
+   CHECK(check_device(AGX_ISA_ENCODING_AGX3B, tps_return, b_tps_return_130,
+                      sizeof(b_tps_return_130)) == 0);
+   uint8_t tps_bytes[AGX3_ATOMIC_MAX_LENGTH], tps_len;
+   tps_return.result_tps_half = 131;
+   CHECK(!agx3_atomic_encode_device(AGX_ISA_ENCODING_AGX3B, &tps_return,
+                                    tps_bytes, &tps_len));
+   tps_return.result_tps_half = 130;
+   CHECK(!agx3_atomic_encode_device(AGX_ISA_ENCODING_AGX3C, &tps_return,
+                                    tps_bytes, &tps_len));
+
    struct agx3_local_atomic_desc local = {
       .op = AGX3_ATOMIC_ADD,
       .value = 4,

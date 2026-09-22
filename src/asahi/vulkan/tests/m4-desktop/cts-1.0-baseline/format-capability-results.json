@@ -1,0 +1,616 @@
+{
+  "counts": {
+    "NotSupported": 35,
+    "Pass": 64,
+    "Crash": 1
+  },
+  "batches": [
+    "20260913T153548474829Z-cts-format-capability-100-000",
+    "20260913T153600581607Z-cts-format-capability-100-035",
+    "20260913T153605654142Z-cts-format-capability-100-046",
+    "20260913T153618368574Z-cts-format-capability-100-081"
+  ],
+  "library_sha256": "353adcd7c87b10be333d246d450f2816ed85936f36a42b1414dd6533d02f415a",
+  "cases": [
+    {
+      "index": 0,
+      "case": "dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.color.b8g8r8a8_unorm.r16_sscaled.general_general_linear",
+      "status": "NotSupported",
+      "message": "Format feature blit destination not supported at vktApiCopiesAndBlittingTests.cpp:1780"
+    },
+    {
+      "index": 1,
+      "case": "dEQP-VK.renderpass.dedicated_allocation.formats.a8b8g8r8_srgb_pack32.input.clear.dont_care.draw",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 2,
+      "case": "dEQP-VK.synchronization.win32_keyed_mutex.write_blit_image_read_copy_image_to_buffer.image_128x128_r32g32b32a32_sfloat_nt",
+      "status": "NotSupported",
+      "message": "Required extensions not supported at vktSynchronizationWin32KeyedMutexTests.cpp:226"
+    },
+    {
+      "index": 3,
+      "case": "dEQP-VK.pipeline.stencil.format.d16_unorm_s8_uint.states.front_fail_decc_pass_decw_dfail_keep_comp_always_back_fail_keep_pass_repl_dfail_keep_comp_less_or_equal",
+      "status": "NotSupported",
+      "message": "Unsupported depth/stencil format: VK_FORMAT_D16_UNORM_S8_UINT"
+    },
+    {
+      "index": 4,
+      "case": "dEQP-VK.pipeline.blend.format.r8g8_srgb.states.color_dc_1mda_sub_alpha_1mcc_dc_sub-color_1mcc_o_sub_alpha_1mda_ca_sub-color_1mcc_ca_min_alpha_1mcc_cc_add-color_1mdc_da_min_alpha_dc_sa_sub",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 5,
+      "case": "dEQP-VK.ycbcr.format.g10x6_b10x6r10x6_2plane_422_unorm_3pack16_khr.tess_eval_linear",
+      "status": "NotSupported",
+      "message": "Tessellation shader is not supported by device at vktShaderExecutor.cpp:2132"
+    },
+    {
+      "index": 6,
+      "case": "dEQP-VK.ycbcr.conversion.g10x6_b10x6r10x6_2plane_420_unorm_3pack16_khr.chroma_reconstruction.nearest.default_linear_cosited_midpoint_tiling_optimal_swapped_chroma",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 7,
+      "case": "dEQP-VK.synchronization.win32_keyed_mutex.write_draw_indexed_read_image_fragment.image_128x128_r32g32b32a32_sfloat_kmt",
+      "status": "NotSupported",
+      "message": "Required extensions not supported at vktSynchronizationWin32KeyedMutexTests.cpp:226"
+    },
+    {
+      "index": 8,
+      "case": "dEQP-VK.texture.filtering.3d.combinations.linear_mipmap_nearest_nearest_repeat_clamp_to_border_clamp_to_border",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 9,
+      "case": "dEQP-VK.pipeline.sampler.view_type.3d.format.astc_6x6_srgb_block.address_modes.all_mode_clamp_to_border_opaque_white",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 10,
+      "case": "dEQP-VK.pipeline.sampler.view_type.cube.format.r32_uint.mipmap.nearest.lod.select_bias_2_5",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 11,
+      "case": "dEQP-VK.pipeline.image_view.view_type.cube_array.format.r32_sint.subresource_range.lod_base_mip_level_array_base_and_size",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 12,
+      "case": "dEQP-VK.pipeline.sampler.view_type.1d.format.r32g32b32_uint.address_modes.uvw_mode_repeat_mode_clamp_to_border_mode_clamp_to_edge",
+      "status": "NotSupported",
+      "message": "Unsupported format for sampling: VK_FORMAT_R32G32B32_UINT"
+    },
+    {
+      "index": 13,
+      "case": "dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.color.a2r10g10b10_sscaled_pack32.a2b10g10r10_sscaled_pack32.optimal_optimal",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 14,
+      "case": "dEQP-VK.pipeline.sampler.view_type.3d.format.r8_srgb.mag_filter.linear",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 15,
+      "case": "dEQP-VK.pipeline.image_view.view_type.2d.format.astc_5x5_unorm_block.subresource_range.lod_base_mip_level_array_layer_second",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 16,
+      "case": "dEQP-VK.ycbcr.copy.b10g11r11_ufloat_pack32.g12x4_b12x4r12x4_2plane_422_unorm_3pack16_khr.linear_linear",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 17,
+      "case": "dEQP-VK.pipeline.stencil.format.d24_unorm_s8_uint.states.front_fail_repl_pass_wrap_dfail_inv_comp_greater_back_fail_repl_pass_incc_dfail_inv_comp_less_or_equal",
+      "status": "NotSupported",
+      "message": "Unsupported depth/stencil format: VK_FORMAT_D24_UNORM_S8_UINT"
+    },
+    {
+      "index": 18,
+      "case": "dEQP-VK.glsl.swizzles.vector_swizzles.mediump_bvec4_xyzw_vertex",
+      "status": "Pass",
+      "message": "All sub-cases passed"
+    },
+    {
+      "index": 19,
+      "case": "dEQP-VK.image.texel_view_compatible.compute.extended.texel_fetch.etc2_r8g8b8_srgb_block.r16g16b16a16_sint",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 20,
+      "case": "dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.color.r32g32_sfloat.r32_sfloat.optimal_general_linear",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 21,
+      "case": "dEQP-VK.image.texel_view_compatible.compute.extended.image_load.eac_r11_unorm_block.r16g16b16a16_uscaled",
+      "status": "NotSupported",
+      "message": "Operation not supported with this image format at vktImageCompressionTranscodingSupport.cpp:2582"
+    },
+    {
+      "index": 22,
+      "case": "dEQP-VK.memory.mapping.dedicated_alloc.image.sub.4087.offset_129.size_1025.remap",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 23,
+      "case": "dEQP-VK.image.texel_view_compatible.graphic.basic.attachment_write.etc2_r8g8b8a1_unorm_block.r16g16b16a16_sint",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 24,
+      "case": "dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.color.r16g16_unorm.r16g16_uint.optimal_general",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 25,
+      "case": "dEQP-VK.binding_model.shader_access.secondary_cmd_buf.with_template.sampler_mutable.tess_eval.descriptor_array.2d_base_mip",
+      "status": "NotSupported",
+      "message": "2 is not supported at vktBindingShaderAccessTests.cpp:942"
+    },
+    {
+      "index": 26,
+      "case": "dEQP-VK.binding_model.shader_access.secondary_cmd_buf.with_template.combined_image_sampler_immutable.tess_ctrl.descriptor_array.cube_base_mip",
+      "status": "NotSupported",
+      "message": "2 is not supported at vktBindingShaderAccessTests.cpp:942"
+    },
+    {
+      "index": 27,
+      "case": "dEQP-VK.api.copy_and_blit.dedicated_allocation.image_to_image.all_formats.color.a2b10g10r10_snorm_pack32.r8g8b8a8_unorm.general_optimal",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 28,
+      "case": "dEQP-VK.pipeline.image_view.view_type.2d_array.format.astc_12x12_unorm_block.subresource_range.lod_base_mip_level_array_size",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 29,
+      "case": "dEQP-VK.binding_model.shader_access.secondary_cmd_buf.uniform_texel_buffer.vertex.single_descriptor.offset_nonzero",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 30,
+      "case": "dEQP-VK.pipeline.multisample.storage_image.79x31_4.r32_uint.samples_8",
+      "status": "NotSupported",
+      "message": "Multisampled storage images are not supported at vktPipelineMultisampleImageTests.cpp:514"
+    },
+    {
+      "index": 31,
+      "case": "dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.color.r16g16b16_snorm.r8g8b8_snorm.general_optimal_linear",
+      "status": "NotSupported",
+      "message": "Format not supported at vktApiCopiesAndBlittingTests.cpp:1766"
+    },
+    {
+      "index": 32,
+      "case": "dEQP-VK.synchronization.op.single_queue.semaphore.write_image_tess_control_read_image_vertex.image_128_r32_uint",
+      "status": "NotSupported",
+      "message": "Tessellation shader not supported"
+    },
+    {
+      "index": 33,
+      "case": "dEQP-VK.pipeline.image.suballocation.sampling_type.combined.view_type.2d.format.r16g16_sfloat.count_1.size.32x16",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 34,
+      "case": "dEQP-VK.synchronization.op.single_queue.event.write_image_compute_indirect_read_image_compute_indirect.image_128x128_r32g32b32a32_sfloat",
+      "status": "Pass",
+      "message": "OK"
+    },
+    {
+      "index": 35,
+      "case": "dEQP-VK.ycbcr.conversion.g8_b8_r8_3plane_422_unorm_khr.chroma_reconstruction.linear.default_linear_cosited_tiling_linear_disjoint",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 36,
+      "case": "dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.color.r8g8b8_unorm.r8g8_snorm.general_general_linear",
+      "status": "NotSupported",
+      "message": "Format not supported at vktApiCopiesAndBlittingTests.cpp:1766"
+    },
+    {
+      "index": 37,
+      "case": "dEQP-VK.image.mutable.2d.r8g8b8a8_unorm_r8g8b8a8_uint_draw_load_format_list",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 38,
+      "case": "dEQP-VK.pipeline.image.suballocation.sampling_type.separate.view_type.3d.format.r8g8_sscaled.count_1.size.5x11x17",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 39,
+      "case": "dEQP-VK.pipeline.sampler.view_type.3d.format.astc_4x4_unorm_block.address_modes.all_mode_mirrored_repeat",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 40,
+      "case": "dEQP-VK.spirv_assembly.instruction.graphics.opspecconstantop.iequal_tessc",
+      "status": "NotSupported",
+      "message": "Tessellation not supported"
+    },
+    {
+      "index": 41,
+      "case": "dEQP-VK.pipeline.stencil.format.d24_unorm_s8_uint.states.front_fail_decc_pass_decc_dfail_wrap_comp_greater_or_equal_back_fail_repl_pass_decc_dfail_incc_comp_greater",
+      "status": "NotSupported",
+      "message": "Unsupported depth/stencil format: VK_FORMAT_D24_UNORM_S8_UINT"
+    },
+    {
+      "index": 42,
+      "case": "dEQP-VK.binding_model.shader_access.primary_cmd_buf.with_template.uniform_texel_buffer.geometry.single_descriptor.offset_zero",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 43,
+      "case": "dEQP-VK.ycbcr.copy.g10x6_b10x6_r10x6_3plane_444_unorm_3pack16_khr.g10x6_b10x6_r10x6_3plane_420_unorm_3pack16_khr.optimal_linear",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 44,
+      "case": "dEQP-VK.pipeline.stencil.format.d24_unorm_s8_uint.states.front_fail_incc_pass_incc_dfail_decc_comp_less_or_equal_back_fail_wrap_pass_inv_dfail_inv_comp_not_equal",
+      "status": "NotSupported",
+      "message": "Unsupported depth/stencil format: VK_FORMAT_D24_UNORM_S8_UINT"
+    },
+    {
+      "index": 45,
+      "case": "dEQP-VK.renderpass.dedicated_allocation.formats.a8b8g8r8_unorm_pack32.input.load.dont_care.self_dep_clear_use_input_aspect",
+      "status": "Crash",
+      "message": "Process signal 6"
+    },
+    {
+      "index": 46,
+      "case": "dEQP-VK.spirv_assembly.instruction.graphics.16bit_storage.input_output_int_16_to_32.scalar_uint4_vert",
+      "status": "Pass",
+      "message": "Rendered output matches input"
+    },
+    {
+      "index": 47,
+      "case": "dEQP-VK.binding_model.shader_access.secondary_cmd_buf.with_push_template.sampler_mutable.geometry.multiple_discontiguous_descriptors.2d",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 48,
+      "case": "dEQP-VK.glsl.texture_gather.offsets.min_required_offset.2d_array.rgba8i.texture_swizzle.blue_alpha_zero_one",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 49,
+      "case": "dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.color.b8g8r8a8_uscaled.a8b8g8r8_sint_pack32.optimal_optimal",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 50,
+      "case": "dEQP-VK.synchronization.op.single_queue.event.write_image_compute_read_copy_image.image_128x128_r32g32b32a32_sfloat",
+      "status": "Pass",
+      "message": "OK"
+    },
+    {
+      "index": 51,
+      "case": "dEQP-VK.pipeline.image.suballocation.sampling_type.separate.view_type.1d_array.format.r16g16b16a16_unorm.count_1.size.3x1_array_of_6",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 52,
+      "case": "dEQP-VK.ycbcr.copy.g10x6_b10x6r10x6_2plane_420_unorm_3pack16_khr.r4g4b4a4_unorm_pack16.linear_optimal_disjoint",
+      "status": "NotSupported",
+      "message": "Format doesn&apos;t disjoint planes at vktYCbCrCopyTests.cpp:138"
+    },
+    {
+      "index": 53,
+      "case": "dEQP-VK.pipeline.sampler.view_type.2d.format.etc2_r8g8b8a1_unorm_block.address_modes.all_mode_clamp_to_border_transparent_black",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 54,
+      "case": "dEQP-VK.binding_model.shader_access.primary_cmd_buf.with_template.combined_image_sampler_mutable.geometry.descriptor_array.cube_array_base_mip",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 55,
+      "case": "dEQP-VK.binding_model.shader_access.primary_cmd_buf.with_push_template.uniform_buffer.vertex_fragment.multiple_contiguous_descriptors.offset_view_zero",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 56,
+      "case": "dEQP-VK.ycbcr.copy.g12x4_b12x4r12x4_2plane_420_unorm_3pack16_khr.b5g5r5a1_unorm_pack16.optimal_disjoint_linear",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 57,
+      "case": "dEQP-VK.ycbcr.copy.g10x6_b10x6_r10x6_3plane_422_unorm_3pack16_khr.r10x6_unorm_pack16_khr.linear_linear_disjoint",
+      "status": "NotSupported",
+      "message": "Format doesn&apos;t disjoint planes at vktYCbCrCopyTests.cpp:138"
+    },
+    {
+      "index": 58,
+      "case": "dEQP-VK.binding_model.shader_access.secondary_cmd_buf.storage_buffer_dynamic.tess_eval.single_descriptor.offset_view_zero_dynamic_zero",
+      "status": "NotSupported",
+      "message": "2 is not supported at vktBindingShaderAccessTests.cpp:942"
+    },
+    {
+      "index": 59,
+      "case": "dEQP-VK.pipeline.sampler.view_type.1d.format.r8g8_sint.address_modes.all_mode_mirror_clamp_to_edge",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 60,
+      "case": "dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.color.a8b8g8r8_sscaled_pack32.a2r10g10b10_snorm_pack32.general_general",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 61,
+      "case": "dEQP-VK.ycbcr.copy.r8g8b8a8_unorm.r12x4g12x4_unorm_2pack16_khr.linear_linear_disjoint",
+      "status": "NotSupported",
+      "message": "Format doesn&apos;t disjoint planes at vktYCbCrCopyTests.cpp:138"
+    },
+    {
+      "index": 62,
+      "case": "dEQP-VK.spirv_assembly.instruction.graphics.16bit_storage.input_output_int_16_to_32.scalar_sint4_geom",
+      "status": "Pass",
+      "message": "Rendered output matches input"
+    },
+    {
+      "index": 63,
+      "case": "dEQP-VK.synchronization.cross_instance.suballocated.write_draw_indexed_indirect_read_image_fragment.image_128x128_r8_unorm_win32",
+      "status": "NotSupported",
+      "message": "Required extensions not supported at vktSynchronizationCrossInstanceSharingTests.cpp:299"
+    },
+    {
+      "index": 64,
+      "case": "dEQP-VK.pipeline.stencil.format.s8_uint.states.front_fail_decw_pass_keep_dfail_inv_comp_equal_back_fail_zero_pass_wrap_dfail_zero_comp_not_equal",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 65,
+      "case": "dEQP-VK.pipeline.image.suballocation.sampling_type.combined.view_type.2d.format.r8_sint.count_1.size.32x32",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 66,
+      "case": "dEQP-VK.ycbcr.copy.g12x4_b12x4_r12x4_3plane_420_unorm_3pack16_khr.g16_b16_r16_3plane_444_unorm_khr.optimal_linear",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 67,
+      "case": "dEQP-VK.ycbcr.copy.g16_b16_r16_3plane_422_unorm_khr.g16_b16r16_2plane_420_unorm_khr.linear_disjoint_linear",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 68,
+      "case": "dEQP-VK.synchronization.op.multi_queue.semaphore.write_blit_image_read_copy_image_to_buffer.image_128x128_r8_unorm_concurrent",
+      "status": "NotSupported",
+      "message": "Queue not found at vktSynchronizationOperationMultiQueueTests.cpp:202"
+    },
+    {
+      "index": 69,
+      "case": "dEQP-VK.synchronization.op.multi_queue.fence.write_image_fragment_read_blit_image.image_128_r32_uint_concurrent",
+      "status": "NotSupported",
+      "message": "Queue not found at vktSynchronizationOperationMultiQueueTests.cpp:202"
+    },
+    {
+      "index": 70,
+      "case": "dEQP-VK.api.info.sparse_image_format_properties2.3d.optimal.d32_sfloat_s8_uint",
+      "status": "Pass",
+      "message": "Querying sparse image format properties succeeded"
+    },
+    {
+      "index": 71,
+      "case": "dEQP-VK.binding_model.shader_access.primary_cmd_buf.sampler_immutable.tess_eval.multiple_contiguous_descriptors.3d_base_mip",
+      "status": "NotSupported",
+      "message": "2 is not supported at vktBindingShaderAccessTests.cpp:942"
+    },
+    {
+      "index": 72,
+      "case": "dEQP-VK.synchronization.cross_instance.dedicated.write_image_tess_control_read_copy_image.image_64x64x8_r32_sfloat_fence_fd",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 73,
+      "case": "dEQP-VK.binding_model.shader_access.secondary_cmd_buf.with_template.sampler_mutable.tess_eval.single_descriptor.3d",
+      "status": "NotSupported",
+      "message": "2 is not supported at vktBindingShaderAccessTests.cpp:942"
+    },
+    {
+      "index": 74,
+      "case": "dEQP-VK.api.copy_and_blit.dedicated_allocation.image_to_image.all_formats.color.a8b8g8r8_snorm_pack32.r8g8b8a8_unorm.general_general",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 75,
+      "case": "dEQP-VK.pipeline.sampler.view_type.1d_array.format.r8_unorm.address_modes.uvw_mode_mirrored_repeat_mode_clamp_to_edge_mode_repeat",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 76,
+      "case": "dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.color.a2b10g10r10_unorm_pack32.b8g8r8a8_unorm.general_general",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 77,
+      "case": "dEQP-VK.ssbo.layout.single_basic_array.std140.row_major_mat2x3_comp_access",
+      "status": "Pass",
+      "message": "Result comparison and counter values are OK"
+    },
+    {
+      "index": 78,
+      "case": "dEQP-VK.renderpass.suballocation.formats.r32g32_sfloat.input.clear.dont_care.self_dep_clear_draw",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 79,
+      "case": "dEQP-VK.pipeline.stencil.format.d32_sfloat_s8_uint.states.front_fail_inv_pass_decw_dfail_decc_comp_greater_back_fail_repl_pass_keep_dfail_decc_comp_not_equal",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 80,
+      "case": "dEQP-VK.pipeline.sampler.view_type.2d.format.astc_5x4_srgb_block.address_modes.uvw_mode_repeat_mode_mirrored_repeat_mode_clamp_to_border",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 81,
+      "case": "dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.color.r8g8_sscaled.b4g4r4a4_unorm_pack16.general_optimal_linear",
+      "status": "NotSupported",
+      "message": "Source format feature sampled image filter linear not supported at vktApiCopiesAndBlittingTests.cpp:1786"
+    },
+    {
+      "index": 82,
+      "case": "dEQP-VK.image.texel_view_compatible.compute.basic.texture.bc4_unorm_block.r32g32_sfloat",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 83,
+      "case": "dEQP-VK.ycbcr.copy.b5g5r5a1_unorm_pack16.g10x6_b10x6_r10x6_3plane_422_unorm_3pack16_khr.linear_disjoint_linear",
+      "status": "NotSupported",
+      "message": "Format doesn&apos;tsupport  disjoint planes at vktYCbCrCopyTests.cpp:114"
+    },
+    {
+      "index": 84,
+      "case": "dEQP-VK.api.info.image_format_properties.2d.linear.r8_srgb",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 85,
+      "case": "dEQP-VK.glsl.operator.binary_operator.mul_assign_effect.mediump_ivec2_fragment",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 86,
+      "case": "dEQP-VK.api.copy_and_blit.core.blit_image.all_formats.color.r16g16b16a16_snorm.r8g8_sscaled.general_general_linear",
+      "status": "NotSupported",
+      "message": "Format feature blit destination not supported at vktApiCopiesAndBlittingTests.cpp:1780"
+    },
+    {
+      "index": 87,
+      "case": "dEQP-VK.pipeline.image.suballocation.sampling_type.separate.view_type.2d.format.b10g11r11_ufloat_pack32.count_1.size.8x16",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 88,
+      "case": "dEQP-VK.pipeline.image.suballocation.sampling_type.separate.view_type.3d.format.astc_8x5_srgb_block.count_4.size.11x11x11",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 89,
+      "case": "dEQP-VK.ycbcr.copy.g8_b8_r8_3plane_444_unorm_khr.r4g4_unorm_pack8.linear_disjoint_linear",
+      "status": "NotSupported",
+      "message": "Source format doesn&apos;t support copies at vktYCbCrCopyTests.cpp:134"
+    },
+    {
+      "index": 90,
+      "case": "dEQP-VK.synchronization.win32_keyed_mutex.write_copy_image_to_buffer_read_ubo_tess_eval.buffer_16384_kmt",
+      "status": "NotSupported",
+      "message": "Required extensions not supported at vktSynchronizationWin32KeyedMutexTests.cpp:226"
+    },
+    {
+      "index": 91,
+      "case": "dEQP-VK.synchronization.op.single_queue.barrier.write_image_compute_read_image_compute_indirect.image_128_r32_uint",
+      "status": "Pass",
+      "message": "OK"
+    },
+    {
+      "index": 92,
+      "case": "dEQP-VK.synchronization.op.single_queue.event.write_image_tess_control_read_image_compute_indirect.image_64x64x8_r32_sfloat",
+      "status": "NotSupported",
+      "message": "Tessellation shader not supported"
+    },
+    {
+      "index": 93,
+      "case": "dEQP-VK.texture.shadow.2d_array.nearest_mipmap_linear.never_d16_unorm_s8_uint",
+      "status": "NotSupported",
+      "message": "Format not supported: VK_FORMAT_D16_UNORM_S8_UINT at vktTextureTestUtil.cpp:326"
+    },
+    {
+      "index": 94,
+      "case": "dEQP-VK.api.external.semaphore.opaque_win32_kmt.import_multiple_times_permanent",
+      "status": "NotSupported",
+      "message": "Semaphore doesn&apos;t support exporting in external type at vktApiExternalMemoryTests.cpp:346"
+    },
+    {
+      "index": 95,
+      "case": "dEQP-VK.binding_model.shader_access.secondary_cmd_buf.with_push_template.sampler_mutable.fragment.single_descriptor.2d_array",
+      "status": "Pass",
+      "message": "Pass"
+    },
+    {
+      "index": 96,
+      "case": "dEQP-VK.pipeline.image_view.view_type.2d.format.r16_sscaled.subresource_range.lod_base_mip_level_array_layer_second",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    },
+    {
+      "index": 97,
+      "case": "dEQP-VK.api.copy_and_blit.core.image_to_image.all_formats.color.r32_uint.r8g8b8a8_snorm.general_optimal",
+      "status": "Pass",
+      "message": "CopiesAndBlitting test"
+    },
+    {
+      "index": 98,
+      "case": "dEQP-VK.synchronization.cross_instance.suballocated.write_image_compute_read_copy_image_to_buffer.image_128x128_r32g32b32a32_sfloat_win32_kmt",
+      "status": "NotSupported",
+      "message": "Required extensions not supported at vktSynchronizationCrossInstanceSharingTests.cpp:299"
+    },
+    {
+      "index": 99,
+      "case": "dEQP-VK.pipeline.image.suballocation.sampling_type.separate.view_type.1d_array.format.r8_srgb.count_1.size.1x1_array_of_3",
+      "status": "Pass",
+      "message": "Result image matches reference"
+    }
+  ]
+}

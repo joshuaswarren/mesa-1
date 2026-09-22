@@ -5,8 +5,6 @@
 
 #include "agx3_binder.h"
 
-#include <string.h>
-
 bool
 agx3_bind_compose(enum agx_isa_encoding encoding, const char *mnemonic, int ep,
                   const struct agx3_field_kv *baseline, unsigned nbaseline,
@@ -40,12 +38,14 @@ agx3_bind_compose(enum agx_isa_encoding encoding, const char *mnemonic, int ep,
       fields[overrides[i].field] = overrides[i].value;
    }
 
-   uint8_t buf[AGX3_MAX_WORDS * 2];
-   if (!agx3_compose(t, (uint32_t)form, fields, buf))
+   /* agx3_compose keeps its words invocation-local and does not touch out
+    * until every predicate, deposit and field-consumption check succeeds.
+    * Encode directly into the caller's buffer instead of copying the same
+    * validated instruction through a second 32-byte stack buffer. */
+   if (!agx3_compose(t, (uint32_t)form, fields, out))
       return false;
 
    const uint8_t size = t->forms[form].size;
-   memcpy(out, buf, size);
    *len = size;
    return true;
 }

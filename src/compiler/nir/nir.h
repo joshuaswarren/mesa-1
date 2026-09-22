@@ -5704,6 +5704,18 @@ bool nir_lower_mem_access_bit_sizes(nir_shader *shader,
 bool nir_lower_robust_access(nir_shader *s,
                              nir_intrin_filter_cb filter, const void *data);
 
+/* Alpha component of the out-of-bounds value of an image load whose format
+ * is unknown at compile time (robustImageAccess2 inserts one for formats
+ * without an alpha channel). Returns a scalar of the load's destination type
+ * and bit size, holding either zero or one. */
+typedef nir_def *(*nir_robust_image_oob_alpha_cb)(nir_builder *b,
+                                                  nir_intrinsic_instr *load,
+                                                  const void *data);
+
+bool nir_lower_robust_access_cb(nir_shader *s, nir_intrin_filter_cb filter,
+                                nir_robust_image_oob_alpha_cb oob_alpha,
+                                const void *data);
+
 /* clang-format off */
 typedef bool (*nir_should_vectorize_mem_func)(unsigned align_mul,
                                               unsigned align_offset,
@@ -6258,6 +6270,13 @@ typedef struct nir_lower_tex_options {
     * LOD bias to every texture instruction's LOD.
     */
    bool lower_sampler_lod_bias;
+
+   /**
+    * Leave depth comparisons alone when folding the sampler's bias above. A
+    * driver whose comparison lookup has no per-lane level form keeps their
+    * bias in the sampler descriptor, where the hardware applies it.
+    */
+   bool keep_sampler_lod_bias_for_shadow;
 
    /* Turns nir_op_tex and other ops with an implicit derivative, in stages
     * without implicit derivatives (like the vertex shader) to have an explicit

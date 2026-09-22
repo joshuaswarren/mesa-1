@@ -78,6 +78,7 @@ MASK = immediate("mask")
 BFI_MASK = immediate("bfi_mask")
 LOD_MODE = immediate("lod_mode", "enum agx_lod_mode")
 PIXEL_OFFSET = immediate("pixel_offset")
+COLOUR_TARGET = immediate("colour_target", "uint8_t")
 STACK_SIZE = immediate("stack_size", 'int16_t')
 EXPLICIT_COORDS = immediate("explicit_coords", "bool")
 PERSPECTIVE = immediate("perspective", "bool")
@@ -150,9 +151,14 @@ SR = enum("sr", {
    144: 'helper_op',
    146: 'helper_arg_l',
    147: 'helper_arg_h',
+   # G17P builtin background reload: native half-register layer input.
+   195: 'background_layer_id',
    # AGX3 hardware-vertex inputs. Apple emits these as explicit 32-bit rld
    # instructions instead of the AGX2 preloaded-input ABI.
    216: 'instance_id',
+   217: 'tess_patch_id',
+   218: 'tess_coord_u',
+   219: 'tess_coord_v',
    221: 'vertex_id',
 })
 
@@ -368,12 +374,12 @@ op("normflt_agx3", _, dests = 1, srcs = 1, imms = [FORMAT], is_float = True,
 
 # Sources: sample mask, explicit coords (if present)
 op("ld_tile", (0x49, 8, _), dests = 1, srcs = 2,
-        imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS], can_reorder = False,
+        imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS, COLOUR_TARGET], can_reorder = False,
         schedule_class = "coverage")
 
 # Sources: value, sample mask, explicit coords (if present)
 op("st_tile", (0x09, 8, _), dests = 0, srcs = 3,
-      can_eliminate = False, imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS],
+      can_eliminate = False, imms = [FORMAT, MASK, PIXEL_OFFSET, EXPLICIT_COORDS, COLOUR_TARGET],
       schedule_class = "coverage")
 
 for (name, exact) in [("any", 0xC000), ("none", 0xC020), ("none_after", 0xC020)]:
@@ -410,10 +416,11 @@ op("iter", (0x21, 8, _), srcs = 2, imms = [CHANNELS, INTERPOLATION])
 op("interp_agx3", None, srcs = 2,
    imms = [INTERPOLATION, PERSPECTIVE])
 
-# G17P computes explicit per-sample interpolation coordinates in a 32-bit
-# token consumed by one or more scalar f32interp instructions. The input is
-# the low 16 bits of the API sample index.
-op("itrcoords_agx3", None, srcs = 1)
+# G17P computes explicit interpolation coordinates in a 32-bit token consumed
+# by one or more scalar f32interp instructions. For sample interpolation the
+# input is the low 16 bits of the API sample index; for centroid interpolation
+# it is the native 16-bit coverage word.
+op("itrcoords_agx3", None, srcs = 1, imms = [INTERPOLATION])
 
 # Native projective-only RHW producer. A distinct opcode prevents CSE from
 # merging it with ordinary position.w, whose f32interp f54 must remain clear.
@@ -578,12 +585,14 @@ for (name, is_float) in [("break_if_icmp", False), ("break_if_fcmp", True)]:
 # Native normalized RGB10A2 conversion, four floats to/from one packed word.
 op("pack_rgb10a2_agx3", _, dests=1, srcs=4, is_float=True, agx3_mnemonic="pack")
 op("unpack_rgb10a2_agx3", _, dests=1, srcs=1, agx3_mnemonic="unpack")
-# G17P's native single-sample coverage word is prepared before RA. Keep the
-# general sample-mask target explicit while selecting its native zero no-op.
+# G17P's native coverage word is prepared before RA, from SR2 at one sample.
+# Keep the general sample-mask target explicit while selecting its native zero
+# no-op.
 op("get_coverage_1x_agx3", _, dests = 1, schedule_class = "coverage")
-op("sample_mask_1x_agx3", _, dests = 0, srcs = 2, imms = [IMM],
+op("sample_mask_agx3", _, dests = 0, srcs = 2, imms = [IMM],
    can_eliminate = False, schedule_class = "coverage")
-# G17P depthf consumes two dwords: coverage and full-width float32 depth.
-# The tuple is assembled before RA and published at staging halves 0 and 2.
+# G17P depthf consumes the coverage dword, carrying any stencil reference in
+# its upper half, and full-width float32 depth when written. The tuple is
+# assembled before RA and published at staging halves 0 and 2.
 op("zs_emit_agx3", _, dests = 0, srcs = 1, imms = [ZS],
    can_eliminate = False, schedule_class = "coverage")

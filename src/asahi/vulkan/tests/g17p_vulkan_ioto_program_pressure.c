@@ -30,14 +30,18 @@
 #include <vulkan/vulkan.h>
 
 #include <dlfcn.h>
+#include <inttypes.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "g17p_wsi_triangle_frag.h"
 #include "g17p_wsi_triangle_vert.h"
+#include "g17p_constant_data_frag.h"
 
 #define T8140_DEVICE_ID 0x8140
 
@@ -86,6 +90,7 @@ VK_FN(vkCreateGraphicsPipelines);
 VK_FN(vkDestroyPipeline);
 VK_FN(vkCreateCommandPool);
 VK_FN(vkDestroyCommandPool);
+VK_FN(vkResetCommandPool);
 VK_FN(vkAllocateCommandBuffers);
 VK_FN(vkBeginCommandBuffer);
 VK_FN(vkEndCommandBuffer);
@@ -102,6 +107,14 @@ VK_FN(vkQueueSubmit);
 VK_FN(vkWaitForFences);
 
 static const char *const NAME = "g17p-vulkan-ioto-program-pressure";
+
+static uint64_t
+monotonic_ns(void)
+{
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+}
 
 static void
 die(const char *message)
@@ -152,6 +165,48 @@ main(int argc, char **argv)
    const bool execute = argc == 2 && !strcmp(argv[1], "--execute");
    if (argc > 2 || (argc == 2 && !execute))
       die("usage: g17p-vulkan-ioto-program-pressure [--execute]");
+
+   unsigned record_rounds = 1;
+   const char *rounds_env = getenv("G17P_RECORD_ROUNDS");
+   if (rounds_env) {
+      char *end = NULL;
+      const unsigned long parsed = strtoul(rounds_env, &end, 10);
+      if (!rounds_env[0] || *end || parsed == 0 || parsed > UINT_MAX)
+         die("G17P_RECORD_ROUNDS must be an integer in 1..UINT_MAX");
+      record_rounds = parsed;
+   }
+   if (execute && record_rounds != 1)
+      die("G17P_RECORD_ROUNDS is recording-only; omit --execute");
+
+   unsigned redundant_pipeline_binds = 0;
+   const char *binds_env = getenv("G17P_REDUNDANT_PIPELINE_BINDS");
+   if (binds_env) {
+      char *end = NULL;
+      const unsigned long parsed = strtoul(binds_env, &end, 10);
+      if (!binds_env[0] || *end || parsed > UINT_MAX)
+         die("G17P_REDUNDANT_PIPELINE_BINDS must be an integer in 0..UINT_MAX");
+      redundant_pipeline_binds = parsed;
+   }
+   const bool alternate_pipelines =
+      getenv("G17P_ALTERNATE_PIPELINES") != NULL;
+   const bool alternate_pipelines_per_draw =
+      getenv("G17P_ALTERNATE_PIPELINES_PER_DRAW") != NULL;
+   unsigned draws_per_pass = DRAWS_PER_PASS;
+   const char *draws_env = getenv("G17P_DRAWS_PER_PASS");
+   if (draws_env) {
+      char *end = NULL;
+      const unsigned long parsed = strtoul(draws_env, &end, 10);
+      if (!draws_env[0] || *end || parsed == 0 || parsed > UINT_MAX)
+         die("G17P_DRAWS_PER_PASS must be an integer in 1..UINT_MAX");
+      draws_per_pass = parsed;
+   }
+   const unsigned color_attachment_count =
+      getenv("G17P_SPILL_ATTACHMENTS") != NULL ? 8 : 1;
+   const VkFormat color_format = color_attachment_count > 1
+      ? VK_FORMAT_R32G32B32A32_SFLOAT
+      : VK_FORMAT_R8G8B8A8_UNORM;
+   const bool constant_data_shader =
+      getenv("G17P_CONSTANT_DATA_SHADER") != NULL;
 
    void *loader = dlopen("libvulkan.so.1", RTLD_NOW | RTLD_LOCAL);
    if (!loader)
@@ -252,6 +307,7 @@ main(int argc, char **argv)
    LOAD(vkCreatePipelineLayout); LOAD(vkDestroyPipelineLayout);
    LOAD(vkCreateGraphicsPipelines); LOAD(vkDestroyPipeline);
    LOAD(vkCreateCommandPool); LOAD(vkDestroyCommandPool);
+   LOAD(vkResetCommandPool);
    LOAD(vkAllocateCommandBuffers); LOAD(vkBeginCommandBuffer);
    LOAD(vkEndCommandBuffer); LOAD(vkCmdBeginRenderPass);
    LOAD(vkCmdEndRenderPass); LOAD(vkCmdBindPipeline);
@@ -302,9 +358,9 @@ main(int argc, char **argv)
    const VkImageCreateInfo colour_info = {
       .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
       .imageType = VK_IMAGE_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
+      .format = color_format,
       .extent = {64, 64, 1},
-      .mipLevels = 1, .arrayLayers = 1,
+      .mipLevels = 1, .arrayLayers = color_attachment_count,
       .samples = VK_SAMPLE_COUNT_1_BIT,
       .tiling = VK_IMAGE_TILING_OPTIMAL,
       .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
@@ -327,44 +383,52 @@ main(int argc, char **argv)
          "vkAllocateMemory(colour)");
    check(vkBindImageMemory(device, colour_image, colour_memory, 0),
          "vkBindImageMemory(colour)");
-   const VkImageViewCreateInfo colour_view_info = {
-      .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-      .image = colour_image,
-      .viewType = VK_IMAGE_VIEW_TYPE_2D,
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
-      .subresourceRange = {
-         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-         .levelCount = 1, .layerCount = 1,
-      },
-   };
-   VkImageView colour_view;
-   check(vkCreateImageView(device, &colour_view_info, NULL, &colour_view),
-         "vkCreateImageView(colour)");
+   VkImageView colour_views[8] = {0};
+   for (unsigned i = 0; i < color_attachment_count; ++i) {
+      const VkImageViewCreateInfo colour_view_info = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+         .image = colour_image,
+         .viewType = VK_IMAGE_VIEW_TYPE_2D,
+         .format = color_format,
+         .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseArrayLayer = i,
+            .levelCount = 1, .layerCount = 1,
+         },
+      };
+      check(vkCreateImageView(device, &colour_view_info, NULL,
+                              &colour_views[i]),
+            "vkCreateImageView(colour)");
+   }
 
    /* Clear on entry and store on exit, so each pass composes a background
     * clear program and an end-of-tile store program rather than the empty
     * pair a DONT_CARE attachment gets. */
-   const VkAttachmentDescription attachment = {
-      .format = VK_FORMAT_R8G8B8A8_UNORM,
-      .samples = VK_SAMPLE_COUNT_1_BIT,
-      .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
-      .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-      .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-      .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-   };
-   const VkAttachmentReference colour_reference = {
-      .attachment = 0,
-      .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-   };
+   VkAttachmentDescription attachments[8];
+   VkAttachmentReference colour_references[8];
+   for (unsigned i = 0; i < color_attachment_count; ++i) {
+      attachments[i] = (VkAttachmentDescription){
+         .format = color_format,
+         .samples = VK_SAMPLE_COUNT_1_BIT,
+         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+         .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+         .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      };
+      colour_references[i] = (VkAttachmentReference){
+         .attachment = i,
+         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+      };
+   }
    const VkSubpassDescription subpass = {
       .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
-      .colorAttachmentCount = 1,
-      .pColorAttachments = &colour_reference,
+      .colorAttachmentCount = color_attachment_count,
+      .pColorAttachments = colour_references,
    };
    const VkRenderPassCreateInfo render_pass_info = {
       .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO,
       .subpassCount = 1, .pSubpasses = &subpass,
-      .attachmentCount = 1, .pAttachments = &attachment,
+      .attachmentCount = color_attachment_count, .pAttachments = attachments,
    };
    VkRenderPass render_pass;
    check(vkCreateRenderPass(device, &render_pass_info, NULL, &render_pass),
@@ -372,7 +436,7 @@ main(int argc, char **argv)
    const VkFramebufferCreateInfo framebuffer_info = {
       .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO,
       .renderPass = render_pass,
-      .attachmentCount = 1, .pAttachments = &colour_view,
+      .attachmentCount = color_attachment_count, .pAttachments = colour_views,
       .width = 64, .height = 64, .layers = 1,
    };
    VkFramebuffer framebuffer;
@@ -397,8 +461,10 @@ main(int argc, char **argv)
          "vkCreateShaderModule(vertex)");
    const VkShaderModuleCreateInfo fragment_module_info = {
       .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-      .codeSize = sizeof(g17p_wsi_triangle_frag_spv),
-      .pCode = g17p_wsi_triangle_frag_spv,
+      .codeSize = constant_data_shader ? sizeof(g17p_constant_data_frag_spv)
+                                       : sizeof(g17p_wsi_triangle_frag_spv),
+      .pCode = constant_data_shader ? g17p_constant_data_frag_spv
+                                    : g17p_wsi_triangle_frag_spv,
    };
    VkShaderModule fragment_module;
    check(vkCreateShaderModule(device, &fragment_module_info, NULL,
@@ -450,13 +516,16 @@ main(int argc, char **argv)
       .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
       .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
    };
-   const VkPipelineColorBlendAttachmentState blend_attachment = {
-      .colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-   };
+   VkPipelineColorBlendAttachmentState blend_attachments[8] = {0};
+   for (unsigned i = 0; i < color_attachment_count; ++i) {
+      blend_attachments[i].colorWriteMask =
+         VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+   }
    const VkPipelineColorBlendStateCreateInfo blend = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-      .attachmentCount = 1, .pAttachments = &blend_attachment,
+      .attachmentCount = color_attachment_count,
+      .pAttachments = blend_attachments,
    };
    const VkDynamicState dynamic_states[2] = {
       VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
@@ -477,10 +546,15 @@ main(int argc, char **argv)
       .pDynamicState = &dynamic,
       .layout = layout, .renderPass = render_pass,
    };
-   VkPipeline pipeline;
+   VkPipeline pipelines[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
    check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &pipeline_info,
-                                   NULL, &pipeline),
+                                   NULL, &pipelines[0]),
          "vkCreateGraphicsPipelines");
+   if (alternate_pipelines || alternate_pipelines_per_draw) {
+      check(vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1,
+                                      &pipeline_info, NULL, &pipelines[1]),
+            "vkCreateGraphicsPipelines(alternate)");
+   }
 
    const VkCommandPoolCreateInfo command_pool_info = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
@@ -503,49 +577,68 @@ main(int argc, char **argv)
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
    };
-   check(vkBeginCommandBuffer(command, &begin), "vkBeginCommandBuffer");
-
-   const VkClearValue clear = {.color = {.float32 = {0.0f, 0.0f, 0.0f, 1.0f}}};
+   const uint64_t record_start_ns = monotonic_ns();
+   VkClearValue clears[8] = {0};
+   for (unsigned i = 0; i < color_attachment_count; ++i)
+      clears[i].color.float32[3] = 1.0f;
    const VkDeviceSize vertex_offset = 0;
-   for (unsigned pass = 0; pass < RENDER_PASSES; ++pass) {
-      const VkRenderPassBeginInfo pass_begin = {
-         .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
-         .renderPass = render_pass,
-         .framebuffer = framebuffer,
-         .renderArea = {.extent = {64, 64}},
-         .clearValueCount = 1,
-         .pClearValues = &clear,
-      };
-      vkCmdBeginRenderPass(command, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
-      vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-      vkCmdBindVertexBuffers(command, 0, 1, &vertex_buffer, &vertex_offset);
+   for (unsigned round = 0; round < record_rounds; ++round) {
+      check(vkBeginCommandBuffer(command, &begin), "vkBeginCommandBuffer");
 
-      for (unsigned draw = 0; draw < DRAWS_PER_PASS; ++draw) {
-         /* Move the viewport every draw. A frame that binds identical state
-          * for every draw would let the driver skip the per-draw program
-          * upload entirely, which is not the shape that ran out of window. */
-         const VkViewport view = {
-            .x = (float)(draw & 1),
-            .width = 64.0f, .height = 64.0f, .maxDepth = 1.0f,
+      for (unsigned pass = 0; pass < RENDER_PASSES; ++pass) {
+         const VkRenderPassBeginInfo pass_begin = {
+            .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+            .renderPass = render_pass,
+            .framebuffer = framebuffer,
+            .renderArea = {.extent = {64, 64}},
+            .clearValueCount = color_attachment_count,
+            .pClearValues = clears,
          };
-         const VkRect2D scissor = {.extent = {64, 64}};
-         vkCmdSetViewport(command, 0, 1, &view);
-         vkCmdSetScissor(command, 0, 1, &scissor);
-         vkCmdDraw(command, VERTICES, 1, 0, 0);
+         vkCmdBeginRenderPass(command, &pass_begin, VK_SUBPASS_CONTENTS_INLINE);
+         VkPipeline pipeline =
+            pipelines[alternate_pipelines ? (pass & 1) : 0];
+         vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+         for (unsigned bind = 0; bind < redundant_pipeline_binds; ++bind)
+            vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+         vkCmdBindVertexBuffers(command, 0, 1, &vertex_buffer, &vertex_offset);
+
+         for (unsigned draw = 0; draw < draws_per_pass; ++draw) {
+            if (alternate_pipelines_per_draw) {
+               pipeline = pipelines[draw & 1];
+               vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                 pipeline);
+            }
+            /* Move the viewport every draw. A frame that binds identical state
+             * for every draw would let the driver skip the per-draw program
+             * upload entirely, which is not the shape that ran out of window. */
+            const VkViewport view = {
+               .x = (float)(draw & 1),
+               .width = 64.0f, .height = 64.0f, .maxDepth = 1.0f,
+            };
+            const VkRect2D scissor = {.extent = {64, 64}};
+            vkCmdSetViewport(command, 0, 1, &view);
+            vkCmdSetScissor(command, 0, 1, &scissor);
+            vkCmdDraw(command, VERTICES, 1, 0, 0);
+         }
+
+         vkCmdEndRenderPass(command);
       }
 
-      vkCmdEndRenderPass(command);
-   }
+      const VkResult recorded = vkEndCommandBuffer(command);
+      if (recorded != VK_SUCCESS) {
+         fprintf(stderr,
+                 "%s: vkEndCommandBuffer returned %d after %u render passes "
+                 "and %u draws in round %u/%u\n",
+                 NAME, recorded, RENDER_PASSES,
+                 RENDER_PASSES * draws_per_pass, round + 1, record_rounds);
+         return EXIT_FAILURE;
+      }
 
-   const VkResult recorded = vkEndCommandBuffer(command);
-   if (recorded != VK_SUCCESS) {
-      fprintf(stderr,
-              "%s: vkEndCommandBuffer returned %d after %u render passes and "
-              "%u draws\n",
-              NAME, recorded, RENDER_PASSES,
-              RENDER_PASSES * DRAWS_PER_PASS);
-      return EXIT_FAILURE;
+      if (round + 1 != record_rounds)
+         check(vkResetCommandPool(device, command_pool, 0),
+               "vkResetCommandPool");
    }
+   const uint64_t record_end_ns = monotonic_ns();
 
    if (execute) {
       const VkFenceCreateInfo fence_info = {
@@ -565,13 +658,16 @@ main(int argc, char **argv)
    }
 
    vkDestroyCommandPool(device, command_pool, NULL);
-   vkDestroyPipeline(device, pipeline, NULL);
+   if (pipelines[1] != VK_NULL_HANDLE)
+      vkDestroyPipeline(device, pipelines[1], NULL);
+   vkDestroyPipeline(device, pipelines[0], NULL);
    vkDestroyShaderModule(device, fragment_module, NULL);
    vkDestroyShaderModule(device, vertex_module, NULL);
    vkDestroyPipelineLayout(device, layout, NULL);
    vkDestroyFramebuffer(device, framebuffer, NULL);
    vkDestroyRenderPass(device, render_pass, NULL);
-   vkDestroyImageView(device, colour_view, NULL);
+   for (unsigned i = 0; i < color_attachment_count; ++i)
+      vkDestroyImageView(device, colour_views[i], NULL);
    vkDestroyImage(device, colour_image, NULL);
    vkFreeMemory(device, colour_memory, NULL);
    vkDestroyBuffer(device, vertex_buffer, NULL);
@@ -580,8 +676,11 @@ main(int argc, char **argv)
    vkDestroyInstance(instance, NULL);
    dlclose(loader);
 
-   printf("G17P IOTO PROGRAM PRESSURE PASS: %u render passes, %u draws "
-          "recorded in one command buffer\n",
-          RENDER_PASSES, RENDER_PASSES * DRAWS_PER_PASS);
+   printf("G17P IOTO PROGRAM PRESSURE PASS: %u rounds, %u render passes and "
+          "%u draws per command buffer; total_record_us=%" PRIu64
+          ", record_us_per_round=%" PRIu64 "\n",
+          record_rounds, RENDER_PASSES, RENDER_PASSES * draws_per_pass,
+          (record_end_ns - record_start_ns) / 1000,
+          (record_end_ns - record_start_ns) / 1000 / record_rounds);
    return EXIT_SUCCESS;
 }

@@ -339,3 +339,18 @@ idep_vulkan_runtime = declare_dependency(
     idep_vulkan_runtime_body,
   ]
 )
+
+if with_tests and dep_libdrm.found()
+  test(
+    'vk_drm_syncobj_pending_wait',
+    executable(
+      'vk_drm_syncobj_pending_wait_test',
+      'tests/vk_drm_syncobj_pending_wait_test.c',
+      include_directories : [inc_include, inc_src],
+      dependencies : [vulkan_lite_runtime_deps, idep_vulkan_lite_runtime_headers],
+      link_with : [libvulkan_lite_runtime, libvulkan_lite_instance],
+    ),
+    suite : ['vulkan', 'drm-syncobj'],
+    timeout : 10,
+  )
+endif

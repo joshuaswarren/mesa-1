@@ -60,6 +60,11 @@ struct hk_physical_device {
    const struct vk_sync_type *sync_types[2];
 
    simple_mtx_t debug_compile_lock;
+
+   /* G17P tessellates with its hardware tessellator instead of the software
+    * tessellator every other generation uses (HK_G17P_NATIVE_TESS=1). This
+    * changes how evaluation shaders are compiled. */
+   bool g17p_native_tess;
 };
 
 VK_DEFINE_HANDLE_CASTS(hk_physical_device, vk.base, VkPhysicalDevice,

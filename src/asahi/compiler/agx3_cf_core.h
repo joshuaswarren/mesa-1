@@ -114,11 +114,10 @@ bool agx3_cf_icmp_zero16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond c
  *   short x;  if (x == 7)   0a 04 23 86 06 00 17 c2 02 00
  *   ushort x; if (x == 2)   0a 04 23 82 06 00 07 c2 02 00
  *
- * A non-zero immediate is refused for the two unsigned ordered relations:
- * Apple compiles `ushort x < 2` to the compact six-byte encoding point
- * instead (0a 04 22 82 05 c2), so this ten-byte form has no witness there.
- * At 256 and above Apple changes the instruction, so the immediate is capped
- * at 255.
+ * The two unsigned ordered relations use the compact six-byte encoding point.
+ * Fresh dead/live witnesses for `ushort x < 4` are both
+ * 0a 04 22 84 05 c2, so that form has no source-lifetime fields. At 256 and
+ * above Apple changes the instruction, so the immediate is capped at 255.
  */
 bool agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc,
                                 enum agx3_cf_icond cond, unsigned slot,
@@ -134,6 +133,13 @@ bool agx3_cf_icmp_zero16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
 bool agx3_cf_fcmp_reg(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
                       bool or_nan, unsigned slot, uint16_t src0, uint16_t src1,
                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+
+/* G17P comparison of two half-float registers with their actual lifetimes. */
+bool agx3_cf_fcmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_fcond cond,
+                        bool or_nan, unsigned slot, const uint16_t src[2],
+                        const struct agx3_cf_source_hints hints[2],
+                        uint16_t wait_mask, uint8_t out[AGX3_CF_MAX_LENGTH],
+                        uint8_t *len);
 
 /* G17P register comparison with exactly one negated f32 source. */
 bool agx3_cf_fcmp_reg_neg(enum agx_isa_encoding enc,

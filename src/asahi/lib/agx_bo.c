@@ -36,9 +36,17 @@ agx_bucket_index(size_t size)
 }
 
 static struct list_head *
-agx_bucket(struct agx_device *dev, size_t size)
+agx_bucket(struct agx_device *dev, size_t size, uint32_t flags)
 {
-   return &dev->bo_cache.buckets[agx_bucket_index(size)];
+   /* Shader, command and resource allocations of the same size often have
+    * incompatible flags. Keep their searches apart instead of repeatedly
+    * walking every unrelated BO while holding the cache lock. Hash all flag
+    * bits; collisions remain safe because fetch checks exact equality.
+    */
+   static_assert(NR_BO_CACHE_FLAG_BUCKETS == 16, "flag hash width");
+   const unsigned flag_bucket = (flags * UINT32_C(0x9e3779b9)) >> 28;
+   return &dev->bo_cache.buckets[agx_bucket_index(size) *
+                                NR_BO_CACHE_FLAG_BUCKETS + flag_bucket];
 }
 
 static void
@@ -60,7 +68,7 @@ agx_bo_cache_fetch(struct agx_device *dev, size_t size, size_t align,
                    uint32_t flags, const bool dontwait)
 {
    simple_mtx_lock(&dev->bo_cache.lock);
-   struct list_head *bucket = agx_bucket(dev, size);
+   struct list_head *bucket = agx_bucket(dev, size, flags);
    struct agx_bo *bo = NULL;
 
    /* Iterate the bucket looking for something suitable */
@@ -109,7 +117,7 @@ agx_bo_cache_evict_stale_bos(struct agx_device *dev, int64_t now_sec)
 static void
 agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
 {
-   struct list_head *bucket = agx_bucket(dev, bo->size);
+   struct list_head *bucket = agx_bucket(dev, bo->size, bo->flags);
    /* Add us to the bucket */
    list_addtail(&bo->bucket_link, bucket);
 

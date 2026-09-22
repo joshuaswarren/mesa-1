@@ -157,3 +157,26 @@ TEST(Miptree, SmallPartialMiptree3D)
    EXPECT_EQ(layout.sparse_folios_per_layer, 1);
    EXPECT_EQ(layout.sparse_table_size_B, 0x20000);
 }
+
+TEST(Linear, Packed422Rows)
+{
+   struct ail_layout layout = {
+      .width_px = 130,
+      .height_px = 3,
+      .depth_px = 2,
+      .sample_count_sa = 1,
+      .levels = 1,
+      .tiling = AIL_TILING_LINEAR,
+      .format = PIPE_FORMAT_R16G16_R16B16_422_UNORM,
+   };
+   ail_make_miptree(&layout);
+   /* 65 eight-byte words per row, not 130 full RGBA texels. */
+   EXPECT_EQ(layout.linear_stride_B, ALIGN_POT(520, AIL_CACHELINE));
+   EXPECT_EQ(layout.layer_stride_B, layout.linear_stride_B * 3);
+   EXPECT_EQ(layout.size_B, layout.layer_stride_B * 2);
+
+   layout.linear_stride_B = 1024;
+   ail_make_miptree(&layout);
+   EXPECT_EQ(layout.layer_stride_B, 3072u);
+   EXPECT_EQ(layout.size_B, 6144u);
+}

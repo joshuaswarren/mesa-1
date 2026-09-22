@@ -75,8 +75,11 @@ lower_tes_load(nir_builder *b, nir_intrinsic_instr *intr)
    if (nir_intrinsic_has_component(intr))
       addr = nir_iadd_imm(b, addr, nir_intrinsic_component(intr) * 4);
 
-   return nir_load_global_constant(b, intr->def.num_components,
-                                   intr->def.bit_size, addr, .align_mul = 4);
+   /* Tessellation buffers have one raw word per component, including narrow
+    * interfaces. */
+   nir_def *value = nir_load_global_constant(b, intr->def.num_components, 32,
+                                             addr, .align_mul = 4);
+   return nir_u2uN(b, value, intr->def.bit_size);
 }
 
 static nir_def *
@@ -94,13 +97,29 @@ static nir_def *
 lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr)
 {
    switch (intr->intrinsic) {
-   case nir_intrinsic_barrier:
-      /* A patch fits in a subgroup, so a pure execution rendezvous is
-       * redundant. Memory barriers still order the global TCS output buffer
-       * between the control-point and patch-constant phases. */
-      return nir_intrinsic_memory_scope(intr) == SCOPE_NONE
-                ? NIR_LOWER_INSTR_PROGRESS_REPLACE
-                : NULL;
+    case nir_intrinsic_barrier: {
+       /* A patch fits in a subgroup, so a pure execution rendezvous is
+        * redundant. Memory barriers still order the global TCS output buffer
+        * between the control-point and patch-constant phases. */
+       if (nir_intrinsic_memory_scope(intr) == SCOPE_NONE)
+          return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+
+       /* Output loads/stores below become global accesses. Their barriers
+        * must follow that address-space change while preserving scopes,
+        * acquire/release semantics, and ordering for any other memory modes.
+        * Leaving shader_out here loses the output-buffer memory ordering. */
+       nir_variable_mode modes = nir_intrinsic_memory_modes(intr);
+       if (!(modes & nir_var_shader_out))
+          return NULL;
+
+       nir_barrier(b,
+                   .execution_scope = nir_intrinsic_execution_scope(intr),
+                   .memory_scope = nir_intrinsic_memory_scope(intr),
+                   .memory_semantics = nir_intrinsic_memory_semantics(intr),
+                   .memory_modes = (modes & ~nir_var_shader_out) |
+                                   nir_var_mem_global);
+       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
+    }
 
    case nir_intrinsic_load_primitive_id:
       return nir_channel(b, nir_load_workgroup_id(b), 0);
@@ -133,14 +152,16 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr)
 
    case nir_intrinsic_load_output: {
       nir_def *addr = tcs_out_addr(b, intr, nir_undef(b, 1, 32));
-      return nir_load_global(b, intr->def.num_components, intr->def.bit_size,
-                             addr, .align_mul = 4);
+      nir_def *value = nir_load_global(b, intr->def.num_components, 32, addr,
+                                       .align_mul = 4);
+      return nir_u2uN(b, value, intr->def.bit_size);
    }
 
    case nir_intrinsic_load_per_vertex_output: {
       nir_def *addr = tcs_out_addr(b, intr, intr->src[0].ssa);
-      return nir_load_global(b, intr->def.num_components, intr->def.bit_size,
-                             addr, .align_mul = 4);
+      nir_def *value = nir_load_global(b, intr->def.num_components, 32, addr,
+                                       .align_mul = 4);
+      return nir_u2uN(b, value, intr->def.bit_size);
    }
 
    case nir_intrinsic_store_output: {
@@ -149,14 +170,14 @@ lower_tcs_impl(nir_builder *b, nir_intrinsic_instr *intr)
              nir_intrinsic_io_semantics(intr).location !=
                 VARYING_SLOT_TESS_LEVEL_INNER);
 
-      nir_store_global(b, intr->src[0].ssa,
+      nir_store_global(b, nir_u2u32(b, intr->src[0].ssa),
                        tcs_out_addr(b, intr, nir_undef(b, 1, 32)),
                        .write_mask = nir_intrinsic_write_mask(intr));
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
    }
 
    case nir_intrinsic_store_per_vertex_output: {
-      nir_store_global(b, intr->src[0].ssa,
+      nir_store_global(b, nir_u2u32(b, intr->src[0].ssa),
                        tcs_out_addr(b, intr, intr->src[1].ssa),
                        .write_mask = nir_intrinsic_write_mask(intr));
       return NIR_LOWER_INSTR_PROGRESS_REPLACE;
@@ -228,6 +249,80 @@ lower_tes(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    } else {
       return false;
    }
+}
+
+static bool
+lower_tes_native(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *p = nir_load_tess_param_buffer_poly(b);
+   nir_def *repl;
+
+   switch (intr->intrinsic) {
+   case nir_intrinsic_load_input:
+   case nir_intrinsic_load_per_vertex_input:
+   case nir_intrinsic_load_tess_level_inner:
+   case nir_intrinsic_load_tess_level_outer: {
+      gl_varying_slot location = nir_intrinsic_io_semantics(intr).location;
+      nir_src *offset_src = nir_get_io_offset_src(intr);
+      nir_def *offset = offset_src ? offset_src->ssa : nir_imm_int(b, 0);
+      nir_def *vertex = intr->intrinsic == nir_intrinsic_load_per_vertex_input
+                           ? intr->src[0].ssa
+                           : nir_imm_int(b, 0);
+
+      nir_def *addr = poly_tes_native_in_address(
+         b, p, nir_load_primitive_id(b), vertex,
+         nir_iadd_imm(b, offset, location));
+
+      if (nir_intrinsic_has_component(intr))
+         addr = nir_iadd_imm(b, addr, nir_intrinsic_component(intr) * 4);
+
+      repl = nir_load_global_constant(b, intr->def.num_components,
+                                      intr->def.bit_size, addr, .align_mul = 4);
+      break;
+   }
+
+   case nir_intrinsic_load_primitive_id:
+      repl = poly_tes_native_patch_id(b, p, nir_load_primitive_id(b));
+      break;
+
+   case nir_intrinsic_load_patch_vertices_in:
+      repl = poly_tes_patch_vertices_in(b, p);
+      break;
+
+   default:
+      return false;
+   }
+
+   nir_def_replace(&intr->def, repl);
+   return true;
+}
+
+/*
+ * Lower a tessellation evaluation shader to the hardware vertex program a
+ * hardware tessellator drives. Unlike poly_nir_lower_tes(), the tessellation
+ * coordinate and the tessellator's patch index stay as intrinsics, which such
+ * a backend reads from the tessellator. The TCS outputs are fetched from the
+ * TCS output buffer and gl_PrimitiveID is derived, both from that patch index.
+ */
+bool
+poly_nir_lower_tes_native(nir_shader *tes)
+{
+   nir_lower_tess_coord_z(
+      tes, tes->info.tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES);
+
+   nir_shader_intrinsics_pass(tes, lower_tes_native, nir_metadata_control_flow,
+                              NULL);
+
+   if (tes->info.tess.point_mode)
+      nir_lower_default_point_size(tes);
+
+   tes->info.stage = MESA_SHADER_VERTEX;
+   memset(&tes->info.vs, 0, sizeof(tes->info.vs));
+   tes->info.vs.tes_poly = true;
+
+   nir_lower_idiv(tes, &(nir_lower_idiv_options){.allow_fp16 = true});
+   return nir_progress(true, nir_shader_get_entrypoint(tes), nir_metadata_none);
 }
 
 static bool

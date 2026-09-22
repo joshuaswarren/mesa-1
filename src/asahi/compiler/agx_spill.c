@@ -308,7 +308,15 @@ static void
 insert_spill(agx_builder *b, struct spill_ctx *ctx, unsigned node)
 {
    if (!ctx->remat[node]) {
-      assert(!ctx->remat_only && "must have remat something");
+      /* The remat-only budget is an estimate; when a value that cannot be
+       * rematerialized must leave the register file, spill it to scratch and
+       * let register allocation finish with real spilling under the full
+       * budget instead of failing the compile
+       * (ssbo.phys.layout.random.8bit.nested_structs_arrays.20). */
+      if (ctx->remat_only) {
+         assert(b->shader->key->has_scratch && "remat fallback needs scratch");
+         b->shader->remat_fallback_spilled = true;
+      }
 
       agx_index idx = reconstruct_index(ctx, node);
       agx_mov_to(b, agx_index_as_mem(idx, ctx->spill_base), idx);
@@ -1167,8 +1175,11 @@ agx_spill(agx_context *ctx, unsigned k, bool remat_only)
 {
    void *memctx = ralloc_context(NULL);
 
-   /* We need extra registers for memory-memory swaps */
-   k -= remat_only ? 2 : 8;
+   /* Spilling needs extra registers for memory-memory swaps. Rematerializing
+    * inserts none, but must still leave room for the registers RA reserves at
+    * the bottom of the file, which is four for an AGX3 divergent shuffle.
+    */
+   k -= remat_only ? MAX2(agx_reserved_registers(ctx), 2) : 8;
 
    uint8_t *channels = rzalloc_array(memctx, uint8_t, ctx->alloc);
    dist_t *next_uses = rzalloc_array(memctx, dist_t, ctx->alloc);

@@ -54,6 +54,15 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   }
 
   test(
+    'hk_g17p_attachmentless_record',
+    g17p_attachmentless_record,
+    env : g17p_queue_progress_environment,
+    depends : [_dev_icd, libvulkan_asahi, libasahi_noop_drm_shim],
+    suite : ['asahi', 'g17p-attachmentless'],
+    timeout : 30,
+  )
+
+  test(
     'hk_g17p_pipeline_cache_persistence',
     g17p_pipeline_cache,
     env : g17p_queue_progress_environment,
@@ -479,10 +488,8 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'VK_DRIVER_FILES' : _dev_icd.full_path(),
   }
   g17p_image_copy_3d_env = environment(g17p_image_copy_3d_environment)
-  # The uncompressed source and destination uploads use raw CDM slices.  Only
-  # the two actual image-copy draws should reach the fragment path.
-  g17p_image_copy_3d_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '2')
+  # The uncompressed uploads and compatible image copies use raw CDM slices,
+  # so this regression should not need the fragment path.
   test(
     'hk_g17p_image_copy_3d',
     g17p_vulkan_image_copy_3d,
@@ -831,7 +838,9 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '6')
   g17p_layered_mip_blit_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
   g17p_layered_mip_blit_env.set(
-    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,0')
+    # The one strong barrier is the host-read cache flush (6aae441547b),
+    # which strengthens the final launch's tail record in place.
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,1')
   test(
     'hk_g17p_layered_mip_blit',
     g17p_vulkan_layered_mip_blit,
@@ -860,9 +869,6 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'ASAHI_SHIM_VALIDATE_G17P_STREAM' : '1',
     'ASAHI_SHIM_G17P_EXPECT_COMPUTE' : '1',
     'ASAHI_SHIM_G17P_EXPECT_STRONG_COMPUTE_BARRIER' : '1',
-    # draw_indirect_count was retired when V12c qualified on hardware and
-    # drawIndirectCount became unconditional; no code reads that token now.
-    'HK_G17P_UNVERIFIED_FEATURES' : 'conditional_rendering',
     'LD_PRELOAD' : libasahi_noop_drm_shim.full_path(),
     'MESA_SHADER_CACHE_DISABLE' : 'true',
     'VK_DRIVER_FILES' : _dev_icd.full_path(),

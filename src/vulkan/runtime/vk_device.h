@@ -30,6 +30,7 @@
 #include "vk_physical_device_features.h"
 
 #include "util/list.h"
+#include "util/mesa-blake3.h"
 #include "util/simple_mtx.h"
 #include "util/u_atomic.h"
 #include "util/u_sync_provider.h"
@@ -43,6 +44,14 @@ struct vk_command_buffer_ops;
 struct vk_device_shader_ops;
 struct vk_sync_signal;
 struct vk_sync_wait;
+
+#define VK_SHADER_BINARY_VALIDATION_CACHE_MAX 8
+
+struct vk_shader_binary_validation_cache_entry {
+   uint8_t *data;
+   size_t size;
+   blake3_hash digest;
+};
 
 enum vk_queue_submit_mode {
    /** Submits happen immediately
@@ -141,6 +150,16 @@ struct vk_device {
 
    /** Shader vtable for VK_EXT_shader_object and common pipelines */
    const struct vk_device_shader_ops *shader_ops;
+
+   /* Bounded cache of complete shader binaries which already passed the
+    * common runtime's UUID/version/size/BLAKE3 checks.  Reuse still requires
+    * full byte equality, so a digest collision cannot bypass validation. */
+   struct {
+      simple_mtx_t lock;
+      struct vk_shader_binary_validation_cache_entry
+         entries[VK_SHADER_BINARY_VALIDATION_CACHE_MAX];
+      uint32_t next;
+   } shader_binary_validation;
 
    /** Acceleration structure build vtable for common BVH building. */
    const struct vk_acceleration_structure_build_ops *as_build_ops;

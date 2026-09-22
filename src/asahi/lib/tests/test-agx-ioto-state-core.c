@@ -773,6 +773,47 @@ test_g17p_compute_ldshdr(void)
       UINT64_C(0x1000000000000), &state));
    CHECK(memcmp(&state, &before, sizeof(state)) == 0);
    CHECK(!agx_ioto_g17p_compute_ldshdr_build(0, NULL));
+
+   /* The hot direct packer must stay byte-identical to the independently
+    * tested semantic encoder throughout the 48-bit aligned VA domain and all
+    * four admitted fetch-span selector values. */
+   for (unsigned i = 0; i < 16384; ++i) {
+      const uint64_t va =
+         ((uint64_t)i * UINT64_C(0x9e3779b97f4a)) &
+         UINT64_C(0xffffffffffc0);
+      for (uint32_t fetch_span = 0; fetch_span <= 3; ++fetch_span) {
+         struct agx_ioto_state semantic = {0};
+         semantic.f[0] = va;
+         semantic.f[1] = fetch_span;
+         semantic.f[23] = 1;
+         uint8_t generic[AGX_IOTO_LDSHDR_SIZE];
+         uint8_t direct[AGX_IOTO_LDSHDR_SIZE];
+         CHECK(agx_ioto_state_pack_ldshdr(AGX_CHIP_G17P, &semantic,
+                                          generic, sizeof(generic)));
+         CHECK(agx_ioto_g17p_compiler_ldshdr_pack(
+            va, fetch_span, direct, sizeof(direct)));
+         CHECK(memcmp(generic, direct, sizeof(generic)) == 0);
+      }
+   }
+
+   uint8_t direct[AGX_IOTO_LDSHDR_SIZE];
+   memset(direct, 0xa5, sizeof(direct));
+   uint8_t direct_before[AGX_IOTO_LDSHDR_SIZE];
+   memcpy(direct_before, direct, sizeof(direct));
+   CHECK(!agx_ioto_g17p_compiler_ldshdr_pack(
+      UINT64_C(0x123456781), 0, direct, sizeof(direct)));
+   CHECK(memcmp(direct, direct_before, sizeof(direct)) == 0);
+   CHECK(!agx_ioto_g17p_compiler_ldshdr_pack(
+      UINT64_C(0x1000000000000), 0, direct, sizeof(direct)));
+   CHECK(memcmp(direct, direct_before, sizeof(direct)) == 0);
+   CHECK(!agx_ioto_g17p_compiler_ldshdr_pack(
+      0, 4, direct, sizeof(direct)));
+   CHECK(memcmp(direct, direct_before, sizeof(direct)) == 0);
+   CHECK(!agx_ioto_g17p_compiler_ldshdr_pack(
+      0, 0, direct, sizeof(direct) - 1));
+   CHECK(memcmp(direct, direct_before, sizeof(direct)) == 0);
+   CHECK(!agx_ioto_g17p_compiler_ldshdr_pack(
+      0, 0, NULL, sizeof(direct)));
    return 0;
 }
 
@@ -830,6 +871,7 @@ test_g17p_runtime_compute_shared_tail(void)
       uint32_t size_B;
       uint32_t speclm_word1;
    } cases[] = {
+      /* Keep the complete Vulkan-qualified 32 KiB allocation range. */
       {256, UINT32_C(0x00000480)},
       {1024, UINT32_C(0x00001080)},
       {4096, UINT32_C(0x00004080)},
@@ -882,11 +924,44 @@ test_g17p_compiler_spectpr(void)
    CHECK(state.f[20] == UINT16_MAX && state.f[21] == UINT16_MAX);
    CHECK(state.f[22] == UINT16_C(0x0ffe));
    struct agx_ioto_state before = state;
+   CHECK(!agx_ioto_g17p_compiler_spectpr_build(UINT32_C(0x3fffd), 0,
+                                               &state));
+   CHECK(memcmp(&state, &before, sizeof(state)) == 0);
    CHECK(!agx_ioto_g17p_compiler_spectpr_build(UINT32_MAX, 0, &state));
    CHECK(memcmp(&state, &before, sizeof(state)) == 0);
    CHECK(!agx_ioto_g17p_compiler_spectpr_build(0, UINT32_MAX, &state));
    CHECK(memcmp(&state, &before, sizeof(state)) == 0);
    CHECK(!agx_ioto_g17p_compiler_spectpr_build(0, 8, NULL));
+
+   /* The hot direct packer must stay byte-identical to the semantic builder
+    * plus the generic, independently tested state encoder. Cover boundaries
+    * and 16,384 deterministic points across the complete admitted domains. */
+   for (unsigned i = 0; i < 16384; ++i) {
+      const uint32_t spill =
+         (uint32_t)(((uint64_t)i * UINT64_C(0x9e37)) % UINT64_C(0x3fffd));
+      const uint32_t d =
+         (uint32_t)(((uint64_t)i * UINT64_C(0x9e3779b1)) %
+                    UINT64_C(4294967293));
+      uint8_t generic[AGX_IOTO_SPECTPR_SIZE];
+      uint8_t direct[AGX_IOTO_SPECTPR_SIZE];
+      CHECK(agx_ioto_g17p_compiler_spectpr_build(spill, d, &state));
+      CHECK(agx_ioto_state_pack_spectpr(AGX_CHIP_G17P, &state, generic,
+                                        sizeof(generic)));
+      CHECK(agx_ioto_g17p_compiler_spectpr_pack(spill, d, direct,
+                                                 sizeof(direct)));
+      CHECK(memcmp(generic, direct, sizeof(generic)) == 0);
+   }
+
+   uint8_t direct[AGX_IOTO_SPECTPR_SIZE];
+   memset(direct, 0xa5, sizeof(direct));
+   uint8_t direct_before[AGX_IOTO_SPECTPR_SIZE];
+   memcpy(direct_before, direct, sizeof(direct));
+   CHECK(!agx_ioto_g17p_compiler_spectpr_pack(
+      UINT32_C(0x3fffd), 0, direct, sizeof(direct)));
+   CHECK(memcmp(direct, direct_before, sizeof(direct)) == 0);
+   CHECK(!agx_ioto_g17p_compiler_spectpr_pack(
+      0, 8, direct, sizeof(direct) - 1));
+   CHECK(memcmp(direct, direct_before, sizeof(direct)) == 0);
    return 0;
 }
 
@@ -904,6 +979,10 @@ test_g17p_fragment_imageblock_speclm(void)
       {{24, 1, 32 * 32}, {0x77, 0x00, 0x2a, 0x47, 0x4b, 0, 0, 0}},
       {{32, 1, 32 * 16}, {0x77, 0x00, 0x2a, 0x09, 0x43, 0, 0, 0}},
       {{64, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x11, 0x41, 0, 0, 0}},
+      /* Past 64 bytes the stride keeps its five-bit field. */
+      {{72, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x13, 0x41, 0, 0, 0}},
+      {{80, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x15, 0x41, 0, 0, 0}},
+      {{120, 1, 16 * 16}, {0x77, 0x00, 0x2a, 0x1f, 0x41, 0, 0, 0}},
       {{8, 2, 32 * 32}, {0x77, 0x00, 0x2a, 0x42, 0x4b, 0, 0, 0}},
       {{16, 2, 32 * 16}, {0x77, 0x00, 0x2a, 0x04, 0x43, 0, 0, 0}},
       {{8, 4, 32 * 16}, {0x77, 0x00, 0xaa, 0x02, 0x43, 0, 0, 0}},
@@ -923,8 +1002,9 @@ test_g17p_fragment_imageblock_speclm(void)
    static const struct agx_ioto_g17p_imageblock invalid[] = {
       {0, 3, 32 * 32},   {8, 0, 32 * 32}, {8, 3, 32 * 32},
       {8, 8, 32 * 32},
-      {4, 1, 32 * 32},   {9, 1, 32 * 32}, {72, 1, 16 * 16},
-      {8, 1, 8 * 8},     {8, 1, 64 * 64}, {64, 4, 16 * 16},
+      {4, 1, 32 * 32},   {9, 1, 32 * 32}, {72, 1, 32 * 32},
+      {136, 1, 16 * 16}, {8, 1, 8 * 8},   {8, 1, 64 * 64},
+      {64, 4, 16 * 16},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i) {
       memcpy(output, before, sizeof(output));

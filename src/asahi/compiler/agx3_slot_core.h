@@ -38,7 +38,8 @@ extern "C" {
 #define AGX3_SLOT_TPS_HALF_TOKENS 32768u
 #define AGX3_SLOT_TEX_COORD_TOKEN                                        \
    (AGX3_SLOT_TPS_TOKEN_BASE + AGX3_SLOT_TPS_HALF_TOKENS)
-#define AGX3_SLOT_NUM_TOKENS (AGX3_SLOT_TEX_COORD_TOKEN + 1u)
+#define AGX3_SLOT_DYNAMIC_TPS_TOKEN (AGX3_SLOT_TEX_COORD_TOKEN + 1u)
+#define AGX3_SLOT_NUM_TOKENS (AGX3_SLOT_DYNAMIC_TPS_TOKEN + 1u)
 
 /* A 3D gradient+minimum sample reads six coordinate halves, fourteen LOD
  * halves, and two four-half descriptor operands. Keep the full dependency
@@ -47,7 +48,19 @@ extern "C" {
 
 struct agx3_slot_instr {
    bool is_async;   /* produces a scoreboard-tracked result */
+   bool drain;      /* retire preceding async operations before a fence */
+   /* This asynchronous instruction reads its sources when it retires rather
+    * than when it issues, so redefining one of them first changes what it
+    * transfers. Set it for device stores, whose payload nothing else tracks:
+    * a store has no destination, so the ordinary result bookkeeping below
+    * never sees those registers. Loads latch their address at issue and keep
+    * this clear, which the native corpus requires. */
+   bool latches_srcs;
    uint8_t preferred_slot; /* 0=round-robin, otherwise required slot */
+   /* The round-robin slot may be reissued while an earlier generation of the
+    * same kind is still live there, since the instruction cannot wait for it:
+    * Apple reissues fragment coefficient-load slots without any wait. */
+   bool reissues_live_slot;
    /* Slots used and fully consumed by this instruction's multi-op encoding.
     * A live prior generation is waited before the internal producer reuses
     * the slot; its register aliases are then synchronously complete. */

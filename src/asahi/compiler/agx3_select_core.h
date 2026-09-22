@@ -74,6 +74,9 @@ struct agx3_sel_src {
    bool abs;
    bool neg;
    uint8_t size; /* AGX size: 0 = 16-bit, 1 = 32-bit, 2 = 64-bit */
+   /* The register is read again after this instruction. Encoders that carry
+    * no lifetime bits ignore it. */
+   bool live;
 };
 
 struct agx3_sel_instr {

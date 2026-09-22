@@ -5526,11 +5526,8 @@ nir_opt_varyings_bulk(nir_shader **shaders, uint32_t num_shaders, bool spirv,
        */
       nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
-      /* A lone pre-rasterization shader has no varying consumer either; see
-       * the same reasoning at the end of this function.
-       */
-      if (nir->info.stage != MESA_SHADER_FRAGMENT)
-         nir_set_pre_rasterization_interpolation(nir);
+      /* A separately compiled producer may acquire a fragment consumer at
+       * link or draw time. Its absence here does not determine qualifiers. */
       return;
    }
 

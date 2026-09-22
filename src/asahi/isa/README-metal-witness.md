@@ -4,6 +4,46 @@ Apple's Metal toolchain is installed on the development Mac and targets our exac
 part directly.  This turns ISA questions from inference into witness: write MSL,
 get Apple's byte-exact `applegpu_g17p` machine code, diff against ours.
 
+## Required compiler-change gate
+
+Use this workflow for every AGX3B change that can affect instruction selection,
+operand packing, staging, register allocation, scheduling, or program ABI.  It
+is also required before adding a G16G/G17P chip gate or accepting a changed
+G17P byte golden.  A host test proves only what our compiler emitted; it is not
+an architecture oracle.
+
+The default rule is that G16G and G17P share the AGX3B compiler path.  Start
+with one common implementation.  Keep a chip-specific branch only when an
+Apple-compiler witness, captured hardware result, or device limit proves a
+real difference.  Resource counts and command-stream plumbing may differ even
+when the ISA form does not.
+
+For each fix:
+
+1. Reduce the failing CTS or application shader to the smallest MSL program
+   that preserves the disputed operation and its live operands.
+2. Compile it with `metal-nt -arch applegpu_g17p`.  Compile an M4/G16G witness
+   too when its native target is available.
+3. Extract the embedded Mach-O `__TEXT,__text` or stage section.  Decode every
+   relevant instruction and record raw bytes plus the re-composed field vector.
+4. Compile the equivalent NIR with Mesa and diff instruction form, operands,
+   register domains, staging order, and waits.  Do not compare only total size
+   or a hash.
+5. Keep the MSL, `.mtlp-json`, toolchain version, exact command, extracted text
+   hash, and conclusion under `src/asahi/compiler/test/probes/` for a permanent
+   rule.  Temporary investigations may begin under `.tmp`, but the evidence
+   that justifies production code must move into the tree.
+
+The 2026-09-16 Eryk-tail integration is the model.  A G17P half-uniform clamp
+emitted tied `fsel` operations whose compared and selected register fields were
+identical, validating per-instruction uniform-copy reuse on both G16G and G17P.
+A `texturecube_array` sample with register LOD emitted the fused `PACK_SMPIR`
+layer/face/LOD form with its seven-bit register field, validating the shared
+low-128 allocator constraint.  The former changed exactly one G17P background
+clear golden from 442 bytes to 394; the four sibling programs stayed
+byte-identical.  The native witness justified updating that golden instead of
+adding a G17P exception.
+
 ## Toolchain
 
     MT=$(dirname $(xcrun -f metal))     # Metal.xctoolchain/usr/bin
@@ -225,11 +265,13 @@ uniform across all five selectors the driver uses, byte for byte:
 
 The attachment table carries no sample count -- the count comes from the
 tilebuffer geometry and the PBE descriptor, which is consistent with a block
-store that writes the whole imageblock. Signed RGBA16/RGBA32 multisample
-admission remains disabled. The later RGBA32 audit in
+store that writes the whole imageblock. The later RGBA32 audit in
 `../compiler/test/probes/README-g17p-native-rt0-eot.md` identifies its old
-84-byte fixture as an array program, not a signedness variant; that correction
-does not expand multisample admission.
+84-byte fixture as an array program, not a signedness variant. The same holds
+unresolved: internal formats 10, 11 and 17 with four components give one
+68-byte type-4 program (SHA256 prefix `cbe3da3f8d30b159`) and one 84-byte
+type-8 program (`25b7628e79fd827b`), so signed RGBA32 stores multisample
+targets like the unsigned and float formats.
 
 The matching write descriptor comes from the UMD rather than the compiler:
 `AGX::PBEStateEncoderGen9<kAGXRevHAL200>::StateFields::StateFields` derives its
@@ -240,16 +282,17 @@ function's `level | (levels-1) << 44` write into word2 and its word0 bit 58 /
 word1 bit 63 extension markers are exactly what `agx_pbe_agx3_2d_mip_pack`
 already encodes from independent evidence.
 
-## Witness: AGX3 per-sample fragment execution is an unrolled shader (2026-09-10)
+## Witness: simple AGX3 per-sample fragments are unrolled (2026-09-10)
 
 `.tmp/g17p-msaa-grounding/` compiles the same MSL fragment function at
 `raster_sample_count` 1, 2 and 4 (the key is a `render_pipelines` entry field of
 that name). For a shader that reads `[[sample_id]]`, Apple's `applegpu_g17p`
 text grows 234 -> 290 -> 422 bytes and the number of tile-store sequences goes
-1 -> 2 -> 4, with the sample index folded in as an immediate. So per-sample
-execution on AGX3 is **unrolled inside the fragment program**, not an external
-sample loop as on AGX2 -- which is why `agx_linker.c`'s AGX2 loop does not
-transfer and `sampleRateShading` is a compiler gap rather than a hardware one.
+1 -> 2 -> 4, with the sample index folded in as an immediate. These shaders
+are **unrolled inside the fragment program**; this is not a universal native
+rule. The later `README-g17p-sample-alpha-depth.md` witness has a native sample
+loop and combined class-13 transaction for alpha coverage plus depth. Neither
+shape makes `agx_linker.c`'s AGX2 external-loop bytes valid AGX3 code.
 
 Separately, the *per-pixel* program for the same shader is 210 bytes at 1x and
 214 at 2x and 4x (2x and 4x byte-identical), so the ordinary fragment epilogue
@@ -313,3 +356,43 @@ Two smaller facts fell out and are worth not rediscovering:
   `.tmp/g17p-deep-break-evidence/extract.py`.
 * `cndend`'s own count (`f10`) is sixteen bits too, at the same bit position as
   `cndcf`'s. Only 1 and 2 are witnessed and encoded.
+
+## Witness: centroid interpolation is an explicit ITRCOORDS token (2026-09-14)
+
+Question: G17P centroid inputs were encoded as the f32interp register-source
+leaf reading an "implicit" coordinate register that nothing produced, and
+single-sample centroid and centre interpolation disagreed on hardware. What
+does Apple emit?
+
+```metal
+struct VCentroid { float4 pos [[position]]; float4 c [[centroid_perspective]]; };
+vertex VCentroid v_centroid(uint vid [[vertex_id]]) {
+  VCentroid o; o.pos = float4(float(vid), 0.0, 0.0, 1.0);
+  o.c = float4(float(vid)); return o;
+}
+fragment float4 f_centroid(VCentroid in [[stage_in]]) { return in.c; }
+```
+
+compiled as a render pipeline (`raster_sample_count` 1, then 4, one RGBA8Unorm
+colour attachment), with the same `metal`/`metallib`/`metal-nt -arch
+applegpu_g17p -platform_version macos 26.0 26.0` invocation as above.
+Decoded with `decomp`, the 1x fragment opens:
+
+    04c2110601000000   rld  SR39 W16 -> h0, slot 1, f48=1 (entry marker)
+    af14540603000a01   itrcoords r6 <- h0 (terminal), wait slot 1, f38=1
+    2f055400030003020900  f32interp RHW, token r6 live, f54=1
+    af005404030002482001  f32rcp
+    2f055400030203020800  f32interp coef 1, token r6 live
+    ...
+    2f055406030803022000  f32interp coef 4, token r6 final (f43)
+
+`[[centroid_no_perspective]]` is the same chain without the RHW, and 4x adds
+only a later unmarked SR39 read for the tile store. So the centroid is computed
+from the covered samples in SR39 by ITRCOORDS mode 1 (explicit sample
+interpolation is mode 2 on a sample index) and consumed through exactly the
+sample-token f32interp leaves. There is no implicit form.
+
+The same programs show where the fragment entry marker goes when SR39 is the
+first input: on the long-form rld (f48), not on the first f32interp (f63).
+`uint m [[sample_mask]]` inputs and a 4x fragment with no inputs at all open
+the same way (`14c2110601000000`, SR39 into h2).

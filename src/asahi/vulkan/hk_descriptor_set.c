@@ -20,6 +20,7 @@
 #include "hk_entrypoints.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "hk_image_view.h"
+#include "hk_image.h"
 #include "hk_physical_device.h"
 #include "hk_sampler.h"
 #include "asahi/compiler/agx_nir.h"
@@ -59,6 +60,29 @@ static void write_desc(struct hk_descriptor_set *set, uint32_t binding,
  * traversal walks it with global loads.  A null handle writes zero, which the
  * traversal treats as an empty structure.
  */
+static VkFilter
+hk_scaled_view_filter(VkDescriptorType descriptor_type,
+                      const struct hk_descriptor_set *set, uint32_t binding,
+                      uint32_t elem, const VkDescriptorImageInfo *info)
+{
+   if (descriptor_type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER)
+      return VK_FILTER_NEAREST;
+
+   const struct hk_descriptor_set_binding_layout *binding_layout =
+      &set->layout->binding[binding];
+   const struct hk_sampler *sampler =
+      binding_layout->immutable_samplers
+         ? binding_layout->immutable_samplers[elem]
+         : (info && info->sampler ? hk_sampler_from_handle(info->sampler)
+                                  : NULL);
+   if (sampler == NULL)
+      return VK_FILTER_NEAREST;
+
+   return (sampler->mag_filter == VK_FILTER_LINEAR ||
+           sampler->min_filter == VK_FILTER_LINEAR)
+             ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+}
+
 static void
 write_accel_struct_desc(struct hk_descriptor_set *set,
                         VkAccelerationStructureKHR _accel_struct,
@@ -127,6 +151,41 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
 
          desc[plane].sw.min_lod_fp16 = _mesa_float_to_half(min_lod);
          desc[plane].sw.min_lod_uint16 = min_lod;
+         const enum pipe_format logical = hk_format_to_pipe_format(view->vk.format);
+         const enum pipe_format integer = hk_scaled_texture_format(logical);
+         if (generation == 9 && integer != PIPE_FORMAT_NONE)
+            desc[plane].sw.scaled_conversion =
+               util_format_is_pure_sint(integer) ? 1 : 2;
+         if (generation == 9 &&
+             hk_scaled_view_filter(descriptor_type, set, binding, elem, info) ==
+                VK_FILTER_LINEAR &&
+             view->planes[plane].filterable_valid &&
+             hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE) {
+            desc[plane].tex = view->planes[plane].sampled_filterable;
+            desc[plane].sw.sampled_heap_index =
+               view->planes[plane].filterable_heap_index;
+            const struct util_format_description *fmt =
+               util_format_description(logical);
+            const VkComponentSwizzle sw[4] = {
+               view->vk.swizzle.r, view->vk.swizzle.g,
+               view->vk.swizzle.b, view->vk.swizzle.a};
+            uint16_t kind = 3 | ((fmt->channel[0].size == 16) << 2) |
+                                ((fmt->channel[0].size == 10) << 7);
+            for (unsigned c = 0; c < 4; ++c) {
+               unsigned comp = sw[c] == VK_COMPONENT_SWIZZLE_IDENTITY ? c :
+                  sw[c] >= VK_COMPONENT_SWIZZLE_R ? sw[c] - VK_COMPONENT_SWIZZLE_R : 4;
+               if (comp < 4 && fmt->swizzle[comp] < PIPE_SWIZZLE_0) {
+                  kind |= BITFIELD_BIT(3 + c);
+                  if (fmt->channel[fmt->swizzle[comp]].size == 2)
+                     kind |= BITFIELD_BIT(8 + c);
+               }
+            }
+            desc[plane].sw.scaled_conversion = kind;
+         }
+         /* The normalized descriptor path -- sample a UNORM view and rescale
+          * per channel in the shader -- returned the wrong texel for every
+          * scaled format it was measured against, so scaled sampling uses the
+          * integer descriptor set above. */
       }
    }
 
@@ -168,7 +227,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       if (sampler->has_border) {
          assert(sampler->plane_count == 2);
          desc[0].sw.clamp_0_sampler_index_or_negative =
-            sampler->planes[1].hw->index + 28;
+            (sampler->planes[1].hw->index + 28) |
+            (sampler->border_is_int ? HK_BORDER_IS_INT_BIT : 0);
 
          assert(desc[0].sw.clamp_0_sampler_index_or_negative >= 0 &&
                 "we have a border colour");
@@ -228,11 +288,13 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
        * fallback is built for.  Whether such a store LANDS is a hardware
        * question that no offline check can answer; it is queued as a probe.
        */
+      /* Layered views carry the native array PBE that PACK_IMGWIR-staged
+       * writes address (1D and 2D arrays, and cubes, which storage packs as
+       * 2D arrays), and 3D views the native 3D PBE. */
       const bool native_basic =
          hk_native_pbe_hardware_supported(generation) &&
          view->plane_count == 1 &&
          view->vk.image->samples == VK_SAMPLE_COUNT_1_BIT &&
-         view->vk.view_type == VK_IMAGE_VIEW_TYPE_2D &&
          view->planes[0].storage_pbe_valid;
       supported = hk_native_pbe_supported(generation) || native_basic;
       /* A readable native texture does not require a writable PBE. In
@@ -298,9 +360,18 @@ get_buffer_address(const VkDescriptorBufferInfo *const info, bool read_only)
       hk_buffer_addr_range(buffer, info->offset, info->range, read_only);
    assert(addr_range.range <= UINT32_MAX);
 
+   uint32_t sparse_map_page = 0;
+   if (!read_only && buffer && buffer->sparse_map) {
+      const uint64_t map_addr = buffer->sparse_map->va->addr;
+      assert((map_addr % AIL_PAGESIZE) == 0);
+      assert((map_addr / AIL_PAGESIZE) <= UINT32_MAX);
+      sparse_map_page = map_addr / AIL_PAGESIZE;
+   }
+
    return (struct hk_buffer_address){
       .base_addr = addr_range.addr,
       .size = addr_range.range,
+      .sparse_map_page = sparse_map_page,
    };
 }
 
@@ -339,17 +410,15 @@ write_buffer_view_desc(struct hk_descriptor_set *set,
       hk_storage_image_descriptor_layout(generation);
    uint32_t heap_index = 0;
 
-   /* G17P imageBuffer reads use the native texture heap even though buffer
-    * writes cannot use the legacy PBE software descriptor. */
+   /* G17P buffer views carry a Gen9 linear PBE; imageBuffer reads still use
+    * the native texture heap. */
    if ((!storage || generation == 9 || hk_native_pbe_supported(generation)) &&
        bufferView != VK_NULL_HANDLE) {
       VK_FROM_HANDLE(hk_buffer_view, view, bufferView);
 
       desc.tex = view->tex;
-      if (storage && hk_native_pbe_supported(generation))
+      if (storage)
          desc.pbe = view->pbe;
-      else if (storage)
-         hk_set_null_native_pbe(generation, &desc.pbe);
       heap_index = view->sampled_heap_index;
    } else {
       hk_set_null_native_texture(generation, &desc.tex);

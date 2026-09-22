@@ -127,6 +127,43 @@ TEST_F(LowerPseudo, LowersAgx3UnconditionalBreakAtEveryDepth)
    }
 }
 
+TEST_F(LowerPseudo, Agx3ConstantControlFlowComparesUseTheIdentity)
+{
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   agx_index r0l = agx_register(0, AGX_SIZE_16);
+
+   agx_builder *actual = agx_test_builder(mem_ctx);
+   actual->shader->key = &key;
+   agx_begin_cf(actual);
+   /* if (true), as emitted for a constant condition: taken. */
+   agx_if_icmp(actual, agx_immediate(1), agx_zero(), 1, AGX_ICOND_UEQ, true,
+               NULL);
+   /* if (1 == 0): never taken. */
+   agx_if_icmp(actual, agx_immediate(1), agx_zero(), 1, AGX_ICOND_UEQ, false,
+               NULL);
+   agx_break_if_icmp(actual, agx_immediate(2), agx_immediate(3), 1, false,
+                     AGX_ICOND_ULT, NULL);
+   agx_break_if_icmp(actual, agx_immediate(2), agx_immediate(3), 1, true,
+                     AGX_ICOND_ULT, NULL);
+   /* A sign-dependent compare of immediates is left alone. */
+   agx_if_icmp(actual, agx_immediate(0x8000), agx_zero(), 1, AGX_ICOND_SLT,
+               false, NULL);
+
+   agx_builder *expected = agx_test_builder(mem_ctx);
+   expected->shader->key = &key;
+   agx_begin_cf(expected);
+   agx_if_icmp(expected, r0l, r0l, 1, AGX_ICOND_UEQ, false, NULL);
+   agx_if_icmp(expected, r0l, r0l, 1, AGX_ICOND_UEQ, true, NULL);
+   agx_break_if_icmp(expected, r0l, r0l, 1, false, AGX_ICOND_UEQ, NULL);
+   agx_break_if_icmp(expected, r0l, r0l, 1, true, AGX_ICOND_UEQ, NULL);
+   agx_if_icmp(expected, agx_immediate(0x8000), agx_zero(), 1, AGX_ICOND_SLT,
+               false, NULL);
+
+   agx_lower_pseudo(actual->shader);
+   ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
+}
+
 TEST_F(LowerPseudo, Agx3DivergentShuffleUsesFullRegisterLane)
 {
    agx_shader_key key = {};

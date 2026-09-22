@@ -275,9 +275,174 @@ test_rejection_and_clearing(void)
    return 0;
 }
 
+/*
+ * Tessellation state records captured from Metal drawPatches on the dev Mac,
+ * one variable per capture, and packed identically by the G17P plugin's
+ * HWTessellationContext::drawPatches.
+ */
+static int
+test_tessellation_state_witnesses(void)
+{
+   const struct {
+      uint32_t word1, word2;
+      struct agx_vdm_tessellation_state_info info;
+   } witnesses[] = {
+      /* Pow2, clockwise, maximum 16, triangles, half factors, per patch */
+      {0x07a20000, 0x3c00, {AGX_VDM_TESSELLATION_PARTITION_POW2, false, 16,
+                            false, false, AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+                            false, 0x3c00}},
+      {0x47a20000, 0x3c00, {AGX_VDM_TESSELLATION_PARTITION_INTEGER, false, 16,
+                            false, false, AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+                            false, 0x3c00}},
+      {0x87220000, 0x3c00,
+       {AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD, false, 16, false, false,
+        AGX_VDM_TESSELLATION_STEP_PER_PATCH, false, 0x3c00}},
+      {0xc7a20000, 0x3c00,
+       {AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_EVEN, false, 16, false,
+        false, AGX_VDM_TESSELLATION_STEP_PER_PATCH, false, 0x3c00}},
+      {0x27a20000, 0x3c00, {AGX_VDM_TESSELLATION_PARTITION_POW2, true, 16,
+                            false, false, AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+                            false, 0x3c00}},
+      {0x1fa20000, 0x3c00, {AGX_VDM_TESSELLATION_PARTITION_POW2, false, 64,
+                            false, false, AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+                            false, 0x3c00}},
+      {0x07b20000, 0x3c00, {AGX_VDM_TESSELLATION_PARTITION_POW2, false, 16,
+                            true, false, AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+                            false, 0x3c00}},
+      {0x87320000, 0x3c00,
+       {AGX_VDM_TESSELLATION_PARTITION_FRACTIONAL_ODD, false, 16, true, false,
+        AGX_VDM_TESSELLATION_STEP_PER_PATCH, false, 0x3c00}},
+      {0x07a20000, 0x4000, {AGX_VDM_TESSELLATION_PARTITION_POW2, false, 16,
+                            false, false, AGX_VDM_TESSELLATION_STEP_PER_PATCH,
+                            false, 0x4000}},
+      {0x07a00000, 0x3c00, {AGX_VDM_TESSELLATION_PARTITION_POW2, false, 16,
+                            false, false, AGX_VDM_TESSELLATION_STEP_CONSTANT,
+                            false, 0x3c00}},
+      {0x07a40000, 0x3c00,
+       {AGX_VDM_TESSELLATION_PARTITION_POW2, false, 16, false, false,
+        AGX_VDM_TESSELLATION_STEP_PER_INSTANCE, false, 0x3c00}},
+      {0x07a60000, 0x3c00,
+       {AGX_VDM_TESSELLATION_PARTITION_POW2, false, 16, false, false,
+        AGX_VDM_TESSELLATION_STEP_PER_PATCH_AND_PER_INSTANCE, false, 0x3c00}},
+   };
+
+   for (unsigned i = 0; i < sizeof(witnesses) / sizeof(witnesses[0]); ++i) {
+      const uint8_t expected[AGX_VDM_TESSELLATION_STATE_LENGTH] = {
+         0x90, 0x00, 0x00, 0x40,
+         (uint8_t)witnesses[i].word1, (uint8_t)(witnesses[i].word1 >> 8),
+         (uint8_t)(witnesses[i].word1 >> 16),
+         (uint8_t)(witnesses[i].word1 >> 24),
+         (uint8_t)witnesses[i].word2, (uint8_t)(witnesses[i].word2 >> 8),
+         0x00, 0x00,
+      };
+      uint8_t packed[AGX_VDM_TESSELLATION_STATE_LENGTH];
+      CHECK(agx_vdm_tessellation_state_pack(AGX_CHIP_G17P, &witnesses[i].info,
+                                            packed));
+      CHECK(memcmp(packed, expected, sizeof(expected)) == 0);
+
+      struct agx_vdm_tessellation_state_info decoded;
+      CHECK(agx_vdm_tessellation_state_unpack(AGX_CHIP_G17P, expected,
+                                              sizeof(expected), &decoded));
+      CHECK(memcmp(&decoded, &witnesses[i].info, sizeof(decoded)) == 0);
+   }
+
+   struct agx_vdm_tessellation_state_info bad = witnesses[0].info;
+   uint8_t packed[AGX_VDM_TESSELLATION_STATE_LENGTH];
+   bad.max_factor = 65;
+   CHECK(!agx_vdm_tessellation_state_pack(AGX_CHIP_G17P, &bad, packed));
+   bad.max_factor = 0;
+   CHECK(!agx_vdm_tessellation_state_pack(AGX_CHIP_G17P, &bad, packed));
+   CHECK(!agx_vdm_tessellation_state_pack(AGX_CHIP_G13G, &witnesses[0].info,
+                                          packed));
+
+   uint8_t corrupt[AGX_VDM_TESSELLATION_STATE_LENGTH];
+   CHECK(agx_vdm_tessellation_state_pack(AGX_CHIP_G17P, &witnesses[0].info,
+                                         corrupt));
+   struct agx_vdm_tessellation_state_info decoded;
+   corrupt[6] &= (uint8_t)~0x20; /* the fixed bit 21 */
+   CHECK(!agx_vdm_tessellation_state_unpack(AGX_CHIP_G17P, corrupt,
+                                            sizeof(corrupt), &decoded));
+   return 0;
+}
+
+/*
+ * An indirect Tessellate record captured from Metal on the development Mac:
+ * two patches drawn from a four-word argument buffer at 0x1000001cf00, with
+ * factors in a 24-byte buffer at 0x10000018300. The G17P plugin packs the
+ * same seven words.
+ */
+static int
+test_tessellate_indirect(void)
+{
+   static const uint8_t witness[AGX_VDM_TESSELLATE_INDIRECT_LENGTH] = {
+      0x00, 0x0c, 0x30, 0xb4, 0x00, 0x83, 0x01, 0x00, 0x00, 0x01,
+      0x00, 0x00, 0x00, 0xcf, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+   };
+   const struct agx_vdm_tessellate_indirect_info info = {
+      .factor_buffer = UINT64_C(0x10000018300),
+      .indirect_buffer = UINT64_C(0x1000001cf00),
+      .instance_stride_word = 0,
+      .factor_buffer_size_minus_one = 5,
+   };
+
+   struct agx_vdm_tessellate_indirect packed;
+   CHECK(agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &info, &packed));
+   CHECK(packed.length == sizeof(witness));
+   CHECK(memcmp(packed.bytes, witness, sizeof(witness)) == 0);
+
+   struct agx_vdm_tessellate_indirect_info decoded;
+   CHECK(agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, witness,
+                                            sizeof(witness), &decoded));
+   CHECK(memcmp(&decoded, &info, sizeof(info)) == 0);
+
+   /* Every split field reaches its word. */
+   const struct agx_vdm_tessellate_indirect_info wide = {
+      .factor_buffer = UINT64_C(0xfedcba987654),
+      .indirect_buffer = UINT64_C(0xabcd12345678),
+      .instance_stride_word = 0x71234,
+      .factor_buffer_size_minus_one = 0x89abcdef,
+   };
+   CHECK(agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &wide, &packed));
+   CHECK(agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, packed.bytes,
+                                            packed.length, &decoded));
+   CHECK(memcmp(&decoded, &wide, sizeof(wide)) == 0);
+
+   struct agx_vdm_tessellate_indirect_info bad = info;
+   bad.indirect_buffer |= 2;
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &bad, &packed));
+   CHECK(packed.length == 0);
+   bad = info;
+   bad.factor_buffer = UINT64_C(1) << 48;
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &bad, &packed));
+   bad = info;
+   bad.instance_stride_word = 0x80000;
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G17P, &bad, &packed));
+   CHECK(!agx_vdm_tessellate_indirect_pack(AGX_CHIP_G13G, &info, &packed));
+
+   uint8_t corrupt[AGX_VDM_TESSELLATE_INDIRECT_LENGTH];
+   memcpy(corrupt, witness, sizeof(corrupt));
+   corrupt[12] |= 1;
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, corrupt,
+                                             sizeof(corrupt), &decoded));
+   memcpy(corrupt, witness, sizeof(corrupt));
+   corrupt[10] = 1; /* above 48 bits */
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, corrupt,
+                                             sizeof(corrupt), &decoded));
+   memcpy(corrupt, witness, sizeof(corrupt));
+   corrupt[3] = 0xb2;
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, corrupt,
+                                             sizeof(corrupt), &decoded));
+   CHECK(!agx_vdm_tessellate_indirect_unpack(AGX_CHIP_G17P, witness,
+                                             sizeof(witness) - 4, &decoded));
+   return 0;
+}
+
 int
 main(void)
 {
+   CHECK(test_tessellation_state_witnesses() == 0);
+   CHECK(test_tessellate_indirect() == 0);
    CHECK(test_exact_witness_and_targets() == 0);
    CHECK(test_domains() == 0);
    CHECK(test_corruption_classification() == 0);

@@ -78,15 +78,17 @@ agx_compose_float_src(agx_index to, agx_index from)
 }
 
 /* AGX3's grounded fmin/fmax encoding requires the compared values to remain
- * tied to the selected values. Inlining a minifloat into only the comparison
- * breaks that identity and needlessly turns a native min/max into a general
- * FSEL. Keep the shared SSA value explicit through register allocation. */
+ * tied to the selected values. Inlining an immediate into only one side (a
+ * minifloat into the comparison, or raw bits that fit an integer immediate,
+ * such as +0.0, into the selection) breaks that identity, and the resulting
+ * general FSEL has no NaN-correct grounded form. Keep the shared SSA value
+ * explicit on both sides through register allocation. */
 static bool
 agx_preserve_g17p_tied_fcmpsel(agx_context *ctx, agx_instr *I, unsigned src)
 {
    return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          I->op == AGX_OPCODE_FCMPSEL && src < 2 &&
-          agx_is_equiv(I->src[src], I->src[src + 2]);
+          I->op == AGX_OPCODE_FCMPSEL && src < 4 &&
+          agx_is_equiv(I->src[src], I->src[src ^ 2]);
 }
 
 /*
@@ -236,6 +238,28 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
           ((s == 0 && I->src[1].neg) || (s == 1 && I->src[0].neg)))
          continue;
 
+      /* G17P has no iadd of two immediates. The ushr count copy
+       * `iadd #0, count` must keep its register count. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_IADD && I->nr_srcs == 2 &&
+          I->src[1 - s].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
+      /* G17P's arithmetic shift right takes its shifted VALUE in a register.
+       * Only the count (source 1) has an immediate form -- `sra` is what
+       * `metal-nt -arch applegpu_g17p` emits for `(-7) >> x`, and it first
+       * spends an LDIMM to put the -7 in a register
+       * (test/probes/g17p-shift-immediate-value.metal, kernel immneg_reg:
+       * `1cf922fe1e0cff0f` ldimm then `a7015408000400d8e200` sra reg,reg;
+       * decoded in test/probes/README-g17p-deep-loops-and-shift-immediates.md).
+       * Folding the constant into source 0 leaves a shape with no encoding
+       * at all -- agx3_select_core.c's AGX3_SEL_OP_ASR requires two plain
+       * 32-bit registers -- and the packer then refuses the whole shader.
+       * Keep the MOV so selection reproduces Apple's ldimm+sra pair. */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_ASR && s == 0)
+         continue;
+
       agx_instr *def = defs[src.value];
       if (!def || def->op != AGX_OPCODE_MOV_IMM)
          continue;
@@ -336,10 +360,20 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
  *    not(xor(x, y) -> xnor(x, y)
  */
 static bool
-agx_optimizer_not(agx_instr *I, agx_instr *use)
+agx_optimizer_not(agx_context *ctx, agx_instr *I, agx_instr *use)
 {
    /* Check for bit op and use of not op */
    if (I->op != AGX_OPCODE_BITOP || use->op != AGX_OPCODE_NOT)
+      return false;
+
+   /* G17P has native word-wide NAND/NOR/XNOR, but the half-width forms
+    * still need the separate complement. Do not create an unencodable
+    * truth table or disable the supported word-wide fusion. */
+   const unsigned truth_table = I->truth_table ^ 0xf;
+   if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->dest[0].size != AGX_SIZE_32 &&
+       truth_table != AGX3_SEL_TT_AND && truth_table != AGX3_SEL_TT_OR &&
+       truth_table != AGX3_SEL_TT_XOR && truth_table != AGX3_SEL_TT_NOT)
       return false;
 
    /* Remap operation to the appropriate one */
@@ -479,7 +513,11 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
           (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD ||
            I->op == AGX_OPCODE_ICMP || I->op == AGX_OPCODE_ICMPSEL ||
            I->op == AGX_OPCODE_BFI || I->op == AGX_OPCODE_BFEIL ||
-           I->op == AGX_OPCODE_BITOP))
+           (I->op == AGX_OPCODE_EXTR && s < 2) ||
+           I->op == AGX_OPCODE_BITOP || I->op == AGX_OPCODE_BALLOT ||
+           I->op == AGX_OPCODE_QUAD_BALLOT ||
+           I->op == AGX_OPCODE_ICMP_BALLOT ||
+           I->op == AGX_OPCODE_ICMP_QUAD_BALLOT))
          continue;
 
       /* Optimize split(64-bit uniform) so we can get better copyprop of the
@@ -587,6 +625,86 @@ agx_optimizer_if_not(agx_instr **defs, agx_instr *I)
 }
 
 /*
+ * Evaluate an integer compare of two immediates on AGX3, which has no compare
+ * or select form without a register compare operand. Immediate inlining
+ * leaves one behind for e.g. umax(undef, 1), a constant compare can feed a
+ * select as a value, and fusing a compare of two constants into a select
+ * produces one; robust cube image coordinates do all of these.
+ */
+bool
+agx_eval_immediate_icond(agx_context *ctx, enum agx_icond icond, agx_index x,
+                         agx_index y, bool *result)
+{
+   if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       x.type != AGX_INDEX_IMMEDIATE || y.type != AGX_INDEX_IMMEDIATE ||
+       x.neg || y.neg)
+      return false;
+
+   /* A 16-bit immediate with its top bit set is negative in a 16-bit signed
+    * comparison but not in a 32-bit one, and the comparison width is no
+    * longer known here. Below that bit, signed and unsigned orderings agree.
+    */
+   const bool is_signed = icond == AGX_ICOND_SEQ || icond == AGX_ICOND_SLT ||
+                          icond == AGX_ICOND_SGT;
+   if (is_signed && (x.value >= 0x8000 || y.value >= 0x8000))
+      return false;
+
+   switch (icond) {
+   case AGX_ICOND_UEQ:
+   case AGX_ICOND_SEQ:
+      *result = x.value == y.value;
+      return true;
+   case AGX_ICOND_ULT:
+   case AGX_ICOND_SLT:
+      *result = x.value < y.value;
+      return true;
+   case AGX_ICOND_UGT:
+   case AGX_ICOND_SGT:
+      *result = x.value > y.value;
+      return true;
+   default:
+      return false;
+   }
+}
+
+static agx_instr *
+agx_optimizer_fold_icmp(agx_context *ctx, agx_instr *I)
+{
+   bool cond;
+   if (!agx_eval_immediate_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+      return NULL;
+
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+   agx_instr *folded =
+      agx_mov_imm_to(&b, I->dest[0], cond != I->invert_cond);
+   agx_remove_instruction(I);
+   return folded;
+}
+
+static agx_instr *
+agx_optimizer_fold_icmpsel(agx_context *ctx, agx_instr *I)
+{
+   bool cond;
+   if (!agx_eval_immediate_icond(ctx, I->icond, I->src[0], I->src[1], &cond))
+      return NULL;
+
+   const agx_index chosen = cond ? I->src[2] : I->src[3];
+   if (chosen.neg ||
+       !(chosen.type == AGX_INDEX_IMMEDIATE ||
+         ((chosen.type == AGX_INDEX_NORMAL ||
+           chosen.type == AGX_INDEX_REGISTER) &&
+          !chosen.abs)))
+      return NULL;
+
+   agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+   agx_instr *folded = chosen.type == AGX_INDEX_IMMEDIATE
+                          ? agx_mov_imm_to(&b, I->dest[0], chosen.value)
+                          : agx_mov_to(&b, I->dest[0], chosen);
+   agx_remove_instruction(I);
+   return folded;
+}
+
+/*
  * Fuse conditions into select. Specifically, acts on icmpsel and fuses:
  *
  *    icmpsel(cmp(x, y, *), 0, z, w, eq) -> cmpsel(x, y, w, z, *)
@@ -657,10 +775,39 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
       return;
    }
 
+   /* Likewise for a quad ballot, whose witnessed register form takes a 16-bit
+    * predicate. */
+   if (I->op == AGX_OPCODE_QUAD_BALLOT && ctx->key &&
+      ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      I->src[0].type == AGX_INDEX_IMMEDIATE) {
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index predicate = agx_temp(ctx, AGX_SIZE_16);
+      agx_mov_imm_to(&b, predicate, I->src[0].value);
+      I->src[0] = predicate;
+      return;
+   }
+
    if (I->src[0].type != AGX_INDEX_NORMAL)
       return;
 
    agx_instr *def = defs[I->src[0].value];
+
+   /* The same register-against-zero ballot is witnessed on G17P for a 16-bit
+    * source only in its equal-to-zero form, while an unfused ballot counts
+    * the lanes where its predicate is nonzero. Widen a half predicate so it
+    * reaches the 32-bit form instead.
+    */
+   if (I->op == AGX_OPCODE_BALLOT && ctx->key &&
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       I->src[0].size == AGX_SIZE_16 &&
+       !(def && (def->op == AGX_OPCODE_ICMP || def->op == AGX_OPCODE_FCMP))) {
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+      agx_mov_to(&b, wide, I->src[0]);
+      I->src[0] = wide;
+      return;
+   }
+
    if (!def || (def->op != AGX_OPCODE_ICMP && def->op != AGX_OPCODE_FCMP))
       return;
 
@@ -669,6 +816,39 @@ agx_optimizer_ballot(agx_context *ctx, agx_instr **defs, agx_instr *I)
 
    /* Replace with a fused instruction since the # of sources changes */
    agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+
+   /* Every G17P SIMD ballot Apple's compiler emits compares one register
+    * against a constant, so a ballot of two registers has no witnessed
+    * encoding. Keep the comparison, with the opposite sense, as a boolean and
+    * ballot the lanes where it is zero: the witnessed simd_broadcast_first()
+    * form.
+    */
+   /* `x != N` for a nonzero N has no immediate form, and the register-zero
+    * equality form it would otherwise take is measured wrong on G17P (see
+    * agx3_emit_subgroup_ballot). Ballot the opposite compare instead, exactly
+    * as for a register operand below. */
+   const bool agx3_inverted_eq_imm =
+      def->op == AGX_OPCODE_ICMP && def->invert_cond &&
+      (def->icond == AGX_ICOND_UEQ || def->icond == AGX_ICOND_SEQ) &&
+      def->src[1].type == AGX_INDEX_IMMEDIATE && def->src[1].value != 0;
+
+   if (!quad && ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       (def->src[1].type != AGX_INDEX_IMMEDIATE || agx3_inverted_eq_imm)) {
+      agx_index opposite = agx_temp(ctx, AGX_SIZE_16);
+
+      if (def->op == AGX_OPCODE_ICMP) {
+         agx_icmp_to(&b, opposite, def->src[0], def->src[1], def->icond,
+                     !def->invert_cond);
+      } else {
+         agx_fcmp_to(&b, opposite, def->src[0], def->src[1], def->fcond,
+                     !def->invert_cond);
+      }
+
+      agx_icmp_ballot_to(&b, I->dest[0], opposite, agx_zero(), AGX_ICOND_UEQ,
+                         false);
+      agx_remove_instruction(I);
+      return;
+   }
 
    agx_instr *fused = agx_icmp_ballot_to(
       &b, I->dest[0], def->src[0], def->src[1], def->icond, def->invert_cond);
@@ -696,7 +876,26 @@ agx_optimizer_bitop(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (def->op == AGX_OPCODE_NOT) {
          const unsigned truth_table =
             util_lut2_invert_source(I->truth_table, s);
+         agx_index other = I->src[1 - s];
+         if (other.type == AGX_INDEX_NORMAL) {
+            const agx_instr *other_def = defs[other.value];
+            if (other_def && other_def->op == AGX_OPCODE_NOT &&
+                other_def->src[0].size == AGX_SIZE_32)
+               other = other_def->src[0];
+         }
+         /* Enable the witnessed uniform forms. Keep the existing restriction
+          * for register-only expressions until their generated code is
+          * profitable as well as their encoding being supported.
+          */
+         const bool native_uniform_word =
+            I->dest[0].size == AGX_SIZE_32 &&
+            I->src[0].size == AGX_SIZE_32 &&
+            I->src[1].size == AGX_SIZE_32 &&
+            def->src[0].size == AGX_SIZE_32 &&
+            (def->src[0].type == AGX_INDEX_UNIFORM ||
+             other.type == AGX_INDEX_UNIFORM);
          if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+             !native_uniform_word &&
              truth_table != AGX3_SEL_TT_AND &&
              truth_table != AGX3_SEL_TT_OR &&
              truth_table != AGX3_SEL_TT_XOR &&
@@ -756,11 +955,37 @@ agx_optimizer_forward(agx_context *ctx)
           I->op != AGX_OPCODE_UNIFORM_STORE && I->op != AGX_OPCODE_EXPORT)
          agx_optimizer_inline_imm(ctx, defs, I);
 
+      /* Inlining a constant into fmov can leave two minifloat operands.
+       * Fold the conversion exactly, including negative zero, before RA. */
+      if (agx_is_fmov(I) && I->src[0].type == AGX_INDEX_IMMEDIATE &&
+          !I->saturate) {
+         float value = agx_minifloat_decode(I->src[0].value);
+         if (I->src[0].abs)
+            value = fabsf(value);
+         if (I->src[0].neg)
+            value = -value;
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         agx_instr *mov = agx_mov_imm_to(&b, I->dest[0],
+            I->dest[0].size == AGX_SIZE_16 ? _mesa_float_to_half(value) : fui(value));
+         defs[I->dest[0].value] = mov;
+         agx_remove_instruction(I);
+         continue;
+      }
+
       if (I->op == AGX_OPCODE_IF_ICMP) {
          agx_optimizer_if_not(defs, I);
          agx_optimizer_if_cmp(defs, I);
+      } else if (I->op == AGX_OPCODE_ICMP) {
+         agx_instr *folded = agx_optimizer_fold_icmp(ctx, I);
+         if (folded)
+            defs[folded->dest[0].value] = folded;
       } else if (I->op == AGX_OPCODE_ICMPSEL) {
+         /* Fusing a compare of two inlined immediates yields a select the
+          * fold below can resolve. */
          agx_optimizer_cmpsel(defs, I);
+         agx_instr *folded = agx_optimizer_fold_icmpsel(ctx, I);
+         if (folded)
+            defs[folded->dest[0].value] = folded;
       } else if (I->op == AGX_OPCODE_BALLOT ||
                  I->op == AGX_OPCODE_QUAD_BALLOT) {
          agx_optimizer_ballot(ctx, defs, I);
@@ -827,7 +1052,7 @@ agx_optimizer_backward(agx_context *ctx)
          if (!use || BITSET_TEST(multiple, I->dest[0].value))
             continue;
 
-         if (agx_optimizer_not(I, use)) {
+         if (agx_optimizer_not(ctx, I, use)) {
             agx_remove_instruction(use);
             continue;
          }

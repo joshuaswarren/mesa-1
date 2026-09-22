@@ -31,6 +31,10 @@
  *   f25 / f27  = source-0 liveness pair, only for a register source:
  *                f27 = 1 last use, f25 = 1 still live
  *   f42 / f44  = the same pair for source 1
+ *   f28 / f29  = source-0 abs / neg of a register source, f45 / f46 for
+ *                source 1: abs(x) and -x into R8/RG8/RGBA8Unorm, R16Unorm,
+ *                RG16Snorm and R8Snorm set them, -abs(x) sets both
+ *                (blend/native/negpack.py, negpack2.py)
  *   f58 = normalized format: U8=0, S8=1, U16=2, S16=3, and the two sRGB
  *         modes below. Fresh native R16Unorm/R16Snorm pipelines establish the
  *         upper width bit.
@@ -164,9 +168,23 @@ struct agx3_fltnorm_src {
    uint8_t kind; /* enum agx3_fltnorm_src_kind */
    uint16_t value;
    bool kill; /* register sources only: this is the last read */
+   /* Register sources only: take |value| and/or negate it first. */
+   bool abs, neg;
 };
 
-/* Native RGB10A2 conversion packs four f32 registers into one32-bit word. */
+/* The packed word `pack` builds and `unpack` reads: pack's f92 and unpack's
+ * f40. The float layouts take three lanes, and pack marks them with f93
+ * (rgb9e5/native/rgb9e5.py: RGB9E5Float and RG11B10Float attachments). */
+enum agx3_packed_layout {
+   AGX3_PACKED_RGB10A2 = 0,
+   AGX3_PACKED_RGB9E5 = 1,
+   AGX3_PACKED_RG11B10 = 2,
+};
+
+/* Native RGB10A2 conversion packs four f32 registers into one32-bit word.
+ * A register lane may take abs (f28 + 17i) and neg (f29 + 17i), as abs(x),
+ * -x and -abs(x) into RGB10A2Unorm do (blend/native/negpack*.py). The
+ * packed float layouts pack the first three lanes the same way. */
 struct agx3_rgb10a2_desc {
    uint16_t dest;
    uint16_t source[4];
@@ -175,6 +193,9 @@ struct agx3_rgb10a2_desc {
    bool first_instruction;
    bool discard[4];
    bool cache[4];
+   bool abs[4];
+   bool neg[4];
+   uint8_t layout; /* enum agx3_packed_layout */
 };
 bool agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *desc,
                         uint8_t out[14], uint8_t *length);
@@ -183,6 +204,7 @@ struct agx3_rgb10a2_unpack_desc {
    uint16_t dest, source; /* half indices: four f32 outputs, one u32 input */
    uint16_t wait_mask;
    bool discard;
+   uint8_t layout; /* enum agx3_packed_layout */
 };
 bool agx3_rgb10a2_unpack_encode(const struct agx3_rgb10a2_unpack_desc *desc,
                                uint8_t out[8], uint8_t *length);
@@ -212,15 +234,20 @@ bool agx3_fltnorm_relocate_start(uint8_t *code, size_t size,
 /* Finite compiler provenance for a uniform-copy-only main and an opaque
  * RGBA8 two-pack epilog. No executable byte parsing is used for fusion. */
 struct agx3_colour_link_info {
-   /* Producer-recorded native pixel-entry provenance for part linking. */
+   /* Producer-recorded native pixel-entry provenance for part linking.
+    * straight_line admits a derivative-consumer entry gate in this part;
+    * branch_free says no branch crosses any byte of the part, so the
+    * linker may remove this part's entry gate. */
    bool entry_emitted;
    bool straight_line;
+   bool branch_free;
    uint32_t entry_offset;
 
-   /* Number of colour-tile partitions whose pixel classes are consumed by
-    * this part.  The linked fragment state loader must keep every active
-    * partition acquired until the shader's terminal ST_TILE releases it. */
-   uint8_t colour_partitions;
+   /* Colour pixel classes consumed by this part: bit n is the class of the
+    * tile partitions n, n + 3, ...  The linked fragment state loader must keep
+    * every consumed class acquired until the shader's terminal ST_TILE
+    * releases it, and releases the others itself. */
+   uint8_t colour_classes;
 
    bool copy_only;
    uint8_t copy_count;

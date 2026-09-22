@@ -13,6 +13,7 @@
 #include "agx_bg_eot.h"
 #include "agx_helpers.h"
 #include "agx_scratch.h"
+#include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_table.h"
 #include "hk_entrypoints.h"
@@ -45,12 +46,42 @@
 #include <fcntl.h>
 #include <xf86drm.h>
 
+static bool
+hk_g17p_prewarm_poly_kernels(struct hk_device *dev)
+{
+#define PREWARM(program, args)                                                \
+   do {                                                                        \
+      if (!hk_g17p_compute_program_cache_prewarm(                              \
+             dev, program, sizeof(struct args)))                               \
+         return false;                                                         \
+   } while (0)
+
+   PREWARM(LIBAGX_GS_SETUP_INDIRECT, libagx_gs_setup_indirect_args);
+   PREWARM(LIBAGX_PREFIX_SUM_GEOM, libagx_prefix_sum_geom_args);
+   PREWARM(LIBAGX_PREFIX_SUM_TESS_0, libagx_prefix_sum_tess_args);
+   PREWARM(LIBAGX_PREFIX_SUM_TESS_1, libagx_prefix_sum_tess_args);
+   PREWARM(LIBAGX_TESS_SETUP_INDIRECT, libagx_tess_setup_indirect_args);
+   PREWARM(LIBAGX_TESS_SETUP_INDIRECT_HW,
+           libagx_tess_setup_indirect_hw_args);
+   PREWARM(LIBAGX_TESS_FACTORS_HALF, libagx_tess_factors_half_args);
+   PREWARM(LIBAGX_TESS_ISOLINE_0, libagx_tess_isoline_args);
+   PREWARM(LIBAGX_TESS_ISOLINE_1, libagx_tess_isoline_args);
+   PREWARM(LIBAGX_TESS_TRI_0, libagx_tess_tri_args);
+   PREWARM(LIBAGX_TESS_TRI_1, libagx_tess_tri_args);
+   PREWARM(LIBAGX_TESS_QUAD_0, libagx_tess_quad_args);
+   PREWARM(LIBAGX_TESS_QUAD_1, libagx_tess_quad_args);
+
+#undef PREWARM
+
+   return true;
+}
+
 /* clang-format off */
 static const struct debug_named_value hk_perf_options[] = {
    {"notess",    HK_PERF_NOTESS,   "Skip draws with tessellation"},
    {"noborder",  HK_PERF_NOBORDER, "Disable custom border colour emulation"},
    {"nobarrier", HK_PERF_NOBARRIER,"Ignore pipeline barriers"},
-   {"batch",     HK_PERF_BATCH,    "Batch submissions"},
+   {"nobatch",   HK_PERF_NOBATCH,  "Disable submission batching"},
    {"norobust",  HK_PERF_NOROBUST, "Disable robustness"},
    DEBUG_NAMED_VALUE_END
 };
@@ -72,8 +103,7 @@ hk_upload_rodata(struct hk_device *dev)
                        "%s has no known sampler heap element size",
                        agx_chip_name(dev->dev.chip));
 
-   const size_t rodata_size =
-      align(sampler_size, sizeof(uint64_t)) + sizeof(struct poly_heap);
+   const size_t rodata_size = align(sampler_size, sizeof(uint64_t));
    dev->rodata.bo =
       agx_bo_create(&dev->dev, rodata_size, 0, 0, "Read only data");
 
@@ -98,6 +128,7 @@ hk_upload_rodata(struct hk_device *dev)
    struct hk_native_sampler_descriptor txf;
    if (!hk_pack_native_txf_sampler(dev->dev.chip, &txf)) {
       agx_bo_unreference(&dev->dev, dev->rodata.bo);
+      dev->rodata.bo = NULL;
       return vk_errorf(dev, VK_ERROR_FEATURE_NOT_PRESENT,
                        "%s cannot pack the texel-fetch sampler",
                        agx_chip_name(dev->dev.chip));
@@ -105,17 +136,51 @@ hk_upload_rodata(struct hk_device *dev)
    memcpy(map + offs, &txf, sampler_size);
    offs += sampler_size;
 
-   /* The heap descriptor isn't strictly readonly data, but we only have a
-    * single instance of it device-wide and -- after initializing at heap
-    * allocate time -- it is read-only from the CPU perspective. The GPU uses it
-    * for scratch, but is required to reset it after use to ensure resubmitting
-    * the same command buffer works.
-    *
-    * So, we allocate it here for convenience.
+   if (dev->dev.chip == AGX_CHIP_G17P) {
+      const uint64_t pointers[2] = {
+         dev->sampled_images.bo->va->addr,
+         dev->samplers.table.bo->va->addr,
+      };
+
+      dev->rodata.indexed_heap_pointers_bo =
+         agx_bo_create(&dev->dev, sizeof(pointers), 0, 0,
+                       "Indexed descriptor heap pointers");
+      if (!dev->rodata.indexed_heap_pointers_bo) {
+         agx_bo_unreference(&dev->dev, dev->rodata.bo);
+         dev->rodata.bo = NULL;
+         return VK_ERROR_OUT_OF_HOST_MEMORY;
+      }
+
+      memcpy(agx_bo_map(dev->rodata.indexed_heap_pointers_bo), pointers,
+             sizeof(pointers));
+      dev->rodata.indexed_heap_pointers =
+         dev->rodata.indexed_heap_pointers_bo->va->addr;
+   }
+
+   /* The heap descriptor is NOT read-only data: hk_init_heap() writes it from
+    * the CPU on the first tessellated or geometry-shaded draw, and the libagx
+    * allocator then atomically bumps poly_heap::bottom from the GPU on every
+    * such draw (src/poly/geometry.h poly_heap_alloc_offs). It used to be
+    * suballocated out of the buffer object above, 32 bytes after the texel
+    * fetch sampler whose base address is handed to every G17P background
+    * reload program as a sampler table pointer -- so one tessellation draw
+    * turned bytes the fragment path can address from zero into live allocator
+    * state. Give it its own buffer object; the sampler table then never
+    * changes after device creation.
     */
-   offs = align(offs, sizeof(uint64_t));
-   dev->rodata.heap = dev->rodata.bo->va->addr + offs;
-   offs += sizeof(struct poly_heap);
+   dev->rodata.heap_bo = agx_bo_create(&dev->dev, sizeof(struct poly_heap), 0,
+                                       0, "Geometry heap descriptor");
+   if (!dev->rodata.heap_bo) {
+      agx_bo_unreference(&dev->dev,
+                         dev->rodata.indexed_heap_pointers_bo);
+      dev->rodata.indexed_heap_pointers_bo = NULL;
+      agx_bo_unreference(&dev->dev, dev->rodata.bo);
+      dev->rodata.bo = NULL;
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+   }
+
+   memset(agx_bo_map(dev->rodata.heap_bo), 0, sizeof(struct poly_heap));
+   dev->rodata.heap = dev->rodata.heap_bo->va->addr;
 
    return VK_SUCCESS;
 }
@@ -135,7 +200,7 @@ internal_key_equal(const void *a_, const void *b_)
    const struct hk_internal_key *b = b_;
 
    return a->builder == b->builder && a->key_size == b->key_size &&
-          memcmp(a->key, b->key, a->key_size) == 0;
+          a->stop == b->stop && memcmp(a->key, b->key, a->key_size) == 0;
 }
 
 static VkResult
@@ -381,6 +446,96 @@ hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
 }
 
 /*
+ * Residency of one byte of a sparse residency buffer, read from that buffer's
+ * live bitmap exactly the way hk_g17p_sparse_buffer_copy() and
+ * lower_sparse_buffer_deref() read it: a header carrying the resource base and
+ * the page count, followed by one bit per AIL page.  Reading it in the shader
+ * rather than at record time is what lets a sparse bind submitted after the
+ * command buffer was recorded still affect this dispatch.
+ *
+ * Every dereference is funnelled through the zero page when the value that
+ * produced it is not trustworthy, so no branch is needed and no load can fault.
+ */
+static nir_def *
+hk_g17p_page_resident(nir_builder *b, nir_def *safe_map, nir_def *has_map,
+                      nir_def *resource_base, nir_def *page_count,
+                      nir_def *addr)
+{
+   static_assert(AIL_PAGESIZE == (1u << 14), "update shader lookup");
+   nir_def *page = nir_ushr_imm(b, nir_isub(b, addr, resource_base), 14);
+   nir_def *in_range = nir_ult(b, page, nir_u2u64(b, page_count));
+   nir_def *valid = nir_iand(b, has_map, in_range);
+
+   nir_def *word_addr = nir_iadd_imm(
+      b,
+      nir_iadd(b, safe_map,
+               nir_imul_imm(b, nir_ushr_imm(b, page, 5), sizeof(uint32_t))),
+      sizeof(struct hk_sparse_buffer_map_header));
+   nir_def *safe_word_addr = nir_bcsel(
+      b, valid, word_addr, nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+   nir_def *word = nir_load_global(b, 1, 32, safe_word_addr,
+                                   .align_mul = sizeof(uint32_t));
+   /* Test the bit with a variable MASK, not `(word >> (page & 31)) & 1`.
+    * nir_opt_algebraic drops the `& 31` because NIR defines a shift to mask
+    * its count, agx_nir_fuse_algebraic_late then folds the result into
+    * ubitfield_extract(word, page, 1), and that pass runs before
+    * agx_nir_lower_algebraic_late puts AGX's shift mask back -- so the raw
+    * page number would reach the hardware as the extract offset.  Same shape,
+    * same reason, as lower_sparse_buffer_deref() and
+    * lower_sparse_buffer_texture(); an argument buffer past 512 KB would
+    * otherwise read its residency from an arbitrary bit. */
+   nir_def *mask =
+      nir_ishl(b, nir_imm_int(b, 1), nir_iand_imm(b, nir_u2u32(b, page), 31));
+
+   return nir_iand(b, in_range, nir_ine_imm(b, nir_iand(b, word, mask), 0));
+}
+
+/*
+ * Residency of a whole VkDispatchIndirectCommand.
+ *
+ * The record is twelve bytes at a four-byte-aligned offset, so it can straddle
+ * a page boundary: at offset 16376 or 16380 within a 16 KiB page its tail lives
+ * in the next one.  Testing only the first page there would let the z or y
+ * count come from the scratch page, which is exactly the arbitrary grid this
+ * lookup exists to prevent, so test the last byte as well.  Where both bytes
+ * share a page the second lookup reads the same word and costs one load.
+ */
+static nir_def *
+hk_g17p_grid_helper_resident(nir_builder *b, nir_def *root, nir_def *grid_addr)
+{
+   nir_def *map_addr = nir_load_global(
+      b, 1, 64,
+      nir_iadd_imm(b, root,
+                   hk_root_descriptor_offset(cs.grid_helper_sparse_map_addr)),
+      .align_mul = 8);
+   nir_def *has_map = nir_ine_imm(b, map_addr, 0);
+   nir_def *safe_map = nir_bcsel(b, has_map, map_addr,
+                                 nir_imm_int64(b, AGX_ZERO_PAGE_ADDRESS));
+
+   nir_def *resource_base = nir_load_global(
+      b, 1, 64,
+      nir_iadd_imm(b, safe_map,
+                   offsetof(struct hk_sparse_buffer_map_header,
+                            resource_base)),
+      .align_mul = alignof(uint64_t));
+   nir_def *page_count = nir_load_global(
+      b, 1, 32,
+      nir_iadd_imm(b, safe_map,
+                   offsetof(struct hk_sparse_buffer_map_header, page_count)),
+      .align_mul = alignof(uint32_t));
+
+   nir_def *first = hk_g17p_page_resident(b, safe_map, has_map, resource_base,
+                                          page_count, grid_addr);
+   nir_def *last = hk_g17p_page_resident(
+      b, safe_map, has_map, resource_base, page_count,
+      nir_iadd_imm(b, grid_addr, sizeof(VkDispatchIndirectCommand) - 1));
+
+   /* No bitmap means this is not a sparse residency buffer, so every byte of
+    * it is there to be read. */
+   return nir_ior(b, nir_inot(b, has_map), nir_iand(b, first, last));
+}
+
+/*
  * The native G17P indirect-compute grid helper.
  *
  * A native indirect dispatch is two CDM records: a direct-shaped main launch
@@ -403,21 +558,24 @@ hk_get_timestamp(struct vk_device *device, uint64_t *timestamp)
  * say how many threads it launches, and an idempotent kernel is correct for
  * any answer.
  */
-static void
-hk_init_g17p_grid_helper(struct hk_device *dev,
-                         const VkAllocationCallbacks *pAllocator)
+static struct hk_api_shader *
+hk_build_g17p_grid_helper(struct hk_device *dev,
+                          const VkAllocationCallbacks *pAllocator,
+                          bool copy_geometry, bool sparse)
 {
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return;
+   assert(!(copy_geometry && sparse));
 
    nir_builder b = nir_builder_init_simple_shader(
-      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P indirect grid helper");
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      copy_geometry ? "G17P indirect geometry copy"
+      : sparse      ? "G17P indirect grid helper (sparse)"
+                    : "G17P indirect grid helper");
    b.shader->info.workgroup_size[0] = 1;
    b.shader->info.workgroup_size[1] = 1;
    b.shader->info.workgroup_size[2] = 1;
 
    nir_def *root = nir_load_root_agx(&b);
-   nir_def *groups_addr = nir_load_global(
+   nir_def *grid_addr = nir_load_global(
       &b, 1, 64,
       nir_iadd_imm(&b, root, hk_root_descriptor_offset(cs.group_count_addr)),
       .align_mul = 8);
@@ -426,17 +584,40 @@ hk_init_g17p_grid_helper(struct hk_device *dev,
       nir_iadd_imm(&b, root,
                    hk_root_descriptor_offset(cs.grid_helper_geometry_addr)),
       .align_mul = 8);
-   nir_def *local = nir_load_global(
-      &b, 3, 32,
-      nir_iadd_imm(&b, root,
-                   hk_root_descriptor_offset(cs.grid_helper_local_size)),
-      .align_mul = 4);
+   nir_def *global, *local;
 
-   /* VkDispatchIndirectCommand is exactly three u32 threadgroup counts. */
-   nir_def *groups = nir_load_global(&b, 3, 32, groups_addr, .align_mul = 4);
+   if (copy_geometry) {
+      /* An indirect-local grid is already a launch geometry, written by an
+       * earlier kernel in the layout the main record consumes. */
+      global = nir_load_global(&b, 3, 32, grid_addr, .align_mul = 4);
+      local = nir_load_global(
+         &b, 3, 32,
+         nir_iadd_imm(&b, grid_addr, AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET),
+         .align_mul = 4);
+   } else {
+      local = nir_load_global(
+         &b, 3, 32,
+         nir_iadd_imm(&b, root,
+                      hk_root_descriptor_offset(cs.grid_helper_local_size)),
+         .align_mul = 4);
 
-   nir_store_global(&b, nir_imul(&b, groups, local), geometry_addr,
-                    .align_mul = 4);
+      /* VkDispatchIndirectCommand is exactly three u32 threadgroup counts. */
+      nir_def *groups = nir_load_global(&b, 3, 32, grid_addr, .align_mul = 4);
+
+      /* sparseResidencyNonResidentStrict is advertised, so arguments in an
+       * unbound page must read as zero.  The primary mapping sends those
+       * reads to the scratch page instead, so substitute the zero grid here
+       * rather than relying on the read-only shadow. */
+      if (sparse) {
+         nir_def *resident =
+            hk_g17p_grid_helper_resident(&b, root, grid_addr);
+         groups = nir_bcsel(&b, resident, groups, nir_imm_zero(&b, 3, 32));
+      }
+
+      global = nir_imul(&b, groups, local);
+   }
+
+   nir_store_global(&b, global, geometry_addr, .align_mul = 4);
    nir_store_global(&b, local,
                     nir_iadd_imm(&b, geometry_addr,
                                  AGX3_G17P_INDIRECT_GEOMETRY_LOCAL_OFFSET),
@@ -447,12 +628,39 @@ hk_init_g17p_grid_helper(struct hk_device *dev,
       .robustness = &vk_robustness_disabled,
       .stage = MESA_SHADER_COMPUTE,
    };
-   hk_compile_shader(dev, &info, NULL, NULL, pAllocator,
-                     &dev->g17p_grid_helper);
+   struct hk_api_shader *helper = NULL;
+   hk_compile_shader(dev, &info, NULL, NULL, pAllocator, &helper);
+   return helper;
+}
+
+static void
+hk_init_g17p_grid_helper(struct hk_device *dev,
+                         const VkAllocationCallbacks *pAllocator)
+{
+   if (dev->dev.chip != AGX_CHIP_G17P)
+      return;
+
+   dev->g17p_grid_helper =
+      hk_build_g17p_grid_helper(dev, pAllocator, false, false);
+   dev->g17p_geometry_copy_helper =
+      hk_build_g17p_grid_helper(dev, pAllocator, true, false);
 
    /* A refusal is not fatal: it costs indirect dispatch, not the device. */
-   if (!dev->g17p_grid_helper)
+   if (!dev->g17p_grid_helper || !dev->g17p_geometry_copy_helper)
       mesa_logw("G17P indirect compute unavailable: grid helper refused");
+
+   /* Only a sparse residency buffer can carry a residency bitmap, so only a
+    * device that enabled the feature can ever select this helper.  Compiling
+    * it unconditionally cost every vkCreateDevice about 2.5 ms -- 32 device
+    * create/destroy cycles went from 419 ms to 499 ms, measured on G17P -- for
+    * a program most devices never launch. */
+   if (!dev->vk.enabled_features.sparseResidencyBuffer)
+      return;
+
+   dev->g17p_grid_helper_sparse =
+      hk_build_g17p_grid_helper(dev, pAllocator, false, true);
+   if (!dev->g17p_grid_helper_sparse)
+      mesa_logw("G17P sparse indirect compute unavailable: helper refused");
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -464,12 +672,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    VkResult result = VK_ERROR_OUT_OF_HOST_MEMORY;
    struct hk_device *dev;
    struct hk_instance *instance = (struct hk_instance *)pdev->vk.instance;
-
-   /* The SPECLM sample selector is only witnessed at one sample; this lets a
-    * boot decide the multisample value. Read here because agx_ioto_state_core
-    * deliberately links without util. -1 keeps the standing guess. */
-   agx_ioto_g17p_set_speclm_sample_code(
-      debug_get_num_option("AGX_SPECLM_SAMPLE_CODE", -1));
 
    dev = vk_zalloc2(&instance->vk.alloc, pAllocator, sizeof(*dev), 8,
                     VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
@@ -524,6 +726,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+   dev->g17p_native_tess = pdev->g17p_native_tess;
 
    if (instance->no_border) {
       dev->perftest |= HK_PERF_NOBORDER;
@@ -597,6 +800,49 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_rodata;
    }
 
+   dev->g17p_compute_program_cache.report_stats =
+      debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
+   dev->g17p_shader_perf.trace =
+      debug_get_bool_option("HK_SHADER_PERF_TRACE", false);
+   dev->g17p_shader_perf.aggregate =
+      debug_get_bool_option("HK_SHADER_PERF_AGGREGATE", false);
+   dev->g17p_shader_perf.fault_trace =
+      debug_get_bool_option("HK_SHADER_PERF_FAULT_TRACE", false);
+   dev->g17p_shader_perf.prefault_stack =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STACK", false);
+   dev->g17p_shader_perf.prefault_driver =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_DRIVER", false);
+   dev->g17p_shader_perf.prefault_main =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_MAIN", false);
+   dev->g17p_shader_perf.prefault_ioto =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_IOTO", false);
+   dev->g17p_shader_perf.prefault_streams =
+      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STREAMS", false);
+   dev->g17p_diagnostics.launch_trace =
+      debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
+   dev->g17p_diagnostics.draw_trace =
+      debug_get_bool_option("HK_G17P_DRAW_TRACE", false);
+   dev->g17p_diagnostics.compact_ioto_trace =
+      debug_get_bool_option("HK_G17P_COMPACT_IOTO_TRACE", false);
+   dev->g17p_diagnostics.graphics_ioto_cache_stats =
+      debug_get_bool_option("HK_G17P_GRAPHICS_IOTO_CACHE_STATS", false);
+   dev->g17p_diagnostics.nonpoint_no_psiz =
+      debug_get_bool_option("HK_G17P_NONPOINT_NO_PSIZ", false);
+   dev->g17p_diagnostics.hal200_about_flags1 =
+      debug_get_bool_option("HK_G17P_HAL200_ABOUT_FLAGS1", false);
+   dev->g17p_diagnostics.force_tri_merge_disable =
+      debug_get_bool_option("HK_G17P_FORCE_TRI_MERGE_DISABLE", false);
+
+   /* Geometry and tessellation are advertised core functionality on G17P.
+    * Upload their immutable internal kernels with the device instead of
+    * making the first vkCmdDraw that needs each kernel serialize on the
+    * cache lock and allocate its executable image. */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       !hk_g17p_prewarm_poly_kernels(dev)) {
+      result = VK_ERROR_OUT_OF_DEVICE_MEMORY;
+      goto fail_bg_eot;
+   }
+
    result = hk_init_internal_shaders(&dev->prolog_epilog);
    if (result != VK_SUCCESS)
       goto fail_bg_eot;
@@ -631,9 +877,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    if (result != VK_SUCCESS)
       goto fail_mem_cache;
 
-   dev->g17p_compute_program_cache.report_stats =
-      debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
-
    /* Precompile an empty fragment shader that can be used to handle API-level
     * null fragment shaders. We do this at device-time to make binds cheap.
     * Regardless, compiling this shader should be fast.
@@ -659,7 +902,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    list_inithead(&dev->vdm.slabs);
    list_inithead(&dev->vdm.quarantined_bos);
    list_inithead(&dev->vdm.quarantined_vdm_allocations);
+   util_dynarray_init(&dev->vdm.quarantined_ioto_bos, NULL);
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
+   simple_mtx_init(&dev->shader_binary_cache.lock, mtx_plain);
    agx_scratch_init(&dev->dev, &dev->scratch.vs);
    agx_scratch_init(&dev->dev, &dev->scratch.fs);
    agx_scratch_init(&dev->dev, &dev->scratch.cs);
@@ -687,6 +932,8 @@ fail_internal_shaders:
 fail_bg_eot:
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_rodata:
+   agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
 fail_queries:
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
@@ -719,6 +966,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    u_rwlock_destroy(&dev->external_bos.lock);
 
    hk_device_finish_meta(dev);
+   hk_shader_binary_cache_finish(dev);
    hk_g17p_compute_program_cache_finish(dev);
    hk_device_finish_accel_struct_state(dev);
    hk_destroy_internal_shaders(dev, &dev->kernels, false);
@@ -749,10 +997,22 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       hk_api_shader_destroy(&dev->vk, &dev->g17p_grid_helper->vk, pAllocator);
    }
 
+   if (dev->g17p_geometry_copy_helper) {
+      hk_api_shader_destroy(&dev->vk, &dev->g17p_geometry_copy_helper->vk,
+                            pAllocator);
+   }
+
+   if (dev->g17p_grid_helper_sparse) {
+      hk_api_shader_destroy(&dev->vk, &dev->g17p_grid_helper_sparse->vk,
+                            pAllocator);
+   }
+
    hk_destroy_sampler_heap(dev, &dev->samplers);
    if (dev->dev.chip == AGX_CHIP_G17P || dev->dev.chip == AGX_CHIP_G17G)
       hk_descriptor_table_finish(dev, &dev->sampled_images);
    hk_descriptor_table_finish(dev, &dev->occlusion_queries);
+   agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
+   agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);

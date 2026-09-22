@@ -23,6 +23,9 @@ extern "C" {
 /* r0-r127 inclusive, as pairs of 16-bits, gives 256 registers */
 #define AGX_NUM_REGS (256)
 
+/* G17P's register file: halves 0..191. */
+#define AGX3B_NUM_REGS (192)
+
 /* u0-u255 inclusive, as pairs of 16-bits */
 #define AGX_NUM_UNIFORMS (512)
 
@@ -423,6 +426,9 @@ typedef struct {
    /* TODO: Handle tilebuffer ops more efficient */
    bool explicit_coords : 1;
 
+   /* Logical attachment identity, independent of the physical pixel_offset. */
+   uint8_t colour_target;
+
    /* TODO: Handle iter ops more efficient */
    enum agx_interpolation interpolation : 2;
    bool perspective                    : 1;
@@ -431,7 +437,8 @@ typedef struct {
    bool coherent : 1;
    /* AGX3 memory index scale excludes the access-format size. */
    bool memory_index_is_bytes : 1;
-   /* Raw subword memory elements occupy packed 32-bit SSA words. */
+   /* Raw subword memory elements use packed payloads (device loads use
+    * 32-bit SSA words; byte stores and shared loads use 16-bit halves). */
    bool memory_is_packed : 1;
 
    /* Explicit AGX3 SCS load semantics.  These stay on the internal SCS pseudo
@@ -526,6 +533,11 @@ typedef struct {
    bool is_preamble;
    unsigned scratch_size_B;
 
+   /* AGX3b: thread-private storage half a returned device atomic publishes
+    * its old value to, above the spill frame.
+    */
+   unsigned agx3_atomic_return_tps_half;
+
    struct list_head blocks; /* list of agx_block */
    struct agx_shader_info *out;
    struct agx_shader_key *key;
@@ -541,6 +553,14 @@ typedef struct {
 
    /* Mask of pixel fences we've definitely already waited for. */
    uint16_t already_pixel_waited;
+
+   /* G17P depth/stencil writes not yet emitted. Every sample's write shares
+    * one class-1 transaction, released after the last. */
+   unsigned zs_writes_left;
+
+   /* The first coverage update in an explicit-early fragment is the one
+    * per-pixel Z/S test.  It has a distinct G17P acquire/retain protocol. */
+   bool force_early_tests_pending;
 
    /* Has r0l been zeroed yet due to control flow? */
    bool any_cf;
@@ -580,6 +600,10 @@ typedef struct {
 
    /* Beginning of stack allocation used for parallel copy lowering */
    bool has_spill_pcopy_reserved;
+
+   /* The remat-only spiller had to spill a value to scratch; register
+    * allocation must finish with real spilling under the full budget. */
+   bool remat_fallback_spilled;
    unsigned spill_pcopy_base;
 
    /* Stats for shader-db */
@@ -1069,6 +1093,8 @@ void agx_print_instr(const agx_instr *I, FILE *fp);
 void agx_print_block(const agx_block *block, FILE *fp);
 void agx_print_shader(const agx_context *ctx, FILE *fp);
 void agx_optimizer_forward(agx_context *ctx);
+bool agx_eval_immediate_icond(agx_context *ctx, enum agx_icond icond,
+                              agx_index x, agx_index y, bool *result);
 void agx_optimizer_backward(agx_context *ctx);
 void agx_lower_divergent_shuffle(agx_context *ctx);
 void agx_lower_pseudo(agx_context *ctx);
@@ -1082,21 +1108,58 @@ void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
-/* The promoted Apple witness exports position plus sixteen float4 user
- * locations (68 scalars). Keep room for the opt-in ANGLE qualification shape:
- * position plus seventeen float4 user locations, or 72 contiguous
- * output/staging scalars. The Vulkan property remains 64 user components by
- * default until that exact image oracle passes on hardware. */
-#define AGX3_MAX_VERTEX_OUTPUTS 72u
+/* UVSW carries the UVS index and the staging address in two independent
+ * eight-bit operands, so the hardware addresses 256 vertex outputs while only
+ * 128 distinct staging pairs exist.
+ *
+ * Apple's G17P compiler emits position plus thirty-one float4 user locations
+ * as 128 UVSWs for UVS indices 0..127, and __GPU_LD_MD root.field1.field3 is
+ * 128; a thirty-second float4 exceeds the fragment's 127 coefficients. Each
+ * of those outputs stages at half 2k, and that scheme is kept verbatim for
+ * the first AGX3_G17P_STAGING_OUTPUTS of any program.
+ *
+ * GL asks for more than Apple's own compiler ever emits: a points geometry
+ * shader may write the full 128 interleaved transform-feedback components as
+ * thirty-one float4 locations and still need position (four) and point size
+ * (one), which is 129 outputs. Those past the staging capacity reuse the
+ * addresses of batches that have already drained -- every batch boundary
+ * waits on all six scoreboard slots, so the COPY/UVSW pair that last owned a
+ * staging half has retired long before it is written again, twenty-one
+ * batches later. Nothing about the UVS index itself wraps. */
+#define AGX3_MAX_VERTEX_OUTPUTS 256u
+#define AGX3_G17P_STAGING_OUTPUTS 128u
+
+/* UVS_POSITION is the first group in the hardware's UVS order (see
+ * agx_uvs.h) and agx_nir_lower_uvs.c gives it four entries whether or not
+ * the shader writes gl_Position. A vertex program that writes no position
+ * therefore starts its outputs here, and nowhere else. */
+#define AGX3_UVS_POSITION_ENTRIES 4u
 bool agx3_sink_vertex_outputs(agx_context *ctx);
 bool agx3_coalesce_uniform_half_stores(agx_context *ctx);
 /* Materialize nonzero minifloats used by G17P structured f32 control flow so
  * the compare uses the already grounded register/register form. */
 void agx_materialize_agx3_cf_constants(agx_context *ctx);
+/* Number of 16-bit registers RA keeps reserved at the bottom of the register
+ * file for the whole shader.
+ */
+static inline unsigned
+agx_reserved_registers(const agx_context *ctx)
+{
+   if (ctx->has_spill_pcopy_reserved)
+      return 8;
+   else if (ctx->any_quad_divergent_shuffle)
+      return ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ? 2 : 4;
+   else if (ctx->any_cf)
+      return 1;
+   else
+      return 0;
+}
+
 void agx_spill(agx_context *ctx, unsigned k, bool remat_only);
 void agx_repair_ssa(agx_context *ctx);
 void agx_reindex_ssa(agx_context *ctx);
 void agx_ra(agx_context *ctx);
+unsigned agx3_tile_store_bank(agx_context *ctx);
 
 /* AGX3b device atomics return through their value register.  Legalize the
  * SSA three-address form before RA so the allocator can enforce that physical
@@ -1170,6 +1233,10 @@ bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
 bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
+void agx_lower_agx3_half_converts(agx_context *ctx);
+bool agx_lower_agx3_cf_constants(agx_context *ctx);
+bool agx_lower_agx3_half_iadd_constants(agx_context *ctx);
+bool agx_lower_agx3_widening_iadd(agx_context *ctx);
 
 struct agx_cycle_estimate {
    /* ALU throughput */

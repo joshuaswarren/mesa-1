@@ -204,9 +204,12 @@ validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
    if (!sink)
       return fail_at(address, "could not open disassembly sink");
 
+   /* The container's own span bounds the walk. A fixed 16 KiB bound used to
+    * reject complete fragment shaders past it -- 16bit_storage
+    * struct_mixed_types links a 27986-byte fragment -- as having no end. */
    size_t offset = 0;
    bool valid = false;
-   while (offset < available && offset < 16384) {
+   while (offset < available) {
       uint8_t bytes[64] = {0};
       const size_t readable =
          available - offset < sizeof(bytes) ? available - offset
@@ -634,8 +637,27 @@ asahi_g17p_compute_validate(
          need_barrier = false;
          break;
 
+      case AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE:
+         /* HAL200 emits SSTT maintenance in a command encoder of its own.
+          * Combining it with shader launches would leave ordering ambiguous. */
+         if (need_barrier || local.launches || local.sstt_flushes)
+            return fail_at(cursor, "SSTT flush-invalidate ordering is invalid");
+
+         local.sstt_flushes++;
+         break;
+
       case AGX3_CDM_RECORD_STREAM_TERMINATE:
-         if (need_barrier || !local.launches ||
+         /* A stream whose only record is the opening strong flush is a real
+          * shape, not an empty stream: hk_CmdPipelineBarrier2() emits exactly
+          * that for an API-declared HOST_READ dependency when the command
+          * buffer records no other compute work, and it is what makes a
+          * preceding fragment store visible to the CPU (Mesa 6aae441547b,
+          * qualified on hardware).  It reaches submission alone whenever the
+          * neighbouring control streams are render ones, so it cannot be
+          * merged into a compute stream that has launches. */
+         if (need_barrier ||
+             (!local.launches && !local.sstt_flushes &&
+              !local.prologue_barriers) ||
              (!followed_link &&
               cursor + record.length != compute->cdm_ctrl_stream_end))
             return fail_at(cursor, "compute terminator is not final");
@@ -813,7 +835,11 @@ validate_slot(const struct asahi_g17p_stream_memory *memory, unsigned slot,
           !agx_ppp_hal200_graphics_core_unpack(
              AGX_CHIP_G17P, AGX_PPP_HAL200_GRAPHICS_OUTPUT, bytes, size,
              &graphics) ||
-          (graphics.words[0] & ~UINT32_C(0x003d0000)) ||
+          /* The low sixteen bits are the eight clip-distance enables and
+           * their companion select bits. agx_ppp_hal200_output_select_pack()
+           * bounds the live producer to this same field; rejecting it here
+           * made valid XFB clip/cull streams look malformed. */
+          (graphics.words[0] & ~UINT32_C(0x003dffff)) ||
           !!(graphics.words[0] & UINT32_C(0x00080000)) !=
              !!(graphics.words[0] & UINT32_C(0x00100000)) ||
           graphics.words[1] ||
@@ -933,8 +959,8 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
                    uint64_t address,
                    struct asahi_g17p_stream_stats *stats)
 {
-   static const uint32_t controls[8] = {
-      0x700, 0x500, 0x700, 0x500, 0xa00, 0x300, 0x200, 0x200,
+   uint32_t controls[8] = {
+      0x700, 0x500, 0x700, 0x500, 0, 0x300, 0x200, 0x200,
    };
    size_t lengths[8] = {20, 28, 28, 28, 20, 0, 12, 8};
    uint8_t bytes[AGX_VDM_HAL200_BIND_TAIL_LENGTH];
@@ -956,6 +982,12 @@ validate_bind_tail(const struct asahi_g17p_stream_memory *memory,
        lengths[5] > AGX_PPP_VIEWPORT_PAYLOAD_MAX_LENGTH)
       return fail_at(address, "viewport slot length is out of range");
    const unsigned viewport_count = (lengths[5] - 8) / 32;
+
+   /* Pair 4 sizes the viewport payload in words. A stale one-viewport size
+    * on a longer payload leaves the tiler parsing a truncated PPP record. */
+   controls[AGX_VDM_HAL200_BIND_VIEWPORT_CONTROL_PAIR] =
+      agx_vdm_hal200_bind_viewport_control(lengths[5]);
+
    uint8_t output_record[AGX_PPP_HAL200_OUTPUT_LENGTH];
    uint8_t primary_record[AGX_PPP_HAL200_PRIMARY_FACE_LENGTH];
    uint8_t secondary_record[AGX_PPP_HAL200_SECONDARY_FACE_LENGTH];
@@ -1031,6 +1063,7 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
    struct asahi_g17p_stream_stats local = {0};
    bool pending_selector = false;
    bool have_state = false;
+   bool tessellation_state_seen = false;
    bool restart_seen = false;
    /* Cleared by every draw body, set by every barrier record.  A state
     * republication seen while this is false is a draw installing fresh VDM
@@ -1276,10 +1309,52 @@ asahi_g17p_stream_validate(const struct asahi_g17p_stream_memory *memory,
          break;
       }
 
-      case AGX_VDM_RECORD_TESSELLATE_DIRECT:
-         oracle_gap_at(cursor, "VDM direct tessellate");
+      case AGX_VDM_RECORD_TESSELLATION_STATE:
+         if (!have_state || restart_seen)
+            return fail_at(cursor, "tessellation state has invalid order");
+         tessellation_state_seen = true;
          cursor += record.length;
          break;
+
+      case AGX_VDM_RECORD_TESSELLATE_DIRECT: {
+         const struct agx_vdm_tessellate_direct_info *draw =
+            &record.data.tessellate_direct;
+         const uint64_t factor_bytes =
+            ((uint64_t)draw->factor_buffer_size_minus_one + 1) * 4;
+         if (!have_state || restart_seen || !tessellation_state_seen ||
+             draw->patch_count == 0 || draw->instance_count == 0 ||
+             factor_bytes > SIZE_MAX ||
+             !memory->owned(memory->data, draw->factor_buffer,
+                            (size_t)factor_bytes))
+            return fail_at(cursor,
+                           "tessellate draw has no state or unowned factors");
+         local.draws++;
+         local.tessellated_draws++;
+         barrier_since_last_draw = false;
+         if (draw->instance_count > local.max_instance_count)
+            local.max_instance_count = draw->instance_count;
+         cursor += record.length;
+         break;
+      }
+
+      case AGX_VDM_RECORD_TESSELLATE_INDIRECT: {
+         const struct agx_vdm_tessellate_indirect_info *draw =
+            &record.data.tessellate_indirect;
+         const uint64_t factor_bytes =
+            ((uint64_t)draw->factor_buffer_size_minus_one + 1) * 4;
+         if (!have_state || restart_seen || !tessellation_state_seen ||
+             factor_bytes > SIZE_MAX ||
+             !memory->owned(memory->data, draw->factor_buffer,
+                            (size_t)factor_bytes) ||
+             !memory->owned(memory->data, draw->indirect_buffer, 16))
+            return fail_at(cursor, "indirect tessellate draw has no state or "
+                                   "unowned factors or arguments");
+         local.draws++;
+         local.tessellated_draws++;
+         barrier_since_last_draw = false;
+         cursor += record.length;
+         break;
+      }
 
       case AGX_VDM_RECORD_UNKNOWN:
       default:

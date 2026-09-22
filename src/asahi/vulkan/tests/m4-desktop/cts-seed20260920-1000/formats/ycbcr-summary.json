@@ -1,0 +1,40 @@
+{
+  "requested": 7,
+  "completed": 7,
+  "jobs": 1,
+  "case_timeout_seconds": 20,
+  "guard_seconds": 40,
+  "started_unix": 1789338646.052793,
+  "finished_unix": 1789338649.334784,
+  "elapsed_seconds": 3.2819912419945467,
+  "batch_execution_seconds": 0.7705787730001248,
+  "counts": {
+    "Pass": 4,
+    "NotSupported": 3
+  },
+  "batches": [
+    "/home/council/dev/dirtyroom_m4/_provenance/experiments/20260913T223046084797Z-packed-ycbcr-v3-000"
+  ],
+  "identity": [
+    "3e6a333b-ddc3-4749-999d-606b6d42262f",
+    {
+      "/opt/asahi-m4-port/lib/libvulkan_asahi.so": "0d3c7fb4846ae008ea6d73dc58a5a17750fe94c3983802d18e659be288196914",
+      "/root/guarded-command.py": "e746929162cc01b809455e9dae4a6d3f8a32b313b8e39373e3d1b00f893b797d",
+      "/opt/asahi-m4-port/lib/libgallium-26.1.4.so": "14c9d843ca2131198ea3a61587e37fc8b7b79a3e39e98bb0c59da209ccae5ba5",
+      "/root/run-m4-gl.py": "6842d9bb244b52e7b358b63af9548c1a08d6c6a3244da61efe1b157006df8471",
+      "/root/firmware-snapshot.py": "be417c075b15da22832f05254b3fab247582c72c9dadccff5f7c56b56a9cedb8",
+      "/root/g16-fault-dump.py": "c3988ddf0ad9e10e2b9736582c9ab7c59c90a62090d0e34a32db1ba46c917bf3",
+      "/lib/modules/7.1.9-dirtyroom-asahi1+/kernel/drivers/gpu/drm/asahi/asahi.ko": "e40b70f2d192a9cb1649dab9aa395862a64481e22e5acb1d3f92b7b32860e85e",
+      "/root/g16-submit-test/experiment_watchdog.py": "28600768bceb930a3528471fd7982db9247ec86c00f4a522456b70e38001e18d",
+      "/root/g16-submit-test/experiment_thermals.py": "c394432327266b50f9c4c16d8f5900ddfb99ce014846f5288af75ff139361a33",
+      "/root/cts-sample.py": "49961904fd4adc7ff4ffc40e0cda73d91583312d9fb20d543256cc88a7805b46",
+      "/root/cts-1.0.2.6/deqp-vk-scaled-float-all": "fc874d5c805cfa5c4055b3f4c3c4dc02b0e0bdea43454222432270b77159c904",
+      "/root/cts-1.0.2.6/seed20-ycbcr.txt": "94724cacee11c376b4f992b27d19e3a9210a914d97f12d2f54aaab245412dde7"
+    },
+    {
+      "path": "/root/cts-1.0.2.6/deqp-vk-scaled-float-all",
+      "sha256": "fc874d5c805cfa5c4055b3f4c3c4dc02b0e0bdea43454222432270b77159c904"
+    }
+  ],
+  "last_guard_verdict": "pass"
+}

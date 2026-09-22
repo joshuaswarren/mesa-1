@@ -35,8 +35,8 @@
  * every pixel fully -- with a per-pixel or resolved depth buffer every pixel
  * would be entirely A or entirely B and no intermediate value could exist.
  *
- * Needs HK_G17P_MSAA=1 and HK_G17P_UNVERIFIED_FEATURES=msaa_depth. The test
- * says so and exits non-zero rather than silently skipping.
+ * A device without multisample colour and depth attachments fails the test
+ * rather than silently skipping it.
  */
 #define VK_NO_PROTOTYPES
 #include <vulkan/vulkan.h>
@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include "g17p_vulkan_msaa_depth_frag.h"
 #include "g17p_vulkan_msaa_depth_vert.h"
@@ -59,21 +60,33 @@
 #error "G17P_MSAA_SAMPLES must be 2 or 4"
 #endif
 
-#if G17P_MSAA_SAMPLES == 2
+#ifdef G17P_KEYFRAMES_REPRO
+#define TEST_NAME "g17p-vulkan-keyframes-repro"
+#elif G17P_MSAA_SAMPLES == 2
 #define TEST_NAME "g17p-vulkan-msaa-depth2"
 #else
 #define TEST_NAME "g17p-vulkan-msaa-depth4"
 #endif
 
+#ifndef WIDTH
 #define WIDTH 64u
+#endif
+#ifndef HEIGHT
 #define HEIGHT 64u
+#endif
 #define PIXEL_BYTES 4u
 #define IMAGE_BYTES (WIDTH * HEIGHT * PIXEL_BYTES)
 #define GUARD_BYTES 64u
 #define READBACK_BYTES (GUARD_BYTES + IMAGE_BYTES + GUARD_BYTES)
 #define GUARD_PATTERN 0xa5
 #define COLOR_FORMAT VK_FORMAT_R8G8B8A8_UNORM
+#ifdef G17P_KEYFRAMES_REPRO
+#define DEPTH_FORMAT VK_FORMAT_D32_SFLOAT_S8_UINT
+#define DEPTH_ASPECT (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+#else
 #define DEPTH_FORMAT VK_FORMAT_D32_SFLOAT
+#define DEPTH_ASPECT VK_IMAGE_ASPECT_DEPTH_BIT
+#endif
 
 /* Must match g17p_vulkan_msaa_depth.frag. */
 static const uint8_t colour_b[4] = {128, 64, 32, 16};
@@ -127,12 +140,14 @@ VK_FN(vkCmdEndRenderPass);
 VK_FN(vkCmdBindPipeline);
 VK_FN(vkCmdBindVertexBuffers);
 VK_FN(vkCmdDraw);
+VK_FN(vkCmdPipelineBarrier);
 VK_FN(vkCmdCopyImageToBuffer);
 VK_FN(vkEndCommandBuffer);
 VK_FN(vkCreateFence);
 VK_FN(vkDestroyFence);
 VK_FN(vkQueueSubmit);
 VK_FN(vkWaitForFences);
+VK_FN(vkResetFences);
 
 static void
 die(const char *what)
@@ -317,8 +332,7 @@ main(void)
    const VkSampleCountFlags want = (VkSampleCountFlags)G17P_MSAA_SAMPLES;
    if ((properties.limits.framebufferColorSampleCounts & want) == 0) {
       fprintf(stderr,
-              TEST_NAME ": framebufferColorSampleCounts lacks %ux "
-                        "(set HK_G17P_MSAA=1)\n",
+              TEST_NAME ": framebufferColorSampleCounts lacks %ux\n",
               G17P_MSAA_SAMPLES);
       return EXIT_FAILURE;
    }
@@ -402,12 +416,14 @@ main(void)
    LOAD_DEVICE(device, vkCmdBindPipeline);
    LOAD_DEVICE(device, vkCmdBindVertexBuffers);
    LOAD_DEVICE(device, vkCmdDraw);
+   LOAD_DEVICE(device, vkCmdPipelineBarrier);
    LOAD_DEVICE(device, vkCmdCopyImageToBuffer);
    LOAD_DEVICE(device, vkEndCommandBuffer);
    LOAD_DEVICE(device, vkCreateFence);
    LOAD_DEVICE(device, vkDestroyFence);
    LOAD_DEVICE(device, vkQueueSubmit);
    LOAD_DEVICE(device, vkWaitForFences);
+   LOAD_DEVICE(device, vkResetFences);
 
    VkQueue queue;
    vkGetDeviceQueue(device, family, 0, &queue);
@@ -500,7 +516,7 @@ main(void)
    /* One depth attachment, shared by both passes: pass 2 reloads what pass 1
     * stored, which is the whole point. */
    struct image depth = create_image(
-      device, &memory_properties, DEPTH_FORMAT, VK_IMAGE_ASPECT_DEPTH_BIT,
+      device, &memory_properties, DEPTH_FORMAT, DEPTH_ASPECT,
       (VkSampleCountFlagBits)G17P_MSAA_SAMPLES,
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, "multisample depth");
 
@@ -553,8 +569,14 @@ main(void)
             .loadOp = pass == 0 ? VK_ATTACHMENT_LOAD_OP_CLEAR
                                 : VK_ATTACHMENT_LOAD_OP_LOAD,
             .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+#ifdef G17P_KEYFRAMES_REPRO
+            .stencilLoadOp = pass == 0 ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                       : VK_ATTACHMENT_LOAD_OP_LOAD,
+            .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
+#else
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE,
             .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+#endif
             .initialLayout = pass == 0
                                 ? VK_IMAGE_LAYOUT_UNDEFINED
                                 : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
@@ -719,6 +741,27 @@ main(void)
          .depthTestEnable = VK_TRUE,
          .depthWriteEnable = draws[d].depth_write,
          .depthCompareOp = VK_COMPARE_OP_LESS,
+#ifdef G17P_KEYFRAMES_REPRO
+         .stencilTestEnable = VK_TRUE,
+         .front = {
+            .failOp = VK_STENCIL_OP_KEEP,
+            .passOp = VK_STENCIL_OP_REPLACE,
+            .depthFailOp = VK_STENCIL_OP_KEEP,
+            .compareOp = VK_COMPARE_OP_ALWAYS,
+            .compareMask = 0xff,
+            .writeMask = 0xff,
+            .reference = 1,
+         },
+         .back = {
+            .failOp = VK_STENCIL_OP_KEEP,
+            .passOp = VK_STENCIL_OP_REPLACE,
+            .depthFailOp = VK_STENCIL_OP_KEEP,
+            .compareOp = VK_COMPARE_OP_ALWAYS,
+            .compareMask = 0xff,
+            .writeMask = 0xff,
+            .reference = 1,
+         },
+#endif
          .maxDepthBounds = 1.0f,
       };
       const VkGraphicsPipelineCreateInfo info = {
@@ -759,10 +802,21 @@ main(void)
          "vkAllocateCommandBuffers");
    const VkCommandBufferBeginInfo begin = {
       .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+#ifdef G17P_KEYFRAMES_REPRO
+      /* The reproducer replays the completed buffer for many independent
+       * frames.  A zero usage mask permits that; ONE_TIME_SUBMIT does not. */
+      .flags = 0,
+#else
       .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+#endif
    };
    check(vkBeginCommandBuffer(command_buffer, &begin),
          "vkBeginCommandBuffer");
+
+   const bool render_only = getenv("G17P_KEYFRAMES_RENDER_ONLY") != NULL;
+   const bool copy_only = getenv("G17P_KEYFRAMES_COPY_ONLY") != NULL;
+   if (render_only && copy_only)
+      die("render-only and copy-only modes are mutually exclusive");
 
    VkClearValue clears[3];
    memset(clears, 0, sizeof(clears));
@@ -792,7 +846,21 @@ main(void)
       }
    }
 
-   for (unsigned pass = 0; pass < 2; ++pass) {
+   unsigned draw_repeats = 1;
+#ifdef G17P_KEYFRAMES_REPRO
+   draw_repeats = 512;
+   {
+      const char *value = getenv("G17P_KEYFRAMES_DRAWS");
+      if (value)
+         draw_repeats = (unsigned)strtoul(value, NULL, 0);
+      if (!draw_repeats)
+         die("G17P_KEYFRAMES_DRAWS must be greater than zero");
+      fprintf(stderr, TEST_NAME ": recording %u repetitions per draw\n",
+              draw_repeats);
+   }
+#endif
+
+   for (unsigned pass = 0; !copy_only && pass < 2; ++pass) {
       if (pass == 1) {
          /* Pass 2 clears colour to A, so a sample whose depth test fails
           * keeps A and the invariant below stays exact. */
@@ -818,7 +886,8 @@ main(void)
          vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
                            pipeline[d]);
          vkCmdBindVertexBuffers(command_buffer, 0, 1, &vertex_buffer, &offset);
-         vkCmdDraw(command_buffer, 3, 1, 0, 0);
+         for (unsigned repeat = 0; repeat < draw_repeats; ++repeat)
+            vkCmdDraw(command_buffer, 3, 1, 0, 0);
       }
       vkCmdEndRenderPass(command_buffer);
    }
@@ -828,10 +897,32 @@ main(void)
       .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
       .imageExtent = {WIDTH, HEIGHT, 1},
    };
-   for (unsigned i = 0; i < 2; ++i) {
-      vkCmdCopyImageToBuffer(command_buffer, resolved[i].image,
-                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                             readback_buffer[i], 1, &copy);
+   if (!render_only) {
+      if (copy_only) {
+         VkImageMemoryBarrier barriers[2];
+         memset(barriers, 0, sizeof(barriers));
+         for (unsigned i = 0; i < 2; ++i) {
+            barriers[i].sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barriers[i].srcAccessMask = 0;
+            barriers[i].dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barriers[i].oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+            barriers[i].newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+            barriers[i].srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[i].dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barriers[i].image = resolved[i].image;
+            barriers[i].subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barriers[i].subresourceRange.levelCount = 1;
+            barriers[i].subresourceRange.layerCount = 1;
+         }
+         vkCmdPipelineBarrier(command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0,
+                              NULL, 2, barriers);
+      }
+      for (unsigned i = 0; i < 2; ++i) {
+         vkCmdCopyImageToBuffer(command_buffer, resolved[i].image,
+                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                readback_buffer[i], 1, &copy);
+      }
    }
    check(vkEndCommandBuffer(command_buffer), "vkEndCommandBuffer");
 
@@ -845,11 +936,58 @@ main(void)
       .commandBufferCount = 1,
       .pCommandBuffers = &command_buffer,
    };
-   check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
-   check(vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX),
-         "vkWaitForFences");
+   unsigned iterations = 1;
+   unsigned hold_after = 0;
+   unsigned hold_seconds = 0;
+#ifdef G17P_KEYFRAMES_REPRO
+   iterations = 4096;
+   {
+      const char *value = getenv("G17P_KEYFRAMES_ITERATIONS");
+      if (value)
+         iterations = (unsigned)strtoul(value, NULL, 0);
+      if (!iterations)
+         die("G17P_KEYFRAMES_ITERATIONS must be greater than zero");
+   }
+   {
+      const char *value = getenv("G17P_KEYFRAMES_HOLD_AFTER");
+      if (value)
+         hold_after = (unsigned)strtoul(value, NULL, 0);
+      value = getenv("G17P_KEYFRAMES_HOLD_SECONDS");
+      if (value)
+         hold_seconds = (unsigned)strtoul(value, NULL, 0);
+      if ((hold_after == 0) != (hold_seconds == 0))
+         die("G17P_KEYFRAMES_HOLD_AFTER and G17P_KEYFRAMES_HOLD_SECONDS "
+             "must both be nonzero");
+      if (hold_after > iterations)
+         die("G17P_KEYFRAMES_HOLD_AFTER exceeds iteration count");
+   }
+#endif
+   for (unsigned iteration = 0; iteration < iterations; ++iteration) {
+      if (iteration)
+         check(vkResetFences(device, 1, &fence), "vkResetFences");
+      check(vkQueueSubmit(queue, 1, &submit, fence), "vkQueueSubmit");
+      check(vkWaitForFences(device, 1, &fence, VK_TRUE,
+                            UINT64_C(10000000000)),
+            "vkWaitForFences");
+#ifdef G17P_KEYFRAMES_REPRO
+      if ((iteration & 63) == 63 || iteration + 1 == iterations)
+         fprintf(stderr, TEST_NAME ": completed %u/%u frames\n",
+                 iteration + 1, iterations);
+      if (iteration + 1 == hold_after) {
+         fprintf(stderr, TEST_NAME ": holding completed queue for %u seconds\n",
+                 hold_seconds);
+         fflush(stderr);
+         sleep(hold_seconds);
+      }
+#endif
+   }
 
    unsigned failures = 0;
+   if (render_only || copy_only) {
+      fprintf(stderr, TEST_NAME ": %s-only mode completed without validation\n",
+              render_only ? "render" : "copy");
+      goto validation_done;
+   }
    unsigned partial_pixels = 0;
    unsigned histogram[G17P_MSAA_SAMPLES + 1];
    memset(histogram, 0, sizeof(histogram));
@@ -938,6 +1076,7 @@ main(void)
    fprintf(stderr, ", %u partial pixels, %u failures\n", partial_pixels,
            failures);
 
+validation_done:
    vkDestroyFence(device, fence, NULL);
    vkDestroyCommandPool(device, command_pool, NULL);
    for (unsigned d = 0; d < 3; ++d)

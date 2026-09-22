@@ -406,6 +406,7 @@ main(void)
    run("atomic-return-store", atomic_return_store, 1);
 
    check_atomic_return_spectpr_metadata(MESA_SHADER_COMPUTE);
+   check_atomic_return_spectpr_metadata(MESA_SHADER_VERTEX);
    check_atomic_return_spectpr_metadata(MESA_SHADER_FRAGMENT);
 
    run_graphics_stage(MESA_SHADER_VERTEX, "vertex-atomic-return-store");

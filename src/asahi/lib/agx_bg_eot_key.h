@@ -16,6 +16,13 @@ extern "C" {
 void agx_g17p_configure_rt0_eot_key(enum pipe_format format,
                                     struct agx_shader_key *key);
 
+/* Return the IMGWBLK selector of one target in Apple's two-to-four-target
+ * G17P EOT builtin, or zero if the format has no such target. The builtin
+ * factory derives each target's selector from that target's format alone,
+ * so it equals the selector of the format's single-target program. Formats
+ * whose single-target program has a different shape are excluded. */
+uint8_t agx_g17p_mrt_eot_selector(enum pipe_format format);
+
 enum pipe_format agx_g17p_rt0_pbe_format(enum pipe_format format);
 
 #ifdef __cplusplus

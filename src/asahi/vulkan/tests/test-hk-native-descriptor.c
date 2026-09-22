@@ -5,6 +5,7 @@
 
 #include "hk_native_descriptor_pack.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/lib/agx_pbe_agx3_core.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -379,6 +380,9 @@ check_buffer_metadata(void)
    assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
       struct hk_g17p_buffer_texture_metadata, rgb32) ==
       AGX_G17P_BUFFER_TEXTURE_RGB32_OFFSET);
+   assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + offsetof(
+      struct hk_g17p_buffer_texture_metadata, sparse) ==
+      AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET);
    assert(AGX_G17P_BUFFER_TEXTURE_METADATA_OFFSET + sizeof(metadata) ==
           AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE);
    uint8_t descriptor[AGX_G17P_BUFFER_TEXTURE_DESCRIPTOR_SIZE] = {0};
@@ -392,12 +396,84 @@ check_buffer_metadata(void)
    memcpy(&address, descriptor + AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, sizeof(address));
    assert(count == 64 && tail == 3 && address == semantic.address);
    assert(memcmp(descriptor, &native, sizeof(native)) == 0);
+
+   /* A storage texel buffer is written through the Gen9 linear PBE: width
+    * 16384, a row pitch of one row of texels and no software tail. The store
+    * handle addresses that PBE, so its tail metadata sits PBE_OFFSET bytes
+    * before the texture-relative offset.
+    */
+   const struct AGX_PBE pbe_semantic = {
+      AGX_PBE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_2D,
+      .layout = AGX_LAYOUT_LINEAR,
+      .channels = AGX_CHANNELS_R32,
+      .type = AGX_TEXTURE_TYPE_UINT,
+      .width = 16384, .height = 1,
+      .stride = 16384 * 4 - 4,
+      .buffer = UINT64_C(0x4000012340),
+   };
+   struct hk_native_pbe_descriptor pbe;
+   assert(hk_pack_native_pbe(9, &pbe, &pbe_semantic));
+   struct agx_pbe_agx3_2d_fields pbe_fields;
+   assert(agx_pbe_agx3_2d_unpack(9, pbe.opaque, sizeof(pbe.opaque),
+                                 &pbe_fields));
+   assert(pbe_fields.layout == AGX_LAYOUT_LINEAR &&
+          pbe_fields.width == 16384 && pbe_fields.height == 1 &&
+          pbe_fields.stride_B == 16384 * 4 &&
+          pbe_fields.buffer == pbe_semantic.buffer);
+   assert(hk_storage_image_descriptor_layout(9).pbe ==
+          AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET);
+
+   struct AGX_PBE pbe_with_tail = pbe_semantic;
+   pbe_with_tail.buffer_offset_sw = 3;
+   assert(!hk_pack_native_pbe(9, &pbe, &pbe_with_tail));
+}
+
+static void
+check_layered_multisample_pbe(void)
+{
+   struct AGX_PBE semantic = {
+      AGX_PBE_header,
+      .dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY_MULTISAMPLED,
+      .layout = AGX_LAYOUT_GPU,
+      .channels = AGX_CHANNELS_R8G8B8A8,
+      .type = AGX_TEXTURE_TYPE_UNORM,
+      .swizzle_r = AGX_CHANNEL_R,
+      .swizzle_g = AGX_CHANNEL_G,
+      .swizzle_b = AGX_CHANNEL_B,
+      .swizzle_a = AGX_CHANNEL_A,
+      .width = 200,
+      .height = 180,
+      .buffer = UINT64_C(0x123456789ab0),
+      .layers = 12,
+      .samples = AGX_SAMPLE_COUNT_4,
+   };
+   struct hk_native_pbe_descriptor packed;
+   assert(hk_pack_native_pbe(9, &packed, &semantic));
+
+   uint64_t word0, word1;
+   memcpy(&word0, (const uint8_t *)packed.opaque, sizeof(word0));
+   memcpy(&word1, (const uint8_t *)packed.opaque + 8, sizeof(word1));
+   assert((word0 & 0xf) == 8);
+   assert(((word0 >> 56) & 3) == 1);
+   assert(((word1 >> 44) & 0xffff) == 11);
+
+   semantic.samples = AGX_SAMPLE_COUNT_2;
+   assert(hk_pack_native_pbe(9, &packed, &semantic));
+   memcpy(&word0, (const uint8_t *)packed.opaque, sizeof(word0));
+   assert(((word0 >> 56) & 3) == 0);
+
+   semantic.layers = 0;
+   assert(!hk_pack_native_pbe(9, &packed, &semantic));
+   semantic.layers = 12;
+   assert(!hk_pack_native_pbe(10, &packed, &semantic));
 }
 
 int
 main(void)
 {
    check_buffer_metadata();
+   check_layered_multisample_pbe();
    uint64_t atomic_sw = 0;
    assert(hk_pack_g17p_image_atomic_sw(0x180, 64, 32, 0x4000, 4,
                                        &atomic_sw));
@@ -1301,7 +1377,54 @@ main(void)
    assert(memcmp(&native_pbe, gen9_array_pbe,
                  sizeof(gen9_array_pbe)) == 0);
    assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
+   /* A one-layer array keeps dimension 3 with a zero layer field. */
    pbe.layers = 1;
+   uint8_t expected_layered[32];
+   memcpy(expected_layered, gen9_array_pbe, sizeof(expected_layered));
+   expected_layered[13] = 0x00;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_layered,
+                 sizeof(expected_layered)) == 0);
+   /* A 3D target is the same packet with dimension 5 and depth - 1. */
+   pbe.dimension = AGX_TEXTURE_DIMENSION_3D;
+   pbe.layers = 4;
+   expected_layered[0] = 0x25;
+   expected_layered[13] = 0x30;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_layered,
+                 sizeof(expected_layered)) == 0);
+   assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
+   /* A level of a mipmapped 3D or array texture keeps the whole chain's
+    * geometry and adds the native mip extension: word0 bit58, word1 bit63,
+    * level at word2[47:44] and levels-1 at word2[51:48]. */
+   pbe.level = 1;
+   pbe.levels = 3;
+   pbe.unk_mipmapped = true;
+   uint8_t expected_mip[32];
+   memcpy(expected_mip, expected_layered, sizeof(expected_mip));
+   expected_mip[7] |= 0x04;
+   expected_mip[15] |= 0x80;
+   expected_mip[21] = 0x10;
+   expected_mip[22] = 0x02;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_mip, sizeof(expected_mip)) == 0);
+   pbe.dimension = AGX_TEXTURE_DIMENSION_2D_ARRAY;
+   pbe.layers = 1;
+   expected_mip[0] = 0x23;
+   expected_mip[13] = 0x00;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(memcmp(&native_pbe, expected_mip, sizeof(expected_mip)) == 0);
+   CHECK_PBE_REJECT(pbe.level = 3);
+   pbe.dimension = AGX_TEXTURE_DIMENSION_3D;
+   pbe.layers = 4;
+   pbe.levels = 1;
+   pbe.unk_mipmapped = false;
+   CHECK_PBE_REJECT(pbe.level = 1);
+   pbe.level = 0;
+   CHECK_PBE_REJECT(pbe.layout = AGX_LAYOUT_LINEAR);
+   pbe.layout = AGX_LAYOUT_GPU;
+   pbe.layers = 1;
+   pbe.dimension = AGX_TEXTURE_DIMENSION_CUBE;
    CHECK_PBE_REJECT((void)0);
    pbe.dimension = AGX_TEXTURE_DIMENSION_2D;
    CHECK_PBE_REJECT(pbe.compressed = true);
@@ -1310,7 +1433,12 @@ main(void)
    pbe.level = 0;
    CHECK_PBE_REJECT(pbe.levels = 17);
    pbe.levels = 1;
-   CHECK_PBE_REJECT(pbe.srgb = true);
+   /* Gen9 converts stores to sRGB with word1 bit 61; Gen10's field is not
+    * recovered. */
+   pbe.srgb = true;
+   assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
+   assert(((const uint8_t *)&native_pbe)[15] & 0x20);
+   assert(!hk_pack_native_pbe(10, &native_pbe, &pbe));
    pbe.srgb = false;
    CHECK_PBE_REJECT(pbe.mode = AGX_IMAGE_MODE_SPARSE);
    pbe.mode = AGX_IMAGE_MODE_NORMAL;

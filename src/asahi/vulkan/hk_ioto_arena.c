@@ -10,35 +10,12 @@
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_ioto_program_core.h"
 
-#include "util/hash_table.h"
 #include "util/log.h"
-#include "util/ralloc.h"
 #include "util/u_dynarray.h"
 
 #include <inttypes.h>
 #include <string.h>
-
-/* A published program, keyed by the bytes themselves. The bytes live in the
- * arena chunk that backs the program, which outlives this table. */
-struct hk_ioto_published {
-   const uint8_t *bytes;
-   uint32_t length;
-};
-
-static uint32_t
-hk_ioto_published_hash(const void *key)
-{
-   const struct hk_ioto_published *published = key;
-   return _mesa_hash_data(published->bytes, published->length);
-}
-
-static bool
-hk_ioto_published_equal(const void *a, const void *b)
-{
-   const struct hk_ioto_published *x = a, *y = b;
-
-   return x->length == y->length && !memcmp(x->bytes, y->bytes, x->length);
-}
+#include <sys/resource.h>
 
 void
 hk_ioto_arena_finish(struct hk_cmd_buffer *cmd)
@@ -47,20 +24,16 @@ hk_ioto_arena_finish(struct hk_cmd_buffer *cmd)
 
    if (arena->programs && hk_g17p_verbose_enabled()) {
       fprintf(stderr,
-              "asahi: G17P Ioto programs: %u composed, %u distinct, "
+              "asahi: G17P Ioto programs: %u published, "
               "%" PRIu64 " program bytes in %" PRIu64 " bytes of USC window\n",
-              arena->programs, arena->distinct, arena->program_bytes,
-              arena->chunk_bytes);
+              arena->programs, arena->program_bytes, arena->chunk_bytes);
    }
-
-   if (arena->published)
-      _mesa_hash_table_destroy(arena->published, NULL);
 
    memset(arena, 0, sizeof(*arena));
 }
 
 /*
- * Start a new chunk. The old one keeps whatever it already published -- those
+ * Start a new chunk. The old one keeps whatever it already recorded -- those
  * addresses are still live in the recorded stream -- and stays owned by
  * large_bos.
  */
@@ -130,10 +103,10 @@ hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
           * is indistinguishable from a texture allocation failing, and the
           * count is the number this recording actually needed. */
          mesa_loge("G17P Ioto arena exhausted requesting %zu bytes for %s "
-                   "after %u programs (%u distinct, %" PRIu64 " program bytes "
+                   "after %u programs (%" PRIu64 " program bytes "
                    "in %" PRIu64 " bytes of USC window)",
                    size, label ? label : "(program)", arena->programs,
-                   arena->distinct, arena->program_bytes, arena->chunk_bytes);
+                   arena->program_bytes, arena->chunk_bytes);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY);
          return false;
       }
@@ -142,7 +115,6 @@ hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
    *reservation = (struct hk_ioto_reservation){
       .map = arena->map + span.offset,
       .va = arena->base + span.offset,
-      .rollback = arena->cursor,
    };
    arena->cursor = span.next_offset;
    return true;
@@ -153,7 +125,12 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
                             const struct hk_ioto_reservation *reservation,
                             size_t length)
 {
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_ioto_arena *arena = &cmd->ioto;
+   const bool fault_trace = dev->g17p_shader_perf.fault_trace;
+   struct rusage fault_start = {0}, fault_sync = {0};
+   if (fault_trace)
+      getrusage(RUSAGE_SELF, &fault_start);
 
    if (!reservation || !reservation->map || length == 0 ||
        length > UINT32_MAX) {
@@ -171,46 +148,21 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
     * composer's bound and compose something shorter. */
    arena->cursor = (uint32_t)offset + (uint32_t)length;
 
-   const struct hk_ioto_published key = {
-      .bytes = reservation->map,
-      .length = (uint32_t)length,
-   };
-
-   if (arena->published) {
-      struct hash_entry *entry =
-         _mesa_hash_table_search(arena->published, &key);
-      if (entry) {
-         /* Identical bytes: hand back the address that already holds them and
-          * release the space this reservation took. */
-         arena->cursor = reservation->rollback;
-         return (uint64_t)(uintptr_t)entry->data;
-      }
-   } else {
-      arena->published = _mesa_hash_table_create(
-         NULL, hk_ioto_published_hash, hk_ioto_published_equal);
-      if (!arena->published) {
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-         return 0;
-      }
-   }
-
    if (agx_bo_sync_for_device(arena->bo, offset, length)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
       return 0;
    }
+   if (fault_trace)
+      getrusage(RUSAGE_SELF, &fault_sync);
 
-   struct hk_ioto_published *stored =
-      ralloc(arena->published, struct hk_ioto_published);
-   if (!stored) {
-      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
-      return 0;
+   if (fault_trace) {
+      const long sync_faults = fault_sync.ru_minflt - fault_start.ru_minflt;
+      if (sync_faults)
+         fprintf(stderr,
+                 "HK_SHADER_PERF publish-fault sync=%ld programs=%u\n",
+                 sync_faults, arena->programs);
    }
 
-   *stored = key;
-   _mesa_hash_table_insert(arena->published, stored,
-                           (void *)(uintptr_t)reservation->va);
-
-   arena->distinct++;
    arena->program_bytes += length;
    return reservation->va;
 }

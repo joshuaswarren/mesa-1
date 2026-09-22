@@ -22,6 +22,15 @@ extern "C" {
 
 struct agx_tilebuffer_layout;
 
+/* Native uniform loads address 512 half-registers in complete dwords. */
+#define HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE 1024u
+
+/* Pack an argument block with zero padding through the last native load.
+ * Leaves output and *written unchanged on failure. */
+bool hk_agx3_g17p_precompiled_data_pack(const void *data, size_t size,
+                                      void *output, size_t capacity,
+                                      size_t *written);
+
 struct hk_agx3_ioto_program_desc {
    uint64_t program_va;
    const void *body;
@@ -68,8 +77,9 @@ struct hk_agx3_g17p_graphics_program_desc {
    uint32_t compiler_d;
    bool fragment;
    bool writes_sample_mask;
-   uint8_t colour_partitions;
+   uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
+   bool preloaded_root;
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
@@ -86,15 +96,19 @@ struct hk_agx3_g17p_graphics_program_desc {
  *   3. draw parameters                     uses_base_param
  *   4. draw ID                             uses_draw_id
  *   5. texture/sampler heap pointers       agx3_indexed_sampler_valid
- *   6. root descriptor                     agx3_uses_root || set_count
+ *   6. root descriptor                     shader/prolog root || set_count
  *   7. promoted constants                  rodata.size_16 != 0
  *
  * The combined-sampler range is not in that list: it is fragment-only, and
  * a fragment program's own worst case is five. hk_cmd_buffer.c static-asserts
  * this derivation against the collector.
  */
-#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES AGX3_G17P_GRAPHICS_MAX_RANGES
+/* Honeykrisp's collector emits at most seven ranges. Gallium uses the
+ * larger shared builder budget for arbitrary attribute bindings. */
+#define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 7u
 #define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
+#define HK_AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE \
+   AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE
 
 bool hk_agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
@@ -111,6 +125,44 @@ bool hk_agx3_g17g_graphics_program_bound(
 bool hk_agx3_g17g_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program);
+
+bool hk_agx3_g17p_graphics_root_prefix_generate(
+   enum agx_chip chip, uint64_t root_va,
+   struct agx3_g17p_graphics_root_prefix *prefix);
+
+bool hk_agx3_g17p_graphics_external_setup_suffix_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc, void *output,
+   size_t capacity, size_t *written);
+
+bool hk_agx3_g17p_graphics_external_launcher_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);
+
+bool hk_agx3_g17p_graphics_external_launcher_template_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc, uint64_t setup_va,
+   struct agx3_g17p_graphics_external_launcher_template *launcher);
+
+bool hk_agx3_g17p_graphics_external_launcher_template_relocate(
+   enum agx_chip chip,
+   const struct agx3_g17p_graphics_external_launcher_template *launcher,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written);
+
+bool hk_agx3_g17p_graphics_program_template_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program_template *program);
+
+bool hk_agx3_g17p_graphics_program_template_relocate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *template_desc,
+   const struct hk_agx3_g17p_graphics_program_desc *target_desc,
+   const struct agx3_g17p_graphics_program_template *program,
+   void *output, size_t capacity, uint16_t *written);
 
 #define HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX 28u
 
@@ -157,6 +209,13 @@ bool hk_agx3_g17p_indexed_storage_pointers(
    const struct hk_agx3_g17p_indexed_storage_heap *heap,
    uint64_t pointers[4]);
 
+static inline bool
+hk_agx3_g17p_graphics_needs_root(bool shader_uses_root,
+                                 bool prolog_uses_root, uint8_t set_count)
+{
+   return shader_uses_root || prolog_uses_root || set_count != 0;
+}
+
 /* Load one root descriptor followed by every descriptor-set pointer named by
  * the shader's pipeline layout. */
 bool hk_agx3_g17p_root_range(uint16_t start_halfs, uint8_t set_count,
@@ -187,6 +246,12 @@ bool hk_agx3_g17p_fragment_blend_constants_range(
 bool hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program);
+
+/* Direct command-buffer-private writer. Output may be modified on failure and
+ * must remain unpublished until success; `written` is unchanged on failure. */
+bool hk_agx3_g17p_basic_graphics_program_write_unpublished(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   void *output, size_t capacity, size_t *written);
 
 enum hk_agx3_g17p_rt0_bg_op {
    HK_AGX3_G17P_RT0_BG_CLEAR,
@@ -309,6 +374,12 @@ bool hk_agx3_g17p_direct_add3_dispatch_append(
 #define HK_AGX3_G17P_COMPUTE_MAX_LOAD_CHUNKS  128u
 #define HK_AGX3_G17P_MAX_ROOT_SETS            8u
 
+/* Resolve a packed precompiled-kernel argument block to the dword-granular
+ * upload and uniform-range sizes required by G17P's Ioto loader. */
+bool hk_agx3_g17p_precompiled_data_layout(size_t data_size_B,
+                                          uint32_t *upload_size_B,
+                                          uint16_t *uniform_size_halfs);
+
 struct hk_agx3_g17p_compute_program_desc {
    uint64_t program_va;
    uint64_t shader_va;
@@ -343,6 +414,12 @@ struct hk_agx3_g17p_compute_program {
 bool hk_agx3_g17p_compute_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_compute_program_desc *desc,
    struct hk_agx3_g17p_compute_program *program);
+
+/* Arena deduplication may retain an earlier identical program and recycle the
+ * reservation used by generation. Launch the retained allocation, not the
+ * reservation. This changes no program bytes or launch-template fields. */
+bool hk_agx3_g17p_compute_program_rebind_published(
+   struct agx3_compute_program *launch, uint64_t published_va);
 
 /* Reuse a generated one-range program by replacing its sole absolute range
  * address and rebinding the command-buffer-local program VA. The template is
