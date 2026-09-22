@@ -2359,6 +2359,17 @@ intrinsic("load_texture_handle_agx", [1], 1, [],
           flags=[CAN_ELIMINATE, CAN_REORDER],
           bit_sizes=[32])
 
+# Load the first 32-bit word of the native texture descriptor bound to a
+# texture deref (source 0), before descriptor lowering resolves the deref.
+intrinsic("load_texture_descriptor_word_agx", [1], 1, [],
+          flags=[CAN_ELIMINATE, CAN_REORDER],
+          bit_sizes=[32])
+
+# Same for the read (texture) half of a storage image deref (source 0).
+intrinsic("load_image_descriptor_word_agx", [1], 1, [],
+          flags=[CAN_ELIMINATE, CAN_REORDER],
+          bit_sizes=[32])
+
 # Load descriptor set address
 intrinsic("load_descriptor_set_agx", [], 1, [DESC_SET],
           flags=[CAN_ELIMINATE, CAN_REORDER],
@@ -2413,11 +2424,12 @@ intrinsic("load_uvs_index_agx", dest_comp = 1, bit_sizes=[16],
 #   (((((y * tile_width) + x) * nr_samples) + sample) * sample_stride) + offset
 #
 # src[] = { sample mask }
-# base = offset
-load("local_pixel_agx", [1], [BASE, FORMAT], [CAN_REORDER, CAN_ELIMINATE])
+# base = byte offset, target = logical colour attachment index. The latter
+# remains unchanged when inactive attachments compact the physical layout.
+load("local_pixel_agx", [1], [BASE, FORMAT, TARGET], [CAN_REORDER, CAN_ELIMINATE])
 # src[] = { value, sample mask, coordinates }
-# base = offset
-store("local_pixel_agx", [1, -1], [BASE, WRITE_MASK, FORMAT, EXPLICIT_COORD], [CAN_REORDER])
+# base = byte offset, target = logical colour attachment index
+store("local_pixel_agx", [1, -1], [BASE, WRITE_MASK, FORMAT, EXPLICIT_COORD, TARGET], [CAN_REORDER])
 
 # Combined depth/stencil emit, applying to a mask of samples. base indicates
 # which to write (1 = depth, 2 = stencil, 3 = both).
@@ -2494,6 +2506,11 @@ intrinsic("load_polygon_stipple_agx", src_comp=[1], dest_comp=1, bit_sizes=[32],
 
 # The fixed-function sample mask specified in the API (e.g. glSampleMask)
 system_value("api_sample_mask_agx", 1, bit_sizes=[16])
+
+# Nonzero when alpha-to-coverage is enabled for the draw. Read by fragment
+# shaders that write the sample mask, which apply alpha-to-coverage themselves
+# ahead of their own coverage update instead of in the epilog.
+system_value("alpha_to_coverage_agx", 1, bit_sizes=[16])
 
 # Bit mask of samples currently being shaded. For API-level sample shading, this
 # will usually equal (1 << sample_id). Multiple bits can be set when sample

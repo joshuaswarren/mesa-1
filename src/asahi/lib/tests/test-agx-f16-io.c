@@ -60,6 +60,49 @@ build_f16_output(void)
    return b.shader;
 }
 
+/* A separately compiled VS has no interpolation contract yet. In particular,
+ * adding the default flat Layer must not move an eventual smooth colour from
+ * slot 4 to slot 5 while the fragment linkage still reads slot 4. */
+static bool
+check_unlinked_interpolation_contract(void)
+{
+   nir_shader *nir = build_f16_output();
+   nir->info.io_lowered = true;
+   nir_opt_varyings_bulk(&nir, 1, true, UINT32_MAX, UINT32_MAX, NULL, NULL);
+   bool valid = !nir->info.known_interpolation_qualifiers;
+
+   agx_nir_lower_default_layer(nir);
+   struct agx_unlinked_uvs_layout layout = {0};
+   agx_nir_lower_uvs(nir, &layout, true);
+
+   unsigned dynamic_indices = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_load_uvs_index_agx)
+               dynamic_indices++;
+         }
+      }
+   }
+   valid &= dynamic_indices == 2;
+
+   struct agx_varyings_vs smooth, flat;
+   agx_assign_uvs(&smooth, &layout, VARYING_BIT_LAYER, 0);
+   agx_assign_uvs(&flat, &layout,
+                  VARYING_BIT_LAYER | BITFIELD64_BIT(VARYING_SLOT_VAR0), 0);
+   valid &= smooth.slots[VARYING_SLOT_VAR0] == 4 &&
+            smooth.slots[VARYING_SLOT_LAYER] == 5 &&
+            flat.slots[VARYING_SLOT_LAYER] == 4 &&
+            flat.slots[VARYING_SLOT_VAR0] == 5;
+
+   if (!valid)
+      fprintf(stderr, "unlinked VS lost its draw-time interpolation contract\n");
+   ralloc_free(nir);
+   return valid;
+}
+
 static bool
 has_type_correct_varying_store(nir_shader *nir)
 {
@@ -134,7 +177,7 @@ build_layer_viewport_output(bool write_layer, uint32_t layer,
 }
 
 static bool
-lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
+lowered_layer_viewport_value(bool write_layer,
                              uint32_t layer, bool write_viewport,
                              uint32_t viewport, bool viewport_varying,
                              uint32_t expected, unsigned expected_size,
@@ -143,7 +186,7 @@ lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
    nir_shader *nir = build_layer_viewport_output(
       write_layer, layer, write_viewport, viewport, viewport_varying);
    struct agx_unlinked_uvs_layout layout = {0};
-   bool valid = agx_nir_lower_uvs(nir, &layout, chip);
+   bool valid = agx_nir_lower_uvs(nir, &layout, false);
 
    bool progress;
    do {
@@ -199,12 +242,92 @@ lowered_layer_viewport_value(enum agx_chip chip, bool write_layer,
             actual == expected;
    if (!valid) {
       fprintf(stderr,
-              "layer/viewport packing mismatch: chip=%u layer=%#x/%u "
+              "layer/viewport packing mismatch: layer=%#x/%u "
               "viewport=%#x/%u/%u actual=%#x expected=%#x stores=%u/%u "
               "size=%u user=%u written=%#" PRIx64 "\n",
-              chip, layer, write_layer, viewport, write_viewport,
+              layer, write_layer, viewport, write_viewport,
               viewport_varying, actual, expected, stores, matching_stores,
               layout.size, layout.user_size, layout.written);
+   }
+
+   ralloc_free(nir);
+   return valid;
+}
+
+static bool
+lowered_g17p_layer_varying(bool explicit_layer)
+{
+   nir_shader *nir = build_layer_viewport_output(explicit_layer, 7, false, 0, false);
+   bool added = false, repeated = false;
+   NIR_PASS(added, nir, agx_nir_lower_default_layer);
+   NIR_PASS(repeated, nir, agx_nir_lower_default_layer);
+   bool valid = added == !explicit_layer && !repeated;
+   valid &= (nir->info.outputs_written & VARYING_BIT_LAYER) != 0;
+   const unsigned expected_layer = explicit_layer ? 7 : 0;
+   struct agx_unlinked_uvs_layout layout = {0};
+   valid &= agx_nir_lower_uvs(nir, &layout, true);
+
+   bool progress;
+   do {
+      progress = false;
+      NIR_PASS(progress, nir, nir_opt_constant_folding);
+      NIR_PASS(progress, nir, nir_opt_copy_prop);
+   } while (progress);
+
+   unsigned layer_stores = 0, packed_stores = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_uvs_agx ||
+                !nir_src_is_const(intr->src[1]) ||
+                !nir_src_is_const(intr->src[0]))
+               continue;
+
+            const unsigned index = nir_src_as_uint(intr->src[1]);
+            const unsigned value = nir_src_as_uint(intr->src[0]);
+            if (index == layout.group_offs[UVS_VARYINGS] && value == expected_layer)
+               layer_stores++;
+            if (index == layout.group_offs[UVS_LAYER_VIEWPORT] && value == expected_layer)
+               packed_stores++;
+         }
+      }
+   }
+
+   struct agx_varyings_vs varyings;
+   agx_assign_uvs(&varyings, &layout, VARYING_BIT_LAYER, 0);
+
+   struct agx_varyings_fs fs = {
+      .nr_cf = 1,
+      .nr_bindings = 1,
+      .bindings[0] = {
+         .slot = VARYING_SLOT_LAYER,
+         .count = 1,
+      },
+   };
+   uint32_t table[2] = {0};
+   bool generate_primitive_id = false;
+   agx_link_varyings_vs_fs(table, &varyings, layout.user_size, &fs,
+                           0, 0, &generate_primitive_id);
+
+   valid &= layout.size == 6 && layout.user_size == 1 &&
+            layout.written == VARYING_BIT_LAYER &&
+            layout.components[VARYING_SLOT_LAYER] == 1 &&
+            varyings.slots[VARYING_SLOT_LAYER] == 4 && layer_stores == 1 &&
+            packed_stores == 1 && table[0] == UINT32_C(0x00000102) &&
+            table[1] == UINT32_C(0x00000100) &&
+            !generate_primitive_id;
+
+   if (!valid) {
+      fprintf(stderr,
+              "G17P layer was not duplicated into fixed and flat UVS words: "
+              "size=%u user=%u written=%#" PRIx64 " slot=%u stores=%u/%u\n",
+              layout.size, layout.user_size, layout.written,
+              varyings.slots[VARYING_SLOT_LAYER], layer_stores,
+              packed_stores);
    }
 
    ralloc_free(nir);
@@ -489,6 +612,9 @@ static const struct vs_input_case vs_input_cases[] = {
 int
 main(void)
 {
+   if (!check_unlinked_interpolation_contract())
+      return 1;
+
    for (unsigned i = 0; i < ARRAY_SIZE(vs_input_cases); ++i) {
       if (!lowered_vs_input(&vs_input_cases[i]))
          return 1;
@@ -501,30 +627,33 @@ main(void)
       return 1;
    }
 
+   /* The generation-neutral path keeps layer in the packed fixed-function
+    * word. G17P additionally duplicates a fragment-consumed layer into one
+    * ordinary flat UVS word, matching the six-UVSW Apple vertex witness. */
+   if (!lowered_g17p_layer_varying(false) || !lowered_g17p_layer_varying(true))
+      return 1;
+
    /* Fresh applegpu_g17p witnesses are exact on both sides of no_varying:
     * viewport-only with an unread FS output has five UVSWs and a five-word
     * layout, while a fragment read adds exactly one ordinary UVSW/word. Layer
-    * and viewport still share one packed scalar in both cases. */
-   if (!lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, false, 0,
-                                     false, UINT32_C(0x00010000), 5, 1) ||
-       !lowered_layer_viewport_value(AGX_CHIP_G17P, false, 0, true, 2,
-                                     false, UINT32_C(0x00000002), 5, 1) ||
-       !lowered_layer_viewport_value(AGX_CHIP_G17P, false, 0, true, 2,
-                                     true, UINT32_C(0x00000002), 6, 2) ||
-       !lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, true, 2,
-                                     false, UINT32_C(0x00010002), 5, 1) ||
-       !lowered_layer_viewport_value(AGX_CHIP_G17P, true, 1, true, 2,
-                                     true, UINT32_C(0x00010002), 6, 2) ||
-       !lowered_layer_viewport_value(AGX_CHIP_G14G, true, 1, true, 2,
-                                     false, UINT32_C(0x00020001), 5, 1) ||
-       !lowered_layer_viewport_value(AGX_CHIP_G14G, true, 1, true, 2,
-                                     true, UINT32_C(0x00020001), 6, 2))
+    * and viewport share one packed scalar in both cases: the layer is its low
+    * half and the viewport its high half, as on AGX2. */
+   if (!lowered_layer_viewport_value(true, 1, false, 0, false,
+                                     UINT32_C(0x00000001), 5, 1) ||
+       !lowered_layer_viewport_value(false, 0, true, 2, false,
+                                     UINT32_C(0x00020000), 5, 1) ||
+       !lowered_layer_viewport_value(false, 0, true, 2, true,
+                                     UINT32_C(0x00020000), 6, 2) ||
+       !lowered_layer_viewport_value(true, 1, true, 2, false,
+                                     UINT32_C(0x00020001), 5, 1) ||
+       !lowered_layer_viewport_value(true, 1, true, 2, true,
+                                     UINT32_C(0x00020001), 6, 2))
       return 1;
 
    nir_shader *nir = build_f16_output();
    struct agx_unlinked_uvs_layout layout = {0};
 
-   if (!agx_nir_lower_uvs(nir, &layout, AGX_CHIP_G17P) || layout.size != 5 ||
+   if (!agx_nir_lower_uvs(nir, &layout, false) || layout.size != 5 ||
        layout.user_size != 1 || !has_type_correct_varying_store(nir)) {
       fprintf(stderr, "f16 output was not widened to f32 before ST_VARY\n");
       ralloc_free(nir);

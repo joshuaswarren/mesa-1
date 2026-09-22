@@ -143,6 +143,26 @@ libagx_increment_cs_invocations(global uint *grid, global uint32_t *statistic,
    *statistic += local_size_threads * grid[0] * grid[1] * grid[2];
 }
 
+/*
+ * G17P launches an indirect dispatch from a six-word grid -- three GLOBAL
+ * thread counts then the three local sizes -- not from the API's three
+ * workgroup counts. Expand one into the other, exactly as the tessellator's
+ * setup kernel does for its own indirect launches, so the indirect path uses
+ * the same grounded launch record as the direct one.
+ */
+KERNEL(1)
+libagx_setup_indirect_dispatch(global uint *api_grid, global uint *grid,
+                               uint32_t local_x, uint32_t local_y,
+                               uint32_t local_z)
+{
+   grid[0] = api_grid[0] * local_x;
+   grid[1] = api_grid[1] * local_y;
+   grid[2] = api_grid[2] * local_z;
+   grid[3] = local_x;
+   grid[4] = local_y;
+   grid[5] = local_z;
+}
+
 KERNEL(32)
 libagx_write_u32s(constant struct libagx_imm_write *p)
 {

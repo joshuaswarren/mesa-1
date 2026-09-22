@@ -4,6 +4,7 @@
  */
 
 #include "../agx3_compute_program_core.h"
+#include "asahi/genxml/agx3_cmdstream.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -290,6 +291,71 @@ test_g17p_native_compute_join(void)
       &indirect_program, &bad_indirect, &bad_indirect_sink));
    CHECK(bad_indirect_sink.length == 0 &&
          memcmp(indirect_bytes, indirect_before, sizeof(indirect_bytes)) == 0);
+
+   /* The standalone launch is byte-for-byte the tail of the coupled pair --
+    * the same six words plus the same barrier -- so GL, whose grid producer
+    * is already its own dispatch, gets the identical record without a helper
+    * prefix it has no use for. */
+   const uint8_t *expected_standalone =
+      expected_indirect + sizeof(expected_indirect) -
+      AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE;
+   uint8_t standalone_bytes[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE + 2];
+   memset(standalone_bytes, 0x4d, sizeof(standalone_bytes));
+   struct agx3_compute_dispatch_sink standalone_sink = {
+      .data = standalone_bytes,
+      .capacity = sizeof(standalone_bytes),
+      .length = 1,
+   };
+   CHECK(agx3_g17p_native_indirect_compute_launch_append(
+      &indirect_program, indirect.geometry_va, 0, &standalone_sink));
+   CHECK(standalone_sink.length == 1 + AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE);
+   CHECK(standalone_bytes[0] == 0x4d &&
+         standalone_bytes[standalone_sink.length] == 0x4d);
+   CHECK(memcmp(standalone_bytes + 1, expected_standalone,
+                AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE) == 0);
+
+   /* A caller-selected barrier reaches only the trailing barrier word. */
+   uint8_t strong_standalone[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE];
+   struct agx3_compute_dispatch_sink strong_standalone_sink = {
+      .data = strong_standalone,
+      .capacity = sizeof(strong_standalone),
+   };
+   CHECK(agx3_g17p_native_indirect_compute_launch_append(
+      &indirect_program, indirect.geometry_va, 5, &strong_standalone_sink));
+   CHECK(strong_standalone_sink.length ==
+         AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE);
+   CHECK(memcmp(strong_standalone, expected_standalone,
+                AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE) == 0);
+   CHECK(memcmp(strong_standalone + AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE,
+                expected_standalone + AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE, 4) != 0);
+
+   /* Every refusal leaves the sink untouched: a misaligned or out-of-range
+    * geometry address, a zero one, and a sink one byte short. */
+   static const uint64_t bad_geometry[] = {
+      0, UINT64_C(0x100001014c2), UINT64_C(1) << 48,
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(bad_geometry); ++i) {
+      uint8_t rejected[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE];
+      memset(rejected, 0x4d, sizeof(rejected));
+      struct agx3_compute_dispatch_sink rejected_sink = {
+         .data = rejected,
+         .capacity = sizeof(rejected),
+      };
+      CHECK(!agx3_g17p_native_indirect_compute_launch_append(
+         &indirect_program, bad_geometry[i], 0, &rejected_sink));
+      CHECK(rejected_sink.length == 0);
+      for (unsigned b = 0; b < sizeof(rejected); ++b)
+         CHECK(rejected[b] == 0x4d);
+   }
+
+   uint8_t tight[AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE - 1];
+   struct agx3_compute_dispatch_sink tight_sink = {
+      .data = tight,
+      .capacity = sizeof(tight),
+   };
+   CHECK(!agx3_g17p_native_indirect_compute_launch_append(
+      &indirect_program, indirect.geometry_va, 0, &tight_sink));
+   CHECK(tight_sink.length == 0);
 
    uint8_t before[sizeof(dispatch)];
    memcpy(before, dispatch, sizeof(dispatch));
@@ -851,6 +917,130 @@ load_le32(const uint8_t *bytes)
 }
 
 static bool
+test_g17p_prepared_direct_template_matches_encoder(void)
+{
+   struct agx3_cdm_direct_template_sources sources;
+   CHECK(agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                   &sources));
+   const struct agx3_g17p_native_compute_program_desc desc = {
+      .program_va = UINT64_C(0x11ffff8000),
+      .shader_va = UINT64_C(0x11ffff0000),
+      .launch_sources = sources,
+   };
+   struct agx3_compute_program program;
+   CHECK(agx3_g17p_native_compute_program_bind(&desc, &program));
+
+   const struct agx3_compute_direct_grid template_grid = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {1, 1, 1},
+      .local_size = {32, 1, 1},
+      .dimensions = 3,
+   };
+   uint8_t template[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
+   struct agx3_compute_dispatch_sink template_sink = {
+      .data = template,
+      .capacity = sizeof(template),
+   };
+   CHECK(agx3_g17p_native_compute_dispatch_append_with_barrier(
+      &program, &template_grid, 0, &template_sink));
+
+   const uint32_t grids[][3] = {{1, 1, 1}, {17, 3, 1}, {1024, 7, 2}};
+   const uint8_t barriers[] = {0, 5};
+   for (unsigned g = 0; g < ARRAY_SIZE(grids); ++g) {
+      for (unsigned b = 0; b < ARRAY_SIZE(barriers); ++b) {
+         const struct agx3_compute_direct_grid grid = {
+            .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+            .size = {grids[g][0], grids[g][1], grids[g][2]},
+            .local_size = {32, 1, 1},
+            .dimensions = grids[g][2] != 1 ? 3 : grids[g][1] != 1 ? 2 : 1,
+         };
+         uint8_t expected[AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE];
+         struct agx3_compute_dispatch_sink expected_sink = {
+            .data = expected,
+            .capacity = sizeof(expected),
+         };
+         CHECK(agx3_g17p_native_compute_dispatch_append_with_barrier(
+            &program, &grid, barriers[b], &expected_sink));
+
+         uint8_t patched[sizeof(template)];
+         memcpy(patched, template, sizeof(patched));
+         agx3_cmdstream_store_le32(patched + 16, grids[g][0]);
+         agx3_cmdstream_store_le32(patched + 20, grids[g][1]);
+         agx3_cmdstream_store_le32(patched + 24, grids[g][2]);
+         agx3_cmdstream_store_le32(
+            patched + AGX3_CDM_DIRECT_LAUNCH_SIZE,
+            agx3_cdm_barrier_word(barriers[b]));
+         CHECK(memcmp(patched, expected, sizeof(patched)) == 0);
+      }
+   }
+   return true;
+}
+
+/* The command-buffer prepared indirect path copies this pair verbatim at the
+ * matching draw.  Pin that the pair encoder is exactly the ordinary helper
+ * dispatch followed by the ordinary indirect-main launch, so preparation
+ * cannot silently diverge from the authoritative live encoders. */
+static bool
+test_g17p_prepared_indirect_template_matches_encoder(void)
+{
+   struct agx3_cdm_direct_template_sources main_sources;
+   struct agx3_cdm_direct_template_sources helper_sources;
+   CHECK(agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                   &main_sources));
+   CHECK(agx3_cdm_direct_template_sources_compute(true, false, false,
+                                                   &helper_sources));
+
+   const struct agx3_g17p_native_compute_program_desc main_desc = {
+      .program_va = UINT64_C(0x11ffff8000),
+      .shader_va = UINT64_C(0x11ffff0000),
+      .launch_sources = main_sources,
+   };
+   const struct agx3_g17p_native_compute_program_desc helper_desc = {
+      .program_va = UINT64_C(0x11fffe8000),
+      .shader_va = UINT64_C(0x11fffe0000),
+      .launch_sources = helper_sources,
+   };
+   struct agx3_compute_program main_program;
+   struct agx3_compute_program helper_program;
+   CHECK(agx3_g17p_native_compute_program_bind(&main_desc, &main_program));
+   CHECK(agx3_g17p_native_compute_program_bind(&helper_desc,
+                                                &helper_program));
+
+   const uint64_t geometry_va = UINT64_C(0x1200004000);
+   const struct agx3_g17p_native_indirect_dispatch indirect = {
+      .helper_program = &helper_program,
+      .geometry_va = geometry_va,
+   };
+   uint8_t prepared[AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE];
+   struct agx3_compute_dispatch_sink prepared_sink = {
+      .data = prepared,
+      .capacity = sizeof(prepared),
+   };
+   CHECK(agx3_g17p_native_indirect_compute_dispatch_append(
+      &main_program, &indirect, &prepared_sink));
+   CHECK(prepared_sink.length == sizeof(prepared));
+
+   uint8_t expected[sizeof(prepared)];
+   struct agx3_compute_dispatch_sink expected_sink = {
+      .data = expected,
+      .capacity = sizeof(expected),
+   };
+   const struct agx3_compute_direct_grid helper_grid = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {1, 1, 1},
+      .local_size = {1, 1, 1},
+      .dimensions = 1,
+   };
+   CHECK(agx3_g17p_native_compute_dispatch_append(
+      &helper_program, &helper_grid, &expected_sink));
+   CHECK(agx3_g17p_native_indirect_compute_launch_append(
+      &main_program, geometry_va, 0, &expected_sink));
+   CHECK(expected_sink.length == sizeof(expected));
+   CHECK(memcmp(prepared, expected, sizeof(prepared)) == 0);
+   return true;
+}
+
+static bool
 test_g17p_usc_window_va_is_encoded_without_constants(void)
 {
    /* A real USC-window address: dev->shader_base is 0x1100000000 on T8140
@@ -970,7 +1160,10 @@ int
 main(void)
 {
    if (!test_prepare_and_launch() || !test_a18_pro_one_dimensional_launch() ||
-       !test_g17p_native_compute_join() || !test_g17g_native_compute_join() ||
+       !test_g17p_native_compute_join() ||
+       !test_g17p_prepared_direct_template_matches_encoder() ||
+       !test_g17p_prepared_indirect_template_matches_encoder() ||
+       !test_g17g_native_compute_join() ||
        !test_g17p_usc_window_va_is_encoded_without_constants() ||
        !test_g17p_direct_add3_program_join() ||
        !test_g17s_minimal_program_join() || !test_fail_closed())

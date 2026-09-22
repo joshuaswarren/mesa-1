@@ -110,6 +110,9 @@ struct agx3_iadd_desc {
    bool saturate;
    bool src_a_sign_extend_32; /* f28 on a 32-bit slot A (saturating only) */
    bool sign_extend_32;       /* f43 on a 32-bit slot B (saturating only) */
+   /* AGX3b register slot A only: operand-cache hints f25 (A) and f40 (B). */
+   bool src_a_cache;
+   bool src_cache;
 };
 
 bool agx3_iadd_encode(enum agx_isa_encoding encoding,

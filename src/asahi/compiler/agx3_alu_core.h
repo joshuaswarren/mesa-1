@@ -43,11 +43,23 @@ bool agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                        uint16_t wait_mask,
                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Whether agx3_alu_compose()'s form for `op` marks source `i` (in
+ * f_src0/f_src1/f_src2 order) dead. */
+bool agx3_alu_form_ends_source(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                               unsigned i);
+
 /* G17P 32-bit AND/OR/XOR with actual post-RA operand hints. */
 bool agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                       uint16_t dest, const uint16_t src[2],
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* `reg & reg` into reg: a no-op carrying a scoreboard wait mask, which keeps
+ * the register live whatever it holds. */
+bool agx3_alu_band_identity_wait(enum agx_isa_encoding enc, uint16_t reg,
+                                 uint16_t wait_mask,
+                                 uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                 uint8_t *len);
 
 bool agx3_alu_bit_reg16(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           uint16_t dest, const uint16_t src[2],
@@ -80,9 +92,53 @@ bool agx3_alu_bit_imm(enum agx_isa_encoding enc, enum agx3_alu_op op,
                       uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* G17P 16-bit ~a, Apple's unary `inv` at width 1. The destination cache is
+ * f11, the source is f16 with its cache/discard hints in f25/f27, and
+ * f30..f35 wait on producer slots 1..6. Witnessed with metal-nt -arch
+ * applegpu_g17p on `ushort m = ~s` fragments and kernels:
+ *
+ *   03002e00010800000000   inv $h0, ^h0
+ *   03002e00012800000000   inv $h0, ^h0  waiting on slot 1
+ *   03802600052800000000   inv $h1, $h0  waiting on slot 1
+ *   03822600050800000000   inv $h1, $h2
+ *   13802600050800000000   inv $h3, $h0
+ *   13022e00010800800000   inv $h2, ^h2  read twice, waiting on slot 6
+ *   13020e00010800800000   inv h2, ^h2   stored once, waiting on slot 6
+ *   13020600050800800000   inv h3, h2    waiting on slot 6
+ */
+bool agx3_alu_bit_not_reg16(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t src, enum agx3_alu_hint hint,
+                            bool dest_cache, uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P 32-bit a & ~b.  Apple exposes this truth-table shape as bit_andc;
  * unlike AND it is not commutative, so the source order is preserved. */
 bool agx3_alu_bit_andc(enum agx_isa_encoding enc, uint16_t dest,
+                      const uint16_t src[2],
+                      const enum agx3_alu_hint hints[2], bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len);
+
+/* G17P 32-bit ~(a | b), Apple's bit_nor. */
+bool agx3_alu_bit_nor(enum agx_isa_encoding enc, uint16_t dest,
+                      const uint16_t src[2],
+                      const enum agx3_alu_hint hints[2], bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len);
+
+/* G17P 32-bit ~(a & b), ~(a ^ b) and a | ~b: Apple's bit_nand, bit_xnor and
+ * bit_orc. bit_orc keeps its source order. */
+bool agx3_alu_bit_nand(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[2],
+                       const enum agx3_alu_hint hints[2], bool dest_cache,
+                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                       uint8_t *len);
+bool agx3_alu_bit_xnor(enum agx_isa_encoding enc, uint16_t dest,
+                       const uint16_t src[2],
+                       const enum agx3_alu_hint hints[2], bool dest_cache,
+                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                       uint8_t *len);
+bool agx3_alu_bit_orc(enum agx_isa_encoding enc, uint16_t dest,
                       const uint16_t src[2],
                       const enum agx3_alu_hint hints[2], bool dest_cache,
                       uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
@@ -94,6 +150,25 @@ bool agx3_alu_shift_add16(enum agx_isa_encoding enc, uint16_t dest,
                             bool dest_cache, uint16_t wait_mask,
                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native scalar-half saturating register addition, signed or unsigned. */
+bool agx3_alu_add_sat16(enum agx_isa_encoding enc, uint16_t dest,
+                        const uint16_t src[2],
+                        const enum agx3_alu_hint hints[2], bool is_signed,
+                        bool dest_cache, uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native scalar-half register subtraction, src[0] - src[1]. */
+bool agx3_alu_sub16(enum agx_isa_encoding enc, uint16_t dest,
+                    const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                    bool dest_cache, uint16_t wait_mask,
+                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native scalar-half integer negation, 0 - src. */
+bool agx3_alu_neg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
+                    enum agx3_alu_hint hint, bool dest_cache,
+                    uint16_t wait_mask,
+                    uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P logical shift-left with register value and register shift count. */
 bool agx3_alu_sll_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
                       bool dest_cache, const uint16_t src[2],
@@ -101,12 +176,25 @@ bool agx3_alu_sll_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native scalar-half `1 << uint_register` form. */
+bool agx3_alu_sll_one_reg32(enum agx_isa_encoding enc, uint16_t dest,
+                            uint16_t shift, enum agx3_alu_hint shift_hint,
+                            bool dest_cache, uint16_t wait_mask,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* G17P logical shift-right with register value and signed boundary. */
 bool agx3_alu_srl_reg(enum agx_isa_encoding enc, uint16_t dest, bool dest_16,
                       bool dest_cache, const uint16_t src[2],
                       const bool src_16[2],
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native signed 16-bit arithmetic shift-right by a 32-bit register count. */
+bool agx3_alu_asr_reg16(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t source, uint16_t shift,
+                        const enum agx3_alu_hint hints[2], bool dest_cache,
+                        uint16_t wait_mask,
+                        uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
 /* Native 16-bit logical shift-right by an immediate bit count. */
 bool agx3_alu_srl_imm16(enum agx_isa_encoding enc, uint16_t dest,
@@ -143,6 +231,16 @@ bool agx3_alu_float_to_int32(enum agx_isa_encoding enc, uint16_t dest,
                              enum agx3_alu_hint hint, bool dest_cache,
                              uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/* Native int8 or int16 to scalar-half or float32 conversion. A byte source
+ * reads only the low eight bits of its half; unsigned8 converts only to
+ * float32. */
+bool agx3_alu_narrow_int_to_float(enum agx_isa_encoding enc, uint16_t dest,
+                                  bool dest_16, uint16_t src, bool src_8,
+                                  bool is_signed, enum agx3_alu_hint hint,
+                                  bool dest_cache, uint16_t wait_mask,
+                                  uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                  uint8_t *len);
 
 /* Native signed/unsigned32 to scalar-half conversion. */
 bool agx3_alu_i32_to_f16(enum agx_isa_encoding enc, uint16_t dest,
@@ -251,9 +349,9 @@ bool agx3_alu_fcmp_select(enum agx_isa_encoding enc,
 
 /* The same select with an absolute value on either comparison source. ABS is
  * not a bit on the form above: it moves to a longer endpoint (ten bytes ->
- * fourteen) with the destination field block shifted by +14. f47 and f64 are
- * the two sources' bits and are separable. See agx3_alu_core.c for the
- * witnessed byte ladder. */
+ * fourteen) whose integer-select destination block is the same f3/f11/f12.
+ * f47 and f64 are the two sources' bits and are separable. See
+ * agx3_alu_core.c for the witnessed byte ladder. */
 bool agx3_alu_fcmp_select_imm_width_abs(
    enum agx_isa_encoding enc, uint16_t dest, const uint16_t src[2],
    const bool src_16[2], const enum agx3_alu_hint hints[2],
@@ -339,7 +437,7 @@ bool agx3_alu_fma_minifloat(enum agx_isa_encoding enc, uint16_t dest,
  * register addend. The addend modifier remains fused and rounds only once. */
 bool agx3_alu_fma_minifloat_mod(enum agx_isa_encoding enc, uint16_t dest,
                                 uint16_t src, uint8_t immediate,
-                                uint16_t addend, bool negate_addend,
+                                uint16_t addend, bool negate_addend, bool saturate,
                                 enum agx3_alu_hint src_hint,
                                 enum agx3_alu_hint addend_hint,
                                 bool dest_cache, uint16_t wait_mask,
@@ -923,6 +1021,24 @@ bool agx3_alu_f32ceil(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                       enum agx3_alu_hint hint, bool dest_cache,
                       uint16_t wait_mask, bool src_neg, bool src_abs,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
+/*
+ * Round-to-nearest-even is the same form with f43 absent, the first line of
+ * the witness table above.
+ *
+ * The select core also encodes a 32-bit roundeven, through
+ * agx3_pack_f32_rint_reg(), but that encoding point deposits its source in a
+ * six-bit field and so refuses any source above r63. Register allocation puts
+ * one there in any shader with real pressure, and the refusal is fatal: the
+ * whole shader is rejected and pipeline creation fails. This form carries the
+ * family's full eight-bit register fields, its source modifiers and its wait
+ * slots, so it covers the register file.
+ */
+bool agx3_alu_f32roundeven(enum agx_isa_encoding enc, uint16_t dest,
+                           uint16_t src, enum agx3_alu_hint hint,
+                           bool dest_cache, uint16_t wait_mask, bool src_neg,
+                           bool src_abs, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                           uint8_t *len);
 
 bool agx3_alu_fcmp_select_f32_f16(enum agx_isa_encoding enc, uint16_t dest,
                                   const uint16_t src[4],

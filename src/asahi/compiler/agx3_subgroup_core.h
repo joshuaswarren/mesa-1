@@ -52,6 +52,21 @@ struct agx3_subgroup_shuffle_desc {
    /* The G17P immediate quad form uses f25 while the source remains live and
     * f27 on its final read.  This is ignored by the older SIMD witnesses. */
    bool src_live;
+
+   /* Register-lane quad broadcast must retain a lane read again later. */
+   bool lane_live;
+
+   /* 16-bit data (f10 = f24 = 1), dest and src in half units. Grounded for
+    * the SIMD broadcast with an immediate lane and for every SIMD shuffle with
+    * a register lane. */
+   bool half;
+
+   /* Lifetime hints of the G17P SIMD register-lane forms, at either width;
+    * the lane is read as 16 bits from the half in `lane`. */
+   bool src_cache;
+   bool src_discard;
+   bool lane_cache;
+   bool lane_discard;
 };
 
 enum agx3_subgroup_ballot_type {
@@ -67,6 +82,14 @@ struct agx3_subgroup_ballot_desc {
    /* The G17P SIMD integer form can compare against a 16-bit immediate. */
    bool compare_immediate;
    uint16_t compare_value;
+   /* The immediate equal-to-zero form also takes a 16-bit source register
+    * (f24 = 1), as Apple's simd_broadcast_first() compares the 16-bit active
+    * thread index against zero. */
+   bool src_half;
+   /* A 16-bit destination (f10 = 1): the quad ballot of a 16- or 32-bit
+    * register against zero, the only such form witnessed. It carries its
+    * source wait in the f46 bank. */
+   bool dest_half;
    bool dest_cache;
    bool src_live;
    uint8_t condition;
@@ -108,6 +131,9 @@ struct agx3_subgroup_reduce_desc {
     * corpus expects.
     */
    bool src_live;
+
+   /* 16-bit destination and source, in half units (AGX3b only). */
+   bool half;
 };
 
 bool agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,

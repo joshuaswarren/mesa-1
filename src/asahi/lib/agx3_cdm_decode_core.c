@@ -24,6 +24,65 @@ agx3_cdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
 
    switch (type) {
    case AGX_CDM_BLOCK_TYPE_LAUNCH: {
+      /* Type zero has three witnessed lengths, and word 0's mode field is
+       * what tells them apart: mode 2 reads its whole grid from six u32 in
+       * memory and is 24 bytes, where the direct form carries its own three
+       * global and three local size words and is 40.  Without keying on the
+       * mode a parser cannot consume either one without risking loss of
+       * synchronization on the other. */
+      switch ((word >> 27) & 3) {
+      case 2: {
+         /* Unlike the direct unpacker, which takes the available span, the
+          * compact one takes the record's exact size. */
+         struct agx3_cdm_indirect_launch_info indirect;
+         if (available < AGX3_CDM_INDIRECT_LAUNCH_SIZE ||
+             !agx3_cdm_indirect_launch_unpack(chip, bytes,
+                                              AGX3_CDM_INDIRECT_LAUNCH_SIZE,
+                                              &indirect))
+            return false;
+         record->kind = AGX3_CDM_RECORD_INDIRECT_LAUNCH;
+         record->length = AGX3_CDM_INDIRECT_LAUNCH_SIZE;
+         record->chip = chip;
+         record->data.indirect_launch.word0_payload = indirect.word0_payload;
+         record->data.indirect_launch.word1_payload = indirect.word1_payload;
+         record->data.indirect_launch.pipeline = indirect.pipeline;
+         record->data.indirect_launch.opaque_word3 = indirect.opaque_word3;
+         record->data.indirect_launch.word4_payload =
+            indirect.indirect_word4_payload;
+         record->data.indirect_launch.parameters =
+            indirect.indirect_parameters;
+         return true;
+      }
+
+      case 1: {
+         struct agx3_cdm_indirect_launch_36_info indirect;
+         if (available < AGX3_CDM_INDIRECT_LAUNCH_36_SIZE ||
+             !agx3_cdm_indirect_launch_36_unpack(
+                chip, bytes, AGX3_CDM_INDIRECT_LAUNCH_36_SIZE, &indirect))
+            return false;
+         record->kind = AGX3_CDM_RECORD_INDIRECT_LAUNCH_36;
+         record->length = AGX3_CDM_INDIRECT_LAUNCH_36_SIZE;
+         record->chip = chip;
+         record->data.indirect_launch.word0_payload = indirect.word0_payload;
+         record->data.indirect_launch.word1_payload = indirect.word1_payload;
+         record->data.indirect_launch.pipeline = indirect.pipeline;
+         record->data.indirect_launch.opaque_word3 = indirect.opaque_word3;
+         record->data.indirect_launch.word4_payload =
+            indirect.indirect_word4_payload;
+         record->data.indirect_launch.parameters =
+            indirect.indirect_parameters;
+         memcpy(record->data.indirect_launch.trailing_words,
+                indirect.trailing_words, sizeof(indirect.trailing_words));
+         return true;
+      }
+
+      case 3:
+         return false;
+
+      default:
+         break;
+      }
+
       struct agx3_cdm_launch_info launch;
       if (!agx3_cdm_launch_unpack(chip, bytes, available, &launch))
          return false;
@@ -62,6 +121,13 @@ agx3_cdm_decode_one(enum agx_chip chip, const void *bytes, size_t available,
       return true;
 
    case AGX_CDM_BLOCK_TYPE_BARRIER:
+      if (agx3_cdm_sstt_flush_invalidate_validate(chip, bytes, available)) {
+         record->kind = AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE;
+         record->length = AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE;
+         record->chip = chip;
+         return true;
+      }
+
       if (agx3_cdm_secondary_barrier_validate(chip, bytes, available)) {
          record->kind = AGX3_CDM_RECORD_SECONDARY_BARRIER;
          record->length = AGX3_CDM_SECONDARY_BARRIER_SIZE;

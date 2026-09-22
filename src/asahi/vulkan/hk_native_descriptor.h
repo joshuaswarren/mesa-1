@@ -24,6 +24,9 @@
 #define HK_G17P_STORAGE_ALIGNMENT       32
 #define HK_G17P_STORAGE_STRIDE          96
 
+/* G17P imgwci indexes whole PBE records in the heap it addresses. */
+#define HK_G17P_PBE_RECORD_SIZE         HK_PBE_DESCRIPTOR_AGX3_SIZE
+
 static inline bool
 hk_pack_g17p_image_atomic_sw(uint64_t level_offset_B, unsigned tile_width_px,
                              unsigned tile_height_px, uint64_t layer_stride_B,
@@ -61,7 +64,8 @@ struct hk_g17p_buffer_texture_metadata {
    uint32_t offset_el;
    uint64_t address;
    uint32_t rgb32;
-   uint32_t reserved;
+   /* See AGX_G17P_BUFFER_TEXTURE_SPARSE_OFFSET in agx_abi.h. */
+   uint32_t sparse;
 };
 
 struct hk_sampled_image_descriptor_layout {

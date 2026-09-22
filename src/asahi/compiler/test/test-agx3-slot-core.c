@@ -17,10 +17,49 @@ static struct agx3_slot_instr
 alu(uint16_t d, uint16_t a, uint16_t b){ struct agx3_slot_instr I={0}; I.nr_dsts=1; I.dst[0]=d; I.nr_srcs=2; I.src[0]=a; I.src[1]=b; return I; }
 static struct agx3_slot_instr
 st(uint16_t a){ struct agx3_slot_instr I={0}; I.nr_srcs=1; I.src[0]=a; return I; }
+/* An asynchronous store: no destination, one payload register it reads. */
+static struct agx3_slot_instr
+stdev(uint16_t a){ struct agx3_slot_instr I={0}; I.is_async=true; I.latches_srcs=true; I.nr_srcs=1; I.src[0]=a; return I; }
+static struct agx3_slot_instr
+mov(uint16_t d){ struct agx3_slot_instr I={0}; I.nr_dsts=1; I.dst[0]=d; return I; }
 
 int main(void)
 {
    struct agx3_slot_result r[64];
+
+   /* Release ordering includes a load used only after the fence. Drain only
+    * issued slots, and start a fresh generation for subsequent loads. */
+   {
+      struct agx3_slot_instr fence = {.drain = true};
+      struct agx3_slot_instr p[] = {
+         fence, ld(0), ld(2), st(2), fence, st(0), ld(4), fence, fence,
+      };
+      CHECK(agx3_slot_assign(p, 9, 6, r));
+      CHECK(r[0].wait_mask == 0);
+      CHECK(r[3].wait_mask == 2);
+      CHECK(r[4].wait_mask == 1);
+      CHECK(r[5].wait_mask == 0);
+      CHECK(r[7].wait_mask == 4);
+      CHECK(r[8].wait_mask == 0);
+   }
+
+   /* A resultless store is still ordered, and its old payload generations
+    * must not create waits after the fence or after transient slot reuse. */
+   {
+      struct agx3_slot_instr fence = {.drain = true};
+      struct agx3_slot_instr texture = ld(8);
+      texture.preferred_slot = 3;
+      texture.transient_slots = 2;
+      struct agx3_slot_instr p[] = {
+         stdev(0), fence, mov(0), stdev(4), texture, fence, fence,
+      };
+      CHECK(agx3_slot_assign(p, 7, 6, r));
+      CHECK(r[1].wait_mask == 1);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[4].wait_mask == 2);
+      CHECK(r[5].wait_mask == 4);
+      CHECK(r[6].wait_mask == 0);
+   }
 
    /* Two loads then an add consuming both: each load gets a distinct slot, the
     * add waits both. */
@@ -31,6 +70,35 @@ int main(void)
       CHECK(r[1].slot==2 && r[1].wait_mask==0);
       CHECK(r[2].slot==0 && r[2].wait_mask==0x3u);  /* wait slots 1 and 2 */
       CHECK(r[3].slot==0 && r[3].wait_mask==0);      /* add result is sync */
+   }
+
+   /* Write-after-read. An asynchronous store latches its payload when it
+    * retires, so redefining that register first must wait the store's slot.
+    * A store has no destination, so nothing else tracks its payload: this is
+    * what corrupted the transform feedback copy program, which reuses one
+    * payload quad for every captured varying. */
+   {
+      struct agx3_slot_instr p[] = { stdev(8), mov(8), stdev(8) };
+      CHECK(agx3_slot_assign(p, 3, 6, r));
+      CHECK(r[0].slot==1 && r[0].wait_mask==0);
+      CHECK(r[1].slot==0 && r[1].wait_mask==0x1u); /* wait the store */
+      CHECK(r[2].slot==2);
+   }
+
+   /* Having waited the slot once, a second redefinition needs no further
+    * wait until a new generation is outstanding. */
+   {
+      struct agx3_slot_instr p[] = { stdev(8), mov(8), mov(8) };
+      CHECK(agx3_slot_assign(p, 3, 6, r));
+      CHECK(r[1].wait_mask==0x1u);
+      CHECK(r[2].wait_mask==0);
+   }
+
+   /* A register no outstanding operation reads is free to redefine. */
+   {
+      struct agx3_slot_instr p[] = { stdev(8), mov(10) };
+      CHECK(agx3_slot_assign(p, 2, 6, r));
+      CHECK(r[1].wait_mask==0);
    }
 
    /* Waited once = satisfied globally: two consumers of the same load; only the
@@ -94,15 +162,55 @@ int main(void)
       CHECK(r[2].wait_mask==0);
    }
 
-   /* Round-robin over nslots: the 7th async op on a 6-slot part reuses slot 1;
-    * a consumer of the 1st load (still in slot 1) forces its wait first. */
+   /* Round-robin over nslots: the 7th async op on a 6-slot part wraps to
+    * slot 1. Every slot still holds an outstanding live result, so it waits
+    * the first load before reissuing slot 1; otherwise the first load's
+    * consumer would wait the 7th load instead. */
    {
       struct agx3_slot_instr p[8];
       for (int i=0;i<7;i++) p[i]=ld((uint16_t)(i*2));
       p[7]=st(0);  /* consume the first load, slot 1 */
       CHECK(agx3_slot_assign(p, 8, 6, r));
       CHECK(r[0].slot==1 && r[1].slot==2 && r[5].slot==6 && r[6].slot==1);
-      CHECK(r[7].wait_mask==0x1u);
+      CHECK(r[6].wait_mask==0x1u);
+      CHECK(r[7].wait_mask==0);
+   }
+
+   /* The wrap skips a slot whose outstanding generation is still live for a
+    * later consumer, taking the next already-waited one instead. */
+   {
+      struct agx3_slot_instr p[9];
+      for (int i=0;i<6;i++) p[i]=ld((uint16_t)(i*2));
+      p[6]=st(2);  /* retire slot 2 */
+      p[7]=ld(20);
+      p[8]=st(0);  /* consume the first load, slot 1 */
+      CHECK(agx3_slot_assign(p, 9, 6, r));
+      CHECK(r[6].wait_mask==(1u << 1));
+      CHECK(r[7].slot==2 && r[7].wait_mask==0);
+      CHECK(r[8].wait_mask==0x1u);
+   }
+
+   /* Coefficient loads cannot wait, and Apple's own reissue slots whose
+    * coefficients are still live: the seventh of seven wraps to slot 1 with
+    * no wait. They still skip a slot another load's live result holds. */
+   {
+      struct agx3_slot_instr p[9];
+      for (int i=0;i<7;i++) {
+         p[i]=ld((uint16_t)(i*2));
+         p[i].reissues_live_slot=true;
+      }
+      p[7]=st(0);
+      CHECK(agx3_slot_assign(p, 8, 6, r));
+      CHECK(r[6].slot==1 && r[6].wait_mask==0);
+
+      p[0].reissues_live_slot=false;  /* slot 1 now holds a device load */
+      CHECK(agx3_slot_assign(p, 8, 6, r));
+      CHECK(r[6].slot==2 && r[6].wait_mask==0);
+
+      for (int i=0;i<6;i++)
+         p[i].reissues_live_slot=false;  /* no coefficient slot to reissue */
+      CHECK(agx3_slot_assign(p, 8, 6, r));
+      CHECK(r[6].slot==1 && r[6].wait_mask==0);
    }
 
    /* agx3c has 8 slots. */
@@ -263,6 +371,85 @@ int main(void)
       CHECK(r[4].wait_mask == 4);
       p[3].nr_srcs = AGX3_SLOT_MAX_REGS + 1;
       CHECK(!agx3_slot_assign(p, 5, 6, r));
+   }
+
+   /* Integrating store-payload tracking with generation-safe allocation:
+    * a resultless store still owns its slot until its reader retires. */
+   {
+      struct agx3_slot_instr store = st(0);
+      store.is_async = true;
+      store.latches_srcs = true;
+      struct agx3_slot_instr p[] = {store, ld(8), alu(0, 2, 4), st(8)};
+      CHECK(agx3_slot_assign(p, 4, 1, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+      CHECK(r[1].slot == 1 && r[1].wait_mask == 1);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[3].wait_mask == 1);
+   }
+
+   /* A texture's internal staging generation must also retire store readers,
+    * even though no prior async instruction wrote a result on that slot. */
+   {
+      struct agx3_slot_instr store = st(0), texture = ld(8);
+      store.is_async = true;
+      store.latches_srcs = true;
+      store.preferred_slot = 2;
+      texture.preferred_slot = 1;
+      texture.transient_slots = 1u << 1;
+      struct agx3_slot_instr p[] = {store, texture, alu(0, 2, 4), st(8)};
+      CHECK(agx3_slot_assign(p, 4, 6, r));
+      CHECK(r[1].slot == 1 && r[1].wait_mask == 2);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[3].wait_mask == 1);
+   }
+
+   /* Dependency ordering is unchanged when a token is renamed across the
+    * GPR, static TPS, and special-token boundaries. In the second region the
+    * highest token appears only as a payload source, never a destination. */
+   {
+      const uint16_t tokens[] = {
+         0, AGX3_SLOT_GPR_TOKENS - 1, AGX3_SLOT_TPS_TOKEN_BASE,
+         AGX3_SLOT_TEX_COORD_TOKEN - 1, AGX3_SLOT_TEX_COORD_TOKEN,
+         AGX3_SLOT_DYNAMIC_TPS_TOKEN,
+      };
+      for (unsigned t = 0; t < sizeof(tokens) / sizeof(tokens[0]); ++t) {
+         const uint16_t token = tokens[t];
+         struct agx3_slot_instr producer = ld(token), store = stdev(token);
+         producer.preferred_slot = 1;
+         store.preferred_slot = 2;
+         struct agx3_slot_instr p[] = {producer, store, mov(token)};
+         CHECK(agx3_slot_assign(p, 3, 6, r));
+         CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+         CHECK(r[1].slot == 2 && r[1].wait_mask == 1);
+         CHECK(r[2].slot == 0 && r[2].wait_mask == 2);
+
+         struct agx3_slot_instr texture = ld(7);
+         texture.preferred_slot = 1;
+         texture.transient_slots = 1u << 1;
+         struct agx3_slot_instr q[] = {store, texture, mov(token), st(7)};
+         CHECK(agx3_slot_assign(q, 4, 6, r));
+         CHECK(r[0].slot == 2 && r[0].wait_mask == 0);
+         CHECK(r[1].slot == 1 && r[1].wait_mask == 2);
+         CHECK(r[2].slot == 0 && r[2].wait_mask == 0);
+         CHECK(r[3].slot == 0 && r[3].wait_mask == 1);
+      }
+   }
+
+   /* Rejecting a malformed later instruction preserves the completed output
+    * prefix, even when the bounds prepass encounters it before assignment. */
+   {
+      struct agx3_slot_instr p[] = {ld(0), st(AGX3_SLOT_NUM_TOKENS)};
+      memset(r, 0, sizeof(r));
+      r[1].slot = 8;
+      r[1].wait_mask = 0xff;
+      CHECK(!agx3_slot_assign(p, 2, 6, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+      CHECK(r[1].slot == 8 && r[1].wait_mask == 0xff);
+      p[1].nr_srcs = AGX3_SLOT_MAX_REGS + 1;
+      CHECK(!agx3_slot_assign(p, 2, 6, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
+      CHECK(r[1].slot == 8 && r[1].wait_mask == 0xff);
+      CHECK(agx3_slot_assign(p, 0, 6, r));
    }
 
    /* Malformed inputs. */

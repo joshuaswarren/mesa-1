@@ -133,6 +133,34 @@ enum agx_submission_model {
    AGX_SUBMISSION_MODEL_SKSM,
    AGX_SUBMISSION_MODEL_UNKNOWN,
 };
+
+/* G17P keeps every colour target in the imageblock past 64 bytes a sample:
+ * Apple's applegpu_g17p fragments store five RGBA32Float targets at tile
+ * offsets 0..64 and eight at 0..112, and an eight-target mixed-format set at
+ * 65 bytes, with no memory store, and its background builtins clear them at
+ * the same offsets. */
+#define AGX_G17P_MAX_BYTES_PER_SAMPLE (128)
+
+/* On a G17P tile that no colour-writing geometry covered, the background
+ * program -- clear or reload alike -- delivers only the low eight bytes of
+ * each sample when the tilebuffer is multisampled. Measured on an A18 Pro:
+ * with a sixteen-byte sample at 2x or 4x, such a texel reads back with its
+ * upper eight bytes zero, while the same background program keeps the whole
+ * sample on a tile a draw did cover -- including the pixels of that tile the
+ * draw's scissor rejected. Eight-byte and narrower samples are unaffected at
+ * every sample count, layer count and image size measured, and so is a
+ * single-sample sixteen-byte target.
+ *
+ * Above this bound a load-op clear is emitted as a full-area draw instead,
+ * which covers every tile and keeps the target in the tilebuffer. A reloaded
+ * attachment has no such draw and spills. A multiview render has a second,
+ * separate defect that the full-area draw does not cover --
+ * dEQP-VK.multiview.multisample.no_queries.max_multi_view_view_count, 32
+ * views of RGBA32F at 4x, whose clear value is all zeroes so the background
+ * clear cannot be what it observes -- and spills too.
+ */
+#define AGX_G17P_MAX_UNCOVERED_TILE_BYTES_PER_SAMPLE (8)
+
 #ifndef __OPENCL_VERSION__
 
 #include <stdbool.h>

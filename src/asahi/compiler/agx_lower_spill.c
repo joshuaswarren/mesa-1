@@ -83,27 +83,29 @@ agx_lower_spill(agx_context *ctx)
 
 
 /*
- * Split a multi-component thread-private-storage access into one 32-bit
- * component per instruction, for AGX3.
+ * Split a multi-component thread-private-storage access into one component
+ * per instruction, for AGX3.
  *
- * G17P's grounded TPS form moves a single 32-bit component:
+ * G17P's grounded static TPS forms move a single 16-bit or 32-bit component:
  * agx3_translate_static_spill() admits `mask == 1` only, and the AGX3 slot
  * allocator describes the TPS tokens the same way. Any wider access failed
- * the whole shader closed -- so a vec4 spill, or a vec4 element of a
+ * the whole shader closed -- so a vec4 spill, or a vector element of a
  * scratch-lowered array, was unencodable regardless of what the shader
  * computed. That silently capped shader complexity across the driver.
  *
  * Splitting needs no new encoding: `mask` is always contiguous from component
  * zero (both producers build it with BITFIELD_MASK), the components live in
  * consecutive registers, and their stack slots are consecutive, so N scalar
- * accesses at `offset + 4*c` are exactly equivalent. Both producers are
+ * accesses at `offset + size*c` are exactly equivalent. Both producers are
  * covered by running after register allocation: agx_lower_spill()'s real
  * spills and agx_emit_{load,store}_scratch()'s NIR scratch access.
  *
- * Restricted to 32-bit components with an immediate offset -- the domain the
- * scalar TPS form is witnessed at. Anything else is left exactly as it was
- * and still refuses, rather than being split into something unwitnessed.
- * AGX2 never reaches here, so none of its bytes change.
+ * Restricted to 16-bit and 32-bit components with an immediate offset -- the
+ * domain the scalar TPS forms are witnessed at. A spilled 64-bit scalar is
+ * represented as an I32 mask of two consecutive words, so reinterpret those
+ * two halves as independent W32 copies as well. Anything else is left exactly
+ * as it was and still refuses, rather than being split into something
+ * unwitnessed. AGX2 never reaches here, so none of its bytes change.
  */
 void
 agx3_split_vector_stack_access(agx_context *ctx)
@@ -114,7 +116,7 @@ agx3_split_vector_stack_access(agx_context *ctx)
          continue;
 
       const unsigned nr = util_bitcount(I->mask);
-      if (nr <= 1 || I->format != AGX_FORMAT_I32)
+      if (nr <= 1)
          continue;
 
       /* Only a contiguous mask starting at component 0 is a plain vector. */
@@ -123,18 +125,27 @@ agx3_split_vector_stack_access(agx_context *ctx)
 
       const agx_index data = is_store ? I->src[0] : I->dest[0];
       const agx_index offset = I->src[is_store ? 1 : 0];
-      if (offset.type != AGX_INDEX_IMMEDIATE || data.size != AGX_SIZE_32)
+      const enum agx_size size = I->format == AGX_FORMAT_I32   ? AGX_SIZE_32
+                                 : I->format == AGX_FORMAT_I16 ? AGX_SIZE_16
+                                                               : AGX_SIZE_64;
+      const bool split_64_as_32 =
+         size == AGX_SIZE_32 && data.size == AGX_SIZE_64 &&
+         nr == 2 * agx_channels(data);
+      if (size == AGX_SIZE_64 || offset.type != AGX_INDEX_IMMEDIATE ||
+          (data.size != size && !split_64_as_32))
          continue;
 
+      /* IR register values are 16-bit halves: a 32-bit component is two of
+       * them and occupies four stack bytes, a 16-bit one is one and two. */
+      const unsigned halves = agx_size_align_16(size);
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
       for (unsigned c = 0; c < nr; ++c) {
          agx_index comp = data;
-         /* IR register values are 16-bit halves, so a 32-bit component is
-          * two of them; each stack slot is four bytes. */
-         comp.value += c * 2;
+         comp.value += c * halves;
          comp.channels_m1 = 0;
+         comp.size = size;
 
-         const agx_index off = agx_immediate(offset.value + (c * 4));
+         const agx_index off = agx_immediate(offset.value + (c * halves * 2));
          if (is_store)
             agx_stack_store(&b, comp, off, I->format, 1);
          else

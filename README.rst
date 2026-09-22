@@ -1,6 +1,10 @@
 `Mesa <https://mesa3d.org>`_ - The 3D Graphics Library
 ======================================================
 
+Aurora Silicon's ``j700`` branch targets MacBook Neo (T8140 / Mac17,5).
+See the `J700 graphics checkpoint <docs/j700.rst>`_ for the qualified
+desktop stack, validation limits and earlier bring-up record.
+
 
 Source
 ------

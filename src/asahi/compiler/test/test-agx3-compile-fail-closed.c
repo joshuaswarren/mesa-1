@@ -96,6 +96,45 @@ check_shared_store_compute(enum agx_isa_encoding encoding)
 }
 
 static bool
+check_g17p_shared_byte_vectors(void)
+{
+   for (unsigned channels = 2; channels <= 4; ++channels) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "packed shared bytes");
+      b.shader->info.workgroup_size[0] = 1;
+      b.shader->info.workgroup_size[1] = 1;
+      b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.shared_size = 16;
+      nir_def *values[4];
+      for (unsigned c = 0; c < channels; ++c)
+         values[c] = nir_imm_intN_t(&b, 0x35 + c * 0x31, 8);
+      nir_store_shared(&b, nir_vec(&b, values, channels), nir_imm_int(&b, 1),
+                       .align_mul = 1, .write_mask = BITFIELD_MASK(channels),
+                       .access = ACCESS_VOLATILE);
+      nir_def *loaded = nir_load_shared(
+         &b, channels, 8, nir_imm_int(&b, 1), .align_mul = 1,
+         .access = ACCESS_VOLATILE);
+      nir_store_global(&b, nir_u2u32(&b, loaded),
+                       nir_imm_int64(&b, UINT64_C(0x2000000000)),
+                       .align_mul = 4);
+      agx_preprocess_nir_g17p(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true,
+      };
+      struct agx_shader_part part = {0};
+      const bool ok = agx_compile_shader_nir(b.shader, &key, &part);
+      free(part.binary);
+      ralloc_free(b.shader);
+      if (!ok) {
+         fprintf(stderr, "shared byte vector rejected: %u channels\n", channels);
+         return false;
+      }
+   }
+   return true;
+}
+
+static bool
 check_unlowered_printf_address_rejected(enum agx_isa_encoding encoding)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -201,6 +240,50 @@ check_shared_rmw_compute(enum agx_isa_encoding encoding)
 
    if (!valid)
       fprintf(stderr, "AGX3 shared-RMW metadata/binary mismatch\n");
+
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
+check_g17p_saturating_iadd_immediate_compute(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options,
+      "G17P saturating integer add with immediate");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   b.shader->info.shared_size = 2 * sizeof(uint32_t);
+
+   nir_def *value = nir_load_shared(&b, 1, 32, nir_imm_int(&b, 0),
+                                    .align_mul = 4);
+   nir_def *bounded = nir_uadd_sat(&b, value, nir_imm_int(&b, 4));
+   nir_store_shared(&b, bounded, nir_imm_int(&b, sizeof(uint32_t)),
+                    .align_mul = 4);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+
+   if (!agx_compile_shader_nir(b.shader, &key, &part)) {
+      fprintf(stderr,
+              "G17P saturating integer add with immediate was rejected\n");
+      ralloc_free(b.shader);
+      return false;
+   }
+
+   const bool valid = part.binary != NULL && part.info.binary_size > 4 &&
+                      part.info.main_offset == 0 &&
+                      part.info.main_size == part.info.binary_size &&
+                      part.info.stats.instrs > 3 &&
+                      part.info.local_size == 2 * sizeof(uint32_t);
+
+   if (!valid)
+      fprintf(stderr,
+              "G17P saturating integer add immediate metadata mismatch\n");
 
    free(part.binary);
    ralloc_free(b.shader);
@@ -513,6 +596,58 @@ check_g17p_subgroup_quad_compute(bool valid_lane)
    return valid;
 }
 
+/*
+ * A quad broadcast whose lane is a REGISTER rather than an immediate has no
+ * 16-bit encoding: agx3_subgroup_encode_shuffle() narrows the width pair only
+ * on the immediate-lane word, and no Apple witness exists for a narrow
+ * register-lane quad shuffle.  Every
+ * dEQP-VK.subgroups.quad.compute.subgroupquadbroadcast_nonconst_* case on a
+ * scalar 8-bit, 16-bit or boolean type reached that shape -- 8-bit values and
+ * booleans live in 16-bit registers -- and the refusal failed the WHOLE
+ * shader:
+ *
+ *   agx3_pack_binary.c: no grounded AGX3 encoding for quad_shuffle
+ *     [d16:reg13 s0=16:reg13 s1=32:reg2 ...]
+ *   hk: vkCreateComputePipelines refused pipeline 0 of 1: VK_ERROR_UNKNOWN
+ *
+ * measured on Neo (G17P, A18 Pro).  The backend widens that shape to the
+ * 32-bit register-lane form, which is the same one nir_lower_subgroups
+ * already produces for the narrow VECTOR types that passed all along.  Both
+ * widths have to compile.
+ */
+static bool
+check_g17p_quad_broadcast_dynamic_lane(unsigned bits)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P dynamic quad broadcast");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *value = nir_load_global(&b, 1, bits, nir_imm_int64(&b, 0x1000),
+                                    .align_mul = sizeof(uint32_t));
+   nir_def *lane = nir_iand_imm(
+      &b, nir_load_global(&b, 1, 32, nir_imm_int64(&b, 0x1004),
+                          .align_mul = sizeof(uint32_t)),
+      3);
+   nir_def *broadcast = nir_quad_broadcast(&b, value, lane);
+   nir_store_global(&b, nir_u2u32(&b, broadcast), nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   free(part.binary);
+   ralloc_free(b.shader);
+
+   if (!compiled)
+      fprintf(stderr, "G17P %u-bit quad broadcast from a register lane was "
+                      "refused\n", bits);
+   return compiled;
+}
+
 static bool
 check_device_shuffle_compute(enum agx_isa_encoding encoding)
 {
@@ -560,6 +695,48 @@ check_device_shuffle_compute(enum agx_isa_encoding encoding)
    return valid;
 }
 
+/* popcount(ballot(true)) reads the active thread count on AGX2 and stays a
+ * ballot on G17P, where that register is only witnessed inside Apple's
+ * helper-guarded uniform atomics. */
+static bool
+check_active_count_lowering(bool g17p)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "active subgroup count");
+   b.shader->info.workgroup_size[0] = 32;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+
+   nir_def *mask = nir_ballot(&b, 1, 32, nir_imm_true(&b));
+   nir_store_global(&b, nir_bit_count(&b, mask), nir_imm_int64(&b, 0x2000),
+                    .align_mul = sizeof(uint32_t));
+   if (g17p)
+      agx_preprocess_nir_g17p(b.shader);
+   else
+      agx_preprocess_nir(b.shader);
+
+   bool count = false, ballot = false;
+   nir_foreach_function_impl(impl, b.shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            const nir_intrinsic_op op =
+               nir_instr_as_intrinsic(instr)->intrinsic;
+            count |= op == nir_intrinsic_load_active_subgroup_count_agx;
+            ballot |= op == nir_intrinsic_ballot;
+         }
+      }
+   }
+
+   const bool valid = g17p ? (ballot && !count) : (count && !ballot);
+   if (!valid)
+      fprintf(stderr, "active subgroup count lowering wrong for %s\n",
+              g17p ? "G17P" : "AGX2");
+   ralloc_free(b.shader);
+   return valid;
+}
+
 static bool
 check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
 {
@@ -584,7 +761,11 @@ check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
    nir_pop_if(&b, NULL);
    agx_preprocess_nir(b.shader);
 
+   /* Both must key off the active thread index. A subgroup reduction also
+    * sees lanes masked off by the enclosing control flow, so reducing the
+    * invocation IDs elects the wrong lane there. */
    bool lowered = true;
+   bool active_index = false;
    nir_foreach_function_impl(impl, b.shader) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -594,11 +775,14 @@ check_elect_broadcast_first_compute(enum agx_isa_encoding encoding)
                nir_instr_as_intrinsic(instr)->intrinsic;
             if (op == nir_intrinsic_elect ||
                 op == nir_intrinsic_read_first_invocation ||
-                op == nir_intrinsic_load_active_subgroup_invocation_agx)
+                op == nir_intrinsic_reduce)
                lowered = false;
+            if (op == nir_intrinsic_load_active_subgroup_invocation_agx)
+               active_index = true;
          }
       }
    }
+   lowered &= active_index;
 
    struct agx_shader_key key = {0};
    key.dev.encoding = encoding;
@@ -1102,6 +1286,8 @@ g17p_backend_key(enum agx_isa_encoding encoding, struct agx_shader_key *key)
 {
    *key = (struct agx_shader_key){0};
    key->dev.encoding = encoding;
+   key->dev.chip = encoding == AGX_ISA_ENCODING_AGX3B ? AGX_CHIP_G17P
+                                                       : AGX_CHIP_G13G;
    key->reserved_preamble = 4 * (1 + 1);
    key->has_scratch = true;
    key->promote_constants = true;
@@ -1116,13 +1302,13 @@ g17p_backend_key(enum agx_isa_encoding encoding, struct agx_shader_key *key)
  * Honeykrisp must run nir_opt_large_constants BEFORE agx_preprocess_nir
  * (hk_shader.c hk_preprocess_nir_internal).  Run it after and the array is
  * already scratch, nir_opt_large_constants has no function_temp variable left
- * to move, and the shader reaches the backend as stack_store/stack_load
- * traffic which AGX3 cannot encode and which
- * hk_g17p_compute_shader_supported() would refuse anyway.
+ * to move, and the shader reaches the backend as stack_store/stack_load.
+ * AGX3B now has a grounded dynamic/static TPS path for that fallback; AGX3C
+ * does not and must continue to fail closed.
  *
  * `ordered` reproduces the correct order and must compile with no scratch and
- * a non-empty constant blob.  `!ordered` reproduces the regression and must
- * FAIL CLOSED -- never silently produce a scratch-using shader.
+ * a non-empty constant blob. `!ordered` pins the bounded AGX3B scratch launch
+ * and the corresponding AGX3C rejection.
  */
 static bool
 check_constant_array_ordering(enum agx_isa_encoding encoding, bool ordered)
@@ -1175,21 +1361,38 @@ check_constant_array_ordering(enum agx_isa_encoding encoding, bool ordered)
                  b.shader->constant_data_size, b.shader->scratch_size);
       }
 
-      /* ...and the backend must refuse it rather than emit something. */
-      if (valid && compiled) {
-         fprintf(stderr,
-                 "AGX3 accepted a scratch-using compute shader; if stack "
-                 "access is now grounded, widen "
-                 "hk_g17p_compute_shader_supported() in the same change\n");
-         valid = false;
-      }
+      if (encoding == AGX_ISA_ENCODING_AGX3B) {
+         /* The grounded AGX3B TPS backend must preserve it in a launchable,
+          * bounded private frame. hk_g17p_compute_shader_supported() already
+          * admits this same 4096-byte bound. */
+         if (valid)
+            valid = compiled && part.binary != NULL &&
+                    part.info.binary_size > 4 && part.info.main_size > 4 &&
+                    !part.info.has_preamble &&
+                    part.info.preamble_scratch_size == 0 &&
+                    part.info.scratch_size > 0 &&
+                    part.info.scratch_size <= 4096 &&
+                    part.info.agx3_staging_known;
 
-      if (valid) {
-         const uint8_t zero[sizeof(part)] = {0};
-         if (memcmp(&part, zero, sizeof(part)) != 0) {
-            fprintf(stderr, "AGX3 scratch rejection did not clear output\n");
-            valid = false;
+         if (!valid)
+            fprintf(stderr,
+                    "AGX3B scratch fallback is not a bounded launch: "
+                    "compiled %u binary %u main %u scratch %u preamble %u "
+                    "staging %u\n",
+                    compiled, compiled ? part.info.binary_size : 0,
+                    compiled ? part.info.main_size : 0,
+                    compiled ? part.info.scratch_size : 0,
+                    compiled ? part.info.preamble_scratch_size : 0,
+                    compiled ? part.info.agx3_staging_known : 0);
+      } else {
+         /* AGX3C has no corresponding TPS witness and remains fail-closed. */
+         valid &= !compiled;
+         if (valid) {
+            const uint8_t zero[sizeof(part)] = {0};
+            valid = memcmp(&part, zero, sizeof(part)) == 0;
          }
+         if (!valid)
+            fprintf(stderr, "AGX3C scratch path did not fail closed\n");
       }
    }
 
@@ -2078,7 +2281,9 @@ main(int argc, char **argv)
    }
    if (argc == 2 && !strcmp(argv[1], "--subgroup-quad-only")) {
       const bool valid = check_g17p_subgroup_quad_compute(true) &&
-                         check_g17p_subgroup_quad_compute(false);
+                         check_g17p_subgroup_quad_compute(false) &&
+                         check_g17p_quad_broadcast_dynamic_lane(16) &&
+                         check_g17p_quad_broadcast_dynamic_lane(32);
       fprintf(stderr, "G17P subgroup quad: %s\n", valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
@@ -2181,6 +2386,8 @@ main(int argc, char **argv)
       return 1;
    if (!check_mixed_fma_neg_compute())
       return 1;
+   if (!check_g17p_saturating_iadd_immediate_compute())
+      return 1;
    if (!check_subgroup_multiply_compute())
       return 1;
    if (!check_half_add_compute())
@@ -2221,11 +2428,20 @@ main(int argc, char **argv)
       return 1;
    if (!check_elect_broadcast_first_compute(AGX_ISA_ENCODING_AGX2))
       return 1;
+   if (!check_active_count_lowering(false) ||
+       !check_active_count_lowering(true))
+      return 1;
    if (!check_g17p_subgroup_vote_compute() ||
        !check_g17p_signed_immediate_ballot_rejected())
       return 1;
    if (!check_g17p_subgroup_quad_compute(true) ||
        !check_g17p_subgroup_quad_compute(false))
+      return 1;
+   if (!check_g17p_quad_broadcast_dynamic_lane(16) ||
+       !check_g17p_quad_broadcast_dynamic_lane(32))
+      return 1;
+
+   if (!check_g17p_shared_byte_vectors())
       return 1;
 
    for (unsigned i = 0; i < sizeof(encodings) / sizeof(encodings[0]); ++i) {
@@ -2292,7 +2508,7 @@ main(int argc, char **argv)
    glsl_type_singleton_decref();
 
    puts("agx3_compile: compute SR/shared-memory/constant-data paths emitted; "
-        "constant arrays kept out of scratch; unlowered ray queries and "
-        "printf addresses rejected");
+        "AGX3B scratch fallback bounded; unlowered ray queries and printf "
+        "addresses rejected");
    return 0;
 }

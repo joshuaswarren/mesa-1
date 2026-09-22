@@ -9,7 +9,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "drm-uapi/asahi_drm.h"
+#include "agx_abi.h"
+#include "util/bitscan.h"
+#include "util/macros.h"
 #include "util/format/u_formats.h"
+#include "agx_chip.h"
 #include "agx_pack.h"
 
 #ifdef __cplusplus
@@ -51,6 +55,15 @@ struct agx_tilebuffer_layout {
    /* If layered rendering is used */
    bool layered;
 
+   /* Most bytes a sample may hold before render targets spill, or zero for
+    * the 64-byte AGX2 bound. The tile size bounds it separately. */
+   uint8_t max_sample_size_B;
+
+   /* Independent storage and raster-sample budgets. Zero retains the legacy
+    * byte capacity or imposes no additional sample budget, respectively. */
+   uint16_t max_bytes_per_tile;
+   uint16_t max_samples_per_tile;
+
    /* Selected tile size in pixels. Either 32*32, 32*16, or 16*16. */
    uint16_t tile_size;
 
@@ -80,7 +93,7 @@ agx_tilebuffer_offset_B(struct agx_tilebuffer_layout *layout, unsigned rt)
 }
 
 static inline bool
-agx_tilebuffer_spills(struct agx_tilebuffer_layout *layout)
+agx_tilebuffer_spills(const struct agx_tilebuffer_layout *layout)
 {
    for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
       if (layout->spilled[rt])
@@ -93,6 +106,26 @@ agx_tilebuffer_spills(struct agx_tilebuffer_layout *layout)
 struct agx_tilebuffer_layout
 agx_build_tilebuffer_layout(const enum pipe_format *formats, uint8_t nr_cbufs,
                             uint8_t nr_samples, bool layered);
+
+/* As agx_build_tilebuffer_layout(), spilling render targets only once a
+ * sample would exceed max_sample_size_B bytes (zero for the AGX2 bound). */
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_bounded(const enum pipe_format *formats,
+                                    uint8_t nr_cbufs, uint8_t nr_samples,
+                                    bool layered, uint8_t max_sample_size_B);
+
+struct agx_tilebuffer_layout
+agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
+                                      uint8_t nr_cbufs, uint8_t nr_samples,
+                                      bool layered, uint8_t max_sample_size_B,
+                                      uint16_t max_bytes_per_tile,
+                                      uint16_t max_samples_per_tile);
+
+/* Compact attachment slots for internal programs without moving tile data.
+ * map[dense slot] identifies the original logical attachment. */
+unsigned agx_tilebuffer_compact(const struct agx_tilebuffer_layout *src,
+                                struct agx_tilebuffer_layout *dst,
+                                uint8_t map[AGX_MAX_RENDER_TARGETS]);
 
 void agx_tilebuffer_set_samples(struct agx_tilebuffer_layout *tib,
                                 unsigned nr_samples);
@@ -109,20 +142,147 @@ bool agx_nir_lower_to_per_sample(struct nir_shader *shader);
 bool agx_nir_lower_monolithic_msaa(struct nir_shader *shader,
                                    uint8_t nr_samples);
 
+/* Export registers of one sample's colours in a G17P fragment unrolled per
+ * sample: eight halves for each location up to the last one written. */
+static inline unsigned
+agx_g17p_sample_colour_stride(uint8_t loc_written)
+{
+   return 8 * util_last_bit(loc_written);
+}
+
+/* Export base of sample `sample`'s depth (stencil two halves later) in such
+ * a fragment, for every sample after the first: four halves per sample after
+ * every sample's colours. */
+static inline unsigned
+agx_g17p_sample_zs_base(unsigned nr_samples, uint8_t loc_written,
+                        unsigned sample)
+{
+   return AGX_ABI_FOUT_COLOUR(0) +
+          nr_samples * agx_g17p_sample_colour_stride(loc_written) +
+          4 * (sample - 1);
+}
+
+/* Where each colour location's components sit in the export registers of one
+ * sample of a G17P fragment unrolled per sample.
+ *
+ * The fragment ABI gives every location a four-component slot, which is what
+ * a location that writes fewer components still costs once the slot is
+ * repeated for each sample. Eight two-component 32-bit targets at four
+ * samples need 276 halves that way, and G17P's register file is 192 -- the
+ * draw is refused for want of registers the shader never writes. The packed
+ * layout gives each location only the components it exports, which brings the
+ * same fragment to 148 halves. Both layouts describe the same thing, so the
+ * unroll and the epilog share this one description of it.
+ */
+struct agx_g17p_colour_layout {
+   /* Halves from AGX_ABI_FOUT_COLOUR(0) to this location's first component */
+   uint8_t offset[8];
+
+   /* Components this location occupies, zero if it exports none */
+   uint8_t comps[8];
+
+   /* Halves one sample's colours occupy in total */
+   uint16_t stride;
+};
+
+/* `colour_comps` holds the components each location exports, four bits per
+ * location, as agx_fs_epilog_link_info records them. It is only consulted for
+ * the packed layout; the ABI layout is fixed by the loc_written mask alone.
+ */
+static inline void
+agx_g17p_colour_layout_init(struct agx_g17p_colour_layout *l,
+                            uint8_t loc_written, uint8_t size_32,
+                            uint32_t colour_comps, bool packed)
+{
+   unsigned offset = 0;
+
+   for (unsigned loc = 0; loc < 8; ++loc) {
+      const bool written = loc_written & BITFIELD_BIT(loc);
+
+      if (packed) {
+         /* Each component is preloaded and exported on its own, so a 32-bit
+          * location has to start on an even half like any register pair. */
+         const unsigned halves_per_comp =
+            (size_32 & BITFIELD_BIT(loc)) ? 2 : 1;
+         const unsigned comps =
+            written ? util_last_bit((colour_comps >> (4 * loc)) & 0xf) : 0;
+
+         offset = ALIGN_POT(offset, halves_per_comp);
+         l->offset[loc] = offset;
+         l->comps[loc] = comps;
+         offset += comps * halves_per_comp;
+      } else {
+         l->offset[loc] = AGX_ABI_FOUT_COLOUR(loc) - AGX_ABI_FOUT_COLOUR(0);
+         l->comps[loc] = 4;
+      }
+   }
+
+   /* Every sample repeats the layout, and AGX_ABI_FOUT_COLOUR(0) is even, so
+    * an even stride is what keeps each sample's pairs aligned too. */
+   l->stride =
+      packed ? ALIGN_POT(offset, 2) : agx_g17p_sample_colour_stride(loc_written);
+}
+
+/* Export base of location `loc`'s first component for sample `sample`. */
+static inline unsigned
+agx_g17p_sample_colour_base(const struct agx_g17p_colour_layout *l,
+                            unsigned sample, unsigned loc)
+{
+   return AGX_ABI_FOUT_COLOUR(0) + (sample * l->stride) + l->offset[loc];
+}
+
+/* As agx_g17p_sample_zs_base, for a laid-out fragment. */
+static inline unsigned
+agx_g17p_sample_zs_base_layout(const struct agx_g17p_colour_layout *l,
+                               unsigned nr_samples, unsigned sample)
+{
+   return AGX_ABI_FOUT_COLOUR(0) + (nr_samples * l->stride) +
+          4 * (sample - 1);
+}
+
+/* Halves of export registers the whole unrolled fragment needs. Passing the
+ * sample count as the sample index names the half one past the last sample's
+ * stencil, which is exactly the count of halves used. */
+static inline unsigned
+agx_g17p_sample_exports_end(const struct agx_g17p_colour_layout *l,
+                            unsigned nr_samples)
+{
+   return agx_g17p_sample_zs_base_layout(l, nr_samples, nr_samples);
+}
+
+bool agx_nir_needs_sample_count(const struct nir_shader *shader);
+bool agx_nir_specialize_sample_count(struct nir_shader *shader, unsigned samples);
+bool agx_nir_unroll_g17p_samples(struct nir_shader *shader,
+                                 unsigned nr_samples, uint8_t loc_written);
+bool agx_nir_unroll_g17p_samples_layout(
+   struct nir_shader *shader, unsigned nr_samples,
+   const struct agx_g17p_colour_layout *layout);
+
+bool agx_nir_hoist_g17p_zs_writes(struct nir_shader *shader);
+
 bool agx_nir_lower_sample_intrinsics(struct nir_shader *shader,
                                      bool ignore_sample_mask_without_msaa);
 
 uint32_t agx_tilebuffer_total_size(struct agx_tilebuffer_layout *tib);
 
 enum pipe_format
-agx_tilebuffer_physical_format(struct agx_tilebuffer_layout *tib, unsigned rt);
+agx_tilebuffer_physical_format(const struct agx_tilebuffer_layout *tib,
+                               unsigned rt);
 
 bool agx_tilebuffer_supports_mask(struct agx_tilebuffer_layout *tib,
                                   unsigned rt);
 
 void agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib);
 
-bool agx_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib);
+bool agx_g17p_rt0_tile_layout_supported(
+   const struct agx_tilebuffer_layout *tib);
+
+/* Logical active attachment mask for compact RGBA8 storage in partition zero. */
+unsigned agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib);
+
+/* Dense, unspilled single-sample RGBA8 layouts with three to eight targets. */
+unsigned
+agx_g17p_wide_rgba8_mrt_count(const struct agx_tilebuffer_layout *tib);
 
 enum agx_g17p_mrt_layout {
    AGX_G17P_MRT_NONE,
@@ -131,6 +291,7 @@ enum agx_g17p_mrt_layout {
    AGX_G17P_MRT_R11G11B10,
    AGX_G17P_MRT_RGBA32,
    AGX_G17P_MRT_R32_QUAD,
+   AGX_G17P_MRT_MIXED,
 };
 
 /* Classify the byte-grounded G17P multiple-render-target layouts. The

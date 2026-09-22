@@ -122,6 +122,74 @@ tile_offset_shifted(uint32_t x, uint32_t y,
 int
 main(void)
 {
+   const VkImageAspectFlags color = VK_IMAGE_ASPECT_COLOR_BIT;
+   const VkImageAspectFlags depth = VK_IMAGE_ASPECT_DEPTH_BIT;
+   const VkImageAspectFlags stencil = VK_IMAGE_ASPECT_STENCIL_BIT;
+   const VkImageAspectFlags pairs[][2] = {
+      {color, color}, {depth, depth}, {stencil, stencil},
+      {depth | stencil, depth | stencil},
+      {color, depth}, {depth, color}, {color, stencil}, {stencil, color},
+   };
+   for (unsigned src = 0; src < 128; ++src) {
+      for (unsigned dst = 0; dst < 128; ++dst) {
+         bool expected = false;
+         for (unsigned i = 0; i < sizeof(pairs) / sizeof(pairs[0]); ++i)
+            expected |= src == pairs[i][0] && dst == pairs[i][1];
+         struct hk_g17p_copy_aspect_plan plan = {.count = 99};
+         CHECK(hk_g17p_copy_aspect_plan(src, dst, &plan) == expected);
+         if (!expected) {
+            CHECK(plan.count == 0 && plan.src[0] == 0 && plan.dst[0] == 0);
+         } else if (src == (depth | stencil)) {
+            CHECK(plan.count == 2);
+            CHECK(plan.src[0] == depth && plan.dst[0] == depth);
+            CHECK(plan.src[1] == stencil && plan.dst[1] == stencil);
+         } else {
+            CHECK(plan.count == 1 && plan.src[0] == src && plan.dst[0] == dst);
+         }
+      }
+   }
+   CHECK(!hk_g17p_copy_aspect_plan(color, depth, NULL));
+
+   VkImageCopy2 element_region = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .srcOffset = {12, 3, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .dstOffset = {2, 1, 0},
+      .extent = {4, 4, 1},
+   };
+   struct hk_g17p_image_copy_element_plan elements;
+   CHECK(hk_g17p_image_copy_element_plan(
+      VK_FORMAT_BC1_RGB_UNORM_BLOCK, VK_FORMAT_R16G16B16A16_UINT,
+      &element_region, &elements));
+   CHECK(elements.block_size_B == 8);
+   CHECK(elements.src_x_el == 3 && elements.src_y_el == 0);
+   CHECK(elements.dst_x_el == 2 && elements.dst_y_el == 1);
+   CHECK(elements.width_el == 1 && elements.height_el == 1);
+
+   element_region.srcOffset = (VkOffset3D){3, 5, 0};
+   element_region.dstOffset = (VkOffset3D){7, 11, 0};
+   element_region.extent = (VkExtent3D){13, 17, 1};
+   CHECK(hk_g17p_image_copy_element_plan(
+      VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32,
+      &element_region, &elements));
+   CHECK(elements.block_size_B == 4);
+   CHECK(elements.src_x_el == 3 && elements.src_y_el == 5);
+   CHECK(elements.dst_x_el == 7 && elements.dst_y_el == 11);
+   CHECK(elements.width_el == 13 && elements.height_el == 17);
+
+   elements.block_size_B = 19;
+   CHECK(!hk_g17p_image_copy_element_plan(
+      VK_FORMAT_R8_UINT, VK_FORMAT_R16_UINT, &element_region, &elements));
+   CHECK(elements.block_size_B == 0);
+   element_region.srcOffset.x = -1;
+   CHECK(!hk_g17p_image_copy_element_plan(
+      VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, &element_region, &elements));
+   element_region.srcOffset.x = 0;
+   element_region.extent.width = 0;
+   CHECK(!hk_g17p_image_copy_element_plan(
+      VK_FORMAT_R8_UINT, VK_FORMAT_R8_UINT, &element_region, &elements));
+
    struct hk_g17p_tile_address_config tile_config;
    CHECK(!hk_g17p_tile_address_config_init(0, 64, 64, &tile_config));
    CHECK(!hk_g17p_tile_address_config_init(64, 0, 64, &tile_config));
@@ -265,6 +333,16 @@ main(void)
    CHECK(plan.buffer_row_stride_B == 24 &&
          plan.buffer_slice_stride_B == 48 && plan.buffer_span_B == 80);
 
+   /* A partial block short of the level edge still copies the whole block,
+    * matching the AGX2 compute copy. */
+   struct hk_g17p_buffer_to_image_copy partial = volume;
+   partial.image_offset.x = 0;
+   partial.copy_extent.width = 3;
+   partial.copy_extent.height = 5;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &partial, 64, 144, &plan));
+   CHECK(plan.base_x_el == 0 && plan.blocks_x == 1 && plan.blocks_y == 2);
+
    struct hk_g17p_buffer_to_image_copy readback = volume;
    readback.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
@@ -405,7 +483,7 @@ main(void)
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
       &malformed, 64, 144, &plan));
    malformed = volume;
-   malformed.copy_extent.width = 3;
+   malformed.copy_extent.width = 5;
    CHECK(!hk_g17p_compressed_buffer_to_image_copy_plan(
       &malformed, 64, 144, &plan));
    malformed = volume;
@@ -576,11 +654,13 @@ main(void)
          raw_plan.buffer_slice_stride_B == 46080 &&
          raw_plan.buffer_span_B == 64296);
    raw_upload.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
+   CHECK(raw_plan.block_size_B == 8);
    raw_upload.format = VK_FORMAT_R32G32B32A32_UINT;
-   CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
+   CHECK(hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
+   CHECK(raw_plan.block_size_B == 16);
    raw_upload.format = VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
    CHECK(!hk_g17p_uncompressed_buffer_to_image_copy_plan(
       &raw_upload, 64, UINT64_MAX, &raw_plan));
@@ -927,6 +1007,55 @@ main(void)
             one.dstSubresource.layerCount == 1 && one.extent.depth == 1);
       CHECK(one.extent.width == 37 && one.extent.height == 29);
    }
+
+   /* Vulkan permits copies between 1D and 2D images when height and depth
+    * are one. Both endpoints are ordinary single-layer EOT views on G17P. */
+   const VkImageCopy2 one_d_two_d = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 1, 2, 1},
+      .srcOffset = {7, 0, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 2, 5, 1},
+      .dstOffset = {11, 0, 0},
+      .extent = {37, 1, 1},
+   };
+   VkImageCopy2 one_d_out;
+   CHECK(hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_2D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(one_d_out.srcSubresource.baseArrayLayer == 2);
+   CHECK(one_d_out.dstSubresource.baseArrayLayer == 5);
+   CHECK(one_d_out.srcSubresource.layerCount == 1);
+   CHECK(one_d_out.dstSubresource.layerCount == 1);
+   CHECK(one_d_out.extent.width == 37 && one_d_out.extent.height == 1 &&
+         one_d_out.extent.depth == 1);
+   CHECK(hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 1, 1,
+      &one_d_two_d, 0, &one_d_out));
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_2D, VK_IMAGE_TYPE_1D, 2, 2,
+      &one_d_two_d, 0, &one_d_out));
+
+   /* A 1D array copies to or from 3D slices exactly as a 2D array does: its
+    * layers map to the volume's depth. */
+   const VkImageCopy2 one_d_volume = {
+      .sType = VK_STRUCTURE_TYPE_IMAGE_COPY_2,
+      .srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 4},
+      .srcOffset = {3, 0, 0},
+      .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+      .dstOffset = {5, 0, 2},
+      .extent = {17, 1, 4},
+   };
+   for (uint32_t slice = 0; slice < 4; ++slice) {
+      CHECK(hk_g17p_image_copy_slice(
+         AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 4, 4,
+         &one_d_volume, slice, &one_d_out));
+      CHECK(one_d_out.srcSubresource.baseArrayLayer == 1 + slice);
+      CHECK(one_d_out.dstOffset.z == 2 + (int32_t)slice);
+      CHECK(one_d_out.extent.depth == 1);
+   }
+   CHECK(!hk_g17p_image_copy_slice(
+      AGX_CHIP_G17P, VK_IMAGE_TYPE_1D, VK_IMAGE_TYPE_3D, 3, 3,
+      &one_d_volume, 0, &one_d_out));
 
    VkImageCopy2 volume_array = volume_copy;
    volume_array.dstSubresource.baseArrayLayer = 7;

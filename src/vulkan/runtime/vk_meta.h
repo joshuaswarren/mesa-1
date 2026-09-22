@@ -89,6 +89,10 @@ struct vk_meta_copy_image_properties {
       };
    };
 
+   /* Keep depth/stencil aspects on internal color-format views when the
+    * driver uses the aspect to select separate backing planes. */
+   bool depth_stencil_aspect_views;
+
    /* Size of the image tile. Used to select the optimal workgroup size. */
    VkExtent3D tile_size;
 };
@@ -113,6 +117,12 @@ struct vk_meta_device {
    bool use_gs_for_layer;
    bool use_layer_output;
    bool use_stencil_export;
+   /* Bind each blit source as a combined image sampler rather than a separate
+    * sampled image and sampler.  A driver whose descriptor contents depend on
+    * the sampler -- for example one that must pick a filterable format for a
+    * scaled image -- cannot make that choice when the two arrive separately.
+    */
+   bool use_combined_blit_descriptors;
    bool use_masked_rgba8_buffer_unpack;
    /* A driver without layered rendering may split a 3D graphics copy into
     * one attachment view per destination Z slice.  The fragment Layer value

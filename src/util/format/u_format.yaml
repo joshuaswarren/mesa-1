@@ -3297,3 +3297,11 @@
   block: {width: 1, height: 1, depth: 1}
   channels: [X8, SP8, SP8, SP8]
   swizzles: [W, Z, Y, 1]
+
+# Vulkan R4G4_PACK8 names packed channels from high to low bits.
+- name: G4R4_UNORM
+  layout: plain
+  colorspace: RGB
+  block: {width: 1, height: 1, depth: 1}
+  channels: [UN4, UN4]
+  swizzles: [Y, X, 0, 1]

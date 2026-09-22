@@ -25,6 +25,7 @@
 #define AGX3_CDM_STREAM_LINK_SIZE 8u
 #define AGX3_CDM_LINK_PADDING_SIZE 4u
 #define AGX3_CDM_BARRIER_SIZE 4u
+#define AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE 4u
 #define AGX3_CDM_SECONDARY_BARRIER_SIZE 4u
 #define AGX3_CDM_STREAM_TERMINATE_SIZE 4u
 
@@ -636,6 +637,35 @@ agx3_cdm_barrier_unpack(enum agx_chip chip, const void *packed,
    info->chip = chip;
    info->flags = flags;
    return true;
+}
+
+/* HAL200's encodeSSTTFlushInvalidate emits this standalone record after the
+ * CPU changes a sparse texture translation table. It is not an ordinary CDM
+ * barrier: the low control byte and SSTT selector at bit 14 are distinct. */
+static inline bool
+agx3_cdm_sstt_flush_invalidate_pack(
+   enum agx_chip chip,
+   uint8_t packed[AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE])
+{
+   if (!packed)
+      return false;
+
+   memset(packed, 0, AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE);
+   if (chip != AGX_CHIP_G17P)
+      return false;
+
+   agx3_cmdstream_store_le32(packed, UINT32_C(0x60024102));
+   return true;
+}
+
+static inline bool
+agx3_cdm_sstt_flush_invalidate_validate(enum agx_chip chip,
+                                        const void *packed,
+                                        size_t available)
+{
+   return chip == AGX_CHIP_G17P && packed &&
+          available >= AGX3_CDM_SSTT_FLUSH_INVALIDATE_SIZE &&
+          agx3_cmdstream_load_le32(packed) == UINT32_C(0x60024102);
 }
 
 /* endVirtualSubstream and the Gen7 first-class substream emitter encode the

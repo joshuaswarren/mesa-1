@@ -38,24 +38,41 @@ main(void)
     * 3474e39a65f602e913af23900d0205bd436c8c930dc4fa6f3571e539ae9437cd.
     *
     * This is the exact Mesa-ABI form of the same witnessed operations.  It
-    * differs in register assignment and has one extra uniform move because
-    * libagx receives its six arguments in contiguous uniform halves. */
+    * differs in register assignment and argument placement. Native uniform
+    * IMAD avoids the old multiplicand copy. This fingerprint uses the current
+    * Mesa ABI; the encoder's independent native-byte tests cover that form. */
    static const uint8_t expected[] = {
       0x0c, 0xa0, 0x10, 0x06, 0x1c, 0xa1, 0x10, 0x26,
-      0x2b, 0x04, 0x01, 0x08, 0x9f, 0x30, 0x54, 0x00,
-      0x02, 0x04, 0x10, 0x00, 0xd0, 0x2f, 0x2a, 0x00,
-      0x4b, 0x06, 0x01, 0x08, 0x5b, 0x08, 0x01, 0x08,
-      0x6b, 0x0a, 0x01, 0x08, 0x7b, 0x0c, 0x01, 0x08,
-      0xe7, 0x00, 0x54, 0x08, 0x00, 0x00, 0x20, 0x00,
-      0x17, 0x00, 0x00, 0x10, 0x10, 0x00, 0x0e, 0x00,
-      0x00, 0x00,
+      0x9f, 0x30, 0x54, 0x00, 0x02, 0x20, 0x08, 0x00,
+      0xd0, 0x2f, 0x28, 0x00, 0x4b, 0x12, 0x01, 0x08,
+      0x5b, 0x14, 0x01, 0x08, 0x6b, 0x16, 0x01, 0x08,
+      0x7b, 0x18, 0x01, 0x08, 0xe7, 0x00, 0x54, 0x08,
+      0x03, 0x00, 0x20, 0x00, 0x17, 0x00, 0x00, 0x10,
+      0x10, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 ||
+          /* Qualified in agx_supports_precompiled() (src/asahi/clc/
+           * asahi_clc.c) after this list was first written.  This list is a
+           * deliberate second copy: it is a tripwire, so a kernel that starts
+           * being precompiled for G17P without anyone deciding to qualify it
+           * fails here.  Keep the two in step by hand. */
+          i == LIBAGX_FILL ||
+          i == LIBAGX_COPY_UINT4 ||
+          i == LIBAGX_COPY_UCHAR ||
+          i == LIBAGX_COPY_QUERY_GL ||
+          i == LIBAGX_INCREMENT_IA_RESTART ||
+          i == LIBAGX_SETUP_INDIRECT_DISPATCH ||
+          /* Qualified for its arithmetic oracle only; its machine code has
+           * never executed, and the ray-tracing-pipeline path it serves is
+           * behind HK_G17P_UNVERIFIED_FEATURES.  Presence here is not a claim
+           * that it runs -- see the comment on it in agx_supports_precompiled(). */
+          i == LIBAGX_TRACE_RAYS_INDIRECT_SETUP ||
           i == LIBAGX_COPY_IMAGE ||
           i == LIBAGX_MIPMAP_UNORM8X4 ||
           i == LIBAGX_MIPMAP_UNORM8X4_ODD ||
+          i == LIBAGX_RESOLVE_UNORM8X4 ||
           i == LIBAGX_DRAW_INDIRECT_BYTE_COUNT ||
           i == LIBAGX_COPY_XFB_COUNTERS ||
           i == LIBAGX_DRAW_ROBUST_INDEX_0 ||
@@ -65,12 +82,73 @@ main(void)
           i == LIBAGX_INCREMENT_IA_RESTART_NONNULL ||
           i == LIBAGX_COPY_QUERY ||
           i == LIBAGX_INCREMENT_CS_INVOCATIONS ||
+          i == LIBAGX_COPY_TIMESTAMP ||
           i == LIBAGX_PREDICATE_INDIRECT_0 ||
           i == LIBAGX_PREDICATE_INDIRECT_1 ||
-          i == LIBAGX_CONDITIONAL_RENDER)
+          i == LIBAGX_CONDITIONAL_RENDER ||
+          i == LIBAGX_DRAW_WITHOUT_ADJ ||
+          (i >= LIBAGX_UNROLL_RESTART_0 &&
+           i <= LIBAGX_UNROLL_RESTART_10) ||
+          i == LIBAGX_GS_SETUP_INDIRECT ||
+          i == LIBAGX_PREFIX_SUM_GEOM ||
+          i == LIBAGX_G17P_LOCAL_PROBE ||
+          i == LIBAGX_G17P_LOCAL_SG_PROBE ||
+          (i >= LIBAGX_PREFIX_SUM_TESS_0 &&
+           i <= LIBAGX_PREFIX_SUM_TESS_1) ||
+          i == LIBAGX_INCREMENT_STATISTIC ||
+          i == LIBAGX_TESS_SETUP_INDIRECT ||
+          i == LIBAGX_TESS_SETUP_INDIRECT_HW ||
+          i == LIBAGX_TESS_FACTORS_HALF ||
+          (i >= LIBAGX_TESS_ISOLINE_0 && i <= LIBAGX_TESS_QUAD_1))
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
+   }
+
+   /* Every primitive-restart variant is one 1024-thread workgroup and uses
+    * the same 128-byte local ballot array.  The G17P precompiled dispatcher
+    * consumes this metadata to allocate threadgroup memory in its Ioto
+    * program, so pin it independently of the generated machine code. */
+   for (unsigned i = LIBAGX_UNROLL_RESTART_0;
+        i <= LIBAGX_UNROLL_RESTART_10; ++i) {
+      const struct agx_precompiled_kernel_info *unroll_info =
+         (const void *)libagx_g17p[i];
+      CHECK(unroll_info->workgroup_size[0] == 1024);
+      CHECK(unroll_info->workgroup_size[1] == 1);
+      CHECK(unroll_info->workgroup_size[2] == 1);
+      CHECK(unroll_info->local_size == 128);
+   }
+
+   /* Tessellation's two prefix variants exchange 32 subgroup totals through
+    * the same shared allocation before generating the indirect draw. */
+   for (unsigned i = LIBAGX_PREFIX_SUM_TESS_0;
+        i <= LIBAGX_PREFIX_SUM_TESS_1; ++i) {
+      const struct agx_precompiled_kernel_info *info =
+         (const void *)libagx_g17p[i];
+      CHECK(info->workgroup_size[0] == 1024);
+      CHECK(info->local_size == 128);
+   }
+
+   /* The two threadgroup-memory probes carry the same launch shape as the
+    * tessellation prefix sum they exist to compare against: one 1024-thread
+    * workgroup, and a shared allocation the precompiled dispatcher must
+    * publish (4096 B for the 1024-slot array, 128 B for the 32-subgroup
+    * exchange). They are never dispatched by the driver; see geometry.cl. */
+   {
+      const struct agx_precompiled_kernel_info *probe =
+         (const void *)libagx_g17p[LIBAGX_G17P_LOCAL_PROBE];
+      CHECK(probe != NULL);
+      if (probe) {
+         CHECK(probe->workgroup_size[0] == 1024);
+         CHECK(probe->local_size == 4096);
+      }
+      const struct agx_precompiled_kernel_info *sg_probe =
+         (const void *)libagx_g17p[LIBAGX_G17P_LOCAL_SG_PROBE];
+      CHECK(sg_probe != NULL);
+      if (sg_probe) {
+         CHECK(sg_probe->workgroup_size[0] == 1024);
+         CHECK(sg_probe->local_size == 128);
+      }
    }
 
    /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
@@ -92,8 +170,8 @@ main(void)
    static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(copy_image_info->preamble_offset == 0);
    CHECK(copy_image_info->main_offset == 0);
-   CHECK(copy_image_info->main_size == 1670);
-   CHECK(copy_image_info->binary_size == 1670);
+   CHECK(copy_image_info->main_size == 1606);
+   CHECK(copy_image_info->binary_size == 1606);
    CHECK(copy_image_info->nr_gprs == 22);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
    CHECK(copy_image_info->push_count == 42);
@@ -106,10 +184,44 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x93a824ae6ebc0afa));
+         UINT64_C(0xbc86c399457f3a6a));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
+
+   /* The G17P Vulkan resolve path dispatches this raw RGBA8 kernel for 2x and
+    * 4x images. Pin the complete binary and its 84-byte argument ABI so a
+    * compiler change cannot silently alter the hardware-tested program. */
+   const uint32_t *resolve_blob =
+      libagx_g17p[LIBAGX_RESOLVE_UNORM8X4];
+   CHECK(resolve_blob != NULL);
+   if (!resolve_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *resolve_info =
+      (const void *)resolve_blob;
+   const uint8_t *resolve_binary =
+      (const uint8_t *)resolve_blob + sizeof(*resolve_info);
+   static const uint8_t resolve_end[] = {0x0e, 0x00, 0x00, 0x00};
+   CHECK(resolve_info->preamble_offset == 0);
+   CHECK(resolve_info->main_offset == 0);
+   CHECK(resolve_info->main_size == 4686);
+   CHECK(resolve_info->binary_size == 4686);
+   CHECK(resolve_info->nr_gprs == 42);
+   CHECK(resolve_info->nr_preamble_gprs == 0);
+   CHECK(resolve_info->push_count == 42);
+   CHECK(resolve_info->workgroup_size[0] == 32);
+   CHECK(resolve_info->workgroup_size[1] == 1);
+   CHECK(resolve_info->workgroup_size[2] == 1);
+   CHECK(resolve_info->local_size == 0);
+   CHECK(resolve_info->imageblock_stride == 0);
+   CHECK(!resolve_info->uses_txf);
+   CHECK(resolve_info->agx3_staging_known);
+   CHECK(resolve_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(resolve_binary, resolve_info->binary_size) ==
+         UINT64_C(0x3ec2844f60948ce4));
+   CHECK(memcmp(resolve_binary + resolve_info->binary_size -
+                   sizeof(resolve_end),
+                resolve_end, sizeof(resolve_end)) == 0);
 
    /* The G17P UNORM8 mip kernel replaces one firmware render job per level
     * with a launch in the command buffer's merged compute stream. Its native
@@ -130,8 +242,8 @@ main(void)
       (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
    CHECK(mipmap_info->preamble_offset == 0);
    CHECK(mipmap_info->main_offset == 0);
-   CHECK(mipmap_info->main_size == 3234);
-   CHECK(mipmap_info->binary_size == 3234);
+   CHECK(mipmap_info->main_size == 3190);
+   CHECK(mipmap_info->binary_size == 3190);
    CHECK(mipmap_info->nr_gprs == 38);
    CHECK(mipmap_info->nr_preamble_gprs == 0);
    CHECK(mipmap_info->push_count == 28);
@@ -144,7 +256,7 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0x1761df231cb8080c));
+         UINT64_C(0xd412eb7d64cc5c54));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -165,8 +277,8 @@ main(void)
       (const uint8_t *)odd_mipmap_blob + sizeof(*odd_mipmap_info);
    CHECK(odd_mipmap_info->preamble_offset == 0);
    CHECK(odd_mipmap_info->main_offset == 0);
-   CHECK(odd_mipmap_info->main_size == 3474);
-   CHECK(odd_mipmap_info->binary_size == 3474);
+   CHECK(odd_mipmap_info->main_size == 3442);
+   CHECK(odd_mipmap_info->binary_size == 3442);
    CHECK(odd_mipmap_info->nr_gprs == 36);
    CHECK(odd_mipmap_info->nr_preamble_gprs == 0);
    CHECK(odd_mipmap_info->push_count == 28);
@@ -179,7 +291,7 @@ main(void)
    CHECK(odd_mipmap_info->agx3_staging_known);
    CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
-         UINT64_C(0x96fff30496176f5b));
+         UINT64_C(0x1256365ce6cd378b));
    CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -224,12 +336,12 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3286,
-       UINT64_C(0x65f2e3931125c0e5)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3358,
-       UINT64_C(0xe0f6486882dbf4ce)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3356,
-       UINT64_C(0x8ac2f745459caef4)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
+       UINT64_C(0x4d6a2a534eb147d2)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
+       UINT64_C(0x35d000696c7b7865)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
+       UINT64_C(0xa8a7f8b341b3355f)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -306,8 +418,8 @@ main(void)
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(xfb_info->preamble_offset == 0);
    CHECK(xfb_info->main_offset == 0);
-   CHECK(xfb_info->main_size == 176);
-   CHECK(xfb_info->binary_size == 176);
+   CHECK(xfb_info->main_size == 168);
+   CHECK(xfb_info->binary_size == 168);
    CHECK(xfb_info->nr_gprs == 12);
    CHECK(xfb_info->push_count == 4);
    CHECK(xfb_info->workgroup_size[0] == 4);
@@ -348,7 +460,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0x53a133a878a678f4));
+         UINT64_C(0xccb20ed438e45f04));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -367,15 +479,14 @@ main(void)
       uint16_t local_size;
       uint64_t hash;
    } statistics[] = {
-      /* The top-level loop now has the native guard/entry/exit scopes.
-       * Relative to that topology, the CNDCF fix changes only byte +0x2db
-       * from 09 to 01: the unconditional break must consume true directly.
-       * Size, registers and every other helper byte are unchanged. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2962, 3090, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0x6360c3db2cff4712)},
-      {LIBAGX_COPY_QUERY, 0, 890, 890, 28, 25, {32, 1, 1}, 0,
-       UINT64_C(0x810469359ef8a715)},
-      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 86, 86, 8, 10, {1, 1, 1}, 0,
+      /* The top-level loop has the native guard/entry/exit scopes. Native
+       * descriptor scheduling assigns independent slots and uses per-slot
+       * dependent wait carriers while keeping adjacent producers overlapped. */
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
+       {1024, 1, 1}, 4, UINT64_C(0xf620f3d617876470)},
+      {LIBAGX_COPY_QUERY, 0, 890, 890, 24, 25, {32, 1, 1}, 0,
+       UINT64_C(0x28b92f478b1714d4)},
+      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 82, 82, 8, 10, {1, 1, 1}, 0,
        UINT64_C(0xd292b1db166dd1e9)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(statistics); ++i) {
@@ -425,8 +536,8 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } predicate[] = {
-      {LIBAGX_PREDICATE_INDIRECT_0, 668, UINT64_C(0xf2b66d8d7f84647b)},
-      {LIBAGX_PREDICATE_INDIRECT_1, 814, UINT64_C(0x8d8bd8fca36d1b3f)},
+      {LIBAGX_PREDICATE_INDIRECT_0, 622, UINT64_C(0xd312d6837034a3df)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 760, UINT64_C(0xa7af1ba09fd87252)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
       const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
@@ -475,8 +586,8 @@ main(void)
       (const uint8_t *)conditional_blob + sizeof(*conditional_info);
    CHECK(conditional_info->preamble_offset == 0);
    CHECK(conditional_info->main_offset == 0);
-   CHECK(conditional_info->main_size == 184);
-   CHECK(conditional_info->binary_size == 184);
+   CHECK(conditional_info->main_size == 180);
+   CHECK(conditional_info->binary_size == 180);
    CHECK(conditional_info->nr_gprs == 6);
    CHECK(conditional_info->nr_preamble_gprs == 0);
    CHECK(conditional_info->push_count == 16);
@@ -489,9 +600,110 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0x215a4d602b5de34e));
+         UINT64_C(0x89f7e9a45c600e83));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
+                end, sizeof(end)) == 0);
+
+   /* A timestamp written inside a render pass after another timestamp copies
+    * the graphics control stream's completion time. Fresh metal-nt
+    * applegpu_g17p ground truth for the equivalent MSL kernel, dest[0] =
+    * src[0] over two ulong device buffers, performs one 64-bit lddev and one
+    * 64-bit stdev (native __compute text SHA-256
+    * 682dde00553bdaf5abe66ee9c2d7bb9f1ce9e3cb50db1dbd79f0289094885441).
+    * The Mesa ABI form addresses both pointers from its uniforms, leaving
+    * exactly that load, store and end. */
+   static const uint8_t timestamp_expected[] = {
+      0x67, 0x00, 0x54, 0x00, 0x01, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
+      0x40, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x19, 0x00, 0x00, 0x90, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+   };
+   const uint32_t *timestamp_blob = libagx_g17p[LIBAGX_COPY_TIMESTAMP];
+   CHECK(timestamp_blob != NULL);
+   if (!timestamp_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *timestamp_info =
+      (const void *)timestamp_blob;
+   CHECK(timestamp_info->preamble_offset == 0);
+   CHECK(timestamp_info->main_offset == 0);
+   CHECK(timestamp_info->main_size == sizeof(timestamp_expected));
+   CHECK(timestamp_info->binary_size == sizeof(timestamp_expected));
+   CHECK(timestamp_info->nr_gprs == 4);
+   CHECK(timestamp_info->nr_preamble_gprs == 0);
+   CHECK(timestamp_info->push_count == 8);
+   CHECK(timestamp_info->workgroup_size[0] == 1);
+   CHECK(timestamp_info->workgroup_size[1] == 1);
+   CHECK(timestamp_info->workgroup_size[2] == 1);
+   CHECK(timestamp_info->local_size == 0);
+   CHECK(timestamp_info->imageblock_stride == 0);
+   CHECK(!timestamp_info->uses_txf);
+   CHECK(timestamp_info->agx3_staging_known);
+   CHECK(timestamp_info->agx3_staging_halfs == 0);
+   CHECK(memcmp((const uint8_t *)timestamp_blob + sizeof(*timestamp_info),
+                timestamp_expected, sizeof(timestamp_expected)) == 0);
+
+   /* Hardware tessellation factor records: one KERNEL(32) invocation per
+    * patch reading the TCS levels as floats and as bits through the
+    * tessellation parameters, and writing IEEE halves from the draw's first
+    * patch index. Pin the whole generated program and its launch ABI. */
+   const uint32_t *factors_blob = libagx_g17p[LIBAGX_TESS_FACTORS_HALF];
+   CHECK(factors_blob != NULL);
+   if (!factors_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *factors_info =
+      (const void *)factors_blob;
+   const uint8_t *factors_binary =
+      (const uint8_t *)factors_blob + sizeof(*factors_info);
+   CHECK(factors_info->preamble_offset == 0);
+   CHECK(factors_info->main_offset == 0);
+   CHECK(factors_info->main_size == 1510);
+   CHECK(factors_info->binary_size == 1510);
+   CHECK(factors_info->nr_gprs == 28);
+   CHECK(factors_info->nr_preamble_gprs == 0);
+   CHECK(factors_info->push_count == 10);
+   CHECK(factors_info->workgroup_size[0] == 32);
+   CHECK(factors_info->workgroup_size[1] == 1);
+   CHECK(factors_info->workgroup_size[2] == 1);
+   CHECK(factors_info->local_size == 0);
+   CHECK(factors_info->imageblock_stride == 0);
+   CHECK(!factors_info->uses_txf);
+   CHECK(factors_info->agx3_staging_known);
+   CHECK(factors_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
+         UINT64_C(0x897af867361b9f42));
+   CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
+                end, sizeof(end)) == 0);
+
+   /* Indirect hardware tessellation setup: one invocation that places the
+    * TCS outputs, vertex outputs and factor records in the heap without the
+    * AGX2 printf/abort overflow ABI, and writes the launch grids and the
+    * patch draw. Pin the whole generated program and its launch ABI. */
+   const uint32_t *setup_blob = libagx_g17p[LIBAGX_TESS_SETUP_INDIRECT_HW];
+   CHECK(setup_blob != NULL);
+   if (!setup_blob)
+      return 1;
+   const struct agx_precompiled_kernel_info *setup_info =
+      (const void *)setup_blob;
+   const uint8_t *setup_binary =
+      (const uint8_t *)setup_blob + sizeof(*setup_info);
+   CHECK(setup_info->preamble_offset == 0);
+   CHECK(setup_info->main_offset == 0);
+   CHECK(setup_info->main_size == 2186);
+   CHECK(setup_info->binary_size == 2186);
+   CHECK(setup_info->nr_gprs == 48);
+   CHECK(setup_info->nr_preamble_gprs == 0);
+   CHECK(setup_info->push_count == 40);
+   CHECK(setup_info->workgroup_size[0] == 1);
+   CHECK(setup_info->workgroup_size[1] == 1);
+   CHECK(setup_info->workgroup_size[2] == 1);
+   CHECK(setup_info->local_size == 0);
+   CHECK(setup_info->imageblock_stride == 0);
+   CHECK(!setup_info->uses_txf);
+   CHECK(setup_info->agx3_staging_known);
+   CHECK(setup_info->agx3_staging_halfs == 0);
+   CHECK(fnv1a64(setup_binary, setup_info->binary_size) ==
+         UINT64_C(0xbf22b41150f292ab));
+   CHECK(memcmp(setup_binary + setup_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
 
    if (failures) {

@@ -2833,6 +2833,16 @@ agx3_pack_scoped_barrier(enum agx_isa_encoding encoding,
          0x07, 0x04, 0x54, 0x51, 0x0e, 0x00,
          0x07, 0x04, 0x54, 0xd1, 0x0e, 0x00,
       },
+      [AGX3_BARRIER_SCOPE_DEVICE_FENCE] =
+         {0x07, 0x04, 0x54, 0x84, 0x0a, 0x00},
+      [AGX3_BARRIER_SCOPE_TEXTURE_FENCE] = {
+         0x07, 0x04, 0x54, 0x50, 0x06, 0x00,
+         0x07, 0x04, 0x54, 0xd0, 0x06, 0x00,
+      },
+      [AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT] = {
+         0x07, 0x14, 0x54, 0x50, 0x06, 0x00,
+         0x07, 0x04, 0x54, 0xd0, 0x06, 0x00,
+      },
    };
    static const uint8_t canonical_c[][AGX3_SCOPED_BARRIER_MAX_LENGTH] = {
       [AGX3_BARRIER_SCOPE_EXECUTION] =
@@ -2849,11 +2859,18 @@ agx3_pack_scoped_barrier(enum agx_isa_encoding encoding,
    const uint8_t(*canonical)[AGX3_SCOPED_BARRIER_MAX_LENGTH] =
       encoding == AGX_ISA_ENCODING_AGX3B ? canonical_b :
       encoding == AGX_ISA_ENCODING_AGX3C ? canonical_c : NULL;
-   const uint8_t length = scope == AGX3_BARRIER_SCOPE_TEXTURE ? 12 : 6;
+   const uint8_t length =
+      scope == AGX3_BARRIER_SCOPE_TEXTURE ||
+            scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE ||
+            scope == AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT
+         ? 12
+         : 6;
 
    if (canonical == NULL || out == NULL ||
        scope < AGX3_BARRIER_SCOPE_EXECUTION ||
-       scope > AGX3_BARRIER_SCOPE_TEXTURE)
+       scope > AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT ||
+       (encoding == AGX_ISA_ENCODING_AGX3C &&
+        scope > AGX3_BARRIER_SCOPE_TEXTURE))
       return false;
 
    memset(out, 0, sizeof(*out));
@@ -2872,7 +2889,7 @@ agx3_unpack_scoped_barrier(enum agx_isa_encoding encoding,
       return false;
 
    for (enum agx3_barrier_scope candidate = AGX3_BARRIER_SCOPE_EXECUTION;
-        candidate <= AGX3_BARRIER_SCOPE_TEXTURE; ++candidate) {
+        candidate <= AGX3_BARRIER_SCOPE_TEXTURE_FENCE_WAIT; ++candidate) {
       struct agx3_encoded_scoped_barrier canonical;
       if (agx3_pack_scoped_barrier(encoding, candidate, &canonical) &&
           available >= canonical.length &&

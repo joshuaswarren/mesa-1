@@ -1,5 +1,10 @@
 # Special registers
 
+AGX3 compiler changes must follow the Apple native-witness gate in
+[`../isa/README-metal-witness.md`](../isa/README-metal-witness.md).  Treat G16G
+and G17P as one AGX3B compiler target unless native code, hardware output, or a
+device limit proves a difference.
+
 `r0l` is the hardware nesting counter.
 
 `r1` is the hardware link register.

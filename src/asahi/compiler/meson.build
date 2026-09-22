@@ -8,6 +8,7 @@ libasahi_agx_files = files(
   'agx_liveness.c',
   'agx_insert_waits.c',
   'agx_nir_lower_address.c',
+  'agx_nir_opt_select_load.c',
   'agx_nir_lower_cull_distance.c',
   'agx_nir_lower_fminmax.c',
   'agx_nir_lower_frag_sidefx.c',
@@ -54,6 +55,8 @@ libasahi_agx_files = files(
   'agx3_graphics_program.h',
   'agx3_tex_core.c',
   'agx3_falu_mod_core.c',
+  'agx3_uniform_alu.c',
+  'agx3_uniform_integer.c',
   'agx3_vary_core.c',
   'agx3_tile_core.c',
   'agx3_pixel_core.c',
@@ -525,6 +528,20 @@ if with_tests
   )
 
   test(
+    'agx-interp-pixel-source',
+    executable(
+      'agx_interp_pixel_source_test',
+      files('test/test-agx-interp-pixel-source.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_copy_core',
     executable(
       'agx3_copy_core_test',
@@ -625,6 +642,9 @@ if with_tests
          'test/test-repair-ssa.cpp',
          'test/test-agx3-pack-binary.cpp',
          'test/test-agx3-sr.cpp',
+         'test/test-agx3-uniform-alu.cpp',
+         'test/test-agx3-integer-fusion.cpp',
+         'test/test-agx3-integer-lowering.cpp',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
@@ -633,6 +653,30 @@ if with_tests
     ),
     suite : ['asahi'],
     protocol : 'gtest',
+  )
+
+  test(
+    'agx3_uniform_integer',
+    executable(
+      'agx3_uniform_integer_test',
+      files('test/test-agx3-uniform-integer.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_optimization_corpus',
+    executable(
+      'agx3_optimization_corpus_test',
+      files('test/test-agx3-optimization-corpus.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      dependencies : [idep_nir, idep_agx_opcodes_h, idep_agx_builder_h, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
   )
 
   test(
@@ -653,6 +697,19 @@ if with_tests
     executable(
       'agx3_wide_imad_test',
       files('test/test-agx3-wide-imad.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx-select-load',
+    executable(
+      'agx_select_load_test',
+      files('test/test-agx-select-load.c'),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],
@@ -688,6 +745,19 @@ if with_tests
   )
 
   test(
+    'agx3_shared_element_index',
+    executable(
+      'agx3_shared_element_index_test',
+      files('test/test-agx3-shared-element-index.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_multi_store',
     executable(
       'agx3_multi_store_test',
@@ -709,6 +779,19 @@ if with_tests
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       include_directories : [inc_include, inc_src],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_vertex_formats',
+    executable(
+      'agx3_vertex_formats_test',
+      files('test/test-agx3-vertex-formats.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
       dependencies : [idep_nir, idep_mesautil],
       link_with : [libasahi_compiler],
     ),
@@ -806,8 +889,8 @@ if with_tests
       libagx[1],
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
-      dependencies : [idep_nir, idep_mesautil],
-      link_with : [libasahi_compiler],
+      dependencies : [idep_nir, idep_mesautil, idep_libpoly],
+      link_with : [libasahi_compiler, libpoly_nir],
     ),
     suite : ['asahi'],
   )
@@ -825,6 +908,7 @@ if with_tests
       'agx3_graphics_program_test',
       files(
         'agx3_graphics_program.c',
+        'agx3_copy_core.c',
         'agx3_ioto_uniform_program.c',
         'agx3_ioto_load_packer.c',
         'agx3_mem_core.c',

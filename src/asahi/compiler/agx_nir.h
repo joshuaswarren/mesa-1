@@ -22,12 +22,19 @@ bool agx_nir_cleanup_amul(struct nir_shader *shader);
 bool agx_nir_fuse_lea(struct nir_shader *shader);
 bool agx_nir_lower_lea(struct nir_shader *shader);
 bool agx_nir_fuse_selects(struct nir_shader *shader);
+bool agx_nir_opt_select_load(struct nir_shader *shader);
 bool agx_nir_fuse_algebraic_late(struct nir_shader *shader);
 bool agx_nir_fence_images(struct nir_shader *shader);
 bool agx_nir_lower_layer(struct nir_shader *s);
 bool agx_nir_lower_clip_distance(struct nir_shader *s);
 bool agx_nir_lower_subgroups(struct nir_shader *s);
 bool agx_nir_lower_subgroups_g17p(struct nir_shader *s);
+
+/* AGX3 ldtg/sttg index threadgroup memory in scalar elements, scaled by the
+ * access width; NIR shared offsets are bytes.  Idempotent, so a frontend may
+ * run it as early as the optimizer can use it and agx_compile_shader_nir()
+ * still guarantees it for any AGX3 target. */
+bool agx_nir_lower_shared_element_index(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 
 bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
@@ -38,22 +45,41 @@ bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,
                                                     bool lower_2d_robustness);
 bool agx_nir_lower_texture(struct nir_shader *s);
 bool agx_nir_lower_texture_for_generation(struct nir_shader *s, unsigned generation);
+/* robust_formatless_images: formatless image loads have not been lowered for
+ * view-bounds robustness and require it. */
+/* sparse_buffer_residency: ordinary texel-buffer reads must consult the
+ * software sparse residency map, because the descriptor names the primary
+ * mapping rather than the read-only shadow (hk_buffer_view.c). */
 bool agx_nir_lower_texture_with_buffer_metadata(struct nir_shader *s,
-                                               unsigned generation);
+                                               unsigned generation,
+                                               bool robust_formatless_images,
+                                               uint64_t sparse_ro_offset,
+                                               bool sparse_buffer_residency);
 bool agx_nir_lower_multisampled_image_store(struct nir_shader *s);
+bool agx_nir_lower_multisampled_image_store_for_generation(struct nir_shader *s,
+                                                         unsigned generation);
 bool agx_nir_needs_texture_crawl(struct nir_instr *instr);
+
+/* Local arrays larger than this many bytes are lowered to scratch memory by
+ * agx_preprocess_nir(); smaller ones become csel ladders. */
+#define AGX_SCRATCH_ARRAY_THRESHOLD_B 256
 
 /* Existing reserved software tail, relative to a Gen9 sampled texture. */
 #define AGX_G17P_SAMPLED_HEAP_INDEX_OFFSET 68
 /* G17P appends one native texture-heap index after the 64-byte texture/PBE
  * storage descriptor pair. Other generations retain their existing ABI. */
 #define AGX_G17P_STORAGE_HEAP_INDEX_OFFSET 64
+
+bool agx_nir_lower_g17p_bindless_storage(struct nir_shader *s);
 /* G17P storage descriptors reserve the following eight bytes for the two
  * texture-heap indices.  Image atomics keep their software address metadata
  * in a separate packed word after those indices, 40 bytes past the native PBE
  * handle seen by agx_nir_lower_texture_for_generation(). */
 #define AGX_G17P_IMAGE_ATOMIC_SW_OFFSET 72
 #define AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE 40
+/* Native texture/PBE pair, heap indices, address sideband, then padding. */
+#define AGX_G17P_EMRT_DESCRIPTOR_SIZE 96
+#define AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET 80
 /* Software sampler indices carry AGX2's reservation of the first 28 entries;
  * the native G17P heap is zero-based. Must match the runtime's
  * HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX. */

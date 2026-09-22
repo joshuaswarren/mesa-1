@@ -120,7 +120,11 @@ struct agx3_compute_program_upload {
    (AGX3_CDM_DIRECT_LAUNCH_SIZE + 4u)
 /* Mode 2 consumes both global and local sizes from six indirect u32 words. */
 #define AGX3_G17P_NATIVE_INDIRECT_MODE UINT32_C(0x10000000)
-#define AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE 28u
+/* Six words where the direct record has ten: mode 2 replaces the three global
+ * and three local size words with one 48-bit address. */
+#define AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE 24u
+#define AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE \
+   (AGX3_G17P_NATIVE_INDIRECT_LAUNCH_SIZE + 4u)
 #define AGX3_G17P_NATIVE_INDIRECT_COMPUTE_DISPATCH_SIZE \
    (AGX3_G17P_NATIVE_COMPUTE_DISPATCH_SIZE + \
     AGX3_G17P_NATIVE_INDIRECT_MAIN_SIZE)
@@ -218,6 +222,16 @@ bool agx3_g17p_native_compute_dispatch_append_with_barrier(
    const struct agx3_compute_program *program,
    const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
    struct agx3_compute_dispatch_sink *sink);
+
+/* Append one standalone 24-byte indirect launch and its barrier.  `geometry_va`
+ * addresses six u32 the GPU reads for itself: three global THREAD counts then
+ * three local sizes.  Use this when the producer of that grid is already its
+ * own dispatch earlier in the stream -- GL's geometry and tessellation setup
+ * kernels are dispatched that way, behind a full barrier -- so there is no
+ * helper program to couple into the same record pair. */
+bool agx3_g17p_native_indirect_compute_launch_append(
+   const struct agx3_compute_program *program, uint64_t geometry_va,
+   uint8_t barrier_flags, struct agx3_compute_dispatch_sink *sink);
 
 /* Append the helper/indirect-application record pair used by G17P indirect
  * compute.  The caller owns the helper program, its resources, and geometry

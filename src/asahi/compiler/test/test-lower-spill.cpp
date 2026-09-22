@@ -162,3 +162,34 @@ TEST_F(LowerSpill, Vec6Fill)
                            BITFIELD_MASK(2));
       });
 }
+
+TEST_F(LowerSpill, AGX3SplitsVectorStackAccess)
+{
+   agx_builder *A = agx_test_builder(mem_ctx);
+   agx_builder *B = agx_test_builder(mem_ctx);
+
+   {
+      agx_builder *b = A;
+      agx_index h3 = agx_register(6, AGX_SIZE_16);
+      h3.channels_m1 = 3 - 1;
+      agx_index w2 = agx_register(4, AGX_SIZE_32);
+      w2.channels_m1 = 2 - 1;
+
+      agx_stack_store(b, h3, agx_immediate(12), i16, BITFIELD_MASK(3));
+      agx_stack_load_to(b, w2, agx_immediate(8), i32, BITFIELD_MASK(2));
+   }
+   {
+      agx_builder *b = B;
+      for (unsigned c = 0; c < 3; ++c) {
+         agx_stack_store(b, agx_register(6 + c, AGX_SIZE_16),
+                         agx_immediate(12 + 2 * c), i16, 1);
+      }
+      for (unsigned c = 0; c < 2; ++c) {
+         agx_stack_load_to(b, agx_register(4 + 2 * c, AGX_SIZE_32),
+                           agx_immediate(8 + 4 * c), i32, 1);
+      }
+   }
+
+   agx3_split_vector_stack_access(A->shader);
+   ASSERT_SHADER_EQUAL(A->shader, B->shader);
+}

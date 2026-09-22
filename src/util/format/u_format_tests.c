@@ -93,6 +93,11 @@
 const struct util_format_test_case
 util_format_test_cases[] =
 {
+   {PIPE_FORMAT_G4R4_UNORM, PACKED_1x8(0xff), PACKED_1x8(0x00), UNPACKED_1x1(0.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G4R4_UNORM, PACKED_1x8(0xff), PACKED_1x8(0xf0), UNPACKED_1x1(1.0, 0.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G4R4_UNORM, PACKED_1x8(0xff), PACKED_1x8(0x0f), UNPACKED_1x1(0.0, 1.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G4R4_UNORM, PACKED_1x8(0xff), PACKED_1x8(0xa5), UNPACKED_1x1(10.0/15.0, 5.0/15.0, 0.0, 1.0)},
+   {PIPE_FORMAT_G4R4_UNORM, PACKED_1x8(0xff), PACKED_1x8(0xff), UNPACKED_1x1(1.0, 1.0, 0.0, 1.0)},
 
    /*
     * 32-bit rendertarget formats

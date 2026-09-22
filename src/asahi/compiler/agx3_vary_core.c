@@ -59,8 +59,12 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
       ov[n++] = (struct agx3_field_kv)KV(41, 0);
       ov[n++] = (struct agx3_field_kv)KV(32, 0);
    } else {
-      /* Centroid interpolation uses the same register-source leaf, with the
-       * native implicit coordinate register selected by the shade model. */
+      /* AGX3C centroid interpolation uses the same register-source leaf, with
+       * the native implicit coordinate register selected by the shade model.
+       * G17P has no implicit form: its centroid coordinates are an explicit
+       * ITRCOORDS token. */
+      if (is_b(enc))
+         return false;
       ov[n++] = (struct agx3_field_kv)KV(39, 2);
       ov[n++] = (struct agx3_field_kv)KV(41, 1);
       ov[n++] =
@@ -74,34 +78,58 @@ agx3_vary_interp_mode(enum agx_isa_encoding enc, uint16_t dest,
                             is_b(enc) ? 5 : 7, ov, n, out, len);
 }
 
-bool
-agx3_vary_sample_coords(enum agx_isa_encoding enc, uint16_t dest,
-                        uint16_t sample_index, bool sample_index_kill,
-                        uint16_t wait_mask, uint8_t out[AGX3_VARY_MAX_LENGTH],
-                        uint8_t *len)
+/* ITRCOORDS modes: f38=2 derives a sample's coordinates from a sample index,
+ * f38=1 derives the centroid of the covered samples from a coverage word. */
+static bool
+agx3_vary_coords(enum agx_isa_encoding enc, uint16_t dest, uint8_t mode,
+                 uint16_t source, bool source_kill, uint16_t wait_mask,
+                 uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
    if (enc != AGX_ISA_ENCODING_AGX3B || (dest & 1) != 0 || dest >= 256 ||
-       sample_index >= 256 || (wait_mask & ~0x3f) != 0)
+       source >= 256 || (wait_mask & ~0x3f) != 0)
       return false;
 
-   /* Fresh Apple Metal 32023.917 `interpolate_at_sample` and
-    * `[[sample_{,no_}perspective]]` witnesses. ITRCOORDS is an eight-byte
-    * G17P instruction: register/32-bit destination, register/16-bit sample
-    * source, and sample mode f38=2. */
+   /* ITRCOORDS is an eight-byte G17P instruction: register/32-bit
+    * destination, register/16-bit source, and the mode in f38. */
    const struct agx3_field_kv base[] = {
-      KV(9, 2), KV(10, 2), KV(11, 1), KV(23, 2), KV(24, 1), KV(38, 2),
+      KV(9, 2), KV(10, 2), KV(11, 1), KV(23, 2), KV(24, 1), KV(38, mode),
    };
    struct agx3_field_kv ov[10];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(2, dest);
-   ov[n++] = (struct agx3_field_kv)KV(16, sample_index);
-   if (sample_index_kill)
+   ov[n++] = (struct agx3_field_kv)KV(16, source);
+   if (source_kill)
       ov[n++] = (struct agx3_field_kv)KV(27, 1);
    for (unsigned i = 0; i < 6; ++i)
       if (wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
 
    return agx3_bind_compose(enc, "itrcoords", 0, base, 6, ov, n, out, len);
+}
+
+bool
+agx3_vary_sample_coords(enum agx_isa_encoding enc, uint16_t dest,
+                        uint16_t sample_index, bool sample_index_kill,
+                        uint16_t wait_mask, uint8_t out[AGX3_VARY_MAX_LENGTH],
+                        uint8_t *len)
+{
+   /* Fresh Apple Metal 32023.917 `interpolate_at_sample` and
+    * `[[sample_{,no_}perspective]]` witnesses. */
+   return agx3_vary_coords(enc, dest, 2, sample_index, sample_index_kill,
+                           wait_mask, out, len);
+}
+
+bool
+agx3_vary_centroid_coords(enum agx_isa_encoding enc, uint16_t dest,
+                          uint16_t coverage, bool coverage_kill,
+                          uint16_t wait_mask,
+                          uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
+{
+   /* Fresh applegpu_g17p `[[centroid_{,no_}perspective]]` witnesses at
+    * raster_sample_count 1 and 4 read SR39 and emit ITRCOORDS f38=1 on it,
+    * then consume the token exactly as explicit sample interpolation does. */
+   return agx3_vary_coords(enc, dest, 1, coverage, coverage_kill, wait_mask,
+                           out, len);
 }
 
 bool
@@ -219,4 +247,32 @@ agx3_vary_uvsw(enum agx_isa_encoding enc, uint16_t value, uint16_t uvs_index,
 
    return agx3_bind_compose(enc, "uvsw", 0, is_b(enc) ? base_b : base_c,
                             is_b(enc) ? 3 : 6, ov, n, out, len);
+}
+
+bool
+agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
+                              uint16_t index, uint8_t slot, bool value_kill,
+                              uint16_t wait_mask,
+                              uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
+{
+   /* uvsw's index operand has three kinds in Apple's AGX3b encoder table:
+    * f23 = 1 immediate (f15), 2 register (f16) and 3 uniform (f17), each a
+    * half wide. Metal never computes a vertex output's index, so only the
+    * immediate kind is witnessed in compiled programs; the register kind is
+    * the table's own form for the same field. */
+   if (enc != AGX_ISA_ENCODING_AGX3B || (value & 1) != 0 || value >= 256 ||
+       index >= 256 || slot < 1 || slot > 6 || (wait_mask & ~0x3fu) != 0)
+      return false;
+   const struct agx3_field_kv base[] = {KV(9, 5), KV(23, 2), KV(24, 1)};
+   struct agx3_field_kv ov[10];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(5, value);
+   ov[n++] = (struct agx3_field_kv)KV(16, index);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(13, value_kill ? 1 : 0);
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
+
+   return agx3_bind_compose(enc, "uvsw", 0, base, 3, ov, n, out, len);
 }

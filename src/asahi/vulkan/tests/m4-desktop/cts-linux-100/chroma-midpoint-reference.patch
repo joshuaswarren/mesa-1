@@ -1,0 +1,15 @@
+--- a/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp
++++ b/external/vulkancts/modules/vulkan/ycbcr/vktYCbCrConversionTests.cpp
+@@ -1009,10 +1009,10 @@
+ 
+ 	const double	a		= xOffset == vk::VK_CHROMA_LOCATION_COSITED_EVEN_KHR
+ 							? (i % 2 == 0 ? 0.0 : 0.5)
+-							: (i % 2 == 0 ? 0.25 : 0.75);
++							: (i % 2 == 0 ? 0.75 : 0.25);
+ 	const double	b		= yOffset == vk::VK_CHROMA_LOCATION_COSITED_EVEN_KHR
+ 							? (j % 2 == 0 ? 0.0 : 0.5)
+-							: (j % 2 == 0 ? 0.25 : 0.75);
++							: (j % 2 == 0 ? 0.75 : 0.25);
+ 
+ 	return linearInterpolate(filteringFormat, a, b,
+ 								lookupWrapped(access, conversionFormat, addressModeU, addressModeV, IVec2(subI, subJ)),

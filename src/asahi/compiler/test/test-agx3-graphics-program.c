@@ -4,6 +4,10 @@
  */
 
 #include "agx3_graphics_program.h"
+#include "agx3_copy_core.h"
+#include "agx3_ioto_load_packer.h"
+#include "asahi/lib/agx_ioto_preshader_core.h"
+#include "util/macros.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -173,6 +177,18 @@ test_g17g_programs(void)
    return 0;
 }
 
+static uint8_t *
+eot_offset(struct agx3_g17p_rt0_eot_program_desc *desc, unsigned rt)
+{
+   uint8_t *const offsets[AGX3_G17P_MRT_MAX_TARGETS] = {
+      &desc->imageblock_offset_B,  &desc->imageblock_offset1_B,
+      &desc->imageblock_offset2_B, &desc->imageblock_offset3_B,
+      &desc->imageblock_offset4_B, &desc->imageblock_offset5_B,
+      &desc->imageblock_offset6_B, &desc->imageblock_offset7_B,
+   };
+   return offsets[rt];
+}
+
 int
 main(void)
 {
@@ -237,6 +253,200 @@ main(void)
       AGX_CHIP_G17P, &rectangle_desc, &rectangle));
    CHECK(memcmp(&rectangle, &previous_program, sizeof(rectangle)) == 0);
 
+   /* The inline compact program begins with exactly two root-address
+    * immediates. The immutable shader-owned setup template follows them. */
+   const uint64_t root_va = UINT64_C(0x2ffff6c540);
+   struct agx3_g17p_graphics_root_prefix prefix;
+   CHECK(agx3_g17p_graphics_root_prefix_generate(
+      AGX_CHIP_G17P, root_va, &prefix));
+   uint8_t expected[AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE] = {0};
+   uint8_t low_length = 0, high_length = 0;
+   CHECK(agx_ioto_load_pack_ldimm(
+      AGX_CHIP_G17P, AGX3_G17P_GRAPHICS_ROOT_BASE_HALF,
+      (uint32_t)root_va, expected, &low_length));
+   CHECK(agx_ioto_load_pack_ldimm(
+      AGX_CHIP_G17P, AGX3_G17P_GRAPHICS_ROOT_BASE_HALF + 2,
+      (uint32_t)(root_va >> 32), expected + low_length,
+      &high_length));
+   CHECK(prefix.length == low_length + high_length);
+   CHECK(prefix.length <= AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE);
+   CHECK(memcmp(prefix.bytes, expected, prefix.length) == 0);
+   CHECK(!agx3_g17p_graphics_root_prefix_generate(
+      AGX_CHIP_G17S, root_va, &prefix));
+   CHECK(!agx3_g17p_graphics_root_prefix_generate(
+      AGX_CHIP_G17P, 0, &prefix));
+
+   /* A persistent root range is a true execution-time two-level load.  Its
+    * source VA lives in ordinary root memory, while the immutable setup only
+    * contains the root-field offset, destination and width.  Exercise more
+    * than four dwords so the fixed payload window must be retired and reused. */
+   uint8_t indirect_body[512];
+   size_t indirect_size = 0;
+   CHECK(agx3_ioto_load_indirect_uniform_range(
+      AGX_CHIP_G17P, AGX3_G17P_GRAPHICS_ROOT_BASE_HALF, 24, 40, 18,
+      indirect_body, sizeof(indirect_body), &indirect_size));
+   CHECK(indirect_size > 0 && indirect_size < sizeof(indirect_body));
+   const size_t valid_indirect_size = indirect_size;
+   uint8_t uniform_root_body[512];
+   size_t uniform_root_size = 0;
+   CHECK(agx3_ioto_load_indirect_uniform_range_from_uniform_root(
+      AGX_CHIP_G17P, AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF, 24,
+      40, 18, uniform_root_body, sizeof(uniform_root_body),
+      &uniform_root_size));
+   CHECK(uniform_root_size == valid_indirect_size);
+   CHECK(memcmp(uniform_root_body, indirect_body, valid_indirect_size) != 0);
+   CHECK(!agx3_ioto_load_indirect_uniform_range(
+      AGX_CHIP_G17S, AGX3_G17P_GRAPHICS_ROOT_BASE_HALF, 24, 40, 18,
+      indirect_body, sizeof(indirect_body), &indirect_size));
+   CHECK(indirect_size == valid_indirect_size);
+   CHECK(!agx3_ioto_load_indirect_uniform_range(
+      AGX_CHIP_G17P, AGX3_G17P_GRAPHICS_ROOT_BASE_HALF, 24, 40, 17,
+      indirect_body, sizeof(indirect_body), &indirect_size));
+   CHECK(indirect_size == valid_indirect_size);
+
+   struct agx3_ioto_uniform_range rooted_ranges[] = {
+      {.start_halfs = 8, .size_halfs = 4, .address = 24},
+      {.start_halfs = 20, .size_halfs = 18, .address = 32},
+   };
+   const struct agx3_g17p_graphics_program_desc rooted_desc = {
+      .program_va = UINT64_C(0x10000000000),
+      .shader_va = UINT64_C(0x100000003c0),
+      .uniform_ranges = rooted_ranges,
+      .uniform_range_count = ARRAY_SIZE(rooted_ranges),
+      .shader_binary_size = 128,
+      .nr_gprs = 16,
+      .preloaded_root = true,
+   };
+   struct agx3_g17p_graphics_program_template rooted_template;
+   CHECK(agx3_g17p_graphics_program_template_generate(
+      AGX_CHIP_G17P, &rooted_desc, &rooted_template));
+   CHECK(rooted_template.program.length >
+         AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE);
+   CHECK(rooted_template.relocation_count == 0);
+
+   /* The production split keeps the root address in a bounded launcher and
+    * the two-level load schedule in an immutable external suffix. A different
+    * draw root changes only the launcher; the suffix remains byte-identical. */
+   uint8_t external_suffix[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   size_t external_suffix_size = 0;
+   CHECK(agx3_g17p_graphics_external_setup_suffix_generate(
+      AGX_CHIP_G17P, &rooted_desc, external_suffix,
+      sizeof(external_suffix), &external_suffix_size));
+   CHECK(external_suffix_size > 4 &&
+         external_suffix_size < rooted_template.program.length);
+   CHECK(external_suffix[external_suffix_size - 4] == 0x0e);
+   CHECK(external_suffix[external_suffix_size - 3] == 0x00);
+   CHECK(external_suffix[external_suffix_size - 2] == 0x00);
+   CHECK(external_suffix[external_suffix_size - 1] == 0x00);
+
+   uint8_t launcher_a[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+   uint8_t launcher_b[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+   size_t launcher_a_size = 0, launcher_b_size = 0;
+   const uint64_t setup_va = UINT64_C(0x10000008000);
+   CHECK(agx3_g17p_graphics_external_launcher_generate(
+      AGX_CHIP_G17P, &rooted_desc, rooted_desc.program_va, root_va, setup_va,
+      launcher_a, sizeof(launcher_a), &launcher_a_size));
+   CHECK(launcher_a_size > prefix.length &&
+         launcher_a_size <= sizeof(launcher_a));
+   uint8_t carrier[2][AGX3_COPY_MAX_LENGTH];
+   uint8_t carrier_length[2];
+   CHECK(agx3_copy_encode_reg_to_uniform(
+      AGX_ISA_ENCODING_AGX3B,
+      AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF,
+      AGX3_G17P_GRAPHICS_ROOT_BASE_HALF, false, 0, carrier[0],
+      &carrier_length[0]));
+   CHECK(agx3_copy_encode_reg_to_uniform(
+      AGX_ISA_ENCODING_AGX3B,
+      AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF + 2,
+      AGX3_G17P_GRAPHICS_ROOT_BASE_HALF + 2, false, 0, carrier[1],
+      &carrier_length[1]));
+   CHECK(memcmp(launcher_a + prefix.length, carrier[0],
+                carrier_length[0]) == 0);
+   CHECK(memcmp(launcher_a + prefix.length + carrier_length[0], carrier[1],
+                carrier_length[1]) == 0);
+   CHECK(launcher_a_size ==
+         prefix.length + carrier_length[0] + carrier_length[1] +
+            AGX_IOTO_STATE_TAIL_TYPE0_SIZE +
+            AGX_IOTO_G17P_DEFAULT_PROFILE_PREFIX_SIZE +
+            AGX_IOTO_PRESHADER_PRELUDE_SIZE +
+            AGX_IOTO_PRESHADER_BRANCH_SIZE);
+   uint8_t expected_branch[AGX_IOTO_PRESHADER_BRANCH_SIZE];
+   const uint64_t branch_pc =
+      rooted_desc.program_va + launcher_a_size - sizeof(expected_branch);
+   const uint64_t branch_displacement =
+      (setup_va - branch_pc) & ((UINT64_C(1) << 48) - 1);
+   CHECK(agx_ioto_preshader_pack_branch(
+      AGX_CHIP_G17P, branch_displacement, false, expected_branch));
+   CHECK(memcmp(launcher_a + launcher_a_size - sizeof(expected_branch),
+                expected_branch, sizeof(expected_branch)) == 0);
+   CHECK(agx3_g17p_graphics_external_launcher_generate(
+      AGX_CHIP_G17P, &rooted_desc, rooted_desc.program_va,
+      root_va + 0x1000, setup_va, launcher_b, sizeof(launcher_b),
+      &launcher_b_size));
+    CHECK(launcher_a_size == launcher_b_size);
+    CHECK(memcmp(launcher_a, launcher_b, launcher_a_size) != 0);
+
+    /* The linked shader owns one fully composed launcher template. Recording a
+     * draw only relocates its root prefix and terminal PC-relative branch; the
+     * result must remain byte-identical to the authoritative full composer. */
+    struct agx3_g17p_graphics_external_launcher_template launcher_template;
+    CHECK(agx3_g17p_graphics_external_launcher_template_generate(
+       AGX_CHIP_G17P, &rooted_desc, setup_va, &launcher_template));
+    uint8_t relocated_a[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+    uint8_t relocated_b[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+    size_t relocated_a_size = 0, relocated_b_size = 0;
+    CHECK(agx3_g17p_graphics_external_launcher_template_relocate(
+       AGX_CHIP_G17P, &launcher_template, rooted_desc.program_va, root_va,
+       setup_va, relocated_a, sizeof(relocated_a), &relocated_a_size));
+    CHECK(agx3_g17p_graphics_external_launcher_template_relocate(
+       AGX_CHIP_G17P, &launcher_template, rooted_desc.program_va,
+       root_va + 0x1000, setup_va, relocated_b, sizeof(relocated_b),
+       &relocated_b_size));
+    CHECK(relocated_a_size == launcher_a_size);
+    CHECK(relocated_b_size == launcher_b_size);
+    CHECK(memcmp(relocated_a, launcher_a, launcher_a_size) == 0);
+    CHECK(memcmp(relocated_b, launcher_b, launcher_b_size) == 0);
+
+    /* A root outside the template's compact LDIMM length class must refuse
+     * transactionally so HK can retain the qualified inline fallback. */
+    memset(relocated_a, 0xa5, sizeof(relocated_a));
+    const size_t refused_written = SIZE_MAX;
+    relocated_a_size = refused_written;
+    CHECK(!agx3_g17p_graphics_external_launcher_template_relocate(
+       AGX_CHIP_G17P, &launcher_template, rooted_desc.program_va,
+       UINT64_C(0x18000000080), setup_va, relocated_a, sizeof(relocated_a),
+       &relocated_a_size));
+    CHECK(relocated_a_size == refused_written);
+    for (unsigned i = 0; i < sizeof(relocated_a); ++i)
+       CHECK(relocated_a[i] == 0xa5);
+
+    CHECK(!agx3_g17p_graphics_external_launcher_generate(
+       AGX_CHIP_G17P, &rooted_desc, rooted_desc.program_va, root_va, 0,
+       launcher_a, sizeof(launcher_a), &launcher_a_size));
+   CHECK(!agx3_g17p_graphics_external_setup_suffix_generate(
+      AGX_CHIP_G17S, &rooted_desc, external_suffix,
+      sizeof(external_suffix), &external_suffix_size));
+
+   /* The carrier is outside ordinary linked-shader uniform ownership.  A
+    * shader which genuinely consumes the final four halves keeps the proven
+    * inline path; external generation must fail without changing that path. */
+   struct agx3_ioto_uniform_range carrier_overlap = {
+      .start_halfs = AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF,
+      .size_halfs = 4,
+      .address = 24,
+   };
+   struct agx3_g17p_graphics_program_desc overlap_desc = rooted_desc;
+   overlap_desc.uniform_ranges = &carrier_overlap;
+   overlap_desc.uniform_range_count = 1;
+   CHECK(!agx3_g17p_graphics_external_setup_suffix_generate(
+      AGX_CHIP_G17P, &overlap_desc, external_suffix,
+      sizeof(external_suffix), &external_suffix_size));
+   CHECK(!agx3_g17p_graphics_external_launcher_generate(
+      AGX_CHIP_G17P, &overlap_desc, overlap_desc.program_va, root_va,
+      setup_va, launcher_a, sizeof(launcher_a), &launcher_a_size));
+   CHECK(agx3_g17p_graphics_program_template_generate(
+      AGX_CHIP_G17P, &overlap_desc, &rooted_template));
+
    uint16_t blend_base = UINT16_C(0xa5a5);
    CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 0,
                                                  &blend_base));
@@ -287,6 +497,26 @@ main(void)
       AGX_CHIP_G17P, &compositor_desc, &compositor_program));
    CHECK(compositor_program.length >
          AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE);
+   uint8_t direct_program[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   memset(direct_program, 0xa5, sizeof(direct_program));
+   size_t direct_written = SIZE_MAX;
+   CHECK(agx3_g17p_graphics_program_write_unpublished(
+      AGX_CHIP_G17P, &compositor_desc, direct_program,
+      sizeof(direct_program), &direct_written));
+   CHECK(direct_written == compositor_program.length);
+   CHECK(memcmp(direct_program, compositor_program.bytes,
+                direct_written) == 0);
+   CHECK(direct_program[direct_written] == 0xa5);
+
+   const size_t successful_written = direct_written;
+   CHECK(!agx3_g17p_graphics_program_write_unpublished(
+      AGX_CHIP_G17P, &compositor_desc, direct_program,
+      compositor_program.length - 1, &direct_written));
+   CHECK(direct_written == successful_written);
+   CHECK(!agx3_g17p_graphics_program_write_unpublished(
+      AGX_CHIP_G17P, &compositor_desc, NULL, sizeof(direct_program),
+      &direct_written));
+   CHECK(direct_written == successful_written);
    const struct agx3_g17p_graphics_program compositor_baseline =
       compositor_program;
    struct agx3_g17p_graphics_program_desc mixed_desc = compositor_desc;
@@ -348,6 +578,24 @@ main(void)
    CHECK(webgl_vertex_program.length <= webgl_vertex_bound);
    const struct agx3_g17p_graphics_program webgl_vertex_baseline =
       webgl_vertex_program;
+   /* Vertex state uses a fixed SPECLM tail. Framebuffer imageblock geometry
+    * is a fragment-only dependency, so every such variation must remain
+    * byte-identical and may share one exact command-buffer program. */
+   for (unsigned samples = 1; samples <= 8; samples *= 2) {
+      for (unsigned sample_size_B = 4; sample_size_B <= 16;
+           sample_size_B *= 2) {
+         webgl_vertex_desc.imageblock.nr_samples = samples;
+         webgl_vertex_desc.imageblock.sample_size_B = sample_size_B;
+         webgl_vertex_desc.imageblock.tile_size_px =
+            sample_size_B * samples <= 8 ? 32 : 16;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &webgl_vertex_desc, &webgl_vertex_program));
+         CHECK(webgl_vertex_program.length == webgl_vertex_baseline.length);
+         CHECK(memcmp(webgl_vertex_program.bytes,
+                      webgl_vertex_baseline.bytes,
+                      webgl_vertex_program.length) == 0);
+      }
+   }
    for (unsigned i = 0; i < webgl_vertex_range_count; ++i) {
       webgl_vertex_ranges[i].address += 0x40;
       CHECK(agx3_g17p_graphics_program_generate(
@@ -356,6 +604,108 @@ main(void)
       CHECK(memcmp(webgl_vertex_program.bytes, webgl_vertex_baseline.bytes,
                    webgl_vertex_program.length) != 0);
       webgl_vertex_ranges[i].address -= 0x40;
+   }
+
+   /* AGX3 IOTO programs are command-buffer-local, but their loader schedule
+    * is not: independently allocated ranges may move while their program
+    * shape remains identical.  Exercise 10,000 such address sets and require
+    * relocation to reproduce the full generator byte for byte. */
+   struct agx3_ioto_uniform_range template_ranges[] = {
+      {.start_halfs = 8, .size_halfs = 4,
+       .address = UINT64_C(0x4000012340)},
+      {.start_halfs = 12, .size_halfs = 2,
+       .address = UINT64_C(0x4000212340)},
+      {.start_halfs = 14, .size_halfs = 4,
+       .address = UINT64_C(0x4000412340)},
+      {.start_halfs = 0, .size_halfs = 8,
+       .address = UINT64_C(0x4000612340)},
+      {.start_halfs = 28, .size_halfs = 16,
+       .address = UINT64_C(0x4000812340)},
+      {.start_halfs = 72, .size_halfs = 2,
+       .address = UINT64_C(0x4000a12340)},
+   };
+   struct agx3_g17p_graphics_program_desc template_desc = webgl_vertex_desc;
+   template_desc.uniform_ranges = template_ranges;
+   struct agx3_g17p_graphics_program_template program_template;
+   CHECK(agx3_g17p_graphics_program_template_generate(
+      AGX_CHIP_G17P, &template_desc, &program_template));
+   CHECK(program_template.relocation_count ==
+         sizeof(template_ranges) / sizeof(template_ranges[0]));
+
+   uint32_t random = UINT32_C(0x81418a2d);
+   for (unsigned iteration = 0; iteration < 10000; ++iteration) {
+      struct agx3_ioto_uniform_range moved[ARRAY_SIZE(template_ranges)];
+      memcpy(moved, template_ranges, sizeof(moved));
+      for (unsigned i = 0; i < ARRAY_SIZE(moved); ++i) {
+         random = random * UINT32_C(1664525) + UINT32_C(1013904223);
+         moved[i].address = UINT64_C(0x5000012340) +
+                            (uint64_t)i * UINT64_C(0x20000000) +
+                            (uint64_t)(random & 0xff) * UINT64_C(0x20000);
+      }
+
+      struct agx3_g17p_graphics_program_desc moved_desc = template_desc;
+      moved_desc.uniform_ranges = moved;
+      struct agx3_g17p_graphics_program reference;
+      CHECK(agx3_g17p_graphics_program_generate(
+         AGX_CHIP_G17P, &moved_desc, &reference));
+
+      uint8_t relocated[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+      uint16_t relocated_size = 0;
+      CHECK(agx3_g17p_graphics_program_template_relocate(
+         AGX_CHIP_G17P, &template_desc, &moved_desc, &program_template,
+         relocated, sizeof(relocated), &relocated_size));
+      CHECK(relocated_size == reference.length);
+      CHECK(memcmp(relocated, reference.bytes, reference.length) == 0);
+   }
+
+   /* Moving two formerly independent ranges into the 16-bit base-address
+    * reuse window changes the loader schedule and must not be patched. */
+   struct agx3_ioto_uniform_range merged[ARRAY_SIZE(template_ranges)];
+   memcpy(merged, template_ranges, sizeof(merged));
+   merged[1].address = merged[0].address + 0x100;
+   struct agx3_g17p_graphics_program_desc merged_desc = template_desc;
+   merged_desc.uniform_ranges = merged;
+   uint8_t refused[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   uint16_t refused_size = UINT16_C(0xa5a5);
+   CHECK(!agx3_g17p_graphics_program_template_relocate(
+      AGX_CHIP_G17P, &template_desc, &merged_desc, &program_template,
+      refused, sizeof(refused), &refused_size));
+   CHECK(refused_size == UINT16_C(0xa5a5));
+
+   /* Large ranges cross allocator rounds and therefore materialize the same
+    * source more than once after the address cache is cleared.  Every such
+    * site must relocate, not only the first LDIMM pair for each range. */
+   struct agx3_ioto_uniform_range rollover_ranges[] = {
+      {.start_halfs = 0, .size_halfs = 256,
+       .address = UINT64_C(0x4001012340)},
+      {.start_halfs = 256, .size_halfs = 256,
+       .address = UINT64_C(0x4002012340)},
+   };
+   struct agx3_g17p_graphics_program_desc rollover_desc = template_desc;
+   rollover_desc.uniform_ranges = rollover_ranges;
+   rollover_desc.uniform_range_count = ARRAY_SIZE(rollover_ranges);
+   struct agx3_g17p_graphics_program_template rollover_template;
+   CHECK(agx3_g17p_graphics_program_template_generate(
+      AGX_CHIP_G17P, &rollover_desc, &rollover_template));
+   CHECK(rollover_template.relocation_count > ARRAY_SIZE(rollover_ranges));
+   for (unsigned iteration = 0; iteration < 1000; ++iteration) {
+      struct agx3_ioto_uniform_range moved[ARRAY_SIZE(rollover_ranges)];
+      memcpy(moved, rollover_ranges, sizeof(moved));
+      for (unsigned i = 0; i < ARRAY_SIZE(moved); ++i)
+         moved[i].address += (uint64_t)(iteration + 1) *
+                             (i + 1) * UINT64_C(0x40000);
+      struct agx3_g17p_graphics_program_desc moved_desc = rollover_desc;
+      moved_desc.uniform_ranges = moved;
+      struct agx3_g17p_graphics_program reference;
+      CHECK(agx3_g17p_graphics_program_generate(
+         AGX_CHIP_G17P, &moved_desc, &reference));
+      uint8_t relocated[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+      uint16_t relocated_size;
+      CHECK(agx3_g17p_graphics_program_template_relocate(
+         AGX_CHIP_G17P, &rollover_desc, &moved_desc, &rollover_template,
+         relocated, sizeof(relocated), &relocated_size));
+      CHECK(relocated_size == reference.length);
+      CHECK(memcmp(relocated, reference.bytes, reference.length) == 0);
    }
 
    uint64_t clear_spec = 0, reload_spec = 0, none_spec = 0;
@@ -415,6 +765,17 @@ main(void)
                                            &bg_program));
    CHECK(bg_program.length > 0 &&
          bg_program.length <= AGX_IOTO_G17P_QUAD_CLEAR_PROGRAM_MAX_SIZE);
+   for (unsigned count = 5; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
+      bg.clear_push_halfs = 4 + 8 * count;
+      CHECK(agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                              &bg_program));
+      CHECK(bg_program.length > 0 &&
+            bg_program.length <=
+               AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE);
+   }
+   bg.clear_push_halfs = AGX3_G17P_OCTA_CLEAR_PUSH_HALFS + 8;
+   CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                            &bg_program));
    bg.clear_push_halfs = AGX3_G17P_R11G11B10_MRT_CLEAR_PUSH_HALFS - 1;
    CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
                                             &bg_program));
@@ -432,6 +793,60 @@ main(void)
    CHECK(bg_program.length > 0 &&
          bg_program.length <= AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE);
    bg.sampler_pointer_va = 0;
+   CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                            &bg_program));
+
+   /* Reloaded targets precede cleared ones. Each clear value keeps its
+    * target's eight halves, which start after the texture/sampler pointers
+    * only when at least one target reloads. */
+   CHECK(agx3_g17p_rt0_bg_resource_spec(
+      AGX_CHIP_G17P, AGX3_G17P_RT0_BG_CLEAR_RELOAD, &clear_spec));
+   CHECK(clear_spec == reload_spec);
+   CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_QUAD_CLEAR_PUSH_HALFS, true));
+   CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_QUAD_CLEAR_PUSH_HALFS, false));
+   CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR_RELOAD, AGX3_G17P_RT0_CLEAR_PUSH_HALFS, true));
+   /* Five to eight mixed-format targets: eight halves per clear value. */
+   for (unsigned count = 5; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
+      CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+         AGX3_G17P_RT0_BG_CLEAR, 4 + 8 * count, false));
+      CHECK(agx3_g17p_rt0_bg_shader_resources_match(
+         AGX3_G17P_RT0_BG_CLEAR_RELOAD, 4 + 8 * count, true));
+   }
+   CHECK(!agx3_g17p_rt0_bg_shader_resources_match(
+      AGX3_G17P_RT0_BG_CLEAR, AGX3_G17P_OCTA_CLEAR_PUSH_HALFS + 8, false));
+   bg.sampler_pointer_va = UINT64_C(0x4000020008);
+   bg.clear_value_va = UINT64_C(0x4000010000);
+   bg.op = AGX3_G17P_RT0_BG_CLEAR_RELOAD;
+   for (unsigned count = 2; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
+      bg.clear_push_halfs = 4 + 8 * count;
+      for (unsigned reloads = 1; reloads < count; ++reloads) {
+         bg.clear_start_halfs = 4 + 8 * reloads;
+         CHECK(agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                                 &bg_program));
+         CHECK(bg_program.length > 0 &&
+               bg_program.length <=
+                  (count > 4 ? AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE
+                             : AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE));
+      }
+      bg.clear_start_halfs = 4;
+      CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                               &bg_program));
+      bg.clear_start_halfs = 4 + 8 * count;
+      CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                               &bg_program));
+      bg.clear_start_halfs = 13;
+      CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                               &bg_program));
+   }
+   bg.clear_start_halfs = 12;
+   bg.clear_value_va = 0;
+   CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
+                                            &bg_program));
+   bg.clear_value_va = UINT64_C(0x4000010000);
+   bg.texture_pointer_va = 0;
    CHECK(!agx3_g17p_rt0_bg_program_generate(AGX_CHIP_G17P, &bg,
                                             &bg_program));
 
@@ -509,6 +924,26 @@ main(void)
                                               &eot_program));
    }
 
+   /* Three RGBA8 attachments occupy twelve bytes but the tilebuffer rounds
+    * the sample stride to sixteen. The native EOT still publishes offsets
+    * 0, 4 and 8, with no fourth offset operand. */
+   struct agx3_g17p_rt0_eot_program_desc rgba8_three = eot;
+   rgba8_three.shader_binary_size = 164;
+   rgba8_three.staging_halfs = 24;
+   rgba8_three.attachment_count = 3;
+   rgba8_three.imageblock_offset1_B = 4;
+   rgba8_three.imageblock_offset2_B = 8;
+   rgba8_three.imageblock_offset3_B = 0;
+   rgba8_three.imageblock.sample_size_B = 16;
+   rgba8_three.imageblock.tile_size_px = 32 * 32;
+   CHECK(agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &rgba8_three, &eot_program));
+   CHECK(eot_program.length > 0 &&
+         eot_program.length <= AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE);
+   rgba8_three.imageblock.sample_size_B = 12;
+   CHECK(!agx3_g17p_rt0_eot_program_generate(
+      AGX_CHIP_G17P, &rgba8_three, &eot_program));
+
    /* Two and three RGBA32 targets retain the same sparse per-attachment
     * offset ABI, with only their actual descriptor and staging counts. */
    for (unsigned count = 2; count <= 3; ++count) {
@@ -539,6 +974,96 @@ main(void)
       raw.pbe_argument_va = UINT64_C(0xffffffffffe0);
       CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &raw,
                                               &eot_program));
+   }
+
+   /* Targets of arbitrary formats keep the multi-target program and offset
+    * uniforms, but each target may sit at any offset inside the sample. */
+   for (unsigned count = 2; count <= AGX3_G17P_MRT_MAX_TARGETS; ++count) {
+      struct agx3_g17p_rt0_eot_program_desc mixed = eot;
+      static const uint8_t offsets[AGX3_G17P_MRT_MAX_TARGETS] = {
+         16, 24, 0, 8, 32, 40, 48, 56};
+      mixed.shader_binary_size = 32 + 44 * count;
+      mixed.staging_halfs = 8 * count;
+      mixed.attachment_count = count;
+      for (unsigned rt = 0; rt < AGX3_G17P_MRT_MAX_TARGETS; ++rt)
+         *eot_offset(&mixed, rt) = rt < count ? offsets[rt] : 0;
+      mixed.imageblock.sample_size_B = count > 4 ? 64 : 32;
+      mixed.imageblock.tile_size_px = count > 4 ? 16 * 16 : 32 * 16;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mixed,
+                                              &eot_program));
+      mixed.mixed_mrt = true;
+      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &mixed,
+                                             &eot_program));
+      /* Each target beyond the second adds one offset LDIMM and two COPYs. */
+      CHECK(eot_program.length > 0 &&
+            eot_program.length <= (count > 4
+                                      ? AGX_IOTO_G17P_OCTA_EOT_PROGRAM_MAX_SIZE
+                                      : 144));
+
+      struct agx3_g17p_rt0_eot_program_desc bad = mixed;
+      bad.imageblock_offset1_B = mixed.imageblock.sample_size_B;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                              &eot_program));
+      bad = mixed;
+      if (count < AGX3_G17P_MRT_MAX_TARGETS) {
+         *eot_offset(&bad, count) = 4;
+         CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                                 &eot_program));
+      }
+      bad = mixed;
+      bad.staging_halfs -= 8;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                              &eot_program));
+      /* The multisample program has the same shape; the imageblock carries
+       * the count. */
+      if (count <= 4) {
+         bad = mixed;
+         bad.imageblock.nr_samples = 2;
+         bad.imageblock.tile_size_px = 16 * 16;
+         CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                                &eot_program));
+      }
+      bad = mixed;
+      bad.imageblock.nr_samples = 3;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                              &eot_program));
+      bad = mixed;
+      bad.pbe_argument_va = UINT64_C(0xffffffffffe0);
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &bad,
+                                              &eot_program));
+   }
+
+   /* dEQP-VK.renderpasses.*.attachment.8.620 stores eight targets of an
+    * 80-byte sample. Each offset reaches its uniform unchanged, including
+    * those past 64: Apple's configurePBE writes
+    * ((draw_state >> 12) & 255) % sample_stride, which is the offset itself
+    * for any target inside the sample. */
+   {
+      static const uint8_t offsets[AGX3_G17P_MRT_MAX_TARGETS] = {
+         0, 16, 48, 56, 60, 68, 32, 72};
+      struct agx3_g17p_rt0_eot_program_desc wide = eot;
+      wide.shader_binary_size = 32 + 44 * 8;
+      wide.staging_halfs = 8 * 8;
+      wide.attachment_count = 8;
+      wide.mixed_mrt = true;
+      wide.imageblock.sample_size_B = 80;
+      wide.imageblock.tile_size_px = 16 * 16;
+      uint8_t loads[2 * AGX3_G17P_MRT_MAX_TARGETS];
+      for (unsigned rt = 0; rt < AGX3_G17P_MRT_MAX_TARGETS; ++rt) {
+         *eot_offset(&wide, rt) = offsets[rt];
+         loads[2 * rt] = 0x0c | ((8 + 2 * rt) >> 1) << 4;
+         loads[2 * rt + 1] = offsets[rt];
+      }
+      CHECK(agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &wide,
+                                               &eot_program));
+      bool found = false;
+      for (size_t at = 0; !found && at + sizeof(loads) <= eot_program.length;
+           ++at)
+         found = !memcmp(eot_program.bytes + at, loads, sizeof(loads));
+      CHECK(found);
+      wide.imageblock_offset7_B = 80;
+      CHECK(!agx3_g17p_rt0_eot_program_generate(AGX_CHIP_G17P, &wide,
+                                                &eot_program));
    }
 
    /* The native layered array EOT is an 84-byte, eight-half program. It keeps

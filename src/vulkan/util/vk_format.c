@@ -39,7 +39,7 @@
  * PIPE_FORMAT_NONE.
  */
 const enum pipe_format vk_format_map[] = {
-   /* Missing R4G4 */
+   [VK_FORMAT_R4G4_UNORM_PACK8] = PIPE_FORMAT_G4R4_UNORM,
    [VK_FORMAT_R4G4B4A4_UNORM_PACK16] = PIPE_FORMAT_A4B4G4R4_UNORM,
    [VK_FORMAT_B4G4R4A4_UNORM_PACK16] = PIPE_FORMAT_A4R4G4B4_UNORM,
    [VK_FORMAT_R5G6B5_UNORM_PACK16] = PIPE_FORMAT_B5G6R5_UNORM,
@@ -276,6 +276,33 @@ vk_format_to_pipe_format(VkFormat vkformat)
          return PIPE_FORMAT_G8B8_G8R8_UNORM;
       case VK_FORMAT_B8G8R8G8_422_UNORM:
          return PIPE_FORMAT_B8G8_R8G8_UNORM;
+      /* The remaining single-plane 4:2:2 formats have no pipe format of their
+       * own: the table has no chroma-first 16-bit entry and nothing for the
+       * 12-bit pack, and the 10/12-bit packs differ from the 16-bit one only in
+       * which bits of each 16-bit word carry the value, not in how the words
+       * are laid out.  They all share one memory layout -- a 2x1 pixel block of
+       * four 16-bit words -- and that block is exactly what the generic
+       * vk_format_* queries need, so map them onto it.
+       *
+       * Leaving them unmapped returned PIPE_FORMAT_NONE, whose description is a
+       * 1x1 block of a single byte.  vk_format_get_blocksize() then answered 1
+       * for an 8-byte texel, vk_format_get_blockwidth() answered 1 for a 2-wide
+       * one, and vk_format_is_compressed() answered false for a subsampled
+       * format -- silently mis-sizing every copy of these images.
+       *
+       * Anything that must tell luma-first from chroma-first, or 10- from 12-
+       * from 16-bit, reads the VkFormat itself (hk_packed_ycbcr_bits(),
+       * hk_packed_ycbcr_luma_first()).  This mapping is deliberately only about
+       * block geometry, and it agrees with the format hk_format_to_pipe_format()
+       * already lays these images out with.
+       */
+      case VK_FORMAT_G10X6B10X6G10X6R10X6_422_UNORM_4PACK16:
+      case VK_FORMAT_B10X6G10X6R10X6G10X6_422_UNORM_4PACK16:
+      case VK_FORMAT_G12X4B12X4G12X4R12X4_422_UNORM_4PACK16:
+      case VK_FORMAT_B12X4G12X4R12X4G12X4_422_UNORM_4PACK16:
+      case VK_FORMAT_G16B16G16R16_422_UNORM:
+      case VK_FORMAT_B16G16R16G16_422_UNORM:
+         return PIPE_FORMAT_R16G16_R16B16_422_UNORM;
       case VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM:
          return PIPE_FORMAT_G8_B8_R8_420_UNORM;
       case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
@@ -449,6 +476,7 @@ static const VkFormat formats[PIPE_FORMAT_COUNT] = {
    MAP_FORMAT_FLOAT(R32G32B32A32)
 
    // other color formats
+   [PIPE_FORMAT_G4R4_UNORM] = VK_FORMAT_R4G4_UNORM_PACK8,
    [PIPE_FORMAT_A4B4G4R4_UNORM] = VK_FORMAT_R4G4B4A4_UNORM_PACK16,
    [PIPE_FORMAT_A4R4G4B4_UNORM] = VK_FORMAT_B4G4R4A4_UNORM_PACK16,
    [PIPE_FORMAT_B4G4R4A4_UNORM] = VK_FORMAT_A4R4G4B4_UNORM_PACK16,

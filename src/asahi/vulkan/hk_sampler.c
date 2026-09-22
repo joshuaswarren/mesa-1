@@ -9,6 +9,7 @@
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_instance.h"
+#include "hk_image.h"
 #include "hk_native_sampler.h"
 #include "hk_physical_device.h"
 
@@ -87,7 +88,8 @@ uses_border(const VkSamplerCreateInfo *info)
 }
 
 static enum agx_border_colour
-is_border_color_custom(VkBorderColor color, bool workaround_rgba4)
+is_border_color_custom(VkBorderColor color, bool workaround_rgba4,
+                       bool int_border_custom)
 {
    switch (color) {
    case VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK:
@@ -96,6 +98,16 @@ is_border_color_custom(VkBorderColor color, bool workaround_rgba4)
        * formats to worry about.
        */
       return workaround_rgba4;
+
+   case VK_BORDER_COLOR_INT_OPAQUE_WHITE:
+   case VK_BORDER_COLOR_INT_OPAQUE_BLACK:
+      /* Native scaled views sample a normalized twin and rescale in the
+       * shader; the hardware's opaque white there is the format maximum,
+       * while the integer border means the texel value one
+       * (pipeline.*.sampler.*.a2r10g10b10_uscaled_pack32.*clamp_to_border*).
+       * Emulate like a custom border so the shader applies the recorded
+       * integer value. */
+      return int_border_custom;
 
    case VK_BORDER_COLOR_INT_CUSTOM_EXT:
    case VK_BORDER_COLOR_FLOAT_CUSTOM_EXT:
@@ -109,9 +121,9 @@ is_border_color_custom(VkBorderColor color, bool workaround_rgba4)
 /* Translate an American VkBorderColor into a Canadian agx_border_colour */
 static enum agx_border_colour
 translate_border_color(VkBorderColor color, bool custom_to_1,
-                       bool workaround_rgba4)
+                       bool workaround_rgba4, bool int_border_custom)
 {
-   if (is_border_color_custom(color, workaround_rgba4)) {
+   if (is_border_color_custom(color, workaround_rgba4, int_border_custom)) {
       return custom_to_1 ? AGX_BORDER_COLOUR_OPAQUE_WHITE
                          : AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
    }
@@ -152,7 +164,8 @@ translate_reduction_mode(VkSamplerReductionMode mode)
 static bool
 pack_sampler(const struct hk_physical_device *pdev,
              const struct VkSamplerCreateInfo *info, bool custom_to_1,
-             bool workaround_rgba4, VkSamplerReductionMode reduction_mode,
+             bool workaround_rgba4, bool int_border_custom,
+             VkSamplerReductionMode reduction_mode,
              struct hk_native_sampler_descriptor *out)
 {
    const struct hk_native_sampler_state state = {
@@ -175,7 +188,7 @@ pack_sampler(const struct hk_physical_device *pdev,
       .border_colour =
          uses_border(info)
             ? translate_border_color(info->borderColor, custom_to_1,
-                                     workaround_rgba4)
+                                     workaround_rgba4, int_border_custom)
             : AGX_BORDER_COLOUR_TRANSPARENT_BLACK,
       .reduction_mode = translate_reduction_mode(reduction_mode),
       .pixel_coordinates = info->unnormalizedCoordinates,
@@ -225,10 +238,48 @@ hk_CreateSampler(VkDevice device,
    if (!sampler)
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
-   bool workaround_rgba4 = dev->vk.enabled_features.customBorderColors;
+   sampler->min_filter = info->minFilter;
+   sampler->mag_filter = info->magFilter;
+   sampler->mip_lod_bias = info->mipLodBias;
+   if (sampler->vk.ycbcr_conversion) {
+      sampler->ycbcr = sampler->vk.ycbcr_conversion->state;
+      /* This is a lowering switch on our private copy of the conversion
+       * state, not an echo of the API's forceExplicitReconstruction, and it
+       * stays even though G17P no longer advertises either
+       * CHROMA_RECONSTRUCTION_EXPLICIT bit for these formats.
+       *
+       * On G17P a packed 4:2:2 view is programmed as a plain four-component
+       * word texture -- R8G8B8A8_UNORM or R16G16B16A16_UNORM, see
+       * hk_image_view.c -- because the texture unit does not reconstruct
+       * these formats for us.  Every luma and chroma sample therefore comes
+       * out of hk_shader.c's lowering, and that lowering is reached only
+       * through lower_ycbcr_explicit(), which this flag gates:
+       * lower_packed_ycbcr_center() fires on the txl taps that pass emits,
+       * and the common nir_vk_lower_ycbcr_tex() deliberately skips packed
+       * formats.  Clear the flag and an application's texture() would sample
+       * raw packed words as RGBA with no conversion at all.
+       *
+       * Withdrawing the format features is therefore not a promise that we
+       * stopped reconstructing at luma texel centres; it is a statement that
+       * we no longer guarantee it, which is what "reconstruction is
+       * implementation-defined" means.
+       */
+      if (agx_native_graphics(&dev->dev) && hk_packed_ycbcr_bits(sampler->ycbcr.format))
+         sampler->ycbcr.force_explicit_reconstruction = true;
+      /* Explicit nearest chroma maps luma (i,j) to (i/2,j/2), independent
+       * of chroma location. Linear reconstruction retains the offset. */
+      if (sampler->ycbcr.force_explicit_reconstruction &&
+          sampler->ycbcr.chroma_filter == VK_FILTER_NEAREST)
+         sampler->ycbcr.chroma_reconstruction = false;
+   }
+
+   bool workaround_rgba4 = dev->vk.enabled_features.customBorderColors ||
+                           agx_native_graphics(&dev->dev);
+   bool int_border_custom = agx_native_graphics(&dev->dev);
    bool custom_border =
       uses_border(info) &&
-      is_border_color_custom(info->borderColor, workaround_rgba4);
+      is_border_color_custom(info->borderColor, workaround_rgba4,
+                             int_border_custom);
 
    /* Sanity check the noborder setting. There's no way to recover from it being
     * wrong but at least we can make noise to lint for errors in the driconf.
@@ -250,7 +301,7 @@ hk_CreateSampler(VkDevice device,
    }
 
    struct hk_native_sampler_descriptor samp;
-   if (!pack_sampler(pdev, info, true, workaround_rgba4,
+   if (!pack_sampler(pdev, info, true, workaround_rgba4, int_border_custom,
                      sampler->vk.reduction_mode, &samp)) {
       hk_DestroySampler(device, hk_sampler_to_handle(sampler), pAllocator);
       return hk_sampler_pack_error(dev, info, sampler->vk.reduction_mode,
@@ -284,7 +335,10 @@ hk_CreateSampler(VkDevice device,
     * then just copy the last sampler plane out as far as we need to fill the
     * number of image planes.
     */
-   if (sampler->vk.ycbcr_conversion) {
+   /* Packed conversion fetches raw words; chroma filtering runs in the
+    * shader and does not consume a second sampler/descriptor plane. */
+   if (sampler->vk.ycbcr_conversion &&
+       !(agx_native_graphics(&dev->dev) && hk_packed_ycbcr_bits(sampler->ycbcr.format))) {
       assert(!uses_border(info) &&
              "consequence of VUID-VkSamplerCreateInfo-addressModeU-01646");
 
@@ -297,6 +351,7 @@ hk_CreateSampler(VkDevice device,
          plane2_info.minFilter = chroma_filter;
 
          if (!pack_sampler(pdev, &plane2_info, false, workaround_rgba4,
+                          int_border_custom,
                            sampler->vk.reduction_mode, &samp)) {
             hk_DestroySampler(device, hk_sampler_to_handle(sampler),
                               pAllocator);
@@ -319,7 +374,7 @@ hk_CreateSampler(VkDevice device,
       /* If the sampler uses custom border colours, we need both clamp-to-1
        * and clamp-to-0 variants. We treat these as planes.
        */
-      if (!pack_sampler(pdev, info, false, workaround_rgba4,
+      if (!pack_sampler(pdev, info, false, workaround_rgba4, int_border_custom,
                         sampler->vk.reduction_mode, &samp)) {
          hk_DestroySampler(device, hk_sampler_to_handle(sampler), pAllocator);
          return hk_sampler_pack_error(dev, info, sampler->vk.reduction_mode,
@@ -354,6 +409,7 @@ hk_CreateSampler(VkDevice device,
 
       sampler->custom_border = bc;
       sampler->has_border = true;
+      sampler->border_is_int = vk_border_color_is_int(info->borderColor);
    }
 
    *pSampler = hk_sampler_to_handle(sampler);

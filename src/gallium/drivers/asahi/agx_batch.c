@@ -344,6 +344,38 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
 
    agx_finish_batch_queries(batch, begin_ts, end_ts);
 
+   /* Diagnostic CPU observation after retirement distinguishes an empty
+    * multisample store from a later texture-fetch or resolve problem. */
+   if (!reset && (dev->debug & AGX_DBG_ASYNCTRACE) &&
+       batch->key.nr_cbufs == 1 && batch->key.cbufs[0].texture &&
+       batch->key.cbufs[0].format == PIPE_FORMAT_R8_UNORM &&
+       util_res_sample_count(batch->key.cbufs[0].texture) > 1) {
+      struct agx_resource *rt = agx_resource(batch->key.cbufs[0].texture);
+      const size_t size = MIN2(rt->layout.size_B, rt->bo->size);
+      const uint8_t *map = size <= 4 * 1024 * 1024 ? agx_bo_map(rt->bo) : NULL;
+      if (map) {
+         size_t nonzero = 0, full = 0;
+         size_t first = size, last = 0, quarters[4] = {0}, residues[4] = {0};
+         for (size_t i = 0; i < size; ++i) {
+            nonzero += map[i] != 0;
+            full += map[i] == 0xff;
+            if (map[i]) {
+               first = MIN2(first, i);
+               last = i;
+               quarters[MIN2((i * 4) / size, 3)]++;
+               residues[i % 4]++;
+            }
+         }
+         agx_msg("MSAA image at retire: base=0x%llx size=0x%zx "
+                 "nonzero=%zu full=%zu samples=%u first=0x%zx last=0x%zx "
+                 "quarters=%zu,%zu,%zu,%zu residues4=%zu,%zu,%zu,%zu\n",
+                 (unsigned long long)agx_map_gpu(rt), size, nonzero, full,
+                 util_res_sample_count(&rt->base), first, last,
+                 quarters[0], quarters[1], quarters[2], quarters[3],
+                 residues[0], residues[1], residues[2], residues[3]);
+      }
+   }
+
    if (reset) {
       int handle;
       AGX_BATCH_FOREACH_BO_HANDLE(batch, handle) {
@@ -659,12 +691,14 @@ agx_batch_reads(struct agx_batch *batch, struct agx_resource *rsrc)
     * BO was just added to this batch, so its writer is a hazard too.
     */
    agx_flush_writer_except(batch->ctx, rsrc, batch, "Read from another batch",
-                           false);
+                            false);
 
-   if (rsrc->separate_stencil) {
+   /* A combined depth/stencil read also retains the separate stencil BO.
+    * Its writer may differ after a plane-by-plane blit, so resolve that
+    * dependency before submitting the reader as well. */
+   if (rsrc->separate_stencil)
       agx_flush_writer_except(batch->ctx, rsrc->separate_stencil, batch,
-                              "Read from another batch (stencil)", false);
-   }
+                              "Read stencil from another batch", false);
 }
 
 static void
@@ -947,7 +981,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
     * fences, which also need full records in the same allocation.
     */
    unsigned max_syncs = batch->bo_list.bit_count + 2;
-   unsigned sync_capacity = max_syncs + 2;
+   unsigned sync_capacity = max_syncs + 3;
    unsigned in_sync_count = 0;
    unsigned shared_bo_count = 0;
    struct drm_asahi_sync *syncs =
@@ -1138,6 +1172,72 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
     * Everything still works (but over-synchronizes because this effectively
     * serializes all submissions once any context flushes once).
     */
+   /* The G17P kernel path accepts one hardware command per submission, so a
+    * batch that carries geometry/transform feedback compute work ahead of
+    * its render submits the compute command on its own and makes the render
+    * submission wait on its fence. Other chips keep the combined submission
+    * with its intra-submit barrier.
+    */
+   uint32_t compute_syncobj = 0;
+   const bool split_compute =
+      dev->chip == AGX_CHIP_G17P && compute && render;
+   if (split_compute) {
+      struct util_dynarray compute_cmdbuf = UTIL_DYNARRAY_INIT;
+      struct drm_asahi_sync *compute_syncs =
+         malloc((in_sync_count + 1) * sizeof(*compute_syncs));
+      int ret = compute_syncs ? drmSyncobjCreate(dev->fd, 0, &compute_syncobj)
+                              : -1;
+
+      if (!ret) {
+         memcpy(compute_syncs, syncs, in_sync_count * sizeof(*syncs));
+         compute_syncs[in_sync_count] = (struct drm_asahi_sync){
+            .sync_type = DRM_ASAHI_SYNC_SYNCOBJ,
+            .handle = compute_syncobj,
+         };
+
+         struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
+         util_dynarray_append(&compute_cmdbuf, header);
+         util_dynarray_append(&compute_cmdbuf, *compute);
+
+         struct drm_asahi_submit compute_submit = {
+            .flags = 0,
+            .queue_id = ctx->queue_id,
+            .in_sync_count = in_sync_count,
+            .out_sync_count = 1,
+            .syncs = (uint64_t)(uintptr_t)(compute_syncs),
+            .cmdbuf = (uint64_t)(uintptr_t)(compute_cmdbuf.data),
+            .cmdbuf_size = compute_cmdbuf.size,
+         };
+
+         ret = dev->ops.submit(dev, &compute_submit, &virt);
+      }
+
+      const int compute_errno =
+         ret < -1 ? -ret : (ret ? (errno ? errno : EIO) : 0);
+
+      if (!ret && (dev->debug & AGX_DBG_ASYNCTRACE))
+         agx_cmdtrace_dump_cmdbuf(dev, batch, &compute_cmdbuf,
+                                  "accepted-compute", seqid, 0);
+
+      free(compute_syncs);
+      util_dynarray_fini(&compute_cmdbuf);
+
+      if (ret) {
+         fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT compute failed: %s\n",
+                 strerror(compute_errno));
+         if (compute_syncobj)
+            drmSyncobjDestroy(dev->fd, compute_syncobj);
+         u_rwlock_rdunlock(&screen->destroy_lock);
+         agx_retire_failed_submit(ctx, batch, syncs, shared_bos,
+                                  shared_bo_count, virt.extres, &cmdbuf,
+                                  compute_errno);
+         return;
+      }
+
+      batch_debug(batch, "Render waits on its own compute submission");
+      agx_add_sync(syncs, &in_sync_count, compute_syncobj);
+   }
+
    struct drm_asahi_sync *out_syncs = syncs + in_sync_count;
    assert(in_sync_count + 2 <= sync_capacity);
 
@@ -1189,7 +1289,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                                   : 0;
 
    /* Submit! */
-   if (compute) {
+   if (compute && !split_compute) {
       /* Barrier on previous submission */
       struct drm_asahi_cmd_header header = agx_cmd_header(true, 0, 0);
 
@@ -1310,9 +1410,13 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                                     att.list, att.count);
       }
 
-      /* Barrier on previous submission */
+      /* Barrier on previous submission, or on the compute command that
+       * shares this submission. A split compute is a previous submission.
+       */
+      const bool compute_here = compute && !split_compute;
       struct drm_asahi_cmd_header header = agx_cmd_header(
-         false, compute ? DRM_ASAHI_BARRIER_NONE : 0, compute ? 1 : 0);
+         false, compute_here ? DRM_ASAHI_BARRIER_NONE : 0,
+         compute_here ? 1 : 0);
 
       util_dynarray_append(&cmdbuf, header);
       util_dynarray_append(&cmdbuf, *render);
@@ -1348,12 +1452,16 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
 
    u_rwlock_rdunlock(&screen->destroy_lock);
 
+   /* The render job holds its own reference to the compute fence. */
+   if (compute_syncobj)
+      drmSyncobjDestroy(dev->fd, compute_syncobj);
+
    if (!ret && (dev->debug & AGX_DBG_ASYNCTRACE))
       agx_cmdtrace_dump_cmdbuf(dev, batch, &cmdbuf, "accepted-current",
                                seqid, 0);
 
    if (ret) {
-      if (compute) {
+      if (compute && !split_compute) {
          fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT compute failed: %s\n",
                  strerror(submit_errno));
       }

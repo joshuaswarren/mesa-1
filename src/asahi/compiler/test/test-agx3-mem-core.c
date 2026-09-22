@@ -244,6 +244,61 @@ main(void)
       }
    }
 
+   /* Apple Metal 32023.917, applegpu_g17p. A relaxed atomic store/load uses
+    * the ordinary STDEV/LDDEV family with one coherency field set: f75 for a
+    * store and f77 for a load. The plain uint variants differ in exactly the
+    * corresponding bit. */
+   {
+      static const uint8_t expected_store[] = {
+         0xe7, 0x00, 0x54, 0x0c, 0x05, 0x02, 0x20,
+         0x00, 0x11, 0x00, 0x00, 0xa0, 0x11, 0x00,
+      };
+      static const uint8_t expected_load[] = {
+         0x67, 0x00, 0x44, 0x0a, 0x05, 0x85, 0x20,
+         0x00, 0x51, 0x01, 0x00, 0x80, 0x46, 0x00,
+      };
+      struct agx3_mem_desc store = {
+         .data = 12,
+         .width = AGX3_MEM_W32,
+         .mask = 1,
+         .shift = 2,
+         .base_is_uniform = true,
+         .base = 20,
+         .idx_kind = AGX3_MEM_IDX_REG,
+         .idx_reg = 4,
+         .coherent = true,
+      };
+      struct agx3_mem_desc load = {
+         .data = 10,
+         .width = AGX3_MEM_W32,
+         .mask = 1,
+         .shift = 2,
+         .base_is_uniform = true,
+         .base = 20,
+         .idx_kind = AGX3_MEM_IDX_REG,
+         .idx_reg = 10,
+         .idx_kill = true,
+         .slot = 6,
+         .coherent = true,
+         .agx3b_last_load = true,
+      };
+      uint8_t out[AGX3_MEM_MAX_LENGTH], len = 0;
+      if (!agx3_mem_encode_store(AGX_ISA_ENCODING_AGX3B, &store, out, &len) ||
+          len != sizeof(expected_store) || memcmp(out, expected_store, len)) {
+         fprintf(stderr, "FAIL G17P coherent STDEV\n");
+         fail++;
+      } else {
+         pass++;
+      }
+      if (!agx3_mem_encode_load(AGX_ISA_ENCODING_AGX3B, &load, out, &len) ||
+          len != sizeof(expected_load) || memcmp(out, expected_load, len)) {
+         fprintf(stderr, "FAIL G17P coherent LDDEV\n");
+         fail++;
+      } else {
+         pass++;
+      }
+   }
+
    if (fail) {
       fprintf(stderr, "agx3_mem_core: %u of %zu failed\n", fail, mem_vec_count);
       return 1;

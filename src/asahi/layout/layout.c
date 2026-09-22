@@ -330,7 +330,10 @@ ail_make_miptree(struct ail_layout *layout)
       assert(layout->levels == 1 && "Invalid linear layout");
       assert(layout->sample_count_sa == 1 &&
              "Multisampled linear layouts not supported");
-      assert(util_format_get_blockwidth(layout->format) == 1 &&
+      /* Horizontal subsampling retains ordinary rows. get_stride already
+       * measures the row in packed words, and height/layer strides are unchanged. */
+      assert((util_format_get_blockwidth(layout->format) == 1 ||
+              util_format_description(layout->format)->layout == UTIL_FORMAT_LAYOUT_SUBSAMPLED) &&
              "Strided linear block formats unsupported");
       assert(util_format_get_blockheight(layout->format) == 1 &&
              "Strided linear block formats unsupported");

@@ -6,6 +6,7 @@
 #include "../agx_ioto_program_core.h"
 
 #include "../agx_ioto_core.h"
+#include "../../compiler/test/probes/g17p-sparse-mrt.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -515,6 +516,14 @@ test_g17p_no_resource_program(void)
    CHECK(memcmp(output, expected, sizeof(expected)) == 0);
    CHECK(output[sizeof(expected)] == 0xa5);
 
+   uint8_t trusted[sizeof(expected)];
+   size_t trusted_written = 0;
+   CHECK(agx_ioto_g17p_no_resource_program_compose_trusted(
+      UINT64_C(0x10001990240), &tail, trusted, sizeof(trusted),
+      &trusted_written));
+   CHECK(trusted_written == sizeof(expected));
+   CHECK(memcmp(trusted, expected, sizeof(expected)) == 0);
+
    uint8_t before[sizeof(output)];
    memset(before, 0xa5, sizeof(before));
    memcpy(output, before, sizeof(output));
@@ -531,6 +540,8 @@ test_g17p_no_resource_program(void)
 
    tail.length--;
    CHECK(!agx_ioto_g17p_no_resource_program_compose(
+      UINT64_C(0x10001990240), &tail, output, sizeof(expected), &written));
+   CHECK(!agx_ioto_g17p_no_resource_program_compose_trusted(
       UINT64_C(0x10001990240), &tail, output, sizeof(expected), &written));
    CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 23);
    tail.length++;
@@ -582,39 +593,65 @@ test_g17p_fragment_no_resource_program(void)
    CHECK(memcmp(output, expected, sizeof(expected)) == 0);
    CHECK(output[sizeof(expected)] == 0xa5);
 
-   /* applegpu_g17p metadata makes the active partition count observable in
-    * exactly one PIXREL descriptor: p0=0x2f3, p0+p1=0x2c3, and
-    * p0+p1+p2=0x203.  Coverage holds class0 as well.  Compare each complete
-    * composed program so the record position and terminal framing are also
-    * part of the oracle. */
-   static const uint8_t native_pixrel[3][2][6] = {
-      {{0x07,0x02,0x54,0xf3,0x02,0x00},
-       {0x07,0x02,0x54,0xf2,0x02,0x00}},
-      {{0x07,0x02,0x54,0xc3,0x02,0x00},
-       {0x07,0x02,0x54,0xc2,0x02,0x00}},
-      {{0x07,0x02,0x54,0x03,0x02,0x00},
-       {0x07,0x02,0x54,0x02,0x02,0x00}},
+   uint8_t trusted[sizeof(expected)];
+   size_t trusted_written = 0;
+   CHECK(agx_ioto_g17p_fragment_no_resource_program_compose_trusted(
+      UINT64_C(0x10000130640), &tail, 1, trusted, sizeof(trusted),
+      &trusted_written));
+   CHECK(trusted_written == sizeof(expected));
+   CHECK(memcmp(trusted, expected, sizeof(expected)) == 0);
+
+   /* applegpu_g17p metadata makes the consumed colour classes observable in
+    * exactly one PIXREL descriptor: p0=0x2f3, p0+p1=0x2c3, p0+p1+p2=0x203,
+    * and for fragments writing only some targets p1+p2=0x20f and p2=0x23f.
+    * Coverage holds class0 as well.  Compare each complete composed program
+    * so the record position and terminal framing are also part of the
+    * oracle. */
+   static const struct {
+      uint8_t classes;
+      uint8_t pixrel[2][6];
+   } native_pixrel[] = {
+      {1, {{0x07,0x02,0x54,0xf3,0x02,0x00}, {0x07,0x02,0x54,0xf2,0x02,0x00}}},
+      {3, {{0x07,0x02,0x54,0xc3,0x02,0x00}, {0x07,0x02,0x54,0xc2,0x02,0x00}}},
+      {7, {{0x07,0x02,0x54,0x03,0x02,0x00}, {0x07,0x02,0x54,0x02,0x02,0x00}}},
+      {6, {{0x07,0x02,0x54,0x0f,0x02,0x00}, {0x07,0x02,0x54,0x0e,0x02,0x00}}},
+      {4, {{0x07,0x02,0x54,0x3f,0x02,0x00}, {0x07,0x02,0x54,0x3e,0x02,0x00}}},
    };
    const size_t pixrel_offset = sizeof(expected) - 10;
-   for (unsigned partitions = 1; partitions <= 3; ++partitions) {
+   for (unsigned i = 0; i < ARRAY_SIZE(native_pixrel); ++i) {
+      const unsigned classes = native_pixrel[i].classes;
       uint8_t expected_variant[sizeof(expected)];
       memcpy(expected_variant, expected, sizeof(expected_variant));
-      memcpy(expected_variant + pixrel_offset,
-             native_pixrel[partitions - 1][0], 6);
+      memcpy(expected_variant + pixrel_offset, native_pixrel[i].pixrel[0], 6);
       CHECK(agx_ioto_g17p_fragment_no_resource_program_compose(
-         UINT64_C(0x10000130640), &tail, partitions, output,
+         UINT64_C(0x10000130640), &tail, classes, output,
          sizeof(expected), &written));
       CHECK(written == sizeof(expected));
       CHECK(memcmp(output, expected_variant, sizeof(expected_variant)) == 0);
 
-      memcpy(expected_variant + pixrel_offset,
-             native_pixrel[partitions - 1][1], 6);
+      memcpy(expected_variant + pixrel_offset, native_pixrel[i].pixrel[1], 6);
       CHECK(agx_ioto_g17p_coverage_fragment_program_compose(
-         UINT64_C(0x10000130640), NULL, 0, NULL, 0, &tail, partitions,
+         UINT64_C(0x10000130640), NULL, 0, NULL, 0, &tail, classes,
          output, sizeof(expected), &written));
       CHECK(written == sizeof(expected));
       CHECK(memcmp(output, expected_variant, sizeof(expected_variant)) == 0);
       CHECK(output[sizeof(expected)] == 0xa5);
+   }
+
+   /* Independent native metadata for holes, including no attachment zero. */
+   for (unsigned i = 0; i < sizeof(g17p_sparse_mrt_oracles) /
+                            sizeof(g17p_sparse_mrt_oracles[0]); ++i) {
+      unsigned release = g17p_sparse_mrt_oracles[i].loader_release;
+      uint8_t expected_variant[sizeof(expected)];
+      memcpy(expected_variant, expected, sizeof(expected_variant));
+      expected_variant[pixrel_offset + 3] = release;
+      expected_variant[pixrel_offset + 4] = release >> 8;
+      CHECK(agx_ioto_g17p_fragment_no_resource_program_compose(
+         UINT64_C(0x10000130640), &tail,
+         g17p_sparse_mrt_oracles[i].partition_mask, output,
+         sizeof(expected), &written));
+      CHECK(written == sizeof(expected));
+      CHECK(!memcmp(output, expected_variant, sizeof(expected_variant)));
    }
 
    uint8_t before[sizeof(output)];
@@ -624,7 +661,7 @@ test_g17p_fragment_no_resource_program(void)
       UINT64_C(0x10000130640), &tail, 0, output, sizeof(expected), &written));
    CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 37);
    CHECK(!agx_ioto_g17p_coverage_fragment_program_compose(
-      UINT64_C(0x10000130640), NULL, 0, NULL, 0, &tail, 4, output,
+      UINT64_C(0x10000130640), NULL, 0, NULL, 0, &tail, 8, output,
       sizeof(expected), &written));
    CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 37);
    CHECK(!agx_ioto_g17p_fragment_no_resource_program_compose(
@@ -678,6 +715,13 @@ test_g17p_resource_program(void)
                 sizeof(terminate)) == 0);
    CHECK(output[written] == 0xa5);
 
+   /* Native coverage/resource loaders can copy a completed load before the
+    * final copy suffix. This has been accepted since the coverage loader
+    * integration; only non-straight-line records are invalid here. */
+   CHECK(agx_ioto_g17p_resource_program_compose(
+      UINT64_C(0x10001990240), copies, sizeof(copies), copies, sizeof(copies),
+      &tail, output, sizeof(output), &written));
+
    uint8_t before[sizeof(output)];
    memcpy(before, output, sizeof(output));
    written = 41;
@@ -688,6 +732,10 @@ test_g17p_resource_program(void)
    CHECK(!agx_ioto_g17p_resource_program_compose(
       UINT64_C(0x10001990240), copies, sizeof(copies) - 1, copies,
       sizeof(copies), &tail, output, sizeof(output), &written));
+   CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 41);
+   CHECK(!agx_ioto_g17p_resource_program_compose(
+      UINT64_C(0x10001990240), terminate, sizeof(terminate), copies, sizeof(copies),
+      &tail, output, sizeof(output), &written));
    CHECK(memcmp(output, before, sizeof(output)) == 0 && written == 41);
    static const uint8_t nop[] = {0x06, 0x00};
    CHECK(!agx_ioto_g17p_resource_program_compose(
@@ -800,6 +848,9 @@ test_g17p_fragment_resource_program(void)
    BG_REJECT(UINT64_C(0x10000130640), pre_copy, sizeof(pre_copy), copies,
              sizeof(copies), NULL, sizeof(expected));
    BG_REJECT(UINT64_C(0x10000130640), copies, sizeof(copies) - 1, copies,
+             sizeof(copies), &tail, sizeof(expected));
+   static const uint8_t bad_pre[] = {0x0e, 0x00, 0x00, 0x00};
+   BG_REJECT(UINT64_C(0x10000130640), bad_pre, sizeof(bad_pre), copies,
              sizeof(copies), &tail, sizeof(expected));
    static const uint8_t bad_copy[] = {0x06, 0x00};
    BG_REJECT(UINT64_C(0x10000130640), pre_copy, sizeof(pre_copy), bad_copy,

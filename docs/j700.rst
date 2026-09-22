@@ -1,0 +1,66 @@
+J700 graphics
+=============
+
+Recorded checkpoint: 2026-09-11
+-------------------------------
+
+The ``j700`` branch of ``aurora-silicon/mesa`` targets MacBook Neo
+(J700 / T8140 / Mac17,5). Merge ``c8d98bcc1000`` retains the existing J700
+work and incorporates DJ's ``agx3`` updates through ``ba7aee4190b``.
+
+The ARM64 build ran on the Neo with kernel ``7.1.6-aurora-neo-gpu1``,
+native DCP scanout, KDE Plasma 6.7.5 X11 and KWin GPU compositing.
+Zink/Honeykrisp gears rendered on the Apple A18 Pro GPU. Qt Quick shell
+rendering remained on software. The X11 cursor workaround is maintained
+in the companion Linux repository at
+``tools/aurora/neo-encoding/desktop/``.
+
+The recorded Asahi suite had 236 passes, two expected failures and three
+existing baseline failures out of 241 tests. Zink format checks and the
+target Ioto8148/indexed-texture groups passed. Native gears rendering does
+not establish reliable GPU recovery after firmware or DMA faults, and DCP
+DPMS resume remains unresolved.
+
+Matching binaries, symbols, hashes and runtime evidence are retained in the
+private ``neo-linux/artifacts/agx3-ba7aee4-20260911/`` campaign. Use its
+manifest when pairing source and binaries; a later VM build may differ.
+
+Device-loss presentation fix
+----------------------------
+
+A later GPU job failure reported by firmware returned
+``VK_ERROR_DEVICE_LOST`` to KWin.
+Mesa continued presenting and waited indefinitely to export a semaphore
+whose payload could never arrive. Gears kept rendering into its buffers,
+but KWin stopped updating the desktop. The screen locker appeared after the
+original GPU failure.
+
+The fix rejects WSI presentation on a lost device and checks device
+loss during pending DRM syncobj waits. Healthy waits preserve their original
+deadline. The expanded empty-submit regression fails against the prior
+runtime and passes with the fix. Four sync-provider cases also pass: loss
+before a wait, loss during an infinite wait, delayed payload availability,
+and finite timeout. The Asahi plus Zink suite has 237 passes, two expected
+failures and the same three baseline failures.
+
+The tested runtime is installed separately at
+``/opt/neo-mesa-wsi-device-loss-20260911``. Live process-local submit-error
+injection verified that the indefinite wait is removed, but KWin still needs
+to be restarted to resume presentation. The companion Linux repository's
+``neo-kwin-device-loss-recovery`` service handles explicit errors from the
+current KWin process and bounds compositor shutdown to five seconds. The
+live recovery test restored active compositing in 6.5 seconds. Test injection
+is removed from the final runtime configuration.
+
+This fixes recovery from the observed desktop freeze; the cause of the
+originating GPU job failure and Zink's post-loss context teardown loop remain
+unresolved. Exact source patches, runtime hashes, symbols and evidence
+are in ``neo-linux/artifacts/kwin-freeze-20260911/``.
+
+Historical checkpoint
+---------------------
+
+.. toctree::
+   :maxdepth: 1
+
+   j700-checkpoint-20260910

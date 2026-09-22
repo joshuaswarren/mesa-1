@@ -10,8 +10,27 @@
 #include "asahi/lib/agx_ioto_core.h"
 #include "asahi/lib/agx_tilebuffer.h"
 #include "asahi/compiler/agx3_binder.h"
+#include "util/format/u_format.h"
 
 #include <string.h>
+
+bool
+hk_agx3_g17p_precompiled_data_pack(const void *data, size_t size,
+                                 void *output, size_t capacity, size_t *written)
+{
+   if (!data || !output || !written || !size ||
+       size > HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE)
+      return false;
+
+   const size_t padded = (size + 3u) & ~(size_t)3u;
+   if (padded > capacity)
+      return false;
+
+   memmove(output, data, size);
+   memset((uint8_t *)output + size, 0, padded - size);
+   *written = padded;
+   return true;
+}
 
 bool
 hk_agx3_ioto_program_generate(
@@ -84,6 +103,26 @@ hk_agx3_g17p_rt0_tile_layout_supported(struct agx_tilebuffer_layout *tib)
     */
    struct agx_tilebuffer_layout physical = *tib;
    physical.layered = false;
+   /* Spilled attachments are accessed by the fragment epilog in memory.
+    * Validate only the in-tile targets here, retaining allocation and offsets. */
+   for (unsigned rt = 0; rt < AGX_MAX_RENDER_TARGETS; ++rt) {
+      if (!physical.spilled[rt])
+         continue;
+      if (physical.logical_format[rt] == PIPE_FORMAT_NONE)
+         return false;
+      physical.logical_format[rt] = PIPE_FORMAT_NONE;
+      physical.spilled[rt] = false;
+   }
+
+   /* Attachmentless rendering learns its sample count at draw time. An empty
+    * pass may end before that happens. Validate its physical layout as 1x,
+    * without changing the deferred sample count in the render state. The
+    * physical validator still rejects any other occupied render target.
+    */
+   if (physical.nr_samples == 0 && physical.sample_size_B == 0 &&
+       physical.logical_format[0] == PIPE_FORMAT_NONE)
+      physical.nr_samples = 1;
+
    return agx_g17p_rt0_tile_layout_supported(&physical);
 }
 
@@ -92,7 +131,25 @@ hk_agx3_g17p_direct_color_resolve_supported(
    struct agx_tilebuffer_layout *tib, unsigned color_attachment_count,
    bool has_resolve_target, bool average_resolve, bool store_source)
 {
-   return tib && (tib->nr_samples == 2 || tib->nr_samples == 4) &&
+   if (!tib)
+      return false;
+
+   /* A 32-bit float target's lane is stored raw, and resolving it on the
+    * way out averages the bit patterns: an R32 or RG32 float view resolved
+    * this way reads back values like 4e22 on an A18 Pro. Keep the samples
+    * and resolve after the pass instead. */
+   const enum pipe_format format = tib->logical_format[0];
+   if (util_format_is_float(format) &&
+       util_format_get_component_bits(format, UTIL_FORMAT_COLORSPACE_RGB, 0) ==
+          32)
+      return false;
+
+   /* An RGB9E5 tile keeps each sample's packed word, which averages no
+    * better. */
+   if (format == PIPE_FORMAT_R9G9B9E5_FLOAT)
+      return false;
+
+   return (tib->nr_samples == 2 || tib->nr_samples == 4) &&
           color_attachment_count == 1 && has_resolve_target &&
           average_resolve && !store_source &&
           hk_agx3_g17p_rt0_tile_layout_supported(tib);
@@ -127,8 +184,6 @@ hk_agx3_g17p_graphics_state_tail(
       0x77, 0x00, 0x2a, 0x41, 0x00, 0x00, 0x00, 0x00,
    };
 
-   struct agx_ioto_state ldshdr = {0};
-   ldshdr.f[0] = desc->shader_va;
    /* Native G17P graphics code containers reserve an 0x80-byte framing area
     * before the 64-byte-aligned main code. LDSHDR f1 is the saturated number
     * of complete 0x80-byte spans in that padded main-code region. Valid
@@ -139,8 +194,7 @@ hk_agx3_g17p_graphics_state_tail(
    const uint64_t padded_shader_size =
       ((uint64_t)desc->shader_binary_size + 63) & ~UINT64_C(63);
    const uint64_t fetch_span = padded_shader_size >> 7;
-   ldshdr.f[1] = fetch_span > 3 ? 3 : fetch_span;
-   ldshdr.f[23] = 1;
+   const uint32_t ldshdr_fetch_span = fetch_span > 3 ? 3 : fetch_span;
 
    struct agx_ioto_state spectpr = {0};
    /* The valid cold G1a no-vary fragment and the matched Apple Metal
@@ -173,9 +227,9 @@ hk_agx3_g17p_graphics_state_tail(
    } else {
       memcpy(staged.bytes, vertex_speclm, AGX_IOTO_SPECLM_SIZE);
    }
-   if (!agx_ioto_state_pack_ldshdr(AGX_CHIP_G17P, &ldshdr,
-                                   staged.bytes + AGX_IOTO_SPECLM_SIZE,
-                                   AGX_IOTO_LDSHDR_SIZE) ||
+   if (!agx_ioto_g17p_compiler_ldshdr_pack(
+          desc->shader_va, ldshdr_fetch_span,
+          staged.bytes + AGX_IOTO_SPECLM_SIZE, AGX_IOTO_LDSHDR_SIZE) ||
        !agx_ioto_state_pack_spectpr(
           AGX_CHIP_G17P, &spectpr,
           staged.bytes + AGX_IOTO_SPECLM_SIZE + AGX_IOTO_LDSHDR_SIZE,
@@ -191,17 +245,16 @@ hk_agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, size_t *size)
 {
+   if (range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
+      return false;
    return agx3_g17p_graphics_program_bound(chip, ranges, range_count, size);
 }
 
-static bool
-hk_agx3_basic_graphics_program_generate(
-   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
-   struct hk_agx3_g17p_graphics_program *program)
+static struct agx3_g17p_graphics_program_desc
+hk_agx3_g17p_shared_graphics_desc(
+   const struct hk_agx3_g17p_graphics_program_desc *desc)
 {
-   if (!program || !desc)
-      return false;
-   const struct agx3_g17p_graphics_program_desc shared_desc = {
+   return (struct agx3_g17p_graphics_program_desc){
       .program_va = desc->program_va,
       .shader_va = desc->shader_va,
       .uniform_ranges = desc->uniform_ranges,
@@ -213,19 +266,91 @@ hk_agx3_basic_graphics_program_generate(
       .compiler_d = desc->compiler_d,
       .fragment = desc->fragment,
       .writes_sample_mask = desc->writes_sample_mask,
-      .colour_partitions = desc->colour_partitions,
+      .colour_classes = desc->colour_classes,
       .imageblock = desc->imageblock,
+      .preloaded_root = desc->preloaded_root,
    };
-   struct agx3_g17p_graphics_program shared;
-   const bool built = chip == AGX_CHIP_G17G
-      ? agx3_g17g_graphics_program_generate(chip, &shared_desc, &shared)
-      : agx3_g17p_graphics_program_generate(chip, &shared_desc, &shared);
-   if (!built)
+}
+
+bool
+hk_agx3_g17p_graphics_root_prefix_generate(
+   enum agx_chip chip, uint64_t root_va,
+   struct agx3_g17p_graphics_root_prefix *prefix)
+{
+   return agx3_g17p_graphics_root_prefix_generate(chip, root_va, prefix);
+}
+
+bool
+hk_agx3_g17p_graphics_external_setup_suffix_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc, void *output,
+   size_t capacity, size_t *written)
+{
+   if (!desc)
       return false;
-   memset(program, 0, sizeof(*program));
-   memcpy(program->bytes, shared.bytes, shared.length);
-   program->length = shared.length;
-   return true;
+
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   return agx3_g17p_graphics_external_setup_suffix_generate(
+      chip, &shared_desc, output, capacity, written);
+}
+
+bool
+hk_agx3_g17p_graphics_external_launcher_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written)
+{
+   if (!desc)
+      return false;
+
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   return agx3_g17p_graphics_external_launcher_generate(
+      chip, &shared_desc, program_va, root_va, setup_va, output, capacity,
+      written);
+}
+
+bool
+hk_agx3_g17p_graphics_external_launcher_template_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc, uint64_t setup_va,
+   struct agx3_g17p_graphics_external_launcher_template *launcher)
+{
+   if (!desc)
+      return false;
+
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   return agx3_g17p_graphics_external_launcher_template_generate(
+      chip, &shared_desc, setup_va, launcher);
+}
+
+bool
+hk_agx3_g17p_graphics_external_launcher_template_relocate(
+   enum agx_chip chip,
+   const struct agx3_g17p_graphics_external_launcher_template *launcher,
+   uint64_t program_va, uint64_t root_va, uint64_t setup_va, void *output,
+   size_t capacity, size_t *written)
+{
+   return agx3_g17p_graphics_external_launcher_template_relocate(
+      chip, launcher, program_va, root_va, setup_va, output, capacity,
+      written);
+}
+
+bool
+hk_agx3_g17p_basic_graphics_program_write_unpublished(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   void *output, size_t capacity, size_t *written)
+{
+   if (!desc)
+      return false;
+
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   return agx3_g17p_graphics_program_write_unpublished(
+      chip, &shared_desc, output, capacity, written);
 }
 
 bool
@@ -233,25 +358,50 @@ hk_agx3_g17p_basic_graphics_program_generate(
    enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
    struct hk_agx3_g17p_graphics_program *program)
 {
-   return chip == AGX_CHIP_G17P &&
-          hk_agx3_basic_graphics_program_generate(chip, desc, program);
+   if (!program || !desc)
+      return false;
+
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   struct agx3_g17p_graphics_program shared;
+   if (!agx3_g17p_graphics_program_generate(chip, &shared_desc, &shared))
+      return false;
+   memcpy(program->bytes, shared.bytes, shared.length);
+   program->length = shared.length;
+   return true;
 }
 
 bool
-hk_agx3_g17g_graphics_program_bound(
-   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
-   size_t range_count, size_t *size)
+hk_agx3_g17p_graphics_program_template_generate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program_template *program)
 {
-   return agx3_g17g_graphics_program_bound(chip, ranges, range_count, size);
+   if (!desc)
+      return false;
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   return agx3_g17p_graphics_program_template_generate(chip, &shared_desc,
+                                                        program);
 }
 
 bool
-hk_agx3_g17g_basic_graphics_program_generate(
-   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
-   struct hk_agx3_g17p_graphics_program *program)
+hk_agx3_g17p_graphics_program_template_relocate(
+   enum agx_chip chip,
+   const struct hk_agx3_g17p_graphics_program_desc *template_desc,
+   const struct hk_agx3_g17p_graphics_program_desc *target_desc,
+   const struct agx3_g17p_graphics_program_template *program,
+   void *output, size_t capacity, uint16_t *written)
 {
-   return chip == AGX_CHIP_G17G &&
-          hk_agx3_basic_graphics_program_generate(chip, desc, program);
+   if (!template_desc || !target_desc)
+      return false;
+   const struct agx3_g17p_graphics_program_desc shared_template =
+      hk_agx3_g17p_shared_graphics_desc(template_desc);
+   const struct agx3_g17p_graphics_program_desc shared_target =
+      hk_agx3_g17p_shared_graphics_desc(target_desc);
+   return agx3_g17p_graphics_program_template_relocate(
+      chip, &shared_template, &shared_target, program, output, capacity,
+      written);
 }
 
 bool
@@ -528,7 +678,7 @@ hk_agx3_g17p_rt0_bg_program_generate(
     * ignore_tib_dependencies. Their release descriptor is native BG 0x200;
     * ordinary FS 0x2f3 releases a different set of pixel classes.
     */
-   if (!agx_ioto_g17p_background_resource_program_compose(
+   if (!agx_ioto_g17p_background_resource_program_compose_trusted(
           desc->program_va, body, copy_offset, body + copy_offset,
           body_size - copy_offset, &tail, staged.bytes, sizeof(staged.bytes),
           &written) ||
@@ -658,7 +808,7 @@ hk_agx3_g17p_rt0_eot_program_generate(
     */
    struct hk_agx3_g17p_rt0_eot_program staged = {0};
    size_t written = 0;
-   if (!agx_ioto_g17p_resource_program_compose(
+   if (!agx_ioto_g17p_resource_program_compose_trusted(
           desc->program_va, body, body_size, copies, 4 * copy_count, &tail,
           staged.bytes, sizeof(staged.bytes), &written) ||
        written > sizeof(staged.bytes))
@@ -729,6 +879,38 @@ hk_agx3_g17p_compute_program_generate(
    staged.length = common.length;
    staged.launch = common.launch;
    *program = staged;
+   return true;
+}
+
+bool
+hk_agx3_g17p_precompiled_data_layout(size_t data_size_B,
+                                     uint32_t *upload_size_B,
+                                     uint16_t *uniform_size_halfs)
+{
+   /* The uniform-range ABI counts 16-bit halves, but G17P can only load an
+    * even number of them.  Leave one even half below UINT16_MAX so rounding
+    * a packed argument block up to a dword cannot wrap the field. */
+   if (!upload_size_B || !uniform_size_halfs || data_size_B == 0 ||
+       data_size_B > (UINT16_MAX - 1u) * 2u)
+      return false;
+
+   const uint32_t aligned = ((uint32_t)data_size_B + 3u) & ~3u;
+   *upload_size_B = aligned;
+   *uniform_size_halfs = aligned / 2u;
+   return true;
+}
+
+bool
+hk_agx3_g17p_compute_program_rebind_published(
+   struct agx3_compute_program *launch, uint64_t published_va)
+{
+   if (!launch || launch->chip != AGX_CHIP_G17P ||
+       !launch->g17p_native_compute_live_bound || !published_va ||
+       published_va > UINT64_C(0xffffffffffff) ||
+       (published_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)))
+      return false;
+
+   launch->program_va = published_va;
    return true;
 }
 
@@ -881,4 +1063,31 @@ hk_agx3_g17s_minimal_compute_dispatch_append(
    struct agx3_compute_dispatch_sink *sink)
 {
    return agx3_g17s_minimal_compute_dispatch_append(program, grid, sink);
+}
+
+bool
+hk_agx3_g17g_graphics_program_bound(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, size_t *size)
+{
+   if (range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
+      return false;
+   return agx3_g17g_graphics_program_bound(chip, ranges, range_count, size);
+}
+
+bool
+hk_agx3_g17g_basic_graphics_program_generate(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   struct hk_agx3_g17p_graphics_program *program)
+{
+   if (chip != AGX_CHIP_G17G || !desc || !program)
+      return false;
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   struct agx3_g17p_graphics_program shared;
+   if (!agx3_g17g_graphics_program_generate(chip, &shared_desc, &shared))
+      return false;
+   memcpy(program->bytes, shared.bytes, shared.length);
+   program->length = shared.length;
+   return true;
 }

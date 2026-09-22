@@ -629,18 +629,69 @@ test_sample_witnesses(void)
         .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .cube = true},
        "05800cb8b0000003010010000100", NULL},
-      {"native cube-array dynamic layer implicit LOD",
+      /* metal-nt -arch applegpu_g17p compute kernels close no sample group:
+       * the same samples in texturecube kernels at level(2.0) and at a
+       * kernel-computed level(l), and a texture2d_array kernel at level(l),
+       * leave f156 clear. */
+      {"compute cube level(2.0)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 128, .slot = 1,
+        .wait_mask = 1, .coord_kill = true, .final = true, .cube = true,
+        .compute_stage = true},
+       "05800cb8b0001300000010080100", NULL},
+      {"compute cube register level",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true,
+        .compute_stage = true},
+       "05800cb8b0000003000010000100", NULL},
+      /* metal-nt -arch applegpu_g17p fragment texturecube and
+       * texturecube_array samples at bias(b[i]) and bias(0.5). */
+      {"native cube register bias",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true},
+       "05800cb8b0001400010010000100", NULL},
+      {"native cube bias(0.5)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .cube = true},
+       "05800cb8b0001101010010020100", NULL},
+      /* metal-nt -arch applegpu_g17p, fragment texturecube_array::sample
+       * with the layer read from a device buffer into a GPR: the layer is
+       * staged with CEM's face (f77=2), with no direct f31/f37 operand. */
+      {"native cube-array GPR layer implicit LOD",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true, .cube = true,
         .array_layer = 22},
-       "05800cb8b00013b5010010000100", NULL},
-      {"native cube-array dynamic layer level zero",
+       "05800cb8b0001004010010000100", NULL},
+      {"native cube-array GPR layer level zero",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
         .lod = AGX3_TEX_LOD_LEVEL, .slot = 1, .wait_mask = 1,
         .coord_kill = true, .final = true, .array = true, .cube = true,
         .array_layer = 22},
-       "05800cb8b00007b7010010000100", NULL},
+       "05800cb8b0005300010010000100", NULL},
+      /* metal-nt -arch applegpu_g17p fragment texturecube_array samples at
+       * l[i] with level(b[j]), bias(b[j]) and bias(0.5). */
+      {"native cube-array GPR layer register level",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b0000803010010000100", NULL},
+      {"native cube-array GPR layer register bias",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS_REGISTER, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b0001800010010000100", NULL},
+      {"native cube-array GPR layer bias(0.5)",
+       {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+        .lod = AGX3_TEX_LOD_BIAS, .lod_x64 = 32, .slot = 1, .wait_mask = 1,
+        .coord_kill = true, .final = true, .array = true, .cube = true,
+        .array_layer = 22},
+       "05800cb8b0009101010010020100", NULL},
       {"native cube comparison",
        {.dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1,
         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
@@ -788,13 +839,16 @@ test_sample_witnesses(void)
    bad.lod_x64 = 0x1000;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
+   /* A driver array's GPR layer is staged, so the bias moves to f29/f37=1
+    * beside f77=2, as in Apple's texture2d_array bias(1.0) fragment
+    * function with a runtime layer: 05800cb8b0000701010010040100. */
    bad.lod_x64 = 32;
    bad.array = true;
    bad.array_layer = 22;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b00005b7010010000102"));
+         hex_eq(bytes, length, "05800cb8b0000701010010020100"));
 
    bad = (struct agx3_tex_sample_desc){
       .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
@@ -1162,6 +1216,8 @@ test_gradient_and_register_bias(void)
    bad.lod_x64 = 32;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
+   /* A driver array's GPR layer is staged with f77=2: exactly Apple's
+    * texture2d_array gradient2d() fragment function with a runtime layer. */
    bad = grad;
    bad.array = true;
    bad.array_layer = 22;
@@ -1169,11 +1225,13 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0000fb5000010000100"));
+         hex_eq(bytes, length, "05800cb8b0000c01000010000100"));
    bad = bias_reg;
    bad.lod_x64 = 32;
    CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                  &length));
+   /* Likewise Apple's texture2d_array bias(b) fragment function with a
+    * runtime layer, which publishes layer and bias with one PACK_SMPIR. */
    bad = bias_reg;
    bad.array = true;
    bad.array_layer = 22;
@@ -1181,8 +1239,11 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &bad, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0000db5010010000100"));
+         hex_eq(bytes, length, "05800cb8b0000800010010000100"));
 
+   /* Apple's texture2d_array fragment functions with a runtime layer, at
+    * level(2.0) and at level(b): the staged layer (f77=2) carries the level
+    * in f29/f37 or the packed bank. */
    struct agx3_tex_sample_desc array_level = grad_apple;
    array_level.array = true;
    array_level.array_layer = 22;
@@ -1191,13 +1252,13 @@ test_gradient_and_register_bias(void)
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0008db6010010000108"));
+         hex_eq(bytes, length, "05800cb8b0000901010010080100"));
    array_level.lod = AGX3_TEX_LOD_REGISTER;
    array_level.lod_x64 = 0;
    CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &array_level, bytes,
                                 &length));
    CHECK(length == 14 &&
-         hex_eq(bytes, length, "05800cb8b0008fb4010010000100"));
+         hex_eq(bytes, length, "05800cb8b0000801010010000100"));
 
    bad = grad_apple;
    bad.array = true;
@@ -1545,6 +1606,9 @@ test_3d_fetch(void)
    d.sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE;
    d.sampler_value = 0;
    d.register_lod = true;
+   CHECK(agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                               &length));
+   d.lod_x64 = 64;
    CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3B, &d, bytes,
                                 &length));
    return 0;
@@ -2289,13 +2353,13 @@ test_cube_coordinate_stage(void)
                                false, true, bytes, &len));
    CHECK(len == sizeof(native) && !memcmp(bytes, native, len));
    /* applegpu-nt 32023.917 depthcube_array::sample_compare combines CEM's
-    * face and discarded 32-bit layer r3 in one distinct PACK_SMPIR. */
+    * face and discarded layer half3 in one distinct PACK_SMPIR. */
    static const uint8_t native_shadow_array[] = {
       0x17,0x05,0x54,0x06,0x00,0x06,
       0x08,0x00,0xf0,0xc0,0x29,0x00,
    };
-   CHECK(agx3_tex_stage_cube_array_shadow(
-      AGX_ISA_ENCODING_AGX3B, 6, 1, 0, false, true, bytes, &len));
+   CHECK(agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 2, 3, 1, 0, false, true, bytes, &len));
    CHECK(len == sizeof(native_shadow_array) &&
          !memcmp(bytes, native_shadow_array, len));
    /* G17G carries a cube sample's per-lane level in this same publication,
@@ -2307,14 +2371,14 @@ test_cube_coordinate_stage(void)
    static const uint8_t g17g_cube_z_lod[] = {
       0x37,0x02,0x00,0x0a,0x25,0x00,0xaa,0x0a,0xc0,0x00,0x60,0x30,0x09,0x00,
    };
-   CHECK(agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3C, false, 2, 3, 1, 0,
+   CHECK(agx3_tex_stage_cube_z_lod_g17g(AGX_ISA_ENCODING_AGX3C, false, 2, 3, 1, 0,
                                    false, true, false, true, bytes, &len));
    CHECK(len == sizeof(g17g_cube_z_lod) &&
          !memcmp(bytes, g17g_cube_z_lod, len));
    static const uint8_t g17g_cube_array_z_lod[] = {
       0x37,0x02,0x00,0x4a,0x25,0x00,0xaa,0x0a,0xc0,0x02,0x61,0x40,0x29,0x00,
    };
-   CHECK(agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3C, true, 20, 11, 1, 0,
+   CHECK(agx3_tex_stage_cube_z_lod_g17g(AGX_ISA_ENCODING_AGX3C, true, 20, 11, 1, 0,
                                    false, true, false, true, bytes, &len));
    CHECK(len == sizeof(g17g_cube_array_z_lod) &&
          !memcmp(bytes, g17g_cube_array_z_lod, len));
@@ -2336,13 +2400,76 @@ test_cube_coordinate_stage(void)
 
    /* G17P has no witness for the pair, and a cube array's word operand must
     * stay even. */
-   CHECK(!agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3B, false, 2, 3, 1, 0,
+   CHECK(!agx3_tex_stage_cube_z_lod_g17g(AGX_ISA_ENCODING_AGX3B, false, 2, 3, 1, 0,
                                     false, true, false, true, bytes, &len));
-   CHECK(!agx3_tex_stage_cube_z_lod(AGX_ISA_ENCODING_AGX3C, true, 21, 11, 1, 0,
+   CHECK(!agx3_tex_stage_cube_z_lod_g17g(AGX_ISA_ENCODING_AGX3C, true, 21, 11, 1, 0,
                                     false, true, false, true, bytes, &len));
 
    /* The G17G forms of both stagers are witnessed below (the shadow
     * array/cube set); only the G17P misalignments stay closed here. */
+   /* metal-nt -arch applegpu_g17p, texturecube_array::sample in a kernel at
+    * uint(c.w): flt2int writes the 16-bit layer to half11 (2707540b030cb0080300)
+    * and PACK_SMPIR names that half beside CEM's face half10. */
+   static const uint8_t native_array_face10[] = {
+      0x17,0x05,0x54,0x06,0x00,0x16,
+      0x28,0x00,0xf0,0xc0,0x29,0x00,
+   };
+   CHECK(agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 10, 11, 1, 0, false, true, bytes, &len));
+   CHECK(len == sizeof(native_array_face10) &&
+         !memcmp(bytes, native_array_face10, len));
+
+   /* metal-nt -arch applegpu_g17p register level and bias. A cube publishes
+    * its face and LOD together; a cube array first packs its layer into r0
+    * and publishes that word as the third operand. */
+   static const struct {
+      const char *name;
+      uint16_t face, lod;
+      int packed_layer;
+      const char *hex;
+   } cube_lods[] = {
+      {"kernel texturecube level(c.w)", 10, 11, -1,
+       "1705540600142c00f0c01100"},
+      {"fragment texturecube level/bias(b[i])", 2, 3, -1,
+       "1705540600040c00f0c01100"},
+      {"kernel texturecube_array level(c.x)", 10, 11, 0,
+       "1705540600142c00f0c21700"},
+      {"kernel texturecube_array level(lod[i])", 8, 9, 0,
+       "1705540600102400f0c21700"},
+      {"fragment texturecube_array level/bias(b[j])", 2, 3, 0,
+       "1705540600040c00f0c21700"},
+   };
+   for (unsigned i = 0; i < sizeof(cube_lods) / sizeof(cube_lods[0]); ++i) {
+      const bool packed = cube_lods[i].packed_layer < 0
+         ? agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3B, cube_lods[i].face,
+                                   cube_lods[i].lod, 1, 0, false, true,
+                                   bytes, &len)
+         : agx3_tex_stage_cube_array_lod(
+              AGX_ISA_ENCODING_AGX3B, cube_lods[i].face, cube_lods[i].lod,
+              cube_lods[i].packed_layer, 1, 0, false, true, bytes, &len);
+      if (!packed || !hex_eq(bytes, len, cube_lods[i].hex)) {
+         fprintf(stderr, "cube LOD staging mismatch: %s\n", cube_lods[i].name);
+         return false;
+      }
+   }
+   static const uint8_t native_layer14_r0[] = {
+      0x17,0x05,0x54,0x00,0x03,0x1c,
+      0x00,0x00,0xf0,0x88,0x04,0x00,
+   };
+   CHECK(agx3_tex_pack_ms_array_layer(AGX_ISA_ENCODING_AGX3B, 14, 0, false,
+                                      true, bytes, &len));
+   CHECK(len == sizeof(native_layer14_r0) &&
+         !memcmp(bytes, native_layer14_r0, len));
+   CHECK(!agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3C, 2, 3, 1, 0,
+                                  false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3B, 3, 3, 1, 0,
+                                  false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_lod(AGX_ISA_ENCODING_AGX3B, 2, 3, 1, 0,
+                                  true, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_lod(AGX_ISA_ENCODING_AGX3B, 2, 3, 1, 1,
+                                        0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_lod(AGX_ISA_ENCODING_AGX3B, 2, 128, 0,
+                                        1, 0, false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 3, 1, 0,
                                 false, true, bytes, &len));
    CHECK(!agx3_tex_stage_cube_z(AGX_ISA_ENCODING_AGX3B, 2, 1, 0,
@@ -2394,6 +2521,14 @@ test_cube_coordinate_stage(void)
    CHECK(agx3_tex_cube_cem_finalize(AGX_ISA_ENCODING_AGX3C, 1, true, bytes,
                                     &len));
    CHECK(len == sizeof(finalize[1]) && !memcmp(bytes, finalize[1], len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3C, 2, 6, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 2, 128, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 3, 6, 1, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_stage_cube_array_layer(
+      AGX_ISA_ENCODING_AGX3B, 2, 6, 1, 0, true, true, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 4, 6, 20, 0,
                                  true, bytes, &len));
    CHECK(!agx3_tex_cube_cem_calc(AGX_ISA_ENCODING_AGX3B, 128, 6, 20, 0,
@@ -2543,6 +2678,13 @@ test_multisample_sample_stage(void)
    CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 12, 0,
                                   false, true, other, &other_len));
    CHECK(hex_eq(other, other_len, "1705540400180000d0c00800"));
+   static const uint8_t native_r4[] = {
+      0x17,0x05,0x54,0x04,0x00,0x10,
+      0x00,0x00,0xd0,0xc0,0x08,0x00,
+   };
+   CHECK(agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 8, 0,
+                                  false, true, bytes, &len));
+   CHECK(len == sizeof(native_r4) && !memcmp(bytes, native_r4, len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 256, 0,
                                    false, false, bytes, &len));
    CHECK(!agx3_tex_stage_ms_sample(AGX_ISA_ENCODING_AGX3B, 3, 0,
@@ -2743,6 +2885,44 @@ test_offset_witnesses(void)
                                    &length));
       CHECK(length == 14 && hex_eq(bytes, length, sweep[i].hex));
    }
+
+   /* The staged runtime form is the register-source branch of the native
+    * PACK_SMPIR offset witness. r2/r3 publish signed X/Y at positions 12/28
+    * in operand bank 6, and SMP selects that bank with f141=2. */
+   CHECK(agx3_tex_stage_offset_2d(AGX_ISA_ENCODING_AGX3B, 4, 6, 1, 0,
+                                  false, true, bytes, &length));
+   CHECK(length == 12 &&
+         hex_eq(bytes, length, "170554060008180070c00100"));
+   CHECK(!agx3_tex_stage_offset_2d(AGX_ISA_ENCODING_AGX3C, 4, 6, 1, 0,
+                                   false, true, bytes, &length));
+
+   d = base;
+   d.offset = true;
+   d.offset_staged = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
+   d.offset_xyz = 1;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                 &length));
+   d.offset_xyz = 0;
+   d.three_d = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                 &length));
+
+   /* The driver descriptor ABI cannot use Apple's direct array-layer field.
+    * Its staged offset is valid only when the layer is already present in the
+    * published bank-6 word. */
+   d = base;
+   d.sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER;
+   d.array = true;
+   d.array_layer = 12;
+   d.offset = true;
+   d.offset_staged = true;
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                 &length));
+   d.offset_staged_array = true;
+   CHECK(agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                &length));
 
    /* The same offset (1,1) carried by every other LOD shape. f156 on the
     * immediate-level row is the stream group terminator, which this encoder
@@ -3450,6 +3630,13 @@ test_indexed_offset_witnesses(void)
                                     true, true, false, true, bytes, &length));
    CHECK(!agx3_tex_stage_array_lod(AGX_ISA_ENCODING_AGX3B, 12, 13, 6, 0,
                                     false, true, true, true, bytes, &length));
+   CHECK(agx3_tex_stage_array_integer_lod(
+      AGX_ISA_ENCODING_AGX3B, 12, 14, 2, 0, false, true, false, true,
+      bytes, &length));
+   CHECK(length == 12);
+   CHECK(!agx3_tex_stage_array_integer_lod(
+      AGX_ISA_ENCODING_AGX3B, 12, 13, 2, 0, false, true, false, true,
+      bytes, &length));
    return 0;
 }
 
@@ -3557,10 +3744,188 @@ test_minimum_lod_witnesses(void)
    CHECK(!agx3_tex_stage_bias_min(enc, 0, 1, 1, 0, true, true, bytes, &len));
    CHECK(!agx3_tex_stage_bias_min(AGX_ISA_ENCODING_AGX3C, 0, 1, 1, 0,
                                  false, true, bytes, &len));
+   /* texture2d_array and texturecube_array bias + min_lod_clamp. */
+   CHECK(agx3_tex_stage_array_minimum_lod(enc, 0, 1, 0, false, true, bytes,
+                                          &len));
+   CHECK(hex_eq(bytes, len, "1705540400001004f0c00800"));
+   CHECK(agx3_tex_stage_array_minimum_lod(enc, 4, 1, 0, false, true, bytes,
+                                          &len));
+   CHECK(hex_eq(bytes, len, "1705540400081004f0c00800"));
+   CHECK(agx3_tex_stage_array_lod(enc, 2, 3, 1, 0, false, true, false, true,
+                                  bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600040c00f0c02500"));
+   CHECK(!agx3_tex_stage_array_minimum_lod(enc, 256, 1, 0, false, true, bytes,
+                                           &len));
+   CHECK(!agx3_tex_stage_array_minimum_lod(enc, 0, 1, 0, true, true, bytes,
+                                           &len));
+   /* depth2d_array sample_compare bias + min_lod_clamp, two in one fragment. */
+   CHECK(agx3_tex_pack_minimum(enc, 0, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540002000000d0886000"));
+   CHECK(agx3_tex_pack_minimum(enc, 2, 2, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540202040000d0886000"));
+   CHECK(!agx3_tex_pack_minimum(enc, 128, 0, false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_minimum(enc, 0, 1, false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_minimum(enc, 0, 192, false, true, bytes, &len));
+   CHECK(!agx3_tex_pack_minimum(enc, 0, 0, true, true, bytes, &len));
+   for (unsigned offset = 0; offset < 2; ++offset) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 1, .slot = 1,
+         .wait_mask = 1, .coord_kill = true, .final = true, .min_lod = true,
+         .min_lod_register = true, .min_lod_value = 0, .min_lod_kill = true,
+         .lod = AGX3_TEX_LOD_BIAS_REGISTER, .offset = offset,
+         .offset_xyz = offset ? 0xf1 : 0, .shadow = true, .array = true,
+         .array_layer = 4, .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, offset ? "05800ca09000020101880008010e"
+                                      : "05800ca090004200010000080100"));
+      d.min_lod_value = 1;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      d.min_lod_value = 0;
+      d.cube = true;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+   }
+   /* texture3d bias and gradient3d + min_lod_clamp with an immediate offset
+    * (1, -1, 2), and the bias with a runtime offset, whose minimum SMP reads
+    * from a packed register;
+    * texture2d with a runtime offset, whose bank-6 word carries the minimum.
+    * metal-nt -arch applegpu_g17p. */
+   static const struct {
+      bool three_d, staged, registered, gradient, shadow;
+      const char *hex;
+   } offsets[] = {
+      {true, false, false, false, false, "05800cb8b000d90201881000012e"},
+      {true, false, false, true, false, "05800cb8b000590300881000012e"},
+      {true, true, true, false, false, "05800cb8b0008200010010080100"},
+      {false, true, false, false, false, "05800cb8b0004408010010000100"},
+      {false, true, false, true, false, "05800cb8b0005401000010000100"},
+      {false, true, false, false, true, "05800ca090006408010000000100"},
+      {false, true, false, true, true, "05800ca090007401000000000100"},
+   };
+   for (unsigned i = 0; i < sizeof(offsets) / sizeof(offsets[0]); ++i) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = offsets[i].shadow ? 1 : 15, .slot = 1, .wait_mask = 1,
+         .coord_kill = true, .final = true, .min_lod = true,
+         .min_lod_register = offsets[i].registered,
+         .min_lod_kill = offsets[i].registered,
+         .lod = offsets[i].gradient ? AGX3_TEX_LOD_GRADIENT
+                                    : AGX3_TEX_LOD_BIAS_REGISTER,
+         .offset = true, .offset_staged = offsets[i].staged,
+         .offset_xyz = offsets[i].staged ? 0 : 0x2f1,
+         .three_d = offsets[i].three_d, .shadow = offsets[i].shadow,
+         .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, offsets[i].hex));
+      if (offsets[i].three_d && offsets[i].staged) {
+         /* Only the bias is witnessed beside a staged 3D offset. */
+         d.lod = AGX3_TEX_LOD_GRADIENT;
+         d.min_lod_register = false;
+         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      }
+   }
+   /* A staged 3D offset without the register minimum has no witness. */
+   {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15, .slot = 1,
+         .wait_mask = 1, .coord_kill = true, .final = true, .min_lod = true,
+         .lod = AGX3_TEX_LOD_BIAS_REGISTER, .offset = true,
+         .offset_staged = true, .three_d = true,
+         .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      d.min_lod = false;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+   }
+   /* texturecube and depthcube bias + min_lod_clamp: the face packed alone,
+    * then minimum and bias beside it. */
+   CHECK(agx3_tex_pack_cube_face(enc, 8, 0, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540003100004f0880400"));
+   CHECK(agx3_tex_pack_cube_face(enc, 10, 0, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540003140004f0880400"));
+   CHECK(!agx3_tex_pack_cube_face(enc, 9, 0, bytes, &len));
+   CHECK(!agx3_tex_pack_cube_face(enc, 8, 1, bytes, &len));
+   CHECK(agx3_tex_stage_cube_bias_min(enc, 9, 16, 0, 1, 0, false, true, bytes,
+                                      &len));
+   CHECK(hex_eq(bytes, len, "1705540600202400f0c22300"));
+   CHECK(agx3_tex_stage_cube_bias_min(enc, 2, 3, 0, 1, 0, false, true, bytes,
+                                      &len));
+   CHECK(hex_eq(bytes, len, "1705540600060800f0c22300"));
+   CHECK(!agx3_tex_stage_cube_bias_min(enc, 2, 3, 1, 1, 0, false, true, bytes,
+                                       &len));
+   CHECK(!agx3_tex_stage_cube_bias_min(enc, 2, 3, 0, 1, 3, false, true, bytes,
+                                       &len));
+   /* texturecube_array bias + min_lod_clamp: layer pack, minimum at half 4
+    * (above), then face and bias beside the packed layer. */
+   CHECK(agx3_tex_pack_ms_array_layer(enc, 11, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540003160000f0880400"));
+   CHECK(agx3_tex_stage_cube_array_lod(enc, 10, 2, 0, 1, 0, false, true, bytes,
+                                       &len));
+   CHECK(hex_eq(bytes, len, "1705540600140800f0c21700"));
+   /* depthcube sample_compare(level(reg)): face and level in bank 6. */
+   CHECK(agx3_tex_stage_cube_lod(enc, 10, 8, 1, 0, false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "1705540600142000f0c01100"));
+   static const struct {
+      bool array, shadow, min_lod;
+      enum agx3_tex_lod lod;
+      const char *hex;
+   } cubes[] = {
+      {false, false, true, AGX3_TEX_LOD_BIAS_REGISTER, "05800cb8b0001408010010000100"},
+      {true, false, true, AGX3_TEX_LOD_BIAS_REGISTER, "05800cb8b0001c00010010000100"},
+      {false, true, true, AGX3_TEX_LOD_BIAS_REGISTER, "05800ca090003408010000000100"},
+      {false, true, false, AGX3_TEX_LOD_REGISTER, "05800ca090002003010000000100"},
+   };
+   for (unsigned i = 0; i < sizeof(cubes) / sizeof(cubes[0]); ++i) {
+      struct agx3_tex_sample_desc d = {
+         .dest = 0, .coord = 0, .width = AGX3_TEX_W32,
+         .mask = cubes[i].shadow ? 1 : 15, .slot = 1, .wait_mask = 1,
+         .coord_kill = true, .final = true, .min_lod = cubes[i].min_lod,
+         .lod = cubes[i].lod, .shadow = cubes[i].shadow, .cube = true,
+         .array = cubes[i].array, .array_layer = cubes[i].array ? 6 : 0,
+         .texture_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+         .sampler_kind = AGX3_TEX_OPERAND_IMMEDIATE,
+      };
+      CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+      CHECK(hex_eq(bytes, len, cubes[i].hex));
+      d.lod = AGX3_TEX_LOD_GRADIENT;
+      CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+      if (cubes[i].shadow) {
+         d.lod = cubes[i].lod;
+         d.array = true;
+         d.array_layer = 6;
+         if (cubes[i].min_lod) {
+            /* No cube-array witness clamps a minimum beside its bias. */
+            CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+         } else {
+            /* The comparison cube array does take a register level. AIR-NT
+             * 32023.917 -arch applegpu_g17p compiles
+             * depthcube_array.sample_compare(s, dir, uint(layer), ref,
+             * level(lod)), every operand a varying, to the auxiliary layer
+             * word 1705540003200000f0880400, the face+level word
+             * 1705540600040c00f0c21700, the pixel entry 870254000600 and
+             * then this SMP. KHR-GL30.ext_texture_shadow_lod's textureLod
+             * and bias on samplerCubeArrayShadow are this shape. */
+            CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
+            CHECK(hex_eq(bytes, len, "05800ca090002803010000000100"));
+         }
+      }
+   }
+   /* texture2d_array gradient2d + min_lod_clamp. */
+   CHECK(agx3_tex_stage_array_minimum_gradient(enc, 14, 15, 1, 0, false, true,
+                                               false, true, bytes, &len));
+   CHECK(hex_eq(bytes, len, "17055406001c3c00f0c02d00"));
+   CHECK(!agx3_tex_stage_array_minimum_gradient(enc, 15, 14, 1, 0, false,
+                                                true, false, true, bytes,
+                                                &len));
    static const struct {
       bool gradient, offset, shadow, three_d, indexed;
       uint16_t texture, sampler;
       const char *hex;
+      bool array;
    } rows[] = {
       {false, false, false, false, false, 0, 0, "05800cb8b0000408010010000100"},
       {true, false, false, false, false, 0, 0, "05800cb8b0001401000010000100"},
@@ -3572,6 +3937,12 @@ test_minimum_lod_witnesses(void)
       {true, false, false, true, false, 0, 0, "05800cb8b0009c21000010000100"},
       {false, false, false, false, true, 0, 4, "05800cb8b4000408010290010100a02800000000"},
       {true, false, false, false, true, 8, 12, "05c00cb8bc001401000290010100a02800000000"},
+      {false, false, false, false, false, 0, 0, "05800cb8b0000c00010010000100", true},
+      {true, false, false, false, false, 0, 0, "05800cb8b0001c01000010000100", true},
+      {false, true, false, false, false, 0, 0, "05800cb8b000c10301881000010e", true},
+      {true, true, false, false, false, 0, 0, "05800cb8b000490300881000010e", true},
+      {true, false, true, false, false, 0, 0, "05800ca090003c01000000000100", true},
+      {true, true, true, false, false, 0, 0, "05800ca09000690300880000010e", true},
    };
    for (unsigned i = 0; i < sizeof(rows) / sizeof(rows[0]); ++i) {
       struct agx3_tex_sample_desc d = {
@@ -3588,6 +3959,7 @@ test_minimum_lod_witnesses(void)
                                          : AGX3_TEX_OPERAND_IMMEDIATE,
          .texture_value = rows[i].texture, .sampler_value = rows[i].sampler,
          .texture_kill = rows[i].indexed, .sampler_kill = rows[i].indexed,
+         .array = rows[i].array, .array_layer = rows[i].array ? 4 : 0,
       };
       CHECK(agx3_tex_encode_sample(enc, &d, bytes, &len));
       if (!hex_eq(bytes, len, rows[i].hex)) {
@@ -3595,9 +3967,24 @@ test_minimum_lod_witnesses(void)
          return 1;
       }
       checks++;
-      d.array = true;
+      /* Only the biased cube forms are witnessed. */
+      const enum agx3_tex_lod lod = d.lod;
+      d.cube = true;
+      d.lod = AGX3_TEX_LOD_GRADIENT;
       CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
-      d.array = false;
+      d.cube = false;
+      d.lod = lod;
+      if (rows[i].array && rows[i].shadow && !rows[i].offset) {
+         /* The comparison bias reads its minimum from a register pack. */
+         d.lod = AGX3_TEX_LOD_BIAS_REGISTER;
+         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+         d.lod = AGX3_TEX_LOD_GRADIENT;
+      }
+      if (!rows[i].array || rows[i].shadow) {
+         d.min_lod_register = true;
+         CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
+         d.min_lod_register = false;
+      }
       d.vertex_stage = true;
       CHECK(!agx3_tex_encode_sample(enc, &d, bytes, &len));
       d.vertex_stage = false;
@@ -4106,6 +4493,152 @@ test_g17g_sample_lod_witnesses(void)
    return 0;
 }
 
+/*
+ * Sparse texel residency.
+ *
+ * Witness: xcrun metal-nt -arch applegpu_g17p -N k.mtlp-json
+ *          -platform_version macos 27.0 27.0 (MetalToolchain v27.1.5194.15),
+ * probes/g17p-sparse-residency.{metal,mtlp-json}, __TEXT,__text of each
+ * compute object.  Both arms of each pair bind the texture and sampler
+ * through the same argument buffer, so the only source difference is
+ * sparse_sample/sparse_read against sample/read:
+ *
+ *   sample  k_ab_dense  05800cb8b4000900920390010100802000800098
+ *           k_ab_sparse 2dc00c38bc000900920392010200802028c00018
+ *   fetch   k_ab_dread  05800cb8b0001701900280000100002000800098
+ *           k_ab_sread  2dc00c38b0001701900282000200002028c00018
+ *
+ * Decoding both pairs against the generated AGX3b encoder tables leaves
+ * exactly three field differences beyond register allocation and the group
+ * terminator: f112 4 -> 8, f120 0 -> 1 and f142 0 -> 1.
+ *
+ * This encoder reproduces two of those three.  It deliberately leaves f112 at
+ * its dense value, because moving it clears operand-profile bit 2 and G17P
+ * then fails every sparse fetch and every explicit-LOD sparse sample;
+ * agx3_tex_encode_sample() records the hardware measurement.  So byte 12
+ * below reads 01 on both arms, where Apple's sparse arm reads 02.
+ *
+ * The goldens below are this encoder's bytes, which reproduce Apple's
+ * through byte 15 apart from that and carry f120 at byte 17 bit 6.  They
+ * differ from Apple's in three further ep4 places -- the destination copy in
+ * f19's upper byte, f91, and bits 154..159 -- and those three are not
+ * specific to sparse: the dense arms below, and every other ep4 texture
+ * operation this encoder emits, differ from Apple in exactly the same way.
+ * See the KNOWN GAP note at the top of agx3_tex_core.c.  What this test pins
+ * is therefore the sparse delta this encoder does emit: byte 10 bit 1 (f142)
+ * and byte 17 bit 6 (f120), and nothing else.
+ */
+static int
+test_sparse_residency(void)
+{
+   const enum agx_isa_encoding enc = AGX_ISA_ENCODING_AGX3B;
+   uint8_t bytes[AGX3_TEX_MAX_LENGTH];
+   uint8_t length;
+
+   /* Apple's own sparse sample, byte for byte through byte 18. */
+   struct agx3_tex_sample_desc sample = {
+      .dest = 10, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_LEVEL, .lod_x64 = 0, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = false, .compute_stage = true,
+      .texture_kind = AGX3_TEX_OPERAND_UNIFORM, .texture_value = 24,
+      .sampler_kind = AGX3_TEX_OPERAND_UNIFORM, .sampler_value = 28,
+      .sparse = true,
+   };
+   CHECK(agx3_tex_encode_sample(enc, &sample, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38bc000900920392010100802000400000"));
+
+   /* The dense sibling differs in exactly the two sparse fields this encoder
+    * emits: byte 10 bit 1 (f142) and byte 17 bit 6 (f120).  Byte 12, the
+    * operand profile, stays put. */
+   struct agx3_tex_sample_desc dense = sample;
+   dense.sparse = false;
+   CHECK(agx3_tex_encode_sample(enc, &dense, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38bc000900920390010100802000000000"));
+
+   /* The texel fetch carries the same two fields. */
+   struct agx3_tex_fetch_desc fetch = {
+      .dest = 10, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = false,
+      .texture_kind = AGX3_TEX_OPERAND_UNIFORM, .texture_value = 24,
+      .sparse = true,
+   };
+   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38b0001701900282000100002000400000"));
+
+   struct agx3_tex_fetch_desc dense_fetch = fetch;
+   dense_fetch.sparse = false;
+   CHECK(agx3_tex_encode_fetch(enc, &dense_fetch, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "2dc00c38b0001701900280000100002000000000"));
+
+   /* A sparse fetch round-trips through the strict decoder, and the decoded
+    * descriptor reports the residency request. */
+   CHECK(agx3_tex_encode_fetch(enc, &fetch, bytes, &length));
+   struct agx3_tex_fetch_desc decoded;
+   CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
+   CHECK(decoded.sparse && decoded.dest == 10 && decoded.mask == 15 &&
+         decoded.texture_kind == AGX3_TEX_OPERAND_UNIFORM &&
+         decoded.texture_value == 24);
+   CHECK(agx3_tex_encode_fetch(enc, &dense_fetch, bytes, &length));
+   CHECK(agx3_tex_decode_fetch(enc, bytes, length, &decoded));
+   CHECK(!decoded.sparse);
+
+   /* f120 deposits instruction bit 142, past the 112-bit ep3 form, so a
+    * sparse operation takes the 20-byte ep4 form even when both descriptors
+    * are immediate -- where the dense sibling stays 14 bytes. */
+   struct agx3_tex_sample_desc immediate = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_LEVEL, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .compute_stage = true,
+   };
+   CHECK(agx3_tex_encode_sample(enc, &immediate, bytes, &length));
+   CHECK(length == 14);
+   immediate.sparse = true;
+   CHECK(agx3_tex_encode_sample(enc, &immediate, bytes, &length));
+   CHECK(length == 20 &&
+         hex_eq(bytes, length, "05800cb8b0000900000212000100000000400000"));
+
+   /* Negative: no AGX3c witness exists, and f142 is outside the AGX3c sample
+    * entirely. */
+   struct agx3_tex_sample_desc agx3c = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+      .coord_kill = true, .final = true, .sparse = true,
+   };
+   CHECK(!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3C, &agx3c, bytes,
+                                 &length));
+   struct agx3_tex_fetch_desc agx3c_fetch = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .sparse = true,
+   };
+   CHECK(!agx3_tex_encode_fetch(AGX_ISA_ENCODING_AGX3C, &agx3c_fetch, bytes,
+                                &length));
+
+   /* Negative: a depth comparison and a LOD query have no sparse witness. */
+   struct agx3_tex_sample_desc bad = sample;
+   bad.shadow = true;
+   bad.mask = 1;
+   CHECK(!agx3_tex_encode_sample(enc, &bad, bytes, &length));
+   bad = sample;
+   bad.query_lod = true;
+   bad.mask = 3;
+   CHECK(!agx3_tex_encode_sample(enc, &bad, bytes, &length));
+
+   /* Negative: no sparse multisample read is witnessed. */
+   struct agx3_tex_fetch_desc bad_ms = {
+      .dest = 0, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+      .slot = 1, .wait_mask = 1, .coord_kill = true, .final = true,
+      .multisample = true, .sparse = true,
+   };
+   CHECK(!agx3_tex_encode_fetch(enc, &bad_ms, bytes, &length));
+
+   return 0;
+}
+
 int
 main(void)
 {
@@ -4127,7 +4660,7 @@ main(void)
        test_vertex_offset_witnesses() ||
        test_shadow_lod_witnesses() ||
        test_3d_lod_witnesses() || test_image_write_state0_witnesses() ||
-       test_query_lod_witnesses() || test_m5_indexed_reads())
+       test_query_lod_witnesses() || test_m5_indexed_reads() || test_sparse_residency())
       return 1;
    printf("agx3 texture core: %u checks passed\n", checks);
    return 0;

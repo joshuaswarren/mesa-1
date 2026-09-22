@@ -19,6 +19,40 @@ main(void)
 {
    unsigned pass = 0, fail = 0;
 
+   const agx3_table *tables[] = {&agx3b_table, &agx3c_table};
+   for (unsigned table = 0; table < 2; ++table) {
+      const agx3_table *t = tables[table];
+
+      for (uint32_t i = 0; i < t->num_forms; ++i) {
+         const agx3_form *f = &t->forms[i];
+         if (agx3_form_index(t, f->mnemonic, f->ep) != (int32_t)i) {
+            fprintf(stderr, "FAIL form lookup %s.ep%u (agx3%c)\n",
+                    f->mnemonic, f->ep, table == 0 ? 'b' : 'c');
+            fail++;
+         }
+
+         if (i > 0) {
+            const agx3_form *prev = &t->forms[i - 1];
+            const int mnemonic_cmp = strcmp(prev->mnemonic, f->mnemonic);
+            if (mnemonic_cmp > 0 ||
+                (mnemonic_cmp == 0 && prev->ep >= f->ep)) {
+               fprintf(stderr, "FAIL unsorted forms %s.ep%u, %s.ep%u "
+                               "(agx3%c)\n",
+                       prev->mnemonic, prev->ep, f->mnemonic, f->ep,
+                       table == 0 ? 'b' : 'c');
+               fail++;
+            }
+         }
+      }
+
+      if (agx3_form_index(t, "", 0) != -1 ||
+          agx3_form_index(t, "~unknown", UINT8_MAX) != -1) {
+         fprintf(stderr, "FAIL unknown form lookup (agx3%c)\n",
+                 table == 0 ? 'b' : 'c');
+         fail++;
+      }
+   }
+
    for (size_t i = 0; i < agx3_compose_corpus_case_count; ++i) {
       const struct agx3_compose_corpus_case *c = &agx3_compose_corpus_cases[i];
       const agx3_table *t = c->enc == 0 ? &agx3b_table : &agx3c_table;

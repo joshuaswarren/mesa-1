@@ -14,7 +14,8 @@ agx_allows_16bit_immediate(agx_instr *I)
           (I->op == AGX_OPCODE_STACK_LOAD) ||
           (I->op == AGX_OPCODE_STACK_STORE) ||
           (I->op == AGX_OPCODE_UNIFORM_STORE) || (I->op == AGX_OPCODE_ATOMIC) ||
-          (I->op == AGX_OPCODE_PHI) || (I->op == AGX_OPCODE_TEX_STATE_STORE) ||
+          (I->op == AGX_OPCODE_LOCAL_ATOMIC) || (I->op == AGX_OPCODE_PHI) ||
+          (I->op == AGX_OPCODE_TEX_STATE_STORE) ||
           (I->op == AGX_OPCODE_SAMPLER_STATE_STORE);
 }
 

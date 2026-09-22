@@ -8,10 +8,14 @@
 #include "compiler/nir/nir.h"
 #include "asahi/lib/agx_chip.h"
 #include "agx3_fltnorm_core.h"
+#include "util/bitset.h"
 #include "util/shader_stats.h"
 #include "util/u_dynarray.h"
 #include "util/u_tristate.h"
 #include "shader_enums.h"
+
+/* Cache-line align shader programs. This matches the prop compiler. */
+#define AGX_CODE_ALIGN 0x80
 
 struct agx_cf_binding {
    /* Base coefficient register */
@@ -137,6 +141,19 @@ struct agx_shader_info {
    /* Shader is incompatible with triangle merging */
    bool disable_tri_merging;
 
+   /* Fragment shader reads implicit quad derivatives: an implicit-LOD texture
+    * op, ddx/ddy, or a quad intrinsic. Triangle merging packs fragments of two
+    * primitives that share an edge into a single 2x2 quad, so the lanes of a
+    * quad straddling that edge interpolate from two different plane equations
+    * and any derivative taken across it is meaningless.
+    *
+    * This is deliberately narrower than disable_tri_merging, which also covers
+    * memory writes and wide subgroup intrinsics. Apple's own G17P shader
+    * metadata leaves the native merge-disable bit clear for those, and neither
+    * needs quad coherence, so G17P consumes only this term.
+    */
+   bool needs_quad_derivatives;
+
    /* Reads draw ID system value */
    bool uses_draw_id;
 
@@ -207,6 +224,17 @@ struct agx_precompiled_kernel_info {
    bool uses_txf;
    bool agx3_staging_known;
    uint16_t agx3_staging_halfs;
+
+   /* AGX3 kernels read the printf buffer address from a 64-bit uniform at this
+    * half, the first multiple of 4 after their arguments, or 0 if they do not
+    * use it. AGX2 kernels use the fixed LIBAGX_PRINTF_BUFFER_ADDRESS.
+    */
+   uint16_t printf_uniform;
+
+   /* AGX3 thread-private storage frame in bytes: spills and returned atomic
+    * words. AGX2 kernels do not spill.
+    */
+   uint32_t agx3_tps_size;
 };
 
 static inline struct agx_precompiled_kernel_info
@@ -231,6 +259,8 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .uses_txf = info->uses_txf,
       .agx3_staging_known = info->agx3_staging_known,
       .agx3_staging_halfs = info->agx3_staging_halfs,
+      .agx3_tps_size =
+         MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
    };
 }
 
@@ -290,9 +320,20 @@ struct agx_fs_shader_key {
 
    /* Base coefficient register. 0 for API shaders but nonzero for FS prolog */
    uint8_t cf_base;
+
+   /* G17P rasterization sample count that coverage updates (sample mask
+    * writes and discards) are compiled for. Apple's fragments build the
+    * coverage word from different system values, and with a different
+    * all-samples constant, at one and at several samples. 0 is one sample.
+    */
+   uint8_t nr_samples;
 };
 
 struct agx_device_key {
+   /* Some native AGX3 contracts differ between G16G and G17P despite sharing
+    * the instruction encoding, notably formatted PBE store inputs. */
+   enum agx_chip chip;
+
    /*
     * Binary encoding of the instruction set to emit.
     *
@@ -371,6 +412,7 @@ struct agx_shader_key {
     * every path except VK_ATTACHMENT_STORE_OP_STORE. */
    bool g17p_rt0_eot_multisample;
 
+   /* These selectors retain the separately witnessed G17G EOT ABI. */
    /* Select the native R5G6B5 imgwblk tail (0x35). RGB565 has three logical
     * F16 imageblock lanes spanning two words and lowers to a raw I16 block
     * store, but it does not share RGBA16F's selector. */
@@ -393,7 +435,7 @@ struct agx_shader_key {
     * pair. */
    bool g17p_rt0_eot_i32_four_words;
 
-   /* Select the distinct 84-byte signed four-word I32 builtin. */
+   /* Authorize the signed four-word I32 builtin, which stays single-sample. */
    bool g17p_rt0_eot_i32_signed_four_words;
 
    /* Select the native 0x15 imgwblk variant for an I32 store. This is
@@ -416,6 +458,34 @@ struct agx_shader_key {
     * graph is otherwise indistinguishable from unsupported dual-I32 layouts. */
    bool g17p_r11g11b10_mrt_eot;
 
+   /* Background program for a G17P AGX_G17P_MRT_MIXED layout. Apple's
+    * builtin for such layouts stores each target without pixel transactions,
+    * at f13=0 even from high registers, and in no required partition order. */
+   bool g17p_mrt_bg;
+   /* Generated native eMRT epilog. Memory writes may split its sample groups
+    * into blocks, but tile operations retain the per-sample partition order. */
+   bool g17p_emrt;
+
+   /* A Honeykrisp hardware vertex binary adjacent to software geometry or
+    * transform feedback. The API VS hardware variant may expose only values
+    * consumed by GS/XFB, while the generated post-GS raster VS may expose only
+    * values GS produced. Both may therefore have a sparse terminal UVS
+    * suffix. */
+   bool g17p_sparse_vertex_outputs;
+
+   /* G17P multi-target epilog: bit n is set when a colour target of the
+    * framebuffer starts at tile byte n. Apple's fragments select a written
+    * target's pixel classes from its position among all targets, so an epilog
+    * writing only some targets needs the others' offsets too. An empty set
+    * derives the partitions from the tile operations. */
+   BITSET_DECLARE(g17p_tile_partitions, AGX_G17P_MAX_BYTES_PER_SAMPLE);
+
+   /* Number of targets, two to eight, stored by a G17P multi-target EOT for
+    * arbitrary target formats, and the IMGWBLK selector of each target in
+    * store order. Zero selects the format-specific EOT recognizers. */
+   uint8_t g17p_mrt_eot_count;
+   uint8_t g17p_mrt_eot_selectors[AGX_MAX_RTS];
+
    /* Set if this is a secondary shader part (prolog or epilog). This prevents
     * the compiler from allocating uniform registers. For example, this turns
     * off preambles.
@@ -433,7 +503,8 @@ void agx_preprocess_nir(nir_shader *nir);
 void agx_preprocess_nir_g17p(nir_shader *nir);
 bool agx_nir_lower_discard_zs_emit(nir_shader *s);
 bool agx_nir_lower_sample_mask(nir_shader *s);
-bool agx_nir_lower_interpolation(nir_shader *s);
+bool agx_nir_lower_sample_mask_deferred(nir_shader *s);
+bool agx_nir_lower_interpolation(nir_shader *s, bool layer_as_varying);
 bool agx_nir_fix_g17g_constant_interpolation(nir_shader *s);
 
 bool agx_nir_lower_cull_distance_vs(struct nir_shader *s);

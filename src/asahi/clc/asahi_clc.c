@@ -6,6 +6,7 @@
 
 #include "asahi_clc.h"
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/lib/agx_abi.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/glsl_types.h"
 #include "compiler/spirv/nir_spirv.h"
@@ -183,9 +184,10 @@ compile(void *memctx, const uint32_t *spirv, size_t spirv_size)
 
 static void
 print_shader(FILE *fp, const char *name, const char *suffix, uint32_t variant,
-             struct agx_shader_part *p)
+             struct agx_shader_part *p, uint16_t printf_uniform)
 {
    struct agx_precompiled_kernel_info info = agx_compact_kernel_info(&p->info);
+   info.printf_uniform = printf_uniform;
    size_t sz_B = sizeof(info) + p->info.binary_size;
    size_t sz_el = DIV_ROUND_UP(sz_B, 4);
    uint32_t *mem = calloc(sz_el, 4);
@@ -195,6 +197,31 @@ print_shader(FILE *fp, const char *name, const char *suffix, uint32_t variant,
 
    nir_precomp_print_blob(fp, name, suffix, variant, mem, sz_B, true);
    free(mem);
+}
+
+static bool
+uses_printf_address(nir_builder *b, nir_intrinsic_instr *intr, void *data)
+{
+   if (intr->intrinsic == nir_intrinsic_load_printf_buffer_address)
+      *(bool *)data = true;
+
+   return false;
+}
+
+/* AGX3 has no fixed printf buffer address, so a kernel reads it from a 64-bit
+ * uniform after its arguments, which the driver fills in at dispatch.
+ */
+static bool
+lower_printf_address_to_uniform(nir_builder *b, nir_intrinsic_instr *intr,
+                                void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_printf_buffer_address)
+      return false;
+
+   const unsigned *base_halfs = data;
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def_replace(&intr->def, nir_load_preamble(b, 1, 64, .base = *base_halfs));
+   return true;
 }
 
 static bool
@@ -242,15 +269,103 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_copy_image") ||
           !strcmp(func->name, "libagx_mipmap_unorm8x4") ||
           !strcmp(func->name, "libagx_mipmap_unorm8x4_odd") ||
+          !strcmp(func->name, "libagx_resolve_unorm8x4") ||
           !strcmp(func->name, "libagx_predicate_indirect") ||
+          /* VK_KHR_ray_tracing_pipeline's indirect trace-rays setup.  One
+           * invocation, three constant loads, three global stores and a shift
+           * -- no atomics, no barriers, no printf, no scratch.  Its ARITHMETIC
+           * has a host oracle (test-hk-ray-tracing-core's launch
+           * decomposition, which the direct path uses for the same numbers);
+           * its MACHINE CODE has never executed, exactly like the rest of the
+           * ray-tracing-pipeline path it serves, which is why that whole path
+           * is behind HK_G17P_UNVERIFIED_FEATURES.  Do not read this entry as
+           * a claim that it runs. */
+          !strcmp(func->name, "libagx_trace_rays_indirect_setup") ||
           !strcmp(func->name, "libagx_draw_indirect_byte_count") ||
           !strcmp(func->name, "libagx_conditional_render") ||
           !strcmp(func->name, "libagx_draw_robust_index") ||
+          !strcmp(func->name, "libagx_unroll_restart") ||
+          !strcmp(func->name, "libagx_gs_setup_indirect") ||
+          !strcmp(func->name, "libagx_prefix_sum_geom") ||
+          !strcmp(func->name, "libagx_copy_uchar") ||
+          !strcmp(func->name, "libagx_copy_uint4") ||
+          !strcmp(func->name, "libagx_fill") ||
           !strcmp(func->name, "libagx_copy_xfb_counters") ||
           !strcmp(func->name, "libagx_increment_ia") ||
+          !strcmp(func->name, "libagx_increment_ia_restart") ||
           !strcmp(func->name, "libagx_increment_ia_restart_nonnull") ||
           !strcmp(func->name, "libagx_copy_query") ||
-          !strcmp(func->name, "libagx_increment_cs_invocations");
+          !strcmp(func->name, "libagx_copy_query_gl") ||
+          !strcmp(func->name, "libagx_increment_cs_invocations") ||
+          !strcmp(func->name, "libagx_setup_indirect_dispatch") ||
+          !strcmp(func->name, "libagx_copy_timestamp") ||
+          !strcmp(func->name, "libagx_tess_setup_indirect_hw") ||
+          !strcmp(func->name, "libagx_tess_factors_half") ||
+          !strcmp(func->name, "libagx_increment_statistic") ||
+          /* Software tessellation */
+          !strcmp(func->name, "libagx_tess_setup_indirect") ||
+          !strcmp(func->name, "libagx_tess_isoline") ||
+          !strcmp(func->name, "libagx_tess_tri") ||
+          !strcmp(func->name, "libagx_tess_quad") ||
+          !strcmp(func->name, "libagx_prefix_sum_tess") ||
+          !strcmp(func->name, "libagx_g17p_local_probe") ||
+          !strcmp(func->name, "libagx_g17p_local_sg_probe") ||
+          !strcmp(func->name, "libagx_draw_without_adj") ||
+          /* Materialises an adjacency decomposition as an index buffer, which
+           * is the only remap a G17P hardware vertex shader observes: it reads
+           * its invocation index from SR 0xdd, never the prolog's exported
+           * AGX_ABI_VIN_VERTEX_ID.  One invocation per output index, one call
+           * to poly_map_adj_vertex(), at most one index-buffer load and one
+           * global store -- no atomics, barriers, printf or scratch, and the
+           * same poly_load_index() the already-qualified
+           * libagx_draw_without_adj uses.  Its ARITHMETIC has a host oracle:
+           * test-poly-adj-map checks poly_map_adj_vertex() against the
+           * per-topology sequences for all four adjacency primitives. */
+          !strcmp(func->name, "libagx_write_adj_indices") ||
+          /* Its indirect form.  Same mapping and the same index load, plus a
+           * heap allocation and one barrier -- both already qualified here by
+           * libagx_unroll_restart, which allocates from the same heap with the
+           * same printf-free poly_heap_try_alloc_offs(). */
+          !strcmp(func->name, "libagx_write_adj_indices_indirect");
+}
+
+/* Like nir_precomp_print_binary_map, but programs the target does not support
+ * are left NULL, as they have no binary.
+ */
+static void
+print_supported_binary_map(FILE *fp, const nir_shader *nir, const char *target)
+{
+   fprintf(fp, "const uint32_t *libagx_%s[LIBAGX_NUM_PROGRAMS] = {\n", target);
+
+   nir_foreach_entrypoint(func, nir) {
+      if (!target_supports_program(target, func))
+         continue;
+
+      for (unsigned v = 0; v < nir_precomp_nr_variants(func); ++v) {
+         fprintf(fp, "    [");
+         nir_precomp_print_enum_variant_value(fp, func, v);
+         fprintf(fp, "] = %s_%u_%s,\n", func->name, v,
+                 remap_variant(func, v, target));
+      }
+   }
+
+   fprintf(fp, "};\n\n");
+}
+
+/* Lift every kernel-argument preamble load above the halves the AGX3
+ * hardware ABI owns -- see AGX_ABI_AGX3_PRECOMP_ARG_HALFS.  Run per target,
+ * on that target's clone, so AGX2 keeps its arguments at half 0. */
+static bool
+rebase_preamble_for_agx3(nir_builder *b, nir_intrinsic_instr *intr,
+                         UNUSED void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_preamble)
+      return false;
+
+   nir_intrinsic_set_base(intr,
+                          nir_intrinsic_base(intr) +
+                             AGX_ABI_AGX3_PRECOMP_ARG_HALFS);
+   return true;
 }
 
 static nir_def *
@@ -264,6 +379,15 @@ load_kernel_input(nir_builder *b, unsigned num_components, unsigned bit_size,
 int
 main(int argc, char **argv)
 {
+   /* Without this the compiler's own AGX_MESA_DEBUG flags stay clear here, so
+    * a kernel that fails to compile reports only its name and no reason.
+    * Declared locally: agx_compiler.h needs generated headers this tool does
+    * not include. */
+   {
+      extern int agx_compiler_debug;
+      extern uint64_t agx_get_compiler_debug(void);
+      agx_compiler_debug = (int)agx_get_compiler_debug();
+   }
    if (argc != 4) {
       fprintf(stderr, "Usage: %s [input spir-v] [output header] [output C]\n",
               argv[0]);
@@ -375,11 +499,20 @@ main(int argc, char **argv)
                .reserved_preamble = layout.size_B / 2,
                .is_helper = is_helper,
                .no_preamble = !strcmp(*target, "g17p"),
+
+               /* G17P has a smaller register file than AGX2, so the largest
+                * kernels spill to thread-private storage like API shaders.
+                */
+               .has_scratch = !strcmp(*target, "g17p"),
             };
 
             key.dev.encoding = !strcmp(*target, "g17p")
                                   ? AGX_ISA_ENCODING_AGX3B
                                   : AGX_ISA_ENCODING_AGX2;
+            key.dev.chip = !strcmp(*target, "g17p")
+                              ? AGX_CHIP_G17P
+                              : !strcmp(*target, "g13x") ? AGX_CHIP_G13X
+                                                          : AGX_CHIP_G13G;
 
             if (has_atomic) {
                key.dev.needs_g13x_coherency =
@@ -387,18 +520,50 @@ main(int argc, char **argv)
             }
 
             nir_shader *clone = nir_shader_clone(NULL, s);
+
+            if (key.dev.encoding != AGX_ISA_ENCODING_AGX2) {
+               NIR_PASS(_, clone, nir_shader_intrinsics_pass,
+                        rebase_preamble_for_agx3, nir_metadata_all, NULL);
+               key.reserved_preamble += AGX_ABI_AGX3_PRECOMP_ARG_HALFS;
+            }
+
+            uint16_t printf_uniform = 0;
+            if (!strcmp(*target, "g17p")) {
+               /* Both frontends publish the allocator-owned printf buffer.
+                * Keep that runtime ABI instead of dropping kernel assertions
+                * as upstream did before this branch supplied the address. */
+               bool uses_printf = false;
+               nir_shader_intrinsics_pass(clone, uses_printf_address,
+                                          nir_metadata_all, &uses_printf);
+
+               if (uses_printf) {
+                  /* A 64-bit uniform address must start on a whole dword
+                   * of halves.
+                   */
+                  unsigned base_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS +
+                     ALIGN_POT(layout.size_B, 8) / 2;
+                  printf_uniform = base_halfs;
+                  key.reserved_preamble = base_halfs + 4;
+
+                  NIR_PASS(_, clone, nir_shader_intrinsics_pass,
+                           lower_printf_address_to_uniform,
+                           nir_metadata_control_flow, &base_halfs);
+               }
+            }
             if (!agx_compile_shader_nir(clone, &key, &compiled)) {
                fprintf(stderr, "Failed to compile %s for %s\n",
                        libfunc->name, *target);
                ralloc_free(clone);
                return 1;
             }
-            print_shader(fp_c, libfunc->name, *target, v, &compiled);
+            print_shader(fp_c, libfunc->name, *target, v, &compiled,
+                         printf_uniform);
             free(compiled.binary);
             ralloc_free(clone);
 
-            assert(compiled.info.scratch_size == 0 &&
-                   "internal shaders do not spill");
+            assert((compiled.info.scratch_size == 0 ||
+                    !strcmp(*target, "g17p")) &&
+                   "only G17P internal shaders spill");
 
             assert(compiled.info.preamble_scratch_size == 0 &&
                    "internal shader preambles do not spill");
@@ -415,44 +580,7 @@ main(int argc, char **argv)
    foreach_target(target)
    {
       nir_precomp_print_extern_binary_map(fp_h, "libagx", *target);
-      if (strcmp(*target, "g17p")) {
-         nir_precomp_print_binary_map(fp_c, nir, "libagx", *target,
-                                      remap_variant);
-      } else {
-         fprintf(fp_c,
-                 "const uint32_t *libagx_g17p[LIBAGX_NUM_PROGRAMS] = {\n"
-                 "    [LIBAGX_FILL_UINT4] = libagx_fill_uint4_0_g17p,\n"
-                 "    [LIBAGX_COPY_IMAGE] = libagx_copy_image_0_g17p,\n"
-                 "    [LIBAGX_MIPMAP_UNORM8X4] = "
-                 "libagx_mipmap_unorm8x4_0_g17p,\n"
-                 "    [LIBAGX_MIPMAP_UNORM8X4_ODD] = "
-                 "libagx_mipmap_unorm8x4_odd_0_g17p,\n"
-                 "    [LIBAGX_PREDICATE_INDIRECT_0] = "
-                 "libagx_predicate_indirect_0_g17p,\n"
-                 "    [LIBAGX_PREDICATE_INDIRECT_1] = "
-                 "libagx_predicate_indirect_1_g17p,\n"
-                 "    [LIBAGX_DRAW_INDIRECT_BYTE_COUNT] = "
-                 "libagx_draw_indirect_byte_count_0_g17p,\n"
-                 "    [LIBAGX_CONDITIONAL_RENDER] = "
-                 "libagx_conditional_render_0_g17p,\n"
-                 "    [LIBAGX_DRAW_ROBUST_INDEX_0] = "
-                 "libagx_draw_robust_index_0_g17p,\n"
-                 "    [LIBAGX_DRAW_ROBUST_INDEX_1] = "
-                 "libagx_draw_robust_index_1_g17p,\n"
-                 "    [LIBAGX_DRAW_ROBUST_INDEX_2] = "
-                 "libagx_draw_robust_index_2_g17p,\n"
-                 "    [LIBAGX_COPY_XFB_COUNTERS] = "
-                 "libagx_copy_xfb_counters_0_g17p,\n"
-                 "    [LIBAGX_INCREMENT_IA] = "
-                 "libagx_increment_ia_0_g17p,\n"
-                 "    [LIBAGX_INCREMENT_IA_RESTART_NONNULL] = "
-                 "libagx_increment_ia_restart_nonnull_0_g17p,\n"
-                 "    [LIBAGX_COPY_QUERY] = "
-                 "libagx_copy_query_0_g17p,\n"
-                 "    [LIBAGX_INCREMENT_CS_INVOCATIONS] = "
-                 "libagx_increment_cs_invocations_0_g17p,\n"
-                 "};\n\n");
-      }
+      print_supported_binary_map(fp_c, nir, *target);
    }
 
    glsl_type_singleton_decref();

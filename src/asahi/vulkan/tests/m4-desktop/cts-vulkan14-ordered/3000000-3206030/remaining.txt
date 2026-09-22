@@ -1,0 +1,2 @@
+dEQP-VK.wsi.wayland.colorspace.basic	Timeout	3130000-3140000	Runner detected abnormal execution; inspect QPA/log
+dEQP-VK.wsi.wayland.colorspace.hdr	Timeout	3130000-3140000	Runner detected abnormal execution; inspect QPA/log

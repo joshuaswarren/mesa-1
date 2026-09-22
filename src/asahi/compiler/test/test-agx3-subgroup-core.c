@@ -67,12 +67,17 @@ test_shuffle_vectors(void)
    };
    uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
 
+   /* G15G and G16G independently produce this AGX3b word, whose destination
+    * and source stay cached while the lane is read for the last time. */
    struct agx3_subgroup_shuffle_desc d = {
       .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
       .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
       .dest = 4,
       .src = 0,
       .lane = 4,
+      .dest_hint = true,
+      .src_cache = true,
+      .lane_discard = true,
    };
    CHECK(
       agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
@@ -213,6 +218,205 @@ test_shuffle_vectors(void)
 }
 
 static int
+test_register_lane_hint_vectors(void)
+{
+   /* metal-nt -arch applegpu_g17p, every SIMD shuffle from a register lane,
+    * with the data and lane read again or not; sources on slot 1. */
+   static const struct {
+      enum agx3_subgroup_shuffle_op op;
+      bool half;
+      uint16_t dest, src, lane, wait_mask;
+      bool dest_hint, src_cache, src_discard, lane_cache, lane_discard;
+      uint8_t bytes[10];
+   } vec[] = {
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 0, 0, 4, 0x1,
+       false, false, true, false, true,
+       {0x47, 0x14, 0x54, 0x00, 0x02, 0x00, 0x08, 0x2c, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 8, 0, 3, 0x1,
+       false, false, false, false, true,
+       {0x47, 0x14, 0x54, 0x08, 0x02, 0x00, 0x06, 0x2c, 0x18, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 4, 2, 10, 0x1,
+       false, false, true, true, false,
+       {0x47, 0x14, 0x54, 0x04, 0x02, 0x04, 0x14, 0x2e, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 0, 0, 10, 0x2,
+       false, false, true, false, true,
+       {0x47, 0x24, 0x54, 0x00, 0x02, 0x00, 0x14, 0x2c, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 6, 0, 9, 0x0,
+       true, true, false, true, false,
+       {0x47, 0x04, 0x54, 0x06, 0x03, 0x00, 0x12, 0x2e, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_BROADCAST, false, 0, 0, 9, 0x0,
+       true, false, true, true, false,
+       {0x47, 0x04, 0x54, 0x00, 0x03, 0x00, 0x12, 0x2e, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, false, 0, 0, 4, 0x1,
+       false, false, true, false, true,
+       {0xc7, 0x14, 0x54, 0x00, 0x02, 0x00, 0x08, 0x2c, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, false, 4, 0, 2, 0x1,
+       true, false, true, true, false,
+       {0xc7, 0x14, 0x54, 0x04, 0x03, 0x00, 0x04, 0x2e, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_UP, false, 4, 0, 8, 0x1,
+       true, true, false, true, false,
+       {0x47, 0x15, 0x54, 0x04, 0x03, 0x00, 0x10, 0x2e, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_DOWN, false, 2, 0, 8, 0x1,
+       true, true, false, true, false,
+       {0xc7, 0x15, 0x54, 0x02, 0x03, 0x00, 0x10, 0x2e, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, true, 2, 3, 2, 0x1,
+       false, false, true, false, true,
+       {0xc7, 0x14, 0x54, 0x02, 0x02, 0x06, 0x04, 0x20, 0x1c, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_XOR, true, 5, 1, 0, 0x1,
+       true, false, true, true, false,
+       {0xc7, 0x14, 0x54, 0x05, 0x03, 0x02, 0x00, 0x22, 0x14, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_UP, true, 4, 3, 2, 0x1,
+       true, true, false, true, false,
+       {0x47, 0x15, 0x54, 0x04, 0x03, 0x06, 0x04, 0x22, 0x12, 0x00}},
+      {AGX3_SUBGROUP_SHUFFLE_DOWN, true, 4, 1, 0, 0x1,
+       true, true, false, true, false,
+       {0xc7, 0x15, 0x54, 0x04, 0x03, 0x02, 0x00, 0x22, 0x12, 0x00}},
+   };
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(vec); ++i) {
+      const struct agx3_subgroup_shuffle_desc d = {
+         .op = vec[i].op,
+         .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
+         .dest = vec[i].dest,
+         .src = vec[i].src,
+         .lane = vec[i].lane,
+         .wait_mask = vec[i].wait_mask,
+         .dest_hint = vec[i].dest_hint,
+         .half = vec[i].half,
+         .src_cache = vec[i].src_cache,
+         .src_discard = vec[i].src_discard,
+         .lane_cache = vec[i].lane_cache,
+         .lane_discard = vec[i].lane_discard,
+      };
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, vec[i].bytes, sizeof(vec[i].bytes)));
+   }
+   return 0;
+}
+
+static int
+test_half_broadcast_vectors(void)
+{
+   /* metal-nt -arch applegpu_g17p, simd_broadcast() of 16-bit data. */
+   static const struct {
+      uint16_t dest, src, lane, wait_mask;
+      bool dest_hint, src_cache, src_discard, lane_cache, lane_discard;
+      uint8_t bytes[10];
+   } reg[] = {
+      {2, 3, 2, 0x1, false, false, true, false, true,
+       {0x47, 0x14, 0x54, 0x02, 0x02, 0x06, 0x04, 0x20, 0x1c, 0x00}},
+      {7, 8, 6, 0x1, false, false, false, false, false,
+       {0x47, 0x14, 0x54, 0x07, 0x02, 0x10, 0x0c, 0x20, 0x10, 0x00}},
+      {5, 0, 4, 0x1, false, false, true, false, false,
+       {0x47, 0x14, 0x54, 0x05, 0x02, 0x00, 0x08, 0x20, 0x14, 0x00}},
+      {5, 4, 0, 0x1, false, false, false, false, true,
+       {0x47, 0x14, 0x54, 0x05, 0x02, 0x08, 0x00, 0x20, 0x18, 0x00}},
+      {6, 3, 5, 0x1, true, true, false, false, true,
+       {0x47, 0x14, 0x54, 0x06, 0x03, 0x06, 0x0a, 0x20, 0x1a, 0x00}},
+      {7, 3, 4, 0x0, true, true, false, true, false,
+       {0x47, 0x04, 0x54, 0x07, 0x03, 0x06, 0x08, 0x22, 0x12, 0x00}},
+   };
+   static const uint8_t immediate_lane5[] = {0x47, 0x04, 0x56, 0x02, 0x02,
+                                             0x04, 0x0a, 0x20, 0x04, 0x00};
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(reg); ++i) {
+      const struct agx3_subgroup_shuffle_desc d = {
+         .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+         .lane_kind = AGX3_SUBGROUP_LANE_REGISTER,
+         .dest = reg[i].dest,
+         .src = reg[i].src,
+         .lane = reg[i].lane,
+         .wait_mask = reg[i].wait_mask,
+         .dest_hint = reg[i].dest_hint,
+         .half = true,
+         .src_cache = reg[i].src_cache,
+         .src_discard = reg[i].src_discard,
+         .lane_cache = reg[i].lane_cache,
+         .lane_discard = reg[i].lane_discard,
+      };
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, reg[i].bytes, sizeof(reg[i].bytes)));
+   }
+
+   struct agx3_subgroup_shuffle_desc d = {
+      .op = AGX3_SUBGROUP_SHUFFLE_BROADCAST,
+      .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+      .dest = 2,
+      .src = 2,
+      .lane = 5,
+      .wait_mask = 1u << 5,
+      .half = true,
+   };
+   CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   CHECK(bytes_equal(out, length, immediate_lane5, sizeof(immediate_lane5)));
+
+   /* The quad selector composes with the narrowed width pair.  metal-nt
+    * -arch applegpu_g17p on `ushort`, immediate lane, identical registers
+    * (src/asahi/compiler/test/probes/g17p-vertex-quad.metal): only byte 1
+    * moves between a quad word and its SIMD control. */
+   static const struct {
+      bool quad;
+      enum agx3_subgroup_shuffle_op op;
+      uint16_t lane;
+      uint8_t bytes[10];
+   } half_imm[] = {
+      {true, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 3,
+       {0x47, 0x00, 0x56, 0x02, 0x02, 0x04, 0x06, 0x20, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_BROADCAST, 3,
+       {0x47, 0x04, 0x56, 0x02, 0x02, 0x04, 0x06, 0x20, 0x04, 0x00}},
+      {true, AGX3_SUBGROUP_SHUFFLE_XOR, 1,
+       {0xc7, 0x00, 0x56, 0x02, 0x02, 0x04, 0x02, 0x20, 0x04, 0x00}},
+      {false, AGX3_SUBGROUP_SHUFFLE_XOR, 1,
+       {0xc7, 0x04, 0x56, 0x02, 0x02, 0x04, 0x02, 0x20, 0x04, 0x00}},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(half_imm); ++i) {
+      const struct agx3_subgroup_shuffle_desc q = {
+         .quad = half_imm[i].quad,
+         .op = half_imm[i].op,
+         .lane_kind = AGX3_SUBGROUP_LANE_IMMEDIATE,
+         .dest = 2,
+         .src = 2,
+         .lane = half_imm[i].lane,
+         .wait_mask = 1u << 5,
+         .half = true,
+      };
+      CHECK(agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &q, out,
+                                         &length));
+      CHECK(bytes_equal(out, length, half_imm[i].bytes,
+                        sizeof(half_imm[i].bytes)));
+   }
+
+   /* The shifts are not this composition: Apple's 16-bit simd_shuffle_up is
+    * 47055603030402200200, whose f9/f10 pair is 3/3 rather than the 2/1 the
+    * broadcast/butterfly point deposits.  Keep them refused until mapped. */
+   d.op = AGX3_SUBGROUP_SHUFFLE_UP;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   d.op = AGX3_SUBGROUP_SHUFFLE_DOWN;
+   d.quad = true;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   /* A 16-bit quad shuffle is witnessed only from an immediate lane. */
+   d.op = AGX3_SUBGROUP_SHUFFLE_BROADCAST;
+   d.quad = true;
+   d.lane_kind = AGX3_SUBGROUP_LANE_REGISTER;
+   d.lane = 4;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   d.quad = false;
+   d.lane_kind = AGX3_SUBGROUP_LANE_UNIFORM;
+   d.lane = 8;
+   CHECK(!agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                       &length));
+   return 0;
+}
+
+static int
 test_ballot_vectors(void)
 {
    static const uint8_t int_b[] = {
@@ -276,6 +480,20 @@ test_ballot_vectors(void)
    CHECK(bytes_equal(out, length, int_b, sizeof(int_b)));
    CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
    CHECK(bytes_equal(out, length, int_c, sizeof(int_c)));
+
+   /* G17P retains a live ballot input for the following subgroup broadcast.
+    * f27 is the source discard bit in the native live/dead witnesses above
+    * the encoder; the register-zero comparison fields remain unchanged.
+    */
+   static const uint8_t int_live_b[] = {
+      0x17, 0x07, 0x54, 0x00, 0x02, 0x08, 0x00, 0xb8, 0xa2, 0x02,
+   };
+   d.src_live = true;
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
+   CHECK(bytes_equal(out, length, int_live_b, sizeof(int_live_b)));
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
+   CHECK(bytes_equal(out, length, int_c, sizeof(int_c)));
+   d.src_live = false;
 
    d.dest = 4;
    CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
@@ -361,6 +579,84 @@ test_ballot_vectors(void)
                                      &length));
    CHECK(bytes_equal(out, length, uint_eq0_live_b,
                      sizeof(uint_eq0_live_b)));
+
+   /* metal-nt applegpu_g17p simd_broadcast_first(): the 16-bit active thread
+    * index in h4 compared equal to zero, discarded, into a cached r2
+    * (half 4). */
+   static const uint8_t half_eq0_b[] = {0x17, 0x17, 0x54, 0x04, 0x03,
+                                        0x08, 0x00, 0x48, 0x22, 0x02};
+   d = (struct agx3_subgroup_ballot_desc) {
+      .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+      .dest = 4,
+      .src = 4,
+      .condition = 4,
+      .compare_immediate = true,
+      .src_half = true,
+      .dest_cache = true,
+   };
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                     &length));
+   CHECK(bytes_equal(out, length, half_eq0_b, sizeof(half_eq0_b)));
+   /* The 16-bit quad ballot against zero of a ushort or uint, sources
+    * arriving on slot 6. */
+   static const struct {
+      uint16_t dest, src;
+      bool src_half, live, invert;
+      uint8_t bytes[10];
+   } quad_half[] = {
+      {0, 0, true, false, true,
+       {0x17, 0x02, 0x56, 0x00, 0x03, 0x00, 0x00, 0x40, 0x22, 0x12}},
+      {1, 1, true, false, false,
+       {0x17, 0x02, 0x56, 0x01, 0x03, 0x02, 0x00, 0x40, 0x22, 0x02}},
+      {0, 1, true, true, true,
+       {0x17, 0x02, 0x56, 0x00, 0x03, 0x02, 0x02, 0x00, 0x22, 0x12}},
+      {0, 0, false, false, false,
+       {0x17, 0x02, 0x56, 0x00, 0x03, 0x00, 0x00, 0x50, 0x22, 0x02}},
+      {0, 0, false, false, true,
+       {0x17, 0x02, 0x56, 0x00, 0x03, 0x00, 0x00, 0x50, 0x22, 0x12}},
+      {2, 0, false, true, true,
+       {0x17, 0x02, 0x56, 0x02, 0x03, 0x00, 0x02, 0x10, 0x22, 0x12}},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(quad_half); ++i) {
+      const struct agx3_subgroup_ballot_desc q = {
+         .quad = true,
+         .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+         .dest = quad_half[i].dest,
+         .src = quad_half[i].src,
+         .src_half = quad_half[i].src_half,
+         .dest_half = true,
+         .dest_cache = true,
+         .src_live = quad_half[i].live,
+         .condition = 4,
+         .invert = quad_half[i].invert,
+         .wait_mask = 1u << 5,
+      };
+      CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &q, out,
+                                        &length));
+      CHECK(bytes_equal(out, length, quad_half[i].bytes,
+                        sizeof(quad_half[i].bytes)));
+   }
+
+   d.compare_value = 1;
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   d.compare_value = 0;
+   d.condition = 1;
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   d.condition = 4;
+   d.compare_immediate = false;
+   CHECK(!agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+
+   d = (struct agx3_subgroup_ballot_desc) {
+      .type = AGX3_SUBGROUP_BALLOT_INTEGER,
+      .src = 2,
+      .condition = 2,
+      .compare_immediate = true,
+      .compare_value = 15,
+      .src_live = true,
+   };
 
    /* No immediate signed, inverted, quad, or AGX3c form was witnessed. */
    d.condition = 5;
@@ -636,7 +932,14 @@ test_rejection(void)
    };
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX2, &s, out, &length));
+   /* The G17P register-lane forms carry waits for the six witnessed slots;
+    * AGX3c's do not. */
    s.wait_mask = 1;
+   CHECK(
+      agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3C, &s, out, &length));
+   s.wait_mask = 1u << 6;
    CHECK(
       !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
    s.wait_mask = 0;
@@ -659,9 +962,13 @@ test_rejection(void)
    s.wait_mask = 0;
    s.quad = false;
    s.lane_kind = AGX3_SUBGROUP_LANE_REGISTER;
+   /* G17P reads the lane as 16 bits, from any half; AGX3c only from a full
+    * register. */
    s.lane = 3;
    CHECK(
-      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+      agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3B, &s, out, &length));
+   CHECK(
+      !agx3_subgroup_encode_shuffle(AGX_ISA_ENCODING_AGX3C, &s, out, &length));
    s.lane = 4;
    s.op = (enum agx3_subgroup_shuffle_op)-1;
    CHECK(
@@ -693,7 +1000,7 @@ test_rejection(void)
       !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &r, out, &length));
    r.quad = false;
    CHECK(
-      !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &r, out, &length));
+      !agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &r, out, &length));
    r.prefix = false;
    r.op = (enum agx3_subgroup_reduce_op)-1;
    CHECK(
@@ -701,12 +1008,155 @@ test_rejection(void)
    return 0;
 }
 
+static int
+test_half_reduce_vectors(void)
+{
+   /* metal-nt -arch applegpu_g17p. Every source arrives from a device load on
+    * scoreboard slot 6. The unsigned quad words come from o = quad_op(x16),
+    * whose result escapes the quad and so also sets f62 (byte 1, bit 3);
+    * Apple leaves that bit clear when the result feeds another quad
+    * reduction, and so does this encoder, as the signed pair shows:
+    * quad_min(short) is 370a560003001007 escaping and 3702560003001007
+    * chained. */
+   static const struct {
+      bool quad, prefix, dest_hint, src_live;
+      enum agx3_subgroup_reduce_op op;
+      uint16_t dest, src;
+      uint8_t bytes[8];
+   } vec[] = {
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_IADD, 2, 2,
+       {0xbf, 0x01, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, true, true, true, AGX3_SUBGROUP_REDUCE_IADD, 2, 3,
+       {0xbf, 0x01, 0x56, 0x02, 0x03, 0x06, 0x12, 0x09}},
+      {false, true, false, false, AGX3_SUBGROUP_REDUCE_IADD, 2, 2,
+       {0xbf, 0x01, 0x56, 0x02, 0x02, 0x04, 0x10, 0x0b}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_UMIN, 2, 2,
+       {0x3f, 0x03, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_SMIN, 2, 2,
+       {0x3f, 0x02, 0x56, 0x02, 0x02, 0x04, 0x10, 0x07}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_SMAX, 2, 2,
+       {0xbf, 0x02, 0x56, 0x02, 0x02, 0x04, 0x10, 0x07}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_AND, 2, 2,
+       {0x3f, 0x00, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_OR, 2, 2,
+       {0xbf, 0x00, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, false, false, false, AGX3_SUBGROUP_REDUCE_XOR, 2, 2,
+       {0x3f, 0x01, 0x56, 0x02, 0x02, 0x04, 0x10, 0x03}},
+      {false, true, true, true, AGX3_SUBGROUP_REDUCE_FMUL, 3, 2,
+       {0xbf, 0x04, 0x56, 0x03, 0x03, 0x04, 0x8a, 0x10}},
+      {false, true, false, false, AGX3_SUBGROUP_REDUCE_FMUL, 2, 2,
+       {0xbf, 0x04, 0x56, 0x02, 0x02, 0x04, 0x88, 0x18}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_SMAX, 0, 0,
+       {0xb7, 0x02, 0x56, 0x00, 0x03, 0x00, 0x10, 0x07}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_SMIN, 0, 0,
+       {0x37, 0x02, 0x56, 0x00, 0x03, 0x00, 0x10, 0x07}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_FADD, 0, 0,
+       {0x37, 0x04, 0x56, 0x00, 0x03, 0x00, 0x88, 0x08}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_FMIN, 0, 0,
+       {0xb7, 0x05, 0x56, 0x00, 0x03, 0x00, 0x08, 0x13}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_FMAX, 0, 0,
+       {0xb7, 0x07, 0x56, 0x00, 0x03, 0x00, 0x08, 0x13}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_IADD, 0, 0,
+       {0xb7, 0x01, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_AND, 0, 0,
+       {0x37, 0x00, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_UMIN, 0, 0,
+       {0x37, 0x03, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+      {true, false, true, false, AGX3_SUBGROUP_REDUCE_UMAX, 0, 0,
+       {0xb7, 0x03, 0x56, 0x00, 0x03, 0x00, 0x10, 0x03}},
+   };
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], length = 0;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(vec); ++i) {
+      const struct agx3_subgroup_reduce_desc d = {
+         .quad = vec[i].quad,
+         .prefix = vec[i].prefix,
+         .op = vec[i].op,
+         .dest = vec[i].dest,
+         .src = vec[i].src,
+         .wait_mask = 1u << 5,
+         .dest_hint = vec[i].dest_hint,
+         .src_live = vec[i].src_live,
+         .half = true,
+      };
+      CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                        &length));
+      CHECK(bytes_equal(out, length, vec[i].bytes, sizeof(vec[i].bytes)));
+   }
+
+   /* simd_prefix_inclusive_sum(uint) keeps its source live: f25, not f27. */
+   static const uint8_t psum32[] = {0xbf, 0x01, 0x56, 0x04,
+                                    0x03, 0x00, 0x16, 0x09};
+   struct agx3_subgroup_reduce_desc d = {
+      .prefix = true,
+      .op = AGX3_SUBGROUP_REDUCE_IADD,
+      .dest = 4,
+      .src = 0,
+      .wait_mask = 1u << 5,
+      .dest_hint = true,
+      .src_live = true,
+   };
+   CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                     &length));
+   CHECK(bytes_equal(out, length, psum32, sizeof(psum32)));
+
+   /* The remaining integer scans set their table prefix operand: word 3 bit
+    * 11 (f53) on signed min/max, bit 10 (f52) on the bitwise and unsigned
+    * forms, and nothing else changes. */
+   static const struct {
+      enum agx3_subgroup_reduce_op op;
+      uint8_t bit;
+   } scan[] = {
+      {AGX3_SUBGROUP_REDUCE_SMIN, 0x08}, {AGX3_SUBGROUP_REDUCE_SMAX, 0x08},
+      {AGX3_SUBGROUP_REDUCE_AND, 0x04},  {AGX3_SUBGROUP_REDUCE_OR, 0x04},
+      {AGX3_SUBGROUP_REDUCE_XOR, 0x04},  {AGX3_SUBGROUP_REDUCE_UMIN, 0x04},
+      {AGX3_SUBGROUP_REDUCE_UMAX, 0x04},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(scan); ++i) {
+      for (unsigned half = 0; half < 2; ++half) {
+         uint8_t reduce[AGX3_SUBGROUP_MAX_LENGTH], reduce_length = 0;
+         d = (struct agx3_subgroup_reduce_desc){
+            .op = scan[i].op,
+            .dest = 2,
+            .src = 4,
+            .half = half,
+         };
+         CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, reduce,
+                                           &reduce_length));
+         d.prefix = true;
+         CHECK(agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                           &length));
+         CHECK(length == reduce_length && length == 8);
+         reduce[7] |= scan[i].bit;
+         CHECK(bytes_equal(out, length, reduce, reduce_length));
+         CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3C, &d, out,
+                                            &length));
+      }
+   }
+
+   /* No float min/max scan and no quad scan exist. */
+   d = (struct agx3_subgroup_reduce_desc){
+      .prefix = true,
+      .op = AGX3_SUBGROUP_REDUCE_FMIN,
+   };
+   CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   d.op = AGX3_SUBGROUP_REDUCE_IADD;
+   d.quad = true;
+   CHECK(!agx3_subgroup_encode_reduce(AGX_ISA_ENCODING_AGX3B, &d, out,
+                                      &length));
+   return 0;
+}
+
 int
 main(void)
 {
    CHECK(test_shuffle_vectors() == 0);
+   CHECK(test_half_broadcast_vectors() == 0);
+   CHECK(test_register_lane_hint_vectors() == 0);
    CHECK(test_ballot_vectors() == 0);
    CHECK(test_reduce_vectors() == 0);
+   CHECK(test_half_reduce_vectors() == 0);
    CHECK(test_rejection() == 0);
    return 0;
 }

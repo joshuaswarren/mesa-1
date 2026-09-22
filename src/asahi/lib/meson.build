@@ -284,6 +284,18 @@ if with_tests
   )
 
   test(
+    'asahi-poly-adj-map',
+    executable(
+      'asahi-poly-adj-map',
+      files('tests/test-poly-adj-map.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-precompiled-fill',
     executable(
       'asahi-g17p-precompiled-fill',
@@ -330,6 +342,18 @@ if with_tests
     executable(
       'asahi-g17p-early-demote-epilog',
       files('tests/test-agx-g17p-early-demote-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-sample-count',
+    executable(
+      'asahi-sample-count',
+      files('tests/test-agx-sample-count.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_nir, idep_mesautil],
       link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
@@ -387,6 +411,18 @@ if with_tests
   )
 
   test(
+    'asahi-g17p-zero-mask-epilog',
+    executable(
+      'asahi-g17p-zero-mask-epilog',
+      files('tests/test-agx-g17p-zero-mask-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-msaa-epilog',
     executable(
       'asahi-g17p-msaa-epilog',
@@ -411,10 +447,46 @@ if with_tests
   )
 
   test(
+    'asahi-g17p-mrt-msaa-epilog',
+    executable(
+      'asahi-g17p-mrt-msaa-epilog',
+      files('tests/test-agx-g17p-mrt-msaa-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-emrt-sample-epilog',
+    executable(
+      'asahi-g17p-emrt-sample-epilog',
+      files('tests/test-agx-g17p-emrt-sample-epilog.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-g17p-mrt-quad',
     executable(
       'asahi-g17p-mrt-quad',
       files('tests/test-agx-g17p-mrt-quad.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-mrt-mixed',
+    executable(
+      'asahi-g17p-mrt-mixed',
+      files('tests/test-agx-g17p-mrt-mixed.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_nir, idep_mesautil],
       link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],

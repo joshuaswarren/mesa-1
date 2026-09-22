@@ -39,6 +39,43 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
 {
    VkFormatFeatureFlags2 features = 0;
 
+   /* G17P reconstructs single-plane interleaved 4:2:2 in the shader rather
+    * than in the texture unit (hk_image_view.c programs these views as plain
+    * four-component words), so it can honour chroma-reconstruction features
+    * that the generic path below cannot, and it used to advertise all of
+    * them.  Explicit reconstruction is withdrawn.
+    *
+    * Advertising CHROMA_RECONSTRUCTION_EXPLICIT is what makes a conformance
+    * run evaluate this driver against the explicit reference, and the
+    * explicit 4:2:2 reference in VK-GL-CTS is wrong for COSITED_EVEN: at even
+    * luma index it weights the chroma sample at subI + 1, one chroma texel
+    * right of the texel COSITED_EVEN co-sites with that luma texel.  We do
+    * not carry a capability whose only effect is to select a broken
+    * reference.  MIDPOINT_CHROMA_SAMPLES and SEPARATE_RECONSTRUCTION_FILTER
+    * go with it: both only describe how chroma is reconstructed, and the
+    * remaining COSITED_EVEN path is reconstructed implicitly as far as the
+    * API is concerned.
+    *
+    * Note this is NOT bit-for-bit what the generic path below computes for
+    * these formats.  There n_planes == 1 and the single plane's
+    * denominator_scales are {1, 1} (vk_format.c, y_plane(...)), so
+    * cosited_chroma stays false and neither chroma-location bit is added at
+    * all.  That reading is not reconciled with M1/M2 conformance and has not
+    * been measured on M1/M2 hardware, so do not copy it here on the strength
+    * of code inspection alone.  COSITED_EVEN is kept because it is what this
+    * driver actually implements and passes.
+    */
+   if (agx_native_graphics(&pdev->dev) && hk_packed_ycbcr_bits(vk_format)) {
+      if (tiling != VK_IMAGE_TILING_OPTIMAL && tiling != VK_IMAGE_TILING_LINEAR)
+         return 0;
+      return VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+             VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT |
+             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+             VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT |
+             VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_YCBCR_CONVERSION_LINEAR_FILTER_BIT;
+   }
+
    /* This optional format needs hacks for opaque black, so hide for
     * performance. We might specially enable this for Proton / behind a driconf.
     */
@@ -46,8 +83,60 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
       return 0;
 
    enum pipe_format p_format = hk_format_to_pipe_format(vk_format);
+   /* D16S8 uses the existing independent D16 and S8 planes. */
+   if (vk_format == VK_FORMAT_D16_UNORM_S8_UINT) {
+      if (pdev->dev.chip != AGX_CHIP_G17P)
+         return 0;
+      p_format = PIPE_FORMAT_Z16_UNORM;
+   }
    if (p_format == PIPE_FORMAT_NONE)
       return 0;
+
+   enum pipe_format padded = hk_padded_image_format(p_format);
+   if (agx_native_graphics(&pdev->dev) && padded != p_format) {
+      /* Linear and external modifier layouts must retain the API's packed
+       * texel stride. This path is restricted to driver-owned optimal images. */
+      if (tiling != VK_IMAGE_TILING_OPTIMAL)
+         return 0;
+      VkFormatFeatureFlags2 rgb = VK_FORMAT_FEATURE_2_TRANSFER_SRC_BIT |
+         VK_FORMAT_FEATURE_2_TRANSFER_DST_BIT;
+      const enum pipe_format integer = hk_scaled_texture_format(padded);
+
+      /* A scaled format reaches this block only because it is three-component
+       * and therefore padded. Everything this block would grant it rests on
+       * the integer-fetch-plus-convert emulation that the withdrawal below
+       * removed for every other component count, so withhold it here too and
+       * leave these formats uniformly unsupported as images, as they are on
+       * G13 and G14. */
+      if (integer != PIPE_FORMAT_NONE)
+         return 0;
+
+      const enum pipe_format storage =
+         integer != PIPE_FORMAT_NONE ? integer : padded;
+      /* vkCmdBlitImage between a scaled and a non-scaled format has no
+       * agreed-upon result: the scaled side carries integer values and the
+       * other carries normalized ones, so no conversion satisfies both. Other
+       * drivers withhold every image feature from scaled formats for this
+       * reason. Keep sampling and transfers, which are well-defined, and
+       * withhold blit. */
+      const bool blittable = integer == PIPE_FORMAT_NONE;
+      if (ail_pixel_format[storage].texturable) {
+         rgb |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
+         if (blittable)
+            rgb |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
+         if (!util_format_is_pure_integer(storage) ||
+             hk_uscaled_normalized_format(padded) != PIPE_FORMAT_NONE)
+            rgb |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
+      }
+      if (ail_pixel_format[storage].renderable && blittable)
+         rgb |= VK_FORMAT_FEATURE_2_BLIT_DST_BIT;
+      if (ail_pixel_format[padded].renderable) {
+         rgb |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
+         if (!util_format_is_pure_integer(padded))
+            rgb |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BLEND_BIT;
+      }
+      return rgb;
+   }
 
    /* Keep compressed-family reporting atomic with the corresponding Vulkan
     * feature. The complete BC, ETC2/EAC and ASTC LDR format matrices are
@@ -72,6 +161,21 @@ hk_get_image_plane_format_features(struct hk_physical_device *pdev,
     */
    if (util_format_is_compressed(p_format) && tiling != VK_IMAGE_TILING_OPTIMAL)
       return 0;
+
+   /* No scaled format has an ail_pixel_format[] entry on any generation: the
+    * hardware does not sample them.  hk_scaled_texture_format() maps SSCALED
+    * to SINT and USCALED to UINT, and the image features above were granted on
+    * the strength of that emulation -- an integer fetch plus an int-to-float
+    * conversion in the shader.  Gate them on descriptor generation 9 and G13
+    * and G14 never saw them, so the whole scaled image-format surface existed
+    * on one generation only, which is not a hardware difference.
+    *
+    * Withdraw it.  radv and anv withhold every image feature from scaled
+    * formats; matching that makes the optional VK_FORMAT_*_[SU]SCALED_* image
+    * formats uniformly unsupported here, as they already are on G13 and G14.
+    * Vertex-buffer use of the same formats is unaffected: it does not come
+    * through this function.
+    */
 
    if (ail_pixel_format[p_format].texturable) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
@@ -187,6 +291,45 @@ hk_get_image_format_features(struct hk_physical_device *pdev,
          VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT;
    }
 
+   /* G17P used to add CHROMA_RECONSTRUCTION_EXPLICIT_FORCEABLE here, and only
+    * G17P: agx_native_graphics() is G16G/G17P, so M1/M2 reach these formats
+    * without it and every explicit_* conformance case is NotSupported there.
+    *
+    * That bit is the sole route into VK-GL-CTS's explicit reconstruction
+    * reference, and both of its routines are wrong.  reconstructLinearX-
+    * ChromaSample() treats its constant as the weight of the first chroma
+    * sample; reconstructLinearXYChromaSample() hands the same constants to
+    * linearInterpolate(), which weights the second.  So the X-only routine is
+    * wrong at COSITED_EVEN and the XY routine is wrong at MIDPOINT in either
+    * axis -- which is exactly the failing set: 4:2:2 cosited, and 4:2:0
+    * cosited_midpoint / midpoint_cosited / midpoint_midpoint, with
+    * cosited_cosited passing.
+    *
+    * We are not giving this up because we cannot do it.  G17P's explicit
+    * multi-plane reconstruction is correct: over 171 logged failing sample
+    * points the driver matched the Vulkan spec reconstruction 171/171 and the
+    * as-written CTS value 0/171, while the reference's own bounds contained
+    * the as-written value 171/171 and the spec value 0/171.  The same
+    * instrument scored 248/248 on packed 4:2:2 before it was extended here.
+    * We are giving up claiming a capability whose only effect is to select a
+    * proven-wrong reference, and matching what M1/M2 report.
+    *
+    * The cost is real and deliberate: 512 conformance cases that pass today
+    * become NotSupported, alongside the 512 that fail.  Nothing outside
+    * ycbcr.conversion.*.chroma_reconstruction moves -- of the 53,768
+    * multi-plane YCbCr cases, exactly 1,024 request explicit reconstruction.
+    *
+    * Nothing is needed on the sampler side.  Unlike packed single-plane,
+    * whose views are programmed as plain four-component word textures so
+    * hk_sampler.c must force the shader lowering on, multi-plane views are
+    * real YCbCr views: hk_sampler.c's forcing is gated on
+    * hk_packed_ycbcr_bits(), which is 0 here, so multi-plane only ever
+    * reconstructed explicitly when an application asked.  Withdrawing the bit
+    * makes that request illegal, lower_ycbcr_explicit() stops firing, and the
+    * common implicit path takes over -- the path the 1,536 default_* cases
+    * already exercise and pass.
+    */
+
    if (cosited_chroma)
       features |= VK_FORMAT_FEATURE_COSITED_CHROMA_SAMPLES_BIT;
 
@@ -230,8 +373,8 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
       format = ycbcr_info->planes[plane].format;
       width /= ycbcr_info->planes[plane].denominator_scales[0];
       height /= ycbcr_info->planes[plane].denominator_scales[0];
-   } else if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-      format = (plane == 0) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_S8_UINT;
+   } else if (hk_split_depth_stencil(format)) {
+      format = hk_depth_stencil_plane_format(format, plane);
    }
 
    /* Allow disabling compression for debugging */
@@ -393,11 +536,26 @@ hk_GetPhysicalDeviceImageFormatProperties2(
 
       features &= ~VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT;
 
-      /* We also do not support sparse RGB32 uniform texel buffers, as we do not
-       * have residency query support for this interaction and there are no
-       * known use cases.
+      /* We also do not support sparse RESIDENCY on a format whose texel block
+       * is not a power of two, as we have no residency granularity to report
+       * for that interaction and there are no known use cases.
+       *
+       * Sparse BINDING and ALIASED have no such interaction: they bind and
+       * alias opaque memory ranges and never ask about texel blocks.
+       * Refusing them there made
+       * vkGetPhysicalDeviceImageFormatProperties fail a combination the spec
+       * requires. CTS excludes a non-power-of-two pixel size only under
+       * VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT (vktApiFeatureInfo.cpp,
+       * isRequiredImageParameterCombination), and the combination it then
+       * demands and we refused is
+       * SPARSE_ALIASED_BIT|SPARSE_BINDING_BIT with SAMPLED usage --
+       * captured on Neo. Every three-channel format failed
+       * dEQP-VK.api.info.image_format_properties as soon as sparseBinding was
+       * advertised. G17P stores a three-channel image padded to four, so it
+       * is the generation that reaches this at all.
        */
-      if (!util_is_power_of_two_nonzero(
+      if ((pImageFormatInfo->flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) &&
+          !util_is_power_of_two_nonzero(
              vk_format_get_blocksize(pImageFormatInfo->format))) {
 
          return VK_ERROR_FORMAT_NOT_SUPPORTED;
@@ -882,7 +1040,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
    /* We do not support interleaved depth/stencil. Instead, we decompose to
     * a depth plane and a stencil plane.
     */
-   if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+   if (hk_split_depth_stencil(image->vk.format)) {
       image->plane_count = 2;
    }
 
@@ -938,9 +1096,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       VkFormat format =
          ycbcr_info ? ycbcr_info->planes[plane].format : pCreateInfo->format;
 
-      if (format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
-         format = (plane == 0) ? VK_FORMAT_D32_SFLOAT : VK_FORMAT_S8_UINT;
-      }
+      format = hk_depth_stencil_plane_format(format, plane);
 
       const uint8_t width_scale =
          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[0] : 1;
@@ -948,6 +1104,11 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          ycbcr_info ? ycbcr_info->planes[plane].denominator_scales[1] : 1;
 
       const enum pipe_format p_format = hk_format_to_pipe_format(format);
+      const enum pipe_format layout_format =
+         agx_native_graphics(&dev->dev) &&
+               pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL
+            ? hk_padded_image_format(p_format)
+            : p_format;
       uint32_t linear_stride_B = 0;
       if (mod_explicit_info &&
           image->vk.drm_format_mod == DRM_FORMAT_MOD_LINEAR) {
@@ -980,7 +1141,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          .tiling = hk_map_tiling(dev, pCreateInfo, image->vk.drm_format_mod),
          .compressed = compressed,
          .mipmapped_z = pCreateInfo->imageType == VK_IMAGE_TYPE_3D,
-         .format = p_format,
+         .format = layout_format,
 
          .linear_stride_B = linear_stride_B,
 
@@ -1543,7 +1704,7 @@ hk_plane_index(VkFormat format, VkImageAspectFlags aspect_mask)
    case VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT:
       return 2;
    case VK_IMAGE_ASPECT_STENCIL_BIT:
-      return format == VK_FORMAT_D32_SFLOAT_S8_UINT;
+      return hk_split_depth_stencil(format);
    }
 }
 
@@ -1858,7 +2019,7 @@ hk_CopyImageToImageEXT(VkDevice _device,
       pCopyImageToImageInfo->flags & VK_HOST_IMAGE_COPY_MEMCPY_EXT;
 
    for (uint32_t i = 0; i < pCopyImageToImageInfo->regionCount; ++i) {
-      if (src_image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+      if (hk_split_depth_stencil(src_image->vk.format)) {
          VkImageCopy2 info = pCopyImageToImageInfo->pRegions[i];
          u_foreach_bit(b, info.dstSubresource.aspectMask) {
             info.srcSubresource.aspectMask = BITFIELD_BIT(b);

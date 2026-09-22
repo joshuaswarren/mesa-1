@@ -3878,6 +3878,15 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
                                                       chain->vk_format, alpha);
    }
    chain->num_drm_modifiers = num_drm_modifiers;
+   if (WSI_DEBUG & WSI_DEBUG_SYNC) {
+      fprintf(stderr,
+              "MESA-WSI-SYNC swapchain images=%u requested=%u mode=%u "
+              "usage=0x%x extent=%ux%u explicit=%u modifiers=%u\n",
+              num_images, pCreateInfo->minImageCount, present_mode,
+              pCreateInfo->imageUsage, pCreateInfo->imageExtent.width,
+              pCreateInfo->imageExtent.height,
+              chain->base.image_info.explicit_sync, num_drm_modifiers);
+   }
    if (num_drm_modifiers) {
       uint64_t *drm_modifiers_copy =
          vk_alloc(pAllocator, sizeof(*drm_modifiers) * num_drm_modifiers, 8,

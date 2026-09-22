@@ -106,3 +106,37 @@ TEST_F(RepairSSA, IfElse)
       agx_unit_test(b, agx_fadd(b, x, y3));
    });
 }
+
+TEST_F(RepairSSA, UseModifiersDoNotLeakIntoPhi)
+{
+   for (unsigned modifiers = 1; modifiers <= 3; ++modifiers) {
+      CASE({
+         agx_block *A = agx_start_block(b->shader);
+         agx_block *B = agx_test_block(b->shader);
+         agx_block *C = agx_test_block(b->shader);
+         agx_block *D = agx_test_block(b->shader);
+         agx_block_add_successor(A, B);
+         agx_block_add_successor(A, C);
+         agx_block_add_successor(B, D);
+         agx_block_add_successor(C, D);
+
+         b->cursor = agx_after_block(B);
+         agx_index x = agx_mov_imm(b, 32, 1);
+         b->cursor = agx_after_block(C);
+         agx_index x2 = repaired ? agx_temp(b->shader, AGX_SIZE_32) : x;
+         agx_mov_imm_to(b, x2, 2);
+
+         b->cursor = agx_after_block(D);
+         if (repaired)
+            x = agx_phi_2(b, x, x2);
+
+         agx_index modified = x;
+         modified.abs = modifiers & 1;
+         modified.neg = modifiers & 2;
+         agx_unit_test(b, modifiers == 2
+                            ? agx_iadd(b, agx_immediate(10), modified, 0)
+                            : agx_fadd(b, modified, agx_negzero()));
+         agx_unit_test(b, x);
+      });
+   }
+}

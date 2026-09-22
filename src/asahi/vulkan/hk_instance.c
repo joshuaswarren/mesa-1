@@ -15,7 +15,6 @@
 #include "util/u_debug.h"
 #include "util/driconf.h"
 #include "util/mesa-blake3.h"
-#include "util/u_debug.h"
 
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_EnumerateInstanceVersion(uint32_t *pApiVersion)

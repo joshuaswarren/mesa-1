@@ -87,6 +87,36 @@ agxdecode_find_handle(struct agxdecode_ctx *ctx, unsigned handle)
    return NULL;
 }
 
+bool
+agxdecode_copy_gpu_mem(struct agxdecode_ctx *ctx, uint64_t gpu_va,
+                       size_t size, void *data)
+{
+   const struct agx_bo *mem =
+      agxdecode_find_mapped_gpu_mem_containing(ctx, gpu_va);
+   if (!mem || !mem->_map || gpu_va - mem->va->addr > mem->size ||
+       size > mem->size - (gpu_va - mem->va->addr))
+      return false;
+
+   memcpy(data, mem->_map + gpu_va - mem->va->addr, size);
+   return true;
+}
+
+bool
+agxdecode_gpu_mem_bounds(struct agxdecode_ctx *ctx, uint64_t gpu_va,
+                         uint64_t *base, size_t *size)
+{
+   const struct agx_bo *mem =
+      agxdecode_find_mapped_gpu_mem_containing(ctx, gpu_va);
+   if (!mem)
+      return false;
+
+   if (base)
+      *base = mem->va->addr;
+   if (size)
+      *size = mem->size;
+   return true;
+}
+
 static size_t
 _agxdecode_grab_mapped(struct agxdecode_ctx *ctx, uint64_t gpu_va, void **buf,
                        int line, const char *filename)
@@ -711,18 +741,23 @@ agxdecode_cdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
    if (available < sizeof(uint32_t))
       return STATE_ERROR;
 
-   /* Type zero has three witnessed lengths (24/36/40 bytes).  Only the
-    * 40-byte direct form has a semantic discriminant strong enough for a
-    * record-at-a-time stream parser: canonical template masks plus word-3's
-    * direct bit/dimension value.  Refuse an indirect or malformed prefix
-    * instead of consuming it as a 40-byte record and losing synchronization. */
-   if ((map[3] >> 5) == AGX_CDM_BLOCK_TYPE_LAUNCH) {
+   /* Type zero has three witnessed lengths (24/36/40 bytes), and word 0's
+    * mode field is what separates them -- 0 direct, 1 the nine-word indirect
+    * form, 2 the compact one -- so the record decoder can size any of them
+    * without guessing.  The direct SEMANTIC unpack is a stricter thing: it
+    * also demands word 3 be a canonical dimension word.  The native compute
+    * path derives word 3 from the program VA instead, which hardware settled
+    * (see agx3_g17p_native_compute_launch_pack), so a mismatch there is a
+    * note about an unresolved field, not a reason to abandon the stream. */
+   if ((map[3] >> 5) == AGX_CDM_BLOCK_TYPE_LAUNCH &&
+       ((map[3] >> 3) & 3) == 0) {
       struct agx3_cdm_direct_launch_info direct;
       if (!agx3_cdm_direct_launch_unpack(chip, map, available, &direct)) {
          fprintf(agxdecode_dump_stream,
-                 "Ambiguous or non-canonical AGX3 launch for %s\n",
+                 "Note: AGX3 launch is not the canonical direct form for %s\n",
                  agxdecode_chip_name(chip));
-         return STATE_ERROR;
+         u_hexdump(agxdecode_dump_stream, map,
+                   MIN2(available, (size_t)AGX3_CDM_DIRECT_LAUNCH_SIZE), false);
       }
    }
 
@@ -757,6 +792,37 @@ agxdecode_cdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
                             agxdecode_ioto, verbose, params, NULL);
       return record.length;
 
+   case AGX3_CDM_RECORD_INDIRECT_LAUNCH_36:
+   case AGX3_CDM_RECORD_INDIRECT_LAUNCH:
+      fprintf(agxdecode_dump_stream,
+              "AGX3 Compute (indirect, %u bytes)\n"
+              "  Word 0 payload = 0x%08" PRIx32 "\n"
+              "  Word 1 payload = 0x%08" PRIx32 "\n"
+              "  Pipeline = 0x%012" PRIx64 "\n"
+              "  Opaque word 3 = 0x%08" PRIx32 "\n"
+              "  Word 4 payload = 0x%04" PRIx16 "\n"
+              "  Parameters = 0x%012" PRIx64 "\n",
+              (unsigned)record.length,
+              record.data.indirect_launch.word0_payload,
+              record.data.indirect_launch.word1_payload,
+              record.data.indirect_launch.pipeline,
+              record.data.indirect_launch.opaque_word3,
+              record.data.indirect_launch.word4_payload,
+              record.data.indirect_launch.parameters);
+      if (record.kind == AGX3_CDM_RECORD_INDIRECT_LAUNCH_36) {
+         fprintf(agxdecode_dump_stream,
+                 "  Trailing = (0x%08" PRIx32 ", 0x%08" PRIx32
+                 ", 0x%08" PRIx32 ")\n",
+                 record.data.indirect_launch.trailing_words[0],
+                 record.data.indirect_launch.trailing_words[1],
+                 record.data.indirect_launch.trailing_words[2]);
+      }
+      if (record.data.indirect_launch.pipeline != 0)
+         agxdecode_stateful(ctx, record.data.indirect_launch.pipeline,
+                            "Ioto pipeline", agxdecode_ioto, verbose, params,
+                            NULL);
+      return record.length;
+
    case AGX3_CDM_RECORD_STREAM_LINK:
       fprintf(agxdecode_dump_stream,
               "AGX3 Stream Link\n  Target = 0x%012" PRIx64
@@ -775,6 +841,10 @@ agxdecode_cdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
    case AGX3_CDM_RECORD_BARRIER:
       fprintf(agxdecode_dump_stream,
               "AGX3 Barrier\n  Flags = 0x%x\n", record.data.barrier.flags);
+      return record.length;
+
+   case AGX3_CDM_RECORD_SSTT_FLUSH_INVALIDATE:
+      agxdecode_log("AGX3 SSTT Flush Invalidate\n");
       return record.length;
 
    case AGX3_CDM_RECORD_SUBSTREAM_BARRIER:
@@ -1133,6 +1203,38 @@ agxdecode_vdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
               record.data.tessellate_direct.base_instance,
               record.data.tessellate_direct.instance_stride_word,
               record.data.tessellate_direct.factor_buffer_size_minus_one);
+      return record.length;
+
+   case AGX_VDM_RECORD_TESSELLATE_INDIRECT:
+      fprintf(agxdecode_dump_stream,
+              "AGX3 Indirect Tessellate\n"
+              "  Factor buffer = 0x%012" PRIx64 "\n"
+              "  Indirect buffer = 0x%012" PRIx64 "\n"
+              "  Instance stride word = 0x%08" PRIx32 "\n"
+              "  Factor buffer size minus one = 0x%08" PRIx32 "\n",
+              record.data.tessellate_indirect.factor_buffer,
+              record.data.tessellate_indirect.indirect_buffer,
+              record.data.tessellate_indirect.instance_stride_word,
+              record.data.tessellate_indirect.factor_buffer_size_minus_one);
+      return record.length;
+
+   case AGX_VDM_RECORD_TESSELLATION_STATE:
+      fprintf(agxdecode_dump_stream,
+              "AGX3 Tessellation State\n"
+              "  Partition = %u\n"
+              "  Counter-clockwise = %u\n"
+              "  Maximum factor = %u\n"
+              "  Quads = %u\n"
+              "  Float factors = %u\n"
+              "  Step function = %u\n"
+              "  Scale = 0x%04x\n",
+              record.data.tessellation_state.partition,
+              record.data.tessellation_state.counterclockwise,
+              record.data.tessellation_state.max_factor,
+              record.data.tessellation_state.quads,
+              record.data.tessellation_state.float_factors,
+              record.data.tessellation_state.step,
+              record.data.tessellation_state.scale_half);
       return record.length;
 
    case AGX_VDM_RECORD_UNKNOWN:

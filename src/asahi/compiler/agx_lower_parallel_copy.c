@@ -84,6 +84,17 @@ do_swap(agx_builder *b, const struct agx_copy *copy)
    agx_index y = copy->src;
    assert(x.memory == y.memory);
 
+   /* A copy's abs/neg is a float modifier composed into the move. AGX3's XOR
+    * swap has no field for one, so swap the registers themselves and apply
+    * the modifier to the moved value afterwards.
+    */
+   const bool agx3_modified =
+      b->shader->key &&
+      b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2 &&
+      (y.abs || y.neg);
+   if (agx3_modified)
+      y.abs = y.neg = false;
+
    /* Memory-memory swaps lowered here, GPR swaps lowered later */
    if (x.memory) {
       agx_index temp1 = agx_register(4, copy->src.size);
@@ -95,6 +106,13 @@ do_swap(agx_builder *b, const struct agx_copy *copy)
       agx_mov_to(b, x, temp2);
    } else {
       agx_swap(b, x, y);
+   }
+
+   if (agx3_modified) {
+      agx_index modified = x;
+      modified.abs = copy->src.abs;
+      modified.neg = copy->src.neg;
+      agx_mov_to(b, x, modified);
    }
 }
 

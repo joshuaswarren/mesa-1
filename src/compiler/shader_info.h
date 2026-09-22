@@ -291,6 +291,16 @@ typedef struct shader_info {
    bool zero_initialize_shared_memory:1;
 
    /**
+    * AGX3 only: something already owns converting load_shared/store_shared
+    * offsets from bytes to the scalar elements the hardware's ldtg/sttg index
+    * field counts -- either a frontend that ran agx_preprocess_nir_g17p(), or
+    * agx_nir_lower_shared_element_index() itself.  It means "do not apply the
+    * conversion again", not "the shader is already converted": a frontend sets
+    * it before its own shared-memory lowering has even created the accesses.
+    */
+   bool shared_element_index_agx:1;
+
+   /**
     * Used for ARB_compute_variable_group_size.
     */
    bool workgroup_size_variable:1;

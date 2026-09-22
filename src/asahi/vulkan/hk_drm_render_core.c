@@ -104,7 +104,11 @@ hk_drm_render_resource_specs_pack(
     *
     * Delete this once the kernel whitelists the flag.
     */
-   if (high && getenv("AGX_NO_RSRC_SPEC_HI") == NULL)
+   static int suppress = -1;
+   if (suppress < 0)
+      suppress = getenv("AGX_NO_RSRC_SPEC_HI") != NULL;
+
+   if (high && !suppress)
       cmd->flags |= DRM_ASAHI_RENDER_RSRC_SPEC_HI;
    else
       cmd->flags &= ~DRM_ASAHI_RENDER_RSRC_SPEC_HI;

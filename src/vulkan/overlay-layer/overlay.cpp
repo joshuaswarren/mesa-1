@@ -24,6 +24,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <unistd.h>
 
 #include <vulkan/vulkan_core.h>
 #include <vulkan/vk_layer.h>
@@ -72,6 +73,25 @@ struct instance_data {
 struct frame_stat {
    uint64_t stats[OVERLAY_PARAM_ENABLED_MAX];
 };
+
+static FILE *
+open_output_file(const char *pattern, const char *mode)
+{
+   const char *pid_token = strstr(pattern, "%p");
+   if (!pid_token)
+      return fopen(pattern, mode);
+
+   char path[4096];
+   const size_t prefix = pid_token - pattern;
+   const int written = snprintf(path, sizeof(path), "%.*s%ld%s", (int)prefix,
+                                pattern, (long)getpid(), pid_token + 2);
+   if (written < 0 || (size_t)written >= sizeof(path)) {
+      errno = ENAMETOOLONG;
+      return NULL;
+   }
+
+   return fopen(path, mode);
+}
 
 /* Mapped from VkDevice */
 struct queue_data;
@@ -482,6 +502,10 @@ static const char *param_unit(enum overlay_param_enabled param)
 {
    switch (param) {
    case OVERLAY_PARAM_ENABLED_frame_timing:
+   case OVERLAY_PARAM_ENABLED_begin_cmdbuf_timing:
+   case OVERLAY_PARAM_ENABLED_end_cmdbuf_timing:
+   case OVERLAY_PARAM_ENABLED_draw_timing:
+   case OVERLAY_PARAM_ENABLED_submit_timing:
    case OVERLAY_PARAM_ENABLED_acquire_timing:
    case OVERLAY_PARAM_ENABLED_present_timing:
       return "(us)";
@@ -534,7 +558,7 @@ static struct swapchain_data *new_swapchain_data(VkSwapchainKHR swapchain,
    /* Open output file on swapchain creation */
    assert(instance_data->output_file_fd == NULL);
    instance_data->output_file_fd =
-      fopen(instance_data->params.output_file, "w+");
+      open_output_file(instance_data->params.output_file, "w+");
 
    if (instance_data->output_file_fd) {
       bool first_column = true;
@@ -550,6 +574,8 @@ static struct swapchain_data *new_swapchain_data(VkSwapchainKHR swapchain,
 #undef OVERLAY_PARAM_BOOL
 #undef OVERLAY_PARAM_CUSTOM
       fprintf(instance_data->output_file_fd, "\n");
+      fclose(instance_data->output_file_fd);
+      instance_data->output_file_fd = NULL;
    } else
       fprintf(stderr, "ERROR opening output file: %s\n", strerror(errno));
 
@@ -862,20 +888,31 @@ static void snapshot_swapchain_frame(struct swapchain_data *data)
           elapsed >= instance_data->params.fps_sampling_period) {
          data->fps = 1000000.0f * data->n_frames_since_update / elapsed;
          if (instance_data->capture_started) {
+            FILE *output =
+               open_output_file(instance_data->params.output_file, "a");
+            bool first_column = true;
+
+            if (!output) {
+               fprintf(stderr, "ERROR opening output file: %s\n",
+                       strerror(errno));
+               return;
+            }
+
             for (int s = 0; s < OVERLAY_PARAM_ENABLED_MAX; s++) {
                if (!instance_data->params.enabled[s])
                   continue;
                if (s == OVERLAY_PARAM_ENABLED_fps) {
-                  fprintf(instance_data->output_file_fd,
-                          "%s%.2f", s == 0 ? "" : ", ", data->fps);
+                  fprintf(output, "%s%.2f",
+                          first_column ? "" : ", ", data->fps);
                } else {
-                  fprintf(instance_data->output_file_fd,
-                          "%s%" PRIu64, s == 0 ? "" : ", ",
+                  fprintf(output, "%s%" PRIu64,
+                          first_column ? "" : ", ",
                           data->accumulated_stats.stats[s]);
                }
+               first_column = false;
             }
-            fprintf(instance_data->output_file_fd, "\n");
-            fflush(instance_data->output_file_fd);
+            fprintf(output, "\n");
+            fclose(output);
          }
 
          memset(&data->accumulated_stats, 0, sizeof(data->accumulated_stats));
@@ -2100,8 +2137,11 @@ static void overlay_CmdDraw(
       FIND(struct command_buffer_data, commandBuffer);
    cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw]++;
    struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
    device_data->vtable.CmdDraw(commandBuffer, vertexCount, instanceCount,
                                firstVertex, firstInstance);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
 }
 
 static void overlay_CmdDrawIndexed(
@@ -2116,8 +2156,11 @@ static void overlay_CmdDrawIndexed(
       FIND(struct command_buffer_data, commandBuffer);
    cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_indexed]++;
    struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
    device_data->vtable.CmdDrawIndexed(commandBuffer, indexCount, instanceCount,
                                       firstIndex, vertexOffset, firstInstance);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
 }
 
 static void overlay_CmdDrawIndirect(
@@ -2131,7 +2174,10 @@ static void overlay_CmdDrawIndirect(
       FIND(struct command_buffer_data, commandBuffer);
    cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_indirect]++;
    struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
    device_data->vtable.CmdDrawIndirect(commandBuffer, buffer, offset, drawCount, stride);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
 }
 
 static void overlay_CmdDrawIndexedIndirect(
@@ -2145,7 +2191,10 @@ static void overlay_CmdDrawIndexedIndirect(
       FIND(struct command_buffer_data, commandBuffer);
    cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_indexed_indirect]++;
    struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
    device_data->vtable.CmdDrawIndexedIndirect(commandBuffer, buffer, offset, drawCount, stride);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
 }
 
 static void overlay_CmdDrawIndirectCount(
@@ -2161,9 +2210,12 @@ static void overlay_CmdDrawIndirectCount(
       FIND(struct command_buffer_data, commandBuffer);
    cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_indirect_count]++;
    struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
    device_data->vtable.CmdDrawIndirectCount(commandBuffer, buffer, offset,
                                             countBuffer, countBufferOffset,
                                             maxDrawCount, stride);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
 }
 
 static void overlay_CmdDrawIndexedIndirectCount(
@@ -2179,9 +2231,54 @@ static void overlay_CmdDrawIndexedIndirectCount(
       FIND(struct command_buffer_data, commandBuffer);
    cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_indexed_indirect_count]++;
    struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
    device_data->vtable.CmdDrawIndexedIndirectCount(commandBuffer, buffer, offset,
                                                    countBuffer, countBufferOffset,
                                                    maxDrawCount, stride);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
+}
+
+static void overlay_CmdDrawMultiEXT(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    drawCount,
+    const VkMultiDrawInfoEXT*                   pVertexInfo,
+    uint32_t                                    instanceCount,
+    uint32_t                                    firstInstance,
+    uint32_t                                    stride)
+{
+   struct command_buffer_data *cmd_buffer_data =
+      FIND(struct command_buffer_data, commandBuffer);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_multi] += drawCount;
+   struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
+   device_data->vtable.CmdDrawMultiEXT(commandBuffer, drawCount, pVertexInfo,
+                                       instanceCount, firstInstance, stride);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
+}
+
+static void overlay_CmdDrawMultiIndexedEXT(
+    VkCommandBuffer                             commandBuffer,
+    uint32_t                                    drawCount,
+    const VkMultiDrawIndexedInfoEXT*            pIndexInfo,
+    uint32_t                                    instanceCount,
+    uint32_t                                    firstInstance,
+    uint32_t                                    stride,
+    const int32_t*                              pVertexOffset)
+{
+   struct command_buffer_data *cmd_buffer_data =
+      FIND(struct command_buffer_data, commandBuffer);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_multi_indexed] +=
+      drawCount;
+   struct device_data *device_data = cmd_buffer_data->device;
+   uint64_t ts0 = os_time_get();
+   device_data->vtable.CmdDrawMultiIndexedEXT(commandBuffer, drawCount,
+                                              pIndexInfo, instanceCount,
+                                              firstInstance, stride,
+                                              pVertexOffset);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_draw_timing] +=
+      os_time_get() - ts0;
 }
 
 static void overlay_CmdDispatch(
@@ -2274,8 +2371,11 @@ static VkResult overlay_BeginCommandBuffer(
             __vk_append_struct(&begin_info, &inhe_info);
       }
 
+      uint64_t ts0 = os_time_get();
       VkResult result = device_data->vtable.BeginCommandBuffer(
          commandBuffer, &begin_info);
+      cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_begin_cmdbuf_timing] +=
+         os_time_get() - ts0;
 
       free_chain(new_pnext);
 
@@ -2283,7 +2383,10 @@ static VkResult overlay_BeginCommandBuffer(
    }
 
    /* Otherwise record a begin query as first command. */
+   uint64_t ts0 = os_time_get();
    VkResult result = device_data->vtable.BeginCommandBuffer(commandBuffer, pBeginInfo);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_begin_cmdbuf_timing] +=
+      os_time_get() - ts0;
 
    if (result == VK_SUCCESS) {
       if (cmd_buffer_data->pipeline_query_pool) {
@@ -2331,7 +2434,11 @@ static VkResult overlay_EndCommandBuffer(
                                       cmd_buffer_data->query_index);
    }
 
-   return device_data->vtable.EndCommandBuffer(commandBuffer);
+   uint64_t ts0 = os_time_get();
+   VkResult result = device_data->vtable.EndCommandBuffer(commandBuffer);
+   cmd_buffer_data->stats.stats[OVERLAY_PARAM_ENABLED_end_cmdbuf_timing] +=
+      os_time_get() - ts0;
+   return result;
 }
 
 static VkResult overlay_ResetCommandBuffer(
@@ -2496,7 +2603,12 @@ static VkResult overlay_QueueSubmit(
       }
    }
 
-   return device_data->vtable.QueueSubmit(queue, submitCount, pSubmits, fence);
+   uint64_t ts0 = os_time_get();
+   VkResult result =
+      device_data->vtable.QueueSubmit(queue, submitCount, pSubmits, fence);
+   device_data->frame_stats.stats[OVERLAY_PARAM_ENABLED_submit_timing] +=
+      os_time_get() - ts0;
+   return result;
 }
 
 static VkResult overlay_QueueSubmit2(
@@ -2536,7 +2648,12 @@ static VkResult overlay_QueueSubmit2(
       }
    }
 
-   return device_data->vtable.QueueSubmit2(queue, submitCount, pSubmits, fence);
+   uint64_t ts0 = os_time_get();
+   VkResult result =
+      device_data->vtable.QueueSubmit2(queue, submitCount, pSubmits, fence);
+   device_data->frame_stats.stats[OVERLAY_PARAM_ENABLED_submit_timing] +=
+      os_time_get() - ts0;
+   return result;
 }
 
 static VkResult overlay_CreateDevice(
@@ -2711,6 +2828,8 @@ static const struct {
    ADD_ALIAS_HOOK(CmdDrawIndirectCountKHR, CmdDrawIndirectCount),
    ADD_HOOK(CmdDrawIndexedIndirectCount),
    ADD_ALIAS_HOOK(CmdDrawIndexedIndirectCountKHR, CmdDrawIndexedIndirectCount),
+   ADD_HOOK(CmdDrawMultiEXT),
+   ADD_HOOK(CmdDrawMultiIndexedEXT),
 
    ADD_HOOK(CmdBindPipeline),
 
@@ -2722,6 +2841,7 @@ static const struct {
 
    ADD_HOOK(QueueSubmit),
    ADD_HOOK(QueueSubmit2),
+   ADD_ALIAS_HOOK(QueueSubmit2KHR, QueueSubmit2),
 
    ADD_HOOK(CreateDevice),
    ADD_HOOK(DestroyDevice),

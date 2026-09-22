@@ -100,8 +100,10 @@ All three formats produce identical text for each texture type:
 
 The type2 text is the existing selector0x35 program. Type3 reproduces the old
 signed fixture byte for byte. The regression requires the same type2 bytes for
-signed and unsigned four-word I32 stores. Multisample and layered admission
-remain unchanged. This is native compiler evidence, not GPU pixel validation.
+signed and unsigned four-word I32 stores. Texture types 4 (multisample) and 8
+(multisample array) are likewise identical across the three formats, and the
+multisample regression requires the unresolved I32 bytes for the signed key.
+This is native compiler evidence, not GPU pixel validation.
 
 On J700 A18 Pro B1, native DM1, the old per-thread-coordinate program stored
 only the first 32x32 tile of a 512x512 target. The matched native shader and
@@ -110,3 +112,30 @@ interior, 188,224 strict exterior and 384 edge-centre pixels, zero mismatches,
 with the full image byte-identical three seconds after the fence. No shader
 diagnostic override was enabled. This proves this bounded spatial path, not
 MRT, MSAA, arbitrary formats, repeated submissions or Vulkan conformance.
+
+### Selector follows the imageblock lane class
+
+Every single-target 2D program is the 68-byte text above with one IMGWBLK
+selector byte. Sweeping byte 0x75 (internal format) over 0..22 with one to
+four components at texture type 2 gives a selector that depends on the format
+only. Builtin background clears of the same formats (root field 2 = 4, clear
+mask 1) store exactly one lane class per selector:
+
+| Formats | Clear store | Selector |
+| --- | --- | --- |
+| 2, 3 | W8 through `fltnorm` | 0x75 |
+| 4, 5 | W8 integer | 0x55 |
+| 6, 7 | W16 through `fltnorm` | 0x95 |
+| 8, 9, 18 | W16 integer | 0x15 |
+| 12..16, 22 | W16 float | 0x15 |
+| 10, 11, 17 | raw W32 | 0x35 |
+| 19..21 | W32 through `pack` | 0x75 |
+
+Apple's render pipelines (`metal-nt -arch applegpu_g17p` on an mtlp-json with
+one colour attachment per MTLPixelFormat) store each format in one of these
+classes, the same class the tilebuffer lowering uses. That fixes the selectors
+the earlier internal-format guesses got wrong: B5G6R5Unorm stores W16 float
+lanes (0x15, not 0x35), RG32Uint and RG32Sint raw W32 lanes (0x35, not 0x75
+and 0x15), and RGBA16Unorm `fltnorm` W16 lanes (0x95, not 0x15). The former
+84-byte RGBA16_SINT program is byte-identical to the texture-type-3 (2D array)
+builtin of every 16-bit internal format; its 2D program is the 0x15 text.

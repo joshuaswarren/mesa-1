@@ -1,0 +1,207 @@
+/*
+ * Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * Pure, dependency-free parts of Honeykrisp's VK_KHR_ray_tracing_pipeline
+ * implementation: the shader-group table, the shader binding table handle
+ * layout, and the pipeline stack-size arithmetic.
+ *
+ * These are split out so they can be unit-tested on the host with no device,
+ * no NIR and no command buffer.  The ABI they describe is documented in
+ * docs/G17P_RAYTRACING_PIPELINE_ABI.md.
+ */
+
+#pragma once
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "vulkan/vulkan_core.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/*
+ * VkPhysicalDeviceRayTracingPipelinePropertiesKHR::shaderGroupHandleSize is
+ * required by the specification to be exactly 32
+ * (VUID-VkPhysicalDeviceRayTracingPipelinePropertiesKHR-shaderGroupHandleSize).
+ * Our handle carries a single 32-bit group index; the remaining 28 bytes are
+ * zero and MUST be written, because an application may compare or hash a whole
+ * handle.
+ */
+#define HK_RAY_TRACING_GROUP_HANDLE_SIZE 32
+
+/*
+ * maxRayHitAttributeSize.  The hit attribute lives in the per-invocation
+ * scratch stack, immediately at the current stack pointer, so this is a
+ * reservation rather than a hardware limit.  32 bytes is what the software
+ * traversal writes (two floats of barycentrics) rounded up to the value
+ * lavapipe uses, which is the shape the CTS exercises.
+ */
+#define HK_RAY_HIT_ATTRIBS_SIZE 32
+
+/*
+ * The megakernel is one compute shader.  Its workgroup is one AGX subgroup
+ * wide so that a ray-generation shader's divergence costs at most one
+ * subgroup, and flat in Y/Z so the launch index arithmetic is a pure
+ * decomposition of the compute global invocation id.
+ */
+/*
+ * maxRayRecursionDepth.  Recursion is unrolled into the megakernel at compile
+ * time, so every extra level multiplies the compiled code; this is a code-size
+ * decision, not a hardware limit.  A pipeline asking for more is refused
+ * rather than silently given a shader that traces one level and stops.
+ */
+#define HK_MAX_RAY_RECURSION_DEPTH 1
+
+#define HK_RT_WORKGROUP_SIZE_X      32
+#define HK_RT_WORKGROUP_SIZE_X_LOG2 5
+#define HK_RT_WORKGROUP_SIZE_Y 1
+#define HK_RT_WORKGROUP_SIZE_Z 1
+
+struct hk_ray_tracing_group_handle {
+   uint32_t index;
+};
+
+/*
+ * A shader group as the megakernel consumes it.  Every index is an index into
+ * the pipeline's flattened stage array, or VK_SHADER_UNUSED_KHR.
+ *
+ * `recursive_index` is the group's *callable* shader: the general shader for a
+ * general group (raygen, miss or callable) and the closest-hit shader for a hit
+ * group.  Any-hit and intersection shaders are not reached through the SBT
+ * dispatch switch, they are reached from inside traversal, so they are named
+ * separately.
+ */
+struct hk_ray_tracing_group {
+   struct hk_ray_tracing_group_handle handle;
+   uint32_t recursive_index;
+   uint32_t ahit_index;
+   uint32_t isec_index;
+};
+
+/*
+ * Derive the three stage indices of one group from its create info.  Returns
+ * false for a group type this driver does not implement, in which case *out is
+ * left untouched.
+ */
+bool hk_rt_group_from_create_info(struct hk_ray_tracing_group *out,
+                                  VkRayTracingShaderGroupTypeKHR type,
+                                  uint32_t general_shader,
+                                  uint32_t closest_hit_shader,
+                                  uint32_t any_hit_shader,
+                                  uint32_t intersection_shader);
+
+/*
+ * Rebase one group of an imported pipeline library onto the importing
+ * pipeline's flattened stage array.  `stage_base` is the number of stages that
+ * precede this library.  VK_SHADER_UNUSED_KHR never moves.
+ */
+struct hk_ray_tracing_group
+hk_rt_group_rebase(struct hk_ray_tracing_group src, uint32_t stage_base);
+
+/*
+ * Serialise a group handle into the application's buffer.  Writes exactly
+ * HK_RAY_TRACING_GROUP_HANDLE_SIZE bytes: the little-endian group index
+ * followed by zeroes.
+ */
+void hk_rt_write_group_handle(void *dst,
+                              struct hk_ray_tracing_group_handle handle);
+
+/*
+ * Per-stage scratch requirements of a compiled pipeline, in bytes.  Each is the
+ * maximum over every stage of that kind that the megakernel inlined.
+ */
+struct hk_rt_stack_sizes {
+   uint32_t raygen;
+   uint32_t any_hit;
+   uint32_t closest_hit;
+   uint32_t miss;
+   uint32_t intersection;
+   uint32_t callable;
+};
+
+/*
+ * Scratch the megakernel must reserve above its own frame, for a pipeline whose
+ * maxPipelineRayRecursionDepth is `recursion_depth`.
+ *
+ * The megakernel does not recurse: every stage is inlined and a traceRay inside
+ * a closest-hit or miss shader is another inlined copy at a higher stack
+ * pointer.  So the worst case is one raygen frame, then for the first level of
+ * recursion either a closest-hit frame, a miss frame, or an intersection frame
+ * with an any-hit frame stacked on it, then for every further level either a
+ * closest-hit or a miss frame (an intersection shader cannot itself trace).
+ * Callables are bounded separately at the 31 the specification's minimum
+ * maxRayRecursionDepth implies.
+ *
+ * This is the same formula lavapipe uses.  It is an upper bound, not a measured
+ * dynamic size: VK_DYNAMIC_STATE_RAY_TRACING_PIPELINE_STACK_SIZE_KHR cannot
+ * shrink it, because the stack is static scratch in the compiled binary.
+ */
+uint32_t hk_rt_pipeline_stack_size(const struct hk_rt_stack_sizes *sizes,
+                                   uint32_t recursion_depth);
+
+/*
+ * vkGetRayTracingShaderGroupStackSizeKHR: the scratch one shader of one group
+ * occupies.  Returns 0 for a shader the group does not have.
+ */
+uint32_t hk_rt_group_stack_size(const struct hk_rt_stack_sizes *sizes,
+                               const struct hk_ray_tracing_group *group,
+                               VkShaderGroupShaderKHR which,
+                               uint32_t recursive_stage_size);
+
+/*
+ * The shader-binding-table index a hit record is fetched with, from the Vulkan
+ * specification's formula
+ *
+ *    instanceShaderBindingTableRecordOffset
+ *      + sbt_offset + sbt_stride * geometryIndex
+ *
+ * `sbt_offset` and `sbt_stride` come from the traceRay call and are already
+ * masked to four bits by the caller; `instance_sbt_offset` is the low 24 bits
+ * of the instance node's sbt_offset_and_flags.  The result is taken modulo
+ * 2^32, exactly as the shader computes it.
+ */
+uint32_t hk_rt_hit_sbt_index(uint32_t sbt_offset, uint32_t sbt_stride,
+                             uint32_t instance_sbt_offset,
+                             uint32_t geometry_index);
+
+/*
+ * Threadgroup counts for a trace-rays launch of `width` x `height` x `depth`
+ * rays, for the megakernel's fixed workgroup size.  The megakernel bounds-checks
+ * its own launch id, so a partial trailing workgroup is safe.
+ */
+void hk_rt_launch_group_count(uint32_t width, uint32_t height, uint32_t depth,
+                              uint32_t out[3]);
+
+/*
+ * Byte offsets inside VkTraceRaysIndirectCommand2KHR, which is the record both
+ * the direct and the indirect entry points publish and the megakernel reads.
+ * Named here so the shader builder and the unit test agree by construction.
+ */
+#define HK_RT_CMD_RAYGEN_ADDRESS                                               \
+   offsetof(VkTraceRaysIndirectCommand2KHR, raygenShaderRecordAddress)
+#define HK_RT_CMD_MISS_ADDRESS                                                 \
+   offsetof(VkTraceRaysIndirectCommand2KHR, missShaderBindingTableAddress)
+#define HK_RT_CMD_HIT_ADDRESS                                                  \
+   offsetof(VkTraceRaysIndirectCommand2KHR, hitShaderBindingTableAddress)
+#define HK_RT_CMD_CALLABLE_ADDRESS                                             \
+   offsetof(VkTraceRaysIndirectCommand2KHR, callableShaderBindingTableAddress)
+#define HK_RT_CMD_WIDTH offsetof(VkTraceRaysIndirectCommand2KHR, width)
+
+/*
+ * A shader binding table region's stride sits two VkDeviceSize after its
+ * address.  hk_rt_sbt_stride_offset() is the one place that relationship is
+ * written down; the NIR builder and the test both use it.
+ */
+static inline uint32_t
+hk_rt_sbt_stride_offset(uint32_t address_offset)
+{
+   return address_offset + 2 * sizeof(VkDeviceSize);
+}
+
+#ifdef __cplusplus
+}
+#endif

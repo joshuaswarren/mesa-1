@@ -34,6 +34,10 @@
 #include "g17p_vulkan_workgroup_shared_spv.h"
 #define COMPUTE_SPV g17p_vulkan_workgroup_shared_spv
 #define TEST_NAME "g17p-vulkan-workgroup-shared"
+#elif defined(G17P_WORKGROUP_SHARED_1024)
+#include "g17p_vulkan_workgroup_shared_1024_spv.h"
+#define COMPUTE_SPV g17p_vulkan_workgroup_shared_1024_spv
+#define TEST_NAME "g17p-vulkan-workgroup-shared-1024"
 #elif defined(G17P_NULL_DESCRIPTOR)
 #include "g17p_vulkan_null_descriptor_spv.h"
 #define COMPUTE_SPV g17p_vulkan_null_descriptor_spv
@@ -60,6 +64,15 @@
    (UINT32_C(0x51000000) ^ ((uint32_t)(i) << 16) ^                            \
     ((UINT32_C(0x100) + (((i) ^ 32u) * 17u)) +                                \
      (UINT32_C(0x100) + ((((i) * 7u + 11u) & 63u) * 17u))))
+#elif defined(G17P_WORKGROUP_SHARED_1024)
+#define ELEMENT_COUNT 1024
+#define PREFIX_COUNT 16
+#define GUARD_COUNT 16
+#define SHARED_VALUE(i) (UINT32_C(0x100) + (uint32_t)(i) * 17u)
+#define EXPECTED(i)                                                            \
+   (UINT32_C(0x51000000) ^ ((uint32_t)(i) << 12) ^                             \
+    (SHARED_VALUE(1023u - (uint32_t)(i)) + SHARED_VALUE((uint32_t)(i) ^ 32u) + \
+     SHARED_VALUE(((uint32_t)(i) + 512u) & 1023u)))
 #elif defined(G17P_NULL_DESCRIPTOR)
 #define ELEMENT_COUNT 32
 #define PREFIX_COUNT 0
@@ -277,8 +290,11 @@ main(int argc, char **argv)
    if (submit_only &&
        (!shim_validate || !strcmp(shim_validate, "0")))
       die("--submit-only requires the G17P DRM-shim stream validator");
+   /* Three launches, each ending in its own barrier. Two are strong: the
+    * predicate patch requests AGX_BARRIER_ALL, and the host-read flush
+    * (6aae441547b) strengthens the final launch's tail barrier in place. */
    if (submit_only &&
-       setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS", "3,3,0,1", 1))
+       setenv("ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS", "3,3,0,2", 1))
       die("failed to select exact G17P compute-stream counts");
    const bool expect_execute =
       (test_case->predicate != 0) != test_case->inverted;
@@ -349,6 +365,12 @@ main(int argc, char **argv)
    free(physical_devices);
    if (physical == VK_NULL_HANDLE)
       die("T8140/G17P Vulkan device was not found");
+#ifdef G17P_WORKGROUP_SHARED_1024
+   if (properties.limits.maxComputeWorkGroupInvocations < 1024 ||
+       properties.limits.maxComputeWorkGroupSize[0] < 1024 ||
+       properties.limits.maxComputeSharedMemorySize < 4096)
+      die("required 1024-thread workgroup limits are not advertised");
+#endif
 #ifdef G17P_WORKGROUP_SHARED
    if (properties.limits.maxComputeWorkGroupInvocations < 64 ||
        properties.limits.maxComputeWorkGroupSize[0] < 64 ||
@@ -1065,6 +1087,10 @@ main(int argc, char **argv)
                     "SSBO stores were discarded, exact output and 32 guards "
                     "stable for three seconds\n");
 #endif
+#elif defined(G17P_WORKGROUP_SHARED_1024)
+   printf(TEST_NAME ": PASS — %u invocations exchanged shared memory across a "
+                    "workgroup barrier, every value exact\n",
+          (unsigned)ELEMENT_COUNT);
 #elif defined(G17P_QUEUE_PROGRESS)
    printf(TEST_NAME ": PASS — QueueWaitIdle retired the first submit and all "
                     "32 buffer writes are visible\n");

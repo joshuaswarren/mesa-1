@@ -4,6 +4,7 @@
  */
 
 #include "agx_vdm_hal200_bind_tail_core.h"
+#include "agx_ppp_viewport_payload_core.h"
 
 #include <string.h>
 
@@ -11,6 +12,30 @@ static const uint32_t controls[AGX_VDM_HAL200_BIND_COUNT] = {
    UINT32_C(0x700), UINT32_C(0x500), UINT32_C(0x700), UINT32_C(0x500),
    UINT32_C(0xa00), UINT32_C(0x300), UINT32_C(0x200), UINT32_C(0x200),
 };
+
+uint32_t
+agx_vdm_hal200_bind_viewport_control(size_t viewport_bytes)
+{
+   if (viewport_bytes < AGX_PPP_VIEWPORT_PAYLOAD_MIN_LENGTH ||
+       viewport_bytes > AGX_PPP_VIEWPORT_PAYLOAD_MAX_LENGTH ||
+       (viewport_bytes - 8) % 32 != 0)
+      return 0;
+
+   return (uint32_t)(viewport_bytes / 4) << 8;
+}
+
+bool
+agx_vdm_hal200_bind_control_valid(unsigned pair, uint32_t control)
+{
+   if (pair >= AGX_VDM_HAL200_BIND_COUNT)
+      return false;
+
+   if (pair != AGX_VDM_HAL200_BIND_VIEWPORT_CONTROL_PAIR)
+      return control == controls[pair];
+
+   return (control & 0xff) == 0 &&
+          agx_vdm_hal200_bind_viewport_control((control >> 8) * 4) == control;
+}
 
 static void
 store_le32(uint8_t *dst, uint32_t value)
@@ -44,7 +69,7 @@ agx_vdm_hal200_bind_tail_pack(
    for (unsigned i = 0; i < AGX_VDM_HAL200_BIND_COUNT; ++i) {
       if (pairs[i].context_offset == 0 ||
           (pairs[i].context_offset & UINT32_C(3)) != 0 ||
-          pairs[i].control != controls[i]) {
+          !agx_vdm_hal200_bind_control_valid(i, pairs[i].control)) {
          memset(out, 0, sizeof(*out));
          return false;
       }
@@ -82,7 +107,7 @@ agx_vdm_hal200_bind_tail_unpack(
       pairs[i].control = load_le32(&raw[offset + 4]);
       if (pairs[i].context_offset == 0 ||
           (pairs[i].context_offset & UINT32_C(3)) != 0 ||
-          pairs[i].control != controls[i]) {
+          !agx_vdm_hal200_bind_control_valid(i, pairs[i].control)) {
          memset(pairs, 0,
                 sizeof(struct agx_vdm_hal200_bind_pair) *
                    AGX_VDM_HAL200_BIND_COUNT);

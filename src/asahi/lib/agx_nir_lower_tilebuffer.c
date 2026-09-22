@@ -107,7 +107,7 @@ store_tilebuffer(nir_builder *b, struct agx_tilebuffer_layout *tib,
    uint8_t offset_B = agx_tilebuffer_offset_B(tib, rt);
    nir_store_local_pixel_agx(b, value, samples, nir_undef(b, 2, 16),
                              .base = offset_B, .write_mask = write_mask,
-                             .format = format);
+                             .format = format, .target = rt);
 }
 
 static nir_def *
@@ -143,7 +143,8 @@ load_tilebuffer(nir_builder *b, struct agx_tilebuffer_layout *tib,
    uint8_t offset_B = agx_tilebuffer_offset_B(tib, rt);
    nir_def *res = nir_load_local_pixel_agx(
       b, MIN2(load_comps, comps), f16 ? 16 : bit_size,
-      nir_imm_intN_t(b, ALL_SAMPLES, 16), .base = offset_B, .format = format);
+      nir_imm_intN_t(b, ALL_SAMPLES, 16), .base = offset_B, .format = format,
+      .target = rt);
 
    /* Extend floats */
    if (f16 && bit_size != 16) {
@@ -253,7 +254,11 @@ store_memory(nir_builder *b, unsigned bindless_base, unsigned nr_samples,
    {
       nir_bindless_image_store(b, image, coords, sample, value, lod,
                                .image_dim = dim, .image_array = true,
-                               .format = format);
+                               .format = format,
+                               .src_type =
+                                  (util_format_is_pure_sint(format) ? nir_type_int :
+                                   util_format_is_pure_uint(format) ? nir_type_uint :
+                                   nir_type_float) | value->bit_size);
    }
    nir_pop_if(b, NULL);
 }
@@ -330,7 +335,9 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          assert(ctx->translucent != NULL &&
                 "colour masking requires translucency");
 
-         assert(agx_tilebuffer_supports_mask(tib, rt));
+         /* Writing nothing takes no masked store: the preserve below issues
+          * a full store of the value it has just loaded. */
+         assert(write_mask == 0 || agx_tilebuffer_supports_mask(tib, rt));
          *(ctx->translucent) = true;
       }
 
@@ -475,6 +482,48 @@ agx_nir_lower_tilebuffer(nir_shader *shader, struct agx_tilebuffer_layout *tib,
 
       if (translucent)
          *translucent |= (exists && !written);
+
+      /* HAL200 coverage dirties the tile even when this shader has no color
+       * output at all (for example, a depth-only meta clear). The explicit
+       * zero-mask path above cannot see such an attachment. Preserve it with
+       * the same load/store pair, otherwise EOT publishes undefined color.
+       * G17P's partial-MRT shaders already acquire/release only the classes
+       * they write. Keep that native subset protocol unchanged.
+       */
+      /* A multisample eMRT epilog has to store every partition. The packer's
+       * grounded combined-acquire form holds every stored partition's classes
+       * across the whole unrolled sample loop, and it fails closed on a
+       * multisample eMRT epilog that leaves a partition unstored
+       * (agx3_pack_binary.c). An attachment the fragment shader never writes
+       * has no store intrinsic for the zero-write-mask path above to rewrite,
+       * so preserve it here and keep the shape on the grounded path.
+       *
+       * Scoped to spilling multisample on purpose. The same unwritten
+       * attachment occurs without spilling -- a five-attachment pass writing
+       * four of them -- and passes on hardware today through the native
+       * partial-MRT subset protocol, which acquires only the classes it
+       * writes. Widening this unconditionally would perturb that. */
+      const bool emrt_multisample =
+         tib->nr_samples > 1 && agx_tilebuffer_spills(tib);
+
+      if (preserve_zero_mask && exists && !written && !tib->spilled[i] &&
+          (ctx.outputs_written == 0 || emrt_multisample)) {
+         nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+         nir_builder b = nir_builder_at(nir_after_impl(impl));
+         enum pipe_format logical = tib->logical_format[i];
+         const bool raw_r11g11b10 = lower_r11g11b10 &&
+                                  logical == PIPE_FORMAT_R11G11B10_FLOAT;
+         enum pipe_format format = raw_r11g11b10 ? PIPE_FORMAT_R32_UINT :
+            lower_srgb && util_format_is_srgb(logical)
+               ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM
+               : agx_tilebuffer_physical_format(tib, i);
+         unsigned comps = raw_r11g11b10 ? 1 : util_format_get_nr_components(logical);
+         nir_def *value = load_tilebuffer(&b, tib, comps, 32, i, format, logical);
+         store_tilebuffer(&b, tib, format, logical, i, value, write_samples,
+                          BITFIELD_MASK(comps));
+         nir_progress(true, impl, nir_metadata_control_flow);
+         progress = true;
+      }
    }
 
    return progress;

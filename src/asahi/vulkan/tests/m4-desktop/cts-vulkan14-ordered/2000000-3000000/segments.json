@@ -1,0 +1,1590 @@
+[
+ {
+  "segment": "2000000-2010000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 5301,
+     "Pass": 4699
+    },
+    "runner_seconds": 29.2,
+    "peak_c": 63.5
+   }
+  ]
+ },
+ {
+  "segment": "2010000-2020000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 3555,
+     "NotSupported": 6445
+    },
+    "runner_seconds": 26.2,
+    "peak_c": 65.25
+   }
+  ]
+ },
+ {
+  "segment": "2020000-2030000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6567,
+     "Pass": 3433
+    },
+    "runner_seconds": 24.4,
+    "peak_c": 66.0
+   }
+  ]
+ },
+ {
+  "segment": "2030000-2040000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6952,
+     "Pass": 3048
+    },
+    "runner_seconds": 22.0,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2040000-2050000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6569,
+     "Pass": 3431
+    },
+    "runner_seconds": 28.8,
+    "peak_c": 66.5
+   }
+  ]
+ },
+ {
+  "segment": "2050000-2060000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6575,
+     "Pass": 3425
+    },
+    "runner_seconds": 28.2,
+    "peak_c": 66.25
+   }
+  ]
+ },
+ {
+  "segment": "2060000-2070000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7805,
+     "Pass": 2195
+    },
+    "runner_seconds": 17.9,
+    "peak_c": 67.0
+   }
+  ]
+ },
+ {
+  "segment": "2070000-2080000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 2429,
+     "NotSupported": 7571
+    },
+    "runner_seconds": 22.0,
+    "peak_c": 67.0
+   }
+  ]
+ },
+ {
+  "segment": "2080000-2090000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 4546,
+     "NotSupported": 5454
+    },
+    "runner_seconds": 58.6,
+    "peak_c": 66.75
+   }
+  ]
+ },
+ {
+  "segment": "2090000-2100000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 10000
+    },
+    "runner_seconds": 63.6,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2100000-2110000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 10000
+    },
+    "runner_seconds": 63.6,
+    "peak_c": 65.5
+   }
+  ]
+ },
+ {
+  "segment": "2110000-2120000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 10000
+    },
+    "runner_seconds": 57.0,
+    "peak_c": 65.25
+   }
+  ]
+ },
+ {
+  "segment": "2120000-2130000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 10000
+    },
+    "runner_seconds": 41.6,
+    "peak_c": 65.5
+   }
+  ]
+ },
+ {
+  "segment": "2130000-2140000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 10000
+    },
+    "runner_seconds": 41.4,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2140000-2150000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 6546,
+     "NotSupported": 3454
+    },
+    "runner_seconds": 33.6,
+    "peak_c": 66.5
+   }
+  ]
+ },
+ {
+  "segment": "2150000-2160000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 9536,
+     "Pass": 460,
+     "Fail": 4
+    },
+    "runner_seconds": 10.7,
+    "peak_c": 66.25
+   }
+  ]
+ },
+ {
+  "segment": "2160000-2170000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.7,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2170000-2180000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 4066,
+     "Pass": 5923,
+     "Fail": 11
+    },
+    "runner_seconds": 21.9,
+    "peak_c": 65.0
+   }
+  ]
+ },
+ {
+  "segment": "2180000-2190000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 9913,
+     "Pass": 83,
+     "Fail": 4
+    },
+    "runner_seconds": 4.9,
+    "peak_c": 65.5
+   }
+  ]
+ },
+ {
+  "segment": "2190000-2200000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 64.5
+   }
+  ]
+ },
+ {
+  "segment": "2200000-2210000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2210000-2220000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 64.0
+   }
+  ]
+ },
+ {
+  "segment": "2220000-2230000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.0,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2230000-2240000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2240000-2250000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 3468,
+     "Pass": 6531,
+     "Fail": 1
+    },
+    "runner_seconds": 58.1,
+    "peak_c": 70.5
+   }
+  ]
+ },
+ {
+  "segment": "2250000-2260000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 4093,
+     "Pass": 5906,
+     "Fail": 1
+    },
+    "runner_seconds": 43.6,
+    "peak_c": 65.0
+   }
+  ]
+ },
+ {
+  "segment": "2260000-2270000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 5072,
+     "Pass": 4926,
+     "Fail": 2
+    },
+    "runner_seconds": 104.5,
+    "peak_c": 65.25
+   }
+  ]
+ },
+ {
+  "segment": "2270000-2280000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "gpu_timeout",
+    "counts": {
+     "Pass": 2565,
+     "Unrun": 6302,
+     "NotSupported": 1112,
+     "Interrupted": 21
+    },
+    "runner_seconds": null,
+    "peak_c": 64.25
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 4492,
+     "NotSupported": 1830,
+     "Fail": 1
+    },
+    "runner_seconds": 110.1,
+    "peak_c": 61.0
+   }
+  ]
+ },
+ {
+  "segment": "2280000-2290000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 9060,
+     "NotSupported": 940
+    },
+    "runner_seconds": 49.4,
+    "peak_c": 62.0
+   }
+  ]
+ },
+ {
+  "segment": "2290000-2300000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "gpu_timeout",
+    "counts": {
+     "Pass": 5007,
+     "Unrun": 3944,
+     "Interrupted": 20,
+     "NotSupported": 1029
+    },
+    "runner_seconds": null,
+    "peak_c": 61.0
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 3286,
+     "NotSupported": 678
+    },
+    "runner_seconds": 64.5,
+    "peak_c": 60.25
+   }
+  ]
+ },
+ {
+  "segment": "2300000-2310000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 4583,
+     "NotSupported": 5417
+    },
+    "runner_seconds": 25.5,
+    "peak_c": 61.75
+   }
+  ]
+ },
+ {
+  "segment": "2310000-2320000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6637,
+     "Pass": 3363
+    },
+    "runner_seconds": 18.3,
+    "peak_c": 62.0
+   }
+  ]
+ },
+ {
+  "segment": "2320000-2330000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 2739,
+     "Pass": 7253,
+     "Fail": 8
+    },
+    "runner_seconds": 166.4,
+    "peak_c": 61.75
+   }
+  ]
+ },
+ {
+  "segment": "2330000-2340000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 3751,
+     "NotSupported": 6249
+    },
+    "runner_seconds": 138.6,
+    "peak_c": 66.0
+   }
+  ]
+ },
+ {
+  "segment": "2340000-2350000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 4169,
+     "NotSupported": 5827,
+     "Fail": 4
+    },
+    "runner_seconds": 40.4,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2350000-2360000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7947,
+     "Pass": 2053
+    },
+    "runner_seconds": 20.9,
+    "peak_c": 66.75
+   }
+  ]
+ },
+ {
+  "segment": "2360000-2370000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7621,
+     "Pass": 2379
+    },
+    "runner_seconds": 24.1,
+    "peak_c": 67.0
+   }
+  ]
+ },
+ {
+  "segment": "2370000-2380000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6572,
+     "Pass": 3428
+    },
+    "runner_seconds": 42.4,
+    "peak_c": 67.0
+   }
+  ]
+ },
+ {
+  "segment": "2380000-2390000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 8253,
+     "Pass": 1747
+    },
+    "runner_seconds": 24.9,
+    "peak_c": 66.75
+   }
+  ]
+ },
+ {
+  "segment": "2390000-2400000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7352,
+     "Pass": 2648
+    },
+    "runner_seconds": 16.1,
+    "peak_c": 66.75
+   }
+  ]
+ },
+ {
+  "segment": "2400000-2410000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 8552,
+     "Pass": 1448
+    },
+    "runner_seconds": 13.0,
+    "peak_c": 66.75
+   }
+  ]
+ },
+ {
+  "segment": "2410000-2420000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 2452,
+     "NotSupported": 7548
+    },
+    "runner_seconds": 15.9,
+    "peak_c": 66.75
+   }
+  ]
+ },
+ {
+  "segment": "2420000-2430000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6444,
+     "Pass": 3552,
+     "Fail": 4
+    },
+    "runner_seconds": 137.7,
+    "peak_c": 68.0
+   }
+  ]
+ },
+ {
+  "segment": "2430000-2440000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7159,
+     "NotSupported": 2841
+    },
+    "runner_seconds": 23.7,
+    "peak_c": 66.0
+   }
+  ]
+ },
+ {
+  "segment": "2440000-2450000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 2856,
+     "Pass": 7144
+    },
+    "runner_seconds": 22.7,
+    "peak_c": 66.0
+   }
+  ]
+ },
+ {
+  "segment": "2450000-2460000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7179,
+     "NotSupported": 2821
+    },
+    "runner_seconds": 27.8,
+    "peak_c": 65.0
+   }
+  ]
+ },
+ {
+  "segment": "2460000-2470000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7138,
+     "NotSupported": 2862
+    },
+    "runner_seconds": 27.3,
+    "peak_c": 65.25
+   }
+  ]
+ },
+ {
+  "segment": "2470000-2480000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 2829,
+     "Pass": 7171
+    },
+    "runner_seconds": 28.2,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2480000-2490000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7139,
+     "NotSupported": 2861
+    },
+    "runner_seconds": 27.1,
+    "peak_c": 65.25
+   }
+  ]
+ },
+ {
+  "segment": "2490000-2500000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7181,
+     "NotSupported": 2819
+    },
+    "runner_seconds": 28.6,
+    "peak_c": 65.5
+   }
+  ]
+ },
+ {
+  "segment": "2500000-2510000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7129,
+     "NotSupported": 2871
+    },
+    "runner_seconds": 28.5,
+    "peak_c": 66.25
+   }
+  ]
+ },
+ {
+  "segment": "2510000-2520000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7181,
+     "NotSupported": 2819
+    },
+    "runner_seconds": 27.7,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2520000-2530000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7129,
+     "NotSupported": 2871
+    },
+    "runner_seconds": 28.9,
+    "peak_c": 65.25
+   }
+  ]
+ },
+ {
+  "segment": "2530000-2540000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7181,
+     "NotSupported": 2819
+    },
+    "runner_seconds": 28.6,
+    "peak_c": 65.5
+   }
+  ]
+ },
+ {
+  "segment": "2540000-2550000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7129,
+     "NotSupported": 2871
+    },
+    "runner_seconds": 29.7,
+    "peak_c": 65.0
+   }
+  ]
+ },
+ {
+  "segment": "2550000-2560000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7181,
+     "NotSupported": 2819
+    },
+    "runner_seconds": 27.5,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2560000-2570000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7129,
+     "NotSupported": 2871
+    },
+    "runner_seconds": 28.2,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2570000-2580000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 5496,
+     "NotSupported": 4504
+    },
+    "runner_seconds": 23.1,
+    "peak_c": 66.25
+   }
+  ]
+ },
+ {
+  "segment": "2580000-2590000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.0,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2590000-2600000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.0,
+    "peak_c": 64.5
+   }
+  ]
+ },
+ {
+  "segment": "2600000-2610000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 64.5
+   }
+  ]
+ },
+ {
+  "segment": "2610000-2620000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2620000-2630000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2630000-2640000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.0,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2640000-2650000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.0,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2650000-2660000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.2,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2660000-2670000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 4958,
+     "Pass": 5036,
+     "Fail": 6
+    },
+    "runner_seconds": 25.4,
+    "peak_c": 66.25
+   }
+  ]
+ },
+ {
+  "segment": "2670000-2680000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 2.0,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2680000-2690000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 8393,
+     "Pass": 1601,
+     "Fail": 6
+    },
+    "runner_seconds": 18.5,
+    "peak_c": 67.0
+   }
+  ]
+ },
+ {
+  "segment": "2690000-2700000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 5153,
+     "NotSupported": 4839,
+     "Fail": 8
+    },
+    "runner_seconds": 21.4,
+    "peak_c": 67.5
+   }
+  ]
+ },
+ {
+  "segment": "2700000-2710000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7833,
+     "Pass": 2167
+    },
+    "runner_seconds": 32.4,
+    "peak_c": 68.5
+   }
+  ]
+ },
+ {
+  "segment": "2710000-2720000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7004,
+     "NotSupported": 2958,
+     "Fail": 38
+    },
+    "runner_seconds": 55.3,
+    "peak_c": 69.0
+   }
+  ]
+ },
+ {
+  "segment": "2720000-2730000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 8803,
+     "NotSupported": 1185,
+     "Fail": 12
+    },
+    "runner_seconds": 64.5,
+    "peak_c": 69.0
+   }
+  ]
+ },
+ {
+  "segment": "2730000-2740000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 5380,
+     "NotSupported": 4620
+    },
+    "runner_seconds": 56.1,
+    "peak_c": 67.5
+   },
+   {
+    "dir": "run-attempt1-thermal-refusal",
+    "verdict": "no summary",
+    "counts": {},
+    "runner_seconds": null,
+    "peak_c": null
+   }
+  ]
+ },
+ {
+  "segment": "2740000-2750000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 10000
+    },
+    "runner_seconds": 92.1,
+    "peak_c": 69.0
+   }
+  ]
+ },
+ {
+  "segment": "2750000-2760000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "process_failure",
+    "counts": {
+     "Pass": 7660,
+     "Interrupted": 9,
+     "NotSupported": 2331
+    },
+    "runner_seconds": 73.6,
+    "peak_c": 69.0
+   },
+   {
+    "dir": "run-attempt1-thermal-refusal",
+    "verdict": "no summary",
+    "counts": {},
+    "runner_seconds": null,
+    "peak_c": null
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 9
+    },
+    "runner_seconds": 1.2,
+    "peak_c": 62.25
+   }
+  ]
+ },
+ {
+  "segment": "2760000-2770000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "process_failure",
+    "counts": {
+     "Pass": 5673,
+     "Unrun": 3569,
+     "Interrupted": 55,
+     "NotSupported": 702,
+     "Crash": 1
+    },
+    "runner_seconds": 43.5,
+    "peak_c": 67.5
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 3191,
+     "NotSupported": 434
+    },
+    "runner_seconds": 29.4,
+    "peak_c": 65.75
+   }
+  ]
+ },
+ {
+  "segment": "2770000-2780000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 5837,
+     "Pass": 4163
+    },
+    "runner_seconds": 298.0,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2780000-2790000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7383,
+     "Pass": 2538,
+     "Fail": 79
+    },
+    "runner_seconds": 178.8,
+    "peak_c": 65.25
+   }
+  ]
+ },
+ {
+  "segment": "2790000-2800000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 9999,
+     "Pass": 1
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2800000-2810000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6592,
+     "Pass": 3408
+    },
+    "runner_seconds": 191.0,
+    "peak_c": 64.0
+   }
+  ]
+ },
+ {
+  "segment": "2810000-2820000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6462,
+     "Pass": 3538
+    },
+    "runner_seconds": 155.6,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2820000-2830000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 4979,
+     "Pass": 5021
+    },
+    "runner_seconds": 59.4,
+    "peak_c": 66.0
+   }
+  ]
+ },
+ {
+  "segment": "2830000-2840000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 4811,
+     "NotSupported": 5189
+    },
+    "runner_seconds": 94.3,
+    "peak_c": 66.75
+   }
+  ]
+ },
+ {
+  "segment": "2840000-2850000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "process_failure",
+    "counts": {
+     "Pass": 300,
+     "Unrun": 9039,
+     "NotSupported": 637,
+     "Interrupted": 24
+    },
+    "runner_seconds": 7.1,
+    "peak_c": 65.5
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 6029,
+     "Pass": 3034
+    },
+    "runner_seconds": 64.0,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2850000-2860000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 565,
+     "Pass": 9435
+    },
+    "runner_seconds": 445.1,
+    "peak_c": 62.5
+   }
+  ]
+ },
+ {
+  "segment": "2860000-2870000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 7102,
+     "NotSupported": 2898
+    },
+    "runner_seconds": 523.8,
+    "peak_c": 62.5
+   }
+  ]
+ },
+ {
+  "segment": "2870000-2880000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 5022,
+     "NotSupported": 4978
+    },
+    "runner_seconds": 71.9,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2880000-2890000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 5646,
+     "Pass": 4354
+    },
+    "runner_seconds": 109.9,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2890000-2900000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 8318,
+     "Pass": 1682
+    },
+    "runner_seconds": 40.2,
+    "peak_c": 65.0
+   }
+  ]
+ },
+ {
+  "segment": "2900000-2910000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7750,
+     "Pass": 2250
+    },
+    "runner_seconds": 60.4,
+    "peak_c": 64.75
+   }
+  ]
+ },
+ {
+  "segment": "2910000-2920000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 9791,
+     "NotSupported": 209
+    },
+    "runner_seconds": 109.8,
+    "peak_c": 64.5
+   }
+  ]
+ },
+ {
+  "segment": "2920000-2930000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "process_failure",
+    "counts": {
+     "Pass": 9893,
+     "Unrun": 103,
+     "Interrupted": 4
+    },
+    "runner_seconds": 900.1,
+    "peak_c": 62.75
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 107
+    },
+    "runner_seconds": 16.9,
+    "peak_c": 60.75
+   }
+  ]
+ },
+ {
+  "segment": "2930000-2940000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "process_failure",
+    "counts": {
+     "Pass": 1957,
+     "Unrun": 5905,
+     "Interrupted": 22,
+     "NotSupported": 2115,
+     "Timeout": 1
+    },
+    "runner_seconds": 82.0,
+    "peak_c": 66.5
+   },
+   {
+    "dir": "run-recover1",
+    "verdict": "pass",
+    "counts": {
+     "Pass": 2867,
+     "NotSupported": 3061
+    },
+    "runner_seconds": 131.3,
+    "peak_c": 67.0
+   }
+  ]
+ },
+ {
+  "segment": "2940000-2950000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 5779,
+     "Pass": 4221
+    },
+    "runner_seconds": 354.5,
+    "peak_c": 62.5
+   }
+  ]
+ },
+ {
+  "segment": "2950000-2960000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 7528,
+     "Pass": 2472
+    },
+    "runner_seconds": 17.9,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2960000-2970000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 9107,
+     "Pass": 893
+    },
+    "runner_seconds": 11.1,
+    "peak_c": 64.5
+   }
+  ]
+ },
+ {
+  "segment": "2970000-2980000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2980000-2990000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.0,
+    "peak_c": 63.75
+   }
+  ]
+ },
+ {
+  "segment": "2990000-3000000",
+  "attempts": [
+   {
+    "dir": "run",
+    "verdict": "pass",
+    "counts": {
+     "NotSupported": 10000
+    },
+    "runner_seconds": 3.1,
+    "peak_c": 63.75
+   }
+  ]
+ }
+]
