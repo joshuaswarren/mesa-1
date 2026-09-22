@@ -26,6 +26,9 @@
 #include "hk_physical_device.h"
 
 #include <xf86drm.h>
+#include <stdio.h>
+#include <time.h>
+#include <string.h>
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/u_dynarray.h"
@@ -76,6 +79,39 @@ queue_submit_empty(struct hk_device *dev, struct hk_queue *queue,
    return VK_SUCCESS;
 }
 
+/* AGX_SUBMIT_TRACE: per-submit host timing + per-CS GPU start/end timestamps
+ * written into a kernel timestamp ring. Debug only; zero cost when unset. */
+#define HK_TRACE_SLOTS 4096
+static struct agx_bo *hk_trace_ring;
+static uint32_t hk_trace_handle;
+static unsigned hk_trace_seq;
+static uint32_t hk_slot, hk_prev_slot;
+
+static inline uint64_t
+hk_trace_now_ns(void)
+{
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static bool
+hk_trace_init(struct hk_device *dev)
+{
+   hk_trace_ring = agx_bo_create(&dev->dev, HK_TRACE_SLOTS * 16, 0,
+                                 AGX_BO_WRITEBACK | AGX_BO_SHARED,
+                                 "hk submit trace");
+   if (!hk_trace_ring)
+      return false;
+   if (agx_bind_timestamps(&dev->dev, hk_trace_ring, &hk_trace_handle)) {
+      hk_trace_ring = NULL;
+      return false;
+   }
+   fprintf(stderr, "[hk-dbg] ts_freq=%llu Hz\n",
+           (unsigned long long)dev->dev.params.command_timestamp_frequency_hz);
+   return true;
+}
+
 static void
 asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
                        struct drm_asahi_cmd_compute *cmd)
@@ -89,6 +125,14 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
       .ts.end.handle = cs->timestamp.end.handle,
       .ts.end.offset = cs->timestamp.end.offset_B,
    };
+   if (getenv("AGX_SUBMIT_TRACE") && hk_trace_ring) {
+      /* Debug ring stamps: start at slot*16, end at slot*16+8. Last CS wins
+       * on multi-CS submits; the decode path is single-CS. */
+      cmd->ts.start.handle = hk_trace_handle;
+      cmd->ts.start.offset = hk_slot * 16;
+      cmd->ts.end.handle = hk_trace_handle;
+      cmd->ts.end.offset = hk_slot * 16 + 8;
+   }
 
    if (cs->uses_sampler_heap) {
       cmd->sampler_heap = dev->samplers.table.bo->va->addr;
@@ -755,6 +799,17 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
       command_count += list_length(&cmdbuf->control_streams);
    }
+   bool hk_trace = getenv("AGX_SUBMIT_TRACE") != NULL;
+   uint64_t hk_t0 = hk_trace ? hk_trace_now_ns() : 0;
+   if (hk_trace) {
+      if (!hk_trace_ring && !hk_trace_init(dev)) {
+         hk_trace = false;
+      } else {
+         hk_trace_seq++;
+         hk_prev_slot = (hk_trace_seq - 1) % HK_TRACE_SLOTS;
+         hk_slot = hk_trace_seq % HK_TRACE_SLOTS;
+      }
+   }
 
    perf_debug_dev(&dev->dev,
                   "Submitting %u control streams (%u command buffers)",
@@ -853,6 +908,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       }
    }
 
+   uint64_t hk_t1 = hk_trace ? hk_trace_now_ns() : 0;
    if (dev->dev.debug & AGX_DBG_TRACE) {
       agxdecode_drm_cmdbuf(dev->dev.agxdecode, &dev->dev.params, &payload,
                            true);
@@ -877,6 +933,22 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    } else {
       result = queue_submit_looped(dev, &submit_ioctl, command_count,
                                    queue->drm.virt_ring_idx);
+   }
+   if (hk_trace) {
+      uint64_t hk_t2 = hk_trace_now_ns();
+      uint64_t g8s = 0, g8e = 0;
+      void *hk_tmap = hk_trace_ring ? agx_bo_map(hk_trace_ring) : NULL;
+      if (hk_tmap && hk_trace_seq > 8) {
+         uint32_t late = (hk_trace_seq - 8) % HK_TRACE_SLOTS;
+         memcpy(&g8s, (char *)hk_tmap + late * 16, 8);
+         memcpy(&g8e, (char *)hk_tmap + late * 16 + 8, 8);
+      }
+      fprintf(stderr, "[hk-submit] cs=%u vdm=%u cdm=%u payload=%uB"
+              " build_ns=%" PRIu64 " ioctl_ns=%" PRIu64 " total_ns=%"
+              PRIu64 " seq=%u late8_st=%" PRIu64 " late8_en=%" PRIu64 "\n",
+              command_count, nr_vdm, nr_cdm, (unsigned)payload.size,
+              hk_t1 - hk_t0, hk_t2 - hk_t1, hk_t2 - hk_t0,
+              hk_trace_seq > 8 ? hk_trace_seq - 8 : 0, g8s, g8e);
    }
 
    util_dynarray_fini(&payload);
