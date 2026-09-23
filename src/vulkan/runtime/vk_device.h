@@ -156,10 +156,11 @@ struct vk_device {
     *
     * sync_poll_misses counts consecutive polls whose budget expired
     * without seeing the signal; sync_poll_miss_expire_ns is the absolute
-    * time until which polling is disabled after such a miss.
+    * time until which polling is disabled after such a miss. Accessed
+    * with the generic p_atomic helpers (64-bit, 8-byte aligned).
     */
-   p_atomic_uint64_t sync_poll_misses;
-   p_atomic_uint64_t sync_poll_miss_expire_ns;
+   uint64_t sync_poll_misses;
+   uint64_t sync_poll_miss_expire_ns;
 
    /** Acceleration structure build vtable for common BVH building. */
    const struct vk_acceleration_structure_build_ops *as_build_ops;
