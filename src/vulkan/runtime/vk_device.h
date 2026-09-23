@@ -152,6 +152,15 @@ struct vk_device {
     */
    uint32_t sync_wait_poll_us;
 
+   /** Miss backoff state for the bounded syncobj poll (see sync_wait_poll_us)
+    *
+    * sync_poll_misses counts consecutive polls whose budget expired
+    * without seeing the signal; sync_poll_miss_expire_ns is the absolute
+    * time until which polling is disabled after such a miss.
+    */
+   p_atomic_uint64_t sync_poll_misses;
+   p_atomic_uint64_t sync_poll_miss_expire_ns;
+
    /** Acceleration structure build vtable for common BVH building. */
    const struct vk_acceleration_structure_build_ops *as_build_ops;
 

@@ -333,10 +333,19 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
     * and a bounded poll observes the signal the moment the kernel
     * publishes it. Once the poll budget is exhausted, fall through to
     * the blocking wait with the original deadline.
+    *
+    * A poll whose budget expires unsignaled means this wait is a long
+    * one (compile-time sync storms, frame fences); polling again would
+    * only burn the budget on every subsequent long wait. Back off
+    * multiplicatively after each miss and re-arm on the next hit.
     */
-   const uint64_t poll_deadline_ns =
-      device->sync_wait_poll_us ?
-      os_time_get_nano() + (uint64_t)device->sync_wait_poll_us * 1000 : 0;
+   const uint64_t poll_budget_ns =
+      (uint64_t)device->sync_wait_poll_us * 1000;
+   uint64_t poll_deadline_ns = 0;
+   if (poll_budget_ns &&
+       os_time_get_nano() >=
+       p_atomic_read(&device->sync_poll_miss_expire_ns))
+      poll_deadline_ns = os_time_get_nano() + poll_budget_ns;
 
    while (wait_count > 0) {
       const bool poll =
@@ -369,8 +378,25 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
        * timeout means poll again until the budget runs out, and any
        * other error surfaces immediately.
        */
-      if (err == 0 || !poll || errno != ETIME)
+      if (err == 0) {
+         if (poll_deadline_ns) {
+            p_atomic_set(&device->sync_poll_misses, 0);
+            p_atomic_set(&device->sync_poll_miss_expire_ns, 0);
+         }
          break;
+      }
+      if (!poll || errno != ETIME)
+         break;
+
+      if (os_time_get_nano() >= poll_deadline_ns) {
+         /* Budget ran out unsignaled: this is a long wait. */
+         const uint32_t misses =
+            (uint32_t)p_atomic_inc_return(&device->sync_poll_misses);
+         const uint64_t backoff_ns =
+            poll_budget_ns << MIN2(misses, 10);
+         p_atomic_set(&device->sync_poll_miss_expire_ns,
+                      os_time_get_nano() + backoff_ns);
+      }
    }
 
    STACK_ARRAY_FINISH(handles);
