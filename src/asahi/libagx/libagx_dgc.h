@@ -399,6 +399,18 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
          cfg.unk_4 = true;
          cfg.unk_7 = true;
       }
+      if (chip == AGX_CHIP_G14X) {
+         /* G14X (t602x, M2 Pro/Max): MaxDispatch decode-gap lane. The full
+          * sink costs ~4.5 us/dispatch over the launch floor on trivial
+          * memory-writing chains (dispatch-floor matrix) and the profiled
+          * decode token shows it as the intra-submission gap. Candidate =
+          * the designedusc quadrant {4,5,6,8}+usc_cache_inval, identical to
+          * HK_PERFTEST=designedusccdmbarrier (ccad76a6160); gated by the
+          * standing protocol: Qwen3.8 digest dbf70497 identical, logits 0
+          * flips, paired A/B CIs, before any default flip ships. */
+         cfg.unk_4 = true;
+         cfg.usc_cache_inval = true;
+      }
 
       /* With multiple launches in the same CDM stream, we can get cache
        * coherency (? or sync?) issues. We hit this with blits, which need - in
@@ -407,7 +419,7 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
        * let's just set these after every launch to be safe. We can revisit in
        * the future when we figure out what the bits mean.
        */
-      if (chip != AGX_CHIP_G13G) {
+      if (chip != AGX_CHIP_G13G && chip != AGX_CHIP_G14X) {
          cfg.unk_0 = true;
          cfg.unk_1 = true;
          cfg.unk_2 = true;
