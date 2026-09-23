@@ -15,6 +15,7 @@
 #include "decode.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "asahi/compiler/agx3_compute_program.h"
+#include "asahi/compiler/agx_debug.h"
 #include "hk_agx3_vdm_decode.h"
 #include "hk_buffer.h"
 #include "hk_cmd_pool.h"
@@ -1670,10 +1671,21 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
 {
    const bool native_spills = s->info.stage == MESA_SHADER_FRAGMENT &&
       agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer);
+   /* First native CProg qualification covers the imported-input region.
+    * Local/spill frame use needs its own native metadata witnesses before
+    * admission. This is not a fallback:
+    * a candidate outside the bounded protocol is refused. */
+   const bool native_preamble = s->info.stage == MESA_SHADER_FRAGMENT &&
+      (agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS) &&
+      s->b.info.has_preamble && s->b.info.preamble_size &&
+      s->b.info.agx3_preamble_staging_known &&
+      s->b.info.nr_preamble_gprs && s->b.info.nr_preamble_gprs <= 256 &&
+      s->b.info.preamble_scratch_size == s->b.info.agx3_preamble_inputs.storage_bytes &&
+      (!!s->b.info.agx3_preamble_inputs.count == s->b.info.agx3_preamble_tps_inputs);
    if (!linked || !linked->b.bo || !linked->b.bo->va || linked->b.size == 0 ||
-       linked->b.size > UINT32_MAX || s->b.info.has_preamble ||
+       linked->b.size > UINT32_MAX || (s->b.info.has_preamble && !native_preamble) ||
        s->b.info.scratch_size > AGX3_G17P_MAX_SPILL_B ||
-       s->b.info.preamble_scratch_size != 0 ||
+       (s->b.info.preamble_scratch_size != 0 && !native_preamble) ||
        linked->b.scratch_size > AGX3_G17P_MAX_SPILL_B ||
        s->b.info.texture_state_count != 0 ||
        (s->b.info.sampler_state_count != 0 &&
@@ -2146,6 +2158,8 @@ hk_g17p_graphics_compact_ranges(
 
 struct hk_g17p_graphics_ioto_key {
    uint64_t shader_va;
+   uint64_t constant_program_va;
+   uint64_t constant_program_size;
    uint64_t range_address[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
    uint32_t shader_binary_size;
    uint32_t scratch_size;
@@ -2162,9 +2176,15 @@ struct hk_g17p_graphics_ioto_key {
    uint8_t colour_classes;
    uint8_t sample_size_B;
    uint8_t nr_samples;
+   uint8_t constant_program_flags;
+   /* Optional tail: shaders without native inputs retain the original key
+    * prefix and comparison size. */
+   uint64_t cprog_input_halves[AGX3_CPROG_INPUT_WORDS];
+   uint16_t cprog_input_count;
+   uint16_t cprog_input_storage;
 };
 
-static void
+static unsigned
 hk_g17p_graphics_ioto_key_init(
    enum agx_chip chip,
    const struct hk_agx3_g17p_graphics_program_desc *desc,
@@ -2174,8 +2194,24 @@ hk_g17p_graphics_ioto_key_init(
                  "graphics Ioto key storage");
    assert(desc->uniform_range_count <= HK_AGX3_G17P_GRAPHICS_MAX_RANGES);
 
-   memset(key, 0, sizeof(*key));
+   const unsigned size = desc->cprog_inputs && desc->cprog_inputs->count
+      ? sizeof(*key) : offsetof(struct hk_g17p_graphics_ioto_key, cprog_input_halves);
+   memset(key, 0, size);
    key->shader_va = desc->shader_va;
+   /* The shader owns immutable code at this VA for the cache's lifetime. */
+   key->constant_program_va = desc->constant_program.code_va;
+   key->constant_program_size = desc->constant_program.code_size;
+   if (desc->cprog_inputs && desc->cprog_inputs->count) {
+      memcpy(key->cprog_input_halves, desc->cprog_inputs->halves,
+             sizeof(key->cprog_input_halves));
+      key->cprog_input_count = desc->cprog_inputs->count;
+      key->cprog_input_storage = desc->cprog_inputs->storage_bytes;
+   }
+   key->constant_program_flags =
+      desc->constant_program.force_external |
+      (desc->constant_program.request_prelude << 1) |
+      (desc->constant_program.suppress_prelude << 2) |
+      (desc->constant_program.absolute_branch << 3);
    key->shader_binary_size = desc->shader_binary_size;
    key->scratch_size = desc->scratch_size;
    key->compiler_d = desc->compiler_d;
@@ -2200,6 +2236,7 @@ hk_g17p_graphics_ioto_key_init(
       key->range_start_halfs[i] = desc->uniform_ranges[i].start_halfs;
       key->range_size_halfs[i] = desc->uniform_ranges[i].size_halfs;
    }
+   return size;
 }
 
 enum hk_g17p_graphics_ioto_cache_result {
@@ -2238,6 +2275,7 @@ hk_g17p_graphics_ioto_cache_stat(
 
 struct hk_g17p_graphics_template_entry {
    struct hk_g17p_graphics_template_entry *next;
+   struct agx3_cprog_inputs cprog_inputs;
    struct hk_agx3_g17p_graphics_program_desc desc;
    struct agx3_ioto_uniform_range
       ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
@@ -2316,9 +2354,14 @@ hk_g17p_graphics_setup_build(
    const struct hk_agx3_g17p_graphics_program_desc *source)
 {
    struct hk_agx3_g17p_graphics_program_desc desc = *source;
-   /* The G17P graphics composer does not encode program_va; use a nonzero
-    * aligned sentinel while building the immutable shader-owned template.
-    * The final inline allocation supplies the actual executable address. */
+   /* An immutable setup may move between inline and external allocations.
+    * A relative constant-program branch would bake in the sentinel PC. */
+   if (desc.constant_program.code_size &&
+       !desc.constant_program.absolute_branch)
+      return NULL;
+
+   /* With an absent or absolute constant-program suffix, bytes do not depend
+    * on program_va. Use a nonzero aligned sentinel for this owned template. */
    desc.program_va = AGX_IOTO_PROGRAM_ALIGNMENT;
    desc.preloaded_root = true;
    uint8_t bytes[HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
@@ -2489,6 +2532,10 @@ hk_g17p_graphics_template_generate(
       return false;
 
    candidate->desc = *desc;
+   if (desc->cprog_inputs) {
+      candidate->cprog_inputs = *desc->cprog_inputs;
+      candidate->desc.cprog_inputs = &candidate->cprog_inputs;
+   }
    memcpy(candidate->ranges, desc->uniform_ranges,
           desc->uniform_range_count * sizeof(candidate->ranges[0]));
    candidate->desc.uniform_ranges = candidate->ranges;
@@ -2645,15 +2692,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          }
       }
 
-      size_t program_capacity;
-      if (!hk_agx3_g17p_graphics_program_bound(dev->dev.chip, ranges,
-                                              range_count, &program_capacity)) {
-         mesa_loge_once("G17P graphics program bound refused: stage=%u ranges=%zu",
-                        (unsigned)s->info.stage, range_count);
-         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
-         return 0;
-      }
-
       struct hk_agx3_g17p_graphics_program_desc desc = {
          /* The container's entry point, not the allocation base: the
        * shader loader reads the block-size dword at entry - 0x80. */
@@ -2678,6 +2716,39 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             .tile_size_px = cmd->state.gfx.render.tilebuffer.tile_size,
          },
       };
+
+      if (s->b.info.has_preamble &&
+          (!s->bo || !s->bo->va ||
+           s->code_size != s->b.info.binary_size ||
+           !hk_agx3_g17p_constant_program_from_binary(
+              s->code_ptr, s->code_size, s->b.info.preamble_offset,
+              s->b.info.preamble_size, s->bo->va->addr, s->bo->size,
+              &desc.constant_program))) {
+         mesa_loge_once("G17P graphics constant-program extent refused");
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return 0;
+      }
+
+      desc.constant_program.request_prelude =
+         s->b.info.agx3_preamble_uniform_inputs;
+      if (s->b.info.agx3_preamble_tps_inputs) {
+         if (!s->b.info.has_preamble ||
+             s->b.info.preamble_scratch_size <
+                s->b.info.agx3_preamble_inputs.storage_bytes) {
+            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            return 0;
+         }
+         desc.cprog_inputs = &s->b.info.agx3_preamble_inputs;
+      }
+
+      size_t program_capacity;
+      if (!hk_agx3_g17p_graphics_program_desc_bound(
+             dev->dev.chip, &desc, &program_capacity)) {
+         mesa_loge_once("G17P graphics program bound refused: stage=%u ranges=%zu",
+                        (unsigned)s->info.stage, range_count);
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+         return 0;
+      }
 
       /* Production draws publish a small root-address launcher. It performs
        * the mandatory shader-state load before the native external-preshader
@@ -2773,7 +2844,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                      hk_cmd_buffer_retain_bo(cmd, linked->b.bo);
                      if (external)
                         hk_cmd_buffer_retain_bo(cmd, setup->external_bo);
-                     if (s->b.info.rodata.size_16 != 0)
+                     if (s->b.info.rodata.size_16 != 0 || s->b.info.has_preamble)
                         hk_cmd_buffer_retain_bo(cmd, s->bo);
                      cached->program = published;
                      cached->source_shader = s;
@@ -2801,9 +2872,9 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
 compact_fallback:
 
       struct hk_g17p_graphics_ioto_key key;
-      hk_g17p_graphics_ioto_key_init(dev->dev.chip, &desc, &key);
-      if (!diagnostics && cached->valid && cached->key_size == sizeof(key) &&
-          !memcmp(cached->key, &key, sizeof(key))) {
+      const unsigned key_size = hk_g17p_graphics_ioto_key_init(dev->dev.chip, &desc, &key);
+      if (!diagnostics && cached->valid && cached->key_size == key_size &&
+          !memcmp(cached->key, &key, key_size)) {
          cached->fast_valid = fast_cacheable;
          if (fast_cacheable) {
             cached->source_shader = s;
@@ -2822,13 +2893,13 @@ compact_fallback:
          return cached->program;
       }
 
-      /* The IOTO program embeds the linked executable address, and promoted
-       * constants embed the shader BO address. Pipelines may be destroyed
-       * after recording, so a newly cached program retains both until this
-       * command buffer is reset. Cache hits reuse those existing references.
+      /* The IOTO program embeds the linked executable address; promoted
+       * constants and preambles also reference the shader BO. Pipelines may
+       * be destroyed after recording, so a cached program retains both until
+       * this command buffer is reset. Cache hits reuse those references.
        */
       hk_cmd_buffer_retain_bo(cmd, linked->b.bo);
-      if (s->b.info.rodata.size_16 != 0)
+      if (s->b.info.rodata.size_16 != 0 || s->b.info.has_preamble)
          hk_cmd_buffer_retain_bo(cmd, s->bo);
 
       struct hk_ioto_reservation reservation;
@@ -2906,8 +2977,8 @@ compact_fallback:
          return 0;
 
       if (!diagnostics) {
-         memcpy(cached->key, &key, sizeof(key));
-         cached->key_size = sizeof(key);
+         memcpy(cached->key, &key, key_size);
+         cached->key_size = key_size;
          cached->program = published;
          cached->fast_valid = fast_cacheable;
          if (fast_cacheable) {

@@ -49,6 +49,7 @@
 #include "agx3_zs_core.h"
 #include "agx3_stage_core.h"
 #include "agx3_static_spill_core.h"
+#include "agx3_cprog_input.h"
 #include "agx3_subgroup_core.h"
 #include "agx3_tex_core.h"
 #include "agx3_tile_core.h"
@@ -771,6 +772,7 @@ agx3_is_async(const agx_instr *I)
           I->op == AGX_OPCODE_TEXTURE_SAMPLE || I->op == AGX_OPCODE_LD_TILE ||
           I->op == AGX_OPCODE_SCS_LOAD_AGX3 ||
           I->op == AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3 ||
+          I->op == AGX_OPCODE_LOAD_CPROG_AGX3 ||
           I->op == AGX_OPCODE_STACK_LOAD ||
           I->op == AGX_OPCODE_STACK_STORE;
 }
@@ -3712,11 +3714,27 @@ agx3_static_reload_rereads(agx_context *ctx, agx_instr **ordered,
       return NULL;
 
    unsigned k = count;
+   bool input_read_later[512] = {false};
    agx_foreach_block_rev(ctx, block) {
       agx_foreach_instr_in_block_rev(block, I) {
          if (I->op == AGX_OPCODE_STOP)
             continue;
          --k;
+         if (I->op == AGX_OPCODE_LOAD_CPROG_AGX3) {
+            if (I->nr_dests != 1 || I->imm >= 512 ||
+                (I->dest[0].size != AGX_SIZE_16 && I->dest[0].size != AGX_SIZE_32) ||
+                agx_channels(I->dest[0]) != 1)
+               return NULL;
+            unsigned n = agx_size_align_16(I->dest[0].size);
+            if (n > 512 - I->imm)
+               return NULL;
+            live[k] = in_loop[block->index];
+            for (unsigned h = I->imm; h < I->imm + n; ++h) {
+               live[k] |= input_read_later[h];
+               input_read_later[h] = true;
+            }
+            continue;
+         }
          if (I->op != AGX_OPCODE_STACK_LOAD ||
              I->src[0].type != AGX_INDEX_IMMEDIATE)
             continue;
@@ -7962,16 +7980,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       (ctx->nir->info.fs.needs_coarse_quad_helper_invocations ||
        ctx->nir->info.fs.needs_full_quad_helper_invocations);
    bool uniform_half_used[512] = {false};
+   for (unsigned h = 0; h < MIN2(ctx->key->reserved_preamble, 512); ++h)
+      uniform_half_used[h] = true;
+   if (ctx->out) {
+      const unsigned base = ctx->out->rodata.base_uniform;
+      for (unsigned h = 0; h < ctx->out->rodata.size_16 && base + h < 512; ++h)
+         uniform_half_used[base + h] = true;
+   }
    bool has_dynamic_cube_sample = false;
    bool has_packed_array_layer = false;
    unsigned observed_max_reg = ctx->max_reg;
    unsigned count = 0;
+   bool cprog_imports = false;
 
    assert(enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C);
    util_dynarray_init(&fixups, ctx);
 
    agx_foreach_block(ctx, scan_block) {
       agx_foreach_instr_in_block(scan_block, scan_I) {
+         /* An imported/read half is not padding either. A scalar export
+          * must not overwrite it merely because no shader store defines it. */
+         agx_foreach_src(scan_I, s) {
+            const agx_index src = scan_I->src[s];
+            if (src.type == AGX_INDEX_UNIFORM) {
+               for (unsigned h = 0; h < agx_index_size_16(src) &&
+                                    src.value + h < 512; ++h)
+                  uniform_half_used[src.value + h] = true;
+            }
+         }
+         cprog_imports |= scan_I->op == AGX_OPCODE_LOAD_CPROG_AGX3;
          if (scan_I->op != AGX_OPCODE_STOP)
             count++;
          /* Apple's "last texture op" marker goes on the final smp of the
@@ -8069,6 +8106,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              scan_I->op == AGX_OPCODE_DFDX ||
              scan_I->op == AGX_OPCODE_DFDY)
             g17p_fragment_helper_protocol = true;
+         if ((scan_I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
+              scan_I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
+              scan_I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3) &&
+             scan_I->imm <= ARRAY_SIZE(uniform_half_used) - 2) {
+            uniform_half_used[scan_I->imm] = true;
+            uniform_half_used[scan_I->imm + 1] = true;
+         }
          if (scan_I->op == AGX_OPCODE_UNIFORM_STORE &&
              scan_I->nr_srcs == 2 &&
              scan_I->src[1].type == AGX_INDEX_IMMEDIATE) {
@@ -8084,6 +8128,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
       }
+   }
+
+   const uint16_t entry_wait = cprog_imports ? (1u << 5) : 0;
+   if (cprog_imports) {
+      if (!ctx->is_preamble || !ctx->agx3_cprog_inputs_lowered ||
+          enc != AGX_ISA_ENCODING_AGX3B || !ctx->out ||
+          !ctx->out->agx3_preamble_inputs.count)
+         goto fail;
+      outstanding = entry_wait;
+      for (unsigned h = 0; h < 512; ++h)
+         uniform_half_used[h] |=
+            !!(ctx->out->agx3_preamble_inputs.halves[h / 64] &
+               (UINT64_C(1) << (h % 64)));
    }
 
    /* Fresh G17P fragment witnesses with two/three ordinary SMPs clear f156 on
@@ -8434,6 +8491,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                continue;
             ns = agx3_expand_regs(I->src[s], e->src, ns);
          }
+         if (I->op == AGX_OPCODE_LOAD_CPROG_AGX3) {
+            if (ns >= AGX3_SLOT_MAX_REGS)
+               goto fail;
+            e->src[ns++] = AGX3_SLOT_CPROG_INPUT_TOKEN;
+         }
          if (nd > AGX3_SLOT_MAX_REGS || ns > AGX3_SLOT_MAX_REGS ||
              (I->agx3_tex_coord_start && nd == AGX3_SLOT_MAX_REGS) ||
              (I->agx3_tex_coords_staged && ns == AGX3_SLOT_MAX_REGS)) {
@@ -8585,7 +8647,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       }
    }
 
-   if (!agx3_slot_assign(sl, count, nslots, res))
+   const struct agx3_slot_entry input_entry = {
+      .token = AGX3_SLOT_CPROG_INPUT_TOKEN, .slot = 6,
+   };
+   if (!agx3_slot_assign_with_entry(sl, count, nslots, &input_entry,
+                                    cprog_imports ? 1 : 0, res))
       goto fail;
 
    /* Emission drains every live scoreboard generation before control flow,
@@ -8594,7 +8660,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * later producer reuses the slot. Otherwise a post-branch ISEL may carry a
     * stale slot together with two real producers, escaping the native
     * slots-1-and-2 pair even though only that pair is live. */
-   uint16_t cf_retired = 0, cf_live = 0;
+   uint16_t cf_retired = 0, cf_live = entry_wait;
    for (unsigned i = 0; i < count; ++i) {
       res[i].wait_mask &= (uint16_t)~cf_retired;
       cf_live &= (uint16_t)~res[i].wait_mask;
@@ -8804,6 +8870,42 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
          after_loop_backedge = false;
          after_loop_exit_test = false;
+
+         if (I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
+             I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
+             I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3) {
+            const enum agx3_uniform_float_op op =
+               I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ? AGX3_UNIFORM_FADD :
+               I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ? AGX3_UNIFORM_FMUL :
+                                                     AGX3_UNIFORM_FMA;
+            const unsigned count = op == AGX3_UNIFORM_FMA ? 3 : 2;
+            if (!ctx->is_preamble || I->nr_dests || I->nr_srcs != count ||
+                I->saturate || I->imm >= 128 || (I->imm & 1))
+               AGX3_REFUSE(I);
+            struct agx3_uniform_float_src src[3] = {0};
+            for (unsigned s = 0; s < count; ++s) {
+               const agx_index index = I->src[s];
+               const bool reg = index.type == AGX_INDEX_REGISTER;
+               if ((!reg && index.type != AGX_INDEX_IMMEDIATE) ||
+                   index.value >= 256 ||
+                   index.memory || index.abs || index.neg ||
+                   (reg && (index.size != AGX_SIZE_32 ||
+                            agx_channels(index) != 1)))
+                  AGX3_REFUSE(I);
+               src[s] = (struct agx3_uniform_float_src){
+                  .kind = reg ? AGX3_FLOAT_REGISTER : AGX3_FLOAT_IMMEDIATE,
+                  .value = index.value,
+                  .cache = index.cache,
+                  .discard = index.discard,
+               };
+            }
+            uint8_t bytes[16], len;
+            if (!agx3_uniform_float_store_encode(enc, op, I->imm, src,
+                                                  wait, bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
 
          /*
           * `export` is a zero-byte pseudo-op, exactly as on AGX2
@@ -10361,6 +10463,29 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             outstanding &= ~retire;
+            continue;
+         }
+
+         if (I->op == AGX_OPCODE_LOAD_CPROG_AGX3) {
+            if (!cprog_imports || I->nr_dests != 1 || I->nr_srcs ||
+                I->saturate || I->imm >= 512 ||
+                !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
+                I->dest[0].abs || I->dest[0].neg || I->dest[0].kill ||
+                I->dest[0].discard || agx_channels(I->dest[0]) != 1 ||
+                (I->dest[0].size != AGX_SIZE_16 && I->dest[0].size != AGX_SIZE_32))
+               AGX3_REFUSE(I);
+            const struct agx3_cprog_import import = {
+               .uniform_half = I->imm, .dest_half = I->dest[0].value,
+               .width = I->dest[0].size == AGX_SIZE_16 ? AGX3_MEM_W16 : AGX3_MEM_W32,
+               .slot = slot, .wait_mask = wait,
+               .tps_live = tps_rereads[instr_index],
+            };
+            uint8_t bytes[AGX3_STATIC_SPILL_MAX_LENGTH];
+            size_t length;
+            if (!agx3_cprog_input_import(&ctx->out->agx3_preamble_inputs,
+                                        &import, bytes, sizeof(bytes), &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
             continue;
          }
 

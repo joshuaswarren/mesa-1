@@ -5702,7 +5702,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       mesa_loge_once("G17P HAL200 About flags=1 diagnostic active");
 
    struct agx_ppp_hal200_graphics_core fs_record;
-   const struct agx_ppp_hal200_fragment_fields fs_fields = {
+   struct agx_ppp_hal200_fragment_fields fs_fields = {
       /* HAL200 finalize 0x3f04e4..0x3f0508 puts iteration count at bit 16.
        * The packer merges the complete VIT address, including its high bits. */
       .resource_counts = linked_fs->b.cf.nr_bindings << 16,
@@ -5712,6 +5712,12 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       .stage_program_template = 0,
       .flags = about_flags1_diagnostic ? BITFIELD_BIT(0) : 0,
    };
+   if (fs->b.info.has_preamble &&
+       (!fs->b.info.agx3_preamble_staging_known ||
+        !agx_ppp_hal200_fragment_ti_resources(
+          dev->dev.chip, fs->b.info.preamble_scratch_size,
+          fs->b.info.agx3_preamble_staging_halfs * 2u, &fs_fields)))
+      return hk_g17p_bind_tail_refused(__LINE__);
 
    struct agx_ppp_hal200_graphics_core output_record;
    struct agx_ppp_hal200_graphics_fields output_fields = {

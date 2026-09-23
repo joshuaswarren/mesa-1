@@ -174,7 +174,11 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
    /* This could be optimized but it doesn't matter. The hardware tessellator
     * compiles evaluation shaders differently, so key its binaries apart. */
-   return pdev->dev.debug | ((uint64_t)pdev->g17p_native_tess << 32);
+   const uint64_t debug = agx_get_compiler_debug();
+   /* The native backend experiments change emitted code. Keep their cached
+    * binaries distinct; bits 0..31 are device flags and bit 32 is tessellation. */
+   return pdev->dev.debug | ((uint64_t)pdev->g17p_native_tess << 32) |
+          ((uint64_t)!!(debug & AGX_DBG_NATIVE_UNIFORMS) << 34);
 }
 
 const nir_shader_compiler_options *
@@ -2949,14 +2953,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          dev->dev.chip == AGX_CHIP_G17P && hw &&
          hk_g17p_sparse_vertex_outputs(&nir->info, sw_stage,
                                        xfb_info && xfb_info->output_count),
-      /* G17P's Ioto resource program populates CProg before the main shader;
-       * it does not execute AGX2's tex_state_store/sampler_state_store shader
-       * preamble.  The bounded G17P descriptor lowerings above convert the
-       * admitted static texture cases to immediate state slots before the
-       * backend runs.  Keep this architectural, not environment-selected:
-       * an unhandled descriptor shape must fail closed in the main packer.
-       */
-      .no_preamble = dev->dev.chip == AGX_CHIP_G17P,
+      /* Native fragment CProg qualification is explicitly opt-in. Descriptor
+       * lowering above still uses immediate native state slots, never the
+       * AGX2 texture/sampler-state-store protocol. Vertex/compute launch and
+       * the default G17P path remain outside this qualification gate. */
+      .no_preamble = dev->dev.chip == AGX_CHIP_G17P &&
+         !(nir->info.stage == MESA_SHADER_FRAGMENT &&
+           (agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS)),
    };
 
    /* For now, sample shading is always dynamic. Indicate that. */

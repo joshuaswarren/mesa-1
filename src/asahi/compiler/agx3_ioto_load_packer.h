@@ -14,6 +14,7 @@
 
 #include "asahi/lib/agx_ioto_load_core.h"
 #include "agx3_mem_core.h"
+#include "agx3_cprog_input.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -76,6 +77,12 @@ bool agx3_ioto_load_indirect_uniform_range(
 bool agx3_ioto_load_indirect_uniform_range_from_uniform_root(
    enum agx_chip chip, uint16_t root_base_half, int16_t pointer_offset,
    uint16_t uniform_half, uint16_t size_halfs, void *output, size_t capacity,
+   size_t *written);
+
+bool agx3_ioto_load_indirect_uniform_range_cprog(
+   enum agx_chip chip, uint16_t root_base_half, bool root_is_uniform,
+   int16_t pointer_offset, uint16_t uniform_half, uint16_t size_halfs,
+   const struct agx3_cprog_inputs *inputs, void *output, size_t capacity,
    size_t *written);
 
 #ifdef __cplusplus

@@ -28,13 +28,21 @@
 extern "C" {
 #endif
 
-/* Normal register dependencies occupy tokens 0..255. Static Mesa stack
+/* Normal register dependencies occupy tokens 0..255. The next eight tokens
+ * represent native sample staging groups (eight halves per group), distinct
+ * from GPR allocation and from the older implicit-coordinate transaction.
+ * Static Mesa stack
  * offsets are 16-bit byte immediates; their 32768 addressable half-registers
  * occupy a separate token range so async copy/rld ordering is exact. The final
  * token holds the one bounded implicit-coordinate staging transaction selected
  * by the pre-RA fragment sink. */
 #define AGX3_SLOT_GPR_TOKENS 256u
-#define AGX3_SLOT_TPS_TOKEN_BASE AGX3_SLOT_GPR_TOKENS
+#define AGX3_SLOT_STAGING_TOKEN_BASE AGX3_SLOT_GPR_TOKENS
+#define AGX3_SLOT_STAGING_GROUPS 8u
+#define AGX3_SLOT_CPROG_INPUT_TOKEN \
+   (AGX3_SLOT_STAGING_TOKEN_BASE + AGX3_SLOT_STAGING_GROUPS)
+#define AGX3_SLOT_TPS_TOKEN_BASE \
+   (AGX3_SLOT_CPROG_INPUT_TOKEN + 1u)
 #define AGX3_SLOT_TPS_HALF_TOKENS 32768u
 #define AGX3_SLOT_TEX_COORD_TOKEN                                        \
    (AGX3_SLOT_TPS_TOKEN_BASE + AGX3_SLOT_TPS_HALF_TOKENS)
@@ -56,6 +64,10 @@ struct agx3_slot_instr {
     * never sees those registers. Loads latch their address at issue and keep
     * this clear, which the native corpus requires. */
    bool latches_srcs;
+   /* Selected sources read through completion, independently of ordinary
+    * issue-time GPR inputs. Native SMP uses this for its staging group while
+    * its descriptor operands retain the existing issue-time contract. */
+   uint32_t late_src_mask;
    uint8_t preferred_slot; /* 0=round-robin, otherwise required slot */
    /* The round-robin slot may be reissued while an earlier generation of the
     * same kind is still live there, since the instruction cannot wait for it:
@@ -75,6 +87,21 @@ struct agx3_slot_result {
    uint8_t slot;       /* 1..nslots for async instructions, 0 otherwise */
    uint16_t wait_mask; /* bit (s-1) set => wait scoreboard slot s */
 };
+
+/* An asynchronous producer outside this instruction region. For example,
+ * the native loader publishes constant-program imports on slot 6. Reads,
+ * overwrites, drains and reuse of that slot must retire the entry generation
+ * by the same rules as a producer within the region. */
+struct agx3_slot_entry {
+   uint16_t token;
+   uint8_t slot;
+};
+
+bool agx3_slot_assign_with_entry(const struct agx3_slot_instr *instrs, unsigned n,
+                                 unsigned nslots,
+                                 const struct agx3_slot_entry *entry,
+                                 unsigned entry_count,
+                                 struct agx3_slot_result *out);
 
 /*
  * Assign slots and waits for one straight-line instruction region, which may

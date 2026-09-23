@@ -287,6 +287,15 @@ op("texture_sample",
       encoding = (0x31, 8, 10), # XXX WRONG SIZE
       srcs = 6, imms = [DIM, LOD_MODE, MASK, SCOREBOARD, OFFSET, SHADOW,
                         QUERY_LOD, GATHER, SPARSE])
+
+# Immutable constant-program input. IMM names the logical uniform half in
+# the frozen loader interface, not a GPR or an already assigned TPS offset.
+op("load_cprog_agx3", None, srcs = 0, imms = [IMM])
+# Constant-program arithmetic with a native uniform-file destination (IMM,
+# in half-register units). No temporary GPR result or following COPY.
+for name, srcs in [("fadd", 2), ("fmul", 2), ("ffma", 3)]:
+   op(f"uniform_{name}_agx3", None, dests = 0, srcs = srcs, imms = [IMM],
+      is_float = True, can_eliminate = False)
 for memory, can_reorder in [("texture", True), ("image", False)]:
     coherency = [COHERENT] if not can_reorder else []
     op(f"{memory}_load", encoding = (0x71, 8, 10), # XXX WRONG SIZE

@@ -53,19 +53,37 @@ agx3_slot_token_count(const struct agx3_slot_instr *instrs, unsigned n)
 }
 
 bool
-agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
-                 unsigned nslots, struct agx3_slot_result *out)
+agx3_slot_assign_with_entry(const struct agx3_slot_instr *instrs, unsigned n,
+                            unsigned nslots, const struct agx3_slot_entry *entry,
+                            unsigned entry_count, struct agx3_slot_result *out)
 {
-   if (instrs == NULL || out == NULL || nslots < 1 || nslots > 8)
+   if (instrs == NULL || out == NULL || nslots < 1 || nslots > 8 ||
+       (entry_count && entry == NULL) || entry_count > AGX3_SLOT_NUM_TOKENS)
       return false;
 
-   const unsigned token_count = agx3_slot_token_count(instrs, n);
+   unsigned token_count = agx3_slot_token_count(instrs, n);
+   for (unsigned i = 0; i < entry_count; ++i) {
+      if (entry[i].token >= AGX3_SLOT_NUM_TOKENS ||
+          entry[i].slot < 1 || entry[i].slot > nslots)
+         return false;
+      if (entry[i].token >= token_count)
+         token_count = entry[i].token + 1u;
+   }
 
    /* reg_slot[r] = slot (1..nslots) of the async op whose result currently
     * lives in half-register r, or 0 if r was last written by a synchronous op
     * (or never). */
    uint8_t reg_slot[AGX3_SLOT_NUM_TOKENS];
    memset(reg_slot, 0, token_count * sizeof(reg_slot[0]));
+   uint16_t pending = 0;
+   for (unsigned i = 0; i < entry_count; ++i) {
+      /* One token cannot name two independently pending generations. */
+      if (reg_slot[entry[i].token])
+         return false;
+      reg_slot[entry[i].token] = entry[i].slot;
+      pending |= (uint16_t)(1u << (entry[i].slot - 1));
+   }
+   uint16_t entry_pending = pending;
 
    /* reader_slots[r] = the slots of the in-flight stores that latch
     * half-register r as payload. A store has no destination, so the result
@@ -85,7 +103,6 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
    bool slot_reissuable[9] = {false};
 
    unsigned next = 0; /* round-robin cursor into 0..nslots-1 */
-   uint16_t pending = 0;
 
    for (unsigned i = 0; i < n; ++i) {
       const struct agx3_slot_instr *I = &instrs[i];
@@ -94,6 +111,9 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
       if (I->preferred_slot > nslots || (!I->is_async && I->preferred_slot))
          return false;
       const uint16_t valid_slots = (uint16_t)((1u << nslots) - 1u);
+      if ((I->nr_srcs < 32 && (I->late_src_mask >> I->nr_srcs)) ||
+          (!I->is_async && I->late_src_mask))
+         return false;
       if ((I->transient_slots & ~valid_slots) ||
           (I->preferred_slot &&
            (I->transient_slots & (1u << (I->preferred_slot - 1)))))
@@ -222,8 +242,17 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
             next = slot % nslots;
          }
 
+         /* A preferred/reissuable native instruction may normally join an
+          * in-region generation. The external loader's generation is not
+          * part of that protocol: retire it before any slot reuse. */
+         if ((entry_pending & (1u << (slot - 1))) && !slot_waited[slot]) {
+            wait_mask |= (uint16_t)(1u << (slot - 1));
+            slot_waited[slot] = true;
+         }
+
          out[i].wait_mask = wait_mask;
          out[i].slot = slot;
+         entry_pending &= (uint16_t)~wait_mask;
          pending &= (uint16_t)~wait_mask;
          pending |= (uint16_t)(1u << (slot - 1));
 
@@ -252,14 +281,17 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
                return false;
             reg_slot[I->dst[d]] = slot;
          }
-         if (I->latches_srcs && I->nr_srcs) {
+         if ((I->latches_srcs || I->late_src_mask) && I->nr_srcs) {
             active_reader_slots |= (uint16_t)(1u << (slot - 1));
-            for (unsigned s = 0; s < I->nr_srcs; ++s)
-               reader_slots[I->src[s]] |= (uint16_t)(1u << (slot - 1));
+            for (unsigned s = 0; s < I->nr_srcs; ++s) {
+               if (I->latches_srcs || (I->late_src_mask & (UINT32_C(1) << s)))
+                  reader_slots[I->src[s]] |= (uint16_t)(1u << (slot - 1));
+            }
          }
       } else {
          out[i].wait_mask = wait_mask;
          out[i].slot = 0;
+         entry_pending &= (uint16_t)~wait_mask;
          pending &= (uint16_t)~wait_mask;
          for (unsigned d = 0; d < I->nr_dsts; ++d) {
             if (I->dst[d] >= AGX3_SLOT_NUM_TOKENS)
@@ -270,4 +302,11 @@ agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
    }
 
    return true;
+}
+
+bool
+agx3_slot_assign(const struct agx3_slot_instr *instrs, unsigned n,
+                 unsigned nslots, struct agx3_slot_result *out)
+{
+   return agx3_slot_assign_with_entry(instrs, n, nslots, NULL, 0, out);
 }

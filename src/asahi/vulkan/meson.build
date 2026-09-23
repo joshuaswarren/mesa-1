@@ -211,6 +211,8 @@ if with_tests
     suite : ['asahi'],
   )
 
+
+
   test(
     'hk_nir_robust_image',
     executable(
@@ -493,6 +495,8 @@ if with_tests
             '../compiler/agx3_copy_core.c',
             '../compiler/agx3_ioto_uniform_program.c',
             '../compiler/agx3_ioto_load_packer.c',
+            '../compiler/agx3_cprog_input.c',
+            '../compiler/agx3_static_spill_core.c',
             '../compiler/agx3_mem_core.c',
             '../compiler/agx3_binder.c',
             '../compiler/agx3_compose/agx3_compose.c',

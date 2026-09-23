@@ -297,6 +297,28 @@ agx_ppp_hal200_graphics_core_unpack(
 }
 
 bool
+agx_ppp_hal200_fragment_ti_resources(
+   enum agx_chip chip, uint32_t spill_bytes, uint32_t largest_ipr_bytes,
+   struct agx_ppp_hal200_fragment_fields *fields)
+{
+   const uint64_t spill_quads = ((uint64_t)spill_bytes + 3) >> 2;
+   const uint64_t ipr_quads = ((((uint64_t)largest_ipr_bytes + 3) >> 2) + 1) &
+                             ~UINT64_C(1);
+   if (chip != AGX_CHIP_G17P || !fields || spill_quads > 0x3ffff ||
+       ipr_quads > 0xffe)
+      return false;
+
+   /* Pinned G17P FragmentProgramVariantESLState::finalize:
+    * 0x218841194..0x2188411c4 consumes the builder's TI spill quads at
+    * +0x128 and rounded TI largest-IPR bytes at +0x12c. It stores the
+    * seven-word fragment record at +0x544: IPR at +0x550, spill at +0x554. */
+   fields->unknown_0c = (fields->unknown_0c & ~UINT32_C(0xfff)) | ipr_quads;
+   fields->stage_program_template =
+      (fields->stage_program_template & ~UINT32_C(0x1ffff8)) | (spill_quads << 3);
+   return true;
+}
+
+bool
 agx_ppp_hal200_fragment_core_pack(
    enum agx_chip chip, const struct agx_ppp_hal200_fragment_fields *fields,
    struct agx_ppp_hal200_graphics_core *out)

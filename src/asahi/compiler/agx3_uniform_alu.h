@@ -28,6 +28,18 @@ struct agx3_uniform_float_src {
    bool cache, discard;
 };
 
+/* Native constant-program f32 ALU -> uniform-file destination. The initial
+ * witness set admits aligned destinations below half128, plain GPR/immediate
+ * inputs and the ordinary ALU wait fields. It does not admit half results,
+ * saturation, modifiers, or uniform-file source ports. Failure is transactional.
+ */
+bool agx3_uniform_float_store_encode(enum agx_isa_encoding encoding,
+                                     enum agx3_uniform_float_op op,
+                                     uint16_t uniform_half,
+                                     const struct agx3_uniform_float_src src[3],
+                                     uint8_t wait_mask,
+                                     uint8_t output[16], uint8_t *length);
+
 /* Scalar f32 arithmetic with native uniform operands. Sources are in ordinary
  * expression order, unlike the historical falu helper's reversed multipliers.
  * Immediates are minifloat codes. Uniform indices name 16-bit halves.

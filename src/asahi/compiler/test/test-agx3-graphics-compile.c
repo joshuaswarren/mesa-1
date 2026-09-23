@@ -23,6 +23,7 @@
  */
 
 #include "agx_compile.h"
+#include "agx_debug.h"
 #include "poly/nir/poly_nir.h"
 #include "nir_xfb_info.h"
 #include "agx3_alu_core.h"
@@ -3446,6 +3447,68 @@ test_g17p_cube_array_shadow_level_varyings(bool bias)
  * programs fail to link, with no offline gate the wiser.
  */
 static bool
+test_g17p_explicit_texture_transactions(bool red_only)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "explicit native texture transactions");
+   nir_def *bary = nir_load_barycentric_pixel(&b, 32,
+                                             .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *input = nir_load_interpolated_input(
+      &b, 3, 32, bary, nir_imm_int(&b, 0), .base = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0,
+      .io_semantics.num_slots = 1);
+   nir_def *lod = nir_channel(&b, input, 2);
+   nir_def *sum = nir_imm_vec4(&b, 0, 0, 0, 0);
+   for (unsigned i = 0; i < 10; ++i) {
+      nir_def *uv = nir_vec2(&b, nir_fadd_imm(&b, nir_channel(&b, input, 0),
+                                           i * 0.03125f),
+                              nir_channel(&b, input, 1));
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+      tex->op = nir_texop_txl;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, uv);
+      tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_def *value = &tex->def;
+      if (red_only) {
+         nir_def *red = nir_channel(&b, value, 0);
+         value = nir_vec4(&b, red, red, red, red);
+      }
+      sum = nir_fadd(&b, sum, value);
+   }
+   fs_store_colour(&b, sum);
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   agx_preprocess_nir(b.shader);
+   fs_lower(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(b.shader, &key, &part) && part.binary;
+   if (getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr, "explicit-staging-nir-%s: compiled=%u bytes=%u gprs=%u "
+                      "staging=%u scratch=%u\n",
+              red_only ? "red" : "rgba", ok, part.info.binary_size,
+              part.info.nr_gprs, part.info.agx3_staging_halfs,
+              part.info.scratch_size);
+      for (unsigned i = 0; part.binary && i < part.info.binary_size; ++i)
+         fprintf(stderr, "%02x", ((uint8_t *)part.binary)[i]);
+      fputc('\n', stderr);
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
+static bool
 test_g17p_array_shadow_register_lod(bool bias)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -3625,23 +3688,39 @@ test_g17p_native_cube_array_sample(void)
    ok &= compiled;
 
    bool native_smp = false;
-   /* The combined HK ABI keeps the descriptor pointers in r8:r11 and stages
-    * the post-RA layer with CEM's face. This is the exact SMP tail produced
-    * from that ABI; its cube/array selectors match Apple's GPR-layer
-    * cube-array witness (f77=2, no direct layer), while f83/f112 retain the
-    * driver's independently qualified 0/4 profile.
+   /* The combined HK ABI stages the post-RA layer with CEM's face. Its
+    * cube/array selectors match Apple's GPR-layer cube-array witness
+    * (f77=2, no direct layer), while f83/f112 retain the driver's independently
+    * qualified 0/4 profile. The scoreboard allocator may reuse any retired
+    * slot; require a matching signalling/wait pair instead of freezing slot 2.
     */
-   static const uint8_t hk_native_smp[] = {
-      0x05,0x80,0x0c,0xb8,0x30,0x25,0x10,
-      0x04,0x01,0x00,0x10,0x00,0x01,0x00,
-   };
-   for (unsigned off = 0;
-        part.binary && off + sizeof(hk_native_smp) <= part.info.binary_size;
-        ++off)
-      native_smp |= !memcmp((uint8_t *)part.binary + off, hk_native_smp,
-                            sizeof(hk_native_smp));
+   for (unsigned slot = 1; slot <= 6; ++slot) {
+      const struct agx3_tex_sample_desc sample = {
+         .width = AGX3_TEX_W32, .mask = 15, .lod = AGX3_TEX_LOD_AUTO,
+         .slot = slot, .wait_mask = 1u << (slot - 1),
+         .coord_kill = true, .final = true, .array = true, .cube = true,
+         .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+      };
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], length;
+      if (!agx3_tex_encode_sample(AGX_ISA_ENCODING_AGX3B, &sample, bytes, &length)) {
+         ok = false;
+         break;
+      }
+      for (unsigned off = 0;
+           part.binary && off + length <= part.info.binary_size; ++off)
+         native_smp |= !memcmp((uint8_t *)part.binary + off, bytes, length);
+   }
    ok &= native_smp && part.info.agx3_staging_known &&
          part.info.agx3_staging_halfs == 8;
+   if (!ok || getenv("AGX3_DUMP_BINARY")) {
+      fprintf(stderr,
+              "cube-array: shape=%u compiled=%u smp=%u staging=%u/%u size=%u bytes:",
+              shape, compiled, native_smp, part.info.agx3_staging_known,
+              part.info.agx3_staging_halfs, part.info.binary_size);
+      for (unsigned i = 0; compiled && i < part.info.binary_size; ++i)
+         fprintf(stderr, " %02x", ((const uint8_t *)part.binary)[i]);
+      fputc('\n', stderr);
+   }
    free(part.binary);
    ralloc_free(b.shader);
    return ok;
@@ -8822,6 +8901,11 @@ main(int argc, char **argv)
 
    if (!test_g17p_cube_array_shadow_dump()) {
       fputs("cube-array shadow dump compile failed\n", stderr);
+      return 1;
+   }
+   if (!test_g17p_explicit_texture_transactions(false) ||
+       !test_g17p_explicit_texture_transactions(true)) {
+      fputs("explicit texture transaction compile failed\n", stderr);
       return 1;
    }
    if (!test_g17p_compute_form_vertex_shader()) {

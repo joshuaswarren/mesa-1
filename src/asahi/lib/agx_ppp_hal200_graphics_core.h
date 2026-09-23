@@ -125,6 +125,15 @@ struct agx_ppp_hal200_fragment_fields {
    uint32_t flags;
 };
 
+/* G17P fragment thread-invariant resources, separate from main SPECTPR.
+ * Spill bytes become quads in stage-program-template bits 3..20. The native
+ * thread_invariant_largest_ipr_bytes field becomes an even quad count in
+ * unknown_0c bits 0..11. This is not a temporary-GPR count. Other template
+ * bits are preserved; failure leaves fields unchanged. */
+bool agx_ppp_hal200_fragment_ti_resources(
+   enum agx_chip chip, uint32_t spill_bytes, uint32_t largest_ipr_bytes,
+   struct agx_ppp_hal200_fragment_fields *fields);
+
 /*
  * Pack one complete fixed-layout G17P record.  Each record has its own header
  * and outer VDM PPP_STATE pointer; records must never be concatenated behind a

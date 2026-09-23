@@ -71,6 +71,50 @@ agx3_ioto_uniform_program_body_bound(
    return true;
 }
 
+bool
+agx3_ioto_uniform_program_desc_body_bound(
+   enum agx_chip chip, const struct agx3_ioto_uniform_program_desc *desc,
+   size_t *bytes, size_t *chunks)
+{
+   size_t bound, count;
+   if (!desc || !bytes || !chunks ||
+       !agx3_ioto_uniform_program_body_bound(chip, desc->ranges,
+          desc->range_count, &bound, &count))
+      return false;
+   if (desc->cprog_inputs) {
+      struct agx3_cprog_inputs checked;
+      const struct agx3_cprog_inputs *inputs = desc->cprog_inputs;
+      if (!agx3_cprog_inputs_init(inputs->halves, &checked) ||
+          checked.count != inputs->count ||
+          checked.storage_bytes != inputs->storage_bytes ||
+          (inputs->count && (chip != AGX_CHIP_G17P || desc->fast_path_enabled)))
+         return false;
+      uint64_t covered[AGX3_CPROG_INPUT_WORDS] = {0};
+      for (size_t i = 0; i < desc->range_count; ++i) {
+         const struct agx3_ioto_uniform_range *range = &desc->ranges[i];
+         for (unsigned h = range->start_halfs;
+              h < range->start_halfs + range->size_halfs; ++h) {
+            const uint64_t bit = UINT64_C(1) << (h % 64);
+            if (!(inputs->halves[h / 64] & bit))
+               continue;
+            if (covered[h / 64] & bit)
+               return false;
+            covered[h / 64] |= bit;
+         }
+      }
+      for (unsigned w = 0; w < AGX3_CPROG_INPUT_WORDS; ++w) {
+         if (covered[w] != inputs->halves[w])
+            return false;
+      }
+      /* At worst each selected half uses its own extended COPY. */
+      if (!add_size(&bound, 10u * inputs->count))
+         return false;
+   }
+   *bytes = bound;
+   *chunks = count;
+   return true;
+}
+
 static bool
 spans_overlap(const void *a, size_t a_size, const void *b, size_t b_size)
 {
@@ -132,10 +176,10 @@ agx3_ioto_uniform_program_body_generate(
 {
    size_t body_bound, chunk_count;
    if (desc == NULL || written == NULL || copy_offset == NULL ||
-       !agx3_ioto_uniform_program_body_bound(
-          chip, desc != NULL ? desc->ranges : NULL,
-          desc != NULL ? desc->range_count : 0, &body_bound, &chunk_count) ||
-       body_bound > workspace.body_capacity ||
+       !agx3_ioto_uniform_program_desc_body_bound(
+          chip, desc, &body_bound, &chunk_count) ||
+       (body_bound > workspace.body_capacity &&
+        !(desc->cprog_inputs && desc->cprog_inputs->count)) ||
        (workspace.body_capacity != 0 && workspace.body == NULL) ||
        workspace_overlaps(workspace) ||
        (workspace.relocation_capacity && !workspace.relocations) ||
@@ -179,13 +223,24 @@ agx3_ioto_uniform_program_body_generate(
          if (cprog_dest_half > UINT16_MAX)
             return false;
 
-         const struct agx_ioto_load_absolute load = {
+         struct agx_ioto_load_absolute load = {
             .native_slot = range->start_halfs / 2 + dword,
             .count_dwords = count,
             .address = range->address + (uint64_t)dword * 4,
             .lane_mask = lane_mask,
             .cprog_dest_half = (uint16_t)cprog_dest_half,
          };
+         if (desc->cprog_inputs) {
+            for (unsigned h = 0; h < 2u * count; ++h) {
+               uint16_t tps;
+               if (!agx3_cprog_input_tps_half(desc->cprog_inputs,
+                          range->start_halfs + 2u * dword + h, &tps))
+                  continue;
+               if (!load.cprog_input_mask)
+                  load.cprog_input_tps_half = tps;
+               load.cprog_input_mask |= 1u << h;
+            }
+         }
          struct agx_ioto_load_allocation allocation;
          if (!agx3_ioto_load_absolute_native(&core, &load, sort, &allocation))
             return false;
@@ -213,10 +268,10 @@ agx3_ioto_uniform_program_generate(
 {
    size_t body_bound, chunk_count;
    if (desc == NULL || output == NULL || written == NULL ||
-       !agx3_ioto_uniform_program_body_bound(
-          chip, desc != NULL ? desc->ranges : NULL,
-          desc != NULL ? desc->range_count : 0, &body_bound, &chunk_count) ||
-       body_bound > workspace.body_capacity ||
+       !agx3_ioto_uniform_program_desc_body_bound(
+          chip, desc, &body_bound, &chunk_count) ||
+       (body_bound > workspace.body_capacity &&
+        !(desc->cprog_inputs && desc->cprog_inputs->count)) ||
        (workspace.body_capacity != 0 && workspace.body == NULL) ||
        workspace_overlaps(workspace) ||
        spans_overlap(workspace.body, workspace.body_capacity, output,

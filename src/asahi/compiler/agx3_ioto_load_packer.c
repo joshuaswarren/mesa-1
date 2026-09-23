@@ -6,6 +6,7 @@
 #include "agx3_ioto_load_packer.h"
 
 #include "agx3_binder.h"
+#include "agx3_cprog_input.h"
 
 #include <string.h>
 
@@ -122,14 +123,14 @@ add_half(uint16_t base, uint16_t increment, uint16_t *result)
 
 static bool
 pack_copy_fields(enum agx_isa_encoding enc, uint16_t destination_half,
-                 uint16_t source_half, int wait_slot,
+                 uint16_t source_half, int wait_slot, bool source_kill,
                  struct agx_ioto_load_raw_record *record)
 {
    /* COPY ep0: f3 destination bits [4:1], [6:5], [0] go to
     * byte0[7:4], byte2[7:6], byte3[0]. f16 source bits [6:0], [7]
     * go to byte1[6:0], byte3[4]. Larger destinations use the composer
     * (including its exact extended-form and alias rules). */
-   if (enc == AGX_ISA_ENCODING_AGX3B && wait_slot < 0 &&
+   if (enc == AGX_ISA_ENCODING_AGX3B && wait_slot < 0 && source_kill &&
        destination_half < 128 && source_half < 256) {
       record->bytes[0] = 0x0b | ((destination_half & 0x1e) << 3);
       record->bytes[1] = source_half & 0x7f;
@@ -149,7 +150,7 @@ pack_copy_fields(enum agx_isa_encoding enc, uint16_t destination_half,
     * moves a material draw-recording cost. This direct form is exhaustive
     * over the complete eight-bit register encoding and is checked byte for
     * byte against the authoritative composer in the packer test. */
-   if (enc == AGX_ISA_ENCODING_AGX3B && wait_slot < 0 &&
+   if (enc == AGX_ISA_ENCODING_AGX3B && wait_slot < 0 && source_kill &&
        destination_half < 256 && source_half < 256) {
       record->bytes[0] = 0x0b | ((destination_half & 0x1e) << 3);
       record->bytes[1] = 0x01 | (source_half & 0x7e);
@@ -179,7 +180,7 @@ pack_copy_fields(enum agx_isa_encoding enc, uint16_t destination_half,
       KV(10, 2),
       KV(23, 2),
       KV(24, 2),
-      KV(27, 1),
+      KV(27, source_kill),
    };
    unsigned nbaseline = 5;
    if (enc == AGX_ISA_ENCODING_AGX3C) {
@@ -250,11 +251,42 @@ pack_absolute_copy(void *context, enum agx_chip chip,
    }
 
    memset(record, 0, sizeof(*record));
-   if (!pack_copy_fields(enc, destination_half, source_half, wait_slot, record))
+   const bool source_kill = !((load->cprog_input_mask >> (2 * dword)) & 3);
+   if (!pack_copy_fields(enc, destination_half, source_half, wait_slot,
+                         source_kill, record))
       return false;
 
    if (packer->encoding == AGX_IOTO_LOAD_ENCODING_GPU1)
       packer->copy_wait_emitted = true;
+   return true;
+}
+
+static bool
+pack_cprog_copy(void *context, enum agx_chip chip,
+                const struct agx_ioto_inflight_load *load, uint8_t dword,
+                struct agx_ioto_load_raw_record records[2], uint8_t *count)
+{
+   struct agx3_ioto_load_packer *packer = context;
+   if (!packer || packer->chip != chip || chip != AGX_CHIP_G17P ||
+       !load || !records || !count || dword >= load->count_dwords ||
+       dword >= 4 || !direct_load_registers_ok(load))
+      return false;
+   unsigned tps = load->cprog_input_tps_half;
+   for (unsigned h = 0; h < 2u * dword; ++h)
+      tps += (load->cprog_input_mask >> h) & 1;
+   unsigned mask = (load->cprog_input_mask >> (2 * dword)) & 3;
+   uint8_t bytes[AGX3_CPROG_INPUT_COPY_MAX_SIZE];
+   size_t length;
+   if (!agx3_cprog_input_publish_at(mask, tps, load->data.half + 2u * dword,
+                                    bytes, sizeof(bytes), &length) ||
+       length > 20 || length % 10)
+      return false;
+   *count = length / 10;
+   for (unsigned i = 0; i < *count; ++i) {
+      records[i].kind = AGX_IOTO_LOAD_RAW_COPY_EP1;
+      records[i].length = 10;
+      memcpy(records[i].bytes, bytes + 10 * i, 10);
+   }
    return true;
 }
 
@@ -294,6 +326,7 @@ agx3_ioto_load_packer_ops(struct agx3_ioto_load_packer *packer,
       .pack_copy = pack_absolute_copy,
       .context = packer,
       .trusted_records = true,
+      .pack_cprog_copy = pack_cprog_copy,
    };
 }
 
@@ -406,13 +439,22 @@ static bool
 load_indirect_uniform_range(
    enum agx_chip chip, uint16_t root_base_half, bool root_base_is_uniform,
    int16_t pointer_offset, uint16_t uniform_half, uint16_t size_halfs,
-   void *output, size_t capacity, size_t *written)
+   const struct agx3_cprog_inputs *inputs, void *output, size_t capacity,
+   size_t *written)
 {
    if (chip != AGX_CHIP_G17P || !output || !written ||
        (root_base_half & 1) || (uniform_half & 1) || (size_halfs & 1) ||
        size_halfs == 0 || uniform_half + size_halfs > 512 ||
        root_base_half + 4 > (root_base_is_uniform ? 512 : 256))
       return false;
+
+   if (inputs) {
+      struct agx3_cprog_inputs checked;
+      if (!agx3_cprog_inputs_init(inputs->halves, &checked) ||
+          checked.count != inputs->count ||
+          checked.storage_bytes != inputs->storage_bytes)
+         return false;
+   }
 
    /* Load the pointer into r2:r3 and retire physical slot 2 with G17P's
     * witnessed four-NOP protocol before using that pair as another LDDEV's
@@ -462,14 +504,24 @@ load_indirect_uniform_range(
          return false;
 
       for (unsigned i = 0; i < count; ++i) {
+         unsigned half = uniform_half + 2 * (first + i);
+         unsigned selected = inputs ?
+            (inputs->halves[half / 64] >> (half % 64)) & 3 : 0;
          struct agx_ioto_load_raw_record copy;
          memset(&copy, 0, sizeof(copy));
          if (!pack_copy_fields(AGX_ISA_ENCODING_AGX3B,
-                               uniform_half + 2 * (first + i),
-                               staging_half + 2 * i, -1, &copy) ||
+                               half, staging_half + 2 * i, -1, !selected, &copy) ||
              !append_record(output, capacity, &offset, copy.bytes,
                             copy.length))
             return false;
+         if (selected) {
+            uint8_t bytes[AGX3_CPROG_INPUT_COPY_MAX_SIZE];
+            size_t size;
+            if (!agx3_cprog_input_publish(inputs, half, staging_half + 2 * i,
+                                           bytes, sizeof(bytes), &size) ||
+                !append_record(output, capacity, &offset, bytes, size))
+               return false;
+         }
       }
    }
 
@@ -485,7 +537,7 @@ agx3_ioto_load_indirect_uniform_range(
 {
    return load_indirect_uniform_range(
       chip, root_base_half, false, pointer_offset, uniform_half, size_halfs,
-      output, capacity, written);
+      NULL, output, capacity, written);
 }
 
 bool
@@ -496,5 +548,16 @@ agx3_ioto_load_indirect_uniform_range_from_uniform_root(
 {
    return load_indirect_uniform_range(
       chip, root_base_half, true, pointer_offset, uniform_half, size_halfs,
-      output, capacity, written);
+      NULL, output, capacity, written);
+}
+
+bool
+agx3_ioto_load_indirect_uniform_range_cprog(
+   enum agx_chip chip, uint16_t root_base_half, bool root_is_uniform,
+   int16_t pointer_offset, uint16_t uniform_half, uint16_t size_halfs,
+   const struct agx3_cprog_inputs *inputs, void *output, size_t capacity,
+   size_t *written)
+{
+   return load_indirect_uniform_range(chip, root_base_half, root_is_uniform,
+      pointer_offset, uniform_half, size_halfs, inputs, output, capacity, written);
 }

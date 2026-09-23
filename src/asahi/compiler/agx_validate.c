@@ -181,6 +181,14 @@ agx_write_registers(const agx_context *ctx, const agx_instr *I, unsigned d)
        */
       return (I->sparse ? 8 : 4) * size;
 
+   case AGX_OPCODE_LOAD_CPROG_AGX3:
+      assert(ctx->is_preamble && ctx->agx3_cprog_inputs_lowered &&
+             ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+      assert(I->nr_dests == 1 && I->nr_srcs == 0 && !I->saturate);
+      assert(I->dest[d].size == AGX_SIZE_16 || I->dest[d].size == AGX_SIZE_32);
+      assert(agx_channels(I->dest[d]) == 1 && I->imm < 512 && size <= 512 - I->imm);
+      return size;
+
    case AGX_OPCODE_DEVICE_LOAD:
    case AGX_OPCODE_LOCAL_LOAD:
    case AGX_OPCODE_STACK_LOAD:
@@ -304,6 +312,24 @@ agx_read_registers(const agx_context *ctx, const agx_instr *I, unsigned s)
          return util_bitcount(I->mask) * size;
       else
          return size;
+
+   case AGX_OPCODE_UNIFORM_FADD_AGX3:
+   case AGX_OPCODE_UNIFORM_FMUL_AGX3:
+   case AGX_OPCODE_UNIFORM_FFMA_AGX3:
+      assert(ctx->is_preamble &&
+             ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+      assert(I->nr_dests == 0 && I->imm < 128 && !(I->imm & 1));
+      assert(I->nr_srcs == (I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3 ? 3 : 2));
+      assert(!I->saturate && !I->src[s].memory &&
+             !I->src[s].abs && !I->src[s].neg);
+      if (I->src[s].type == AGX_INDEX_IMMEDIATE) {
+         assert(I->src[s].value <= 255);
+      } else {
+         assert(I->src[s].type == AGX_INDEX_NORMAL ||
+                I->src[s].type == AGX_INDEX_REGISTER);
+         assert(I->src[s].size == AGX_SIZE_32 && agx_channels(I->src[s]) == 1);
+      }
+      return size;
 
    case AGX_OPCODE_DEVICE_STORE:
    case AGX_OPCODE_LOCAL_STORE:

@@ -10,6 +10,7 @@
 #include "util/u_debug.h"
 #include "util/sparse_bitset.h"
 #include "agx_compiler.h"
+#include "agx3_fixed_dependencies.h"
 #include "agx_opcodes.h"
 
 /* Diagnostic escape hatch for A/B testing the UVS store ordering below. */
@@ -46,10 +47,82 @@ serialize(struct sched_node *a, struct sched_node **b)
    *b = a;
 }
 
+static bool
+native_uniform_write(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
+          I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
+          I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3;
+}
+
+static void
+add_fixed_dependency(void *data, uint32_t before, uint32_t after)
+{
+   struct sched_node **nodes = data;
+   /* The pressure scheduler walks dependents before their dependencies. */
+   add_dep(nodes[after], nodes[before]);
+}
+
+static bool
+uniform_access(struct util_dynarray *accesses, unsigned instruction,
+               unsigned first, unsigned count, bool write)
+{
+   if (!count || first >= AGX_NUM_UNIFORMS ||
+       count > AGX_NUM_UNIFORMS - first)
+      return false;
+   struct agx3_fixed_access access = {
+      .instruction = instruction, .first = first, .count = count, .write = write,
+   };
+   util_dynarray_append(accesses, access);
+   return true;
+}
+
+static bool
+add_uniform_dependencies(struct util_dynarray *nodes, void *memctx)
+{
+   struct util_dynarray accesses;
+   util_dynarray_init(&accesses, memctx);
+   unsigned instruction = 0;
+   util_dynarray_foreach(nodes, struct sched_node *, node) {
+      const agx_instr *I = (*node)->instr;
+      agx_foreach_src(I, s) {
+         const agx_index src = I->src[s];
+         if (src.type == AGX_INDEX_UNIFORM &&
+             !uniform_access(&accesses, instruction, src.value,
+                              agx_index_size_16(src), false))
+            return false;
+      }
+      if (native_uniform_write(I)) {
+         if (I->imm > AGX_NUM_UNIFORMS - 2 ||
+             !uniform_access(&accesses, instruction, I->imm, 2, true))
+            return false;
+      } else if (I->op == AGX_OPCODE_UNIFORM_STORE) {
+         if (I->nr_srcs != 2 || I->src[1].type != AGX_INDEX_IMMEDIATE)
+            return false;
+         const unsigned stride = agx_size_align_16(I->src[0].size);
+         const unsigned base = I->src[1].value;
+         if (base >= AGX_NUM_UNIFORMS || I->mask > 15)
+            return false;
+         for (unsigned c = 0; c < 4; ++c) {
+            if ((I->mask & (1u << c)) &&
+                !uniform_access(&accesses, instruction, base + c * stride,
+                                  stride, true))
+               return false;
+         }
+      }
+      ++instruction;
+   }
+   return agx3_fixed_dependencies(accesses.data,
+      util_dynarray_num_elements(&accesses, struct agx3_fixed_access),
+      AGX_NUM_UNIFORMS, add_fixed_dependency, nodes->data);
+}
+
 static struct dag *
-create_dag(agx_context *ctx, agx_block *block, void *memctx)
+create_dag(agx_context *ctx, agx_block *block, void *memctx, bool native_uniforms)
 {
    struct dag *dag = dag_create(ctx);
+   struct util_dynarray nodes;
+   util_dynarray_init(&nodes, memctx);
 
    struct sched_node **last_write =
       calloc(ctx->alloc, sizeof(struct sched_node *));
@@ -97,6 +170,8 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx)
       struct sched_node *node = rzalloc(memctx, struct sched_node);
       node->instr = I;
       dag_init_node(dag, &node->dag);
+      if (native_uniforms)
+         util_dynarray_append(&nodes, node);
 
       /* Reads depend on writes, no other hazards in SSA */
       agx_foreach_ssa_src(I, s) {
@@ -143,6 +218,8 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx)
 
    free(last_write);
 
+   if (native_uniforms && !add_uniform_dependencies(&nodes, memctx))
+      return NULL;
    return dag;
 }
 
@@ -289,8 +366,19 @@ agx_pressure_schedule(agx_context *ctx)
    agx_compute_liveness(ctx);
    void *memctx = ralloc_context(ctx);
 
+   bool native_uniforms = false;
+   agx_foreach_instr_global(ctx, I) {
+      native_uniforms |= native_uniform_write(I);
+   }
+
    agx_foreach_block(ctx, block) {
-      struct sched_ctx sctx = {.dag = create_dag(ctx, block, memctx)};
+      struct sched_ctx sctx = {
+         .dag = create_dag(ctx, block, memctx, native_uniforms),
+      };
+      /* Preserve the original order if a complete dependency graph cannot be
+       * built (invalid range or workspace allocation failure). */
+      if (!sctx.dag)
+         continue;
       u_sparse_bitset_init(&sctx.live, ctx->alloc, memctx);
 
       pressure_schedule_block(ctx, block, &sctx);

@@ -125,6 +125,45 @@ main(void)
    assert(memcmp(live_fs_packed.bytes, no_vary_expected,
                  sizeof(no_vary_expected)) == 0);
 
+   /* Pinned native finalization maps 32 TI storage bytes to 0x40 in the
+    * stage-program template. IPR is independently zero in all five retained
+    * pointer-bitcast CProg metadata witnesses, despite nonzero temporaries. */
+   struct agx_ppp_hal200_fragment_fields ti = live_fs;
+   assert(agx_ppp_hal200_fragment_ti_resources(AGX_CHIP_G17P, 32, 0, &ti));
+   assert(ti.unknown_0c == 0 && ti.stage_program_template == 0x40);
+   assert(agx_ppp_hal200_fragment_core_pack(AGX_CHIP_G17P, &ti, &live_fs_packed));
+   uint32_t ti_words[7];
+   memcpy(ti_words, live_fs_packed.bytes, sizeof(ti_words));
+   assert(ti_words[3] == 0 && ti_words[4] == 0x01000040);
+   assert(ti_words[5] == 0x4c19);
+
+   const uint32_t spill_inputs[] = {0, 1, 3, 4, 5, 16, 32, 1040, 65536, 1048572};
+   const uint32_t spill_words[] = {0, 8, 8, 8, 16, 32, 64, 2080, 131072, 0x1ffff8};
+   const uint32_t ipr_inputs[] = {0, 1, 4, 5, 8, 9, 16, 17, 16376};
+   const uint32_t ipr_words[] = {0, 2, 2, 2, 2, 4, 4, 6, 4094};
+   for (unsigned s = 0; s < sizeof(spill_inputs) / sizeof(spill_inputs[0]); ++s) {
+      for (unsigned i = 0; i < sizeof(ipr_inputs) / sizeof(ipr_inputs[0]); ++i) {
+         ti = live_fs;
+         ti.stage_program_template = 0x200007;
+         ti.unknown_0c = 0xabcd0000;
+         assert(agx_ppp_hal200_fragment_ti_resources(
+            AGX_CHIP_G17P, spill_inputs[s], ipr_inputs[i], &ti));
+         assert(ti.stage_program_template == (0x200007 | spill_words[s]));
+         assert(ti.unknown_0c == (0xabcd0000 | ipr_words[i]));
+         assert(agx_ppp_hal200_fragment_core_pack(AGX_CHIP_G17P, &ti, &live_fs_packed));
+         memcpy(ti_words, live_fs_packed.bytes, sizeof(ti_words));
+         assert(ti_words[4] == (0x01200007 | spill_words[s]));
+         assert(ti_words[5] == 0x4c19);
+      }
+   }
+   struct agx_ppp_hal200_fragment_fields saved_ti = ti;
+   assert(!agx_ppp_hal200_fragment_ti_resources(AGX_CHIP_G16G, 32, 0, &ti));
+   assert(!agx_ppp_hal200_fragment_ti_resources(AGX_CHIP_G17P, 1048573, 0, &ti));
+   assert(!agx_ppp_hal200_fragment_ti_resources(AGX_CHIP_G17P, 0, 16377, &ti));
+   assert(!agx_ppp_hal200_fragment_ti_resources(AGX_CHIP_G17P, UINT32_MAX, 0, &ti));
+   assert(!agx_ppp_hal200_fragment_ti_resources(AGX_CHIP_G17P, 0, UINT32_MAX, &ti));
+   assert(!memcmp(&ti, &saved_ti, sizeof(ti)));
+
    /* Native 0x4c5e38 packs absolute VIT 0x100000004c0 and 2 iterations as
     * counts 0x00020100 / low-pointer 0x4c0, independently of the Ioto VA. */
    struct agx_ppp_hal200_fragment_fields varying_fs = live_fs;

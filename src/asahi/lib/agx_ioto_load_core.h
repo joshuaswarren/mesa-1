@@ -61,6 +61,11 @@ struct agx_ioto_inflight_load {
    uint8_t lane_mask;
    uint16_t cprog_dest_half;
 
+   /* Optional native constant-program TPS publication, independent of the
+    * ordinary uniform lane mask. Selected halves compact from this base. */
+   uint8_t cprog_input_mask;
+   uint16_t cprog_input_tps_half;
+
    uint32_t sequence;
    uint8_t signal_slot;
    bool processed;
@@ -129,6 +134,14 @@ struct agx_ioto_load_emit_ops {
     * compare every supported form against the independent composer. Custom
     * callbacks remain fully decoded and validated before publication. */
    bool trusted_records;
+
+   /* Zero, one or two additional COPY records after the uniform COPY. The
+    * ordinary COPY must preserve source halves consumed by these records. */
+   bool (*pack_cprog_copy)(void *context, enum agx_chip chip,
+                          const struct agx_ioto_inflight_load *load,
+                          uint8_t dword,
+                          struct agx_ioto_load_raw_record records[2],
+                          uint8_t *count);
 };
 
 struct agx_ioto_load_core {
@@ -181,6 +194,8 @@ struct agx_ioto_load_absolute {
    uint64_t address;
    uint8_t lane_mask;
    uint16_t cprog_dest_half;
+   uint8_t cprog_input_mask;
+   uint16_t cprog_input_tps_half;
 };
 
 #define AGX_IOTO_LOAD_SCS_BASE_HALF 8u

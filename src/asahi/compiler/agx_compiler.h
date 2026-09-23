@@ -532,6 +532,9 @@ typedef struct {
    mesa_shader_stage stage;
    bool is_preamble;
    unsigned scratch_size_B;
+   /* The input mask/compact ranks are frozen before native import selection.
+    * Later DCE may remove a read without changing this external interface. */
+   bool agx3_cprog_inputs_lowered;
 
    /* AGX3b: thread-private storage half a returned device atomic publishes
     * its old value to, above the spill frame.
@@ -1106,6 +1109,11 @@ void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
+bool agx3_lower_uniform_program(agx_context *ctx);
+/* Success/refusal, not a progress flag. Call only for AGX3B preambles. */
+bool agx3_lower_cprog_inputs(agx_context *ctx);
+bool agx3_lower_uniform_half_exports(agx_context *ctx);
+bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
 /* UVSW carries the UVS index and the staging address in two independent
  * eight-bit operands, so the hardware addresses 256 vertex outputs while only
  * 128 distinct staging pairs exist.

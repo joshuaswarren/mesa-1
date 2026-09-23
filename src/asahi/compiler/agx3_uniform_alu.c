@@ -8,6 +8,7 @@ uniform_float_encode(enum agx_isa_encoding encoding,
                      enum agx3_uniform_float_op op, uint16_t dest,
                      const struct agx3_uniform_float_src src[3], bool saturate,
                      bool dest_cache, uint8_t wait_mask, bool half,
+                     bool uniform_dest,
                      uint8_t output[16], uint8_t *length)
 {
    if (encoding != AGX_ISA_ENCODING_AGX3B || !src || !output || !length ||
@@ -15,9 +16,18 @@ uniform_float_encode(enum agx_isa_encoding encoding,
        (!half && (dest & 1)) || wait_mask > 0x3f)
       return false;
 
+   /* Direct uniform destinations are witnessed in constant programs, with
+    * aligned low-file f32 results and plain GPR/immediate sources. Keep the
+    * independently qualified main-program source contract unchanged. */
+   if (uniform_dest && (half || dest >= 128 || dest_cache || saturate))
+      return false;
+
    const unsigned count = op == AGX3_UNIFORM_FMA ? 3 : 2;
    bool uniform = false, reg = false;
    for (unsigned i = 0; i < count; ++i) {
+      if (uniform_dest && (src[i].kind == AGX3_FLOAT_UNIFORM ||
+                           src[i].abs || src[i].neg))
+         return false;
       switch (src[i].kind) {
       case AGX3_FLOAT_UNIFORM:
          uniform = true;
@@ -47,7 +57,7 @@ uniform_float_encode(enum agx_isa_encoding encoding,
    /* Native main-program witnesses all retain at least one GPR operand.
     * All-uniform/immediate expressions keep one materialized input until
     * their port and constant-program contracts have their own witness. */
-   if (!uniform || !reg)
+   if (!reg || (!uniform_dest && !uniform))
       return false;
 
    /* Apple G17P/G16G uniform_repeat: 09010e0d210e02c2. Domain 3 selects
@@ -62,7 +72,8 @@ uniform_float_encode(enum agx_isa_encoding encoding,
    uint8_t best[16], best_length = 0;
    for (unsigned swap = 0; swap < 2; ++swap) {
       struct agx3_field_kv fields[48] = {
-         {2, dest},        {9, 2},         {10, half ? 1 : 2},
+         {uniform_dest ? 3 : 2, dest},
+         {9, uniform_dest ? 3 : 2}, {10, half ? 1 : 2},
          {11, dest_cache}, {14, saturate},
       };
       unsigned n = 5;
@@ -133,7 +144,7 @@ agx3_uniform_float_encode(enum agx_isa_encoding encoding,
                           uint8_t output[16], uint8_t *length)
 {
    return uniform_float_encode(encoding, op, dest, src, saturate, dest_cache,
-                               wait_mask, false, output, length);
+                               wait_mask, false, false, output, length);
 }
 
 bool
@@ -144,7 +155,18 @@ agx3_uniform_half_encode(enum agx_isa_encoding encoding,
                          uint8_t output[16], uint8_t *length)
 {
    return uniform_float_encode(encoding, op, dest, src, saturate, dest_cache,
-                               wait_mask, true, output, length);
+                               wait_mask, true, false, output, length);
+}
+
+bool
+agx3_uniform_float_store_encode(enum agx_isa_encoding encoding,
+                                enum agx3_uniform_float_op op, uint16_t dest,
+                                const struct agx3_uniform_float_src src[3],
+                                uint8_t wait_mask,
+                                uint8_t output[16], uint8_t *length)
+{
+   return uniform_float_encode(encoding, op, dest, src, false, false,
+                               wait_mask, false, true, output, length);
 }
 
 bool

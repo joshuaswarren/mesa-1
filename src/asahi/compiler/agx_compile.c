@@ -49,6 +49,7 @@ static const struct debug_named_value agx_debug_options[] = {
    {"spill",     AGX_DBG_SPILL,     "Spill (almost) everything"},
    {"nopromote", AGX_DBG_NOPROMOTE, "Do not promote constants to uniforms"},
    {"refuse",    AGX_DBG_REFUSE,    "Name refused instructions, without dumping shaders"},
+   {"native_uniforms", AGX_DBG_NATIVE_UNIFORMS, "Validate AGX3 constant-program destination selection (experimental)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -7041,6 +7042,14 @@ agx3_coalesce_uniform_half_stores(agx_context *ctx)
          if (!scalar_half) {
             if (I->op == AGX_OPCODE_UNIFORM_STORE)
                pending = NULL;
+            /* Native arithmetic exports write the same fixed uniform file.
+             * Do not move the pending half past an overlapping write. */
+            if (pending &&
+                (I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
+                 I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
+                 I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3) &&
+                I->imm < pending_base + 2 && I->imm + 2 > pending_base)
+               pending = NULL;
             if (pending != NULL) {
                agx_foreach_src(I, s) {
                   if (I->src[s].type == AGX_INDEX_UNIFORM)
@@ -8139,9 +8148,31 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * as copyprop creates uniform sources). To keep register pressure in
     * check, lower after CSE, since moves are cheaper than registers.
     */
+   if ((agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS) && ctx->is_preamble &&
+       key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      if (!agx3_lower_cprog_inputs(ctx)) {
+         binary->size = initial_binary_size;
+         ralloc_free(ctx);
+         return false;
+      }
+      agx_validate(ctx, "agx3_lower_cprog_inputs");
+      if (!(agx_compiler_debug & AGX_DBG_NOOPT))
+         AGX_PASS(ctx, agx_opt_cse);
+   }
+
    AGX_PASS(ctx, agx_lower_uniform_sources);
 
+   if ((agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS) && ctx->is_preamble &&
+       key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      /* Selection requires a single live use of an arithmetic result.
+       * Dead uses left by earlier lowering must not hide that opportunity. */
+      AGX_PASS(ctx, agx_dce, true);
+      AGX_PASS(ctx, agx3_lower_uniform_program);
+   }
+
    AGX_PASS(ctx, agx3_coalesce_uniform_half_stores);
+   if (agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS)
+      AGX_PASS(ctx, agx3_lower_uniform_half_exports);
    AGX_PASS(ctx, agx3_drop_unchanged_tile_stores);
 
    /* RA correctness depends on DCE */
@@ -8274,6 +8305,16 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* Set last-use bits after lowering pseudo for best results. */
    agx_opt_register_cache(ctx);
 
+   if (ctx->is_preamble &&
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       !ctx->agx3_cprog_inputs_lowered &&
+       !agx3_analyze_preamble_uniform_inputs(
+          ctx, &out->agx3_preamble_uniform_inputs)) {
+      binary->size = initial_binary_size;
+      ralloc_free(ctx);
+      return false;
+   }
+
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
 
@@ -8309,11 +8350,17 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    unsigned nr_gprs = ctx->max_reg + 1;
 
-   /* If the preamble uses scratch (due to spilling), we need to set maximal
-    * GPRs. Do it here so the driver doesn't have to worry about it.
-    */
-   if (impl->function->is_preamble)
-      out->nr_preamble_gprs = ctx->scratch_size_B ? 256 : nr_gprs;
+   /* Preserve the legacy preamble scratch reservation on its existing
+    * targets. AGX3B uses launch-allocated TPS with native COPY/RLD and no
+    * AGX2 stack adjustment. Its input-storage prefix is not a reason to
+    * reserve every GPR; report the allocation that actually reached packing. */
+   if (impl->function->is_preamble) {
+      const bool legacy_scratch = ctx->scratch_size_B &&
+         ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B;
+      out->nr_preamble_gprs = legacy_scratch ? 256 : nr_gprs;
+      out->agx3_preamble_staging_halfs = ctx->agx3_staging_halfs;
+      out->agx3_preamble_staging_known = ctx->agx3_staging_known;
+   }
    else {
       out->nr_gprs = nr_gprs;
       out->agx3_staging_halfs = ctx->agx3_staging_halfs;
@@ -9064,6 +9111,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
       if (func->is_preamble) {
          info->preamble_offset = offset;
+         info->preamble_size = binary.size - offset;
          info->has_preamble = true;
       } else if (func->is_entrypoint) {
          info->main_offset = offset;
@@ -9073,9 +9121,24 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       }
    }
 
+   /* The preamble may be compiled after main and legalize a final half-word
+    * export into a native dword. Report the complete physical footprint. */
+   info->stats.uniforms = info->push_count;
+
    if (agx_should_dump(nir, AGX_DBG_SHADERDB)) {
       agx2_stats_fprintf(stderr, _mesa_shader_stage_to_abbrev(nir->info.stage),
                          &out->info.stats);
+      if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B && info->has_preamble) {
+         fprintf(stderr, "AGX3 CProg: inputs=%u storage=%u scratch=%u "
+                         "gpr_halves=%u bytes=%u native_tps=%u "
+                         "staging_halfs=%u staging_known=%u\n",
+                 info->agx3_preamble_inputs.count,
+                 info->agx3_preamble_inputs.storage_bytes,
+                 info->preamble_scratch_size, info->nr_preamble_gprs,
+                 info->preamble_size, info->agx3_preamble_tps_inputs,
+                 info->agx3_preamble_staging_halfs,
+                 info->agx3_preamble_staging_known);
+      }
    }
 
    info->stage = nir->info.stage;

@@ -223,23 +223,213 @@ check_external(enum agx_chip chip, bool gpu1)
    return 0;
 }
 
+static int
+check_constant_program(enum agx_chip chip)
+{
+   const uint64_t limit = UINT64_C(1) << 48;
+   struct agx_ioto_constant_program program = {
+      .code_size = 4,
+      .force_external = true,
+   };
+   static const struct {
+      uint64_t suffix_va, code_va, displacement;
+      bool prelude, suppress;
+   } relocations[] = {
+      {0x1000, 0x2000, 0x1000, false, false},
+      {0x1000, 0x2000, 0x0ffe, true, false},
+      {0x1000, 0x2000, 0x1000, true, true},
+      {0x10000, 0x8000, UINT64_C(0xffffffff8000), false, false},
+      {0x10000, 0x8000, UINT64_C(0xffffffff7ffe), true, false},
+      {2, UINT64_C(0x800000000000), UINT64_C(0x7ffffffffffe), false, false},
+      {UINT64_C(0x800000000002), 2, UINT64_C(0x800000000000), false, false},
+      {UINT64_C(0xfffffffffff6), UINT64_C(0xffffffffffee),
+       UINT64_C(0xfffffffffff8), false, false},
+   };
+   for (size_t i = 0; i < sizeof(relocations) / sizeof(relocations[0]); ++i) {
+      program.code_va = relocations[i].code_va;
+      program.request_prelude = relocations[i].prelude;
+      program.suppress_prelude = relocations[i].suppress;
+      struct agx_ioto_preshader_output output;
+      CHECK(agx_ioto_constant_program_emit(
+         chip, &program, relocations[i].suffix_va, &output));
+      CHECK(output.mode == AGX_IOTO_PRESHADER_MODE_EXTERNAL);
+      CHECK(output.branch_offset ==
+            (program.request_prelude && !program.suppress_prelude ? 2u : 0u));
+      CHECK(output.length == output.branch_offset + 10);
+      uint8_t expected[AGX_IOTO_PRESHADER_BRANCH_SIZE];
+      CHECK(agx_ioto_preshader_pack_branch(
+         chip, relocations[i].displacement, false, expected));
+      CHECK(memcmp(output.bytes + output.branch_offset,
+                   expected, sizeof(expected)) == 0);
+   }
+
+   /* An inline program exactly at the native threshold is copied and trimmed;
+    * one halfword above it requires an external target, even with CPU bytes. */
+   uint8_t code[AGX_IOTO_PRESHADER_INLINE_LIMIT + 2] = {0x0e, 0, 0, 0};
+   for (size_t i = 4; i < sizeof(code); i += 2)
+      code[i] = 0x06;
+   program = (struct agx_ioto_constant_program){
+      .code = code,
+      .code_size = AGX_IOTO_PRESHADER_INLINE_LIMIT,
+   };
+   struct agx_ioto_preshader_output output;
+   CHECK(agx_ioto_constant_program_emit(chip, &program, 0x1000, &output));
+   CHECK(output.mode == AGX_IOTO_PRESHADER_MODE_INLINE);
+   CHECK(output.length == 4);
+   CHECK(memcmp(output.bytes, code, 4) == 0);
+   CHECK(agx_ioto_constant_program_emit(chip, &program, limit - 4, &output));
+   program.code_size += 2;
+   memset(&output, 0xa5, sizeof(output));
+   CHECK(!agx_ioto_constant_program_emit(chip, &program, 0x1000, &output));
+   CHECK(all_bytes(&output, sizeof(output), 0xa5));
+   program.code_va = 0x2000;
+   CHECK(agx_ioto_constant_program_emit(chip, &program, 0x1000, &output));
+   CHECK(output.mode == AGX_IOTO_PRESHADER_MODE_EXTERNAL);
+
+   /* Zero extent is absent even if a stale address or policy flag is present. */
+   program.code_size = 0;
+   program.force_external = true;
+   CHECK(agx_ioto_constant_program_emit(chip, &program, 0x1000, &output));
+   CHECK(output.mode == AGX_IOTO_PRESHADER_MODE_ABSENT);
+   CHECK(output.length == 4);
+   return 0;
+}
+
+static int
+check_g17p_absolute_constant_program(void)
+{
+   /* Native finish()/B_0 emitter witness: code VA 0x90000 with f11=1.
+    * The relative control-flow form has the same target bits but f11=0. */
+   static const uint8_t expected[] = {
+      0x0f, 0x00, 0x54, 0x01, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct agx_ioto_constant_program program = {
+      .code_size = 4, .code_va = 0x90000, .force_external = true,
+      .absolute_branch = true,
+   };
+   struct agx_ioto_preshader_output a, b;
+   CHECK(agx_ioto_constant_program_emit(AGX_CHIP_G17P, &program, 0x1000, &a));
+   CHECK(a.length == sizeof(expected));
+   CHECK(memcmp(a.bytes, expected, sizeof(expected)) == 0);
+
+   for (unsigned bit = 1; bit < 48; ++bit) {
+      program.code_va = UINT64_C(1) << bit;
+      for (unsigned prelude = 0; prelude < 2; ++prelude) {
+         program.request_prelude = prelude;
+         CHECK(agx_ioto_constant_program_emit(
+            AGX_CHIP_G17P, &program, 0x1000, &a));
+         CHECK(agx_ioto_constant_program_emit(
+            AGX_CHIP_G17P, &program, UINT64_C(0x900000000000), &b));
+         CHECK(a.length == b.length && a.branch_offset == b.branch_offset);
+         CHECK(memcmp(a.bytes, b.bytes, a.length) == 0);
+         const uint8_t *branch = a.bytes + a.branch_offset;
+         CHECK(branch[3] & 1);
+         uint64_t target = 0;
+         for (unsigned byte = 0; byte < 6; ++byte)
+            target |= (uint64_t)branch[3 + byte] << (8 * byte);
+         CHECK((target & ~UINT64_C(1)) == program.code_va);
+         struct agx_ioto_record record;
+         size_t consumed = 0;
+         CHECK(agx_ioto_validate_kind(AGX_CHIP_G17P, AGX_IOTO_KIND_B_EP0,
+                                     branch, 10, &record, &consumed));
+         CHECK(consumed == 10);
+      }
+   }
+
+   /* Absolute code may be farther away than a signed 48-bit displacement.
+    * Bounds still apply to both the executable extent and output suffix. */
+   program.code_va = UINT64_C(0x800000000100);
+   CHECK(agx_ioto_constant_program_emit(AGX_CHIP_G17P, &program, 2, &a));
+   program.absolute_branch = false;
+   CHECK(!agx_ioto_constant_program_emit(AGX_CHIP_G17P, &program, 2, &b));
+   program.absolute_branch = true;
+   memset(&b, 0xa5, sizeof(b));
+   CHECK(!agx_ioto_constant_program_emit(AGX_CHIP_G17G, &program, 2, &b));
+   CHECK(all_bytes(&b, sizeof(b), 0xa5));
+   program.code_va = (UINT64_C(1) << 48) - 2;
+   CHECK(!agx_ioto_constant_program_emit(AGX_CHIP_G17P, &program, 2, &b));
+   CHECK(all_bytes(&b, sizeof(b), 0xa5));
+   return 0;
+}
+
+static int
+check_constant_program_refusals(void)
+{
+   const uint64_t limit = UINT64_C(1) << 48;
+   static const uint8_t code[] = {0x0e, 0, 0, 0};
+   static const struct {
+      uint64_t suffix_va, code_va;
+      size_t code_size;
+      bool external, prelude;
+      const void *code;
+   } invalid[] = {
+      {0, 0x2000, 4, true, false, NULL},
+      {1, 0x2000, 4, true, false, NULL},
+      {UINT64_C(1) << 48, 0x2000, 4, true, false, NULL},
+      {0x1000, 0, 4, true, false, NULL},
+      {0x1000, 0x2001, 4, true, false, NULL},
+      {0x1000, UINT64_C(1) << 48, 4, true, false, NULL},
+      {0x1000, UINT64_C(0xfffffffffffe), 4, true, false, NULL},
+      {0x1000, 0x2000, SIZE_MAX - 1, true, false, NULL},
+      {0x1000, 0x2000, 3, true, false, NULL},
+      {2, UINT64_C(0x800000000002), 4, true, false, NULL},
+      {UINT64_C(0x800000000004), 2, 4, true, false, NULL},
+      {UINT64_C(0xfffffffffff8), UINT64_C(0xffffffffff00),
+       4, true, false, NULL},
+      {UINT64_C(0xfffffffffff6), UINT64_C(0xffffffffff00),
+       4, true, true, NULL},
+      {0x1000, 0, 4, false, false, NULL},
+      {0x1000, 0, 3, false, false, code},
+      {UINT64_C(0xfffffffffffe), 0, 4, false, false, code},
+      {UINT64_C(0xfffffffffffe), 0, 0, false, false, NULL},
+   };
+   for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+      struct agx_ioto_constant_program program = {
+         .code = invalid[i].code,
+         .code_size = invalid[i].code_size,
+         .code_va = invalid[i].code_va,
+         .force_external = invalid[i].external,
+         .request_prelude = invalid[i].prelude,
+      };
+      struct agx_ioto_preshader_output output;
+      memset(&output, 0xa5, sizeof(output));
+      CHECK(!agx_ioto_constant_program_emit(
+         AGX_CHIP_G17P, &program, invalid[i].suffix_va, &output));
+      CHECK(all_bytes(&output, sizeof(output), 0xa5));
+   }
+
+   struct agx_ioto_constant_program absent = {0};
+   struct agx_ioto_preshader_output output;
+   memset(&output, 0xa5, sizeof(output));
+   CHECK(!agx_ioto_constant_program_emit(AGX_CHIP_G14G, &absent, 2, &output));
+   CHECK(!agx_ioto_constant_program_emit(AGX_CHIP_G17P, NULL, 2, &output));
+   CHECK(!agx_ioto_constant_program_emit(AGX_CHIP_G17P, &absent, 2, NULL));
+   CHECK(!agx_ioto_constant_program_emit(AGX_CHIP_G17P, &absent, limit, &output));
+   CHECK(all_bytes(&output, sizeof(output), 0xa5));
+   return 0;
+}
+
 int
 main(void)
 {
-   if (check_program_sizes() || check_branch_witnesses())
+   if (check_g17p_absolute_constant_program() ||
+       check_program_sizes() || check_branch_witnesses() ||
+       check_constant_program_refusals())
       return 1;
 
    for (size_t i = 0; i < sizeof(gpu0_targets) / sizeof(gpu0_targets[0]); ++i) {
       if (check_branch(gpu0_targets[i], false) ||
           check_inline(gpu0_targets[i]) ||
-          check_external(gpu0_targets[i], false))
+          check_external(gpu0_targets[i], false) ||
+          check_constant_program(gpu0_targets[i]))
          return 1;
    }
 
    for (size_t i = 0; i < sizeof(gpu1_targets) / sizeof(gpu1_targets[0]); ++i) {
       if (check_branch(gpu1_targets[i], true) ||
           check_inline(gpu1_targets[i]) ||
-          check_external(gpu1_targets[i], true))
+          check_external(gpu1_targets[i], true) ||
+          check_constant_program(gpu1_targets[i]))
          return 1;
    }
 
