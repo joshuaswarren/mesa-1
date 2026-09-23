@@ -325,29 +325,52 @@ vk_drm_syncobj_wait_many(struct vk_device *device,
    if (!(wait_flags & VK_SYNC_WAIT_ANY))
       syncobj_wait_flags |= DRM_SYNCOBJ_WAIT_FLAGS_WAIT_ALL;
 
-   int err;
-   if (wait_count == 0) {
-      err = 0;
-   } else if (wait_flags & VK_SYNC_WAIT_PENDING) {
-      /* We always use a timeline wait for WAIT_PENDING, even for binary
-       * syncobjs because the non-timeline wait doesn't support
-       * DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE.
+   int err = 0;
+
+   /* When the driver opted in, poll with a zero timeout first: short
+    * waits that are submitted-and-signaled within a few hundred
+    * microseconds pay a wake-up latency premium under the blocking wait,
+    * and a bounded poll observes the signal the moment the kernel
+    * publishes it. Once the poll budget is exhausted, fall through to
+    * the blocking wait with the original deadline.
+    */
+   const uint64_t poll_deadline_ns =
+      device->sync_wait_poll_us ?
+      os_time_get_nano() + (uint64_t)device->sync_wait_poll_us * 1000 : 0;
+
+   while (wait_count > 0) {
+      const bool poll =
+         poll_deadline_ns && os_time_get_nano() < poll_deadline_ns;
+      const uint64_t timeout_ns = poll ? 0 : abs_timeout_ns;
+
+      if (wait_flags & VK_SYNC_WAIT_PENDING) {
+         /* We always use a timeline wait for WAIT_PENDING, even for binary
+          * syncobjs because the non-timeline wait doesn't support
+          * DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE.
+          */
+         err = device->sync->timeline_wait(device->sync, handles, wait_values,
+                                           wait_count, timeout_ns,
+                                           syncobj_wait_flags |
+                                           DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
+                                           NULL /* first_signaled */);
+      } else if (has_timeline) {
+         err = device->sync->timeline_wait(device->sync, handles, wait_values,
+                                           wait_count, timeout_ns,
+                                           syncobj_wait_flags,
+                                           NULL /* first_signaled */);
+      } else {
+         err = device->sync->wait(device->sync, handles,
+                                  wait_count, timeout_ns,
+                                  syncobj_wait_flags,
+                                  NULL /* first_signaled */);
+      }
+
+      /* A zero-timeout wait is a poll iteration: success is done, a
+       * timeout means poll again until the budget runs out, and any
+       * other error surfaces immediately.
        */
-      err = device->sync->timeline_wait(device->sync, handles, wait_values,
-                                        wait_count, abs_timeout_ns,
-                                        syncobj_wait_flags |
-                                        DRM_SYNCOBJ_WAIT_FLAGS_WAIT_AVAILABLE,
-                                        NULL /* first_signaled */);
-   } else if (has_timeline) {
-      err = device->sync->timeline_wait(device->sync, handles, wait_values,
-                                        wait_count, abs_timeout_ns,
-                                        syncobj_wait_flags,
-                                        NULL /* first_signaled */);
-   } else {
-      err = device->sync->wait(device->sync, handles,
-                               wait_count, abs_timeout_ns,
-                               syncobj_wait_flags,
-                               NULL /* first_signaled */);
+      if (err == 0 || !poll || errno != ETIME)
+         break;
    }
 
    STACK_ARRAY_FINISH(handles);
