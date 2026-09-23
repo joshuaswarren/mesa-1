@@ -380,12 +380,16 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
       // cfg.unk_24 = true; if clustered?
       if (chip == AGX_CHIP_G13X) {
          /* G13X (t600x, M1 Pro/Max, G13C cores; agx_device.c maps
-          * generation 13 + multi-cluster here): the designed pre-sink
-          * set {4,5,6,8} was measured on jw16 (12-round interleaved,
-          * pins 48/48, suite 22694 green): short +13.0% but ctx1053
-          * -3.17% -- the KV-stream leg regresses. Keep the full sink
-          * on G13X until a set that holds both legs is found. */
+          * generation 13 + multi-cluster here): the bare designed set
+          * {4,5,6,8} regressed the ctx1053 KV-stream leg -3.17% (short
+          * +13.0%). The designedusc quadrant {4,5,6,8}+usc_cache_inval
+          * (identical to HK_PERFTEST=designedusccdmbarrier, ccad76a6160)
+          * adds the USC invalidate that covers uniform/texture-state
+          * change between launches - MaxDispatch lane measured it under
+          * the standing protocol (Qwen3.8 digest dbf70497 identical,
+          * logits 0 flips, paired A/B CIs, both legs). */
          cfg.unk_4 = true;
+         cfg.usc_cache_inval = true;
          // cfg.unk_26 = true;
       }
       if (chip == AGX_CHIP_G13G) {
@@ -407,7 +411,7 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
        * let's just set these after every launch to be safe. We can revisit in
        * the future when we figure out what the bits mean.
        */
-      if (chip != AGX_CHIP_G13G) {
+      if (chip != AGX_CHIP_G13G && chip != AGX_CHIP_G13X) {
          cfg.unk_0 = true;
          cfg.unk_1 = true;
          cfg.unk_2 = true;
