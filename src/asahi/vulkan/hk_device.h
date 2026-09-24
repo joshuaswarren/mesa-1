@@ -98,6 +98,7 @@ struct hk_device {
    } scratch;
 
    uint32_t perftest;
+   uint32_t perftest_barrier_set;
 
    struct {
       struct u_rwlock lock;
@@ -117,6 +118,7 @@ enum hk_perftest {
    HK_PERF_NOCDMBARRIER = BITFIELD_BIT(5),
    HK_PERF_USCCDMBARRIER = BITFIELD_BIT(6),
    HK_PERF_DESIGNEDUSCCDMBARRIER = BITFIELD_BIT(7),
+   HK_PERF_MASKCDMBARRIER = BITFIELD_BIT(8),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)

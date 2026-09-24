@@ -49,6 +49,8 @@ static const struct debug_named_value hk_perf_options[] = {
     "Reduce the per-launch CDM barrier to a USC cache invalidate"},
    {"designedusccdmbarrier", HK_PERF_DESIGNEDUSCCDMBARRIER,
     "G13X designed set {4,5,6,8} plus USC cache invalidate"},
+   {"maskcdmbarrier", HK_PERF_MASKCDMBARRIER,
+    "Emit CDM barrier fields from HK_CDM_BARRIER_SET (hex bit mask)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -330,6 +332,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+
+   /* Default = the designedusc set {4,5,6,8} + USC cache invalidate (bit 3). */
+   dev->perftest_barrier_set =
+      (uint32_t)debug_get_num_option("HK_CDM_BARRIER_SET", 0x178);
 
    if (instance->drirc.misc.disable_border_emulation) {
       dev->perftest |= HK_PERF_NOBORDER;
