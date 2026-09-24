@@ -398,7 +398,7 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
           * of a ~9.8 ms token). Bits 4-8 hold the mlx-omarchy pinned
           * generated-ID digests (48/48 interleaved runs, both legs) and
           * the omarchy runtime suite (22 cases / 6189 assertions), and
-          * measure +3.05% ctx1053 decode on jwm1. Other chips keep the
+          * measure +3.05% ctx1053 decode on the reference M1. Other chips keep the
           * full sink until measured there. */
          cfg.unk_4 = true;
          cfg.unk_7 = true;

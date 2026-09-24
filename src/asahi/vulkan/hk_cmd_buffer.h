@@ -295,6 +295,13 @@ struct hk_graphics_state {
 struct hk_compute_state {
    struct hk_descriptor_state descriptors;
    struct hk_api_shader *shader;
+
+   /* Set by hk_CmdPipelineBarrier2, consumed by the next CDM launch, which
+    * then carries the full designed barrier set (dependency-tracked
+    * per-launch barrier). Lives on the command buffer, not the hk_cs, so it
+    * survives CS splits and merge_control_streams.
+    */
+   bool cdm_barrier_pending;
 };
 
 struct hk_cmd_push {

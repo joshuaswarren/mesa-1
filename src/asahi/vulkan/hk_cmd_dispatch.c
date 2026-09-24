@@ -77,10 +77,30 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
    cs->stats.cmds++;
 
+   if (HK_PERF(dev, ALWAYSCDMBARRIER)) {
+      cs->current =
+         agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
+      hk_cdm_cache_flush(dev, cs);
+      cs->cmd->state.cs.cdm_barrier_pending = false;
+      return;
+   }
+
+   /* Dependency-tracked per-launch CDM barrier. A vkCmdPipelineBarrier
+    * recorded since the previous launch declares a memory dependency, so the
+    * next launch carries the full designed barrier set. Between launches the
+    * app left unordered, Vulkan defines no ordering, so the barrier enforces
+    * nothing and the drain it costs is skipped. Driver-internal ordering that
+    * does not ride on vkCmdPipelineBarrier (query availability writes) calls
+    * hk_cdm_cache_flush explicitly and is unaffected.
+    */
+   if (cs->cmd->state.cs.cdm_barrier_pending) {
+      assert(cs->type == HK_CS_CDM);
+      hk_cdm_cache_flush(dev, cs);
+      cs->cmd->state.cs.cdm_barrier_pending = false;
+   }
+
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
-
-   hk_cdm_cache_flush(dev, cs);
 }
 
 void
