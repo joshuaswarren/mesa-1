@@ -303,6 +303,19 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
           "must end rendering before ending the command buffer");
 
    perf_debug(cmd, "End command buffer");
+
+   /* A barrier declared with no following launch in this command buffer still
+    * orders this buffer's writes against whatever runs next (the queue's next
+    * submission). Land it on the trailing edge of the open compute stream;
+    * with no trailing edge there is no local work to order.
+    */
+   if (cmd->state.cs.cdm_barrier_pending) {
+      cmd->state.cs.cdm_barrier_pending = false;
+      if (cmd->current_cs.cs) {
+         hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cmd->current_cs.cs);
+      }
+   }
+
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
@@ -336,14 +349,19 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
-   /* Outside a render pass only a CDM control stream can be open, and every
-    * launch in it is already followed by the CDM barrier (hk_cdm_cache_flush)
-    * that orders it against the next launch. Ending the compute batch here
-    * would only produce the stream merge_control_streams stitches back
-    * together at hk_EndCommandBuffer, plus a stream link and a fresh chunk
-    * per barrier; keep it open. The batches must end when a graphics batch
-    * is open: the dependency then spans batch types and the kernel orders
-    * the resulting commands (agx_cmd_header barriers). */
+   /* The app declared a memory dependency: the next CDM launch carries the
+    * full barrier set (hk_cmd_dispatch.c). Compute launches before the
+    * barrier were already flushed by the previous launch's gating.
+    */
+   cmd->state.cs.cdm_barrier_pending = true;
+
+   /* Outside a render pass only a CDM control stream can be open; the
+    * pending flag above orders it against the next launch. Ending the
+    * compute batch here would only produce the stream merge_control_streams
+    * stitches back together at hk_EndCommandBuffer, plus a stream link and
+    * a fresh chunk per barrier; keep it open. The batches must end when a
+    * graphics batch is open: the dependency then spans batch types and the
+    * kernel orders the resulting commands (agx_cmd_header barriers). */
    if (!cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
        !cmd->current_cs.post_gfx)
       return;
