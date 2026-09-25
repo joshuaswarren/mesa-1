@@ -325,6 +325,7 @@ struct hk_descriptor_state {
 
    struct hk_push_descriptor_set *push[HK_MAX_SETS];
    uint32_t push_dirty;
+   uint32_t push_active;
 };
 
 struct hk_attachment {
@@ -495,6 +496,7 @@ struct hk_prepared_fast_link_vs {
 };
 
 struct hk_graphics_state {
+   struct hk_ordinary_fs_selection ordinary_fs;
    struct hk_rendering_state render;
    struct hk_descriptor_state descriptors;
 
@@ -1629,6 +1631,7 @@ struct hk_meta_save {
    struct hk_addr_range vb0;
    struct hk_descriptor_set *desc0;
    bool has_push_desc0;
+   bool push_active0;
    enum agx_visibility_mode occlusion;
    struct hk_push_descriptor_set push_desc0;
    VkQueryPipelineStatisticFlags pipeline_stats_flags;

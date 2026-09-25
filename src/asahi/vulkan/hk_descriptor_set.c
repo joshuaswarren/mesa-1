@@ -604,6 +604,9 @@ hk_push_descriptor_set_update(struct hk_push_descriptor_set *push_set,
                               uint32_t write_count,
                               const VkWriteDescriptorSet *writes)
 {
+   memcpy(push_set->layout_hash, layout->vk.blake3,
+          sizeof(push_set->layout_hash));
+   push_set->layout_flags = layout->vk.flags;
    assert(layout->non_variable_descriptor_buffer_size < sizeof(push_set->data));
    struct hk_descriptor_set set = {
       .layout = layout,
@@ -1106,6 +1109,9 @@ hk_push_descriptor_set_update_template(
    struct hk_descriptor_set_layout *layout,
    const struct vk_descriptor_update_template *template, const void *data)
 {
+   memcpy(push_set->layout_hash, layout->vk.blake3,
+          sizeof(push_set->layout_hash));
+   push_set->layout_flags = layout->vk.flags;
    struct hk_descriptor_set tmp_set = {
       .layout = layout,
       .size = sizeof(push_set->data),

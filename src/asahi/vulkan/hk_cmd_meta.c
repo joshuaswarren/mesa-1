@@ -126,6 +126,7 @@ hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 
    save->desc0 = desc->sets[0];
    save->has_push_desc0 = desc->push[0];
+   save->push_active0 = !!(desc->push_active & BITFIELD_BIT(0));
    if (save->has_push_desc0)
       save->push_desc0 = *desc->push[0];
 
@@ -168,9 +169,16 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
       desc->root.sets[0] = hk_descriptor_set_addr(save->desc0);
       desc->sets_dirty |= BITFIELD_BIT(0);
       desc->push_dirty &= ~BITFIELD_BIT(0);
+      desc->push_active &= ~BITFIELD_BIT(0);
    } else if (save->has_push_desc0) {
       *desc->push[0] = save->push_desc0;
       desc->push_dirty |= BITFIELD_BIT(0);
+      if (save->push_active0)
+         desc->push_active |= BITFIELD_BIT(0);
+      else
+         desc->push_active &= ~BITFIELD_BIT(0);
+   } else {
+      desc->push_active &= ~BITFIELD_BIT(0);
    }
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {

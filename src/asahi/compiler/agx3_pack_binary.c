@@ -9397,7 +9397,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * 45 dEQP-VK.glsl.texture_functions.query.texturequerylod
                 * cases while fixing the one array-shadow case. Leave it
                 * alone. */
-               const bool staged_sample = !I->query_lod;
+               /* PERSP_MUL/FADD coordinate publications already belong to a
+                * native transaction. SMP consumes that transaction through
+                * its coordinate-slot wait below; moving the wait to a
+                * carrier would retire it before the sample can consume it.
+                * Only the late COPY publication needs the carrier. */
+               const bool staged_sample =
+                  !I->query_lod && !I->agx3_tex_coords_staged;
                const uint16_t live =
                   !staged_sample ? 0
                   : drain == 3 ? wait

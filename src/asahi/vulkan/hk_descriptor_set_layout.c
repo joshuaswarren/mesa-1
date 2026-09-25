@@ -305,42 +305,7 @@ hk_CreateDescriptorSetLayout(VkDevice device,
    layout->non_variable_descriptor_buffer_size = buffer_size;
    layout->vk.dynamic_descriptor_count = dynamic_buffer_count;
 
-   struct mesa_blake3 blake3_ctx;
-   _mesa_blake3_init(&blake3_ctx);
-
-#define BLAKE3_UPDATE_VALUE(x)                                                 \
-   _mesa_blake3_update(&blake3_ctx, &(x), sizeof(x));
-   BLAKE3_UPDATE_VALUE(layout->descriptor_generation);
-   BLAKE3_UPDATE_VALUE(layout->non_variable_descriptor_buffer_size);
-   BLAKE3_UPDATE_VALUE(layout->vk.dynamic_descriptor_count);
-   BLAKE3_UPDATE_VALUE(layout->binding_count);
-
-   for (uint32_t b = 0; b < num_bindings; b++) {
-      BLAKE3_UPDATE_VALUE(layout->binding[b].type);
-      BLAKE3_UPDATE_VALUE(layout->binding[b].flags);
-      BLAKE3_UPDATE_VALUE(layout->binding[b].array_size);
-      BLAKE3_UPDATE_VALUE(layout->binding[b].offset);
-      BLAKE3_UPDATE_VALUE(layout->binding[b].stride);
-      BLAKE3_UPDATE_VALUE(layout->binding[b].dynamic_buffer_index);
-
-      if (layout->binding[b].immutable_samplers != NULL) {
-         for (uint32_t i = 0; i < layout->binding[b].array_size; i++) {
-            const struct hk_sampler *sampler =
-               layout->binding[b].immutable_samplers[i];
-
-            /* We zalloc the object, so it's safe to hash the whole thing */
-            if (sampler != NULL && sampler->vk.ycbcr_conversion != NULL) {
-               BLAKE3_UPDATE_VALUE(sampler->ycbcr);
-               BLAKE3_UPDATE_VALUE(sampler->min_filter);
-               BLAKE3_UPDATE_VALUE(sampler->mag_filter);
-               BLAKE3_UPDATE_VALUE(sampler->mip_lod_bias);
-            }
-         }
-      }
-   }
-#undef BLAKE3_UPDATE_VALUE
-
-   _mesa_blake3_final(&blake3_ctx, layout->vk.blake3);
+   hk_descriptor_set_layout_hash(layout);
 
    *pSetLayout = hk_descriptor_set_layout_to_handle(layout);
 

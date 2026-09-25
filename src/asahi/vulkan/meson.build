@@ -25,6 +25,7 @@ hk_files = files(
   'hk_descriptor_set.h',
   'hk_descriptor_set.c',
   'hk_descriptor_set_layout.c',
+  'hk_descriptor_set_layout_hash.c',
   'hk_descriptor_set_layout.h',
   'hk_descriptor_table.c',
   'hk_descriptor_table.h',
@@ -75,6 +76,7 @@ hk_files = files(
   'hk_nir_forward_image_stores.c',
   'hk_nir_forward_image_stores.h',
   'hk_nir_lower_descriptors.c',
+  'hk_ordinary_descriptor.c',
   'hk_nir_lower_ray_queries.c',
   'hk_nir_lower_robust_image.c',
   'hk_nir_lower_robust_image.h',
@@ -127,7 +129,8 @@ if with_tests
     'hk_shader_variants',
     executable(
       'hk_shader_variants_test',
-      files('tests/test-hk-shader-variants.c'),
+      files('tests/test-hk-shader-variants.c', 'hk_ordinary_descriptor.c',
+            'hk_descriptor_set_layout_hash.c'),
       include_directories : [
         include_directories('.', '../libagx', '../../gallium/include',
                             '../../gallium/auxiliary', '../../vulkan/runtime',
@@ -380,6 +383,25 @@ if with_tests
             '../lib/agx_vdm_hal200_direct_draw_core.c'),
       include_directories : [inc_include, inc_src],
       c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_ordinary_guard',
+    executable(
+      'hk_ordinary_guard_test',
+      files('tests/test-hk-ordinary-guard.c', 'hk_nir_lower_descriptors.c'),
+      include_directories : [
+        include_directories('.', '../libagx', '../../gallium/include',
+                            '../../gallium/auxiliary', '../../vulkan/runtime',
+                            '../../vulkan/util', '../../vulkan/wsi',
+                            '../../compiler/spirv', '../../virtio/virtio-gpu',
+                            '../../virtio/vdrm'),
+        inc_include, inc_src, inc_asahi,
+      ],
+      dependencies : [idep_nir, idep_mesautil, idep_libagx, idep_libagx_shaders_h],
       gnu_symbol_visibility : 'hidden',
     ),
     suite : ['asahi'],

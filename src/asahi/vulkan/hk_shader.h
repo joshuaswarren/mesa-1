@@ -6,6 +6,7 @@
  */
 
 #pragma once
+#include "hk_ordinary_descriptor.h"
 
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_nir.h"
@@ -335,6 +336,8 @@ struct hk_api_shader {
 
    /* Dynamic G17P sample-rate/coverage shaders have native 1x/2x/4x binaries. */
    bool g17p_sample_variants;
+   /* Generic and independently allocated ordinary fragment programs. */
+   bool g17p_ordinary_variants;
 
    struct hk_shader variants[];
 };
@@ -345,7 +348,27 @@ bool hk_shader_ensure_link_ht_locked(struct hk_shader *shader);
 static inline unsigned
 hk_api_num_variants(const struct hk_api_shader *obj)
 {
+   if (obj->g17p_ordinary_variants) {
+      assert(obj->vk.stage == MESA_SHADER_FRAGMENT);
+      return obj->g17p_sample_variants ? 6 : 2;
+   }
    return obj->g17p_sample_variants ? 3 : hk_num_variants(obj->vk.stage);
+}
+
+static inline size_t
+hk_api_shader_size(mesa_shader_stage stage, bool samples, bool ordinary)
+{
+   unsigned count = ordinary ? (samples ? 6 : 2) :
+                    samples ? 3 : hk_num_variants(stage);
+   return sizeof(struct hk_api_shader) + count * sizeof(struct hk_shader) +
+          (ordinary ? sizeof(struct hk_ordinary_descriptor_requirements) : 0);
+}
+
+static inline struct hk_ordinary_descriptor_requirements *
+hk_api_ordinary_requirements(struct hk_api_shader *obj)
+{
+   assert(obj->g17p_ordinary_variants);
+   return (void *)&obj->variants[hk_api_num_variants(obj)];
 }
 
 #define hk_foreach_variant(api_shader, var)                                    \
@@ -359,7 +382,17 @@ hk_variant_name(struct hk_api_shader *obj, struct hk_shader *variant)
    unsigned i = variant - obj->variants;
    assert(i < hk_api_num_variants(obj));
 
-   if (obj->g17p_sample_variants) {
+   if (obj->g17p_ordinary_variants) {
+      if (obj->g17p_sample_variants) {
+         static const char *names[] = {
+            "1 sample, generic descriptors", "2 samples, generic descriptors",
+            "4 samples, generic descriptors", "1 sample, ordinary descriptors",
+            "2 samples, ordinary descriptors", "4 samples, ordinary descriptors",
+         };
+         return names[i];
+      }
+      return i ? "Ordinary descriptors" : "Generic descriptors";
+   } else if (obj->g17p_sample_variants) {
       static const char *names[] = {"1 sample", "2 samples", "4 samples"};
       return names[i];
    } else if (hk_api_num_variants(obj) == 1) {
@@ -399,10 +432,14 @@ hk_fs_variant(struct hk_api_shader *obj, unsigned samples)
       return NULL;
 
    assert(obj->vk.stage == MESA_SHADER_FRAGMENT);
+   if (obj->g17p_sample_variants)
+      assert(samples == 0 || samples == 1 || samples == 2 || samples == 4);
+   if (obj->g17p_ordinary_variants)
+      return &obj->variants[obj->g17p_sample_variants && samples > 1 ?
+                            util_logbase2(samples) : 0];
    if (!obj->g17p_sample_variants)
       return hk_only_variant(obj);
 
-   assert(samples == 0 || samples == 1 || samples == 2 || samples == 4);
    return &obj->variants[samples > 1 ? util_logbase2(samples) : 0];
 }
 

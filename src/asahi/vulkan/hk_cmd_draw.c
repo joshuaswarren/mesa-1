@@ -30,6 +30,7 @@
 #include "agx_vdm_tessellate_core.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
+#include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_image.h"
@@ -3355,11 +3356,31 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
    }
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_variant_trace,
+                          "HK_G17P_ORDINARY_VARIANT_TRACE", false)
+
 static struct hk_shader *
 hk_bound_fs(struct hk_cmd_buffer *cmd)
 {
-   return hk_fs_variant(cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT],
-                        cmd->vk.dynamic_graphics_state.ms.rasterization_samples);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *obj = gfx->shaders[MESA_SHADER_FRAGMENT];
+   unsigned samples = cmd->vk.dynamic_graphics_state.ms.rasterization_samples;
+   if (!obj || !obj->g17p_ordinary_variants)
+      return hk_fs_variant(obj, samples);
+
+   bool changed;
+   struct hk_shader *selected = hk_ordinary_descriptor_select_push(
+      &gfx->ordinary_fs, obj, gfx->descriptors.sets, gfx->descriptors.root.sets,
+      gfx->descriptors.push, gfx->descriptors.push_active,
+      HK_MAX_SETS, gfx->descriptors.generation, samples, &changed);
+   if (changed)
+      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
+   if (changed && debug_get_option_hk_g17p_ordinary_variant_trace())
+      fprintf(stderr, "G17P ordinary variant: selected=%u generation=%" PRIu64
+                      " main=%u\n",
+              (unsigned)(selected - obj->variants), gfx->descriptors.generation,
+              selected->b.info.main_size);
+   return selected;
 }
 
 static uint64_t
@@ -4587,6 +4608,7 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
    cmd->state.gfx.shaders_dirty |= BITFIELD_BIT(stage);
 
    if (stage == MESA_SHADER_FRAGMENT) {
+      cmd->state.gfx.ordinary_fs.valid = false;
       BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
    }
 }
@@ -4609,7 +4631,10 @@ static void
 hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
    struct hk_api_shader *fs_obj =
-      cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
+       cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
+   /* Selection may dirty FS before the ordinary early-out below. */
+   if (fs_obj->g17p_ordinary_variants)
+      hk_bound_fs(cmd);
    const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
                   MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);

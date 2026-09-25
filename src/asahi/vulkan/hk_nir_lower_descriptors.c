@@ -12,6 +12,7 @@
 #include "hk_cmd_buffer.h"
 #include "hk_descriptor_set.h"
 #include "hk_descriptor_set_layout.h"
+#include "hk_ordinary_descriptor.h"
 #include "hk_native_descriptor.h"
 #include "hk_shader.h"
 #include "layout/layout.h"
@@ -1252,4 +1253,176 @@ hk_nir_lower_descriptors(nir_shader *nir,
    }
 
    return pass_lower_descriptors || pass_lower_ssbo || pass_sparse_buffers;
+}
+
+/* Offline opt-in: create one descriptor-uniform fast/slow shader region.
+ * Restrict eager descriptor reads to fixed, required combined-image bindings.
+ * Calls stay separate until feature lowering, then are inlined. */
+bool
+hk_nir_ordinary_descriptor_regions(nir_shader *nir,
+                                   uint32_t set_layout_count,
+                                   struct vk_descriptor_set_layout *const *layouts,
+                                   bool allow_single_sample,
+                                   struct hk_ordinary_descriptor_requirements *requirements)
+{
+   if (nir->info.stage != MESA_SHADER_FRAGMENT)
+      return false;
+   nir_function_impl *old = nir_shader_get_entrypoint(nir);
+   nir_variable *resources[16];
+   unsigned count = 0, samples = 0;
+   nir_foreach_block(block, old) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_tex)
+            continue;
+         nir_tex_instr *tex = nir_instr_as_tex(instr);
+         if (nir_tex_instr_is_query(tex))
+            continue;
+         if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+              tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
+             tex->dest_type != nir_type_float32 || tex->is_shadow ||
+             tex->is_sparse || tex->is_array ||
+             tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
+             nir_tex_instr_src_index(tex, nir_tex_src_plane) >= 0)
+            return false;
+         int t = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
+         int s = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
+         if (t < 0 || s < 0)
+            return false;
+         nir_deref_instr *td = nir_src_as_deref(tex->src[t].src);
+         nir_deref_instr *sd = nir_src_as_deref(tex->src[s].src);
+         if (td->deref_type != nir_deref_type_var ||
+             sd->deref_type != nir_deref_type_var || td->var != sd->var)
+            return false;
+         nir_variable *var = td->var;
+         unsigned set = var->data.descriptor_set, binding = var->data.binding;
+         if (set >= set_layout_count || !layouts[set])
+            return false;
+         const struct hk_descriptor_set_layout *layout =
+            vk_to_hk_descriptor_set_layout(layouts[set]);
+         if (layout->descriptor_generation != 9 || binding >= layout->binding_count)
+            return false;
+         const struct hk_descriptor_set_binding_layout *bl = &layout->binding[binding];
+         if (bl->type != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER ||
+             bl->array_size != 1 || bl->flags != 0)
+            return false;
+         unsigned j = 0;
+         while (j < count && resources[j] != var)
+            ++j;
+         if (j == count) {
+            if (count == ARRAY_SIZE(resources))
+               return false;
+            resources[count++] = var;
+         }
+         ++samples;
+      }
+   }
+   /* The two-sample threshold is a profitability heuristic, not a descriptor
+    * safety requirement. Single-sample atlas blits still incur the same
+    * format conversion and border fallback on each fragment. Keep their
+    * experimental admission separate while preserving every shape/layout
+    * restriction and the complete nonordinary fallback below. */
+   if (!count || samples < (allow_single_sample ? 1 : 2))
+      return false;
+
+   struct hk_ordinary_descriptor_requirements proof = {0};
+   bool can_select = requirements != NULL;
+   for (unsigned i = 0; i < count && can_select; ++i) {
+      unsigned set = resources[i]->data.descriptor_set;
+      unsigned binding = resources[i]->data.binding;
+      const struct hk_descriptor_set_layout *layout =
+         vk_to_hk_descriptor_set_layout(layouts[set]);
+      if (layout->vk.flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_DESCRIPTOR_BUFFER_BIT_EXT) {
+         can_select = false;
+         break;
+      }
+      proof.bindings[proof.count++] = (struct hk_ordinary_descriptor_binding){
+         .set = set, .binding = binding, .offset = layout->binding[binding].offset,
+         .push = !!(layout->vk.flags & VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR),
+      };
+      memcpy(proof.bindings[proof.count - 1].layout_hash,
+             layout->vk.blake3, sizeof(blake3_hash));
+      proof.set_mask |= 1u << set;
+   }
+
+   struct lower_descriptors_ctx ctx = {
+      .stage = MESA_SHADER_FRAGMENT,
+      .descriptor_generation = 9,
+   };
+   for (unsigned i = 0; i < set_layout_count; ++i)
+      if (layouts[i])
+         ctx.set_layouts[i] = vk_to_hk_descriptor_set_layout(layouts[i]);
+
+   nir_function *entry = old->function;
+   nir_function *fast = nir_function_create(nir, "hk_ordinary_descriptor_fast");
+   fast->impl = nir_function_impl_clone(nir, old);
+   fast->impl->function = fast;
+   nir_function *slow = nir_function_create(nir, "hk_ordinary_descriptor_slow");
+   slow->impl = old;
+   old->function = slow;
+   entry->impl = NULL;
+   nir_function_impl *main = nir_function_impl_create(entry);
+   nir_builder b = nir_builder_at(nir_before_impl(main));
+   nir_def *ordinary = nir_imm_bool(&b, true);
+   const struct hk_sampled_image_descriptor_layout native =
+      hk_sampled_image_descriptor_layout(9);
+   for (unsigned i = 0; i < count; ++i) {
+      nir_deref_instr *deref = nir_build_deref_var(&b, resources[i]);
+      /* Match lower_scaled_sample's aligned descriptor read. */
+      unsigned scaled_off = native.texture + 32 +
+         offsetof(struct hk_sampled_image_descriptor_sw, scaled_conversion);
+      nir_def *scaled_word = load_resource_deref_desc(
+         &b, 1, 32, deref, scaled_off & ~3u, &ctx);
+      nir_def *kind = nir_iand_imm(&b,
+         nir_ushr_imm(&b, scaled_word, 8 * (scaled_off & 3)), 0xffff);
+      /* Signed-negative clamp_0 means no custom-border emulation, matching
+       * nir_texop_has_custom_border_color_agx lowering. Read its aligned pair. */
+      unsigned border_off = native.clamp_0_sampler_index;
+      nir_def *border_word = load_resource_deref_desc(
+         &b, 1, 32, deref, border_off & ~3u, &ctx);
+      nir_def *border = nir_u2u16(&b,
+         nir_ushr_imm(&b, border_word, 8 * (border_off & 3)));
+      ordinary = nir_iand(&b, ordinary,
+         nir_iand(&b, nir_ieq_imm(&b, kind, 0), nir_ilt_imm(&b, border, 0)));
+   }
+   /* Preserve the specialization point through inter-stage optimization.
+    * The marker is removed before either variant reaches AGX compilation. */
+   if (can_select) {
+      *requirements = proof;
+      ordinary = nir_load_ordinary_descriptor_guard_agx(&b, ordinary);
+   }
+   nir_if *nif = nir_push_if(&b, ordinary);
+   nif->control = nir_selection_control_dont_flatten;
+   nir_call(&b, fast);
+   nir_push_else(&b, nif);
+   nir_call(&b, slow);
+   nir_pop_if(&b, nif);
+   nir_lower_io_vars_to_temporaries(nir, main, nir_var_shader_out);
+   nir_split_var_copies(nir);
+   nir_lower_var_copies(nir);
+   nir_metadata_invalidate(nir);
+   fprintf(stderr, "HK ordinary descriptor region: resources=%u samples=%u\n", count, samples);
+   return true;
+}
+
+static bool
+lower_ordinary_descriptor_guard(nir_builder *b, nir_intrinsic_instr *intr,
+                                 void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_load_ordinary_descriptor_guard_agx)
+      return false;
+   b->cursor = nir_before_instr(&intr->instr);
+   enum hk_ordinary_guard_mode mode = *(enum hk_ordinary_guard_mode *)data;
+   assert(mode <= HK_ORDINARY_GUARD_FALSE);
+   nir_def *replacement = mode == HK_ORDINARY_GUARD_DYNAMIC ? intr->src[0].ssa :
+      nir_imm_bool(b, mode == HK_ORDINARY_GUARD_TRUE);
+   nir_def_replace(&intr->def, replacement);
+   return true;
+}
+
+bool
+hk_nir_lower_ordinary_descriptor_guard(nir_shader *nir,
+                                      enum hk_ordinary_guard_mode mode)
+{
+   return nir_shader_intrinsics_pass(nir, lower_ordinary_descriptor_guard,
+                                     nir_metadata_control_flow, &mode);
 }

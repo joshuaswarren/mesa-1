@@ -7,6 +7,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_shader.h"
+#include "util/u_debug.h"
 
 #include "hk_nir_ray_tracing.h"
 #include "hk_nir_forward_image_stores.h"
@@ -169,6 +170,35 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
    *size = comp_size * length, *align = comp_size;
 }
 
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_region,
+                          "HK_G17P_ORDINARY_REGION", false)
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_single_sample,
+                          "HK_G17P_ORDINARY_SINGLE_SAMPLE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_variants,
+                          "HK_G17P_ORDINARY_VARIANTS", false)
+
+static bool
+hk_ordinary_variants_enabled(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G17P &&
+          debug_get_option_hk_g17p_ordinary_variants();
+}
+
+static bool
+hk_ordinary_regions_enabled(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G17P &&
+          (debug_get_option_hk_g17p_ordinary_region() ||
+           hk_ordinary_variants_enabled(dev));
+}
+
+static bool
+hk_ordinary_single_sample_enabled(const struct agx_device *dev)
+{
+   return hk_ordinary_regions_enabled(dev) &&
+          debug_get_option_hk_g17p_ordinary_single_sample();
+}
+
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
@@ -178,7 +208,11 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
    /* The native backend experiments change emitted code. Keep their cached
     * binaries distinct; bits 0..31 are device flags and bit 32 is tessellation. */
    return pdev->dev.debug | ((uint64_t)pdev->g17p_native_tess << 32) |
-          ((uint64_t)!!(debug & AGX_DBG_NATIVE_UNIFORMS) << 34);
+          ((uint64_t)!!(debug & AGX_DBG_NATIVE_UNIFORMS) << 34) |
+          ((uint64_t)hk_ordinary_regions_enabled(&pdev->dev) << 40) |
+          ((uint64_t)hk_ordinary_single_sample_enabled(&pdev->dev) << 58) |
+          ((uint64_t)hk_ordinary_variants_enabled(&pdev->dev) << 60) |
+          ((uint64_t)hk_ordinary_variants_enabled(&pdev->dev) << 61);
 }
 
 const nir_shader_compiler_options *
@@ -1293,8 +1327,17 @@ has_custom_border(nir_builder *b, nir_tex_instr *tex)
 }
 
 static bool
+hk_is_ordinary_descriptor_region(nir_builder *b)
+{
+   const char *name = b->impl->function->name;
+   return name && !strcmp(name, "hk_ordinary_descriptor_fast");
+}
+
+static bool
 lower(nir_builder *b, nir_tex_instr *tex, UNUSED void *_data)
 {
+   if (hk_is_ordinary_descriptor_region(b))
+      return false;
    if (!nir_tex_instr_need_sampler(tex) || nir_tex_instr_is_query(tex))
       return false;
 
@@ -1445,6 +1488,8 @@ lower_scaled_storage(nir_builder *b, nir_intrinsic_instr *intr, void *unused)
 static bool
 lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
 {
+   if (hk_is_ordinary_descriptor_region(b))
+      return false;
    if (tex->dest_type != nir_type_float32 || tex->is_shadow ||
        tex->sampler_dim == GLSL_SAMPLER_DIM_BUF || tex->is_sparse)
       return false;
@@ -1817,8 +1862,11 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
              VkShaderStageFlags next_stage_mask, uint32_t set_layout_count,
              struct vk_descriptor_set_layout *const *set_layouts,
-             enum hk_feature_key features)
+             enum hk_feature_key features,
+             struct hk_ordinary_descriptor_requirements *ordinary_requirements)
 {
+   if (ordinary_requirements)
+      memset(ordinary_requirements, 0, sizeof(*ordinary_requirements));
    if (HK_PERF(dev, NOROBUST)) {
       rs = &vk_robustness_disabled;
    }
@@ -1938,6 +1986,13 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
    if (instance->image_view_min_lod) {
       NIR_PASS(_, nir, agx_nir_lower_image_view_min_lod);
    }
+
+   bool ordinary_regions = false;
+   if (hk_ordinary_regions_enabled(&dev->dev))
+      ordinary_regions = hk_nir_ordinary_descriptor_regions(
+          nir, set_layout_count, set_layouts,
+          hk_ordinary_single_sample_enabled(&dev->dev),
+          hk_ordinary_variants_enabled(&dev->dev) ? ordinary_requirements : NULL);
 
    if (((features & HK_FEAT_CUSTOM_BORDER) || agx_native_graphics(&dev->dev)) &&
        !HK_PERF(dev, NOBORDER)) {
@@ -2071,6 +2126,14 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
                nir_metadata_none, NULL);
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_scaled_sample,
                nir_metadata_control_flow, NULL);
+   }
+
+   if (ordinary_regions) {
+      NIR_PASS(_, nir, nir_inline_functions);
+      nir_cleanup_functions(nir);
+      NIR_PASS(_, nir, nir_lower_global_vars_to_local);
+      NIR_PASS(_, nir, nir_split_var_copies);
+      NIR_PASS(_, nir, nir_lower_vars_to_ssa);
    }
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
@@ -3215,12 +3278,13 @@ hk_shader_prepare_device_for_stage(struct hk_device *dev,
       hk_device_ensure_geometry_heap(dev);
 }
 
-VkResult
-hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
+static VkResult
+hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
                   const struct vk_features *vk_features,
                   const VkAllocationCallbacks *pAllocator,
-                  struct hk_api_shader **shader_out)
+                  struct hk_api_shader **shader_out,
+                  const struct hk_ordinary_descriptor_requirements *provided_requirements)
 {
    VkResult result;
    enum hk_feature_key features = hk_make_feature_key(vk_features);
@@ -3232,10 +3296,14 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
    /* We consume the NIR, regardless of success or failure */
    nir_shader *nir = info->nir;
+   struct hk_ordinary_descriptor_requirements ordinary_requirements = {0};
+   if (provided_requirements)
+      ordinary_requirements = *provided_requirements;
 
    if (!nir->info.io_lowered) {
-      hk_lower_nir(dev, nir, info->robustness, false, info->next_stage_mask,
-                   info->set_layout_count, info->set_layouts, features);
+       hk_lower_nir(dev, nir, info->robustness, false, info->next_stage_mask,
+                    info->set_layout_count, info->set_layouts, features,
+                    &ordinary_requirements);
    }
 
    union hk_key key_tmp, *key = NULL;
@@ -3258,9 +3326,18 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
           coverage_updates || agx_nir_needs_sample_count(nir));
    }
 
-   size_t size = sizeof(struct hk_api_shader) +
-                 sizeof(struct hk_shader) *
-                    (sample_variants ? 3 : hk_num_variants(info->stage));
+   /* Descriptor specialization is independent of the raster sample count.
+    * A dynamic-count fragment with discard needs native 1x/2x/4x coverage
+    * variants, while its ordinary texture path still needs a separately
+    * selectable program for each count. */
+   const bool ordinary_variants = ordinary_requirements.count &&
+      info->stage == MESA_SHADER_FRAGMENT &&
+      !nir->info.fs.uses_sample_shading && !key_tmp.fs.force_sample_shading;
+   if (!ordinary_variants)
+      NIR_PASS(_, nir, hk_nir_lower_ordinary_descriptor_guard,
+               HK_ORDINARY_GUARD_DYNAMIC);
+
+   size_t size = hk_api_shader_size(info->stage, sample_variants, ordinary_variants);
    struct hk_api_shader *obj =
       vk_shader_zalloc(&dev->vk, &hk_shader_ops, info->stage, pAllocator, size);
 
@@ -3270,6 +3347,9 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
    }
 
    obj->g17p_sample_variants = sample_variants;
+   obj->g17p_ordinary_variants = ordinary_variants;
+   if (ordinary_variants)
+      *hk_api_ordinary_requirements(obj) = ordinary_requirements;
 
    mesa_shader_stage sw_stage = nir->info.stage;
 
@@ -3489,6 +3569,63 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
             return result;
          }
       }
+   } else if (ordinary_variants && sample_variants) {
+      /* Keep the two proof domains orthogonal: sample index 0/1/2 chooses
+       * the coverage/export ABI, and the second three-program group chooses
+       * the descriptor-fast implementation. A failed descriptor proof always
+       * selects the complete generic program for the current sample count. */
+      hk_foreach_variant(obj, shader) {
+         const unsigned index = shader - obj->variants;
+         const unsigned samples = 1u << (index % 3);
+         nir_shader *clone = nir_shader_clone(NULL, nir);
+         if (!clone) {
+            ralloc_free(nir);
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+         }
+         NIR_PASS(_, clone, hk_nir_lower_ordinary_descriptor_guard,
+                  index < 3 ? HK_ORDINARY_GUARD_FALSE :
+                              HK_ORDINARY_GUARD_TRUE);
+         NIR_PASS(_, clone, nir_opt_dead_cf);
+         key->fs.g17p_samples = samples;
+         if (samples == 1)
+            NIR_PASS(_, clone, agx_nir_lower_g17p_1x_sample_shading);
+         NIR_PASS(_, clone, agx_nir_lower_sample_intrinsics, false);
+         result = hk_compile_nir(dev, pAllocator, clone, info->flags,
+                                 info->robustness, key, features, shader,
+                                 sw_stage, true, NULL, info->set_layout_count);
+         if (result != VK_SUCCESS) {
+            ralloc_free(nir);
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return result;
+         }
+      }
+      ralloc_free(nir);
+   } else if (ordinary_variants) {
+      hk_foreach_variant(obj, shader) {
+         nir_shader *clone = nir_shader_clone(NULL, nir);
+         if (!clone) {
+            ralloc_free(nir);
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+         }
+         /* The slow arm implements all descriptor kinds, including ordinary
+          * textures. It does not need another copy of the fast arm when an
+          * independently allocated ordinary program is available. */
+         NIR_PASS(_, clone, hk_nir_lower_ordinary_descriptor_guard,
+                  shader == obj->variants ? HK_ORDINARY_GUARD_FALSE :
+                                           HK_ORDINARY_GUARD_TRUE);
+         NIR_PASS(_, clone, nir_opt_dead_cf);
+         result = hk_compile_nir(dev, pAllocator, clone, info->flags,
+                                 info->robustness, key, features, shader,
+                                 sw_stage, true, NULL, info->set_layout_count);
+         if (result != VK_SUCCESS) {
+            ralloc_free(nir);
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            return result;
+         }
+      }
+      ralloc_free(nir);
    } else if (sample_variants) {
       /* The sample count is dynamic API state, but native coverage words and
        * export registers depend on it. Compile the same native specialization
@@ -3550,6 +3687,17 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
    *shader_out = obj;
    return VK_SUCCESS;
+}
+
+VkResult
+hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
+                  const struct vk_graphics_pipeline_state *state,
+                  const struct vk_features *features,
+                  const VkAllocationCallbacks *allocator,
+                  struct hk_api_shader **shader_out)
+{
+   return hk_compile_shader_impl(dev, info, state, features, allocator,
+                                  shader_out, NULL);
 }
 
 static void
@@ -3662,6 +3810,8 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 {
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
    nir_shader *shaders[shader_count];
+   struct hk_ordinary_descriptor_requirements ordinary_requirements[shader_count];
+   memset(ordinary_requirements, 0, sizeof(ordinary_requirements));
 
    /* Lower shaders, notably lowering I/O. This is a prerequisite for
     * intershader optimization.
@@ -3675,7 +3825,7 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 
       hk_lower_nir(dev, nir, info->robustness, is_multiview,
                    info->next_stage_mask, info->set_layout_count,
-                   info->set_layouts, hk_features);
+                    info->set_layouts, hk_features, &ordinary_requirements[i]);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
          enum hk_nir_widen_16bit_varyings_mode mode = 0;
@@ -3751,8 +3901,9 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
 
    for (uint32_t i = 0; i < shader_count; i++) {
       VkResult result =
-         hk_compile_shader(dev, &infos[i], state, features, pAllocator,
-                           (struct hk_api_shader **)&shaders_out[i]);
+         hk_compile_shader_impl(dev, &infos[i], state, features, pAllocator,
+                            (struct hk_api_shader **)&shaders_out[i],
+                            &ordinary_requirements[i]);
       if (result != VK_SUCCESS) {
          /* Clean up all the shaders before this point */
          for (uint32_t j = 0; j < i; j++)
@@ -3836,15 +3987,31 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    mesa_shader_stage stage = blob_read_uint8(blob);
-   const unsigned sample_variants = blob_read_uint8(blob);
-   if (blob->overrun || stage >= MESA_SHADER_STAGES || sample_variants > 1 ||
-       (sample_variants && (stage != MESA_SHADER_FRAGMENT ||
-                            dev->dev.chip != AGX_CHIP_G17P)))
+   const unsigned variant_flags = blob_read_uint8(blob);
+   const bool sample_variants = variant_flags & 1;
+   const bool ordinary_variants = variant_flags & 2;
+   if (blob->overrun || stage >= MESA_SHADER_STAGES || variant_flags > 3 ||
+        (variant_flags && (stage != MESA_SHADER_FRAGMENT ||
+                            dev->dev.chip != AGX_CHIP_G17P)) ||
+        (ordinary_variants && !hk_ordinary_variants_enabled(&dev->dev)))
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
-   size_t size = sizeof(struct hk_api_shader) +
-                 sizeof(struct hk_shader) *
-                    (sample_variants ? 3 : hk_num_variants(stage));
+   struct hk_ordinary_descriptor_requirements requirements = {0};
+   if (ordinary_variants) {
+      blob_copy_bytes(blob, &requirements, sizeof(requirements));
+      if (blob->overrun || !requirements.count ||
+          requirements.count > HK_ORDINARY_DESCRIPTOR_MAX_BINDINGS)
+         return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+      uint32_t set_mask = 0;
+      for (unsigned i = 0; i < requirements.count; ++i) {
+         if (requirements.bindings[i].set >= HK_MAX_SETS)
+            return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+         set_mask |= 1u << requirements.bindings[i].set;
+      }
+      if (set_mask != requirements.set_mask)
+         return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
+   }
+   size_t size = hk_api_shader_size(stage, sample_variants, ordinary_variants);
 
    struct hk_api_shader *obj =
       vk_shader_zalloc(&dev->vk, &hk_shader_ops, stage, pAllocator, size);
@@ -3853,6 +4020,10 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
       return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
 
    obj->g17p_sample_variants = sample_variants;
+
+   obj->g17p_ordinary_variants = ordinary_variants;
+   if (ordinary_variants)
+      *hk_api_ordinary_requirements(obj) = requirements;
 
    hk_foreach_variant(obj, shader) {
       VkResult result = hk_deserialize_shader(dev, blob, shader);
@@ -3907,9 +4078,8 @@ hk_shader_binary_cache_clone(struct hk_device *dev,
                              struct vk_shader **shader_out)
 {
    const struct hk_api_shader *src_obj = entry->shader;
-   const size_t size = sizeof(struct hk_api_shader) +
-                       sizeof(struct hk_shader) *
-                          hk_api_num_variants(src_obj);
+   const size_t size = hk_api_shader_size(src_obj->vk.stage,
+      src_obj->g17p_sample_variants, src_obj->g17p_ordinary_variants);
    struct hk_api_shader *obj =
       vk_shader_zalloc(&dev->vk, &hk_shader_ops, src_obj->vk.stage,
                        pAllocator, size);
@@ -3920,6 +4090,11 @@ hk_shader_binary_cache_clone(struct hk_device *dev,
 
    obj->is_passthrough = src_obj->is_passthrough;
    obj->g17p_sample_variants = src_obj->g17p_sample_variants;
+   obj->g17p_ordinary_variants = src_obj->g17p_ordinary_variants;
+   if (obj->g17p_ordinary_variants)
+      memcpy(hk_api_ordinary_requirements(obj),
+             &src_obj->variants[hk_api_num_variants(src_obj)],
+             sizeof(struct hk_ordinary_descriptor_requirements));
    obj->binary_cache_entry = entry;
 
    for (unsigned i = 0; i < hk_api_num_variants(src_obj); ++i) {
@@ -4079,7 +4254,11 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       container_of(vk_shader, struct hk_api_shader, vk);
 
    blob_write_uint8(blob, vk_shader->stage);
-   blob_write_uint8(blob, obj->g17p_sample_variants);
+   blob_write_uint8(blob, obj->g17p_sample_variants |
+                         (obj->g17p_ordinary_variants << 1));
+   if (obj->g17p_ordinary_variants)
+      blob_write_bytes(blob, hk_api_ordinary_requirements(obj),
+                        sizeof(struct hk_ordinary_descriptor_requirements));
 
    hk_foreach_variant(obj, shader) {
       hk_shader_serialize(vk_dev, shader, blob);

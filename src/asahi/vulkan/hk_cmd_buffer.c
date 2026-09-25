@@ -1043,7 +1043,8 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
       unsigned s = i + info->firstSet;
       VK_FROM_HANDLE(hk_descriptor_set, set, info->pDescriptorSets[i]);
 
-      if (desc->sets[s] != set) {
+      if (desc->sets[s] != set ||
+          (desc->push_active & BITFIELD_BIT(s))) {
          if (set != NULL) {
             desc->root.sets[s] = hk_descriptor_set_addr(set);
             desc->set_sizes[s] = set->size;
@@ -1055,8 +1056,9 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
          desc->sets_dirty |= BITFIELD_BIT(s);
 
          /* Binding descriptors invalidates push descriptors */
-         desc->push_dirty &= ~BITFIELD_BIT(s);
       }
+      desc->push_active &= ~BITFIELD_BIT(s);
+      desc->push_dirty &= ~BITFIELD_BIT(s);
 
       desc->root.set_dynamic_buffer_start[s] = dyn_buffer_start;
 
@@ -1152,6 +1154,7 @@ hk_cmd_push_descriptors(struct hk_cmd_buffer *cmd,
    /* Pushing descriptors replaces whatever sets are bound */
    desc->sets[set] = NULL;
    desc->push_dirty |= BITFIELD_BIT(set);
+   desc->push_active |= BITFIELD_BIT(set);
    desc->generation++;
 
    return desc->push[set];
