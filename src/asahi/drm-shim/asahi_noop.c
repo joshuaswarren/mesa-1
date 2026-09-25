@@ -112,12 +112,14 @@ static const struct drm_asahi_params_global params_g17g_compile_only = {
  *
  * Grounded fields: generation 18, variant 'G' and chip 0x8152 (the J873 is
  * Mac18,5 / T8152, its ADT GPU node is gpu,t8152 and its kext
- * com.apple.AGXG18G); revision A0 (the 26A428 kernelcache's accelerator class
- * is AGX::PI_400::G::A0); USC generation 3 (the applegpu_g18g Mach-O
+ * com.apple.AGXG18G); USC generation 3 (the applegpu_g18g Mach-O
  * cpusubtype 0x1c3); a 42-bit user VA two pages below the top, as on M5 (the
  * UAT is 43 bits wide with root selection at bit 42, per the SPTM GET_INFO
- * replies in j873/hv/G18G-BOOTSTRAP.md). The core count is not measured and
- * mirrors the J813 profile.
+ * replies in j873/hv/G18G-BOOTSTRAP.md). Revision and topology are measured
+ * on the J873: the Linux driver's SGX ID probe decodes revision B1 and two
+ * clusters of six cores (mask 0xfff), and the native ioreg reports
+ * num_cores=12, num_mgpus=2, core_mask_list=(63,63). (The kext's class
+ * name, AGX::PI_400::G::A0, ends in A0; the ID register reads B1.)
  *
  * gpu_hal_generation stays DRM_ASAHI_GPU_HAL_300 until the kernel settles on a
  * value: Apple's G18G kext is PI_400, but no Linux G18G driver publishes one
@@ -127,12 +129,12 @@ static const struct drm_asahi_params_global params_g17g_compile_only = {
 static const struct drm_asahi_params_global params_g18g = {
    .gpu_generation = 18,
    .gpu_variant = 'G',
-   .gpu_revision = 0x00,
+   .gpu_revision = 0x11,
    .chip_id = 0x8152,
    .num_dies = 1,
-   .num_clusters_total = 1,
-   .num_cores_per_cluster = 10,
-   .core_masks = {0x3ff},
+   .num_clusters_total = 2,
+   .num_cores_per_cluster = 6,
+   .core_masks = {0x3f, 0x3f},
    .vm_start = 0x4000,
    .vm_end = (1ull << 42) - 0x8000ull,
    .vm_kernel_min_size = 0x20000000,
