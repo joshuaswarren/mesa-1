@@ -100,6 +100,10 @@ static const struct chip_case chip_cases[] = {
     "G17S", true, false},
    {17, 'C', 4, AGX_CHIP_G17C, AGX_ISA_AGX3, AGX_ISA_ENCODING_AGX3C,
     "G17C", true, false},
+
+   /* M6 (J873): the third AGX3 encoding. */
+   {18, 'G', 1, AGX_CHIP_G18G, AGX_ISA_AGX3, AGX_ISA_ENCODING_AGX3D,
+    "G18G", true, false},
 };
 
 static enum agx_chip
@@ -127,10 +131,12 @@ test_recovered_table(void)
       CHECK(agx_chip_has_hardware_ray_tracing(c->chip) == c->ray_tracing);
       CHECK(agx_chip_needs_scheduling_stalls(c->chip) ==
             c->scheduling_stalls);
-      /* Every named chip has a known encoding and therefore a packer:
-       * AGX2 through agx_pack.c, AGX3b/AGX3c through agx3_pack_binary.c. */
+      /* Every named chip has a known encoding. Every encoding but AGX3d has
+       * a packer: AGX2 through agx_pack.c, AGX3b/AGX3c through
+       * agx3_pack_binary.c. */
       CHECK(c->encoding != AGX_ISA_ENCODING_UNKNOWN);
-      CHECK(agx_chip_codegen_supported(c->chip));
+      CHECK(agx_chip_codegen_supported(c->chip) ==
+            (c->encoding != AGX_ISA_ENCODING_AGX3D));
       CHECK(!seen[c->chip]);
       seen[c->chip] = true;
    }
@@ -156,6 +162,9 @@ test_variant_is_load_bearing(void)
             AGX_ISA_ENCODING_AGX3B);
    CHECK_EQ(agx_chip_isa_encoding(AGX_CHIP_G17G),
             AGX_ISA_ENCODING_AGX3C);
+   CHECK_EQ(chip_for(18, 'G', 4), AGX_CHIP_G18G);
+   CHECK_EQ(agx_chip_isa_encoding(AGX_CHIP_G18G),
+            AGX_ISA_ENCODING_AGX3D);
 }
 
 static void
@@ -212,6 +221,32 @@ test_independent_generation_axes(void)
    CHECK_EQ(agx_chip_submission_model(AGX_CHIP_G17G),
             AGX_SUBMISSION_MODEL_SKSM);
 
+   /* G18G writes the M5 records with a new shader encoding. */
+   CHECK_EQ(agx_chip_isa(AGX_CHIP_G18G), AGX_ISA_AGX3);
+   CHECK_EQ(agx_chip_command_stream_generation(AGX_CHIP_G18G),
+            AGX_CS_GENERATION_HAL300);
+   CHECK_EQ(agx_chip_descriptor_generation(AGX_CHIP_G18G),
+            AGX_DESCRIPTOR_GENERATION_10);
+   CHECK_EQ(agx_chip_sampler_generation(AGX_CHIP_G18G),
+            AGX_SAMPLER_GENERATION_GEN5);
+   CHECK_EQ(agx_chip_sampler_heap_element_size(AGX_CHIP_G18G), 32);
+   CHECK_EQ(agx_chip_submission_model(AGX_CHIP_G18G),
+            AGX_SUBMISSION_MODEL_SKSM);
+   CHECK(agx_chip_has_hardware_ray_tracing(AGX_CHIP_G18G));
+   CHECK(!agx_chip_needs_scheduling_stalls(AGX_CHIP_G18G));
+   CHECK(!agx_chip_uses_legacy_precompiled_programs(AGX_CHIP_G18G));
+   CHECK(agx_chip_exact_product_name(AGX_CHIP_G18G) == NULL);
+
+   /* The witnessed HAL300 record set is G17G and G18G only. */
+   for (int chip = AGX_CHIP_G13G; chip <= AGX_CHIP_UNKNOWN; ++chip) {
+      const enum agx_chip c = (enum agx_chip)chip;
+      CHECK(agx_chip_hal300_records(c) ==
+            (c == AGX_CHIP_G17G || c == AGX_CHIP_G18G));
+      if (agx_chip_hal300_records(c))
+         CHECK_EQ(agx_chip_command_stream_generation(c),
+                  AGX_CS_GENERATION_HAL300);
+   }
+
    /* These phone identities are useful for selecting the ISA, but the Mac
     * driver corpus did not contain enough evidence to select every other
     * driver axis. They remain outside the runnable device set. */
@@ -234,6 +269,10 @@ test_independent_generation_axes(void)
    CHECK(agx_chip_codegen_supported(AGX_CHIP_G17P));
    CHECK(agx_chip_codegen_supported(AGX_CHIP_G17S));
    CHECK(!agx_chip_codegen_supported(AGX_CHIP_UNKNOWN));
+   /* No agx3d table exists, so G18G has no code generator and therefore no
+    * device path, whatever its command-stream axes say. */
+   CHECK(!agx_chip_codegen_supported(AGX_CHIP_G18G));
+   CHECK(!agx_chip_driver_supported(AGX_CHIP_G18G));
 
    CHECK(!agx_chip_driver_supported(AGX_CHIP_G15P));
    CHECK(!agx_chip_driver_supported(AGX_CHIP_G15G));
@@ -300,6 +339,14 @@ test_independent_generation_axes(void)
    CHECK(!agx_params_m5_bringup_supported(&m5));
    CHECK(!agx_params_m5_bringup_supported(NULL));
 
+   /* The M5 bring-up contract must not admit the M6. */
+   struct drm_asahi_params_global m6 = m5;
+   m6.gpu_generation = 18;
+   m6.chip_id = 0x8152;
+   CHECK_EQ(agx_chip_from_params(&m6), AGX_CHIP_G18G);
+   CHECK(!agx_params_m5_bringup_supported(&m6));
+   CHECK(!agx_params_driver_supported(&m6));
+
    CHECK(agx_chip_uses_legacy_precompiled_programs(AGX_CHIP_G13G));
    CHECK(agx_chip_uses_legacy_precompiled_programs(AGX_CHIP_G14X));
    CHECK(!agx_chip_uses_legacy_precompiled_programs(AGX_CHIP_G17P));
@@ -317,7 +364,9 @@ static void
 test_invalid_identity(void)
 {
    CHECK_EQ(chip_for(12, 'G', 1), AGX_CHIP_UNKNOWN);
-   CHECK_EQ(chip_for(18, 'G', 1), AGX_CHIP_UNKNOWN);
+   CHECK_EQ(chip_for(18, 'P', 1), AGX_CHIP_UNKNOWN);
+   CHECK_EQ(chip_for(18, 'S', 2), AGX_CHIP_UNKNOWN);
+   CHECK_EQ(chip_for(19, 'G', 1), AGX_CHIP_UNKNOWN);
    CHECK_EQ(chip_for(15, 'A', 1), AGX_CHIP_UNKNOWN);
    CHECK_EQ(chip_for(16, 'D', 8), AGX_CHIP_UNKNOWN);
    CHECK_EQ(chip_for(17, 'D', 8), AGX_CHIP_UNKNOWN);
@@ -339,7 +388,8 @@ test_classification_invariants(void)
       const enum agx_isa_encoding encoding = agx_chip_isa_encoding(c);
       const bool known = c != AGX_CHIP_UNKNOWN;
       const bool agx3_encoding = encoding == AGX_ISA_ENCODING_AGX3B ||
-                                 encoding == AGX_ISA_ENCODING_AGX3C;
+                                 encoding == AGX_ISA_ENCODING_AGX3C ||
+                                 encoding == AGX_ISA_ENCODING_AGX3D;
 
       CHECK(strcmp(agx_chip_name(c), "") != 0);
       CHECK((isa != AGX_ISA_UNKNOWN) == known);
@@ -354,6 +404,9 @@ test_classification_invariants(void)
          0);
    CHECK(strcmp(agx_isa_encoding_name(AGX_ISA_ENCODING_AGX3C), "agx3c") ==
          0);
+   CHECK(strcmp(agx_isa_encoding_name(AGX_ISA_ENCODING_AGX3D), "agx3d") ==
+         0);
+   CHECK(strcmp(agx_chip_name(AGX_CHIP_G18G), "G18G") == 0);
    CHECK(strcmp(agx_chip_name(AGX_CHIP_UNKNOWN), "unknown") == 0);
 }
 

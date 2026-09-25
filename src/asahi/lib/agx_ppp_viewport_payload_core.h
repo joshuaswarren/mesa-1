@@ -67,7 +67,8 @@ struct agx_ppp_viewport_payload_core {
  * generation-specific.
  *
  * The target allowlist contains only identities directly served by the
- * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X plugins.  This helper
+ * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X plugins, plus G18G,
+ * whose J873 native renders carry the Gen7 one-viewport form.  This helper
  * does not allocate or emit a live PPP update, follow a VDM pointer, submit a
  * command, or admit a device.
  */

@@ -109,6 +109,7 @@ done
     "$repo_root/src/asahi/compiler/agx3_compose/agx3_compose.c" \
     "$repo_root/src/asahi/compiler/agx3_compose/agx3b_tables.c" \
     "$repo_root/src/asahi/compiler/agx3_compose/agx3c_tables.c" \
+    "$repo_root/src/asahi/compiler/agx3_compose/agx3d_tables.c" \
     "$repo_root/src/asahi/compiler/test/test-agx3-compose-corpus.c" \
     -o "$out/test_agx3_compose_corpus"
 "$out/test_agx3_compose_corpus"

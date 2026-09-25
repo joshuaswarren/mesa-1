@@ -134,7 +134,8 @@ agx_vdm_index_list_direct_indexed_unpack(
    if (info)
       memset(info, 0, sizeof(*info));
 
-   if (!bytes || !info || !agx_vdm_index_list_direct_target_supported(chip))
+   if (!bytes || !info ||
+       !agx_vdm_index_list_indexed_or_indirect_supported_inline(chip))
       return false;
 
    const bool hal300 = agx_vdm_index_list_direct_is_hal300(chip);
@@ -208,7 +209,8 @@ agx_vdm_index_list_indirect_nonindexed_unpack(
    if (info)
       memset(info, 0, sizeof(*info));
 
-   if (!bytes || !info || !agx_vdm_index_list_direct_target_supported(chip))
+   if (!bytes || !info ||
+       !agx_vdm_index_list_indexed_or_indirect_supported_inline(chip))
       return false;
 
    const bool hal300 = agx_vdm_index_list_direct_is_hal300(chip);
@@ -270,7 +272,8 @@ agx_vdm_index_list_indirect_indexed_unpack(
    if (info)
       memset(info, 0, sizeof(*info));
 
-   if (!bytes || !info || !agx_vdm_index_list_direct_target_supported(chip))
+   if (!bytes || !info ||
+       !agx_vdm_index_list_indexed_or_indirect_supported_inline(chip))
       return false;
 
    const bool hal300 = agx_vdm_index_list_direct_is_hal300(chip);

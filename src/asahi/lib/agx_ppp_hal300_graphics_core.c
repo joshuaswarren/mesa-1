@@ -10,7 +10,16 @@ agx_ppp_hal300_graphics_core_pack(
    enum agx_chip chip, const struct agx_ppp_hal300_graphics_fields *fields,
    struct agx_ppp_hal300_graphics_core *out)
 {
-   if (chip != AGX_CHIP_G17G || !fields || !out ||
+   /* Every field below but lines was grounded on G17G. The J873 G18G
+    * captures reproduce byte for byte for each shape they contain --
+    * triangles, points, lines, the three pass types, depth less/always with
+    * writes, stencil control, two- and four-component smooth varyings --
+    * apart from one stencil face bit that no caller can set on either chip
+    * (see the stencil note in the header). The shapes grounded
+    * only on G17G (flat, noperspective, colour-free, depth output, clip
+    * distances, culling and winding) are carried to G18G on the strength of
+    * that shared layout, without a G18G capture of their own. */
+   if (!agx_chip_hal300_records(chip) || !fields || !out ||
        !fields->fragment_program || fields->cull_mode > 3 ||
        fields->fragment_pass > 2 || fields->vertex_varying_components > 8 ||
        fields->fragment_varying_components > fields->vertex_varying_components)
@@ -32,10 +41,13 @@ agx_ppp_hal300_graphics_core_pack(
       return false;
 
    /* Only the witnessed point shape: Apple's point draw exports a point
-    * size, and a point without one has no capture behind it. */
-   if (fields->object_type > AGX_PPP_HAL300_POINTS ||
+    * size, and a point without one has no capture behind it. Lines are
+    * captured on G18G only, without a point size. */
+   if (fields->object_type > AGX_PPP_HAL300_LINES ||
        (fields->object_type == AGX_PPP_HAL300_POINTS &&
-        !fields->point_size_output))
+        !fields->point_size_output) ||
+       (fields->object_type == AGX_PPP_HAL300_LINES &&
+        (chip != AGX_CHIP_G18G || fields->point_size_output)))
       return false;
 
    /* Only the interpolated colour-free shape is witnessed. */
@@ -62,7 +74,8 @@ agx_ppp_hal300_graphics_core_pack(
    const bool write = fields->depth_active && fields->depth_write;
    const bool depth_inactive = !fields->depth_active;
    const bool points = fields->object_type == AGX_PPP_HAL300_POINTS;
-   const uint32_t control = 0x00000200 | (points ? 0x04000000 : 0) |
+   const bool lines = fields->object_type == AGX_PPP_HAL300_LINES;
+   const uint32_t control = 0x00000200 | (points || lines ? 0x04000000 : 0) |
                             (depth_inactive ? 0x00040000 : 0) |
                             (fields->stencil_active ? 0x00080000 : 0);
    const uint32_t face = ((uint32_t)compare << 24) |
@@ -73,7 +86,7 @@ agx_ppp_hal300_graphics_core_pack(
     * these bits. See fragment_writes_depth in the header. */
    const uint32_t early_test =
       (fields->fragment_writes_depth ? 0x07200000 : 0x07e00000) |
-      (points ? 0x40000000 : 0);
+      (points ? 0x40000000 : 0) | (lines ? 0x10000000 : 0);
 
    struct agx_vdm_state_vertex_pipeline_pair program;
    if (!agx_vdm_state_vertex_pipeline_pair_pack(
@@ -119,8 +132,9 @@ agx_ppp_hal300_graphics_core_pack(
        * and emits this secondary record's word1 at 4e83d0. They do not
        * belong in the primary face record, unlike the HAL200 layout. */
       {0x02000062, 0x00000200 | (fields->fragment_pass << 29) |
-                      ((fields->disable_tri_merging || points) ? 0x04000000
-                                                               : 0),
+                      (fields->disable_tri_merging || points || lines
+                          ? 0x04000000
+                          : 0),
        early_test, early_test,
        fields->no_color_attachment ? 0 : 0x0001ffff},
       {0x00840002, 0, 0x80},

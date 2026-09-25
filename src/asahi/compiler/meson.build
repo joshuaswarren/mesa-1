@@ -433,6 +433,10 @@ if with_tests
   # Apple's own decoded instructions, reproduced byte-exactly. This is the
   # ground truth every hand-written AGX3 encoder is validated against, so it
   # belongs in CI rather than being run by hand.
+  #
+  # agx3d_tables.c (G18G) is built here only: nothing in the compiler selects
+  # the agx3d table yet, so it stays out of the library until a G18G packer
+  # needs it. test/agx3d_compose_corpus_vectors.c is #included by the test.
   test(
     'agx3_compose_corpus',
     executable(
@@ -441,6 +445,7 @@ if with_tests
         'agx3_compose/agx3_compose.c',
         'agx3_compose/agx3b_tables.c',
         'agx3_compose/agx3c_tables.c',
+        'agx3_compose/agx3d_tables.c',
         'test/agx3_compose_corpus_vectors.c',
         'test/test-agx3-compose-corpus.c',
       ),
@@ -899,6 +904,13 @@ if with_tests
     'agx3_refusal_corpus_parser',
     prog_python,
     args : [files('test/extract-g17p-refusals.py'), '--self-test'],
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_g18g_native_corpus',
+    prog_python,
+    args : [files('test/native/g18g/build-reference.py'), '--verify'],
     suite : ['asahi'],
   )
 

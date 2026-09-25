@@ -23,7 +23,7 @@ agx_vdm_decode_load_le32(const uint8_t *src)
 static bool
 agx_vdm_decode_is_hal300(enum agx_chip chip)
 {
-   return chip == AGX_CHIP_G17G || chip == AGX_CHIP_G17S ||
+   return agx_chip_hal300_records(chip) || chip == AGX_CHIP_G17S ||
           chip == AGX_CHIP_G17C;
 }
 

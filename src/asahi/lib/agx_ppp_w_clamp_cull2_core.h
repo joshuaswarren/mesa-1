@@ -53,7 +53,8 @@ struct agx_ppp_w_clamp_cull2_core {
  * bit 7 or to the fixed Gen7 header bit 1.
  *
  * The target allowlist contains only identities directly served by the
- * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X plugins.  This helper
+ * inspected G15G/G15X, G16G/G16X, G17P, and G17G/G17X plugins, plus G18G,
+ * whose J873 native renders carry the Gen7 default witness.  This helper
  * does not allocate PPP memory, emit the surrounding VDM pointer, lower API
  * state, submit a command, admit a device, or advertise a capability.
  */

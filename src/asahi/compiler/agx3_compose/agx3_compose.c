@@ -146,8 +146,8 @@ bool agx3_compose(const agx3_table *t, uint32_t form,
    /* Composition is used by parallel shader compilers.  Keep all mutable
     * traversal state on this invocation; the generated tables are immutable. */
    /* Generated AGX3B/C tables currently select at most 73 commands along any
-    * form path.  One slot per field leaves more than twice that headroom and
-    * fails closed if a future table exceeds it. */
+    * form path, and AGX3D at most 68.  One slot per field leaves more than
+    * twice that headroom and fails closed if a future table exceeds it. */
    struct direct_cmd direct_cmds[AGX3_MAX_FIELDS];
    ctx c = {0};
    ctx *cp = &c;

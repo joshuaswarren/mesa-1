@@ -32,8 +32,9 @@ struct agx_vdm_stream_terminate_core {
  * {0, 0xc0000000}; emitEndCommandStream advances four bytes and writes its
  * second word.
  *
- * The allowlist contains only identities directly served by those plugins;
- * G16P and G17A remain closed.  The unlocated type-7 Stream Return form also
+ * The allowlist contains only identities directly served by those plugins,
+ * plus G18G, whose J873 native VDM streams all end in 0xc0000000; G16P and
+ * G17A remain closed.  The unlocated type-7 Stream Return form also
  * remains closed.  This helper does not allocate or emit a live command,
  * submit work, or admit a device.
  */

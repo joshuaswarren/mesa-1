@@ -1,0 +1,1261 @@
+{
+  "scope": "Apple compiler references only; no GPU execution",
+  "hardware_execution": false,
+  "mesa_execution": false,
+  "toolchain": {
+    "metal": "Apple metal version 32023.921 (metalfe-32023.921.6)",
+    "metal_nt": "AIR-NT 32023.921",
+    "metal_toolchain": "27.1.266.1",
+    "host_os": "macOS 27.0 (26A428)"
+  },
+  "texts": {
+    "oracle.blend-add.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/blend-add.mtlp-json",
+      "mode": "blend-add",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 288,
+      "sha256": "5e7336f8efab5aa100344635bf13e4df6fd1d12bf7f5bbe216cbed2106b03847"
+    },
+    "oracle.blend-add.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/blend-add.mtlp-json",
+      "mode": "blend-add",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 304,
+      "sha256": "5c046c10145a3e9600d77657f1a9e7ba8b611dee2f1c39d012a3b726b7a14c36",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.blend-add.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/blend-add.mtlp-json",
+      "mode": "blend-add",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.blend-add.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/blend-add.mtlp-json",
+      "mode": "blend-add",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.color.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/color.mtlp-json",
+      "mode": "color",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 216,
+      "sha256": "9c5bc42ab27d056f68eae3bb70249f5d7c9332b8ee0a89fd978cbaf3ee5f2567"
+    },
+    "oracle.color.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/color.mtlp-json",
+      "mode": "color",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 246,
+      "sha256": "a5a02f979c4a0e7b67797c30cdae491229730fa632136b283c0ce0a64d8f429e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.color.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/color.mtlp-json",
+      "mode": "color",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.color.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/color.mtlp-json",
+      "mode": "color",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.compute-add.compute.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/compute-add.mtlp-json",
+      "mode": "compute-add",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 114,
+      "sha256": "ba277baf38abcfab9c9992b76a3ddb81f1fd6a2946936598e3cfe18191dce282"
+    },
+    "oracle.compute-add.compute.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/compute-add.mtlp-json",
+      "mode": "compute-add",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 114,
+      "sha256": "5a1d4d13999ffe4dd91b86a155d7e278119dae6c90dcbce722f81cbd9ab4e4d7",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.depth-always.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-always.mtlp-json",
+      "mode": "depth-always",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 216,
+      "sha256": "9c5bc42ab27d056f68eae3bb70249f5d7c9332b8ee0a89fd978cbaf3ee5f2567"
+    },
+    "oracle.depth-always.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-always.mtlp-json",
+      "mode": "depth-always",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 246,
+      "sha256": "a5a02f979c4a0e7b67797c30cdae491229730fa632136b283c0ce0a64d8f429e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.depth-always.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-always.mtlp-json",
+      "mode": "depth-always",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.depth-always.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-always.mtlp-json",
+      "mode": "depth-always",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.depth-less.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-less.mtlp-json",
+      "mode": "depth-less",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 216,
+      "sha256": "9c5bc42ab27d056f68eae3bb70249f5d7c9332b8ee0a89fd978cbaf3ee5f2567"
+    },
+    "oracle.depth-less.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-less.mtlp-json",
+      "mode": "depth-less",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 246,
+      "sha256": "a5a02f979c4a0e7b67797c30cdae491229730fa632136b283c0ce0a64d8f429e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.depth-less.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-less.mtlp-json",
+      "mode": "depth-less",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.depth-less.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/depth-less.mtlp-json",
+      "mode": "depth-less",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.discard.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/discard.mtlp-json",
+      "mode": "discard",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 278,
+      "sha256": "53cf0d4f2e9cd55dd94558afcf16b20722796a39c20d04599d5cc7f2b984dfe3"
+    },
+    "oracle.discard.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/discard.mtlp-json",
+      "mode": "discard",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 300,
+      "sha256": "dcdebd312fedc636733127da275f9debb6e356ed926431e42018dbbe97db5f13",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.discard.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/discard.mtlp-json",
+      "mode": "discard",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.discard.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/discard.mtlp-json",
+      "mode": "discard",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.lines.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/lines.mtlp-json",
+      "mode": "lines",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 216,
+      "sha256": "9c5bc42ab27d056f68eae3bb70249f5d7c9332b8ee0a89fd978cbaf3ee5f2567"
+    },
+    "oracle.lines.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/lines.mtlp-json",
+      "mode": "lines",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 246,
+      "sha256": "a5a02f979c4a0e7b67797c30cdae491229730fa632136b283c0ce0a64d8f429e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.lines.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/lines.mtlp-json",
+      "mode": "lines",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.lines.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/lines.mtlp-json",
+      "mode": "lines",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.msaa4.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/msaa4.mtlp-json",
+      "mode": "msaa4",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 220,
+      "sha256": "ece5bd7b0d411ac02b38707b7b9dcf9e2bfd4164021c182847e537d035a2952d"
+    },
+    "oracle.msaa4.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/msaa4.mtlp-json",
+      "mode": "msaa4",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 252,
+      "sha256": "be46ea4ca0240e9490bc6c34513549d29f38a165ea16c4efd24c983250432545",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.msaa4.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/msaa4.mtlp-json",
+      "mode": "msaa4",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.msaa4.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/msaa4.mtlp-json",
+      "mode": "msaa4",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.points.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/points.mtlp-json",
+      "mode": "points",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 216,
+      "sha256": "9c5bc42ab27d056f68eae3bb70249f5d7c9332b8ee0a89fd978cbaf3ee5f2567"
+    },
+    "oracle.points.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/points.mtlp-json",
+      "mode": "points",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 246,
+      "sha256": "a5a02f979c4a0e7b67797c30cdae491229730fa632136b283c0ce0a64d8f429e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.points.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/points.mtlp-json",
+      "mode": "points",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 260,
+      "sha256": "12a18e2bb74b6f8c79bcbd716ccb0a443c7a6c2de880b8f51d0d1aa27e618da4"
+    },
+    "oracle.points.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/points.mtlp-json",
+      "mode": "points",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 348,
+      "sha256": "8ed690c22015e699b0bfe9a1e07508dc1294e6e1c52c1d4a6b388ccf956dcd6a",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.r32f.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r32f.mtlp-json",
+      "mode": "r32f",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 138,
+      "sha256": "02563b0082e5b69a11c952ec03ae6a52253bfa189241f5a16d541b7b791525c6"
+    },
+    "oracle.r32f.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r32f.mtlp-json",
+      "mode": "r32f",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 144,
+      "sha256": "224ec508b9a1fbba6f52b7d926e07475688f24b382735bdfe92dafa35720c360",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.r32f.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r32f.mtlp-json",
+      "mode": "r32f",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.r32f.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r32f.mtlp-json",
+      "mode": "r32f",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.r8ui.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r8ui.mtlp-json",
+      "mode": "r8ui",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 170,
+      "sha256": "57eb3c6f8c2485bc740a460e4cd6950d0049a04a9a17cabeccabbd2359e68447"
+    },
+    "oracle.r8ui.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r8ui.mtlp-json",
+      "mode": "r8ui",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 172,
+      "sha256": "031b4f95e904e408957cb5e9ca0f2d244850111059957d7678858840a637f437",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.r8ui.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r8ui.mtlp-json",
+      "mode": "r8ui",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.r8ui.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/r8ui.mtlp-json",
+      "mode": "r8ui",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.stencil.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/stencil.mtlp-json",
+      "mode": "stencil",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 216,
+      "sha256": "9c5bc42ab27d056f68eae3bb70249f5d7c9332b8ee0a89fd978cbaf3ee5f2567"
+    },
+    "oracle.stencil.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/stencil.mtlp-json",
+      "mode": "stencil",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 246,
+      "sha256": "a5a02f979c4a0e7b67797c30cdae491229730fa632136b283c0ce0a64d8f429e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.stencil.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/stencil.mtlp-json",
+      "mode": "stencil",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 242,
+      "sha256": "d7502530e287b063f5b0980d777bd331bd699c802dcc4bcff0f6b373148a4f00"
+    },
+    "oracle.stencil.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/stencil.mtlp-json",
+      "mode": "stencil",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 332,
+      "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.texture-sample.fragment.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/texture-sample.mtlp-json",
+      "mode": "texture-sample",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 202,
+      "sha256": "d407dc47835e2697fb144e1abde017e316e9c2263a7013c660a0378970fba846"
+    },
+    "oracle.texture-sample.fragment.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/texture-sample.mtlp-json",
+      "mode": "texture-sample",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 218,
+      "sha256": "548deb0f38f60adae5cf28aca9ca8b963dc3abdd2d990fd0818cf816ec286341",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "oracle.texture-sample.vertex.g17g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/texture-sample.mtlp-json",
+      "mode": "texture-sample",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 198,
+      "sha256": "0d5a11309680d83556f98cf293e622cd85584f2e39a0a75e86f9018b65f8c18d"
+    },
+    "oracle.texture-sample.vertex.g18g.bin": {
+      "corpus": "oracle",
+      "source": "oracle/oracle.metal",
+      "config": "oracle/texture-sample.mtlp-json",
+      "mode": "texture-sample",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 240,
+      "sha256": "cb1c4e606f109142259031278a77011c64508c3873c8123cd479ea0d586b6f51",
+      "device_witness": [
+        "mini-26A428/sessions-20260925-a",
+        "mini-26A428/sessions-20260925-b"
+      ]
+    },
+    "probe.m5-array-sampler-reference.m5_sample_array_level_zero.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-array-sampler-reference.metal",
+      "config": "../g17g/m5-array-sampler-reference.mtlp-json",
+      "function": "m5_sample_array_level_zero",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 186,
+      "sha256": "56c8c6c600b8df62ff79ddb365d004200d3f54ddd815603b987fc787e4486cf1"
+    },
+    "probe.m5-array-sampler-reference.m5_sample_array_level_zero.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-array-sampler-reference.metal",
+      "config": "../g17g/m5-array-sampler-reference.mtlp-json",
+      "function": "m5_sample_array_level_zero",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 186,
+      "sha256": "1ebf1f7c521588e842903542c8a79903024bfa3164fc9d77439330070ce5a1a1"
+    },
+    "probe.m5-buffer-store-reference.m5_copy_indexed_buffers.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-buffer-store-reference.metal",
+      "config": "../g17g/m5-buffer-store-reference.mtlp-json",
+      "function": "m5_copy_indexed_buffers",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 134,
+      "sha256": "c8c8b0d4b4497a08fee3277e99a21fd3cd374f423fbee40e52b7bac4da974b12"
+    },
+    "probe.m5-buffer-store-reference.m5_copy_indexed_buffers.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-buffer-store-reference.metal",
+      "config": "../g17g/m5-buffer-store-reference.mtlp-json",
+      "function": "m5_copy_indexed_buffers",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 130,
+      "sha256": "cd4d6ed2f897752ce9403d3a4c8e46566cde1fb9cc6c79f813b721e4ff1ffb55"
+    },
+    "probe.m5-float-runtime-reference.m5_fma_live.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-float-runtime-reference.metal",
+      "config": "../g17g/m5-float-runtime-reference.mtlp-json",
+      "function": "m5_fma_live",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 110,
+      "sha256": "b8972f9750483a0e24a14685d54ec2603ff3e8524a17efc806714280f2cfbb13"
+    },
+    "probe.m5-float-runtime-reference.m5_fma_live.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-float-runtime-reference.metal",
+      "config": "../g17g/m5-float-runtime-reference.mtlp-json",
+      "function": "m5_fma_live",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 106,
+      "sha256": "d4df32771254d5bc41bc08d4d2c30e965c12cfec34de6ef66d36cdb9a5f2c44a"
+    },
+    "probe.m5-float-runtime-reference.m5_mul_live.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-float-runtime-reference.metal",
+      "config": "../g17g/m5-float-runtime-reference.mtlp-json",
+      "function": "m5_mul_live",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 108,
+      "sha256": "fb4baa4f66bb2bb6a013fb90b0da2154dd2da89b62f009c4eed5df6d140364e8"
+    },
+    "probe.m5-float-runtime-reference.m5_mul_live.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-float-runtime-reference.metal",
+      "config": "../g17g/m5-float-runtime-reference.mtlp-json",
+      "function": "m5_mul_live",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 104,
+      "sha256": "e3a77bc802ea8956f4b1f6a8cff7e8e9626c1733901693b882a8633f6f747b95"
+    },
+    "probe.m5-float-runtime-reference.m5_sub_live.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-float-runtime-reference.metal",
+      "config": "../g17g/m5-float-runtime-reference.mtlp-json",
+      "function": "m5_sub_live",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 106,
+      "sha256": "e48de577c1bbf90c1f581147cac7dae764e7764b0529efdf0ee6f63dfb1545f7"
+    },
+    "probe.m5-float-runtime-reference.m5_sub_live.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-float-runtime-reference.metal",
+      "config": "../g17g/m5-float-runtime-reference.mtlp-json",
+      "function": "m5_sub_live",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 104,
+      "sha256": "737f145447eb00273c013b035cce541ff8a8b76156f43419df0f37b7f6c8be21"
+    },
+    "probe.m5-gles3-half-widen-reference.m5_half_full_add.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gles3-half-widen-reference.metal",
+      "config": "../g17g/m5-gles3-half-widen-reference.mtlp-json",
+      "function": "m5_half_full_add",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 130,
+      "sha256": "344a80c6a3c373a469f481fe63a5e946055f1ccd6772a4497ff440eb77b5790d"
+    },
+    "probe.m5-gles3-half-widen-reference.m5_half_full_add.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gles3-half-widen-reference.metal",
+      "config": "../g17g/m5-gles3-half-widen-reference.mtlp-json",
+      "function": "m5_half_full_add",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 130,
+      "sha256": "ad43eece46f0694440e367a82f312fe9b1ed251a3dc68287547c14c34da4318e"
+    },
+    "probe.m5-gles3-half-widen-reference.m5_half_widen.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gles3-half-widen-reference.metal",
+      "config": "../g17g/m5-gles3-half-widen-reference.mtlp-json",
+      "function": "m5_half_widen",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 124,
+      "sha256": "cfb9e75dbe59e8c4c4808460e556f790155fb426dfb63c061b62d2420dcd5780"
+    },
+    "probe.m5-gles3-half-widen-reference.m5_half_widen.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gles3-half-widen-reference.metal",
+      "config": "../g17g/m5-gles3-half-widen-reference.mtlp-json",
+      "function": "m5_half_widen",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 122,
+      "sha256": "752ad2557cf5894a8d659dc9c125ebf4c82a3c41419796eefe8c843573940644"
+    },
+    "probe.m5-gles3-half-widen-reference.m5_half_widen_modifiers.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gles3-half-widen-reference.metal",
+      "config": "../g17g/m5-gles3-half-widen-reference.mtlp-json",
+      "function": "m5_half_widen_modifiers",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 138,
+      "sha256": "1f0d5ebebb11045c4898a90b40e7258dc48d8fc17639c50cec5397a1c9a7bc4f"
+    },
+    "probe.m5-gles3-half-widen-reference.m5_half_widen_modifiers.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gles3-half-widen-reference.metal",
+      "config": "../g17g/m5-gles3-half-widen-reference.mtlp-json",
+      "function": "m5_half_widen_modifiers",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 128,
+      "sha256": "c73eacac3d912d31963459a832943b308e469d0a2247a9b3c51fd16c53247429"
+    },
+    "probe.m5-half-select-reference.m5_half_select.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-half-select-reference.metal",
+      "config": "../g17g/m5-half-select-reference.mtlp-json",
+      "function": "m5_half_select",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 138,
+      "sha256": "85e3e67ccd71ad778ec2bd679658412910f052badc8b2f3f1cd2d4a4edb0f81a"
+    },
+    "probe.m5-half-select-reference.m5_half_select.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-half-select-reference.metal",
+      "config": "../g17g/m5-half-select-reference.mtlp-json",
+      "function": "m5_half_select",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 136,
+      "sha256": "b15c6dc83a913b52aec94c0ee28d3a8d775b7a9f1000ebc1fee326b0018a3944"
+    },
+    "probe.m5-half-select-reference.m5_half_select_nested.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-half-select-reference.metal",
+      "config": "../g17g/m5-half-select-reference.mtlp-json",
+      "function": "m5_half_select_nested",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 148,
+      "sha256": "e3fb0490ec5599f4688eefbb4126f25332040c52caf7e059225cb37f40fdfd46"
+    },
+    "probe.m5-half-select-reference.m5_half_select_nested.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-half-select-reference.metal",
+      "config": "../g17g/m5-half-select-reference.mtlp-json",
+      "function": "m5_half_select_nested",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 146,
+      "sha256": "fbd5cacad9e7d01f39d787f969acce6b54607abfb39238399edf543c370707de"
+    },
+    "probe.m5-imad-reference.m5_imad_const_live.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-imad-reference.metal",
+      "config": "../g17g/m5-imad-reference.mtlp-json",
+      "function": "m5_imad_const_live",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 108,
+      "sha256": "a47969c8743b2fe983a0ef008148caa0de370e58df840e8e2eabe89aa098bd8c"
+    },
+    "probe.m5-imad-reference.m5_imad_const_live.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-imad-reference.metal",
+      "config": "../g17g/m5-imad-reference.mtlp-json",
+      "function": "m5_imad_const_live",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 106,
+      "sha256": "88317e76df1294a2edf3c635b0d51c7ce8303580a0a54efee8e0a29d412d38ca"
+    },
+    "probe.m5-imad-reference.m5_imad_imm_live.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-imad-reference.metal",
+      "config": "../g17g/m5-imad-reference.mtlp-json",
+      "function": "m5_imad_imm_live",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 108,
+      "sha256": "1b88582951d6fcdf6343d63768571904c989a4ebe0c655b6a7b1400577d1e2b4"
+    },
+    "probe.m5-imad-reference.m5_imad_imm_live.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-imad-reference.metal",
+      "config": "../g17g/m5-imad-reference.mtlp-json",
+      "function": "m5_imad_imm_live",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 106,
+      "sha256": "9289c92e96ff432195477f12c6bc09f0ae4f40df5ef01da59e2a5f38c6dc50a3"
+    },
+    "probe.m5-imad-reference.m5_imad_reg_live.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-imad-reference.metal",
+      "config": "../g17g/m5-imad-reference.mtlp-json",
+      "function": "m5_imad_reg_live",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 108,
+      "sha256": "5a867c8d904df08fbb5b484f3cfd68df8ea5e98d0a1505cf965e9784973e2a81"
+    },
+    "probe.m5-imad-reference.m5_imad_reg_live.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-imad-reference.metal",
+      "config": "../g17g/m5-imad-reference.mtlp-json",
+      "function": "m5_imad_reg_live",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 106,
+      "sha256": "871c444fef424d9cd703ce23142c6e04a83696e645616ec00ceda1e19b3773ce"
+    },
+    "probe.m5-indexed-array-sampler-reference.m5_sample_indexed_array_level_zero.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-indexed-array-sampler-reference.metal",
+      "config": "../g17g/m5-indexed-array-sampler-reference.mtlp-json",
+      "function": "m5_sample_indexed_array_level_zero",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 222,
+      "sha256": "0f160280d39974e69dbd3d82e920e49ebd6ea4609cadd7479b5169ccdd58ded9"
+    },
+    "probe.m5-indexed-array-sampler-reference.m5_sample_indexed_array_level_zero.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-indexed-array-sampler-reference.metal",
+      "config": "../g17g/m5-indexed-array-sampler-reference.mtlp-json",
+      "function": "m5_sample_indexed_array_level_zero",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 204,
+      "sha256": "b740bb69117688cbfeefa90751f314136f78ed347cf25207c421ec1cbcc11566"
+    },
+    "probe.m5-texture-read-reference.m5_read_array_indexed.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-texture-read-reference.metal",
+      "config": "../g17g/m5-texture-read-reference.mtlp-json",
+      "function": "m5_read_array_indexed",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 188,
+      "sha256": "1330719ecfd336a562f21bac82f9fd5ecb1f434ac709c5963b08773c78a3c472"
+    },
+    "probe.m5-texture-read-reference.m5_read_array_indexed.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-texture-read-reference.metal",
+      "config": "../g17g/m5-texture-read-reference.mtlp-json",
+      "function": "m5_read_array_indexed",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 172,
+      "sha256": "6f004bb5735d062ed496f291bf830d866c58c69284186f298687ad0ca2428149"
+    },
+    "probe.m5-texture-read-reference.m5_read_array_uniform.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-texture-read-reference.metal",
+      "config": "../g17g/m5-texture-read-reference.mtlp-json",
+      "function": "m5_read_array_uniform",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 126,
+      "sha256": "6bc88c7201a6406d3ce29bb101ea0a487667133256e5d2aa79cfc6193702ef3b"
+    },
+    "probe.m5-texture-read-reference.m5_read_array_uniform.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-texture-read-reference.metal",
+      "config": "../g17g/m5-texture-read-reference.mtlp-json",
+      "function": "m5_read_array_uniform",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 132,
+      "sha256": "00914d7a1879e1427aa833f3578065ed2a64ec6042e3c7905fb27bac9c179aad"
+    }
+  }
+}

@@ -132,6 +132,7 @@ agx_vdm_index_list_direct_target_supported_inline(enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+   case AGX_CHIP_G18G:
       return true;
    default:
       return false;
@@ -141,8 +142,18 @@ agx_vdm_index_list_direct_target_supported_inline(enum agx_chip chip)
 static inline bool
 agx_vdm_index_list_direct_is_hal300_inline(enum agx_chip chip)
 {
-   return chip == AGX_CHIP_G17G || chip == AGX_CHIP_G17S ||
+   return agx_chip_hal300_records(chip) || chip == AGX_CHIP_G17S ||
           chip == AGX_CHIP_G17C;
+}
+
+/* The J873 native captures (26A428, sessions-20260925-{a,b}) contain only
+ * direct non-indexed draws. The HAL300 indexed and indirect forms are not
+ * inferred for G18G from G17G; they fail closed until captured. */
+static inline bool
+agx_vdm_index_list_indexed_or_indirect_supported_inline(enum agx_chip chip)
+{
+   return agx_vdm_index_list_direct_target_supported_inline(chip) &&
+          chip != AGX_CHIP_G18G;
 }
 
 static inline bool
@@ -150,8 +161,14 @@ agx_vdm_index_list_nonindexed_has_tail(enum agx_chip chip)
 {
    /* The hardware-qualified M5/25G76 direct triangle has 0x61c40600 and
     * four words. Do not infer the G17S/C fifth word from HAL300 alone.
-    * This witness does not establish M5 indexed or indirect encodings. */
-   return chip == AGX_CHIP_G17S || chip == AGX_CHIP_G17C;
+    * This witness does not establish M5 indexed or indirect encodings.
+    *
+    * G18G is witnessed with the fifth word: every J873 native render draws
+    * with 0x69c40000 | primitive << 8, count, instances, start and 7, e.g.
+    * 69c40600 3 1 0 7 for the colour triangle and 69c40100 6 1 6 7 for
+    * lines, against the M5 capture's 61c40600 3 1 0 for the same draw. */
+   return chip == AGX_CHIP_G17S || chip == AGX_CHIP_G17C ||
+          chip == AGX_CHIP_G18G;
 }
 
 static inline bool
@@ -204,9 +221,10 @@ agx_vdm_index_list_direct_pack_words(
    if (!agx_vdm_index_list_direct_target_supported_inline(chip) ||
        !agx_vdm_index_list_direct_primitive_supported_inline(primitive) ||
        instances == 0 ||
-       (indexed && (!agx_vdm_index_list_index_size_supported_inline(
-                       chip, index_size) ||
-                    index_buffer >= ((uint64_t)1 << 48))))
+       (indexed &&
+        (!agx_vdm_index_list_indexed_or_indirect_supported_inline(chip) ||
+         !agx_vdm_index_list_index_size_supported_inline(chip, index_size) ||
+         index_buffer >= ((uint64_t)1 << 48))))
       return false;
 
    const bool hal300 = agx_vdm_index_list_direct_is_hal300_inline(chip);
@@ -270,7 +288,7 @@ agx_vdm_index_list_indirect_pack_words(
       out->words[i] = 0;
    out->count = 0;
 
-   if (!agx_vdm_index_list_direct_target_supported_inline(chip) ||
+   if (!agx_vdm_index_list_indexed_or_indirect_supported_inline(chip) ||
        !agx_vdm_index_list_direct_primitive_supported_inline(primitive) ||
        indirect_buffer >= ((uint64_t)1 << 48) || (indirect_buffer & 3u) != 0 ||
        (indexed && (!agx_vdm_index_list_index_size_supported_inline(

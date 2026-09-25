@@ -693,6 +693,65 @@ if with_tests
   )
 
   test(
+    'asahi-g18g-capture-vectors',
+    executable(
+      'asahi-g18g-capture-vectors',
+      files(
+        'agx3_cdm_decode_core.c',
+        'agx_pbe_agx3_core.c',
+        'agx_ppp_decode_core.c',
+        'agx_ppp_hal300_depth_bias_scissor_core.c',
+        'agx_ppp_hal300_depth_stencil_core.c',
+        'agx_ppp_viewport_payload_core.c',
+        'agx_ppp_w_clamp_cull2_core.c',
+        'agx_vdm_barrier_core.c',
+        'agx_vdm_decode_core.c',
+        'agx_vdm_index_list_core.c',
+        'agx_vdm_ppp_state_core.c',
+        'agx_vdm_state_core.c',
+        'agx_vdm_state_update_core.c',
+        'agx_vdm_stream_link_core.c',
+        'agx_vdm_stream_terminate_core.c',
+        'agx_vdm_tessellate_core.c',
+        'tests/test-g18g-capture-vectors.c',
+      ),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_agx_pack, idep_mesautil],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-ppp-hal300-g18g',
+    executable(
+      'asahi-ppp-hal300-g18g',
+      files(
+        'agx3_cdm_decode_core.c',
+        'agx_pbe_agx3_core.c',
+        'agx_ppp_decode_core.c',
+        'agx_ppp_hal300_depth_bias_scissor_core.c',
+        'agx_ppp_hal300_depth_stencil_core.c',
+        'agx_ppp_hal300_graphics_core.c',
+        'agx_ppp_viewport_payload_core.c',
+        'agx_ppp_w_clamp_cull2_core.c',
+        'agx_vdm_barrier_core.c',
+        'agx_vdm_decode_core.c',
+        'agx_vdm_index_list_core.c',
+        'agx_vdm_ppp_state_core.c',
+        'agx_vdm_state_core.c',
+        'agx_vdm_state_update_core.c',
+        'agx_vdm_stream_link_core.c',
+        'agx_vdm_stream_terminate_core.c',
+        'agx_vdm_tessellate_core.c',
+        'tests/test-ppp-hal300-g18g.c',
+      ),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_agx_pack, idep_mesautil],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-agx3-cdm-direct-launch-semantic-core',
     executable(
       'asahi-agx3-cdm-direct-launch-semantic-core',

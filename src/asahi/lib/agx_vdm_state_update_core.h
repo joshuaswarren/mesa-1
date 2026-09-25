@@ -150,9 +150,11 @@ struct agx_vdm_state_update_draw_info {
  * complete AGX3 bit semantics are not independently grounded.
  *
  * The target allowlist contains only identities directly served by the
- * inspected Apple Metal plugins.  G16P and G17A remain closed despite sharing
- * neighboring command-stream generations.  This helper does not emit a live
- * command or enable lowering, scheduling, submission, or device admission.
+ * inspected Apple Metal plugins, plus G18G, whose J873 native renders emit
+ * the G17G HAL300 form byte for byte.  G16P and G17A remain closed despite
+ * sharing neighboring command-stream generations.  This helper does not emit
+ * a live command or enable lowering, scheduling, submission, or device
+ * admission.
  */
 bool agx_vdm_state_update_supported(enum agx_chip chip);
 

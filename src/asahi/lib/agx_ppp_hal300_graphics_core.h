@@ -84,12 +84,17 @@ struct agx_ppp_hal300_graphics_fields {
     * the two are OR'd rather than added: merging triangles is meaningless
     * for points and the hardware is told so either way.
     *
-    * Lines have their own oracle mode but no capture yet, so only points and
-    * triangles are admitted.
+    * Lines have their own oracle mode but no M5 capture yet, so G17G admits
+    * only points and triangles. G18G's J873 "lines" render (sessions
+    * 20260925-a/b) against its colour render in the same session moves
+    * exactly the words points move, except that the early-test words gain
+    * 0x10000000 where points set 0x40000000; lines export no point size and
+    * keep the colour render's UVS record. Lines are admitted on G18G alone.
     */
    enum agx_ppp_hal300_object_type {
       AGX_PPP_HAL300_TRIANGLES = 0,
       AGX_PPP_HAL300_POINTS = 1,
+      AGX_PPP_HAL300_LINES = 2,
    } object_type;
    /* Vertex exports and fragment interpolation are independent. A fragment
     * shader may leave the vertex shader's output unused. Counts are scalar
@@ -150,6 +155,11 @@ struct agx_ppp_hal300_graphics_fields {
     * write, witnessed for the always/replace and equal/keep pairs the
     * capture matrix drew. Only those two operation encodings are grounded,
     * so a caller asking for another one is refused.
+    *
+    * Not modelled: the always/replace draw's two face words carry bit 0
+    * (0x07200f01 where this packer writes 0x07200f00), on M5/25G76 and on
+    * the J873 alike, while the equal/keep draw's do not. It looks like a
+    * stencil-write enable but has no field here yet.
     */
    uint32_t front_stencil;
    uint32_t back_stencil;

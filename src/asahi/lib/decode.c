@@ -263,6 +263,11 @@ agxdecode_chip_from_params(const decoder_params *params)
       case 'C': return AGX_CHIP_G17C;
       default: return AGX_CHIP_UNKNOWN;
       }
+   case 18:
+      switch (params->gpu_variant) {
+      case 'G': return AGX_CHIP_G18G;
+      default: return AGX_CHIP_UNKNOWN;
+      }
    default:
       return AGX_CHIP_UNKNOWN;
    }
@@ -285,6 +290,7 @@ agxdecode_chip_uses_agx3(enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+   case AGX_CHIP_G18G:
       return true;
    default:
       return false;
@@ -308,6 +314,7 @@ agxdecode_chip_name(enum agx_chip chip)
    case AGX_CHIP_G17G: return "G17G";
    case AGX_CHIP_G17S: return "G17S";
    case AGX_CHIP_G17C: return "G17C";
+   case AGX_CHIP_G18G: return "G18G";
    default: return "unknown";
    }
 }

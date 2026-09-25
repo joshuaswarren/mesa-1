@@ -121,6 +121,7 @@ agx_vdm_state_update_is_hal300(enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+   case AGX_CHIP_G18G:
       return true;
    default:
       return false;

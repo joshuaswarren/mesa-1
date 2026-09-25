@@ -69,6 +69,13 @@ agx_chip_from_params(const struct drm_asahi_params_global *params)
       case 'C': return AGX_CHIP_G17C;
       default: return AGX_CHIP_UNKNOWN;
       }
+   case 18:
+      /* Only the M6 base part has been observed. G18M and G19P share its
+       * shader encoding but nothing else about them is known. */
+      switch (params->gpu_variant) {
+      case 'G': return AGX_CHIP_G18G;
+      default: return AGX_CHIP_UNKNOWN;
+      }
    default:
       return AGX_CHIP_UNKNOWN;
    }
@@ -98,6 +105,7 @@ agx_chip_isa(enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+   case AGX_CHIP_G18G:
       return AGX_ISA_AGX3;
 
    case AGX_CHIP_UNKNOWN:
@@ -144,6 +152,10 @@ agx_chip_isa_encoding(enum agx_chip chip)
    case AGX_CHIP_G17C:
       return AGX_ISA_ENCODING_AGX3C;
 
+   /* Apple's "g18g-encodings" table, shared with G18M and G19P. */
+   case AGX_CHIP_G18G:
+      return AGX_ISA_ENCODING_AGX3D;
+
    case AGX_CHIP_UNKNOWN:
    default:
       return AGX_ISA_ENCODING_UNKNOWN;
@@ -177,6 +189,11 @@ agx_chip_command_stream_generation(enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+      return AGX_CS_GENERATION_HAL300;
+
+   /* The record format, not the kernel HAL: the J873 native captures decode
+    * and repack under the HAL300 codecs. See agx_chip_hal300_records. */
+   case AGX_CHIP_G18G:
       return AGX_CS_GENERATION_HAL300;
 
    /* The A16 compiler target is known to be AGX2, but its command-stream
@@ -216,6 +233,12 @@ agx_chip_descriptor_generation(enum agx_chip chip)
    case AGX_CHIP_G17C:
       return AGX_DESCRIPTOR_GENERATION_10;
 
+   /* The J873 colour render's PBE descriptor (ffe40a02 00007f80 00005800
+    * 0003f010) and its texture descriptor (f6880a02 0007f80f 00005800
+    * 000fc010) unpack as Gen10 and repack byte-identically. */
+   case AGX_CHIP_G18G:
+      return AGX_DESCRIPTOR_GENERATION_10;
+
    case AGX_CHIP_G15P:
    case AGX_CHIP_UNKNOWN:
    default:
@@ -248,6 +271,14 @@ agx_chip_sampler_generation(enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+      return AGX_SAMPLER_GENERATION_GEN5;
+
+   /* The J873 texture-sample render's sampler (Metal's default descriptor
+    * with nearest filters and clamp-to-edge) is 000f0000 00000780 at
+    * element 2 of a 32-byte heap. It repacks byte-identically as Gen5 and
+    * not as either Gen4 layout, whose maximum-LOD clamp of 14.0 turns the
+    * 15.0 there into 000e0000. */
+   case AGX_CHIP_G18G:
       return AGX_SAMPLER_GENERATION_GEN5;
 
    case AGX_CHIP_G15P:
@@ -298,6 +329,12 @@ agx_chip_submission_model(enum agx_chip chip)
    case AGX_CHIP_G17C:
       return AGX_SUBMISSION_MODEL_SKSM;
 
+   /* The only channel classes of the 26A428 mac18g kernelcache's
+    * AGX::PI_400::G::A0 accelerator are 3DChannelSKSM, TAChannelSKSM and
+    * CLChannelSKSM; there is no classic queue. */
+   case AGX_CHIP_G18G:
+      return AGX_SUBMISSION_MODEL_SKSM;
+
    /* No corresponding accelerator class was present in the Mac corpus. */
    case AGX_CHIP_G15P:
    case AGX_CHIP_G16P:
@@ -316,6 +353,21 @@ agx_chip_codegen_supported(enum agx_chip chip)
     *
     *   AGX2         -> agx_pack.c            (AGX2.xml)
     *   AGX3b/AGX3c  -> agx3_pack_binary.c    (agx3_compose/, AGX3{b,c}.xml)
+    *
+    * AGX3d (G18G) has an encoder table (agx3_compose/agx3d_tables.c, which
+    * reproduces every instruction of the committed G18G witness texts), and
+    * agx3_binder encodes it -- in Apple's form order, and only for callers
+    * that ask with AGX3_BIND_APPLE_ORDER. The core encoders admit AGX3D for
+    * a first, witness-grounded instruction catalogue (the glxgears-shaped
+    * vertex and flat-colour fragment programs: SR read, vertex fetch, float
+    * ALU, ldimm, uvsw, ldcf, f32interp, fltnorm, pixwait/pixrel, lstcol,
+    * end), where the G17G field vector is the G18G one or differs by a
+    * witnessed constant (lddev f87 = 2, ldcfr f38 = 5 and f49 = 2). Every
+    * other core encoder refuses AGX3D rather than hand it agx3b or agx3c
+    * fields, and agx3_pack_binary refuses every AGX3D shader outright: its
+    * program-level pieces (end-of-tile and background programs, one-slot
+    * wait codes, Apple's G18G float-varying epilogue) are not grounded. So
+    * AGX3D stays out of this list.
     *
     * The AGX3 side is a real encoder, not a decoder: agx3_compose replays
     * 1,494 corpus instructions byte-exactly (test-agx3-compose-corpus.c), and
@@ -453,6 +505,7 @@ agx_chip_name(enum agx_chip chip)
    case AGX_CHIP_G17G: return "G17G";
    case AGX_CHIP_G17S: return "G17S";
    case AGX_CHIP_G17C: return "G17C";
+   case AGX_CHIP_G18G: return "G18G";
    case AGX_CHIP_UNKNOWN:
    default: return "unknown";
    }
@@ -465,6 +518,7 @@ agx_isa_encoding_name(enum agx_isa_encoding encoding)
    case AGX_ISA_ENCODING_AGX2: return "agx2";
    case AGX_ISA_ENCODING_AGX3B: return "agx3b";
    case AGX_ISA_ENCODING_AGX3C: return "agx3c";
+   case AGX_ISA_ENCODING_AGX3D: return "agx3d";
    case AGX_ISA_ENCODING_UNKNOWN:
    default: return "unknown";
    }
