@@ -225,6 +225,21 @@ agx_chip_hal300_records(enum agx_chip chip)
 }
 
 /*
+ * Whether the Gallium driver takes its M5 paths on this chip: draw admission,
+ * native descriptors, the VDM/PPP streams and the M5 kernel contract. G18G
+ * does: its records and texture/PBE descriptors are byte-identical to M5's
+ * on every J873 native capture (agx_chip_hal300_records), its code is G17G
+ * code re-encoded (agx_device_key::emit_agx3d), and the chip-specific deltas
+ * (the tailed non-indexed Index List, the point-size rule) stay keyed on the
+ * chip inside the record packers.
+ */
+static inline bool
+agx_chip_m5_paths(enum agx_chip chip)
+{
+   return chip == AGX_CHIP_G17G || chip == AGX_CHIP_G18G;
+}
+
+/*
  * Whether an encoding is one of the AGX3 tables (agx3b, agx3c or agx3d).
  *
  * For compiler decisions about the AGX3 instruction set as such -- which IR
@@ -338,6 +353,8 @@ bool agx_params_driver_supported(
 /* Exact M5 kernel contract for explicitly opted-in driver integration.
  * This is not a declaration of a complete or conformant device path. */
 bool agx_params_m5_bringup_supported(
+   const struct drm_asahi_params_global *params);
+bool agx_params_g18g_bringup_supported(
    const struct drm_asahi_params_global *params);
 
 /* Exact product name when the chip identity maps to one unambiguous SoC.

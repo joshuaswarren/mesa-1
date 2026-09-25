@@ -902,7 +902,15 @@ agx_open_device(void *memctx, struct agx_device *dev)
       agx_params_m5_bringup_supported(&dev->params);
    if (m5_bringup)
       fprintf(stderr, "Experimental M5 HAL300 integration enabled; general rendering is unqualified\n");
-   if (!agx_params_driver_supported(&dev->params) && !m5_bringup) {
+   /* M6: the G18G records are the M5 ones (agx_chip_hal300_records) and its
+    * code is G17G code re-encoded as agx3d (agx_gather_device_key). */
+   const bool g18g_bringup =
+      debug_get_bool_option("ASAHI_G18G_BRINGUP", false) &&
+      agx_params_g18g_bringup_supported(&dev->params);
+   if (g18g_bringup)
+      fprintf(stderr, "Experimental M6 G18G integration enabled (M5 paths, agx3d code); rendering is unqualified\n");
+   if (!agx_params_driver_supported(&dev->params) && !m5_bringup &&
+       !g18g_bringup) {
       if (dev->chip == AGX_CHIP_UNKNOWN) {
          fprintf(stderr,
                  "Unsupported Apple GPU architecture G%u (variant 0x%x, %u "
@@ -1061,7 +1069,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * ASAHI_G17P_USC_BASE below overrides this for further experiments only. */
    if (dev->chip == AGX_CHIP_G17P)
       dev->shader_base = AGX_G17P_USC_WINDOW_BASE;
-   else if (dev->chip == AGX_CHIP_G17G)
+   else if (agx_chip_m5_paths(dev->chip))
       dev->shader_base = AGX_M5_SHADER_BASE;
 
    /* G17P launch-level bring-up controls.
@@ -1146,7 +1154,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * directly representable, with no per-run alias option.
     */
    const bool heap_below_usc = dev->chip == AGX_CHIP_G17P ||
-                               dev->chip == AGX_CHIP_G17G;
+                               agx_chip_m5_paths(dev->chip);
 
    /*
     * Start the low heap as high as it can go rather than at the reservation.
@@ -1195,7 +1203,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
       .kernel_start = dev->params.vm_end - kernel_size,
       .kernel_end = dev->params.vm_end,
    };
-   if (dev->chip == AGX_CHIP_G17G) {
+   if (agx_chip_m5_paths(dev->chip)) {
       struct agx_m5_va_layout layout;
       if (!agx_m5_va_layout(dev->params.vm_start, dev->params.vm_end,
                             dev->params.vm_kernel_min_size, dev->shader_base,
@@ -1211,7 +1219,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    /* G17P and M5 keep data and sparse aliases below the compact VDM and
     * absolute USC texture/sampler pointer limits. Other chips retain the
     * kernel-reported user limit. */
-   const uint64_t user_limit = dev->chip == AGX_CHIP_G17G
+   const uint64_t user_limit = agx_chip_m5_paths(dev->chip)
                                  ? AGX_M5_DATA_END
                                  : heap_below_usc ? AGX_G17P_USER_LIMIT
                                                   : vm_create.kernel_start;
@@ -1453,7 +1461,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * needs allocator-owned storage: the legacy fixed address overlaps its
     * compact, driver-owned TA arena. */
    const bool dynamic_printf = dev->chip == AGX_CHIP_G17P ||
-                               dev->chip == AGX_CHIP_G17G;
+                               agx_chip_m5_paths(dev->chip);
    struct agx_bo *bo =
       dynamic_printf
          ? agx_bo_create(dev, LIBAGX_PRINTF_BUFFER_SIZE, 0, AGX_BO_WRITEBACK,
@@ -1499,7 +1507,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
     * dword terminates the chain, so it is a well-formed empty container
     * rather than a blank page.
     */
-   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
+   if (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) {
       const size_t usc_base_size = AIL_PAGESIZE;
 
       simple_mtx_lock(&dev->vma_lock);
@@ -1527,7 +1535,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
       }
 
       memset(map, 0, usc_base_size);
-      if (dev->chip == AGX_CHIP_G17G) {
+      if (agx_chip_m5_paths(dev->chip)) {
          if (!agx3_build_g17g_container_lead(map, usc_base_size))
             return false;
       } else {
@@ -1813,10 +1821,15 @@ agx_gather_device_key(struct agx_device *dev)
                     dev->params.num_clusters_total > 1) ||
                    dev->params.num_dies > 1;
 
+   /* G18G compiles as G17G and re-encodes as agx3d; see emit_agx3d. */
+   const bool g18g = dev->chip == AGX_CHIP_G18G;
+   const enum agx_chip chip = g18g ? AGX_CHIP_G17G : dev->chip;
+
    return (struct agx_device_key){
-      .chip = dev->chip,
-      .encoding = agx_chip_isa_encoding(dev->chip),
+      .chip = chip,
+      .encoding = agx_chip_isa_encoding(chip),
       .needs_g13x_coherency = u_tristate_make(g13x_coh),
       .soft_fault = agx_has_soft_fault(dev),
+      .emit_agx3d = g18g,
    };
 }

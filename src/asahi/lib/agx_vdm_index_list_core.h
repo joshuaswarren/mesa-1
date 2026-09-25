@@ -146,14 +146,23 @@ agx_vdm_index_list_direct_is_hal300_inline(enum agx_chip chip)
           chip == AGX_CHIP_G17C;
 }
 
-/* The J873 native captures (26A428, sessions-20260925-{a,b}) contain only
- * direct non-indexed draws. The HAL300 indexed and indirect forms are not
- * inferred for G18G from G17G; they fail closed until captured. */
+/* Sessions 20260925-a and -b of the J873 native captures (26A428) contain
+ * only direct non-indexed draws; sessions -g1 and -g2 add direct indexed ones
+ * (indexed-u16, indexed-strip, quad-strip, gears). Those are Mesa's HAL300
+ * direct indexed words byte for byte, e.g. 69f20600 00018300 3 1 0 7 0000000f
+ * 1 for three u16 triangles and 69f30900 ... for a restarted u16 strip. No
+ * indirect draw is captured, so the indirect forms still fail closed. */
 static inline bool
 agx_vdm_index_list_indexed_or_indirect_supported_inline(enum agx_chip chip)
 {
    return agx_vdm_index_list_direct_target_supported_inline(chip) &&
           chip != AGX_CHIP_G18G;
+}
+
+static inline bool
+agx_vdm_index_list_direct_indexed_supported_inline(enum agx_chip chip)
+{
+   return agx_vdm_index_list_direct_target_supported_inline(chip);
 }
 
 static inline bool
@@ -222,7 +231,7 @@ agx_vdm_index_list_direct_pack_words(
        !agx_vdm_index_list_direct_primitive_supported_inline(primitive) ||
        instances == 0 ||
        (indexed &&
-        (!agx_vdm_index_list_indexed_or_indirect_supported_inline(chip) ||
+        (!agx_vdm_index_list_direct_indexed_supported_inline(chip) ||
          !agx_vdm_index_list_index_size_supported_inline(chip, index_size) ||
          index_buffer >= ((uint64_t)1 << 48))))
       return false;

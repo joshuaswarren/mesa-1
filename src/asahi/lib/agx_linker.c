@@ -48,7 +48,7 @@ agx_fs_epilog_apply_device_policy(enum agx_chip chip,
    /* Both AGX3 tile interfaces move packed bytes. The RGB transfer function
     * belongs around blending; alpha remains linear. Packed float lowering
     * is a separate capability and remains confined to G17P. */
-   key->lower_srgb = g17p || chip == AGX_CHIP_G17G;
+   key->lower_srgb = g17p || agx_chip_m5_paths(chip);
    key->lower_r11g11b10 = g17p;
 }
 
@@ -205,7 +205,7 @@ agx3_build_container(enum agx_chip chip, uint8_t *image, size_t code_size, bool 
                      bool sampled_fragment)
 {
    memset(image, 0, agx3_container_size(code_size));
-   if (chip == AGX_CHIP_G17G) {
+   if (agx_chip_m5_paths(chip)) {
       bool built = agx3_build_g17g_container_lead(image, AGX3_CONTAINER_LEAD);
       assert(built);
       (void)built;
@@ -218,15 +218,19 @@ agx3_build_container(enum agx_chip chip, uint8_t *image, size_t code_size, bool 
                     ALIGN_POT(code_size, 64));
 
    uint8_t *constant = image + AGX3_CONTAINER_LEAD + AGX3_CONTAINER_BLOCK_HDR;
+   if (chip == AGX_CHIP_G18G) {
+      agx3_build_container_stop_program_agx3d(constant);
+      return;
+   }
    agx3_build_container_constant_program(constant,
-                                          fragment || chip == AGX_CHIP_G17G,
-                                          sampled_fragment && chip != AGX_CHIP_G17G);
+                                          fragment || agx_chip_m5_paths(chip),
+                                          sampled_fragment && !agx_chip_m5_paths(chip));
 }
 
 static bool
 agx3_uses_code_container(const struct agx_device *dev)
 {
-   return dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G;
+   return dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip);
 }
 
 bool
@@ -238,7 +242,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    /* These literal loop fragments are AGX2 machine code. G17P exposes only
     * one sample and its Vulkan path folds sample shading before split-FS
     * lowering; fail closed if a caller ever bypasses that canonicalization. */
-   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) &&
+   if ((dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) &&
        nr_samples_shaded) {
       fprintf(stderr,
               "agx_fast_link: external sample loop is not AGX3 machine code\n");
@@ -346,7 +350,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
 
    assert(size > 0 && "must stop");
 
-   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) &&
+   if ((dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) &&
        (main->info.stage == MESA_SHADER_VERTEX ||
         main->info.stage == MESA_SHADER_FRAGMENT ||
         main->info.stage == MESA_SHADER_COMPUTE) &&

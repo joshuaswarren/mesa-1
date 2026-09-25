@@ -8,6 +8,7 @@
 #include "agx_compile.h"
 #include "asahi/clc/asahi_clc.h"
 #include "asahi/isa/disasm.h"
+#include "agx3_transcode.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
 #include "compiler/nir/nir_builder.h"
@@ -8639,6 +8640,19 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       if (!agx3_pack_binary(ctx, binary)) {
          if (agx_compiler_debug & AGX_DBG_REFUSE)
             fprintf(stderr, "AGX3 refused shader during binary packing\n");
+         binary->size = initial_binary_size;
+         ralloc_free(ctx);
+         return false;
+      }
+
+      /* G18G: the G17G code just packed, re-encoded as agx3d. */
+      const char *why;
+      unsigned at;
+      if (ctx->key->dev.emit_agx3d &&
+          !agx3_transcode_agx3d(binary, offset, &why, &at)) {
+         if (agx_compiler_debug & AGX_DBG_REFUSE)
+            fprintf(stderr, "G18G refused shader: %s at agx3c +0x%x\n", why,
+                    at);
          binary->size = initial_binary_size;
          ralloc_free(ctx);
          return false;

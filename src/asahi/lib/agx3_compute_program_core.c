@@ -148,7 +148,7 @@ agx3_native_compute_launch_pack(
 
    memset(packed, 0, AGX3_CDM_DIRECT_LAUNCH_SIZE);
    if (!program || !grid ||
-       (program->chip != AGX_CHIP_G17P && program->chip != AGX_CHIP_G17G) ||
+       (program->chip != AGX_CHIP_G17P && !agx_chip_m5_paths(program->chip)) ||
        program->program_va == 0 ||
        program->program_va > UINT64_C(0xffffffffffff) ||
        (program->program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
@@ -267,7 +267,7 @@ agx3_g17g_native_compute_dispatch_append(
    const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
    struct agx3_compute_dispatch_sink *sink)
 {
-   if (!program || program->chip != AGX_CHIP_G17G ||
+   if (!program || !agx_chip_m5_paths(program->chip) ||
        !program->g17g_native_compute_live_bound || !grid || !sink ||
        !sink->data || sink->length > sink->capacity ||
        AGX3_G17G_NATIVE_COMPUTE_DISPATCH_SIZE > sink->capacity - sink->length)

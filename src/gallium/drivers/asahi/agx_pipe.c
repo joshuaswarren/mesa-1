@@ -988,7 +988,7 @@ agx_transfer_map(struct pipe_context *pctx, struct pipe_resource *resource,
    agx_prepare_for_map(ctx, rsrc, level, usage, box, staging_blit);
 
    struct agx_device *dev = agx_device(pctx->screen);
-   const bool trace_read = dev->chip == AGX_CHIP_G17G &&
+   const bool trace_read = agx_chip_m5_paths(dev->chip) &&
                           (dev->debug & AGX_DBG_FAULTTRACE) &&
                           (usage & PIPE_MAP_READ);
    if (trace_read) {
@@ -1447,7 +1447,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
    /* G17P treats an absent ZLS allocation as an inactive depth surface.  Its
     * native render command keeps the clear register at 1.0 in that state;
     * zero is only a real clear value when depth or stencil storage exists. */
-   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) && !zres && !sres)
+   if ((dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) && !zres && !sres)
       c->isp_bgobjdepth = fui(1.0f);
 
    /* Neither AGX3 generation publishes the ISP's depth/stencil dimensions the
@@ -1456,7 +1456,7 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
     * Gallium path had been publishing G17P's 15-bit pair on G17G, which the
     * kernel's M5 depth admission refused as soon as a render actually carried
     * a depth attachment. */
-   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
+   if (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) {
       c->isp_zls_pixels =
          agx_zls_pixels(dev->chip, c->width_px, c->height_px, c->depth.base,
                         c->depth.comp_base, c->stencil.base,
@@ -2204,12 +2204,13 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_dual_source_render_targets = 1;
 
    caps->occlusion_query = true;
-   /* The experimental M5 kernel does not map timestamp objects yet. Timer
+   /* The experimental M5 and M6 kernels do not map timestamp objects yet. Timer
     * queries are optional for GL 2.x and GLES 3.0; do not advertise them or
     * require their unsupported buffer binding to create an ordinary context.
     */
    const bool timestamps =
-      !agx_params_m5_bringup_supported(&agx_device(pscreen)->params);
+      !agx_params_m5_bringup_supported(&agx_device(pscreen)->params) &&
+      !agx_params_g18g_bringup_supported(&agx_device(pscreen)->params);
    caps->query_timestamp = timestamps;
    caps->query_time_elapsed = timestamps;
    caps->query_so_overflow = true;

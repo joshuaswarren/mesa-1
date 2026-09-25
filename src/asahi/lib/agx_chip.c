@@ -461,6 +461,21 @@ agx_params_m5_bringup_supported(const struct drm_asahi_params_global *params)
           params->gpu_hal_generation == DRM_ASAHI_GPU_HAL_300;
 }
 
+/*
+ * The M6 bring-up contract: the J873's G18G (chip 0x8152, one die, USC 3).
+ * The shim's G18G profile and the J873 G18G kernel driver both publish HAL
+ * 300 until the uAPI has a PI_400 value. Like the M5 contract above, it is
+ * honoured only with ASAHI_G18G_BRINGUP set; see agx_open_device.
+ */
+bool
+agx_params_g18g_bringup_supported(const struct drm_asahi_params_global *params)
+{
+   return params && agx_chip_from_params(params) == AGX_CHIP_G18G &&
+          params->chip_id == 0x8152 && params->num_dies == 1 &&
+          params->usc_generation == AGX_ISA_AGX3 &&
+          params->gpu_hal_generation == DRM_ASAHI_GPU_HAL_300;
+}
+
 bool
 agx_chip_uses_legacy_precompiled_programs(enum agx_chip chip)
 {

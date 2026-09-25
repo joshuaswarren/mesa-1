@@ -356,6 +356,14 @@ struct agx_device_key {
     * kernel, but that's functionally a hardware feature.
     */
    bool soft_fault;
+
+   /*
+    * Re-encode the finished code as agx3d (G18G). The rest of the key then
+    * describes G17G: G18G executes the G17G instruction set, so the compiler
+    * runs exactly as for M5 and agx3_transcode_agx3d() re-encodes each
+    * function's code after packing. See agx3_transcode.c for the evidence.
+    */
+   bool emit_agx3d;
 };
 
 struct agx_shader_key {

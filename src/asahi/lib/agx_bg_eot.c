@@ -108,7 +108,7 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
    if (!image)
       return false;
 
-   if (cache->dev->chip == AGX_CHIP_G17G) {
+   if (agx_chip_m5_paths(cache->dev->chip)) {
       if (!agx3_build_g17g_container_lead(image, lead_size)) {
          free(image);
          return false;
@@ -116,9 +116,14 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
    } else
       agx3_build_container_lead(image);
    const uint8_t *text = bin->binary;
-   const bool built = agx3_build_code_block(
+   bool built = agx3_build_code_block(
       image + lead_size, block_size, text + main_offset, bin->info.main_size,
       main_span, main_offset ? text : NULL, true);
+   /* G18G: the compiled text is agx3d already; only the synthesized stop
+    * program is agx3c. */
+   if (built && !main_offset && cache->dev->chip == AGX_CHIP_G18G)
+      agx3_build_container_stop_program_agx3d(
+         image + lead_size + AGX3_CODE_BLOCK_HEADER_SIZE);
    const uint64_t allocation = built
       ? agx_pool_upload_aligned_with_bo(&cache->pool, image, size, 128,
                                          &res->bo)
@@ -220,7 +225,7 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
       NIR_PASS(_, shader, agx_nir_lower_tilebuffer, tib, NULL, &bindless_base,
                NULL, NULL, false,
                cache->dev->chip == AGX_CHIP_G17P ||
-                  cache->dev->chip == AGX_CHIP_G17G,
+                  agx_chip_m5_paths(cache->dev->chip),
                cache->dev->chip == AGX_CHIP_G17P);
       NIR_PASS(_, shader, agx_nir_lower_monolithic_msaa, tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_multisampled_image_store);
@@ -269,7 +274,7 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 
    res->info = bin.info;
    if (cache->dev->chip == AGX_CHIP_G17P ||
-       cache->dev->chip == AGX_CHIP_G17G) {
+       agx_chip_m5_paths(cache->dev->chip)) {
       if (!agx_g17p_upload_bg_eot(cache, &bin, res)) {
          free(bin.binary);
          ralloc_free(shader);
@@ -345,7 +350,7 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
          cache->dev->chip == AGX_CHIP_G17P ? key->tib.nr_samples : 0,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P ||
-                     cache->dev->chip == AGX_CHIP_G17G,
+                     agx_chip_m5_paths(cache->dev->chip),
    };
 
    /* The multi-target background protocol is keyed, not inferred: without
@@ -371,7 +376,7 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
       nir_store_output(
          &b, build_background_op(&b, key->op[rt], rt, nr, source_msaa, layered,
                                  cache->dev->chip == AGX_CHIP_G17P ||
-                                 cache->dev->chip == AGX_CHIP_G17G),
+                                 agx_chip_m5_paths(cache->dev->chip)),
          nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(nr),
          .src_type = nir_type_uint32,
          .io_semantics.location = FRAG_RESULT_DATA0 + rt,
@@ -387,7 +392,7 @@ static struct agx_bg_eot_shader *
 agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
                              struct agx_bg_eot_key *key)
 {
-   const bool g17g = cache->dev->chip == AGX_CHIP_G17G;
+   const bool g17g = agx_chip_m5_paths(cache->dev->chip);
    if (g17g) {
       /* The compiler substitutes Apple's 78-byte native text for the G17G RT0
        * store, and it has that text for a U8NORM imageblock only, so the gate

@@ -11,6 +11,7 @@
 #include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx3_graphics_program.h"
+#include "asahi/compiler/agx3_transcode.h"
 #include "asahi/compiler/agx_nir.h"
 #include "asahi/genxml/agx_pack.h"
 #include "asahi/layout/layout.h"
@@ -124,7 +125,7 @@ static bool
 agx_gallium_ppp_record(enum agx_chip chip, uint64_t address, uint32_t words,
                         struct agx_vdm_ppp_state_core *out)
 {
-   if (chip == AGX_CHIP_G17G && !agx_m5_vdm_compact(address, &address))
+   if (agx_chip_m5_paths(chip) && !agx_m5_vdm_compact(address, &address))
       return false;
    return agx_vdm_ppp_state_core_pack(chip, address, words, out);
 }
@@ -137,7 +138,7 @@ agx_gallium_ppp_fini(struct agx_batch *batch, uint8_t **out,
       return false;
 
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
-   if (dev->chip == AGX_CHIP_G17G) {
+   if (agx_chip_m5_paths(dev->chip)) {
       struct agx_ppp_update compact = *ppp;
       if (!agx_m5_vdm_compact(ppp->gpu_base, &compact.gpu_base))
          return false;
@@ -761,6 +762,64 @@ agx_native_descriptor_rejected(struct agx_batch *batch, const char *operation)
       mesa_loge("asahi: %s has no proven native descriptor encoding on %s",
                 operation, agx_chip_name(dev->chip));
    batch->native_rejected = true;
+}
+
+/* The M5 Ioto generators take the chip they emit code for. G18G runs them as
+ * G17G and re-encodes their output; see agx_g18g_reencode_program. */
+static inline enum agx_chip
+agx_ioto_chip(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G18G ? AGX_CHIP_G17G : dev->chip;
+}
+
+/* Room for a program's agx3d re-encoding: twice the G17G bound, which covers
+ * every witness (the largest growth is f32mul's 8-byte form becoming 16).
+ * The callers still refuse a program longer than what they allocated. */
+static inline size_t
+agx_ioto_capacity(const struct agx_device *dev, size_t g17g_capacity)
+{
+   return dev->chip == AGX_CHIP_G18G ? 2 * g17g_capacity : g17g_capacity;
+}
+
+/* G18G: re-encode a generated M5 Ioto program as agx3d in place. The G17G
+ * programs embed no address of their own (agx_ioto_g17g_* only validate
+ * program_va), so the longer agx3d text stays position-independent. */
+static bool
+agx_g18g_reencode_program(const struct agx_device *dev,
+                          struct agx3_g17p_graphics_program *program,
+                          bool api_program, unsigned shader_gprs)
+{
+   if (dev->chip != AGX_CHIP_G18G)
+      return true;
+
+   const struct agx3_transcode_ioto ioto = {
+      .api_program = api_program,
+      .shader_gprs = shader_gprs,
+   };
+
+   struct util_dynarray code;
+   util_dynarray_init(&code, NULL);
+   memcpy(util_dynarray_grow_bytes(&code, 1, program->length), program->bytes,
+          program->length);
+   const char *why = NULL;
+   unsigned at = 0;
+   const bool ok = agx3_transcode_agx3d_ioto(&code, 0, &ioto, &why, &at) &&
+                   code.size <= sizeof(program->bytes);
+   if (ok) {
+      memcpy(program->bytes, code.data, code.size);
+      program->length = code.size;
+   } else {
+      mesa_loge("asahi: G18G Ioto program not re-encoded: %s at +0x%x",
+                why ? why : "longer than the program buffer", at);
+      if (dev->debug & AGX_DBG_FAULTTRACE) {
+         fprintf(stderr, "G18G_IOTO_REFUSED length=%u data=", program->length);
+         for (unsigned i = 0; i < program->length; ++i)
+            fprintf(stderr, "%02x", program->bytes[i]);
+         fputc('\n', stderr);
+      }
+   }
+   util_dynarray_fini(&code);
+   return ok;
 }
 
 static struct asahi_bg_eot
@@ -1825,7 +1884,7 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
         * including geometry/tessellation lowered to compute: `stage` still
         * names their original API stage here. */
        .no_preamble = dev->chip == AGX_CHIP_G17P ||
-                       (dev->chip == AGX_CHIP_G17G &&
+                       (agx_chip_m5_paths(dev->chip) &&
                         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_FRAGMENT ||
                          stage == MESA_SHADER_COMPUTE)),
    };
@@ -1852,7 +1911,7 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, agx_nir_lower_sysvals, stage, true,
                texture_descriptor_size);
       compiled->g17p_texture_resources =
-         (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) &&
+         (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) &&
          (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_COMPUTE) &&
          (BITSET_LAST_BIT(nir->info.textures_used) != 0 ||
           BITSET_LAST_BIT(nir->info.images_used) != 0);
@@ -2048,7 +2107,7 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          unsigned rt_spill = rt_spill_base;
          NIR_PASS(_, nir, agx_nir_lower_tilebuffer, &tib, NULL, &rt_spill, NULL,
                   &translucent, false,
-                  dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G,
+                  dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip),
                   dev->chip == AGX_CHIP_G17P);
       }
 
@@ -2312,11 +2371,11 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
    struct agx_lower_bindings_options binding_options = {
       .uses_bindless_samplers = &so->uses_bindless_samplers,
       .g17p_plain_txf_crawl = dev->chip == AGX_CHIP_G17P,
-      .table_index_crawls = dev->chip == AGX_CHIP_G17G,
+      .table_index_crawls = agx_chip_m5_paths(dev->chip),
       .g17p_native_sampler_handles =
-         dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G,
+         dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip),
       .bindful_sampler_count =
-         dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G
+         dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)
             ? AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS
             : 16,
    };
@@ -2976,7 +3035,7 @@ agx_update_gs(struct agx_context *ctx, const struct pipe_draw_info *info,
    struct agx_device *dev = agx_device(ctx->base.screen);
    struct agx_uncompiled_shader *fs = ctx->stage[MESA_SHADER_FRAGMENT].shader;
    struct asahi_gs_shader_key key = {0};
-   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
+   if (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) {
       key.link_uvs = true;
       if (fs) {
          key.flat_varyings = fs->info.inputs_flat_shaded;
@@ -3736,7 +3795,7 @@ agx_pack_g17_api_sampler(enum agx_chip chip, void *out,
       compare ? agx_compare_funcs[state->compare_func]
               : AGX_COMPARE_FUNC_LEQUAL;
 
-   if (chip == AGX_CHIP_G17G) {
+   if (agx_chip_m5_paths(chip)) {
       agx_pack(out, SAMPLER_GEN5, cfg) {
          cfg.minimum_lod = state->min_lod;
          cfg.maximum_lod = state->max_lod;
@@ -3797,7 +3856,7 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
    bool custom_borders = ctx->stage[stage].custom_borders;
 
    struct agx_device *dev = agx_device(ctx->base.screen);
-   const bool g17 = dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G;
+   const bool g17 = dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip);
    size_t sampler_length = g17
       ? agx_chip_sampler_heap_element_size(dev->chip)
       : AGX_SAMPLER_LENGTH + (custom_borders ? AGX_BORDER_LENGTH : 0);
@@ -4086,11 +4145,13 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
    }
 
    size_t capacity;
-   const bool bounded = dev->chip == AGX_CHIP_G17G
-      ? agx3_g17g_graphics_program_bound(dev->chip, ranges, count, &capacity)
+   const bool bounded = agx_chip_m5_paths(dev->chip)
+      ? agx3_g17g_graphics_program_bound(agx_ioto_chip(dev), ranges, count,
+                                         &capacity)
       : agx3_g17p_graphics_program_bound(dev->chip, ranges, count, &capacity);
    if (!bounded)
       AGX3_PROGRAM_REFUSE("program size bound");
+   capacity = agx_ioto_capacity(dev, capacity);
 
    struct agx_bo *program_bo = NULL;
    struct agx_ptr t = agx_pool_alloc_aligned_with_bo(
@@ -4126,8 +4187,10 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
       },
    };
    struct agx3_g17p_graphics_program program;
-   const bool generated = dev->chip == AGX_CHIP_G17G
-      ? agx3_g17g_graphics_program_generate(dev->chip, &desc, &program)
+   const bool generated = agx_chip_m5_paths(dev->chip)
+      ? agx3_g17g_graphics_program_generate(agx_ioto_chip(dev), &desc,
+                                            &program) &&
+           agx_g18g_reencode_program(dev, &program, true, linked->nr_gprs)
       : agx3_g17p_graphics_program_generate(dev->chip, &desc, &program);
    if (!generated || program.length > capacity) {
       if (dev->debug & AGX_DBG_FAULTTRACE) {
@@ -4186,7 +4249,7 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
    struct agx_context *ctx = batch->ctx;
    struct agx_device *dev = agx_device(ctx->base.screen);
 
-   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) &&
+   if ((dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) &&
        phys_stage != MESA_SHADER_COMPUTE)
       return agx_build_agx3_graphics_program(batch, cs, linked, full_va);
 
@@ -4333,7 +4396,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
                         size_t range_count, unsigned variable_shared_mem)
 {
    struct agx_device *dev = agx_device(batch->ctx->base.screen);
-   const bool g17g = dev->chip == AGX_CHIP_G17G;
+   const bool g17g = agx_chip_m5_paths(dev->chip);
    /* Mode 2 reads the whole grid -- three global thread counts then three
     * local sizes -- from six u32 in GPU memory, so the workgroup this call
     * was handed is not the one that launches and must not be validated. */
@@ -4477,8 +4540,11 @@ agx_g17p_append_compute(struct agx_batch *batch,
          .shader_va = shader_va,
          .launch_sources = launch_sources,
       };
-      if (!agx3_g17g_compute_program_generate(dev->chip, &g17g_desc,
+      if (!agx3_g17g_compute_program_generate(agx_ioto_chip(dev), &g17g_desc,
                                               &g17g_program) ||
+          !agx_g18g_reencode_program(dev, &g17g_program, true,
+                                     info->nr_gprs) ||
+          g17g_program.length > AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE ||
           !agx3_g17g_native_compute_program_bind(&bind_desc, &g17g_launch))
          return false;
       memcpy(program.cpu, g17g_program.bytes, g17g_program.length);
@@ -4850,9 +4916,16 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       /* Match the M5 native EOT ABI already used by Honeykrisp: the PBE
        * table pointer occupies u0..3 and the tile offset occupies u4..5.
        */
-      if (shader->info.binary_size != 78 || shader->info.nr_gprs != 8 ||
-          shader->info.agx3_staging_halfs != 8)
+      /* G18G runs the same shader re-encoded as agx3d, which is 68 bytes. */
+      const unsigned eot_size = dev->chip == AGX_CHIP_G18G ? 68 : 78;
+      if (shader->info.binary_size != eot_size || shader->info.nr_gprs != 8 ||
+          shader->info.agx3_staging_halfs != 8) {
+         if (dev->debug & AGX_DBG_FAULTTRACE)
+            fprintf(stderr, "M5_EOT_ABI size=%u gprs=%u staging=%u\n",
+                    shader->info.binary_size, shader->info.nr_gprs,
+                    shader->info.agx3_staging_halfs);
          return agx_reject_g17g_tile(batch, "M5 EOT shader ABI");
+      }
       struct agx_ptr pbe = agx_pool_alloc_aligned(
          &batch->pool, sizeof(struct agx_gallium_pbe_descriptor), 32);
       struct pipe_image_view view = image_view_for_surface(surf);
@@ -4923,8 +4996,10 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
    }
 
    size_t capacity;
-   if (!agx3_g17g_graphics_program_bound(dev->chip, ranges, range_count, &capacity))
+   if (!agx3_g17g_graphics_program_bound(agx_ioto_chip(dev), ranges,
+                                         range_count, &capacity))
       return agx_reject_g17g_tile(batch, "M5 tile program size");
+   capacity = agx_ioto_capacity(dev, capacity);
    struct agx_bo *program_bo = NULL;
    struct agx_ptr ptr = agx_pool_alloc_aligned_with_bo(
       &batch->pipeline_pool, capacity, AGX_IOTO_PROGRAM_ALIGNMENT, &program_bo);
@@ -4945,7 +5020,10 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       .uniform_range_count = range_count,
    };
    struct agx3_g17p_graphics_program program;
-   if (!agx3_g17g_tile_program_generate(dev->chip, &desc, store, &program) ||
+   if (!agx3_g17g_tile_program_generate(agx_ioto_chip(dev), &desc, store,
+                                        &program) ||
+       !agx_g18g_reencode_program(dev, &program, false,
+                                  shader->info.nr_gprs) ||
        program.length > capacity)
       return agx_reject_g17g_tile(batch, "M5 tile Ioto program");
    memcpy(ptr.cpu, program.bytes, program.length);
@@ -5037,7 +5115,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       }
    }
 
-   if (dev->chip == AGX_CHIP_G17G)
+   if (agx_chip_m5_paths(dev->chip))
       return agx_build_g17g_bg_eot(batch, &key, store);
 
    if (dev->chip == AGX_CHIP_G17P) {
@@ -5624,7 +5702,11 @@ agx_batch_init_state(struct agx_batch *batch)
     * with another that caused stale data to be cached and the CPU wrote to it
     * in the meantime.
     */
-   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
+   if (dev->chip == AGX_CHIP_G18G) {
+      /* None of the J873 native render or compute streams (sessions-20260925
+       * a, b, g1, g2) contains the barrier word 0x21000960, so its G18G
+       * encoding has no witness. Emit none, as Apple's streams do. */
+   } else if (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) {
       struct agx_vdm_barrier_core barrier;
       const bool packed = agx_vdm_barrier_core_pack(dev->chip, &barrier);
       assert(packed);
@@ -5639,7 +5721,7 @@ agx_batch_init_state(struct agx_batch *batch)
       }
    }
 
-   if (dev->chip == AGX_CHIP_G17G) {
+   if (agx_chip_m5_paths(dev->chip)) {
       /* Same fixed-layout initial state as Honeykrisp's M5 path. These
        * records establish the processor's initial state even for clear-only
        * batches; the AGX2 selector graph cannot initialize HAL300.
@@ -6320,7 +6402,13 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
     * byte-identical to a plain D32 one. Stencil *operations* are a separate
     * axis and still refused above.
     */
-   const enum pipe_format zs_format = zsbuf->format;
+   /* The attachment's hardware format, from the driver's layout: the
+    * pipe_resource keeps the API format, but u_transfer_helper allocates the
+    * API's Z24X8 as a Z32F plane and Z24S8 as Z32F plus separate S8, so
+    * glxgears' 24-bit depth visual renders into exactly the planes above. */
+   const enum pipe_format zs_format =
+      zsbuf->texture ? agx_resource(zsbuf->texture)->layout.format
+                     : zsbuf->format;
    const bool depth_format_ok =
       zs_format == PIPE_FORMAT_Z32_FLOAT ||
       zs_format == PIPE_FORMAT_Z16_UNORM ||
@@ -6585,7 +6673,7 @@ agx_encode_state(struct agx_batch *batch, uint8_t *out,
    if (draw_state_offset)
       *draw_state_offset = 0;
 
-   if (dev->chip == AGX_CHIP_G17G)
+   if (agx_chip_m5_paths(dev->chip))
       {
          uint8_t *encoded = agx_encode_g17g_state(batch, out);
          if (encoded == NULL)
@@ -8587,7 +8675,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
        * draw profile has no witness for the indexed, restart-enabled draw
        * the copy program needs, so the work is complete here. Refusing it
        * would drop the whole batch, prepass included. */
-      if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17G &&
+      if (agx_chip_m5_paths(agx_device(ctx->base.screen)->chip) &&
           ctx->rast->base.rasterizer_discard)
          return;
    }
@@ -8617,7 +8705,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
     * that state block alone; overread padding is not command storage.
     */
    const size_t command_space =
-      dev->chip == AGX_CHIP_G17G
+      agx_chip_m5_paths(dev->chip)
          ? AGX_VDM_STATE_UPDATE_LENGTH +
               (2 + AGX_PPP_HAL300_GRAPHICS_RECORDS) * AGX_VDM_PPP_STATE_CORE_LENGTH +
               AGX_VDM_STATE_LENGTH + AGX_VDM_STATE_RESTART_INDEX_LENGTH +
@@ -8709,7 +8797,7 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       out = (void *)agx_vdm_barrier((uint32_t *)out, dev->chip);
    }
 
-   assert(dev->chip != AGX_CHIP_G17G ||
+   assert(!agx_chip_m5_paths(dev->chip) ||
           (size_t)(out - batch->vdm.current) <= command_space);
    batch->vdm.current = out;
    assert((batch->vdm.current + AGX_VDM_STREAM_LINK_LENGTH) <= batch->vdm.end &&
@@ -8794,7 +8882,7 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
    agx_upload_uniforms(batch);
 
    struct agx_device *dev = agx_device(ctx->base.screen);
-   if (dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G17G) {
+   if (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) {
       struct agx3_ioto_uniform_range ranges[AGX_MAX_PUSH_RANGES + 2];
       size_t range_count = 0;
       const bool resource_pair = batch->texture_count[stage] != 0;
@@ -8883,7 +8971,7 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
           * express falls back to the AGX2 encoder below, which is what this
           * part did for every dispatch until now. G17P has no fallback --
           * its native path is the only proven one there. */
-         if (dev->chip != AGX_CHIP_G17G)
+         if (!agx_chip_m5_paths(dev->chip))
             {
                agx_native_descriptor_rejected(batch, "compute Ioto dispatch");
                return;

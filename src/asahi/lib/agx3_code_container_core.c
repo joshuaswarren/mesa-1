@@ -110,3 +110,20 @@ agx3_build_container_constant_program(
       image[offset + 1] = 0x00;
    }
 }
+
+void
+agx3_build_container_stop_program_agx3d(
+   uint8_t image[AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE])
+{
+   /* G18G (agx3d): `end` is 08 04 and `nop` 08 00. Every applegpu_g18g
+    * fragment witness without a constant program of its own
+    * (test/native/g18g oracle.*.fragment.g18g.bin) carries exactly this:
+    * end, then 31 nops. The M5 paths only ever use the stop program. */
+   image[0] = 0x08;
+   image[1] = 0x04;
+   for (size_t offset = 2; offset < AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE;
+        offset += 2) {
+      image[offset] = 0x08;
+      image[offset + 1] = 0x00;
+   }
+}

@@ -683,11 +683,29 @@ test_closed_forms(void)
    struct agx_vdm_index_list_direct_words words;
    struct agx_vdm_index_list_indirect_words indirect;
 
-   /* No J873 capture contains an indexed or indirect draw, a VDM barrier, a
-    * stream link or a tessellation record. */
-   CHECK(!agx_vdm_index_list_direct_pack_words(
+   /* Direct indexed draws are captured: Apple's words for three u16
+    * triangles and for a restarted nine-index u16 strip, both with indices at
+    * 0x10000018300 (sessions-20260925-g1 indexed-u16 and indexed-strip). */
+   static const uint32_t apple_u16_triangles[] = {
+      0x69f20600, 0x00018300, 3, 1, 0, 7, 0xf, 1,
+   };
+   static const uint32_t apple_u16_strip[] = {
+      0x69f30900, 0x00018300, 9, 1, 0, 7, 0xf, 1,
+   };
+   CHECK(agx_vdm_index_list_direct_pack_words(
       AGX_CHIP_G18G, 6, true, false, AGX_VDM_INDEX_LIST_INDEX_SIZE_U16,
-      0x10000100000, 3, 1, 0, 0, &words));
+      0x10000018300, 3, 1, 0, 0xf, &words));
+   CHECK(words.count == 8 &&
+         memcmp(words.words, apple_u16_triangles,
+                sizeof(apple_u16_triangles)) == 0);
+   CHECK(agx_vdm_index_list_direct_pack_words(
+      AGX_CHIP_G18G, 9, true, true, AGX_VDM_INDEX_LIST_INDEX_SIZE_U16,
+      0x10000018300, 9, 1, 0, 0xf, &words));
+   CHECK(words.count == 8 &&
+         memcmp(words.words, apple_u16_strip, sizeof(apple_u16_strip)) == 0);
+
+   /* No J873 capture contains an indirect draw, a VDM barrier, a stream
+    * link or a tessellation record. */
    CHECK(agx_vdm_index_list_direct_pack_words(
       AGX_CHIP_G17G, 6, true, false, AGX_VDM_INDEX_LIST_INDEX_SIZE_U16,
       0x10000100000, 3, 1, 0, 0, &words));

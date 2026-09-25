@@ -59,7 +59,7 @@ agx_gallium_pack_g17p_txf_sampler(
       return false;
 
    memset(out, 0, sizeof(*out));
-   if (chip == AGX_CHIP_G17G) {
+   if (agx_chip_m5_paths(chip)) {
       /* The same texel-fetch state in G17G's Gen5 record, as
        * hk_pack_native_txf_sampler() and the G17G tile reload use it: the
        * compare-mode selector is set even without a comparison. */
@@ -101,7 +101,7 @@ bool
 agx_gallium_g17p_sampler_handle(enum agx_chip chip, unsigned api_sampler,
                                 uint16_t *native_handle)
 {
-   if ((chip != AGX_CHIP_G17P && chip != AGX_CHIP_G17G) ||
+   if ((chip != AGX_CHIP_G17P && !agx_chip_m5_paths(chip)) ||
        api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
        !native_handle)
       return false;
@@ -115,7 +115,7 @@ agx_gallium_g17p_custom_border_handle(enum agx_chip chip,
                                       unsigned api_sampler,
                                       uint16_t *native_handle)
 {
-   if ((chip != AGX_CHIP_G17P && chip != AGX_CHIP_G17G) ||
+   if ((chip != AGX_CHIP_G17P && !agx_chip_m5_paths(chip)) ||
        api_sampler >= AGX_GALLIUM_G17P_API_SAMPLERS ||
        !native_handle)
       return false;

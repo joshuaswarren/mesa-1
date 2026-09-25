@@ -27,6 +27,10 @@ void agx3_build_container_constant_program(
 #define AGX3_CODE_BLOCK_HEADER_SIZE 0x40u
 #define AGX3_CODE_BLOCK_ENTRY_OFFSET 0x80u
 size_t agx3_code_block_size(size_t main_span);
+/* The fragment stop constant program in the G18G (agx3d) encoding. */
+void agx3_build_container_stop_program_agx3d(
+   uint8_t image[AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE]);
+
 bool agx3_build_code_block(void *image, size_t capacity, const void *main,
                           size_t main_size, size_t main_span,
                           const uint8_t *constant_program,

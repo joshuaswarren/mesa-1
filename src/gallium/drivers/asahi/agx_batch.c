@@ -1281,7 +1281,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
     * tail submission and owns the output syncs; with no render the final
     * dispatch takes that role, so the loop below stops one short. */
    const bool m5_split_prepass =
-      dev->chip == AGX_CHIP_G17G && compute;
+      agx_chip_m5_paths(dev->chip) && compute;
    const unsigned m5_split_count =
       !m5_split_prepass  ? 0
       : render           ? batch->cdm_dispatch_count

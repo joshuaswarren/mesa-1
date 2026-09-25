@@ -79,6 +79,9 @@ agx_gallium_descriptor_generation(enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+   /* The J873 native captures carry Gen10 texture and PBE descriptors that
+    * Mesa's G17G packers reproduce byte for byte. */
+   case AGX_CHIP_G18G:
       return AGX_DESCRIPTOR_GENERATION_10;
    case AGX_CHIP_G15P:
    case AGX_CHIP_UNKNOWN:
