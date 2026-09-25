@@ -379,15 +379,14 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
       // cfg.unk_20 = true;
       // cfg.unk_24 = true; if clustered?
       if (chip == AGX_CHIP_G13X) {
-         /* G13X (t600x, M1 Pro/Max, G13C cores; agx_device.c maps
-          * generation 13 + multi-cluster here): the bare designed set
-          * {4,5,6,8} regressed the ctx1053 KV-stream leg -3.17% (short
-          * +13.0%). The designedusc quadrant {4,5,6,8}+usc_cache_inval
-          * (identical to HK_PERFTEST=designedusccdmbarrier, ccad76a6160)
-          * adds the USC invalidate that covers uniform/texture-state
-          * change between launches - MaxDispatch lane measured it under
-          * the standing protocol (Qwen3.8 digest dbf70497 identical,
-          * logits 0 flips, paired A/B CIs, both legs). */
+         /* G13X (t600x, M1 Pro/Max, G13C cores): restore bits 0-2
+          * (PBE/texture flush) alongside unk_4 + usc_cache_inval.
+          * Bits 0-2 are required for cross-launch coherency when
+          * control streams are not split and across dependency-skipped
+          * launches ({0,1,2,4,5,6,8}+usc_cache_inval = 0x17f). */
+         cfg.unk_0 = true;
+         cfg.unk_1 = true;
+         cfg.unk_2 = true;
          cfg.unk_4 = true;
          cfg.usc_cache_inval = true;
          // cfg.unk_26 = true;
@@ -468,6 +467,9 @@ static inline GLOBAL uint32_t *
 agx_cdm_barrier_designed_usc(GLOBAL uint32_t *out)
 {
    agx_push(out, CDM_BARRIER, cfg) {
+      cfg.unk_0 = true;
+      cfg.unk_1 = true;
+      cfg.unk_2 = true;
       cfg.unk_4 = true;
       cfg.unk_5 = true;
       cfg.unk_6 = true;

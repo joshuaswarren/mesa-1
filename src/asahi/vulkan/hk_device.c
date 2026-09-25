@@ -48,7 +48,7 @@ static const struct debug_named_value hk_perf_options[] = {
    {"usccdmbarrier", HK_PERF_USCCDMBARRIER,
     "Reduce the per-launch CDM barrier to a USC cache invalidate"},
    {"designedusccdmbarrier", HK_PERF_DESIGNEDUSCCDMBARRIER,
-    "G13X designed set {4,5,6,8} plus USC cache invalidate"},
+    "G13X designed set {0,1,2,4,5,6,8} plus USC cache invalidate (0x17f)"},
    {"alwayscdmbarrier", HK_PERF_ALWAYSCDMBARRIER, "Unconditional per-launch CDM barrier (disable dependency tracking)"},
    DEBUG_NAMED_VALUE_END
 };
