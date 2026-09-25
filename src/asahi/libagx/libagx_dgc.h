@@ -480,44 +480,6 @@ agx_cdm_barrier_designed_usc(GLOBAL uint32_t *out)
    return out;
 }
 
-/*
- * Perftest variant: emit CDM_BARRIER with an env-selected field set
- * (bit N of `set` = the XML field starting at bit N; bit 3 is the USC
- * cache invalidate). Unset fields are left false. Selected through
- * HK_PERFTEST=maskcdmbarrier plus HK_CDM_BARRIER_SET (hex).
- */
-static inline GLOBAL uint32_t *
-agx_cdm_barrier_set(GLOBAL uint32_t *out, uint32_t set)
-{
-   agx_push(out, CDM_BARRIER, cfg) {
-      cfg.unk_0 = (set >> 0) & 1;
-      cfg.unk_1 = (set >> 1) & 1;
-      cfg.unk_2 = (set >> 2) & 1;
-      cfg.usc_cache_inval = (set >> 3) & 1;
-      cfg.unk_4 = (set >> 4) & 1;
-      cfg.unk_5 = (set >> 5) & 1;
-      cfg.unk_6 = (set >> 6) & 1;
-      cfg.unk_7 = (set >> 7) & 1;
-      cfg.unk_8 = (set >> 8) & 1;
-      cfg.unk_9 = (set >> 9) & 1;
-      cfg.unk_10 = (set >> 10) & 1;
-      cfg.unk_11 = (set >> 11) & 1;
-      cfg.unk_12 = (set >> 12) & 1;
-      cfg.unk_13 = (set >> 13) & 1;
-      cfg.unk_14 = (set >> 14) & 1;
-      cfg.unk_15 = (set >> 15) & 1;
-      cfg.unk_16 = (set >> 16) & 1;
-      cfg.unk_17 = (set >> 17) & 1;
-      cfg.unk_18 = (set >> 18) & 1;
-      cfg.unk_19 = (set >> 19) & 1;
-      cfg.unk_20 = (set >> 20) & 1;
-      cfg.unk_24 = (set >> 24) & 1;
-      cfg.unk_26 = (set >> 26) & 1;
-   }
-
-   return out;
-}
-
 static inline GLOBAL uint32_t *
 agx_vdm_return(GLOBAL uint32_t *out)
 {
