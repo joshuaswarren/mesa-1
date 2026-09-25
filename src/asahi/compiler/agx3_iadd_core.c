@@ -17,11 +17,18 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
    if (d == NULL || out == NULL || len == NULL)
       return false;
 
+   /*
+    * G18G (agx3d) spells iadd32/isub32 with the agx3c field vector: across
+    * the 178 aligned applegpu_g17g/applegpu_g18g iadd32 pairs of the j813-linux
+    * gpu/m5-*-reference corpus only the destination, source, cache hint and
+    * wait-slot choices differ (f2, f11, f16, f31, f40, f46..f53), and its
+    * forms are taken in Apple's order below.
+    */
    const bool agx3b = encoding == AGX_ISA_ENCODING_AGX3B;
-   if (!agx3b && encoding != AGX_ISA_ENCODING_AGX3C)
+   if (!agx3b && !agx_encoding_is_g17_class(encoding))
       return false;
 
-   /* Six scoreboard slots on AGX3b, eight on AGX3c. */
+   /* Six scoreboard slots on AGX3b, eight on AGX3c and agx3d. */
    const unsigned slots = agx3b ? 6 : 8;
 
    /* A 32-bit destination spans two halves. The source is one half when
@@ -154,7 +161,8 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
 
    return agx3_bind_compose(encoding,
                             agx3b ? (d->subtract ? "isub" : "iadd") : (d->subtract ? "isub32" : "iadd32"),
-                            0, baseline, nbaseline, ov, n, out, len);
+                            agx3_bind_ep(encoding, 0), baseline, nbaseline,
+                            ov, n, out, len);
 }
 
 bool
@@ -163,7 +171,7 @@ agx3_isub_immediate_encode(enum agx_isa_encoding encoding,
                             uint8_t out[AGX3_IADD_MAX_LENGTH], uint8_t *len)
 {
    const bool gpu1 = encoding == AGX_ISA_ENCODING_AGX3C;
-   const unsigned slots = gpu1 ? 8 : 6;
+   const unsigned slots = agx_encoding_is_g17_class(encoding) ? 8 : 6;
    if (!d || !out || !len ||
        (encoding != AGX_ISA_ENCODING_AGX3B && !gpu1) ||
        d->dest > 254 || (d->dest & 1) || d->src >= 256 ||
@@ -204,10 +212,14 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
       return false;
 
    if (encoding != AGX_ISA_ENCODING_AGX3B &&
-       encoding != AGX_ISA_ENCODING_AGX3C)
+       !agx_encoding_is_g17_class(encoding))
       return false;
 
-   const bool m5 = encoding == AGX_ISA_ENCODING_AGX3C;
+   /* G18G (agx3d) takes the same imadd32/imadd64 field vector: the
+    * applegpu_g18g builds of the m5 reference corpus and of the glxgears vertex probe
+    * (2b 80 85 8c 12 04 01 90 13 00 00 00, the vertex_id * 12 + base address)
+    * differ from G17G only in the wait slot (f61..f68). */
+   const bool m5 = agx_encoding_is_g17_class(encoding);
    /* M5's imadd32 has the same integer operand classes, with a separate
     * fourteen-byte encoding and eight producer slots. Narrow and widening
     * forms require independent M5 witnesses. */
@@ -420,5 +432,5 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
       encoding,
       m5 ? (d->dest_64 ? "imadd64" : "imadd32")
          : (d->negate_addend ? "imsub" : "imadd"),
-      0, baseline, nbaseline, ov, n, out, len);
+      agx3_bind_ep(encoding, 0), baseline, nbaseline, ov, n, out, len);
 }

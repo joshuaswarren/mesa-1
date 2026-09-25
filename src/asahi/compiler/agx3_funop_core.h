@@ -85,6 +85,15 @@ bool agx3_funop_encode_g17g(enum agx3_funop op, uint16_t dest, uint16_t src,
                            const struct agx3_funop_runtime *runtime,
                            uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len);
 
+/* agx3_funop_encode_g17g for either G17-class encoding: AGX3C (G17G) or
+ * AGX3D (G18G), whose runtime field vectors are the same. */
+bool agx3_funop_encode_runtime(enum agx_isa_encoding enc, enum agx3_funop op,
+                               uint16_t dest, uint16_t src, bool src_abs,
+                               bool src_neg, bool saturate, uint16_t wait_mask,
+                               const struct agx3_funop_runtime *runtime,
+                               uint8_t out[AGX3_FUNOP_MAX_LENGTH],
+                               uint8_t *len);
+
 /* Preserve a live G17P rounding/log/exp source. Other instruction families
  * retain their canonical encoding; the wrapper above is the last-use form. */
 bool agx3_funop_encode_source_lifetime(

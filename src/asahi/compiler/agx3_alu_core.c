@@ -1407,8 +1407,8 @@ agx3_alu_compose_raw(enum agx_isa_encoding enc, const struct agx3_alu_form *F,
    for (unsigned i = 0; i < F->nwait; ++i)
       if (wait_mask & (1u << i)) { ov[n].field = F->wait[i]; ov[n].value = 1; n++; }
 
-   return agx3_bind_compose(enc, F->mnemonic, F->ep, base, nbase, ov, n, out,
-                            len);
+   return agx3_bind_compose(enc, F->mnemonic, agx3_bind_ep(enc, F->ep), base,
+                            nbase, ov, n, out, len);
 }
 
 static bool
@@ -1429,7 +1429,20 @@ agx3_alu_compose(enum agx_isa_encoding enc, enum agx3_alu_op op, uint16_t dest,
 {
    if (op >= AGX3_ALU_NUM)
       return false;
-   const unsigned ei = (enc == AGX_ISA_ENCODING_AGX3C) ? 1
+   /*
+    * G18G (agx3d) uses the agx3c column, but only for LDIMM so far: its row
+    * pins no specimen lifetime or wait, and the applegpu_g18g 32-bit GPR
+    * ldimm witnesses of the j813-linux gpu/m5-*-reference corpus carry
+    * exactly its fields (f9=2 f10=2 f15=3 f16=105, f2 destination, f14
+    * immediate: 41 03 00 08, 41 05 ff ff, 11 07 00 00 80 3f). The other rows
+    * pin their specimen's source lifetimes, which agx3d instead takes from
+    * the runtime encoders (agx3_falu_*_runtime). Its wait field is one slot
+    * code; the additivity check below refuses anything else.
+    */
+   const bool agx3d = enc == AGX_ISA_ENCODING_AGX3D;
+   if (agx3d && op != AGX3_ALU_LDIMM)
+      return false;
+   const unsigned ei = agx_encoding_is_g17_class(enc) ? 1
                        : (enc == AGX_ISA_ENCODING_AGX3B) ? 0
                                                          : 2;
    if (ei == 2)
@@ -1446,7 +1459,7 @@ agx3_alu_compose(enum agx_isa_encoding enc, enum agx3_alu_op op, uint16_t dest,
    if (F->nwait < 16 && (wait_mask >> F->nwait) != 0)
       return false;
 
-   if (!agx3_alu_compose_raw(enc, F, false, dest, src0, src1, src2, imm,
+   if (!agx3_alu_compose_raw(enc, F, agx3d, dest, src0, src1, src2, imm,
                              wait_mask, out, len))
       return false;
 
@@ -1508,8 +1521,8 @@ agx3_alu_compose(enum agx_isa_encoding enc, enum agx3_alu_op op, uint16_t dest,
 
    /* Requirement two: the form's pinned specimen wait, if it has one, is
     * additive with what the caller asked for rather than merging into a third
-    * value. */
-   if (!agx3_alu_form_pins_a_wait(F))
+    * value. agx3d never deposits the pinned wait. */
+   if (agx3d || !agx3_alu_form_pins_a_wait(F))
       return true;
    if (!agx3_alu_compose_raw(enc, F, false, dest, src0, src1, src2, imm, 0,
                              pinned, &pinned_len) ||

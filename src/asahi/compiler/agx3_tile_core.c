@@ -62,7 +62,7 @@ common_ok(uint16_t reg, enum agx3_tile_width w, uint8_t mask,
 {
    const unsigned nwait = is_b(enc) ? 6 : 8;
    return (enc == AGX_ISA_ENCODING_AGX3B ||
-           enc == AGX_ISA_ENCODING_AGX3C) &&
+           agx_encoding_is_g17_class(enc)) &&
           reg < (is_b(enc) ? 192 : 256) &&
           (w != AGX3_TILE_W32 || (reg & 1) == 0) &&
           (w == AGX3_TILE_W8 || w == AGX3_TILE_W16 || w == AGX3_TILE_W32) &&
@@ -108,6 +108,10 @@ agx3_tile_store_f13(enum agx_isa_encoding enc, uint16_t data,
 
    if (!common_ok(data, width, chan_mask, sample, enc, wait_mask, tile_off))
       return false;
+   /* G18G (agx3d) keeps lstcol bit for bit: the 96 aligned
+    * applegpu_g17g/applegpu_g18g lstcol words of the m5 reference corpus are
+    * byte-identical, as is the oracle colour store 27 01 05 08 21 01 ad 02 00
+    * 00 61 5c 00 00; the wait field stays a mask. */
    const struct agx3_field_kv base_b[] = {KV(9, 2),  KV(35, 9), KV(37, 7),
                                           KV(38, 1), KV(52, 1), KV(65, 1),
                                           KV(66, 1)};
@@ -124,8 +128,9 @@ agx3_tile_store_f13(enum agx_isa_encoding enc, uint16_t data,
    ov[n++] = (struct agx3_field_kv)KV(57, tile_off);
    n = sample_overrides(sample, ov, n);
    n = wait_overrides(enc, wait_mask, ov, n);
-   if (!agx3_bind_compose(enc, "lstcol", 0, is_b(enc) ? base_b : base_c,
-                          is_b(enc) ? 7 : 8, ov, n, out, len)) {
+   if (!agx3_bind_compose(enc, "lstcol", agx3_bind_ep(enc, 0),
+                          is_b(enc) ? base_b : base_c, is_b(enc) ? 7 : 8, ov,
+                          n, out, len)) {
       memset(out, 0, AGX3_TILE_MAX_LENGTH);
       *len = 0;
       return false;
@@ -144,6 +149,11 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
       return false;
    memset(out, 0, AGX3_TILE_MAX_LENGTH);
    *len = 0;
+
+   /* lldcol gains f79 on G18G (the one aligned applegpu_g18g tile load has
+    * f79 = 2, its G17G twin none), which is not modelled: refuse agx3d. */
+   if (enc == AGX_ISA_ENCODING_AGX3D)
+      return false;
 
    /* Full-component loads, plus the G17P scalar, pair, and RGB565 forms.
     * Fresh applegpu_g17p RG8, RG16{Float,Unorm,Snorm,Uint,Sint}, and

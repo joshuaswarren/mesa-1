@@ -165,8 +165,7 @@ agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
        * explicit exact widening for ordinary full-width arithmetic; native
        * patterns such as the scalar-half sqrt are emitted without an fmov and
        * therefore remain available. */
-      if (ctx->key && (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+      if (ctx->key && agx_encoding_is_agx3(ctx->key->dev.encoding) &&
           (ins->op == AGX_OPCODE_FADD || ins->op == AGX_OPCODE_FMUL ||
            ins->op == AGX_OPCODE_FFMA) &&
           src.size == AGX_SIZE_32 &&
@@ -176,8 +175,7 @@ agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
       /* FLTNORM and RGB10A2 packing have only captured f32 sources. Keep
        * the explicit widening used by linked half-width fragment outputs
        * before normalized packing. */
-      if (ctx->key && (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+      if (ctx->key && agx_encoding_is_agx3(ctx->key->dev.encoding) &&
           (ins->op == AGX_OPCODE_FLTNORM_AGX3 ||
            ins->op == AGX_OPCODE_PACK_RGB10A2_AGX3) &&
           src.size == AGX_SIZE_32 &&
@@ -395,8 +393,7 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
     * Pulling that modifier into its producer invents saturated forms for
     * operations such as fmul and transcendental functions. Keep the exact
     * Apple sequence intact for every producer. */
-   if (ctx->key && (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                    ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+   if (ctx->key && agx_encoding_is_agx3(ctx->key->dev.encoding) &&
        use->saturate)
       return false;
 
@@ -415,8 +412,7 @@ agx_optimizer_fmov_rev(agx_context *ctx, agx_instr *I, agx_instr *use)
     * and the remaining float operations so each rounds exactly once through
     * the native narrowing form instead of creating an unencodable mixed-width
     * producer. */
-   if (ctx->key && (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                    ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+   if (ctx->key && agx_encoding_is_agx3(ctx->key->dev.encoding) &&
        I->dest[0].size == AGX_SIZE_32 && use->dest[0].size == AGX_SIZE_16 &&
        I->op != AGX_OPCODE_FMUL)
       return false;
@@ -507,8 +503,7 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
        * level field is a half extract: folding the widening left an
        * `and d32, h5, r8` the packer has no encoding for, and the whole
        * fragment program -- the depth blitter's -- was dropped. */
-      if (ctx->key && (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+      if (ctx->key && agx_encoding_is_agx3(ctx->key->dev.encoding) &&
           def->src[0].size == AGX_SIZE_16 && src.size == AGX_SIZE_32 &&
           (I->op == AGX_OPCODE_IADD || I->op == AGX_OPCODE_IMAD ||
            I->op == AGX_OPCODE_ICMP || I->op == AGX_OPCODE_ICMPSEL ||

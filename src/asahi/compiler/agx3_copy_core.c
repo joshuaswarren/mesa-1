@@ -214,7 +214,15 @@ agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
    if (encoding == AGX_ISA_ENCODING_AGX3B) {
       baseline = agx3b_copy_baseline;
       nbaseline = AGX3_COPY_ARRAY_SIZE(agx3b_copy_baseline);
-   } else if (encoding == AGX_ISA_ENCODING_AGX3C) {
+   } else if (agx_encoding_is_g17_class(encoding)) {
+      /* G18G (agx3d) spells this copy with the agx3c field vector: the
+       * applegpu_g18g build of a kernel storing a constant-buffer float4
+       * reads it with copy.ep0 83 00 08 08 .. 83 06 0e 08 (f2 0..6,
+       * f17 8..14, f23=3 f24=2 f28=3 f29=35), the G17G build with the same
+       * fields. Only those compact destinations are witnessed there. */
+      if (encoding == AGX_ISA_ENCODING_AGX3D &&
+          dest_half >= AGX3_COPY_REG16_DEST_HALVES)
+         return false;
       baseline = agx3c_copy_baseline;
       nbaseline = AGX3_COPY_ARRAY_SIZE(agx3c_copy_baseline);
    } else {
@@ -235,8 +243,8 @@ agx3_copy_encode_uniform_to_reg32(enum agx_isa_encoding encoding,
 
    if (dest_half < AGX3_COPY_REG16_DEST_HALVES ||
        encoding != AGX_ISA_ENCODING_AGX3B)
-      return agx3_bind_compose(encoding, "copy", 0, baseline, nbaseline,
-                               overrides,
+      return agx3_bind_compose(encoding, "copy", agx3_bind_ep(encoding, 0),
+                               baseline, nbaseline, overrides,
                                AGX3_COPY_ARRAY_SIZE(overrides), out, len);
 
    /* The compact four-byte copy carries its destination in a seven-bit f2 and

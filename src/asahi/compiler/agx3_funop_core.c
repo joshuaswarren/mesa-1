@@ -122,14 +122,23 @@ agx3_funop_encode_impl(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t d
    memset(out, 0, AGX3_FUNOP_MAX_LENGTH);
    *len = 0;
 
-   if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) ||
-        op >= AGX3_FUNOP_COUNT)
+   /*
+    * G18G (agx3d) takes the G17G runtime field vectors unchanged: the
+    * f32rsqrt, f32rint, f32log2, f32exp2 and f32sqrtstep words of the aligned
+    * applegpu_g17g/applegpu_g18g pairs of the j813-linux gpu/m5-*-reference
+    * corpus (16 to 24 of each) differ only in their wait slot, and 12 of 16
+    * are byte-identical; the glxgears normalize() is one of them
+    * (27 00 04 58 2a 20 a3 12 30 00). Only that runtime entry point, whose
+    * lifetimes and waits are the caller's, is admitted for agx3d.
+    */
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !agx_encoding_is_g17_class(enc)) ||
+        op >= AGX3_FUNOP_COUNT || (enc == AGX_ISA_ENCODING_AGX3D && !runtime))
       return false;
 
    const bool root = op == AGX3_FUNOP_RSQRT || op == AGX3_FUNOP_SQRT_STEP;
    if (root && !runtime)
       return false;
-   if (runtime && (enc != AGX_ISA_ENCODING_AGX3C ||
+   if (runtime && (!agx_encoding_is_g17_class(enc) ||
                    (op > AGX3_FUNOP_EXP2 && !root) ||
                    (runtime->src_cache && runtime->src_discard)))
       return false;
@@ -202,7 +211,8 @@ agx3_funop_encode_impl(enum agx_isa_encoding enc, enum agx3_funop op, uint16_t d
    const struct agx3_field_kv *base = is_b(enc) ? F->base_b : F->base_c;
    const unsigned nbase = is_b(enc) ? F->nbase_b : F->nbase_c;
 
-   if (!agx3_bind_compose(enc, F->mnemonic, 0, base, nbase, ov, n, out, len)) {
+   if (!agx3_bind_compose(enc, F->mnemonic, agx3_bind_ep(enc, 0), base, nbase,
+                          ov, n, out, len)) {
       memset(out, 0, AGX3_FUNOP_MAX_LENGTH);
       *len = 0;
       return false;
@@ -227,9 +237,22 @@ agx3_funop_encode_g17g(enum agx3_funop op, uint16_t dest, uint16_t src,
                        const struct agx3_funop_runtime *runtime,
                        uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len)
 {
-   return runtime && agx3_funop_encode_impl(AGX_ISA_ENCODING_AGX3C, op, dest, src,
-                                            src_abs, src_neg, saturate,
-                                            wait_mask, false, runtime, out, len);
+   return agx3_funop_encode_runtime(AGX_ISA_ENCODING_AGX3C, op, dest, src,
+                                    src_abs, src_neg, saturate, wait_mask,
+                                    runtime, out, len);
+}
+
+bool
+agx3_funop_encode_runtime(enum agx_isa_encoding enc, enum agx3_funop op,
+                          uint16_t dest, uint16_t src, bool src_abs,
+                          bool src_neg, bool saturate, uint16_t wait_mask,
+                          const struct agx3_funop_runtime *runtime,
+                          uint8_t out[AGX3_FUNOP_MAX_LENGTH], uint8_t *len)
+{
+   return runtime && agx_encoding_is_g17_class(enc) &&
+          agx3_funop_encode_impl(enc, op, dest, src, src_abs, src_neg,
+                                 saturate, wait_mask, false, runtime, out,
+                                 len);
 }
 
 bool

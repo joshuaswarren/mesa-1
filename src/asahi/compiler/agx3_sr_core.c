@@ -91,7 +91,24 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
    if (d->width == AGX3_SR_W32 && (d->dest & 1) != 0)
       return false;
 
-   const unsigned nslots = (enc == AGX_ISA_ENCODING_AGX3C) ? 8 : 6;
+   /*
+    * G18G (agx3d) reads special registers with the agx3c `rld` field vector:
+    * the f28/f29 pair and every operand field are the same in all 374
+    * aligned applegpu_g17g/applegpu_g18g rld pairs of the j813-linux
+    * gpu/m5-*-reference corpus (only the destination, slot and wait choices
+    * differ), and the G18G builds read SR 2 (W16), 23/24/25 and 51 (W32)
+    * for the same builtins, and SR 39 (W16) in the native msaa4 fragment
+    * (21 0a 42 00 00 00). Only those numbers are admitted for agx3d.
+    */
+   const bool g17 = agx_encoding_is_g17_class(enc);
+   if (enc != AGX_ISA_ENCODING_AGX3B && !g17)
+      return false;
+   if (enc == AGX_ISA_ENCODING_AGX3D &&
+       !(d->width == AGX3_SR_W16 ? d->sr == 2 || d->sr == 39
+                                 : (d->sr >= 23 && d->sr <= 25) || d->sr == 51))
+      return false;
+
+   const unsigned nslots = g17 ? 8 : 6;
    if (d->slot < 1 || d->slot > nslots || (d->wait_mask >> nslots) != 0)
       return false;
 
@@ -107,7 +124,7 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
    base[nbase++] = (struct agx3_field_kv)KV(9, 2);
    base[nbase++] = (struct agx3_field_kv)KV(38, 1);
    base[nbase++] = (struct agx3_field_kv)KV(23, 7);
-   if (enc == AGX_ISA_ENCODING_AGX3C) {
+   if (g17) {
       base[nbase++] = (struct agx3_field_kv)KV(28, 4);
       base[nbase++] = (struct agx3_field_kv)KV(29, 144);
    }
@@ -120,7 +137,8 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
    ov[n++] = (struct agx3_field_kv)KV(21, d->sr);
    ov[n++] = (struct agx3_field_kv)KV(12, d->slot);
    if (d->fragment_active_index) {
-      if (d->sr != 34 || d->width != AGX3_SR_W16)
+      if (d->sr != 34 || d->width != AGX3_SR_W16 ||
+          enc == AGX_ISA_ENCODING_AGX3D)
          return false;
       ov[n++] = (struct agx3_field_kv)KV(48, 1);
    }
@@ -133,6 +151,14 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
 
    if (d->first)
       ov[n++] = (struct agx3_field_kv)KV(48, 1);
+
+   /* agx3d picks its own rld form, smallest first, as Apple's encoder does:
+    * 21 05 5d 00 00 00 is the G18G `rld r2, SR 51` of every vertex shader
+    * (applegpu_g18g builds of the oracle and glxgears probes). */
+   if (enc == AGX_ISA_ENCODING_AGX3D)
+      return !d->first &&
+             agx3_bind_compose(enc, "rld", AGX3_BIND_APPLE_ORDER, base, nbase,
+                               ov, n, out, len);
 
    /* The compact form's selector requires every wait bit zero, a narrow
     * destination field and no entry marker; the composer refuses it otherwise

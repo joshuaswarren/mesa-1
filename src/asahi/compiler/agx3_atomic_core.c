@@ -15,10 +15,12 @@ encoding_ok(enum agx_isa_encoding enc)
    return enc == AGX_ISA_ENCODING_AGX3B ||
           enc == AGX_ISA_ENCODING_AGX3C;
 }
+/* Scoreboard slots are machine behaviour: eight on every G17-class part.
+ * The encoders here still accept only agx3b/agx3c (encoding_ok). */
 static unsigned
 slot_count(enum agx_isa_encoding enc)
 {
-   return enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
+   return agx_encoding_is_g17_class(enc) ? 8 : 6;
 }
 
 static bool
@@ -51,7 +53,11 @@ compose_first(enum agx_isa_encoding enc, const char *mnemonic,
               const struct agx3_field_kv *fields, unsigned nfields,
               uint8_t out[AGX3_ATOMIC_MAX_LENGTH], uint8_t *len)
 {
-   const unsigned count = enc == AGX_ISA_ENCODING_AGX3C ? 12 : 1;
+   /* The encoding points to try are a per-table layout: twelve agx3c
+    * atomicdev/atomictg forms, one agx3b form, none elsewhere. */
+   const unsigned count = enc == AGX_ISA_ENCODING_AGX3C   ? 12
+                          : enc == AGX_ISA_ENCODING_AGX3B ? 1
+                                                          : 0;
 
    for (unsigned ep = 0; ep < count; ++ep) {
       if (agx3_bind_compose(enc, mnemonic, ep, fields, nfields, NULL, 0,

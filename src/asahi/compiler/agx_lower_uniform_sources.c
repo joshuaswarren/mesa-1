@@ -123,7 +123,7 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
        * half uniform (a 16-bit constant such as a stencil reference) has no
        * witnessed uniform-to-half copy, so it is split from its aligned word
        * below, ahead of the export run. */
-      return !((encoding == AGX_ISA_ENCODING_AGX3B || encoding == AGX_ISA_ENCODING_AGX3C) && size == AGX_SIZE_16);
+      return !(agx_encoding_is_agx3(encoding) && size == AGX_SIZE_16);
    case AGX_OPCODE_PHI:
       /* We would fail validation otherwise */
       return true;
@@ -235,8 +235,7 @@ agx_lower_uniform_sources_block(agx_context *ctx, agx_block *block)
             }
             if (reused)
                continue;
-            if ((ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                 ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+            if (agx_encoding_is_agx3(ctx->key->dev.encoding) &&
                 idx.size == AGX_SIZE_16) {
                /* Native uniform copies fetch an aligned word. Extract the
                 * requested half through an SSA split, so RA can coalesce

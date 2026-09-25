@@ -32,10 +32,7 @@ agx_opt_compact_constants(agx_context *ctx)
     * same shape, and the one a transform-feedback vertex shader hits --
     * `v + 100.0` narrows the constant because 100.0 round-trips exactly
     * through f16. Widening stays explicit instead. */
-   const bool agx3 = ctx->key && (ctx->key->dev.encoding ==
-                                     AGX_ISA_ENCODING_AGX3B ||
-                                  ctx->key->dev.encoding ==
-                                     AGX_ISA_ENCODING_AGX3C);
+   const bool agx3 = ctx->key && agx_encoding_is_agx3(ctx->key->dev.encoding);
 
    /* Analyze the types that we read constants as */
    agx_foreach_instr_global(ctx, I) {

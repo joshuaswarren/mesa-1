@@ -86,8 +86,7 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx)
    struct sched_node *vary_store = NULL;
    const enum agx_isa_encoding enc = ctx->key->dev.encoding;
    const bool order_vary_stores =
-      (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
-      !debug_get_option_agx_stvary_noorder();
+      agx_encoding_is_agx3(enc) && !debug_get_option_agx_stvary_noorder();
 
    agx_foreach_instr_in_block(block, I) {
       /* Don't touch control flow */

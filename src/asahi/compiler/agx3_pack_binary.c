@@ -1672,6 +1672,9 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       return agx3_emit_texture_fetch_g17g(emission, enc, I, slot, wait_mask,
           final, stage_coordinates, separate_write_coords, ms_array_scratch,
           NULL);
+   /* What follows is the agx3b emitter; no other encoding may fall into it. */
+   if (enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
 
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE;
@@ -3013,6 +3016,9 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
           sample_group_nonterminal, sample_group_end, pixel_entry,
           pixel_entry_offset, native_coord_slot, cem_scratch, vertex_stage, array_scratch,
           g17g_lod_relay, NULL);
+   /* What follows is the agx3b emitter; no other encoding may fall into it. */
+   if (enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
 
    const bool explicit_lod = I->lod_mode == AGX_LOD_MODE_LOD_MIN;
    const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
@@ -8780,7 +8786,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    agx3_trace_shader_name =
       (ctx && ctx->nir && ctx->nir->info.name) ? ctx->nir->info.name : NULL;
    const enum agx_isa_encoding enc = ctx->key->dev.encoding;
-   const unsigned nslots = (enc == AGX_ISA_ENCODING_AGX3C) ? 8 : 6;
+
+   /*
+    * G18G (AGX3D) is refused here, whole shader, before anything is emitted.
+    * Its core encoders ground a first instruction catalogue through the
+    * agx3d table (the vertex_id read, vertex fetch, float ALU, ldimm, uvsw,
+    * flat and smooth varyings, fltnorm, pixwait/pixrel, lstcol and end; see
+    * the agx3_*_core.c admissions), but this packer is still the agx3b/agx3c
+    * one: its hand-written end-of-tile, background and array programs are
+    * agx3c or agx3b bytes, its compact paths call the agx3c hand packers, its
+    * waits assume agx3c's per-slot masks where agx3d's re-encoded forms name
+    * one slot, and Apple's G18G vertex programs add an epilogue on every
+    * float varying (bit_andc/iself32/bit_and/bit_or over three driver
+    * uniforms) that nothing here emits. Until those are grounded no agx3d
+    * byte may leave through this path.
+    */
+   if (enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C)
+      return false;
+
+   const unsigned nslots = agx_encoding_is_g17_class(enc) ? 8 : 6;
    const unsigned initial_size = emission->size;
    ctx->agx3_staging_known = true;
    ctx->agx3_fltnorm_start = false;

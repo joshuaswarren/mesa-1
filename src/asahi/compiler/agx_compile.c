@@ -868,8 +868,7 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
       if (channels[i].size == AGX_SIZE_32) {
          pack_sources[i] = channels[i];
       } else if (norm8 &&
-                 (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                  b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+                 agx_encoding_is_agx3(b->shader->key->dev.encoding) &&
                  channels[i].size == AGX_SIZE_16) {
          pack_sources[i] = agx_temp(b->shader, AGX_SIZE_32);
          agx_fmov_to(b, pack_sources[i], channels[i]);
@@ -1141,8 +1140,15 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
     * 0xff00 | stencil in its high half (0xff5a / 0xff01 for constant
     * stencil 0x5a / 1, 0xff00 when only depth is written) and publish the
     * saturated fp32 depth as the second dword. Build the vector as halves
-    * so the allocator keeps the word and the depth one contiguous pair. */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) {
+    * so the allocator keeps the word and the depth one contiguous pair.
+    *
+    * The applegpu_g18g builds of the same fragments (gpu/m5-fragment-zs-
+    * constant-reference.metal, -depth-) issue the same SR 2 read, iadd32
+    * folds, 0xff00 | stencil half, copy and a depthf with an identical field
+    * vector; only the depth clamp is one fsel3f32 where G17G uses
+    * fself32 + fseli32, which is instruction selection, not this IR. So the
+    * protocol is G17-class; before, AGX3D fell through to the AGX2 path. */
+   if (agx_encoding_is_g17_class(b->shader->key->dev.encoding)) {
       agx_index sr2 = agx_temp(b->shader, AGX_SIZE_16);
       agx_get_coverage_1x_agx3_to(b, sr2);
       agx_index shifted = agx_iadd(b, agx_immediate(0), sr2, 4);
@@ -1614,7 +1620,7 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
     * `normflt`, the way Apple spells unpack_unorm4x8_to_float on a loaded
     * word (gpu/m5-xfb-alu7-, -alu12-reference.metal); the AGX3 device load
     * has no normalized format of its own. */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+   if (agx_encoding_is_g17_class(b->shader->key->dev.encoding) &&
        (fmt == AGX_FORMAT_U8NORM || fmt == AGX_FORMAT_S8NORM) &&
        dest.size == AGX_SIZE_32 && packed_count == 0 && !index_bytes &&
        agx_emit_norm8_load_g17g(b, dest, instr, fmt, addr, offset, shift,
@@ -3715,7 +3721,7 @@ agx_lower_agx3_mixed_width_transcendental(agx_context *ctx)
 void
 agx_lower_agx3_fma_sources(agx_context *ctx)
 {
-   const bool g17g = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C;
+   const bool g17g = agx_encoding_is_g17_class(ctx->key->dev.encoding);
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g17g)
       return;
 
@@ -4576,7 +4582,7 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       /* The G17G full-register select compares f32 operands. Retain a
        * mediump comparator's value by widening it before that comparison;
        * leave the selected values and ordered comparison condition intact. */
-      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+      if (agx_encoding_is_g17_class(ctx->key->dev.encoding) &&
           I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 && I->nr_dests == 1 &&
           I->dest[0].size == AGX_SIZE_32 &&
           I->src[2].size == AGX_SIZE_32 && I->src[3].size == AGX_SIZE_32) {
@@ -4593,7 +4599,7 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       /* Native FLTNORM consumes unmodified f32 sources. A negative alpha
        * from subtractive blending must reach its normal clamp/quantization,
        * not be dropped or have its sign modifier silently ignored. */
-      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+      if (agx_encoding_is_g17_class(ctx->key->dev.encoding) &&
           I->op == AGX_OPCODE_FLTNORM_AGX3) {
          agx_foreach_src(I, s) {
             if (I->src[s].type != AGX_INDEX_IMMEDIATE &&
@@ -5156,7 +5162,7 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 void
 agx_lower_agx3_immediates(agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3C)
+   if (!agx_encoding_is_g17_class(ctx->key->dev.encoding))
       return;
 
    agx_foreach_instr_global_safe(ctx, I) {
@@ -5961,8 +5967,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
           * materializing the constant there only produced an operand shape
           * the packer had no witness for.
           */
-         if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-              b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+         if (agx_encoding_is_agx3(b->shader->key->dev.encoding) &&
              nir_src_is_const(instr->src[i].src) &&
              (instr->op == nir_texop_tg4 ||
               nir_src_as_uint(instr->src[i].src) <= 0xfff)) {
@@ -6097,7 +6102,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     * native form. */
    if (((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          b->shader->stage != MESA_SHADER_FRAGMENT) ||
-        b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+        agx_encoding_is_g17_class(b->shader->key->dev.encoding)) &&
        (instr->op == nir_texop_txl || instr->op == nir_texop_txf) &&
        lod_is_zero) {
       lod_mode = AGX_LOD_MODE_LOD_MIN;
@@ -6138,8 +6143,7 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     * source it accepts only for a gather with a runtime offset, so every
     * textureOffset on a shadow sampler was refused. */
    const bool split_constant_offset =
-      (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+      agx_encoding_is_agx3(b->shader->key->dev.encoding) &&
       packed_offset.type == AGX_INDEX_IMMEDIATE;
 
    if (split_constant_offset && !agx_is_null(compare))
@@ -9189,8 +9193,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                               agx_nir_has_alu64(nir, nir_op_umul_2x32_64) ||
                               agx_nir_has_alu64(nir, nir_op_imul_2x32_64);
 
-   if ((key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-        key->dev.encoding == AGX_ISA_ENCODING_AGX3C) &&
+   if (agx_encoding_is_agx3(key->dev.encoding) &&
        has_unlowered_printf_address(nir))
       return false;
 
@@ -9203,9 +9206,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
     * its fatal unhandled-intrinsic path, and keep the output transactional.
     * This gate is removed only together with the full lowering and scheduling
     * contract; it does not prevent direct internal encoder tests. */
-   if (nir->info.ray_queries != 0 &&
-       (key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-        key->dev.encoding == AGX_ISA_ENCODING_AGX3C))
+   if (nir->info.ray_queries != 0 && agx_encoding_is_agx3(key->dev.encoding))
       return false;
 
    /* If required, tag writes will be enabled by instruction selection */
@@ -9276,8 +9277,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    info->push_count = key->reserved_preamble;
    const bool form_preamble = !key->secondary && !key->no_preamble;
-   const bool is_agx3 = key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
-                       key->dev.encoding == AGX_ISA_ENCODING_AGX3C;
+   const bool is_agx3 = agx_encoding_is_agx3(key->dev.encoding);
    const bool is_g17p = key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
 
    /* AGX3's ldtg/sttg index counts scalar elements and the instruction's own
@@ -9365,7 +9365,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
        * optimization rather than present in the source. */
       if (source_imul64)
          NIR_PASS(_, nir, agx_nir_lower_imul64);
-   } else if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C && source_iadd64) {
+   } else if (agx_encoding_is_g17_class(key->dev.encoding) && source_iadd64) {
       /* M5's generated geometry shaders also add full-width addresses.
        * Apple G17G ulong addition uses low/add, carry and high/add; keep
        * that lowering local instead of reaching an ungrounded IADD64. */

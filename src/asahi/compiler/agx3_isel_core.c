@@ -369,7 +369,7 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
        (!d->cmp1_immediate &&
         !(d->cmp_16 ? reg16_ok(d->cmp1) : reg32_ok(d->cmp1))))
       return false;
-   if (d->wait_mask >= (1u << (encoding == AGX_ISA_ENCODING_AGX3C ? 8 : 6)))
+   if (d->wait_mask >= (1u << (agx_encoding_is_g17_class(encoding) ? 8 : 6)))
       return false;
 
    if (d->dest_16 ? !reg16_ok(d->dest) : !reg32_ok(d->dest))

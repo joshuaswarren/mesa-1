@@ -37,6 +37,23 @@ b(enum agx_isa_encoding e)
    return e == AGX_ISA_ENCODING_AGX3B;
 }
 
+/*
+ * The runtime-hint float forms below also encode G18G (agx3d), from the
+ * agx3c field vector: f32add, f32mul and f32fma differ between the aligned
+ * applegpu_g17g/applegpu_g18g pairs of the j813-linux gpu/m5-*-reference
+ * corpus (58, 371 and 79 of them) only in register, cache/discard hint,
+ * output-register and wait choices. agx3d picks its own encoding point,
+ * smallest first, and its wait field is one slot code rather than agx3c's
+ * mask, so at most one wait slot is admitted.
+ */
+static bool
+runtime_enc_ok(enum agx_isa_encoding e, uint16_t wait_mask)
+{
+   if (e == AGX_ISA_ENCODING_AGX3D)
+      return (wait_mask & (wait_mask - 1)) == 0 && wait_mask <= 0xff;
+   return e == AGX_ISA_ENCODING_AGX3B || e == AGX_ISA_ENCODING_AGX3C;
+}
+
 static unsigned
 common_mods(uint16_t dest, uint16_t src0, uint16_t src1,
             const struct agx3_falu_mods *m, struct agx3_field_kv *ov)
@@ -95,8 +112,8 @@ agx3_falu_add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                          const struct agx3_falu_runtime *runtime,
                          uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) || !m || !runtime || !out || !len ||
-       (dest & 1) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
+   if (!runtime || !runtime_enc_ok(enc, runtime->wait_mask) || !m || !out ||
+       !len || (dest & 1) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
        !slot_ok(src1, m->src1_16) || m->addend_abs || m->addend_neg ||
        (b(enc) && runtime->wait_mask > 0x3f) ||
        (!b(enc) && (m->src0_16 || m->src1_16)))
@@ -132,7 +149,8 @@ agx3_falu_add_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                                           (runtime->wait_mask >> i) & 1);
       for (unsigned ep = 0; ep <= 3; ++ep) {
          uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], size;
-         if (agx3_bind_compose(enc, "f32add", ep, b(enc) ? add_b : add_c,
+         if (agx3_bind_compose(enc, "f32add", agx3_bind_ep(enc, ep),
+                              b(enc) ? add_b : add_c,
                               b(enc) ? 9 : 11, ov, n, bytes, &size)) {
             if (!best_size || size < best_size) {
                for (unsigned i = 0; i < size; ++i)
@@ -319,8 +337,8 @@ agx3_falu_mul_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) || !m || !runtime || !out || !len ||
-       (dest & 1) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
+   if (!runtime || !runtime_enc_ok(enc, runtime->wait_mask) || !m || !out ||
+       !len || (dest & 1) || dest >= 256 || !slot_ok(src0, m->src0_16) ||
        !slot_ok(src1, m->src1_16) || m->addend_abs || m->addend_neg ||
        (b(enc) && runtime->wait_mask > 0x3f) ||
        (!b(enc) && (m->src0_16 || m->src1_16)))
@@ -341,7 +359,8 @@ agx3_falu_mul_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                                        (runtime->wait_mask >> i) & 1);
    for (unsigned ep = 0; ep <= 3; ++ep) {
       uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], size;
-      if (agx3_bind_compose(enc, "f32mul", ep, b(enc) ? mul_b : mul_c,
+      if (agx3_bind_compose(enc, "f32mul", agx3_bind_ep(enc, ep),
+                           b(enc) ? mul_b : mul_c,
                            b(enc) ? 11 : 13, ov, n, bytes, &size)) {
          for (unsigned i = 0; i < size; ++i)
             out[i] = bytes[i];
@@ -384,8 +403,8 @@ agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) || m == NULL || runtime == NULL ||
-       out == NULL || len == NULL || (dest & 1) || dest >= 256 ||
+   if (runtime == NULL || !runtime_enc_ok(enc, runtime->wait_mask) ||
+       m == NULL || out == NULL || len == NULL || (dest & 1) || dest >= 256 ||
        !slot_ok(src0, m->src0_16) || !slot_ok(src1, m->src1_16) ||
        !slot_ok(addend, m->addend_16) || (b(enc) && runtime->wait_mask > 0x3f) ||
        (!b(enc) && (m->src0_16 || m->src1_16 || m->addend_16)))
@@ -412,7 +431,8 @@ agx3_falu_fma_mod_runtime(enum agx_isa_encoding enc, uint16_t dest,
                                        (runtime->wait_mask >> i) & 1);
    for (unsigned ep = 2; ep <= (b(enc) ? 5 : 7); ++ep) {
       uint8_t bytes[AGX3_FALU_MOD_MAX_LENGTH], size;
-      if (agx3_bind_compose(enc, "f32fma", ep, b(enc) ? fma_b : fma_c,
+      if (agx3_bind_compose(enc, "f32fma", agx3_bind_ep(enc, ep),
+                           b(enc) ? fma_b : fma_c,
                            b(enc) ? 14 : 16, ov, n,
                            bytes, &size)) {
          for (unsigned i = 0; i < size; ++i)

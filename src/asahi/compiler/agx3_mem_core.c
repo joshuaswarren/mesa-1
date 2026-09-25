@@ -98,7 +98,7 @@ mem_baseline(enum agx_isa_encoding enc, bool is_load,
    base[i++] = (struct agx3_field_kv)KV(9, 2);
    base[i++] = (struct agx3_field_kv)KV(39, 3);
    base[i++] = (struct agx3_field_kv)KV(54, 1);
-   if (enc == AGX_ISA_ENCODING_AGX3C) {
+   if (agx_encoding_is_g17_class(enc)) {
       base[i++] = (struct agx3_field_kv)KV(45, 15);
       base[i++] = (struct agx3_field_kv)KV(53, 1);
       base[i++] = (struct agx3_field_kv)KV(59, is_load ? 104 : 187);
@@ -106,34 +106,86 @@ mem_baseline(enum agx_isa_encoding enc, bool is_load,
    *n = i;
 }
 
+/*
+ * The field vector of one LDDEV. `ep` is an agx3b/agx3c encoding point; it
+ * is only range-checked here. Returns false for a descriptor it cannot hold.
+ */
+static bool
+mem_load_fields(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
+                uint8_t ep, struct agx3_field_kv *base, unsigned *nbase,
+                struct agx3_field_kv *ov, unsigned *n)
+{
+   if (!common_ok(d) || d->slot < 1 ||
+       d->slot > (agx_encoding_is_g17_class(enc) ? 8 : 6) ||
+       (enc == AGX_ISA_ENCODING_AGX3B ? ep != 0 : ep > 5))
+      return false;
+
+   mem_baseline(enc, true, base, nbase);
+   if (d->agx3b_last_load && enc != AGX_ISA_ENCODING_AGX3B)
+      return false;
+   if ((d->last_load || d->agx3b_last_load) && enc == AGX_ISA_ENCODING_AGX3B)
+      base[(*nbase)++] = (struct agx3_field_kv)KV(79, 2);
+
+   *n = common_overrides(d, /*off*/ 76, /*shift*/ 75, /*mask*/ 73, ov);
+   ov[(*n)++] = (struct agx3_field_kv)KV(12, d->slot);
+   /* Only ep2/ep5 carry f82; the other forms fail the compose and the
+    * caller's form order lands on ep2 like Apple's emitter. */
+   if (d->last_load && agx_encoding_is_g17_class(enc))
+      ov[(*n)++] = (struct agx3_field_kv)KV(82, 2);
+   ov[(*n)++] = (struct agx3_field_kv)KV(77, d->coherent ? 1 : 0);
+   return true;
+}
+
 bool
 agx3_mem_encode_load_form(enum agx_isa_encoding enc,
                           const struct agx3_mem_desc *d, uint8_t ep,
                           uint8_t out[AGX3_MEM_MAX_LENGTH], uint8_t *len)
 {
-   if (!common_ok(d) || d->slot < 1 ||
-       d->slot > (enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6) ||
-       (enc == AGX_ISA_ENCODING_AGX3B ? ep != 0 : ep > 5))
+   /* agx3b/agx3c encoding points do not name agx3d forms. */
+   if (enc == AGX_ISA_ENCODING_AGX3D)
       return false;
 
    struct agx3_field_kv base[7];
-   unsigned nbase;
-   mem_baseline(enc, true, base, &nbase);
-   if (d->agx3b_last_load && enc != AGX_ISA_ENCODING_AGX3B)
-      return false;
-   if ((d->last_load || d->agx3b_last_load) && enc == AGX_ISA_ENCODING_AGX3B)
-      base[nbase++] = (struct agx3_field_kv)KV(79, 2);
-
    struct agx3_field_kv ov[32];
-   unsigned n = common_overrides(d, /*off*/ 76, /*shift*/ 75, /*mask*/ 73, ov);
-   ov[n++] = (struct agx3_field_kv)KV(12, d->slot);
-   /* Only ep2/ep5 carry f82; the other forms fail the compose and the
-    * caller's form order lands on ep2 like Apple's emitter. */
-   if (d->last_load && enc == AGX_ISA_ENCODING_AGX3C)
-      ov[n++] = (struct agx3_field_kv)KV(82, 2);
-   ov[n++] = (struct agx3_field_kv)KV(77, d->coherent ? 1 : 0);
+   unsigned nbase, n;
+   if (!mem_load_fields(enc, d, ep, base, &nbase, ov, &n))
+      return false;
 
    return agx3_bind_compose(enc, "lddev", ep, base, nbase, ov, n, out, len);
+}
+
+/*
+ * G18G (agx3d) LDDEV: the agx3c field vector plus f87 = 2, in Apple's form
+ * order. Grounded on the applegpu_g18g builds of the j813-linux
+ * gpu/m5-*-reference corpus: the 436 LDDEVs aligned with a G17G one differ
+ * only in slot, wait and register choices, except that the 409 main-program
+ * data loads (uniform or GPR base, immediate or register index) all carry
+ * f87 = 2, which no G17G LDDEV has; the glxgears vertex fetch
+ * (49 07 00 80 08 10 80 60 08 00) is one of them. f87 is 0 on the loads of
+ * argument-buffer and descriptor words in constant programs; what it selects
+ * is not decoded, so this encoder is for data loads only.
+ *
+ * agx3d's LDDEV wait field is one slot code, not a mask (composing slots 1
+ * and 3 gives the code of neither), so at most one wait slot is admitted.
+ * Coherent (f77) loads have no G18G witness and are refused.
+ */
+static bool
+agx3d_mem_encode_load(const struct agx3_mem_desc *d,
+                      uint8_t out[AGX3_MEM_MAX_LENGTH], uint8_t *len)
+{
+   if (d == NULL || d->coherent || (d->wait_mask & (d->wait_mask - 1)))
+      return false;
+
+   struct agx3_field_kv base[7];
+   struct agx3_field_kv ov[33];
+   unsigned nbase, n;
+   if (!mem_load_fields(AGX_ISA_ENCODING_AGX3D, d, 0, base, &nbase, ov, &n))
+      return false;
+   ov[n++] = (struct agx3_field_kv)KV(87, 2);
+
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3D, "lddev",
+                            AGX3_BIND_APPLE_ORDER, base, nbase, ov, n, out,
+                            len);
 }
 
 bool
@@ -152,6 +204,8 @@ agx3_mem_encode_load(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
       }
       return false;
    }
+   if (enc == AGX_ISA_ENCODING_AGX3D)
+      return agx3d_mem_encode_load(d, out, len);
    return agx3_mem_encode_load_form(enc, d, 0, out, len);
 }
 
@@ -160,6 +214,14 @@ agx3_mem_encode_store(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
                       uint8_t out[AGX3_MEM_MAX_LENGTH], uint8_t *len)
 {
    if (!common_ok(d) || d->last_load || d->agx3b_last_load)
+      return false;
+
+   /* G18G (agx3d) STDEV takes the agx3c field vector: the 248 aligned
+    * applegpu_g17g/applegpu_g18g stores of the m5 reference corpus differ
+    * only in their wait slot. Its wait field is one slot code, and no G18G
+    * store witnesses the coherent bit. */
+   if (enc == AGX_ISA_ENCODING_AGX3D &&
+       (d->coherent || (d->wait_mask & (d->wait_mask - 1))))
       return false;
 
    struct agx3_field_kv base[6];
@@ -182,5 +244,6 @@ agx3_mem_encode_store(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
       }
       return false;
    }
-   return agx3_bind_compose(enc, "stdev", 0, base, nbase, ov, n, out, len);
+   return agx3_bind_compose(enc, "stdev", agx3_bind_ep(enc, 0), base, nbase,
+                            ov, n, out, len);
 }

@@ -172,7 +172,7 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
    if (d->sparse && (enc != AGX_ISA_ENCODING_AGX3B || d->multisample))
       return false;
 
-   const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
+   const unsigned slots = agx_encoding_is_g17_class(enc) ? 8 : 6;
    const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0xff : 0x3f;
    return d->slot >= 1 && d->slot <= slots &&
           (d->wait_mask & ~waits) == 0 && one_or_zero(d->wait_mask);
@@ -784,7 +784,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
         d->min_lod_value > 190 || (d->min_lod_value & 1)))
       return false;
 
-   const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
+   const unsigned slots = agx_encoding_is_g17_class(enc) ? 8 : 6;
    const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0xff : 0x3f;
    return d->slot >= 1 && d->slot <= slots &&
           (d->wait_mask & ~waits) == 0 && one_or_zero(d->wait_mask);
@@ -1096,7 +1096,7 @@ agx3_tex_stage_copy_hints(enum agx_isa_encoding enc, uint16_t dest, uint16_t src
    if ((dest & 1) || (src & 1) || dest >= 256 || src >= 128)
       return false;
 
-   const unsigned slots = enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
+   const unsigned slots = agx_encoding_is_g17_class(enc) ? 8 : 6;
    const uint16_t waits = enc == AGX_ISA_ENCODING_AGX3C ? 0xff : 0x3f;
    if (slot < 1 || slot > slots || (wait_mask & ~waits) ||
        !one_or_zero(wait_mask))

@@ -22,13 +22,13 @@ b_only(enum agx_isa_encoding enc)
 static bool
 enc_ok(enum agx_isa_encoding enc)
 {
-   return enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C;
+   return enc == AGX_ISA_ENCODING_AGX3B || agx_encoding_is_g17_class(enc);
 }
 
 static unsigned
 nslots(enum agx_isa_encoding enc)
 {
-   return enc == AGX_ISA_ENCODING_AGX3C ? 8 : 6;
+   return agx_encoding_is_g17_class(enc) ? 8 : 6;
 }
 
 static uint16_t
@@ -135,6 +135,13 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
     * f68. Its second immediate pack leaves the bit clear. */
    if (!enc_ok(enc) || d->dest >= 256)
       return false;
+   /* G18G (agx3d) keeps fltnorm's agx3c encoding: 147 of the 152 aligned
+    * applegpu_g17g/applegpu_g18g fltnorm words of the m5 reference corpus are
+    * byte-identical and the rest differ only in register and wait choices,
+    * and the wait field stays a mask. No G18G program carries the f68 start
+    * marker, so it is refused there. */
+   if (enc == AGX_ISA_ENCODING_AGX3D && d->first_instruction)
+      return false;
    if (enc == AGX_ISA_ENCODING_AGX3C && d->first_instruction &&
        (!d->two_lanes || d->snorm || d->is_16bit ||
         d->srgb != AGX3_FLTNORM_SRGB_NONE ||
@@ -164,7 +171,7 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
    unsigned nbase = 0;
    base[nbase++] = (struct agx3_field_kv)KV(9, 2);
    base[nbase++] = (struct agx3_field_kv)KV(10, 1);
-   if (enc == AGX_ISA_ENCODING_AGX3C) {
+   if (agx_encoding_is_g17_class(enc)) {
       base[nbase++] = (struct agx3_field_kv)KV(48, 3);
       base[nbase++] = (struct agx3_field_kv)KV(49, 72);
    }
@@ -198,7 +205,8 @@ agx3_fltnorm_encode(enum agx_isa_encoding enc,
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(50 + i, 1);
 
-   if (agx3_bind_compose(enc, "fltnorm", 0, base, nbase, ov, n, out, len))
+   if (agx3_bind_compose(enc, "fltnorm", agx3_bind_ep(enc, 0), base, nbase,
+                         ov, n, out, len))
       return true;
 
    memset(out, 0, AGX3_FLTNORM_MAX_LENGTH);
@@ -442,7 +450,11 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
    base[nbase++] =
       (struct agx3_field_kv)KV(26, d->is_16bit && d->two_lanes ? 2 : 1);
    base[nbase++] = (struct agx3_field_kv)KV(29, 1);
-   if (enc == AGX_ISA_ENCODING_AGX3C) {
+   /* G18G (agx3d) keeps normflt's agx3c encoding: 8 of the 14 aligned
+    * applegpu_g17g/applegpu_g18g normflt words of the m5 reference corpus are
+    * byte-identical and the rest differ only in wait choice (f32..f39, still
+    * a mask on agx3d). */
+   if (agx_encoding_is_g17_class(enc)) {
       base[nbase++] = (struct agx3_field_kv)KV(30, 3);
       base[nbase++] = (struct agx3_field_kv)KV(31, 115);
    }
@@ -462,7 +474,8 @@ agx3_normflt_encode(enum agx_isa_encoding enc,
       if (d->wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(32 + i, 1);
 
-   if (agx3_bind_compose(enc, "normflt", 0, base, nbase, ov, n, out, len))
+   if (agx3_bind_compose(enc, "normflt", agx3_bind_ep(enc, 0), base, nbase,
+                         ov, n, out, len))
       return true;
 
    memset(out, 0, AGX3_FLTNORM_MAX_LENGTH);
