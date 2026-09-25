@@ -172,6 +172,12 @@ signed
 ${isa_prefix}_disassemble_instr(BITSET_WORD *code, FILE *fp, unsigned offset, size_t available, bool verbose)
 {
   return _disassemble_instr(code, fp, decodings, ARRAY_SIZE(decodings), available, offset, verbose);
+}
+
+signed
+${isa_prefix}_instr_length(const uint8_t *code, size_t available, const char **display)
+{
+  return _instr_length(code, decodings, ARRAY_SIZE(decodings), available, display);
 }"""
 
 try:

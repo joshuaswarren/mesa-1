@@ -200,6 +200,43 @@ print_modifier(struct disasm_ctx *ctx, const char *display, unsigned value)
    }
 }
 
+/* The length and display name of the instruction at code, by exactly the
+ * matching rule _disassemble_instr uses, without printing. -1 if no form
+ * matches within `available` bytes. The display name may carry trailing
+ * padding spaces. */
+static signed
+_instr_length(const uint8_t *code, struct disasm_spec *specs,
+              unsigned nr_specs, size_t available, const char **display)
+{
+   BITSET_WORD tmp[AGX_DISASM_WORDS] = {0};
+   memcpy(tmp, code, MIN2(available, sizeof(tmp)));
+
+   for (unsigned i = 0; i < nr_specs; ++i) {
+      const struct disasm_spec *spec = &specs[i];
+      const unsigned n = BITSET_TEST(tmp, spec->length_bit) ? spec->length_long
+                                                            : spec->length_short;
+      if (n > available)
+         continue;
+
+      bool match = true;
+      for (unsigned w = 0; w < AGX_DISASM_WORDS && match; ++w) {
+         BITSET_WORD masked = tmp[w];
+         const unsigned base = w * 4;
+         if (base >= n)
+            masked = 0;
+         else if (n - base < 4)
+            masked &= (UINT32_C(1) << ((n - base) * 8)) - 1;
+         match = (masked & spec->mask[w]) == spec->exact[w];
+      }
+      if (match) {
+         if (display)
+            *display = spec->display;
+         return n;
+      }
+   }
+   return -1;
+}
+
 static signed
 _disassemble_instr(BITSET_WORD *code, FILE *fp, struct disasm_spec *specs,
                    unsigned nr_specs, size_t available, unsigned offset,

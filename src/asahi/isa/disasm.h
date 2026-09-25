@@ -33,6 +33,21 @@ signed agx3d_disassemble_instr(BITSET_WORD *code, FILE *fp, unsigned offset,
                                size_t available, bool verbose);
 
 /*
+ * Length in bytes of the instruction at code (at most `available` bytes), and
+ * its display name, which may carry trailing padding, by the same matching
+ * rule as the disassemblers above but without printing. -1 if nothing
+ * matches.
+ */
+signed agx2_instr_length(const uint8_t *code, size_t available,
+                         const char **display);
+signed agx3b_instr_length(const uint8_t *code, size_t available,
+                          const char **display);
+signed agx3c_instr_length(const uint8_t *code, size_t available,
+                          const char **display);
+signed agx3d_instr_length(const uint8_t *code, size_t available,
+                          const char **display);
+
+/*
  * Disassemble a whole shader, stopping at max_len.
  *
  * AGX2 additionally stops at the first `trap`, which is what pads the tail of
