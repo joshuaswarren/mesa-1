@@ -35,8 +35,11 @@ libasahi_agx_files = files(
   'agx3_iadd_core.c',
   'agx3_pack_binary.c',
   'agx3_compose/agx3_compose.c',
+  'agx3_compose/agx3_decode.c',
   'agx3_compose/agx3b_tables.c',
   'agx3_compose/agx3c_tables.c',
+  'agx3_compose/agx3d_tables.c',
+  'agx3_transcode.c',
   'agx3_binder.c',
   'agx3_atomic_core.c',
   'agx3_cf_core.c',
@@ -137,8 +140,9 @@ libasahi_compiler = static_library(
   'asahi_compiler',
   [libasahi_agx_files, agx_opcodes_c, agx_nir_algebraic_c],
   dependencies: [idep_nir, idep_agx_opcodes_h, idep_agx_builder_h, idep_mesautil, idep_libagx],
-  link_with : [libagx2_disasm],
-  c_args : [no_override_init_args, '-Wno-c2x-extensions'],
+  link_with : [libagx2_disasm, libagx3c_disasm, libagx3d_disasm],
+  c_args : [no_override_init_args, '-Wno-c2x-extensions',
+            '-DAGX3_HAVE_AGX3D_TABLE'],
   gnu_symbol_visibility : 'hidden',
   build_by_default : false,
 )
@@ -434,9 +438,9 @@ if with_tests
   # ground truth every hand-written AGX3 encoder is validated against, so it
   # belongs in CI rather than being run by hand.
   #
-  # agx3d_tables.c (G18G) is built here only: nothing in the compiler selects
-  # the agx3d table yet, so it stays out of the library until a G18G packer
-  # needs it. test/agx3d_compose_corpus_vectors.c is #included by the test.
+  # agx3d_tables.c (G18G) is also in the compiler library, which re-encodes
+  # G18G code with it (agx3_transcode.c). test/agx3d_compose_corpus_vectors.c
+  # is #included by the test.
   test(
     'agx3_compose_corpus',
     executable(
@@ -452,6 +456,29 @@ if with_tests
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
       include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  # G17G -> G18G re-encoding against Apple's own G18G bytes for the same
+  # Metal source (test/agx3d_transcode_vectors.c, from native/g18g).
+  test(
+    'agx3_transcode',
+    executable(
+      'agx3_transcode_test',
+      files(
+        'agx3_transcode.c',
+        'agx3_compose/agx3_compose.c',
+        'agx3_compose/agx3_decode.c',
+        'agx3_compose/agx3c_tables.c',
+        'agx3_compose/agx3d_tables.c',
+        'test/test-agx3-transcode.c',
+      ),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      link_with : [libagx3c_disasm, libagx3d_disasm],
+      dependencies : [idep_mesautil],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src, include_directories('.', 'test')],
     ),
     suite : ['asahi'],
   )

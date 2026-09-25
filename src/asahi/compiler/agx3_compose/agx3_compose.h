@@ -85,4 +85,10 @@ int32_t agx3_compose_mnemonic(const agx3_table *t, const char *mnemonic,
 
 int32_t agx3_form_index(const agx3_table *t, const char *mnemonic, uint8_t ep);
 
+/* The form Apple's encoder picks: this mnemonic's forms by ascending size,
+ * ep breaking ties, first that encodes. Writes the bytes to out; -1 if none. */
+int32_t agx3_compose_apple_order(const agx3_table *t, const char *mnemonic,
+                                 const uint64_t fields[AGX3_MAX_FIELDS],
+                                 uint8_t *out);
+
 #endif
