@@ -330,6 +330,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
+   dev->cdm_barrier_mask =
+      debug_get_num_option("HK_CDM_BARRIER_MASK", 0) & 0x07ffffff;
 
    if (instance->drirc.misc.disable_border_emulation) {
       dev->perftest |= HK_PERF_NOBORDER;

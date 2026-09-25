@@ -48,7 +48,12 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
           "caller must ensure space");
 
-   if (HK_PERF(dev, NOCDMBARRIER)) {
+   if (unlikely(dev->cdm_barrier_mask)) {
+      /* Perftest only: exact CDM_BARRIER flag word from the environment. */
+      uint32_t *word = cs->current;
+      *word = dev->cdm_barrier_mask | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
+      cs->current = word + 1;
+   } else if (HK_PERF(dev, NOCDMBARRIER)) {
       /* Perftest only: launch with no cache maintenance at all. */
    } else if (HK_PERF(dev, DESIGNEDUSCCDMBARRIER)) {
       /* Perftest only: designed set {4,5,6,8} + USC cache invalidate. */

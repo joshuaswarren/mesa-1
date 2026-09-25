@@ -98,6 +98,9 @@ struct hk_device {
    } scratch;
 
    uint32_t perftest;
+   /* HK_CDM_BARRIER_MASK=<hex>: perftest-only override of the per-launch
+    * CDM_BARRIER flag word (bits 0..26). 0 = unset. */
+   uint32_t cdm_barrier_mask;
 
    struct {
       struct u_rwlock lock;
