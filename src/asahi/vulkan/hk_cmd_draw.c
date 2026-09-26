@@ -9414,7 +9414,12 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
        * general encoder inside the first indexed draw. */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
       struct hk_graphics_state *gfx = &cmd->state.gfx;
+      /* Index buffers may be bound before shaders (or after unbinding
+       * them). Linked shader cache entries can still refer to the previous
+       * draw, so they do not prove that warm-up has live API shaders. */
       if (dev->dev.chip == AGX_CHIP_G17P &&
+          gfx->shaders[MESA_SHADER_VERTEX] &&
+          gfx->shaders[MESA_SHADER_FRAGMENT] &&
           !vk_command_buffer_has_error(&cmd->vk)) {
          /* The indexed fast link also changes the vertex identity captured by
           * the immutable HAL200 tail.  Refresh it alongside the dispatch so
