@@ -20,8 +20,10 @@
 #include "pool.h"
 #include "shader_enums.h"
 
+#include "asahi/compiler/agx3_ioto_uniform_program.h"
 #include "asahi/genxml/agx3_cmdstream.h"
 #include "asahi/lib/agx3_compute_program_core.h"
+#include "asahi/lib/agx_ppp_hal200_graphics_core.h"
 #include "asahi/lib/agx_ppp_viewport_payload_core.h"
 #include "asahi/lib/agx_vdm_hal200_bind_tail_core.h"
 
@@ -467,6 +469,19 @@ static_assert(offsetof(struct hk_g17p_graphics_root_record, range_address) % 8 =
 static_assert(sizeof(struct hk_g17p_graphics_root_record) <= 512,
               "G17P graphics root must remain compact and bounded");
 
+/* Where a G17P graphics uniform range's source address comes from. */
+enum hk_g17p_range_source {
+   /* Fixed for the shader and device (heap pointers, promoted constants). */
+   HK_G17P_RANGE_SOURCE_CONSTANT = 0,
+   /* The graphics root plus a fixed offset. */
+   HK_G17P_RANGE_SOURCE_ROOT = 1,
+   HK_G17P_RANGE_SOURCE_DRAW_PARAMS = 2,
+   HK_G17P_RANGE_SOURCE_DRAW_ID = 3,
+   /* Uploaded while collecting the ranges (combined-sampler pointers,
+    * spilled render-target descriptors): not re-derivable. */
+   HK_G17P_RANGE_SOURCE_UPLOADED,
+};
+
 struct hk_g17p_graphics_ioto_cache_entry {
    uint8_t key[HK_G17P_GRAPHICS_IOTO_KEY_MAX];
    uint64_t program;
@@ -483,6 +498,53 @@ struct hk_g17p_graphics_ioto_cache_entry {
    bool root_dependent;
    bool fast_valid;
    bool valid;
+
+   /* Launcher inputs of the last compact publication for this stage.  A
+    * later draw of the same linked shader, render layout and range layout
+    * whose only change is range source addresses -- a new root after a
+    * descriptor push, or the next indexed-indirect record's draw parameters
+    * -- would re-derive exactly the same bounds, constant-program extent and
+    * setup template.  The record keeps those so such a draw rebuilds only
+    * its root record and launcher. */
+   struct {
+      struct agx3_ioto_uniform_range ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      /* The same ranges after hk_g17p_graphics_compact_ranges(), their root
+       * record, and where each source address came from (enum
+       * hk_g17p_range_source) with its root-relative offset.  When no source
+       * is an upload made while collecting (patchable), a draw can re-derive
+       * every address from the root, draw-parameter and draw-ID pointers. */
+      struct agx3_ioto_uniform_range
+         compact_ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      struct hk_g17p_graphics_root_record root;
+      /* Patchable address r is base[source[r]] + source_offset[r], with
+       * base = {0, root, draw parameters, draw ID}; a constant's offset is
+       * its address. */
+      uint64_t source_offset[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      uint8_t source[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      bool patchable;
+      bool uses_root;
+      bool has_draw_params;
+      bool has_draw_id;
+      /* Fragment admission inputs (hk_g17p_basic_graphics_program_supported):
+       * the varying-coefficient check reads the topology, provoking vertex
+       * and hardware vertex shader. */
+      const void *admit_hw_vs;
+      uint8_t admit_topology;
+      uint8_t admit_provoking;
+      bool external;
+      const void *source_shader;
+      const void *linked;
+      const void *setup;
+      uint64_t linked_shader_va;
+      uint64_t rodata_va;
+      uint8_t range_count;
+      uint16_t tile_size_px;
+      uint8_t sample_size_B;
+      uint8_t nr_samples;
+      bool blend;
+      bool spills;
+      bool valid;
+   } compact;
 };
 
 struct hk_prepared_fast_link_vs {
@@ -552,6 +614,40 @@ struct hk_graphics_state {
    struct hk_g17p_prepared_sw_tess_batch g17p_sw_tess_batch;
 
    struct hk_g17p_prepared_bind_tail g17p_bind_tail;
+
+   /* The last successfully built HAL200 bind tail's inputs and packed
+    * records.  A rebuild whose only changed inputs are the root, descriptor
+    * or vertex-buffer identity (a descriptor push or vertex-buffer bind)
+    * reads exactly the same state for every record except the fragment
+    * record's stage program, which is recomputed; see
+    * hk_g17p_build_native_bind_tail(). */
+   struct {
+      struct hk_g17p_prepared_bind_tail snapshot;
+      struct agx_ppp_hal200_fragment_fields fs_fields;
+      struct agx_ppp_viewport_payload_core viewport_record;
+      uint8_t bind_group[0x80];
+      const struct hk_shader *fs;
+      const struct hk_shader *hw_vs;
+      bool valid;
+   } g17p_bind_tail_memo;
+
+   /* Per vertex-attribute slot: the last API format seen and the pipe format
+    * and interchange block size hk_flush_dynamic_state_slow() derives from
+    * it, which are pure functions of the format. */
+   struct {
+      VkFormat vk_format;
+      enum pipe_format format;
+      unsigned interchange_align;
+   } vb_format_memo[AGX_MAX_VBUFS];
+
+   /* The last VertexProgramVariant state update this command buffer encoded,
+    * keyed by every encoder input except the pipeline address; see
+    * hk_g17p_encode_vdm_state_update(). */
+   struct {
+      struct agx_vdm_state_update_draw_info info;
+      struct agx_vdm_state_update encoded;
+      bool valid;
+   } g17p_vdm_update_memo;
    struct hk_g17p_bg_eot_cache_entry
       g17p_bg_eot_cache[HK_G17P_BG_EOT_CACHE_ENTRIES];
    uint8_t g17p_bg_eot_cache_next;

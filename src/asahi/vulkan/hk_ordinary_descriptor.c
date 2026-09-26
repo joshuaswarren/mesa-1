@@ -85,7 +85,7 @@ hk_ordinary_descriptor_sets_match(
 }
 
 struct hk_shader *
-hk_ordinary_descriptor_select_push(
+hk_ordinary_descriptor_select_push_slow(
    struct hk_ordinary_fs_selection *cache, struct hk_api_shader *obj,
    struct hk_descriptor_set *const *sets, const uint64_t *addresses,
    struct hk_push_descriptor_set *const *push_sets, uint32_t push_active,

@@ -422,7 +422,10 @@ agx3_g17p_graphics_external_launcher_template_relocate(
        displacement >= (INT64_C(1) << 47) || (displacement & 1) != 0)
       return false;
 
-   uint8_t staged[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+   /* Every refusal is above, so the output can be written in place: the
+    * relocation stays transactional without a staging copy (it runs once
+    * per draw). */
+   uint8_t *staged = output;
    memcpy(staged, launcher->bytes, launcher->length);
 
    const uint16_t root_w0 =
@@ -452,7 +455,6 @@ agx3_g17p_graphics_external_launcher_template_relocate(
       staged[launcher->branch_offset + 3 + byte] =
          encoded_displacement >> (8 * byte);
 
-   memcpy(output, staged, launcher->length);
    *written = launcher->length;
    return true;
 }

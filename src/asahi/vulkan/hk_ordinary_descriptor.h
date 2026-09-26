@@ -50,11 +50,31 @@ struct hk_shader *hk_ordinary_descriptor_select(
    struct hk_descriptor_set *const *sets, const uint64_t *addresses,
    unsigned set_count, uint64_t generation, unsigned samples, bool *changed);
 
-struct hk_shader *hk_ordinary_descriptor_select_push(
+struct hk_shader *hk_ordinary_descriptor_select_push_slow(
    struct hk_ordinary_fs_selection *cache, struct hk_api_shader *obj,
    struct hk_descriptor_set *const *sets, const uint64_t *addresses,
    struct hk_push_descriptor_set *const *push_sets, uint32_t push_active,
    unsigned set_count, uint64_t generation, unsigned samples, bool *changed);
+
+/* The selection is re-queried several times per draw; answer the cached case
+ * inline. */
+static inline struct hk_shader *
+hk_ordinary_descriptor_select_push(
+   struct hk_ordinary_fs_selection *cache, struct hk_api_shader *obj,
+   struct hk_descriptor_set *const *sets, const uint64_t *addresses,
+   struct hk_push_descriptor_set *const *push_sets, uint32_t push_active,
+   unsigned set_count, uint64_t generation, unsigned samples, bool *changed)
+{
+   if (cache->valid && cache->api == obj &&
+       cache->descriptor_generation == generation && cache->samples == samples) {
+      *changed = false;
+      return cache->selected;
+   }
+
+   return hk_ordinary_descriptor_select_push_slow(
+      cache, obj, sets, addresses, push_sets, push_active, set_count,
+      generation, samples, changed);
+}
 
 bool hk_nir_ordinary_descriptor_regions(
    struct nir_shader *nir, uint32_t set_layout_count,

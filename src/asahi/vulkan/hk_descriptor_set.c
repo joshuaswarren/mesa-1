@@ -117,10 +117,9 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    const struct hk_sampled_image_descriptor_layout native =
       hk_sampled_image_descriptor_layout(generation);
 
-   /* "Zero" initialize */
+   /* "Zero" initialize.  The null texture word is filled below, only for
+    * the planes that are written out without an image view's word. */
    for (unsigned i = 0; i < 3; ++i) {
-      hk_set_null_native_texture(generation, &desc[i].tex);
-
       /* G17P's native sampler heap reserves entry zero for robust null
        * sampling. The descriptor-set ABI stores application indices with the
        * legacy +28 bias, so encode that same base for an explicit null
@@ -134,6 +133,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    }
 
    uint8_t plane_count = 1;
+   /* Planes [0, view_planes) carry the image view's texture word. */
+   uint8_t view_planes = 0;
    bool ia = (descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
 
    if (descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER && info &&
@@ -141,6 +142,7 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       VK_FROM_HANDLE(hk_image_view, view, info->imageView);
 
       plane_count = view->plane_count;
+      view_planes = view->plane_count;
       for (uint8_t plane = 0; plane < plane_count; plane++) {
          desc[plane].tex =
             ia ? view->planes[plane].ia : view->planes[plane].sampled;
@@ -157,11 +159,12 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
          if (generation == 9 && integer != PIPE_FORMAT_NONE)
             desc[plane].sw.scaled_conversion =
                util_format_is_pure_sint(integer) ? 1 : 2;
+         /* Pure tests, cheapest first: almost no format is USCALED. */
          if (generation == 9 &&
-             hk_scaled_view_filter(descriptor_type, set, binding, elem, info) ==
-                VK_FILTER_LINEAR &&
+             hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE &&
              view->planes[plane].filterable_valid &&
-             hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE) {
+             hk_scaled_view_filter(descriptor_type, set, binding, elem, info) ==
+                VK_FILTER_LINEAR) {
             desc[plane].tex = view->planes[plane].sampled_filterable;
             desc[plane].sw.sampled_heap_index =
                view->planes[plane].filterable_heap_index;
@@ -243,7 +246,13 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       }
    }
 
-   uint8_t packed[3 * HK_MAX_DESCRIPTOR_SIZE] = {0};
+   for (unsigned plane = view_planes; plane < plane_count; ++plane)
+      hk_set_null_native_texture(generation, &desc[plane].tex);
+
+   /* Only the written planes are read, so only they need zeroing. */
+   uint8_t packed[3 * HK_MAX_DESCRIPTOR_SIZE];
+   assert(native.stride * plane_count <= sizeof(packed));
+   memset(packed, 0, native.stride * plane_count);
    for (unsigned plane = 0; plane < plane_count; ++plane) {
       uint8_t *dst = packed + plane * native.stride;
       memcpy(dst + native.texture, &desc[plane].tex,

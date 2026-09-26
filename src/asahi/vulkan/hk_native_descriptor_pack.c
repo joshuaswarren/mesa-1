@@ -7,6 +7,8 @@
 
 #include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx_pbe_agx3_core.h"
+#include "util/macros.h"
+#include "util/u_atomic.h"
 
 #include <string.h>
 
@@ -311,13 +313,10 @@ hk_pack_native_pbe(unsigned generation,
    return true;
 }
 
-bool
-hk_set_null_native_texture(unsigned generation,
-                           struct hk_native_texture_descriptor *out)
+static bool
+hk_pack_null_native_texture(unsigned generation,
+                            struct hk_native_texture_descriptor *out)
 {
-   if (!out)
-      return false;
-
    const struct AGX_TEXTURE semantic = {
       AGX_TEXTURE_header,
       .layout = AGX_LAYOUT_TWIDDLED,
@@ -331,6 +330,38 @@ hk_set_null_native_texture(unsigned generation,
    };
 
    return hk_pack_native_texture(generation, out, &semantic);
+}
+
+/* The null descriptor is a pure function of the generation, and every
+ * sampled-image descriptor write starts from it (three planes each), so pack
+ * it once per generation.  A refused generation is not cached: it takes the
+ * packer, and its exact output, every time. */
+bool
+hk_set_null_native_texture(unsigned generation,
+                           struct hk_native_texture_descriptor *out)
+{
+   static struct hk_native_texture_descriptor packed[16];
+   /* 0: not packed yet, 1: being published, 2: packed[] valid. */
+   static uint32_t state[16];
+
+   if (!out)
+      return false;
+
+   if (generation < ARRAY_SIZE(state) &&
+       p_atomic_read(&state[generation]) == 2) {
+      *out = packed[generation];
+      return true;
+   }
+
+   if (!hk_pack_null_native_texture(generation, out))
+      return false;
+
+   if (generation < ARRAY_SIZE(state) &&
+       p_atomic_cmpxchg(&state[generation], 0, 1) == 0) {
+      packed[generation] = *out;
+      p_atomic_set(&state[generation], 2);
+   }
+   return true;
 }
 
 bool
