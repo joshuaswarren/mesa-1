@@ -8,6 +8,7 @@
 #pragma once
 
 #include "hk_private.h"
+#include "hk_sync.h"
 #include "vk_queue.h"
 
 struct hk_device;
@@ -48,6 +49,9 @@ struct hk_queue {
    /* Device-lifetime command storage for the G17P SSTT maintenance encoder.
     * Sparse image remaps submit this record before their signal operations. */
    struct agx_bo *g17p_sstt_flush_bo;
+
+   /* Kinds of streams this queue has ever run, see hk_sync.h. */
+   struct hk_sync_queue sync;
 
    /* Failure-only rolling ioctl history.  A GPU fault is reported to
     * userspace by a later submit, so decoding only the rejected ioctl loses

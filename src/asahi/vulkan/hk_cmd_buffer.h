@@ -30,6 +30,7 @@
 #include "hk_private.h"
 #include "hk_conditional_render_core.h"
 #include "hk_shader.h"
+#include "hk_sync.h"
 
 #include "hk_cmd_pool.h"
 #include "hk_cs_root_size.h"
@@ -806,18 +807,7 @@ struct hk_scratch_req {
    bool preamble;
 };
 
-/*
- * Represents a firmware timestamp request.  Handle is a kernel timestamp object
- * handle, not a GEM handle.
- *
- * The kernel/firmware uses the handle/offset_B to write. We use the address to
- * read the results back. We could deduplicate this, but this is convenient.
- */
-struct agx_timestamp_req {
-   uint64_t addr;
-   uint32_t handle;
-   uint32_t offset_B;
-};
+/* struct agx_timestamp_req lives in hk_sync.h. */
 
 /*
  * hk_cs represents a single control stream, to be enqueued either to the
@@ -942,13 +932,17 @@ struct hk_cs {
       uint32_t calls, cmds, flushes, merged;
    } stats;
 
-   /* Timestamp writes. Currently just compute end / fragment end. We could
-    * flesh this out later if we want finer info. (We will, but it's not
-    * required for conformance.)
+   /* Timestamp writes: the start of the command (compute start, render
+    * vertex start) and its end (compute end, render fragment end). The
+    * kernel writes both from the firmware's native pass record.
     */
    struct {
+      struct agx_timestamp_req start;
       struct agx_timestamp_req end;
    } timestamp;
+
+   /* Recorded dependencies, see hk_sync.h. */
+   struct hk_sync_stream sync;
 
    /* Writable destinations known while recording meta compute dispatches. */
    struct hk_drm_attachment_set compute_attachments;
@@ -982,6 +976,23 @@ struct hk_cs {
     */
    uint32_t restart_index;
 };
+
+static inline unsigned
+hk_sync_sq(const struct hk_cs *cs)
+{
+   return cs->type == HK_CS_VDM ? HK_SYNC_VDM : HK_SYNC_CDM;
+}
+
+/* The later of two streams in list order; NULL is earlier than anything. */
+static inline struct hk_cs *
+hk_sync_later(struct hk_cs *a, struct hk_cs *b)
+{
+   if (!a)
+      return b;
+   if (!b)
+      return a;
+   return b->sync.seq > a->sync.seq ? b : a;
+}
 
 void *hk_cmd_buffer_emit_cs_jump(struct hk_cmd_buffer *cmd, void *current,
                                  uint64_t target, bool vdm);
@@ -1070,7 +1081,12 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    }
    a->compute_attachments.complete &= b->compute_attachments.complete;
 
-   a->timestamp = b->timestamp;
+   /* The merged command ends where b ended. It starts where a started; a
+    * start stamp b carried was a top-of-pipe write, which any earlier value
+    * also satisfies. The caller refuses the merge when both have one. */
+   a->timestamp.end = b->timestamp.end;
+   if (!a->timestamp.start.handle)
+      a->timestamp.start = b->timestamp.start;
 
    a->stats.calls += b->stats.calls;
    a->stats.cmds += b->stats.cmds;
@@ -1157,6 +1173,9 @@ struct hk_cmd_buffer {
       struct hk_cs *post_gfx;
    } current_cs;
 
+   /* Recorded dependencies between control streams, see hk_sync.h. */
+   struct hk_sync_state sync;
+
    /* Are we currently inside a vk_meta operation? This alters sample location
     * behaviour.
     */
@@ -1212,6 +1231,23 @@ struct hk_cmd_buffer {
    uint64_t shader_perf_draw_bo_alloc_ns;
 
 };
+
+/* Transfer entry points bracket their recording so the streams they create
+ * belong to the transfer stage class (VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT and
+ * its sub-stages). Nesting is fine: meta helpers re-enter through the
+ * dispatch table. */
+static inline void
+hk_sync_xfer_begin(struct hk_cmd_buffer *cmd)
+{
+   cmd->sync.xfer_depth++;
+}
+
+static inline void
+hk_sync_xfer_end(struct hk_cmd_buffer *cmd)
+{
+   assert(cmd->sync.xfer_depth > 0);
+   cmd->sync.xfer_depth--;
+}
 
 /*
  * One reservation inside the Ioto arena: where the program is to be composed,
@@ -1366,6 +1402,12 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
    if (vk_command_buffer_has_error(&cmd->vk))
       return NULL;
 
+   /* A recorded dependency may have ordered the open general compute stream
+    * after work that follows it in the list. It is then ended, and the work
+    * goes into a stream positioned after that requirement. */
+   if (*ptr && ptr == &cmd->current_cs.cs && cmd->sync.cs_check_pending)
+      hk_sync_check_cs(cmd);
+
    if ((*ptr) == NULL) {
       /* Allocate root control stream */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -1419,6 +1461,7 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
       *ptr = cs;
 
+      hk_sync_stream_created(cmd, cs, ptr, compute);
    }
 
    assert(*ptr != NULL);
@@ -1506,9 +1549,11 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
 
       /* A transformed draw may reserve a pre-graphics stream and then prove
        * that it has no vertices to process. Do not leave an empty CDM job in
-       * the submission list. */
+       * the submission list. A stream that only carries a timestamp stays:
+       * that is the one job the stamp can ride on. */
       if (cs->stats.cmds == 0 && cs->stats.flushes == 0 &&
-          !cs->timestamp.end.handle) {
+          !cs->timestamp.end.handle && !cs->timestamp.start.handle) {
+         hk_sync_forget_stream(cmd, cs);
          list_del(&cs->node);
          hk_cs_destroy(cs);
       }

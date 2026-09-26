@@ -304,6 +304,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->geom_index_count = 0;
    cmd->geom_instance_count = 0;
    cmd->uses_heap = false;
+   hk_sync_reset(cmd);
 
    memset(&cmd->state, 0, sizeof(cmd->state));
 }
@@ -876,8 +877,10 @@ merge_control_streams(struct hk_cmd_buffer *cmd)
 
    list_for_each_entry_safe(struct hk_cs, cs, &cmd->control_streams, node) {
       if (cs->type == HK_CS_CDM && last && last->type == HK_CS_CDM &&
-          !last->timestamp.end.handle) {
+          !last->timestamp.end.handle &&
+          !(last->timestamp.start.handle && cs->timestamp.start.handle)) {
 
+         hk_sync_merge(cmd, last, cs);
          hk_cs_merge_cdm(last, cs);
          list_del(&cs->node);
          hk_cs_destroy(cs);
@@ -921,6 +924,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
           "must end rendering before ending the command buffer");
 
    perf_debug(cmd, "End command buffer");
+   hk_sync_flush_pending_timestamp(cmd);
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
@@ -972,6 +976,30 @@ hk_dependency_has_host_read(const VkDependencyInfo *info)
    return false;
 }
 
+/* Whether any barrier in the dependency makes writes visible to later reads.
+ * An execution-only dependency (both access masks zero) inside a render pass
+ * instance needs no tile store. */
+static bool
+hk_dependency_has_memory_scope(const VkDependencyInfo *info)
+{
+   for (uint32_t i = 0; i < info->memoryBarrierCount; ++i) {
+      if (info->pMemoryBarriers[i].dstAccessMask)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      if (info->pBufferMemoryBarriers[i].dstAccessMask)
+         return true;
+   }
+
+   for (uint32_t i = 0; i < info->imageMemoryBarrierCount; ++i) {
+      if (info->pImageMemoryBarriers[i].dstAccessMask)
+         return true;
+   }
+
+   return false;
+}
+
 VKAPI_ATTR void VKAPI_CALL
 hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
                        const VkDependencyInfo *pDependencyInfo)
@@ -984,30 +1012,59 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
-   /* The big hammer. We end both compute and graphics batches. Ending compute
-    * here is necessary to properly handle graphics->compute dependencies.
-    *
-    * XXX: perf. */
-   if (cmd->current_cs.gfx) {
-      hk_g17p_note_gfx_split(cmd, "pipeline-barrier",
-                             cmd->current_cs.gfx->stats.cmds, 0);
+   /* Inside a render pass instance both scopes are limited to that instance
+    * (Vulkan 1.3, 7.6.1: "If vkCmdPipelineBarrier2 is called inside a render
+    * pass instance, the first synchronization scope includes only commands
+    * that occur earlier in submission order within the same subpass" and
+    * likewise for the second). Nothing after the pass learns anything from
+    * it. The one thing the driver owes it is memory: input attachments are
+    * lowered to texture loads (nir_lower_input_attachments in hk_shader.c),
+    * so a dependency with a memory scope needs the tile buffer stored and
+    * reloaded, which is a render split. The continuation stream then waits
+    * on the stream it continues, see hk_sync_stream_created. */
+   if (cmd->sync.in_pass) {
+      if (hk_dependency_has_memory_scope(pDependencyInfo) &&
+          cmd->current_cs.gfx) {
+         hk_g17p_note_gfx_split(cmd, "pipeline-barrier",
+                                cmd->current_cs.gfx->stats.cmds, 0);
+         hk_cmd_buffer_end_graphics(cmd);
+      }
+      return;
    }
-   hk_cmd_buffer_end_compute(cmd);
-   hk_cmd_buffer_end_graphics(cmd);
+
+   uint8_t src_kinds, dst_kinds;
+   hk_sync_dependency_kinds(pDependencyInfo, &src_kinds, &dst_kinds);
+
+   /* Compute work that stays in the open compute stream is ordered by the
+    * stream itself; what it needs at a barrier is visibility. Every native
+    * launch ends in a weak ordering barrier record, and the strong cache
+    * flush is that same record with Apple's flags, upgraded in place. */
+   struct hk_cs *cs = cmd->current_cs.cs;
+   if (cs && (src_kinds & (HK_SYNC_COMPUTE | HK_SYNC_XFER)) && dst_kinds &&
+       cs->stats.cmds > 0 && cs->current != cs->strong_flush_end) {
+      hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
+      hk_cdm_cache_flush(dev, cs);
+   }
+
+   hk_sync_barrier(cmd, src_kinds, dst_kinds);
 
    /* A barrier-only command buffer otherwise records no GPU work, so it
     * cannot make a preceding fragment store visible to the host. Emit the
     * exact G17P strong CDM cache-maintenance record only when the API requests
-    * host-read availability. This preserves ordinary batching and adds work
-    * only at the synchronization boundary the application already declared. */
+    * host-read availability, in a stream ordered after the source scope. */
    if (dev->dev.chip == AGX_CHIP_G17P &&
        hk_dependency_has_host_read(pDependencyInfo)) {
-      struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, true);
-      if (!cs)
+      struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+      hk_sync_src_dep(cmd, src_kinds, cmd->current_cs.cs, dep);
+
+      cmd->sync.kind_override = HK_SYNC_ALL;
+      struct hk_cs *flush = hk_sync_get_cs_after(cmd, dep);
+      cmd->sync.kind_override = 0;
+      if (!flush)
          return;
 
-      hk_ensure_cs_has_space(cmd, cs, AGX3_CDM_BARRIER_SIZE);
-      hk_cdm_cache_flush(dev, cs);
+      hk_ensure_cs_has_space(cmd, flush, AGX3_CDM_BARRIER_SIZE);
+      hk_cdm_cache_flush(dev, flush);
    }
 }
 
@@ -4072,6 +4129,11 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    const bool g17p_output_only_through_eot =
       dev->dev.chip == AGX_CHIP_G17P && render->g17p_direct_color_resolve;
 
+   /* A timestamp rides on this exact command; replacing the render with
+    * image clears would drop it. Keep the render. */
+   if (cs->timestamp.start.handle || cs->timestamp.end.handle)
+      return false;
+
    if (dev->dev.chip == AGX_CHIP_G17P && cs->cr.process_empty_tiles &&
        (g17p_output_only_through_eot ||
         !agx_get_precompiled(&dev->bg_eot, LIBAGX_FILL_UINT4))) {
@@ -4116,6 +4178,11 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
       return false;
    }
 
+   /* The clears stand in for the render: they are graphics work for every
+    * later dependency, and they were recorded under the same requirements
+    * the render was created under. */
+   cmd->sync.kind_override = HK_SYNC_GFX;
+
    for (unsigned i = 0; i < render->color_att_count; ++i) {
       clear_attachment_as_image(cmd, render, &render->color_att[i], ~0);
    }
@@ -4126,9 +4193,12 @@ hk_optimize_empty_vdm(struct hk_cmd_buffer *cmd)
    clear_attachment_as_image(cmd, render, &render->stencil_att,
                              VK_IMAGE_ASPECT_STENCIL_BIT);
 
+   cmd->sync.kind_override = 0;
+
    /* Remove the VDM control stream from the command buffer, now that it is
     * replaced by equivalent other operations.
     */
+   hk_sync_forget_stream(cmd, cs);
    list_del(&cs->node);
    hk_cs_destroy(cs);
    return true;

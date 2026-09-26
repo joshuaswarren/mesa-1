@@ -59,24 +59,39 @@ def check(submits):
     assert computes, "no compute command was submitted; the readback copy did " \
                      "not become a CDM dispatch"
 
-    last_render = max(renders)
-    copies = [i for i in computes if i > last_render]
+    # Flatten to (submit index, render index within its ioctl, name, vdm,
+    # cdm). The kernel accepts up to 64 commands per ioctl, so the render and
+    # the copy normally share one; a shim reporting a limit of 1 puts them in
+    # consecutive ioctls. Both shapes must order the copy after the render.
+    flat = []
+    for i, s in enumerate(submits):
+        nr_render = 0
+        for name, vdm, cdm in s[2]:
+            if name == "render":
+                nr_render += 1
+            flat.append((i, nr_render, name, vdm, cdm))
+    last_render_pos = max(k for k, f in enumerate(flat) if f[2] == "render")
+    copies = [k for k, f in enumerate(flat)
+              if f[2] == "compute" and k > last_render_pos]
     assert copies, "the readback copy was submitted before the render"
-    copy_index = min(copies)
+    copy_pos = min(copies)
+    copy_index = flat[copy_pos][0]
+    render_submit, render_ordinal = flat[last_render_pos][0], flat[last_render_pos][1]
 
-    for name, vdm, cdm in submits[copy_index][2]:
-        if name != "compute":
-            continue
-        assert vdm != BARRIER_NONE, (
-            "the readback copy declares vdm_barrier=NONE: it does not wait for "
-            "the render on the VDM subqueue at all")
+    _, _, _, vdm, cdm = flat[copy_pos]
+    assert vdm != BARRIER_NONE, (
+        "the readback copy declares vdm_barrier=NONE: it does not wait for "
+        "the render on the VDM subqueue at all")
+    if copy_index == render_submit:
+        assert 1 <= vdm and vdm >= render_ordinal, (
+            "the readback copy declares vdm_barrier=%u in the render's own "
+            "ioctl; the render is render command %u, which only a prefix of "
+            "at least that many waits on" % (vdm, render_ordinal))
+    else:
         assert vdm == 0, (
             "the readback copy declares vdm_barrier=%u, an index within its own "
             "submit; the render is in an earlier ioctl, which only vdm_barrier=0 "
             "waits on" % vdm)
-        assert cdm == 0, (
-            "the readback copy declares cdm_barrier=%u; earlier compute work in "
-            "previous ioctls is not waited on" % cdm)
 
     # Userspace waits on the out-syncobjs of the submission as a whole. They
     # must ride the last ioctl, so the fence a client waits on is the copy's

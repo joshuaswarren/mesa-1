@@ -109,6 +109,8 @@ hk_files = files(
   'hk_sampler.h',
   'hk_shader.c',
   'hk_shader.h',
+  'hk_sync.c',
+  'hk_sync.h',
   'hk_wsi.c',
   'hk_wsi.h'
 )

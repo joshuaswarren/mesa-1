@@ -2572,6 +2572,9 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    memset(render, 0, sizeof(*render));
 
+   hk_sync_begin_rendering(
+      cmd, pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT);
+
    render->flags = pRenderingInfo->flags;
    render->area = pRenderingInfo->renderArea;
    render->view_mask = pRenderingInfo->viewMask;
@@ -2899,12 +2902,13 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    /* Reordering barrier for post-gfx, in case we had any. */
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
 
-   /* Don't reorder compute across render passes.
-    *
-    * TODO: Check if this is necessary if the proper PipelineBarriers are
-    * handled... there may be CTS bugs...
-    */
-   hk_cmd_buffer_end_compute(cmd);
+   /* The open compute stream sits before this render in the list. It stays
+    * open across the pass unless the render was recorded to wait on it: then
+    * later compute must not extend what the render waits for. Compute the
+    * application records after the pass with no dependency on it may
+    * legally run before it (Vulkan 1.3, 7.2: without a dependency, commands
+    * may execute in any order). */
+   hk_sync_first_render_stream(cmd, cs);
 
    /* If we spill colour attachments, we need to decompress them. This happens
     * at the start of the render; it is not re-emitted when resuming
@@ -3178,11 +3182,20 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
 
    memset(render, 0, sizeof(*render));
 
+   hk_sync_end_rendering(cmd);
+
    if (need_resolve) {
       perf_debug(cmd, "Resolving render pass, colour store op %u",
                  vk_color_att[0].storeOp);
 
+      /* The resolve is a render of the driver's own that reads what this
+       * pass stored: it waits on the pass, and it is graphics work for every
+       * later dependency, like the resolve operation of the pass itself
+       * (Vulkan 1.3, 8.4: resolves are part of the render pass instance in
+       * the COLOR_ATTACHMENT_OUTPUT stage). */
+      hk_sync_resolve_begin(cmd);
       hk_meta_resolve_rendering(cmd, &vk_render);
+      hk_sync_resolve_end(cmd);
    }
 }
 
@@ -3237,6 +3250,10 @@ hk_heap(struct hk_cmd_buffer *cmd)
    if (!cmd->uses_heap) {
       perf_debug(cmd, "Freeing heap");
       uint64_t addr = dev->rodata.heap;
+
+      /* One device-wide bump allocator: every pass that uses it runs after
+       * every earlier stream and its free runs after the pass. */
+      hk_sync_heap_used(cmd);
 
       /* Zeroing the allocated index frees everything */
       hk_queue_write(cmd, addr + offsetof(struct poly_heap, bottom), 0,

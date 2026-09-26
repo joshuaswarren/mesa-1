@@ -73,7 +73,10 @@ static const struct drm_asahi_params_global params_g17p = {
    .vm_start = 0x4000,
    .vm_end = (1ull << 42) - 0x8000ull,
    .vm_kernel_min_size = 0x20000000,
-   .max_commands_per_submission = 1,
+   /* file.rs:60 MAX_COMMANDS_PER_SUBMISSION. With 1 the driver would split
+    * every command into its own ioctl and the per-command barrier fields
+    * would all collapse to 0, hiding what the driver actually requests. */
+   .max_commands_per_submission = 64,
    .max_attachments = 16,
    .max_frequency_khz = 1500000,
    .command_timestamp_frequency_hz = 1000000000,
@@ -1765,6 +1768,16 @@ asahi_log_submit(const struct drm_asahi_submit *submit)
                  (unsigned long long)compute.cdm_ctrl_stream_end,
                  (unsigned long long)(compute.cdm_ctrl_stream_end -
                                       compute.cdm_ctrl_stream_base));
+         fprintf(log, "\n");
+         /* Timestamp destinations are the other write-only request: a
+          * query folded onto a command is visible only here. Own line, so
+          * the "  cmd" line keeps the shape the recorded tests parse. */
+         if (compute.ts.start.handle || compute.ts.end.handle)
+            fprintf(log, "    ts start=%u:%u end=%u:%u\n",
+                    compute.ts.start.handle, compute.ts.start.offset,
+                    compute.ts.end.handle, compute.ts.end.offset);
+         offset += sizeof(header) + header.size;
+         continue;
       } else if (header.cmd_type == DRM_ASAHI_CMD_RENDER &&
                  header.size >= sizeof(struct drm_asahi_cmd_render)) {
          struct drm_asahi_cmd_render render;
@@ -1784,6 +1797,13 @@ asahi_log_submit(const struct drm_asahi_submit *submit)
                     (unsigned long long)render.stencil.base,
                     (unsigned long long)render.stencil.comp_base,
                     render.stencil.stride, render.stencil.comp_stride);
+         fprintf(log, "\n");
+         if (render.ts_vtx.start.handle || render.ts_frag.end.handle)
+            fprintf(log, "    ts start=%u:%u end=%u:%u\n",
+                    render.ts_vtx.start.handle, render.ts_vtx.start.offset,
+                    render.ts_frag.end.handle, render.ts_frag.end.offset);
+         offset += sizeof(header) + header.size;
+         continue;
       }
       fprintf(log, "\n");
 

@@ -229,9 +229,13 @@ hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
     * availability store cannot migrate ahead of its producing VDM stream. */
    struct hk_cs *saved = NULL;
    const bool redirect = target != &cmd->current_cs.cs;
+   const bool pinned = cmd->sync.pin_cs;
    if (redirect) {
       saved = cmd->current_cs.cs;
       cmd->current_cs.cs = *target;
+      /* The caller chose this exact stream; dependency tracking must not
+       * replace it with a later one. */
+      cmd->sync.pin_cs = true;
    }
 
    struct hk_meta_save save;
@@ -245,6 +249,7 @@ hk_g17p_meta_fill_addr(struct hk_cmd_buffer *cmd, struct hk_cs **target,
    if (redirect) {
       *target = cmd->current_cs.cs;
       cmd->current_cs.cs = saved;
+      cmd->sync.pin_cs = pinned;
    }
 }
 
@@ -2206,8 +2211,8 @@ hk_g17p_compute_blit(struct hk_cmd_buffer *cmd, struct hk_image *src,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
+static void
+hk_xfer_blitimage2(VkCommandBuffer commandBuffer,
                  const VkBlitImageInfo2 *pBlitImageInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
@@ -2284,8 +2289,8 @@ hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdResolveImage2(VkCommandBuffer commandBuffer,
+static void
+hk_xfer_resolveimage2(VkCommandBuffer commandBuffer,
                     const VkResolveImageInfo2 *pResolveImageInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
@@ -2455,8 +2460,8 @@ hk_cmd_copy(struct hk_cmd_buffer *cmd, uint64_t dst, uint64_t src, size_t size)
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *info)
+static void
+hk_xfer_copybuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *info)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -3549,8 +3554,8 @@ hk_bind_point(bool gfx)
               : VK_PIPELINE_BIND_POINT_COMPUTE;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
+static void
+hk_xfer_copybuffertoimage2(VkCommandBuffer commandBuffer,
                          const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
@@ -3684,8 +3689,8 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
    hk_meta_end(cmd, &save, bind_point);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
+static void
+hk_xfer_copyimagetobuffer2(VkCommandBuffer commandBuffer,
                          const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
@@ -3728,8 +3733,8 @@ hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
+static void
+hk_xfer_copyimage2(VkCommandBuffer commandBuffer,
                  const VkCopyImageInfo2 *pCopyImageInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
@@ -3818,8 +3823,8 @@ hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
    hk_meta_end(cmd, &save, bind_point);
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+static void
+hk_xfer_fillbuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
                  VkDeviceSize dstOffset, VkDeviceSize dstRange, uint32_t data)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
@@ -3854,8 +3859,8 @@ hk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+static void
+hk_xfer_updatebuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
                    VkDeviceSize dstOffset, VkDeviceSize dstRange,
                    const void *pData)
 {
@@ -3900,4 +3905,108 @@ hk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
                              attachmentCount, pAttachments, rectCount, pRects);
    cmd->conditional_meta = false;
    hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdBlitImage2(VkCommandBuffer commandBuffer,
+                 const VkBlitImageInfo2 *pBlitImageInfo)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_blitimage2(commandBuffer, pBlitImageInfo);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdResolveImage2(VkCommandBuffer commandBuffer,
+                    const VkResolveImageInfo2 *pResolveImageInfo)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_resolveimage2(commandBuffer, pResolveImageInfo);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdCopyBuffer2(VkCommandBuffer commandBuffer, const VkCopyBufferInfo2 *info)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_copybuffer2(commandBuffer, info);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
+                         const VkCopyBufferToImageInfo2 *pCopyBufferToImageInfo)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_copybuffertoimage2(commandBuffer, pCopyBufferToImageInfo);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdCopyImageToBuffer2(VkCommandBuffer commandBuffer,
+                         const VkCopyImageToBufferInfo2 *pCopyImageToBufferInfo)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_copyimagetobuffer2(commandBuffer, pCopyImageToBufferInfo);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdCopyImage2(VkCommandBuffer commandBuffer,
+                 const VkCopyImageInfo2 *pCopyImageInfo)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_copyimage2(commandBuffer, pCopyImageInfo);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdFillBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+                 VkDeviceSize dstOffset, VkDeviceSize dstRange, uint32_t data)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_fillbuffer(commandBuffer, dstBuffer, dstOffset, dstRange, data);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdUpdateBuffer(VkCommandBuffer commandBuffer, VkBuffer dstBuffer,
+                   VkDeviceSize dstOffset, VkDeviceSize dstRange,
+                   const void *pData)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_updatebuffer(commandBuffer, dstBuffer, dstOffset, dstRange, pData);
+   hk_sync_xfer_end(cmd);
 }

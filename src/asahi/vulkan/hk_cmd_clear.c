@@ -155,8 +155,8 @@ hk_clear_image(struct hk_cmd_buffer *cmd, struct hk_image *image,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
+static void
+hk_xfer_clearcolorimage(VkCommandBuffer commandBuffer, VkImage _image,
                       VkImageLayout imageLayout,
                       const VkClearColorValue *pColor, uint32_t rangeCount,
                       const VkImageSubresourceRange *pRanges)
@@ -170,8 +170,8 @@ hk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
    }
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
+static void
+hk_xfer_cleardepthstencilimage(VkCommandBuffer commandBuffer, VkImage _image,
                              VkImageLayout imageLayout,
                              const VkClearDepthStencilValue *pDepthStencil,
                              uint32_t rangeCount,
@@ -185,4 +185,35 @@ hk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
       hk_clear_image(cmd, image, PIPE_FORMAT_NONE, colour, &pRanges[r],
                      true /* whole 3D */);
    }
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdClearColorImage(VkCommandBuffer commandBuffer, VkImage _image,
+                      VkImageLayout imageLayout,
+                      const VkClearColorValue *pColor, uint32_t rangeCount,
+                      const VkImageSubresourceRange *pRanges)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_clearcolorimage(commandBuffer, _image, imageLayout, pColor, rangeCount, pRanges);
+   hk_sync_xfer_end(cmd);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdClearDepthStencilImage(VkCommandBuffer commandBuffer, VkImage _image,
+                             VkImageLayout imageLayout,
+                             const VkClearDepthStencilValue *pDepthStencil,
+                             uint32_t rangeCount,
+                             const VkImageSubresourceRange *pRanges)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+
+   /* Transfer stage: the streams recorded here belong to the transfer
+    * class for every recorded dependency. */
+   hk_sync_xfer_begin(cmd);
+   hk_xfer_cleardepthstencilimage(commandBuffer, _image, imageLayout, pDepthStencil, rangeCount, pRanges);
+   hk_sync_xfer_end(cmd);
 }

@@ -125,6 +125,8 @@ asahi_fill_cdm_command(struct hk_device *dev, struct hk_cs *cs,
       .cdm_ctrl_stream_base = cs->addr,
       .cdm_ctrl_stream_end = cs->addr + len,
 
+      .ts.start.handle = cs->timestamp.start.handle,
+      .ts.start.offset = cs->timestamp.start.offset_B,
       .ts.end.handle = cs->timestamp.end.handle,
       .ts.end.offset = cs->timestamp.end.offset_B,
    };
@@ -488,6 +490,11 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->fragment_helper.data = dev->scratch.fs.buf->va->addr;
       c->fragment_helper.cfg = cs->scratch.fs.preamble ? (1 << 16) : 0;
       c->fragment_helper.binary = agx_helper_program(&dev->bg_eot);
+   }
+
+   if (cs->timestamp.start.handle) {
+      c->ts_vtx.start.handle = cs->timestamp.start.handle;
+      c->ts_vtx.start.offset = cs->timestamp.start.offset_B;
    }
 
    if (cs->timestamp.end.handle) {
@@ -1257,14 +1264,18 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
              cmd->cmd_type != DRM_ASAHI_CMD_COMPUTE)
             continue;
 
+         /* A prefix that ends in an earlier ioctl becomes 0, the kernel's
+          * "everything submitted before this ioctl", which contains it. */
          if (cmd->vdm_barrier != DRM_ASAHI_BARRIER_NONE) {
-            assert(cmd->vdm_barrier >= submitted_vdm);
-            cmd->vdm_barrier -= submitted_vdm;
+            cmd->vdm_barrier = cmd->vdm_barrier > submitted_vdm
+                                  ? cmd->vdm_barrier - submitted_vdm
+                                  : 0;
          }
 
          if (cmd->cdm_barrier != DRM_ASAHI_BARRIER_NONE) {
-            assert(cmd->cdm_barrier >= submitted_cdm);
-            cmd->cdm_barrier -= submitted_cdm;
+            cmd->cdm_barrier = cmd->cdm_barrier > submitted_cdm
+                                  ? cmd->cdm_barrier - submitted_cdm
+                                  : 0;
          }
       }
 
@@ -1868,14 +1879,27 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       nr_flushes++;
    }
 
+   /* Every command's barrier fields come from the dependencies the
+    * application recorded (hk_sync.h). The kernel attaches this ioctl's
+    * input syncs to the first hardware command only, so when there are any,
+    * every command is chained behind that first command. */
+   hk_sync_resolve_submit(queue,
+                          (struct hk_cmd_buffer *const *)submit->command_buffers,
+                          submit->command_buffer_count, flush_sstt,
+                          wait_count > 0);
+
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
          (struct hk_cmd_buffer *)submit->command_buffers[i];
 
       list_for_each_entry(struct hk_cs, cs, &cmdbuf->control_streams, node) {
-         /* Barrier on previous command */
          struct drm_asahi_cmd_header header =
-            agx_cmd_header(cs->type == HK_CS_CDM, nr_vdm, nr_cdm);
+            agx_cmd_header(cs->type == HK_CS_CDM, cs->sync.barrier[HK_SYNC_VDM],
+                           cs->sync.barrier[HK_SYNC_CDM]);
+         assert(header.vdm_barrier == DRM_ASAHI_BARRIER_NONE ||
+                header.vdm_barrier <= nr_vdm);
+         assert(header.cdm_barrier == DRM_ASAHI_BARRIER_NONE ||
+                header.cdm_barrier <= nr_cdm);
 
          if (cs->type == HK_CS_CDM) {
             perf_debug(
@@ -1885,7 +1909,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                cs->stats.merged);
 
             assert(cs->stats.cmds > 0 || cs->stats.flushes > 0 ||
-                   cs->timestamp.end.handle);
+                   cs->timestamp.end.handle || cs->timestamp.start.handle);
 
             asahi_append_compute_attachments(dev, &payload, cs);
             util_dynarray_append(&payload, header);
@@ -1901,7 +1925,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             perf_debug(cmdbuf, "%u: Submitting VDM with %u API draws, %u draws",
                        i, cs->stats.calls, cs->stats.cmds);
             assert(cs->stats.cmds > 0 || cs->cr.process_empty_tiles ||
-                   cs->timestamp.end.handle);
+                   cs->timestamp.end.handle || cs->timestamp.start.handle);
 
             asahi_append_fragment_attachments(dev, &payload, cs);
             util_dynarray_append(&payload, header);
