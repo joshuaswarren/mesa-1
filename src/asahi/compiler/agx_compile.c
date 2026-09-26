@@ -1248,21 +1248,35 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
 /* Unpack already-loaded normalized halves into `dest`. A byte format packs
  * two channels into each half; a 16-bit one occupies a half per channel and
  * is recollected into the pair the conversion consumes. Tile and device
- * traffic differ only in how the halves arrive, so both share this tail. */
+ * traffic differ only in how the halves arrive, so both share this tail.
+ *
+ * `read_mask` names the channels anything reads: a pair with no read lane
+ * needs no conversion. With `split_dest` false the channels are only cached
+ * as the collect's sources, so readers take each `normflt` result where it
+ * was written and the collected vector itself stays dead; the device
+ * (vertex fetch) path uses that, like Apple's vertex programs, which read the
+ * conversion results in place. */
 static void
 agx_unpack_normalized_halves_agx3(agx_builder *b, agx_index dest,
                                   agx_index *halves, enum agx_format format,
-                                  unsigned nr_comps)
+                                  unsigned nr_comps, unsigned read_mask,
+                                  bool split_dest)
 {
    const bool norm16 =
       format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
    agx_index channels[4] = {agx_null()};
    const unsigned conversions = DIV_ROUND_UP(nr_comps, 2);
    for (unsigned i = 0; i < conversions; ++i) {
+      const unsigned lanes = MIN2(2u, nr_comps - i * 2);
+      if (!(read_mask & (BITFIELD_MASK(lanes) << (i * 2)))) {
+         for (unsigned c = 0; c < lanes; ++c)
+            channels[i * 2 + c] = agx_undef(dest.size);
+         continue;
+      }
+
       /* One unpack per packed register; each yields a 32-bit pair, which the
        * split below turns back into the two scalar channels. */
       agx_index pair = agx_temp(b->shader, AGX_SIZE_32);
-      const unsigned lanes = MIN2(2u, nr_comps - i * 2);
       pair.channels_m1 = lanes - 1;
       agx_index source = halves[i];
       if (norm16) {
@@ -1285,7 +1299,8 @@ agx_unpack_normalized_halves_agx3(agx_builder *b, agx_index dest,
    }
 
    agx_emit_collect_to(b, dest, nr_comps, channels);
-   agx_emit_cached_split(b, dest, nr_comps);
+   if (split_dest)
+      agx_emit_cached_split(b, dest, nr_comps);
 }
 
 /*
@@ -1361,7 +1376,8 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
    agx_index halves[4] = {agx_null()};
    agx_emit_split(b, halves, packed, loaded_channels);
 
-   agx_unpack_normalized_halves_agx3(b, dest, halves, format, nr_comps);
+   agx_unpack_normalized_halves_agx3(b, dest, halves, format, nr_comps,
+                                     BITFIELD_MASK(nr_comps), true);
    return true;
 }
 
@@ -1463,7 +1479,17 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       } else {
          agx_emit_split(b, halves, packed, nr);
       }
-      agx_unpack_normalized_halves_agx3(b, dest, halves, fmt, nr);
+      /* Vertex fetch (agx_nir_lower_vbo, the only producer of normalized
+       * constant loads) converts only the lanes the shader reads and leaves
+       * each result where `normflt` wrote it. Formatted meta loads keep
+       * their collected vector. */
+      const bool vertex_fetch =
+         instr->intrinsic == nir_intrinsic_load_constant_agx;
+      agx_unpack_normalized_halves_agx3(
+         b, dest, halves, fmt, nr,
+         vertex_fetch ? nir_def_components_read(&instr->def)
+                      : BITFIELD_MASK(nr),
+         !vertex_fetch);
       return;
    }
 
@@ -1479,6 +1505,21 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       load->memory_index_is_bytes = index_bytes;
       agx_unpack_rgb10a2_agx3_to(b, dest, packed);
       agx_emit_cached_split(b, dest, 4);
+      return;
+   }
+
+   /* The same one-word load and native unpack for R11G11B10_FLOAT: Apple's
+    * G17P FloatRG11B10 vertex fetch is LDDEV W32 + `unpack` layout 2. */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       fmt == AGX_FORMAT_RG11B10F) {
+      assert(dest.size == AGX_SIZE_32 && instr->def.num_components == 3);
+      assert(packed_count == 0);
+      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *load = agx_device_load_to(b, packed, addr, offset,
+         AGX_FORMAT_I32, 1, shift, nir_is_coherent(instr));
+      load->memory_index_is_bytes = index_bytes;
+      agx_unpack_rgb10a2_agx3_to(b, dest, packed)->format = fmt;
+      agx_emit_cached_split(b, dest, 3);
       return;
    }
 

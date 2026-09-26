@@ -2942,9 +2942,9 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
                  uint16_t wait, bool first)
 {
    const bool unpack = I->op == AGX_OPCODE_UNPACK_RGB10A2_AGX3;
-   const uint8_t layout = I->format == AGX_FORMAT_RGB9E5
-                             ? AGX3_PACKED_RGB9E5
-                             : AGX3_PACKED_RGB10A2;
+   const uint8_t layout = I->format == AGX_FORMAT_RGB9E5    ? AGX3_PACKED_RGB9E5
+                          : I->format == AGX_FORMAT_RG11B10F ? AGX3_PACKED_RG11B10
+                                                             : AGX3_PACKED_RGB10A2;
    const unsigned lanes = layout == AGX3_PACKED_RGB10A2 ? 4 : 3;
    if (I->nr_dests != 1 || I->nr_srcs != (unpack ? 1 : 4))
       return false;
