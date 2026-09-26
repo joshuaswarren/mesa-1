@@ -5,6 +5,8 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image.h"
+#include "hk_g17p_compression.h"
+#include "agx_bg_eot_key.h"
 #include "hk_native_descriptor.h"
 #include "asahi/layout/layout.h"
 #include "drm-uapi/drm_fourcc.h"
@@ -364,7 +366,7 @@ static bool
 hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
                 unsigned width, unsigned height, unsigned samples,
                 VkImageCreateFlagBits flags, VkImageUsageFlagBits usage,
-                const void *pNext)
+                const void *pNext, bool allow_agx3)
 {
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(format);
@@ -381,27 +383,14 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
    if (dev->debug & AGX_DBG_NOCOMPRESS)
       return false;
 
-   /*
-    * AGX3 has no grounded compressed PBE (write) descriptor. The read side is
-    * fine -- hk_pack_native_texture() carries the compression mode and the
-    * acceleration buffer -- but hk_pack_native_pbe() accepts only the plain 2D
-    * subset, so a compressed colour attachment cannot be stored at
-    * end-of-tile, and every render pass with a store fails at
-    * pack_pbe()/eot_pbe_valid.
-    *
-    * Storing one through a non-compressed descriptor is not an option: it
-    * would put raw pixels where every reader expects compressed blocks plus
-    * their metadata. The image must therefore not be compressed in the first
-    * place. Unlike the shader encodings, a descriptor layout cannot be
-    * witnessed with the Metal compiler probes -- descriptors are built by the
-    * driver, not the shader compiler -- so this stays closed until the
-    * compressed AGX3 PBE form is recovered from a real macOS descriptor.
-    *
-    * Cost is performance only. Delete this together with that descriptor.
-    */
+   /* AGX3 compresses only what hk_g17p_compression_eligible() admitted
+    * (allow_agx3). That excludes images shared through DRM modifiers or
+    * external memory, so hk_can_compress_format() -- which decides whether
+    * the compressed modifier is advertised -- is always false on AGX3. */
    if (hk_descriptor_generation_is_agx3(
-          agx_chip_descriptor_generation(dev->chip))) {
-      perf_debug_dev(dev, "No compression: no AGX3 PBE descriptor yet");
+          agx_chip_descriptor_generation(dev->chip)) &&
+       !allow_agx3) {
+      perf_debug_dev(dev, "No compression: AGX3 image outside G17P policy");
       return false;
    }
 
@@ -468,6 +457,10 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
       return false;
    }
 
+   if (allow_agx3)
+      perf_debug_dev(dev, "G17P compression enabled: %s %ux%u",
+                     util_format_short_name(p_format), width, height);
+
    return true;
 }
 
@@ -480,7 +473,7 @@ hk_can_compress_format(const struct agx_device *dev, VkFormat format)
     *
     * Likewise, we do not set flags as flags only disable compression.
     */
-   return hk_can_compress(dev, format, 0, 64, 64, 1, 0, 0, NULL);
+   return hk_can_compress(dev, format, 0, 64, 64, 1, 0, 0, NULL, false);
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL
@@ -918,9 +911,31 @@ static bool
 hk_can_compress_create_info(struct hk_device *dev, unsigned plane,
                             const VkImageCreateInfo *info)
 {
+   /* AGX3: G17P compresses every image hk_g17p_compression.h admits. Other
+    * AGX3 chips stay plain until their packets are recovered. */
+   bool allow_agx3 = hk_g17p_compression_eligible(dev->dev.chip, plane, info);
+
+   /* Compressed data is only decodable through its own channel class. Every
+    * G17P writer of a colour image is a PBE; the end-of-tile PBE may store a
+    * different format from the image (agx_g17p_rt0_pbe_format packs
+    * R11G11B10/RGB9E5 into R32_UINT words). Never compress an image whose
+    * store class would differ from the class its textures read. */
+   if (allow_agx3 && !vk_format_is_depth_or_stencil(info->format)) {
+      const enum pipe_format p_format = hk_format_to_pipe_format(info->format);
+      const enum pipe_format store = agx_g17p_rt0_pbe_format(
+         util_format_linear(hk_padded_image_format(p_format)));
+      if (!ail_formats_compatible(p_format, store)) {
+         perf_debug_dev(&dev->dev,
+                        "No compression: G17P stores %s through class of %s",
+                        util_format_short_name(p_format),
+                        util_format_short_name(store));
+         allow_agx3 = false;
+      }
+   }
+
    return hk_can_compress(&dev->dev, info->format, plane, info->extent.width,
                           info->extent.height, info->samples, info->flags,
-                          info->usage, info->pNext);
+                          info->usage, info->pNext, allow_agx3);
 }
 
 static enum ail_tiling

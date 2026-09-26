@@ -97,6 +97,13 @@ fields_valid(uint32_t generation,
    const bool address_valid =
       fields->buffer && !(fields->buffer & 0xf) &&
       !(fields->buffer >> (linear ? 44 : 48));
+   const bool compression_valid = fields->compressed
+      ? generation == AGX_PBE_AGX3_GENERATION_9 &&
+           fields->layout == AGX_PBE_LAYOUT_GPU &&
+           fields->acceleration_buffer &&
+           !(fields->acceleration_buffer & 0xf) &&
+           !(fields->acceleration_buffer >> 48)
+      : !fields->acceleration_buffer;
    return (!linear || generation == AGX_PBE_AGX3_GENERATION_9) &&
           (!fields->srgb || generation == AGX_PBE_AGX3_GENERATION_9) &&
           (linear || fields->layout == AGX_PBE_LAYOUT_TWIDDLED ||
@@ -105,7 +112,8 @@ fields_valid(uint32_t generation,
           fields->swizzle_r <= 3 && fields->swizzle_g <= 3 &&
           fields->swizzle_b <= 3 && fields->swizzle_a <= 3 && fields->width &&
           fields->width <= maximum_dimension && fields->height &&
-          fields->height <= maximum_dimension && address_valid && stride_valid;
+          fields->height <= maximum_dimension && address_valid && stride_valid &&
+          compression_valid;
 }
 
 bool
@@ -133,6 +141,8 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
    word0 |= (uint64_t)fields->swizzle_a << 22;
    word0 |= (uint64_t)(fields->width - 1u) << 24;
    word0 |= (uint64_t)(fields->height - 1u) << height_shift;
+   if (fields->compressed)
+      word0 |= UINT64_C(1) << 59;
 
    /* Gen9 StateFields (0x34f188..0x34f1f8) only writes word1 bit60 for
     * array/type-flagged or kind3/4 images. This codec admits ordinary kind2,
@@ -155,8 +165,12 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
     * encodeImageReadState turns the same field into the texture descriptor's
     * sRGB bits, and AGX2's PBE keeps its sRGB store conversion at this bit. */
    word1 |= (uint64_t)fields->srgb << 61;
+   if (fields->compressed)
+      word1 |= UINT64_C(1) << 63;
    store_le64(&out->bytes[0], word0);
    store_le64(&out->bytes[8], word1);
+   if (fields->compressed)
+      store_le64(&out->bytes[16], fields->acceleration_buffer >> 4);
    out->length = AGX_PBE_AGX3_DESCRIPTOR_LENGTH;
    return true;
 }
@@ -183,6 +197,7 @@ mark_mip_chain(struct agx_pbe_agx3_descriptor *out, uint32_t level,
    store_le64(&out->bytes[0], load_le64(&out->bytes[0]) | (UINT64_C(1) << 58));
    store_le64(&out->bytes[8], load_le64(&out->bytes[8]) | (UINT64_C(1) << 63));
    store_le64(&out->bytes[16],
+              (load_le64(&out->bytes[16]) & ((UINT64_C(1) << 44) - 1)) |
               ((uint64_t)level << 44) | ((uint64_t)(levels - 1) << 48));
 }
 
@@ -206,6 +221,7 @@ pack_layered(uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
     * Linear stride and Gen10's shifted mode fields remain independently
     * gated. */
    if (generation != AGX_PBE_AGX3_GENERATION_9 || !fields ||
+       fields->compressed ||
        fields->layout == AGX_PBE_LAYOUT_LINEAR || layers < 1 ||
        layers > UINT16_MAX + 1u || !levels || levels > 16 ||
        level >= levels ||
@@ -276,6 +292,7 @@ agx_pbe_agx3_2d_multisample_pack(
     * its own witness to recover, so it is refused here too.
     */
    if (generation != AGX_PBE_AGX3_GENERATION_9 || !fields ||
+       fields->compressed ||
        (samples != 2 && samples != 4) ||
        fields->layout == AGX_PBE_LAYOUT_LINEAR ||
        !agx_pbe_agx3_2d_pack(generation, fields, out))
@@ -357,14 +374,21 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
          : (UINT64_C(1) << 54) - 1;
 
    const uint8_t layout = (word0 >> 4) & 0x3;
+   const bool compressed = generation == AGX_PBE_AGX3_GENERATION_9 &&
+                           (word0 & (UINT64_C(1) << 59));
    const uint64_t srgb_bit = generation == AGX_PBE_AGX3_GENERATION_9
       ? UINT64_C(1) << 61 : 0;
    const uint64_t word1_mask = layout == AGX_PBE_LAYOUT_LINEAR
       ? ((UINT64_C(1) << 61) - 1) | srgb_bit
       : ((UINT64_C(1) << 44) - 1) | srgb_bit |
+           (compressed ? UINT64_C(1) << 63 : 0) |
            (generation == AGX_PBE_AGX3_GENERATION_10 ? UINT64_C(1) << 60 : 0);
+   const uint64_t permitted_word0 =
+      word0_mask | (compressed ? UINT64_C(1) << 59 : 0);
    if ((word0 & 0xf) != AGX_PBE_DIMENSION_2D ||
-       (word0 & ~word0_mask) || (word1 & ~word1_mask) || word2 || word3)
+       (word0 & ~permitted_word0) || (word1 & ~word1_mask) ||
+       (compressed ? (word2 & ~((UINT64_C(1) << 44) - 1)) : word2) ||
+       word3)
       return false;
 
    fields->layout = layout;
@@ -378,6 +402,9 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
    fields->height =
       ((word0 >> height_shift) & ((UINT64_C(1) << dimension_bits) - 1)) + 1;
    fields->srgb = (word1 & srgb_bit) != 0;
+   fields->compressed = compressed;
+   if (compressed)
+      fields->acceleration_buffer = word2 << 4;
    if (layout == AGX_PBE_LAYOUT_LINEAR) {
       fields->buffer = (word1 & ((UINT64_C(1) << 40) - 1)) << 4;
       fields->stride_B = ((word1 >> 40) & ((UINT64_C(1) << 21) - 1)) + 16;

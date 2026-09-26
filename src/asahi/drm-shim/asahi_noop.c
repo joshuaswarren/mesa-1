@@ -1771,6 +1771,19 @@ asahi_log_submit(const struct drm_asahi_submit *submit)
          memcpy(&render, cmdbuf + offset + sizeof(header), sizeof(render));
          fprintf(log, " vdm_base=0x%llx",
                  (unsigned long long)render.vdm_ctrl_stream_base);
+         /* ZLS: the compression bits (2/4/6/8) and the metadata base and
+          * stride are write-only too; print them for depth compression. */
+         if (render.depth.base || render.stencil.base)
+            fprintf(log,
+                    " zls_ctrl=0x%llx depth=0x%llx/0x%llx stride=0x%x/0x%x"
+                    " stencil=0x%llx/0x%llx stride=0x%x/0x%x",
+                    (unsigned long long)render.zls_ctrl,
+                    (unsigned long long)render.depth.base,
+                    (unsigned long long)render.depth.comp_base,
+                    render.depth.stride, render.depth.comp_stride,
+                    (unsigned long long)render.stencil.base,
+                    (unsigned long long)render.stencil.comp_base,
+                    render.stencil.stride, render.stencil.comp_stride);
       }
       fprintf(log, "\n");
 

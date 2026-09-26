@@ -115,6 +115,16 @@ hk_files = files(
 
 if with_tests
   test(
+    'hk_g17p_compression',
+    executable(
+      'hk_g17p_compression_test',
+      files('tests/test-hk-g17p-compression.c'),
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_g17p_precomp_cache',
     executable(
       'hk_g17p_precomp_cache_test',

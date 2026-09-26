@@ -2783,6 +2783,16 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       unsigned stride_pages = z_layout->layer_stride_B / AIL_PAGESIZE;
       render->cr.depth.stride = ((stride_pages - 1) << 14) | 1;
 
+      /* A compressed single-layer image is not page padded, so a small one
+       * has a zero-page layer stride and the expression above underflows.
+       * The stride is unused for one layer; Apple's G17P Framebuffer writes
+       * 0 for a sub-cacheline layer and cacheline units below one page, a
+       * form the G17P kernel's ZLS validation does not accept. Send 0. */
+      if (dev->dev.chip == AGX_CHIP_G17P && stride_pages == 0) {
+         assert(z_layout->depth_px == 1);
+         render->cr.depth.stride = 0;
+      }
+
       assert(z_layout->tiling != AIL_TILING_LINEAR && "must tile");
 
       if (z_layout->compressed) {
@@ -2833,6 +2843,10 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
              "Page aligned S layers");
       unsigned stride_pages = s_layout->layer_stride_B / AIL_PAGESIZE;
       render->cr.stencil.stride = ((stride_pages - 1) << 14) | 1;
+      if (dev->dev.chip == AGX_CHIP_G17P && stride_pages == 0) {
+         assert(s_layout->depth_px == 1);
+         render->cr.stencil.stride = 0;
+      }
 
       if (s_layout->compressed) {
          render->cr.stencil.meta =
@@ -2928,6 +2942,19 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
                                                   view->vk.base_mip_level)) {
 
                perf_debug(cmd, "Decompressing in-place");
+
+               /* libagx_decompress has no G17P binary. G17P only compresses
+                * 1-8 byte single-sample targets, which cannot spill (8 x 8 B
+                * fit the 120 B/sample tilebuffer), so this is unreachable;
+                * fail closed with a diagnostic rather than a NULL program. */
+               if (dev->dev.chip == AGX_CHIP_G17P) {
+                  mesa_loge_once("G17P: spilled render pass with a compressed "
+                                 "attachment (%s) is unsupported",
+                                 util_format_short_name(layout->format));
+                  vk_command_buffer_set_error(&cmd->vk,
+                                              VK_ERROR_FEATURE_NOT_PRESENT);
+                  return;
+               }
 
                unsigned level = view->vk.base_mip_level;
                unsigned layer = view->vk.base_array_layer;

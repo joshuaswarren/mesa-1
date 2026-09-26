@@ -14,8 +14,9 @@
 struct hk_g17p_buffer_to_image_copy {
    enum agx_chip chip;
    VkFormat format;
-   /* Whether the destination plane's format is renderable, i.e. whether the
-    * driver advertises COLOR_ATTACHMENT for it. The path below the gate is
+   /* Whether the destination plane's copy-view format is renderable, i.e.
+    * whether the driver advertises COLOR_ATTACHMENT for it. D32/D16 use their
+    * bit-compatible R32_UINT/R16_UINT copy views. The path below the gate is
     * generic vk_meta, which renders the staged texels through a native EOT
     * view, so that -- not membership of a hardcoded list -- is what decides
     * whether the copy can be serviced. The caller supplies it because the
@@ -156,10 +157,13 @@ enum hk_g17p_block_format_family {
 enum hk_g17p_block_format_family
 hk_g17p_block_format_family(VkFormat format);
 
-/* Native uncompressed color uploads preserve rectangles and mip/layer/Z
+/* Native color uploads preserve rectangles and mip/layer/Z
  * subresources. Array and 3D regions are split into native single-slice
  * passes without changing source layout or copying index/pixel data. 8-bit
- * multi-planar YCbCr uploads use the same per-plane R8/RG8 render path. */
+ * multi-planar YCbCr uploads use the same per-plane R8/RG8 render path.
+ * Single-level, single-layer 2D D32/D16 uploads use an R32_UINT/R16_UINT
+ * color view so the PBE maintains compression metadata for compressed
+ * destinations. */
 bool hk_g17p_buffer_to_image_copy_supported(
    const struct hk_g17p_buffer_to_image_copy *copy);
 

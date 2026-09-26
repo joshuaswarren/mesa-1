@@ -850,6 +850,37 @@ canonical_format(VkFormat fmt)
 
 static inline VkFormat hk_meta_bitwise_copy_format(VkFormat format);
 
+/*
+ * Copy view for a losslessly compressed G17P colour plane.
+ *
+ * Compressed data is only decodable through a view of the same compression
+ * (channel) class: ail_formats_compatible(). G17P's usual packed-word aliases
+ * (R32_UINT for any 4-byte format, R16_UINT for any 2-byte format, ...) are
+ * not: an RGBA8 image written through an R32_UINT PBE is compressed as one
+ * 32-bit channel and decodes as garbage through the application's RGBA8
+ * view, and vice versa. That mismatch was the 2026-09-24 magenta (sampled
+ * source) / white (readback of a normalized store) failure.
+ *
+ * Use the canonical view of the image's own channel class, and prefer its
+ * integer member where one exists so the copy stays bitwise: R16 and
+ * R10G10B10A2 canonicalize to UNORM for AGX2's Z16 copies, but their UINT
+ * members are in the same class.
+ */
+static VkFormat
+hk_meta_compressed_copy_format(VkFormat fmt)
+{
+   const enum pipe_format p_format = hk_format_to_pipe_format(fmt);
+   enum pipe_format view = canonical_format_pipe(p_format);
+
+   if (view == PIPE_FORMAT_R16_UNORM)
+      view = PIPE_FORMAT_R16_UINT;
+   else if (view == PIPE_FORMAT_R10G10B10A2_UNORM)
+      view = PIPE_FORMAT_R10G10B10A2_UINT;
+
+   assert(ail_formats_compatible(p_format, view));
+   return vk_format_from_pipe_format(view);
+}
+
 enum copy_type {
    BUF2IMG,
    IMG2BUF,
@@ -1330,9 +1361,17 @@ hk_meta_copy_image_to_buffer2(struct vk_command_buffer *cmd,
             container_of(device, struct hk_device, vk)->dev.chip ==
                AGX_CHIP_G17P &&
             !vk_format_is_depth_or_stencil(image->format);
-         VkFormat canonical = g17p_color
-                                 ? hk_meta_bitwise_copy_format(aspect_fmt)
-                                 : canonical_format(aspect_fmt);
+         const struct hk_image *hk_image =
+            container_of(image, struct hk_image, vk);
+         const unsigned plane = hk_image_aspects_to_plane(hk_image, aspect);
+         /* Lossless compression is channel-layout dependent. The packed-word
+          * alias used for plain G17P copies is incompatible with, for example,
+          * a compressed RGBA8 image. Preserve its compression class. */
+         VkFormat canonical =
+            !g17p_color ? canonical_format(aspect_fmt)
+            : hk_image->planes[plane].layout.compressed
+               ? hk_meta_compressed_copy_format(aspect_fmt)
+               : hk_meta_bitwise_copy_format(aspect_fmt);
 
          uint32_t blocksize_B =
             util_format_get_blocksize(hk_format_to_pipe_format(canonical));
@@ -1928,10 +1967,20 @@ hk_meta_copy_get_image_properties(struct hk_image *img, bool g17p)
        * render target may round the copied values or untouched pixels reloaded
        * by the background shader, violating the bit-exact copy contract.
        */
-      props.color.view_format =
-         (g17p || vk_format_is_compressed(img->vk.format))
-            ? hk_meta_bitwise_copy_format(img->vk.format)
-            : img->vk.format;
+      if (g17p && img->planes[0].layout.compressed) {
+         /* R32_UINT and RGBA8_UINT have the same texel size but different
+          * lossless compression classes. Uploads and image copies must write
+          * the channel layout that ordinary image views will consume. */
+         props.color.view_format = hk_meta_compressed_copy_format(img->vk.format);
+         assert(ail_formats_compatible(
+            img->planes[0].layout.format,
+            hk_format_to_pipe_format(props.color.view_format)));
+      } else {
+         props.color.view_format =
+            (g17p || vk_format_is_compressed(img->vk.format))
+               ? hk_meta_bitwise_copy_format(img->vk.format)
+               : img->vk.format;
+      }
    } else {
       switch (img->vk.format) {
       case VK_FORMAT_S8_UINT:
@@ -2491,8 +2540,17 @@ hk_g17p_copy_buffer_to_image_supported(
        * hk_get_format_features() reports from ail_pixel_format[].renderable.
        * For a multi-planar destination the core selects the plane format and
        * this is the aspect's own plane; ask about that one. */
-      const VkFormat plane_vk_format = hk_g17p_copy_plane_format(
+      VkFormat plane_vk_format = hk_g17p_copy_plane_format(
          image, region->imageSubresource.aspectMask);
+      /* Match hk_meta_copy_get_image_properties(): D32/D16 uploads use a raw
+       * R32_UINT/R16_UINT color view, not a depth fragment output. Query the
+       * format the graphics copy actually renders, preserving every bit. */
+      if (region->imageSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT) {
+         if (plane_vk_format == VK_FORMAT_D32_SFLOAT)
+            plane_vk_format = VK_FORMAT_R32_UINT;
+         else if (plane_vk_format == VK_FORMAT_D16_UNORM)
+            plane_vk_format = VK_FORMAT_R16_UINT;
+      }
       const enum pipe_format plane_pipe =
          hk_format_to_pipe_format(plane_vk_format);
       const bool plane_renderable =
@@ -3559,7 +3617,8 @@ hk_CmdCopyBufferToImage2(VkCommandBuffer commandBuffer,
 
    if (gfx) {
       struct vk_meta_copy_image_properties dst_props =
-         hk_meta_copy_get_image_properties(dst_image, false);
+         hk_meta_copy_get_image_properties(dst_image,
+                                          dev->dev.chip == AGX_CHIP_G17P);
 
       if (dev->dev.chip == AGX_CHIP_G17P) {
          /* Native single-slice EOT views already select the mip and array
