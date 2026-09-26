@@ -607,6 +607,24 @@ hk_cmd_buffer_emit_cs_jump(struct hk_cmd_buffer *cmd, void *current,
  * program; both are small, so dump them verbatim and diff against the
  * known-good 48-byte add3 stream instead of reasoning about them.
  */
+static bool
+hk_g17p_push_descriptor_dedicated_bo(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_PUSH_DESCRIPTOR_DEDICATED_BO", false);
+   return enabled != 0;
+}
+
+static bool
+hk_g17p_sync_push_descriptors(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_G17P_SYNC_PUSH_DESCRIPTORS", false);
+   return enabled != 0;
+}
+
 __attribute__((hot)) bool
 hk_g17p_launch_trace_enabled(void)
 {
@@ -1213,7 +1231,7 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
       const bool dedicated_g17p_descriptor_bo =
          dev->dev.chip == AGX_CHIP_G17P &&
-         debug_get_bool_option("HK_G17P_PUSH_DESCRIPTOR_DEDICATED_BO", false);
+         hk_g17p_push_descriptor_dedicated_bo();
       if (dedicated_g17p_descriptor_bo) {
          /* G17P diagnostic: keep the pushed descriptor snapshot out of the
           * mixed command uploader whose BO may also acquire a low VDM alias.
@@ -1253,8 +1271,7 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
          hk_g17p_trace_line("push-descriptor-set", push_set_addr,
                             push_set->data, sizeof(push_set->data));
 
-      if (!dedicated_g17p_descriptor_bo &&
-          debug_get_bool_option("HK_G17P_SYNC_PUSH_DESCRIPTORS", false)) {
+      if (!dedicated_g17p_descriptor_bo && hk_g17p_sync_push_descriptors()) {
          bool found = false;
          list_for_each_entry(struct hk_cmd_bo, bo,
                              &cmd->uploader.main.bos, link) {

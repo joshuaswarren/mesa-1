@@ -176,8 +176,13 @@ void
 agx_g17p_va_lifetime_trace(struct agx_device *dev, const char *phase,
                            const struct agx_bo *bo)
 {
-   if (!dev || !bo || dev->chip != AGX_CHIP_G17P ||
-       !debug_get_bool_option("AGX_G17P_VA_LIFETIME_TRACE", false))
+   static int enabled = -1;
+
+   if (!dev || !bo || dev->chip != AGX_CHIP_G17P)
+      return;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("AGX_G17P_VA_LIFETIME_TRACE", false);
+   if (!enabled)
       return;
 
    const uint64_t rw = bo->va ? bo->va->addr : 0;

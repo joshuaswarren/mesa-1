@@ -14,6 +14,7 @@
 
 #include "agx_helpers.h"
 #include "hk_buffer.h"
+#include "hk_cmd_buffer.h"
 #include "hk_buffer_view.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
@@ -337,7 +338,7 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    if (stride >= AGX_G17P_IMAGE_ATOMIC_SW_OFFSET + sizeof(desc.atomic_sw))
       memcpy(packed + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, &desc.atomic_sw,
              sizeof(desc.atomic_sw));
-   if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
+   if (hk_g17p_launch_trace_enabled() && generation == 9) {
       fprintf(stderr,
               "G17P storage descriptor set=0x%" PRIx64
               " binding=%u elem=%u offset=%u valid=%u bytes=",
