@@ -128,10 +128,21 @@ hk_agx3_g17p_vertex_program_info(
       compiler_info && compiler_info->user_size == 0 && !writes_psiz &&
       !writes_layer_viewport;
 
+   /* A constant program needs its register allocation, a known staging
+    * footprint and a caller that built it as a native CProg; without a
+    * preamble there must be no preamble resources at all. */
+   const bool preamble_ok =
+      compiler_info &&
+      (compiler_info->has_preamble
+          ? compiler_info->constant_program_allowed &&
+               compiler_info->preamble_staging_known &&
+               compiler_info->nr_preamble_gprs != 0 &&
+               compiler_info->nr_preamble_gprs <= 256
+          : compiler_info->nr_preamble_gprs == 0 &&
+               compiler_info->preamble_scratch_size == 0);
+
    if (chip != AGX_CHIP_G17P || !compiler_info || !program ||
-       !compiler_info->hardware_vertex ||
-       compiler_info->has_preamble || compiler_info->nr_preamble_gprs != 0 ||
-       compiler_info->preamble_scratch_size != 0 ||
+       !compiler_info->hardware_vertex || !preamble_ok ||
        compiler_info->position_off != 0 || compiler_info->varyings_off != 4 ||
        compiler_info->psiz_off != 4 + compiler_info->user_size ||
        (compiler_info->layer_viewport_off != compiler_info->psiz_off &&
@@ -146,12 +157,13 @@ hk_agx3_g17p_vertex_program_info(
        util_bitcount64(compiler_info->uvs_written) > compiler_info->user_size)
       return false;
 
-   *program = (struct agx_vdm_state_update_program_info){
+   struct agx_vdm_state_update_program_info staged = {
       .source_layout =
          AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT,
       .template_info =
          {
             /* The no-preamble Ioto loader finishes with both state counts zero.
+             * A constant program replaces them below with its TI resources.
              */
             .raw_state_load_count_12 = 0,
             .raw_state_load_count_18 = 0,
@@ -172,6 +184,18 @@ hk_agx3_g17p_vertex_program_info(
             .raw_active_context_selector = UINT32_MAX,
          },
    };
+
+   /* Native CProg inputs live at the start of the preamble's TPS frame, so
+    * the preamble scratch size is the thread-invariant spill-buffer size
+    * (Apple's terrain VS: eight imported words, 32 bytes). */
+   if (compiler_info->has_preamble &&
+       !agx_vdm_state_update_vertex_ti_resources(
+          chip, compiler_info->preamble_scratch_size,
+          (uint32_t)compiler_info->preamble_staging_halfs * 2u,
+          &staged.template_info))
+      return false;
+
+   *program = staged;
    return true;
 }
 

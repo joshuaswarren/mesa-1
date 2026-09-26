@@ -48,6 +48,13 @@ hk_agx3_vdm_live_source_layout(
 struct hk_agx3_g17p_vertex_compile_info {
    bool hardware_vertex;
    bool has_preamble;
+   /* The caller compiled the preamble as a native constant program (inputs
+    * imported through its TPS frame). Without it a preamble is refused. */
+   bool constant_program_allowed;
+   /* The constant program's texture staging footprint, published as its
+    * thread-invariant largest-IPR bytes (as for the fragment CProg). */
+   bool preamble_staging_known;
+   uint16_t preamble_staging_halfs;
    uint16_t nr_preamble_gprs;
    uint32_t preamble_scratch_size;
    uint64_t uvs_written;
@@ -62,8 +69,11 @@ struct hk_agx3_g17p_vertex_compile_info {
 
 /* Build the exact G17P VertexProgramVariant fields for a hardware vertex
  * shader with position, ordinary user locations, and the Vulkan-bounded
- * eight-word combined clip/cull-distance tail. System outputs and preambles
- * are separate state shapes. */
+ * eight-word combined clip/cull-distance tail. System outputs are a separate
+ * state shape. A constant program is admitted only when
+ * `constant_program_allowed` is set; its thread-invariant spill (the CProg's
+ * imported-input TPS frame) and staging footprint then populate the two
+ * state-load counts (agx_vdm_state_update_vertex_ti_resources). */
 bool hk_agx3_g17p_vertex_program_info(
    enum agx_chip chip,
    const struct hk_agx3_g17p_vertex_compile_info *compiler_info,

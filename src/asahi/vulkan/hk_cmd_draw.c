@@ -7949,6 +7949,12 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    memcpy(out, encoded.bytes, encoded.length);
    out += encoded.length;
 
+   /* Host-checkable launch encoding: word 1 bits 8..19 and the
+    * pipeline template bits 3..20 carry a vertex CProg's TI counts. */
+   if (unlikely(hk_g17p_launch_trace_enabled()))
+      hk_g17p_trace_line("vdm-state-update", pipeline_program,
+                         encoded.bytes, encoded.length);
+
    if (perf_trace) {
       *publish_vdm_ns = os_time_get_nano() - *phase_start;
       *phase_start = os_time_get_nano();

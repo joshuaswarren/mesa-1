@@ -214,6 +214,26 @@ agx_vdm_state_update_template_pack(
 }
 
 bool
+agx_vdm_state_update_vertex_ti_resources(
+   enum agx_chip chip, uint32_t spill_bytes, uint32_t largest_ipr_bytes,
+   struct agx_vdm_state_update_template_info *info)
+{
+   const uint64_t spill_quads = ((uint64_t)spill_bytes + 3) >> 2;
+   const uint64_t ipr_quads = ((((uint64_t)largest_ipr_bytes + 3) >> 2) + 1) &
+                              ~UINT64_C(1);
+
+   /* Same bounds as the HAL200 fragment record: an 18-bit spill field and
+    * the 12-bit IPR field, whose even rounding caps it at 0xffe. */
+   if (chip != AGX_CHIP_G17P || !info || spill_quads > UINT32_C(0x3ffff) ||
+       ipr_quads > UINT32_C(0xffe))
+      return false;
+
+   info->raw_state_load_count_12 = (uint16_t)ipr_quads;
+   info->raw_state_load_count_18 = (uint32_t)spill_quads;
+   return true;
+}
+
+bool
 agx_vdm_state_update_draw_pack(
    enum agx_chip chip, const struct agx_vdm_state_update_draw_info *info,
    struct agx_vdm_state_update *out)

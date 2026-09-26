@@ -402,6 +402,14 @@ struct agx_shader_key {
     */
    bool no_preamble;
 
+   /* AGX3B: build the preamble as a native constant program (CProg inputs
+    * imported through its TPS frame, arithmetic results selected straight
+    * into uniform destinations, half exports legalized) for this shader,
+    * independent of AGX_MESA_DEBUG=native_uniforms. G17P vertex programs
+    * always use it.
+    */
+   bool agx3_native_cprog;
+
    /* Set if this is a non-monolithic shader that must be linked with additional
     * shader parts before the program can be used. This suppresses omission of
     * `stop` instructions, which the linker must insert instead.

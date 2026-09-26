@@ -1700,13 +1700,15 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
     * Local/spill frame use needs its own native metadata witnesses before
     * admission. This is not a fallback:
     * a candidate outside the bounded protocol is refused. */
-   const bool native_preamble = s->info.stage == MESA_SHADER_FRAGMENT &&
-      (agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS) &&
-      s->b.info.has_preamble && s->b.info.preamble_size &&
-      s->b.info.agx3_preamble_staging_known &&
-      s->b.info.nr_preamble_gprs && s->b.info.nr_preamble_gprs <= 256 &&
-      s->b.info.preamble_scratch_size == s->b.info.agx3_preamble_inputs.storage_bytes &&
-      (!!s->b.info.agx3_preamble_inputs.count == s->b.info.agx3_preamble_tps_inputs);
+   /* Every G17P hardware vertex program (API VS, GS raster and native TES
+    * variants) is compiled with a native CProg when anything is hoistable;
+    * its VertexProgramVariant carries the TI counts. The stage branches
+    * below still require that variant. */
+   const bool native_preamble =
+      (s->b.info.stage == MESA_SHADER_VERTEX ||
+       (s->info.stage == MESA_SHADER_FRAGMENT &&
+        (agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS))) &&
+      hk_g17p_native_cprog_qualified(&s->b.info);
    if (!linked || !linked->b.bo || !linked->b.bo->va || linked->b.size == 0 ||
        linked->b.size > UINT32_MAX || (s->b.info.has_preamble && !native_preamble) ||
        s->b.info.scratch_size > AGX3_G17P_MAX_SPILL_B ||

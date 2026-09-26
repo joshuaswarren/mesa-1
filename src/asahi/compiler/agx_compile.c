@@ -8148,7 +8148,12 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * as copyprop creates uniform sources). To keep register pressure in
     * check, lower after CSE, since moves are cheaper than registers.
     */
-   if ((agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS) && ctx->is_preamble &&
+   /* Native constant-program lowering: every preamble with the debug flag,
+    * or the shaders whose key requires it (G17P vertex programs). */
+   const bool native_cprog =
+      (agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS) || key->agx3_native_cprog;
+
+   if (native_cprog && ctx->is_preamble &&
        key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
       if (!agx3_lower_cprog_inputs(ctx)) {
          binary->size = initial_binary_size;
@@ -8162,7 +8167,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    AGX_PASS(ctx, agx_lower_uniform_sources);
 
-   if ((agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS) && ctx->is_preamble &&
+   if (native_cprog && ctx->is_preamble &&
        key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
       /* Selection requires a single live use of an arithmetic result.
        * Dead uses left by earlier lowering must not hide that opportunity. */
@@ -8171,7 +8176,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    }
 
    AGX_PASS(ctx, agx3_coalesce_uniform_half_stores);
-   if (agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS)
+   if (native_cprog)
       AGX_PASS(ctx, agx3_lower_uniform_half_exports);
    AGX_PASS(ctx, agx3_drop_unchanged_tile_stores);
 

@@ -2575,6 +2575,120 @@ hk_g17p_unrolls_sample_shading(const nir_shader *nir,
           AGX3B_NUM_REGS;
 }
 
+static void
+hk_g17p_vertex_compile_info_init(const struct hk_shader *shader,
+                                 bool constant_program_allowed,
+                                 struct hk_agx3_g17p_vertex_compile_info *info)
+{
+   *info = (struct hk_agx3_g17p_vertex_compile_info){
+      .hardware_vertex = shader->b.info.stage == MESA_SHADER_VERTEX,
+      .has_preamble = shader->b.info.has_preamble,
+      .constant_program_allowed = constant_program_allowed,
+      .preamble_staging_known = shader->b.info.agx3_preamble_staging_known,
+      .preamble_staging_halfs = shader->b.info.agx3_preamble_staging_halfs,
+      .nr_preamble_gprs = shader->b.info.nr_preamble_gprs,
+      .preamble_scratch_size = shader->b.info.preamble_scratch_size,
+      .uvs_written = shader->info.uvs.written,
+      .position_off = shader->info.uvs.group_offs[UVS_POSITION],
+      .varyings_off = shader->info.uvs.group_offs[UVS_VARYINGS],
+      .psiz_off = shader->info.uvs.group_offs[UVS_PSIZ],
+      .layer_viewport_off = shader->info.uvs.group_offs[UVS_LAYER_VIEWPORT],
+      .clip_off = shader->info.uvs.group_offs[UVS_CLIP_DIST],
+      .uvs_size = shader->info.uvs.size,
+      .user_size = shader->info.uvs.user_size,
+   };
+}
+
+/*
+ * Compile a G17P hardware vertex program with its native constant program.
+ * The compiler hoists uniform-only work into the preamble (nothing, for a
+ * shader without any) and the launch runs it once per draw.
+ *
+ * A preamble outside the bounded native protocol -- a CProg that spills
+ * beyond its imported-input TPS frame, a texture/sampler state register, or
+ * TI resources the VertexProgramVariant cannot encode -- is not launchable.
+ * Such a shader is reported loudly and compiled without the preamble instead
+ * of failing pipeline creation; every occurrence is a protocol gap to close,
+ * not an alternative path (the bench corpus hits none). The compile uses a
+ * clone so that guard keeps the original NIR. On success the clone replaces
+ * `*nir`; otherwise `shader->b` is cleared and `*nir` is untouched.
+ */
+static bool
+hk_g17p_compile_vs_cprog(struct hk_device *dev, nir_shader **nir,
+                         const struct agx_shader_key *key,
+                         struct hk_shader *shader)
+{
+   nir_shader *attempt = nir_shader_clone(NULL, *nir);
+   if (!attempt)
+      return false;
+
+   struct agx_shader_key cprog_key = *key;
+   cprog_key.no_preamble = false;
+   cprog_key.agx3_native_cprog = true;
+
+   const char *declined = "compile";
+   if (agx_compile_shader_nir(attempt, &cprog_key, &shader->b)) {
+      const struct agx_shader_info *info = &shader->b.info;
+      struct hk_agx3_g17p_vertex_compile_info compiler_info;
+      struct agx_vdm_state_update_program_info program = {0};
+      hk_g17p_vertex_compile_info_init(shader, true, &compiler_info);
+
+      if (!info->has_preamble)
+         declined = NULL;
+      else if (!hk_g17p_native_cprog_qualified(info))
+         declined = "cprog-shape";
+      else if (info->texture_state_count != 0 || info->uses_sampler_heap ||
+               (info->sampler_state_count != 0 &&
+                !(shader->info.agx3_indexed_sampler_valid &&
+                  info->sampler_state_count == 1)))
+         declined = "texture-state";
+      else if (!hk_agx3_g17p_vertex_program_info(dev->dev.chip,
+                                                 &compiler_info, &program))
+         declined = "vdm-state";
+      else
+         declined = NULL;
+
+      if (agx_get_compiler_debug() & AGX_DBG_SHADERDB) {
+         fprintf(stderr,
+                 "HK G17P VS CProg: %s%s preamble=%uB inputs=%u tps=%uB "
+                 "gprs=%u staging=%u uniforms=%u main=%uB state=%u/%u\n",
+                 declined ? "declined:"
+                 : info->has_preamble ? "admitted" : "none",
+                 declined ? declined : "",
+                 info->preamble_size, info->agx3_preamble_inputs.count,
+                 info->preamble_scratch_size, info->nr_preamble_gprs,
+                 info->agx3_preamble_staging_halfs, info->push_count,
+                 info->main_size,
+                 program.template_info.raw_state_load_count_12,
+                 program.template_info.raw_state_load_count_18);
+      }
+
+      if (!declined) {
+         ralloc_free(*nir);
+         *nir = attempt;
+         return true;
+      }
+
+      mesa_loge("G17P vertex constant program not launchable (%s): "
+                "preamble=%uB tps=%uB inputs=%uB gprs=%u staging_known=%u "
+                "textures=%u samplers=%u; compiling without it",
+                declined, info->preamble_size, info->preamble_scratch_size,
+                info->agx3_preamble_inputs.storage_bytes,
+                info->nr_preamble_gprs, info->agx3_preamble_staging_known,
+                info->texture_state_count, info->sampler_state_count);
+      free(shader->b.binary);
+   } else {
+      if (agx_get_compiler_debug() & AGX_DBG_SHADERDB)
+         fprintf(stderr, "HK G17P VS CProg: declined:%s\n", declined);
+      mesa_loge("G17P vertex constant program failed to compile; "
+                "compiling without it");
+   }
+
+   memset(&shader->b, 0, sizeof(shader->b));
+   ralloc_free(attempt);
+   return false;
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
@@ -3018,8 +3132,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                                        xfb_info && xfb_info->output_count),
       /* Native fragment CProg qualification is explicitly opt-in. Descriptor
        * lowering above still uses immediate native state slots, never the
-       * AGX2 texture/sampler-state-store protocol. Vertex/compute launch and
-       * the default G17P path remain outside this qualification gate. */
+       * AGX2 texture/sampler-state-store protocol. G17P hardware vertex
+       * programs always get their native CProg in hk_g17p_compile_vs_cprog();
+       * compute launch remains outside this qualification gate. */
       .no_preamble = dev->dev.chip == AGX_CHIP_G17P &&
          !(nir->info.stage == MESA_SHADER_FRAGMENT &&
            (agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS)),
@@ -3041,8 +3156,15 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       simple_mtx_lock(lock);
 
    assert(nir->info.io_lowered);
-   const bool compiled =
-      agx_compile_shader_nir(nir, &backend_key, &shader->b);
+   /* G17P hardware vertex programs (API VS, GS raster and native TES
+    * variants) run per-draw uniform work once in a native vertex constant
+    * program, as Apple's compiler does: e.g. ProjMat * ModelViewMat. */
+   const bool vs_cprog = dev->dev.chip == AGX_CHIP_G17P && hw &&
+                         nir->info.stage == MESA_SHADER_VERTEX;
+   bool compiled = vs_cprog &&
+      hk_g17p_compile_vs_cprog(dev, &nir, &backend_key, shader);
+   if (!compiled)
+      compiled = agx_compile_shader_nir(nir, &backend_key, &shader->b);
 
    if (lock)
       simple_mtx_unlock(lock);
@@ -3101,20 +3223,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
     * layout, while leaving compute-only GS variants untouched. */
    if (dev->dev.chip == AGX_CHIP_G17P && hw &&
        shader->b.info.stage == MESA_SHADER_VERTEX) {
-      const struct hk_agx3_g17p_vertex_compile_info compiler_info = {
-         .hardware_vertex = shader->b.info.stage == MESA_SHADER_VERTEX,
-         .has_preamble = shader->b.info.has_preamble,
-         .nr_preamble_gprs = shader->b.info.nr_preamble_gprs,
-         .preamble_scratch_size = shader->b.info.preamble_scratch_size,
-         .uvs_written = shader->info.uvs.written,
-         .position_off = shader->info.uvs.group_offs[UVS_POSITION],
-         .varyings_off = shader->info.uvs.group_offs[UVS_VARYINGS],
-         .psiz_off = shader->info.uvs.group_offs[UVS_PSIZ],
-         .layer_viewport_off = shader->info.uvs.group_offs[UVS_LAYER_VIEWPORT],
-         .clip_off = shader->info.uvs.group_offs[UVS_CLIP_DIST],
-         .uvs_size = shader->info.uvs.size,
-         .user_size = shader->info.uvs.user_size,
-      };
+      struct hk_agx3_g17p_vertex_compile_info compiler_info;
+      hk_g17p_vertex_compile_info_init(shader, vs_cprog, &compiler_info);
       const bool state_ok = hk_agx3_g17p_vertex_program_info(
          dev->dev.chip, &compiler_info, &shader->agx3_vdm_state_update);
       if (!state_ok && hk_g17p_launch_trace_enabled())

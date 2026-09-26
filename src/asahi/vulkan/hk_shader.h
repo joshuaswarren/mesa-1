@@ -528,6 +528,21 @@ extern const struct vk_device_shader_ops hk_device_shader_ops;
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev);
 
+/* The bounded native CProg shape both graphics stages admit: imported
+ * uniform inputs stored in, and exactly filling, the preamble's TPS frame,
+ * with a known staging footprint. */
+static inline bool
+hk_g17p_native_cprog_qualified(const struct agx_shader_info *info)
+{
+   return info->has_preamble && info->preamble_size &&
+          info->agx3_preamble_staging_known && info->nr_preamble_gprs &&
+          info->nr_preamble_gprs <= 256 &&
+          info->preamble_scratch_size ==
+             info->agx3_preamble_inputs.storage_bytes &&
+          (!!info->agx3_preamble_inputs.count ==
+           info->agx3_preamble_tps_inputs);
+}
+
 static inline nir_address_format
 hk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness,
                       bool null_descriptor)
