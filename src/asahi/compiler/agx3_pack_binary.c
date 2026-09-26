@@ -202,6 +202,27 @@ agx3_tex_decline(const agx_instr *I, unsigned line)
    return false;
 }
 
+/* Instructions that read other lanes of the 2x2 quad, so need its helper
+ * invocations alive when they execute. */
+static bool
+agx3_reads_quad_lanes(const agx_instr *I)
+{
+   switch (I->op) {
+   case AGX_OPCODE_DFDX:
+   case AGX_OPCODE_DFDY:
+   case AGX_OPCODE_QUAD_SHUFFLE:
+   case AGX_OPCODE_QUAD_SHUFFLE_XOR:
+   case AGX_OPCODE_QUAD_SHUFFLE_UP:
+   case AGX_OPCODE_QUAD_SHUFFLE_DOWN:
+   case AGX_OPCODE_QUAD_REDUCE:
+   case AGX_OPCODE_QUAD_PREFIX:
+   case AGX_OPCODE_ICMP_QUAD_BALLOT:
+   case AGX_OPCODE_FCMP_QUAD_BALLOT:
+      return true;
+   default:
+      return false;
+   }
+}
 
 static bool
 agx3_append(struct util_dynarray *emission, const uint8_t *bytes, uint8_t len)
@@ -7777,6 +7798,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned tile_stores_left = 0;
    unsigned image_writes_left = 0;
    unsigned texture_samples_left = 0;
+   /* A derivative or quad operation after the last sample-group member: see
+    * helpers_outlive_group below. */
+   bool g17p_quad_op_after_group = false;
    unsigned sample_group_members_left = 0;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
@@ -7854,9 +7878,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * outside f156 sample groups. Native AUTO/GRAD/AUTO groups the
              * two AUTO samples across the gradient without marking it. */
             if (scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
-                scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN)
+                scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN) {
                sample_group_members_left++;
+               g17p_quad_op_after_group = false;
+            }
          }
+         if (sample_group_members_left && agx3_reads_quad_lanes(scan_I))
+            g17p_quad_op_after_group = true;
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (scan_I->dim == AGX_DIM_CUBE ||
               scan_I->dim == AGX_DIM_CUBE_ARRAY)) {
@@ -9023,7 +9051,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool sample_group_member =
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN;
+            /* f156 on the last group member ends the fragment's helper
+             * invocations: lanes outside the primitive stop after that SMP.
+             * A dFdx/dFdy/fwidth or quad operation later in the program then
+             * reads dead neighbours. WebRender's composite shader computes
+             * its clip anti-aliasing range with fwidth() after sampling the
+             * tile, so every 2x2 quad row straddling two 512-px picture-cache
+             * tiles (content origin at an odd row) came out partly
+             * transparent in Zen. Leave the group open in that case; the
+             * helpers then live to the end of the program. A later
+             * implicit-LOD SMP (which does terminate the group) restores
+             * correct derivatives, confirming the f156 boundary. */
+            const bool helpers_outlive_group =
+               g17p_quad_op_after_group && sample_group_member &&
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
+               sample_group_members_remaining == 1;
             const bool sample_group_nonterminal =
+               helpers_outlive_group ||
                (g17p_sample_group && sample_group_member &&
                 sample_group_members_remaining > 1) ||
                /* Compute gathers use level zero without a fragment group. */
@@ -9034,7 +9079,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (sample_group_member) {
                assert(sample_group_members_remaining > 0);
                sample_group_end = --sample_group_members_remaining == 0 &&
-                                  g17p_sample_group;
+                                  g17p_sample_group && !helpers_outlive_group;
             }
             /* Apple's implicit-derivative fragment programs enter the pixel
              * transaction immediately before their first SMP, after their
