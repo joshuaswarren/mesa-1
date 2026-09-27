@@ -790,6 +790,15 @@ hk_cmd_copy_query_pool_results(struct hk_cmd_buffer *cmd,
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
+   /* Query availability writes may be deferred to the post-graphics stream.
+    * Finish the producing streams before creating a waiting consumer so it
+    * cannot spin ahead of its own availability write. Do this before
+    * hk_query_command_cs attaches dependencies to the consumer stream. */
+   if (agx_native_graphics(&dev->dev) && (flags & VK_QUERY_RESULT_WAIT_BIT)) {
+      hk_cmd_buffer_end_graphics(cmd);
+      hk_cmd_buffer_end_compute(cmd);
+   }
+
    /* The copy reads results and availability every earlier stream may still
     * be producing. Ordering the destination buffer against later use is the
     * application's (it is a transfer operation, Vulkan 1.3, 17.2). */
