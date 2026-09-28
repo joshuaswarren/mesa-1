@@ -473,7 +473,12 @@ agx_cdm_barrier_designed_usc(GLOBAL uint32_t *out)
       cfg.unk_6 = true;
       cfg.unk_8 = true;
       cfg.usc_cache_inval = true;
+   }
 
+   return out;
+}
+
+/*
  * Runtime-masked variant of the kitchen-sink CDM barrier. Bit i of mask
  * enables field i (bit 3 = usc_cache_inval); used to bisect which barrier
  * bits the hardware actually needs between launches. The full mask
