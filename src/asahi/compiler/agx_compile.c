@@ -1679,8 +1679,18 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
    }
 
    /* A scalar W8 load writes an aligned low half. Multi-component W8 loads
-    * instead return a byte-packed payload, like G17P tile traffic. */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+    * instead return a byte-packed payload, like G17P tile traffic.
+    *
+    * G17G's scalar byte loads land the same way: every applegpu_g17g W8
+    * mask-1 LDDEV in test/native/g17g/m5-libagx-reference.metal names an
+    * even half (a uchar array indexed by a 32-bit id, strided, through a
+    * loaded pointer, and into a ushort), and its consumer reads that half
+    * as a 16-bit operand. Its packed multi-byte form is not witnessed, so
+    * only the scalar takes this path there. */
+   const enum agx_isa_encoding encoding = b->shader->key->dev.encoding;
+   if ((encoding == AGX_ISA_ENCODING_AGX3B ||
+        (encoding == AGX_ISA_ENCODING_AGX3C &&
+         instr->def.num_components == 1)) &&
        fmt == AGX_FORMAT_I8 && dest.size == AGX_SIZE_16 && packed_count == 0) {
       const unsigned nr = instr->def.num_components;
       agx_index payload = agx_temp(b->shader, AGX_SIZE_32);
