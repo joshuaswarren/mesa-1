@@ -3544,7 +3544,14 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
 
-   if (likely(!(agx_compiler_debug & AGX_DBG_NOSCHED))) {
+   /* The bottom-up register-pressure scheduler moves each load next to its use,
+    * which serializes the memory round trips of small compute kernels (the
+    * LLM decode chain: +1.7% tokens/s with it off, bit-identical results).
+    * Compute shaders therefore skip it unless AGX_SCHED_COMPUTE is set. */
+   bool skip_sched = (agx_compiler_debug & AGX_DBG_NOSCHED) ||
+                     (nir->info.stage == MESA_SHADER_COMPUTE &&
+                      !getenv("AGX_SCHED_COMPUTE"));
+   if (likely(!skip_sched)) {
       AGX_PASS(ctx, agx_pressure_schedule);
    }
 
