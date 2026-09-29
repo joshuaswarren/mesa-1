@@ -1579,6 +1579,21 @@ static void test_half_uv(void)
       /* A word operand is an aligned pair. */
       assert(!agx3_alu_bit_andc32_gpu1(0,false,1,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_DISCARD,0,out,&size));
 
+      /* Bit reverse, Apple applegpu_g17g reverse_bits(uint)
+       * (test/native/g17g/m5-gl4-reference.metal rbit32_*): in place and
+       * dead, into a cached r1 from a cached r0, and waiting for slot 8. */
+      static const uint8_t rev_dead[] = {0x27,0x00,0x00,0x1a,0x26,0x00,0xa9,0x02,0x08,0x00};
+      static const uint8_t rev_live[] = {0x37,0x80,0x00,0x1a,0x2a,0x00,0xa9,0x02,0x08,0x00};
+      static const uint8_t rev_wait[] = {0x2f,0x00,0x00,0x1a,0x26,0x00,0xa9,0x02,0x08,0x00};
+      assert(agx3_alu_rev_gpu1(0,0,AGX3_ALU_HINT_DISCARD,false,0,out,&size));
+      assert(size==10 && !memcmp(out,rev_dead,10));
+      assert(agx3_alu_rev_gpu1(2,0,AGX3_ALU_HINT_CACHE,true,0,out,&size));
+      assert(size==10 && !memcmp(out,rev_live,10));
+      assert(agx3_alu_rev_gpu1(0,0,AGX3_ALU_HINT_DISCARD,false,128,out,&size));
+      assert(size==10 && !memcmp(out,rev_wait,10));
+      /* No other wait slot is witnessed. */
+      assert(!agx3_alu_rev_gpu1(0,0,AGX3_ALU_HINT_DISCARD,false,1,out,&size));
+
       /* Half AND/OR/XOR over registers (gpu/m5-xfb-alu9-reference.metal):
        * h2 = h3 op h2, both sources dead, waiting for slot 8. */
       static const struct { enum agx3_alu_op op; uint8_t bytes[10]; } r16[] = {

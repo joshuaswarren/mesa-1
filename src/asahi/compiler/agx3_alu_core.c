@@ -237,6 +237,34 @@ agx3_alu_ft1_gpu1(uint16_t dest, uint16_t src, bool half,
 }
 
 bool
+agx3_alu_rev_gpu1(uint16_t dest, uint16_t src, enum agx3_alu_hint hint,
+                  bool dest_cache, uint16_t wait_mask,
+                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   /* Apple applegpu_g17g reverse_bits(uint)
+    * (test/native/g17g/m5-gl4-reference.metal rbit32_*):
+    *   27 00 00 1a 26 00 a9 02 08 00   rev r0, r0 (dead)
+    *   37 80 00 1a 2a 00 a9 02 08 00   rev r1 (cached), r0 (cached)
+    *   2f 00 00 1a 26 00 a9 02 08 00   rev r0, r0 (dead), wait8
+    * cbs's and ft1's shape with opcode f30=143. Only the slot-8 wait is
+    * witnessed. */
+   if (!out || !len || dest >= 256 || src >= 256 || ((dest | src) & 1) ||
+       (wait_mask & ~128u) || (unsigned)hint > AGX3_ALU_HINT_CACHE)
+      return false;
+
+   const struct agx3_field_kv fields[] = {
+      {9, 2}, {10, 2}, {2, dest}, {11, dest_cache},
+      {23, 2}, {24, 2}, {16, src},
+      {25, hint == AGX3_ALU_HINT_CACHE},
+      {27, hint == AGX3_ALU_HINT_DISCARD},
+      {29, 3}, {30, 143}, {38, !!wait_mask},
+   };
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "rev", 0, fields,
+                            sizeof(fields) / sizeof(fields[0]), NULL, 0, out,
+                            len);
+}
+
+bool
 agx3_alu_fcmp_bool16_gpu1(uint16_t dest, uint16_t src0,
                           enum agx3_alu_hint src0_hint, bool src1_is_register,
                           uint16_t src1, bool src1_kill, uint8_t if_true,

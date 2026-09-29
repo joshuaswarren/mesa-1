@@ -7999,6 +7999,31 @@ TEST_F(AGX3PackBinary, G17PFrontFacingUsesNativeBackFacingSr)
    EXPECT_EQ(pack(b), g17g_native);
 }
 
+TEST_F(AGX3PackBinary, G17GHelperInvocationReadsActiveThreadSr)
+{
+   /* A fragment side effect is predicated on the helper-invocation test,
+    * which reads the active-thread SR2 as W16. applegpu_g17g opens its
+    * fragment atomic with exactly that read into half 2 on slot 1
+    * (test/native/g17g/m5-gl4-reference.metal sxAtomic). */
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3C);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   agx_get_sr_coverage_to(b, agx_register(2, AGX_SIZE_16),
+                          AGX_SR_IS_ACTIVE_THREAD);
+   agx_stop(b);
+   const std::vector<uint8_t> native = {
+      0x14,0x84,0x10,0x06, 0x0e,0x00,0x00,0x00,
+   };
+   EXPECT_EQ(pack(b), native);
+
+   /* Outside a fragment there is no helper invocation to test. */
+   b = builder(AGX_ISA_ENCODING_AGX3C);
+   b->shader->stage = MESA_SHADER_COMPUTE;
+   agx_get_sr_coverage_to(b, agx_register(2, AGX_SIZE_16),
+                          AGX_SR_IS_ACTIVE_THREAD);
+   agx_stop(b);
+   pack(b, /*expect_ok=*/false);
+}
+
 TEST_F(AGX3PackBinary, PackedSharedByteVectorsUsePhysicalHalves)
 {
    for (unsigned channels = 2; channels <= 4; ++channels) {

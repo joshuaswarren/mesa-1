@@ -470,6 +470,10 @@ bool agx3_alu_ft1_gpu1(uint16_t dest, uint16_t src, bool half,
                        enum agx3_alu_hint hint, bool dest_cache,
                        uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                        uint8_t *len);
+/* G17G bit reverse (NIR bitfield_reverse) of a 32-bit register. */
+bool agx3_alu_rev_gpu1(uint16_t dest, uint16_t src, enum agx3_alu_hint hint,
+                       bool dest_cache, uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 /* G17G float compare selecting between two small 16-bit immediates
  * (`fseli16`): dest(16) = (src0(32) cond src1) ? if_true : if_false, where
  * src1 is an 8-bit minifloat immediate or a 32-bit register. Witnessed for

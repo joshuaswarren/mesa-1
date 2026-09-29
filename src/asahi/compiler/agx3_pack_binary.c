@@ -11558,6 +11558,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * 0 as `imadd(SR36, #7)`, so SR36 is the total number of active
              * threads in the subgroup, also W16. Other coverage
              * pseudo-registers remain closed until separately witnessed. */
+            /* G17G reads the same W16 SR2 at the head of Apple's fragment
+             * atomic (test/native/g17g/m5-gl4-reference.metal sxAtomic,
+             * rld 14841006); the others stay G17P-only. */
             const bool active_thread =
                I->sr == AGX_SR_IS_ACTIVE_THREAD &&
                ctx->stage == MESA_SHADER_FRAGMENT;
@@ -11586,7 +11589,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool active_count =
                I->sr == AGX_SR_TOTAL_ACTIVE_THREADS_IN_SUBGROUP &&
                subgroup_stage;
-            if (enc != AGX_ISA_ENCODING_AGX3B ||
+            if ((enc != AGX_ISA_ENCODING_AGX3B &&
+                 !(enc == AGX_ISA_ENCODING_AGX3C && active_thread)) ||
                 !(active_thread || sample_coverage || active_index || active_count) ||
                 I->nr_dests != 1 ||
                 I->nr_srcs != 0 || !agx3_src_is_register(I->dest[0]) ||
@@ -16435,6 +16439,29 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    !agx3_append(emission, hi, hi_len))
                   AGX3_REFUSE(I);
             }
+            outstanding &= (uint16_t)~retire;
+            continue;
+         }
+
+         /* G17G bit reverse of a word (agx3_alu_rev_gpu1), retiring any
+          * producer but the witnessed slot-8 load first, like find-top-one
+          * above. */
+         if (enc == AGX_ISA_ENCODING_AGX3C && I->op == AGX_OPCODE_BITREV &&
+             I->nr_dests == 1 && I->nr_srcs == 1) {
+            const agx_index dest = I->dest[0], src = I->src[0];
+            if (!agx3_vary_reg32(dest) || agx_channels(dest) != 1 ||
+                !agx3_vary_reg32(src) || agx_channels(src) != 1 ||
+                src.kill || (src.cache && src.discard))
+               AGX3_REFUSE(I);
+            const uint16_t retire = wait & ~128u;
+            if (retire && !agx3_retire_slots_noop(emission, enc, retire))
+               AGX3_REFUSE(I);
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+            if (!agx3_alu_rev_gpu1(dest.value, src.value,
+                                   agx3_post_ra_hint(src), dest.cache,
+                                   wait & 128u, bytes, &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
             outstanding &= (uint16_t)~retire;
             continue;
          }
