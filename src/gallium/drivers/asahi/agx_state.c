@@ -1893,8 +1893,13 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
        /* G17P binds the linked executable through a native Ioto program with
         * no executable preshader contract. Keep all stages monolithic,
         * including geometry/tessellation lowered to compute: `stage` still
-        * names their original API stage here. */
+        * names their original API stage here. G18G likewise: its draws and
+        * dispatches refuse a preamble (the M5 draw profile's "vertex
+        * preamble", agx_g17p_append_compute()) and it has no AGX2 fallback
+        * to run one, so a tessellation or geometry stage with a preamble
+        * could never launch there. */
        .no_preamble = dev->chip == AGX_CHIP_G17P ||
+                       dev->chip == AGX_CHIP_G18G ||
                        (agx_chip_m5_paths(dev->chip) &&
                         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_FRAGMENT ||
                          stage == MESA_SHADER_COMPUTE)),
