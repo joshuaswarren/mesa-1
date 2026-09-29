@@ -571,89 +571,115 @@ hk_cdm_flush(struct hk_device *dev, struct hk_cs *cs, bool memory)
    assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
           "caller must ensure space");
 
-   switch (agx_chip_command_stream_generation(dev->dev.chip)) {
-   case AGX_CS_GENERATION_AGX2:
-      cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
-      break;
+   if (unlikely(dev->cdm_barrier_mask)) {
+      /* Perftest only: exact CDM_BARRIER flag word from the environment. */
+      uint32_t *word = cs->current;
+      *word = dev->cdm_barrier_mask | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
+      cs->current = word + 1;
+   } else if (HK_PERF(dev, NOCDMBARRIER)) {
+      /* Perftest only: launch with no cache maintenance at all. */
+   } else if (HK_PERF(dev, DESIGNEDUSCCDMBARRIER)) {
+      /* Perftest only: designed set {4,5,6,8} + USC cache invalidate. */
+      cs->current = agx_cdm_barrier_designed_usc(cs->current);
+   } else if (HK_PERF(dev, USCCDMBARRIER)) {
+      /* Perftest only: keep the USC cache invalidate, drop the rest. */
+      cs->current = agx_cdm_barrier_usc(cs->current);
+   } else if (unlikely(p_atomic_read(&dev->sparse_used))) {
+      /* Sparse resources change page mappings behind the launches. The
+       * reduced G13X word leaves sparse-image atomics wrong and the GPU
+       * faulting, so a device that created one keeps the full word
+       * (bits 0-19, the barrier before the reduction).
+       */
+      uint32_t *word = cs->current;
+      *word = 0xfffff | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
+      cs->current = word + 1;
+   } else {
+      switch (agx_chip_command_stream_generation(dev->dev.chip)) {
+      case AGX_CS_GENERATION_AGX2:
+         cs->current = agx_cdm_barrier(cs->current, dev->dev.chip);
+         break;
 
-   case AGX_CS_GENERATION_G15:
-   case AGX_CS_GENERATION_HAL200:
-   case AGX_CS_GENERATION_HAL300: {
-      const bool memory_scope = hk_cdm_flush_has_memory_scope(dev, memory);
+      case AGX_CS_GENERATION_G15:
+      case AGX_CS_GENERATION_HAL200:
+      case AGX_CS_GENERATION_HAL300: {
+         const bool memory_scope = hk_cdm_flush_has_memory_scope(dev, memory);
 
-      /* A strong flush already ends the stream: every launch has one in its
-       * tail, and a second barrier with no launch between them is not a
-       * shape Apple's CDM emitter produces. On M5 that flush already has
-       * memory scope; on G17P a request for it strengthens the record in
-       * place below. */
-      const bool upgrade_strong = cs->current == cs->strong_flush_end;
-      if (upgrade_strong &&
-          (!memory_scope || agx_chip_g17_m5(dev->dev.chip) ||
-           cs->current == cs->memory_flush_end))
-         return;
+         /* A strong flush already ends the stream: every launch has one in its
+          * tail, and a second barrier with no launch between them is not a
+          * shape Apple's CDM emitter produces. On M5 that flush already has
+          * memory scope; on G17P a request for it strengthens the record in
+          * place below. */
+         const bool upgrade_strong = cs->current == cs->strong_flush_end;
+         if (upgrade_strong &&
+             (!memory_scope || agx_chip_g17_m5(dev->dev.chip) ||
+              cs->current == cs->memory_flush_end))
+            return;
 
-      /* Apple's CommandEncodingNext emitter uses flags=5 for its strong
-       * post-dispatch cache flush on every grounded G15--G17 identity.  Keep
-       * Honeykrisp's deliberately conservative flush-after-every-launch
-       * policy, but encode it in the target command-stream ISA. */
-      const struct agx3_cdm_barrier_info info = {
-         .chip = dev->dev.chip,
-         .flags = 0x5,
-         .wide_visibility = agx_chip_cdm_wide_visibility(dev->dev.chip),
-         .flush_memory = memory_scope,
-      };
-      uint8_t packed[AGX3_CDM_BARRIER_SIZE];
-      if (!agx3_cdm_barrier_pack(&info, packed)) {
-         mesa_loge("no grounded AGX3 CDM cache flush for %s",
+         /* Apple's CommandEncodingNext emitter uses flags=5 for its strong
+          * post-dispatch cache flush on every grounded G15--G17 identity.  Keep
+          * Honeykrisp's deliberately conservative flush-after-every-launch
+          * policy, but encode it in the target command-stream ISA. */
+         const struct agx3_cdm_barrier_info info = {
+            .chip = dev->dev.chip,
+            .flags = 0x5,
+            .wide_visibility = agx_chip_cdm_wide_visibility(dev->dev.chip),
+            .flush_memory = memory_scope,
+         };
+         uint8_t packed[AGX3_CDM_BARRIER_SIZE];
+         if (!agx3_cdm_barrier_pack(&info, packed)) {
+            mesa_loge("no grounded AGX3 CDM cache flush for %s",
+                      agx_chip_name(dev->dev.chip));
+            vk_command_buffer_set_error(&cs->cmd->vk,
+                                        VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+
+         /* Native AGX3 launches carry a weak ordering barrier in their tail.
+          * When an API operation immediately needs a cache flush, strengthen
+          * that record in place. Apple's emitter does not produce adjacent weak
+          * and strong barriers, and retaining the weak record buys no ordering
+          * while making the control stream larger. A strong record that lacks
+          * the requested memory scope is strengthened the same way. */
+         if (upgrade_strong || cs->current == cs->weak_barrier_end) {
+            memcpy((uint8_t *)cs->current - sizeof(packed), packed,
+                   sizeof(packed));
+            cs->strong_flush_end = cs->current;
+            cs->weak_barrier_end = NULL;
+            cs->memory_flush_end = memory_scope ? cs->current : NULL;
+            if (!upgrade_strong)
+               cs->stats.flushes++;
+            return;
+         }
+
+         const bool at_stream_start = cs->current == cs->start;
+         memcpy(cs->current, packed, sizeof(packed));
+         cs->current = (uint32_t *)((uint8_t *)cs->current + sizeof(packed));
+         cs->strong_flush_end = cs->current;
+         cs->weak_barrier_end = NULL;
+         cs->memory_flush_end = memory_scope ? cs->current : NULL;
+         /* A barrier that opens the stream is the post-graphics strong flush.
+          * It is canonical here and only here; record it so a later inline
+          * concatenation can fold it into the preceding stream's trailing
+          * barrier instead of leaving the two adjacent. */
+         if (at_stream_start)
+            cs->leading_barrier_end = cs->current;
+         break;
+      }
+
+      case AGX_CS_GENERATION_UNKNOWN:
+      default:
+         mesa_loge("unknown CDM command-stream generation for %s",
                    agx_chip_name(dev->dev.chip));
          vk_command_buffer_set_error(&cs->cmd->vk,
                                      VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
-
-      /* Native AGX3 launches carry a weak ordering barrier in their tail.
-       * When an API operation immediately needs a cache flush, strengthen
-       * that record in place. Apple's emitter does not produce adjacent weak
-       * and strong barriers, and retaining the weak record buys no ordering
-       * while making the control stream larger. A strong record that lacks
-       * the requested memory scope is strengthened the same way. */
-      if (upgrade_strong || cs->current == cs->weak_barrier_end) {
-         memcpy((uint8_t *)cs->current - sizeof(packed), packed,
-                sizeof(packed));
-         cs->strong_flush_end = cs->current;
-         cs->weak_barrier_end = NULL;
-         cs->memory_flush_end = memory_scope ? cs->current : NULL;
-         if (!upgrade_strong)
-            cs->stats.flushes++;
-         return;
-      }
-
-      const bool at_stream_start = cs->current == cs->start;
-      memcpy(cs->current, packed, sizeof(packed));
-      cs->current = (uint32_t *)((uint8_t *)cs->current + sizeof(packed));
-      cs->strong_flush_end = cs->current;
-      cs->weak_barrier_end = NULL;
-      cs->memory_flush_end = memory_scope ? cs->current : NULL;
-      /* A barrier that opens the stream is the post-graphics strong flush.
-       * It is canonical here and only here; record it so a later inline
-       * concatenation can fold it into the preceding stream's trailing
-       * barrier instead of leaving the two adjacent. */
-      if (at_stream_start)
-         cs->leading_barrier_end = cs->current;
-      break;
    }
 
-   case AGX_CS_GENERATION_UNKNOWN:
-   default:
-      mesa_loge("unknown CDM command-stream generation for %s",
-                agx_chip_name(dev->dev.chip));
-      vk_command_buffer_set_error(&cs->cmd->vk,
-                                  VK_ERROR_FEATURE_NOT_PRESENT);
-      return;
-   }
-
-   cs->stats.flushes++;
+   if (!HK_PERF(dev, NOCDMBARRIER))
+      cs->stats.flushes++;
 }
+
 
 void
 hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
@@ -701,10 +727,39 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
 
    hk_ensure_cs_has_space(cs->cmd, cs, 0x2000 /* TODO */);
    cs->stats.cmds++;
+
+   if (HK_PERF(dev, ALWAYSCDMBARRIER)) {
+      cs->current =
+         agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
+      hk_cdm_cache_flush(dev, cs);
+      cs->cmd->state.cs.cdm_barrier_pending = false;
+      return;
+   }
+
+   /* Dependency-tracked per-launch CDM barrier. A vkCmdPipelineBarrier
+    * recorded since the previous launch declares a memory dependency, so the
+    * next launch carries the full designed barrier set. Between launches the
+    * app left unordered, Vulkan defines no ordering, so the barrier enforces
+    * nothing and the drain it costs is skipped. Driver-internal ordering that
+    * does not ride on vkCmdPipelineBarrier (query availability writes) calls
+    * hk_cdm_cache_flush explicitly and is unaffected.
+    */
+   if (cs->cmd->state.cs.cdm_barrier_pending) {
+      assert(cs->type == HK_CS_CDM);
+      hk_cdm_cache_flush(dev, cs);
+      cs->cmd->state.cs.cdm_barrier_pending = false;
+   }
+
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
 
-   hk_cdm_cache_flush(dev, cs);
+   /* A meta operation (an image copy with several regions, for one) writes
+    * through the same caches in consecutive launches that the app declared no
+    * dependency between; each write must reach memory before the next launch,
+    * as it did when every launch flushed.
+    */
+   if (cs->cmd->in_meta)
+      cs->cmd->state.cs.cdm_barrier_pending = true;
 }
 
 void

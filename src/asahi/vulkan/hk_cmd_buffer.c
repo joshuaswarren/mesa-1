@@ -957,6 +957,19 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    perf_debug(cmd, "End command buffer");
    hk_flush_deferred_clears(cmd);
    hk_sync_flush_pending_timestamp(cmd);
+
+   /* A barrier declared with no following launch in this command buffer still
+    * orders this buffer's writes against whatever runs next (the queue's next
+    * submission). Land it on the trailing edge of the open compute stream;
+    * with no trailing edge there is no local work to order.
+    */
+   if (cmd->state.cs.cdm_barrier_pending) {
+      cmd->state.cs.cdm_barrier_pending = false;
+      if (cmd->current_cs.cs) {
+         hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cmd->current_cs.cs);
+      }
+   }
+
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_compute_internal(cmd, &cmd->current_cs.post_gfx);
    hk_resolve_deferred_oq_available(cmd);
@@ -1070,6 +1083,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
+<<<<<<< HEAD
    if (unlikely(dev->frame_anatomy)) {
       const VkDependencyInfo *dep = pDependencyInfo;
       for (uint32_t i = 0; i < dep->memoryBarrierCount; ++i) {
@@ -1103,6 +1117,9 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
       /* Preserve the same conservative ordering in the shared submit graph,
        * including kernels that advertise exact prior barriers on AGX2. */
       hk_sync_barrier(cmd, HK_SYNC_ALL, HK_SYNC_ALL);
+      /* The app declared a dependency: the next CDM launch carries the full
+       * barrier word (hk_cmd_dispatch.c) instead of every launch flushing. */
+      cmd->state.cs.cdm_barrier_pending = true;
       return;
    }
 
