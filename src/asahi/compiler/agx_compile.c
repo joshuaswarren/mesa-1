@@ -1024,11 +1024,19 @@ format_for_bitsize(unsigned bitsize)
    }
 }
 
+static unsigned
+agx_local_probe_k(void)
+{
+   const char* e = getenv("AGX_LOCAL_PROBE");
+   return e ? (unsigned)atoi(e) : 0u;
+}
+
 static void
 agx_emit_local_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *instr)
 {
    agx_index base = agx_local_base(instr->src[0]);
-   agx_index index = agx_zero(); /* TODO: optimize address arithmetic */
+   agx_index index = agx_local_probe_k() ? agx_immediate(agx_local_probe_k())
+                                         : agx_zero(); /* TODO: optimize address arithmetic */
    assert(base.size == AGX_SIZE_16);
 
    enum agx_format format = format_for_bitsize(instr->def.bit_size);
@@ -1044,7 +1052,8 @@ agx_emit_local_store(agx_builder *b, nir_intrinsic_instr *instr)
 {
    agx_index value = agx_src_index(&instr->src[0]);
    agx_index base = agx_local_base(instr->src[1]);
-   agx_index index = agx_zero(); /* TODO: optimize address arithmetic */
+   agx_index index = agx_local_probe_k() ? agx_immediate(agx_local_probe_k())
+                                         : agx_zero(); /* TODO: optimize address arithmetic */
    assert(base.size == AGX_SIZE_16);
 
    enum agx_format format = format_for_bitsize(nir_src_bit_size(instr->src[0]));
@@ -2830,6 +2839,38 @@ agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
    return true;
 }
 
+/* H78 probe: subtract D = K*E from every 16-bit shared load/store address
+ * (modular) so the backend's AGX_LOCAL_PROBE=K index immediate is compensated
+ * exactly when E matches the hardware's index unit. AGX_LOCAL_E selects E.
+ * Gated by AGX_LOCAL_SHIFT. */
+static bool
+agx_local_probe_shift(nir_builder *b, nir_instr *instr, UNUSED void *_)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   unsigned oi;
+   if (intr->intrinsic == nir_intrinsic_load_shared)
+      oi = 0;
+   else if (intr->intrinsic == nir_intrinsic_store_shared)
+      oi = 1;
+   else
+      return false;
+   const char* ee = getenv("AGX_LOCAL_E");
+   unsigned e = ee ? (unsigned)atoi(ee) : 4u;
+   unsigned d = agx_local_probe_k() * e;
+   nir_def *addr = intr->src[oi].ssa;
+   if (!d || addr->bit_size != 16)
+      return false;
+   b->cursor = nir_before_instr(instr);
+   nir_def *shifted =
+       nir_u2u16(b, nir_iadd_imm(b, nir_u2u32(b, addr), -(int32_t)d));
+   fprintf(stderr, "H78 shift k=%u e=%u bits=%u\n", agx_local_probe_k(), e,
+           addr->bit_size);
+   nir_src_rewrite(&intr->src[oi], shifted);
+   return true;
+}
+
 static bool
 set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
 {
@@ -2864,6 +2905,11 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
    if (soft_fault) {
       NIR_PASS(_, nir, nir_shader_instructions_pass, set_speculate,
                nir_metadata_control_flow, NULL);
+   }
+
+   if (getenv("AGX_LOCAL_SHIFT")) {
+      NIR_PASS(_, nir, nir_shader_instructions_pass, agx_local_probe_shift,
+               nir_metadata_none, NULL);
    }
 
    /* Peephole select again after setting the speculate flag but before
