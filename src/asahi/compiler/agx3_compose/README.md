@@ -54,7 +54,7 @@ cmp $OUT/vectors.c ../test/agx3d_compose_corpus_vectors.c
 ## Validation
 
 `test/test-agx3-compose-corpus.c` replays 1,494 real G16G/G17S corpus
-instructions (decoded by the Python composer) and 230 distinct G18G
+instructions (decoded by the Python composer) and 475 distinct G18G
 instructions from the witness texts, and the C encoder reproduces every one
 byte-exactly.
 

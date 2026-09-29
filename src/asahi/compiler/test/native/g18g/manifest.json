@@ -865,6 +865,454 @@
       "size": 130,
       "sha256": "cd4d6ed2f897752ce9403d3a4c8e46566cde1fb9cc6c79f813b721e4ff1ffb55"
     },
+    "probe.m5-control-flow-reference.cf_deep_break.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_deep_break",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 376,
+      "sha256": "559bc9bd947adf9e8d64345ad0be7a8580f94d3eea6c7a56d47e3b103c749a51"
+    },
+    "probe.m5-control-flow-reference.cf_deep_break.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_deep_break",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 316,
+      "sha256": "b3d5ab05673c7586f7580d996ad107a838c9d45058335aca1b0e3e4177367281"
+    },
+    "probe.m5-control-flow-reference.cf_fcmp_forms.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_fcmp_forms",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 430,
+      "sha256": "bf0cd8da1e90fb7e55577b13f017dc1f3742fe4b8576c9fd6116bbe02e14d450"
+    },
+    "probe.m5-control-flow-reference.cf_fcmp_forms.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_fcmp_forms",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 414,
+      "sha256": "42e8b2c633d27e5e2e3c10fcbbac5fe07c42cd802b4401ccbca8295c4ae05d65"
+    },
+    "probe.m5-control-flow-reference.cf_float_alu_if.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_float_alu_if",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 178,
+      "sha256": "85bdb6c88443e7358d339d1baf2213d71fe456b382fdb7bfd687ebf14afaa563"
+    },
+    "probe.m5-control-flow-reference.cf_float_alu_if.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_float_alu_if",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 162,
+      "sha256": "dfbfc38275db8aae48852f9451e614885762998ff45e3fef06ca9674521476ce"
+    },
+    "probe.m5-control-flow-reference.cf_float_if.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_float_if",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 116,
+      "sha256": "60c32d7cb2d592027b14dc80000afac49495df025f071f444059d4c97dacc657"
+    },
+    "probe.m5-control-flow-reference.cf_float_if.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_float_if",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 116,
+      "sha256": "12513f8db19461769d5d489da979e8f2d2b7e259fbeed5d4058ee3c7149b12da"
+    },
+    "probe.m5-control-flow-reference.cf_icmp_forms.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_icmp_forms",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 426,
+      "sha256": "9e534eeaa930bb717fb311f2e05b9dcf807c2f4ae7dcbfb69cca33c0a1b8c4f5"
+    },
+    "probe.m5-control-flow-reference.cf_icmp_forms.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_icmp_forms",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 414,
+      "sha256": "b6d4ab80a328cbd645445d844be4a2bc4c0853b2164478d648eff5d84f58b071"
+    },
+    "probe.m5-control-flow-reference.cf_if_else_store.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_if_else_store",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 160,
+      "sha256": "243a04d83d7e3067225fd8825237da48cb48a41d6396daaf54fe9c257d75ee11"
+    },
+    "probe.m5-control-flow-reference.cf_if_else_store.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_if_else_store",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 146,
+      "sha256": "d9aea17809e26ed391969c572a427d962060f8f6dea5d58dcabce184b3e9ee74"
+    },
+    "probe.m5-control-flow-reference.cf_if_store.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_if_store",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 136,
+      "sha256": "34221adef0c919bf994ed321344f73a1d0b26015303fcd5ffb75f36923ab715a"
+    },
+    "probe.m5-control-flow-reference.cf_if_store.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_if_store",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 124,
+      "sha256": "b48f027b70186411c3fa5ac2b2a33d95f2c0ea2aeac97cb11d95e60bdcbd2d50"
+    },
+    "probe.m5-control-flow-reference.cf_loop_break.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_break",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 204,
+      "sha256": "f9ba830d4bb1a6c47407b8719f144e42b5b0882020ea2178161336d797a16ccf"
+    },
+    "probe.m5-control-flow-reference.cf_loop_break.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_break",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 186,
+      "sha256": "a27b227b4ad6b3b434ae710fc1a590d9ff5acc4bb96c7e5efe3888feb4d8e3ee"
+    },
+    "probe.m5-control-flow-reference.cf_loop_continue_nested.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_continue_nested",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 350,
+      "sha256": "ea96fe48c8fc2c8de732a138725bd0d16c18adfc15675d16ae4d28b68fe032f1"
+    },
+    "probe.m5-control-flow-reference.cf_loop_continue_nested.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_continue_nested",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 284,
+      "sha256": "8d5e8077310fe33f43d21afdba03a1d89573f19a0e8294007377e2c3b966d2da"
+    },
+    "probe.m5-control-flow-reference.cf_loop_divergent.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_divergent",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 198,
+      "sha256": "741c30f1c3448e5216fbb60e6adbc9ac6bd2ef6fa54a37be11cd72d521768491"
+    },
+    "probe.m5-control-flow-reference.cf_loop_divergent.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_divergent",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 176,
+      "sha256": "fa6948731f32b77e2e655013d86ef17c89c7b36e508d79dd4a89cf520d44f8f6"
+    },
+    "probe.m5-control-flow-reference.cf_loop_uniform.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_uniform",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 196,
+      "sha256": "4d46d5c055de94b65692c08a3317ef2d1d4178ba16aedb53d1d1ad96ce290a53"
+    },
+    "probe.m5-control-flow-reference.cf_loop_uniform.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loop_uniform",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 150,
+      "sha256": "8ae0c36139c7670ab153305dcd775c491d0aaf0da1d6b7bc13b145065bb66fd7"
+    },
+    "probe.m5-control-flow-reference.cf_loops_breaks.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loops_breaks",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 678,
+      "sha256": "f121fbc61b34d868244c845212469dfc1d7485ab013fced4268043a710d36635"
+    },
+    "probe.m5-control-flow-reference.cf_loops_breaks.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_loops_breaks",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 554,
+      "sha256": "ad58d9fe05d9ae4ec49cb97c59a993b6fa6d4c56f958cc4f9dd415111f05707f"
+    },
+    "probe.m5-control-flow-reference.cf_nested_break.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_nested_break",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 246,
+      "sha256": "d88f5c77061e176a4327788bc81ccac13acd6ee2fa3b09512efcb8702d4ea7e6"
+    },
+    "probe.m5-control-flow-reference.cf_nested_break.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_nested_break",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 222,
+      "sha256": "654d94a06d318b836d6090d01c29185d2eda46ddf5634a522bf39bae2077089a"
+    },
+    "probe.m5-control-flow-reference.cf_nested_loops_break.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_nested_loops_break",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 284,
+      "sha256": "1728107637ae6c8c795e0d662efcdb996b4b0ada3fade4023e923dfb162a6bfe"
+    },
+    "probe.m5-control-flow-reference.cf_nested_loops_break.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_nested_loops_break",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 264,
+      "sha256": "969abf8518385bc45ff1577f736eb35bd6767632e4cdfeb4a028d3f1c1458815"
+    },
+    "probe.m5-control-flow-reference.cf_switch.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_switch",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 214,
+      "sha256": "4f10ef4fe1313cd4809327422e7128157d5ea232c9f70382f3f6c747f43a863e"
+    },
+    "probe.m5-control-flow-reference.cf_switch.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_switch",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 202,
+      "sha256": "a31972d6e352963f3027976297eaab84bb57e84e2950dbc64d0b826e9373deb7"
+    },
+    "probe.m5-control-flow-reference.cf_two_flags.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_two_flags",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 370,
+      "sha256": "a874e9f44a04d6b0bd0d1ae51c678f703d1f40ab82e717936149d3338ecb8aac"
+    },
+    "probe.m5-control-flow-reference.cf_two_flags.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-control-flow-reference.metal",
+      "config": "../g17g/m5-control-flow-reference.mtlp-json",
+      "function": "cf_two_flags",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 352,
+      "sha256": "197b551953ee3ae7f02781cce27c9abdb98b5beaad2d8bb6efce7d36e390dbd4"
+    },
     "probe.m5-float-runtime-reference.m5_fma_live.g17g.bin": {
       "corpus": "probe",
       "source": "../g17g/m5-float-runtime-reference.metal",
