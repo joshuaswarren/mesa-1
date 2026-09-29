@@ -7631,6 +7631,12 @@ agx3_sink_vertex_outputs(agx_context *ctx)
 static bool
 agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 {
+   /* Only G17P's tile ops are ordered here; every other encoding declines
+    * below anyway. Decline quietly, so AGX_MESA_DEBUG=refuse names only real
+    * refusals on G17G and G18G. */
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
    if (ctx->key->g17p_emrt && ctx->key->secondary &&
        ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT && ctx->key->fs.nr_samples >= 1 &&
