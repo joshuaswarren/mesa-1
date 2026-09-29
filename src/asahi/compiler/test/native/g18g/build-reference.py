@@ -5,7 +5,8 @@
 Two corpora are compiled for applegpu_g17g and applegpu_g18g:
 
   probe   the M5 instruction probes in ../g17g (<probe>.metal, .mtlp-json),
-          one text per compute function
+          one text per compute function, or per vertex and fragment
+          function of a render pipeline
   oracle  the native Metal state oracle in oracle/ (oracle.metal plus one
           pipeline script per mode), one text per vertex, fragment or
           compute stage; these are the pipelines captured on the J873
@@ -172,8 +173,15 @@ def compile_probes(names, out, texts):
     for name in names:
         source, config = PROBES/(name + '.metal'), PROBES/(name + '.mtlp-json')
         assert source.is_file() and config.is_file() and Path(name).name == name
+        pipelines = json.loads(config.read_text())['pipelines']
         functions = [p['compute_function'] for p in
-                     json.loads(config.read_text())['pipelines']['compute_pipelines']]
+                     pipelines.get('compute_pipelines', [])]
+        # A render probe names one vertex and one fragment function per
+        # pipeline; each stage section holds one object per pipeline.
+        render = {'vertex': [p['vertex_function'] for p in
+                             pipelines.get('render_pipelines', [])],
+                  'fragment': [p['fragment_function'] for p in
+                               pipelines.get('render_pipelines', [])]}
         folder = out/'probe'/name
         folder.mkdir(parents=True)
         air, lib = folder/'probe.air', folder/'probe.metallib'
@@ -197,18 +205,21 @@ def compile_probes(names, out, texts):
             probe['targets'][arch] = dict(sha256=digest(blob), size=len(blob),
                                           command=command,
                                           binary=str(binary.relative_to(out)))
-            objects = stage_objects(blob, '__compute')
-            assert len(objects) == len(functions), (name, arch, len(objects))
-            for function, obj in zip(functions, objects):
-                # Each object names its own function (NUL-terminated) and no
-                # other, which confirms the pipeline-script order.
-                named = [f for f in functions if f.encode() + b'\0' in obj]
-                assert named == [function], (name, arch, function, named)
-                code, syms = text_of(obj)
-                texts[text_name('probe', name, function, arch)] = dict(
-                    corpus='probe', source=rel(source), config=rel(config),
-                    function=function, stage='compute', arch=arch,
-                    symbols=syms, code=code)
+            for stage, names in (('compute', functions), *render.items()):
+                if not names:
+                    continue
+                objects = stage_objects(blob, '__' + stage)
+                assert len(objects) == len(names), (name, arch, stage, len(objects))
+                for function, obj in zip(names, objects):
+                    # Each object names its own function (NUL-terminated) and
+                    # no other, which confirms the pipeline-script order.
+                    named = [f for f in names if f.encode() + b'\0' in obj]
+                    assert named == [function], (name, arch, function, named)
+                    code, syms = text_of(obj)
+                    texts[text_name('probe', name, function, arch)] = dict(
+                        corpus='probe', source=rel(source), config=rel(config),
+                        function=function, stage=stage, arch=arch,
+                        symbols=syms, code=code)
         report.append(probe)
         print('COMPILED probe', name, 'G17G and G18G', flush=True)
     return report

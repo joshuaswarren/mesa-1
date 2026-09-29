@@ -35,10 +35,12 @@
 
 #define CONSTANT_PROGRAM_SIZE 0x40
 
-/* 57 shaders, each built for both architectures (manifest.json): the 41
- * oracle and instruction probes plus the 16 control-flow kernels of
- * m5-control-flow-reference. */
-#define EXPECTED_TEXTS_PER_ARCH 57
+/* 91 shaders, each built for both architectures (manifest.json): the 41
+ * oracle and instruction probes, the 16 control-flow kernels of
+ * m5-control-flow-reference, the 32 compare/select kernels of
+ * m5-compare-select-reference, and m5-front-facing-reference's vertex and
+ * fragment functions. */
+#define EXPECTED_TEXTS_PER_ARCH 91
 
 typedef signed (*disassemble_instr_fn)(BITSET_WORD *, FILE *, unsigned,
                                        size_t, bool);
