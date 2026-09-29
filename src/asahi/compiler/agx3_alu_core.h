@@ -561,6 +561,16 @@ bool agx3_alu_bit_andc16_gpu1(uint16_t dest, bool dest_cache, uint16_t src0,
                               enum agx3_alu_hint hint0, uint16_t src1,
                               enum agx3_alu_hint hint1, uint16_t wait_mask,
                               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+/* dest(32) = src0(32) & ~src1(32): the same instruction over aligned pairs,
+ * f10/f24/f38 = 2. Apple applegpu_g17g
+ * (test/native/g17g/m5-libagx-reference.metal):
+ *   x & ~y, both dead       23 00 06 80 32 30 a4 02 84 80
+ *   x & ~y, both cached     23 00 06 80 32 30 a2 0a 82 80   into r2
+ *   ~x & y, y dead          23 02 06 80 32 30 a0 0a 04 80   into r2 */
+bool agx3_alu_bit_andc32_gpu1(uint16_t dest, bool dest_cache, uint16_t src0,
+                              enum agx3_alu_hint hint0, uint16_t src1,
+                              enum agx3_alu_hint hint1, uint16_t wait_mask,
+                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 /* dest(16) = src0(16) op src1(16) for AND, OR and XOR: the same operand
  * fields on each mnemonic's second encoding point, Apple applegpu_g17g
  * (gpu/m5-xfb-alu9-reference.metal):

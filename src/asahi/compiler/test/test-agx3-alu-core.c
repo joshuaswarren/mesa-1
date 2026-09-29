@@ -1543,6 +1543,30 @@ static void test_half_uv(void)
       assert(size==sizeof(andc16) && !memcmp(out,andc16,size));
       assert(!agx3_alu_bit_andc16_gpu1(3,true,3,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_CACHE,0x100,out,&size));
 
+      /* The word form, Apple applegpu_g17g
+       * (test/native/g17g/m5-libagx-reference.metal andc32_*):
+       * r0 = r0 & ~r1 both dead; r2 = r0 & ~r1 both cached; r2 = r1 & ~r0
+       * with r1 dead. */
+      static const struct {
+         uint16_t dest, keep, clear;
+         enum agx3_alu_hint keep_hint, clear_hint;
+         uint8_t bytes[10];
+      } andc32[] = {
+         {0, 0, 2, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD,
+          {0x23,0x00,0x06,0x80,0x32,0x30,0xa4,0x02,0x84,0x80}},
+         {4, 0, 2, AGX3_ALU_HINT_CACHE, AGX3_ALU_HINT_CACHE,
+          {0x23,0x00,0x06,0x80,0x32,0x30,0xa2,0x0a,0x82,0x80}},
+         {4, 2, 0, AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_NONE,
+          {0x23,0x02,0x06,0x80,0x32,0x30,0xa0,0x0a,0x04,0x80}},
+      };
+      for (unsigned i = 0; i < 3; ++i) {
+         assert(agx3_alu_bit_andc32_gpu1(andc32[i].dest,false,andc32[i].keep,
+            andc32[i].keep_hint,andc32[i].clear,andc32[i].clear_hint,0,out,&size));
+         assert(size==10 && !memcmp(out,andc32[i].bytes,10));
+      }
+      /* A word operand is an aligned pair. */
+      assert(!agx3_alu_bit_andc32_gpu1(0,false,1,AGX3_ALU_HINT_DISCARD,2,AGX3_ALU_HINT_DISCARD,0,out,&size));
+
       /* Half AND/OR/XOR over registers (gpu/m5-xfb-alu9-reference.metal):
        * h2 = h3 op h2, both sources dead, waiting for slot 8. */
       static const struct { enum agx3_alu_op op; uint8_t bytes[10]; } r16[] = {

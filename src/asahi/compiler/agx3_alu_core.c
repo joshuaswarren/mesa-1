@@ -123,31 +123,35 @@ agx3_alu_ft1_u32(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    return true;
 }
 
+/* f10, f24 and f38 are the result's and the two operands' widths: 1 for a
+ * half, 2 for an aligned 32-bit pair. */
 static bool
-bit_reg16_gpu1(const char *mnemonic, uint8_t ep, unsigned table,
-               uint16_t dest, bool dest_cache, uint16_t src0,
-               enum agx3_alu_hint hint0, uint16_t src1,
-               enum agx3_alu_hint hint1, uint16_t wait_mask,
-               uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+bit_reg_gpu1(const char *mnemonic, uint8_t ep, unsigned table, bool word,
+             uint16_t dest, bool dest_cache, uint16_t src0,
+             enum agx3_alu_hint hint0, uint16_t src1,
+             enum agx3_alu_hint hint1, uint16_t wait_mask,
+             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
    if (!out || !len || dest >= 256 || src0 >= 256 || src1 >= 256 ||
+       (word && ((dest | src0 | src1) & 1)) ||
        (unsigned)hint0 > AGX3_ALU_HINT_CACHE ||
        (unsigned)hint1 > AGX3_ALU_HINT_CACHE || wait_mask >= (1u << 8))
       return false;
+   const unsigned width = word ? 2 : 1;
    struct agx3_field_kv fields[24];
    unsigned n = 0;
    fields[n++] = (struct agx3_field_kv){9, 2};
-   fields[n++] = (struct agx3_field_kv){10, 1};
+   fields[n++] = (struct agx3_field_kv){10, width};
    fields[n++] = (struct agx3_field_kv){2, dest};
    fields[n++] = (struct agx3_field_kv){11, dest_cache};
    fields[n++] = (struct agx3_field_kv){23, 2};
-   fields[n++] = (struct agx3_field_kv){24, 1};
+   fields[n++] = (struct agx3_field_kv){24, width};
    fields[n++] = (struct agx3_field_kv){16, src0};
    fields[n++] = (struct agx3_field_kv){25, hint0 == AGX3_ALU_HINT_CACHE};
    fields[n++] = (struct agx3_field_kv){27, hint0 == AGX3_ALU_HINT_DISCARD};
    fields[n++] = (struct agx3_field_kv){30, src1};
    fields[n++] = (struct agx3_field_kv){37, 2};
-   fields[n++] = (struct agx3_field_kv){38, 1};
+   fields[n++] = (struct agx3_field_kv){38, width};
    fields[n++] = (struct agx3_field_kv){39, hint1 == AGX3_ALU_HINT_CACHE};
    fields[n++] = (struct agx3_field_kv){41, hint1 == AGX3_ALU_HINT_DISCARD};
    fields[n++] = (struct agx3_field_kv){42, 3};
@@ -166,8 +170,18 @@ agx3_alu_bit_andc16_gpu1(uint16_t dest, bool dest_cache, uint16_t src0,
 {
    /* Apple applegpu_g17g ctz: 33 03 06 01 3a 20 a2 02 84 00
     *   bit_andc h3 (cached), h3 (dead), h2 (cached) */
-   return bit_reg16_gpu1("bit_andc", 0, 11, dest, dest_cache, src0, hint0,
-                         src1, hint1, wait_mask, out, len);
+   return bit_reg_gpu1("bit_andc", 0, 11, false, dest, dest_cache, src0,
+                       hint0, src1, hint1, wait_mask, out, len);
+}
+
+bool
+agx3_alu_bit_andc32_gpu1(uint16_t dest, bool dest_cache, uint16_t src0,
+                         enum agx3_alu_hint hint0, uint16_t src1,
+                         enum agx3_alu_hint hint1, uint16_t wait_mask,
+                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   return bit_reg_gpu1("bit_andc", 0, 11, true, dest, dest_cache, src0,
+                       hint0, src1, hint1, wait_mask, out, len);
 }
 
 bool
@@ -179,14 +193,14 @@ agx3_alu_bit_reg16_gpu1(enum agx3_alu_op op, uint16_t dest, bool dest_cache,
 {
    switch (op) {
    case AGX3_ALU_BAND:
-      return bit_reg16_gpu1("bit_and", 1, 10, dest, dest_cache, src0, hint0,
-                            src1, hint1, wait_mask, out, len);
+      return bit_reg_gpu1("bit_and", 1, 10, false, dest, dest_cache, src0,
+                          hint0, src1, hint1, wait_mask, out, len);
    case AGX3_ALU_BOR:
-      return bit_reg16_gpu1("bit_or", 1, 16, dest, dest_cache, src0, hint0,
-                            src1, hint1, wait_mask, out, len);
+      return bit_reg_gpu1("bit_or", 1, 16, false, dest, dest_cache, src0,
+                          hint0, src1, hint1, wait_mask, out, len);
    case AGX3_ALU_BXOR:
-      return bit_reg16_gpu1("bit_xor", 1, 19, dest, dest_cache, src0, hint0,
-                            src1, hint1, wait_mask, out, len);
+      return bit_reg_gpu1("bit_xor", 1, 19, false, dest, dest_cache, src0,
+                          hint0, src1, hint1, wait_mask, out, len);
    default:
       return false;
    }

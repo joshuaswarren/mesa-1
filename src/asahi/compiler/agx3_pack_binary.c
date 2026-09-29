@@ -15621,6 +15621,32 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
 
+         /* G17G's 32-bit and-not, `x & ~y` (truth table 0x2) or with the
+          * sources exchanged (0x4): bit_andc over aligned pairs, with the
+          * actual post-RA lifetimes (agx3_alu_bit_andc32_gpu1). */
+         if (enc == AGX_ISA_ENCODING_AGX3C && I->op == AGX_OPCODE_BITOP &&
+             I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
+             ((I->truth_table & 0xfu) == 0x2u ||
+              (I->truth_table & 0xfu) == 0x4u) &&
+             agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
+             agx3_vary_reg32(I->src[0]) && agx_channels(I->src[0]) == 1 &&
+             agx3_vary_reg32(I->src[1]) && agx_channels(I->src[1]) == 1) {
+            const bool swap = (I->truth_table & 0xfu) == 0x4u;
+            const agx_index keep = I->src[swap ? 1 : 0];
+            const agx_index clear = I->src[swap ? 0 : 1];
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (keep.kill || clear.kill || (keep.cache && keep.discard) ||
+                (clear.cache && clear.discard) ||
+                !agx3_alu_bit_andc32_gpu1(I->dest[0].value, I->dest[0].cache,
+                                          keep.value, agx3_post_ra_hint(keep),
+                                          clear.value,
+                                          agx3_post_ra_hint(clear), wait,
+                                          bytes, &len) ||
+                !agx3_append(emission, bytes, len))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
          /* AGX3b's compact 32-bit move cannot address full registers above
           * r95. Chromium's animation_keyframes vertex shader moves values in
           * both directions across that boundary. The native 16-bit
@@ -15663,7 +15689,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           * (gpu/m5-xfb-alu9-reference.metal) and the ctz kernel's
           * `bit_andc h3, h3, h2` (gpu/m5-xfb-alu3-reference.metal). The
           * truth table 0x2 is a & ~b; 0x4 is the same with the sources
-          * exchanged. */
+          * exchanged.
+          *
+          * A narrow result depends only on the low half of a 32-bit source,
+          * and a register index already names a half, so such a source is
+          * its even half. Apple does exactly this for `ushort(x) & k` with
+          * x still live as a word: `bit_and h2, h2, h0`, x in r0
+          * (test/native/g17g/m5-libagx-reference.metal and16_of32_live). */
          if (enc == AGX_ISA_ENCODING_AGX3C && I->op == AGX_OPCODE_BITOP &&
              I->nr_dests == 1 && I->nr_srcs == 2 && !I->saturate &&
              ((I->truth_table & 0xfu) == AGX3_SEL_TT_AND ||
@@ -15675,11 +15707,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              agx_channels(I->dest[0]) == 1 && I->dest[0].size == AGX_SIZE_16 &&
              agx3_src_is_register(I->src[0]) && !I->src[0].memory &&
              !I->src[0].abs && !I->src[0].neg && !I->src[0].kill &&
-             I->src[0].size == AGX_SIZE_16 && agx_channels(I->src[0]) == 1 &&
+             (I->src[0].size == AGX_SIZE_16 || agx3_vary_reg32(I->src[0])) &&
+             agx_channels(I->src[0]) == 1 &&
              !(I->src[0].cache && I->src[0].discard) &&
              agx3_src_is_register(I->src[1]) && !I->src[1].memory &&
              !I->src[1].abs && !I->src[1].neg && !I->src[1].kill &&
-             I->src[1].size == AGX_SIZE_16 && agx_channels(I->src[1]) == 1 &&
+             (I->src[1].size == AGX_SIZE_16 || agx3_vary_reg32(I->src[1])) &&
+             agx_channels(I->src[1]) == 1 &&
              !(I->src[1].cache && I->src[1].discard)) {
             const unsigned table = I->truth_table & 0xfu;
             const bool andc = table == 0x2u || table == 0x4u;
