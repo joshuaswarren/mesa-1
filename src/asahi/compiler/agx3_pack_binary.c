@@ -11653,7 +11653,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
 
          if (I->op == AGX_OPCODE_SAMPLE_MASK_AGX3) {
-            if (enc != AGX_ISA_ENCODING_AGX3B || ctx->stage != MESA_SHADER_FRAGMENT ||
+            /* G17G spells the same kill protocol; Apple's applegpu_g17g
+             * discard fragment (test/native/g18g
+             * oracle.discard.fragment.g17g.bin) stages the coverage word
+             * before its colour-entry wait, then waits on class 1, kills
+             * with MOVMSK and releases class 1 -- each instruction the
+             * encoders below produce for AGX3c. */
+            const bool m5_order = enc == AGX_ISA_ENCODING_AGX3C;
+            if ((enc != AGX_ISA_ENCODING_AGX3B && !m5_order) ||
+                ctx->stage != MESA_SHADER_FRAGMENT ||
                 I->nr_dests || I->nr_srcs != 2 ||
                 !agx3_src_is_register(I->src[0]) || I->src[0].memory ||
                 I->src[0].size != AGX_SIZE_16 || agx_channels(I->src[0]) != 1 ||
@@ -11661,6 +11669,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
             const bool force_early = I->imm & 1;
             if ((I->imm & ~3) || (force_early && !(I->imm & 2)))
+               AGX3_REFUSE(I);
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+            if (m5_order &&
+                (!agx3_stage_copy_source(enc, 0, I->src[1].value,
+                                         I->src[1].discard, 1,
+                                         wait | outstanding_here, bytes,
+                                         &len) ||
+                 !agx3_append(emission, bytes, len)))
                AGX3_REFUSE(I);
             if (!g17p_colour_open) {
                uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
@@ -11671,11 +11687,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                ctx->agx3_colour_link.entry_offset = emission->size - entry_len - initial_size;
                g17p_colour_open = true;
             }
-            uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
-            if (!agx3_stage_copy_source(enc, 0, I->src[1].value,
+            if (!m5_order &&
+                (!agx3_stage_copy_source(enc, 0, I->src[1].value,
                                          I->src[1].discard, 1,
-                                         wait | outstanding_here, bytes, &len) ||
-                !agx3_append(emission, bytes, len))
+                                         wait | outstanding_here, bytes,
+                                         &len) ||
+                 !agx3_append(emission, bytes, len)))
                AGX3_REFUSE(I);
             /* Native simple and sampled-alpha fragments produce and stage
              * SR2's complete coverage word before acquiring class1. Keep

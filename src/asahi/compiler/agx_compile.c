@@ -2787,8 +2787,16 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
            !(nir_src_as_uint(instr->src[0]) &
              nir_src_as_uint(instr->src[1]))));
 
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-          !b->shader->key->fs.inside_sample_loop) {
+      /* G17G kills with the same MOVMSK protocol (Apple's applegpu_g17g
+       * discard fragment, test/native/g18g oracle.discard.fragment.g17g:
+       * stage the word, wait on class 1, MOVMSK, release), and reads the
+       * one-sample coverage from the same SR 2. Multisampled G17G coverage is
+       * not witnessed. */
+      const bool movmsk_protocol =
+         b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+         (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          b->shader->key->fs.nr_samples <= 1);
+      if (movmsk_protocol && !b->shader->key->fs.inside_sample_loop) {
          /* The all/all update inserted at the start of an explicit-early
           * shader is a distinct native protocol: acquire class 1 before
           * reading SR39 and building the coverage word, then keep the class
