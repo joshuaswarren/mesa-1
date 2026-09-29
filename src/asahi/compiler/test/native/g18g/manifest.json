@@ -2349,6 +2349,202 @@
       "size": 332,
       "sha256": "2658b297e1bf1cc8c553c28252e8b719cfb181820a7db86e154825f92cda531e"
     },
+    "probe.m5-gl4-reference.rbit32_dead.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "rbit32_dead",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 118,
+      "sha256": "633f72c5872d66683339198db48bcf44d160ff4dec3a2fc4c523df4f2259f9a2"
+    },
+    "probe.m5-gl4-reference.rbit32_dead.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "rbit32_dead",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 112,
+      "sha256": "c11fa5055cc659966f63609b7918a115f329a29057f54bc887ccbdbd697ec952"
+    },
+    "probe.m5-gl4-reference.rbit32_live.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "rbit32_live",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 122,
+      "sha256": "c8aa6ce5bb46dd18ac5b81e26c1d68dcd2157c3956d37fc3b2e902529be03d64"
+    },
+    "probe.m5-gl4-reference.rbit32_live.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "rbit32_live",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 120,
+      "sha256": "9924eea8b3f504a3f8beddca5d3777111280f77111cc6080858540aa0b7cd321"
+    },
+    "probe.m5-gl4-reference.rbit32_loaded.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "rbit32_loaded",
+      "stage": "compute",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 104,
+      "sha256": "6f215b83065bad7c5d8ab7fa68387aa31b89e7e93cd1534752e9d1b6e1cfc326"
+    },
+    "probe.m5-gl4-reference.rbit32_loaded.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "rbit32_loaded",
+      "stage": "compute",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 102,
+      "sha256": "44f16a5f99e1550229478e948a05076f5f42d57c10a36d4cf86aef01baa9352b"
+    },
+    "probe.m5-gl4-reference.sxAtomic.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxAtomic",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 424,
+      "sha256": "f73b8b463ad17b9260225a2d356df72a2ecfb9f8e714c15caedc6f861c4a4ad6"
+    },
+    "probe.m5-gl4-reference.sxAtomic.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxAtomic",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 442,
+      "sha256": "8df2e9b81a7549f11429e696742cb349963c9b168139dc89def80263bdadfa4b"
+    },
+    "probe.m5-gl4-reference.sxAtomicVertex.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxAtomicVertex",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 258,
+      "sha256": "bad269c055baae9af5e9963e885ba3d7366f3c3f1fb182a482f9e25a26c71c5c"
+    },
+    "probe.m5-gl4-reference.sxAtomicVertex.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxAtomicVertex",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 344,
+      "sha256": "91e2f1f7cdc09643edcf7914f9f756a2495b19f5ee9dd093c2438a09db3745b6"
+    },
+    "probe.m5-gl4-reference.sxHelper.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxHelper",
+      "stage": "fragment",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 458,
+      "sha256": "737fab3cc64fa0305c37df207db05bd27a25176e9b96f632cea603ef28dc6fbd"
+    },
+    "probe.m5-gl4-reference.sxHelper.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxHelper",
+      "stage": "fragment",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 474,
+      "sha256": "be64caa54bf3d2b8ab8ad8bc76967e4278326fda7d5418fc6e48a3959ade62e2"
+    },
+    "probe.m5-gl4-reference.sxHelperVertex.g17g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxHelperVertex",
+      "stage": "vertex",
+      "arch": "applegpu_g17g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 258,
+      "sha256": "bad269c055baae9af5e9963e885ba3d7366f3c3f1fb182a482f9e25a26c71c5c"
+    },
+    "probe.m5-gl4-reference.sxHelperVertex.g18g.bin": {
+      "corpus": "probe",
+      "source": "../g17g/m5-gl4-reference.metal",
+      "config": "../g17g/m5-gl4-reference.mtlp-json",
+      "function": "sxHelperVertex",
+      "stage": "vertex",
+      "arch": "applegpu_g18g",
+      "symbols": {
+        "_agc.main.constant_program": 0,
+        "_agc.main": 64
+      },
+      "size": 344,
+      "sha256": "91e2f1f7cdc09643edcf7914f9f756a2495b19f5ee9dd093c2438a09db3745b6"
+    },
     "probe.m5-gles3-half-widen-reference.m5_half_full_add.g17g.bin": {
       "corpus": "probe",
       "source": "../g17g/m5-gles3-half-widen-reference.metal",
