@@ -5,15 +5,18 @@
  * agx3_transcode against Apple: every G17G witness instruction whose G18G
  * counterpart Apple compiled from the same source must re-encode to exactly
  * Apple's G18G bytes (agx3d_transcode_vectors.c, from the committed witness
- * texts). The Ioto rules are checked against an instruction from Apple's own
- * G18G Ioto programs, and Ioto-only instructions must be refused in shader
- * code.
+ * texts), and every branch of a re-encoded G17G program must land where
+ * Apple's G18G branch lands. The Ioto rules are checked against an
+ * instruction from Apple's own G18G Ioto programs, and Ioto-only
+ * instructions must be refused in shader code.
  */
 #include <stdio.h>
 #include <string.h>
 
+#include "util/macros.h"
 #include "util/u_dynarray.h"
 #include "agx3_compose/agx3_decode.h"
+#include "asahi/isa/disasm.h"
 #include "agx3_transcode.h"
 #include "agx3d_transcode_vectors.c"
 
@@ -94,6 +97,66 @@ main(void)
       failures++;
    }
 
+   /* Branches: re-encode Apple's whole G17G program, then every b/bn must be
+    * Apple's ten-byte G18G form and land on the instruction Apple's G18G
+    * counterpart branch lands on. */
+   const unsigned programs = sizeof(agx3d_transcode_branch_programs) /
+                             sizeof(agx3d_transcode_branch_programs[0]);
+   unsigned branches = 0;
+   for (unsigned p = 0; p < programs; ++p) {
+      const struct agx3d_transcode_branch_program *prog =
+         &agx3d_transcode_branch_programs[p];
+      struct util_dynarray code;
+      util_dynarray_init(&code, NULL);
+      memcpy(util_dynarray_grow_bytes(&code, 1, prog->g17g_len), prog->g17g,
+             prog->g17g_len);
+      unsigned at = 0;
+      why = NULL;
+      if (!agx3_transcode_agx3d(&code, 0, &why, &at)) {
+         fprintf(stderr, "MISMATCH %s: refused at +0x%x: %s\n", prog->text, at,
+                 why);
+         failures++;
+         util_dynarray_fini(&code);
+         continue;
+      }
+
+      /* Instruction offsets of the re-encoded program, plus its end. */
+      unsigned offsets[512], count = 0;
+      const uint8_t *bytes = code.data;
+      bool segmented = true;
+      for (unsigned off = 0; off < code.size && segmented;) {
+         const signed n = agx3d_instr_length(bytes + off, code.size - off, NULL);
+         segmented = n > 0 && count + 1 < ARRAY_SIZE(offsets);
+         if (segmented) {
+            offsets[count++] = off;
+            off += n;
+         }
+      }
+      offsets[count] = code.size;
+
+      for (unsigned c = 0; c < prog->count && segmented; ++c) {
+         const unsigned b = prog->checks[c].branch, t = prog->checks[c].target;
+         uint64_t fields[AGX3_MAX_FIELDS];
+         const bool ok =
+            b < count && t <= count && offsets[b + 1] - offsets[b] == 10 &&
+            (agx3_decode(&agx3d_table, bytes + offsets[b], 10, "b", fields) >= 0 ||
+             agx3_decode(&agx3d_table, bytes + offsets[b], 10, "bn", fields) >= 0) &&
+            (int64_t)offsets[b] + ((int64_t)(fields[0] << 16) >> 16) ==
+               (int64_t)offsets[t];
+         if (!ok) {
+            fprintf(stderr, "MISMATCH %s: branch %u does not land on %u\n",
+                    prog->text, b, t);
+            failures++;
+         }
+         branches++;
+      }
+      if (!segmented) {
+         fprintf(stderr, "MISMATCH %s: output does not segment\n", prog->text);
+         failures++;
+      }
+      util_dynarray_fini(&code);
+   }
+
    /* Negative control: the same helper call is Ioto-only and must not be
     * re-encoded as shader code. */
    why = NULL;
@@ -103,6 +166,8 @@ main(void)
       failures++;
    }
 
-   printf("agx3_transcode: %u Apple vectors, %u failures\n", count, failures);
+   printf("agx3_transcode: %u Apple vectors, %u branches in %u programs, "
+          "%u failures\n",
+          count, branches, programs, failures);
    return failures ? 1 : 0;
 }

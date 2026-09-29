@@ -15,6 +15,11 @@ differ only in the scoreboard slot (field 12, which each compiler allocates on
 its own; this is how every lddev pair looks), the vector is marked so the test
 compares the decoded G18G fields with field 12 left out. The expected values
 are Apple's, never the encoder's own output.
+
+b/bn are never vectors on their own: a displacement belongs to its program.
+Each G17G text with branches instead becomes a program vector listing, per
+branch, the instruction Apple's G18G counterpart branch lands on (mapped back
+through the alignment); the re-encoded program must land on the same one.
 """
 
 import collections
@@ -41,9 +46,24 @@ for arch, (xml, table) in ARCH.items():
                    agx3_table.Decoder(T))
 
 
+FLAG_SLOT_FIELD = {'icmp': 31, 'fcmp': 35, 'cndst': 1, 'cndlt': 1,
+                   'cndcf': 1, 'cndef': 1}
+BRANCHES = ('b', 'bn')
+
+
 def g18g_rules(mnemonic, fields):
-    """agx3_transcode.c's shader-code rules, in Python."""
+    """agx3_transcode.c's shader-code rules, in Python. Only the flag slots
+    the witnesses use (0, 1 and the always-true 6) are modelled; the C side's
+    fold of slots 2..5 needs a whole program."""
     v = list(fields)
+    field = FLAG_SLOT_FIELD.get(mnemonic)
+    if field is not None:
+        if v[field] == 6 and mnemonic in ('cndst', 'cndef'):
+            v[1], v[0] = 0, v[0] ^ 1
+        elif v[field] <= 1:
+            v[field] += 1
+        else:
+            return None
     if mnemonic == 'lddev':
         v[87] = 2 if v[75] else 0
     elif mnemonic == 'smp':
@@ -71,8 +91,20 @@ def decode(arch, data, symbols, size):
             res = D.decode(b, pref)
             if res is None:
                 sys.exit('%s+0x%x does not decode' % (arch, start + off))
-            out.append((b, T['forms'][res[0]][0], list(res[1])))
+            out.append((b, T['forms'][res[0]][0], list(res[1]), start + off))
     return out
+
+
+def sext48(x):
+    return x - (1 << 48) if x & (1 << 47) else x
+
+
+def branch_targets(text):
+    """{instruction index of a b/bn: instruction index it lands on}."""
+    index = {x[3]: k for k, x in enumerate(text)}
+    index[text[-1][3] + len(text[-1][0])] = len(text)
+    return {k: index.get(x[3] + sext48(x[2][0]))
+            for k, x in enumerate(text) if x[1] in BRANCHES}
 
 
 def main():
@@ -82,29 +114,54 @@ def main():
         pairs[fn.rsplit('.', 2)[0]][m['arch']] = (fn, m)
 
     vectors = {}
+    programs = []
     for stem in sorted(pairs):
         p = pairs[stem]
         if set(p) != set(ARCH):
             continue
         t = {}
+        raw = {}
         for arch, (fn, m) in p.items():
-            t[arch] = decode(arch, open(os.path.join(NATIVE, fn), 'rb').read(),
-                             m['symbols'], m['size'])
+            raw[arch] = open(os.path.join(NATIVE, fn), 'rb').read()
+            t[arch] = decode(arch, raw[arch], m['symbols'], m['size'])
         c, d = t['applegpu_g17g'], t['applegpu_g18g']
         sm = difflib.SequenceMatcher(a=[x[1] for x in c], b=[x[1] for x in d],
                                      autojunk=False)
+        aligned = {}
         for tag, i1, i2, j1, j2 in sm.get_opcodes():
-            if tag != 'equal':
+            if tag == 'equal':
+                aligned.update(zip(range(i1, i2), range(j1, j2)))
+
+        # Branches: where Apple's G18G branch lands on the counterpart of the
+        # instruction the G17G branch lands on, the re-encoded program must
+        # land there too. The expected index is read off Apple's G18G text.
+        back = {j: i for i, j in aligned.items()}
+        back[len(d)] = len(c)
+        ct, dt = branch_targets(c), branch_targets(d)
+        checks = []
+        for i, target in sorted(ct.items()):
+            j = aligned.get(i)
+            if j is None or dt.get(j) is None:
                 continue
-            for i, j in zip(range(i1, i2), range(j1, j2)):
-                ruled = g18g_rules(c[i][1], c[i][2])
-                if ruled is None:
-                    continue
-                if ruled == d[j][2]:
-                    vectors.setdefault((c[i][0], d[j][0]), (c[i][1], stem, 0xff))
-                elif [x for k, x in enumerate(ruled) if k != 12] == \
-                     [x for k, x in enumerate(d[j][2]) if k != 12]:
-                    vectors.setdefault((c[i][0], d[j][0]), (c[i][1], stem, 12))
+            expected = back.get(dt[j])
+            if expected is not None and expected == target:
+                checks.append((i, expected))
+        if checks:
+            programs.append((stem, raw['applegpu_g17g'], checks))
+
+        # A branch's displacement is a property of the whole program, so
+        # branches are only checked above, never as lone instructions.
+        for i, j in aligned.items():
+            if c[i][1] in BRANCHES:
+                continue
+            ruled = g18g_rules(c[i][1], c[i][2])
+            if ruled is None:
+                continue
+            if ruled == d[j][2]:
+                vectors.setdefault((c[i][0], d[j][0]), (c[i][1], stem, 0xff))
+            elif [x for k, x in enumerate(ruled) if k != 12] == \
+                 [x for k, x in enumerate(d[j][2]) if k != 12]:
+                vectors.setdefault((c[i][0], d[j][0]), (c[i][1], stem, 12))
 
     out = ['/*',
            ' * Copyright 2026 Aurora Silicon',
@@ -133,7 +190,34 @@ def main():
                    (mn, stem, ignore, len(bc), len(bd), hexlist(bc),
                     hexlist(bd)))
     out += ['};', '']
+
+    # Whole G17G programs with branches: after re-encoding, branch number
+    # `branch` (an instruction index) must land on instruction `target`, the
+    # counterpart of the one Apple's G18G branch lands on.
+    max_checks = max((len(p[2]) for p in programs), default=1)
+    for n, (stem, code, checks) in enumerate(programs):
+        out.append('static const uint8_t agx3d_branch_program_%d[] = {' % n)
+        for k in range(0, len(code), 16):
+            out.append('   ' + ','.join('0x%02x' % x for x in code[k:k + 16]) + ',')
+        out.append('};')
+    out += ['',
+            'struct agx3d_transcode_branch_program {',
+            '   const char *text;',
+            '   const uint8_t *g17g;',
+            '   unsigned g17g_len, count;',
+            '   struct { unsigned branch, target; } checks[%d];' % max_checks,
+            '};',
+            '',
+            'static const struct agx3d_transcode_branch_program '
+            'agx3d_transcode_branch_programs[] = {']
+    for n, (stem, code, checks) in enumerate(programs):
+        out.append('   {"%s", agx3d_branch_program_%d, %d, %d, {%s}},' %
+                   (stem, n, len(code), len(checks),
+                    ', '.join('{%d, %d}' % c for c in checks)))
+    out += ['};', '']
     open(sys.argv[1], 'w').write('\n'.join(out))
+    print('branch programs', len(programs), 'branches',
+          sum(len(p[2]) for p in programs))
     print('vectors', len(vectors), 'slot-normalised',
           sum(1 for v in vectors.values() if v[2] == 12), 'mnemonics',
           len({v[0] for v in vectors.values()}))

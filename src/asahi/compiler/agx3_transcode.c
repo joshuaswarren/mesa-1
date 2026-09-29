@@ -43,11 +43,37 @@
  *    the power of two at or above its 32-bit register count, at least 8
  *    (every fragment 8, vertex 8 or 16, the end-of-tile shader 16 for r12).
  *
+ * Control flow, measured on the control-flow witnesses (probe
+ * m5-control-flow-reference, sixteen kernels of ifs, elses, loops, breaks,
+ * continues and switches that Apple cannot if-convert):
+ *
+ *  - Flag slots move up by one. Every G17G compare that writes slot 0 or 1
+ *    (icmp f31, fcmp f35) writes slot 1 or 2 on G18G, and every exec-mask op
+ *    that reads it (cndst/cndlt/cndcf f1) reads slot 1 or 2; G17G's
+ *    always-true slot 6 (the loop-entry cndst and cndef f1 = 6) is G18G's
+ *    slot 0 with the invert bit f0 flipped. No G18G compare ever writes slot
+ *    0. With that rule 114 of the 118 aligned cndst/cndlt/cndcf/cndef/cndend
+ *    reproduce Apple's G18G bytes -- the other four are cndsts whose invert
+ *    Apple chose together with the opposite compare condition -- and so does
+ *    every compare whose sources Apple chose alike.
+ *  - Slots 2..5 have no G18G witness. The G17G packer emits every compare
+ *    immediately before the exec-mask op that consumes it, so no predicate is
+ *    live across another instruction and the slot is only a name; such a
+ *    program folds them to slot 1. That is checked here, over the whole
+ *    program, rather than assumed.
+ *  - b/bn keep their field vector apart from the displacement f0: a 48-bit
+ *    byte offset from the branch's own first byte on both encodings (35 of
+ *    35 aligned branch targets land on the same instruction). Apple encodes
+ *    every G18G branch in the ten-byte form (ep 5, all 39 branches), which is
+ *    also the G17G branch length, so re-encoding the other instructions moves
+ *    the targets but never a branch's own size: the displacements are
+ *    recomputed once every agx3c offset has its agx3d offset.
+ *
  * Refused (the shader then fails, it is never mis-encoded):
  *
- *  - control flow: every PC-relative or predicate-stack mnemonic. The
- *    witnesses contain no branch at all, so relocation after a length change
- *    is ungrounded;
+ *  - the control flow no G17G/G18G pair shows: bl, brk, cndret, dbgrtn,
+ *    yield, and cndcall outside Ioto programs;
+ *  - a branch whose target is not an instruction boundary of the program;
  *  - smp with an f77 other than 0 or 2 (the only values the witnesses show).
  *
  * Not modelled: Apple's G18G vertex programs add a bit_andc/iself32/bit_and/
@@ -65,9 +91,18 @@
 #include "asahi/isa/disasm.h"
 
 static const char *const refused_control_flow[] = {
-   "b",      "bl",     "bn",     "brk",    "cndcall", "cndcf", "cndef",
-   "cndend", "cndlt",  "cndret", "cndst",  "dbgrtn",  "yield",
+   "bl", "brk", "cndcall", "cndret", "dbgrtn", "yield",
 };
+
+/* The G17G flag slot that always reads true, and G18G's always-false one. */
+#define G17G_TRUE_SLOT  6
+#define G18G_FALSE_SLOT 0
+
+/* agx3d's ten-byte b/bn, the only branch form in Apple's G18G code. */
+#define G18G_BRANCH_EP   5
+#define G18G_BRANCH_SIZE 10
+
+#define DISPLACEMENT_MASK ((UINT64_C(1) << 48) - 1)
 
 static bool
 is_control_flow(const char *mnemonic)
@@ -163,6 +198,141 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
    return true;
 }
 
+/* The field naming the flag slot a compare writes or an exec-mask op reads,
+ * or -1. cndend names none. */
+static int
+flag_slot_field(const char *mnemonic)
+{
+   if (!strcmp(mnemonic, "icmp"))
+      return 31;
+   if (!strcmp(mnemonic, "fcmp"))
+      return 35;
+   if (!strcmp(mnemonic, "cndst") || !strcmp(mnemonic, "cndlt") ||
+       !strcmp(mnemonic, "cndcf") || !strcmp(mnemonic, "cndef"))
+      return 1;
+   return -1;
+}
+
+static bool
+is_compare(const char *mnemonic)
+{
+   return !strcmp(mnemonic, "icmp") || !strcmp(mnemonic, "fcmp");
+}
+
+/* Whole-program flag-slot state: which predicate the previous instruction
+ * wrote, whether every predicate so far was consumed by the instruction right
+ * after its compare, and whether a slot without a G18G witness was folded. */
+struct flag_state {
+   int pending;
+   bool adjacent;
+   bool folded;
+};
+
+static bool
+apply_flag_slot_rule(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
+                     struct flag_state *state, const char **why)
+{
+   const int field = flag_slot_field(mnemonic);
+   const bool compare = is_compare(mnemonic);
+   const uint64_t slot = field >= 0 ? fields[field] : 0;
+   const bool reads_flag = field >= 0 && !compare && slot != G17G_TRUE_SLOT;
+
+   /* A predicate must be read by the instruction right after its compare,
+    * and a read must come right after the compare, for the slot to be only
+    * a name. */
+   if (state->pending >= 0 && !(reads_flag && slot == (uint64_t)state->pending))
+      state->adjacent = false;
+   if (reads_flag && state->pending != (int)slot)
+      state->adjacent = false;
+   state->pending = compare ? (int)slot : -1;
+
+   if (field < 0)
+      return true;
+
+   if (slot == G17G_TRUE_SLOT) {
+      /* Only the unconditional loop-entry push and the else flip read the
+       * always-true slot, in G17G and G18G code alike. */
+      if (strcmp(mnemonic, "cndst") && strcmp(mnemonic, "cndef")) {
+         *why = "always-true flag slot outside cndst/cndef";
+         return false;
+      }
+      fields[1] = G18G_FALSE_SLOT;
+      fields[0] ^= 1;
+      return true;
+   }
+   if (slot > 5) {
+      *why = "flag slot above 5";
+      return false;
+   }
+   if (slot <= 1) {
+      fields[field] = slot + 1;
+   } else {
+      fields[field] = 1;
+      state->folded = true;
+   }
+   return true;
+}
+
+static int64_t
+sign_extend_48(uint64_t v)
+{
+   return (int64_t)(v << 16) >> 16;
+}
+
+/* One re-encoded b/bn waiting for its displacement. */
+struct pending_branch {
+   unsigned out_offset;
+   unsigned in_offset;
+   int64_t in_target;
+   int32_t form;
+   uint64_t fields[AGX3_MAX_FIELDS];
+};
+
+/* agx3c offset -> agx3d offset of one instruction boundary. */
+struct offset_pair {
+   unsigned in, out;
+};
+
+static bool
+relocate_branches(struct util_dynarray *out, const struct util_dynarray *map,
+                  const struct util_dynarray *branches, const char **why,
+                  unsigned *fail_offset)
+{
+   const struct offset_pair *pairs = map->data;
+   const unsigned count = util_dynarray_num_elements(map, struct offset_pair);
+
+   util_dynarray_foreach(branches, struct pending_branch, br) {
+      *fail_offset = br->in_offset;
+      /* The map is in ascending agx3c order; find the target boundary. */
+      unsigned lo = 0, hi = count;
+      while (lo < hi) {
+         const unsigned mid = lo + (hi - lo) / 2;
+         if ((int64_t)pairs[mid].in < br->in_target)
+            lo = mid + 1;
+         else
+            hi = mid;
+      }
+      if (br->in_target < 0 || lo == count ||
+          (int64_t)pairs[lo].in != br->in_target) {
+         *why = "branch target is not an instruction boundary of the program";
+         return false;
+      }
+
+      const int64_t displacement =
+         (int64_t)pairs[lo].out - (int64_t)br->out_offset;
+      uint64_t fields[AGX3_MAX_FIELDS];
+      memcpy(fields, br->fields, sizeof(fields));
+      fields[0] = (uint64_t)displacement & DISPLACEMENT_MASK;
+      uint8_t bytes[2 * AGX3_MAX_WORDS];
+      if (!agx3_compose(&agx3d_table, br->form, fields, bytes)) {
+         *why = "branch displacement has no agx3d encoding";
+         return false;
+      }
+      memcpy((uint8_t *)out->data + br->out_offset, bytes, G18G_BRANCH_SIZE);
+   }
+   return true;
+}
+
 static bool
 transcode(struct util_dynarray *binary, unsigned start,
           const struct agx3_transcode_ioto *ioto, const char **why,
@@ -184,8 +354,11 @@ transcode(struct util_dynarray *binary, unsigned start,
 
    const unsigned len = binary->size - start;
    const uint8_t *in = (const uint8_t *)binary->data + start;
-   struct util_dynarray out;
+   struct util_dynarray out, map, branches;
    util_dynarray_init(&out, NULL);
+   util_dynarray_init(&map, NULL);
+   util_dynarray_init(&branches, NULL);
+   struct flag_state flags = {.pending = -1, .adjacent = true};
 
    unsigned i = 0;
    while (i < len) {
@@ -213,15 +386,39 @@ transcode(struct util_dynarray *binary, unsigned start,
       }
       /* Encode by the table's own name for the decoded form. */
       const char *name = agx3c_table.forms[form].mnemonic;
-      if (!apply_g18g_rules(name, fields, ioto, why))
+      if (!apply_g18g_rules(name, fields, ioto, why) ||
+          !apply_flag_slot_rule(name, fields, &flags, why))
          goto fail;
 
+      util_dynarray_append(&map, ((struct offset_pair){i, out.size}));
+
       uint8_t bytes[2 * AGX3_MAX_WORDS];
-      const int32_t dform =
-         agx3_compose_apple_order(&agx3d_table, name, fields, bytes);
-      if (dform < 0) {
-         *why = "field vector has no agx3d encoding";
-         goto fail;
+      int32_t dform;
+      const bool branch = !strcmp(name, "b") || !strcmp(name, "bn");
+      if (branch) {
+         /* Encode with a zero displacement now, the real one once every
+          * target has its agx3d offset. */
+         struct pending_branch br = {
+            .out_offset = out.size,
+            .in_offset = i,
+            .in_target = (int64_t)i + sign_extend_48(fields[0]),
+            .form = agx3_form_index(&agx3d_table, name, G18G_BRANCH_EP),
+         };
+         fields[0] = 0;
+         memcpy(br.fields, fields, sizeof(br.fields));
+         dform = br.form;
+         if (dform < 0 || agx3d_table.forms[dform].size != G18G_BRANCH_SIZE ||
+             !agx3_compose(&agx3d_table, dform, fields, bytes)) {
+            *why = "branch has no ten-byte agx3d encoding";
+            goto fail;
+         }
+         util_dynarray_append(&branches, br);
+      } else {
+         dform = agx3_compose_apple_order(&agx3d_table, name, fields, bytes);
+         if (dform < 0) {
+            *why = "field vector has no agx3d encoding";
+            goto fail;
+         }
       }
       const unsigned size = agx3d_table.forms[dform].size;
       if (agx3d_instr_length(bytes, size, NULL) != (signed)size) {
@@ -232,13 +429,29 @@ transcode(struct util_dynarray *binary, unsigned start,
       i += n;
    }
 
+   /* A branch may also land on the end of the program. */
+   util_dynarray_append(&map, ((struct offset_pair){len, out.size}));
+   *fail_offset = len;
+   if (flags.pending >= 0)
+      flags.adjacent = false;
+   if (flags.folded && !flags.adjacent) {
+      *why = "flag slot above 1 while a predicate lives across instructions";
+      goto fail;
+   }
+   if (!relocate_branches(&out, &map, &branches, why, fail_offset))
+      goto fail;
+
    binary->size = start;
    memcpy(util_dynarray_grow_bytes(binary, 1, out.size), out.data, out.size);
    util_dynarray_fini(&out);
+   util_dynarray_fini(&map);
+   util_dynarray_fini(&branches);
    return true;
 
 fail:
    util_dynarray_fini(&out);
+   util_dynarray_fini(&map);
+   util_dynarray_fini(&branches);
    return false;
 }
 
