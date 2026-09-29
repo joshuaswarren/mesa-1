@@ -1142,6 +1142,69 @@ main(void)
    }
 
    /*
+    * AGX3c immediate minus a register, Apple Metal for applegpu_g17g
+    * (test/native/g17g/m5-libagx-reference.metal isub_imm*): libagx's
+    * ineg, 4 - x and 31 - x. The result lands in r0 unless noted.
+    */
+   {
+      static const struct {
+         const char *name;
+         struct agx3_iadd_desc d;
+         uint8_t bytes[12];
+      } svec[] = {
+         {"0u - x", {.immediate = 0, .src = 0, .src_kill = true,
+                     .subtract = true},
+          {0x27,0x00,0x24,0x1a,0x25,0x00,0xa2,0x02,0x00,0x80,0x21,0x00}},
+         {"4u - x", {.immediate = 4, .src = 0, .src_kill = true,
+                     .subtract = true},
+          {0x27,0x00,0x24,0x3a,0x25,0x00,0xa2,0x02,0x00,0x80,0x21,0x00}},
+         {"31u - x", {.immediate = 31, .src = 0, .src_kill = true,
+                      .subtract = true},
+          {0x27,0x03,0x24,0xfa,0x25,0x00,0xa2,0x02,0x00,0x80,0x21,0x00}},
+         {"255u - x", {.immediate = 255, .src = 0, .src_kill = true,
+                       .subtract = true},
+          {0x27,0x03,0x24,0xfa,0x25,0x80,0xa2,0x02,0x03,0x80,0x21,0x00}},
+         {"31u - x, x cached, into r3",
+          {.dest = 6, .immediate = 31, .src = 0, .src_cache = true,
+           .subtract = true},
+          {0x37,0x03,0x24,0xfa,0x25,0x00,0xa2,0x0a,0x00,0x80,0x11,0x00}},
+         {"16 - int(short x)",
+          {.immediate = 16, .src = 0, .src_16 = true, .sign_extend = true,
+           .src_kill = true, .subtract = true},
+          {0x27,0x00,0x24,0x9a,0x25,0x08,0xa2,0x02,0x00,0x00,0x21,0x00}},
+         {"16u - uint(ushort x)",
+          {.immediate = 16, .src = 0, .src_16 = true, .src_kill = true,
+           .subtract = true},
+          {0x27,0x00,0x24,0x9a,0x25,0x00,0xa2,0x02,0x00,0x00,0x21,0x00}},
+         {"31u - in[id], waiting for slot 8",
+          {.immediate = 31, .src = 0, .src_kill = true, .subtract = true,
+           .wait_mask = 1u << 7},
+          {0x2f,0x03,0x24,0xfa,0x25,0x00,0xa2,0x02,0x00,0x80,0x21,0x00}},
+      };
+      for (unsigned i = 0; i < sizeof(svec) / sizeof(svec[0]); ++i) {
+         uint8_t co[AGX3_IADD_MAX_LENGTH];
+         uint8_t cl = 0;
+         CHECK(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &svec[i].d, co, &cl));
+         ++checks;
+         if (cl != 12 || memcmp(co, svec[i].bytes, 12) != 0) {
+            ++failures;
+            fprintf(stderr, "FAIL agx3c %s\n", svec[i].name);
+         }
+      }
+
+      /* A shifted subtract, a saturating one and a cached add stay closed. */
+      struct agx3_iadd_desc bad = svec[0].d;
+      bad.shift = 2;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+      bad = svec[0].d;
+      bad.saturate = true;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+      bad = svec[4].d;
+      bad.subtract = false;
+      CHECK(!agx3_iadd_encode(AGX_ISA_ENCODING_AGX3C, &bad, out, &len));
+   }
+
+   /*
     * AGX3c 32x32->64 multiply-add, Apple Metal for applegpu_g17g
     * (gpu/m5-xfb-alu-reference.metal): `ulong(a) * ulong(b) + 12` and
     * `ulong(a) * ulong(b) + c`, every operand dead, waiting for slot 8.

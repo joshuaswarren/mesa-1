@@ -42,11 +42,27 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * shifted adds witness 1..4; shift 0 is the unshifted form. */
    if (d->shift > 4 || d->wait_mask >= (1u << slots))
       return false;
-   if ((d->src_a_cache || d->src_cache) && !agx3b)
+
+   /* G17G's immediate minus a register: the immediate in slot A, a 32-bit or
+    * a sign-/zero-extended 16-bit register in slot B, unshifted, with the
+    * source's cache (f40) or discard (f42) hint. Apple Metal for
+    * applegpu_g17g (test/native/g17g/m5-libagx-reference.metal):
+    *
+    *   0u - x, x dead          27 00 24 1a 25 00 a2 02 00 80 21 00
+    *   31u - x, x live (to r3) 37 03 24 fa 25 00 a2 0a 00 80 11 00   f40
+    *   16 - int(short x)       27 00 24 9a 25 08 a2 02 00 00 21 00   f39, f43
+    *   16u - uint(ushort x)    27 00 24 9a 25 00 a2 02 00 00 21 00   f39
+    */
+   const bool g17g_imm_minus_reg = !agx3b && d->subtract &&
+                                   !d->src_a_is_register && !d->saturate &&
+                                   d->shift == 0;
+   if (d->src_a_cache && !agx3b)
+      return false;
+   if (d->src_cache && !agx3b && !g17g_imm_minus_reg)
       return false;
    if ((d->saturate || d->src_a_cache) && !d->src_a_is_register)
       return false;
-   if (d->src_cache && !d->src_a_is_register)
+   if (d->src_cache && !d->src_a_is_register && !g17g_imm_minus_reg)
       return false;
    if ((d->src_a_cache && d->src_a_kill) || (d->src_cache && d->src_kill))
       return false;
@@ -71,7 +87,8 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * alongside saturation. */
    const bool g17g_wide_pair = !agx3b && d->src_a_is_register &&
                                !d->src_a_16 && !d->src_16 && d->shift == 0;
-   if (!agx3b && (d->subtract || d->saturate) && !g17g_wide_pair)
+   if (!agx3b && (d->subtract || d->saturate) && !g17g_wide_pair &&
+       !g17g_imm_minus_reg)
       return false;
    if ((d->src_a_sign_extend_32 || d->sign_extend_32) && !d->saturate)
       return false;
@@ -103,7 +120,7 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
    };
    const struct agx3_field_kv baseline_c[] = {
       KV(9, 2),  KV(10, 2), KV(23, 1), KV(24, 1),
-      KV(38, 2), KV(42, 1), KV(44, 3),  KV(45, 80),
+      KV(38, 2), KV(42, 1), KV(44, 3),  KV(45, d->subtract ? 100 : 80),
    };
    const struct agx3_field_kv *baseline =
       d->src_a_is_register ? (agx3b ? baseline_b_reg : baseline_c_reg)
@@ -145,6 +162,8 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * G17S corpus carries iadd32 with f42 set and clear. */
    if (!d->src_a_is_register)
       ov[n++] = (struct agx3_field_kv)KV(42, d->src_kill ? 1 : 0);
+   if (!d->src_a_is_register && d->src_cache)
+      ov[n++] = (struct agx3_field_kv)KV(40, 1);
    ov[n++] = (struct agx3_field_kv)KV(31, d->src);
    if (!d->src_a_is_register)
       ov[n++] = (struct agx3_field_kv)KV(39, d->src_16 ? 1 : 2);

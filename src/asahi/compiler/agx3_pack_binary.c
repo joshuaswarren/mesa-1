@@ -14079,9 +14079,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * the immediate in slot A, `16 - int(short b)` being
              * 1f 01 56 00 02 20 00 08 15 0c. Before, a negated register was
              * added, and a negated half was added sign-extended. Only the
-             * unshifted subtraction is witnessed. */
+             * unshifted subtraction is witnessed. G17G's isub32 takes the
+             * same operands (agx3_iadd_encode); it is libagx's ineg, 4 - x
+             * and 31 - x. */
             const bool imm_minus_reg =
-               enc == AGX_ISA_ENCODING_AGX3B && !I->saturate &&
+               (enc == AGX_ISA_ENCODING_AGX3B ||
+                enc == AGX_ISA_ENCODING_AGX3C) && !I->saturate &&
                reg.neg && I->shift == 0 &&
                (reg.size == AGX_SIZE_16 ||
                 (reg.size == AGX_SIZE_32 && !reg.abs));
@@ -14098,6 +14101,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   .immediate = (uint8_t)constant.value,
                   .src = reg.value,
                   .src_kill = reg.discard,
+                  /* G17G's isub32 carries the source's cache hint. */
+                  .src_cache = enc == AGX_ISA_ENCODING_AGX3C && reg.neg &&
+                               reg.cache,
                   .src_16 = reg.size == AGX_SIZE_16,
                   .sign_extend = reg.size == AGX_SIZE_16 && !reg.abs,
                   .shift = I->shift,
