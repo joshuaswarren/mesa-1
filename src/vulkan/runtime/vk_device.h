@@ -143,6 +143,25 @@ struct vk_device {
    /** Shader vtable for VK_EXT_shader_object and common pipelines */
    const struct vk_device_shader_ops *shader_ops;
 
+   /** Bounded poll before blocking syncobj waits, in microseconds
+    *
+    * Zero (the default) disables the poll. When nonzero, common syncobj
+    * waits first poll with a zero timeout for up to this long before
+    * falling back to the blocking wait with the original deadline,
+    * trading CPU for wake-up latency on short waits.
+    */
+   uint32_t sync_wait_poll_us;
+
+   /** Miss backoff state for the bounded syncobj poll (see sync_wait_poll_us)
+    *
+    * sync_poll_misses counts consecutive polls whose budget expired
+    * without seeing the signal; sync_poll_miss_expire_ns is the absolute
+    * time until which polling is disabled after such a miss. Accessed
+    * with the generic p_atomic helpers (64-bit, 8-byte aligned).
+    */
+   uint64_t sync_poll_misses;
+   uint64_t sync_poll_miss_expire_ns;
+
    /** Acceleration structure build vtable for common BVH building. */
    const struct vk_acceleration_structure_build_ops *as_build_ops;
 
