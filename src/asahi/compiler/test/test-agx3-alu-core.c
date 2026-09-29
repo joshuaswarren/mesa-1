@@ -117,8 +117,20 @@ test_gpu1_popcount(void)
       AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 256, false,
       AGX3_ALU_HINT_DISCARD, false, 0, bytes, &len));
+   /* Apple applegpu_g17g popcount(a[id]) + popcount(b[id * 3]): the count
+    * of the slot-8 load waits in f38 and that of the slot-1 load in f31
+    * (test/native/g17g/m5-libagx-reference.metal popcnt_two_loads). */
+   static const uint8_t slot8[] = {0x2f,0x00,0x00,0x80,0x3a,0x30,0xaa,0x02,0x04,0x00};
+   static const uint8_t slot1[] = {0x27,0x04,0x00,0x80,0x3a,0x70,0xaa,0x0a,0x04,0x00};
+   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
+      AGX3_ALU_HINT_DISCARD, true, 128, bytes, &len));
+   assert(len == 10 && !memcmp(bytes, slot8, len));
+   assert(agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 4, 4, false,
+      AGX3_ALU_HINT_DISCARD, true, 1, bytes, &len));
+   assert(len == 10 && !memcmp(bytes, slot1, len));
+   /* No other slot is witnessed. */
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, false,
-      AGX3_ALU_HINT_DISCARD, false, 1, bytes, &len));
+      AGX3_ALU_HINT_DISCARD, false, 2, bytes, &len));
    assert(!agx3_alu_popcount(AGX_ISA_ENCODING_AGX3C, 0, 0, true,
       AGX3_ALU_HINT_CACHE, false, 0, bytes, &len));
 }

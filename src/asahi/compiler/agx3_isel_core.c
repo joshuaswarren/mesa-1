@@ -271,10 +271,15 @@ encode_gpu1(const struct agx3_isel_desc *d,
    /* A half comparand is witnessed only against an equality immediate: 0
     * and 1 in both result widths, and 2 with a word result (applegpu_g17g,
     * `select(0u, v, k == 2)` and `select(w, v, k == 2)` for ushort k). f30
-    * is the same 8-bit deposit in every form, but only those values are
-    * grounded, so anything larger stays refused. */
-   const unsigned half_imm_max = d->dest_16 ? 1 : 2;
-   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 > half_imm_max ||
+    * is the same 8-bit deposit in every form, and
+    * test/native/g17g/m5-libagx-reference.metal carries it at 3 with a half
+    * result and at 4 and 255 with a word result, the last with the
+    * immediate on the false side:
+    *
+    *   (k == 4) ? 0u : w      02 08 0f 84 26 80 07 02 82 00
+    *   (k == 255) ? w : 7u    02 08 1f fe 86 00 17 02 22 87
+    *   (k == 3) ? 0 : j       02 00 0d 82 26 80 17 02 82 01   half result */
+   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 > 255 ||
                      d->cond != AGX3_ISEL_ICOND_EQ))
       return false;
    /* A narrow second comparand widens into a full-width comparison only.

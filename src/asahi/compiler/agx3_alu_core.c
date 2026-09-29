@@ -17,10 +17,13 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
    if (enc == AGX_ISA_ENCODING_AGX3C) {
       /* G17G uint4/ushort4 popcount witnesses use cbs ep0. The separate
        * live uint4 probe also witnesses cached sources and destinations.
-       * Only the observed slot-8 wait is admitted here; the caller retires
-       * other dependencies separately. */
+       * The wait bank starts at f31 as on G17P: a count of the slot-8 load
+       * waits in f38, and one of the slot-1 load in f31
+       * (test/native/g17g/m5-libagx-reference.metal popcnt_two_loads). Only
+       * those two slots are admitted; the caller retires other
+       * dependencies separately. */
       if (!out || !len || dest >= 256 || src >= 256 ||
-          (!half && ((dest | src) & 1)) || (wait_mask & ~128u) ||
+          (!half && ((dest | src) & 1)) || (wait_mask & ~129u) ||
           (hint != AGX3_ALU_HINT_DISCARD &&
            !(hint == AGX3_ALU_HINT_CACHE && !half)))
          return false;
@@ -30,7 +33,7 @@ agx3_alu_popcount(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
          {23, 2}, {24, half ? 1 : 2}, {16, src},
          {25, hint == AGX3_ALU_HINT_CACHE},
          {27, hint == AGX3_ALU_HINT_DISCARD},
-         {29, 3}, {30, 23}, {38, !!wait_mask},
+         {29, 3}, {30, 23}, {31, wait_mask & 1}, {38, !!(wait_mask & 128)},
       };
       return agx3_bind_compose(enc, "cbs", 0, fields,
                                  sizeof(fields) / sizeof(fields[0]),

@@ -473,9 +473,6 @@ main(void)
       CHECK(len == half_vectors[i].length && !memcmp(out,half_vectors[i].bytes,len));
    }
    m5 = half_vectors[0].d;
-   m5.cmp1 = 2;
-   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
-   m5.cmp1 = 0;
    m5.cond = AGX3_ISEL_ICOND_ULT;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    m5 = half_vectors[0].d;
@@ -484,26 +481,45 @@ main(void)
    m5.sel_true = 256;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
 
-   /* The half comparand against 2 is grounded only as witnessed: equality,
-    * an immediate, a word result. Its neighbours stay refused. */
+   /* A half comparand is grounded only against an equality immediate. */
    const unsigned nhalf = sizeof(half_vectors) / sizeof(half_vectors[0]);
    /* The three signed 16-bit-result vectors sit after these. */
    const struct agx3_isel_desc *half_two = &half_vectors[nhalf - 6].d;
-   m5 = *half_two;
-   m5.cmp1 = 3;
-   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    m5 = *half_two;
    m5.cond = AGX3_ISEL_ICOND_ULT;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    m5 = *half_two;
    m5.cmp1_immediate = false;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
-   m5 = *half_two;
-   m5.dest_16 = true;
-   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
-   m5 = half_vectors[nhalf - 5].d;
-   m5.cmp1 = 3;
-   CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
+
+   /* The same equality against 3, 4 and 255: Apple applegpu_g17g,
+    * test/native/g17g/m5-libagx-reference.metal sel_heq*. libagx's GL query
+    * copy selects on `k == 4`. */
+   static const struct isel_vec heq_vectors[] = {
+      {"G17G (k == 4) ? 0u : w", {.dest=0,.cmp_16=true,.cmp0=8,.cmp1=4,
+         .cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,
+         .true_kind=AGX3_ISEL_IMMEDIATE,.sel_true=0,.sel_false=0,
+         .discard={true,false,false,true}},
+       {0x02,0x08,0x0f,0x84,0x26,0x80,0x07,0x02,0x82,0x00},10},
+      {"G17G (k == 255) ? w : 7u", {.dest=0,.cmp_16=true,.cmp0=8,.cmp1=255,
+         .cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=0,.sel_false=7,
+         .discard={true,false,true,false}},
+       {0x02,0x08,0x1f,0xfe,0x86,0x00,0x17,0x02,0x22,0x87},10},
+      {"G17G (k == 3) ? 0 : j, half result", {.dest=0,.dest_16=true,
+         .cmp_16=true,.cmp0=0,.cmp1=3,.cmp1_immediate=true,
+         .cond=AGX3_ISEL_ICOND_EQ,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=0,.sel_false=1,.discard={true,false,false,true}},
+       {0x02,0x00,0x0d,0x82,0x26,0x80,0x17,0x02,0x82,0x01},10},
+      {"G17G (k == 4) ? v : w", {.dest=0,.cmp_16=true,.cmp0=10,.cmp1=4,
+         .cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_EQ,.sel_true=2,
+         .sel_false=0,.discard={true,false,true,true}},
+       {0x02,0x0a,0x0f,0x84,0x86,0x02,0x07,0x02,0x82,0x00},10},
+   };
+   for (unsigned i=0; i<sizeof(heq_vectors)/sizeof(heq_vectors[0]); ++i) {
+      CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&heq_vectors[i].d,out,&len));
+      CHECK(len == heq_vectors[i].length && !memcmp(out,heq_vectors[i].bytes,len));
+   }
 
    /* GPU1 f11 is the destination-cache hint: with the word-comparand witness
     * kept live through the cache only that bit (bit 35, byte 4) changes. */
