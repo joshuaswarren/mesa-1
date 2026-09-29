@@ -964,6 +964,22 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       batch->native_rejected = true;
    }
 
+   /* G18G takes the same per-dispatch split, but its hardware has run
+    * compute-only jobs (the J873 compute-add bring-up), so it is not held to
+    * the M5 compute-before-render profile above. A compute command with no
+    * recorded dispatch carries no work -- the dispatch that opened the CDM
+    * stream was refused -- and a stream without a launch is what M5 firmware
+    * linked and never retired, so do not send it; the render still goes. */
+   if (compute && !batch->native_rejected && dev->chip == AGX_CHIP_G18G &&
+       !batch->cdm_dispatch_count) {
+      compute = NULL;
+      if (!render) {
+         mesa_loge("asahi: a G18G compute batch without a dispatch carries "
+                   "no work");
+         batch->native_rejected = true;
+      }
+   }
+
    if (batch->native_rejected) {
       batch_debug(batch, "DROP");
       mesa_loge("asahi: dropping work: batch %u used state with no proven "
