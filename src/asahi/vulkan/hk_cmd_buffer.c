@@ -1083,7 +1083,6 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
-<<<<<<< HEAD
    if (unlikely(dev->frame_anatomy)) {
       const VkDependencyInfo *dep = pDependencyInfo;
       for (uint32_t i = 0; i < dep->memoryBarrierCount; ++i) {
