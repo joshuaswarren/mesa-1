@@ -2923,12 +2923,14 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
    };
    NIR_PASS(_, nir, nir_opt_peephole_select, &peephole_select_options);
 
-   NIR_PASS(_, nir, nir_opt_load_store_vectorize,
-            &(const nir_load_store_vectorize_options){
-               .modes = nir_var_mem_global | nir_var_mem_constant |
-                        nir_var_shader_temp,
-               .callback = agx_mem_vectorize_cb,
-            });
+   nir_load_store_vectorize_options vec_opts = {
+      .modes = nir_var_mem_global | nir_var_mem_constant |
+               nir_var_shader_temp,
+      .callback = agx_mem_vectorize_cb,
+   };
+   if (getenv("AGX_VEC_SHARED"))
+      vec_opts.modes |= nir_var_mem_shared;
+   NIR_PASS(_, nir, nir_opt_load_store_vectorize, &vec_opts);
    NIR_PASS(_, nir, nir_lower_pack);
    NIR_PASS(_, nir, nir_opt_algebraic);
 
