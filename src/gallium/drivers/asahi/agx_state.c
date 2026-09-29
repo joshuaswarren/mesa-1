@@ -772,6 +772,17 @@ agx_ioto_chip(const struct agx_device *dev)
    return dev->chip == AGX_CHIP_G18G ? AGX_CHIP_G17G : dev->chip;
 }
 
+/* The CDM barrier that ends an M5-profile compute dispatch: G17G's captured
+ * flags-5 word, but on G18G the flag-free word -- the only barrier its
+ * compute-add capture shows, and the only one agx3_cdm_barrier_flags_grounded
+ * admits for it. (agx3_g17g_native_compute_dispatch_append packs as G17G, so
+ * it cannot apply that gate itself.) */
+static inline uint8_t
+agx_m5_dispatch_barrier_flags(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G18G ? 0 : 5;
+}
+
 /* Room for a program's agx3d re-encoding: twice the G17G bound, which covers
  * every witness (the largest growth is f32mul's 8-byte form becoming 16).
  * The callers still refuse a program longer than what they allocated. */
@@ -4590,7 +4601,9 @@ agx_g17p_append_compute(struct agx_batch *batch,
                           ? 3
                        : grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
       };
-      if (!(g17g ? agx3_g17g_native_compute_dispatch_append(&g17g_launch, &direct, 5, &sink)
+      if (!(g17g ? agx3_g17g_native_compute_dispatch_append(
+                      &g17g_launch, &direct, agx_m5_dispatch_barrier_flags(dev),
+                      &sink)
                   : agx3_g17p_native_compute_dispatch_append(&native.launch, &direct, &sink)))
          return false;
    }
