@@ -187,7 +187,7 @@ lower_load_store(nir_builder *b, struct hash_table *tm, nir_intrinsic_instr *int
     * 24 distinct fragment regs (vs ~12 reused) so the post-RA scheduler can hoist all
     * loads (kills the 42 waits -> ~1). flat is even (frag_rc col is always x2) so the
     * pair is vec2-aligned. Row-major (A) only; col-major (B) pair is strided. */
-   const bool vec2ld = getenv("AGX_HWMAT_VEC2") != NULL;
+   const bool vec2ld = getenv("AGX_HWMAT_VEC2_OFF") == NULL;
    nir_deref_instr *v2dref =
       (flataddr && vec2ld)
          ? nir_build_deref_cast(b, &deref->def, deref->modes,
