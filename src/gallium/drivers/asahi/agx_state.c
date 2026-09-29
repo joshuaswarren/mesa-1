@@ -4677,6 +4677,15 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
    struct agx_precompiled_shader *cs =
       agx_get_precompiled(&batch->ctx->bg_eot, program);
 
+   /* No libagx is built for G17G or G18G (agx_open_device), so every
+    * precompiled kernel -- the tessellator, the geometry and restart
+    * prefix sums, query copies -- is absent there. Refuse the batch rather
+    * than launch through a null program. (G17P checks its own below.) */
+   if (!cs && dev->chip != AGX_CHIP_G17P) {
+      agx_native_descriptor_rejected(batch, "a precompiled libagx program");
+      return;
+   }
+
    if (dev->chip == AGX_CHIP_G17P) {
       if (!cs || !cs->bo || !cs->info.main_size || !cs->info.nr_gprs ||
           cs->info.nr_preamble_gprs ||
@@ -8338,6 +8347,20 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       return;
    }
 
+   /* No J873 capture holds an indirect Index List (test-ppp-hal300-g18g.c),
+    * so agx_vdm_draw() has no G18G encoding for one. Read the arguments of
+    * an API draw on the CPU, as the paths above and draw-auto do, until one
+    * is witnessed. The tessellation draw's arguments live in a batch-private
+    * buffer; it is refused below instead. */
+   if (indirect && !ctx->in_tess &&
+       agx_chip_m5_paths(agx_device(pctx->screen)->chip) &&
+       !agx_vdm_index_list_indexed_or_indirect_supported_inline(
+          agx_device(pctx->screen)->chip)) {
+      perf_debug_ctx(ctx, "indirect draw without an indirect Index List");
+      util_draw_indirect(pctx, info, drawid_offset, indirect);
+      return;
+   }
+
    /* HAL300's grounded index-list encodings consume U16 or U32 indices.
     * Preserve U8 API draws by widening through Gallium's ordinary index
     * utility before command construction. Vertex values, index bias and
@@ -8678,6 +8701,18 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       if (agx_chip_m5_paths(agx_device(ctx->base.screen)->chip) &&
           ctx->rast->base.rasterizer_discard)
          return;
+   }
+
+   /* The geometry-shader and tessellation rasterization draws are indirect
+    * by construction and cannot take the CPU path above. Without an indirect
+    * Index List fail them closed; the prepass work stays in the batch. */
+   if (indirect && agx_chip_m5_paths(agx_device(ctx->base.screen)->chip) &&
+       !agx_vdm_index_list_indexed_or_indirect_supported_inline(
+          agx_device(ctx->base.screen)->chip)) {
+      mesa_loge("asahi: dropping an internal indirect draw: %s has no "
+                "witnessed indirect Index List",
+                agx_chip_name(agx_device(ctx->base.screen)->chip));
+      return;
    }
 
    assert((!indirect || !indirect->indirect_draw_count) && "multidraw handled");
