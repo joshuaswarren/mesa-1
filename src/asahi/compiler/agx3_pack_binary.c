@@ -896,7 +896,10 @@ agx3_map_sr(enum agx_isa_encoding enc, enum agx_sr sr, uint8_t *apple,
       SR(AGX_SR_COVERAGE_MASK, 39, AGX3_SR_W16);
       SR(AGX_SR_IS_ACTIVE_THREAD, 2, AGX3_SR_W16);
    case AGX_SR_BACKFACING:
-      if (enc != AGX_ISA_ENCODING_AGX3B)
+      /* G17G reads the same SR 41 into a half for [[front_facing]], and
+       * selects on it being zero (test/native/g17g
+       * m5-front-facing-reference.metal: rld 64c51006, f21 = 41). */
+      if (enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C)
          return false;
       *apple = 41;
       *width = AGX3_SR_W16;

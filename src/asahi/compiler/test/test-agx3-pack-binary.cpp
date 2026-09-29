@@ -7986,12 +7986,17 @@ TEST_F(AGX3PackBinary, G17PFrontFacingUsesNativeBackFacingSr)
    };
    EXPECT_EQ(pack(b), native);
 
-   /* The semantic identity is grounded only on applegpu_g17p. */
+   /* applegpu_g17g reads the same SR 41 for [[front_facing]] and selects on
+    * it being zero (test/native/g17g/m5-front-facing-reference.metal, whose
+    * fragment reads it into half 12 on slot 1). */
    b = builder(AGX_ISA_ENCODING_AGX3C);
    b->shader->stage = MESA_SHADER_FRAGMENT;
-   agx_get_sr_to(b, agx_register(0, AGX_SIZE_16), AGX_SR_BACKFACING);
+   agx_get_sr_to(b, agx_register(12, AGX_SIZE_16), AGX_SR_BACKFACING);
    agx_stop(b);
-   pack(b, /*expect_ok=*/false);
+   const std::vector<uint8_t> g17g_native = {
+      0x64,0xc5,0x10,0x06, 0x0e,0x00,0x00,0x00,
+   };
+   EXPECT_EQ(pack(b), g17g_native);
 }
 
 TEST_F(AGX3PackBinary, PackedSharedByteVectorsUsePhysicalHalves)
