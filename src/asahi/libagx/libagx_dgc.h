@@ -379,8 +379,28 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
       // cfg.unk_20 = true;
       // cfg.unk_24 = true; if clustered?
       if (chip == AGX_CHIP_G13X) {
+         /* G13X (t600x, M1 Pro/Max, G13C cores): restore bits 0-2
+          * (PBE/texture flush) alongside unk_4 + usc_cache_inval.
+          * Bits 0-2 are required for cross-launch coherency when
+          * control streams are not split and across dependency-skipped
+          * launches ({0,1,2,4,5,6,8}+usc_cache_inval = 0x17f). */
+         cfg.unk_0 = true;
+         cfg.unk_1 = true;
+         cfg.unk_2 = true;
          cfg.unk_4 = true;
+         cfg.usc_cache_inval = true;
          // cfg.unk_26 = true;
+      }
+      if (chip == AGX_CHIP_G13G) {
+         /* G13G (t8103, M1): the kitchen-sink bits below cost ~10 us per
+          * dispatch in real dependent compute chains (Qwen decode: ~2.1 ms
+          * of a ~9.8 ms token). Bits 4-8 hold the mlx-omarchy pinned
+          * generated-ID digests (48/48 interleaved runs, both legs) and
+          * the omarchy runtime suite (22 cases / 6189 assertions), and
+          * measure +3.05% ctx1053 decode on jwm1. Other chips keep the
+          * full sink until measured there. */
+         cfg.unk_4 = true;
+         cfg.unk_7 = true;
       }
 
       /* With multiple launches in the same CDM stream, we can get cache
@@ -390,26 +410,71 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
        * let's just set these after every launch to be safe. We can revisit in
        * the future when we figure out what the bits mean.
        */
+      if (chip != AGX_CHIP_G13G && chip != AGX_CHIP_G13X) {
+         cfg.unk_0 = true;
+         cfg.unk_1 = true;
+         cfg.unk_2 = true;
+         cfg.usc_cache_inval = true;
+         cfg.unk_4 = true;
+         cfg.unk_5 = true;
+         cfg.unk_6 = true;
+         cfg.unk_7 = true;
+         cfg.unk_8 = true;
+         cfg.unk_9 = true;
+         cfg.unk_10 = true;
+         cfg.unk_11 = true;
+         cfg.unk_12 = true;
+         cfg.unk_13 = true;
+         cfg.unk_14 = true;
+         cfg.unk_15 = true;
+         cfg.unk_16 = true;
+         cfg.unk_17 = true;
+         cfg.unk_18 = true;
+         cfg.unk_19 = true;
+      }
+   }
+
+   return out;
+}
+
+/*
+ * Minimal variant of agx_cdm_barrier: invalidate the USC cache only. Used by
+ * the Vulkan driver for launches whose results are consumed by another compute
+ * launch through the same (L2-backed) storage path, where the PBE/texture
+ * cache maintenance of the full barrier is not required.
+ */
+static inline GLOBAL uint32_t *
+agx_cdm_barrier_usc(GLOBAL uint32_t *out)
+{
+   agx_push(out, CDM_BARRIER, cfg) {
+      cfg.usc_cache_inval = true;
+   }
+
+   return out;
+}
+
+/*
+ * G13X candidate reduction: the designed set {unk_4, unk_5, unk_6, unk_8}
+ * (the bits that held mlx-omarchy pinned digests 48/48 in the termA
+ * battery) plus the USC cache invalidate (covers uniform/texture-state
+ * changes between launches; measured 4.6 us/launch of the 20.4 us
+ * sink+cache cost on real dependent chains). The full-sink unk_0..unk_19
+ * block (PBE/texture cache maintenance, measured 15.8 us/launch) is
+ * dropped. Perftest arm designedusccdmbarrier; NOT a default-emission
+ * proposal until it holds both decode legs and the digest protocol.
+ */
+static inline GLOBAL uint32_t *
+agx_cdm_barrier_designed_usc(GLOBAL uint32_t *out)
+{
+   agx_push(out, CDM_BARRIER, cfg) {
       cfg.unk_0 = true;
       cfg.unk_1 = true;
       cfg.unk_2 = true;
-      cfg.usc_cache_inval = true;
       cfg.unk_4 = true;
       cfg.unk_5 = true;
       cfg.unk_6 = true;
-      cfg.unk_7 = true;
       cfg.unk_8 = true;
-      cfg.unk_9 = true;
-      cfg.unk_10 = true;
-      cfg.unk_11 = true;
-      cfg.unk_12 = true;
-      cfg.unk_13 = true;
-      cfg.unk_14 = true;
-      cfg.unk_15 = true;
-      cfg.unk_16 = true;
-      cfg.unk_17 = true;
-      cfg.unk_18 = true;
-      cfg.unk_19 = true;
+      cfg.usc_cache_inval = true;
    }
 
    return out;
