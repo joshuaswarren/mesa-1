@@ -103,6 +103,67 @@ test_half_comparisons(void)
    }
 }
 
+/* G17G float branches against Apple's applegpu_g17g bytes
+ * (test/native/g17g/m5-compare-select-reference.metal cmp_fimm_*,
+ * cmp_freg16): a compared register not read again, slot 0. */
+static void
+test_g17g_float_compares(void)
+{
+   const struct agx3_cf_source_hints dead = {false, true};
+   const struct {
+      const char *name;
+      enum agx3_cf_fcond cond;
+      bool or_nan, half;
+      uint8_t minifloat, len, bytes[10];
+   } imm[] = {
+      {"x < 0.5", AGX3_CF_FCOND_LT, false, false, 32, 6,
+       {0x0a, 0x01, 0x2a, 0xa1, 0x03, 0x02}},
+      {"x > 1.0", AGX3_CF_FCOND_GT, false, false, 48, 6,
+       {0x0a, 0x01, 0x2a, 0xb1, 0x02, 0x02}},
+      {"x < -1.0", AGX3_CF_FCOND_LT, false, false, 176, 6,
+       {0x0a, 0x01, 0x3a, 0xb1, 0x03, 0x02}},
+      {"half x < 1.0h", AGX3_CF_FCOND_LT, false, true, 48, 6,
+       {0x0a, 0x00, 0x2a, 0xb1, 0x03, 0x02}},
+      {"x >= 0.0 as lt unordered", AGX3_CF_FCOND_LT, true, false, 0, 10,
+       {0x1a, 0x01, 0x2b, 0x81, 0x06, 0x00, 0x02, 0x02, 0x00, 0x00}},
+      {"x <= 2.0 as gt unordered", AGX3_CF_FCOND_GT, true, false, 64, 10,
+       {0x1a, 0x01, 0x2b, 0xc1, 0x06, 0x00, 0x03, 0x02, 0x00, 0x00}},
+      {"x == 0.0", AGX3_CF_FCOND_EQ, false, false, 0, 10,
+       {0x0a, 0x01, 0x2b, 0x81, 0x06, 0x00, 0x00, 0x02, 0x00, 0x00}},
+   };
+   for (unsigned i = 0; i < sizeof(imm) / sizeof(imm[0]); ++i) {
+      uint8_t out[AGX3_CF_MAX_LENGTH], len = 0;
+      const bool ok = agx3_cf_fcmp_zero_imm(
+         AGX_ISA_ENCODING_AGX3C, imm[i].cond, imm[i].or_nan, 0, 0,
+         imm[i].half, imm[i].minifloat, dead, 0, out, &len);
+      ++checks;
+      if (!ok || len != imm[i].len || memcmp(out, imm[i].bytes, len)) {
+         fprintf(stderr, "G17G fcmp %s failed\n", imm[i].name);
+         ++failures;
+      }
+   }
+
+   const uint16_t src[] = {0, 1};
+   const struct agx3_cf_source_hints hints[] = {dead, dead};
+   static const uint8_t half_lt[] = {0x0a, 0x00, 0x3a, 0x00, 0x13, 0x00};
+   uint8_t out[AGX3_CF_MAX_LENGTH], len = 0;
+   const bool ok = agx3_cf_fcmp_reg16(AGX_ISA_ENCODING_AGX3C,
+                                      AGX3_CF_FCOND_LT, false, 0, src, hints,
+                                      0, out, &len);
+   ++checks;
+   if (!ok || len != sizeof(half_lt) || memcmp(out, half_lt, len)) {
+      fprintf(stderr, "G17G half fcmp failed\n");
+      ++failures;
+   }
+
+   /* A ninth wait slot and an unordered equality stay closed. */
+   REJECT(agx3_cf_fcmp_zero_imm(AGX_ISA_ENCODING_AGX3C, AGX3_CF_FCOND_LT,
+                                false, 0, 0, false, 32, dead, 0x100, out,
+                                &len));
+   REJECT(agx3_cf_fcmp_zero_imm(AGX_ISA_ENCODING_AGX3C, AGX3_CF_FCOND_EQ,
+                                true, 0, 0, false, 32, dead, 0, out, &len));
+}
+
 static void
 test_half_zero_lifetime(void)
 {
@@ -607,6 +668,7 @@ main(void)
    test_float_absolute_register_compare();
    test_half_float_zero_compare();
    test_half_comparisons();
+   test_g17g_float_compares();
    test_half_zero_lifetime();
    test_half_immediate_compare();
    test_deep_break_levels();

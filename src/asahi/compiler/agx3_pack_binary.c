@@ -5887,7 +5887,8 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
     * the 146 instructions left refused in the Vulkan compute block -- had no
     * encoding. The constant is the ordinary minifloat, so a zero constant
     * still emits exactly the bytes it always did. */
-   if (is_float && enc == AGX_ISA_ENCODING_AGX3B &&
+   if (is_float &&
+       (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
        ((agx3_cf_fminifloat(I->src[1]) &&
          agx3_cf_immediate_freg(I->src[0])) ||
         (agx3_cf_fminifloat(I->src[0]) &&
@@ -6011,8 +6012,10 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
    }
 
    /* Two half-float registers compare natively, as Apple's G17P compiler
-    * does for `if (h0 < h1)`, with both sources' actual lifetimes. */
-   if (is_float && enc == AGX_ISA_ENCODING_AGX3B &&
+    * does for `if (h0 < h1)`, with both sources' actual lifetimes; and as
+    * Apple's G17G compiler does (agx3_cf_fcmp_reg16). */
+   if (is_float &&
+       (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
        agx3_src_is_register(I->src[0]) && agx3_src_is_register(I->src[1]) &&
        I->src[0].size == AGX_SIZE_16 && I->src[1].size == AGX_SIZE_16 &&
        agx_channels(I->src[0]) == 1 && agx_channels(I->src[1]) == 1 &&
