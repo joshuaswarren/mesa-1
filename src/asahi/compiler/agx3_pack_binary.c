@@ -16489,9 +16489,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * (including Apple's U32 dest=src=0 program). */
             if (hint == AGX3_ALU_HINT_NONE && dest.value == src.value)
                hint = AGX3_ALU_HINT_DISCARD;
-            if (!agx3_alu_popcount(enc, dest.value, src.value, !word, hint,
-                                   dest.cache, wait, bytes, &length) ||
-                !agx3_append(emission, bytes, length))
+            bool encoded = agx3_alu_popcount(enc, dest.value, src.value,
+                                             !word, hint, dest.cache, wait,
+                                             bytes, &length);
+            /* G17G's cbs has witnessed waits for load slots 1 and 8 only.
+             * Retire any other producer through the grounded band no-op
+             * first, as the uniform copies do, and count with no wait. */
+            if (!encoded && enc == AGX_ISA_ENCODING_AGX3C && wait &&
+                agx3_retire_slots_noop(emission, enc, wait)) {
+               outstanding &= (uint16_t)~wait;
+               encoded = agx3_alu_popcount(enc, dest.value, src.value, !word,
+                                           hint, dest.cache, 0, bytes,
+                                           &length);
+            }
+            if (!encoded || !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             if (widened &&
                 (!agx3_clr(enc, dest.value + 1, true, false, bytes,
