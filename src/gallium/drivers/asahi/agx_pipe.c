@@ -2175,6 +2175,29 @@ agx_init_compute_caps(struct pipe_screen *pscreen)
    caps->max_subgroups = caps->max_variable_threads_per_block / 32;
 }
 
+/*
+ * Whether the kernel binds a timestamp object: timer queries and the
+ * per-context timestamp buffer need DRM_ASAHI_GEM_BIND_OBJECT with
+ * DRM_ASAHI_BIND_OBJECT_USAGE_TIMESTAMPS. Asked of the kernel with a
+ * throwaway binding rather than assumed.
+ */
+static bool
+agx_kernel_binds_timestamps(struct agx_device *dev)
+{
+   struct agx_bo *bo =
+      agx_bo_create(dev, sizeof(struct agx_timestamps) * AGX_MAX_BATCHES, 0,
+                    AGX_BO_WRITEBACK | AGX_BO_SHARED, "Timestamp probe");
+   if (!bo)
+      return false;
+
+   uint32_t handle = 0;
+   const bool bound = agx_bind_timestamps(dev, bo, &handle) == 0;
+   if (bound)
+      dev->ops.bo_unbind_object(dev, handle);
+   agx_bo_unreference(dev, bo);
+   return bound;
+}
+
 static void
 agx_init_screen_caps(struct pipe_screen *pscreen)
 {
@@ -2204,13 +2227,19 @@ agx_init_screen_caps(struct pipe_screen *pscreen)
    caps->max_dual_source_render_targets = 1;
 
    caps->occlusion_query = true;
-   /* The experimental M5 and M6 kernels do not map timestamp objects yet. Timer
+   /* The experimental M5 kernel does not map timestamp objects yet. Timer
     * queries are optional for GL 2.x and GLES 3.0; do not advertise them or
     * require their unsupported buffer binding to create an ordinary context.
+    *
+    * They are not optional for GL 3.3 (ARB_timer_query), which gates every
+    * later desktop GL version, so on M6, whose kernel contract is still being
+    * written, follow what the kernel does rather than refusing outright.
     */
+   struct agx_device *dev = agx_device(pscreen);
    const bool timestamps =
-      !agx_params_m5_bringup_supported(&agx_device(pscreen)->params) &&
-      !agx_params_g18g_bringup_supported(&agx_device(pscreen)->params);
+      agx_params_m5_bringup_supported(&dev->params)     ? false
+      : agx_params_g18g_bringup_supported(&dev->params) ? agx_kernel_binds_timestamps(dev)
+                                                        : true;
    caps->query_timestamp = timestamps;
    caps->query_time_elapsed = timestamps;
    caps->query_so_overflow = true;
