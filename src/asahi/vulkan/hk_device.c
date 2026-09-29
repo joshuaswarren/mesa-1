@@ -334,6 +334,12 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->cdm_barrier_mask =
       debug_get_num_option("HK_CDM_BARRIER_MASK", 0) & 0x07ffffff;
 
+   /* Bounded poll before blocking syncobj waits (see vk_device.sync_wait_poll_us).
+    * Off by default; pays CPU to skip wake-up latency on short submit->signal
+    * round trips. */
+   dev->vk.sync_wait_poll_us =
+      CLAMP(debug_get_num_option("HK_SUBMIT_POLL_US", 0), 0, 1000000);
+
    if (instance->drirc.misc.disable_border_emulation) {
       dev->perftest |= HK_PERF_NOBORDER;
    }
