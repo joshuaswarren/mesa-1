@@ -4503,7 +4503,11 @@ agx_g17p_append_compute(struct agx_batch *batch,
       return false;
 
    const uint64_t shared = (uint64_t)info->local_size + variable_shared_mem;
-   if (shared > UINT32_MAX)
+   /* The M5 profile below has no threadgroup-memory size -- G17P's SPECLM
+    * carries one (agx3_g17p_compute_program_desc), G17G's generator takes
+    * none -- so a kernel using threadgroup memory would run without any.
+    * Decline it like any other shape the M5 record cannot express. */
+   if (shared > UINT32_MAX || (g17g && shared))
       return false;
    const struct agx3_g17p_compute_program_desc desc = {
       .program_va = program.gpu,
@@ -9170,8 +9174,10 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
          /* G17G is newly on this path: a shape the native record cannot
           * express falls back to the AGX2 encoder below, which is what this
           * part did for every dispatch until now. G17P has no fallback --
-          * its native path is the only proven one there. */
-         if (!agx_chip_m5_paths(dev->chip))
+          * its native path is the only proven one there -- and neither has
+          * G18G, which never ran that encoder: agx_cdm_launch() writes the
+          * AGX2 compute packet, and G18G's records are HAL300's. */
+         if (dev->chip != AGX_CHIP_G17G)
             {
                agx_native_descriptor_rejected(batch, "compute Ioto dispatch");
                return;
