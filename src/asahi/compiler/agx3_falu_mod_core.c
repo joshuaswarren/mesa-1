@@ -538,6 +538,19 @@ agx3_falu_fma_two_imm(enum agx_isa_encoding enc, uint16_t dest,
  * operand, modifier, lifetime hint and wait bit is an override, so a field
  * the selected encoding point does not consume makes the composer refuse
  * rather than silently drop it. */
+/*
+ * G17G (AGX3c) has the same cell, with its selector constants f95/f96 and
+ * eight wait slots (f97..f104). Apple's applegpu_g17g f32fma witnesses in
+ * test/native/g17g/m5-compare-select-reference.metal, the form chosen
+ * smallest first as Apple does:
+ *
+ *   fma(-2.0f, x, y)            09011ec1a002        f34 = 192
+ *   fma(x, 2.0f, y)             09010ec1a002        f34 = 64
+ *   fma(-2.0f, x, fabs(load))   09011ec189040202    f64 = 1, addend in f52
+ *
+ * The last is the shape of glamor's reflect-repeat texture coordinate. 16-bit
+ * operands and saturation are not witnessed on G17G and stay refused.
+ */
 bool
 agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
                           uint8_t multiplier, uint16_t src1, uint16_t addend,
@@ -545,10 +558,13 @@ agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
                           const struct agx3_falu_runtime *runtime,
                           uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], uint8_t *len)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || m == NULL || runtime == NULL ||
-       out == NULL || len == NULL || (dest & 1) || dest >= 256 ||
-       !slot_ok(src1, m->src1_16) || !slot_ok(addend, m->addend_16) ||
-       runtime->wait_mask > 0x3f)
+   const bool m5 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !m5) || m == NULL ||
+       runtime == NULL || out == NULL || len == NULL || (dest & 1) ||
+       dest >= 256 || !slot_ok(src1, m->src1_16) ||
+       !slot_ok(addend, m->addend_16) ||
+       runtime->wait_mask > (m5 ? 0xffu : 0x3fu) ||
+       (m5 && (m->src1_16 || m->addend_16 || m->saturate)))
       return false;
 
    /* There is no f35 register slot in this form, so nothing can carry a
@@ -571,6 +587,7 @@ agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
    const struct agx3_field_kv base[] = {
       KV(9, 2), KV(10, 2), KV(25, 2), KV(26, 2), KV(42, 1),
       KV(43, 2), KV(59, 2), KV(60, 2), KV(77, 2), KV(91, 2),
+      KV(95, 3), KV(96, 55),
    };
    /* Appended rather than counted: a designated-initialiser list with a
     * hand-written length silently grows a zeroed {field 0, value 0} entry the
@@ -592,9 +609,12 @@ agx3_falu_fma_mul_imm_mod(enum agx_isa_encoding enc, uint16_t dest,
    ov[n++] = (struct agx3_field_kv)KV(29, runtime->discard[1]);
    ov[n++] = (struct agx3_field_kv)KV(61, runtime->cache[2]);
    ov[n++] = (struct agx3_field_kv)KV(63, runtime->discard[2]);
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < (m5 ? 8 : 6); ++i)
       ov[n++] = (struct agx3_field_kv)KV(97 + i, (runtime->wait_mask >> i) & 1);
 
+   if (m5)
+      return agx3_bind_compose(enc, "f32fma", AGX3_BIND_APPLE_ORDER, base, 12,
+                               ov, n, out, len);
    for (unsigned ep = 0; ep <= 5; ++ep) {
       if (agx3_bind_compose(enc, "f32fma", ep, base, 10, ov, n, out, len))
          return true;

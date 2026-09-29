@@ -701,6 +701,62 @@ fma_mul_imm_vectors(void)
    return fail;
 }
 
+/* The same immediate-multiplier cell on G17G: Apple's applegpu_g17g bytes
+ * from test/native/g17g/m5-compare-select-reference.metal. The last one is
+ * glamor's reflect-repeat fma(-2.0, x, |y|) with the absolute addend kept in
+ * the instruction. */
+static unsigned
+m5_fma_mul_imm_vectors(void)
+{
+   const struct agx3_falu_runtime rt = {
+      .discard = {false, true, true},
+   };
+   const struct {
+      const char *name;
+      uint8_t mul;
+      uint16_t src1, addend;
+      struct agx3_falu_mods m;
+      uint8_t size, bytes[8];
+   } vectors[] = {
+      {"glm_fma_neg_imm_reg fma(-2.0, x, y)", 192, 0, 2, {0}, 6,
+       {0x09, 0x01, 0x1e, 0xc1, 0xa0, 0x02}},
+      {"glm_fma_imm_mul fma(x, 2.0, y)", 64, 0, 2, {0}, 6,
+       {0x09, 0x01, 0x0e, 0xc1, 0xa0, 0x02}},
+      {"glm_fma_negimm_absload fma(-2.0, x, |y|)", 192, 0, 4,
+       {.addend_abs = true}, 8,
+       {0x09, 0x01, 0x1e, 0xc1, 0x89, 0x04, 0x02, 0x02}},
+   };
+   unsigned fail = 0;
+   for (unsigned i = 0; i < sizeof(vectors) / sizeof(vectors[0]); ++i) {
+      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
+      if (!agx3_falu_fma_mul_imm_mod(AGX_ISA_ENCODING_AGX3C, 0, vectors[i].mul,
+                                     vectors[i].src1, vectors[i].addend,
+                                     &vectors[i].m, &rt, out, &size) ||
+          size != vectors[i].size ||
+          memcmp(out, vectors[i].bytes, size) != 0) {
+         fprintf(stderr, "G17G FMA minifloat multiplier %s failed\n",
+                 vectors[i].name);
+         fail++;
+      }
+   }
+   /* Half operands and saturation are not witnessed on G17G. */
+   const struct agx3_falu_mods bad[] = {
+      {.src1_16 = true}, {.addend_16 = true}, {.saturate = true},
+      {.src1_neg = true},
+   };
+   for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); ++i) {
+      uint8_t out[AGX3_FALU_MOD_MAX_LENGTH], size = 0;
+      if (agx3_falu_fma_mul_imm_mod(AGX_ISA_ENCODING_AGX3C, 0, 192, 0, 4,
+                                    &bad[i], &rt, out, &size)) {
+         fprintf(stderr, "G17G FMA minifloat multiplier accepted %u\n", i);
+         fail++;
+      }
+   }
+   printf("G17G FMA minifloat multiplier: three Apple vectors: %u failures\n",
+          fail);
+   return fail;
+}
+
 static unsigned
 m5_fma_immediate_vectors(void)
 {
@@ -881,6 +937,7 @@ main(void)
 {
    unsigned pass = 0, fail = runtime_vectors() + add_runtime_vectors() + narrow_runtime_vectors() + mul_runtime_vectors() + fma_addend_vectors() + fma_two_vectors() + fma_mul_imm_vectors() + m5_runtime_vectors();
    fail += m5_fma_immediate_vectors();
+   fail += m5_fma_mul_imm_vectors();
    for (size_t i = 0; i < mod_vec_count; ++i) {
       const struct mod_vec *v = &mod_vecs[i];
       const enum agx_isa_encoding e =

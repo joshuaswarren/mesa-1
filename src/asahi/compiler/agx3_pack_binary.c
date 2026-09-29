@@ -15908,8 +15908,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
           *
           * A modifier on the immediate itself is folded into the minifloat:
           * Apple encodes fma(0.5, -b, c) as f34 = -0.5, not as a neg bit,
-          * and there is no register slot here to hang one on. */
-         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FFMA &&
+          * and there is no register slot here to hang one on.
+          *
+          * G17G takes the same cell for an absolute addend -- glamor's
+          * fma(-2.0, x, |y|) -- witnessed in agx3_falu_fma_mul_imm_mod(); an
+          * absolute multiplicand is not witnessed there and stays refused. */
+         if ((enc == AGX_ISA_ENCODING_AGX3B ||
+              enc == AGX_ISA_ENCODING_AGX3C) && I->op == AGX_OPCODE_FFMA &&
              I->nr_dests == 1 && I->nr_srcs == 3 &&
              agx3_vary_reg32(I->dest[0]) && agx_channels(I->dest[0]) == 1 &&
              (I->src[0].type == AGX_INDEX_IMMEDIATE) !=
@@ -15922,7 +15927,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (agx3_plain_immediate(imm) && imm.value <= 255 &&
                 agx3_mod_src_any_width(reg) && agx3_mod_src_any_width(add)) {
                if (reg.kill || add.kill || (reg.cache && reg.discard) ||
-                   (add.cache && add.discard))
+                   (add.cache && add.discard) ||
+                   (enc == AGX_ISA_ENCODING_AGX3C && reg.abs))
                   AGX3_REFUSE(I);
 
                uint8_t multiplier = imm.value;
