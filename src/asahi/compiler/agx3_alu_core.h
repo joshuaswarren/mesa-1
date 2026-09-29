@@ -546,6 +546,15 @@ struct agx3_fsel32_gpu1_desc {
 bool agx3_alu_fcmp_select32_gpu1(const struct agx3_fsel32_gpu1_desc *d,
                                  uint8_t out[AGX3_ALU_MAX_LENGTH],
                                  uint8_t *len);
+
+/*
+ * The same comparison with a 16-bit result (`fseli16`). Here a selected
+ * register is a 16-bit half (any index) and a selected immediate is an 8-bit
+ * integer, as in Mesa's fcmpsel; see agx3_alu_core.c for the witnesses.
+ */
+bool agx3_alu_fcmp_select16_gpu1(const struct agx3_fsel32_gpu1_desc *d,
+                                 uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                 uint8_t *len);
 /* dest(16) = src0(16) & ~src1(16): Apple's ctz `bit_andc h3, h3, h2`
  * (gpu/m5-xfb-alu3-reference.metal). */
 bool agx3_alu_bit_andc16_gpu1(uint16_t dest, bool dest_cache, uint16_t src0,

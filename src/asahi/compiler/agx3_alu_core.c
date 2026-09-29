@@ -3343,10 +3343,31 @@ agx3_alu_fcmp_select_gpu1(uint16_t dest, const uint16_t src[4],
     * own form; the 32-bit one below selects two registers only. */
    if (dest_16 && compare_zero && src[1] == 0 && !compare_abs[0] &&
        !compare_abs[1] && immediate[0] && !immediate[1] && src[2] <= 7 &&
-       hints[2] == AGX3_ALU_HINT_NONE)
-      return agx3_alu_fcmp_select16_const_reg_gpu1(
-         dest, src[0], hints[0], 0, (uint8_t)src[2], src[3], condition,
-         wait_mask, out, len);
+       hints[2] == AGX3_ALU_HINT_NONE &&
+       agx3_alu_fcmp_select16_const_reg_gpu1(
+          dest, src[0], hints[0], 0, (uint8_t)src[2], src[3], condition,
+          wait_mask, out, len))
+      return true;
+
+   /* Every other 16-bit result is the general `fseli16`: registers or
+    * integer bytes on either side, a register or minifloat comparand. */
+   if (dest_16 && !compare_abs[0] && !compare_abs[1]) {
+      const struct agx3_fsel32_gpu1_desc d = {
+         .dest = dest,
+         .dest_cache = dest_cache,
+         .cmp0 = src[0],
+         .cmp0_hint = hints[0],
+         .cmp1_immediate = compare_zero,
+         .cmp1 = src[1],
+         .cmp1_hint = hints[1],
+         .sel_immediate = {immediate[0], immediate[1]},
+         .sel = {src[2], src[3]},
+         .sel_hint = {hints[2], hints[3]},
+         .condition = condition,
+         .wait_mask = wait_mask,
+      };
+      return agx3_alu_fcmp_select16_gpu1(&d, out, len);
+   }
 
    if (dest_16 || compare_abs[0] || compare_abs[1] ||
        (compare_zero && src[1] != 0) || (immediate[0] && src[2] != 0) ||
@@ -3427,6 +3448,79 @@ agx3_alu_fcmp_select16_const_reg_gpu1(
    return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "fseli16", 8, base,
                             sizeof(base) / sizeof(base[0]), fields,
                             sizeof(fields) / sizeof(fields[0]), out, len);
+}
+
+/*
+ * The general GPU1 `fseli16`: a 32-bit float comparison of a register with a
+ * register or a minifloat, selecting 16-bit registers or 8-bit integers into
+ * a 16-bit result. It is the `fseli32` field layout (see
+ * agx3_alu_fcmp_select32_gpu1) with the result and both selected values
+ * declared 16-bit (f10, f58, f72 = 1) and opcode f77 = 75. Apple's
+ * applegpu_g17g kernels (test/native/g17g/m5-compare-select-reference.metal),
+ * each reproduced in test-agx3-alu-core.c:
+ *
+ *   (x <  y)    ? h0 : h1       12011d03820403008005   glamor gradient stops
+ *   (x <  y)    ? 255 : 0       02011d03a2ff03002080   a discard mask
+ *   (x == 0.0f) ? 255 : 0       02010d81a6ff00022080   glamor's stipple
+ *   (x <  0.0f) ? 255 : 0       02010d81a2ff03022080
+ *
+ * A zero immediate leaves its value field (f32, f49, f63) empty. The form is
+ * Apple's own choice, smallest first (AGX3_BIND_APPLE_ORDER), which is also
+ * how agx3_alu_fcmp_select16_const_reg_gpu1's sixteen-byte witnesses come
+ * out once their slot-8 wait is set.
+ */
+bool
+agx3_alu_fcmp_select16_gpu1(const struct agx3_fsel32_gpu1_desc *d,
+                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (!d || !out || !len || d->dest >= 256 || (d->wait_mask & ~0xffu) ||
+       (d->condition != 0 && d->condition != 1 && d->condition != 2 &&
+        d->condition != 5 && d->condition != 6))
+      return false;
+
+   const uint16_t src[4] = {d->cmp0, d->cmp1, d->sel[0], d->sel[1]};
+   const bool imm[4] = {false, d->cmp1_immediate, d->sel_immediate[0],
+                        d->sel_immediate[1]};
+   const enum agx3_alu_hint hints[4] = {d->cmp0_hint, d->cmp1_hint,
+                                        d->sel_hint[0], d->sel_hint[1]};
+   for (unsigned i = 0; i < 4; ++i) {
+      /* The comparands are 32-bit registers (even halves); the selected
+       * values are 16-bit halves. */
+      if (src[i] >= 256 || (!imm[i] && i < 2 && (src[i] & 1)) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE ||
+          (imm[i] && hints[i] != AGX3_ALU_HINT_NONE))
+         return false;
+   }
+
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 1}, {23, 2}, {24, 2},
+      {40, imm[1] ? 1 : 2}, {41, 2},
+      {57, imm[2] ? 1 : 2}, {58, 1},
+      {71, imm[3] ? 1 : 2}, {72, 1},
+      {76, 3}, {77, 75},
+   };
+   struct agx3_field_kv fields[23] = {
+      {2, d->dest}, {11, d->dest_cache}, {16, src[0]},
+      {imm[1] ? 32 : 33, src[1]},
+      {imm[2] ? 49 : 50, src[2]},
+      {imm[3] ? 63 : 64, src[3]},
+      {86, d->condition},
+   };
+   static const uint16_t cache[] = {25, 42, 59, 73};
+   static const uint16_t discard[] = {27, 44, 61, 75};
+   unsigned n = 7;
+   for (unsigned i = 0; i < 4; ++i) {
+      fields[n++] = (struct agx3_field_kv){
+         cache[i], hints[i] == AGX3_ALU_HINT_CACHE};
+      fields[n++] = (struct agx3_field_kv){
+         discard[i], hints[i] == AGX3_ALU_HINT_DISCARD};
+   }
+   for (unsigned i = 0; i < 8; ++i)
+      fields[n++] = (struct agx3_field_kv){78 + i, !!(d->wait_mask & (1u << i))};
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "fseli16",
+                            AGX3_BIND_APPLE_ORDER, base,
+                            sizeof(base) / sizeof(base[0]), fields, n, out,
+                            len);
 }
 
 /* Native short arithmetic shift: f10/f24 select half destination/source. */

@@ -13354,7 +13354,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               (agx3_vary_reg32(I->src[0]) && agx3_src_is_zero_imm(I->src[1])) ||
               (agx3_src_is_zero_imm(I->src[0]) && agx3_vary_reg32(I->src[1]))) &&
              (agx3_src_is_register(I->src[2]) ||
-              agx3_src_is_register(I->src[3]))) {
+              agx3_src_is_register(I->src[3]) ||
+              /* G17G's fseli16 also selects two integer bytes, e.g. the
+               * 255/0 mask a conditional discard lowers to. */
+              (enc == AGX_ISA_ENCODING_AGX3C &&
+               I->dest[0].size == AGX_SIZE_16))) {
             /* G16G's condition-3/7 full-register form is grounded only when
              * the alternatives are tied min/max operands, handled above.
              * Rewriting an untied all-register form to ordered GE/LE returns

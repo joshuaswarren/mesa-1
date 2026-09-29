@@ -259,6 +259,71 @@ test_native_f32_rcp_rsqrt(void)
       0, 0, AGX3_ALU_HINT_DISCARD, 0, 1, 10, 3, 128, bytes, &len));
    assert(!agx3_alu_fcmp_select16_const_reg_gpu1(
       0, 0, AGX3_ALU_HINT_DISCARD, 0, 1, 10, 1, 32, bytes, &len));
+
+   /* The general 16-bit select, against Apple's applegpu_g17g bytes from
+    * test/native/g17g/m5-compare-select-reference.metal (glm_fsel16_regs,
+    * sel_f16_imm, glm_fsel16_eqzero_imm, sel_f16_imm_zero), and the two
+    * mixed constant/register witnesses above, which it must also spell. */
+   const struct {
+      struct agx3_fsel32_gpu1_desc d;
+      uint8_t bytes[16];
+      uint8_t len;
+   } fsel16[] = {
+      {{.dest = 2, .cmp0 = 0, .cmp0_hint = AGX3_ALU_HINT_DISCARD, .cmp1 = 2,
+        .cmp1_hint = AGX3_ALU_HINT_DISCARD, .sel = {4, 5},
+        .sel_hint = {AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD},
+        .condition = 1},
+       {0x12, 0x01, 0x1d, 0x03, 0x82, 0x04, 0x03, 0x00, 0x80, 0x05}, 10},
+      {{.dest = 0, .cmp0 = 0, .cmp0_hint = AGX3_ALU_HINT_DISCARD, .cmp1 = 2,
+        .cmp1_hint = AGX3_ALU_HINT_DISCARD, .sel_immediate = {true, true},
+        .sel = {255, 0}, .condition = 1},
+       {0x02, 0x01, 0x1d, 0x03, 0xa2, 0xff, 0x03, 0x00, 0x20, 0x80}, 10},
+      {{.dest = 0, .cmp0 = 0, .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+        .cmp1_immediate = true, .cmp1 = 0, .sel_immediate = {true, true},
+        .sel = {255, 0}, .condition = 0},
+       {0x02, 0x01, 0x0d, 0x81, 0xa6, 0xff, 0x00, 0x02, 0x20, 0x80}, 10},
+      {{.dest = 0, .cmp0 = 0, .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+        .cmp1_immediate = true, .cmp1 = 0, .sel_immediate = {true, true},
+        .sel = {255, 0}, .condition = 1},
+       {0x02, 0x01, 0x0d, 0x81, 0xa2, 0xff, 0x03, 0x02, 0x20, 0x80}, 10},
+      {{.dest = 0, .cmp0 = 0, .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+        .cmp1_immediate = true, .cmp1 = 0, .sel_immediate = {true, false},
+        .sel = {1, 10}, .sel_hint = {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD},
+        .condition = 1, .wait_mask = 128},
+       {0}, 0 /* mixsel_lt */},
+      {{.dest = 0, .cmp0 = 0, .cmp0_hint = AGX3_ALU_HINT_DISCARD,
+        .cmp1_immediate = true, .cmp1 = 0, .sel_immediate = {true, false},
+        .sel = {1, 10}, .sel_hint = {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_DISCARD},
+        .condition = 5, .wait_mask = 128},
+       {0}, 0 /* mixsel_ge */},
+   };
+   for (unsigned i = 0; i < sizeof(fsel16) / sizeof(fsel16[0]); ++i) {
+      const uint8_t *want = fsel16[i].bytes;
+      unsigned want_len = fsel16[i].len;
+      if (i == 4) {
+         want = mixsel_lt;
+         want_len = sizeof(mixsel_lt);
+      } else if (i == 5) {
+         want = mixsel_ge;
+         want_len = sizeof(mixsel_ge);
+      }
+      assert(agx3_alu_fcmp_select16_gpu1(&fsel16[i].d, bytes, &len));
+      assert(len == want_len && !memcmp(bytes, want, len));
+   }
+   /* Comparands are 32-bit registers; a hinted immediate, a condition
+    * outside the five and a ninth wait slot stay closed. */
+   struct agx3_fsel32_gpu1_desc bad = fsel16[0].d;
+   bad.cmp1 = 3;
+   assert(!agx3_alu_fcmp_select16_gpu1(&bad, bytes, &len));
+   bad = fsel16[1].d;
+   bad.sel_hint[0] = AGX3_ALU_HINT_CACHE;
+   assert(!agx3_alu_fcmp_select16_gpu1(&bad, bytes, &len));
+   bad = fsel16[1].d;
+   bad.condition = 3;
+   assert(!agx3_alu_fcmp_select16_gpu1(&bad, bytes, &len));
+   bad = fsel16[1].d;
+   bad.wait_mask = 256;
+   assert(!agx3_alu_fcmp_select16_gpu1(&bad, bytes, &len));
 }
 
 /*
@@ -5743,11 +5808,17 @@ static void test_gpu1_float_compare_select(void)
    assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C, 0, gears, true,
       no_abs, no_abs, gears_imm, gears_hints, 1, false, false, 0x80, out, &len));
    exact(out, len, "2200032a2300a00214804a200000c000");
-   uint16_t src[4] = {14, 0, 26, 0};
+   /* A 16-bit result selecting a register or zero is the general fseli16:
+    * Apple's `(x > 0.0f) ? s : ushort(0)` (m5-compare-select-reference,
+    * sel_f16_reg_zero). */
+   uint16_t src[4] = {0, 0, 8, 0};
    const bool immediate[2] = {false, true};
+   const enum agx3_alu_hint reg_zero_hints[4] = {D, N, D, N};
+   assert(agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
+      0, src, true, no_abs, no_abs, immediate, reg_zero_hints, 2, true, false,
+      0, out, &len));
+   exact(out, len, "02010d81820802022080");
    const enum agx3_alu_hint hints[4] = {0};
-   assert(!agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
-      14, src, true, no_abs, no_abs, immediate, hints, 2, true, false, 0, out, &len));
    src[3] = 1; /* A minifloat payload is not an integer result immediate. */
    assert(!agx3_alu_fcmp_select_reg_imm(AGX_ISA_ENCODING_AGX3C,
       14, src, true, no_abs, no_abs, immediate, hints, 2, false, false, 0, out, &len));
