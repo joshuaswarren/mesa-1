@@ -3258,6 +3258,18 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
    }
 
+   /* What follows is the AGX2 USC launch. G18G's table holds agx3d images
+    * for the M5 compute profile, which only the Gallium driver launches
+    * (agx_launch_precomp); keep refusing here as before that table existed.
+    */
+   if (agx_chip_command_stream_generation(dev->dev.chip) !=
+       AGX_CS_GENERATION_AGX2) {
+      mesa_loge("no precompiled launch for helper %u on %s", idx,
+                agx_chip_name(dev->dev.chip));
+      vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+      return;
+   }
+
    struct hk_cs **target = (barrier & AGX_POSTGFX)  ? &cmd->current_cs.post_gfx
                            : (barrier & AGX_PREGFX) ? &cmd->current_cs.pre_gfx
                                                     : &cmd->current_cs.cs;

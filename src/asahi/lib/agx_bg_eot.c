@@ -682,7 +682,13 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       agx_workgroup(info->workgroup_size[0], info->workgroup_size[1],
                     info->workgroup_size[2]);
 
-   if (cache->dev->chip == AGX_CHIP_G17P) {
+   /* G18G's kernels (agx3d, compiled as G17G) sit in the same CODE container
+    * as G17P's: the M5 compute profile takes the entry exactly as the API
+    * compute path builds it (agx_g17p_append_compute). */
+   const bool agx3_image = cache->dev->chip == AGX_CHIP_G17P ||
+                           cache->dev->chip == AGX_CHIP_G18G;
+
+   if (agx3_image) {
       const size_t lead_size = 0x340;
       const size_t main_span = MAX2(info->main_size, info->binary_size);
       const size_t block_size = agx3_code_block_size(main_span);
@@ -699,7 +705,7 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
            (info->rodata.offset > info->binary_size ||
             rodata_size > info->binary_size - info->rodata.offset)) ||
           info->preamble_offset || info->nr_preamble_gprs) {
-         mesa_loge("asahi: libagx program %u has no G17P launch shape: "
+         mesa_loge("asahi: libagx program %u has no AGX3 launch shape: "
                    "main %u@%u of %u, preamble %u/%u, rodata %u",
                    program, info->main_size, info->main_offset,
                    info->binary_size, info->preamble_offset,
@@ -740,9 +746,10 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
       return NULL;
    }
 
-   if (cache->dev->chip == AGX_CHIP_G17P) {
-      /* HAL200 consumes the CODE entry through a dispatch-local Ioto program;
-       * none of the legacy USC launch words below are part of that ABI. */
+   if (agx3_image) {
+      /* HAL200 and HAL300 consume the CODE entry through a dispatch-local Ioto
+       * program; none of the legacy USC launch words below are part of that
+       * ABI. */
       p_atomic_set(&cache->precomp[program], p);
       return p;
    }

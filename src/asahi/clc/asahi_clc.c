@@ -23,9 +23,30 @@
 #include <string.h>
 #include <unistd.h>
 #include "util/macros.h"
+#include "util/set.h"
 #include <sys/mman.h>
 
-const char *targets[] = {"g13g", "g13x", "g17p"};
+const char *targets[] = {"g13g", "g13x", "g17p", "g18g"};
+
+/* G18G compiles as G17G (agx3c) and re-encodes its code as agx3d, exactly as
+ * the driver's own compiles do (agx_device_key::emit_agx3d). */
+static bool
+target_is_agx3(const char *target)
+{
+   return !strcmp(target, "g17p") || !strcmp(target, "g18g");
+}
+
+/* G18G's encoders are still being grounded form by form, and its compute
+ * profile (agx3_g17g_compute_program_generate) has neither scratch nor a
+ * threadgroup-memory size. A qualified kernel it cannot take yet is left out
+ * of its table -- a NULL entry, which agx_launch_precomp refuses at launch --
+ * instead of failing the build. G17P stays strict: every kernel on its list
+ * compiles. */
+static bool
+target_omits_refused_programs(const char *target)
+{
+   return !strcmp(target, "g18g");
+}
 
 #define foreach_target(target)                                                 \
    for (const char **target = &targets[0];                                     \
@@ -261,10 +282,11 @@ remap_variant(nir_function *func, unsigned variant, const char *target)
 static bool
 target_supports_program(const char *target, const nir_function *func)
 {
-   /* AGX3 internal programs need both native machine code and the HAL200
-    * Ioto/CDM launch contract.  Qualify only kernels with a strict public
-    * execute oracle; every other slot remains NULL and fails closed. */
-   return strcmp(target, "g17p") ||
+   /* AGX3 internal programs need both native machine code and an Ioto/CDM
+    * launch contract (HAL200 on G17P, the M5 compute profile on G18G).
+    * Qualify only kernels with a strict public execute oracle; every other
+    * slot remains NULL and fails closed. */
+   return !target_is_agx3(target) ||
           !strcmp(func->name, "libagx_fill_uint4") ||
           !strcmp(func->name, "libagx_copy_image") ||
           !strcmp(func->name, "libagx_mipmap_unorm8x4") ||
@@ -330,10 +352,12 @@ target_supports_program(const char *target, const nir_function *func)
 }
 
 /* Like nir_precomp_print_binary_map, but programs the target does not support
- * are left NULL, as they have no binary.
+ * are left NULL, as they have no binary. So are the variants in `omitted`,
+ * named as their binaries would have been.
  */
 static void
-print_supported_binary_map(FILE *fp, const nir_shader *nir, const char *target)
+print_supported_binary_map(FILE *fp, const nir_shader *nir, const char *target,
+                           const struct set *omitted)
 {
    fprintf(fp, "const uint32_t *libagx_%s[LIBAGX_NUM_PROGRAMS] = {\n", target);
 
@@ -342,6 +366,12 @@ print_supported_binary_map(FILE *fp, const nir_shader *nir, const char *target)
          continue;
 
       for (unsigned v = 0; v < nir_precomp_nr_variants(func); ++v) {
+         char name[256];
+         snprintf(name, sizeof(name), "%s_%u_%s", func->name, v,
+                  remap_variant(func, v, target));
+         if (_mesa_set_search(omitted, name))
+            continue;
+
          fprintf(fp, "    [");
          nir_precomp_print_enum_variant_value(fp, func, v);
          fprintf(fp, "] = %s_%u_%s,\n", func->name, v,
@@ -429,6 +459,11 @@ main(int argc, char **argv)
    /* load_preamble works at 16-bit granularity */
    struct nir_precomp_opts opt = {.arg_align_B = 2};
 
+   /* Variants a target_omits_refused_programs() target could not take. */
+   struct set *omitted =
+      _mesa_set_create(mem_ctx, _mesa_hash_string, _mesa_key_string_equal);
+   unsigned nr_compiled = 0;
+
    nir_foreach_entrypoint(libfunc, nir) {
       libfunc->pass_flags = 0;
       struct nir_precomp_layout layout =
@@ -498,21 +533,30 @@ main(int argc, char **argv)
 
                .reserved_preamble = layout.size_B / 2,
                .is_helper = is_helper,
-               .no_preamble = !strcmp(*target, "g17p"),
+               .no_preamble = target_is_agx3(*target),
 
                /* G17P has a smaller register file than AGX2, so the largest
                 * kernels spill to thread-private storage like API shaders.
+                * G18G's profile cannot launch a spilling kernel, but letting
+                * the allocator spill turns "does not fit" into a scratch size
+                * checked below rather than an unspillable-shader assert.
                 */
-               .has_scratch = !strcmp(*target, "g17p"),
+               .has_scratch = target_is_agx3(*target),
             };
 
-            key.dev.encoding = !strcmp(*target, "g17p")
-                                  ? AGX_ISA_ENCODING_AGX3B
-                                  : AGX_ISA_ENCODING_AGX2;
-            key.dev.chip = !strcmp(*target, "g17p")
-                              ? AGX_CHIP_G17P
-                              : !strcmp(*target, "g13x") ? AGX_CHIP_G13X
-                                                          : AGX_CHIP_G13G;
+            if (!strcmp(*target, "g17p")) {
+               key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+               key.dev.chip = AGX_CHIP_G17P;
+            } else if (!strcmp(*target, "g18g")) {
+               /* The device key agx_gather_device_key() builds for G18G. */
+               key.dev.encoding = AGX_ISA_ENCODING_AGX3C;
+               key.dev.chip = AGX_CHIP_G17G;
+               key.dev.emit_agx3d = true;
+            } else {
+               key.dev.encoding = AGX_ISA_ENCODING_AGX2;
+               key.dev.chip = !strcmp(*target, "g13x") ? AGX_CHIP_G13X
+                                                        : AGX_CHIP_G13G;
+            }
 
             if (has_atomic) {
                key.dev.needs_g13x_coherency =
@@ -528,7 +572,7 @@ main(int argc, char **argv)
             }
 
             uint16_t printf_uniform = 0;
-            if (!strcmp(*target, "g17p")) {
+            if (target_is_agx3(*target)) {
                /* Both frontends publish the allocator-owned printf buffer.
                 * Keep that runtime ABI instead of dropping kernel assertions
                 * as upstream did before this branch supplied the address. */
@@ -550,12 +594,27 @@ main(int argc, char **argv)
                            nir_metadata_control_flow, &base_halfs);
                }
             }
-            if (!agx_compile_shader_nir(clone, &key, &compiled)) {
-               fprintf(stderr, "Failed to compile %s for %s\n",
-                       libfunc->name, *target);
-               ralloc_free(clone);
-               return 1;
+            bool compiled_ok = agx_compile_shader_nir(clone, &key, &compiled);
+            if (compiled_ok && target_omits_refused_programs(*target) &&
+                compiled.info.scratch_size) {
+               free(compiled.binary);
+               compiled_ok = false;
             }
+            if (!compiled_ok) {
+               if (!target_omits_refused_programs(*target)) {
+                  fprintf(stderr, "Failed to compile %s for %s\n",
+                          libfunc->name, *target);
+                  ralloc_free(clone);
+                  return 1;
+               }
+               _mesa_set_add(omitted,
+                             ralloc_asprintf(mem_ctx, "%s_%u_%s",
+                                             libfunc->name, v, *target));
+               ralloc_free(clone);
+               continue;
+            }
+            if (target_omits_refused_programs(*target))
+               nr_compiled++;
             print_shader(fp_c, libfunc->name, *target, v, &compiled,
                          printf_uniform);
             free(compiled.binary);
@@ -580,7 +639,18 @@ main(int argc, char **argv)
    foreach_target(target)
    {
       nir_precomp_print_extern_binary_map(fp_h, "libagx", *target);
-      print_supported_binary_map(fp_c, nir, *target);
+      print_supported_binary_map(fp_c, nir, *target, omitted);
+   }
+
+   /* Say which qualified kernels a lenient target went without, so a newly
+    * grounded encoding shows up as a shorter list. */
+   if (omitted->entries) {
+      fprintf(stderr, "asahi_clc: %u of %u qualified kernel variants are "
+              "left NULL for G18G (no encoding or launch shape yet):",
+              omitted->entries, omitted->entries + nr_compiled);
+      set_foreach(omitted, entry)
+         fprintf(stderr, " %s", (const char *)entry->key);
+      fprintf(stderr, "\n");
    }
 
    glsl_type_singleton_decref();

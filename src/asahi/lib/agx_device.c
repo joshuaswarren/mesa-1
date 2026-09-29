@@ -1368,6 +1368,12 @@ agx_open_device(void *memctx, struct agx_device *dev)
          dev->libagx_programs = libagx_g13g;
    } else if (dev->chip == AGX_CHIP_G17P) {
       dev->libagx_programs = libagx_g17p;
+   } else if (dev->chip == AGX_CHIP_G18G) {
+      /* Compiled as G17G and re-encoded as agx3d (asahi_clc), launched
+       * through the M5 compute profile (agx_launch_precomp). G17G keeps no
+       * table: HoneyKrisp's M5 empty-tile clear keys off whether
+       * LIBAGX_FILL_UINT4 exists, and no M5 prepass is proven on hardware. */
+      dev->libagx_programs = libagx_g18g;
    } else {
       dev->libagx_programs = NULL;
    }

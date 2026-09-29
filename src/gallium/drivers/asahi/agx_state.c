@@ -4681,6 +4681,190 @@ agx_launch_internal(struct agx_batch *batch, struct agx_grid grid,
           "Failed to reserve sufficient space in encoder");
 }
 
+/* Upload an AGX3 precompiled kernel's arguments and publish them, with its
+ * promoted constants, as Ioto uniform ranges. Shared by the G17P and M5
+ * launches below; refuses the batch and returns false on failure. */
+static bool
+agx_precomp_agx3_uniform_ranges(struct agx_batch *batch,
+                                const struct agx_precompiled_shader *cs,
+                                const void *args, size_t arg_size,
+                                struct agx3_ioto_uniform_range ranges[2],
+                                unsigned *range_count)
+{
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+
+   /* Match the precompiler's rebased arguments and optional runtime printf
+    * address. Pad packed argument structs for Ioto's whole-dword loads. */
+   const size_t printf_offset = cs->info.printf_uniform
+      ? (size_t)(cs->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
+      : 0;
+   const size_t upload_size = ALIGN_POT(
+      cs->info.printf_uniform ? MAX2(arg_size, printf_offset + 8) : arg_size, 4);
+   struct agx_ptr uploaded = agx_pool_alloc_aligned(&batch->pool, upload_size, 4);
+   if (!uploaded.cpu || upload_size / 2 > UINT16_MAX)
+      {
+         agx_native_descriptor_rejected(batch, "precompiled argument upload");
+         return false;
+      }
+   memcpy(uploaded.cpu, args, arg_size);
+   memset((uint8_t *)uploaded.cpu + arg_size, 0, upload_size - arg_size);
+   if (cs->info.printf_uniform)
+      memcpy((uint8_t *)uploaded.cpu + printf_offset,
+             &dev->printf_buffer_address, sizeof(uint64_t));
+   if (!uploaded.gpu) {
+      agx_native_descriptor_rejected(batch, "precompiled compute resources");
+      return false;
+   }
+
+   /* Above the halves the AGX3 hardware ABI owns, matching where the
+    * precompiler now places these loads. */
+   ranges[0] = (struct agx3_ioto_uniform_range){
+      .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
+      .size_halfs = upload_size / 2,
+      .address = uploaded.gpu,
+   };
+   *range_count = 1;
+
+   /* Constants the compiler promoted out of the code are published as a
+    * second range, exactly as the legacy USC path maps them with
+    * agx_usc_immediates(). Their base is already in this ABI's numbering:
+    * agx_opt_promote_constants() allocates above push_count, which starts
+    * at the reserved preamble. Without this the kernel reads whatever the
+    * uniform file happened to hold -- which is why the launch-shape check
+    * refused a kernel carrying rodata rather than dispatching one. */
+   if (cs->info.rodata.size_16) {
+      ranges[(*range_count)++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = cs->info.rodata.base_uniform,
+         .size_halfs = cs->info.rodata.size_16,
+         .address = cs->ptr + cs->rodata_offset,
+      };
+   }
+   return true;
+}
+
+/* G17G's and G18G's precompiled kernels, through the M5 compute profile the
+ * API compute path uses (agx_g17p_append_compute): the graphics generator's
+ * compute form, re-encoded as agx3d on G18G, and the captured M5 direct
+ * launch record, one terminated dispatch per command.
+ *
+ * That profile has no scratch and no threadgroup-memory size, which G17P's
+ * SPECLM carries (agx3_g17p_compute_program_desc). A kernel that keeps
+ * cross-subgroup scratch in threadgroup memory -- the prefix sums, the
+ * restart unroll -- would read and write memory it was never given, so it is
+ * refused rather than launched. Hardware execution is unproven: this is
+ * checked under the drm-shim only. */
+static void
+agx_launch_precomp_m5(struct agx_batch *batch, struct agx_grid grid,
+                      const struct agx_precompiled_shader *cs,
+                      const void *args, size_t arg_size)
+{
+   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+
+   if (!cs->bo || !cs->info.main_size || !cs->info.nr_gprs ||
+       cs->info.nr_preamble_gprs || cs->info.agx3_tps_size ||
+       cs->info.local_size ||
+       (cs->info.rodata.size_16 && !cs->rodata_offset) ||
+       (cs->info.printf_uniform &&
+        cs->info.printf_uniform < AGX_ABI_AGX3_PRECOMP_ARG_HALFS) ||
+       !cs->info.agx3_staging_known || !args || !arg_size ||
+       arg_size > UINT16_MAX * 2u ||
+       cs->entry_offset > UINT64_MAX - cs->ptr ||
+       !cs->b.workgroup.x || !cs->b.workgroup.y || !cs->b.workgroup.z ||
+       agx_is_indirect(grid)) {
+      agx_native_descriptor_rejected(batch, "precompiled M5 compute program");
+      return;
+   }
+
+   if (!grid.count[0] || !grid.count[1] || !grid.count[2])
+      return;
+
+   struct agx3_ioto_uniform_range ranges[2];
+   unsigned range_count;
+   if (!agx_precomp_agx3_uniform_ranges(batch, cs, args, arg_size, ranges,
+                                        &range_count))
+      return;
+
+   struct agx_bo *program_bo = NULL;
+   struct agx_ptr program = agx_pool_alloc_aligned_with_bo(
+      &batch->pipeline_pool, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE,
+      AGX_IOTO_PROGRAM_ALIGNMENT, &program_bo);
+   const uint64_t shader_va = cs->ptr + cs->entry_offset;
+   const struct agx3_g17p_graphics_program_desc desc = {
+      .program_va = program.gpu,
+      .shader_va = shader_va,
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+      .shader_binary_size = cs->info.main_size,
+      .nr_gprs = cs->info.nr_gprs,
+      .compiler_d_valid = cs->info.agx3_staging_known,
+      .compiler_d = (uint32_t)cs->info.agx3_staging_halfs * 2,
+   };
+   struct agx3_g17p_native_compute_program_desc bind_desc = {
+      .program_va = program.gpu,
+      .shader_va = shader_va,
+   };
+   struct agx3_g17p_graphics_program generated;
+   struct agx3_compute_program launch;
+   if (!program.cpu || !program_bo ||
+       !agx_va_in_usc_window(dev, program.gpu) ||
+       !agx_va_in_usc_window(dev, shader_va) ||
+       !agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                 &bind_desc.launch_sources) ||
+       !agx3_g17g_compute_program_generate(agx_ioto_chip(dev), &desc,
+                                           &generated) ||
+       !agx_g18g_reencode_program(dev, &generated, true, cs->info.nr_gprs) ||
+       generated.length > AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE ||
+       !agx3_g17g_native_compute_program_bind(&bind_desc, &launch)) {
+      agx_native_descriptor_rejected(batch, "precompiled M5 compute Ioto");
+      return;
+   }
+   memcpy(program.cpu, generated.bytes, generated.length);
+   if (agx_bo_sync_for_device(program_bo, program.gpu - program_bo->va->addr,
+                              generated.length)) {
+      agx_native_descriptor_rejected(batch, "precompiled compute upload");
+      return;
+   }
+
+   const uint8_t *cdm_base_map =
+      batch->cdm.bo ? agx_bo_map(batch->cdm.bo) : NULL;
+   if (!cdm_base_map || batch->cdm_dispatch_count >= AGX_MAX_CDM_DISPATCHES) {
+      agx_native_descriptor_rejected(batch, "precompiled compute launch");
+      return;
+   }
+   const uint32_t dispatch_start = batch->cdm.current - cdm_base_map;
+   struct agx3_compute_dispatch_sink sink = {
+      .data = batch->cdm.current,
+      .capacity = batch->cdm.end - batch->cdm.current,
+   };
+   const struct agx3_compute_direct_grid direct = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {grid.count[0], grid.count[1], grid.count[2]},
+      .local_size = {cs->b.workgroup.x, cs->b.workgroup.y, cs->b.workgroup.z},
+      .dimensions = grid.count[2] != 1 || cs->b.workgroup.z != 1 ? 3
+                    : grid.count[1] != 1 || cs->b.workgroup.y != 1 ? 2 : 1,
+   };
+   /* Every M5-profile dispatch is its own command, so the barrier the
+    * caller asked for is already implied; end it as the API path does. */
+   uint8_t terminate[AGX3_CDM_STREAM_TERMINATE_SIZE];
+   if (!agx3_g17g_native_compute_dispatch_append(
+          &launch, &direct, agx_m5_dispatch_barrier_flags(dev), &sink) ||
+       !agx3_cdm_stream_terminate_pack(dev->chip, terminate) ||
+       sink.capacity - sink.length < sizeof(terminate)) {
+      agx_native_descriptor_rejected(batch, "precompiled compute launch");
+      return;
+   }
+   memcpy(sink.data + sink.length, terminate, sizeof(terminate));
+   sink.length += sizeof(terminate);
+   batch->cdm.current += sink.length;
+
+   /* As agx_g17p_append_compute: the M5 profile covers one dispatch per
+    * command, and agx_batch_submit() sends each recorded extent alone. */
+   const unsigned i = batch->cdm_dispatch_count++;
+   batch->cdm_dispatch[i].start = dispatch_start;
+   batch->cdm_dispatch[i].end = batch->cdm.current - cdm_base_map;
+   agx_batch_add_bo(batch, cs->bo);
+}
+
 void
 agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
                    enum agx_barrier barrier, enum libagx_program program,
@@ -4690,12 +4874,18 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
    struct agx_precompiled_shader *cs =
       agx_get_precompiled(&batch->ctx->bg_eot, program);
 
-   /* No libagx is built for G17G or G18G (agx_open_device), so every
-    * precompiled kernel -- the tessellator, the geometry and restart
-    * prefix sums, query copies -- is absent there. Refuse the batch rather
-    * than launch through a null program. (G17P checks its own below.) */
+   /* No libagx is built for G17G (agx_open_device), and G18G's table leaves
+    * out the kernels its encoders cannot take yet (asahi_clc), so a
+    * precompiled kernel -- the tessellator, the geometry and restart prefix
+    * sums, query copies -- can be absent there. Refuse the batch rather than
+    * launch through a null program. (G17P checks its own below.) */
    if (!cs && dev->chip != AGX_CHIP_G17P) {
       agx_native_descriptor_rejected(batch, "a precompiled libagx program");
+      return;
+   }
+
+   if (agx_chip_m5_paths(dev->chip)) {
+      agx_launch_precomp_m5(batch, grid, cs, args, arg_size);
       return;
    }
 
@@ -4719,52 +4909,14 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
       if (!grid.count[0] || !grid.count[1] || !grid.count[2])
          return;
 
-      /* Match the precompiler's rebased arguments and optional runtime printf
-       * address. Pad packed argument structs for Ioto's whole-dword loads. */
-      const size_t printf_offset = cs->info.printf_uniform
-         ? (size_t)(cs->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
-         : 0;
-      const size_t upload_size = ALIGN_POT(
-         cs->info.printf_uniform ? MAX2(arg_size, printf_offset + 8) : arg_size, 4);
-      struct agx_ptr uploaded = agx_pool_alloc_aligned(&batch->pool, upload_size, 4);
-      if (!uploaded.cpu || upload_size / 2 > UINT16_MAX)
-         {
-            agx_native_descriptor_rejected(batch, "precompiled argument upload");
-            return;
-         }
-      memcpy(uploaded.cpu, args, arg_size);
-      memset((uint8_t *)uploaded.cpu + arg_size, 0, upload_size - arg_size);
-      if (cs->info.printf_uniform)
-         memcpy((uint8_t *)uploaded.cpu + printf_offset,
-                &dev->printf_buffer_address, sizeof(uint64_t));
-      const uint64_t uploaded_data = uploaded.gpu;
-      /* Above the halves the AGX3 hardware ABI owns, matching where the
-       * precompiler now places these loads. */
-      const struct agx3_ioto_uniform_range range = {
-         .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
-         .size_halfs = upload_size / 2,
-         .address = uploaded_data,
-      };
+      struct agx3_ioto_uniform_range ranges[2];
+      unsigned range_count;
+      if (!agx_precomp_agx3_uniform_ranges(batch, cs, args, arg_size, ranges,
+                                           &range_count))
+         return;
 
-      /* Constants the compiler promoted out of the code are published as a
-       * second range, exactly as the legacy USC path maps them with
-       * agx_usc_immediates(). Their base is already in this ABI's numbering:
-       * agx_opt_promote_constants() allocates above push_count, which starts
-       * at the reserved preamble. Without this the kernel reads whatever the
-       * uniform file happened to hold -- which is why the launch-shape check
-       * refused a kernel carrying rodata rather than dispatching one. */
-      struct agx3_ioto_uniform_range ranges[2] = {range};
-      unsigned range_count = 1;
-      if (cs->info.rodata.size_16) {
-         ranges[range_count++] = (struct agx3_ioto_uniform_range){
-            .start_halfs = cs->info.rodata.base_uniform,
-            .size_halfs = cs->info.rodata.size_16,
-            .address = cs->ptr + cs->rodata_offset,
-         };
-      }
       struct agx3_cdm_direct_template_sources launch_sources;
-      if (!uploaded_data ||
-          !agx3_cdm_direct_template_sources_compute(false, false, false,
+      if (!agx3_cdm_direct_template_sources_compute(false, false, false,
                                                      &launch_sources))
          {
             agx_native_descriptor_rejected(batch, "precompiled compute resources");
