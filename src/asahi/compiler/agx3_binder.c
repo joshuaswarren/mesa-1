@@ -85,11 +85,21 @@ agx3_bind_compose(enum agx_isa_encoding encoding, const char *mnemonic, int ep,
    else
       return false;
 
+   uint64_t fields[AGX3_MAX_FIELDS];
+   if (ep == AGX3_BIND_APPLE_ORDER) {
+      if (!agx3_bind_fields(baseline, nbaseline, overrides, noverrides, fields))
+         return false;
+      const int32_t form = agx3_compose_apple_order(t, mnemonic, fields, out);
+      if (form < 0)
+         return false;
+      *len = t->forms[form].size;
+      return true;
+   }
+
    const int32_t form = agx3_form_index(t, mnemonic, (uint8_t)ep);
    if (form < 0)
       return false;
 
-   uint64_t fields[AGX3_MAX_FIELDS];
    if (!agx3_bind_fields(baseline, nbaseline, overrides, noverrides, fields))
       return false;
 

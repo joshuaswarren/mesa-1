@@ -32,7 +32,10 @@ struct agx3_field_kv {
 /*
  * The `ep` argument that asks for Apple's own form choice: the mnemonic's
  * encoding points by ascending size, ep breaking ties, first that encodes.
- * It is the only one AGX_ISA_ENCODING_AGX3D accepts.
+ * It is the only one AGX_ISA_ENCODING_AGX3D accepts. On AGX3B/AGX3C it is
+ * Apple's choice too: it reproduces every applegpu_g17g fcmp, icmp, fseli16,
+ * fseli32, iseli16, iseli32 and f32fma witness (102 distinct instructions in
+ * test/native/g18g and m5-compare-select-reference).
  */
 #define AGX3_BIND_APPLE_ORDER (-1)
 
