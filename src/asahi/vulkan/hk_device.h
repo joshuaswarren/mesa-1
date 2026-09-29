@@ -98,6 +98,9 @@ struct hk_device {
    } scratch;
 
    uint32_t perftest;
+   /* HK_CDM_BARRIER_MASK=<hex>: perftest-only override of the per-launch
+    * CDM_BARRIER flag word (bits 0..26). 0 = unset. */
+   uint32_t cdm_barrier_mask;
 
    struct {
       struct u_rwlock lock;
@@ -114,6 +117,12 @@ enum hk_perftest {
    HK_PERF_NOBARRIER = BITFIELD_BIT(2),
    HK_PERF_BATCH = BITFIELD_BIT(3),
    HK_PERF_NOROBUST = BITFIELD_BIT(4),
+   HK_PERF_NOCDMBARRIER = BITFIELD_BIT(5),
+   HK_PERF_USCCDMBARRIER = BITFIELD_BIT(6),
+   HK_PERF_DESIGNEDUSCCDMBARRIER = BITFIELD_BIT(7),
+   /* Restore the unconditional per-launch CDM barrier (the default is the
+    * dependency-tracked barrier keyed on vkCmdPipelineBarrier2). */
+   HK_PERF_ALWAYSCDMBARRIER = BITFIELD_BIT(8),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)
