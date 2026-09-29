@@ -287,9 +287,20 @@ encode_gpu1(const struct agx3_isel_desc *d,
       return false;
    const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
    const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
+   /* A signed relation with a 16-bit result is the same instruction with
+    * f82 = 5/6, on a full-width comparand: applegpu_g17g kernels in
+    * test/native/g17g/m5-compare-select-reference.metal, which is also the
+    * shape glamor's gradient stop search reaches --
+    *
+    *   (i > 1) ? 0 : 1       02010d82228107022080   slt 2, constants exchanged
+    *   (i < 1) ? 0 : 1       02010d80228106022080   sgt 0
+    *   (i < j) ? 0 : 1       02011d03228007002081   slt, register comparand
+    *
+    * A narrow comparand with a signed relation stays unwitnessed. */
    if (d->dest_16 &&
        (d->cond != AGX3_ISEL_ICOND_ULT && d->cond != AGX3_ISEL_ICOND_UGT &&
-        d->cond != AGX3_ISEL_ICOND_EQ))
+        d->cond != AGX3_ISEL_ICOND_EQ) &&
+       (d->cmp_16 || d->cmp1_16))
       return false;
    for (unsigned i = 0; i < 4; ++i) {
       if (d->cache[i] && d->discard[i])

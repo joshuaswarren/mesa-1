@@ -450,6 +450,23 @@ main(void)
          .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=0,.sel_false=0,
          .discard={true,false,true,false},.wait_mask=128},
        {0x22,0x00,0x07,0x2a,0x27,0x00,0xac,0x02,0x81,0x00,0x82,0x0c,0x00,0x10},14},
+      /* Signed relations with a 16-bit result, Apple applegpu_g17g
+       * (test/native/g17g/m5-compare-select-reference.metal glm_isel16_*). */
+      {"G17G (i > 1) ? 0 : 1 as slt 2", {.dest=0,.dest_16=true,.cmp0=0,
+         .cmp1=2,.cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_SLT,
+         .true_kind=AGX3_ISEL_IMMEDIATE,.false_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=1,.sel_false=0,.discard={true}},
+       {0x02,0x01,0x0d,0x82,0x22,0x81,0x07,0x02,0x20,0x80},10},
+      {"G17G (i < 1) ? 0 : 1 as sgt 0", {.dest=0,.dest_16=true,.cmp0=0,
+         .cmp1=0,.cmp1_immediate=true,.cond=AGX3_ISEL_ICOND_SGT,
+         .true_kind=AGX3_ISEL_IMMEDIATE,.false_kind=AGX3_ISEL_IMMEDIATE,
+         .sel_true=1,.sel_false=0,.discard={true}},
+       {0x02,0x01,0x0d,0x80,0x22,0x81,0x06,0x02,0x20,0x80},10},
+      {"G17G (i < j) ? 0 : 1", {.dest=0,.dest_16=true,.cmp0=0,.cmp1=2,
+         .cond=AGX3_ISEL_ICOND_SLT,.true_kind=AGX3_ISEL_IMMEDIATE,
+         .false_kind=AGX3_ISEL_IMMEDIATE,.sel_true=0,.sel_false=1,
+         .discard={true,true}},
+       {0x02,0x01,0x1d,0x03,0x22,0x80,0x07,0x00,0x20,0x81},10},
    };
    for (unsigned i=0; i<sizeof(half_vectors)/sizeof(half_vectors[0]); ++i) {
       CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&half_vectors[i].d,out,&len));
@@ -470,7 +487,8 @@ main(void)
    /* The half comparand against 2 is grounded only as witnessed: equality,
     * an immediate, a word result. Its neighbours stay refused. */
    const unsigned nhalf = sizeof(half_vectors) / sizeof(half_vectors[0]);
-   const struct agx3_isel_desc *half_two = &half_vectors[nhalf - 3].d;
+   /* The three signed 16-bit-result vectors sit after these. */
+   const struct agx3_isel_desc *half_two = &half_vectors[nhalf - 6].d;
    m5 = *half_two;
    m5.cmp1 = 3;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
@@ -483,19 +501,19 @@ main(void)
    m5 = *half_two;
    m5.dest_16 = true;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
-   m5 = half_vectors[nhalf - 2].d;
+   m5 = half_vectors[nhalf - 5].d;
    m5.cmp1 = 3;
    CHECK(!agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
 
    /* GPU1 f11 is the destination-cache hint: with the word-comparand witness
     * kept live through the cache only that bit (bit 35, byte 4) changes. */
-   const struct agx3_isel_desc *word_two = &half_vectors[nhalf - 1].d;
+   const struct agx3_isel_desc *word_two = &half_vectors[nhalf - 4].d;
    m5 = *word_two;
    m5.dest_cache = true;
    CHECK(agx3_isel_encode(AGX_ISA_ENCODING_AGX3C,&m5,out,&len));
    CHECK(len == 14 && out[4] == 0x2f &&
-         !memcmp(out, half_vectors[nhalf - 1].bytes, 4) &&
-         !memcmp(out + 5, half_vectors[nhalf - 1].bytes + 5, 9));
+         !memcmp(out, half_vectors[nhalf - 4].bytes, 4) &&
+         !memcmp(out + 5, half_vectors[nhalf - 4].bytes + 5, 9));
 
    /* Apple applegpu_g17g, gpu/m5-mixed-compare-reference.metal: the same
     * `a.x < b.z ? a.y : a.w` lane compiled with b as uint4 and as ushort4.
