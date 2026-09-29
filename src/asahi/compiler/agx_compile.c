@@ -739,6 +739,13 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
 static bool
 nir_is_coherent(nir_intrinsic_instr *instr)
 {
+   /* EXPERIMENT (jw16/coherent-exp): AGX_FORCE_COHERENT=1 makes every device
+    * load/store coherent. Never a default. */
+   static int force = -1;
+   if (force < 0)
+      force = getenv("AGX_FORCE_COHERENT") != NULL;
+   if (force)
+      return true;
    return nir_intrinsic_access(instr) & (ACCESS_COHERENT | ACCESS_VOLATILE);
 }
 
