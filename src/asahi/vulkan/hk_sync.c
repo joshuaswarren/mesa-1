@@ -22,6 +22,7 @@
 #include "util/bitscan.h"
 #include "util/list.h"
 #include "util/u_debug.h"
+#include "util/log.h"
 
 bool
 hk_sync_trace_enabled(void)
@@ -244,11 +245,35 @@ hk_sync_stream_wait(struct hk_cs *cs,
    }
 }
 
+/* The latest stream on subqueue sq positioned before cs in the list. Stream
+ * positions follow sync.seq (see hk_sync_stream_created). */
+static struct hk_cs *
+latest_before(struct hk_cmd_buffer *cmd, unsigned sq, const struct hk_cs *cs)
+{
+   struct hk_cs *best = NULL;
+   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
+      if (hk_sync_sq(it) == sq && it->sync.seq < cs->sync.seq &&
+          (!best || it->sync.seq > best->sync.seq))
+         best = it;
+   }
+   return best;
+}
+
 void
 hk_sync_stream_wait_all(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
    hk_sync_src_dep(cmd, HK_SYNC_ALL, cs, dep);
+
+   /* Every stream positioned before cs. A stream can exist before streams
+    * positioned after it -- a pass's pre-graphics stream precedes its render,
+    * and hk_sync_heap_used reorders already-created streams -- and waiting
+    * on those would be a dependency on later commands of the submission. */
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      if (dep[sq].cut && dep[sq].cut->sync.seq >= cs->sync.seq)
+         dep[sq].cut = latest_before(cmd, sq, cs);
+   }
+
    hk_sync_stream_wait(cs, dep);
 }
 
@@ -613,6 +638,21 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
 
       struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
       hk_sync_src_dep(cmd, src_kinds, gfx, dep);
+      /* v56h/v57f: the render can only wait on streams positioned before
+       * it. The latest stream of a kind may be this render's own
+       * post-graphics stream (an earlier in-pass stamp's copy, an occlusion
+       * query's availability write), which itself waits on the render:
+       * waiting on it formed a VDM<->CDM cycle the firmware never resolves
+       * (three in-pass stamps, or an ended occlusion query followed by one
+       * stamp, in one pass -> the render's CDM barrier named a later
+       * command; debug builds assert in queue_submit, release builds hang
+       * the 3D job). That stream runs after the render anyway, so the
+       * stamp's first scope needs nothing from it. */
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+         if (dep[sq].cut && dep[sq].cut != gfx &&
+             dep[sq].cut->sync.seq > gfx->sync.seq)
+            dep[sq].cut = latest_before(cmd, sq, gfx);
+      }
       hk_sync_stream_wait(gfx, dep);
 
       if (gfx->timestamp.end.handle) {
@@ -814,6 +854,22 @@ hk_sync_resolve_submit(struct hk_queue *queue,
 
       list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
          for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+            /* v56h/v57f safety net: a wait on a stream positioned after
+             * this one can never be satisfied (the kernel receives a barrier
+             * past the commands submitted before it and the job hangs until
+             * the firmware times it out). Clamp to the latest earlier
+             * stream on that subqueue and say so. */
+            struct hk_sync_dep *d = &cs->sync.dep[sq];
+            if (d->cut && d->cut != cs && d->cut->sync.seq > cs->sync.seq) {
+               mesa_logw_once("hk_sync: forward wait clamped (stream seq %u "
+                              "waited on seq %u)", cs->sync.seq,
+                              d->cut->sync.seq);
+               if (hk_sync_trace_enabled())
+                  fprintf(stderr, "hk_sync: forward wait clamped seq=%u -> "
+                                  "seq=%u\n", cs->sync.seq,
+                          d->cut->sync.seq);
+               d->cut = latest_before(cmd, sq, cs);
+            }
             hk_sync_value v = resolve_dep(&ss, &cs->sync.dep[sq], sq);
             u_foreach_bit(k, cs->sync.kind)
                v = value_max(v, ss.carry[k][sq]);
@@ -840,8 +896,9 @@ hk_sync_resolve_submit(struct hk_queue *queue,
       }
    }
 
-   /* The kernel attaches the ioctl's input syncs to its first hardware
-    * command only, and a sparse flush must precede everything. Every
+   /* Legacy kernels attach input syncs to the first hardware command only;
+    * the caller requests that chain when needed. A sparse flush must still
+    * precede everything. Every
     * command that does not already follow the first one transitively gets
     * an explicit wait on it. Waits are prefixes, so following any command
     * that follows the first is enough. */
