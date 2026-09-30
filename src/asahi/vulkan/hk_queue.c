@@ -1314,7 +1314,11 @@ queue_submit_looped(struct hk_device *dev, struct hk_queue *queue,
             cmd->cdm_barrier = 0;
       }
 
-      bool has_in_syncs = first;
+      /* Without the first-command dependency, later chunks have independent
+       * roots too. Each must carry the original input syncs. Legacy kernels
+       * retain the first-command chain and receive the waits only once. */
+      bool has_in_syncs = first ||
+         (dev->dev.params.features & DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS);
       bool has_out_syncs = last;
 
       struct drm_asahi_submit submit_ioctl = {
@@ -1843,9 +1847,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
        */
       bool skip = false;
       if (submit->waits[i].sync->flags & VK_SYNC_IS_TIMELINE) {
-         uint32_t v1 = submit->waits[i].wait_value;
+         const uint64_t v1 = submit->waits[i].wait_value;
          for (unsigned j = 0; j < submit->wait_count; ++j) {
-            uint32_t v2 = submit->waits[j].wait_value;
+            const uint64_t v2 = submit->waits[j].wait_value;
             if (i != j && submit->waits[i].sync == submit->waits[j].sync &&
                 (v1 < v2 || (v1 == v2 && i < j))) {
                skip = true;
@@ -1897,14 +1901,15 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       nr_flushes++;
    }
 
-   /* Every command's barrier fields come from the dependencies the
-    * application recorded (hk_sync.h). The kernel attaches this ioctl's
-    * input syncs to the first hardware command only, so when there are any,
-    * every command is chained behind that first command. */
+   /* Every command's barrier fields come from recorded dependencies. Legacy
+    * kernels attach input syncs only to the first command, requiring a chain.
+    * A kernel advertising per-command waits needs no such execution edge. */
    hk_sync_resolve_submit(queue,
                           (struct hk_cmd_buffer *const *)submit->command_buffers,
                           submit->command_buffer_count, flush_sstt,
-                          wait_count > 0);
+                          wait_count > 0 &&
+                          !(dev->dev.params.features &
+                            DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS));
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =

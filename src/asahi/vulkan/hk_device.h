@@ -151,6 +151,13 @@ struct hk_device {
       uint64_t misses;
    } g17p_compute_program_cache;
 
+   /* v48: kernel-maintained copy of this VM's sticky status
+    * (DRM_ASAHI_FEATURE_VM_STATUS_MIRROR). NULL: query per check instead. */
+   struct {
+      struct agx_bo *bo;
+      int32_t *word;
+   } vm_status_mirror;
+
    /* Immutable diagnostic selection. Never rescan the process environment
     * from render-pass, draw, dispatch, or per-program publication paths. */
    struct {

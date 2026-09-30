@@ -2413,6 +2413,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # v48: per-wait device-lost check through the VM-status mirror or the
+    # GET_PARAMS query, against the DRM shim (see the probe's header).
+    executable(
+      'g17p-vm-status-mirror',
+      files('tests/g17p_vm_status_mirror.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
     # Same probe, minimal shader: one store of a computed constant, no
     # constant-data array. Isolates "does any G17P dispatch execute" from
     # "does the constant-data path work".

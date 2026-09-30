@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 #include "asahi_g17p_stream_validator.h"
 #include "util/macros.h"
@@ -1557,11 +1558,89 @@ asahi_ioctl_gem_mmap_offset(int fd, unsigned long request, void *arg)
    return 0;
 }
 
+/* v48 VM-status mirror checks (test infrastructure only; off by default).
+ * ASAHI_SHIM_VM_STATUS=1 advertises group 1, ASAHI_SHIM_VM_STATUS_MIRROR=1
+ * advertises group 3, ASAHI_SHIM_VM_STATUS_ERROR=<errno> is the sticky VM
+ * error both report. Counts are printed at exit for the harness. */
+static unsigned shim_vm_status_queries;
+static unsigned shim_vm_status_mirrors;
+
+static bool
+shim_env_on(const char *name)
+{
+   const char *value = getenv(name);
+   return value && !strcmp(value, "1");
+}
+
+static int32_t
+shim_vm_status_error(void)
+{
+   const char *value = getenv("ASAHI_SHIM_VM_STATUS_ERROR");
+   return value ? (int32_t)strtol(value, NULL, 0) : 0;
+}
+
+static void
+shim_vm_status_report(void)
+{
+   fprintf(stderr, "shim: vm-status queries=%u mirrors=%u\n",
+           shim_vm_status_queries, shim_vm_status_mirrors);
+}
+
+static void
+shim_vm_status_register_report(void)
+{
+   static bool registered;
+   if (!registered && (shim_env_on("ASAHI_SHIM_VM_STATUS") ||
+                       shim_env_on("ASAHI_SHIM_VM_STATUS_MIRROR"))) {
+      registered = true;
+      atexit(shim_vm_status_report);
+   }
+}
+
+static int
+asahi_ioctl_vm_status_mirror(int fd, struct drm_asahi_get_params *gp)
+{
+   if (!shim_env_on("ASAHI_SHIM_VM_STATUS_MIRROR")) {
+      errno = EOPNOTSUPP;
+      return -1;
+   }
+   struct drm_asahi_vm_status_mirror *m = (void *)(uintptr_t)gp->pointer;
+   if (gp->size < sizeof(*m) || m->flags || (m->offset & 3)) {
+      errno = EINVAL;
+      return -1;
+   }
+   struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
+   struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, m->handle);
+   if (!bo || (uint64_t)m->offset + 4 > bo->size) {
+      if (bo)
+         drm_shim_bo_put(bo);
+      errno = EINVAL;
+      return -1;
+   }
+   const long page = sysconf(_SC_PAGESIZE);
+   const uint64_t at = bo->mem_addr + m->offset;
+   const uint64_t base = at & ~(uint64_t)(page - 1);
+   char *map = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED,
+                    shim_device.mem_fd, base);
+   drm_shim_bo_put(bo);
+   if (map == MAP_FAILED)
+      return -1;
+   int32_t *word = (int32_t *)(map + (at - base));
+   __atomic_store_n(word, 0, __ATOMIC_SEQ_CST);
+   const int32_t error = shim_vm_status_error();
+   if (error)
+      __atomic_store_n(word, error, __ATOMIC_SEQ_CST);
+   munmap(map, page);
+   shim_vm_status_mirrors++;
+   return 0;
+}
+
 static int
 asahi_ioctl_get_param(int fd, unsigned long request, void *arg)
 {
    struct drm_asahi_get_params *gp = arg;
 
+   shim_vm_status_register_report();
    switch (gp->param_group) {
    case 0: {
       /* Mirror the kernel, which copies min(sizeof(params), data.size) and
@@ -1569,10 +1648,39 @@ asahi_ioctl_get_param(int fd, unsigned long request, void *arg)
        * instead made the shim unusable against any caller whose header
        * differs by a field. */
       size_t size = MIN2((size_t)gp->size, sizeof(struct drm_asahi_params_global));
-      memcpy((void *)gp->pointer, shim_params(), size);
+      struct drm_asahi_params_global params = *shim_params();
+      /* Test both old and capability-aware kernels without GPU execution. */
+      const char *per_command = getenv("ASAHI_SHIM_PER_COMMAND_INPUT_SYNCS");
+      if (per_command && !strcmp(per_command, "1"))
+         params.features |= DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS;
+      if (shim_env_on("ASAHI_SHIM_VM_STATUS"))
+         params.features |= DRM_ASAHI_FEATURE_VM_STATUS;
+      if (shim_env_on("ASAHI_SHIM_VM_STATUS_MIRROR"))
+         params.features |= DRM_ASAHI_FEATURE_VM_STATUS_MIRROR;
+      const char *command_limit = getenv("ASAHI_SHIM_COMMAND_LIMIT");
+      if (command_limit) {
+         unsigned limit = strtoul(command_limit, NULL, 0);
+         if (limit > 0 && limit <= params.max_commands_per_submission)
+            params.max_commands_per_submission = limit;
+      }
+      memcpy((void *)gp->pointer, &params, size);
       gp->size = size;
       return 0;
    }
+
+   case DRM_ASAHI_PARAM_GROUP_VM_STATUS: {
+      if (!shim_env_on("ASAHI_SHIM_VM_STATUS")) {
+         errno = EINVAL;
+         return -1;
+      }
+      struct drm_asahi_vm_status *status = (void *)(uintptr_t)gp->pointer;
+      status->error = shim_vm_status_error();
+      shim_vm_status_queries++;
+      return 0;
+   }
+
+   case DRM_ASAHI_PARAM_GROUP_VM_STATUS_MIRROR:
+      return asahi_ioctl_vm_status_mirror(fd, gp);
 
    default:
       fprintf(stderr, "Unknown DRM_IOCTL_ASAHI_GET_PARAMS %d\n",
