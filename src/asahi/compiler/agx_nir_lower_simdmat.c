@@ -189,18 +189,14 @@ lower_load_store(nir_builder *b, struct hash_table *tm, nir_intrinsic_instr *int
       nir_build_deref_cast(b, &deref->def, deref->modes,
                            glsl_scalar_type(desc.element_type), tsz);
 
-   /* VEC2 fragment loads (opt-in via AGX_HWMAT_VEC2): load the contiguous
-    * (col,col+1) row-major pair as ONE i16,xy load instead of two i16,x scalars.
-    * pt11 found this perf-neutral ALONE, but macOS RE of Apple's pp512=270 kernel
-    * (RECIPE 2026-06-22) shows Apple emits paired i16,xy loads, ALL hoisted into one
-    * block before a tight 8x4 simd_matrix burst. The pairing is the ENABLER: it gives
-    * 24 distinct fragment regs (vs ~12 reused) so the post-RA scheduler can hoist all
-    * loads (kills the 42 waits -> ~1). flat is even (frag_rc col is always x2) so the
-    * pair is vec2-aligned. Row-major (A) only; col-major (B) pair is strided. */
-   /* Paired (col,col+1) row-major fragment loads, default ON for this build
- * (jwm1 qmm coopmat: -6..-9% prefill, bit-exact, digests pinned; H80).
- * Runtime off-switch: AGX_HWMAT_VEC2_OFF=1. */
-const bool vec2ld = getenv("AGX_HWMAT_VEC2_OFF") == NULL && width_matched;
+   /* VEC2 fragment loads (on by default, AGX_HWMAT_VEC2_OFF=1 disables): load
+    * the contiguous (col,col+1) row-major pair as ONE i16,xy load instead of
+    * two i16,x scalars. The pairing gives 24 distinct fragment regs (vs ~12
+    * reused) so the post-RA scheduler can hoist all loads. flat is even
+    * (frag_rc col is always x2) so the pair is vec2-aligned. Row-major (A)
+    * only; col-major (B) pair is strided. M1 prefill +9.4%, bit-exact.
+    */
+   const bool vec2ld = getenv("AGX_HWMAT_VEC2_OFF") == NULL && width_matched;
    nir_deref_instr *v2dref =
       vec2ld
          ? nir_build_deref_cast(b, &deref->def, deref->modes,
