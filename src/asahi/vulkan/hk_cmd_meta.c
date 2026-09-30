@@ -3894,6 +3894,12 @@ hk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
    struct vk_meta_rendering_info render_info;
    hk_meta_init_render(cmd, &render_info);
 
+   for (uint32_t i = 0; i < attachmentCount; ++i) {
+      if (pAttachments[i].aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT |
+                                        VK_IMAGE_ASPECT_STENCIL_BIT))
+         hk_g17p_note_depth_clear(cmd);
+   }
+
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);
 

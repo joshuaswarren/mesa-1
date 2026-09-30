@@ -428,6 +428,14 @@ struct hk_rendering_state {
    bool zls_precise;
    struct agx_zls_control_packed zls_control_only, zls_control_last;
    const void *zls_first_cs;
+
+   /* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED (opt-in): the pass may drop its
+    * depth/stencil attachment from every control stream when no draw or
+    * clear in it tests, writes, bounds-tests or clears depth/stencil and
+    * neither aspect has a CLEAR load op or a resolve (see
+    * hk_g17p_zls_elide()). */
+   bool g17p_zls_elide_ok;
+   bool g17p_depth_touched;
 };
 
 struct hk_index_buffer_state {
@@ -1413,6 +1421,8 @@ hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 }
 
 bool hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED: a depth/stencil clear touched it. */
+void hk_g17p_note_depth_clear(struct hk_cmd_buffer *cmd);
 
 bool hk_g17p_split_trace_enabled(void);
 void hk_g17p_note_gfx_split(struct hk_cmd_buffer *cmd, const char *reason,

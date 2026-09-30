@@ -2727,6 +2727,84 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
 DEBUG_GET_ONCE_BOOL_OPTION(hk_zls_precise_depth_store,
                            "HK_ZLS_PRECISE_DEPTH_STORE", false)
 
+/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED=1 (opt-in).
+ *
+ * Minecraft opens every full-screen pass with loadOp LOAD / storeOp STORE on
+ * its D32 attachment, including passes whose pipelines neither test nor
+ * write depth (GUI). Such a pass leaves the attachment's contents exactly as
+ * they were, so loading and storing them (up to 2 x 14.9 MB at 2408x1506;
+ * less when agx3 compresses the D32 image) is pure traffic. When the pass
+ * ends with nothing
+ * having touched depth/stencil, drop the attachment from every control
+ * stream of the pass: no ZLS load/store, and no depth base for the kernel,
+ * whose partial-render word forces Z/S load+store whenever a base is present
+ * (g17_uapi.rs partial_depth_flags), which would otherwise store tile depth
+ * that was never loaded. Not eligible: CLEAR load ops (the clear itself
+ * changes the attachment), resolves, suspended/resumed passes and passes
+ * recorded in secondaries. Depth/stencil input-attachment reads inside the
+ * pass cannot see the dropped tile contents, but G17P does not expose
+ * dynamicRenderingLocalReadDepthStencilAttachments, and a separate subpass
+ * reads the (unchanged) image from memory. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_zls_elide_untouched,
+                           "HK_G17P_ZLS_ELIDE_UNTOUCHED", false)
+
+static bool
+hk_g17p_zls_attachment_elidable(const VkRenderingAttachmentInfo *att)
+{
+   return !att || !att->imageView ||
+          (att->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR &&
+           att->resolveMode == VK_RESOLVE_MODE_NONE);
+}
+
+static inline void
+hk_g17p_note_depth_use(struct hk_cmd_buffer *cmd)
+{
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (likely(!render->g17p_zls_elide_ok) || render->g17p_depth_touched)
+      return;
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd->vk.dynamic_graphics_state;
+   if (dyn->ds.depth.test_enable || dyn->ds.depth.write_enable ||
+       dyn->ds.depth.bounds_test.enable || dyn->ds.stencil.test_enable)
+      render->g17p_depth_touched = true;
+}
+
+void
+hk_g17p_note_depth_clear(struct hk_cmd_buffer *cmd)
+{
+   cmd->state.gfx.render.g17p_depth_touched = true;
+}
+
+/* Returns whether the pass's depth/stencil attachment was dropped. */
+static bool
+hk_g17p_zls_elide(struct hk_cmd_buffer *cmd)
+{
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (!render->g17p_zls_elide_ok || render->g17p_depth_touched ||
+       !render->zls_first_cs)
+      return false;
+   bool found = false;
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs == render->zls_first_cs)
+         found = true;
+      if (!found || cs->type != HK_CS_VDM)
+         continue;
+      cs->cr.depth.buffer = 0;
+      cs->cr.depth.meta = 0;
+      cs->cr.depth.meta_stride = 0;
+      cs->cr.stencil.buffer = 0;
+      cs->cr.stencil.meta = 0;
+      cs->cr.stencil.meta_stride = 0;
+      memset(&cs->cr.zls_control, 0, sizeof(cs->cr.zls_control));
+   }
+   if (HK_ENV_BOOL_ONCE("HK_G17P_ZLS_ELIDE_TRACE", false))
+      fprintf(stderr, "G17P ZLS elided: %ux%u depth=%p stencil=%p\n",
+              render->cr.width, render->cr.height,
+              (void *)render->depth_att.iview,
+              (void *)render->stencil_att.iview);
+   return true;
+}
+
 static void
 hk_pack_zls_control_final(struct agx_zls_control_packed *packed,
                           struct ail_layout *z_layout,
@@ -3114,6 +3192,16 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    render->zls_precise = debug_get_option_hk_zls_precise_depth_store() &&
                          z_layout != NULL;
+   render->g17p_depth_touched = false;
+   render->g17p_zls_elide_ok =
+      dev->dev.chip == AGX_CHIP_G17P &&
+      debug_get_option_hk_g17p_zls_elide_untouched() &&
+      (z_layout != NULL || s_layout != NULL) &&
+      !(render->flags & (VK_RENDERING_SUSPENDING_BIT |
+                         VK_RENDERING_RESUMING_BIT |
+                         VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) &&
+      hk_g17p_zls_attachment_elidable(attach_z) &&
+      hk_g17p_zls_attachment_elidable(attach_s);
    if (render->zls_precise) {
       hk_pack_zls_control_final(&render->zls_control_only, z_layout,
                                 s_layout, attach_z, attach_s,
@@ -3362,11 +3450,13 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
    struct hk_cs *cs = cmd->current_cs.gfx;
    if (cs) {
       cs->cr.eot.main = render->cr.eot.main;
+      const bool zls_elided = hk_g17p_zls_elide(cmd);
 
       /* HK_ZLS_PRECISE_DEPTH_STORE: see hk_pack_zls_control_final(). A
        * suspended pass continues in a later command buffer, which reloads
-       * depth, so it keeps the forced store. */
-      if (render->zls_precise &&
+       * depth, so it keeps the forced store. An elided pass has no
+       * depth/stencil to store. */
+      if (render->zls_precise && !zls_elided &&
           !(render->flags & VK_RENDERING_SUSPENDING_BIT)) {
          cs->cr.zls_control = cs == render->zls_first_cs
                                  ? render->zls_control_only
@@ -10708,6 +10798,8 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
        (draw_.b.count[0] == 0 || draw_.b.count[1] == 0))
       return;
 
+   hk_g17p_note_depth_use(cmd);
+
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -11482,6 +11574,11 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
    struct hk_descriptor_state *desc = &gfx->descriptors;
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_cs *cs = cmd->current_cs.gfx;
+
+   /* An eligible multi-draw may emit even its first record here, so this
+    * direct path must record depth/stencil use exactly as hk_draw_impl()
+    * does for HK_G17P_ZLS_ELIDE_UNTOUCHED. */
+   hk_g17p_note_depth_use(cmd);
 
    /* The general path from here on, with its no-op branches removed. */
    hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
