@@ -259,6 +259,13 @@ enum hk_vs_variant {
    HK_VS_VARIANT_SW,
 
    HK_VS_VARIANTS,
+
+   /* v96 (G17P, HK_G17P_ORDINARY_VS_VARIANTS): the hardware vertex shader
+    * specialised for ordinary descriptors, selected per draw like the
+    * fragment ordinary variants. Allocated only when the API vertex shader
+    * has g17p_ordinary_variants; the two variants above stay the complete
+    * generic programs. */
+   HK_VS_VARIANT_HW_ORDINARY = HK_VS_VARIANTS,
 };
 
 enum hk_gs_variant {
@@ -398,6 +405,8 @@ static inline unsigned
 hk_api_num_variants(const struct hk_api_shader *obj)
 {
    if (obj->g17p_ordinary_variants) {
+      if (obj->vk.stage == MESA_SHADER_VERTEX)
+         return HK_VS_VARIANTS + 1;
       assert(obj->vk.stage == MESA_SHADER_FRAGMENT);
       return obj->g17p_sample_variants ? 6 : 2;
    }
@@ -407,7 +416,8 @@ hk_api_num_variants(const struct hk_api_shader *obj)
 static inline size_t
 hk_api_shader_size(mesa_shader_stage stage, bool samples, bool ordinary)
 {
-   unsigned count = ordinary ? (samples ? 6 : 2) :
+   unsigned count = ordinary ? (stage == MESA_SHADER_VERTEX ? HK_VS_VARIANTS + 1 :
+                                samples ? 6 : 2) :
                     samples ? 3 : hk_num_variants(stage);
    return sizeof(struct hk_api_shader) + count * sizeof(struct hk_shader) +
           (ordinary ? sizeof(struct hk_ordinary_descriptor_requirements) : 0);
@@ -431,7 +441,12 @@ hk_variant_name(struct hk_api_shader *obj, struct hk_shader *variant)
    unsigned i = variant - obj->variants;
    assert(i < hk_api_num_variants(obj));
 
-   if (obj->g17p_ordinary_variants) {
+   if (obj->g17p_ordinary_variants && obj->vk.stage == MESA_SHADER_VERTEX) {
+      static const char *names[] = {"Hardware, generic descriptors", "Software",
+                                    "Hardware, ordinary descriptors"};
+      assert(i < ARRAY_SIZE(names));
+      return names[i];
+   } else if (obj->g17p_ordinary_variants) {
       if (obj->g17p_sample_variants) {
          static const char *names[] = {
             "1 sample, generic descriptors", "2 samples, generic descriptors",

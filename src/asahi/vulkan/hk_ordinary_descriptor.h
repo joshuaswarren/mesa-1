@@ -122,6 +122,11 @@ hk_ordinary_descriptor_select_push(
  *     admitted; its guard is the same kind==0 && no-custom-border proof. */
 #define HK_ORDINARY_V57_VERTEX (1u << 0)
 #define HK_ORDINARY_V57_TXF (1u << 1)
+/* v96 HK_G17P_ORDINARY_VS_VARIANTS: with HK_ORDINARY_V57_VERTEX, the vertex
+ * region reports its proof like a fragment one (guard intrinsic, no runtime
+ * branch) and the API shader gets a separate ordinary hardware variant,
+ * selected per draw (hk_cmd_draw.c hk_select_ordinary_vs()). */
+#define HK_ORDINARY_V96_VERTEX_VARIANTS (1u << 2)
 
 bool hk_nir_ordinary_descriptor_regions(
    struct nir_shader *nir, uint32_t set_layout_count,

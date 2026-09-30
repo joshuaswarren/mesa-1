@@ -182,6 +182,11 @@ DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_variants,
 /* v57, opt-in (see hk_ordinary_descriptor.h). */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_vs, "HK_G17P_ORDINARY_VS", false)
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_txf, "HK_G17P_ORDINARY_TXF", false)
+/* v96: ordinary-descriptor hardware vertex variants selected per draw (see
+ * HK_ORDINARY_V96_VERTEX_VARIANTS). Needs the ordinary variants (the
+ * descriptor proof); implies the vertex region. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_vs_variants,
+                           "HK_G17P_ORDINARY_VS_VARIANTS", false)
 
 static bool
 hk_ordinary_variants_enabled(const struct agx_device *dev)
@@ -210,7 +215,11 @@ hk_ordinary_v57_flags(const struct agx_device *dev)
 {
    if (!hk_ordinary_regions_enabled(dev))
       return 0;
-   return (debug_get_option_hk_g17p_ordinary_vs() ? HK_ORDINARY_V57_VERTEX : 0) |
+   const bool vs_variants = hk_ordinary_variants_enabled(dev) &&
+                            debug_get_option_hk_g17p_ordinary_vs_variants();
+   return (debug_get_option_hk_g17p_ordinary_vs() || vs_variants
+              ? HK_ORDINARY_V57_VERTEX : 0) |
+          (vs_variants ? HK_ORDINARY_V96_VERTEX_VARIANTS : 0) |
           (debug_get_option_hk_g17p_ordinary_txf() ? HK_ORDINARY_V57_TXF : 0);
 }
 
@@ -3932,8 +3941,10 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
     * variants, while its ordinary texture path still needs a separately
     * selectable program for each count. */
    const bool ordinary_variants = ordinary_requirements.count &&
-      info->stage == MESA_SHADER_FRAGMENT &&
-      !nir->info.fs.uses_sample_shading && !key_tmp.fs.force_sample_shading;
+      ((info->stage == MESA_SHADER_FRAGMENT &&
+        !nir->info.fs.uses_sample_shading && !key_tmp.fs.force_sample_shading) ||
+       (info->stage == MESA_SHADER_VERTEX &&
+        (hk_ordinary_v57_flags(&dev->dev) & HK_ORDINARY_V96_VERTEX_VARIANTS)));
    if (!ordinary_variants)
       NIR_PASS(_, nir, hk_nir_lower_ordinary_descriptor_guard,
                HK_ORDINARY_GUARD_DYNAMIC);
@@ -4077,7 +4088,10 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
       /* Fold constant offset srcs for IO. */
       NIR_PASS(_, nir, nir_opt_constant_folding);
 
-      for (enum hk_vs_variant v = 0; v < HK_VS_VARIANTS; ++v) {
+      /* v96: an ordinary-descriptor vertex object adds the specialised
+       * hardware variant after the two generic ones. */
+      const unsigned vs_variant_count = hk_api_num_variants(obj);
+      for (unsigned v = 0; v < vs_variant_count; ++v) {
          /* Only compile the software variant if we might use this shader with
           * geometry/tessellation. We need to compile the hardware variant
           * unconditionally to handle the VS -> null FS case, which does not
@@ -4089,13 +4103,24 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
             continue;
 
          struct hk_shader *shader = &obj->variants[v];
-         bool hw = v == HK_VS_VARIANT_HW;
-         bool last = (v + 1) == HK_VS_VARIANTS;
+         bool hw = v == HK_VS_VARIANT_HW || v == HK_VS_VARIANT_HW_ORDINARY;
+         bool last = (v + 1) == vs_variant_count;
 
          /* Each variant gets its own NIR. To save an extra clone, we use the
           * original NIR for the last stage.
           */
          nir_shader *clone = last ? nir : nir_shader_clone(NULL, nir);
+
+         /* v96: resolve the descriptor proof per program. The generic
+          * hardware and software variants keep the complete slow arm; the
+          * ordinary one is correct only for descriptors the draw proves. */
+         if (obj->g17p_ordinary_variants) {
+            assert(sw_stage == MESA_SHADER_VERTEX);
+            NIR_PASS(_, clone, hk_nir_lower_ordinary_descriptor_guard,
+                     v == HK_VS_VARIANT_HW_ORDINARY ? HK_ORDINARY_GUARD_TRUE
+                                                    : HK_ORDINARY_GUARD_FALSE);
+            NIR_PASS(_, clone, nir_opt_dead_cf);
+         }
 
          /* Without a declared fragment successor this hardware variant is
           * only used for VS -> null FS. Geometry/tessellation and transform
@@ -4639,8 +4664,10 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
    const bool sample_variants = variant_flags & 1;
    const bool ordinary_variants = variant_flags & 2;
    if (blob->overrun || stage >= MESA_SHADER_STAGES || variant_flags > 3 ||
-        (variant_flags && (stage != MESA_SHADER_FRAGMENT ||
-                            dev->dev.chip != AGX_CHIP_G17P)) ||
+        (variant_flags && (dev->dev.chip != AGX_CHIP_G17P ||
+                           (stage != MESA_SHADER_FRAGMENT &&
+                            /* v96 ordinary vertex variants */
+                            !(stage == MESA_SHADER_VERTEX && variant_flags == 2)))) ||
         (ordinary_variants && !hk_ordinary_variants_enabled(&dev->dev)))
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 

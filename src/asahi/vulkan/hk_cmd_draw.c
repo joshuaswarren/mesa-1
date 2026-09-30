@@ -503,6 +503,7 @@ static void hk_flush_shaders(struct hk_cmd_buffer *cmd);
 static bool hk_g17p_tess_is_native(const struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs(struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure);
+static void hk_select_ordinary_vs(struct hk_cmd_buffer *cmd);
 static uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 static enum mesa_prim hk_gs_in_prim(struct hk_cmd_buffer *cmd);
 
@@ -609,6 +610,9 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
        !gfx->shaders[MESA_SHADER_FRAGMENT] ||
        vk_command_buffer_has_error(&cmd->vk))
       return;
+
+   /* v96: predict the ordinary vertex variant before preparing its link. */
+   hk_select_ordinary_vs(cmd);
 
    /* v56e: if the fragment program this state would select is a deferred
     * generic variant (typically because the draw's descriptors are not bound
@@ -3916,6 +3920,63 @@ hk_bound_fs(struct hk_cmd_buffer *cmd)
    return hk_bound_fs_select(cmd, true);
 }
 
+/* v96 HK_G17P_ORDINARY_VS_VARIANTS: choose the hardware vertex program of a
+ * vertex object with an ordinary variant for the current descriptors, before
+ * anything reads hk_bound_hw_vs() for the draw. The proof is the fragment
+ * one (hk_ordinary_descriptor_reason()) over the vertex requirements; it is
+ * re-evaluated whenever the descriptor generation or the object changes. At
+ * bind time the descriptors still belong to an earlier draw, so the choice
+ * is predicted (the object's last choice, else ordinary) and recorded with
+ * an impossible generation so the draw always re-proves it. A changed choice
+ * dirties the vertex stage, which relinks and republishes it. */
+static void
+hk_select_ordinary_vs(struct hk_cmd_buffer *cmd)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
+   if (!vs || !vs->g17p_ordinary_variants)
+      return;
+
+   __typeof__(gfx->ordinary_vs) *c = &gfx->ordinary_vs;
+   uint64_t generation = gfx->descriptors.generation;
+   if (c->valid && c->api == vs && c->generation == generation)
+      return;
+
+   bool ordinary;
+   enum hk_ordinary_reason reason = HK_ORDINARY_PREDICTED;
+   if (gfx->g17p_bind_prepare) {
+      if (c->valid && c->api == vs)
+         return; /* keep the current choice until the draw re-proves it */
+      ordinary = !hk_g17p_ordinary_force_generic();
+      generation = UINT64_MAX;
+   } else {
+      reason = hk_g17p_ordinary_force_generic()
+         ? HK_ORDINARY_FORCED_GENERIC
+         : hk_ordinary_descriptor_reason(
+              hk_api_ordinary_requirements(vs), gfx->descriptors.sets,
+              gfx->descriptors.root.sets, gfx->descriptors.push,
+              gfx->descriptors.push_active, HK_MAX_SETS, NULL);
+      ordinary = reason == HK_ORDINARY_OK;
+   }
+
+   const bool changed = !c->valid || c->api != vs || c->ordinary != ordinary;
+   c->api = vs;
+   c->generation = generation;
+   c->valid = true;
+   c->ordinary = ordinary;
+   if (changed) {
+      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_VERTEX);
+      if (debug_get_option_hk_g17p_ordinary_variant_trace())
+         fprintf(stderr,
+                 "G17P ordinary vertex variant: site=%s variant=%s reason=%s"
+                 " vs=%08x generation=%" PRIu64 "\n",
+                 gfx->g17p_bind_prepare ? "bind" : "draw",
+                 ordinary ? "ordinary" : "generic",
+                 hk_ordinary_reason_name(reason), hk_ordinary_trace_id(vs),
+                 gfx->descriptors.generation);
+   }
+}
+
 /* v57d: the variant bind-time preparation should build. The draw's
  * descriptors are normally pushed or bound after the pipeline, so the proof
  * over the current state describes the previous draw; v57c's peek therefore
@@ -5281,6 +5342,8 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    /* Selection may dirty FS before the ordinary early-out below. */
    if (fs_obj->g17p_ordinary_variants)
       hk_bound_fs(cmd);
+   /* v96: and the vertex ordinary-variant choice may dirty the VS. */
+   hk_select_ordinary_vs(cmd);
    const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
                   MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
@@ -5327,8 +5390,13 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
     * immutable data address actually changes.  In particular, equivalent
     * shader objects must not clone the root and invalidate both native IOTO
     * programs merely because their API handles differ. */
+   /* v96: an ordinary vertex variant has its own constant data. */
+   struct hk_api_shader *vs_api = gfx->shaders[MESA_SHADER_VERTEX];
    const uint64_t vs_constant_data_addr = hk_upload_constant_data(
-      cmd, hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]));
+      cmd, vs_api && vs_api->g17p_ordinary_variants &&
+              !gfx->shaders[MESA_SHADER_GEOMETRY] &&
+              !gfx->shaders[MESA_SHADER_TESS_EVAL]
+         ? hk_bound_hw_vs(gfx) : hk_any_variant(vs_api));
    const uint64_t fs_constant_data_addr =
       hk_upload_constant_data(cmd, fs);
    if (desc->root.draw.vs_constant_data_addr != vs_constant_data_addr) {
@@ -10954,6 +11022,7 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       return;
 
    hk_g17p_note_depth_use(cmd);
+   hk_select_ordinary_vs(cmd);
 
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
@@ -11679,6 +11748,14 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->render.view_mask ||
        mesa_prim_has_adjacency(
           vk_topology_to_mesa(dyn->ia.primitive_topology)))
+      return false;
+
+   /* v96: likewise the vertex ordinary-variant choice must already be
+    * proven for these descriptors (hk_select_ordinary_vs()). */
+   struct hk_api_shader *vs_obj = gfx->shaders[MESA_SHADER_VERTEX];
+   if (vs_obj->g17p_ordinary_variants &&
+       !(gfx->ordinary_vs.valid && gfx->ordinary_vs.api == vs_obj &&
+         gfx->ordinary_vs.generation == desc->generation))
       return false;
 
    /* hk_bound_fs() must answer from its cache without dirtying the FS. */
