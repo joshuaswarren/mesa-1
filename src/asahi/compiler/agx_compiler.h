@@ -1421,6 +1421,7 @@ bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
 bool agx_nir_lower_simdmat(nir_shader *shader, unsigned subgroup_size);
+bool agx_nir_lower_cmat(nir_shader *shader);
 bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
 void agx_lower_agx3_fma_sources(agx_context *ctx);
 void agx_materialize_agx3_alu_constants(agx_context *ctx);
