@@ -346,6 +346,17 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
        !HK_PERF(dev, TRACKCDMBARRIER))
       dev->perftest |= HK_PERF_ALWAYSCDMBARRIER;
 
+   /* Deferred CDM flush: one barrier at the end of each compute batch
+    * instead of the dependency-tracked barrier. It holds token-digest parity
+    * on M1 (G13G) and is faster there; M1 Max (G13X) lost digest parity with
+    * it. On by default on G13G only; HK_CDM_DEFER_FLUSH=0 disables it,
+    * HK_CDM_DEFER_FLUSH=1 enables it elsewhere for a gate run.
+    */
+   dev->cdm_defer_flush =
+      !HK_PERF(dev, ALWAYSCDMBARRIER) &&
+      debug_get_bool_option("HK_CDM_DEFER_FLUSH",
+                            pdev->dev.chip == AGX_CHIP_G13G);
+
    /* Bounded poll before blocking syncobj waits (see vk_device.sync_wait_poll_us).
     * Off by default; pays CPU to skip wake-up latency on short submit->signal
     * round trips. */
