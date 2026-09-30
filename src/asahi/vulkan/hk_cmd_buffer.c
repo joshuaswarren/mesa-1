@@ -1083,6 +1083,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
+<<<<<<< HEAD
    if (unlikely(dev->frame_anatomy)) {
       const VkDependencyInfo *dep = pDependencyInfo;
       for (uint32_t i = 0; i < dep->memoryBarrierCount; ++i) {
@@ -1117,8 +1118,11 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
        * including kernels that advertise exact prior barriers on AGX2. */
       hk_sync_barrier(cmd, HK_SYNC_ALL, HK_SYNC_ALL);
       /* The app declared a dependency: the next CDM launch carries the full
-       * barrier word (hk_cmd_dispatch.c) instead of every launch flushing. */
-      cmd->state.cs.cdm_barrier_pending = true;
+       * barrier word (hk_cmd_dispatch.c) instead of every launch flushing.
+       * Chips without a digest-parity measurement keep the unconditional
+       * per-launch barrier. */
+      if (!HK_PERF(dev, ALWAYSCDMBARRIER))
+         cmd->state.cs.cdm_barrier_pending = true;
       return;
    }
 
