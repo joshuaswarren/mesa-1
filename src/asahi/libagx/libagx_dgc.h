@@ -391,17 +391,6 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
          cfg.usc_cache_inval = true;
          // cfg.unk_26 = true;
       }
-      if (chip == AGX_CHIP_G13G) {
-         /* G13G (t8103, M1): the kitchen-sink bits below cost ~10 us per
-          * dispatch in real dependent compute chains (Qwen decode: ~2.1 ms
-          * of a ~9.8 ms token). Bits 4-8 hold the mlx-omarchy pinned
-          * generated-ID digests (48/48 interleaved runs, both legs) and
-          * the omarchy runtime suite (22 cases / 6189 assertions), and
-          * measure +3.05% ctx1053 decode on jwm1. Other chips keep the
-          * full sink until measured there. */
-         cfg.unk_4 = true;
-         cfg.unk_7 = true;
-      }
 
       /* With multiple launches in the same CDM stream, we can get cache
        * coherency (? or sync?) issues. We hit this with blits, which need - in
@@ -410,7 +399,7 @@ agx_cdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
        * let's just set these after every launch to be safe. We can revisit in
        * the future when we figure out what the bits mean.
        */
-      if (chip != AGX_CHIP_G13G && chip != AGX_CHIP_G13X) {
+      if (chip != AGX_CHIP_G13X) {
          cfg.unk_0 = true;
          cfg.unk_1 = true;
          cfg.unk_2 = true;
