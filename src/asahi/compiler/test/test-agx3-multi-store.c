@@ -449,27 +449,29 @@ main(void)
       uint8_t add[10];
       bool add_found = false;
       /*
-       * The `K + gid` add. Post-RA this shader is
+       * The `K + gid` add. With AGX_G17P_PROMOTE_INTEGER_CONSTANTS (default
+       * on) the constant is promoted to uniform u8 and post-RA this shader is
        *
        *   r0 = imad ^r0, #32, ^r1, #0      <- the index
-       *   r1 = mov_imm #0x12340000         <- the constant
-       *   r1 = iadd r0, ^r1, #0            <- THIS
+       *   r1 = iadd u8, r0                 <- THIS (0x12340000 in u8)
        *   device_store ^r1, u0:u1, ^r0.abs
        *
-       * so the two last-use bits in byte 8 are determined: slot A (r0) is
-       * still live, because the store addresses with it, and slot B (r1, the
-       * constant) is dead. That is byte 8 = 0x15; the sweep over
-       * agx3_iadd_encode()'s two kill flags gives 0x11/0x13/0x15/0x17 for
-       * (A,B) = (0,0)/(1,0)/(0,1)/(1,1). Byte 2 is 0x54 -- no scoreboard
-       * wait -- because the only async producers here are the two get_sr
-       * reads, and the imad above already waited them.
+       * in the native uniform-first form (agx3_uniform_integer_encode()),
+       * whose register operand carries its own cache (f40) and discard (f42)
+       * hints. r0 must stay live, because the store addresses with it:
+       * re-encoding these bytes gives dest r1, register r0 with cache = 0 and
+       * discard = 0, uniform u8, no destination cache; discard = 1 encodes
+       * differently. Byte 2 is 0x54 -- no scoreboard wait -- because the only
+       * async producers here are the two get_sr reads, and the imad above
+       * already waited them.
        *
-       * The previous pin (byte 2 = 0x56, byte 8 = 0x13) was taken before 142
-       * commits of packer work and named the opposite operand as dead; it
-       * described an operand order this shader no longer has.
+       * With the promotion off this is the register form
+       * `r1 = iadd r0, ^r1` after `r1 = mov_imm #0x12340000`, pinned as
+       * 9f 01 54 02 02 00 08 a8 15 05 (agx3_iadd_encode()'s kill flags
+       * 0x11/0x13/0x15/0x17 in byte 8 for (A,B) = (0,0)/(1,0)/(0,1)/(1,1)).
        */
       static const uint8_t want_add[10] = {0x9f, 0x01, 0x54, 0x02, 0x02,
-                                           0x00, 0x08, 0xa8, 0x15, 0x05};
+                                           0x10, 0x00, 0xa8, 0x13, 0x04};
       CHECK(compile_index_derived_store(AGX_ISA_ENCODING_AGX3B, store, &found,
                                         add, &add_found));
       CHECK(found);

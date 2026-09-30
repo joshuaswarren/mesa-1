@@ -51,7 +51,9 @@ count_stores(const struct agx_shader_part *part)
 {
    const uint8_t *b = part->binary;
    unsigned n = 0;
-   for (unsigned i = 0; i + AGX3_STDEV_LEN <= part->info.binary_size; ++i) {
+   /* Only the code: promoted constants precede main (see run()). */
+   for (unsigned i = part->info.main_offset;
+        i + AGX3_STDEV_LEN <= part->info.binary_size; ++i) {
       if (b[i] == 0xe7 && (b[i + 2] & 0xfc) == 0x54 && b[i + 11] == 0x90)
          ++n;
    }
@@ -125,8 +127,15 @@ run(const char *name, void (*body)(nir_builder *b, nir_def *base, nir_def *g),
    }
 
    CHECK(part.binary != NULL && part.info.binary_size > sizeof(agx3_stop));
-   CHECK(part.info.main_offset == 0);
-   CHECK(part.info.main_size == part.info.binary_size);
+   /* Integer constants the native uniform forms can read are promoted to
+    * uniforms (AGX_G17P_PROMOTE_INTEGER_CONSTANTS, default on); their data is
+    * uploaded before the code, so main starts after it. Main still runs to
+    * the end of the binary. */
+   CHECK(part.info.rodata.size_16
+            ? part.info.rodata.offset + 2u * part.info.rodata.size_16 <=
+                 part.info.main_offset
+            : part.info.main_offset == 0);
+   CHECK(part.info.main_offset + part.info.main_size == part.info.binary_size);
    CHECK(part.info.binary_size >= sizeof(agx3_stop) &&
          memcmp((const uint8_t *)part.binary + part.info.binary_size -
                    sizeof(agx3_stop),

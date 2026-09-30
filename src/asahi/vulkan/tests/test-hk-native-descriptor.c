@@ -469,6 +469,45 @@ check_layered_multisample_pbe(void)
    assert(!hk_pack_native_pbe(10, &packed, &semantic));
 }
 
+static void
+check_captured_rgba8_lossless_pbe(void)
+{
+   struct AGX_PBE p = {AGX_PBE_header};
+   p.dimension = AGX_TEXTURE_DIMENSION_2D;
+   p.layout = AGX_LAYOUT_GPU;
+   p.channels = AGX_CHANNELS_R8G8B8A8;
+   p.type = AGX_TEXTURE_TYPE_UNORM;
+   p.swizzle_r = AGX_CHANNEL_R; p.swizzle_g = AGX_CHANNEL_G;
+   p.swizzle_b = AGX_CHANNEL_B; p.swizzle_a = AGX_CHANNEL_A;
+   p.width = p.height = 1024;
+   p.buffer = UINT64_C(0x10000080000);
+   p.acceleration_buffer = UINT64_C(0x10000480000);
+   p.compressed = p.extended = true;
+   /* Live native StateFields, compressed default texture, first record. */
+   const uint64_t expected[4] = {
+      UINT64_C(0x0800ffc3ffe40a22), UINT64_C(0x8000001000008000),
+      UINT64_C(0x0000001000048000), 0,
+   };
+   struct hk_native_pbe_descriptor actual;
+   assert(hk_pack_native_pbe(9, &actual, &p));
+   assert(memcmp(&actual, expected, sizeof(expected)) == 0);
+   assert(!hk_pack_native_pbe(10, &actual, &p));
+   const struct AGX_PBE original = p;
+#define REJECT_COMPRESSED(change) do { p = original; change; \
+   assert(!hk_pack_native_pbe(9, &actual, &p)); } while (0)
+   /* Compressed mip chains and the other compressed colour classes are
+    * admitted by the G17P compression policy (the five-mip HAL200 witness in
+    * test-pbe-agx3-core.c); only shapes outside the compressed packet stay
+    * refused. */
+   REJECT_COMPRESSED(p.acceleration_buffer = 0);
+   REJECT_COMPRESSED(p.acceleration_buffer++);
+   REJECT_COMPRESSED(p.extended = false);
+   REJECT_COMPRESSED(p.layers = 2);
+   REJECT_COMPRESSED(p.layout = AGX_LAYOUT_LINEAR);
+   REJECT_COMPRESSED(p.mode = AGX_IMAGE_MODE_SPARSE);
+#undef REJECT_COMPRESSED
+}
+
 int
 main(void)
 {
@@ -1521,6 +1560,7 @@ main(void)
    assert(memcmp(&null_pbe10, &(struct hk_native_pbe_descriptor){0},
                  sizeof(null_pbe10)) != 0);
 
+   check_captured_rgba8_lossless_pbe();
    puts("honeykrisp native descriptor geometry/policy: passed");
    return 0;
 }
