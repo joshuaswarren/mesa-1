@@ -1503,6 +1503,9 @@ hk_codegen_env_hash(void)
       /* v96: HK_G17P_ZLS_ELIDE_UNTOUCHED only changes command recording;
        * HK_G17P_SLOW_SUBMIT_US only prints. */
       "ZLS_ELIDE", "SLOW_SUBMIT",
+      /* v96: prolog/epilog disk caching changes where a part comes from,
+       * never its bytes (the verify mode proves it). */
+      "PROLOG_DISK_CACHE",
    };
    const char *list[512];
    unsigned n = 0;

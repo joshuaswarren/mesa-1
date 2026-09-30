@@ -44,6 +44,7 @@
 #include "hk_physical_device.h"
 #include "hk_private.h"
 #include "hk_shader.h"
+#include "util/disk_cache.h"
 #include "agx_debug.h"
 #include "asahi/lib/agx3_g17p_grid_helper_core.h"
 
@@ -5341,6 +5342,134 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
 }
 
 static void build_g17p_fs_epilog(nir_builder *b, const void *key_);
+static void build_fs_prolog(nir_builder *b, const void *key);
+
+/* v96: prolog/epilog parts persist in the device's disk cache. The in-memory
+ * table above is per process, so every launch used to compile each part again
+ * on the render thread at the first bind or draw that needed it (the whole
+ * MC corpus: ~87 compiles even with a warm pipeline cache). The disk key
+ * names the builder by a stable id and covers every input of the compile
+ * below; the cache identity already carries the build, the GPU and the
+ * codegen flags/environment. HK_G17P_PROLOG_DISK_CACHE=0 is the A/B
+ * off-switch. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_prolog_disk_cache,
+                           "HK_G17P_PROLOG_DISK_CACHE", true)
+
+static uint8_t
+hk_prolog_epilog_builder_id(hk_internal_builder_t builder)
+{
+   if (builder == agx_nir_vs_prolog_raw)
+      return 1;
+   if (builder == agx_nir_vs_prolog)
+      return 2;
+   if (builder == build_fs_prolog)
+      return 3;
+   if (builder == build_g17p_fs_epilog)
+      return 4;
+   if (builder == agx_nir_fs_epilog)
+      return 5;
+   return 0;
+}
+
+static bool
+hk_prolog_epilog_disk_key(struct hk_device *dev, const struct hk_internal_key *key,
+                          bool preprocess_nir, bool stop, unsigned cf_base,
+                          const BITSET_WORD *g17p_tile_partitions,
+                          unsigned nr_samples, cache_key out)
+{
+   struct disk_cache *cache = dev->vk.physical->disk_cache;
+   const uint8_t builder = hk_prolog_epilog_builder_id(key->builder);
+   if (!cache || !builder || !debug_get_option_hk_g17p_prolog_disk_cache())
+      return false;
+
+   const struct agx_device_key dk = agx_gather_device_key(&dev->dev);
+   struct {
+      char magic[8];
+      uint32_t builder, stop, preprocess, cf_base, nr_samples, key_size;
+      uint32_t chip, encoding, g13x_coherency, soft_fault;
+      BITSET_WORD partitions[ARRAY_SIZE(((struct agx_shader_key *)0)->g17p_tile_partitions)];
+   } h;
+   memset(&h, 0, sizeof(h));
+   memcpy(h.magic, "hkpe-v1", 8);
+   h.builder = builder;
+   h.stop = stop;
+   h.preprocess = preprocess_nir;
+   h.cf_base = cf_base;
+   h.nr_samples = nr_samples;
+   h.key_size = key->key_size;
+   h.chip = dk.chip;
+   h.encoding = dk.encoding;
+   h.g13x_coherency = dk.needs_g13x_coherency;
+   h.soft_fault = dk.soft_fault;
+   if (g17p_tile_partitions)
+      memcpy(h.partitions, g17p_tile_partitions, sizeof(h.partitions));
+
+   const size_t size = sizeof(h) + key->key_size;
+   uint8_t *buf = alloca(size);
+   memcpy(buf, &h, sizeof(h));
+   memcpy(buf + sizeof(h), key->key, key->key_size);
+   disk_cache_compute_key(cache, buf, size, out);
+   return true;
+}
+
+/* A stored part is its agx_shader_info followed by the binary. */
+static struct agx_shader_part *
+hk_prolog_epilog_disk_get(struct hk_device *dev, const cache_key disk_key)
+{
+   size_t size = 0;
+   uint8_t *data = disk_cache_get(dev->vk.physical->disk_cache, disk_key, &size);
+   if (!data)
+      return NULL;
+
+   struct agx_shader_part *part = NULL;
+   struct agx_shader_info info;
+   if (size >= sizeof(info)) {
+      memcpy(&info, data, sizeof(info));
+      if (size == sizeof(info) + info.binary_size && info.binary_size) {
+         part = rzalloc(dev->prolog_epilog.ht, struct agx_shader_part);
+         void *binary = part ? malloc(info.binary_size) : NULL;
+         if (binary) {
+            part->info = info;
+            memcpy(binary, data + sizeof(info), info.binary_size);
+            part->binary = binary;
+         } else {
+            ralloc_free(part);
+            part = NULL;
+         }
+      }
+   }
+   free(data);
+   return part;
+}
+
+static void
+hk_prolog_epilog_disk_put(struct hk_device *dev, const cache_key disk_key,
+                          const struct agx_shader_part *part)
+{
+   const size_t size = sizeof(part->info) + part->info.binary_size;
+   uint8_t *data = malloc(size);
+   if (!data)
+      return;
+   memcpy(data, &part->info, sizeof(part->info));
+   memcpy(data + sizeof(part->info), part->binary, part->info.binary_size);
+   disk_cache_put(dev->vk.physical->disk_cache, disk_key, data, size, NULL);
+   free(data);
+}
+
+static bool
+hk_prolog_epilog_insert(struct hk_device *dev, const struct hk_internal_key *key,
+                        struct agx_shader_part *part)
+{
+   /* The key is on the caller's stack, so clone it before using it as a hash
+    * table key. The clone is logically owned by the hash table. */
+   size_t total_key_size = sizeof(*key) + key->key_size;
+   void *cloned_key = ralloc_memdup(dev->prolog_epilog.ht, key, total_key_size);
+   if (!cloned_key)
+      return false;
+
+   _mesa_hash_table_insert(dev->prolog_epilog.ht, cloned_key, part);
+   return true;
+}
 
 static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
@@ -5353,6 +5482,23 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    struct hash_entry *ent = _mesa_hash_table_search(dev->prolog_epilog.ht, key);
    if (ent)
       return ent->data;
+
+   cache_key disk_key;
+   const bool disk =
+      hk_prolog_epilog_disk_key(dev, key, preprocess_nir, stop, cf_base,
+                                g17p_tile_partitions, nr_samples, disk_key);
+   /* HK_G17P_PROLOG_DISK_CACHE_VERIFY=1 (gate): compile every part even on a
+    * disk hit and compare the stored bytes with the fresh compile. */
+   const bool verify = disk && HK_ENV_BOOL_ONCE("HK_G17P_PROLOG_DISK_CACHE_VERIFY", false);
+   struct agx_shader_part *cached =
+      disk ? hk_prolog_epilog_disk_get(dev, disk_key) : NULL;
+   if (cached && !verify) {
+      if (hk_prolog_epilog_insert(dev, key, cached))
+         return cached;
+      free(cached->binary);
+      ralloc_free(cached);
+      return NULL;
+   }
 
    hk_slow_tl.prolog_epilog_compiles++;
 
@@ -5425,19 +5571,28 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       return NULL;
    }
 
-   /* ..and cache it before we return. The key is on the stack right now, so
-    * clone it before using it as a hash table key. The clone is logically owned
-    * by the hash table.
-    */
-   size_t total_key_size = sizeof(*key) + key->key_size;
-   void *cloned_key = ralloc_memdup(dev->prolog_epilog.ht, key, total_key_size);
-   if (!cloned_key) {
+   if (cached) {
+      /* Verify mode: the stored part must be the fresh compile, byte for
+       * byte (info and binary). */
+      const bool same =
+         !memcmp(&cached->info, &part->info, sizeof(part->info)) &&
+         !memcmp(cached->binary, part->binary, part->info.binary_size);
+      fprintf(stderr, "G17P prolog/epilog disk cache verify: builder=%u size=%u %s\n",
+              hk_prolog_epilog_builder_id(builder), part->info.binary_size,
+              same ? "MATCH" : "MISMATCH");
+      free(cached->binary);
+      ralloc_free(cached);
+   }
+
+   /* ..and cache it before we return. */
+   if (!hk_prolog_epilog_insert(dev, key, part)) {
       free(part->binary);
       ralloc_free(part);
       return NULL;
    }
 
-   _mesa_hash_table_insert(dev->prolog_epilog.ht, cloned_key, part);
+   if (disk && !cached)
+      hk_prolog_epilog_disk_put(dev, disk_key, part);
    return part;
 }
 
