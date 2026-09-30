@@ -1673,6 +1673,44 @@ agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
    return agx3_alu_bit_width(enc, op, false, dest, src, hints, wait_mask, out, len);
 }
 
+/* Native runtime fragment XORs at offsets108/152/198/222 use ep0,
+ * f11 destination-cache and both source lifetimes. The same fields have
+ * independent extended-form native witnesses. Let the composer reject an
+ * unrepresentable compact operand/wait tuple before trying ep1: never clear
+ * a dependency to make the compact form fit. Legacy callers stay unchanged. */
+bool
+agx3_alu_bit_reg_native(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                         uint16_t dest, const uint16_t src[2],
+                         const enum agx3_alu_hint hints[2], bool dest_cache,
+                         uint16_t wait_mask,
+                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
+       (op != AGX3_ALU_BAND && op != AGX3_ALU_BOR && op != AGX3_ALU_BXOR) ||
+       dest >= 256 || (dest & 1) || (wait_mask & ~UINT16_C(0x3f)))
+      return false;
+   for (unsigned i = 0; i < 2; ++i)
+      if (src[i] >= 256 || (src[i] & 1) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   const struct agx3_field_kv base[] = {
+      {9,2}, {10,2}, {23,2}, {24,2}, {37,2}, {38,2},
+   };
+   struct agx3_field_kv fields[] = {
+      {2,dest}, {16,src[0]}, {30,src[1]}, {11,dest_cache},
+      {25,hints[0] == AGX3_ALU_HINT_CACHE},
+      {27,hints[0] == AGX3_ALU_HINT_DISCARD},
+      {39,hints[1] == AGX3_ALU_HINT_CACHE},
+      {41,hints[1] == AGX3_ALU_HINT_DISCARD},
+      {44,!!(wait_mask & 1)}, {45,!!(wait_mask & 2)},
+      {46,!!(wait_mask & 4)}, {47,!!(wait_mask & 8)},
+      {48,!!(wait_mask & 16)}, {49,!!(wait_mask & 32)},
+   };
+   const char *name = agx3_alu_forms[op][0].mnemonic;
+   return agx3_bind_compose(enc,name,0,base,6,fields,14,out,len) ||
+          agx3_bind_compose(enc,name,1,base,6,fields,14,out,len);
+}
+
 /*
  * The carrier must not end its source's lifetime. The composer table's
  * bit_and baseline is Apple's `bit_and r0, ^r0, r0` specimen, whose f27 marks
@@ -1937,10 +1975,28 @@ agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
                  uint16_t wait_mask,
                  uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
 {
+   return agx3_alu_integer_reg_shift_cache(enc, op, dest, src, hints, shift,
+                                           false, wait_mask, out, len);
+}
+
+/* As above, optionally depositing f11 (destination register-cache hint).
+ * Native G17P code sets f11 on every integer iadd/isub result, including
+ * loop-carried ones (captured throughput fragment shader, 0xa8..0xe2).
+ */
+bool
+agx3_alu_integer_reg_shift_cache(enum agx_isa_encoding enc,
+                                 enum agx3_alu_op op, uint16_t dest,
+                                 const uint16_t src[2],
+                                 const enum agx3_alu_hint hints[2],
+                                 uint8_t shift, bool dest_cache,
+                                 uint16_t wait_mask,
+                                 uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                 uint8_t *len)
+{
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    if((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || !src || !hints || !out ||
       !len || (op != AGX3_ALU_IADD && op != AGX3_ALU_ISUB) ||
-      dest >= 256 || (dest & 1) ||
+      dest >= 256 || (dest & 1) || (gpu1 && dest_cache) ||
       (wait_mask & ~(uint16_t)(gpu1 ? 0xff : 0x3f)))
       return false;
    /* Only the subtract's shift is witnessed; the add reaches its shifted
@@ -1971,6 +2027,7 @@ agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
    /* f54, slot B's shift. Zero is the form's own absence, so only deposit a
     * real shift; that keeps every previously encodable add byte-identical. */
    if(shift)ov[n++]=(struct agx3_field_kv){54,shift};
+   if(dest_cache)ov[n++]=(struct agx3_field_kv){11,1};
    return agx3_bind_compose(enc,f->mnemonic,f->ep,base,nb,ov,n,out,len);
 }
 
@@ -3203,6 +3260,42 @@ agx3_alu_asr_reg16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
    }
 
    return agx3_bind_compose(enc, "sra", 0, base, 7, fields, count, out, len);
+}
+
+bool
+agx3_alu_shift_imm32(enum agx_isa_encoding enc, bool left,
+                      uint16_t dest, uint16_t src, unsigned shift,
+                      enum agx3_alu_hint hint, bool dest_cache,
+                      uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                      uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !len ||
+       dest >= 192 || src >= 192 || ((dest | src) & 1) ||
+       shift < 1 || shift > 31 ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
+      return false;
+
+   /* Native runtime archives for uint shifts pin the literal count at f30,
+    * independently of value width, lifetime hints, and scoreboard waits.
+    * sll_13:2700560002003400f0110100
+    * srl_17:a700560002004400f0110100
+    * Both use a discarded r0 value and wait slot 6. No count register or
+    * arithmetic boundary conversion is part of this immediate form. */
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {23, 2}, {24, 2},
+      {38, 1}, {39, 2}, {52, 1}, {53, 2},
+   };
+   struct agx3_field_kv fields[12] = {
+      {2, dest}, {11, dest_cache}, {16, src},
+      {25, hint == AGX3_ALU_HINT_CACHE},
+      {27, hint == AGX3_ALU_HINT_DISCARD}, {30, shift},
+   };
+   unsigned n = 6;
+   for (unsigned i = 0; i < 6; ++i)
+      if (wait_mask & (1u << i))
+         fields[n++] = (struct agx3_field_kv){60 + i, 1};
+   return agx3_bind_compose(enc, left ? "sll" : "srl", 0,
+                            base, 8, fields, n, out, len);
 }
 
 bool

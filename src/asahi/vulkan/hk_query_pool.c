@@ -45,6 +45,14 @@ hk_has_available(const struct hk_query_pool *pool)
 static uint16_t *
 hk_pool_oq_index_ptr(const struct hk_query_pool *pool)
 {
+   /* v56h/v57f: a pool whose BO allocation failed (e.g. after the VM went
+    * sticky-lost, when every BO creation fails) is destroyed from
+    * hk_CreateQueryPool's error path with pool->bo == NULL. Mapping it
+    * dereferenced NULL and turned a clean VK_ERROR_DEVICE_LOST in
+    * Minecraft into a SIGSEGV (abl_BeginCommandBuffer -> hk_CreateQueryPool
+    * -> hk_DestroyQueryPool, 2026-09-29 22:00Z). */
+   if (!pool->bo)
+      return NULL;
    return agx_bo_map(pool->bo) + pool->query_start;
 }
 
@@ -66,18 +74,26 @@ hk_reports_per_query(struct hk_query_pool *pool)
    }
 }
 
-static void
-hk_flush_if_timestamp(struct hk_cmd_buffer *cmd, struct hk_query_pool *pool)
+/*
+ * Prepare the compute stream a query command (reset, result copy) records
+ * into. Query state is updated in submission order without application
+ * barriers (Vulkan 1.3, 17 "Queries": vkCmdCopyQueryPoolResults sees every
+ * earlier vkCmdResetQueryPool on the queue, and vkCmdBeginQuery requires the
+ * query to be unavailable, which an earlier reset in the same command buffer
+ * provides). The stream therefore waits on every earlier stream, and it is
+ * never the stream carrying a pending end timestamp, which is written after
+ * the stream's launches. The caller marks later streams as ordered after it
+ * where the command's semantics require that.
+ */
+static struct hk_cs *
+hk_query_command_cs(struct hk_cmd_buffer *cmd)
 {
-   /* There might not be a barrier between the timestamp write and the copy
-    * otherwise but we need one to give the CPU a chance to write the timestamp.
-    * This could maybe optimized.
-    */
-   if (pool->vk.query_type == VK_QUERY_TYPE_TIMESTAMP) {
-      perf_debug(cmd, "Flushing for timestamp copy");
-      hk_cmd_buffer_end_graphics(cmd);
-      hk_cmd_buffer_end_compute(cmd);
-   }
+   hk_sync_flush_pending_timestamp(cmd);
+   hk_sync_end_cs_if_timestamped(cmd);
+
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   hk_sync_src_dep(cmd, HK_SYNC_ALL, cmd->current_cs.cs, dep);
+   return hk_sync_get_cs_after(cmd, dep);
 }
 
 static uint64_t
@@ -463,6 +479,7 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
    }
 
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
+   assert(oq_index || !occlusion_queries);
 
    for (unsigned i = 0; i < occlusion_queries; ++i) {
       uint64_t zero = 0;
@@ -501,7 +518,7 @@ hk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
 
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
 
-   for (unsigned i = 0; i < pool->oq_queries; ++i) {
+   for (unsigned i = 0; oq_index && i < pool->oq_queries; ++i) {
       hk_descriptor_table_remove(dev, &dev->occlusion_queries, oq_index[i]);
    }
 
@@ -529,10 +546,23 @@ hk_CmdResetQueryPool(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
 
-   hk_flush_if_timestamp(cmd, pool);
-
    perf_debug(cmd, "Reset query pool");
-   emit_zero_queries(cmd, pool, firstQuery, queryCount, false);
+
+   /* The reset runs after every earlier use of the pool and before every
+    * later one: it is a transfer operation (Vulkan 1.3, 17.1) whose result
+    * every later query command on the queue observes without further
+    * synchronization. Zeroing is compute on every generation, so the
+    * ordering is one compute stream everything after waits on. */
+   cmd->sync.kind_override = HK_SYNC_ALL;
+   struct hk_cs *cs = hk_query_command_cs(cmd);
+   if (cs)
+      emit_zero_queries(cmd, pool, firstQuery, queryCount, false);
+   cmd->sync.kind_override = 0;
+   if (!cs)
+      return;
+
+   hk_sync_after_stream(cmd, cmd->current_cs.cs ? cmd->current_cs.cs : cs,
+                        HK_SYNC_ALL);
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -544,42 +574,17 @@ hk_CmdWriteTimestamp2(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
-   uint64_t report_addr = hk_query_report_addr(dev, pool, query);
-   bool after_gfx = cmd->current_cs.gfx != NULL;
+   const struct agx_timestamp_req req = {
+      .addr = hk_query_report_addr(dev, pool, query),
+      .handle = pool->handle,
+      .offset_B = hk_query_offset(pool, query),
+   };
 
-   /* When writing timestamps for compute, we split the control stream at each
-    * write. This ensures we never need to copy compute timestamps, which would
-    * require an extra control stream anyway. Unlike graphics, splitting compute
-    * control streams is inexpensive so there's not a strong performance reason
-    * to do otherwise. Finally, batching multiple timestamp writes (like we do
-    * for graphics) would destroy the ability to profile individual compute
-    * dispatches. While that's allowed by the Vulkan spec, it's pretty mean to
-    * apps. So.. don't do that.
-    */
-   if (!after_gfx && cmd->current_cs.cs &&
-       cmd->current_cs.cs->timestamp.end.addr) {
-
-      perf_debug(cmd, "Splitting for compute timestamp");
-      hk_cmd_buffer_end_compute(cmd);
-   }
-
-   struct hk_cs *cs = hk_cmd_buffer_get_cs_general(
-      cmd, after_gfx ? &cmd->current_cs.gfx : &cmd->current_cs.cs, true);
-   if (!cs)
+   /* The stamp rides on a command's native start or end timestamp; which
+    * command, and what it must wait on, follows from the stage. */
+   hk_sync_write_timestamp(cmd, stage, req);
+   if (vk_command_buffer_has_error(&cmd->vk))
       return;
-
-   if (cs->timestamp.end.addr) {
-      assert(after_gfx && "compute is handled above");
-
-      libagx_copy_timestamp(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_POSTGFX,
-                            report_addr, cs->timestamp.end.addr);
-   } else {
-      cs->timestamp.end = (struct agx_timestamp_req){
-         .addr = report_addr,
-         .handle = pool->handle,
-         .offset_B = hk_query_offset(pool, query),
-      };
-   }
 
    /* From the Vulkan spec:
     *
@@ -785,18 +790,29 @@ hk_GetQueryPoolResults(VkDevice device, VkQueryPool queryPool,
    return status;
 }
 
-VKAPI_ATTR void VKAPI_CALL
-hk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
-                           uint32_t firstQuery, uint32_t queryCount,
-                           VkBuffer dstBuffer, VkDeviceSize dstOffset,
-                           VkDeviceSize stride, VkQueryResultFlags flags)
+static void
+hk_cmd_copy_query_pool_results(struct hk_cmd_buffer *cmd,
+                               struct hk_query_pool *pool, uint32_t firstQuery,
+                               uint32_t queryCount, struct hk_buffer *dst_buffer,
+                               VkDeviceSize dstOffset, VkDeviceSize stride,
+                               VkQueryResultFlags flags)
 {
-   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
-   VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
-   VK_FROM_HANDLE(hk_buffer, dst_buffer, dstBuffer);
-
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   hk_flush_if_timestamp(cmd, pool);
+
+   /* Query availability writes may be deferred to the post-graphics stream.
+    * Finish the producing streams before creating a waiting consumer so it
+    * cannot spin ahead of its own availability write. Do this before
+    * hk_query_command_cs attaches dependencies to the consumer stream. */
+   if (agx_native_graphics(&dev->dev) && (flags & VK_QUERY_RESULT_WAIT_BIT)) {
+      hk_cmd_buffer_end_graphics(cmd);
+      hk_cmd_buffer_end_compute(cmd);
+   }
+
+   /* The copy reads results and availability every earlier stream may still
+    * be producing. Ordering the destination buffer against later use is the
+    * application's (it is a transfer operation, Vulkan 1.3, 17.2). */
+   if (!hk_query_command_cs(cmd))
+      return;
 
    perf_debug(cmd, "Query pool copy");
 
@@ -854,4 +870,20 @@ hk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
    };
 
    libagx_copy_query_struct(cmd, agx_1d(queryCount), AGX_BARRIER_ALL, info);
+}
+
+VKAPI_ATTR void VKAPI_CALL
+hk_CmdCopyQueryPoolResults(VkCommandBuffer commandBuffer, VkQueryPool queryPool,
+                           uint32_t firstQuery, uint32_t queryCount,
+                           VkBuffer dstBuffer, VkDeviceSize dstOffset,
+                           VkDeviceSize stride, VkQueryResultFlags flags)
+{
+   VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
+   VK_FROM_HANDLE(hk_query_pool, pool, queryPool);
+   VK_FROM_HANDLE(hk_buffer, dst_buffer, dstBuffer);
+
+   cmd->sync.kind_override = HK_SYNC_ALL;
+   hk_cmd_copy_query_pool_results(cmd, pool, firstQuery, queryCount,
+                                  dst_buffer, dstOffset, stride, flags);
+   cmd->sync.kind_override = 0;
 }

@@ -248,10 +248,44 @@ enum drm_asahi_feature {
 	DRM_ASAHI_FEATURE_VM_STATUS = (1UL) << 1,
 	/** @DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES: Reserved independent queues and limits. */
 	DRM_ASAHI_FEATURE_INDEPENDENT_QUEUES = (1UL) << 2,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS: Every hardware command in
+	 * a submit waits on all of that ioctl's input syncs, including errors.
+	 * Independent commands need no extra dependency on the first command.
+	 * Userspace splitting a batch across ioctls must supply its input syncs
+	 * to every chunk relying on this guarantee.
+	 */
+	DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS = (1UL) << 3,
+
+	/**
+	 * @DRM_ASAHI_FEATURE_VM_STATUS_MIRROR: GET_PARAMS group
+	 * DRM_ASAHI_PARAM_GROUP_VM_STATUS_MIRROR registers a userspace word that
+	 * always holds the VM's sticky status (the value group VM_STATUS would
+	 * return). The kernel stores a failure there before signalling any fence
+	 * of the failed job, so after a successful syncobj wait a load of the word
+	 * replaces the VM_STATUS query. Registration may still be refused.
+	 */
+	DRM_ASAHI_FEATURE_VM_STATUS_MIRROR = (1UL) << 4,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
 #define DRM_ASAHI_PARAM_GROUP_QUEUE_LIMITS 2
+#define DRM_ASAHI_PARAM_GROUP_VM_STATUS_MIRROR 3
+
+/* GET_PARAMS group VM_STATUS_MIRROR (input only; feature bit 4).
+ * handle names a GEM object (at most 64 KiB) of the calling file; offset is a 4-byte-aligned
+ * byte offset of a __s32 inside it; flags is zero. The kernel keeps its own
+ * reference to the object for the VM status lifetime, zeroes the word, then
+ * keeps it equal to the sticky VM error (0 or a negative errno). One
+ * registration per VM. EOPNOTSUPP means "keep using group VM_STATUS".
+ */
+struct drm_asahi_vm_status_mirror {
+   __u32 vm_id;
+   __u32 handle;
+   __u32 offset;
+   __u32 flags;
+};
 
 /* GET_PARAMS group VM_STATUS is an in/out query on the calling file's VM.
  * Set pointer to this structure and size to sizeof(structure).

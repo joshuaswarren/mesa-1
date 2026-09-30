@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/mman.h>
 
 #include "asahi_g17p_stream_validator.h"
 #include "util/macros.h"
@@ -73,7 +74,10 @@ static const struct drm_asahi_params_global params_g17p = {
    .vm_start = 0x4000,
    .vm_end = (1ull << 42) - 0x8000ull,
    .vm_kernel_min_size = 0x20000000,
-   .max_commands_per_submission = 1,
+   /* file.rs:60 MAX_COMMANDS_PER_SUBMISSION. With 1 the driver would split
+    * every command into its own ioctl and the per-command barrier fields
+    * would all collapse to 0, hiding what the driver actually requests. */
+   .max_commands_per_submission = 64,
    .max_attachments = 16,
    .max_frequency_khz = 1500000,
    .command_timestamp_frequency_hz = 1000000000,
@@ -1336,6 +1340,205 @@ shim_gpu_read(void *data, uint64_t address, void *dst, size_t size)
    return true;
 }
 
+/*
+ * ASAHI_SHIM_DUMP_SUBMIT=<directory>: byte-exactness oracle for driver CPU
+ * work (draw-cpu-20260926). At every submit, append to one file per process
+ * the submit's command buffer (hex) and, for every VM mapping of the
+ * submitting fd in address order, its address, size and a 64-bit hash of its
+ * current contents (a single-page mapping hashes its one page). Two drivers
+ * that emit identical GPU-visible bytes into identically placed allocations
+ * produce identical files. The file is named after a hash of the command
+ * line and the ASAHI_ / HK_ / AGX_ / MESA_ / BENCH_ environment, so the same
+ * test run against two drivers lands in the same file name. Diagnostic only;
+ * it changes no ioctl result.
+ */
+static uint64_t
+dump_hash_bytes(uint64_t h, const uint8_t *p, size_t n)
+{
+   for (size_t i = 0; i < n; ++i) {
+      h ^= p[i];
+      h *= UINT64_C(0x100000001b3);
+   }
+   return h;
+}
+
+/* Replace a build-output directory prefix ("/.../outputs/mesa/<build>/")
+ * with "BUILD/" so the same test run from two build trees hashes alike. */
+static size_t
+dump_normalize(const char *in, size_t len, char *out, size_t cap)
+{
+   size_t o = 0;
+   for (size_t i = 0; i < len && o + 8 < cap;) {
+      const char *marker = "/outputs/mesa/";
+      const size_t mlen = strlen(marker);
+      if (i + mlen <= len && !memcmp(in + i, marker, mlen)) {
+         size_t j = i + mlen;
+         while (j < len && in[j] != '/' && in[j] != '\0')
+            ++j;
+         /* Drop what precedes the marker in this string too. */
+         size_t k = o;
+         while (k > 0 && out[k - 1] != '\0' && out[k - 1] != '=' &&
+                out[k - 1] != ' ' && out[k - 1] != ':')
+            --k;
+         o = k;
+         memcpy(out + o, "BUILD", 5);
+         o += 5;
+         i = j;
+         continue;
+      }
+      out[o++] = in[i++];
+   }
+   return o;
+}
+
+static FILE *
+dump_submit_file(void)
+{
+   static FILE *file;
+   static bool tried;
+   if (tried)
+      return file;
+   tried = true;
+
+   const char *dir = getenv("ASAHI_SHIM_DUMP_SUBMIT");
+   if (!dir || !*dir)
+      return NULL;
+
+   uint64_t h = UINT64_C(0xcbf29ce484222325);
+   static char raw[65536], norm[65536];
+   size_t raw_len = 0, norm_len = 0;
+   FILE *cmd = fopen("/proc/self/cmdline", "rb");
+   if (cmd) {
+      raw_len = fread(raw, 1, sizeof(raw) - 1, cmd);
+      fclose(cmd);
+      norm_len = dump_normalize(raw, raw_len, norm, sizeof(norm));
+      h = dump_hash_bytes(h, (const uint8_t *)norm, norm_len);
+   }
+   extern char **environ;
+   /* Order-independent over the selected variables. */
+   uint64_t env_sum = 0;
+   for (char **e = environ; e && *e; ++e) {
+      if (strncmp(*e, "ASAHI_", 6) && strncmp(*e, "HK_", 3) &&
+          strncmp(*e, "AGX_", 4) && strncmp(*e, "MESA_", 5) &&
+          strncmp(*e, "BENCH_", 6))
+         continue;
+      if (!strncmp(*e, "ASAHI_SHIM_DUMP_SUBMIT=", 23))
+         continue;
+      static char env_norm[8192];
+      const size_t env_len =
+         dump_normalize(*e, strlen(*e), env_norm, sizeof(env_norm));
+      env_sum += dump_hash_bytes(UINT64_C(0xcbf29ce484222325),
+                                 (const uint8_t *)env_norm, env_len);
+   }
+   h = dump_hash_bytes(h, (const uint8_t *)&env_sum, sizeof(env_sum));
+
+   const char *name = "prog";
+   FILE *comm = fopen("/proc/self/comm", "r");
+   static char comm_name[64];
+   if (comm) {
+      if (fgets(comm_name, sizeof(comm_name), comm)) {
+         comm_name[strcspn(comm_name, "\n")] = 0;
+         name = comm_name;
+      }
+      fclose(comm);
+   }
+
+   char path[4096];
+   for (unsigned k = 0; k < 64; ++k) {
+      snprintf(path, sizeof(path), "%s/%s-%016llx.%u.dump", dir, name,
+               (unsigned long long)h, k);
+      file = fopen(path, "wx");
+      if (file)
+         break;
+   }
+   if (file) {
+      fputs("CMD", file);
+      for (size_t i = 0; i < norm_len; ++i)
+         fputc(norm[i] ? norm[i] : ' ', file);
+      fputc('\n', file);
+   }
+   return file;
+}
+
+static int
+dump_mapping_cmp(const void *a, const void *b)
+{
+   const struct asahi_vm_mapping *x = *(const struct asahi_vm_mapping *const *)a;
+   const struct asahi_vm_mapping *y = *(const struct asahi_vm_mapping *const *)b;
+   return x->address < y->address ? -1 : x->address > y->address;
+}
+
+static void
+dump_submit(int fd, const struct drm_asahi_submit *submit, unsigned index)
+{
+   FILE *f = dump_submit_file();
+   if (!f)
+      return;
+
+   const uint8_t *cmdbuf = (const void *)(uintptr_t)submit->cmdbuf;
+   fprintf(f, "SUBMIT %u queue=%u in_syncs=%u out_syncs=%u cmdbuf_size=%u\nCMDBUF ",
+           index, submit->queue_id, submit->in_sync_count,
+           submit->out_sync_count, submit->cmdbuf_size);
+   for (uint32_t i = 0; cmdbuf && i < submit->cmdbuf_size; ++i)
+      fprintf(f, "%02x", cmdbuf[i]);
+   fputc('\n', f);
+
+   const struct asahi_vm_mapping **list =
+      malloc(sizeof(*list) * (shim_mappings.count + 1));
+   size_t n = 0;
+   for (size_t i = 0; i < shim_mappings.count; ++i) {
+      if (shim_mappings.entries[i].fd == fd)
+         list[n++] = &shim_mappings.entries[i];
+   }
+   qsort(list, n, sizeof(*list), dump_mapping_cmp);
+
+   static uint8_t *chunk;
+   const size_t chunk_size = 1 << 20;
+   if (!chunk)
+      chunk = malloc(chunk_size);
+
+   for (size_t i = 0; i < n; ++i) {
+      const struct asahi_vm_mapping *m = list[i];
+      const uint64_t bytes = m->single_page ? UINT64_C(0x4000) : m->size;
+      uint64_t h = UINT64_C(0xcbf29ce484222325);
+      for (uint64_t off = 0; off < bytes; off += chunk_size) {
+         const size_t len = MIN2(chunk_size, bytes - off);
+         const uint64_t file_offset =
+            m->bo->mem_addr + m->object_offset + off;
+         if (pread(shim_device.mem_fd, chunk, len, (off_t)file_offset) !=
+             (ssize_t)len) {
+            memset(chunk, 0xee, len);
+         }
+         h = dump_hash_bytes(h, chunk, len);
+      }
+      fprintf(f, "MAP %#llx size=%#llx single=%u hash=%016llx\n",
+              (unsigned long long)m->address, (unsigned long long)m->size,
+              m->single_page, (unsigned long long)h);
+
+      /* ASAHI_SHIM_DUMP_BYTES=<hex address>: also write that mapping's raw
+       * bytes, one file per submit, next to the dump. */
+      const char *want = getenv("ASAHI_SHIM_DUMP_BYTES");
+      if (want && strtoull(want, NULL, 16) == m->address) {
+         char path[4096];
+         snprintf(path, sizeof(path), "%s/bytes-%llx-%u.bin",
+                  getenv("ASAHI_SHIM_DUMP_SUBMIT"),
+                  (unsigned long long)m->address, index);
+         FILE *raw = fopen(path, "wb");
+         for (uint64_t off = 0; raw && off < bytes; off += chunk_size) {
+            const size_t len = MIN2(chunk_size, bytes - off);
+            if (pread(shim_device.mem_fd, chunk, len,
+                      (off_t)(m->bo->mem_addr + m->object_offset + off)) ==
+                (ssize_t)len)
+               fwrite(chunk, 1, len, raw);
+         }
+         if (raw)
+            fclose(raw);
+      }
+   }
+   free(list);
+   fflush(f);
+}
+
 static int
 asahi_ioctl_noop(int fd, unsigned long request, void *arg)
 {
@@ -1439,11 +1642,89 @@ asahi_ioctl_gem_mmap_offset(int fd, unsigned long request, void *arg)
    return 0;
 }
 
+/* v48 VM-status mirror checks (test infrastructure only; off by default).
+ * ASAHI_SHIM_VM_STATUS=1 advertises group 1, ASAHI_SHIM_VM_STATUS_MIRROR=1
+ * advertises group 3, ASAHI_SHIM_VM_STATUS_ERROR=<errno> is the sticky VM
+ * error both report. Counts are printed at exit for the harness. */
+static unsigned shim_vm_status_queries;
+static unsigned shim_vm_status_mirrors;
+
+static bool
+shim_env_on(const char *name)
+{
+   const char *value = getenv(name);
+   return value && !strcmp(value, "1");
+}
+
+static int32_t
+shim_vm_status_error(void)
+{
+   const char *value = getenv("ASAHI_SHIM_VM_STATUS_ERROR");
+   return value ? (int32_t)strtol(value, NULL, 0) : 0;
+}
+
+static void
+shim_vm_status_report(void)
+{
+   fprintf(stderr, "shim: vm-status queries=%u mirrors=%u\n",
+           shim_vm_status_queries, shim_vm_status_mirrors);
+}
+
+static void
+shim_vm_status_register_report(void)
+{
+   static bool registered;
+   if (!registered && (shim_env_on("ASAHI_SHIM_VM_STATUS") ||
+                       shim_env_on("ASAHI_SHIM_VM_STATUS_MIRROR"))) {
+      registered = true;
+      atexit(shim_vm_status_report);
+   }
+}
+
+static int
+asahi_ioctl_vm_status_mirror(int fd, struct drm_asahi_get_params *gp)
+{
+   if (!shim_env_on("ASAHI_SHIM_VM_STATUS_MIRROR")) {
+      errno = EOPNOTSUPP;
+      return -1;
+   }
+   struct drm_asahi_vm_status_mirror *m = (void *)(uintptr_t)gp->pointer;
+   if (gp->size < sizeof(*m) || m->flags || (m->offset & 3)) {
+      errno = EINVAL;
+      return -1;
+   }
+   struct shim_fd *shim_fd = drm_shim_fd_lookup(fd);
+   struct shim_bo *bo = drm_shim_bo_lookup(shim_fd, m->handle);
+   if (!bo || (uint64_t)m->offset + 4 > bo->size) {
+      if (bo)
+         drm_shim_bo_put(bo);
+      errno = EINVAL;
+      return -1;
+   }
+   const long page = sysconf(_SC_PAGESIZE);
+   const uint64_t at = bo->mem_addr + m->offset;
+   const uint64_t base = at & ~(uint64_t)(page - 1);
+   char *map = mmap(NULL, page, PROT_READ | PROT_WRITE, MAP_SHARED,
+                    shim_device.mem_fd, base);
+   drm_shim_bo_put(bo);
+   if (map == MAP_FAILED)
+      return -1;
+   int32_t *word = (int32_t *)(map + (at - base));
+   __atomic_store_n(word, 0, __ATOMIC_SEQ_CST);
+   const int32_t error = shim_vm_status_error();
+   if (error)
+      __atomic_store_n(word, error, __ATOMIC_SEQ_CST);
+   munmap(map, page);
+   shim_vm_status_mirrors++;
+   return 0;
+}
+
 static int
 asahi_ioctl_get_param(int fd, unsigned long request, void *arg)
 {
    struct drm_asahi_get_params *gp = arg;
 
+   shim_vm_status_register_report();
    switch (gp->param_group) {
    case 0: {
       /* Mirror the kernel, which copies min(sizeof(params), data.size) and
@@ -1451,10 +1732,39 @@ asahi_ioctl_get_param(int fd, unsigned long request, void *arg)
        * instead made the shim unusable against any caller whose header
        * differs by a field. */
       size_t size = MIN2((size_t)gp->size, sizeof(struct drm_asahi_params_global));
-      memcpy((void *)gp->pointer, shim_params(), size);
+      struct drm_asahi_params_global params = *shim_params();
+      /* Test both old and capability-aware kernels without GPU execution. */
+      const char *per_command = getenv("ASAHI_SHIM_PER_COMMAND_INPUT_SYNCS");
+      if (per_command && !strcmp(per_command, "1"))
+         params.features |= DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS;
+      if (shim_env_on("ASAHI_SHIM_VM_STATUS"))
+         params.features |= DRM_ASAHI_FEATURE_VM_STATUS;
+      if (shim_env_on("ASAHI_SHIM_VM_STATUS_MIRROR"))
+         params.features |= DRM_ASAHI_FEATURE_VM_STATUS_MIRROR;
+      const char *command_limit = getenv("ASAHI_SHIM_COMMAND_LIMIT");
+      if (command_limit) {
+         unsigned limit = strtoul(command_limit, NULL, 0);
+         if (limit > 0 && limit <= params.max_commands_per_submission)
+            params.max_commands_per_submission = limit;
+      }
+      memcpy((void *)gp->pointer, &params, size);
       gp->size = size;
       return 0;
    }
+
+   case DRM_ASAHI_PARAM_GROUP_VM_STATUS: {
+      if (!shim_env_on("ASAHI_SHIM_VM_STATUS")) {
+         errno = EINVAL;
+         return -1;
+      }
+      struct drm_asahi_vm_status *status = (void *)(uintptr_t)gp->pointer;
+      status->error = shim_vm_status_error();
+      shim_vm_status_queries++;
+      return 0;
+   }
+
+   case DRM_ASAHI_PARAM_GROUP_VM_STATUS_MIRROR:
+      return asahi_ioctl_vm_status_mirror(fd, gp);
 
    default:
       fprintf(stderr, "Unknown DRM_IOCTL_ASAHI_GET_PARAMS %d\n",
@@ -1650,12 +1960,42 @@ asahi_log_submit(const struct drm_asahi_submit *submit)
                  (unsigned long long)compute.cdm_ctrl_stream_end,
                  (unsigned long long)(compute.cdm_ctrl_stream_end -
                                       compute.cdm_ctrl_stream_base));
+         fprintf(log, "\n");
+         /* Timestamp destinations are the other write-only request: a
+          * query folded onto a command is visible only here. Own line, so
+          * the "  cmd" line keeps the shape the recorded tests parse. */
+         if (compute.ts.start.handle || compute.ts.end.handle)
+            fprintf(log, "    ts start=%u:%u end=%u:%u\n",
+                    compute.ts.start.handle, compute.ts.start.offset,
+                    compute.ts.end.handle, compute.ts.end.offset);
+         offset += sizeof(header) + header.size;
+         continue;
       } else if (header.cmd_type == DRM_ASAHI_CMD_RENDER &&
                  header.size >= sizeof(struct drm_asahi_cmd_render)) {
          struct drm_asahi_cmd_render render;
          memcpy(&render, cmdbuf + offset + sizeof(header), sizeof(render));
          fprintf(log, " vdm_base=0x%llx",
                  (unsigned long long)render.vdm_ctrl_stream_base);
+         /* ZLS: the compression bits (2/4/6/8) and the metadata base and
+          * stride are write-only too; print them for depth compression. */
+         if (render.depth.base || render.stencil.base)
+            fprintf(log,
+                    " zls_ctrl=0x%llx depth=0x%llx/0x%llx stride=0x%x/0x%x"
+                    " stencil=0x%llx/0x%llx stride=0x%x/0x%x",
+                    (unsigned long long)render.zls_ctrl,
+                    (unsigned long long)render.depth.base,
+                    (unsigned long long)render.depth.comp_base,
+                    render.depth.stride, render.depth.comp_stride,
+                    (unsigned long long)render.stencil.base,
+                    (unsigned long long)render.stencil.comp_base,
+                    render.stencil.stride, render.stencil.comp_stride);
+         fprintf(log, "\n");
+         if (render.ts_vtx.start.handle || render.ts_frag.end.handle)
+            fprintf(log, "    ts start=%u:%u end=%u:%u\n",
+                    render.ts_vtx.start.handle, render.ts_vtx.start.offset,
+                    render.ts_frag.end.handle, render.ts_frag.end.offset);
+         offset += sizeof(header) + header.size;
+         continue;
       }
       fprintf(log, "\n");
 
@@ -1729,6 +2069,7 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
    const struct drm_asahi_submit *submit = arg;
    submit_calls++;
    asahi_log_submit(submit);
+   dump_submit(fd, submit, submit_calls);
    if (queue_progress_lifecycle_case()) {
       const struct drm_asahi_sync *syncs =
          (const void *)(uintptr_t)submit->syncs;

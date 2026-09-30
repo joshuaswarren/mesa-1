@@ -8,6 +8,7 @@
 #include "compiler/nir/nir.h"
 #include "asahi/lib/agx_chip.h"
 #include "agx3_fltnorm_core.h"
+#include "agx3_cprog_input.h"
 #include "util/bitset.h"
 #include "util/shader_stats.h"
 #include "util/u_dynarray.h"
@@ -92,6 +93,18 @@ struct agx_shader_info {
    /* Number of uniforms */
    uint16_t push_count;
 
+   /* G17P uniform DMA (v51a, AGX_G17P_UNIFORM_DMA): constant-index loads
+    * through one 64-bit pointer uniform were replaced by uniform reads of
+    * [agx3_uniform_dma_dest, +agx3_uniform_dma_halfs). The driver publishes
+    * that block as one Ioto uniform range whose source is the pointer's
+    * value plus agx3_uniform_dma_offset_B, read at launch like the loads. */
+   bool agx3_uniform_dma_valid;
+   uint16_t agx3_uniform_dma_pointer;
+   uint16_t agx3_uniform_dma_dest;
+   uint16_t agx3_uniform_dma_halfs;
+   uint32_t agx3_uniform_dma_offset_B;
+   uint16_t agx3_uniform_dma_loads;
+
    /* Local memory allocation in bytes */
    uint16_t local_size;
 
@@ -105,13 +118,22 @@ struct agx_shader_info {
     * explicit shader scratch and does not use the legacy helper program. */
    unsigned agx3_spectpr_scratch_size;
 
-   /* Size in bytes of the main sahder */
-   unsigned main_size;
+   /* Exact emitted code extents, excluding inter-function alignment and
+    * rodata. A missing preamble has size zero. Native constant-program
+    * launchers need its extent independently of the main function's offset. */
+   unsigned main_size, preamble_size;
 
    /* Does the shader have a preamble? If so, it is at offset preamble_offset.
     * The main shader is at offset main_offset. The preamble is executed first.
     */
    bool has_preamble;
+   /* Native constant-program live-ins. External G17P launch needs the
+    * uniform-input prelude when a uniform half is read before definition. */
+   bool agx3_preamble_uniform_inputs;
+   /* The machine program consumes the frozen layout through native TPS RLDs.
+    * Older uniform-read programs must not silently select this loader ABI. */
+   bool agx3_preamble_tps_inputs;
+   struct agx3_cprog_inputs agx3_preamble_inputs;
    unsigned preamble_offset, main_offset;
 
    /* Does the shader read the tilebuffer? */
@@ -183,6 +205,10 @@ struct agx_shader_info {
     * this value to reproduce Apple ShaderInfo fields 38/42. */
    uint16_t agx3_staging_halfs;
    bool agx3_staging_known;
+   /* Separate thread-invariant IPR footprint for native CProg. It must not
+    * inherit the main program's texture/staging domain or its GPR count. */
+   uint16_t agx3_preamble_staging_halfs;
+   bool agx3_preamble_staging_known;
 
    /* Output mask set during driver lowering */
    uint64_t outputs;
@@ -214,7 +240,7 @@ struct agx_shader_info {
 
 struct agx_precompiled_kernel_info {
    uint32_t preamble_offset, main_offset;
-   uint32_t main_size, binary_size;
+   uint32_t main_size, preamble_size, binary_size;
    struct agx_rodata rodata;
    uint16_t nr_gprs, nr_preamble_gprs;
    uint16_t push_count;
@@ -247,6 +273,7 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .preamble_offset = info->preamble_offset,
       .main_offset = info->main_offset,
       .main_size = info->main_size,
+      .preamble_size = info->preamble_size,
       .binary_size = info->binary_size,
       .rodata = info->rodata,
       .nr_gprs = info->nr_gprs,
@@ -260,7 +287,7 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .agx3_staging_known = info->agx3_staging_known,
       .agx3_staging_halfs = info->agx3_staging_halfs,
       .agx3_tps_size =
-         MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
+         (uint16_t)MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
    };
 }
 
@@ -398,6 +425,31 @@ struct agx_shader_key {
     */
    bool no_preamble;
 
+   /* AGX3B: build the preamble as a native constant program (CProg inputs
+    * imported through its TPS frame, arithmetic results selected straight
+    * into uniform destinations, half exports legalized) for this shader,
+    * independent of AGX_MESA_DEBUG=native_uniforms. G17P vertex programs
+    * always use it.
+    */
+   bool agx3_native_cprog;
+   /* v56d: the native constant-program lowering (the AGX_DBG_NATIVE_UNIFORMS
+    * behaviour) for THIS compile. Decided per compile by the driver (G17P
+    * fragment constant program, v57 vertex CProg) and carried in the key:
+    * never by writing the process-global agx_compiler_debug, which every
+    * concurrently compiling thread reads (v56c raced here: a vertex compile
+    * starting on another thread cleared the bit under a fragment compile,
+    * whose preamble then could not be encoded). */
+   bool g17p_native_uniforms;
+
+   /* G17P uniform DMA (v51a): hoist constant-index loads through the 64-bit
+    * pointer uniform at g17p_dma_root (the root table) or at
+    * g17p_dma_root + 4 * (1 + s) for each set s in g17p_dma_set_mask into
+    * one driver-published uniform range. Zero mask and !g17p_uniform_dma
+    * leave code unchanged. */
+   bool g17p_uniform_dma;
+   uint16_t g17p_dma_root;
+   uint8_t g17p_dma_set_mask;
+
    /* Set if this is a non-monolithic shader that must be linked with additional
     * shader parts before the program can be used. This suppresses omission of
     * `stop` instructions, which the linker must insert instead.
@@ -505,6 +557,10 @@ struct agx_shader_key {
    };
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 uint64_t agx_gather_texcoords(nir_shader *nir);
 
 void agx_preprocess_nir(nir_shader *nir);
@@ -535,6 +591,10 @@ struct agx_occupancy {
 
 struct agx_occupancy agx_occupancy_for_register_count(unsigned halfregs);
 unsigned agx_max_registers_for_occupancy(unsigned occupancy);
+
+#ifdef __cplusplus
+}
+#endif
 
 static inline unsigned
 agx_round_registers(unsigned halfregs)

@@ -224,3 +224,72 @@ agx_ioto_preshader_emit(enum agx_chip chip,
    *output = staged;
    return true;
 }
+
+bool
+agx_ioto_constant_program_emit(
+   enum agx_chip chip, const struct agx_ioto_constant_program *program,
+   uint64_t suffix_va, struct agx_ioto_preshader_output *output)
+{
+   const uint64_t address_limit = UINT64_C(1) << 48;
+   if (!program || !output || !suffix_va || suffix_va >= address_limit ||
+       (suffix_va & 1) || (program->code_size & 1))
+      return false;
+
+   struct agx_ioto_preshader_desc desc = {
+      .code = program->code,
+      .code_size = program->code_size,
+      .external_va = AGX_IOTO_PRESHADER_NO_VA,
+      .force_external = program->force_external,
+      .request_prelude = program->request_prelude,
+      .suppress_prelude = program->suppress_prelude,
+   };
+
+   if (program->code_size &&
+       (program->force_external ||
+        program->code_size > AGX_IOTO_PRESHADER_INLINE_LIMIT)) {
+      if (!program->code_va || program->code_va >= address_limit ||
+          (program->code_va & 1) ||
+          program->code_size > address_limit - program->code_va)
+         return false;
+
+      const unsigned branch_offset =
+         program->request_prelude && !program->suppress_prelude
+            ? AGX_IOTO_PRESHADER_PRELUDE_SIZE : 0;
+      if (branch_offset + AGX_IOTO_PRESHADER_BRANCH_SIZE >
+          address_limit - suffix_va)
+         return false;
+
+      if (program->absolute_branch) {
+         if (chip != AGX_CHIP_G17P)
+            return false;
+         desc.external_va = program->code_va;
+      } else {
+         const int64_t displacement =
+            (int64_t)program->code_va - (int64_t)(suffix_va + branch_offset);
+         if (displacement < -(INT64_C(1) << 47) ||
+             displacement >= (INT64_C(1) << 47))
+            return false;
+
+         desc.external_va = (uint64_t)displacement & (address_limit - 1);
+      }
+   }
+
+   struct agx_ioto_preshader_output staged;
+   if (!agx_ioto_preshader_emit(chip, &desc, &staged) ||
+       staged.length > address_limit - suffix_va)
+      return false;
+
+   if (staged.mode == AGX_IOTO_PRESHADER_MODE_EXTERNAL &&
+       program->absolute_branch) {
+      /* Current G17P finish() places absolute code_va at object bits 1..48
+       * and sets object bit 0. AGXIotoInstruction_B_0::emit deposits that
+       * selector at instruction bit 24 (f11); target bits occupy 25..71.
+       * cloneProgramInfo changes the code VA without subtracting a B PC.
+       * Witnesses: 0x218780f48/f4c, 0x218737b8c, 0x2188416d8/e0/e4 in
+       * AGXMetalG17P UUID 4A1B0ACE-B7E3-3B5B-A594-84289B937288. */
+      staged.bytes[staged.branch_offset + 3] |= 1;
+   }
+
+   *output = staged;
+   return true;
+}

@@ -710,11 +710,12 @@ agx_get_precompiled_locked(struct agx_bg_eot_cache *cache, unsigned program)
           (rodata_size &&
            (info->rodata.offset > info->binary_size ||
             rodata_size > info->binary_size - info->rodata.offset)) ||
-          info->preamble_offset || info->nr_preamble_gprs) {
+          info->preamble_offset || info->preamble_size ||
+          info->nr_preamble_gprs) {
          mesa_loge("asahi: libagx program %u has no AGX3 launch shape: "
-                   "main %u@%u of %u, preamble %u/%u, rodata %u",
+                   "main %u@%u of %u, preamble %u@%u/%u, rodata %u",
                    program, info->main_size, info->main_offset,
-                   info->binary_size, info->preamble_offset,
+                   info->binary_size, info->preamble_size, info->preamble_offset,
                    info->nr_preamble_gprs, info->rodata.size_16);
          ralloc_free(p);
          return NULL;

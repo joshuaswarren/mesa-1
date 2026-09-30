@@ -27,11 +27,11 @@ struct hk_vdm_slab {
 
 #include <string.h>
 
-bool
-hk_g17p_vdm_low_window_enabled(const struct agx_device *dev)
-{
-   static int enabled = -1;
+int hk_g17p_vdm_low_window_state = -1;
 
+int
+hk_g17p_vdm_low_window_init(void)
+{
    /* On by default: a VDM record's pointer is 40 bits and hardware reads bit
     * 39 as the UAT root select, adding 0x1000000000 when it is clear. G17P's
     * main heap sits at 0x8000000000, so every main-heap pointer a VDM record
@@ -42,10 +42,10 @@ hk_g17p_vdm_low_window_enabled(const struct agx_device *dev)
     * 0x1000000000 window, which is what this path reproduces. The environment
     * variable now only exists to turn the correct behaviour back off for A/B
     * testing. */
-   if (enabled < 0)
-      enabled = debug_get_bool_option("ASAHI_G17P_VDM_LOW_WINDOW", true);
-
-   return dev->chip == AGX_CHIP_G17P && enabled;
+   const int enabled =
+      debug_get_bool_option("ASAHI_G17P_VDM_LOW_WINDOW", true) ? 1 : 0;
+   hk_g17p_vdm_low_window_state = enabled;
+   return enabled;
 }
 
 static void
@@ -282,7 +282,7 @@ hk_g17p_upload_quarantine_enabled(const struct hk_device *dev)
 {
    static int enabled = -1;
    if (enabled < 0)
-      enabled = debug_get_bool_option("HK_G17P_UPLOAD_QUARANTINE", false);
+      enabled = HK_ENV_BOOL_ONCE("HK_G17P_UPLOAD_QUARANTINE", false);
 
    return dev->dev.chip == AGX_CHIP_G17P && enabled;
 }

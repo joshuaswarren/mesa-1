@@ -7,6 +7,8 @@
 
 #include "asahi/lib/agx_abi.h"
 #include "asahi/lib/agx_pbe_agx3_core.h"
+#include "util/macros.h"
+#include "util/u_atomic.h"
 
 #include <string.h>
 
@@ -217,10 +219,11 @@ hk_pack_native_pbe(unsigned generation,
    if (!hk_descriptor_generation_is_agx3(generation))
       return false;
 
-   /* The recovered subset deliberately excludes every field whose Gen9/10
-    * semantic placement is incomplete: compression, sparse mode, Gen10 gamma
-    * and the software-addressing sideband. HAL200's exact tiled 2D-array and 3D
-    * packets are the bounded layered exceptions. */
+   /* The recovered subset excludes fields whose Gen9/10 semantic placement
+    * remains incomplete: sparse mode, Gen10 gamma and the software-addressing
+    * sideband. The host-only HAL200 StateFields oracle matches the complete
+    * GPU-tiled 2D compressed packet, including the metadata GPU address and
+    * mip extension. Other compressed shapes remain closed. */
    const bool array = generation == 9 &&
                       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_ARRAY;
    const bool array_multisample =
@@ -235,6 +238,10 @@ hk_pack_native_pbe(unsigned generation,
       generation == 9 &&
       (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
        array_multisample);
+   const bool compressed_2d = legacy->compressed && generation == 9 &&
+                              legacy->dimension == AGX_TEXTURE_DIMENSION_2D &&
+                              legacy->layout == AGX_LAYOUT_GPU &&
+                              !multisample;
    if ((!layered && !multisample &&
         legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
        (legacy->layout == AGX_LAYOUT_LINEAR &&
@@ -247,18 +254,20 @@ hk_pack_native_pbe(unsigned generation,
        (multisample ? (legacy->samples != AGX_SAMPLE_COUNT_2 &&
                        legacy->samples != AGX_SAMPLE_COUNT_4)
                     : legacy->samples != AGX_SAMPLE_COUNT_2) ||
-       legacy->compressed || legacy->mode != AGX_IMAGE_MODE_NORMAL ||
+       (legacy->compressed && !compressed_2d) ||
+       legacy->mode != AGX_IMAGE_MODE_NORMAL ||
        (!layered && legacy->layers != 1) ||
        (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
                         legacy->level != 0 || legacy->levels != 1 ||
                         legacy->unk_mipmapped || legacy->compressed)) ||
        (generation != 9 && (legacy->level != 0 || legacy->levels != 1 ||
                             legacy->unk_mipmapped)) ||
-       (generation != 9 && legacy->srgb) || legacy->extended ||
+       (generation != 9 && legacy->srgb) ||
+       (legacy->extended != legacy->compressed) ||
        (legacy->layout == AGX_LAYOUT_LINEAR
            ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
                                              : legacy->stride != 0) ||
-       legacy->acceleration_buffer ||
+       (!legacy->compressed && legacy->acceleration_buffer) ||
        legacy->depth_linear != 1 || legacy->layer_stride_linear ||
        legacy->level_offset_sw || legacy->aligned_width_msaa_sw ||
        legacy->sample_count_log2_sw || legacy->tile_width_sw != 1 ||
@@ -277,6 +286,8 @@ hk_pack_native_pbe(unsigned generation,
       .width = legacy->width,
       .height = legacy->height,
       .buffer = legacy->buffer,
+      .compressed = legacy->compressed,
+      .acceleration_buffer = legacy->acceleration_buffer,
       .stride_B = legacy->layout == AGX_LAYOUT_LINEAR
                      ? legacy->stride + 4
                      : 0,
@@ -311,13 +322,10 @@ hk_pack_native_pbe(unsigned generation,
    return true;
 }
 
-bool
-hk_set_null_native_texture(unsigned generation,
-                           struct hk_native_texture_descriptor *out)
+static bool
+hk_pack_null_native_texture(unsigned generation,
+                            struct hk_native_texture_descriptor *out)
 {
-   if (!out)
-      return false;
-
    const struct AGX_TEXTURE semantic = {
       AGX_TEXTURE_header,
       .layout = AGX_LAYOUT_TWIDDLED,
@@ -331,6 +339,38 @@ hk_set_null_native_texture(unsigned generation,
    };
 
    return hk_pack_native_texture(generation, out, &semantic);
+}
+
+/* The null descriptor is a pure function of the generation, and every
+ * sampled-image descriptor write starts from it (three planes each), so pack
+ * it once per generation.  A refused generation is not cached: it takes the
+ * packer, and its exact output, every time. */
+bool
+hk_set_null_native_texture(unsigned generation,
+                           struct hk_native_texture_descriptor *out)
+{
+   static struct hk_native_texture_descriptor packed[16];
+   /* 0: not packed yet, 1: being published, 2: packed[] valid. */
+   static uint32_t state[16];
+
+   if (!out)
+      return false;
+
+   if (generation < ARRAY_SIZE(state) &&
+       p_atomic_read(&state[generation]) == 2) {
+      *out = packed[generation];
+      return true;
+   }
+
+   if (!hk_pack_null_native_texture(generation, out))
+      return false;
+
+   if (generation < ARRAY_SIZE(state) &&
+       p_atomic_cmpxchg(&state[generation], 0, 1) == 0) {
+      packed[generation] = *out;
+      p_atomic_set(&state[generation], 2);
+   }
+   return true;
 }
 
 bool

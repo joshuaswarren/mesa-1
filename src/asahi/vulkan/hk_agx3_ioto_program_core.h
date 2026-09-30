@@ -22,6 +22,16 @@ extern "C" {
 
 struct agx_tilebuffer_layout;
 
+/* Describe a nonempty compiler preamble uploaded with its whole binary.
+ * Checks both CPU and executable extents. The caller keeps the immutable CPU
+ * binary alive during composition and the BO alive through execution. This
+ * selects the address-independent G17P branch, but does not qualify the
+ * preamble's register/resource ABI. Leaves output unchanged on failure. */
+bool hk_agx3_g17p_constant_program_from_binary(
+   const void *binary, size_t binary_size, size_t offset, size_t size,
+   uint64_t allocation_va, size_t allocation_size,
+   struct agx_ioto_constant_program *output);
+
 /* Native uniform loads address 512 half-registers in complete dwords. */
 #define HK_AGX3_G17P_PRECOMPILED_DATA_MAX_SIZE 1024u
 
@@ -80,6 +90,11 @@ struct hk_agx3_g17p_graphics_program_desc {
    uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
    bool preloaded_root;
+   struct agx_ioto_constant_program constant_program;
+   const struct agx3_cprog_inputs *cprog_inputs;
+   /* v51x HK_G17P_IOTO_IMMEDIATE: CPU source copies parallel to
+    * uniform_ranges, or NULL. */
+   const void *const *uniform_range_cpu;
 };
 
 #define HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
@@ -113,6 +128,10 @@ struct hk_agx3_g17p_graphics_program_desc {
 bool hk_agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, size_t *size);
+
+bool hk_agx3_g17p_graphics_program_desc_bound(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   size_t *size);
 
 struct hk_agx3_g17p_graphics_program {
    uint8_t bytes[HK_AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];

@@ -544,6 +544,57 @@ main(void)
       .copy_extent = {256, 256, 1},
    };
    CHECK(hk_g17p_buffer_to_image_copy_supported(&vkcube));
+
+   /* Compressed Minecraft D32 uploads reach the graphics fallback. Exercise
+    * the complete image and a padded-row subrectangle crossing 16x16 tiles. */
+   struct hk_g17p_buffer_to_image_copy depth_upload = vkcube;
+   depth_upload.format = VK_FORMAT_D32_SFLOAT;
+   depth_upload.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   depth_upload.image_extent = (VkExtent3D){2408, 1506, 1};
+   depth_upload.copy_extent = depth_upload.image_extent;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.layout = VK_IMAGE_LAYOUT_GENERAL;
+   depth_upload.image_offset = (VkOffset3D){15, 31, 0};
+   depth_upload.copy_extent = (VkExtent3D){33, 17, 1};
+   depth_upload.buffer_row_length = 40;
+   depth_upload.buffer_image_height = 20;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.buffer_row_length = 32;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.buffer_row_length = 40;
+   depth_upload.image_offset.x = 2400;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.image_offset.x = 15;
+   depth_upload.plane_format_renderable = false;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.plane_format_renderable = true;
+   depth_upload.aspect = VK_IMAGE_ASPECT_STENCIL_BIT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+   depth_upload.format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.format = VK_FORMAT_D32_SFLOAT;
+   depth_upload.array_layers = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.array_layers = 1;
+   depth_upload.mip_levels = 2;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.mip_levels = 1;
+   depth_upload.image_type = VK_IMAGE_TYPE_3D;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.image_type = VK_IMAGE_TYPE_2D;
+   depth_upload.samples = VK_SAMPLE_COUNT_2_BIT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.samples = VK_SAMPLE_COUNT_1_BIT;
+
+   /* D16 uses the same bounded fallback through an R16_UINT view. */
+   depth_upload.format = VK_FORMAT_D16_UNORM;
+   CHECK(hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.format = VK_FORMAT_D16_UNORM_S8_UINT;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+   depth_upload.format = VK_FORMAT_X8_D24_UNORM_PACK32;
+   CHECK(!hk_g17p_buffer_to_image_copy_supported(&depth_upload));
+
    struct hk_g17p_buffer_to_image_copy explicit_stride = vkcube;
    explicit_stride.buffer_row_length = explicit_stride.copy_extent.width;
    explicit_stride.buffer_image_height = explicit_stride.copy_extent.height;

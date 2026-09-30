@@ -15,6 +15,29 @@
 #include <string.h>
 
 bool
+hk_agx3_g17p_constant_program_from_binary(
+   const void *binary, size_t binary_size, size_t offset, size_t size,
+   uint64_t allocation_va, size_t allocation_size,
+   struct agx_ioto_constant_program *output)
+{
+   const uint64_t limit = UINT64_C(1) << 48;
+   if (!binary || !output || !size || (offset & 1) || (size & 1) ||
+       offset > binary_size || size > binary_size - offset ||
+       binary_size > allocation_size || !allocation_va ||
+       allocation_va >= limit || (allocation_va & 1) ||
+       binary_size > limit - allocation_va)
+      return false;
+
+   *output = (struct agx_ioto_constant_program){
+      .code = (const uint8_t *)binary + offset,
+      .code_size = size,
+      .code_va = allocation_va + offset,
+      .absolute_branch = true,
+   };
+   return true;
+}
+
+bool
 hk_agx3_g17p_precompiled_data_pack(const void *data, size_t size,
                                  void *output, size_t capacity, size_t *written)
 {
@@ -269,7 +292,22 @@ hk_agx3_g17p_shared_graphics_desc(
       .colour_classes = desc->colour_classes,
       .imageblock = desc->imageblock,
       .preloaded_root = desc->preloaded_root,
+      .constant_program = desc->constant_program,
+      .cprog_inputs = desc->cprog_inputs,
+      .uniform_range_cpu = desc->uniform_range_cpu,
    };
+}
+
+bool
+hk_agx3_g17p_graphics_program_desc_bound(
+   enum agx_chip chip, const struct hk_agx3_g17p_graphics_program_desc *desc,
+   size_t *size)
+{
+   if (!desc)
+      return false;
+   const struct agx3_g17p_graphics_program_desc shared_desc =
+      hk_agx3_g17p_shared_graphics_desc(desc);
+   return agx3_g17p_graphics_program_desc_bound(chip, &shared_desc, size);
 }
 
 bool

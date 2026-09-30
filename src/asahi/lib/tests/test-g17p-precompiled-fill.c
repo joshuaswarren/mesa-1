@@ -103,6 +103,12 @@ main(void)
          CHECK(libagx_g17p[i] != NULL);
       else
          CHECK(libagx_g17p[i] == NULL);
+
+      if (libagx_g17p[i]) {
+         const struct agx_precompiled_kernel_info *info =
+            (const void *)libagx_g17p[i];
+         CHECK(info->preamble_size == 0);
+      }
    }
 
    /* Every primitive-restart variant is one 1024-thread workgroup and uses

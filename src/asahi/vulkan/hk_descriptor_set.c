@@ -14,6 +14,7 @@
 
 #include "agx_helpers.h"
 #include "hk_buffer.h"
+#include "hk_cmd_buffer.h"
 #include "hk_buffer_view.h"
 #include "hk_descriptor_set_layout.h"
 #include "hk_device.h"
@@ -116,10 +117,9 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    const struct hk_sampled_image_descriptor_layout native =
       hk_sampled_image_descriptor_layout(generation);
 
-   /* "Zero" initialize */
+   /* "Zero" initialize.  The null texture word is filled below, only for
+    * the planes that are written out without an image view's word. */
    for (unsigned i = 0; i < 3; ++i) {
-      hk_set_null_native_texture(generation, &desc[i].tex);
-
       /* G17P's native sampler heap reserves entry zero for robust null
        * sampling. The descriptor-set ABI stores application indices with the
        * legacy +28 bias, so encode that same base for an explicit null
@@ -133,6 +133,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    }
 
    uint8_t plane_count = 1;
+   /* Planes [0, view_planes) carry the image view's texture word. */
+   uint8_t view_planes = 0;
    bool ia = (descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT);
 
    if (descriptor_type != VK_DESCRIPTOR_TYPE_SAMPLER && info &&
@@ -140,6 +142,7 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       VK_FROM_HANDLE(hk_image_view, view, info->imageView);
 
       plane_count = view->plane_count;
+      view_planes = view->plane_count;
       for (uint8_t plane = 0; plane < plane_count; plane++) {
          desc[plane].tex =
             ia ? view->planes[plane].ia : view->planes[plane].sampled;
@@ -156,11 +159,12 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
          if (generation == 9 && integer != PIPE_FORMAT_NONE)
             desc[plane].sw.scaled_conversion =
                util_format_is_pure_sint(integer) ? 1 : 2;
+         /* Pure tests, cheapest first: almost no format is USCALED. */
          if (generation == 9 &&
-             hk_scaled_view_filter(descriptor_type, set, binding, elem, info) ==
-                VK_FILTER_LINEAR &&
+             hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE &&
              view->planes[plane].filterable_valid &&
-             hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE) {
+             hk_scaled_view_filter(descriptor_type, set, binding, elem, info) ==
+                VK_FILTER_LINEAR) {
             desc[plane].tex = view->planes[plane].sampled_filterable;
             desc[plane].sw.sampled_heap_index =
                view->planes[plane].filterable_heap_index;
@@ -242,7 +246,13 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
       }
    }
 
-   uint8_t packed[3 * HK_MAX_DESCRIPTOR_SIZE] = {0};
+   for (unsigned plane = view_planes; plane < plane_count; ++plane)
+      hk_set_null_native_texture(generation, &desc[plane].tex);
+
+   /* Only the written planes are read, so only they need zeroing. */
+   uint8_t packed[3 * HK_MAX_DESCRIPTOR_SIZE];
+   assert(native.stride * plane_count <= sizeof(packed));
+   memset(packed, 0, native.stride * plane_count);
    for (unsigned plane = 0; plane < plane_count; ++plane) {
       uint8_t *dst = packed + plane * native.stride;
       memcpy(dst + native.texture, &desc[plane].tex,
@@ -337,7 +347,7 @@ write_storage_image_view_desc(struct hk_descriptor_set *set,
    if (stride >= AGX_G17P_IMAGE_ATOMIC_SW_OFFSET + sizeof(desc.atomic_sw))
       memcpy(packed + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET, &desc.atomic_sw,
              sizeof(desc.atomic_sw));
-   if (debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
+   if (HK_ENV_BOOL_ONCE("HK_G17P_LAUNCH_TRACE", false) && generation == 9) {
       fprintf(stderr,
               "G17P storage descriptor set=0x%" PRIx64
               " binding=%u elem=%u offset=%u valid=%u bytes=",
@@ -604,6 +614,9 @@ hk_push_descriptor_set_update(struct hk_push_descriptor_set *push_set,
                               uint32_t write_count,
                               const VkWriteDescriptorSet *writes)
 {
+   memcpy(push_set->layout_hash, layout->vk.blake3,
+          sizeof(push_set->layout_hash));
+   push_set->layout_flags = layout->vk.flags;
    assert(layout->non_variable_descriptor_buffer_size < sizeof(push_set->data));
    struct hk_descriptor_set set = {
       .layout = layout,
@@ -1106,6 +1119,9 @@ hk_push_descriptor_set_update_template(
    struct hk_descriptor_set_layout *layout,
    const struct vk_descriptor_update_template *template, const void *data)
 {
+   memcpy(push_set->layout_hash, layout->vk.blake3,
+          sizeof(push_set->layout_hash));
+   push_set->layout_flags = layout->vk.flags;
    struct hk_descriptor_set tmp_set = {
       .layout = layout,
       .size = sizeof(push_set->data),

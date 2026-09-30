@@ -61,6 +61,11 @@ struct agx_ioto_inflight_load {
    uint8_t lane_mask;
    uint16_t cprog_dest_half;
 
+   /* Optional native constant-program TPS publication, independent of the
+    * ordinary uniform lane mask. Selected halves compact from this base. */
+   uint8_t cprog_input_mask;
+   uint16_t cprog_input_tps_half;
+
    uint32_t sequence;
    uint8_t signal_slot;
    bool processed;
@@ -129,6 +134,14 @@ struct agx_ioto_load_emit_ops {
     * compare every supported form against the independent composer. Custom
     * callbacks remain fully decoded and validated before publication. */
    bool trusted_records;
+
+   /* Zero, one or two additional COPY records after the uniform COPY. The
+    * ordinary COPY must preserve source halves consumed by these records. */
+   bool (*pack_cprog_copy)(void *context, enum agx_chip chip,
+                          const struct agx_ioto_inflight_load *load,
+                          uint8_t dword,
+                          struct agx_ioto_load_raw_record records[2],
+                          uint8_t *count);
 };
 
 struct agx_ioto_load_core {
@@ -166,6 +179,10 @@ struct agx_ioto_load_core {
    uint8_t current_gpr_dwords;
    bool fast_path_enabled;
    bool gpu0_round_nops;
+   /* v51y HK_G17P_NATIVE_ESL_WAIT: GPU0 without round NOPs; the packer puts
+    * the slot wait on the first COPY.  A complete round that emits loads but
+    * no COPY still drains with the NOP round. */
+   bool gpu0_copy_wait;
    /* Apple's fixed SCS base register (half-register 8) is initialized lazily
     * and survives finishRound().  ABI buffer slot 4 aliases that register.
     * The native builder relies on caller ordering for the alias, so the
@@ -181,6 +198,8 @@ struct agx_ioto_load_absolute {
    uint64_t address;
    uint8_t lane_mask;
    uint16_t cprog_dest_half;
+   uint8_t cprog_input_mask;
+   uint16_t cprog_input_tps_half;
 };
 
 #define AGX_IOTO_LOAD_SCS_BASE_HALF 8u
@@ -225,6 +244,14 @@ enum agx_ioto_load_encoding agx_ioto_load_target_encoding(enum agx_chip chip);
  * grounded.  Narrow G17S minimal dispatch admission is tracked separately by
  * agx3_g17s_minimal_compute_dispatch_ready(). */
 bool agx_ioto_load_production_ready(enum agx_chip chip);
+
+/* v51y diagnostic (default off, read once from the environment).
+ * HK_G17P_NATIVE_ESL_WAIT=1: G17P (GPU0) setup programs drop the four-NOP
+ * load drain in front of the uniform COPYs and instead carry the slot-2
+ * scoreboard wait on the first COPY, as native ESL programs do (copy
+ * 2b240944).  A drain is kept only in front of a dependent LDDEV whose base
+ * is a just-loaded pointer, and after a round that has no COPY. */
+bool agx_ioto_g17p_native_esl_wait_enabled(void);
 
 bool agx_ioto_load_core_init(struct agx_ioto_load_core *core,
                              enum agx_chip chip, struct agx_ioto_load_sink sink,

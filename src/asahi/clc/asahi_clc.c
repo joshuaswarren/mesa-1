@@ -287,7 +287,8 @@ target_supports_program(const char *target, const nir_function *func)
     * Qualify only kernels with a strict public execute oracle; every other
     * slot remains NULL and fails closed. */
    return !target_is_agx3(target) ||
-          !strcmp(func->name, "libagx_fill_uint4") ||
+           !strcmp(func->name, "libagx_fill_uint4") ||
+           (!strcmp(target, "g17p") && !strcmp(func->name, "libagx_fast_clear")) ||
           !strcmp(func->name, "libagx_copy_image") ||
           !strcmp(func->name, "libagx_mipmap_unorm8x4") ||
           !strcmp(func->name, "libagx_mipmap_unorm8x4_odd") ||
@@ -349,6 +350,35 @@ target_supports_program(const char *target, const nir_function *func)
            * libagx_unroll_restart, which allocates from the same heap with the
            * same printf-free poly_heap_try_alloc_offs(). */
           !strcmp(func->name, "libagx_write_adj_indices_indirect");
+}
+
+/* AGX3 has no grounded INTL instruction encoding. Expand the 16-bit Morton
+ * interleave used by libagx_fast_clear into ordinary integer operations
+ * before instruction selection, without changing AGX2's native path. */
+static nir_def *
+g17p_part1by1(nir_builder *b, nir_def *src)
+{
+   nir_def *v = nir_u2u32(b, src);
+   v = nir_iand_imm(b, nir_ior(b, v, nir_ishl_imm(b, v, 8)), 0x00ff00ff);
+   v = nir_iand_imm(b, nir_ior(b, v, nir_ishl_imm(b, v, 4)), 0x0f0f0f0f);
+   v = nir_iand_imm(b, nir_ior(b, v, nir_ishl_imm(b, v, 2)), 0x33333333);
+   return nir_iand_imm(b, nir_ior(b, v, nir_ishl_imm(b, v, 1)), 0x55555555);
+}
+
+static bool
+lower_g17p_interleave(nir_builder *b, nir_alu_instr *alu, void *data)
+{
+   if (alu->op != nir_op_interleave)
+      return false;
+
+   assert(alu->def.bit_size == 32);
+   assert(nir_src_bit_size(alu->src[0].src) == 16);
+   assert(nir_src_bit_size(alu->src[1].src) == 16);
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def *x = g17p_part1by1(b, nir_ssa_for_alu_src(b, alu, 0));
+   nir_def *y = g17p_part1by1(b, nir_ssa_for_alu_src(b, alu, 1));
+   nir_def_replace(&alu->def, nir_ior(b, x, nir_ishl_imm(b, y, 1)));
+   return true;
 }
 
 /* Like nir_precomp_print_binary_map, but programs the target does not support
@@ -568,6 +598,9 @@ main(int argc, char **argv)
             if (key.dev.encoding != AGX_ISA_ENCODING_AGX2) {
                NIR_PASS(_, clone, nir_shader_intrinsics_pass,
                         rebase_preamble_for_agx3, nir_metadata_all, NULL);
+               NIR_PASS(_, clone, nir_shader_alu_pass,
+                        lower_g17p_interleave, nir_metadata_control_flow,
+                        NULL);
                key.reserved_preamble += AGX_ABI_AGX3_PRECOMP_ARG_HALFS;
             }
 

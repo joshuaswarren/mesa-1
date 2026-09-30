@@ -37,7 +37,12 @@ struct agx_ioto_preshader_desc {
    const void *code;
    size_t code_size;
 
-   /* GPU base plus program start, or AGX_IOTO_PRESHADER_NO_VA. */
+   /* Encoded PC-relative byte displacement modulo 2^48, or
+    * AGX_IOTO_PRESHADER_NO_VA. Despite the historical field name this is
+    * not an absolute target address: the caller must subtract the address
+    * of the emitted B instruction from the target program address.
+    * agx_ioto_preshader_emit has no source program address with which to
+    * perform that relocation itself. */
    uint64_t external_va;
 
    /* ConstantCalculationProgramInfo bytes +0x28 and +0x29, respectively. */
@@ -56,6 +61,35 @@ struct agx_ioto_preshader_output {
    size_t branch_offset;
    uint8_t bytes[AGX_IOTO_PRESHADER_MAX_SUFFIX_SIZE];
 };
+
+/* Compiler-produced constant program. Unlike the low-level encoder descriptor
+ * above, code_va is an absolute GPU address. code_size is the exact emitted
+ * extent, not the distance to the next aligned shader function. A zero extent
+ * means no program. The CPU code pointer is required only for inline mode. */
+struct agx_ioto_constant_program {
+   const void *code;
+   size_t code_size;
+   uint64_t code_va;
+   bool force_external;
+   bool request_prelude;
+   bool suppress_prelude;
+   /* G17P's native constant-program branch uses an absolute target (f11=1).
+    * Its bytes are independent of the suffix allocation. Other families
+    * currently support only the existing relative form (false). */
+   bool absolute_branch;
+};
+
+/* Select and relocate a compiler-produced constant program at suffix_va,
+ * the absolute address of the first suffix byte, after resource loads and
+ * shader/profile state. The optional prelude shifts the B instruction's PC.
+ * External programs must fit the 48-bit address space; relative branches
+ * also require a signed 48-bit displacement. Addresses/extents are halfword
+ * aligned; suffix_va is nonzero even for the address-independent form.
+ * Output is unchanged on failure. This packs bytes only: the caller owns code
+ * lifetime, resource state and launch register/occupancy accounting. */
+bool agx_ioto_constant_program_emit(
+   enum agx_chip chip, const struct agx_ioto_constant_program *program,
+   uint64_t suffix_va, struct agx_ioto_preshader_output *output);
 
 /*
  * Reproduce the size choice in setConstantCalculationProgramInfo:
@@ -81,8 +115,9 @@ agx_ioto_preshader_pack_branch(enum agx_chip chip, uint64_t target_va,
                                uint8_t out[AGX_IOTO_PRESHADER_BRANCH_SIZE]);
 
 /*
- * Pack only the suffix appended by finish() after resource/state loads,
- * LoadShader and any PIXREL record:
+ * Pack a relative-form suffix after resource/state loads, LoadShader and
+ * any PIXREL record. The high-level constant-program API also supports the
+ * G17P renderer's native absolute branch selector:
  *
  *   inline:  compiled bytes with every trailing 06 00 NOP removed
  *   external: optional fixed LDIMM followed by the long target-family B

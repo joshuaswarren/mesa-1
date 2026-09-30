@@ -713,10 +713,68 @@ check_rejections(void)
    return 0;
 }
 
+static int
+check_vertex_ti_resources(void)
+{
+   /* VertexProgramVariantESLState: spill quads = (bytes + 3) >> 2, IPR
+    * quads = (((bytes + 3) >> 2) + 1) & ~1, both published by finalize. */
+   static const struct {
+      uint32_t spill_bytes, ipr_bytes;
+      uint32_t count_18;
+      uint16_t count_12;
+   } cases[] = {
+      {0, 0, 0, 0},       /* no TI resources */
+      {32, 0, 8, 0},      /* Apple G17P terrain VS: eight imported words */
+      {48, 160, 12, 40},  /* Apple terrain FS-sized pair */
+      {1, 1, 1, 2},       /* partial quads round up; IPR rounds to even */
+      {4, 4, 1, 2},
+      {5, 8, 2, 2},
+      {UINT32_C(0x3ffff) * 4, 0xffe * 4, UINT32_C(0x3ffff), 0xffe},
+   };
+
+   for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+      struct agx_vdm_state_update_template_info info;
+      memcpy(&info, &template_witness_info, sizeof(info));
+      CHECK(agx_vdm_state_update_vertex_ti_resources(
+         AGX_CHIP_G17P, cases[i].spill_bytes, cases[i].ipr_bytes, &info));
+      CHECK(info.raw_state_load_count_18 == cases[i].count_18);
+      CHECK(info.raw_state_load_count_12 == cases[i].count_12);
+
+      /* Every other template field is untouched, and the result packs. */
+      struct agx_vdm_state_update_template_info expect;
+      memcpy(&expect, &template_witness_info, sizeof(expect));
+      expect.raw_state_load_count_12 = cases[i].count_12;
+      expect.raw_state_load_count_18 = cases[i].count_18;
+      CHECK(memcmp(&info, &expect, sizeof(info)) == 0);
+      struct agx_vdm_state_update_info raw;
+      CHECK(agx_vdm_state_update_template_materialize(AGX_CHIP_G17P, &info,
+                                                       &raw));
+      CHECK(raw.raw_pipeline_template == cases[i].count_18 << 3);
+      CHECK(((raw.raw_vertex_shader_word0 >> 8) & 0xfff) == cases[i].count_12);
+   }
+
+   /* Out of range or off-target: fail closed, output unchanged. */
+   struct agx_vdm_state_update_template_info info;
+   memcpy(&info, &template_witness_info, sizeof(info));
+   CHECK(!agx_vdm_state_update_vertex_ti_resources(
+      AGX_CHIP_G17P, UINT32_C(0x3ffff) * 4 + 1, 0, &info));
+   CHECK(!agx_vdm_state_update_vertex_ti_resources(
+      AGX_CHIP_G17P, 0, 0xffe * 4 + 1, &info));
+   CHECK(!agx_vdm_state_update_vertex_ti_resources(AGX_CHIP_G17P, UINT32_MAX,
+                                                   UINT32_MAX, &info));
+   CHECK(!agx_vdm_state_update_vertex_ti_resources(AGX_CHIP_G17S, 32, 0,
+                                                   &info));
+   CHECK(!agx_vdm_state_update_vertex_ti_resources(AGX_CHIP_G17P, 32, 0,
+                                                   NULL));
+   CHECK(memcmp(&info, &template_witness_info, sizeof(info)) == 0);
+   return 0;
+}
+
 int
 main(void)
 {
    if (check_pipeline_va_resolution() || check_exact_witnesses() ||
+       check_vertex_ti_resources() ||
        check_template_witnesses() ||
        check_template_variants_and_selectors() ||
        check_template_ranges_and_rejections() ||

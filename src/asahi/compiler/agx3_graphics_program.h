@@ -6,6 +6,7 @@
 #pragma once
 
 #include "agx3_ioto_uniform_program.h"
+#include "asahi/lib/agx_ioto_preshader_core.h"
 #include "asahi/lib/agx_ioto_state_core.h"
 
 #define AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
@@ -47,6 +48,18 @@ struct agx3_g17p_graphics_program_desc {
     * second-level dereference. Ordinary programs leave this false and
     * materialize every absolute range themselves. */
    bool preloaded_root;
+
+   /* Executed after resource publication and the terminal state protocol.
+    * program_va must name the actual first byte for relative external
+    * branches; absolute G17P branches can be copied unchanged to another
+    * allocation. The caller owns executable lifetime and launch
+    * resource accounting; a zero extent preserves the absent END suffix. */
+   struct agx_ioto_constant_program constant_program;
+   const struct agx3_cprog_inputs *cprog_inputs;
+
+   /* v51x: optional CPU source copies parallel to uniform_ranges (see
+    * agx3_ioto_uniform_program_desc::range_cpu). */
+   const void *const *uniform_range_cpu;
 };
 
 struct agx3_g17p_graphics_program {
@@ -82,7 +95,14 @@ struct agx3_g17p_graphics_program_template {
    struct agx_ioto_load_relocation
       relocations[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
    uint16_t relocation_count;
+   uint16_t constant_suffix_offset;
 };
+
+/* Includes the selected constant suffix. The original range-only bound
+ * remains available for callers which have no constant program. */
+bool agx3_g17p_graphics_program_desc_bound(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   size_t *size);
 
 struct agx3_g17p_graphics_root_prefix {
    uint8_t bytes[AGX3_G17P_GRAPHICS_ROOT_PREFIX_MAX_SIZE];
@@ -107,7 +127,8 @@ bool agx3_g17p_graphics_root_prefix_generate(
 
 /* Build the shader-owned constant-calculation suffix and its small per-draw
  * launcher. The suffix receives r0:r1 from the launcher and contains no
- * draw-varying address. */
+ * draw-varying address. With a constant program, desc->program_va names the
+ * suffix allocation itself, not its separate launcher. */
 bool agx3_g17p_graphics_external_setup_suffix_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    void *output, size_t capacity, size_t *written);
@@ -172,6 +193,9 @@ struct agx3_g17p_rt0_bg_program_desc {
    bool staging_known;
    enum agx3_g17p_rt0_bg_op op;
    struct agx_ioto_g17p_imageblock imageblock;
+   /* v51x: CPU copy of the clear_value_va bytes; non-NULL requests the
+    * LDIMM clear-value form (CLEAR only). */
+   const void *clear_value_cpu;
 };
 
 struct agx3_g17p_rt0_bg_program {

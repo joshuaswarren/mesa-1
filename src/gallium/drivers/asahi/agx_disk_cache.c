@@ -230,7 +230,9 @@ agx_disk_cache_init(struct agx_screen *screen)
    char timestamp[BLAKE3_HEX_LEN];
    _mesa_sha1_format(timestamp, id_sha1);
 
-   uint64_t driver_flags = screen->dev.debug;
+   /* dev.debug is 32 bits wide; codegen flags change emitted binaries. */
+   uint64_t driver_flags =
+      screen->dev.debug | ((uint64_t)agx_get_codegen_flags() << 32);
    screen->disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
 #endif
 }

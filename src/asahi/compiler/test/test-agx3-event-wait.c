@@ -5,6 +5,7 @@
 
 #include "agx_compile.h"
 #include "agx_compiler.h"
+#include "agx_debug.h"
 #include "nir_builder.h"
 
 #include <stdint.h>
@@ -45,6 +46,38 @@ main(void)
       0x0e, 0x00, 0x00, 0x00,
    };
 
+   /* v53-c2: with AGX_G17P_UNIFORM_COMPARE (default on) both compares read
+    * the preamble uniforms directly (Apple's reg/uniform icmp, f18/f24=3), so
+    * the two uniform copies disappear. Same control structure, flag slot 0
+    * and inverted CNDLT; decoded: copy h2<-u6, icmp ^h2<u4 (guard), cndst,
+    * cndst, coherent lddev h2, slot-retire carrier, icmp h2==u4, cndlt inv,
+    * b, cndend(2), cndend(1), end. */
+   static const uint8_t expected_uniform_binary[] = {
+      0x1b, 0x06, 0x01, 0x08,
+      /* f13: the copied zero's last use (the loop's lddev reuses h2). */
+      0x0a, 0x03, 0x2b, 0x05, 0x02, 0x00, 0x05, 0x02, 0x00, 0x00,
+      0x0f, 0x05, 0x54, 0x01,
+      0x0f, 0x05, 0x54, 0x1a,
+      0x67, 0x00, 0x54, 0x02, 0x00, 0x00, 0x00, 0x00,
+      0x11, 0x00, 0x00, 0x80, 0x02, 0x00,
+      0x0b, 0x01, 0x07, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
+      0x0a, 0x03, 0x23, 0x05, 0x06, 0x00, 0x07, 0x02, 0x00, 0x00,
+      0x8f, 0x04, 0x54, 0x22,
+      0x0f, 0x00, 0x54, 0xda, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00,
+      0x0f, 0x06, 0x04, 0x02, 0x00, 0x00,
+      0x0f, 0x06, 0x04, 0x01, 0x00, 0x00,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   const bool uniform_compare =
+      agx_get_alu_flags() & AGX_ALU_G17P_UNIFORM_COMPARE;
+   const uint8_t *golden =
+      uniform_compare ? expected_uniform_binary : expected_binary;
+   const size_t golden_size = uniform_compare ? sizeof(expected_uniform_binary)
+                                              : sizeof(expected_binary);
+   /* Offsets of the loop compare and its CNDLT in each form. */
+   const unsigned compare_at = uniform_compare ? 46 : 54;
+   const unsigned cndlt_at = uniform_compare ? 56 : 64;
+
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 event wait");
    b.shader->info.workgroup_size[0] = 1;
@@ -80,8 +113,8 @@ main(void)
       part.info.main_offset == 0 &&
       part.info.main_size == part.info.binary_size &&
       part.info.stats.instrs >= 4 &&
-      part.info.binary_size == sizeof(expected_binary) &&
-      memcmp(part.binary, expected_binary, sizeof(expected_binary)) == 0 &&
+      part.info.binary_size == golden_size &&
+      memcmp(part.binary, golden, golden_size) == 0 &&
       memcmp((const uint8_t *)part.binary + part.info.binary_size - sizeof(end),
              end, sizeof(end)) == 0;
 
@@ -90,16 +123,22 @@ main(void)
     * therefore invert this CNDLT. This is the first loop, even though it is
     * inside an if, so it uses flag0. Reject both the old flag1 comparison and
     * the non-inverted CNDLT that keeps waiting after the event reaches SET. */
-   static const uint8_t wrong_break[] = {
+   static const uint8_t wrong_break_reg[] = {
       0x2a, 0x05, 0x23, 0x03, 0x06, 0x00, 0x07, 0x00, 0x00, 0x00,
    };
+   static const uint8_t wrong_break_uniform[] = {
+      0x2a, 0x03, 0x23, 0x05, 0x06, 0x00, 0x07, 0x02, 0x00, 0x00,
+   };
+   const uint8_t *wrong_break =
+      uniform_compare ? wrong_break_uniform : wrong_break_reg;
    static const uint8_t wrong_cndlt[] = {0x8f, 0x04, 0x54, 0x02};
    const bool rejects_wrong_break =
-      part.binary && part.info.binary_size >= 54 + sizeof(wrong_break) &&
-      memcmp((const uint8_t *)part.binary + 54, wrong_break,
-             sizeof(wrong_break)) != 0 &&
-      part.info.binary_size >= 64 + sizeof(wrong_cndlt) &&
-      memcmp((const uint8_t *)part.binary + 64, wrong_cndlt,
+      part.binary &&
+      part.info.binary_size >= compare_at + sizeof(wrong_break_reg) &&
+      memcmp((const uint8_t *)part.binary + compare_at, wrong_break,
+             sizeof(wrong_break_reg)) != 0 &&
+      part.info.binary_size >= cndlt_at + sizeof(wrong_cndlt) &&
+      memcmp((const uint8_t *)part.binary + cndlt_at, wrong_cndlt,
              sizeof(wrong_cndlt)) != 0;
 
    unsigned control = 0;

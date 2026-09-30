@@ -29,6 +29,9 @@ libasahi_agx_files = files(
   'agx_lower_uniform_sources.c',
   'agx_pack.c',
   'agx3_pack.c',
+  'agx3_lower_uniform_program.c',
+  'agx3_lower_cprog_inputs.c',
+  'agx3_cprog_input.c',
   'agx3_select_core.c',
   'agx3_copy_core.c',
   'agx3_isel_core.c',
@@ -69,6 +72,7 @@ libasahi_agx_files = files(
   'agx3_zs_core.c',
   'agx3_rt_core.c',
   'agx3_slot_core.c',
+  'agx3_fixed_dependencies.c',
   'agx3_alu_core.c',
   'agx3_funop_core.c',
   'agx3_sr_core.c',
@@ -233,6 +237,20 @@ if with_tests
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_cprog_input',
+    executable(
+      'agx3_cprog_input_test',
+      files('agx3_cprog_input.c', 'agx3_static_spill_core.c',
+            'agx3_binder.c', 'agx3_slot_core.c', 'agx3_compose/agx3_compose.c',
+            'agx3_compose/agx3b_tables.c', 'agx3_compose/agx3c_tables.c',
+            'test/test-agx3-cprog-input.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
       include_directories : [inc_include, inc_src],
     ),
     suite : ['asahi'],
@@ -521,6 +539,35 @@ if with_tests
     suite : ['asahi'],
   )
 
+
+
+  test(
+    'agx3_uniform_destination',
+    executable(
+      'agx3_uniform_destination_test',
+      files('agx3_uniform_alu.c', 'agx3_binder.c',
+            'agx3_compose/agx3_compose.c', 'agx3_compose/agx3b_tables.c',
+            'agx3_compose/agx3c_tables.c',
+            'test/test-agx3-uniform-destination.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_fixed_dependencies',
+    executable(
+      'agx3_fixed_dependencies_test',
+      files('agx3_fixed_dependencies.c', 'test/test-agx3-fixed-dependencies.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
   test(
     'agx3_iadd_core',
     executable(
@@ -617,6 +664,8 @@ if with_tests
       'agx3_ioto_load_packer_test',
       files(
         'agx3_ioto_load_packer.c',
+        'agx3_cprog_input.c',
+        'agx3_static_spill_core.c',
         'agx3_mem_core.c',
         'agx3_binder.c',
         'agx3_compose/agx3_compose.c',
@@ -638,8 +687,11 @@ if with_tests
     executable(
       'agx3_ioto_uniform_program_test',
       files(
+        'agx3_copy_core.c',
         'agx3_ioto_uniform_program.c',
         'agx3_ioto_load_packer.c',
+        'agx3_cprog_input.c',
+        'agx3_static_spill_core.c',
         'agx3_mem_core.c',
         'agx3_binder.c',
         'agx3_compose/agx3_compose.c',
@@ -665,6 +717,12 @@ if with_tests
     executable(
       'agx_tests',
       files(
+         '../lib/agx_ioto_core.c',
+         '../lib/agx_ioto_preshader_core.c',
+         '../lib/agx_ioto_load_core.c',
+         '../lib/agx_ioto_profile_core.c',
+         '../lib/agx_ioto_state_core.c',
+         '../lib/agx_ioto_program_core.c',
          'test/test-compact-constants.cpp',
          'test/test-minifloat.cpp',
          'test/test-optimizer.cpp',
@@ -673,6 +731,7 @@ if with_tests
          'test/test-lower-spill.cpp',
          'test/test-repair-ssa.cpp',
          'test/test-agx3-pack-binary.cpp',
+         'test/test-agx3-lower-uniform-program.cpp',
          'test/test-agx3-sr.cpp',
          'test/test-agx3-uniform-alu.cpp',
          'test/test-agx3-integer-fusion.cpp',
@@ -950,6 +1009,8 @@ if with_tests
         'agx3_copy_core.c',
         'agx3_ioto_uniform_program.c',
         'agx3_ioto_load_packer.c',
+        'agx3_cprog_input.c',
+        'agx3_static_spill_core.c',
         'agx3_mem_core.c',
         'agx3_binder.c',
         'agx3_compose/agx3_compose.c',

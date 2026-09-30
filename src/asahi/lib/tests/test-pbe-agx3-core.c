@@ -34,6 +34,8 @@ same_fields(uint32_t generation, const struct agx_pbe_agx3_2d_fields *a,
           a->swizzle_b == b->swizzle_b &&
           a->swizzle_a == b->swizzle_a && a->width == b->width &&
           a->height == b->height && a->buffer == b->buffer &&
+          a->compressed == b->compressed &&
+          a->acceleration_buffer == b->acceleration_buffer &&
           a->stride_B == b->stride_B &&
           a->page_aligned_layers ==
              (generation == AGX_PBE_AGX3_GENERATION_10 && b->page_aligned_layers);
@@ -623,6 +625,57 @@ check_gen9_multisample_vector(void)
 }
 
 static int
+check_gen9_compressed_atlas_vector(void)
+{
+   /* Byte-exact pure Apple HAL200 StateFields witness for one-layer, GPU-tiled
+    * RGBA8 UNORM, 2048x2048, five mips, and two independent GPU addresses. */
+   const struct agx_pbe_agx3_2d_fields fields = {
+      .layout = 2, .channels = 0x28, .type = 0,
+      .swizzle_r = 0, .swizzle_g = 1, .swizzle_b = 2, .swizzle_a = 3,
+      .width = 2048, .height = 2048,
+      .buffer = UINT64_C(0x10000000000),
+      .compressed = true,
+      .acceleration_buffer = UINT64_C(0x100000a0000),
+   };
+   static const uint8_t expected[32] = {
+      0x22, 0x0a, 0xe4, 0xff, 0xc7, 0xff, 0x01, 0x0c,
+      0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x80,
+      0x00, 0xa0, 0x00, 0x00, 0x10, 0x00, 0x04, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct agx_pbe_agx3_descriptor packed;
+   CHECK(agx_pbe_agx3_2d_mip_pack(9, &fields, 0, 5, &packed));
+   CHECK(memcmp(packed.bytes, expected, sizeof(expected)) == 0);
+   for (unsigned level = 0; level < 5; ++level) {
+      uint8_t mip_expected[32];
+      memcpy(mip_expected, expected, sizeof(mip_expected));
+      mip_expected[21] = level << 4;
+      CHECK(agx_pbe_agx3_2d_mip_pack(9, &fields, level, 5, &packed));
+      CHECK(memcmp(packed.bytes, mip_expected, sizeof(mip_expected)) == 0);
+   }
+
+   CHECK(agx_pbe_agx3_2d_pack(9, &fields, &packed));
+   struct agx_pbe_agx3_2d_fields decoded;
+   CHECK(agx_pbe_agx3_2d_unpack(9, packed.bytes, sizeof(packed.bytes),
+                                &decoded));
+   CHECK(same_fields(9, &decoded, &fields));
+
+   struct agx_pbe_agx3_2d_fields bad = fields;
+   bad.acceleration_buffer = 0;
+   CHECK(!agx_pbe_agx3_2d_pack(9, &bad, &packed));
+   bad = fields;
+   bad.acceleration_buffer++;
+   CHECK(!agx_pbe_agx3_2d_pack(9, &bad, &packed));
+   bad = fields;
+   bad.layout = 1;
+   CHECK(!agx_pbe_agx3_2d_pack(9, &bad, &packed));
+   CHECK(!agx_pbe_agx3_2d_pack(10, &fields, &packed));
+   CHECK(!agx_pbe_agx3_2d_array_mip_pack(9, &fields, 2, 0, 5, &packed));
+   CHECK(!agx_pbe_agx3_2d_multisample_pack(9, &fields, 4, &packed));
+   return 0;
+}
+
+static int
 check_gen9_array_multisample_vector(void)
 {
    const struct agx_pbe_agx3_2d_fields fields = {
@@ -694,6 +747,7 @@ main(void)
        check_dimension_and_address_bits() || check_fail_closed_axes() ||
        check_gen9_srgb_vector() ||
        check_gen9_single_layer_packet() || check_gen9_native_mips() ||
+       check_gen9_compressed_atlas_vector() ||
        check_gen9_multisample_vector() ||
        check_gen9_array_multisample_vector())
       return 1;

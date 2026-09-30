@@ -21,6 +21,8 @@
 #include "nir_lower_blend.h"
 #include "shader_enums.h"
 
+static bool drop_unit_range_source_clamps(nir_shader *s);
+
 /* Mesa's "every sample" spelling, shared with agx_nir_lower_tilebuffer. */
 #define ALL_SAMPLES 0xFF
 
@@ -951,6 +953,8 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, nir_lower_alpha_to_one);
 
    NIR_PASS(_, b->shader, nir_lower_blend, &opts);
+   if (key->colour_unit_range)
+      NIR_PASS(_, b->shader, drop_unit_range_source_clamps);
    nir_shader_intrinsics_pass(b->shader, convert_scaled_output,
                               nir_metadata_control_flow, (void *)key);
    nir_shader_intrinsics_pass(b->shader, pad_blended_output,
@@ -1033,6 +1037,202 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    b->shader->info.io_lowered = true;
    b->shader->info.fs.uses_fbfetch_output |= force_translucent;
    b->shader->info.fs.uses_sample_shading = key->link.sample_shading;
+}
+
+/*
+ * AGX_G17P_UNIT_RANGE_BLEND.
+ *
+ * Apple's inline blend for the throughput fragment shader has no source
+ * clamp: its compiler knows float(v & 63) / 255 lies in [0, 1]
+ * (native fragment 0x106..0x1b4). Honeykrisp's split epilog cannot see the
+ * main shader's values, so nir_lower_blend clamps every UNORM blend source
+ * (four f32add.sat per RGBA8 pixel). The main shader proves the bound here;
+ * the epilog key carries it; the epilog then drops fsat of the exported
+ * colour. Only fsat whose operand is the exported colour itself is removed.
+ */
+static bool
+unit_bound(nir_shader *s, struct hash_table *ht, nir_scalar v, double *lo,
+           double *hi, unsigned depth)
+{
+   if (depth > 24)
+      return false;
+
+   v = nir_scalar_chase_movs(v);
+   if (nir_scalar_is_const(v)) {
+      if (v.def->bit_size != 16 && v.def->bit_size != 32)
+         return false;
+      const double c = nir_scalar_as_float(v);
+      if (isnan(c) || isinf(c))
+         return false;
+      *lo = *hi = c;
+      return true;
+   }
+
+   if (!nir_scalar_is_alu(v))
+      return false;
+
+   const nir_op op = nir_scalar_alu_op(v);
+   double a0, a1, b0, b1, c0, c1;
+   switch (op) {
+   case nir_op_fsat:
+      *lo = 0.0;
+      *hi = 1.0;
+      return true;
+
+   case nir_op_u2f32:
+   case nir_op_u2f16: {
+      const uint32_t ub = nir_unsigned_upper_bound(
+         s, ht, nir_scalar_chase_alu_src(v, 0));
+      /* Keep the conversion exact so the bound is not rounded up. */
+      if (ub > (op == nir_op_u2f16 ? 2048u : (1u << 24)))
+         return false;
+      *lo = 0.0;
+      *hi = ub;
+      return true;
+   }
+
+   case nir_op_f2f32:
+   case nir_op_f2f16:
+      return unit_bound(s, ht, nir_scalar_chase_alu_src(v, 0), lo, hi,
+                        depth + 1);
+
+   case nir_op_fmul:
+   case nir_op_fmulz:
+   case nir_op_ffma:
+   case nir_op_ffmaz: {
+      if (!unit_bound(s, ht, nir_scalar_chase_alu_src(v, 0), &a0, &a1,
+                      depth + 1) ||
+          !unit_bound(s, ht, nir_scalar_chase_alu_src(v, 1), &b0, &b1,
+                      depth + 1))
+         return false;
+      /* Only non-negative factors: the product bound is then its corners
+       * and no sign or zero-times-infinity case arises. */
+      if (a0 < 0.0 || b0 < 0.0)
+         return false;
+      *lo = a0 * b0;
+      *hi = a1 * b1;
+      if (op == nir_op_ffma || op == nir_op_ffmaz) {
+         if (!unit_bound(s, ht, nir_scalar_chase_alu_src(v, 2), &c0, &c1,
+                         depth + 1))
+            return false;
+         *lo += c0;
+         *hi += c1;
+      }
+      return true;
+   }
+
+   case nir_op_fadd:
+      if (!unit_bound(s, ht, nir_scalar_chase_alu_src(v, 0), &a0, &a1,
+                      depth + 1) ||
+          !unit_bound(s, ht, nir_scalar_chase_alu_src(v, 1), &b0, &b1,
+                      depth + 1))
+         return false;
+      *lo = a0 + b0;
+      *hi = a1 + b1;
+      return true;
+
+   case nir_op_fmin:
+   case nir_op_fmax:
+      if (!unit_bound(s, ht, nir_scalar_chase_alu_src(v, 0), &a0, &a1,
+                      depth + 1) ||
+          !unit_bound(s, ht, nir_scalar_chase_alu_src(v, 1), &b0, &b1,
+                      depth + 1))
+         return false;
+      *lo = op == nir_op_fmin ? MIN2(a0, b0) : MAX2(a0, b0);
+      *hi = op == nir_op_fmin ? MIN2(a1, b1) : MAX2(a1, b1);
+      return true;
+
+   case nir_op_bcsel:
+      if (!unit_bound(s, ht, nir_scalar_chase_alu_src(v, 1), &a0, &a1,
+                      depth + 1) ||
+          !unit_bound(s, ht, nir_scalar_chase_alu_src(v, 2), &b0, &b1,
+                      depth + 1))
+         return false;
+      *lo = MIN2(a0, b0);
+      *hi = MAX2(a1, b1);
+      return true;
+
+   default:
+      return false;
+   }
+}
+
+bool
+agx_nir_fs_colour_outputs_unit_range(nir_shader *s, bool exact_constants)
+{
+   if (s->info.stage != MESA_SHADER_FRAGMENT)
+      return false;
+
+   struct hash_table *ht = _mesa_pointer_hash_table_create(NULL);
+   bool any = false, all = true;
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_store_output)
+               continue;
+            const nir_io_semantics sem = nir_intrinsic_io_semantics(intr);
+            if (sem.location != FRAG_RESULT_COLOR &&
+                sem.location < FRAG_RESULT_DATA0)
+               continue;
+
+            nir_def *vec = intr->src[0].ssa;
+            if (vec->bit_size != 16 && vec->bit_size != 32) {
+               all = false;
+               continue;
+            }
+            u_foreach_bit(c, nir_intrinsic_write_mask(intr)) {
+               double lo, hi;
+               nir_scalar chan = nir_scalar_chase_movs(nir_get_scalar(vec, c));
+               any = true;
+               /* An exact constant needs no rounding margin: fsat(k) == k
+                * for every k in [0, 1], including 1.0 (v52). */
+               if (exact_constants && nir_scalar_is_const(chan)) {
+                  const double k = nir_scalar_as_float(chan);
+                  if (!(k >= 0.0 && k <= 1.0))
+                     all = false;
+                  continue;
+               }
+               /* Margin covers f16/f32 rounding of each bounded step. */
+               if (!unit_bound(s, ht, nir_get_scalar(vec, c), &lo, &hi, 0) ||
+                   lo < 0.0 || hi > 0.99)
+                  all = false;
+            }
+         }
+      }
+   }
+   _mesa_hash_table_destroy(ht, NULL);
+   return any && all;
+}
+
+static bool
+drop_unit_range_source_clamp(nir_builder *b, nir_alu_instr *alu,
+                             UNUSED void *data)
+{
+   if (alu->op != nir_op_fsat)
+      return false;
+
+   for (unsigned c = 0; c < alu->def.num_components; ++c) {
+      nir_scalar src = nir_scalar_chase_movs(
+         nir_get_scalar(alu->src[0].src.ssa, alu->src[0].swizzle[c]));
+      if (!nir_def_is_intrinsic(src.def) ||
+          nir_scalar_intrinsic_op(src) != nir_intrinsic_load_exported_agx)
+         return false;
+   }
+
+   b->cursor = nir_before_instr(&alu->instr);
+   nir_def_replace(&alu->def, nir_mov_alu(b, alu->src[0],
+                                          alu->def.num_components));
+   return true;
+}
+
+static bool
+drop_unit_range_source_clamps(nir_shader *s)
+{
+   return nir_shader_alu_pass(s, drop_unit_range_source_clamp,
+                              nir_metadata_control_flow, NULL);
 }
 
 struct lower_epilog_ctx {

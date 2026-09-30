@@ -8,6 +8,8 @@
 #pragma once
 
 #include "hk_private.h"
+#include "util/macros.h"
+#include "asahi/lib/agx_device.h"
 
 #include "vk_command_pool.h"
 
@@ -49,7 +51,21 @@ struct agx_device;
 struct agx_ptr;
 struct hk_device;
 
-bool hk_g17p_vdm_low_window_enabled(const struct agx_device *dev);
+/* -1 until the environment has been read (hk_g17p_vdm_low_window_init()),
+ * then 0 or 1.  Queried several times per draw, so the cached answer is read
+ * inline. */
+extern int hk_g17p_vdm_low_window_state;
+int hk_g17p_vdm_low_window_init(void);
+
+static inline bool
+hk_g17p_vdm_low_window_enabled(const struct agx_device *dev)
+{
+   int enabled = hk_g17p_vdm_low_window_state;
+   if (unlikely(enabled < 0))
+      enabled = hk_g17p_vdm_low_window_init();
+
+   return enabled && dev->chip == AGX_CHIP_G17P;
+}
 
 struct hk_cmd_pool {
    struct vk_command_pool vk;

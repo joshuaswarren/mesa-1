@@ -48,6 +48,7 @@ static const struct debug_named_value agx_debug_options[] = {
    {"spill",     AGX_DBG_SPILL,     "Spill (almost) everything"},
    {"nopromote", AGX_DBG_NOPROMOTE, "Do not promote constants to uniforms"},
    {"refuse",    AGX_DBG_REFUSE,    "Name refused instructions, without dumping shaders"},
+   {"native_uniforms", AGX_DBG_NATIVE_UNIFORMS, "Validate AGX3 constant-program destination selection (experimental)"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -76,6 +77,299 @@ uint64_t
 agx_get_compiler_debug(void)
 {
    return debug_get_option_agx_compiler_debug();
+}
+
+static __thread char agx_refusal[192];
+
+const char *
+agx_last_compile_refusal(void)
+{
+   return agx_refusal;
+}
+
+static void
+agx_set_refusal(const agx_context *ctx, const char *what, unsigned line)
+{
+   snprintf(agx_refusal, sizeof(agx_refusal), "%s%s (%s:%u)", what,
+            ctx ? (ctx->is_preamble ? " [constant program]" : " [main]") : "",
+            __FILE__, line);
+}
+
+/* v56c master: follows the v56 master unless set. */
+static bool
+debug_get_option_agx_g17p_v56c_defaults(void);
+
+/* The fragment constant program measured in Minecraft (native_uniforms on:
+ * v51f 69.7 FPS / 14.05 ms vs the v56b fragment-DMA path 62.9 / 15.87 ms,
+ * lab 2026-09-29). Offline it removes every per-pixel UBO device load and
+ * hoists uniform-only work (terrain main 330 -> 305, entity 303 -> 210). */
+bool
+agx_g17p_fs_cprog_default(void)
+{
+   static int value = -1;
+   if (value < 0)
+      value = debug_get_bool_option("AGX_G17P_FS_CPROG",
+                                    debug_get_option_agx_g17p_v56c_defaults());
+   return value;
+}
+
+bool
+agx_g17p_fs_native_uniforms(void)
+{
+   return (agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS) ||
+          agx_g17p_fs_cprog_default();
+}
+
+/* v53-c2 default candidate. The C2 loop shape measured on v92d (SLC on,
+ * oracle clean): AGX_G17P_APPLE_LOOP2 + AGX_G17P_UNIFORM_DMA gave heavy d32
+ * 250.1 -> 298.3/s and comp128 d32 2098.8 -> 2487.5/s. Its components default
+ * on here; AGX_G17P_C2_DEFAULTS=0 restores the v53-pre defaults (all off), and
+ * each component's own variable still overrides either way. Every component
+ * keeps its own safety guard (uniform-only rotation, pure-ALU crossing for
+ * the moved compare, memory-free ILP blocks, divergence-gated discards). */
+/* v56 default candidate (neo-default-mesa-v56). One master switch:
+ * AGX_G17P_V56_DEFAULTS=0 reverts every default below to the v51y-era
+ * baseline (all codegen candidates off) for CTS comparison. Each flag's own
+ * variable still overrides either way. Default on:
+ *  - the C2/C3 loop set (via AGX_G17P_C2_DEFAULTS, which now defaults to
+ *    the master), including AGX_G17P_UNIFORM_DMA;
+ *  - the four remaining measured-effective FS_STRUCTURE flags:
+ *    AGX_G17P_PIXEL_COORD_FOLD, AGX_G17P_SR32_PIXEL_COORD,
+ *    AGX_G17P_UNIT_RANGE_BLEND and AGX_G17P_TIB_UNPACK_DIRECT (lab: light
+ *    d32 +22% over C3 with no heavy/compute regression).
+ * Still off: AGX_G17P_INLINE_BLEND, AGX_G17P_DISCARD_NO_RESTORE, the four
+ * null v52 flags, AGX_G17P_SPREAD_TEMPS and AGX_G17P_PHYSICAL_DISCARD. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_v56_defaults, "AGX_G17P_V56_DEFAULTS", true)
+static bool
+debug_get_option_agx_g17p_v56c_defaults(void)
+{
+   static int value = -1;
+   if (value < 0)
+      value = debug_get_bool_option("AGX_G17P_V56C_DEFAULTS",
+                                    debug_get_option_agx_g17p_v56_defaults());
+   return value;
+}
+static bool
+debug_get_option_agx_g17p_c2_defaults(void)
+{
+   static int value = -1;
+   if (value < 0)
+      value = debug_get_bool_option("AGX_G17P_C2_DEFAULTS",
+                                    debug_get_option_agx_g17p_v56_defaults());
+   return value;
+}
+#define AGX_V56_OPTION(name, env)                                              \
+   static bool debug_get_option_##name(void)                                  \
+   {                                                                           \
+      static int value = -1;                                                   \
+      if (value < 0)                                                           \
+         value = debug_get_bool_option(                                        \
+            env, debug_get_option_agx_g17p_v56_defaults());                    \
+      return value;                                                            \
+   }
+#define AGX_C2_OPTION(name, env)                                               \
+   static bool debug_get_option_##name(void)                                  \
+   {                                                                           \
+      static int value = -1;                                                   \
+      if (value < 0)                                                           \
+         value = debug_get_bool_option(                                        \
+            env, debug_get_option_agx_g17p_c2_defaults());                     \
+      return value;                                                            \
+   }
+
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_immediate_shifts,
+                           "AGX_G17P_IMMEDIATE_SHIFTS", true)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_promote_integer_constants,
+                           "AGX_G17P_PROMOTE_INTEGER_CONSTANTS", true)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_compact_bitops,
+                           "AGX_G17P_COMPACT_BITOPS", true)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_shifted_add,
+                           "AGX_G17P_SHIFTED_ADD", true)
+AGX_C2_OPTION(agx_g17p_uniform_cf_hints, "AGX_G17P_UNIFORM_CF_HINTS")
+AGX_V56_OPTION(agx_g17p_pixel_coord_fold, "AGX_G17P_PIXEL_COORD_FOLD")
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_int_dest_cache,
+                           "AGX_G17P_INT_DEST_CACHE", true)
+/* v46 execution-efficiency candidates (neo-gpu-exec-mesa-v46). Default off:
+ * each changes emitted fragment code and is cache-keyed through
+ * agx_get_codegen_flags(); enable only for the matched hardware A/B. */
+AGX_V56_OPTION(agx_g17p_tib_unpack_direct, "AGX_G17P_TIB_UNPACK_DIRECT")
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_bitop_immediates,
+                           "AGX_G17P_BITOP_IMMEDIATES", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_extract16_bfe,
+                           "AGX_G17P_EXTRACT16_BFE", false)
+/* v47 (neo-gpu-exec-mesa-v47): latency-aware list scheduling, default off. */
+AGX_C2_OPTION(agx_g17p_ilp_schedule, "AGX_G17P_ILP_SCHEDULE")
+/* v49 (neo-gpu-exec-mesa-v49) light-fragment candidates, default off. */
+AGX_V56_OPTION(agx_g17p_sr32_pixel_coord, "AGX_G17P_SR32_PIXEL_COORD")
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_bfe_immediate,
+                           "AGX_G17P_BFE_IMMEDIATE", false)
+AGX_V56_OPTION(agx_g17p_unit_range_blend, "AGX_G17P_UNIT_RANGE_BLEND")
+/* v52a (neo-alu-mesa-v52a) ALU-issue candidates, default off.
+ * AGX_G17P_APPLE_LOOP=1 is shorthand for the whole Apple loop shape:
+ * rotation + loop-head hint + ILP interleave + uniform-CF lifetime hints. */
+AGX_C2_OPTION(agx_g17p_loop_rotate, "AGX_G17P_LOOP_ROTATE")
+AGX_C2_OPTION(agx_g17p_loop_head_hint, "AGX_G17P_LOOP_HEAD_HINT")
+/* v53-c3: default with the C2 set (AGX_G17P_C2_DEFAULTS). */
+AGX_C2_OPTION(agx_g17p_exit_compare, "AGX_G17P_EXIT_COMPARE")
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_apple_loop,
+                           "AGX_G17P_APPLE_LOOP", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_apple_loop2,
+                           "AGX_G17P_APPLE_LOOP2", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_apple_loop3,
+                           "AGX_G17P_APPLE_LOOP3", false)
+
+/* v52 (neo-fs-structure-mesa-v52) fragment-structure bundle and flags,
+ * default off. See agx_debug.h. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_fs_structure,
+                           "AGX_G17P_FS_STRUCTURE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_unit_range_const,
+                           "AGX_G17P_UNIT_RANGE_CONST", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_early_colour_gate,
+                           "AGX_G17P_EARLY_COLOUR_GATE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_discard_fold,
+                           "AGX_G17P_DISCARD_FOLD", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_input_mark,
+                           "AGX_G17P_INPUT_MARK", false)
+/* v54 (neo-fs-blend-mesa-v54), default off, not in the v52 bundle. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_inline_blend,
+                           "AGX_G17P_INLINE_BLEND", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_discard_no_restore,
+                           "AGX_G17P_DISCARD_NO_RESTORE", false)
+
+uint32_t
+agx_get_fs_structure_flags(void)
+{
+   /* v54: the lab measured the four v52-only flags null on the light pass
+    * (±0.2 µs) and the v52 bundle regresses heavy d32 by 4.5%, so the bundle
+    * no longer turns them on. They remain individual diagnostics. */
+   const bool all = false;
+   return ((all || debug_get_option_agx_g17p_unit_range_const())
+              ? AGX_FS_STRUCTURE_UNIT_RANGE_CONST : 0) |
+          ((all || debug_get_option_agx_g17p_early_colour_gate())
+              ? AGX_FS_STRUCTURE_EARLY_COLOUR_GATE : 0) |
+          ((all || debug_get_option_agx_g17p_discard_fold())
+              ? AGX_FS_STRUCTURE_DISCARD_FOLD : 0) |
+          ((all || debug_get_option_agx_g17p_input_mark())
+              ? AGX_FS_STRUCTURE_INPUT_MARK : 0) |
+          (debug_get_option_agx_g17p_inline_blend()
+              ? AGX_FS_STRUCTURE_INLINE_BLEND : 0) |
+          ((debug_get_option_agx_g17p_inline_blend() &&
+            debug_get_option_agx_g17p_discard_no_restore())
+              ? AGX_FS_STRUCTURE_DISCARD_NO_RESTORE : 0);
+}
+
+/* The bundle's share of the existing structure flags. */
+#define AGX_FS_STRUCTURE_BUNDLE_CODEGEN                                      \
+   (AGX_CODEGEN_G17P_TIB_UNPACK_DIRECT | AGX_CODEGEN_G17P_PIXEL_COORD_FOLD | \
+    AGX_CODEGEN_G17P_SR32_PIXEL_COORD | AGX_CODEGEN_G17P_UNIT_RANGE_BLEND)
+
+uint32_t
+agx_get_codegen_flags(void)
+{
+   return (debug_get_option_agx_g17p_fs_structure()
+              ? AGX_FS_STRUCTURE_BUNDLE_CODEGEN : 0) |
+          (debug_get_option_agx_g17p_immediate_shifts()
+              ? AGX_CODEGEN_G17P_IMMEDIATE_SHIFTS : 0) |
+          (debug_get_option_agx_g17p_promote_integer_constants()
+              ? AGX_CODEGEN_G17P_PROMOTE_INTEGER_CONSTANTS : 0) |
+          (debug_get_option_agx_g17p_compact_bitops()
+              ? AGX_CODEGEN_G17P_COMPACT_BITOPS : 0) |
+          (debug_get_option_agx_g17p_shifted_add()
+              ? AGX_CODEGEN_G17P_SHIFTED_ADD : 0) |
+          (debug_get_option_agx_g17p_uniform_cf_hints()
+              ? AGX_CODEGEN_G17P_UNIFORM_CF_HINTS : 0) |
+          (debug_get_option_agx_g17p_pixel_coord_fold()
+              ? AGX_CODEGEN_G17P_PIXEL_COORD_FOLD : 0) |
+          (debug_get_option_agx_g17p_int_dest_cache()
+              ? AGX_CODEGEN_G17P_INT_DEST_CACHE : 0) |
+          (debug_get_option_agx_g17p_tib_unpack_direct()
+              ? AGX_CODEGEN_G17P_TIB_UNPACK_DIRECT : 0) |
+          (debug_get_option_agx_g17p_bitop_immediates()
+              ? AGX_CODEGEN_G17P_BITOP_IMMEDIATES : 0) |
+          (debug_get_option_agx_g17p_extract16_bfe()
+              ? AGX_CODEGEN_G17P_EXTRACT16_BFE : 0) |
+          (debug_get_option_agx_g17p_ilp_schedule()
+              ? AGX_CODEGEN_G17P_ILP_SCHEDULE : 0) |
+          (debug_get_option_agx_g17p_sr32_pixel_coord()
+              ? AGX_CODEGEN_G17P_SR32_PIXEL_COORD : 0) |
+          (debug_get_option_agx_g17p_bfe_immediate()
+              ? AGX_CODEGEN_G17P_BFE_IMMEDIATE : 0) |
+          (debug_get_option_agx_g17p_unit_range_blend()
+              ? AGX_CODEGEN_G17P_UNIT_RANGE_BLEND : 0) |
+          (debug_get_option_agx_g17p_loop_rotate()
+              ? AGX_CODEGEN_G17P_LOOP_ROTATE : 0) |
+          (debug_get_option_agx_g17p_loop_head_hint()
+              ? AGX_CODEGEN_G17P_LOOP_HEAD_HINT : 0) |
+          (debug_get_option_agx_g17p_exit_compare()
+              ? AGX_CODEGEN_G17P_EXIT_COMPARE : 0) |
+          (debug_get_option_agx_g17p_apple_loop3()
+              ? AGX_CODEGEN_G17P_EXIT_COMPARE : 0) |
+          ((debug_get_option_agx_g17p_apple_loop() ||
+            debug_get_option_agx_g17p_apple_loop2() ||
+            debug_get_option_agx_g17p_apple_loop3())
+              ? (AGX_CODEGEN_G17P_LOOP_ROTATE |
+                 AGX_CODEGEN_G17P_LOOP_HEAD_HINT |
+                 AGX_CODEGEN_G17P_ILP_SCHEDULE |
+                 AGX_CODEGEN_G17P_UNIFORM_CF_HINTS) : 0);
+}
+
+/* v52b (neo-alu-mesa-v52b) ALU-issue candidates, default off.
+ * AGX_G17P_APPLE_LOOP2=1 = AGX_G17P_APPLE_LOOP plus UNIFORM_COMPARE and
+ * EARLY_COMPARE (the complete Apple loop-control shape). */
+AGX_C2_OPTION(agx_g17p_uniform_compare, "AGX_G17P_UNIFORM_COMPARE")
+AGX_C2_OPTION(agx_g17p_early_compare, "AGX_G17P_EARLY_COMPARE")
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_physical_discard,
+                           "AGX_G17P_PHYSICAL_DISCARD", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_spread_temps,
+                           "AGX_G17P_SPREAD_TEMPS", false)
+
+uint32_t
+agx_get_alu_flags(void)
+{
+   return (debug_get_option_agx_g17p_uniform_compare()
+              ? AGX_ALU_G17P_UNIFORM_COMPARE : 0) |
+          (debug_get_option_agx_g17p_early_compare()
+              ? AGX_ALU_G17P_EARLY_COMPARE : 0) |
+          (debug_get_option_agx_g17p_physical_discard()
+              ? AGX_ALU_G17P_PHYSICAL_DISCARD : 0) |
+          (debug_get_option_agx_g17p_spread_temps()
+              ? AGX_ALU_G17P_SPREAD_TEMPS : 0) |
+          ((debug_get_option_agx_g17p_apple_loop2() ||
+            debug_get_option_agx_g17p_apple_loop3())
+              ? (AGX_ALU_G17P_UNIFORM_COMPARE |
+                 AGX_ALU_G17P_EARLY_COMPARE) : 0);
+}
+
+/* v50 footgun-audit candidates (neo-footgun-mesa-v50), default off. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_scaled_sample_guard,
+                           "HK_G17P_SCALED_SAMPLE_GUARD", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_uniform_atomics,
+                           "AGX_G17P_UNIFORM_ATOMICS", false)
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_shared_rhw,
+                           "AGX_G17P_SHARED_RHW", false)
+AGX_C2_OPTION(agx_g17p_uniform_dma, "AGX_G17P_UNIFORM_DMA")
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_tex_uniform_operands,
+                           "AGX_G17P_TEX_UNIFORM_OPERANDS", false)
+
+uint32_t
+agx_get_v57_flags(void)
+{
+   return debug_get_option_agx_g17p_tex_uniform_operands()
+             ? AGX_V57_TEX_UNIFORM_OPERANDS : 0;
+}
+
+uint32_t
+agx_get_footgun_flags(void)
+{
+   return (debug_get_option_hk_g17p_scaled_sample_guard()
+              ? AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD : 0) |
+          (debug_get_option_agx_g17p_uniform_atomics()
+              ? AGX_FOOTGUN_G17P_UNIFORM_ATOMICS : 0) |
+          (debug_get_option_agx_g17p_shared_rhw()
+              ? AGX_FOOTGUN_G17P_SHARED_RHW : 0) |
+          ((debug_get_option_agx_g17p_uniform_dma() ||
+            debug_get_option_agx_g17p_fs_structure())
+              ? AGX_FOOTGUN_G17P_UNIFORM_DMA : 0);
 }
 
 static agx_index
@@ -672,19 +966,44 @@ agx_emit_load_vary_agx3(agx_builder *b, agx_index dest, agx_index cf,
    }
 
    agx_index reciprocal_w = agx_null();
+   /* AGX_G17P_SHARED_RHW (v50, default off): centre interpolation reads no
+    * per-load coordinate token, so its RHW and projective reciprocal are the
+    * same for every input of the shader. Backend CSE is block-local and NIR
+    * sinks input loads into their using blocks, so later loads re-emit the
+    * f32interp + f32rcp pair. Reuse the first pair when it was emitted in
+    * the entry block (it then dominates every later load, and the first
+    * f32interp -- which carries the fragment-input start marker -- stays
+    * exactly where it is today). */
+   agx_context *const vctx = b->shader;
+   const bool share_rhw =
+      perspective && interp == AGX_INTERPOLATION_CENTER &&
+      vctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      !vctx->is_preamble &&
+      (agx_get_footgun_flags() & AGX_FOOTGUN_G17P_SHARED_RHW);
    if (perspective) {
       agx_index rhw_cf = agx_get_cf(b->shader, VARYING_SLOT_POS, 3);
       if (rhw_cf.type != AGX_INDEX_IMMEDIATE)
          return false;
 
-      agx_index rhw = agx_temp(b->shader, AGX_SIZE_32);
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
-         agx_rhw_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp);
-      else
-         agx_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp, true);
-      reciprocal_w = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
-                        ? agx_persp_rcp_agx3(b, rhw, rhw_cf.value)
-                        : agx_rcp(b, rhw);
+      if (share_rhw && !agx_is_null(vctx->agx3_shared_rcp_w) &&
+          vctx->agx3_shared_rhw_cf == rhw_cf.value) {
+         reciprocal_w = vctx->agx3_shared_rcp_w;
+      } else {
+         agx_index rhw = agx_temp(b->shader, AGX_SIZE_32);
+         if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+            agx_rhw_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp);
+         else
+            agx_interp_agx3_to(b, rhw, rhw_cf, interp_coords, interp, true);
+         reciprocal_w = b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B
+                           ? agx_persp_rcp_agx3(b, rhw, rhw_cf.value)
+                           : agx_rcp(b, rhw);
+
+         if (share_rhw && agx_is_null(vctx->agx3_shared_rcp_w) &&
+             vctx->current_block == agx_start_block(vctx)) {
+            vctx->agx3_shared_rcp_w = reciprocal_w;
+            vctx->agx3_shared_rhw_cf = rhw_cf.value;
+         }
+      }
    }
 
    agx_index channels[4];
@@ -1302,21 +1621,35 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
 /* Unpack already-loaded normalized halves into `dest`. A byte format packs
  * two channels into each half; a 16-bit one occupies a half per channel and
  * is recollected into the pair the conversion consumes. Tile and device
- * traffic differ only in how the halves arrive, so both share this tail. */
+ * traffic differ only in how the halves arrive, so both share this tail.
+ *
+ * `read_mask` names the channels anything reads: a pair with no read lane
+ * needs no conversion. With `split_dest` false the channels are only cached
+ * as the collect's sources, so readers take each `normflt` result where it
+ * was written and the collected vector itself stays dead; the device
+ * (vertex fetch) path uses that, like Apple's vertex programs, which read the
+ * conversion results in place. */
 static void
 agx_unpack_normalized_halves_agx3(agx_builder *b, agx_index dest,
                                   agx_index *halves, enum agx_format format,
-                                  unsigned nr_comps)
+                                  unsigned nr_comps, unsigned read_mask,
+                                  bool split_dest)
 {
    const bool norm16 =
       format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
    agx_index channels[4] = {agx_null()};
    const unsigned conversions = DIV_ROUND_UP(nr_comps, 2);
    for (unsigned i = 0; i < conversions; ++i) {
+      const unsigned lanes = MIN2(2u, nr_comps - i * 2);
+      if (!(read_mask & (BITFIELD_MASK(lanes) << (i * 2)))) {
+         for (unsigned c = 0; c < lanes; ++c)
+            channels[i * 2 + c] = agx_undef(dest.size);
+         continue;
+      }
+
       /* One unpack per packed register; each yields a 32-bit pair, which the
        * split below turns back into the two scalar channels. */
       agx_index pair = agx_temp(b->shader, AGX_SIZE_32);
-      const unsigned lanes = MIN2(2u, nr_comps - i * 2);
       pair.channels_m1 = lanes - 1;
       agx_index source = halves[i];
       if (norm16) {
@@ -1339,7 +1672,18 @@ agx_unpack_normalized_halves_agx3(agx_builder *b, agx_index dest,
    }
 
    agx_emit_collect_to(b, dest, nr_comps, channels);
-   agx_emit_cached_split(b, dest, nr_comps);
+
+   /* agx_emit_collect_to() has already recorded `channels` as the components
+    * of `dest`. The cached split below re-extracts them from the collected
+    * vector into fresh SSA values and replaces that record, so every consumer
+    * reads the split and the collect survives. Register allocation must then
+    * give the collect a contiguous vector and emits one move per channel: four
+    * extra moves in every RGBA8 blend epilog (FS epilog ld_tile -> normflt x2
+    * -> 4 x mov -> blend). Apple's inline blend has no such moves
+    * (native fragment 0x10c..0x1b4). With TIB_UNPACK_DIRECT the channels are
+    * consumed directly and the now-unused collect is dead code. */
+   if (split_dest && !(agx_get_codegen_flags() & AGX_CODEGEN_G17P_TIB_UNPACK_DIRECT))
+      agx_emit_cached_split(b, dest, nr_comps);
 }
 
 /*
@@ -1415,7 +1759,8 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
    agx_index halves[4] = {agx_null()};
    agx_emit_split(b, halves, packed, loaded_channels);
 
-   agx_unpack_normalized_halves_agx3(b, dest, halves, format, nr_comps);
+   agx_unpack_normalized_halves_agx3(b, dest, halves, format, nr_comps,
+                                     BITFIELD_MASK(nr_comps), true);
    return true;
 }
 
@@ -1659,7 +2004,17 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       } else {
          agx_emit_split(b, halves, packed, nr);
       }
-      agx_unpack_normalized_halves_agx3(b, dest, halves, fmt, nr);
+      /* Vertex fetch (agx_nir_lower_vbo, the only producer of normalized
+       * constant loads) converts only the lanes the shader reads and leaves
+       * each result where `normflt` wrote it. Formatted meta loads keep
+       * their collected vector. */
+      const bool vertex_fetch =
+         instr->intrinsic == nir_intrinsic_load_constant_agx;
+      agx_unpack_normalized_halves_agx3(
+         b, dest, halves, fmt, nr,
+         vertex_fetch ? nir_def_components_read(&instr->def)
+                      : BITFIELD_MASK(nr),
+         !vertex_fetch);
       return;
    }
 
@@ -1675,6 +2030,21 @@ agx_emit_load(agx_builder *b, agx_index dest, nir_intrinsic_instr *instr)
       load->memory_index_is_bytes = index_bytes;
       agx_unpack_rgb10a2_agx3_to(b, dest, packed);
       agx_emit_cached_split(b, dest, 4);
+      return;
+   }
+
+   /* The same one-word load and native unpack for R11G11B10_FLOAT: Apple's
+    * G17P FloatRG11B10 vertex fetch is LDDEV W32 + `unpack` layout 2. */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       fmt == AGX_FORMAT_RG11B10F) {
+      assert(dest.size == AGX_SIZE_32 && instr->def.num_components == 3);
+      assert(packed_count == 0);
+      agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
+      agx_instr *load = agx_device_load_to(b, packed, addr, offset,
+         AGX_FORMAT_I32, 1, shift, nir_is_coherent(instr));
+      load->memory_index_is_bytes = index_bytes;
+      agx_unpack_rgb10a2_agx3_to(b, dest, packed)->format = fmt;
+      agx_emit_cached_split(b, dest, 3);
       return;
    }
 
@@ -2750,6 +3120,8 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
                b, native, AGX_SR_THREAD_POSITION_IN_GRID_X + i);
             xy[i] = agx_temp(b->shader, AGX_SIZE_16);
             agx_subdivide_to(b, xy[i], native, 0);
+            b->shader->agx3_pixel_coord_native[i] = native;
+            b->shader->agx3_pixel_coord_half[i] = xy[i];
          }
          return agx_emit_collect_to(b, dst, 2, xy);
       }
@@ -2830,6 +3202,55 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          agx_index target_in = agx_src_index(&instr->src[0]);
          agx_index live_in = agx_src_index(&instr->src[1]);
          agx_index target, keep, mid;
+
+         /* v52 AGX_G17P_DISCARD_FOLD: at one sample, a target that is a
+          * constant or `x | c` with bit 0 of c set, and a constant keep value,
+          * are known here. discard reaches this as (root | 0xff, 0). Fold them
+          * instead of building both with ALU ops, and skip the IMAD select
+          * when the target is known to be sample 0: target 1 selects the word
+          * itself, target 0 selects word zero. */
+         int known_target = -1, known_keep = -1;
+         if (samples == 1 && (agx_get_fs_structure_flags() &
+                              AGX_FS_STRUCTURE_DISCARD_FOLD)) {
+            if (nir_src_is_const(instr->src[0])) {
+               known_target = nir_src_as_uint(instr->src[0]) & 1;
+            } else {
+               nir_scalar t = nir_scalar_chase_movs(
+                  nir_get_scalar(instr->src[0].ssa, 0));
+               if (nir_scalar_is_alu(t) && nir_scalar_alu_op(t) == nir_op_ior) {
+                  for (unsigned i = 0; i < 2; ++i) {
+                     nir_scalar c = nir_scalar_chase_movs(
+                        nir_scalar_chase_alu_src(t, i));
+                     if (nir_scalar_is_const(c) && (nir_scalar_as_uint(c) & 1))
+                        known_target = 1;
+                  }
+               }
+            }
+            if (nir_src_is_const(instr->src[1]))
+               known_keep = nir_src_as_uint(instr->src[1]) & 1;
+            if (known_target < 0 || known_keep < 0)
+               known_target = known_keep = -1;
+         }
+
+         if (known_target >= 0) {
+            target = agx_mov_imm(b, 16, known_target);
+            agx_index selected = agx_temp(b->shader, AGX_SIZE_32);
+            if (known_target) {
+               agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
+               agx_get_coverage_1x_agx3_to(b, t16);
+               mid = agx_iadd(b, t16, t16, 4);
+               agx_index word =
+                  agx_iadd(b, agx_immediate(known_keep), mid, 4);
+               agx_emit_collect_to(b, selected, 2,
+                                   (agx_index[]){word,
+                                                 agx_mov_imm(b, 16, 0)});
+            } else {
+               agx_mov_imm_to(b, selected, 0);
+            }
+            return agx_sample_mask_agx3(
+               b, target, selected,
+               (!no_tests ? 2 : 0) | (force_early ? 1 : 0));
+         }
 
          if (samples == 1) {
             /* Apple's one-sample fragments read SR2 and repeat it in both
@@ -4167,6 +4588,37 @@ agx_lower_agx3_shifted_subtract(agx_context *ctx)
    return progress;
 }
 
+/* AGX_G17P_BITOP_IMMEDIATES: the exact operand shape of the packer's
+ * "bitwise operation against an IMMEDIATE" rule (agx3_pack_binary.c): one
+ * AND/OR/XOR truth table, a single 8-bit non-modified immediate and one
+ * width-matched scalar SSA value that register allocation turns into a GPR.
+ * Uniform or immediate partners keep the old materialization. */
+static bool
+agx_agx3_bitop_immediate_ok(const agx_context *ctx, const agx_instr *I)
+{
+   if (!(agx_get_codegen_flags() & AGX_CODEGEN_G17P_BITOP_IMMEDIATES) ||
+       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       I->op != AGX_OPCODE_BITOP || I->nr_dests != 1 || I->nr_srcs != 2 ||
+       I->saturate || agx_channels(I->dest[0]) != 1 ||
+       (I->dest[0].size != AGX_SIZE_16 && I->dest[0].size != AGX_SIZE_32))
+      return false;
+
+   const unsigned tt = I->truth_table & 0xfu;
+   if (tt != 0x8 /* AND */ && tt != 0xe /* OR */ && tt != 0x6 /* XOR */)
+      return false;
+
+   const bool imm0 = I->src[0].type == AGX_INDEX_IMMEDIATE;
+   const bool imm1 = I->src[1].type == AGX_INDEX_IMMEDIATE;
+   if (imm0 == imm1)
+      return false;
+
+   const agx_index imm = I->src[imm0 ? 0 : 1];
+   const agx_index reg = I->src[imm0 ? 1 : 0];
+   return imm.value <= 0xff && !imm.abs && !imm.neg && !imm.memory &&
+          reg.type == AGX_INDEX_NORMAL && !reg.memory && !reg.abs &&
+          !reg.neg && agx_channels(reg) == 1 && reg.size == I->dest[0].size;
+}
+
 static void
 agx_materialize_agx3_alu_constants(agx_context *ctx)
 {
@@ -5153,7 +5605,28 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
           I->nr_dests == 1 && I->nr_srcs == 3 &&
           I->dest[0].size == AGX_SIZE_32 &&
           I->src[2].type == AGX_INDEX_IMMEDIATE) {
-         I->src[2] = agx_mov_imm(&b, 32, I->src[2].value);
+         const bool immediate_shift =
+            (agx_get_codegen_flags() & AGX_CODEGEN_G17P_IMMEDIATE_SHIFTS) &&
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+            I->bfi_mask == 0 && I->src[0].type == AGX_INDEX_IMMEDIATE &&
+            I->src[0].value == 0 && I->src[1].size == AGX_SIZE_32 &&
+            I->src[2].value >= 1 && I->src[2].value <= 31 &&
+            !I->src[2].abs && !I->src[2].neg;
+         /* AGX_G17P_BFE_IMMEDIATE: a constant-offset, constant-width extract
+          * is one SRL with the offset in f30 and the width in f57, as Apple
+          * emits for (v >> 8) & 63 (native fragment 0x118,
+          * a700540203002200f0106100: f30=8 f57=6). agx3_alu_bfeil() already
+          * encodes that immediate form; only this materialization of the
+          * offset into a register (an extra LDIMM) stood in the way. */
+         const bool immediate_extract =
+            (agx_get_codegen_flags() & AGX_CODEGEN_G17P_BFE_IMMEDIATE) &&
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+            I->op == AGX_OPCODE_BFEIL && I->bfi_mask >= 1 &&
+            I->bfi_mask <= 31 && I->src[0].type == AGX_INDEX_IMMEDIATE &&
+            I->src[0].value == 0 && I->src[1].size == AGX_SIZE_32 &&
+            I->src[2].value <= 31 && !I->src[2].abs && !I->src[2].neg;
+         if (!immediate_shift && !immediate_extract)
+            I->src[2] = agx_mov_imm(&b, 32, I->src[2].value);
       }
 
       /* G17P's register-selected shift has no immediate value operand.  NIR
@@ -5169,6 +5642,15 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
                   (I->dest[0].size == AGX_SIZE_16 &&
                    (I->truth_table == 0x8 || I->truth_table == 0xe ||
                     I->truth_table == 0x6)))) {
+         /* The packer encodes AND/OR/XOR against an 8-bit immediate directly
+          * (agx3_alu_bit_imm: f37=1 selects the immediate operand kind, f29
+          * holds the constant; witnessed Apple bytes in agx3_alu_core.h, e.g.
+          * `a & 0xff` 0b011fff100200800000). Native G17P code uses that form
+          * (native fragment 0x124 `bit_and ... f29=63`). Materializing the
+          * constant costs an extra ldimm per use. Keep the immediate only for
+          * the exact shape that encoder accepts. */
+         if (agx_agx3_bitop_immediate_ok(ctx, I))
+            continue;
          agx_foreach_src(I, s) {
             if (I->src[s].type == AGX_INDEX_IMMEDIATE)
                I->src[s] = agx_mov_imm(&b, I->dest[0].size == AGX_SIZE_16 ? 16 : 32,
@@ -5386,6 +5868,44 @@ agx_g17p_ishl_imm(agx_builder *b, agx_index value, unsigned shift)
    return shifted;
 }
 
+/* nir_op_interleave is the exact 16+16 -> 32 Morton permutation.
+ * No G17P INTL encoding is established. Expand before RA using the same
+ * grounded shifts and bitwise operations as the bit-reversal lowering.
+ */
+static agx_index
+agx_g17p_dilate_u16(agx_builder *b, agx_index value)
+{
+   agx_index x = agx_temp(b->shader, AGX_SIZE_32);
+   agx_mov_to(b, x, value);
+   x = agx_g17p_and_imm(b, x, UINT32_C(0xffff));
+   static const struct {
+      uint8_t shift;
+      uint32_t mask;
+   } stages[] = {
+      {8, UINT32_C(0x00ff00ff)},
+      {4, UINT32_C(0x0f0f0f0f)},
+      {2, UINT32_C(0x33333333)},
+      {1, UINT32_C(0x55555555)},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
+      x = agx_g17p_and_imm(
+         b, agx_or(b, x, agx_g17p_ishl_imm(b, x, stages[i].shift)),
+         stages[i].mask);
+   }
+   return x;
+}
+
+static agx_instr *
+agx_emit_g17p_interleave(agx_builder *b, agx_index dst,
+                         agx_index even, agx_index odd)
+{
+   assert(dst.size == AGX_SIZE_32);
+   assert(even.size == AGX_SIZE_16 && odd.size == AGX_SIZE_16);
+   agx_index x = agx_g17p_dilate_u16(b, even);
+   agx_index y = agx_g17p_dilate_u16(b, odd);
+   return agx_or_to(b, dst, x, agx_g17p_ishl_imm(b, y, 1));
+}
+
 static agx_instr *
 agx_emit_g17p_bitrev(agx_builder *b, agx_index dst, agx_index value)
 {
@@ -5497,7 +6017,22 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       UNOP(fexp2, exp2);
 
       UNOP(mov, mov);
-      UNOP(u2u32, mov);
+   case nir_op_u2u32:
+      /* AGX_G17P_SR32_PIXEL_COORD: a pixel coordinate is at most 16 bits and
+       * its native special register is already zero-extended to 32 bits, so
+       * reuse that register instead of copying the half and clearing the
+       * high half (two instructions per coordinate). */
+      if ((agx_get_codegen_flags() & AGX_CODEGEN_G17P_SR32_PIXEL_COORD) &&
+          b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          s0.size == AGX_SIZE_16 && dst.size == AGX_SIZE_32) {
+         for (unsigned i = 0; i < 2; ++i) {
+            if (!agx_is_null(b->shader->agx3_pixel_coord_native[i]) &&
+                agx_is_equiv(s0, b->shader->agx3_pixel_coord_half[i]))
+               return agx_mov_to(b, dst,
+                                 b->shader->agx3_pixel_coord_native[i]);
+         }
+      }
+      return agx_mov_to(b, dst, s0);
    case nir_op_bitfield_reverse:
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           src_sz == 32)
@@ -5521,7 +6056,10 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       BINOP(iand, and);
       BINOP(ior, or);
       BINOP(ixor, xor);
-      BINOP(interleave, intl);
+   case nir_op_interleave:
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         return agx_emit_g17p_interleave(b, dst, s0, s1);
+      return agx_intl_to(b, dst, s0, s1);
 
    case nir_op_fadd:
       if (instr->def.bit_size == 16)
@@ -5674,8 +6212,34 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       return agx_mul_high_to(b, dst, s0, s1, true);
 
    case nir_op_ishl:
+      /* Native G17P implements constant left shifts 1..4 with the iadd
+       * source-B shift and 5..8 with two such adds (shifting by k-4, then 4),
+       * using SLL only from 9 (captured shift corpus sll_1..8, and the native
+       * throughput shader's x << 5). The adds take the zero immediate in
+       * slot A.
+       */
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          sz == 32 && nir_src_is_const(instr->src[1].src) &&
+          (agx_get_codegen_flags() & AGX_CODEGEN_G17P_SHIFTED_ADD)) {
+         const unsigned shift = nir_alu_src_as_uint(instr->src[1]) & 31;
+         if (shift >= 1 && shift <= 4)
+            return agx_iadd_to(b, dst, agx_zero(), s0, shift);
+         if (shift >= 5 && shift <= 8) {
+            agx_index partial = agx_temp(b->shader, AGX_SIZE_32);
+            agx_iadd_to(b, partial, agx_zero(), s0, shift - 4);
+            return agx_iadd_to(b, dst, agx_zero(), partial, 4);
+         }
+      }
       return agx_bfi_to(b, dst, i0, s0, s1, 0);
    case nir_op_ushr: {
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          sz == 32 && nir_src_is_const(instr->src[1].src) &&
+          (agx_get_codegen_flags() & AGX_CODEGEN_G17P_IMMEDIATE_SHIFTS)) {
+         const unsigned shift = nir_alu_src_as_uint(instr->src[1]) & 31;
+         if (shift == 0)
+            return agx_mov_to(b, dst, s0);
+         return agx_ushr_to(b, dst, s0, agx_immediate(shift));
+      }
       /* G17P's register `srl` takes the ordinary positive count, as
        * applegpu_g17p's `ushort(a >> s)` (a710540002080000d0130500, after
        * its own `s & 31`) does. This used to build `0 - count`, but the
@@ -5684,7 +6248,10 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
        * the positive count through this add, which is kept. */
       if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
          if (s1.type == AGX_INDEX_IMMEDIATE) {
-            s1 = agx_g17p_shift_boundary(b, s1.value);
+            /* The immediate SRL form consumes the positive literal itself. */
+            if (!(sz == 32 && s1.value >= 1 && s1.value <= 31 &&
+                  (agx_get_codegen_flags() & AGX_CODEGEN_G17P_IMMEDIATE_SHIFTS)))
+               s1 = agx_g17p_shift_boundary(b, s1.value);
          } else {
             agx_index boundary = agx_temp(b->shader, AGX_SIZE_32);
             agx_iadd_to(b, boundary, i0, s1, 0);
@@ -6351,6 +6918,7 @@ agx_create_block(agx_context *ctx)
 
    /* This is conservative, TODO: divergence analysis */
    blk->divergent = ctx->total_nesting > 0;
+   blk->cf_divergent = ctx->divergent_nesting > 0;
 
    util_dynarray_init(&blk->predecessors, blk);
 
@@ -6393,8 +6961,13 @@ emit_if(agx_context *ctx, nir_if *nif)
 
    agx_instr *if_ = agx_if_icmp(&_b, cond, agx_zero(), 1, AGX_ICOND_UEQ, true,
                                 NULL /* filled in later */);
+   const bool divergent =
+      !((agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_CF_HINTS) ||
+        (agx_get_alu_flags() & AGX_ALU_G17P_PHYSICAL_DISCARD)) ||
+      nir_src_is_divergent(&nif->condition);
    ctx->loop_nesting++;
    ctx->total_nesting++;
+   ctx->divergent_nesting += divergent;
 
    /* Emit the two subblocks. */
    agx_block *if_block = emit_cf_list(ctx, &nif->then_list);
@@ -6427,6 +7000,7 @@ emit_if(agx_context *ctx, nir_if *nif)
    agx_pop_exec(&_b, 1);
    ctx->loop_nesting--;
    ctx->total_nesting--;
+   ctx->divergent_nesting -= divergent;
 }
 
 static void
@@ -6435,8 +7009,13 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    assert(!nir_loop_has_continue_construct(nloop));
    /* We only track nesting within the innermost loop, so push and reset */
    unsigned pushed_nesting = ctx->loop_nesting;
+   const bool divergent =
+      !((agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_CF_HINTS) ||
+        (agx_get_alu_flags() & AGX_ALU_G17P_PHYSICAL_DISCARD)) ||
+      nir_loop_is_divergent(nloop);
    ctx->loop_nesting = 0;
    ctx->total_nesting++;
+   ctx->divergent_nesting += divergent;
 
    agx_block *popped_break = ctx->break_block;
 
@@ -6485,6 +7064,7 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    /* Restore loop nesting (we might be inside an if inside an outer loop) */
    ctx->loop_nesting = pushed_nesting;
    ctx->total_nesting--;
+   ctx->divergent_nesting -= divergent;
 }
 
 /* Before the first control flow structure, the nesting counter needs to be
@@ -7089,7 +7669,13 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
    /* Do remaining lowering late, since this inserts &s for shifts so we want to
     * do it after fusing constant shifts. Constant folding will clean up.
     */
+   /* Must precede agx_nir_lower_algebraic_late, which rewrites extract_u16
+    * into u2u32(unpack_32_2x16_split_y) (the pass also matches that form). */
+   if (agx_get_codegen_flags() & AGX_CODEGEN_G17P_EXTRACT16_BFE)
+      NIR_PASS(_, nir, agx_nir_fold_extract16_bfe);
    NIR_PASS(_, nir, agx_nir_lower_algebraic_late);
+   if (agx_get_codegen_flags() & AGX_CODEGEN_G17P_PIXEL_COORD_FOLD)
+      NIR_PASS(_, nir, agx_nir_fold_pixel_coord);
    NIR_PASS(_, nir, agx_nir_fuse_selects);
    NIR_PASS(_, nir, nir_opt_constant_folding);
    NIR_PASS(_, nir, nir_opt_combine_barriers, NULL, NULL);
@@ -7395,6 +7981,14 @@ agx3_coalesce_uniform_half_stores(agx_context *ctx)
             !I->src[1].neg;
          if (!scalar_half) {
             if (I->op == AGX_OPCODE_UNIFORM_STORE)
+               pending = NULL;
+            /* Native arithmetic exports write the same fixed uniform file.
+             * Do not move the pending half past an overlapping write. */
+            if (pending &&
+                (I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
+                 I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
+                 I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3) &&
+                I->imm < pending_base + 2 && I->imm + 2 > pending_base)
                pending = NULL;
             if (pending != NULL) {
                agx_foreach_src(I, s) {
@@ -8246,9 +8840,13 @@ agx3_bank_scalar_tile_store_inputs(agx_context *ctx)
    bool progress = false;
    agx_builder b = agx_init_builder(ctx, agx_before_instr(first_store));
    agx_foreach_instr_global(ctx, store) {
+      /* v94 memory safety: test the opcode before reading src[0]; an
+       * instruction with no sources (e.g. stop) has no src[0] (ASan
+       * heap-buffer-overflow READ in agx3_bank_scalar_tile_store_inputs). */
+      if (store->op != AGX_OPCODE_ST_TILE)
+         continue;
       agx_index source = store->src[0];
-      if (store->op != AGX_OPCODE_ST_TILE || source.type != AGX_INDEX_NORMAL ||
-          agx_channels(source) != 1)
+      if (source.type != AGX_INDEX_NORMAL || agx_channels(source) != 1)
          continue;
 
       agx_foreach_instr_global(ctx, I) {
@@ -8428,6 +9026,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    }
 
    ctx->alloc = impl->ssa_alloc;
+   /* Uniform control-flow hints need divergence metadata for this final IR. */
+   if ((agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_CF_HINTS) ||
+       (agx_get_alu_flags() & AGX_ALU_G17P_PHYSICAL_DISCARD))
+      nir_divergence_analysis(nir);
    emit_cf_list(ctx, &impl->body);
    agx_emit_phis_deferred(ctx);
 
@@ -8500,9 +9102,43 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * as copyprop creates uniform sources). To keep register pressure in
     * check, lower after CSE, since moves are cheaper than registers.
     */
+   const bool native_cprog =
+      (agx_compiler_debug & AGX_DBG_NATIVE_UNIFORMS) || key->g17p_native_uniforms || key->agx3_native_cprog;
+   if (native_cprog && ctx->is_preamble &&
+       key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      if (!agx3_lower_cprog_inputs(ctx)) {
+         agx_set_refusal(ctx, "constant-program input lowering refused",
+                         __LINE__);
+         binary->size = initial_binary_size;
+         ralloc_free(ctx);
+         return false;
+      }
+      agx_validate(ctx, "agx3_lower_cprog_inputs");
+      if (!(agx_compiler_debug & AGX_DBG_NOOPT))
+         AGX_PASS(ctx, agx_opt_cse);
+   }
+
    AGX_PASS(ctx, agx_lower_uniform_sources);
 
+   /* AGX_G17P_UNIFORM_DMA: uniform sources the consuming instruction cannot
+    * read directly are copied once per USE by agx_lower_uniform_sources.
+    * DMA'd descriptor words feed several instructions each, so merge the
+    * identical block-local copies (and their half splits) again. */
+   if (key->g17p_uniform_dma && out->agx3_uniform_dma_valid &&
+       !(agx_compiler_debug & AGX_DBG_NOOPT))
+      AGX_PASS(ctx, agx_opt_cse);
+
+   if (native_cprog && ctx->is_preamble &&
+       key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      /* Selection requires a single live use of an arithmetic result.
+       * Dead uses left by earlier lowering must not hide that opportunity. */
+      AGX_PASS(ctx, agx_dce, true);
+      AGX_PASS(ctx, agx3_lower_uniform_program);
+   }
+
    AGX_PASS(ctx, agx3_coalesce_uniform_half_stores);
+   if (native_cprog)
+      AGX_PASS(ctx, agx3_lower_uniform_half_exports);
    AGX_PASS(ctx, agx3_drop_unchanged_tile_stores);
 
    AGX_PASS(ctx, agx_lower_agx3_immediates);
@@ -8519,6 +9155,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    if (likely(!(agx_compiler_debug & AGX_DBG_NOSCHED))) {
       AGX_PASS(ctx, agx_pressure_schedule);
+      if ((agx_get_codegen_flags() & AGX_CODEGEN_G17P_ILP_SCHEDULE) &&
+          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+         AGX_PASS(ctx, agx_ilp_schedule);
    }
 
    AGX_PASS(ctx, agx3_order_fragment_device_loads);
@@ -8534,6 +9173,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    if (!agx3_tile_store_payloads_fit(ctx)) {
       if (agx_compiler_debug & AGX_DBG_REFUSE)
          fprintf(stderr, "AGX3 refused fragment: tile-store payload bank overflow\n");
+      agx_set_refusal(ctx, "tile-store payload bank overflow", __LINE__);
       ralloc_free(ctx);
       return false;
    }
@@ -8637,6 +9277,18 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* Set last-use bits after lowering pseudo for best results. */
    agx_opt_register_cache(ctx);
 
+   if (ctx->is_preamble &&
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       !ctx->agx3_cprog_inputs_lowered &&
+       !agx3_analyze_preamble_uniform_inputs(
+          ctx, &out->agx3_preamble_uniform_inputs)) {
+      agx_set_refusal(ctx, "constant-program uniform inputs not analysable "
+                      "(no native CProg lowering ran)", __LINE__);
+      binary->size = initial_binary_size;
+      ralloc_free(ctx);
+      return false;
+   }
+
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       agx_print_shader(ctx, stdout);
 
@@ -8664,6 +9316,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       if (!agx3_pack_binary(ctx, binary)) {
          if (agx_compiler_debug & AGX_DBG_REFUSE)
             fprintf(stderr, "AGX3 refused shader during binary packing\n");
+         agx_set_refusal(ctx, "AGX3 binary packer refused an instruction "
+                         "(AGX_MESA_DEBUG=refuse names it)", __LINE__);
          binary->size = initial_binary_size;
          ralloc_free(ctx);
          return false;
@@ -8685,11 +9339,17 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    unsigned nr_gprs = ctx->max_reg + 1;
 
-   /* If the preamble uses scratch (due to spilling), we need to set maximal
-    * GPRs. Do it here so the driver doesn't have to worry about it.
-    */
-   if (impl->function->is_preamble)
-      out->nr_preamble_gprs = ctx->scratch_size_B ? 256 : nr_gprs;
+   /* Preserve the legacy preamble scratch reservation on its existing
+    * targets. AGX3B uses launch-allocated TPS with native COPY/RLD and no
+    * AGX2 stack adjustment. Its input-storage prefix is not a reason to
+    * reserve every GPR; report the allocation that actually reached packing. */
+   if (impl->function->is_preamble) {
+      const bool legacy_scratch = ctx->scratch_size_B &&
+         ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B;
+      out->nr_preamble_gprs = legacy_scratch ? 256 : nr_gprs;
+      out->agx3_preamble_staging_halfs = ctx->agx3_staging_halfs;
+      out->agx3_preamble_staging_known = ctx->agx3_staging_known;
+   }
    else {
       out->nr_gprs = nr_gprs;
       out->agx3_staging_halfs = ctx->agx3_staging_halfs;
@@ -9213,11 +9873,191 @@ has_unlowered_printf_address(const nir_shader *nir)
    return false;
 }
 
+/*
+ * AGX_G17P_UNIFORM_DMA (v51a, keyed by agx_shader_key::g17p_uniform_dma).
+ *
+ * G17P forms no preamble (hk sets no_preamble), so every constant-index
+ * descriptor or push-constant read -- load_constant_agx(load_preamble(ptr),
+ * k) -- stays a per-invocation device load (lddev): 1 per pixel in the light
+ * FS, 36 static in the Minecraft terrain FS. Apple's G17P shaders instead
+ * receive such data through uniform DMA in the launch (Ioto) program: its
+ * light FS reads the push constants as uniforms u4..7 and runs an empty
+ * constant program.
+ *
+ * Do the same without a constant program: pick the pointer uniform (root
+ * table or one descriptor set) with the most hoistable loads, cover them
+ * with one dword-aligned span of at most AGX3_UNIFORM_DMA_MAX_HALFS, place
+ * the span after every reserved uniform, and turn each covered load into a
+ * uniform read. The driver publishes the span as ONE extra Ioto uniform range
+ * sourced from the pointer's value plus the span offset, read at launch time
+ * exactly like the loads it replaces (so descriptor updates after bind stay
+ * visible). Only raw 16/32-bit formats with a constant, non-negative element
+ * index qualify; everything else is left alone.
+ */
+#define AGX3_UNIFORM_DMA_MAX_HALFS 128u
+
+struct agx3_uniform_dma_candidate {
+   nir_intrinsic_instr *load;
+   uint16_t pointer;
+   uint32_t offset_B;
+   uint32_t size_B;
+};
+
+static int
+agx3_uniform_dma_compare(const void *a_, const void *b_)
+{
+   const struct agx3_uniform_dma_candidate *a = a_, *b = b_;
+   if (a->pointer != b->pointer)
+      return a->pointer < b->pointer ? -1 : 1;
+   if (a->offset_B != b->offset_B)
+      return a->offset_B < b->offset_B ? -1 : 1;
+   return a->size_B < b->size_B ? -1 : a->size_B > b->size_B;
+}
+
+static bool
+agx3_uniform_dma_pointer_allowed(const struct agx_shader_key *key,
+                                 unsigned base)
+{
+   const unsigned root = key->g17p_dma_root;
+   if (base == root)
+      return true;
+   if (base < root + 4 || (base - root - 4) % 4 != 0)
+      return false;
+   const unsigned set = (base - root - 4) / 4;
+   return set < 8 && (key->g17p_dma_set_mask & BITFIELD_BIT(set));
+}
+
+static bool
+agx3_nir_lower_uniform_dma(nir_shader *nir, const struct agx_shader_key *key,
+                           struct agx_shader_info *info)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
+   struct util_dynarray cands = UTIL_DYNARRAY_INIT;
+
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_load_constant_agx)
+            continue;
+
+         nir_intrinsic_instr *ptr = nir_src_as_intrinsic(intr->src[0]);
+         if (!ptr || ptr->intrinsic != nir_intrinsic_load_preamble ||
+             ptr->def.bit_size != 64 || ptr->def.num_components != 1 ||
+             !agx3_uniform_dma_pointer_allowed(key, nir_intrinsic_base(ptr)))
+            continue;
+
+         if (!nir_src_is_const(intr->src[1]))
+            continue;
+
+         const unsigned field = nir_intrinsic_base(intr);
+         if (field & (AGX_NIR_MEMORY_INDEX_BYTES |
+                      AGX_NIR_MEMORY_PACKED_COUNT_MASK))
+            continue;
+
+         unsigned format_shift;
+         const enum pipe_format format = nir_intrinsic_format(intr);
+         if (format == PIPE_FORMAT_R32_UINT && intr->def.bit_size == 32)
+            format_shift = 2;
+         else if (format == PIPE_FORMAT_R16_UINT && intr->def.bit_size == 16)
+            format_shift = 1;
+         else
+            continue;
+
+         const int64_t index = nir_intrinsic_sign_extend(intr)
+                                  ? nir_src_as_int(intr->src[1])
+                                  : (int64_t)nir_src_as_uint(intr->src[1]);
+         if (index < 0 || index > (1 << 20) || field > 3)
+            continue;
+
+         const uint64_t offset_B = (uint64_t)index << (format_shift + field);
+         if (offset_B > (UINT32_C(1) << 24))
+            continue;
+
+         struct agx3_uniform_dma_candidate c = {
+            .load = intr,
+            .pointer = nir_intrinsic_base(ptr),
+            .offset_B = (uint32_t)offset_B,
+            .size_B = intr->def.num_components << format_shift,
+         };
+         util_dynarray_append(&cands, c);
+      }
+   }
+
+   const unsigned n = util_dynarray_num_elements(
+      &cands, struct agx3_uniform_dma_candidate);
+   if (n == 0) {
+      util_dynarray_fini(&cands);
+      return false;
+   }
+
+   struct agx3_uniform_dma_candidate *c =
+      util_dynarray_begin(&cands);
+   qsort(c, n, sizeof(*c), agx3_uniform_dma_compare);
+
+   /* Best window: most loads within one pointer and one span. */
+   unsigned best_first = 0, best_count = 0;
+   uint32_t best_start = 0, best_end = 0;
+   for (unsigned i = 0; i < n; ++i) {
+      const uint32_t start = c[i].offset_B & ~3u;
+      uint32_t end = start;
+      unsigned count = 0;
+      for (unsigned j = i; j < n && c[j].pointer == c[i].pointer; ++j) {
+         const uint32_t e = ALIGN_POT(c[j].offset_B + c[j].size_B, 4);
+         const uint32_t new_end = MAX2(end, e);
+         if ((new_end - start) / 2 > AGX3_UNIFORM_DMA_MAX_HALFS)
+            break;
+         end = new_end;
+         count = j - i + 1;
+      }
+      if (count > best_count ||
+          (count == best_count && end - start < best_end - best_start)) {
+         best_first = i;
+         best_count = count;
+         best_start = start;
+         best_end = end;
+      }
+   }
+
+   const unsigned dest = ALIGN_POT(info->push_count, 4);
+   const unsigned halfs = (best_end - best_start) / 2;
+   if (!best_count || dest + halfs > 512) {
+      util_dynarray_fini(&cands);
+      return false;
+   }
+
+   for (unsigned k = best_first; k < best_first + best_count; ++k) {
+      nir_intrinsic_instr *load = c[k].load;
+      nir_builder b = nir_builder_at(nir_before_instr(&load->instr));
+      const unsigned half = dest + (c[k].offset_B - best_start) / 2;
+      nir_def *value = nir_load_preamble(&b, load->def.num_components,
+                                         load->def.bit_size, .base = half);
+      nir_def_replace(&load->def, value);
+   }
+
+   info->agx3_uniform_dma_valid = true;
+   info->agx3_uniform_dma_pointer = c[best_first].pointer;
+   info->agx3_uniform_dma_dest = dest;
+   info->agx3_uniform_dma_halfs = halfs;
+   info->agx3_uniform_dma_offset_B = best_start;
+   info->agx3_uniform_dma_loads = best_count;
+   info->push_count = dest + halfs;
+
+   util_dynarray_fini(&cands);
+   nir_progress(true, impl, nir_metadata_control_flow);
+   return true;
+}
+
 bool
 agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                        struct agx_shader_part *out)
 {
    agx_compiler_debug = agx_get_compiler_debug();
+   agx_refusal[0] = 0;
+   /* v56d: the native constant-program decision is per compile
+    * (agx_shader_key::g17p_native_uniforms, read through ctx); the global
+    * agx_compiler_debug is never modified here. */
    struct agx_shader_info *info = &out->info;
 
    struct util_dynarray binary = UTIL_DYNARRAY_INIT;
@@ -9232,8 +10072,10 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                               agx_nir_has_alu64(nir, nir_op_imul_2x32_64);
 
    if (agx_encoding_is_agx3(key->dev.encoding) &&
-       has_unlowered_printf_address(nir))
+       has_unlowered_printf_address(nir)) {
+      agx_set_refusal(NULL, "unlowered printf address", __LINE__);
       return false;
+   }
 
    assert(nir->info.io_lowered &&
           "agx_preprocess_nir is called first, then the shader is specalized,"
@@ -9244,8 +10086,10 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
     * its fatal unhandled-intrinsic path, and keep the output transactional.
     * This gate is removed only together with the full lowering and scheduling
     * contract; it does not prevent direct internal encoder tests. */
-   if (nir->info.ray_queries != 0 && agx_encoding_is_agx3(key->dev.encoding))
+   if (nir->info.ray_queries != 0 && agx_encoding_is_agx3(key->dev.encoding)) {
+      agx_set_refusal(NULL, "ray queries are not lowered on AGX3", __LINE__);
       return false;
+   }
 
    /* If required, tag writes will be enabled by instruction selection */
    if (nir->info.stage == MESA_SHADER_FRAGMENT)
@@ -9412,8 +10256,32 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       nir->options = &agx3_options;
    }
 
+   /* AGX_G17P_UNIFORM_ATOMICS (v50, default off): SR34/SR36 are grounded in
+    * agx3_map_sr(), so the one-atomic-per-subgroup rewrite can run on G17P;
+    * it stays opt-in until the atomic/subgroup CTS subsets pass on Neo. */
+   const bool uniform_atomics =
+      !is_agx3 || (is_g17p && (agx_get_footgun_flags() &
+                               AGX_FOOTGUN_G17P_UNIFORM_ATOMICS));
+
+   /* AGX_G17P_LOOP_ROTATE (v52a, default off): Apple's G17P loops are a
+    * guard plus a bottom-tested body (fs/cs-apple.bin: the backedge target
+    * is the first xorshift `sll`, `icmp` sits mid-body and `cndlt; b` end
+    * the body). Rotate single-exit counted loops the same way before the
+    * main optimization loop, so the copied test is optimized with the rest. */
+   if (is_g17p &&
+       (agx_get_codegen_flags() & AGX_CODEGEN_G17P_LOOP_ROTATE)) {
+      /* v52b: uniform loops only (bw_copy regression, see nir_opt_loop.c). */
+      nir_divergence_analysis(nir);
+      bool rotated = false;
+      NIR_PASS(rotated, nir, nir_opt_loop_rotate, true);
+      if (rotated) {
+         NIR_PASS(_, nir, nir_opt_copy_prop);
+         NIR_PASS(_, nir, nir_opt_dce);
+      }
+   }
+
    agx_optimize_nir(
-      nir, key->dev.soft_fault, !is_agx3,
+      nir, key->dev.soft_fault, uniform_atomics,
       key->dev.encoding == AGX_ISA_ENCODING_AGX3B,
       form_preamble ? &info->push_count : NULL,
       (form_preamble && key->promote_textures) ? &info->texture_state_count
@@ -9426,6 +10294,11 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    if (is_agx3)
       nir->options = original_options;
+
+   /* AGX_G17P_UNIFORM_DMA (v51a): only when no preamble is formed. */
+   if (is_g17p && key->g17p_uniform_dma && !form_preamble &&
+       agx3_nir_lower_uniform_dma(nir, key, info))
+      NIR_PASS(_, nir, nir_opt_dce);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       info->varyings.fs.nr_cf = key->fs.cf_base;
@@ -9455,6 +10328,7 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
       if (func->is_preamble) {
          info->preamble_offset = offset;
+         info->preamble_size = binary.size - offset;
          info->has_preamble = true;
       } else if (func->is_entrypoint) {
          info->main_offset = offset;
@@ -9464,9 +10338,24 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       }
    }
 
+   /* The preamble may be compiled after main and legalize a final half-word
+    * export into a native dword. Report the complete physical footprint. */
+   info->stats.uniforms = info->push_count;
+
    if (agx_should_dump(nir, AGX_DBG_SHADERDB)) {
       agx2_stats_fprintf(stderr, _mesa_shader_stage_to_abbrev(nir->info.stage),
                          &out->info.stats);
+      if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B && info->has_preamble) {
+         fprintf(stderr, "AGX3 CProg: inputs=%u storage=%u scratch=%u "
+                         "gpr_halves=%u bytes=%u native_tps=%u "
+                         "staging_halfs=%u staging_known=%u\n",
+                 info->agx3_preamble_inputs.count,
+                 info->agx3_preamble_inputs.storage_bytes,
+                 info->preamble_scratch_size, info->nr_preamble_gprs,
+                 info->preamble_size, info->agx3_preamble_tps_inputs,
+                 info->agx3_preamble_staging_halfs,
+                 info->agx3_preamble_staging_known);
+      }
    }
 
    info->stage = nir->info.stage;

@@ -86,15 +86,198 @@ agx3_g17p_graphics_program_bound(
    return true;
 }
 
+static bool graphics_root_body_generate(
+   const struct agx3_g17p_graphics_program_desc *desc, void *output,
+   size_t capacity, size_t *written, bool root_is_uniform);
+
+static bool
+graphics_input_body_bound(const struct agx3_g17p_graphics_program_desc *desc,
+                           size_t *bytes, size_t *chunks)
+{
+   if (!desc || (desc->cprog_inputs && desc->cprog_inputs->count &&
+                 !desc->constant_program.code_size))
+      return false;
+   const struct agx3_ioto_uniform_program_desc loads = {
+      .ranges = desc->uniform_ranges, .range_count = desc->uniform_range_count,
+      .cprog_inputs = desc->cprog_inputs,
+   };
+   return agx3_ioto_uniform_program_desc_body_bound(
+      AGX_CHIP_G17P, &loads, bytes, chunks);
+}
+
+static bool
+graphics_measure_cprog_body(const struct agx3_g17p_graphics_program_desc *desc,
+                             size_t *size)
+{
+   /* The range-only worst case assumes a fresh address pair and round for
+    * every chunk. With up to 512 input halves that loose bound can exceed
+    * capacity even though the real batched body fits. Measure the native
+    * schedule when building this persistent setup, as for root loaders. */
+   uint8_t body[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   struct agx_ioto_inflight_load loads[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
+   struct agx_ioto_inflight_load sort[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
+   struct agx_ioto_load_cache_entry cache[AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS];
+   const struct agx3_ioto_uniform_program_desc load_desc = {
+      .ranges = desc->uniform_ranges, .range_count = desc->uniform_range_count,
+      .cprog_inputs = desc->cprog_inputs,
+   };
+   const struct agx3_ioto_uniform_program_workspace workspace = {
+      .body = body, .body_capacity = sizeof(body),
+      .loads = loads, .load_capacity = ARRAY_SIZE(loads),
+      .sort = sort, .sort_capacity = ARRAY_SIZE(sort),
+      .cache = cache, .cache_capacity = ARRAY_SIZE(cache),
+   };
+   size_t copies;
+   return agx3_ioto_uniform_program_body_generate(
+      AGX_CHIP_G17P, &load_desc, workspace, size, &copies);
+}
+
+bool
+agx3_g17p_graphics_program_desc_bound(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   size_t *size)
+{
+   size_t base, input_body, chunks;
+   if (!desc || !size || chip != AGX_CHIP_G17P ||
+       desc->uniform_range_count > AGX3_G17P_GRAPHICS_MAX_RANGES ||
+       (desc->uniform_range_count && !desc->uniform_ranges) ||
+       (desc->constant_program.code_size & 1) ||
+       !graphics_input_body_bound(desc, &input_body, &chunks) ||
+       chunks > AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS)
+      return false;
+
+   if (desc->preloaded_root) {
+      /* A root range includes a dependent pointer load absent from the
+       * direct-address bound. Measure the shared encoder's exact schedule
+       * when constructing this persistent program, not per recorded draw. */
+      uint8_t body[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+      if (!graphics_root_body_generate(desc, body, sizeof(body), &base, false) ||
+          base > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE -
+                    AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE)
+         return false;
+      base += AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE;
+   } else {
+      if (desc->cprog_inputs && desc->cprog_inputs->count &&
+          input_body > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE -
+                          AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE &&
+          !graphics_measure_cprog_body(desc, &input_body))
+         return false;
+      if (input_body > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE -
+                          AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE)
+         return false;
+      base = input_body + AGX_IOTO_G17P_NO_RESOURCE_PROGRAM_SIZE;
+   }
+
+   const struct agx_ioto_constant_program *cp = &desc->constant_program;
+   size_t suffix = AGX_IOTO_PRESHADER_ABSENT_SIZE;
+   if (cp->code_size) {
+      if (cp->force_external ||
+          cp->code_size > AGX_IOTO_PRESHADER_INLINE_LIMIT) {
+         suffix = AGX_IOTO_PRESHADER_BRANCH_SIZE +
+                  (cp->request_prelude && !cp->suppress_prelude
+                      ? AGX_IOTO_PRESHADER_PRELUDE_SIZE : 0);
+      } else {
+         if (!cp->code)
+            return false;
+         suffix = MAX2(cp->code_size, AGX_IOTO_PRESHADER_ABSENT_SIZE);
+      }
+   }
+
+   base -= AGX_IOTO_PRESHADER_ABSENT_SIZE;
+   if (suffix > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE - base)
+      return false;
+   *size = base + suffix;
+   return true;
+}
+
+static bool
+graphics_constant_suffix_emit(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   size_t offset, struct agx_ioto_preshader_output *suffix)
+{
+   const uint64_t limit = UINT64_C(1) << 48;
+   return desc->program_va && desc->program_va < limit &&
+          offset < limit - desc->program_va &&
+          agx_ioto_constant_program_emit(
+             chip, &desc->constant_program, desc->program_va + offset,
+             suffix);
+}
+
+/* All qualified resource composers end in the same absent-program END.
+ * Replace that suffix only: profile/PIXREL ordering and the load schedule
+ * are independent of constant-program selection. This writes unpublished
+ * storage; the public transactional generator stages the whole result. */
+static bool
+graphics_constant_suffix_replace(
+   enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
+   void *output, size_t capacity, size_t *written)
+{
+   if (!desc->constant_program.code_size)
+      return true;
+
+   static const uint8_t absent[] = {0x0e, 0, 0, 0};
+   if (*written < sizeof(absent) || *written > capacity)
+      return false;
+   const size_t offset = *written - sizeof(absent);
+   if (memcmp((uint8_t *)output + offset, absent, sizeof(absent)))
+      return false;
+
+   struct agx_ioto_preshader_output suffix;
+   if (!graphics_constant_suffix_emit(chip, desc, offset, &suffix) ||
+       suffix.length > capacity - offset)
+      return false;
+
+   memcpy((uint8_t *)output + offset, suffix.bytes, suffix.length);
+   *written = offset + suffix.length;
+   return true;
+}
+
 static bool
 graphics_root_body_generate(
    const struct agx3_g17p_graphics_program_desc *desc, void *output,
    size_t capacity, size_t *written, bool root_is_uniform)
 {
-   if (!desc || !output || !written || !desc->preloaded_root)
+   size_t bound, chunks;
+   if (!desc || !output || !written || !desc->preloaded_root ||
+       !graphics_input_body_bound(desc, &bound, &chunks) ||
+       chunks > AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS)
       return false;
 
    size_t offset = 0;
+   /* v51y HK_G17P_NATIVE_ESL_WAIT: one drain for all pointer loads and a
+    * COPY-carried wait for all payload loads, instead of a four-NOP drain
+    * after every LDDEV.  Falls back to the per-range schedule below. */
+   if (agx_ioto_g17p_native_esl_wait_enabled() && !desc->cprog_inputs &&
+       desc->uniform_range_count != 0 &&
+       desc->uniform_range_count <= AGX3_G17P_GRAPHICS_MAX_RANGES) {
+      struct agx3_ioto_indirect_range batched[AGX3_G17P_GRAPHICS_MAX_RANGES];
+      bool ok = true;
+      for (size_t i = 0; i < desc->uniform_range_count; ++i) {
+         const struct agx3_ioto_uniform_range *range =
+            &desc->uniform_ranges[i];
+         if (range->address > INT16_MAX) {
+            ok = false;
+            break;
+         }
+         batched[i] = (struct agx3_ioto_indirect_range){
+            .pointer_offset = (int16_t)range->address,
+            .uniform_half = range->start_halfs,
+            .size_halfs = range->size_halfs,
+         };
+      }
+      const uint16_t root_half =
+         root_is_uniform ? AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF
+                         : AGX3_G17P_GRAPHICS_ROOT_BASE_HALF;
+      size_t batched_size = 0;
+      if (ok && agx3_ioto_load_indirect_uniform_ranges_native(
+                   AGX_CHIP_G17P, root_half, root_is_uniform, batched,
+                   (unsigned)desc->uniform_range_count, output, capacity,
+                   &batched_size)) {
+         *written = batched_size;
+         return true;
+      }
+   }
+
    for (size_t i = 0; i < desc->uniform_range_count; ++i) {
       const struct agx3_ioto_uniform_range *range = &desc->uniform_ranges[i];
       if (range->address > INT16_MAX)
@@ -104,15 +287,10 @@ graphics_root_body_generate(
       const uint16_t root_half =
          root_is_uniform ? AGX3_G17P_GRAPHICS_EXTERNAL_ROOT_UNIFORM_HALF
                          : AGX3_G17P_GRAPHICS_ROOT_BASE_HALF;
-      const bool loaded = root_is_uniform
-         ? agx3_ioto_load_indirect_uniform_range_from_uniform_root(
-              AGX_CHIP_G17P, root_half, (int16_t)range->address,
-              range->start_halfs, range->size_halfs,
-              (uint8_t *)output + offset, capacity - offset, &range_size)
-         : agx3_ioto_load_indirect_uniform_range(
-              AGX_CHIP_G17P, root_half, (int16_t)range->address,
-              range->start_halfs, range->size_halfs,
-              (uint8_t *)output + offset, capacity - offset, &range_size);
+      const bool loaded = agx3_ioto_load_indirect_uniform_range_cprog(
+         AGX_CHIP_G17P, root_half, root_is_uniform, (int16_t)range->address,
+         range->start_halfs, range->size_halfs, desc->cprog_inputs,
+         (uint8_t *)output + offset, capacity - offset, &range_size);
       if (!loaded)
          return false;
       offset += range_size;
@@ -160,10 +338,16 @@ agx3_g17p_graphics_external_setup_suffix_generate(
                                     true))
       return false;
 
-   return agx_ioto_g17p_external_setup_suffix_compose(
+   size_t size;
+   if (!agx_ioto_g17p_external_setup_suffix_compose(
       body, body_size, desc->fragment,
       desc->fragment && desc->writes_sample_mask, desc->colour_classes,
-      output, capacity, written);
+      output, capacity, &size) ||
+       !graphics_constant_suffix_replace(chip, desc, output, capacity, &size))
+      return false;
+
+   *written = size;
+   return true;
 }
 
 bool
@@ -272,7 +456,10 @@ agx3_g17p_graphics_external_launcher_template_relocate(
        displacement >= (INT64_C(1) << 47) || (displacement & 1) != 0)
       return false;
 
-   uint8_t staged[AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE];
+   /* Every refusal is above, so the output can be written in place: the
+    * relocation stays transactional without a staging copy (it runs once
+    * per draw). */
+   uint8_t *staged = output;
    memcpy(staged, launcher->bytes, launcher->length);
 
    const uint16_t root_w0 =
@@ -302,7 +489,6 @@ agx3_g17p_graphics_external_launcher_template_relocate(
       staged[launcher->branch_offset + 3 + byte] =
          encoded_displacement >> (8 * byte);
 
-   memcpy(output, staged, launcher->length);
    *written = launcher->length;
    return true;
 }
@@ -312,8 +498,10 @@ graphics_program_write_unpublished(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    void *output, size_t capacity, size_t *written_out,
    struct agx_ioto_load_relocation *relocations,
-   size_t relocation_capacity, size_t *relocation_count)
+   size_t relocation_capacity, size_t *relocation_count,
+   size_t *constant_suffix_offset)
 {
+   size_t input_body, input_chunks;
    if (!output || !written_out || chip != AGX_CHIP_G17P || !desc ||
        (desc->writes_sample_mask && !desc->fragment) ||
        (!desc->fragment && desc->colour_classes) ||
@@ -322,7 +510,9 @@ graphics_program_write_unpublished(
        desc->uniform_range_count > AGX3_G17P_GRAPHICS_MAX_RANGES ||
        (desc->uniform_range_count && !desc->uniform_ranges) ||
        (relocation_capacity && !relocations) ||
-       (relocations && !relocation_count))
+       (relocations && !relocation_count) ||
+       !graphics_input_body_bound(desc, &input_body, &input_chunks) ||
+       input_chunks > AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS)
       return false;
 
    /* Zero remains the conservative no-colour/default-fragment spelling.  It
@@ -364,11 +554,13 @@ graphics_program_write_unpublished(
          .program_va = desc->program_va,
          .ranges = desc->uniform_ranges,
          .range_count = desc->uniform_range_count,
+         .cprog_inputs = desc->cprog_inputs,
          .initial_gpr_dwords =
             desc->preloaded_root ? AGX3_G17P_GRAPHICS_ROOT_GPR_DWORDS : 0,
          .preloaded_base_valid = desc->preloaded_root,
          .preloaded_base_half = AGX3_G17P_GRAPHICS_ROOT_BASE_HALF,
          .preloaded_base_address = 0,
+         .range_cpu = desc->preloaded_root ? NULL : desc->uniform_range_cpu,
       };
       const struct agx3_ioto_uniform_program_workspace workspace = {
          .body = body,
@@ -422,6 +614,12 @@ graphics_program_write_unpublished(
    if (!desc->uniform_range_count && relocations)
       *relocation_count = 0;
 
+   const size_t suffix_offset = written - AGX_IOTO_PRESHADER_ABSENT_SIZE;
+   if (!graphics_constant_suffix_replace(chip, desc, output, capacity, &written))
+      return false;
+
+   if (constant_suffix_offset)
+      *constant_suffix_offset = suffix_offset;
    *written_out = written;
    return true;
 }
@@ -460,7 +658,7 @@ agx3_g17p_graphics_program_write_unpublished(
    void *output, size_t capacity, size_t *written_out)
 {
    return graphics_program_write_unpublished(chip, desc, output, capacity,
-                                              written_out, NULL, 0, NULL);
+                                              written_out, NULL, 0, NULL, NULL);
 }
 
 bool
@@ -491,16 +689,17 @@ agx3_g17p_graphics_program_template_generate(
    if (!program)
       return false;
 
-   size_t written, relocation_count;
+   size_t written, relocation_count, suffix_offset;
    if (!graphics_program_write_unpublished(
           chip, desc, program->program.bytes,
           sizeof(program->program.bytes), &written, program->relocations,
-          ARRAY_SIZE(program->relocations), &relocation_count) ||
+          ARRAY_SIZE(program->relocations), &relocation_count, &suffix_offset) ||
        written > UINT16_MAX || relocation_count > UINT16_MAX)
       return false;
 
    program->program.length = (uint16_t)written;
    program->relocation_count = (uint16_t)relocation_count;
+   program->constant_suffix_offset = (uint16_t)suffix_offset;
    return true;
 }
 
@@ -598,7 +797,19 @@ graphics_program_shape_equal(
        a->colour_classes != b->colour_classes ||
        a->imageblock.sample_size_B != b->imageblock.sample_size_B ||
        a->imageblock.nr_samples != b->imageblock.nr_samples ||
-       a->imageblock.tile_size_px != b->imageblock.tile_size_px)
+       a->imageblock.tile_size_px != b->imageblock.tile_size_px ||
+       a->constant_program.code_size != b->constant_program.code_size ||
+       a->constant_program.force_external != b->constant_program.force_external ||
+       a->constant_program.request_prelude != b->constant_program.request_prelude ||
+       a->constant_program.suppress_prelude != b->constant_program.suppress_prelude ||
+       a->constant_program.absolute_branch != b->constant_program.absolute_branch)
+      return false;
+
+   static const struct agx3_cprog_inputs empty;
+   const struct agx3_cprog_inputs *ai = a->cprog_inputs ? a->cprog_inputs : &empty;
+   const struct agx3_cprog_inputs *bi = b->cprog_inputs ? b->cprog_inputs : &empty;
+   if (ai->count != bi->count || ai->storage_bytes != bi->storage_bytes ||
+       memcmp(ai->halves, bi->halves, sizeof(ai->halves)))
       return false;
 
    unsigned ap[AGX3_G17P_GRAPHICS_MAX_RANGES];
@@ -703,6 +914,25 @@ agx3_g17p_graphics_program_template_relocate(
 
       memcpy(staged + rel->offset, new_low, new_low_len);
       memcpy(staged + rel->offset + new_low_len, new_high, new_high_len);
+   }
+
+   if (template_desc->constant_program.code_size) {
+      const size_t offset = program->constant_suffix_offset;
+      struct agx_ioto_preshader_output old_suffix, new_suffix;
+      if (offset > program->program.length ||
+          !graphics_constant_suffix_emit(chip, template_desc, offset,
+                                         &old_suffix) ||
+          !graphics_constant_suffix_emit(chip, target_desc, offset,
+                                         &new_suffix) ||
+          old_suffix.length != program->program.length - offset ||
+          old_suffix.length != new_suffix.length ||
+          old_suffix.mode != new_suffix.mode ||
+          memcmp(staged + offset, old_suffix.bytes, old_suffix.length) ||
+          (old_suffix.mode != AGX_IOTO_PRESHADER_MODE_EXTERNAL &&
+           memcmp(old_suffix.bytes, new_suffix.bytes, old_suffix.length)))
+         return false;
+
+      memcpy(staged + offset, new_suffix.bytes, new_suffix.length);
    }
 
    memcpy(output, staged, program->program.length);
@@ -1049,10 +1279,16 @@ agx3_g17p_rt0_bg_program_generate(
    struct agx_ioto_inflight_load loads[64];
    struct agx_ioto_inflight_load sort[64];
    struct agx_ioto_load_cache_entry cache[64];
+   /* v51x: LDIMM clear values only for the plain CLEAR program. */
+   const void *clear_cpu[1] = {desc->clear_value_cpu};
    const struct agx3_ioto_uniform_program_desc load_desc = {
       .program_va = desc->program_va,
       .ranges = ranges,
       .range_count = range_count,
+      .range_cpu = desc->op == AGX3_G17P_RT0_BG_CLEAR && range_count == 1 &&
+                         desc->clear_value_cpu
+                      ? clear_cpu
+                      : NULL,
    };
    const struct agx3_ioto_uniform_program_workspace workspace = {
       .body = body,

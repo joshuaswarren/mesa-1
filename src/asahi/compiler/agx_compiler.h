@@ -500,6 +500,12 @@ typedef struct agx_block {
    /* Could there be masked execution? */
    bool divergent;
 
+   /* Some enclosing if or loop may diverge within the subgroup (NIR
+    * divergence analysis). Equal to divergent unless AGX_G17P_UNIFORM_CF_HINTS
+    * is set; used only for register-cache discard hints.
+    */
+   bool cf_divergent;
+
    /* Liveness analysis results */
    struct u_sparse_bitset live_in;
    struct u_sparse_bitset live_out;
@@ -532,6 +538,9 @@ typedef struct {
    mesa_shader_stage stage;
    bool is_preamble;
    unsigned scratch_size_B;
+   /* The input mask/compact ranks are frozen before native import selection.
+    * Later DCE may remove a read without changing this external interface. */
+   bool agx3_cprog_inputs_lowered;
 
    /* AGX3b: thread-private storage half a returned device atomic publishes
     * its old value to, above the spill frame.
@@ -578,6 +587,9 @@ typedef struct {
    /* Total nesting across all loops, to determine if we need push_exec */
    unsigned total_nesting;
 
+   /* Enclosing ifs/loops that may diverge; see agx_block::cf_divergent. */
+   unsigned divergent_nesting;
+
    /* During instruction selection, for inserting control flow */
    agx_block *current_block;
    agx_block *break_block;
@@ -592,6 +604,20 @@ typedef struct {
     * preloaded.
     */
    agx_index preloaded[AGX_NUM_REGS];
+
+   /* AGX_G17P_SR32_PIXEL_COORD: the 32-bit native pixel-coordinate special
+    * registers read by load_pixel_coord and the 16-bit halves NIR sees, so a
+    * zero extension of a half can reuse the register (Apple reads SR80/81 as
+    * zero-extended 32-bit values: native fragment 0x40/0x48 feed 32-bit XORs
+    * directly). Null unless the pixel coordinate was loaded. */
+   agx_index agx3_pixel_coord_native[2];
+   agx_index agx3_pixel_coord_half[2];
+
+   /* AGX_G17P_SHARED_RHW: the centre-interpolated projective 1/W computed in
+    * the entry block by the first perspective input load, reused by later
+    * loads instead of a fresh RHW f32interp + f32rcp pair. Null until then. */
+   agx_index agx3_shared_rcp_w;
+   unsigned agx3_shared_rhw_cf;
 
    /* Beginning of our stack allocation used for spilling, below that is
     * NIR-level scratch.
@@ -1108,6 +1134,12 @@ void agx_opt_compact_constants(agx_context *ctx);
 void agx_opt_promote_constants(agx_context *ctx);
 void agx_dce(agx_context *ctx, bool partial);
 void agx_pressure_schedule(agx_context *ctx);
+void agx_ilp_schedule(agx_context *ctx);
+bool agx3_lower_uniform_program(agx_context *ctx);
+/* Success/refusal, not a progress flag. Call only for AGX3B preambles. */
+bool agx3_lower_cprog_inputs(agx_context *ctx);
+bool agx3_lower_uniform_half_exports(agx_context *ctx);
+bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
 /* UVSW carries the UVS index and the staging address in two independent
  * eight-bit operands, so the hardware addresses 256 vertex outputs while only
  * 128 distinct staging pairs exist.

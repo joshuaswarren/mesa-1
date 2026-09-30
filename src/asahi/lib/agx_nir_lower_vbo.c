@@ -122,6 +122,81 @@ agx_vbo_supports_format(enum pipe_format format)
    return agx_vbo_internal_format(format) != PIPE_FORMAT_NONE;
 }
 
+/*
+ * How G17P converts a vertex format. G17P has no fixed-function vertex fetch
+ * and its LDDEV carries only an element width (8/16/32 bits), never a format.
+ * Apple's G17P vertex programs (metal-nt -arch applegpu_g17p, one pipeline per
+ * MTLVertexFormat) convert with a native ALU instruction straight after the
+ * load, and only fall back to integer shifts and masks where no such
+ * instruction exists:
+ *
+ *   8/16-bit UNORM/SNORM   LDDEV + `normflt` (two lanes per instruction)
+ *   R10G10B10A2_UNORM,     LDDEV W32 + `unpack` (all lanes in one instruction)
+ *   R11G11B10_FLOAT
+ *   16-bit FLOAT/SINT/     LDDEV W16; the consumer reads the 16-bit half with
+ *   UINT/[SU]SCALED        its own widening source (f16->f32, sext, zext,
+ *                          int->float)
+ *   8-bit integer/scaled,  shifts and masks (same as the software path)
+ *   other 10:10:10:2
+ *
+ * On a G17P-class GPU (M5 Pro, applegpu_g17s), Apple's fetch of every code of
+ * every lane of these formats is exact: correctly rounded c / (2^b - 1), SNORM
+ * clamped to -1, exact half/11-bit float and integer values. The software
+ * unpack computes u2f32(c) * fl(1 / (2^b - 1)) after lower_fdiv and is up to
+ * 1 ULP off for some codes, so the native conversion is also the exact one.
+ */
+enum g17p_fetch {
+   G17P_FETCH_SOFTWARE = 0,
+   G17P_FETCH_NORMALIZED,
+   G17P_FETCH_PACKED,
+   G17P_FETCH_HALVES,
+};
+
+static enum g17p_fetch
+g17p_fetch_class(const struct util_format_description *desc, int chan)
+{
+   if (is_rgb10_a2(desc))
+      return desc->is_unorm ? G17P_FETCH_PACKED : G17P_FETCH_SOFTWARE;
+
+   if (desc->format == PIPE_FORMAT_R11G11B10_FLOAT)
+      return G17P_FETCH_PACKED;
+
+   if (!desc->is_array || desc->layout != UTIL_FORMAT_LAYOUT_PLAIN ||
+       desc->colorspace != UTIL_FORMAT_COLORSPACE_RGB)
+      return G17P_FETCH_SOFTWARE;
+
+   const struct util_format_channel_description *c = &desc->channel[chan];
+   if (c->type != UTIL_FORMAT_TYPE_UNSIGNED &&
+       c->type != UTIL_FORMAT_TYPE_SIGNED && c->type != UTIL_FORMAT_TYPE_FLOAT)
+      return G17P_FETCH_SOFTWARE;
+
+   if (c->normalized && (c->size == 8 || c->size == 16))
+      return G17P_FETCH_NORMALIZED;
+
+   if (c->size == 16)
+      return G17P_FETCH_HALVES;
+
+   return G17P_FETCH_SOFTWARE;
+}
+
+/* Convert one 16-bit lane with the widening conversion its format needs. */
+static nir_def *
+g17p_convert_half(nir_builder *b, nir_def *half,
+                  const struct util_format_channel_description *c,
+                  unsigned bit_size)
+{
+   if (c->type == UTIL_FORMAT_TYPE_FLOAT)
+      return nir_f2fN(b, half, bit_size);
+
+   const bool is_signed = c->type == UTIL_FORMAT_TYPE_SIGNED;
+   if (c->pure_integer)
+      return is_signed ? nir_i2iN(b, half, bit_size)
+                       : nir_u2uN(b, half, bit_size);
+
+   return is_signed ? nir_i2fN(b, half, bit_size)
+                    : nir_u2fN(b, half, bit_size);
+}
+
 static nir_def *
 apply_swizzle_channel(nir_builder *b, nir_def *vec, unsigned swizzle,
                       bool is_int)
@@ -276,11 +351,73 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
       base = nir_bcsel(b, oob, nir_imm_int64(b, 0), base);
    }
 
+   /* G17P formats with a native conversion (g17p_fetch_class above). The
+    * load keeps the software path's element size and index, so the address
+    * math is unchanged; only the conversion after it differs.
+    */
+   const enum g17p_fetch fetch =
+      ctx->native_raw ? g17p_fetch_class(desc, chan) : G17P_FETCH_SOFTWARE;
+   if (fetch != G17P_FETCH_SOFTWARE) {
+      const unsigned count = util_format_get_nr_components(attrib.format);
+      nir_def *value;
+
+      if (fetch == G17P_FETCH_HALVES) {
+         /* One W16 LDDEV of every lane into consecutive halves, exactly the
+          * load the software path emits; each half is then read directly by
+          * its widening conversion. */
+         nir_def *raw = nir_load_constant_agx(
+            b, DIV_ROUND_UP(count, 2), 32, base, stride_offset_el,
+            .format = PIPE_FORMAT_R16_UINT,
+            .base = shift | (count << AGX_NIR_MEMORY_PACKED_COUNT_SHIFT));
+         if (ctx->rs.level >= AGX_ROBUSTNESS_D3D && !rs_address_fixup)
+            raw = nir_bcsel(b, oob, nir_imm_zero(b, raw->num_components, 32),
+                            raw);
+
+         nir_def *lanes[4];
+         for (unsigned c = 0; c < count; ++c) {
+            nir_def *word = nir_channel(b, raw, c / 2);
+            nir_def *half = (c & 1) ? nir_unpack_32_2x16_split_y(b, word)
+                                    : nir_unpack_32_2x16_split_x(b, word);
+            lanes[c] = g17p_convert_half(b, half, &desc->channel[c],
+                                         intr->def.bit_size);
+         }
+         value = nir_vec(b, lanes, count);
+      } else {
+         /* A load in the normalized or packed format itself: the backend
+          * emits the raw-width LDDEV followed by `normflt` or `unpack`
+          * (agx_emit_load). Every such conversion maps 0 to 0.0, so the
+          * robustness select may follow it. */
+         const enum pipe_format load_format =
+            agx_vbo_internal_format(attrib.format);
+         const unsigned load_count =
+            fetch == G17P_FETCH_PACKED
+               ? (load_format == PIPE_FORMAT_R11G11B10_FLOAT ? 3 : 4)
+               : count;
+         value = nir_load_constant_agx(b, load_count, 32, base,
+                                       stride_offset_el, .format = load_format,
+                                       .base = shift);
+         if (ctx->rs.level >= AGX_ROBUSTNESS_D3D && !rs_address_fixup)
+            value = nir_bcsel(b, oob, nir_imm_zero(b, load_count, 32), value);
+         value = nir_f2fN(b, value, intr->def.bit_size);
+      }
+
+      nir_def *channels[4] = {NULL};
+      for (unsigned i = 0; i < intr->num_components; ++i) {
+         unsigned c = nir_intrinsic_component(intr) + i;
+         channels[i] =
+            apply_swizzle_channel(b, value, desc->swizzle[c], is_int);
+      }
+
+      nir_def_rewrite_uses(&intr->def,
+                           nir_vec(b, channels, intr->num_components));
+      return true;
+   }
+
    /* Native G17P LDDEV returns packed raw bytes/halves. Keep one word for
     * RGBA8 even at byte-aligned base/stride (Apple packed_uchar4 stride5,
-    * offset1 witness), then perform Vulkan format conversion explicitly.
-    * This also handles half floats, signed/scaled channels and packed10bit
-    * attributes through the common NIR format helpers. */
+    * offset1 witness), then perform Vulkan format conversion explicitly for
+    * the formats without a native conversion (8-bit integer and scaled
+    * channels, non-UNORM 10:10:10:2). */
    if (ctx->native_raw && (!desc->is_array || desc->channel[chan].size < 32)) {
       const unsigned bits = desc->is_array ? desc->channel[chan].size : 32;
       const unsigned count = desc->is_array ? desc->nr_channels : 1;

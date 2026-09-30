@@ -13,9 +13,11 @@
 #include "agx_tilebuffer.h"
 #include "hk_buffer.h"
 #include "hk_cmd_buffer.h"
+#include "hk_g17p_precomp_cache.h"
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "hk_g17p_apple_override.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "hk_physical_device.h"
@@ -75,26 +77,104 @@ struct hk_g17p_compute_program_ref {
 };
 
 struct hk_g17p_precomp_program {
-   enum libagx_program idx;
-   uint32_t data_size;
-   const void *data;
+   struct hk_g17p_precomp_cache_key key;
    struct agx_workgroup local_size;
    struct hk_g17p_compute_program_ref program;
 };
+
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_precomp_lookup_stats,
+                           "HK_G17P_PRECOMP_LOOKUP_STATS", false)
+DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_precomp_lookup_stats_limit,
+                          "HK_G17P_PRECOMP_LOOKUP_STATS_LIMIT", 512)
+
+static void
+hk_g17p_note_precomp_lookup(struct hk_cmd_buffer *cmd, size_t probes,
+                              size_t comparisons, uint64_t start, bool hit)
+{
+   if (!start)
+      return;
+
+   if (!cmd->g17p_precomp_lookup_stats.first_lookup_ns)
+      cmd->g17p_precomp_lookup_stats.first_lookup_ns = start;
+   cmd->g17p_precomp_lookup_stats.lookup_ns += os_time_get_nano() - start;
+   cmd->g17p_precomp_lookup_stats.comparisons += comparisons;
+   cmd->g17p_precomp_lookup_stats.calls++;
+   cmd->g17p_precomp_lookup_stats.hits += hit;
+   cmd->g17p_precomp_lookup_stats.misses += !hit;
+   cmd->g17p_precomp_lookup_stats.probes += probes;
+   cmd->g17p_precomp_lookup_stats.max_entries = MAX2(
+      cmd->g17p_precomp_lookup_stats.max_entries,
+      util_dynarray_num_elements(&cmd->g17p_precomp_programs,
+                                 struct hk_g17p_precomp_program));
+}
+
+void
+hk_g17p_precomp_lookup_stats_finish(struct hk_cmd_buffer *cmd)
+{
+   static unsigned reports;
+   if (!cmd->g17p_precomp_lookup_stats.calls)
+      return;
+
+   const int limit = debug_get_option_hk_g17p_precomp_lookup_stats_limit();
+   if (limit > 0 && p_atomic_inc_return(&reports) <= (unsigned)limit) {
+      fprintf(stderr,
+              "G17P precomp lookup: cmd=%p calls=%" PRIu64
+              " hits=%" PRIu64 " misses=%" PRIu64 " probes=%" PRIu64
+              " comparisons=%" PRIu64 " max_entries=%" PRIu64
+              " final_entries=%zu lookup_wall_ns=%" PRIu64
+              " record_window_wall_ns=%" PRIu64 " programs=",
+              (void *)cmd, cmd->g17p_precomp_lookup_stats.calls,
+              cmd->g17p_precomp_lookup_stats.hits,
+              cmd->g17p_precomp_lookup_stats.misses,
+              cmd->g17p_precomp_lookup_stats.probes,
+              cmd->g17p_precomp_lookup_stats.comparisons,
+              cmd->g17p_precomp_lookup_stats.max_entries,
+              util_dynarray_num_elements(&cmd->g17p_precomp_programs,
+                                         struct hk_g17p_precomp_program),
+              cmd->g17p_precomp_lookup_stats.lookup_ns,
+              os_time_get_nano() -
+                 cmd->g17p_precomp_lookup_stats.first_lookup_ns);
+      /* At most eight distinct IDs, counted without hot-path histogram work. */
+      unsigned ids[8] = {0}, counts[8] = {0};
+      unsigned slots = 0, other = 0;
+      util_dynarray_foreach(&cmd->g17p_precomp_programs,
+                            struct hk_g17p_precomp_program, cached) {
+         unsigned slot = 0;
+         while (slot < slots && ids[slot] != cached->key.idx)
+            slot++;
+         if (slot == ARRAY_SIZE(ids)) {
+            other++;
+            continue;
+         }
+         if (slot == slots)
+            ids[slots++] = cached->key.idx;
+         counts[slot]++;
+      }
+      for (unsigned i = 0; i < slots; ++i)
+         fprintf(stderr, "%s%u:%u", i ? "," : "", ids[i], counts[i]);
+      fprintf(stderr, " other_entries=%u\n", other);
+   }
+   memset(&cmd->g17p_precomp_lookup_stats, 0,
+          sizeof(cmd->g17p_precomp_lookup_stats));
+}
 
 static __attribute__((hot)) struct hk_g17p_precomp_program *
 hk_g17p_find_precomp_program(struct hk_cmd_buffer *cmd,
                              enum libagx_program idx, const void *data,
                              size_t data_size)
 {
-   util_dynarray_foreach(&cmd->g17p_precomp_programs,
-                         struct hk_g17p_precomp_program, cached) {
-      if (cached->idx == idx && cached->data_size == data_size &&
-          memcmp(cached->data, data, data_size) == 0)
-         return cached;
-   }
-
-   return NULL;
+   const bool trace = debug_get_option_hk_g17p_precomp_lookup_stats();
+   const uint64_t start = trace ? os_time_get_nano() : 0;
+   const uint32_t hash = hk_g17p_precomp_cache_hash(idx, data, data_size);
+   size_t probes, comparisons;
+   const uint32_t entry = hk_g17p_precomp_cache_search(
+      cmd->g17p_precomp_index, util_dynarray_begin(&cmd->g17p_precomp_programs),
+      sizeof(struct hk_g17p_precomp_program), idx, data, data_size, hash,
+      &probes, &comparisons);
+   hk_g17p_note_precomp_lookup(cmd, probes, comparisons, start, entry != 0);
+   return entry ? util_dynarray_element(&cmd->g17p_precomp_programs,
+                                        struct hk_g17p_precomp_program,
+                                        entry - 1) : NULL;
 }
 
 static __attribute__((hot)) bool
@@ -690,6 +770,11 @@ hk_g17p_internal_graphics_uniform_ranges(
       ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
    size_t *range_count)
 {
+   /* Uniform DMA (v51a/b) is only enabled for hardware graphics stages;
+    * this internal path cannot publish its span, so fail closed. */
+   if (s->b.info.agx3_uniform_dma_valid)
+      return false;
+
    if (s->info.stage != MESA_SHADER_VERTEX)
       return hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
                                              ranges, range_count);
@@ -791,6 +876,10 @@ hk_g17p_compute_uniform_ranges(
     * shader cannot consume) and the bisect the null probe needs: a dispatch
     * whose preamble performs no memory access whatsoever.
     */
+   /* Uniform DMA is never enabled for compute (see hk_shader.c). */
+   if (s->b.info.agx3_uniform_dma_valid)
+      return false;
+
    const struct agx_rodata *rodata_probe = &s->b.info.rodata;
    if (!texture_pointers && !s->info.agx3_uses_root && s->info.set_count == 0 &&
        rodata_probe->size_16 == 0) {
@@ -1064,10 +1153,13 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               uint64_t *program_va_out,
                               struct hk_g17p_compute_program_ref *out)
 {
+   /* Diagnostic HK_G17P_APPLE_CS: Apple's uniform layout, never cached. */
+   const bool apple_cs = s->info.g17p_apple_cs && !internal_graphics;
    struct hk_g17p_exact_compute_program *cached =
-      hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
-                                         texture_pointers, internal_graphics,
-                                         kind);
+      apple_cs ? NULL
+               : hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
+                                                    texture_pointers,
+                                                    internal_graphics, kind);
    if (cached) {
       memcpy(ranges, cached->ranges,
              cached->range_count * sizeof(cached->ranges[0]));
@@ -1080,7 +1172,10 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    }
 
    size_t range_count;
-   const bool ranges_ok = internal_graphics
+   const bool ranges_ok = apple_cs
+      ? hk_g17p_apple_cs_ranges(cmd, s, root_ptr, ranges,
+                                HK_AGX3_G17P_GRAPHICS_MAX_RANGES, &range_count)
+      : internal_graphics
       ? hk_g17p_internal_graphics_uniform_ranges(
            cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
       : hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,
@@ -1593,10 +1688,11 @@ hk_g17p_get_precomp_program(struct hk_cmd_buffer *cmd,
                              struct agx_precompiled_shader *prog,
                              enum libagx_program idx, const void *data,
                              size_t data_size, bool indirect,
+                             bool cache_lookup_missed,
                              struct hk_g17p_compute_program_ref *program)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (!indirect) {
+   if (!indirect && !cache_lookup_missed) {
       struct hk_g17p_precomp_program *cached =
          hk_g17p_find_precomp_program(cmd, idx, data, data_size);
       if (cached) {
@@ -1697,12 +1793,22 @@ hk_g17p_get_precomp_program(struct hk_cmd_buffer *cmd,
          return false;
       }
       *stored = (struct hk_g17p_precomp_program){
-         .idx = idx,
-         .data_size = data_size,
-         .data = cache_data,
+         .key = {
+            .idx = idx,
+            .data_size = data_size,
+            .data = cache_data,
+         },
          .local_size = prog->b.workgroup,
          .program = *program,
       };
+      const uint32_t entry = util_dynarray_num_elements(
+         &cmd->g17p_precomp_programs, struct hk_g17p_precomp_program);
+      const uint32_t hash = hk_g17p_precomp_cache_hash(idx, data, data_size);
+      if (!hk_g17p_precomp_cache_insert(&cmd->g17p_precomp_index,
+                                        &stored->key, entry, hash)) {
+         vk_command_buffer_set_error(&cmd->vk, VK_ERROR_OUT_OF_HOST_MEMORY);
+         return false;
+      }
    }
 
    return true;
@@ -1729,7 +1835,7 @@ hk_g17p_prepare_precomp(struct hk_cmd_buffer *cmd, enum libagx_program idx,
       return false;
 
    struct hk_g17p_compute_program_ref program;
-   if (!hk_g17p_get_precomp_program(cmd, prog, idx, data, data_size, false,
+   if (!hk_g17p_get_precomp_program(cmd, prog, idx, data, data_size, false, false,
                                     &program))
       return false;
 
@@ -1820,8 +1926,11 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return;
    }
-   if (data && data_size && !agx_is_indirect(grid) && grid.count[0] &&
-       grid.count[1] && grid.count[2] && !hk_g17p_launch_trace_enabled() &&
+   const bool checked_cache =
+      data && data_size && !agx_is_indirect(grid) && grid.count[0] &&
+      grid.count[1] && grid.count[2] && !hk_g17p_launch_trace_enabled();
+   const unsigned checked_cache_size = cmd->g17p_precomp_programs.size;
+   if (checked_cache &&
        hk_g17p_append_prepared_precomp_direct(cmd, grid, barrier, idx, data,
                                                data_size))
       return;
@@ -1872,8 +1981,13 @@ hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
       return;
 
    struct hk_g17p_compute_program_ref program;
+   /* The fast path already searched these exact arguments. Cache entries
+    * are immutable until command-buffer reset. Preserve a fresh lookup if
+    * intervening stream setup ever appends a precompiled program. */
+   const bool cache_lookup_missed = checked_cache &&
+      checked_cache_size == cmd->g17p_precomp_programs.size;
    if (!hk_g17p_get_precomp_program(cmd, prog, idx, data, data_size,
-                                    indirect, &program))
+                                    indirect, cache_lookup_missed, &program))
       return;
 
    if (indirect) {

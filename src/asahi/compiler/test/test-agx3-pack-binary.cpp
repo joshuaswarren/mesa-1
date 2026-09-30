@@ -7234,6 +7234,10 @@ TEST_F(AGX3PackBinary, FragmentImplicit2DStagesNativeCoordinates)
 {
    const auto enc = AGX_ISA_ENCODING_AGX3B;
    agx_builder *b = builder(enc);
+   /* Exercise G17P's default COPY-wait carrier as well as its encoding.
+    * The native coordinate transaction must reach SMP with its slot-6 wait
+    * intact, rather than being retired by that unrelated COPY workaround. */
+   key.dev.chip = AGX_CHIP_G17P;
    b->shader->stage = MESA_SHADER_FRAGMENT;
 
    agx_index raw_x = agx_register(0, AGX_SIZE_32);

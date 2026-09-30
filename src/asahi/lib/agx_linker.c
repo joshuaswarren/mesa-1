@@ -12,6 +12,7 @@
 #include "agx_abi.h"
 #include "agx3_code_container_core.h"
 #include "agx_compile.h"
+#include "agx_debug.h"
 #include "agx3_fltnorm_core.h"
 #include "agx3_pixel_core.h"
 #include "agx_device.h"
@@ -277,6 +278,7 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    bool entry_seen = false;
    if (dev->chip == AGX_CHIP_G17P && fragment && !nr_samples_shaded &&
        !colour_fused) {
+      int first_entry = -1;
       for (unsigned i = 0; i < ARRAY_SIZE(parts); ++i) {
          struct agx_shader_part *part = parts[i];
          if (!part || !part->info.agx3_colour_link.entry_emitted)
@@ -289,6 +291,26 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
             drop_entry[i] = true;
          } else {
             entry_seen = true;
+            first_entry = i;
+         }
+      }
+
+      /* v52 AGX_G17P_EARLY_COLOUR_GATE: a gate the main part opened early on
+       * behalf of a colour epilog is removed again when no later part opens
+       * the protocol (for example no colour target is bound). The compiler
+       * placed it at offset zero or in a branch-free part. */
+      if (first_entry >= 0 &&
+          parts[first_entry]->info.agx3_colour_link.entry_optional) {
+         bool later = false;
+         for (unsigned i = first_entry + 1; i < ARRAY_SIZE(parts); ++i)
+            later |= parts[i] && parts[i]->info.agx3_colour_link.entry_emitted;
+         if (!later) {
+            const struct agx_shader_part *part = parts[first_entry];
+            if (part->info.agx3_colour_link.entry_offset != 0 &&
+                !part->info.agx3_colour_link.branch_free &&
+                !part->info.agx3_colour_link.entry_in_entry_block)
+               return false;
+            drop_entry[first_entry] = true;
          }
       }
 
@@ -450,6 +472,32 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
           !agx3_fltnorm_relocate_start(linked_map + offset, sz,
                                        part->info.agx3_fltnorm_start, offset))
          goto invalid_start_marker;
+
+      /* v52 AGX_G17P_INPUT_MARK: a fragment carries one input entry marker,
+       * on its first input. Drop this part's LLDCOL first-load marker when
+       * an earlier part already marked an input, as Apple's throughput
+       * fragment leaves its blend read unmarked after its marked rld. The
+       * packer recorded the load's offset; check the bytes before changing
+       * the one bit (byte 1 bit 3, the f78 first marker). */
+      if (dev->chip == AGX_CHIP_G17P && fragment &&
+          (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INPUT_MARK) &&
+          part->info.agx3_colour_link.lldcol_first_valid &&
+          part->info.agx3_colour_link.lldcol_first_offset != UINT32_MAX) {
+         bool earlier_marked = false;
+         for (unsigned j = 0; j < i; ++j)
+            earlier_marked |=
+               parts[j] && parts[j]->info.agx3_colour_link.input_marked;
+         if (earlier_marked) {
+            uint32_t lo = part->info.agx3_colour_link.lldcol_first_offset;
+            if (drop_entry[i] &&
+                part->info.agx3_colour_link.entry_offset < lo)
+               lo -= AGX3_PIXEL_MAX_LENGTH;
+            uint8_t *ld = linked_map + offset + lo;
+            if (lo + 12 > sz || ld[0] != 0x67 || (ld[1] & 0x0f) != 0x0e)
+               goto invalid_start_marker;
+            ld[1] &= ~0x08;
+         }
+      }
       offset += sz;
    }
 

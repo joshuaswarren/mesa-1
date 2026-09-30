@@ -352,6 +352,12 @@ struct agx_fs_epilog_key {
     * write disabled while raster coverage still makes the tile nonempty).
     * Independent of blending, so it also holds for pure-integer formats. */
    uint8_t preserve_rt;
+
+   /* AGX_G17P_UNIT_RANGE_BLEND: every colour the main shader exports is
+    * provably in [0, 1] (agx_nir_fs_colour_outputs_unit_range), so the blend
+    * source clamp nir_lower_blend inserts for UNORM targets is an identity
+    * and is dropped. Occupies the key's former tail padding byte. */
+   uint8_t colour_unit_range;
 };
 
 /* Apply framebuffer rules which are properties of the hardware generation,
@@ -377,6 +383,12 @@ bool agx_nir_lower_vs_input_to_prolog(nir_shader *s);
 
 bool agx_nir_lower_fs_output_to_epilog(nir_shader *s,
                                        struct agx_fs_epilog_link_info *out);
+
+/* True if every colour output component of this (not yet lowered) fragment
+ * shader is a float provably in [0, 1]. Conservative: unknown is false. */
+/* `exact_constants` (v52 AGX_G17P_UNIT_RANGE_CONST): an output channel that
+ * is itself a constant in [0, 1] qualifies without the rounding margin. */
+bool agx_nir_fs_colour_outputs_unit_range(nir_shader *s, bool exact_constants);
 bool agx_nir_lower_fs_output_to_epilog_g17p(
    nir_shader *s, struct agx_fs_epilog_link_info *out);
 bool agx_nir_lower_fs_output_to_epilog_for_device(

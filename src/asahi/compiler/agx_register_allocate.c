@@ -121,6 +121,11 @@ struct ra_ctx {
    BITSET_WORD *low_gpr;
    unsigned tile_gpr_limit;
 
+   /* AGX_G17P_SPREAD_TEMPS (v52b): next scalar temporary starts searching
+    * here. Reset per block. Only set for memory-free loop-body blocks. */
+   unsigned spread_cursor;
+   bool spread_block;
+
    /* SSA values read by G17P's seven-bit texture COPY/CEM source fields. */
    BITSET_WORD *texture_gpr;
 
@@ -1118,6 +1123,18 @@ try_coalesce_with(struct ra_ctx *rctx, agx_index ssa, unsigned count,
 }
 
 static unsigned
+spread_floor_halves(void)
+{
+   static int floor = -1;
+   if (floor < 0) {
+      const char *v = getenv("AGX_G17P_SPREAD_TEMPS_FLOOR");
+      const int parsed = v && v[0] ? atoi(v) : 24;
+      floor = parsed >= 0 && parsed <= 256 ? parsed : 24;
+   }
+   return (unsigned)floor;
+}
+
+static unsigned
 pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
 {
    agx_index idx = I->dest[d];
@@ -1308,6 +1325,33 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
          if (base + count <= rctx->bound[cls] &&
              !BITSET_TEST_COUNT(rctx->used_regs[cls], base, count))
             return base;
+      }
+   }
+
+   /* AGX_G17P_SPREAD_TEMPS (v52b, default off). Apple's G17P throughput
+    * loops place successive temporaries in different registers (x<<13 in r3,
+    * x>>17 in r6, x<<1 in r5, c+i in r3) where lowest-free allocation reuses
+    * one register (r4 or r5) for all of them. For scalar values only, rotate
+    * the search start through registers already below the high-water mark,
+    * so the register count, and with it occupancy, is not raised by this
+    * choice; fall back to the lowest free register otherwise. */
+   if (cls == RA_GPR && count <= 2 && rctx->spread_block) {
+      /* The rotation stays below the current high-water mark, raised to a
+       * small floor (AGX_G17P_SPREAD_TEMPS_FLOOR halves, default 24) so a
+       * compact loop has room to spread; the throughput FS main otherwise
+       * uses 16 halves. */
+      const unsigned floor = spread_floor_halves();
+      const unsigned high = MIN2(MAX2(*(rctx->count[RA_GPR]), floor),
+                                 rctx->bound[RA_GPR]);
+      const unsigned slots = high / align;
+      for (unsigned i = 0; slots && i < slots; ++i) {
+         const unsigned reg =
+            ((rctx->spread_cursor / align + i) % slots) * align;
+         if (reg + count > high || agx_reg_banned(cls, reg, count) ||
+             BITSET_TEST_COUNT(rctx->used_regs[cls], reg, count))
+            continue;
+         rctx->spread_cursor = reg + count;
+         return reg;
       }
    }
 
@@ -2255,10 +2299,45 @@ agx_ra(agx_context *ctx)
    /* Assign registers in dominance-order. This coincides with source-order due
     * to a NIR invariant, so we do not need special handling for this.
     */
+   /* AGX_G17P_SPREAD_TEMPS (v52b): memory-free loop-body blocks, found as
+    * the source-order interval from a loop header to its back edge. */
+   const bool spread = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+                       (agx_get_alu_flags() & AGX_ALU_G17P_SPREAD_TEMPS);
+   bool *spread_blocks = NULL;
+   if (spread) {
+      spread_blocks = rzalloc_array(ctx, bool, ctx->num_blocks + 1);
+      agx_foreach_block(ctx, block) {
+         agx_foreach_successor(block, succ) {
+            if (succ->loop_header && succ->index <= block->index) {
+               for (unsigned i = succ->index; i <= block->index; ++i)
+                  spread_blocks[i] = true;
+            }
+         }
+      }
+      agx_foreach_block(ctx, block) {
+         agx_foreach_instr_in_block(block, I) {
+            if (I->op == AGX_OPCODE_DEVICE_LOAD ||
+                I->op == AGX_OPCODE_DEVICE_STORE ||
+                I->op == AGX_OPCODE_ATOMIC ||
+                I->op == AGX_OPCODE_LOCAL_LOAD ||
+                I->op == AGX_OPCODE_LOCAL_STORE ||
+                I->op == AGX_OPCODE_TEXTURE_LOAD ||
+                I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
+                I->op == AGX_OPCODE_IMAGE_LOAD ||
+                I->op == AGX_OPCODE_IMAGE_WRITE ||
+                I->op == AGX_OPCODE_COLLECT || I->op == AGX_OPCODE_SPLIT ||
+                I->op == AGX_OPCODE_EXPORT)
+               spread_blocks[block->index] = false;
+         }
+      }
+   }
+
    agx_foreach_block(ctx, block) {
       agx_ra_assign_local(&(struct ra_ctx){
          .shader = ctx,
          .block = block,
+         .spread_block = spread_blocks && block->index <= ctx->num_blocks &&
+                         spread_blocks[block->index],
          .src_to_collect_phi = src_to_collect_phi,
          .phi_web = phi_web,
          .ncomps = ncomps,

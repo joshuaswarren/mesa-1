@@ -71,6 +71,8 @@ void hk_descriptor_stride_align_for_type(
    const VkMutableDescriptorTypeListEXT *type_list, uint32_t *stride,
    uint32_t *alignment);
 
+void hk_descriptor_set_layout_hash(struct hk_descriptor_set_layout *layout);
+
 static inline struct hk_descriptor_set_layout *
 vk_to_hk_descriptor_set_layout(struct vk_descriptor_set_layout *layout)
 {

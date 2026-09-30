@@ -7,6 +7,7 @@
 
 #include <assert.h>
 #include <limits.h>
+#include <stdlib.h>
 #include <string.h>
 
 static uint16_t
@@ -55,6 +56,18 @@ static uint8_t
 allocator_limit(const struct agx_ioto_load_core *core)
 {
    return core->encoding == AGX_IOTO_LOAD_ENCODING_GPU0 ? 97 : 127;
+}
+
+bool
+agx_ioto_g17p_native_esl_wait_enabled(void)
+{
+   static int cached = -1;
+   if (cached < 0) {
+      const char *value = getenv("HK_G17P_NATIVE_ESL_WAIT");
+      cached = value && *value && strcmp(value, "0") &&
+               strcmp(value, "false");
+   }
+   return cached;
 }
 
 bool
@@ -311,15 +324,22 @@ agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
          return false;
       if (complete_round) {
          uint8_t mask = core->loads[i].lane_mask;
+         unsigned tps = core->loads[i].cprog_input_tps_half;
          for (uint8_t dword = 0; dword < core->loads[i].count_dwords;
               ++dword, mask >>= 2) {
             if ((mask & 3) != 0 && !add_size(&total, copy_size))
                return false;
+            unsigned inputs = (core->loads[i].cprog_input_mask >> (2 * dword)) & 3;
+            unsigned halves = (inputs & 1) + (inputs >> 1);
+            unsigned copies = inputs == 3 && !(tps & 1) ? 1 : halves;
+            if (!add_size(&total, copies * copy_size))
+               return false;
+            tps += halves;
          }
       }
    }
 
-   if (complete_round && core->gpu0_round_nops &&
+   if (complete_round && (core->gpu0_round_nops || core->gpu0_copy_wait) &&
        !add_size(&total, AGX_IOTO_LOAD_GPU0_ROUND_NOP_SIZE))
       return false;
    *required = total;
@@ -498,6 +518,7 @@ agx_ioto_load_finish_round(struct agx_ioto_load_core *core, bool complete_round,
 
    if (complete_round) {
       core->copy_suffix_offset = core->sink.length;
+      const size_t copies_start = core->sink.length;
       for (size_t i = 0; i < core->load_count; ++i) {
          const struct agx_ioto_inflight_load *load = &workspace.loads[i];
          uint8_t mask = load->lane_mask;
@@ -514,6 +535,44 @@ agx_ioto_load_finish_round(struct agx_ioto_load_core *core, bool complete_round,
                 !raw_record_valid(core, &raw, false,
                                   ops->trusted_records) ||
                 !append_bytes(core, raw.bytes, raw.length))
+               goto fail;
+
+            if ((load->cprog_input_mask >> (2 * dword)) & 3) {
+               struct agx_ioto_load_raw_record extra[2] = {0};
+               uint8_t count = 0;
+               if (!ops->pack_cprog_copy ||
+                   !ops->pack_cprog_copy(ops->context, core->chip, load,
+                                          dword, extra, &count) ||
+                   count == 0 || count > 2)
+                  goto fail;
+               for (unsigned e = 0; e < count; ++e) {
+                  if (!raw_record_valid(core, &extra[e], false,
+                                         ops->trusted_records) ||
+                      !append_bytes(core, extra[e].bytes, extra[e].length))
+                     goto fail;
+               }
+            }
+         }
+      }
+
+      /* Copy-wait mode: a round whose loads feed no COPY (pure base
+       * pointers) has nothing to carry the wait, so drain explicitly. */
+      if (core->gpu0_copy_wait && !core->gpu0_round_nops &&
+          core->load_count != 0 && core->sink.length == copies_start) {
+         static const uint8_t hazard_for_value[6] = {1, 2, 4, 8, 16, 32};
+         uint8_t hazard = 0;
+         for (size_t i = 0; i < core->load_count; ++i) {
+            const int32_t value = workspace.loads[i].data.value;
+            if (value >= 0 && value < 6)
+               hazard |= hazard_for_value[value];
+         }
+         uint8_t nop[AGX_IOTO_LOAD_NOP_SIZE];
+         agx_ioto_load_pack_nop(hazard, nop);
+         if (!append_bytes(core, nop, sizeof(nop)))
+            goto fail;
+         agx_ioto_load_pack_nop(0, nop);
+         for (unsigned i = 0; i < 3; ++i) {
+            if (!append_bytes(core, nop, sizeof(nop)))
                goto fail;
          }
       }
@@ -605,6 +664,20 @@ agx_ioto_load_absolute(struct agx_ioto_load_core *core,
        load->native_slot > UINT16_MAX / 2 || load->lane_mask == 0 ||
        core->next_sequence == UINT32_MAX)
       return false;
+
+   if (load->cprog_input_mask &&
+       (core->chip != AGX_CHIP_G17P || !ops || !ops->pack_cprog_copy ||
+        (load->cprog_input_mask & ~load->lane_mask) ||
+        (load->cprog_input_mask >> (2 * load->count_dwords)) ||
+        load->cprog_input_tps_half < 8 || load->cprog_input_tps_half >= 520))
+      return false;
+   if (load->cprog_input_mask) {
+      unsigned inputs = 0;
+      for (unsigned h = 0; h < 8; ++h)
+         inputs += (load->cprog_input_mask >> h) & 1;
+      if (inputs > 520u - load->cprog_input_tps_half)
+         return false;
+   }
 
    const uint8_t n = load->count_dwords > 2 ? load->count_dwords : 2;
    const uint8_t valid_lane_bits = (uint8_t)((1u << (2u * n)) - 1);
@@ -772,6 +845,8 @@ agx_ioto_load_absolute(struct agx_ioto_load_core *core,
    queued->native_slot_half = (uint16_t)(2u * load->native_slot);
    queued->lane_mask = load->lane_mask;
    queued->cprog_dest_half = load->cprog_dest_half;
+   queued->cprog_input_mask = load->cprog_input_mask;
+   queued->cprog_input_tps_half = load->cprog_input_tps_half;
    queued->sequence = core->next_sequence++;
    return true;
 

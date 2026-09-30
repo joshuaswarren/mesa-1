@@ -115,8 +115,13 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
    /* The entry marker is witnessed only on G17P's W16 SR39 coverage read:
     * `[[sample_mask]]` and centroid inputs, and a multisample fragment with no
     * other input, each open with `rld ep1 ... f48=1`. */
-   if (d->first && (enc != AGX_ISA_ENCODING_AGX3B || d->sr != 39 ||
-                    d->width != AGX3_SR_W16))
+   /* Apple's throughput fragment (metal-nt applegpu_g17p, fragment.fields
+    * offset 64) also opens with a marked 32-bit SR24 read,
+    * 1ca1110601000000, so the pixel-coordinate pair qualifies too. */
+   if (d->first &&
+       (enc != AGX_ISA_ENCODING_AGX3B ||
+        !((d->sr == 39 && d->width == AGX3_SR_W16) ||
+          ((d->sr == 23 || d->sr == 24) && d->width == AGX3_SR_W32))))
       return false;
 
    struct agx3_field_kv base[5];

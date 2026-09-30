@@ -30,6 +30,126 @@ static unsigned checks;
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 
 static int
+test_g17p_constant_program_binary_extent(void)
+{
+   uint8_t binary[512] = {0};
+   /* A valid inline stream, followed by bytes outside its exact extent. */
+   memcpy(binary + 32, (uint8_t[]){0x0c, 0x10, 0x0e, 0, 0, 0}, 6);
+   struct agx_ioto_constant_program cp;
+   CHECK(hk_agx3_g17p_constant_program_from_binary(
+      binary, sizeof(binary), 32, 6, 0x90000, 4096, &cp));
+   CHECK(cp.code == binary + 32 && cp.code_size == 6);
+   CHECK(cp.code_va == 0x90020 && cp.absolute_branch);
+   CHECK(!cp.force_external && !cp.request_prelude && !cp.suppress_prelude);
+
+   const struct {
+      size_t offset, size, allocation_size;
+      uint64_t va;
+   } invalid[] = {
+      {32, 0, 4096, 0x90000},
+      {33, 6, 4096, 0x90000},
+      {32, 5, 4096, 0x90000},
+      {514, 2, 4096, 0x90000},
+      {510, 4, 4096, 0x90000},
+      {32, SIZE_MAX - 1, 4096, 0x90000},
+      {SIZE_MAX - 1, 2, 4096, 0x90000},
+      {32, 6, 511, 0x90000},
+      {32, 6, 4096, 0},
+      {32, 6, 4096, 0x90001},
+      {32, 6, 4096, UINT64_C(1) << 48},
+      {32, 6, 4096, (UINT64_C(1) << 48) - 510},
+      {32, 6, 4096, UINT64_MAX - 1},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(invalid); ++i) {
+      memset(&cp, 0xa5, sizeof(cp));
+      struct agx_ioto_constant_program before;
+      memcpy(&before, &cp, sizeof(cp));
+      CHECK(!hk_agx3_g17p_constant_program_from_binary(
+         binary, sizeof(binary), invalid[i].offset, invalid[i].size,
+         invalid[i].va, invalid[i].allocation_size, &cp));
+      CHECK(memcmp(&before, &cp, sizeof(cp)) == 0);
+   }
+   CHECK(!hk_agx3_g17p_constant_program_from_binary(
+      NULL, sizeof(binary), 32, 6, 0x90000, 4096, &cp));
+   CHECK(!hk_agx3_g17p_constant_program_from_binary(
+      binary, sizeof(binary), 32, 6, 0x90000, 4096, NULL));
+
+   /* Inline and external suffixes are both independent of setup placement.
+    * Exercise the exact final byte of the 48-bit executable address space. */
+   for (unsigned external = 0; external < 2; ++external) {
+      CHECK(hk_agx3_g17p_constant_program_from_binary(
+         binary, sizeof(binary), 32, external ? 480 : 6,
+         (UINT64_C(1) << 48) - sizeof(binary), sizeof(binary), &cp));
+      struct hk_agx3_g17p_graphics_program_desc desc = {
+         .program_va = 64, .shader_va = 0x100000003c0,
+         .shader_binary_size = 128, .nr_gprs = 16,
+         .fragment = true,
+         .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
+         .constant_program = cp,
+      };
+      struct hk_agx3_g17p_graphics_program first, moved;
+      size_t bound;
+      CHECK(hk_agx3_g17p_graphics_program_desc_bound(
+         AGX_CHIP_G17P, &desc, &bound));
+      CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+         AGX_CHIP_G17P, &desc, &first));
+      CHECK(first.length <= bound);
+      desc.program_va = 0x800000000000;
+      CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+         AGX_CHIP_G17P, &desc, &moved));
+      CHECK(first.length == moved.length);
+      CHECK(memcmp(first.bytes, moved.bytes, first.length) == 0);
+   }
+   return 0;
+}
+
+static int
+test_g17p_graphics_constant_program(void)
+{
+   /* The bridge must carry the compiler's exact suffix through both
+    * generation and cached relocation, not silently retain an empty END. */
+   static const uint8_t code[] = {0x0c, 0x10, 0x0e, 0, 0, 0};
+   struct hk_agx3_g17p_graphics_program_desc desc = {
+      .program_va = 0x10000, .shader_va = 0x100000003c0,
+      .shader_binary_size = 128, .nr_gprs = 16,
+      .fragment = true,
+      .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
+      .constant_program = {
+         .code = code, .code_size = sizeof(code), .code_va = 0x90000,
+      },
+   };
+   struct hk_agx3_g17p_graphics_program program;
+   size_t bound;
+   CHECK(hk_agx3_g17p_graphics_program_desc_bound(
+      AGX_CHIP_G17P, &desc, &bound));
+   CHECK(hk_agx3_g17p_basic_graphics_program_generate(
+      AGX_CHIP_G17P, &desc, &program));
+   CHECK(program.length <= bound);
+   const size_t offset = program.length - sizeof(code);
+   CHECK(offset == AGX_IOTO_G17P_FRAGMENT_NO_RESOURCE_PROGRAM_SIZE - 4);
+   CHECK(memcmp(program.bytes + offset, code, sizeof(code)) == 0);
+
+   desc.constant_program.force_external = true;
+   desc.constant_program.request_prelude = true;
+   struct agx3_g17p_graphics_program_template cached;
+   CHECK(hk_agx3_g17p_graphics_program_template_generate(
+      AGX_CHIP_G17P, &desc, &cached));
+   struct hk_agx3_g17p_graphics_program_desc moved = desc;
+   moved.program_va = 0xa0000;
+   CHECK(hk_agx3_g17p_graphics_program_template_relocate(
+      AGX_CHIP_G17P, &desc, &moved, &cached, program.bytes,
+      sizeof(program.bytes), &program.length));
+   CHECK(program.length == offset + 12);
+   uint64_t displacement = 0;
+   for (unsigned byte = 0; byte < 6; ++byte)
+      displacement |= (uint64_t)program.bytes[offset + 2 + 3 + byte]
+                      << (8 * byte);
+   CHECK(((moved.program_va + offset + 2 + displacement) &
+          ((UINT64_C(1) << 48) - 1)) == desc.constant_program.code_va);
+   return 0;
+}
+
+static int
 test_g17p_graphics_root_requirement(void)
 {
    CHECK(!hk_agx3_g17p_graphics_needs_root(false, false, 0));
@@ -3212,7 +3332,9 @@ test_stk_advanced_pipeline_framebuffers(void)
 int
 main(void)
 {
-   if (test_g17p_precompiled_data_layout() ||
+   if (test_g17p_constant_program_binary_extent() ||
+       test_g17p_graphics_constant_program() ||
+       test_g17p_precompiled_data_layout() ||
        test_g17p_graphics_root_requirement() ||
        test_g17p_compute_published_launch() ||
        test_coverage_initial_pixel_dependencies() ||

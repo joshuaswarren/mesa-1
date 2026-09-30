@@ -27,6 +27,58 @@ int main(void)
 {
    struct agx3_slot_result r[64];
 
+   /* SMP latches only its staging group through completion. A descriptor
+    * GPR may be reused immediately; a staging rewrite must wait for SMP. */
+   {
+      const unsigned staging = AGX3_SLOT_STAGING_TOKEN_BASE;
+      struct agx3_slot_instr publish = ld(staging);
+      publish.preferred_slot = 1;
+      struct agx3_slot_instr sample = ld(32);
+      sample.preferred_slot = 2;
+      sample.nr_srcs = 2;
+      sample.src[0] = 8;
+      sample.src[1] = staging;
+      sample.late_src_mask = 2;
+      struct agx3_slot_instr p[] = {
+         publish, sample, mov(8), mov(staging), st(32),
+      };
+      CHECK(agx3_slot_assign(p, 5, 6, r));
+      CHECK(r[1].wait_mask == 1);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[3].wait_mask == 2);
+      CHECK(r[4].wait_mask == 0);
+      sample.late_src_mask = 4;
+      CHECK(!agx3_slot_assign(&sample, 1, 6, r));
+      sample.late_src_mask = 2;
+      sample.is_async = false;
+      sample.preferred_slot = 0;
+      CHECK(!agx3_slot_assign(&sample, 1, 6, r));
+   }
+
+   /* GPR publication inputs are retained until the COPY generation completes;
+    * different staging groups do not acquire false alias dependencies. */
+   {
+      struct agx3_slot_instr publish = ld(AGX3_SLOT_STAGING_TOKEN_BASE);
+      publish.preferred_slot = 1;
+      publish.nr_srcs = 1;
+      publish.src[0] = 0;
+      publish.latches_srcs = true;
+      struct agx3_slot_instr sample = ld(32);
+      sample.preferred_slot = 2;
+      sample.nr_srcs = 1;
+      sample.src[0] = AGX3_SLOT_STAGING_TOKEN_BASE;
+      sample.late_src_mask = 1;
+      struct agx3_slot_instr p[] = {
+         publish, mov(0), sample, mov(AGX3_SLOT_STAGING_TOKEN_BASE + 1),
+         mov(AGX3_SLOT_STAGING_TOKEN_BASE),
+      };
+      CHECK(agx3_slot_assign(p, 5, 6, r));
+      CHECK(r[1].wait_mask == 1);
+      CHECK(r[2].wait_mask == 0);
+      CHECK(r[3].wait_mask == 0);
+      CHECK(r[4].wait_mask == 2);
+   }
+
    /* Release ordering includes a load used only after the fence. Drain only
     * issued slots, and start a fresh generation for subsequent loads. */
    {
@@ -450,6 +502,82 @@ int main(void)
       CHECK(r[0].slot == 1 && r[0].wait_mask == 0);
       CHECK(r[1].slot == 8 && r[1].wait_mask == 0xff);
       CHECK(agx3_slot_assign(p, 0, 6, r));
+   }
+
+   /* Native constant-program inputs arrive from an external slot-6 COPY.
+    * Its generation must be consumed once, with ordinary result tracking
+    * continuing independently for the RLD destinations. */
+   {
+      const struct agx3_slot_entry entry = {
+         .token = AGX3_SLOT_CPROG_INPUT_TOKEN, .slot = 6,
+      };
+      struct agx3_slot_instr first = ld(0), second = ld(2);
+      first.preferred_slot = 2;
+      second.preferred_slot = 3;
+      first.nr_srcs = second.nr_srcs = 1;
+      first.src[0] = second.src[0] = entry.token;
+      struct agx3_slot_instr p[] = {first, second, alu(4, 0, 2)};
+      CHECK(agx3_slot_assign_with_entry(p, 3, 6, &entry, 1, r));
+      CHECK(r[0].slot == 2 && r[0].wait_mask == 0x20);
+      CHECK(r[1].slot == 3 && r[1].wait_mask == 0);
+      CHECK(r[2].wait_mask == 0x6);
+
+      /* Reusing slot 6 before the first import must retire the loader, even
+       * though that instruction does not itself read the imported value. */
+      struct agx3_slot_instr unrelated = ld(16);
+      unrelated.preferred_slot = 6;
+      struct agx3_slot_instr q[] = {unrelated, first, st(16)};
+      CHECK(agx3_slot_assign_with_entry(q, 3, 6, &entry, 1, r));
+      CHECK(r[0].slot == 6 && r[0].wait_mask == 0x20);
+      CHECK(r[1].slot == 2 && r[1].wait_mask == 0);
+      CHECK(r[2].wait_mask == 0x20);
+
+      struct agx3_slot_instr drain = {.drain = true};
+      struct agx3_slot_instr d[] = {drain, first};
+      CHECK(agx3_slot_assign_with_entry(d, 2, 6, &entry, 1, r));
+      CHECK(r[0].wait_mask == 0x20 && r[1].wait_mask == 0);
+
+      struct agx3_slot_instr w[] = {mov(entry.token), first};
+      CHECK(agx3_slot_assign_with_entry(w, 2, 6, &entry, 1, r));
+      CHECK(r[0].wait_mask == 0x20 && r[1].wait_mask == 0);
+
+      struct agx3_slot_instr transient = ld(8);
+      transient.preferred_slot = 1;
+      transient.transient_slots = 0x20;
+      struct agx3_slot_instr t[] = {transient, first};
+      CHECK(agx3_slot_assign_with_entry(t, 2, 6, &entry, 1, r));
+      CHECK(r[0].wait_mask == 0x20 && r[1].wait_mask == 0);
+   }
+
+   /* Entry-only tokens contribute to the region's token bound. Multiple
+    * results may belong to one initial generation; duplicate token bindings
+    * and malformed entry descriptors are refused before writing outputs. */
+   {
+      struct agx3_slot_entry entry[] = {{AGX3_SLOT_NUM_TOKENS - 1, 1}, {7, 1}};
+      struct agx3_slot_instr p[] = {ld(0), st(7)};
+      CHECK(agx3_slot_assign_with_entry(p, 2, 1, entry, 2, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 1);
+      CHECK(r[1].wait_mask == 0);
+      p[0].reissues_live_slot = true;
+      CHECK(agx3_slot_assign_with_entry(p, 2, 1, entry, 2, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 1);
+      CHECK(r[1].wait_mask == 0);
+      memset(r, 0xa5, sizeof(r));
+      struct agx3_slot_result before[sizeof(r) / sizeof(r[0])];
+      memcpy(before, r, sizeof(r));
+      entry[1].token = entry[0].token;
+      CHECK(!agx3_slot_assign_with_entry(p, 2, 6, entry, 2, r));
+      CHECK(memcmp(before, r, sizeof(r)) == 0);
+      entry[1].token = 7;
+      entry[0].slot = 7;
+      CHECK(!agx3_slot_assign_with_entry(p, 2, 6, entry, 2, r));
+      entry[0].slot = 0;
+      CHECK(!agx3_slot_assign_with_entry(p, 2, 6, entry, 2, r));
+      entry[0].slot = 1;
+      entry[0].token = AGX3_SLOT_NUM_TOKENS;
+      CHECK(!agx3_slot_assign_with_entry(p, 2, 6, entry, 2, r));
+      CHECK(!agx3_slot_assign_with_entry(p, 2, 6, NULL, 1, r));
+      CHECK(memcmp(before, r, sizeof(r)) == 0);
    }
 
    /* Malformed inputs. */

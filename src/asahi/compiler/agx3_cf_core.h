@@ -76,6 +76,13 @@ bool agx3_cf_icmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
 bool agx3_cf_icmp_reg(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                       unsigned slot, uint16_t src0, uint16_t src1,
                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
+/* flag[slot] = (32-bit register src0 cond 32-bit uniform), the form Apple's
+ * G17P loop test uses. `uniform` is an even half index below 256. */
+bool agx3_cf_icmp_reg_uniform32(enum agx_isa_encoding enc,
+                                enum agx3_cf_icond cond, unsigned slot,
+                                uint16_t src0, uint16_t uniform,
+                                struct agx3_cf_source_hints hint,
+                                uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);
 bool agx3_cf_icmp_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                       unsigned slot, uint16_t src0, uint8_t imm,
                       uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len);

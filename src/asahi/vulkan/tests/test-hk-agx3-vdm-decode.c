@@ -104,6 +104,14 @@ test_program_cache_lifetime(void)
 
    CHECK(!hk_agx3_shader_binary_version_supported(0));
    CHECK(!hk_agx3_shader_binary_version_supported(15));
+   CHECK(!hk_agx3_shader_binary_version_supported(16));
+   CHECK(!hk_agx3_shader_binary_version_supported(17));
+   CHECK(!hk_agx3_shader_binary_version_supported(18));
+   CHECK(!hk_agx3_shader_binary_version_supported(19));
+   CHECK(!hk_agx3_shader_binary_version_supported(20));
+   CHECK(!hk_agx3_shader_binary_version_supported(21));
+   CHECK(!hk_agx3_shader_binary_version_supported(22));
+   CHECK(!hk_agx3_shader_binary_version_supported(23));
    CHECK(hk_agx3_shader_binary_version_supported(
       HK_AGX3_SHADER_BINARY_VERSION));
    CHECK(!hk_agx3_shader_binary_version_supported(
@@ -431,6 +439,106 @@ test_g17p_vertex_program_info(void)
                                            &program));
    CHECK(program.source_layout ==
          AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_UNSPECIFIED);
+
+   /* Vertex constant program. Apple's G17P terrain VS (MetalToolchain 27.1,
+    * terrain-isa-diff-20260926/apple-metadata.json) imports eight CProg
+    * uniform words: thread_invariant_spill_buffer_bytes 32, no TI IPR, 36
+    * CProg temporaries. VertexProgramVariant::finalize puts the TI spill
+    * quads (8) in pipeline-template bits 3..20 and the TI IPR quads in
+    * vertex-shader word 0 bits 8..19. */
+   struct hk_agx3_g17p_vertex_compile_info cprog_info = vkcube_info;
+   cprog_info.has_preamble = true;
+   cprog_info.nr_preamble_gprs = 36;
+   cprog_info.preamble_scratch_size = 32;
+   cprog_info.preamble_staging_known = true;
+   memset(&program, 0xa5, sizeof(program));
+   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &cprog_info,
+                                           &program));
+   CHECK(program.source_layout ==
+         AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_UNSPECIFIED);
+   cprog_info.constant_program_allowed = true;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &cprog_info,
+                                          &program));
+   CHECK(program.source_layout ==
+         AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT);
+   CHECK(program.template_info.raw_state_load_count_12 == 0);
+   CHECK(program.template_info.raw_state_load_count_18 == 8);
+   CHECK(program.template_info.raw_vs_output_count_0 == 11);
+
+   program.template_info.pipeline = UINT64_C(0x10000128000);
+   struct agx_vdm_state_update_draw_info cprog_draw = {
+      .source_layout = program.source_layout,
+      .draw_path = AGX_VDM_STATE_UPDATE_DRAW_DIRECT_INDEXED,
+      .rasterization_enabled = true,
+      .raw_provoking_selector = 0,
+      .template_info = program.template_info,
+   };
+   CHECK(hk_agx3_encode_vdm_state_update_draw(AGX_CHIP_G17P, &cprog_draw,
+                                               &encoded));
+   /* vkcube_prefix with 0x40 (8 << 3) in the pipeline-pair template. */
+   static const uint8_t cprog_prefix[] = {
+      0x2e, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00,
+      0x00, 0x01, 0x00, 0x4a, 0x00, 0x00, 0x0b, 0x0b, 0x00, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   CHECK(encoded.length == sizeof(cprog_prefix));
+   CHECK(memcmp(encoded.bytes, cprog_prefix, sizeof(cprog_prefix)) == 0);
+   struct agx_vdm_decoded_record cprog_record;
+   CHECK(hk_agx3_decode_vdm_record(AGX_CHIP_G17P, encoded.bytes,
+                                   encoded.length, &cprog_record));
+   CHECK(cprog_record.kind == AGX_VDM_RECORD_STATE_UPDATE);
+   CHECK(cprog_record.data.state_update.pipeline == UINT64_C(0x10000128000));
+   CHECK(cprog_record.data.state_update.raw_pipeline_template == 0x40);
+
+   /* A 40-byte staging footprint: ((40 + 3) >> 2) + 1, even-rounded = 10
+    * quads in vertex-shader word 0 bits 8..19. */
+   cprog_info.preamble_staging_halfs = 20;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &cprog_info,
+                                          &program));
+   CHECK(program.template_info.raw_state_load_count_12 == 10);
+   CHECK(program.template_info.raw_state_load_count_18 == 8);
+   program.template_info.pipeline = UINT64_C(0x10000128000);
+   cprog_draw.template_info = program.template_info;
+   CHECK(hk_agx3_encode_vdm_state_update_draw(AGX_CHIP_G17P, &cprog_draw,
+                                               &encoded));
+   CHECK(encoded.bytes[4] == 0x00 && encoded.bytes[5] == 0x0a &&
+         encoded.bytes[6] == 0x00 && encoded.bytes[7] == 0x00);
+   CHECK(encoded.bytes[8] == 0x40);
+
+   /* Fail closed: unknown staging, no or too many CProg registers, and a TI
+    * spill beyond the 18-bit quad field. */
+   struct hk_agx3_g17p_vertex_compile_info bad_cprog = cprog_info;
+   bad_cprog.preamble_staging_known = false;
+   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &bad_cprog,
+                                           &program));
+   bad_cprog = cprog_info;
+   bad_cprog.nr_preamble_gprs = 0;
+   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &bad_cprog,
+                                           &program));
+   bad_cprog.nr_preamble_gprs = 257;
+   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &bad_cprog,
+                                           &program));
+   bad_cprog = cprog_info;
+   bad_cprog.preamble_scratch_size = UINT32_C(0x3ffff) * 4 + 1;
+   memset(&program, 0xa5, sizeof(program));
+   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &bad_cprog,
+                                           &program));
+   CHECK(program.source_layout ==
+         AGX_VDM_STATE_UPDATE_SOURCE_LAYOUT_UNSPECIFIED);
+   bad_cprog.preamble_scratch_size = UINT32_C(0x3ffff) * 4;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &bad_cprog,
+                                          &program));
+   CHECK(program.template_info.raw_state_load_count_18 == UINT32_C(0x3ffff));
+   /* Allowed but absent: exactly the no-preamble state. */
+   bad_cprog = vkcube_info;
+   bad_cprog.constant_program_allowed = true;
+   CHECK(hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &bad_cprog,
+                                          &program));
+   CHECK(program.template_info.raw_state_load_count_12 == 0);
+   CHECK(program.template_info.raw_state_load_count_18 == 0);
+   bad_cprog.preamble_scratch_size = 4;
+   CHECK(!hk_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &bad_cprog,
+                                           &program));
    invalid_info = vkcube_info;
    invalid_info.user_size = HK_AGX3_G17P_MAX_USER_WORDS + 1;
    invalid_info.psiz_off = invalid_info.layer_viewport_off =

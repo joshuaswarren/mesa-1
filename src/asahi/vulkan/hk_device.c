@@ -386,11 +386,76 @@ hk_sampler_heap_remove(struct hk_device *dev, struct hk_rc_sampler *rc)
    simple_mtx_unlock(&h->lock);
 }
 
+/* v48 (neo-host-path-mesa-v48): register the kernel-maintained VM status
+ * mirror so the per-wait device-lost check is a load instead of a GET_PARAMS
+ * ioctl. The kernel stores a job's sticky error in the word before it
+ * signals that job's fence, exactly the ordering the per-wait query relies
+ * on, and refuses registration whenever the query could report more than the
+ * VM's own status. Any failure here leaves the query path in place.
+ * HK_G17P_VM_STATUS_MIRROR=0 disables registration (A/B control).
+ */
+static void
+hk_init_vm_status_mirror(struct hk_device *dev)
+{
+   if (!(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS) ||
+       !(dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS_MIRROR) ||
+       !debug_get_bool_option("HK_G17P_VM_STATUS_MIRROR", true))
+      return;
+
+   struct agx_bo *bo =
+      agx_bo_create(&dev->dev, 16384, 0, AGX_BO_WRITEBACK, "VM status mirror");
+   if (!bo)
+      return;
+
+   int32_t *word = agx_bo_map(bo);
+   if (!word) {
+      agx_bo_unreference(&dev->dev, bo);
+      return;
+   }
+   __atomic_store_n(word, 0, __ATOMIC_RELEASE);
+
+   struct drm_asahi_vm_status_mirror mirror = {
+      .vm_id = dev->dev.vm_id,
+      .handle = bo->uapi_handle,
+      .offset = 0,
+   };
+   struct drm_asahi_get_params query = {
+      .param_group = DRM_ASAHI_PARAM_GROUP_VM_STATUS_MIRROR,
+      .pointer = (uintptr_t)&mirror,
+      .size = sizeof(mirror),
+   };
+   if (drmIoctl(dev->dev.fd, DRM_IOCTL_ASAHI_GET_PARAMS, &query)) {
+      agx_bo_unreference(&dev->dev, bo);
+      return;
+   }
+
+   dev->vm_status_mirror.bo = bo;
+   dev->vm_status_mirror.word = word;
+}
+
+/* Release before agx_close_device(), whose BO-cache eviction then frees the
+ * object; the kernel's own reference keeps its copy of the pages valid. */
+static void
+hk_finish_vm_status_mirror(struct hk_device *dev)
+{
+   if (dev->vm_status_mirror.bo)
+      agx_bo_unreference(&dev->dev, dev->vm_status_mirror.bo);
+   dev->vm_status_mirror.bo = NULL;
+   dev->vm_status_mirror.word = NULL;
+}
+
 static VkResult
 hk_check_status(struct vk_device *device)
 {
    struct hk_device *dev = container_of(device, struct hk_device, vk);
-   if (dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS) {
+   if (dev->vm_status_mirror.word) {
+      /* Acquire: the kernel stored the error before signalling the fence
+       * this thread has already observed through its syncobj wait. */
+      int32_t error = __atomic_load_n(dev->vm_status_mirror.word, __ATOMIC_ACQUIRE);
+      if (error)
+         return vk_device_set_lost(&dev->vk, "GPU VM %u failed: %s",
+                                   dev->dev.vm_id, strerror(-error));
+   } else if (dev->dev.params.features & DRM_ASAHI_FEATURE_VM_STATUS) {
       struct drm_asahi_vm_status status = {.vm_id = dev->dev.vm_id};
       struct drm_asahi_get_params query = {
          .param_group = DRM_ASAHI_PARAM_GROUP_VM_STATUS,
@@ -753,6 +818,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->vk.command_buffer_ops = &hk_cmd_buffer_ops;
    dev->vk.check_status = hk_check_status;
    dev->vk.get_timestamp = hk_get_timestamp;
+   hk_init_vm_status_mirror(dev);
 
    /* This holds for current platforms. We do not currently implement
     * timestamp scaling, this would require changes in the query copy kernel
@@ -905,6 +971,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    util_dynarray_init(&dev->vdm.quarantined_ioto_bos, NULL);
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
    simple_mtx_init(&dev->shader_binary_cache.lock, mtx_plain);
+   simple_mtx_init(&dev->g17p_lazy.lock, mtx_plain);
    agx_scratch_init(&dev->dev, &dev->scratch.vs);
    agx_scratch_init(&dev->dev, &dev->scratch.fs);
    agx_scratch_init(&dev->dev, &dev->scratch.cs);
@@ -943,6 +1010,7 @@ fail_sampled_images:
 fail_samplers:
    hk_destroy_sampler_heap(dev, &dev->samplers);
 fail_dev:
+   hk_finish_vm_status_mirror(dev);
    agx_close_device(&dev->dev);
 fail_fd:
    close(dev->dev.fd);
@@ -966,6 +1034,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    u_rwlock_destroy(&dev->external_bos.lock);
 
    hk_device_finish_meta(dev);
+   hk_lazy_compile_finish(dev);
    hk_shader_binary_cache_finish(dev);
    hk_g17p_compute_program_cache_finish(dev);
    hk_device_finish_accel_struct_state(dev);
@@ -1016,6 +1085,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
    agx_bg_eot_cleanup(&dev->bg_eot);
+   hk_finish_vm_status_mirror(dev);
    agx_close_device(&dev->dev);
    vk_free(&dev->vk.alloc, dev);
 }

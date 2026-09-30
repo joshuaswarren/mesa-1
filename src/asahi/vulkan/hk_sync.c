@@ -1,0 +1,978 @@
+/*
+ * Copyright 2026 Aurora Silicon
+ * SPDX-License-Identifier: MIT
+ *
+ * Recorded-dependency tracking for Honeykrisp control streams. The design is
+ * described in hk_sync.h.
+ */
+#include "hk_sync.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+
+#include "hk_cmd_buffer.h"
+#include "hk_device.h"
+#include "hk_queue.h"
+
+#include "libagx_dgc.h"
+#include "libagx_shaders.h"
+
+#include "drm-uapi/asahi_drm.h"
+#include "util/bitscan.h"
+#include "util/list.h"
+#include "util/u_debug.h"
+#include "util/log.h"
+
+bool
+hk_sync_trace_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = debug_get_bool_option("HK_SYNC_TRACE", false);
+   return enabled != 0;
+}
+
+static inline unsigned
+kind_index(enum hk_sync_kind kind)
+{
+   assert(util_bitcount(kind) == 1);
+   return ffs(kind) - 1;
+}
+
+static inline void
+dep_max(struct hk_sync_dep *a, const struct hk_sync_dep *b)
+{
+   a->cut = hk_sync_later(a->cut, b->cut);
+   a->prior |= b->prior;
+}
+
+/* The requirement on the next stream of the given kinds: the union over the
+ * kinds, since a stream that does several kinds of work waits for all of
+ * them. */
+static void
+req_for_kinds(const struct hk_cmd_buffer *cmd, uint8_t kinds,
+              struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
+{
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      dep[sq] = (struct hk_sync_dep){0};
+      u_foreach_bit(k, kinds)
+         dep_max(&dep[sq], &cmd->sync.req[k][sq]);
+   }
+}
+
+void
+hk_sync_reset(struct hk_cmd_buffer *cmd)
+{
+   memset(&cmd->sync, 0, sizeof(cmd->sync));
+}
+
+/*
+ * Stage classes. Graphics stages are the whole render pipeline; the driver
+ * also runs geometry, tessellation and query bookkeeping for a render as
+ * compute streams, and those are graphics work too (kind GFX on the compute
+ * subqueue). Indirect parameter and conditional-rendering reads happen for
+ * both draws and dispatches. Unknown bits are treated as every class.
+ */
+#define HK_SYNC_GFX_STAGES                                                     \
+   (VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |                                     \
+    VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT |                                    \
+    VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |                      \
+    VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT |                   \
+    VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |                                  \
+    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |                                  \
+    VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |                             \
+    VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |                              \
+    VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT |                          \
+    VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT |                                     \
+    VK_PIPELINE_STAGE_2_TRANSFORM_FEEDBACK_BIT_EXT |                           \
+    VK_PIPELINE_STAGE_2_FRAGMENT_SHADING_RATE_ATTACHMENT_BIT_KHR |             \
+    VK_PIPELINE_STAGE_2_FRAGMENT_DENSITY_PROCESS_BIT_EXT |                     \
+    VK_PIPELINE_STAGE_2_TASK_SHADER_BIT_EXT |                                  \
+    VK_PIPELINE_STAGE_2_MESH_SHADER_BIT_EXT |                                  \
+    VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT |                                      \
+    VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |                           \
+    VK_PIPELINE_STAGE_2_PRE_RASTERIZATION_SHADERS_BIT |                        \
+    VK_PIPELINE_STAGE_2_SUBPASS_SHADER_BIT_HUAWEI |                            \
+    VK_PIPELINE_STAGE_2_INVOCATION_MASK_BIT_HUAWEI |                           \
+    VK_PIPELINE_STAGE_2_CLUSTER_CULLING_SHADER_BIT_HUAWEI)
+
+#define HK_SYNC_COMPUTE_STAGES                                                 \
+   (VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |                                   \
+    VK_PIPELINE_STAGE_2_RAY_TRACING_SHADER_BIT_KHR |                           \
+    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_BUILD_BIT_KHR |                 \
+    VK_PIPELINE_STAGE_2_ACCELERATION_STRUCTURE_COPY_BIT_KHR |                  \
+    VK_PIPELINE_STAGE_2_MICROMAP_BUILD_BIT_EXT)
+
+#define HK_SYNC_BOTH_STAGES                                                    \
+   (VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |                                    \
+    VK_PIPELINE_STAGE_2_CONDITIONAL_RENDERING_BIT_EXT)
+
+#define HK_SYNC_XFER_STAGES                                                    \
+   (VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT | VK_PIPELINE_STAGE_2_COPY_BIT |      \
+    VK_PIPELINE_STAGE_2_BLIT_BIT | VK_PIPELINE_STAGE_2_RESOLVE_BIT |           \
+    VK_PIPELINE_STAGE_2_CLEAR_BIT)
+
+/* Host work is not GPU work. */
+#define HK_SYNC_NO_STAGES (VK_PIPELINE_STAGE_2_HOST_BIT)
+
+static uint8_t
+stage_kinds(VkPipelineStageFlags2 stages)
+{
+   uint8_t kinds = 0;
+
+   if (stages & VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT)
+      return HK_SYNC_ALL;
+   if (stages & HK_SYNC_GFX_STAGES)
+      kinds |= HK_SYNC_GFX;
+   if (stages & HK_SYNC_COMPUTE_STAGES)
+      kinds |= HK_SYNC_COMPUTE;
+   if (stages & HK_SYNC_BOTH_STAGES)
+      kinds |= HK_SYNC_GFX | HK_SYNC_COMPUTE;
+   if (stages & HK_SYNC_XFER_STAGES)
+      kinds |= HK_SYNC_XFER;
+
+   const VkPipelineStageFlags2 known =
+      HK_SYNC_GFX_STAGES | HK_SYNC_COMPUTE_STAGES | HK_SYNC_BOTH_STAGES |
+      HK_SYNC_XFER_STAGES | HK_SYNC_NO_STAGES |
+      VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
+      VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
+   if (stages & ~known)
+      kinds = HK_SYNC_ALL;
+
+   return kinds;
+}
+
+uint8_t
+hk_sync_kinds_src(VkPipelineStageFlags2 stages)
+{
+   /* Vulkan 1.3, 7.1.2: in the first scope BOTTOM_OF_PIPE is ALL_COMMANDS
+    * and TOP_OF_PIPE is NONE. */
+   if (stages & VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT)
+      return HK_SYNC_ALL;
+   return stage_kinds(stages & ~VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT);
+}
+
+uint8_t
+hk_sync_kinds_dst(VkPipelineStageFlags2 stages)
+{
+   /* And in the second scope TOP_OF_PIPE is ALL_COMMANDS, BOTTOM_OF_PIPE is
+    * NONE. */
+   if (stages & VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT)
+      return HK_SYNC_ALL;
+   return stage_kinds(stages & ~VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT);
+}
+
+void
+hk_sync_dependency_kinds(const VkDependencyInfo *info, uint8_t *src,
+                         uint8_t *dst)
+{
+   *src = 0;
+   *dst = 0;
+
+   for (uint32_t i = 0; i < info->memoryBarrierCount; ++i) {
+      *src |= hk_sync_kinds_src(info->pMemoryBarriers[i].srcStageMask);
+      *dst |= hk_sync_kinds_dst(info->pMemoryBarriers[i].dstStageMask);
+   }
+
+   for (uint32_t i = 0; i < info->bufferMemoryBarrierCount; ++i) {
+      *src |= hk_sync_kinds_src(info->pBufferMemoryBarriers[i].srcStageMask);
+      *dst |= hk_sync_kinds_dst(info->pBufferMemoryBarriers[i].dstStageMask);
+   }
+
+   for (uint32_t i = 0; i < info->imageMemoryBarrierCount; ++i) {
+      *src |= hk_sync_kinds_src(info->pImageMemoryBarriers[i].srcStageMask);
+      *dst |= hk_sync_kinds_dst(info->pImageMemoryBarriers[i].dstStageMask);
+   }
+}
+
+static struct hk_cs *previous_on_sq(struct hk_cmd_buffer *cmd,
+                                    struct hk_cs *cs);
+
+void
+hk_sync_src_dep(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
+                struct hk_cs *self, struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
+{
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      dep[sq] = (struct hk_sync_dep){.prior = src_kinds};
+      u_foreach_bit(k, src_kinds)
+         dep[sq].cut = hk_sync_later(dep[sq].cut, cmd->sync.last[k][sq]);
+
+      /* "Every earlier stream" for a stream that is itself the latest one
+       * on the subqueue is every stream before it. */
+      if (self && dep[sq].cut == self)
+         dep[sq].cut = previous_on_sq(cmd, self);
+   }
+}
+
+void
+hk_sync_barrier(struct hk_cmd_buffer *cmd, uint8_t src_kinds,
+                uint8_t dst_kinds)
+{
+   if (!src_kinds || !dst_kinds)
+      return;
+
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   hk_sync_src_dep(cmd, src_kinds, NULL, dep);
+
+   u_foreach_bit(d, dst_kinds) {
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq)
+         dep_max(&cmd->sync.req[d][sq], &dep[sq]);
+   }
+
+   cmd->sync.cs_check_pending = true;
+
+   if (hk_sync_trace_enabled()) {
+      fprintf(stderr,
+              "hk_sync: barrier src=%#x dst=%#x cut vdm=%u cdm=%u prior=%#x\n",
+              src_kinds, dst_kinds, dep[0].cut ? dep[0].cut->sync.seq : 0,
+              dep[1].cut ? dep[1].cut->sync.seq : 0, dep[0].prior);
+   }
+}
+
+void
+hk_sync_stream_wait(struct hk_cs *cs,
+                    const struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
+{
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      /* A stream never waits on itself: a cut at its own position means the
+       * work before it inside the stream, which the stream orders itself. */
+      if (dep[sq].cut == cs) {
+         cs->sync.dep[sq].prior |= dep[sq].prior;
+         continue;
+      }
+      dep_max(&cs->sync.dep[sq], &dep[sq]);
+   }
+}
+
+/* The latest stream on subqueue sq positioned before cs in the list. Stream
+ * positions follow sync.seq (see hk_sync_stream_created). */
+static struct hk_cs *
+latest_before(struct hk_cmd_buffer *cmd, unsigned sq, const struct hk_cs *cs)
+{
+   struct hk_cs *best = NULL;
+   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
+      if (hk_sync_sq(it) == sq && it->sync.seq < cs->sync.seq &&
+          (!best || it->sync.seq > best->sync.seq))
+         best = it;
+   }
+   return best;
+}
+
+void
+hk_sync_stream_wait_all(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   hk_sync_src_dep(cmd, HK_SYNC_ALL, cs, dep);
+
+   /* Every stream positioned before cs. A stream can exist before streams
+    * positioned after it -- a pass's pre-graphics stream precedes its render,
+    * and hk_sync_heap_used reorders already-created streams -- and waiting
+    * on those would be a dependency on later commands of the submission. */
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      if (dep[sq].cut && dep[sq].cut->sync.seq >= cs->sync.seq)
+         dep[sq].cut = latest_before(cmd, sq, cs);
+   }
+
+   hk_sync_stream_wait(cs, dep);
+}
+
+void
+hk_sync_after_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                     uint8_t dst_kinds)
+{
+   const unsigned sq = hk_sync_sq(cs);
+   const struct hk_sync_dep dep = {.cut = cs};
+
+   u_foreach_bit(d, dst_kinds)
+      dep_max(&cmd->sync.req[d][sq], &dep);
+
+   cmd->sync.cs_check_pending = true;
+}
+
+static uint8_t
+stream_kind(struct hk_cmd_buffer *cmd, struct hk_cs **slot, bool compute)
+{
+   if (cmd->sync.kind_override)
+      return cmd->sync.kind_override;
+   if (cmd->sync.xfer_depth)
+      return HK_SYNC_XFER;
+   if (!compute || slot == &cmd->current_cs.pre_gfx ||
+       slot == &cmd->current_cs.post_gfx)
+      return HK_SYNC_GFX;
+   return HK_SYNC_COMPUTE;
+}
+
+static void
+note_last(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   const unsigned sq = hk_sync_sq(cs);
+
+   u_foreach_bit(k, cs->sync.kind)
+      cmd->sync.last[k][sq] = hk_sync_later(cmd->sync.last[k][sq], cs);
+   cmd->sync.last_any[sq] = hk_sync_later(cmd->sync.last_any[sq], cs);
+}
+
+void
+hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                       struct hk_cs **slot, bool compute)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   struct hk_cs *gfx = cmd->current_cs.gfx;
+   const bool pre_gfx = compute && slot == &cmd->current_cs.pre_gfx && gfx &&
+                        gfx != cs;
+   const bool post_gfx = compute && slot == &cmd->current_cs.post_gfx;
+
+   /* Recording order that matches list order. A render reserves the number
+    * below its own for the pre-graphics stream inserted ahead of it. */
+   if (!compute) {
+      st->next_seq += 2;
+      cs->sync.seq = st->next_seq;
+   } else if (pre_gfx) {
+      cs->sync.seq = gfx->sync.seq - 1;
+   } else {
+      cs->sync.seq = ++st->next_seq;
+   }
+
+   cs->sync.kind = stream_kind(cmd, slot, compute);
+
+   /* The recorded requirement for this kind of work. */
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   req_for_kinds(cmd, cs->sync.kind, dep);
+   hk_sync_stream_wait(cs, dep);
+
+   if (st->internal_active)
+      hk_sync_stream_wait(cs, st->internal);
+
+   if (!compute) {
+      /* A stream that continues a render pass instance, whether after a
+       * split or when resuming a suspended instance, loads the tile buffer
+       * the previous stream of the instance stored. */
+      if (st->in_pass && (st->pass_vdm || st->resume_pending)) {
+         const struct hk_sync_dep cont[HK_SYNC_NUM_SQ] = {
+            {.cut = st->last_any[HK_SYNC_VDM],
+             .prior = st->resume_pending ? HK_SYNC_GFX : 0},
+            {0},
+         };
+         hk_sync_stream_wait(cs, cont);
+         st->resume_pending = false;
+      }
+      if (st->in_pass && !st->pass_vdm)
+         st->pass_vdm = cs;
+
+      /* The open compute stream sits before this render. It stays open
+       * across the pass unless the render waits on it: then later compute
+       * must not extend what the render waits for. */
+      if (slot == &cmd->current_cs.gfx && cmd->current_cs.cs &&
+          cs->sync.dep[HK_SYNC_CDM].cut == cmd->current_cs.cs)
+         hk_cmd_buffer_end_compute(cmd);
+   } else if (pre_gfx) {
+      /* The render consumes what its pre-graphics stream produces. */
+      const struct hk_sync_dep pre[HK_SYNC_NUM_SQ] = {{0}, {.cut = cs}};
+      hk_sync_stream_wait(gfx, pre);
+   } else if (post_gfx) {
+      /* Query availability and heap release after the render finishes. The
+       * render may already have ended, so name the latest one. */
+      const struct hk_sync_dep post[HK_SYNC_NUM_SQ] = {
+         {.cut = gfx ? gfx : st->last_any[HK_SYNC_VDM]}, {0}};
+      hk_sync_stream_wait(cs, post);
+   }
+
+   /* The geometry heap is one device-wide bump allocator (hk_cmd_draw.c,
+    * hk_heap): a pass that uses it must not overlap any earlier stream. */
+   if (st->heap_pass && (!compute || pre_gfx || post_gfx))
+      hk_sync_stream_wait_all(cmd, cs);
+
+   note_last(cmd, cs);
+
+   if (slot == &cmd->current_cs.cs)
+      st->cs_check_pending = false;
+
+   /* A top-of-pipe timestamp waiting for a command to ride on. */
+   if (st->pending_start_ts.handle) {
+      cs->timestamp.start = st->pending_start_ts;
+      st->pending_start_ts = (struct agx_timestamp_req){0};
+   }
+
+   if (hk_sync_trace_enabled()) {
+      fprintf(stderr,
+              "hk_sync: stream seq=%u %s kind=%#x dep vdm=%u/%#x cdm=%u/%#x\n",
+              cs->sync.seq, compute ? "cdm" : "vdm", cs->sync.kind,
+              cs->sync.dep[0].cut ? cs->sync.dep[0].cut->sync.seq : 0,
+              cs->sync.dep[0].prior,
+              cs->sync.dep[1].cut ? cs->sync.dep[1].cut->sync.seq : 0,
+              cs->sync.dep[1].prior);
+   }
+}
+
+/* Whether the open general compute stream may receive work of the given
+ * kinds: every stream it would have to wait on must precede it. */
+static bool
+cs_reusable(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t kinds)
+{
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   req_for_kinds(cmd, kinds, dep);
+
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+      if (dep[sq].cut && dep[sq].cut->sync.seq > cs->sync.seq)
+         return false;
+   }
+
+   return true;
+}
+
+void
+hk_sync_check_cs(struct hk_cmd_buffer *cmd)
+{
+   struct hk_cs *cs = cmd->current_cs.cs;
+   if (!cs || cmd->sync.pin_cs)
+      return;
+
+   const uint8_t kinds = stream_kind(cmd, &cmd->current_cs.cs, true);
+
+   if (!cs_reusable(cmd, cs, kinds)) {
+      if (hk_sync_trace_enabled())
+         fprintf(stderr, "hk_sync: compute stream seq=%u ended for kind %#x\n",
+                 cs->sync.seq, kinds);
+      hk_cmd_buffer_end_compute(cmd);
+      return;
+   }
+
+   /* The stream absorbs the requirement of the work it now carries. */
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   req_for_kinds(cmd, kinds, dep);
+   hk_sync_stream_wait(cs, dep);
+   cs->sync.kind |= kinds;
+   note_last(cmd, cs);
+}
+
+struct hk_cs *
+hk_sync_get_cs_after(struct hk_cmd_buffer *cmd,
+                     const struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
+{
+   struct hk_cs *cs = cmd->current_cs.cs;
+
+   /* The stream must satisfy the caller's requirement and the recorded one
+    * for the kind of work about to be recorded, so that the work itself
+    * finds the stream reusable. */
+   struct hk_sync_dep full[HK_SYNC_NUM_SQ];
+   req_for_kinds(cmd, stream_kind(cmd, &cmd->current_cs.cs, true), full);
+   for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq)
+      dep_max(&full[sq], &dep[sq]);
+
+   if (cs && !cmd->sync.pin_cs) {
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+         if (full[sq].cut && full[sq].cut->sync.seq > cs->sync.seq) {
+            hk_cmd_buffer_end_compute(cmd);
+            break;
+         }
+      }
+   }
+
+   cs = hk_cmd_buffer_get_cs(cmd, true);
+   if (cs)
+      hk_sync_stream_wait(cs, full);
+   return cs;
+}
+
+void
+hk_sync_end_cs_if_timestamped(struct hk_cmd_buffer *cmd)
+{
+   struct hk_cs *cs = cmd->current_cs.cs;
+   if (cs && cs->timestamp.end.handle)
+      hk_cmd_buffer_end_compute(cmd);
+}
+
+/* The stream on the same subqueue that precedes cs in the list. */
+static struct hk_cs *
+previous_on_sq(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   for (struct list_head *n = cs->node.prev; n != &cmd->control_streams;
+        n = n->prev) {
+      struct hk_cs *it = list_entry(n, struct hk_cs, node);
+      if (it->type == cs->type)
+         return it;
+   }
+   return NULL;
+}
+
+static void
+replace_pointer(struct hk_cs **slot, struct hk_cs *from, struct hk_cs *to)
+{
+   if (*slot == from)
+      *slot = to;
+}
+
+/* Every reference to cs moves to its predecessor on the subqueue: a prefix
+ * that ended at cs now ends just before it. */
+void
+hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   struct hk_cs *prev = previous_on_sq(cmd, cs);
+   const unsigned sq = hk_sync_sq(cs);
+
+   for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+      replace_pointer(&st->last[k][sq], cs, prev);
+      replace_pointer(&st->req[k][sq].cut, cs, prev);
+   }
+   replace_pointer(&st->last_any[sq], cs, prev);
+   replace_pointer(&st->internal[sq].cut, cs, prev);
+   replace_pointer(&st->pass_vdm, cs, NULL);
+
+   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node)
+      replace_pointer(&it->sync.dep[sq].cut, cs, prev);
+
+   /* A pre-graphics or continuation stream that was waiting on nothing but
+    * the removed stream inherits the removed stream's own requirement. */
+   if (prev == NULL) {
+      list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
+         if (it != cs)
+            it->sync.dep[sq].prior |= cs->sync.dep[sq].prior;
+      }
+   }
+
+   /* A stamp the stream carried is not lost: it becomes pending again. */
+   if (cs->timestamp.start.handle && !st->pending_start_ts.handle)
+      st->pending_start_ts = cs->timestamp.start;
+}
+
+void
+hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
+              struct hk_cs *from)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   const unsigned sq = hk_sync_sq(from);
+   assert(sq == hk_sync_sq(into));
+
+   hk_sync_stream_wait(into, from->sync.dep);
+   into->sync.kind |= from->sync.kind;
+
+   for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+      replace_pointer(&st->last[k][sq], from, into);
+      replace_pointer(&st->req[k][sq].cut, from, into);
+   }
+   replace_pointer(&st->last_any[sq], from, into);
+   replace_pointer(&st->internal[sq].cut, from, into);
+
+   list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
+      if (it != into && it != from)
+         replace_pointer(&it->sync.dep[sq].cut, from, into);
+   }
+}
+
+/*
+ * Timestamps. vkCmdWriteTimestamp2 (Vulkan 1.3, 17.5) defines an execution
+ * dependency whose first scope is all earlier commands in the given stage
+ * and whose second scope is the timestamp write itself. TOP_OF_PIPE in a
+ * first scope is NONE, so such a stamp may be taken at any time; it becomes
+ * the start stamp of the next command. Every other stage orders the stamp
+ * after earlier work of its class, and the stamp becomes the end stamp of
+ * the last command, which is then ordered after that work.
+ *
+ * A later stamp with a first scope must not read a lower value than an
+ * earlier stamp, since the earlier write is in its scope. A pending
+ * top-of-pipe stamp is therefore resolved before any dependent stamp.
+ */
+static struct hk_cs *
+last_stream(struct hk_cmd_buffer *cmd)
+{
+   if (list_is_empty(&cmd->control_streams))
+      return NULL;
+   return list_last_entry(&cmd->control_streams, struct hk_cs, node);
+}
+
+static struct hk_cs *
+timestamp_only_stream(struct hk_cmd_buffer *cmd,
+                      const struct hk_sync_dep dep[HK_SYNC_NUM_SQ])
+{
+   cmd->sync.kind_override = HK_SYNC_ALL;
+   struct hk_cs *cs = hk_sync_get_cs_after(cmd, dep);
+   cmd->sync.kind_override = 0;
+   return cs;
+}
+
+void
+hk_sync_flush_pending_timestamp(struct hk_cmd_buffer *cmd)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   if (!st->pending_start_ts.handle)
+      return;
+
+   const struct agx_timestamp_req req = st->pending_start_ts;
+   st->pending_start_ts = (struct agx_timestamp_req){0};
+
+   struct hk_cs *tail = last_stream(cmd);
+   if (tail && !tail->timestamp.end.handle) {
+      tail->timestamp.end = req;
+      if (tail == cmd->current_cs.cs)
+         hk_cmd_buffer_end_compute(cmd);
+      return;
+   }
+
+   /* Nothing to ride on: a command of its own, ordered after nothing. */
+   const struct hk_sync_dep none[HK_SYNC_NUM_SQ] = {{0}, {0}};
+   struct hk_cs *cs = timestamp_only_stream(cmd, none);
+   if (!cs)
+      return;
+   cs->timestamp.start = req;
+   hk_cmd_buffer_end_compute(cmd);
+}
+
+void
+hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
+                        struct agx_timestamp_req req)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   const uint8_t src_kinds = hk_sync_kinds_src(stage);
+   struct hk_cs *gfx = cmd->current_cs.gfx;
+
+   if (st->in_pass && gfx) {
+      /* Inside a render pass instance the stamp belongs to the render.
+       * Vertex start for an unordered stamp, fragment end otherwise; a
+       * second end stamp is copied from the first after the render. */
+      if (!src_kinds && !gfx->timestamp.start.handle) {
+         gfx->timestamp.start = req;
+         return;
+      }
+
+      struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+      hk_sync_src_dep(cmd, src_kinds, gfx, dep);
+      /* v56h/v57f: the render can only wait on streams positioned before
+       * it. The latest stream of a kind may be this render's own
+       * post-graphics stream (an earlier in-pass stamp's copy, an occlusion
+       * query's availability write), which itself waits on the render:
+       * waiting on it formed a VDM<->CDM cycle the firmware never resolves
+       * (three in-pass stamps, or an ended occlusion query followed by one
+       * stamp, in one pass -> the render's CDM barrier named a later
+       * command; debug builds assert in queue_submit, release builds hang
+       * the 3D job). That stream runs after the render anyway, so the
+       * stamp's first scope needs nothing from it. */
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+         if (dep[sq].cut && dep[sq].cut != gfx &&
+             dep[sq].cut->sync.seq > gfx->sync.seq)
+            dep[sq].cut = latest_before(cmd, sq, gfx);
+      }
+      hk_sync_stream_wait(gfx, dep);
+
+      if (gfx->timestamp.end.handle) {
+         libagx_copy_timestamp(cmd, agx_1d(1), AGX_BARRIER_ALL | AGX_POSTGFX,
+                               req.addr, gfx->timestamp.end.addr);
+      } else {
+         gfx->timestamp.end = req;
+      }
+      return;
+   }
+
+   if (!src_kinds) {
+      hk_sync_flush_pending_timestamp(cmd);
+      st->pending_start_ts = req;
+      return;
+   }
+
+   hk_sync_flush_pending_timestamp(cmd);
+
+   struct hk_cs *tail = last_stream(cmd);
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   hk_sync_src_dep(cmd, src_kinds, tail, dep);
+
+   if (tail && !tail->timestamp.end.handle) {
+      tail->timestamp.end = req;
+      hk_sync_stream_wait(tail, dep);
+
+      /* Later compute would move the stamp past itself; keep the stream
+       * boundary so the stamp stays at the recorded position. */
+      if (tail == cmd->current_cs.cs)
+         hk_cmd_buffer_end_compute(cmd);
+      return;
+   }
+
+   struct hk_cs *cs = timestamp_only_stream(cmd, dep);
+   if (!cs)
+      return;
+   cs->timestamp.end = req;
+   hk_cmd_buffer_end_compute(cmd);
+}
+
+void
+hk_sync_begin_rendering(struct hk_cmd_buffer *cmd, bool resuming)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   st->in_pass = true;
+   st->pass_vdm = NULL;
+   st->resume_pending = resuming;
+   st->heap_pass = false;
+}
+
+void
+hk_sync_first_render_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   /* Decided when the stream was created (hk_sync_stream_created); a
+    * resumed instance creates its first stream at its first draw, so the
+    * decision lives there for both paths. */
+   struct hk_cs *open = cmd->current_cs.cs;
+   if (open && cs->sync.dep[HK_SYNC_CDM].cut == open)
+      hk_cmd_buffer_end_compute(cmd);
+}
+
+void
+hk_sync_end_rendering(struct hk_cmd_buffer *cmd)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   st->in_pass = false;
+   st->pass_vdm = NULL;
+   st->resume_pending = false;
+   st->heap_pass = false;
+}
+
+void
+hk_sync_heap_used(struct hk_cmd_buffer *cmd)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   st->heap_pass = true;
+
+   /* The streams of this pass already created wait like the ones still to
+    * come. */
+   if (cmd->current_cs.gfx)
+      hk_sync_stream_wait_all(cmd, cmd->current_cs.gfx);
+   if (cmd->current_cs.pre_gfx)
+      hk_sync_stream_wait_all(cmd, cmd->current_cs.pre_gfx);
+   if (cmd->current_cs.post_gfx)
+      hk_sync_stream_wait_all(cmd, cmd->current_cs.post_gfx);
+}
+
+void
+hk_sync_resolve_begin(struct hk_cmd_buffer *cmd)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   st->internal[HK_SYNC_VDM] = (struct hk_sync_dep){
+      .cut = st->last_any[HK_SYNC_VDM],
+   };
+   st->internal[HK_SYNC_CDM] = (struct hk_sync_dep){
+      .cut = st->last_any[HK_SYNC_CDM],
+   };
+   st->internal_active = true;
+   st->kind_override = HK_SYNC_GFX;
+}
+
+void
+hk_sync_resolve_end(struct hk_cmd_buffer *cmd)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   st->internal_active = false;
+   st->internal[0] = (struct hk_sync_dep){0};
+   st->internal[1] = (struct hk_sync_dep){0};
+   st->kind_override = 0;
+}
+
+/*
+ * Submission. Every stream of the ioctl payload receives its two barrier
+ * fields. A value is an index into the commands of that subqueue in this
+ * ioctl (1-based), 0 for "everything in earlier ioctls", or NONE.
+ *
+ * Within one command buffer the cut is exact. Across command buffers of the
+ * same submission, a stream's "prior" kinds resolve against the last stream
+ * of each kind the earlier command buffers contributed, and a command
+ * buffer's tail requirement (its req[] state at the end of recording, which
+ * is what every later command must wait on) carries into the next one.
+ * Anything that reaches before this submission resolves to 0, unless this
+ * queue has never run a stream of that kind on that subqueue, in which case
+ * there is nothing to wait for.
+ */
+
+/* Resolved requirement: -1 none, 0 earlier ioctls, >0 an index. */
+typedef int32_t hk_sync_value;
+
+#define HK_SYNC_NONE (-1)
+
+static inline hk_sync_value
+value_max(hk_sync_value a, hk_sync_value b)
+{
+   return a > b ? a : b;
+}
+
+struct submit_state {
+   const struct hk_queue *queue;
+   /* Global index of the last stream of each kind on each subqueue among the
+    * command buffers already processed. */
+   hk_sync_value last[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
+   /* Requirement every later stream of each kind carries. */
+   hk_sync_value carry[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
+   uint32_t count[HK_SYNC_NUM_SQ];
+};
+
+static hk_sync_value
+resolve_prior(const struct submit_state *ss, uint8_t kinds, unsigned sq)
+{
+   hk_sync_value v = HK_SYNC_NONE;
+   u_foreach_bit(k, kinds) {
+      if (ss->last[k][sq] > 0)
+         v = value_max(v, ss->last[k][sq]);
+      else if (ss->queue->sync.ever[sq] & (1u << k))
+         v = value_max(v, 0);
+   }
+   return v;
+}
+
+static hk_sync_value
+resolve_dep(const struct submit_state *ss, const struct hk_sync_dep *dep,
+            unsigned sq)
+{
+   hk_sync_value v = HK_SYNC_NONE;
+   if (dep->cut)
+      v = value_max(v, (hk_sync_value)dep->cut->sync.index);
+   v = value_max(v, resolve_prior(ss, dep->prior, sq));
+   return v;
+}
+
+void
+hk_sync_resolve_submit(struct hk_queue *queue,
+                       struct hk_cmd_buffer *const *cmdbufs, unsigned count,
+                       bool first_cdm_is_flush, bool chain_first)
+{
+   struct submit_state ss = {.queue = queue};
+
+   for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+         ss.last[k][sq] = HK_SYNC_NONE;
+         ss.carry[k][sq] = HK_SYNC_NONE;
+      }
+   }
+
+   if (first_cdm_is_flush) {
+      /* A sparse-binding flush opens the payload; it is a compute command
+       * everything must follow, handled by the chain below. */
+      ss.count[HK_SYNC_CDM] = 1;
+   }
+
+   for (unsigned i = 0; i < count; ++i) {
+      struct hk_cmd_buffer *cmd = cmdbufs[i];
+
+      /* Positions first: cuts point at streams of this command buffer. */
+      list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node)
+         cs->sync.index = ++ss.count[hk_sync_sq(cs)];
+
+      list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+         for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+            /* v56h/v57f safety net: a wait on a stream positioned after
+             * this one can never be satisfied (the kernel receives a barrier
+             * past the commands submitted before it and the job hangs until
+             * the firmware times it out). Clamp to the latest earlier
+             * stream on that subqueue and say so. */
+            struct hk_sync_dep *d = &cs->sync.dep[sq];
+            if (d->cut && d->cut != cs && d->cut->sync.seq > cs->sync.seq) {
+               mesa_logw_once("hk_sync: forward wait clamped (stream seq %u "
+                              "waited on seq %u)", cs->sync.seq,
+                              d->cut->sync.seq);
+               if (hk_sync_trace_enabled())
+                  fprintf(stderr, "hk_sync: forward wait clamped seq=%u -> "
+                                  "seq=%u\n", cs->sync.seq,
+                          d->cut->sync.seq);
+               d->cut = latest_before(cmd, sq, cs);
+            }
+            hk_sync_value v = resolve_dep(&ss, &cs->sync.dep[sq], sq);
+            u_foreach_bit(k, cs->sync.kind)
+               v = value_max(v, ss.carry[k][sq]);
+            cs->sync.barrier[sq] =
+               v < 0 ? DRM_ASAHI_BARRIER_NONE : (uint16_t)v;
+         }
+      }
+
+      /* This command buffer's tail requirement joins the carry, resolved
+       * against the streams before this command buffer. */
+      for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+         for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+            ss.carry[k][sq] = value_max(
+               ss.carry[k][sq], resolve_dep(&ss, &cmd->sync.req[k][sq], sq));
+         }
+      }
+
+      for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+         for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+            struct hk_cs *last = cmd->sync.last[k][sq];
+            if (last)
+               ss.last[k][sq] = value_max(ss.last[k][sq], last->sync.index);
+         }
+      }
+   }
+
+   /* Legacy kernels attach input syncs to the first hardware command only;
+    * the caller requests that chain when needed. A sparse flush must still
+    * precede everything. Every
+    * command that does not already follow the first one transitively gets
+    * an explicit wait on it. Waits are prefixes, so following any command
+    * that follows the first is enough. */
+   if (chain_first || first_cdm_is_flush) {
+      const unsigned first_sq = first_cdm_is_flush ? HK_SYNC_CDM
+                                : count && !list_is_empty(
+                                              &cmdbufs[0]->control_streams)
+                                   ? hk_sync_sq(list_first_entry(
+                                        &cmdbufs[0]->control_streams,
+                                        struct hk_cs, node))
+                                   : HK_SYNC_VDM;
+      /* covered[sq]: the lowest index on sq of a command that follows the
+       * first command, 0 if none yet. A wait on prefix b of subqueue d
+       * follows the first command when covered[d] is within that prefix. */
+      uint32_t covered[HK_SYNC_NUM_SQ] = {0, 0};
+      if (first_cdm_is_flush)
+         covered[HK_SYNC_CDM] = 1;
+
+      bool seen_first = first_cdm_is_flush;
+      for (unsigned i = 0; i < count; ++i) {
+         list_for_each_entry(struct hk_cs, cs, &cmdbufs[i]->control_streams,
+                             node) {
+            const unsigned sq = hk_sync_sq(cs);
+            bool covers = false;
+
+            if (!seen_first) {
+               /* This is the first command. */
+               seen_first = true;
+               covers = true;
+            } else {
+               for (unsigned d = 0; d < HK_SYNC_NUM_SQ; ++d) {
+                  const uint16_t b = cs->sync.barrier[d];
+                  if (b != DRM_ASAHI_BARRIER_NONE && covered[d] != 0 &&
+                      covered[d] <= b)
+                     covers = true;
+               }
+               if (!covers) {
+                  /* The first command is index 1 on its subqueue. */
+                  cs->sync.barrier[first_sq] = 1;
+                  covers = true;
+               }
+            }
+
+            if (covers && covered[sq] == 0)
+               covered[sq] = cs->sync.index;
+         }
+      }
+   }
+
+   if (hk_sync_trace_enabled()) {
+      for (unsigned i = 0; i < count; ++i) {
+         list_for_each_entry(struct hk_cs, cs, &cmdbufs[i]->control_streams,
+                             node) {
+            fprintf(stderr,
+                    "hk_sync: submit cb=%u %s #%u kind=%#x vdm_barrier=%d "
+                    "cdm_barrier=%d\n",
+                    i, cs->type == HK_CS_VDM ? "vdm" : "cdm", cs->sync.index,
+                    cs->sync.kind,
+                    cs->sync.barrier[0] == DRM_ASAHI_BARRIER_NONE
+                       ? -1
+                       : cs->sync.barrier[0],
+                    cs->sync.barrier[1] == DRM_ASAHI_BARRIER_NONE
+                       ? -1
+                       : cs->sync.barrier[1]);
+         }
+      }
+   }
+
+   /* This queue has now run these kinds. */
+   for (unsigned i = 0; i < count; ++i) {
+      list_for_each_entry(struct hk_cs, cs, &cmdbufs[i]->control_streams,
+                          node)
+         queue->sync.ever[hk_sync_sq(cs)] |= cs->sync.kind;
+   }
+   if (first_cdm_is_flush)
+      queue->sync.ever[HK_SYNC_CDM] |= HK_SYNC_ALL;
+}

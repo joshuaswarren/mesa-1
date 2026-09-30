@@ -177,6 +177,238 @@ test_g17g_programs(void)
    return 0;
 }
 
+static uint64_t
+branch_target(const uint8_t *branch, uint64_t pc)
+{
+   uint64_t displacement = 0;
+   for (unsigned i = 0; i < 6; ++i)
+      displacement |= (uint64_t)branch[3 + i] << (i * 8);
+   if (displacement & 1)
+      return displacement & ~UINT64_C(1);
+   return (pc + displacement) & ((UINT64_C(1) << 48) - 1);
+}
+
+static int
+test_constant_programs(void)
+{
+   /* Native LDIMM prelude, END, and a trailing NOP. The suffix encoder
+    * must trim only the NOP, retaining the program's own termination. */
+   static const uint8_t code[] = {0x0c, 0x10, 0x0e, 0, 0, 0, 0x06, 0};
+   for (unsigned terminal = 0; terminal < 3; ++terminal) {
+      for (unsigned loads = 0; loads < 3; ++loads) {
+         const bool rooted = loads == 2;
+         struct agx3_ioto_uniform_range range = {
+            .start_halfs = 8, .size_halfs = 8,
+            .address = rooted ? 24 : 0x12340000,
+         };
+         struct agx3_g17p_graphics_program_desc desc = {
+            .program_va = 0x10000, .shader_va = 0x100000003c0,
+            .uniform_ranges = loads ? &range : NULL,
+            .uniform_range_count = loads ? 1 : 0,
+            .shader_binary_size = 128, .nr_gprs = 16,
+            .fragment = terminal != 0, .writes_sample_mask = terminal == 2,
+            .colour_classes = terminal ? 2 : 0, .preloaded_root = rooted,
+            .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
+         };
+         struct agx3_g17p_graphics_program absent, inlined;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &absent));
+         const size_t offset = absent.length - 4;
+         desc.constant_program = (struct agx_ioto_constant_program){
+            .code = code, .code_size = sizeof(code), .code_va = 0x90000,
+         };
+         size_t bound;
+         CHECK(agx3_g17p_graphics_program_desc_bound(
+            AGX_CHIP_G17P, &desc, &bound));
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &inlined));
+         CHECK(inlined.length == offset + sizeof(code) - 2);
+         CHECK(inlined.length <= bound);
+         CHECK(memcmp(inlined.bytes, absent.bytes, offset) == 0);
+         CHECK(memcmp(inlined.bytes + offset, code, sizeof(code) - 2) == 0);
+
+         for (unsigned mode = 0; mode < 6; ++mode) {
+            desc.constant_program.code = mode ? NULL : code;
+            desc.constant_program.code_size = mode == 3 ? 258 : sizeof(code);
+            desc.constant_program.force_external = mode != 0 && mode != 3;
+            desc.constant_program.request_prelude = mode == 2 || mode == 5;
+            desc.constant_program.absolute_branch = mode >= 4;
+            struct agx3_g17p_graphics_program_template cached;
+            CHECK(agx3_g17p_graphics_program_template_generate(
+               AGX_CHIP_G17P, &desc, &cached));
+            CHECK(cached.constant_suffix_offset == offset);
+
+            struct agx3_g17p_graphics_program_desc moved = desc;
+            struct agx3_ioto_uniform_range moved_range = range;
+            if (loads && !rooted)
+               moved_range.address = 0x56780000;
+            moved.uniform_ranges = loads ? &moved_range : NULL;
+            moved.program_va = 0x40000;
+            moved.constant_program.code_va = 0x8000;
+            struct agx3_g17p_graphics_program fresh, relocated = {0};
+            CHECK(agx3_g17p_graphics_program_generate(
+               AGX_CHIP_G17P, &moved, &fresh));
+            CHECK(agx3_g17p_graphics_program_template_relocate(
+               AGX_CHIP_G17P, &desc, &moved, &cached, relocated.bytes,
+               sizeof(relocated.bytes), &relocated.length));
+            CHECK(fresh.length == relocated.length);
+            CHECK(memcmp(fresh.bytes, relocated.bytes, fresh.length) == 0);
+
+            if (mode) {
+               const size_t branch = offset +
+                  (desc.constant_program.request_prelude ? 2 : 0);
+               CHECK(branch_target(cached.program.bytes + branch,
+                                   desc.program_va + branch) ==
+                     desc.constant_program.code_va);
+               CHECK(branch_target(relocated.bytes + branch,
+                                   moved.program_va + branch) ==
+                     moved.constant_program.code_va);
+               if (mode >= 4) {
+                  CHECK(cached.program.bytes[branch + 3] & 1);
+                  struct agx3_g17p_graphics_program_desc address_only = desc;
+                  address_only.program_va = moved.program_va;
+                  struct agx3_g17p_graphics_program copied;
+                  CHECK(agx3_g17p_graphics_program_generate(
+                     AGX_CHIP_G17P, &address_only, &copied));
+                  CHECK(copied.length == cached.program.length);
+                  CHECK(memcmp(copied.bytes, cached.program.bytes,
+                               copied.length) == 0);
+               }
+            }
+
+            /* A cache hit cannot silently reuse different inline code, a
+             * corrupt branch, or a malformed program extent/address. */
+            struct agx3_g17p_graphics_program before = relocated;
+            cached.program.bytes[offset] ^= 1;
+            CHECK(!agx3_g17p_graphics_program_template_relocate(
+               AGX_CHIP_G17P, &desc, &moved, &cached, relocated.bytes,
+               sizeof(relocated.bytes), &relocated.length));
+            CHECK(memcmp(&before, &relocated, sizeof(before)) == 0);
+            cached.program.bytes[offset] ^= 1;
+            if (!mode) {
+               uint8_t changed[sizeof(code)];
+               memcpy(changed, code, sizeof(code));
+               changed[1] ^= 1;
+               moved.constant_program.code = changed;
+               CHECK(!agx3_g17p_graphics_program_template_relocate(
+                  AGX_CHIP_G17P, &desc, &moved, &cached, relocated.bytes,
+                  sizeof(relocated.bytes), &relocated.length));
+               moved.constant_program.code = code;
+            } else {
+               moved.constant_program.code_va = (UINT64_C(1) << 48) - 2;
+               CHECK(!agx3_g17p_graphics_program_generate(
+                  AGX_CHIP_G17P, &moved, &relocated));
+            }
+            moved.constant_program.code_size |= 1;
+            CHECK(!agx3_g17p_graphics_program_desc_bound(
+               AGX_CHIP_G17P, &moved, &bound));
+            CHECK(!agx3_g17p_graphics_program_generate(
+               AGX_CHIP_G17P, &moved, &relocated));
+            CHECK(memcmp(&before, &relocated, sizeof(before)) == 0);
+         }
+
+         if (rooted) {
+            /* The persistent suffix is a second allocation. Resolve the
+             * constant branch from its own PC, never the launcher PC. */
+            desc.program_va = 0xa0000;
+            desc.constant_program.force_external = true;
+            desc.constant_program.request_prelude = true;
+            uint8_t external[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+            size_t written;
+            CHECK(agx3_g17p_graphics_external_setup_suffix_generate(
+               AGX_CHIP_G17P, &desc, external, sizeof(external), &written));
+            CHECK(written >= 12);
+            CHECK(branch_target(external + written - 10,
+                                desc.program_va + written - 10) ==
+                  desc.constant_program.code_va);
+         }
+      }
+   }
+   return 0;
+}
+
+static int
+test_cprog_input_composition(void)
+{
+   static const uint8_t end[] = {0x0e, 0, 0, 0};
+   for (unsigned mode = 0; mode < 6; ++mode) {
+      const bool rooted = mode % 2;
+      uint64_t halves[8] = {0x32};
+      struct agx3_cprog_inputs inputs, equal_inputs, changed_inputs;
+      CHECK(agx3_cprog_inputs_init(halves, &inputs));
+      equal_inputs = inputs;
+      halves[0] = 0x62;
+      CHECK(agx3_cprog_inputs_init(halves, &changed_inputs));
+      struct agx3_ioto_uniform_range range = {0, 8, rooted ? 24 : 0x12340000};
+      struct agx3_g17p_graphics_program_desc desc = {
+         .program_va = 0x10000, .shader_va = 0x100000003c0,
+         .uniform_ranges = &range, .uniform_range_count = 1,
+         .shader_binary_size = 128, .nr_gprs = 16,
+         .fragment = mode / 2 != 0, .writes_sample_mask = mode / 2 == 2,
+         .colour_classes = mode / 2 ? 2 : 0, .preloaded_root = rooted,
+         .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
+         .constant_program = {.code = end, .code_size = sizeof(end),
+                              .code_va = 0x90000},
+      };
+      struct agx3_g17p_graphics_program baseline, generated, fresh, relocated;
+      CHECK(agx3_g17p_graphics_program_generate(AGX_CHIP_G17P, &desc, &baseline));
+      desc.cprog_inputs = &inputs;
+      size_t bound;
+      CHECK(agx3_g17p_graphics_program_desc_bound(AGX_CHIP_G17P, &desc, &bound));
+      CHECK(agx3_g17p_graphics_program_generate(AGX_CHIP_G17P, &desc, &generated));
+      CHECK(generated.length == baseline.length + 30);
+      CHECK(generated.length <= bound);
+      if (mode == 0) {
+         struct agx3_cprog_inputs full;
+         uint64_t all[8];
+         for (unsigned w = 0; w < 8; ++w)
+            all[w] = UINT64_MAX;
+         CHECK(agx3_cprog_inputs_init(all, &full));
+         struct agx3_ioto_uniform_range full_range = {0, 512, 0x12340000};
+         struct agx3_g17p_graphics_program_desc dense = desc;
+         dense.uniform_ranges = &full_range;
+         dense.cprog_inputs = &full;
+         size_t dense_bound;
+         CHECK(agx3_g17p_graphics_program_desc_bound(
+            AGX_CHIP_G17P, &dense, &dense_bound));
+         CHECK(agx3_g17p_graphics_program_generate(AGX_CHIP_G17P, &dense, &fresh));
+         CHECK(fresh.length <= dense_bound);
+         CHECK(dense_bound <= AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE);
+      }
+      struct agx3_g17p_graphics_program_template cached;
+      CHECK(agx3_g17p_graphics_program_template_generate(AGX_CHIP_G17P, &desc, &cached));
+      struct agx3_g17p_graphics_program_desc moved = desc;
+      moved.program_va = 0x60000;
+      moved.cprog_inputs = &equal_inputs;
+      CHECK(agx3_g17p_graphics_program_template_relocate(
+         AGX_CHIP_G17P, &desc, &moved, &cached, relocated.bytes,
+         sizeof(relocated.bytes), &relocated.length));
+      CHECK(agx3_g17p_graphics_program_generate(AGX_CHIP_G17P, &moved, &fresh));
+      CHECK(relocated.length == fresh.length);
+      CHECK(!memcmp(relocated.bytes, fresh.bytes, fresh.length));
+      moved.cprog_inputs = &changed_inputs;
+      struct agx3_g17p_graphics_program before = relocated;
+      CHECK(!agx3_g17p_graphics_program_template_relocate(
+         AGX_CHIP_G17P, &desc, &moved, &cached, relocated.bytes,
+         sizeof(relocated.bytes), &relocated.length));
+      CHECK(!memcmp(&before, &relocated, sizeof(before)));
+      moved.uniform_range_count = 0;
+      CHECK(!agx3_g17p_graphics_program_generate(AGX_CHIP_G17P, &moved, &relocated));
+      CHECK(!memcmp(&before, &relocated, sizeof(before)));
+      if (rooted) {
+         uint8_t external[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+         size_t with_inputs, without_inputs;
+         CHECK(agx3_g17p_graphics_external_setup_suffix_generate(
+            AGX_CHIP_G17P, &desc, external, sizeof(external), &with_inputs));
+         desc.cprog_inputs = NULL;
+         CHECK(agx3_g17p_graphics_external_setup_suffix_generate(
+            AGX_CHIP_G17P, &desc, external, sizeof(external), &without_inputs));
+         CHECK(with_inputs == without_inputs + 30);
+      }
+   }
+   return 0;
+}
+
 static uint8_t *
 eot_offset(struct agx3_g17p_rt0_eot_program_desc *desc, unsigned rt)
 {
@@ -253,6 +485,8 @@ main(void)
       AGX_CHIP_G17P, &rectangle_desc, &rectangle));
    CHECK(memcmp(&rectangle, &previous_program, sizeof(rectangle)) == 0);
 
+   CHECK(test_constant_programs() == 0);
+   CHECK(test_cprog_input_composition() == 0);
    /* The inline compact program begins with exactly two root-address
     * immediates. The immutable shader-owned setup template follows them. */
    const uint64_t root_va = UINT64_C(0x2ffff6c540);

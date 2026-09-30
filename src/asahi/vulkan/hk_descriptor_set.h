@@ -123,6 +123,8 @@ hk_descriptor_set_addr(const struct hk_descriptor_set *set)
 }
 
 struct hk_push_descriptor_set {
+   blake3_hash layout_hash;
+   VkDescriptorSetLayoutCreateFlags layout_flags;
    uint8_t data[HK_PUSH_DESCRIPTOR_SET_SIZE];
 };
 

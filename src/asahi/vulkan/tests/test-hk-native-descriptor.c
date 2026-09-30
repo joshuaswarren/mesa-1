@@ -469,6 +469,45 @@ check_layered_multisample_pbe(void)
    assert(!hk_pack_native_pbe(10, &packed, &semantic));
 }
 
+static void
+check_captured_rgba8_lossless_pbe(void)
+{
+   struct AGX_PBE p = {AGX_PBE_header};
+   p.dimension = AGX_TEXTURE_DIMENSION_2D;
+   p.layout = AGX_LAYOUT_GPU;
+   p.channels = AGX_CHANNELS_R8G8B8A8;
+   p.type = AGX_TEXTURE_TYPE_UNORM;
+   p.swizzle_r = AGX_CHANNEL_R; p.swizzle_g = AGX_CHANNEL_G;
+   p.swizzle_b = AGX_CHANNEL_B; p.swizzle_a = AGX_CHANNEL_A;
+   p.width = p.height = 1024;
+   p.buffer = UINT64_C(0x10000080000);
+   p.acceleration_buffer = UINT64_C(0x10000480000);
+   p.compressed = p.extended = true;
+   /* Live native StateFields, compressed default texture, first record. */
+   const uint64_t expected[4] = {
+      UINT64_C(0x0800ffc3ffe40a22), UINT64_C(0x8000001000008000),
+      UINT64_C(0x0000001000048000), 0,
+   };
+   struct hk_native_pbe_descriptor actual;
+   assert(hk_pack_native_pbe(9, &actual, &p));
+   assert(memcmp(&actual, expected, sizeof(expected)) == 0);
+   assert(!hk_pack_native_pbe(10, &actual, &p));
+   const struct AGX_PBE original = p;
+#define REJECT_COMPRESSED(change) do { p = original; change; \
+   assert(!hk_pack_native_pbe(9, &actual, &p)); } while (0)
+   /* Compressed mip chains and the other compressed colour classes are
+    * admitted by the G17P compression policy (the five-mip HAL200 witness in
+    * test-pbe-agx3-core.c); only shapes outside the compressed packet stay
+    * refused. */
+   REJECT_COMPRESSED(p.acceleration_buffer = 0);
+   REJECT_COMPRESSED(p.acceleration_buffer++);
+   REJECT_COMPRESSED(p.extended = false);
+   REJECT_COMPRESSED(p.layers = 2);
+   REJECT_COMPRESSED(p.layout = AGX_LAYOUT_LINEAR);
+   REJECT_COMPRESSED(p.mode = AGX_IMAGE_MODE_SPARSE);
+#undef REJECT_COMPRESSED
+}
+
 int
 main(void)
 {
@@ -832,6 +871,68 @@ main(void)
     */
    assert(hk_pack_native_pbe(9, &native_pbe, &pbe));
    assert(memcmp(&native_pbe, gen9_pbe, sizeof(gen9_pbe)) == 0);
+
+   /* Pure HAL200 StateFields witness for the shape of Minecraft's blocks
+    * atlas: RGBA8 UNORM, GPU-tiled 2048x2048, one layer, five mips. The
+    * addresses are controlled inputs, not addresses captured from the game.
+    */
+   static const uint8_t gen9_compressed_atlas_pbe[32] = {
+      0x22, 0x0a, 0xe4, 0xff, 0xc7, 0xff, 0x01, 0x0c,
+      0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x80,
+      0x00, 0xa0, 0x00, 0x00, 0x10, 0x00, 0x04, 0x00,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+   };
+   struct AGX_PBE compressed_atlas = pbe;
+   compressed_atlas.width = 2048;
+   compressed_atlas.height = 2048;
+   compressed_atlas.buffer = 0x10000000000ull;
+   compressed_atlas.compressed = true;
+   compressed_atlas.extended = true;
+   compressed_atlas.acceleration_buffer = 0x100000a0000ull;
+   compressed_atlas.levels = 5;
+   compressed_atlas.page_aligned_layers = false;
+   assert(hk_pack_native_pbe(9, &native_pbe, &compressed_atlas));
+   assert(memcmp(&native_pbe, gen9_compressed_atlas_pbe,
+                 sizeof(gen9_compressed_atlas_pbe)) == 0);
+   for (unsigned level = 0; level < 5; ++level) {
+      uint8_t mip_expected[32];
+      memcpy(mip_expected, gen9_compressed_atlas_pbe,
+             sizeof(mip_expected));
+      mip_expected[21] = level << 4;
+      compressed_atlas.level = level;
+      assert(hk_pack_native_pbe(9, &native_pbe, &compressed_atlas));
+      assert(memcmp(&native_pbe, mip_expected, sizeof(mip_expected)) == 0);
+   }
+   /* Independent pure HAL200 StateFields packets for one-mip RGBA8 color
+    * targets. A single-level image has no word0 mip-chain bit; compressed
+    * metadata still requires the word1 extension bit. */
+   static const struct {
+      unsigned width, height;
+      uint64_t words[4];
+   } compressed_color_targets[] = {
+      {1920, 1080, {0x08010dc77fe40a22ull, 0x8000001000000000ull,
+                    0x000000100000a000ull, 0}},
+      {2408, 1506, {0x0801784967e40a22ull, 0x8000001000000000ull,
+                    0x000000100000a000ull, 0}},
+      {2560, 1536, {0x08017fc9ffe40a22ull, 0x8000001000000000ull,
+                    0x000000100000a000ull, 0}},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(compressed_color_targets); ++i) {
+      struct AGX_PBE color_target = compressed_atlas;
+      color_target.width = compressed_color_targets[i].width;
+      color_target.height = compressed_color_targets[i].height;
+      color_target.level = 0;
+      color_target.levels = 1;
+      assert(hk_pack_native_pbe(9, &native_pbe, &color_target));
+      assert(memcmp(&native_pbe, compressed_color_targets[i].words,
+                    sizeof(native_pbe)) == 0);
+   }
+   compressed_atlas.level = 0;
+   assert(!hk_pack_native_pbe(10, &native_pbe, &compressed_atlas));
+   compressed_atlas.acceleration_buffer = 0;
+   assert(!hk_pack_native_pbe(9, &native_pbe, &compressed_atlas));
+   compressed_atlas.acceleration_buffer = 0x100000a0001ull;
+   assert(!hk_pack_native_pbe(9, &native_pbe, &compressed_atlas));
 
    /* Actual G17P UMD entry for RG16_UINT: channels0x23, UINT type2, 4B. */
    static const uint8_t gen9_rg16_uint_pbe[32] = {
@@ -1466,6 +1567,7 @@ main(void)
    assert(memcmp(&null_pbe10, &(struct hk_native_pbe_descriptor){0},
                  sizeof(null_pbe10)) != 0);
 
+   check_captured_rgba8_lossless_pbe();
    puts("honeykrisp native descriptor geometry/policy: passed");
    return 0;
 }

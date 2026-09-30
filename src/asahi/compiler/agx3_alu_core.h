@@ -54,6 +54,13 @@ bool agx3_alu_bit_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
                       const enum agx3_alu_hint hints[2], uint16_t wait_mask,
                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Opt-in caller: native compact/full forms with destination caching. */
+bool agx3_alu_bit_reg_native(enum agx_isa_encoding enc, enum agx3_alu_op op,
+                             uint16_t dest, const uint16_t src[2],
+                             const enum agx3_alu_hint hints[2], bool dest_cache,
+                             uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* `reg & reg` into reg: a no-op carrying a scoreboard wait mask, which keeps
  * the register live whatever it holds. */
 bool agx3_alu_band_identity_wait(enum agx_isa_encoding enc, uint16_t reg,
@@ -196,6 +203,13 @@ bool agx3_alu_asr_reg16(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t wait_mask,
                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* G17P 32-bit logical shift with an immediate count, avoiding a count GPR. */
+bool agx3_alu_shift_imm32(enum agx_isa_encoding enc, bool left,
+                          uint16_t dest, uint16_t src, unsigned shift,
+                          enum agx3_alu_hint hint, bool dest_cache,
+                          uint16_t wait_mask,
+                          uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* Native 16-bit logical shift-right by an immediate bit count. */
 bool agx3_alu_srl_imm16(enum agx_isa_encoding enc, uint16_t dest,
                         uint16_t src, unsigned shift,
@@ -211,6 +225,14 @@ bool agx3_alu_integer_reg(enum agx_isa_encoding enc, enum agx3_alu_op op,
 
 /* The same, with slot B shifted left by `shift` first (f54). Witnessed for
  * ISUB at shifts 1..4; see agx3_alu_core.c for the byte ladder. */
+bool agx3_alu_integer_reg_shift_cache(enum agx_isa_encoding enc,
+                                      enum agx3_alu_op op, uint16_t dest,
+                                      const uint16_t src[2],
+                                      const enum agx3_alu_hint hints[2],
+                                      uint8_t shift, bool dest_cache,
+                                      uint16_t wait_mask,
+                                      uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                      uint8_t *len);
 bool agx3_alu_integer_reg_shift(enum agx_isa_encoding enc, enum agx3_alu_op op,
                                 uint16_t dest, const uint16_t src[2],
                                 const enum agx3_alu_hint hints[2],

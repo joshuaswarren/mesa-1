@@ -194,6 +194,34 @@ bool agx_vdm_state_update_template_pack(
    struct agx_vdm_state_update *out);
 
 /*
+ * Publish a vertex constant program's thread-invariant (TI) resources in the
+ * two state-load counts, from the compiler's TI spill-buffer bytes and TI
+ * largest-IPR bytes. G17P only.
+ *
+ * Pinned AGXMetalG17P (HAL200):
+ *
+ *   VertexProgramVariantESLState ctor 0x21883C3A8..0x21883C47C stores
+ *     ESL+0x128 = (thread_invariant_spill_buffer_bytes + 3) >> 2
+ *     ESL+0x12c = (((thread_invariant_largest_ipr_bytes + 3) >> 2) + 1) & ~1
+ *   (ShaderInfo vtable offsets 0x42 and 0x4e; the latter is 0 when absent).
+ *
+ *   VertexProgramVariant::finalize 0x2187B1144..0x2187B1170, after
+ *   ESLStateLoadEncoderGen2::finish, packs every one of the six templates as
+ *     vertex-shader word 0 |= ESL+0x12c << 8   (bfi #8, #12)
+ *     pipeline template     = ESL+0x128 << 3   (ubfiz #3, #18)
+ *
+ * i.e. raw_state_load_count_12 is the TI IPR quad count and
+ * raw_state_load_count_18 the TI spill quad count. The fragment variant
+ * publishes the identical pair in its HAL200 record
+ * (agx_ppp_hal200_fragment_ti_resources). A vertex shader without a constant
+ * program leaves both zero. Fails closed, leaving `info` unchanged, outside
+ * the encodable range.
+ */
+bool agx_vdm_state_update_vertex_ti_resources(
+   enum agx_chip chip, uint32_t spill_bytes, uint32_t largest_ipr_bytes,
+   struct agx_vdm_state_update_template_info *info);
+
+/*
  * Select and pack the State Update prefix used by the four native draw paths.
  * This emits only the 28-byte State Update record: dirty restart/index state
  * may legally intervene before the Index List record, so this helper does not

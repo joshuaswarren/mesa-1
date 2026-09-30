@@ -3140,3 +3140,7 @@ intrinsic("load_sampler_handle_kk", [1], 1, [],
           flags=[CAN_ELIMINATE, CAN_REORDER],
           bit_sizes=[16])
 store("clip_distance_kk", [], [BASE])
+
+# Private marker removed by Honeykrisp before backend compilation.
+intrinsic("load_ordinary_descriptor_guard_agx", src_comp=[1], dest_comp=1,
+          bit_sizes=[1], flags=[CAN_ELIMINATE, CAN_REORDER])

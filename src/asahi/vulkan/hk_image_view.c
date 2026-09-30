@@ -675,6 +675,10 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       }
    }
 
+   /* Diagnostic descriptor dump (sampled texture and EOT PBE bytes). */
+   const bool dump_desc =
+      dev->dev.chip == AGX_CHIP_G17P && HK_ENV_PRESENT_ONCE("HK_DUMP_TEXDESC");
+
    /* Fill in each view plane separately */
    for (unsigned p = 0; p < view->plane_count; p++) {
       const bool textures_valid =
@@ -699,7 +703,7 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
             &view->planes[p].sampled_heap_index);
          if (result != VK_SUCCESS)
             return result;
-         if (getenv("HK_DUMP_TEXDESC")) {
+         if (dump_desc) {
             const uint8_t *d = (const uint8_t *)&view->planes[p].sampled;
             fprintf(stderr, "HKTEXDESC viewtype=%u fmt=%u w=%u h=%u d=%u "
                     "layers=%u levels=%u heap=%u bytes=",
@@ -773,6 +777,15 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
       view->planes[p].layered_eot_pbe_valid =
          pack_pbe(dev, view, p, HK_DESC_USAGE_LAYERED_BG_EOT,
                   &view->planes[p].layered_eot, NULL);
+      if (dump_desc && view->planes[p].eot_pbe_valid) {
+         const uint8_t *d = (const uint8_t *)&view->planes[p].eot;
+         fprintf(stderr, "HKPBEDESC fmt=%u w=%u h=%u level=%u bytes=",
+                 view->vk.format, image->vk.extent.width,
+                 image->vk.extent.height, view->vk.base_mip_level);
+         for (unsigned i = 0; i < 32; ++i)
+            fprintf(stderr, "%02x", d[i]);
+         fprintf(stderr, "\n");
+      }
    }
 
    return VK_SUCCESS;

@@ -25,6 +25,7 @@ hk_files = files(
   'hk_descriptor_set.h',
   'hk_descriptor_set.c',
   'hk_descriptor_set_layout.c',
+  'hk_descriptor_set_layout_hash.c',
   'hk_descriptor_set_layout.h',
   'hk_descriptor_table.c',
   'hk_descriptor_table.h',
@@ -70,12 +71,15 @@ hk_files = files(
   'hk_image_layout_core.c',
   'hk_image_layout_core.h',
   'hk_image_view.c',
+  'hk_g17p_apple_override.c',
+  'hk_g17p_apple_override.h',
   'hk_image_view.h',
   'hk_instance.c',
   'hk_instance.h',
   'hk_nir_forward_image_stores.c',
   'hk_nir_forward_image_stores.h',
   'hk_nir_lower_descriptors.c',
+  'hk_ordinary_descriptor.c',
   'hk_nir_lower_ray_queries.c',
   'hk_nir_lower_robust_image.c',
   'hk_nir_lower_robust_image.h',
@@ -108,16 +112,40 @@ hk_files = files(
   'hk_sampler.h',
   'hk_shader.c',
   'hk_shader.h',
+  'hk_sync.c',
+  'hk_sync.h',
   'hk_wsi.c',
   'hk_wsi.h'
 )
 
 if with_tests
   test(
+    'hk_g17p_compression',
+    executable(
+      'hk_g17p_compression_test',
+      files('tests/test-hk-g17p-compression.c'),
+      include_directories : [inc_include, inc_src],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'hk_g17p_precomp_cache',
+    executable(
+      'hk_g17p_precomp_cache_test',
+      files('tests/test-hk-g17p-precomp-cache.c'),
+      include_directories : [inc_include, inc_src],
+      dependencies : [idep_mesautil],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_shader_variants',
     executable(
       'hk_shader_variants_test',
-      files('tests/test-hk-shader-variants.c'),
+      files('tests/test-hk-shader-variants.c', 'hk_ordinary_descriptor.c',
+            'hk_descriptor_set_layout_hash.c'),
       include_directories : [
         include_directories('.', '../libagx', '../../gallium/include',
                             '../../gallium/auxiliary', '../../vulkan/runtime',
@@ -211,6 +239,8 @@ if with_tests
     ),
     suite : ['asahi'],
   )
+
+
 
   test(
     'hk_nir_robust_image',
@@ -374,6 +404,25 @@ if with_tests
   )
 
   test(
+    'hk_ordinary_guard',
+    executable(
+      'hk_ordinary_guard_test',
+      files('tests/test-hk-ordinary-guard.c', 'hk_nir_lower_descriptors.c'),
+      include_directories : [
+        include_directories('.', '../libagx', '../../gallium/include',
+                            '../../gallium/auxiliary', '../../vulkan/runtime',
+                            '../../vulkan/util', '../../vulkan/wsi',
+                            '../../compiler/spirv', '../../virtio/virtio-gpu',
+                            '../../virtio/vdrm'),
+        inc_include, inc_src, inc_asahi,
+      ],
+      dependencies : [idep_nir, idep_mesautil, idep_libagx, idep_libagx_shaders_h],
+      gnu_symbol_visibility : 'hidden',
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'hk_printf_root',
     executable(
       'hk_printf_root_test',
@@ -494,6 +543,8 @@ if with_tests
             '../compiler/agx3_copy_core.c',
             '../compiler/agx3_ioto_uniform_program.c',
             '../compiler/agx3_ioto_load_packer.c',
+            '../compiler/agx3_cprog_input.c',
+            '../compiler/agx3_static_spill_core.c',
             '../compiler/agx3_mem_core.c',
             '../compiler/agx3_binder.c',
             '../compiler/agx3_compose/agx3_compose.c',
@@ -2357,6 +2408,17 @@ if with_tests
     executable(
       'g17p-vulkan-compute',
       files('tests/g17p_vulkan_compute.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+    )
+
+    # v48: per-wait device-lost check through the VM-status mirror or the
+    # GET_PARAMS query, against the DRM shim (see the probe's header).
+    executable(
+      'g17p-vm-status-mirror',
+      files('tests/g17p_vm_status_mirror.c'),
       include_directories : [inc_include],
       dependencies : [dep_dl],
       c_args : [c_msvc_compat_args],
