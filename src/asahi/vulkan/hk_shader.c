@@ -2259,7 +2259,10 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
             nir_opt_if_optimize_phi_true_false | nir_opt_if_avoid_64bit_phis);
 }
 
-static void
+/* v56h/v57f: a failed executable-preamble upload used to be logged and then
+ * reported as a successfully created shader with preamble_addr 0.  Report it,
+ * so the caller's existing error path destroys the half-built shader. */
+static VkResult
 hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
 {
    if (shader->b.info.has_preamble || shader->b.info.rodata.size_16) {
@@ -2274,7 +2277,7 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
                  "hk_upload_shader: executable preamble allocation failed "
                  "(%zu bytes, stage %u)\n",
                  size, (unsigned)shader->info.stage);
-         return;
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
       }
 
       void *map = agx_bo_map(shader->bo);
@@ -2285,14 +2288,14 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
                  size, (unsigned)shader->info.stage);
          agx_bo_unreference(&dev->dev, shader->bo);
          shader->bo = NULL;
-         return;
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
       }
 
       memcpy(map, shader->b.binary, size);
       if (agx_bo_sync_for_device(shader->bo, 0, size)) {
          agx_bo_unreference(&dev->dev, shader->bo);
          shader->bo = NULL;
-         return;
+         return VK_ERROR_OUT_OF_DEVICE_MEMORY;
       }
       shader->preamble_addr =
          shader->bo->va->addr + shader->b.info.preamble_offset;
@@ -2314,6 +2317,8 @@ hk_upload_shader(struct hk_device *dev, struct hk_shader *shader)
          shader->b.info.sampler_state_count, false);
       cfg.texture_state_register_count = shader->b.info.texture_state_count;
    }
+
+   return VK_SUCCESS;
 }
 
 DERIVE_HASH_TABLE(hk_fast_link_key_vs);
@@ -3461,7 +3466,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    if (result != VK_SUCCESS)
       return vk_error(dev, result);
 
-   hk_upload_shader(dev, shader);
+   result = hk_upload_shader(dev, shader);
+   if (result != VK_SUCCESS)
+      return vk_error(dev, result);
    return VK_SUCCESS;
 }
 
@@ -4609,7 +4616,9 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
       return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
 
    shader->b.binary = (void *)shader->code_ptr;
-   hk_upload_shader(dev, shader);
+   result = hk_upload_shader(dev, shader);
+   if (result != VK_SUCCESS)
+      return vk_error(dev, result);
    return VK_SUCCESS;
 }
 

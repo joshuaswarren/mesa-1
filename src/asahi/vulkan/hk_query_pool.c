@@ -45,6 +45,14 @@ hk_has_available(const struct hk_query_pool *pool)
 static uint16_t *
 hk_pool_oq_index_ptr(const struct hk_query_pool *pool)
 {
+   /* v56h/v57f: a pool whose BO allocation failed (e.g. after the VM went
+    * sticky-lost, when every BO creation fails) is destroyed from
+    * hk_CreateQueryPool's error path with pool->bo == NULL. Mapping it
+    * dereferenced NULL and turned a clean VK_ERROR_DEVICE_LOST in
+    * Minecraft into a SIGSEGV (abl_BeginCommandBuffer -> hk_CreateQueryPool
+    * -> hk_DestroyQueryPool, 2026-09-29 22:00Z). */
+   if (!pool->bo)
+      return NULL;
    return agx_bo_map(pool->bo) + pool->query_start;
 }
 
@@ -471,6 +479,7 @@ hk_CreateQueryPool(VkDevice device, const VkQueryPoolCreateInfo *pCreateInfo,
    }
 
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
+   assert(oq_index || !occlusion_queries);
 
    for (unsigned i = 0; i < occlusion_queries; ++i) {
       uint64_t zero = 0;
@@ -509,7 +518,7 @@ hk_DestroyQueryPool(VkDevice device, VkQueryPool queryPool,
 
    uint16_t *oq_index = hk_pool_oq_index_ptr(pool);
 
-   for (unsigned i = 0; i < pool->oq_queries; ++i) {
+   for (unsigned i = 0; oq_index && i < pool->oq_queries; ++i) {
       hk_descriptor_table_remove(dev, &dev->occlusion_queries, oq_index[i]);
    }
 
