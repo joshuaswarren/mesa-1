@@ -5939,9 +5939,36 @@ agx_batch_init_state(struct agx_batch *batch)
             agx_native_descriptor_rejected(batch, "M5 initial PPP pointers");
             return;
          }
+      /* Native G18 batches initialize two further PPP state groups before
+       * binding a shader. Keep this diagnostic opt-in until a physical run
+       * establishes whether their omission explains the first-draw fault.
+       */
+      struct agx_vdm_ppp_state_core prefix[2];
+      const bool native_prefix = dev->chip == AGX_CHIP_G18G &&
+         debug_get_bool_option("G18_PPP_PREFIX", false);
+      if (native_prefix) {
+         const uint32_t words[2][33] = {{0x13d03762}, {0x13d03760}};
+         const uint64_t gpu = agx_pool_upload_aligned(
+            &batch->pool, words, sizeof(words), AGX_PPP_HEADER_ALIGN);
+         if (!gpu ||
+             !agx_gallium_ppp_record(dev->chip, gpu, 33, &prefix[0]) ||
+             !agx_gallium_ppp_record(dev->chip, gpu + sizeof(words[0]), 33,
+                                    &prefix[1])) {
+            agx_native_descriptor_rejected(batch, "G18 native PPP prefix");
+            return;
+         }
+         fprintf(stderr, "G18_PPP_PREFIX gpu=%#llx words=33,33\n",
+                 (unsigned long long)gpu);
+      }
       for (unsigned i = 0; i < ARRAY_SIZE(records); ++i) {
          memcpy(out, records[i].bytes, records[i].length);
          out += records[i].length;
+         if (native_prefix && i == 0) {
+            for (unsigned j = 0; j < ARRAY_SIZE(prefix); ++j) {
+               memcpy(out, prefix[j].bytes, prefix[j].length);
+               out += prefix[j].length;
+            }
+         }
       }
    } else if (dev->chip == AGX_CHIP_G17P) {
       const struct agx_ppp_w_clamp_cull2_fields fields = {
