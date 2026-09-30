@@ -52,6 +52,27 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
    cs->stats.flushes++;
 }
 
+static bool
+hk_cdm_defer_flush(void)
+{
+   static int cached = -1;
+   if (cached < 0) {
+      const char *e = getenv("HK_CDM_DEFER_FLUSH");
+      cached = (e && atoi(e) != 0) ? 1 : 0;
+   }
+   return cached;
+}
+
+void
+hk_cs_finish_pending_flush(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   if (cs->type == HK_CS_CDM && cs->cdm_flush_pending) {
+      hk_ensure_cs_has_space(cmd, cs, 0x2000);
+      hk_cdm_cache_flush(hk_cmd_buffer_device(cmd), cs);
+      cs->cdm_flush_pending = false;
+   }
+}
+
 void
 hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
                             struct agx_cdm_launch_word_0_packed launch,
@@ -64,7 +85,10 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
    cs->current =
       agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
 
-   hk_cdm_cache_flush(dev, cs);
+   if (hk_cdm_defer_flush())
+      cs->cdm_flush_pending = true;
+   else
+      hk_cdm_cache_flush(dev, cs);
 }
 
 void
