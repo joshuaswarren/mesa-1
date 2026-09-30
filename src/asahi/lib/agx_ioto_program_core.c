@@ -643,7 +643,19 @@ agx_ioto_g17g_resource_program_compose(
    enum agx_ioto_g17g_program_stage stage,
    void *output, size_t capacity, size_t *written)
 {
-   if (!output || !written ||
+   return agx_ioto_g17g_resource_program_compose_classes(
+      program_va, body, body_size, packed_tail, stage, 1,
+      output, capacity, written);
+}
+
+bool
+agx_ioto_g17g_resource_program_compose_classes(
+   uint64_t program_va, const void *body, size_t body_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   enum agx_ioto_g17g_program_stage stage, unsigned colour_classes,
+   void *output, size_t capacity, size_t *written)
+{
+   if (!output || !written || (colour_classes != 1 && colour_classes != 3) ||
        (stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
         stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
         stage != AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT &&
@@ -669,6 +681,15 @@ agx_ioto_g17g_resource_program_compose(
    const bool pixel_release = stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
                               stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT ||
                               stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND;
+   if (colour_classes == 3 && stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT) {
+      /* G18 native two-RGBA8 fragment Ioto: f14=0x2c3. PIXREL has
+       * identical bytes in AGX3c/d, and RT0 alone has f14=0x2f3. */
+      static const uint8_t mrt_pixrel[] = {0x1f, 0x16, 0, 4, 0, 0};
+      memcpy(base + prefix_size, mrt_pixrel, sizeof(mrt_pixrel));
+   }
+   if (colour_classes == 3 &&
+       stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT)
+      return false;
    if (stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT) {
       /* Native M5 punch-through fragment Ioto releases with 971700040000
        * where an opaque one releases with 9f1700040000: one bit, cleared

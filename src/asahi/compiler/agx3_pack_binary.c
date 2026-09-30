@@ -8100,10 +8100,12 @@ static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_protocol(agx_context *ctx)
 {
    struct agx3_g17p_mrt_protocol p = {0};
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+                    ctx->key->dev.emit_agx3d && ctx->key->fs.nr_samples <= 1;
+   if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->agx3_mrt_tile_ops_ordered ||
-       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
+       (!g18 && !ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
        (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1)) {
       /* Not a refusal by itself -- a single-target shader legitimately has no
        * MRT protocol -- so report only when the key names two or more tile
@@ -8153,6 +8155,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          return agx3_g17p_mrt_refused(__LINE__);
       if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
          continue;
+      if (g18 && (I->format != AGX_FORMAT_U8NORM || I->mask != 15))
+         return agx3_g17p_mrt_refused(__LINE__);
       if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
          return agx3_g17p_mrt_refused(__LINE__);
 
@@ -8231,7 +8235,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          }
       }
    }
-   if (p.offsets[0] != 0)
+   if (p.offsets[0] != 0 ||
+       (g18 && (p.count != 2 || p.offsets[1] != 4 ||
+                p.targets[0] != 0 || p.targets[1] != 1 || tile_loads)))
       return agx3_g17p_mrt_refused(__LINE__);
 
    p.multisample = ctx->key->fs.nr_samples > 1 &&
@@ -8409,7 +8415,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
 static bool
 agx3_g17p_multi_background_protocol(const agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+                    ctx->key->dev.emit_agx3d && ctx->key->fs.nr_samples <= 1;
+   if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->key->fs.ignore_tib_dependencies ||
        list_length(&ctx->blocks) != 1)
@@ -8426,6 +8434,9 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
       if (I->op == AGX_OPCODE_STOP) {
          stopped = true;
       } else if (I->op == AGX_OPCODE_ST_TILE && ctx->key->g17p_mrt_bg) {
+         if (g18 && (I->format != AGX_FORMAT_U8NORM || I->mask != 15 ||
+                     I->pixel_offset != stores * 4 || stores >= 2))
+            return false;
          /* Apple's BG builtins for other layouts store each target once, in
           * no required order, so only require disjoint whole-pixel stores.
           * A multisample clear stores each target through the coverage
@@ -8473,7 +8484,7 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
       }
    }
    if (ctx->key->g17p_mrt_bg)
-      return stopped && stores >= 2;
+      return stopped && (g18 ? stores == 2 : stores >= 2);
    return stopped && ((stride == 16 && stores >= 2 && stores <= 4) ||
                       (stride == 4 && (stores == 4 ||
                        (stores == 3 && format == AGX_FORMAT_U8NORM))));
@@ -8609,7 +8620,9 @@ agx3_g17p_mrt_eot_store_format_ok(enum agx_format format, uint8_t selector)
 static unsigned
 agx3_g17p_multi_eot_count(const agx_context *ctx)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+                    ctx->key->dev.emit_agx3d;
+   if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_COMPUTE || ctx->is_preamble ||
        ctx->key->no_stop ||
        (ctx->key->g17p_rt0_eot_multisample && !ctx->key->g17p_mrt_eot_count) ||
@@ -8618,6 +8631,10 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
 
    const unsigned mixed_count = ctx->key->g17p_mrt_eot_count;
    if (mixed_count == 1 || mixed_count > AGX_MAX_RTS)
+      return false;
+   if (g18 && (mixed_count != 2 || ctx->key->g17p_rt0_eot_multisample ||
+               ctx->key->g17p_mrt_eot_selectors[0] != 0x75 ||
+               ctx->key->g17p_mrt_eot_selectors[1] != 0x75))
       return false;
 
    unsigned values[256];
@@ -9180,6 +9197,35 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    }
 
    const unsigned multi_eot_count = agx3_g17p_multi_eot_count(ctx);
+   if (multi_eot_count && enc == AGX_ISA_ENCODING_AGX3C) {
+      /* Native applegpu_g17g BTNF rgba8-2, re-encoded to AGX3d by the
+       * normal final pass. u0..3 points to two consecutive PBE descriptors;
+       * u4..5 and u8..9 are their tile offsets. Native D=32 bytes.
+       * Captured by build-native-eot-reference.py, text SHA256
+       * 344492993770725a63010f9af89423ebe6be03aa1efeb7f3919320bf9bf1b1e6. */
+      static const uint8_t dual_rgba8_eot[] = {
+         0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
+         0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
+         0x28,0x01,0xa0,0x0a,0x37,0x06,0x04,0x1a,
+         0x29,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
+         0x01,0x02,0x27,0x08,0x04,0x1a,0x29,0x00,
+         0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
+         0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
+         0x00,0x00,0x4a,0x30,0x18,0x00,0x0b,0x82,
+         0x21,0x04,0x1b,0x80,0x21,0x04,0x27,0x00,
+         0x20,0x4a,0x21,0x01,0xab,0x1a,0x00,0x00,
+         0x4a,0x30,0x18,0x00,0x23,0x02,0x07,0x02,
+         0x26,0x81,0xa4,0x12,0x33,0x00,0x07,0x02,
+         0x26,0x81,0xa4,0x12,0x25,0x04,0x15,0x00,
+         0x24,0x00,0xa0,0x22,0x00,0xe0,0x00,0x55,
+         0x25,0x08,0x15,0x00,0x34,0x40,0xa0,0x22,
+         0x00,0xe0,0x04,0x55,0x0e,0x00,0x00,0x00,
+      };
+      static_assert(sizeof(dual_rgba8_eot) == 128, "native dual RGBA8 EOT");
+      ctx->max_reg = MAX2(ctx->max_reg, 7);
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 16);
+      return agx3_append(emission, dual_rgba8_eot, sizeof(dual_rgba8_eot));
+   }
    if (multi_eot_count) {
       static_assert(sizeof(agx3_g17p_quad_eot) == 208, "native quad EOT");
       ctx->max_reg = MAX2(ctx->max_reg, 7);
@@ -9929,7 +9975,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    /* Multiple colour stores need an attachment-specific pixel transaction.
     * Emitting individual tile operations without a proven partition graph
     * produces a syntactically valid shader that writes only partition zero. */
-   if (enc == AGX_ISA_ENCODING_AGX3B &&
+   if ((enc == AGX_ISA_ENCODING_AGX3B || ctx->key->dev.emit_agx3d) &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        tile_stores_left > 1 && !g17p_mrt.valid && !g17p_multi_background &&
        !g17p_msaa_background_stores && !g17p_sample_colour_stores)
@@ -10026,7 +10072,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          : NULL;
    const agx_instr *g17g_deferred_write =
       enc == AGX_ISA_ENCODING_AGX3C && ctx->stage == MESA_SHADER_FRAGMENT &&
-      !ctx->key->fs.ignore_tib_dependencies
+      !ctx->key->fs.ignore_tib_dependencies && !g17p_mrt.valid
          ? agx3_g17g_deferred_colour_wait(ctx) : NULL;
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
                                   g17p_deferred_write != NULL);

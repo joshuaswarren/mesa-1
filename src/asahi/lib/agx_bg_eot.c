@@ -399,6 +399,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
                              struct agx_bg_eot_key *key)
 {
    const bool g17g = agx_chip_m5_paths(cache->dev->chip);
+   const bool g18_dual = cache->dev->chip == AGX_CHIP_G18G &&
+                         agx_g17p_rgba8_mrt_mask(&key->tib) == 3;
    if (g17g) {
       /* The compiler substitutes Apple's 78-byte native text for the G17G RT0
        * store, and it has that text for a U8NORM imageblock only, so the gate
@@ -424,7 +426,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          return NULL;
 
       for (unsigned rt = 1; rt < ARRAY_SIZE(key->op); ++rt) {
-         if (key->op[rt] != AGX_BG_EOT_NONE)
+         if (key->op[rt] != (g18_dual && rt == 1 ? AGX_EOT_STORE
+                                                : AGX_BG_EOT_NONE))
             return NULL;
       }
    }

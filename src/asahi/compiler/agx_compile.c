@@ -8235,10 +8235,11 @@ agx3_sink_vertex_outputs(agx_context *ctx)
 static bool
 agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 {
-   /* Only G17P's tile ops are ordered here; every other encoding declines
-    * below anyway. Decline quietly, so AGX_MESA_DEBUG=refuse names only real
-    * refusals on G17G and G18G. */
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+   /* G18's native two-target fragment uses the same descending stores and
+    * per-target class pairs. Keep its qualification to one-sample shaders. */
+   const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+                    ctx->key->dev.emit_agx3d && ctx->key->fs.nr_samples <= 1;
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18)
       return false;
 
    if (ctx->key->g17p_emrt && ctx->key->secondary &&
@@ -8304,9 +8305,9 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       return true;
    }
 
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
-       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
+       (!g18 && !ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
        list_length(&ctx->blocks) != 1)
       AGX3_ORDER_REFUSE();
 
@@ -8460,6 +8461,10 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        (!lone_sparse_store &&
         store_count < (subset && !only_partition0 ? 1 : 2)) ||
        (depth_ops && depth_ops != 3))
+      AGX3_ORDER_REFUSE();
+
+   if (g18 && (store_count != 2 || load_count || sample_masks || depth_ops ||
+               ctx->key->fs.ignore_tib_dependencies))
       AGX3_ORDER_REFUSE();
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no

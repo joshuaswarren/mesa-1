@@ -204,6 +204,14 @@ bool agx_ioto_g17g_resource_program_compose(
    enum agx_ioto_g17g_program_stage stage,
    void *output, size_t capacity, size_t *written);
 
+/* The two-target G18 capture releases colour class pairs 0 and 1 (mask 3).
+ * Other stages retain their own release protocol. */
+bool agx_ioto_g17g_resource_program_compose_classes(
+   uint64_t program_va, const void *body, size_t body_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   enum agx_ioto_g17g_program_stage stage, unsigned colour_classes,
+   void *output, size_t capacity, size_t *written);
+
 /* Compose a G17P resource program around a body emitted by the HAL200 ESL
  * scheduler. Resource loads and their drain padding precede the packed shader
  * state. The default profile loader then copies those results into CProg and

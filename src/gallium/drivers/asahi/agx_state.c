@@ -5077,12 +5077,19 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
     * logs/m5-state-matrix-c-native-hv-20260914-055541).
     */
    const bool no_color = batch->key.nr_cbufs == 0;
+   const bool dual = dev->chip == AGX_CHIP_G18G &&
+                     batch->key.nr_cbufs == 2 &&
+                     agx_g17p_rgba8_mrt_mask(&key->tib) == 3;
+   const unsigned targets = dual ? 2 : 1;
    /* An attachment without valid contents may be initialized to zero. Keep
     * LOAD distinct: partial renders must preserve the previous tile contents.
     */
-   const bool undefined = !store && !no_color && key->op[0] == AGX_BG_EOT_NONE;
-   if (undefined)
-      key->op[0] = AGX_BG_CLEAR;
+   bool undefined[2] = {0};
+   for (unsigned rt = 0; rt < targets; ++rt) {
+      undefined[rt] = !store && !no_color && key->op[rt] == AGX_BG_EOT_NONE;
+      if (undefined[rt])
+         key->op[rt] = AGX_BG_CLEAR;
+   }
    const enum agx_bg_eot_op op = key->op[0];
    if ((no_color ? surf->texture || op != AGX_BG_EOT_NONE ||
                       key->tib.sample_size_B
@@ -5107,11 +5114,11 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       return agx_reject_g17g_tile(batch, "M5 tile layout or operation");
    }
    for (unsigned rt = 1; rt < PIPE_MAX_COLOR_BUFS; ++rt) {
-      if (key->op[rt] != AGX_BG_EOT_NONE)
+      if (key->op[rt] != (rt < targets ? op : AGX_BG_EOT_NONE))
          return agx_reject_g17g_tile(batch, "M5 tile attachment count");
    }
    if (op == AGX_BG_CLEAR)
-      key->reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+      key->reserved_preamble = 4 + 8 * targets;
 
    struct agx_bg_eot_shader *shader = agx_get_bg_eot_shader(&ctx->bg_eot, key);
    if (!shader || !shader->bo || !shader->bo->va || !shader->ptr ||
@@ -5142,9 +5149,9 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
        * table pointer occupies u0..3 and the tile offset occupies u4..5.
        */
       /* G18G runs the same shader re-encoded as agx3d, which is 68 bytes. */
-      const unsigned eot_size = dev->chip == AGX_CHIP_G18G ? 68 : 78;
+      const unsigned eot_size = dual ? 106 : dev->chip == AGX_CHIP_G18G ? 68 : 78;
       if (shader->info.binary_size != eot_size || shader->info.nr_gprs != 8 ||
-          shader->info.agx3_staging_halfs != 8) {
+          shader->info.agx3_staging_halfs != 8 * targets) {
          if (dev->debug & AGX_DBG_FAULTTRACE)
             fprintf(stderr, "M5_EOT_ABI size=%u gprs=%u staging=%u\n",
                     shader->info.binary_size, shader->info.nr_gprs,
@@ -5152,18 +5159,27 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
          return agx_reject_g17g_tile(batch, "M5 EOT shader ABI");
       }
       struct agx_ptr pbe = agx_pool_alloc_aligned(
-         &batch->pool, sizeof(struct agx_gallium_pbe_descriptor), 32);
-      struct pipe_image_view view = image_view_for_surface(surf);
+         &batch->pool, targets * sizeof(struct agx_gallium_pbe_descriptor), 32);
       /* The fragment and background shaders already encode sRGB into the
        * packed imageblock. Store those bytes without a second conversion. */
-      view.format = util_format_linear(view.format);
-      if (!agx_batch_upload_pbe(batch, pbe.cpu, &view, true, true, false,
-                                batch->feedback & PIPE_CLEAR_COLOR0, false))
-         return agx_reject_g17g_tile(batch, "M5 EOT PBE");
-      const uint64_t arguments[2] = {pbe.gpu, 0};
+      for (unsigned rt = 0; rt < targets; ++rt) {
+         struct pipe_image_view view = image_view_for_surface(&batch->key.cbufs[rt]);
+         view.format = util_format_linear(view.format);
+         if (!agx_batch_upload_pbe(
+                batch, (struct agx_gallium_pbe_descriptor *)pbe.cpu + rt,
+                &view, true, true, false,
+                batch->feedback & (PIPE_CLEAR_COLOR0 << rt), false))
+            return agx_reject_g17g_tile(batch, "M5 EOT PBE");
+      }
+      /* Native offset arguments are eight bytes apart: RT0 is u4 and RT1
+       * is u8, with unused padding at u6. The BTNF metadata's argument
+       * offsets 0/2 name dwords, not adjacent CProg half pairs. */
+      const uint64_t arguments[3] = {
+         pbe.gpu, 0, dual ? agx_tilebuffer_offset_B(&key->tib, 1) : 0,
+      };
       const uint64_t table = agx_pool_upload_aligned(
-         &batch->pool, arguments, sizeof(arguments), 16);
-      ranges[0] = (struct agx3_ioto_uniform_range){0, 6, table};
+         &batch->pool, arguments, 8 + 8 * targets, 16);
+      ranges[0] = (struct agx3_ioto_uniform_range){0, 2 + 4 * targets, table};
       if (dev->debug & AGX_DBG_FAULTTRACE) {
          fprintf(stderr, "M5_EOT_PBE address=%#llx descriptor=",
                  (unsigned long long)pbe.gpu);
@@ -5172,30 +5188,42 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
          fputc('\n', stderr);
       }
    } else if (op == AGX_BG_CLEAR) {
-      if (shader->info.push_count != AGX3_G17P_RT0_CLEAR_PUSH_HALFS ||
+      if (shader->info.push_count != 4 + 8 * targets ||
           shader->info.uses_txf)
          return agx_reject_g17g_tile(batch, "M5 clear shader ABI");
-      const union pipe_color_union zero = {0};
+      union pipe_color_union colors[2] = {0};
+      for (unsigned rt = 0; rt < targets; ++rt) {
+         if (!undefined[rt])
+            colors[rt] = batch->clear_color[rt];
+      }
       const uint64_t clear = agx_pool_upload_aligned(
-         &batch->pool, undefined ? &zero : &batch->clear_color[0], 16, 16);
-      ranges[0] = (struct agx3_ioto_uniform_range){4, 8, clear};
+         &batch->pool, colors, targets * sizeof(colors[0]), 16);
+      ranges[0] = (struct agx3_ioto_uniform_range){4, 8 * targets, clear};
       if (dev->debug & AGX_DBG_FAULTTRACE) {
          const union pipe_color_union *color =
-            undefined ? &zero : &batch->clear_color[0];
+            &colors[0];
          fprintf(stderr, "M5_CLEAR undefined=%u rgba=%g,%g,%g,%g format=%s\n",
-                 undefined, color->f[0], color->f[1], color->f[2], color->f[3],
+                 undefined[0], color->f[0], color->f[1], color->f[2], color->f[3],
                  util_format_name(surf->format));
       }
    } else {
       if (shader->info.push_count || !shader->info.uses_txf)
          return agx_reject_g17g_tile(batch, "M5 reload shader ABI");
+      /* Background NIR names texture indices 0, 2, ... for RT0, RT1, ... */
+      const unsigned texture_count = 2 * targets - 1;
       struct agx_ptr texture = agx_pool_alloc_aligned(
-         &batch->pool, sizeof(struct agx_gallium_texture_descriptor), 32);
-      struct pipe_sampler_view sampler_view = sampler_view_for_surface(surf);
-      if (!agx_pack_texture(AGX_DESCRIPTOR_GENERATION_10, texture.cpu,
-                            agx_resource(surf->texture), surf->format,
-                            &sampler_view))
-         return agx_reject_g17g_tile(batch, "M5 reload texture");
+         &batch->pool, texture_count * sizeof(struct agx_gallium_texture_descriptor), 32);
+      memset(texture.cpu, 0,
+             texture_count * sizeof(struct agx_gallium_texture_descriptor));
+      for (unsigned rt = 0; rt < targets; ++rt) {
+         const struct pipe_surface *target = &batch->key.cbufs[rt];
+         struct pipe_sampler_view sampler_view = sampler_view_for_surface(target);
+         if (!agx_pack_texture(
+                AGX_DESCRIPTOR_GENERATION_10,
+                (struct agx_gallium_texture_descriptor *)texture.cpu + 2 * rt,
+                agx_resource(target->texture), target->format, &sampler_view))
+            return agx_reject_g17g_tile(batch, "M5 reload texture");
+      }
       struct agx_gallium_sampler_descriptor sampler = {0};
       /* Same Gen5 texel-fetch sampler as hk_pack_native_txf_sampler(G17G).
        * Gen5's comparison mode bit is required even for a non-shadow fetch.
@@ -6628,7 +6656,10 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
     */
    const bool color_attachment_ok =
       batch->key.nr_cbufs == 0 ||
-      (batch->key.nr_cbufs == 1 && batch->key.cbufs[0].texture);
+      (batch->key.nr_cbufs == 1 && batch->key.cbufs[0].texture) ||
+      (dev->chip == AGX_CHIP_G18G && batch->key.nr_cbufs == 2 &&
+       batch->key.cbufs[0].texture && batch->key.cbufs[1].texture &&
+       agx_g17p_rgba8_mrt_mask(&batch->tilebuffer_layout) == 3);
    const struct pipe_surface *zsbuf = &batch->key.zsbuf;
    /* With the comparison disabled the depth unit performs no test and, per
     * the API, no write either, and a disabled stencil unit does nothing at

@@ -971,7 +971,7 @@ g17g_graphics_program_generate(
        !desc->nr_gprs || desc->nr_gprs > 256 || desc->scratch_size ||
        !desc->compiler_d_valid || desc->compiler_d > 256 ||
        (desc->writes_sample_mask && !desc->fragment) ||
-       desc->colour_classes > 1 ||
+       (desc->colour_classes > 1 && desc->colour_classes != 3) ||
        (!desc->fragment && desc->colour_classes) ||
        /* A render with no colour attachment has an empty imageblock. Apple's
         * own colour-free render emits the same fragment SPECLM spelling as a
@@ -1052,9 +1052,9 @@ g17g_graphics_program_generate(
    struct agx3_g17p_graphics_program staged = {0};
    if (!agx3_ioto_uniform_program_body_generate(
           chip, &load_desc, workspace, &body_size, &copy_offset) ||
-       !agx_ioto_g17g_resource_program_compose(
+       !agx_ioto_g17g_resource_program_compose_classes(
           desc->program_va, body, body_size, &tail,
-          stage,
+          stage, MAX2(desc->colour_classes, 1),
           staged.bytes, sizeof(staged.bytes), &written) ||
        written > bound || written > UINT16_MAX)
       return false;
