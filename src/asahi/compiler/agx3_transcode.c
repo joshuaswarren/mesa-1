@@ -359,6 +359,7 @@ transcode(struct util_dynarray *binary, unsigned start,
    util_dynarray_init(&map, NULL);
    util_dynarray_init(&branches, NULL);
    struct flag_state flags = {.pending = -1, .adjacent = true};
+   bool helper_base_next = false;
 
    unsigned i = 0;
    while (i < len) {
@@ -386,6 +387,18 @@ transcode(struct util_dynarray *binary, unsigned start,
       }
       /* Encode by the table's own name for the decoded form. */
       const char *name = agx3c_table.forms[form].mnemonic;
+      if (helper_base_next) {
+         /* The SR14 setup sequence indexes the USC-base helper table.
+          * G18's AGX3D tables start at 0x200/0x400, twice the G17 bases.
+          * Match this sequence rather than rewriting arbitrary immediates. */
+         if (strcmp(name, "ldimm") || fields[2] != 0 ||
+             (fields[14] != 0x100 && fields[14] != 0x200)) {
+            *why = "unrecognized Ioto SR14 helper base";
+            goto fail;
+         }
+         fields[14] *= 2;
+      }
+      helper_base_next = ioto && !strcmp(name, "rld") && fields[21] == 14;
       if (!apply_g18g_rules(name, fields, ioto, why) ||
           !apply_flag_slot_rule(name, fields, &flags, why))
          goto fail;

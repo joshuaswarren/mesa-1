@@ -8,6 +8,38 @@
 #include <string.h>
 
 bool
+agx3_build_g18g_container_lead(void *image, size_t capacity)
+{
+   if (!image || capacity < AGX3_G18G_CONTAINER_LEAD_SIZE)
+      return false;
+
+   /* Native G18 CODE leads: four identical tables, six helpers followed
+    * by two terminals. The shader setup selects 0x200 for fragment/tile
+    * programs or 0x400 for vertex programs and adds its SR14 offset.
+    * These are AGX3D instructions, not the M5 table's AGX3C bytecode. */
+   uint8_t *bytes = image;
+   memset(bytes, 0, AGX3_G18G_CONTAINER_LEAD_SIZE);
+   bytes[0] = 0x40;
+   bytes[1] = 0x06;
+   for (size_t i = 0x40; i < AGX3_G18G_CONTAINER_LEAD_SIZE; i += 2)
+      bytes[i] = 0x08;
+
+   static const uint8_t terminal[] = {0x00, 0xd1, 0x22, 0, 0, 0, 0, 0x74};
+   for (unsigned table = 2; table <= 5; ++table) {
+      uint8_t *base = bytes + table * 0x100;
+      for (unsigned i = 0; i < 6; ++i) {
+         uint8_t *record = base + i * 16;
+         memset(record, 0, 10);
+         record[1] = 0x0e;
+         record[2] = (6 - i) << 4;
+      }
+      memcpy(base + 0x60, terminal, sizeof(terminal));
+      memcpy(base + 0x70, terminal, sizeof(terminal));
+   }
+   return true;
+}
+
+bool
 agx3_build_g17g_container_lead(void *image, size_t capacity)
 {
    if (!image || capacity < 0x340)

@@ -80,7 +80,8 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
 {
    /* Match the standalone allocation lead already used for G17P main
     * shaders. Native packed CODE blocks do not each own such a lead. */
-   const size_t lead_size = 0x340;
+   const size_t lead_size = cache->dev->chip == AGX_CHIP_G18G
+                              ? AGX3_G18G_CONTAINER_LEAD_SIZE : 0x340;
    /* LDSHDR's existing auxiliary fetch-span metadata is based on compiler
     * text size. Reserve at least that span after the main entry too, so the
     * EOT text128/main64 case cannot prefetch outside this CODE block. */
@@ -108,7 +109,12 @@ agx_g17p_upload_bg_eot(struct agx_bg_eot_cache *cache,
    if (!image)
       return false;
 
-   if (agx_chip_m5_paths(cache->dev->chip)) {
+   if (cache->dev->chip == AGX_CHIP_G18G) {
+      if (!agx3_build_g18g_container_lead(image, lead_size)) {
+         free(image);
+         return false;
+      }
+   } else if (agx_chip_m5_paths(cache->dev->chip)) {
       if (!agx3_build_g17g_container_lead(image, lead_size)) {
          free(image);
          return false;

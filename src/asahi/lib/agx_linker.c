@@ -178,9 +178,16 @@ agx3_put_le32(uint8_t *where, uint32_t value)
 
 /* Total container bytes for `code_size` bytes of executable. */
 static size_t
-agx3_container_size(size_t code_size)
+agx3_container_lead_size(enum agx_chip chip)
 {
-   return AGX3_CONTAINER_LEAD + AGX3_CONTAINER_BLOCK_HDR +
+   return chip == AGX_CHIP_G18G ? AGX3_G18G_CONTAINER_LEAD_SIZE
+                               : AGX3_CONTAINER_LEAD;
+}
+
+static size_t
+agx3_container_size(enum agx_chip chip, size_t code_size)
+{
+   return agx3_container_lead_size(chip) + AGX3_CONTAINER_BLOCK_HDR +
           AGX3_CONTAINER_CONST_PROG + ALIGN_POT(code_size, 64);
 }
 
@@ -204,8 +211,13 @@ static void
 agx3_build_container(enum agx_chip chip, uint8_t *image, size_t code_size, bool fragment,
                      bool sampled_fragment)
 {
-   memset(image, 0, agx3_container_size(code_size));
-   if (agx_chip_m5_paths(chip)) {
+   const size_t lead_size = agx3_container_lead_size(chip);
+   memset(image, 0, agx3_container_size(chip, code_size));
+   if (chip == AGX_CHIP_G18G) {
+      bool built = agx3_build_g18g_container_lead(image, lead_size);
+      assert(built);
+      (void)built;
+   } else if (agx_chip_m5_paths(chip)) {
       bool built = agx3_build_g17g_container_lead(image, AGX3_CONTAINER_LEAD);
       assert(built);
       (void)built;
@@ -213,11 +225,11 @@ agx3_build_container(enum agx_chip chip, uint8_t *image, size_t code_size, bool 
       agx3_build_container_lead(image);
    }
 
-   agx3_put_le32(image + AGX3_CONTAINER_LEAD,
+   agx3_put_le32(image + lead_size,
                  AGX3_CONTAINER_BLOCK_HDR + AGX3_CONTAINER_CONST_PROG +
                     ALIGN_POT(code_size, 64));
 
-   uint8_t *constant = image + AGX3_CONTAINER_LEAD + AGX3_CONTAINER_BLOCK_HDR;
+   uint8_t *constant = image + lead_size + AGX3_CONTAINER_BLOCK_HDR;
    if (chip == AGX_CHIP_G18G) {
       agx3_build_container_stop_program_agx3d(constant);
       return;
@@ -360,12 +372,13 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    }
 
    const bool container = agx3_uses_code_container(dev);
-   const size_t alloc_size = container ? agx3_container_size(size) : size;
+   const size_t alloc_size = container ? agx3_container_size(dev->chip, size) : size;
 
    linked->bo = agx_bo_create(dev, alloc_size, 0, AGX_BO_EXEC | AGX_BO_LOW_VA,
                               "Linked executable");
    linked->size = size;
-   linked->entry_offset = container ? AGX3_CONTAINER_ENTRY : 0;
+   linked->entry_offset = container ? agx3_container_lead_size(dev->chip) +
+                                        AGX3_CODE_BLOCK_ENTRY_OFFSET : 0;
    if (!linked->bo) {
       fprintf(stderr,
               "agx_fast_link: executable low-VA allocation of %zu bytes "

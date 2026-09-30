@@ -1541,7 +1541,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
       }
 
       memset(map, 0, usc_base_size);
-      if (agx_chip_m5_paths(dev->chip)) {
+      if (dev->chip == AGX_CHIP_G18G) {
+         if (!agx3_build_g18g_container_lead(map, usc_base_size))
+            return false;
+      } else if (agx_chip_m5_paths(dev->chip)) {
          if (!agx3_build_g17g_container_lead(map, usc_base_size))
             return false;
       } else {
