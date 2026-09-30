@@ -16245,8 +16245,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                const enum agx3_alu_hint hints[2]={
                   agx3_post_ra_hint(I->src[0]),agx3_post_ra_hint(I->src[1])};
                uint8_t bytes[AGX3_ALU_MAX_LENGTH],len=0;
+               /* The compact form is grounded for G17P only. G18 also
+                * reaches this dispatch as AGX3C before transcoding. */
                const bool native_forms =
-                  agx_get_codegen_flags() & AGX_CODEGEN_G17P_COMPACT_BITOPS;
+                  enc == AGX_ISA_ENCODING_AGX3B &&
+                  (agx_get_codegen_flags() & AGX_CODEGEN_G17P_COMPACT_BITOPS);
                const bool encoded = native_forms
                   ? agx3_alu_bit_reg_native(enc, op, I->dest[0].value, src,
                                             hints, I->dest[0].cache, wait,

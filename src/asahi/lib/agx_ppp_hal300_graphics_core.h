@@ -17,6 +17,9 @@ struct agx_ppp_hal300_graphics_fields {
    uint64_t varying_table;
    unsigned cf_binding_count;
    unsigned cull_mode;
+   /* Native G18 handleScissorUpdates sets primary ISP control bit 16 when
+    * using the separately bound scissor buffer (26A428, 0x21963acb0). */
+   bool scissor_enable;
    /*
     * Set when the render has no colour attachment. Two things move with it,
     * both from controlled colour-free renders on 25G76: the interpolated

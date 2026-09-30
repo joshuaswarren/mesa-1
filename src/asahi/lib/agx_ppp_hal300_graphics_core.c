@@ -76,6 +76,7 @@ agx_ppp_hal300_graphics_core_pack(
    const bool points = fields->object_type == AGX_PPP_HAL300_POINTS;
    const bool lines = fields->object_type == AGX_PPP_HAL300_LINES;
    const uint32_t control = 0x00000200 | (points || lines ? 0x04000000 : 0) |
+                            (fields->scissor_enable ? 0x00010000 : 0) |
                             (depth_inactive ? 0x00040000 : 0) |
                             (fields->stencil_active ? 0x00080000 : 0);
    const uint32_t face = ((uint32_t)compare << 24) |

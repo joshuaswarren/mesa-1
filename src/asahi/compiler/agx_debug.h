@@ -7,6 +7,7 @@
 #pragma once
 
 #include "util/macros.h"
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {

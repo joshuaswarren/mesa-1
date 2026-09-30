@@ -6846,6 +6846,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
 
    const struct agx_ppp_hal300_graphics_fields graphics_fields = {
       .fragment_program = fragment_program,
+      .scissor_enable = dev->chip == AGX_CHIP_G18G,
       .no_color_attachment = batch->key.nr_cbufs == 0,
       .fragment_pass = fragment_pass,
       /* Bit 26 of the shader's own fragment control; a discarding shader
@@ -9185,9 +9186,11 @@ agx_launch(struct agx_batch *batch, struct agx_grid grid,
             const uint64_t write_control = agx_pool_upload_aligned(
                &batch->pool, agx_g17p_native_write_control,
                sizeof(agx_g17p_native_write_control), 32);
-            if (!descriptor_size || !write_control)
-               agx_native_descriptor_rejected(dev,
+            if (!descriptor_size || !write_control) {
+               agx_native_descriptor_rejected(batch,
                                               "compute storage resources");
+               return;
+            }
 
             /* This lowering accepts exactly image unit 0 with no sampled
              * textures, whose paired PBE is descriptor 1. State 0 therefore
