@@ -92,6 +92,17 @@ hk_shader_fma_supported(enum agx_chip chip)
           agx_chip_exact_fma32(chip);
 }
 
+/* Cooperative matrices hold token-digest parity with the reference driver on
+ * G13 (M1 family) only. Other chips need AGX_SIMDMAT=1 until they pass the
+ * same gate. AGX_SIMDMAT=0 disables them everywhere.
+ */
+static bool
+hk_cooperative_matrix_enabled(const struct agx_device *dev)
+{
+   return debug_get_bool_option(
+      "AGX_SIMDMAT", dev->chip == AGX_CHIP_G13G || dev->chip == AGX_CHIP_G13X);
+}
+
 static void
 hk_get_device_extensions(const struct agx_device *dev,
                          const struct hk_instance *instance,
@@ -1956,7 +1967,7 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    bool native_coop_matrix = agx_chip_g17_m5(pdev->dev.chip) &&
                              debug_get_bool_option("ASAHI_M5_COOPERATIVE_MATRIX", true);
    supported_extensions.KHR_cooperative_matrix =
-      native_coop_matrix || agx_simdmat_enabled();
+      native_coop_matrix || hk_cooperative_matrix_enabled(&pdev->dev);
 
    supported_extensions.KHR_shader_bfloat16 =
       native_coop_matrix &&
@@ -2438,7 +2449,7 @@ hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
             }
          }
       }
-   } else if (agx_simdmat_enabled()) {
+   } else if (hk_cooperative_matrix_enabled(&pdev->dev)) {
       /* G13 hardware 8x8x8 matrix MAC (simd_matrix_fmadd16/32), G13 only: the
        * native path above owns M5-generation devices. The unit
        * takes fp16 or fp32 A/B and accumulates in fp32 (fmadd32) or fp16
