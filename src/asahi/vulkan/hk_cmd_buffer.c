@@ -349,22 +349,25 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
-   /* The app declared a memory dependency: the next CDM launch carries the
-    * full barrier set (hk_cmd_dispatch.c). Compute launches before the
-    * barrier were already flushed by the previous launch's gating.
-    */
-   cmd->state.cs.cdm_barrier_pending = true;
+   if (!HK_PERF(dev, ALWAYSCDMBARRIER)) {
+      /* The app declared a memory dependency: the next CDM launch carries the
+       * full barrier set (hk_cmd_dispatch.c). Compute launches before the
+       * barrier were already flushed by the previous launch's gating.
+       */
+      cmd->state.cs.cdm_barrier_pending = true;
 
-   /* Outside a render pass only a CDM control stream can be open; the
-    * pending flag above orders it against the next launch. Ending the
-    * compute batch here would only produce the stream merge_control_streams
-    * stitches back together at hk_EndCommandBuffer, plus a stream link and
-    * a fresh chunk per barrier; keep it open. The batches must end when a
-    * graphics batch is open: the dependency then spans batch types and the
-    * kernel orders the resulting commands (agx_cmd_header barriers). */
-   if (!cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
-       !cmd->current_cs.post_gfx)
-      return;
+      /* Outside a render pass only a CDM control stream can be open; the
+       * pending flag above orders it against the next launch. Ending the
+       * compute batch here would only produce the stream
+       * merge_control_streams stitches back together at hk_EndCommandBuffer,
+       * plus a stream link and a fresh chunk per barrier; keep it open. The
+       * batches must end when a graphics batch is open: the dependency then
+       * spans batch types and the kernel orders the resulting commands
+       * (agx_cmd_header barriers). */
+      if (!cmd->current_cs.gfx && !cmd->current_cs.pre_gfx &&
+          !cmd->current_cs.post_gfx)
+         return;
+   }
 
    hk_cmd_buffer_end_compute(cmd);
    hk_cmd_buffer_end_graphics(cmd);
