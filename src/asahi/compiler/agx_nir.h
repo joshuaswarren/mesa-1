@@ -18,6 +18,8 @@ struct nir_instr;
 #define AGX_NIR_MEMORY_PACKED_COUNT_MASK (7u << AGX_NIR_MEMORY_PACKED_COUNT_SHIFT)
 bool agx_nir_lower_address(struct nir_shader *shader, bool byte_indices);
 bool agx_nir_lower_algebraic_late(struct nir_shader *shader);
+bool agx_nir_fold_pixel_coord(struct nir_shader *shader);
+bool agx_nir_fold_extract16_bfe(struct nir_shader *shader);
 bool agx_nir_cleanup_amul(struct nir_shader *shader);
 bool agx_nir_fuse_lea(struct nir_shader *shader);
 bool agx_nir_lower_lea(struct nir_shader *shader);

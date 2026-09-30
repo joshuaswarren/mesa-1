@@ -124,7 +124,7 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
    static int ro_alias = -1;
    if (unlikely(ro_alias < 0)) {
       ro_alias =
-         debug_get_bool_option("HK_G17P_SPARSE_TEXEL_RO_ALIAS", false) ? 1 : 0;
+         HK_ENV_BOOL_ONCE("HK_G17P_SPARSE_TEXEL_RO_ALIAS", false) ? 1 : 0;
    }
    const bool g17p = device->dev.chip == AGX_CHIP_G17P;
    const uint64_t sampled_base = (g17p && !ro_alias) ? rw_base : ro_base;

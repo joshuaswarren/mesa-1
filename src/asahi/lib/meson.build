@@ -220,6 +220,10 @@ libagx_shaders = custom_target(
   input : libagx_spv,
   output : ['libagx_shaders.h', 'libagx_shaders.c'],
   command : [prog_asahi_clc, libagx_spv, '@OUTPUT0@', '@OUTPUT1@'],
+  # v53-c2: the precompiled internal kernels keep the v53-pre code generation.
+  # The C2 loop defaults are qualified for runtime-compiled shaders first; a
+  # runtime AGX_G17P_C2_DEFAULTS=0 cannot reach these build-time binaries.
+  env : ['AGX_G17P_C2_DEFAULTS=0'],
 )
 
 idep_libagx_shaders_h = declare_dependency(

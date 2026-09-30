@@ -282,7 +282,7 @@ hk_g17p_upload_quarantine_enabled(const struct hk_device *dev)
 {
    static int enabled = -1;
    if (enabled < 0)
-      enabled = debug_get_bool_option("HK_G17P_UPLOAD_QUARANTINE", false);
+      enabled = HK_ENV_BOOL_ONCE("HK_G17P_UPLOAD_QUARANTINE", false);
 
    return dev->dev.chip == AGX_CHIP_G17P && enabled;
 }

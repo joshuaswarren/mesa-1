@@ -1263,10 +1263,23 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
                                    uint32_t set_layout_count,
                                    struct vk_descriptor_set_layout *const *layouts,
                                    bool allow_single_sample,
+                                   unsigned v57_flags,
                                    struct hk_ordinary_descriptor_requirements *requirements)
 {
-   if (nir->info.stage != MESA_SHADER_FRAGMENT)
+   const bool vertex = nir->info.stage == MESA_SHADER_VERTEX &&
+                       (v57_flags & HK_ORDINARY_V57_VERTEX);
+   if (nir->info.stage != MESA_SHADER_FRAGMENT && !vertex)
       return false;
+   /* Vertex objects never get ordinary variants: keep the proof dynamic.
+    * v57d: the requirement list is still reported (vertex_guard_out) so the
+    * driver's per-draw trace can evaluate the dynamic guard on the CPU. */
+   struct hk_ordinary_descriptor_requirements *vertex_guard_out = NULL;
+   if (vertex) {
+      vertex_guard_out = requirements;
+      requirements = NULL;
+      allow_single_sample = true;
+   }
+   const bool allow_txf = v57_flags & HK_ORDINARY_V57_TXF;
    nir_function_impl *old = nir_shader_get_entrypoint(nir);
    nir_variable *resources[16];
    unsigned count = 0, samples = 0;
@@ -1277,8 +1290,9 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
          nir_tex_instr *tex = nir_instr_as_tex(instr);
          if (nir_tex_instr_is_query(tex))
             continue;
+         const bool txf = allow_txf && tex->op == nir_texop_txf;
          if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-              tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
+              tex->op != nir_texop_txl && tex->op != nir_texop_txd && !txf) ||
              tex->dest_type != nir_type_float32 || tex->is_shadow ||
              tex->is_sparse || tex->is_array ||
              tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
@@ -1286,10 +1300,12 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
             return false;
          int t = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
          int s = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
-         if (t < 0 || s < 0)
+         /* A texelFetch has no sampler; its combined-image binding still
+          * carries the sampler words the guard reads. */
+         if (t < 0 || (s < 0 && !txf))
             return false;
          nir_deref_instr *td = nir_src_as_deref(tex->src[t].src);
-         nir_deref_instr *sd = nir_src_as_deref(tex->src[s].src);
+         nir_deref_instr *sd = s >= 0 ? nir_src_as_deref(tex->src[s].src) : td;
          if (td->deref_type != nir_deref_type_var ||
              sd->deref_type != nir_deref_type_var || td->var != sd->var)
             return false;
@@ -1325,7 +1341,7 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
       return false;
 
    struct hk_ordinary_descriptor_requirements proof = {0};
-   bool can_select = requirements != NULL;
+   bool can_select = requirements != NULL || vertex_guard_out != NULL;
    for (unsigned i = 0; i < count && can_select; ++i) {
       unsigned set = resources[i]->data.descriptor_set;
       unsigned binding = resources[i]->data.binding;
@@ -1345,7 +1361,7 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
    }
 
    struct lower_descriptors_ctx ctx = {
-      .stage = MESA_SHADER_FRAGMENT,
+      .stage = nir->info.stage,
       .descriptor_generation = 9,
    };
    for (unsigned i = 0; i < set_layout_count; ++i)
@@ -1386,9 +1402,22 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
    }
    /* Preserve the specialization point through inter-stage optimization.
     * The marker is removed before either variant reaches AGX compilation. */
-   if (can_select) {
+   if (can_select && requirements) {
       *requirements = proof;
       ordinary = nir_load_ordinary_descriptor_guard_agx(&b, ordinary);
+   } else if (can_select && vertex_guard_out) {
+      *vertex_guard_out = proof; /* trace only; the guard stays dynamic */
+   }
+   /* v57d diagnostic HK_G17P_ORDINARY_VS_GUARD=slow|fast: resolve a vertex
+    * region's runtime guard to one arm (flicker bisect). "slow" is the
+    * complete generic path and is correct for every descriptor; "fast" is
+    * correct only for ordinary descriptors. Unset keeps the runtime guard. */
+   if (vertex) {
+      const char *arm = getenv("HK_G17P_ORDINARY_VS_GUARD");
+      if (arm && !strcmp(arm, "slow"))
+         ordinary = nir_imm_false(&b);
+      else if (arm && !strcmp(arm, "fast"))
+         ordinary = nir_imm_true(&b);
    }
    nir_if *nif = nir_push_if(&b, ordinary);
    nif->control = nir_selection_control_dont_flatten;

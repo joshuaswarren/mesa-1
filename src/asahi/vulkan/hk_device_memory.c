@@ -303,7 +303,7 @@ hk_FreeMemory(VkDevice device, VkDeviceMemory _mem,
     */
    if (dev->dev.chip == AGX_CHIP_G17P &&
        (mem->bo->flags & (AGX_BO_SHAREABLE | AGX_BO_SHARED)) &&
-       debug_get_bool_option("HK_G17P_WAIT_SHARED_MEMORY_FREE", false)) {
+       HK_ENV_BOOL_ONCE("HK_G17P_WAIT_SHARED_MEMORY_FREE", false)) {
       mesa_logi_once("G17P shared-memory free queue-idle containment enabled");
       VkResult result = vk_common_DeviceWaitIdle(device);
       if (result != VK_SUCCESS)

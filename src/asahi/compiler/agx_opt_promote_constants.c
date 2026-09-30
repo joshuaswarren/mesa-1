@@ -8,6 +8,9 @@
 #include "util/hash_table.h"
 #include "util/ralloc.h"
 #include "agx_compiler.h"
+#include "agx_debug.h"
+#include "agx3_uniform_integer_instr.h"
+#include "util/u_debug.h"
 #include "agx_opcodes.h"
 
 /*
@@ -74,6 +77,33 @@ record_use(void *memctx, struct hash_table_u64 *constants, uint64_t imm,
    info->align_16 = MAX2(info->align_16, agx_size_align_16(size));
 }
 
+/* Reuse the packer's full instruction-domain proof for AGX3 integer operands.
+ * Do not broaden the opcode-only predicate: modifiers, operand position and
+ * the opposite source's type are part of the native instruction contract.
+ * Private qualification switch; shader cache must be disabled in both arms.
+ */
+static bool
+constant_use_accepts_uniform(agx_context *ctx, const agx_instr *I, unsigned s,
+                             unsigned uniform, enum agx_size size)
+{
+   if (agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s, uniform, size))
+      return true;
+
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B || I->nr_srcs > 3 ||
+       uniform >= AGX_NUM_UNIFORMS ||
+       !(agx_get_codegen_flags() &
+         AGX_CODEGEN_G17P_PROMOTE_INTEGER_CONSTANTS))
+      return false;
+
+   agx_instr candidate = *I;
+   agx_index sources[3];
+   memcpy(sources, I->src, I->nr_srcs * sizeof(*sources));
+   candidate.src = sources;
+   sources[s] = agx_replace_index(sources[s], agx_uniform(uniform, size));
+   struct agx3_uniform_integer_desc desc;
+   return agx3_uniform_integer_instruction(&candidate, false, &desc);
+}
+
 static void
 pass(agx_context *ctx, void *memctx)
 {
@@ -95,7 +125,7 @@ pass(agx_context *ctx, void *memctx)
       } else {
          agx_foreach_ssa_src(I, s) {
             if (BITSET_TEST(is_immediate, I->src[s].value) &&
-                agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+                constant_use_accepts_uniform(ctx, I, s,
                                           ctx->out->push_count,
                                           I->src[s].size)) {
 
@@ -178,7 +208,7 @@ pass(agx_context *ctx, void *memctx)
             _mesa_hash_table_u64_search(constants, values[I->src[s].value]);
 
          if (info && info->promoted &&
-             agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+             constant_use_accepts_uniform(ctx, I, s,
                                        info->uniform, I->src[s].size)) {
 
             agx_replace_src(I, s, agx_uniform(info->uniform, I->src[s].size));

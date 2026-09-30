@@ -329,6 +329,30 @@ lower_lea = [
     (('ilea_agx', a, b, c), ('iadd', a, ('ishl', ('i2i64', b), c))),
 ]
 
+# A fragment's integer pixel coordinate round trip: the 16-bit coordinate
+# converted to float, offset to the pixel centre and truncated back. Exact for
+# every 16-bit value (17 significant bits fit fp32), so fold it to the integer.
+fold_pixel_coord = [
+    (('f2u32', ('fadd', ('u2f32', 'a@16'), 0.5)), ('u2u32', a)),
+    (('f2i32', ('fadd', ('u2f32', 'a@16'), 0.5)), ('u2u32', a)),
+]
+
+# AGX_G17P_EXTRACT16_BFE: nir_opt_algebraic turns `x >> 16` into
+# extract_u16(x, 1), so the generic iand(ushr(a, b), mask) -> ubfe fusion never
+# sees `(x >> 16) & mask`; the late lowering then produces
+# u2u32(unpack_32_2x16_split_y(x)) & mask, which the G17P backend emits as a
+# half copy, a half-to-word copy/clear pair, an ldimm and an AND (five
+# instructions in the throughput fragment's exit block). A constant-width
+# extract of bits [16, 16 + n) is the same value for every n < 16.
+fold_extract16_bfe = []
+for bits in range(1, 16):
+    fold_extract16_bfe.extend([
+        (('iand', ('extract_u16', 'a@32', 1), (1 << bits) - 1),
+         ('ubitfield_extract', a, 16, bits)),
+        (('iand', ('u2u32', ('unpack_32_2x16_split_y', 'a@32')), (1 << bits) - 1),
+         ('ubitfield_extract', a, 16, bits)),
+    ])
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--import-path', required=True)
@@ -350,6 +374,10 @@ def run():
                                       lower_selects).render())
     print(nir_algebraic.AlgebraicPass("agx_nir_fuse_selects",
                                       opt_selects).render())
+    print(nir_algebraic.AlgebraicPass("agx_nir_fold_pixel_coord",
+                                      fold_pixel_coord).render())
+    print(nir_algebraic.AlgebraicPass("agx_nir_fold_extract16_bfe",
+                                      fold_extract16_bfe).render())
     print(nir_algebraic.AlgebraicPass("agx_nir_fuse_algebraic_late",
                                       fuse_extr + fuse_ubfe +
                                       fuse_imad + ixor_bcsel).render())

@@ -17,6 +17,7 @@
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
+#include "hk_g17p_apple_override.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "hk_physical_device.h"
@@ -769,6 +770,11 @@ hk_g17p_internal_graphics_uniform_ranges(
       ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
    size_t *range_count)
 {
+   /* Uniform DMA (v51a/b) is only enabled for hardware graphics stages;
+    * this internal path cannot publish its span, so fail closed. */
+   if (s->b.info.agx3_uniform_dma_valid)
+      return false;
+
    if (s->info.stage != MESA_SHADER_VERTEX)
       return hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
                                              ranges, range_count);
@@ -870,6 +876,10 @@ hk_g17p_compute_uniform_ranges(
     * shader cannot consume) and the bisect the null probe needs: a dispatch
     * whose preamble performs no memory access whatsoever.
     */
+   /* Uniform DMA is never enabled for compute (see hk_shader.c). */
+   if (s->b.info.agx3_uniform_dma_valid)
+      return false;
+
    const struct agx_rodata *rodata_probe = &s->b.info.rodata;
    if (!texture_pointers && !s->info.agx3_uses_root && s->info.set_count == 0 &&
        rodata_probe->size_16 == 0) {
@@ -1143,10 +1153,13 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               uint64_t *program_va_out,
                               struct hk_g17p_compute_program_ref *out)
 {
+   /* Diagnostic HK_G17P_APPLE_CS: Apple's uniform layout, never cached. */
+   const bool apple_cs = s->info.g17p_apple_cs && !internal_graphics;
    struct hk_g17p_exact_compute_program *cached =
-      hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
-                                         texture_pointers, internal_graphics,
-                                         kind);
+      apple_cs ? NULL
+               : hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
+                                                    texture_pointers,
+                                                    internal_graphics, kind);
    if (cached) {
       memcpy(ranges, cached->ranges,
              cached->range_count * sizeof(cached->ranges[0]));
@@ -1159,7 +1172,10 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    }
 
    size_t range_count;
-   const bool ranges_ok = internal_graphics
+   const bool ranges_ok = apple_cs
+      ? hk_g17p_apple_cs_ranges(cmd, s, root_ptr, ranges,
+                                HK_AGX3_G17P_GRAPHICS_MAX_RANGES, &range_count)
+      : internal_graphics
       ? hk_g17p_internal_graphics_uniform_ranges(
            cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
       : hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,

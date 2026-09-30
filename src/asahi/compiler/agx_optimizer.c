@@ -8,6 +8,7 @@
 #include "agx_builder.h"
 #include "agx3_select_core.h"
 #include "agx_compiler.h"
+#include "agx_debug.h"
 #include "agx_opcodes.h"
 
 /* AGX peephole optimizer responsible for instruction combining. It operates in
@@ -537,11 +538,17 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
       if (def->src[0].type == AGX_INDEX_IMMEDIATE)
          continue;
 
-      /* ALU instructions cannot take 64-bit */
+      /* ALU instructions cannot take 64-bit. v57 AGX_G17P_TEX_UNIFORM_OPERANDS:
+       * SMP's texture/sampler index operands can (agx_lower_uniform_sources
+       * copies back any placement the native form cannot encode). */
       if (def->src[0].size == AGX_SIZE_64 &&
           !(I->op == AGX_OPCODE_DEVICE_LOAD && s == 0) &&
           !(I->op == AGX_OPCODE_DEVICE_STORE && s == 1) &&
-          !(I->op == AGX_OPCODE_ATOMIC && s == 1))
+          !(I->op == AGX_OPCODE_ATOMIC && s == 1) &&
+          !(I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
+            ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+            def->src[0].type == AGX_INDEX_UNIFORM &&
+            (agx_get_v57_flags() & AGX_V57_TEX_UNIFORM_OPERANDS)))
          continue;
 
       agx_replace_src(I, s, def->src[0]);
@@ -943,7 +950,11 @@ agx_optimizer_forward(agx_context *ctx)
           I->op != AGX_OPCODE_TEXTURE_LOAD &&
           I->op != AGX_OPCODE_TEX_STATE_STORE &&
           I->op != AGX_OPCODE_SAMPLER_STATE_STORE &&
-          I->op != AGX_OPCODE_UNIFORM_STORE && I->op != AGX_OPCODE_EXPORT)
+          I->op != AGX_OPCODE_UNIFORM_STORE && I->op != AGX_OPCODE_EXPORT &&
+          /* v52 AGX_G17P_DISCARD_FOLD materialises a constant MOVMSK target
+           * with mov_imm; the native form stages it in a register. */
+          !(I->op == AGX_OPCODE_SAMPLE_MASK_AGX3 &&
+            (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_DISCARD_FOLD)))
          agx_optimizer_inline_imm(ctx, defs, I);
 
       /* Inlining a constant into fmov can leave two minifloat operands.

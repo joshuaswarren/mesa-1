@@ -117,6 +117,32 @@ agx3_cf_icmp_reg(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                             agx3b(enc) ? 4 : 6, ov, 4, out, len);
 }
 
+/* Apple's G17P loop tests compare the counter register with the trip count
+ * straight from the uniform file: f18 is the uniform half index, f24 = 3 its
+ * operand class and f11 the register's cache hint, on the same ten-byte ep1
+ * point as the register/register compare:
+ *   fs-apple.bin +0xbc  0a832307060007020000  i == u6, cached i, slot 0
+ *   cs-apple.bin +0x9e  0a03230b060007020000  i == u10, slot 0
+ * f13 is the register's discard hint, as on the register forms. */
+bool
+agx3_cf_icmp_reg_uniform32(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
+                           unsigned slot, uint16_t src0, uint16_t uniform,
+                           struct agx3_cf_source_hints hint,
+                           uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || src0 >= 256 ||
+       (src0 & 1) || uniform >= 256 || (uniform & 1) ||
+       (hint.cache && hint.discard) || !out || !len)
+      return false;
+   const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 2), KV(24, 3),
+                                        KV(25, 2)};
+   const struct agx3_field_kv ov[] = {KV(2, src0), KV(18, uniform),
+                                      KV(31, slot), KV(42, cond),
+                                      KV(11, hint.cache),
+                                      KV(13, hint.discard)};
+   return agx3_bind_compose(enc, "icmp", 1, base, 4, ov, 6, out, len);
+}
+
 bool
 agx3_cf_icmp_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                  unsigned slot, uint16_t src0, uint8_t imm,

@@ -109,7 +109,11 @@ struct hk_shader_info {
          /* Rasterization samples the G17P coverage updates are compiled for */
          uint8_t g17p_samples;
 
-         uint8_t _pad[6];
+         /* AGX_G17P_UNIT_RANGE_BLEND: every colour output is provably in
+          * [0, 1] (computed only with the flag set). */
+         bool g17p_colour_unit_range;
+
+         uint8_t _pad[5];
       } fs;
 
       struct {
@@ -152,6 +156,10 @@ struct hk_shader_info {
     */
    bool agx3_combined_sampler_valid;
    bool agx3_uses_root;
+   /* Diagnostic HK_G17P_APPLE_CS / HK_G17P_APPLE_FS (hk_g17p_apple_override.c):
+    * this variant executes Apple's machine code. Never set otherwise. */
+   bool g17p_apple_cs;
+   bool g17p_apple_fs;
    /* Actual uniform address selected after stage and resource lowering. */
    unsigned agx3_root_uniform;
    bool agx3_txf_texture_valid;
@@ -227,6 +235,20 @@ struct hk_shader {
 
    /* Address of the start of the shader data section */
    uint64_t data_addr;
+
+   /* v54 AGX_G17P_INLINE_BLEND: the fragment main's NIR (serialized just
+    * before its backend compile) and that compile's key, so fast-link can
+    * build one program with the draw's colour epilog inlined. NULL when the
+    * flag is off or the shape is not eligible. */
+   void *g17p_mono_nir;
+   size_t g17p_mono_nir_size;
+   struct agx_shader_key g17p_mono_key;
+
+   /* v56e HK_G17P_LAZY_GENERIC: a generic ordinary-descriptor variant whose
+    * backend compile is deferred (on first selection, or on a background
+    * queue). NULL when the variant was compiled eagerly. Every consumer of a
+    * variant's compiled state goes through hk_shader_ensure_compiled(). */
+   struct hk_lazy_compile *lazy;
 };
 
 enum hk_vs_variant {
@@ -339,10 +361,37 @@ struct hk_api_shader {
    /* Generic and independently allocated ordinary fragment programs. */
    bool g17p_ordinary_variants;
 
+   /* v57d (ordinary variants only): the last draw's variant (0 none,
+    * 1 generic, 2 ordinary) for bind-time prediction, and the
+    * HK_G17P_ORDINARY_VARIANT_TRACE counters. */
+   unsigned g17p_last_draw_ordinary;
+   uint32_t g17p_trace_id;
+   uint64_t g17p_trace_draws[2];
+   uint64_t g17p_trace_reason_draws[16];
+   uint64_t g17p_trace_wait_ns;
+   uint64_t g17p_trace_last_print_ns;
+   /* v57d: a region whose guard stays a runtime branch (a vertex shader
+    * under HK_G17P_ORDINARY_VS, or a fragment without variants) keeps its
+    * requirement list here so HK_G17P_ORDINARY_VARIANT_TRACE=3 can evaluate
+    * on the CPU which arm the GPU guard should take. Not serialized. */
+   struct hk_ordinary_descriptor_requirements *g17p_guard_requirements;
+
    struct hk_shader variants[];
 };
 
 void hk_shader_binary_cache_finish(struct hk_device *dev);
+/* v57d HK_G17P_ORDINARY_VARIANT_TRACE (hk_cmd_draw.c). */
+uint32_t hk_ordinary_trace_id(struct hk_api_shader *obj);
+void hk_ordinary_trace_final(struct hk_api_shader *obj);
+
+/* v56e: compile a lazily deferred variant now (waiting for its background
+ * job if one is queued). VK_SUCCESS immediately for an eager variant. */
+VkResult hk_shader_ensure_compiled(struct hk_device *dev, struct hk_shader *s);
+bool hk_shader_is_compiled(const struct hk_shader *s);
+/* Diagnostic HK_G17P_ORDINARY_FORCE_GENERIC=1: select the generic variant for
+ * every draw (the lazy-path correctness gate). */
+bool hk_g17p_ordinary_force_generic(void);
+void hk_lazy_compile_finish(struct hk_device *dev);
 bool hk_shader_ensure_link_ht_locked(struct hk_shader *shader);
 
 static inline unsigned
@@ -517,6 +566,15 @@ struct hk_linked_shader {
    } usc;
 };
 
+/* v54: `main_part`, when non-NULL, replaces main->b as the linked main part
+ * (the inline-blend monolithic fragment program); main still supplies the
+ * API shader's uniform and resource layout. */
+struct hk_linked_shader *hk_fast_link_part(struct hk_device *dev, bool fragment,
+                                           struct hk_shader *main,
+                                           struct agx_shader_part *main_part,
+                                           struct agx_shader_part *prolog,
+                                           struct agx_shader_part *epilog,
+                                           unsigned nr_samples_shaded);
 struct hk_linked_shader *hk_fast_link(struct hk_device *dev, bool fragment,
                                       struct hk_shader *main,
                                       struct agx_shader_part *prolog,

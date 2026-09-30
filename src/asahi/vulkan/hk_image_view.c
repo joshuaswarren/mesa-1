@@ -677,7 +677,7 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
 
    /* Diagnostic descriptor dump (sampled texture and EOT PBE bytes). */
    const bool dump_desc =
-      dev->dev.chip == AGX_CHIP_G17P && getenv("HK_DUMP_TEXDESC") != NULL;
+      dev->dev.chip == AGX_CHIP_G17P && HK_ENV_PRESENT_ONCE("HK_DUMP_TEXDESC");
 
    /* Fill in each view plane separately */
    for (unsigned p = 0; p < view->plane_count; p++) {

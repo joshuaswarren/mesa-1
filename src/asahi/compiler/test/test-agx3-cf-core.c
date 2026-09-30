@@ -578,9 +578,54 @@ test_deep_break_levels(void)
    }
 }
 
+/* v52b: Apple's G17P loop-test compare of a register against a uniform. */
+static void
+test_uniform_compare(void)
+{
+   uint8_t out[AGX3_CF_MAX_LENGTH], len = 0;
+   ++checks;
+   if (!agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                   0, 2, 6,
+                                   (struct agx3_cf_source_hints){true, false},
+                                   out, &len) ||
+       !hex_is(out, len, "0a832307060007020000")) {
+      fprintf(stderr, "uniform compare fs-apple +0xbc mismatch\n");
+      ++failures;
+   }
+   ++checks;
+   if (!agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                   0, 2, 10,
+                                   (struct agx3_cf_source_hints){false, false},
+                                   out, &len) ||
+       !hex_is(out, len, "0a03230b060007020000")) {
+      fprintf(stderr, "uniform compare cs-apple +0x9e mismatch\n");
+      ++failures;
+   }
+   const struct agx3_cf_source_hints none = {false, false};
+   REJECT(agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3C, AGX3_CF_ICOND_EQ,
+                                     0, 2, 6, none, out, &len));
+   REJECT(agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                     0, 3, 6, none, out, &len));
+   REJECT(agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                     0, 2, 7, none, out, &len));
+   REJECT(agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                     0, 2, 256, none, out, &len));
+   REJECT(agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B,
+                                     (enum agx3_cf_icond)3, 0, 2, 6, none,
+                                     out, &len));
+   REJECT(agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                     6, 2, 6, none, out, &len));
+   REJECT(agx3_cf_icmp_reg_uniform32(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                     0, 2, 6,
+                                     (struct agx3_cf_source_hints){true, true},
+                                     out, &len));
+}
+
+
 int
 main(void)
 {
+   test_uniform_compare();
    test_float_minifloat_compare();
    test_float_zero_compare();
    test_half_register_compare();

@@ -6,6 +6,7 @@
 #include "agx3_ioto_uniform_program.h"
 
 #include <limits.h>
+#include <string.h>
 
 #define GPU0_CHUNK_BODY_BOUND 78u
 #define GPU1_CHUNK_BODY_BOUND 64u
@@ -168,6 +169,116 @@ workspace_overlaps(struct agx3_ioto_uniform_program_workspace workspace)
           spans_overlap(workspace.sort, sort_size, workspace.cache, cache_size);
 }
 
+/* COPY GPR -> uniform with no wait and the source last-use hint: exactly the
+ * direct ep0/ep1 forms agx3_ioto_load_packer.c's pack_copy_fields() emits for
+ * absolute-load completion (checked byte for byte there against the
+ * composer). */
+static bool
+immediate_copy_record(uint16_t destination_half, uint16_t source_half,
+                      uint8_t out[10], size_t *length)
+{
+   if (destination_half < 128 && source_half < 256) {
+      out[0] = 0x0b | ((destination_half & 0x1e) << 3);
+      out[1] = source_half & 0x7f;
+      out[2] = 0x09 | ((destination_half & 0x60) << 1);
+      out[3] = 0x04 | (destination_half & 1) | ((source_half & 0x80) >> 3);
+      *length = 4;
+      return true;
+   }
+   if (destination_half < 256 && source_half < 256) {
+      out[0] = 0x0b | ((destination_half & 0x1e) << 3);
+      out[1] = 0x01 | (source_half & 0x7e);
+      out[2] = 0x0f | ((destination_half & 0x60) << 1);
+      out[3] = 0x00;
+      out[4] = 0x40 | ((destination_half & 0x01) << 2) |
+               ((source_half & 0x01) << 3) | ((destination_half & 0x80) >> 6);
+      out[5] = 0x10 | ((source_half & 0x80) >> 7);
+      memset(&out[6], 0, 4);
+      *length = 10;
+      return true;
+   }
+   return false;
+}
+
+/* Values go to every other 32-bit register (halves 4, 8, 12, ...): no two
+ * LDIMM destinations are adjacent, so no pair can be mistaken for a 64-bit
+ * load address by the stream validator, and the r0/r1 profile scratch is
+ * never touched. Halves stay below the GPU0 allocator limit (97 dwords). */
+#define AGX3_IOTO_IMMEDIATE_FIRST_HALF 4u
+#define AGX3_IOTO_IMMEDIATE_HALF_STRIDE 4u
+#define AGX3_IOTO_IMMEDIATE_MAX_DWORDS 44u
+
+/* All-immediate body: LDIMM every source dword into GPR halves 4, 6, ...
+ * (clear of the r0/r1 profile scratch), then the COPY suffix. Returns false
+ * (without writing) when the shape is not eligible; the caller then uses the
+ * ordinary load path. */
+static bool
+immediate_body_generate(enum agx_chip chip,
+                        const struct agx3_ioto_uniform_program_desc *desc,
+                        struct agx3_ioto_uniform_program_workspace workspace,
+                        size_t *written, size_t *copy_offset)
+{
+   if (!desc->range_cpu || desc->cprog_inputs || desc->preloaded_base_valid ||
+       desc->initial_gpr_dwords || chip != AGX_CHIP_G17P ||
+       agx_ioto_load_target_encoding(chip) != AGX_IOTO_LOAD_ENCODING_GPU0 ||
+       desc->range_count == 0)
+      return false;
+
+   unsigned total = 0;
+   for (size_t i = 0; i < desc->range_count; ++i) {
+      const struct agx3_ioto_uniform_range *range = &desc->ranges[i];
+      if (!desc->range_cpu[i] || (range->start_halfs & 1) ||
+          (range->size_halfs & 1) || !range->size_halfs)
+         return false;
+      total += range->size_halfs / 2;
+   }
+   if (total > AGX3_IOTO_IMMEDIATE_MAX_DWORDS)
+      return false;
+
+   size_t length = 0;
+   unsigned slot = 0;
+   for (size_t i = 0; i < desc->range_count; ++i) {
+      const struct agx3_ioto_uniform_range *range = &desc->ranges[i];
+      const uint8_t *src = desc->range_cpu[i];
+      for (unsigned d = 0; d < range->size_halfs / 2; ++d, ++slot) {
+         uint32_t value;
+         memcpy(&value, src + 4 * d, sizeof(value));
+         uint8_t bytes[AGX_IOTO_LOAD_LDIMM_MAX_SIZE], n;
+         if (!agx_ioto_load_pack_ldimm(
+                chip,
+                AGX3_IOTO_IMMEDIATE_FIRST_HALF +
+                   AGX3_IOTO_IMMEDIATE_HALF_STRIDE * slot,
+                value,
+                bytes, &n) ||
+             length + n > workspace.body_capacity)
+            return false;
+         memcpy(workspace.body + length, bytes, n);
+         length += n;
+      }
+   }
+
+   *copy_offset = length;
+   slot = 0;
+   for (size_t i = 0; i < desc->range_count; ++i) {
+      const struct agx3_ioto_uniform_range *range = &desc->ranges[i];
+      for (unsigned d = 0; d < range->size_halfs / 2; ++d, ++slot) {
+         uint8_t bytes[10];
+         size_t n;
+         if (!immediate_copy_record(range->start_halfs + 2 * d,
+                                    AGX3_IOTO_IMMEDIATE_FIRST_HALF +
+                                       AGX3_IOTO_IMMEDIATE_HALF_STRIDE * slot,
+                                    bytes, &n) ||
+             length + n > workspace.body_capacity)
+            return false;
+         memcpy(workspace.body + length, bytes, n);
+         length += n;
+      }
+   }
+
+   *written = length;
+   return true;
+}
+
 bool
 agx3_ioto_uniform_program_body_generate(
    enum agx_chip chip, const struct agx3_ioto_uniform_program_desc *desc,
@@ -187,6 +298,12 @@ agx3_ioto_uniform_program_body_generate(
       return false;
 
    (void)chunk_count;
+   if (immediate_body_generate(chip, desc, workspace, written, copy_offset)) {
+      if (workspace.relocations)
+         *workspace.relocation_count = 0;
+      return true;
+   }
+
    struct agx_ioto_load_core core;
    if (!agx_ioto_load_core_init(
           &core, chip,
@@ -195,8 +312,13 @@ agx3_ioto_uniform_program_body_generate(
           workspace.loads, workspace.load_capacity, workspace.cache,
           workspace.cache_capacity, desc->initial_gpr_dwords,
           desc->fast_path_enabled,
-          agx_ioto_load_target_encoding(chip) == AGX_IOTO_LOAD_ENCODING_GPU0))
+          agx_ioto_load_target_encoding(chip) == AGX_IOTO_LOAD_ENCODING_GPU0 &&
+             !(chip == AGX_CHIP_G17P &&
+               agx_ioto_g17p_native_esl_wait_enabled())))
       return false;
+   /* v51y: only G17P has the native copy-carried wait witness. */
+   core.gpu0_copy_wait =
+      chip == AGX_CHIP_G17P && agx_ioto_g17p_native_esl_wait_enabled();
 
    core.relocations = workspace.relocations;
    core.relocation_capacity = workspace.relocation_capacity;

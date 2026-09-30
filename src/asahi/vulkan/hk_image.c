@@ -15,6 +15,7 @@
 #include "util/format/u_formats.h"
 #include "util/macros.h"
 #include "util/u_math.h"
+#include "util/u_debug.h"
 #include "vulkan/vulkan_core.h"
 
 #include "agx_bo.h"
@@ -29,6 +30,16 @@
 #include "vk_format.h"
 
 #include <inttypes.h>
+
+/* v51f placement diagnostic, default 0: offset every eligible colour render
+ * target's plane by this many bytes (rounded up to 16 KiB) inside its memory
+ * binding, so image bases stop sharing one 4 MiB alignment. Timing only. */
+DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_rt_pad, "HK_G17P_RT_PAD", 0)
+/* v51f placement diagnostic, default 0: offset the plane inside its binding
+ * by this many bytes (rounded up to 16 KiB), keeping the image layout. With a
+ * dedicated allocation from the top-down VA allocator this is cancelled out
+ * (the larger BO starts lower); it moves the base for suballocated images. */
+DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_rt_offset, "HK_G17P_RT_OFFSET", 0)
 
 /* However, exposing the standard sparse block sizes requires using the standard
  * alignment 65k.
@@ -938,6 +949,106 @@ hk_can_compress_create_info(struct hk_device *dev, unsigned plane,
                           info->usage, info->pNext, allow_agx3);
 }
 
+/* v56g/v57e: HK_G17P_IMAGE_TRACE=1 prints one line per image plane with the
+ * compression decision and, when refused, the first gate that refused it,
+ * evaluated in the same order as hk_map_compression(),
+ * hk_can_compress_create_info() and hk_can_compress(). */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_image_trace, "HK_G17P_IMAGE_TRACE", false)
+
+static const char *
+hk_compression_refusal(struct hk_device *dev, unsigned plane,
+                       const VkImageCreateInfo *info, uint64_t modifier)
+{
+   if (info->tiling == VK_IMAGE_TILING_LINEAR)
+      return "linear-tiling";
+   if (info->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT)
+      return ail_is_drm_modifier_compressed(modifier) ? NULL
+                                                      : "drm-modifier";
+   const bool agx3 = hk_descriptor_generation_is_agx3(
+      agx_chip_descriptor_generation(dev->dev.chip));
+   if (agx3 && !hk_g17p_compression_eligible(dev->dev.chip, plane, info))
+      return dev->dev.chip == AGX_CHIP_G17P ? "g17p-policy" : "agx3-not-g17p";
+   if (agx3 && !vk_format_is_depth_or_stencil(info->format)) {
+      const enum pipe_format p_format = hk_format_to_pipe_format(info->format);
+      const enum pipe_format store = agx_g17p_rt0_pbe_format(
+         util_format_linear(hk_padded_image_format(p_format)));
+      if (!ail_formats_compatible(p_format, store))
+         return "g17p-store-class";
+   }
+   VkFormat format = info->format;
+   unsigned width = info->extent.width, height = info->extent.height;
+   const struct vk_format_ycbcr_info *ycbcr_info =
+      vk_format_get_ycbcr_info(format);
+   if (ycbcr_info) {
+      format = ycbcr_info->planes[plane].format;
+      width /= ycbcr_info->planes[plane].denominator_scales[0];
+      height /= ycbcr_info->planes[plane].denominator_scales[0];
+   } else if (hk_split_depth_stencil(format)) {
+      format = hk_depth_stencil_plane_format(format, plane);
+   }
+   if (dev->dev.debug & AGX_DBG_NOCOMPRESS)
+      return "nocompress-debug";
+   if (info->flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
+                      VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                      VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT))
+      return "sparse";
+   if (info->usage & VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT)
+      return "usage-host-transfer";
+   if (info->usage & VK_IMAGE_USAGE_STORAGE_BIT)
+      return "usage-storage";
+   if (info->usage & VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT)
+      return "usage-feedback-loop";
+   if (info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {
+      const VkImageFormatListCreateInfo *list =
+         vk_find_struct_const(info->pNext, IMAGE_FORMAT_LIST_CREATE_INFO);
+      if (!list || list->viewFormatCount == 0)
+         return "mutable-no-format-list";
+      for (unsigned i = 0; i < list->viewFormatCount; ++i) {
+         if (list->pViewFormats[i] != VK_FORMAT_UNDEFINED &&
+             !ail_formats_compatible(
+                hk_format_to_pipe_format(format),
+                hk_format_to_pipe_format(list->pViewFormats[i])))
+            return "mutable-incompatible-view";
+      }
+   }
+   if (!ail_can_compress(hk_format_to_pipe_format(format), width, height,
+                         info->samples))
+      return "too-small-or-not-renderable";
+   if (!hk_can_compress_create_info(dev, plane, info))
+      return "other";
+   return NULL;
+}
+
+static void
+hk_image_trace_plane(struct hk_device *dev, const struct hk_image *image,
+                     unsigned plane, const VkImageCreateInfo *info)
+{
+   if (!debug_get_option_hk_g17p_image_trace())
+      return;
+   const char *why = image->planes[plane].layout.compressed
+      ? NULL
+      : hk_compression_refusal(dev, plane, info, image->vk.drm_format_mod);
+   char chain[160];
+   unsigned o = 0;
+   chain[0] = 0;
+   vk_foreach_struct_const(ext, info->pNext) {
+      if (o < sizeof(chain) - 12)
+         o += snprintf(chain + o, sizeof(chain) - o, "%s%d", o ? "," : "",
+                       (int)ext->sType);
+   }
+   fprintf(stderr,
+           "G17P image: %p plane=%u format=%d %ux%ux%u mips=%u layers=%u "
+           "samples=%u tiling=%d usage=%#x flags=%#x pnext=[%s] "
+           "compressed=%u reason=%s size=%" PRIu64 "\n",
+           (void *)image, plane, (int)info->format, info->extent.width,
+           info->extent.height, info->extent.depth, info->mipLevels,
+           info->arrayLayers, (unsigned)info->samples, (int)info->tiling,
+           (unsigned)info->usage, (unsigned)info->flags, chain,
+           image->planes[plane].layout.compressed,
+           image->planes[plane].layout.compressed ? "-" : (why ? why : "?"),
+           (uint64_t)image->planes[plane].layout.size_B);
+}
+
 static enum ail_tiling
 hk_map_tiling(struct hk_device *dev, const VkImageCreateInfo *info,
               uint64_t modifier)
@@ -1103,6 +1214,37 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
    const struct vk_format_ycbcr_info *ycbcr_info =
       vk_format_get_ycbcr_info(pCreateInfo->format);
    uint64_t implicit_plane_cursor_B = 0;
+
+   /* HK_G17P_RT_PAD / HK_G17P_RT_OFFSET (v51f placement diagnostics): see
+    * the option comments. */
+   image->g17p_rt_pad_B = 0;
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       (debug_get_option_hk_g17p_rt_pad() > 0 ||
+        debug_get_option_hk_g17p_rt_offset() > 0) &&
+       !mod_explicit_info && !image->disjoint && image->plane_count == 1 &&
+       (pCreateInfo->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) &&
+       pCreateInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
+       !(pCreateInfo->flags & (VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                               VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+                               VK_IMAGE_CREATE_SPARSE_ALIASED_BIT)) &&
+       !vk_find_struct_const(pCreateInfo->pNext,
+                             EXTERNAL_MEMORY_IMAGE_CREATE_INFO)) {
+      /* Tail padding: a dedicated allocation from the top-down VA allocator
+       * then starts pad bytes lower (a front offset would be cancelled by
+       * it), and suballocations after this image shift by pad. A pad of
+       * 32768 reproduces the compressed RGBA8 1024^2 allocation footprint
+       * (its 32 KiB metadata tail) without compression. */
+      const uint64_t cap = UINT32_MAX & ~(uint64_t)(AIL_PAGESIZE - 1);
+      image->g17p_rt_pad_B = (uint32_t)MIN2(
+         align64((uint64_t)MAX2(debug_get_option_hk_g17p_rt_pad(), 0),
+                 AIL_PAGESIZE), cap);
+      implicit_plane_cursor_B = MIN2(
+         align64((uint64_t)MAX2(debug_get_option_hk_g17p_rt_offset(), 0),
+                 AIL_PAGESIZE), cap);
+      mesa_logi_once("HK_G17P_RT_PAD/OFFSET: colour render targets padded "
+                     "by %u and offset by %" PRIu64 " bytes",
+                     image->g17p_rt_pad_B, implicit_plane_cursor_B);
+   }
    for (uint8_t plane = 0; plane < image->plane_count; plane++) {
       VkFormat format =
          ycbcr_info ? ycbcr_info->planes[plane].format : pCreateInfo->format;
@@ -1161,6 +1303,7 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
       };
 
       ail_make_miptree(&image->planes[plane].layout);
+      hk_image_trace_plane(dev, image, plane, pCreateInfo);
 
       uint64_t plane_end_B;
       if (mod_explicit_info) {
@@ -1379,6 +1522,9 @@ hk_get_image_memory_requirements(struct hk_device *dev, struct hk_image *image,
    if (sparse) {
       size_B = align64(size_B, align_B);
    }
+
+   if (!image->disjoint)
+      size_B += image->g17p_rt_pad_B;
 
    pMemoryRequirements->memoryRequirements.memoryTypeBits = memory_types;
    pMemoryRequirements->memoryRequirements.alignment = align_B;

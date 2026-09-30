@@ -44,6 +44,14 @@ struct agx3_ioto_uniform_program_desc {
    uint16_t preloaded_base_half;
    uint64_t preloaded_base_address;
 
+   /* v51x (HK_G17P_IOTO_IMMEDIATE): optional CPU copy of every range's
+    * source bytes, parallel to ranges[]. When every entry is non-NULL (and
+    * there are no CProg inputs or preloaded bases), the body materializes the
+    * values with LDIMM instead of loading them from memory; the COPY suffix
+    * into the uniform file is the same record form the load path emits. The
+    * caller guarantees the memory is immutable for the program's lifetime. */
+   const void *const *range_cpu;
+
    struct agx_ioto_state_tail tail;
    uint16_t profile_payload0;
    uint16_t profile_payload1;

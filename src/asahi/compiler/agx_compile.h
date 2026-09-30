@@ -90,6 +90,18 @@ struct agx_shader_info {
    /* Number of uniforms */
    uint16_t push_count;
 
+   /* G17P uniform DMA (v51a, AGX_G17P_UNIFORM_DMA): constant-index loads
+    * through one 64-bit pointer uniform were replaced by uniform reads of
+    * [agx3_uniform_dma_dest, +agx3_uniform_dma_halfs). The driver publishes
+    * that block as one Ioto uniform range whose source is the pointer's
+    * value plus agx3_uniform_dma_offset_B, read at launch like the loads. */
+   bool agx3_uniform_dma_valid;
+   uint16_t agx3_uniform_dma_pointer;
+   uint16_t agx3_uniform_dma_dest;
+   uint16_t agx3_uniform_dma_halfs;
+   uint32_t agx3_uniform_dma_offset_B;
+   uint16_t agx3_uniform_dma_loads;
+
    /* Local memory allocation in bytes */
    uint16_t local_size;
 
@@ -409,6 +421,23 @@ struct agx_shader_key {
     * always use it.
     */
    bool agx3_native_cprog;
+   /* v56d: the native constant-program lowering (the AGX_DBG_NATIVE_UNIFORMS
+    * behaviour) for THIS compile. Decided per compile by the driver (G17P
+    * fragment constant program, v57 vertex CProg) and carried in the key:
+    * never by writing the process-global agx_compiler_debug, which every
+    * concurrently compiling thread reads (v56c raced here: a vertex compile
+    * starting on another thread cleared the bit under a fragment compile,
+    * whose preamble then could not be encoded). */
+   bool g17p_native_uniforms;
+
+   /* G17P uniform DMA (v51a): hoist constant-index loads through the 64-bit
+    * pointer uniform at g17p_dma_root (the root table) or at
+    * g17p_dma_root + 4 * (1 + s) for each set s in g17p_dma_set_mask into
+    * one driver-published uniform range. Zero mask and !g17p_uniform_dma
+    * leave code unchanged. */
+   bool g17p_uniform_dma;
+   uint16_t g17p_dma_root;
+   uint8_t g17p_dma_set_mask;
 
    /* Set if this is a non-monolithic shader that must be linked with additional
     * shader parts before the program can be used. This suppresses omission of

@@ -62,6 +62,10 @@ struct agx3_g17p_graphics_program_desc {
     * resource accounting; a zero extent preserves the absent END suffix. */
    struct agx_ioto_constant_program constant_program;
    const struct agx3_cprog_inputs *cprog_inputs;
+
+   /* v51x: optional CPU source copies parallel to uniform_ranges (see
+    * agx3_ioto_uniform_program_desc::range_cpu). */
+   const void *const *uniform_range_cpu;
 };
 
 struct agx3_g17p_graphics_program {
@@ -172,6 +176,9 @@ struct agx3_g17p_rt0_bg_program_desc {
    bool staging_known;
    enum agx3_g17p_rt0_bg_op op;
    struct agx_ioto_g17p_imageblock imageblock;
+   /* v51x: CPU copy of the clear_value_va bytes; non-NULL requests the
+    * LDIMM clear-value form (CLEAR only). */
+   const void *clear_value_cpu;
 };
 
 struct agx3_g17p_rt0_bg_program {

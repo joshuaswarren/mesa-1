@@ -6756,6 +6756,7 @@ bool nir_opt_large_constants(nir_shader *shader,
 
 bool nir_opt_licm(nir_shader *shader);
 bool nir_opt_loop(nir_shader *shader);
+bool nir_opt_loop_rotate(nir_shader *shader, bool uniform_only);
 
 bool nir_opt_loop_unroll(nir_shader *shader);
 

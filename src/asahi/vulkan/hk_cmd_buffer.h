@@ -420,6 +420,14 @@ struct hk_rendering_state {
 
    struct agx_tilebuffer_layout tilebuffer;
    struct hk_render_registers cr;
+
+   /* HK_ZLS_PRECISE_DEPTH_STORE (v50, default off): the ZLS words for the
+    * stream that ends the pass, when it is also the first stream (only) or
+    * a later one (last). Depth honours storeOp there; stencil keeps the
+    * forced store. zls_first_cs is the stream BeginRendering created. */
+   bool zls_precise;
+   struct agx_zls_control_packed zls_control_only, zls_control_last;
+   const void *zls_first_cs;
 };
 
 struct hk_index_buffer_state {
@@ -545,7 +553,14 @@ struct hk_g17p_graphics_ioto_cache_entry {
       bool blend;
       bool spills;
       bool valid;
+      /* hk_g17p_dma_set_base() when this record was made: a set-pointer
+       * uniform DMA span is recorded as a constant address, valid only
+       * while the same set stays bound. */
+      uint64_t dma_set_base;
    } compact;
+   /* AGX_G17P_UNIFORM_DMA span source when it is a descriptor-set pointer
+    * (see hk_g17p_dma_set_base); 0 otherwise. */
+   uint64_t dma_set_base;
 };
 
 struct hk_prepared_fast_link_vs {
@@ -560,6 +575,8 @@ struct hk_prepared_fast_link_vs {
 
 struct hk_graphics_state {
    struct hk_ordinary_fs_selection ordinary_fs;
+   /* v57d: set while hk_cmd_prepare_bound_graphics() runs (bind time). */
+   bool g17p_bind_prepare;
    struct hk_rendering_state render;
    struct hk_descriptor_state descriptors;
 
@@ -593,6 +610,7 @@ struct hk_graphics_state {
    uint64_t prepared_vertex_root;
    uint64_t prepared_vertex_draw_params;
    uint64_t prepared_vertex_draw_id_ptr;
+   uint64_t prepared_vertex_dma_set_base;
    struct agx_vdm_state_update prepared_vdm_state_update;
    bool prepared_vdm_state_update_valid;
    uint64_t prepared_fragment_usc;
@@ -1134,6 +1152,10 @@ struct hk_ioto_arena {
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
+   /* v94 HK_G17P_HOST_ENCODE bit1: set by hk_reset_cmd_buffer, cleared by
+    * vkBeginCommandBuffer. */
+   bool g17p_pristine;
+
    struct {
       struct hk_graphics_state gfx;
       struct hk_compute_state cs;
@@ -1225,6 +1247,8 @@ struct hk_cmd_buffer {
    } g17p_precomp_lookup_stats;
 
    /* Opt-in shader performance diagnosis; inactive in production. */
+   /* v57d HK_G17P_ORDINARY_VARIANT_TRACE=3 per-command-buffer draw index. */
+   uint32_t g17p_trace_draws;
    bool shader_perf_draw_active;
    uint32_t shader_perf_draw_bo_allocs;
    uint32_t shader_perf_draw_bo_creates;
@@ -1706,6 +1730,8 @@ void hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
 /* AGX2 returns its shader-base-relative USC offset.  G17P returns the absolute
  * 48-bit Ioto program VA consumed by HAL200 VDM state. */
+uint64_t hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
+                              const struct hk_shader *s);
 uint64_t hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked);
 uint64_t hk_prepare_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,

@@ -1479,6 +1479,56 @@ hk_get_device_properties(const struct agx_device *dev,
    }
 }
 
+/* v56f/v57d: every AGX_*, HK_* and ASAHI_* environment knob that can change
+ * generated code or serialized objects is part of the cache identity, not
+ * only the ones hk_physical_device_compiler_flags() packs into bits
+ * (AGX_MESA_DEBUG's codegen flags and the AGX_G17P_* register/scheduling/
+ * packing diagnostics were missing). Knobs that only print or pick a runtime
+ * path are excluded so tracing keeps a warm cache. The build is already part
+ * of both identities (driver_build_sha). */
+extern char **environ;
+static int
+hk_env_cmp(const void *a, const void *b)
+{
+   return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static uint64_t
+hk_codegen_env_hash(void)
+{
+   static const char *const runtime_only[] = {
+      "TRACE", "DUMP", "_LOG", "PERF", "VERBOSE", "DEBUG_OBJECT", "SLOW_DRAW",
+      "DISK_CACHE_ID", "LAZY_GENERIC", "FORCE_GENERIC", "BIND_PREDICT",
+      "VARIANT_TRACE",
+   };
+   const char *list[512];
+   unsigned n = 0;
+   for (char **e = environ; e && *e && n < ARRAY_SIZE(list); ++e) {
+      if (strncmp(*e, "AGX_", 4) && strncmp(*e, "HK_", 3) &&
+          strncmp(*e, "ASAHI_", 6))
+         continue;
+      const char *eq = strchr(*e, '=');
+      const size_t name_len = eq ? (size_t)(eq - *e) : strlen(*e);
+      bool skip = false;
+      for (unsigned i = 0; i < ARRAY_SIZE(runtime_only) && !skip; ++i) {
+         const size_t l = strlen(runtime_only[i]);
+         for (size_t o = 0; o + l <= name_len && !skip; ++o)
+            skip = !strncmp(*e + o, runtime_only[i], l);
+      }
+      if (!skip)
+         list[n++] = *e;
+   }
+   qsort(list, n, sizeof(list[0]), hk_env_cmp);
+   uint64_t h = 0xcbf29ce484222325ull;
+   for (unsigned i = 0; i < n; ++i)
+      for (const char *c = list[i]; ; ++c) {
+         h = (h ^ (uint8_t)*c) * 0x100000001b3ull;
+         if (!*c)
+            break;
+      }
+   return h;
+}
+
 static void
 hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 {
@@ -1493,6 +1543,8 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    const uint64_t compiler_flags = hk_physical_device_compiler_flags(pdev);
    _mesa_blake3_update(&blake3_ctx, &compiler_flags, sizeof(compiler_flags));
+   const uint64_t env_hash = hk_codegen_env_hash();
+   _mesa_blake3_update(&blake3_ctx, &env_hash, sizeof(env_hash));
 
    unsigned char blake3[BLAKE3_KEY_LEN];
    _mesa_blake3_final(&blake3_ctx, blake3);
@@ -1511,9 +1563,16 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    char timestamp[BLAKE3_HEX_LEN];
    _mesa_blake3_format(timestamp, instance->driver_build_sha);
+   /* v56f diagnostic: HK_DEBUG_DISK_CACHE_ID=<hex> reads a disk cache written
+    * by another build with the same serialized format (warm-cache forensics
+    * with an instrumented library). Never set in production. */
+   const char *cache_id = getenv("HK_DEBUG_DISK_CACHE_ID");
+   if (cache_id && strlen(cache_id) < sizeof(timestamp))
+      snprintf(timestamp, sizeof(timestamp), "%s", cache_id);
 
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
-   pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags);
+   pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags ^
+      (env_hash * UINT64_C(0xff51afd7ed558ccd)));
    if (pdev->vk.disk_cache != NULL) {
       pdev->vk.properties.pipelineBinaryInternalCache = true;
       pdev->vk.properties.pipelineBinaryInternalCacheControl = true;

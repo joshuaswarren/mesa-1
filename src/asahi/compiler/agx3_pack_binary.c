@@ -74,6 +74,24 @@ struct agx3_branch_fixup {
    bool is_bn;
 };
 
+/* AGX_G17P_EARLY_COMPARE (v52b) bookkeeping: where each instruction's bytes
+ * start, and every emitted control-flow compare. */
+struct agx3_instr_span {
+   const agx_instr *I;
+   agx_block *block;
+   off_t start;
+   uint16_t wait;
+   uint8_t slot;
+};
+
+struct agx3_early_compare {
+   const agx_instr *I;
+   agx_block *block;
+   off_t instr_start, compare_start, compare_end;
+   /* Spans recorded up to and including I's own. */
+   unsigned span_count;
+};
+
 /*
  * This backend is fail-closed per instruction: a shader containing anything
  * outside the grounded domain is refused, never mis-encoded. A bare refusal is
@@ -3432,6 +3450,16 @@ agx3_map_atomic_op(enum agx_atomic_opc in, enum agx3_atomic_op *out)
  * 32-bit element index; fold it back into the signed byte-offset field when it
  * fits, matching Apple.  AGX3b returned atomics are physically in-place, so
  * only an RA-coalesced value/result pair is accepted on that encoding. */
+/* AGX_G17P_INT_DEST_CACHE: native G17P sets the f11 destination
+ * register-cache hint on every integer add/subtract result, including
+ * loop-carried ones; otherwise keep each encoder's existing choice. */
+static inline bool
+agx3_int_dest_cache(bool existing)
+{
+   return (agx_get_codegen_flags() & AGX_CODEGEN_G17P_INT_DEST_CACHE) ||
+          existing;
+}
+
 static bool
 agx3_translate_device_atomic(const agx_instr *I,
                              enum agx_isa_encoding enc, bool exec_masked,
@@ -4953,6 +4981,26 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
       return agx3_append(emission, bytes, len);
    }
 
+   /* AGX_G17P_UNIFORM_COMPARE (v52b, default off): a register against an
+    * aligned 32-bit uniform, admitted by agx_instr_accepts_uniform() only
+    * under the same flag, as operand 1. */
+   if (!is_float && enc == AGX_ISA_ENCODING_AGX3B &&
+       (agx_get_alu_flags() & AGX_ALU_G17P_UNIFORM_COMPARE) &&
+       agx3_cf_reg32(I->src[0]) && agx_channels(I->src[0]) == 1 &&
+       !I->src[0].kill && I->src[1].type == AGX_INDEX_UNIFORM &&
+       I->src[1].size == AGX_SIZE_32 && agx_channels(I->src[1]) == 1 &&
+       !I->src[1].abs && !I->src[1].neg) {
+      enum agx3_cf_icond cond;
+      if (!agx3_cf_map_icond(I->icond, &cond) ||
+          !agx3_cf_icmp_reg_uniform32(
+             enc, cond, flag_slot, I->src[0].value, I->src[1].value,
+             (struct agx3_cf_source_hints){I->src[0].cache,
+                                           I->src[0].discard},
+             bytes, &len))
+         return false;
+      return agx3_append(emission, bytes, len);
+   }
+
    bool ok;
    if (is_float) {
       if (!agx3_cf_reg32(I->src[0]))
@@ -5403,7 +5451,8 @@ agx3_try_control_flow(struct util_dynarray *emission,
                       enum agx_chip chip,
                       const agx_instr *I, uint16_t wait_mask,
                       uint16_t outstanding, bool after_loop_backedge,
-                      bool loop_exit_jump, unsigned loop_depth)
+                      bool loop_exit_jump, unsigned loop_depth,
+                      off_t *compare_end)
 {
    const bool is_if =
       I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_IF_FCMP;
@@ -5527,6 +5576,8 @@ agx3_try_control_flow(struct util_dynarray *emission,
             fprintf(stderr, "AGX3 control-flow compare refused\n");
          return -1;
       }
+      if (compare_end)
+         *compare_end = emission->size;
       /* CNDLT retains lanes for which its predicate is true, so a shallow
        * BREAK_IF needs the complementary continue predicate. CNDCF instead
        * consumes the break predicate directly. Native break_continue uses
@@ -7539,6 +7590,234 @@ agx3_post_ra_hint(agx_index index)
           index.cache ? AGX3_ALU_HINT_CACHE : AGX3_ALU_HINT_NONE;
 }
 
+
+/* AGX_G17P_LOOP_HEAD_HINT (v52a, default off).
+ *
+ * Every integer, conversion and control form of AGX3b carries three 2-bit
+ * fields at instruction bits 18..23, each passed through the encoder LUT
+ * [1, 2, 0] (isa/AGX3b.xml, e.g. sll f68/f69/f70 at 22:23/20:21/18:19, iadd
+ * f55/f56/f57 at the same bits), so a field value of 0 encodes as 0b01.
+ * Apple's G17P compiler sets the first two of them to 2 (bits 20..23 = 0)
+ * only on the instruction at a loop's backward-branch target: fs-apple.bin
+ * +0x8c `2700040403003600f0100100` and cs-apple.bin +0x6e
+ * `2700040603083600f0100100`; no other witnessed Apple instruction has a
+ * non-zero value there. Mesa always emitted 0. Semantics are unknown; this
+ * reproduces only Apple's exact use: an allowlisted integer/conversion ALU
+ * form (opcode bits 0..10 and length from AGX3b.xml) that begins a loop
+ * header, whose bits 18..23 still hold the default 0b010101. */
+static const struct {
+   uint16_t opcode;
+   uint8_t length;
+} agx3_loop_head_hint_forms[] = {
+   {0x01f, 12}, /* imsub */   {0x027, 12}, /* sll */
+   {0x09f, 12}, /* imadd */   {0x0a7, 12}, /* srl */
+   {0x11f, 10}, /* isub */    {0x127, 12}, /* extract */
+   {0x19f, 10}, /* iadd */    {0x1a7, 10}, /* sra */
+   {0x227, 12}, /* sllu */    {0x2a7, 12}, /* srlu */
+   {0x3a7, 10}, /* srau */    {0x417, 8},  /* normflt */
+   {0x497, 10}, /* fltnorm */ {0x727, 10}, /* flt2int */
+   {0x7a7, 8},  /* int2flt */
+};
+
+static unsigned
+agx3_apply_loop_head_hints(agx_context *ctx, struct util_dynarray *emission)
+{
+   unsigned applied = 0;
+   agx_foreach_block(ctx, block) {
+      if (!block->loop_header || block->offset < 0 ||
+          (size_t)block->offset + 4 > emission->size)
+         continue;
+      uint8_t *bytes = (uint8_t *)emission->data + block->offset;
+      const uint16_t opcode = (uint16_t)(bytes[0] | ((bytes[1] & 0x7) << 8));
+      /* v53-c2: by default only Apple's witnessed form, the 12-byte `sll`
+       * (fs/cs-apple.bin). AGX_G17P_LOOP_HEAD_HINT_ALL=1 admits the rest of
+       * the allowlist, whose use of the fields is unwitnessed. */
+      static int all_forms = -1;
+      if (all_forms < 0)
+         all_forms = debug_get_bool_option("AGX_G17P_LOOP_HEAD_HINT_ALL",
+                                           false);
+      if (!all_forms && opcode != 0x027)
+         continue;
+      bool ok = false;
+      for (unsigned i = 0; i < ARRAY_SIZE(agx3_loop_head_hint_forms); ++i) {
+         if (agx3_loop_head_hint_forms[i].opcode == opcode &&
+             (size_t)block->offset + agx3_loop_head_hint_forms[i].length <=
+                emission->size) {
+            ok = true;
+            break;
+         }
+      }
+      /* Bits 18..23 live in byte 2 bits 2..7: the default is 0b010101. */
+      if (!ok || (bytes[2] & 0xfc) != 0x54)
+         continue;
+      bytes[2] &= (uint8_t)~0x50; /* bits 20 and 22: f(n), f(n+1) = 2 */
+      applied++;
+   }
+   return applied;
+}
+
+
+/* AGX_G17P_EARLY_COMPARE (v52b, default off).
+ *
+ * Apple's G17P loops test the counter as soon as it is final: in
+ * fs-apple.bin the `icmp` sits right after `i++` (+0xbc) and its `cndlt`
+ * six instructions later at the bottom of the body (+0xec). Our emission
+ * always writes a control-flow compare immediately before the CND that
+ * consumes it. This moves an integer loop/if compare back to just after the
+ * last definition of its register sources, leaving the CND in place.
+ *
+ * The compare may only cross a straight run of emitted bytes: every crossed
+ * instruction is a plain synchronous ALU instruction (no scoreboard slot or
+ * wait, no control flow, so the exec mask and every flag slot are unchanged
+ * across the run), no branch lands inside the run, and no recorded branch
+ * instruction lies in it. The run may span blocks whose own bytes are empty
+ * (the structurizer's empty then/else blocks between a rotated loop body and
+ * its latch). A compare source marked for discard must not be read by a
+ * crossed instruction. The compare bytes are rotated, not re-encoded. */
+static bool
+agx3_early_compare_crossable(const agx_instr *I)
+{
+   if (I->agx3_tex_coord_stage)
+      return false;
+   switch (I->op) {
+   case AGX_OPCODE_MOV_IMM:
+   case AGX_OPCODE_IADD:
+   case AGX_OPCODE_IMAD:
+   case AGX_OPCODE_BFI:
+   case AGX_OPCODE_BFEIL:
+   case AGX_OPCODE_EXTR:
+   case AGX_OPCODE_ASR:
+   case AGX_OPCODE_ICMPSEL:
+   case AGX_OPCODE_BITOP:
+   case AGX_OPCODE_INTL:
+   case AGX_OPCODE_FADD:
+   case AGX_OPCODE_FMUL:
+   case AGX_OPCODE_FFMA:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+agx3_instr_touches_regs(const agx_instr *I, bool dests, unsigned reg,
+                        unsigned count)
+{
+   if (dests) {
+      agx_foreach_reg_dest(I, d) {
+         const unsigned r = I->dest[d].value;
+         const unsigned n = agx_index_size_16(I->dest[d]);
+         if (r < reg + count && reg < r + n)
+            return true;
+      }
+   } else {
+      agx_foreach_reg_src(I, s) {
+         const unsigned r = I->src[s].value;
+         const unsigned n = agx_index_size_16(I->src[s]);
+         if (r < reg + count && reg < r + n)
+            return true;
+      }
+   }
+   return false;
+}
+
+static off_t
+agx3_fixup_target(const struct agx3_branch_fixup *f)
+{
+   return f->loop_exit ? f->block->loop_exit_offset
+          : f->skip_to_end ? f->block->last_offset
+                           : f->block->offset;
+}
+
+static unsigned
+agx3_apply_early_compares(agx_context *ctx, struct util_dynarray *emission,
+                          size_t initial_size,
+                          const struct util_dynarray *spans,
+                          const struct util_dynarray *compares,
+                          const struct util_dynarray *fixups)
+{
+   const struct agx3_instr_span *sp = spans->data;
+   unsigned moved = 0;
+
+   util_dynarray_foreach(compares, struct agx3_early_compare, c) {
+      const agx_instr *T = c->I;
+      if ((T->op != AGX_OPCODE_IF_ICMP && T->op != AGX_OPCODE_WHILE_ICMP &&
+           T->op != AGX_OPCODE_BREAK_IF_ICMP) ||
+          c->compare_start != c->instr_start || c->span_count == 0 ||
+          c->compare_end - c->compare_start > AGX3_CF_MAX_LENGTH)
+         continue;
+      const unsigned t = c->span_count - 1;
+      if (sp[t].I != T || sp[t].start != c->instr_start)
+         continue;
+
+      /* Walk back over crossable instructions to the last source writer. */
+      unsigned from = t;
+      while (from > 0) {
+         const struct agx3_instr_span *x = &sp[from - 1];
+         bool writes = false;
+         agx_foreach_reg_src(T, s) {
+            writes |= agx3_instr_touches_regs(x->I, true, T->src[s].value,
+                                              agx_index_size_16(T->src[s]));
+         }
+         if (writes || x->wait || x->slot ||
+             !agx3_early_compare_crossable(x->I))
+            break;
+         bool read_discarded = false;
+         agx_foreach_reg_src(T, s) {
+            read_discarded |= T->src[s].discard &&
+               agx3_instr_touches_regs(x->I, false, T->src[s].value,
+                                       agx_index_size_16(T->src[s]));
+         }
+         if (read_discarded)
+            break;
+         from--;
+      }
+      if (from == t)
+         continue;
+
+      /* Contiguity: spans [from, t) own exactly [lo, compare_start). */
+      const off_t lo = sp[from].start;
+      bool ok = lo < c->compare_start;
+      util_dynarray_foreach(fixups, struct agx3_branch_fixup, f) {
+         const off_t target = agx3_fixup_target(f);
+         if ((f->offset >= lo && f->offset < c->compare_end) ||
+             (target > lo && target <= c->compare_start))
+            ok = false;
+      }
+      /* Offsets the fragment linker records into this part must not move. */
+      const off_t recorded[] = {
+         ctx->agx3_colour_link.entry_emitted
+            ? (off_t)(initial_size + ctx->agx3_colour_link.entry_offset) : -1,
+         ctx->agx3_colour_link.lldcol_first_valid &&
+               ctx->agx3_colour_link.lldcol_first_offset != UINT32_MAX
+            ? (off_t)(initial_size + ctx->agx3_colour_link.lldcol_first_offset)
+            : -1,
+      };
+      for (unsigned r = 0; r < ARRAY_SIZE(recorded); ++r)
+         ok &= !(recorded[r] >= lo && recorded[r] < c->compare_end);
+      if (!ok)
+         continue;
+
+      uint8_t *base = emission->data;
+      const size_t clen = (size_t)(c->compare_end - c->compare_start);
+      const size_t blen = (size_t)(c->compare_start - lo);
+      uint8_t compare[AGX3_CF_MAX_LENGTH];
+      memcpy(compare, base + c->compare_start, clen);
+      memmove(base + lo + clen, base + lo, blen);
+      memcpy(base + lo, compare, clen);
+
+      /* Blocks that began inside the moved run now begin at the CND. */
+      agx_foreach_block(ctx, block) {
+         if (block->offset > lo && block->offset <= c->compare_start)
+            block->offset = c->compare_end;
+         if (block->last_offset > lo && block->last_offset <= c->compare_start)
+            block->last_offset = c->compare_end;
+      }
+      moved++;
+   }
+   return moved;
+}
+
 bool
 agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 {
@@ -7995,6 +8274,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    assert(enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C);
    util_dynarray_init(&fixups, ctx);
+   const bool early_compare = enc == AGX_ISA_ENCODING_AGX3B &&
+      (agx_get_alu_flags() & AGX_ALU_G17P_EARLY_COMPARE);
+   struct util_dynarray spans, compares;
+   util_dynarray_init(&spans, ctx);
+   util_dynarray_init(&compares, ctx);
 
    agx_foreach_block(ctx, scan_block) {
       agx_foreach_instr_in_block(scan_block, scan_I) {
@@ -8231,10 +8515,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       tile_stores_left == 1;
    if (g17p_blend_protocol) {
       unsigned blocks = 0, phase = 0;
+      /* v54 AGX_G17P_INLINE_BLEND: an inline-blend program has the main's
+       * control flow before its blend. Apple's throughput fragment is that
+       * shape (a loop, then LLDCOL..LSTCOL in the exit block), so admit
+       * several blocks when every pixel and tile instruction is in the
+       * final block, which runs once per invocation after all control flow
+       * has reconverged. */
+      const bool inline_blend = !ctx->key->secondary &&
+         (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND);
+      agx_block *last_block =
+         list_last_entry(&ctx->blocks, agx_block, link);
       agx_foreach_block(ctx, protocol_block) {
-         if (++blocks != 1)
+         if (++blocks != 1 && !inline_blend)
             g17p_blend_protocol = false;
          agx_foreach_instr_in_block(protocol_block, P) {
+            if (inline_blend && protocol_block != last_block &&
+                (P->op == AGX_OPCODE_WAIT_PIX ||
+                 P->op == AGX_OPCODE_SIGNAL_PIX ||
+                 P->op == AGX_OPCODE_LD_TILE || P->op == AGX_OPCODE_ST_TILE))
+               g17p_blend_protocol = false;
             if (P->op == AGX_OPCODE_WAIT_PIX) {
                if (phase == 0 && P->writeout == 8)
                   phase = 1;
@@ -8271,6 +8570,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       g17p_final_release = NULL;
    const bool g17p_pixel_protocol =
       g17p_colour_protocol || g17p_blend_protocol || has_coverage_write;
+   /* v54 AGX_G17P_DISCARD_NO_RESTORE: a fully killed inline fragment keeps
+    * its coverage update and no tile access. It still ends the pixel
+    * transaction it opened, with the witnessed empty final release
+    * (070254000200) before END. */
+   bool g17p_kill_only_release = false;
+   if (enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
+       !ctx->key->secondary && !ctx->key->no_stop &&
+       (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_DISCARD_NO_RESTORE) &&
+       has_coverage_write && !has_zs_emit && tile_stores_left == 0 &&
+       tile_loads_left == 0) {
+      g17p_kill_only_release = true;
+      agx_foreach_instr_global(ctx, kill_I) {
+         if (kill_I->op == AGX_OPCODE_SIGNAL_PIX)
+            g17p_kill_only_release = false;
+      }
+   }
    const bool g17p_colourless_fragment =
       enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
       !ctx->key->fs.ignore_tib_dependencies && tile_stores_left == 0 &&
@@ -8752,6 +9067,70 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       fragment_input_started = true;
    }
 
+   /* v52 AGX_G17P_EARLY_COLOUR_GATE. Apple's compiler opens the colour-tile
+    * protocol near the fragment's entry (native throughput fragment 0x30,
+    * after its two pixel-coordinate reads), while a split Honeykrisp epilog
+    * opens it only after the whole main part. For a main part that exports
+    * colour and has no pixel protocol of its own, emit the gate here instead:
+    * after the leading input reads when the part is branch-free, otherwise
+    * before its first instruction, where no branch can reach it. The linker
+    * drops the epilog's gate, or this one when no later part has a gate. */
+   const bool g17p_single_rt = ctx->nir &&
+      /* One colour target only: Apple's witness is a single-RT fragment,
+       * and a multi-target epilog opens its partitions differently. */
+      util_bitcount64(ctx->nir->info.outputs_written &
+                      (BITFIELD64_RANGE(FRAG_RESULT_DATA0, AGX_MAX_RTS) |
+                       BITFIELD64_BIT(FRAG_RESULT_COLOR))) == 1;
+   const bool g17p_early_gate_base =
+      (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_EARLY_COLOUR_GATE) &&
+      enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
+      !ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
+      !g17p_colour_open && !g17p_mrt.valid && texture_samples_left == 0 &&
+      g17p_single_rt;
+   /* v54: an inline-blend fragment (AGX_G17P_INLINE_BLEND) owns its colour
+    * protocol; open it at entry as Apple's throughput fragment does (0x30,
+    * before the loop and the LLDCOL at 0x10c). Coverage writers keep their
+    * own entry placement. The gate is mandatory there, never optional. */
+   const bool g17p_early_gate_inline =
+      g17p_early_gate_base &&
+      (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND) &&
+      (g17p_colour_protocol || g17p_blend_protocol) && !has_coverage_write &&
+      tile_stores_left != 0;
+   bool g17p_early_gate_pending = g17p_early_gate_inline ||
+      (g17p_early_gate_base && !g17p_pixel_protocol &&
+       tile_stores_left == 0 && tile_loads_left == 0);
+   /* After the leading inputs when the entry block has another instruction
+    * for the gate to precede: the entry block has no predecessors, so a gate
+    * ahead of its first control-flow instruction is crossed by no branch. */
+   bool g17p_early_gate_after_inputs = false;
+   if (g17p_early_gate_pending) {
+      agx_foreach_instr_in_block(agx_start_block(ctx), gate_I) {
+         if (gate_I->op != AGX_OPCODE_GET_SR && gate_I->op != AGX_OPCODE_LDCF &&
+             gate_I->op != AGX_OPCODE_INTERP_AGX3 &&
+             gate_I->op != AGX_OPCODE_RHW_INTERP_AGX3 &&
+             gate_I->op != AGX_OPCODE_ITRCOORDS_AGX3 &&
+             gate_I->op != AGX_OPCODE_STOP) {
+            g17p_early_gate_after_inputs = true;
+            break;
+         }
+      }
+   }
+   if (g17p_early_gate_pending && !g17p_early_gate_after_inputs) {
+      uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
+      if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
+          !agx3_append(emission, entry, entry_len))
+         goto fail;
+      ctx->agx3_colour_link.entry_emitted = true;
+      ctx->agx3_colour_link.entry_optional = !g17p_early_gate_inline;
+      ctx->agx3_colour_link.entry_offset =
+         emission->size - entry_len - initial_size;
+      g17p_colour_open = true;
+      g17p_early_gate_pending = false;
+      /* As for the memory-side-effect gate above: inputs read after the
+       * gate stay unmarked. */
+      fragment_input_started = true;
+   }
+
    agx_foreach_block(ctx, block) {
       block->offset = emission->size;
       block->loop_exit_offset = -1;
@@ -8768,10 +9147,41 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          uint16_t wait = res[k].wait_mask;
          const uint8_t native_coord_slot = native_coord_slots[instr_index];
          k++;
+         const off_t span_start = emission->size;
+         if (early_compare) {
+            const struct agx3_instr_span span = {
+               .I = I, .block = block, .start = span_start,
+               .wait = res[instr_index].wait_mask,
+               .slot = res[instr_index].slot,
+            };
+            util_dynarray_append(&spans, span);
+         }
 
          if (agx3_g17p_trace_slots())
             fprintf(stderr, "G17Pslot %-3u %-22s slot=%u wait=0x%02x\n",
                     instr_index, agx_opcodes_info[I->op].name, slot, wait);
+
+         /* v52 early colour gate, branch-free part: after the leading
+          * fragment-input reads, as Apple places it. */
+         if (g17p_early_gate_pending && I->op != AGX_OPCODE_GET_SR &&
+             I->op != AGX_OPCODE_LDCF && I->op != AGX_OPCODE_INTERP_AGX3 &&
+             I->op != AGX_OPCODE_RHW_INTERP_AGX3 &&
+             I->op != AGX_OPCODE_ITRCOORDS_AGX3) {
+            uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len;
+            if (!agx3_pixel_colour_entry(enc, entry, &entry_len) ||
+                !agx3_append(emission, entry, entry_len))
+               AGX3_REFUSE(I);
+            ctx->agx3_colour_link.entry_emitted = true;
+            ctx->agx3_colour_link.entry_optional = !g17p_early_gate_inline;
+            ctx->agx3_colour_link.entry_in_entry_block =
+               block == agx_start_block(ctx);
+            ctx->agx3_colour_link.entry_offset =
+               emission->size - entry_len - initial_size;
+            g17p_colour_open = true;
+            g17p_early_gate_pending = false;
+            /* The instruction after the gate is the block's current last. */
+            block->last_offset = emission->size;
+         }
 
          /* A wait retires its slots before this instruction issues its own. */
          outstanding &= (uint16_t)~wait;
@@ -8847,12 +9257,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             I->op == AGX_OPCODE_POP_EXEC && after_loop_backedge;
          if (loop_pop)
             block->loop_exit_offset = emission->size;
+         const off_t cf_start = emission->size;
+         off_t cf_compare_end = -1;
          const int cf = agx3_try_control_flow(
             emission, &fixups, enc, ctx->key->dev.chip, I, cf_wait,
             cf_outstanding,
             after_loop_backedge,
             I->op == AGX_OPCODE_JMP_EXEC_NONE_AFTER && after_loop_exit_test,
-            loop_depth);
+            loop_depth, &cf_compare_end);
+         if (early_compare && cf > 0 && cf_compare_end > cf_start) {
+            struct agx3_early_compare c = {
+               .I = I, .block = block, .instr_start = span_start,
+               .compare_start = cf_start, .compare_end = cf_compare_end,
+               .span_count = util_dynarray_num_elements(
+                  &spans, struct agx3_instr_span),
+            };
+            util_dynarray_append(&compares, c);
+         }
          if (cf < 0)
             AGX3_REFUSE(I);
          if (cf > 0) {
@@ -9046,6 +9467,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (!agx3_emit_interp(emission, enc, I, interp_wait, first,
                                   ctx->stage == MESA_SHADER_FRAGMENT))
                AGX3_REFUSE(I);
+            ctx->agx3_colour_link.input_marked |= first;
             fragment_input_started = true;
             continue;
          }
@@ -9111,6 +9533,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                !g17p_fragment_helper_protocol;
             if (!agx3_emit_ldcf(emission, enc, I, slot, wait, first))
                AGX3_REFUSE(I);
+            ctx->agx3_colour_link.input_marked |= first;
             fragment_input_started = true;
             continue;
          }
@@ -9788,6 +10211,19 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                assert(tile_loads_left > 0);
                first = tile_loads_seen++ == 0;
                last = --tile_loads_left == 0;
+               /* v52 AGX_G17P_INPUT_MARK: one entry marker per fragment. An
+                * input this part already marked keeps the load unmarked;
+                * otherwise record where the marker lands so the linker can
+                * drop it when an earlier part marked an input. */
+               if ((agx_get_fs_structure_flags() &
+                    AGX_FS_STRUCTURE_INPUT_MARK) &&
+                   ctx->agx3_colour_link.input_marked)
+                  first = false;
+               if (first && !ctx->agx3_colour_link.lldcol_first_valid) {
+                  ctx->agx3_colour_link.lldcol_first_valid = true;
+                  ctx->agx3_colour_link.lldcol_first_offset =
+                     UINT32_MAX; /* set after the pixel waits below */
+               }
             } else {
                assert(tile_stores_left > 0);
                last = --tile_stores_left == 0;
@@ -9922,6 +10358,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             /* Apple's per-sample RGBA32 fragments store from halves 24 and
              * 16 with f13 clear, as the multi-target backgrounds do. */
+            if (first && I->op == AGX_OPCODE_LD_TILE &&
+                ctx->agx3_colour_link.lldcol_first_valid &&
+                ctx->agx3_colour_link.lldcol_first_offset == UINT32_MAX)
+               ctx->agx3_colour_link.lldcol_first_offset =
+                  emission->size - initial_size;
             if (!agx3_emit_tile(emission, enc, I, slot, wait, first, last,
                                 g17p_multi_background ||
                                    g17p_sample_colour_stores,
@@ -10278,13 +10719,21 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool coverage_input = enc == AGX_ISA_ENCODING_AGX3B &&
                ctx->stage == MESA_SHADER_FRAGMENT &&
                I->sr == AGX_SR_INPUT_SAMPLE_MASK;
-            d.first = coverage_input && emission->size == initial_size &&
+            /* v52 AGX_G17P_INPUT_MARK: a leading pixel-coordinate read is
+             * the fragment's first input in the same sense. */
+            const bool pixel_input = enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
+               (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INPUT_MARK) &&
+               (d.sr == 23 || d.sr == 24) && d.width == AGX3_SR_W32;
+            d.first = (coverage_input || pixel_input) &&
+                      emission->size == initial_size &&
                       !fragment_input_started &&
                       !g17p_fragment_helper_protocol;
             if (!agx3_sr_encode(enc, &d, bytes, &len))
                AGX3_REFUSE(I);
             memcpy(util_dynarray_grow_bytes(emission, 1, len), bytes, len);
-            fragment_input_started |= coverage_input;
+            ctx->agx3_colour_link.input_marked |= d.first;
+            fragment_input_started |= coverage_input || d.first;
             continue;
          }
 
@@ -12247,9 +12696,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->src[0].kill || I->src[1].kill ||
                 (I->src[0].cache && I->src[0].discard) ||
                 (I->src[1].cache && I->src[1].discard) ||
-                !agx3_alu_integer_reg_shift(enc, op, I->dest[0].value, src,
-                                            hints, (uint8_t)I->shift, wait,
-                                            bytes, &len) ||
+                !agx3_alu_integer_reg_shift_cache(
+                   enc, op, I->dest[0].value, src, hints, (uint8_t)I->shift,
+                   (agx_get_codegen_flags() &
+                    AGX_CODEGEN_G17P_INT_DEST_CACHE) != 0,
+                   wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             continue;
@@ -12335,7 +12786,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = I->dest[0].cache,
+                  .dest_cache = agx3_int_dest_cache(I->dest[0].cache),
                   .src_a_is_register = true,
                   .src_a_reg = a.value,
                   .src_a_kill = a.discard,
@@ -12422,7 +12873,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   (reg.abs || reg.neg || signed_half_widen)))) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = signed_half_widen && I->dest[0].cache,
+                  .dest_cache = agx3_int_dest_cache(signed_half_widen && I->dest[0].cache),
                   .immediate = (uint8_t)constant.value,
                   .src = reg.value,
                   .src_kill = reg.discard,
@@ -12487,6 +12938,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                             instr_index, I, &w))
                   AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
+                  .dest_cache = agx3_int_dest_cache(false),
                   .dest = I->dest[0].value,
                   .src_a_is_register = true,
                   .src_a_reg = a.value,
@@ -12552,7 +13004,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   AGX3_REFUSE(I);
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = I->dest[0].cache,
+                  .dest_cache = agx3_int_dest_cache(I->dest[0].cache),
                   .src_a_is_register = true,
                   .src_a_reg = na.value,
                   .src_a_kill = na.discard,
@@ -12609,7 +13061,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (I->dest[0].value >= AGX3_COPY_REG16_DEST_HALVES) {
                const struct agx3_iadd_desc d = {
                   .dest = I->dest[0].value,
-                  .dest_cache = I->dest[0].cache,
+                  .dest_cache = agx3_int_dest_cache(I->dest[0].cache),
                   .immediate = 0,
                   .src = I->src[0].value,
                   .src_kill = I->src[0].discard,
@@ -13806,9 +14258,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                const enum agx3_alu_hint hints[2]={
                   agx3_post_ra_hint(I->src[0]),agx3_post_ra_hint(I->src[1])};
                uint8_t bytes[AGX3_ALU_MAX_LENGTH],len=0;
-               if (!agx3_alu_bit_reg(enc,op,I->dest[0].value,src,hints,wait,
-                                     bytes,&len) ||
-                   !agx3_append(emission,bytes,len))
+               const bool native_forms =
+                  agx_get_codegen_flags() & AGX_CODEGEN_G17P_COMPACT_BITOPS;
+               const bool encoded = native_forms
+                  ? agx3_alu_bit_reg_native(enc, op, I->dest[0].value, src,
+                                            hints, I->dest[0].cache, wait,
+                                            bytes, &len)
+                  : agx3_alu_bit_reg(enc, op, I->dest[0].value, src, hints,
+                                     wait, bytes, &len);
+               if (!encoded || !agx3_append(emission,bytes,len))
                   AGX3_REFUSE(I);
                continue;
             }
@@ -14208,6 +14666,37 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], length = 0;
             if (!agx3_alu_asr_reg16(enc, dest.value, value.value, shift.value,
                                     hints, dest.cache, w, bytes, &length) ||
+                !agx3_append(emission, bytes, length))
+               AGX3_REFUSE(I);
+            continue;
+         }
+
+         /* Native immediate-count logical shifts do not require a GPR
+          * holding the count. Keep the existing masked/register forms below. */
+         if (enc == AGX_ISA_ENCODING_AGX3B &&
+             (I->op == AGX_OPCODE_BFI || I->op == AGX_OPCODE_BFEIL) &&
+             I->nr_dests == 1 && I->nr_srcs == 3 && I->bfi_mask == 0 &&
+             agx3_src_is_zero_imm(I->src[0]) &&
+             I->dest[0].size == AGX_SIZE_32 &&
+             I->src[1].size == AGX_SIZE_32 &&
+             I->src[2].type == AGX_INDEX_IMMEDIATE &&
+             I->src[2].value >= 1 && I->src[2].value <= 31) {
+            const agx_index dest = I->dest[0], value = I->src[1];
+            const agx_index base = I->src[0], shift = I->src[2];
+            if (I->saturate || base.memory || base.abs || base.neg ||
+                base.kill || base.cache || base.discard ||
+                !agx3_src_is_register(dest) || dest.memory ||
+                agx_channels(dest) != 1 || !agx3_src_is_register(value) ||
+                value.memory || agx_channels(value) != 1 || value.abs ||
+                value.neg || value.kill || (value.cache && value.discard) ||
+                shift.memory || shift.abs || shift.neg || shift.kill ||
+                shift.cache || shift.discard)
+               AGX3_REFUSE(I);
+            uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+            if (!agx3_alu_shift_imm32(enc, I->op == AGX_OPCODE_BFI,
+                                      dest.value, value.value, shift.value,
+                                      agx3_post_ra_hint(value), dest.cache, wait,
+                                      bytes, &length) ||
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;
@@ -14696,6 +15185,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       }
    }
 
+   if (early_compare) {
+      const unsigned early =
+         agx3_apply_early_compares(ctx, emission, initial_size, &spans,
+                                   &compares, &fixups);
+      if (agx_compiler_debug & AGX_DBG_SHADERS)
+         fprintf(stderr, "AGX3 early loop compares: %u\n", early);
+   }
+
    util_dynarray_foreach(&fixups, struct agx3_branch_fixup, fixup) {
       if (!agx3_fixup_branch(emission, enc, *fixup)) {
          if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
@@ -14708,6 +15205,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                     fixup->loop_exit, fixup->is_bn);
          goto fail;
       }
+   }
+
+   if (enc == AGX_ISA_ENCODING_AGX3B &&
+       (agx_get_codegen_flags() & AGX_CODEGEN_G17P_LOOP_HEAD_HINT)) {
+      const unsigned hinted = agx3_apply_loop_head_hints(ctx, emission);
+      if (agx_compiler_debug & AGX_DBG_SHADERS)
+         fprintf(stderr, "AGX3 loop-head hints: %u\n", hinted);
    }
 
    /* Separately compiled parts do not share a scoreboard ledger. Apple's
@@ -14725,12 +15229,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
        !agx3_retire_slots_noop(emission, enc, outstanding))
       goto fail;
 
+   if (g17p_kill_only_release && !ctx->is_preamble) {
+      uint8_t bytes[AGX3_PIXEL_MAX_LENGTH], len;
+      if (!g17p_colour_open ||
+          !agx3_pixel_release(enc, 0, true, 0, bytes, &len) ||
+          !agx3_append(emission, bytes, len))
+         goto fail;
+   }
+
    if (!ctx->key->no_stop || ctx->is_preamble) {
       const struct agx3_sel_instr end = {.op = AGX3_SEL_OP_END};
       if (!agx3_emit(emission, enc, &end))
          goto fail;
    }
 
+   util_dynarray_fini(&spans);
+   util_dynarray_fini(&compares);
    util_dynarray_fini(&fixups);
    return true;
 
@@ -14738,6 +15252,8 @@ fail:
    /* Do not leave a valid-looking prefix behind.  The compiler entrypoint
     * propagates this failure and clears the shader part transactionally. */
    emission->size = initial_size;
+   util_dynarray_fini(&spans);
+   util_dynarray_fini(&compares);
    util_dynarray_fini(&fixups);
    return false;
 }

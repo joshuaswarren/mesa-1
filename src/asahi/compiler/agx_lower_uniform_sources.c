@@ -4,6 +4,7 @@
  */
 #include "agx_builder.h"
 #include "agx_compiler.h"
+#include "agx_debug.h"
 #include "agx3_uniform_integer_instr.h"
 
 /*
@@ -66,6 +67,15 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
              (src_index == 2 ||
               (encoding == AGX_ISA_ENCODING_AGX2 && src_index == 1));
    case AGX_OPCODE_TEXTURE_SAMPLE:
+      /* v57 AGX_G17P_TEX_UNIFORM_OPERANDS: the texture (3) and sampler (4)
+       * index operands read the uniform file directly, as Apple's G17P
+       * argument-buffer fragments do (kind 3, u12/u16). Keep Apple's
+       * four-half alignment and the encoder's low-file range. */
+      if (encoding == AGX_ISA_ENCODING_AGX3B &&
+          (agx_get_v57_flags() & AGX_V57_TEX_UNIFORM_OPERANDS) &&
+          (src_index == 3 || src_index == 4))
+         return !high && !(value & 3) && value <= 252 &&
+                (size == AGX_SIZE_64 || size == AGX_SIZE_32);
       /* G17P's LOD operand is an immediate level or a packed GPR value, not a
        * uniform-file operand. Source 2 is still the bindless texture heap. */
       assert(!(src_index == 2 && high) && "texture heap always low");
@@ -124,6 +134,18 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
        * witnessed uniform-to-half copy, so it is split from its aligned word
        * below, ahead of the export run. */
       return !(encoding == AGX_ISA_ENCODING_AGX3B && size == AGX_SIZE_16);
+   case AGX_OPCODE_IF_ICMP:
+   case AGX_OPCODE_WHILE_ICMP:
+   case AGX_OPCODE_BREAK_IF_ICMP:
+      /* AGX_G17P_UNIFORM_COMPARE (v52b, default off): Apple's G17P loop
+       * test compares a GPR with an aligned 32-bit uniform in one icmp
+       * (fs-apple.bin +0xbc 0a832307060007020000: f18 = u6, f24 = 3), so
+       * keep the uniform as the second operand instead of copying it into
+       * a GPR on every iteration. */
+      return encoding == AGX_ISA_ENCODING_AGX3B &&
+             (agx_get_alu_flags() & AGX_ALU_G17P_UNIFORM_COMPARE) &&
+             src_index == 1 && size == AGX_SIZE_32 && !(value & 1) &&
+             value < 256;
    case AGX_OPCODE_PHI:
       /* We would fail validation otherwise */
       return true;
@@ -218,8 +240,19 @@ agx_lower_uniform_sources(agx_context *ctx)
             ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B && full_float &&
             (I->src[s].abs ||
              (I->src[s].neg && !(I->op == AGX_OPCODE_FFMA && s == 2)));
+         /* The reg/uniform compare (AGX_G17P_UNIFORM_COMPARE) exists only
+          * with a 32-bit register first operand. With an immediate, uniform
+          * or 16-bit first operand keep copying the uniform, so the existing
+          * register forms still encode the compare. */
+         const bool copy_compare_uniform =
+            (I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_WHILE_ICMP ||
+             I->op == AGX_OPCODE_BREAK_IF_ICMP) &&
+            (I->src[0].type != AGX_INDEX_NORMAL ||
+             I->src[0].size != AGX_SIZE_32 || I->src[0].abs ||
+             I->src[0].neg);
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
              (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
+              copy_compare_uniform ||
               !(native_integer || agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];

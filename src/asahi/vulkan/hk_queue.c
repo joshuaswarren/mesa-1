@@ -46,6 +46,11 @@
 #include "vk_drm_syncobj.h"
 #include "vk_sync.h"
 
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_aux_fb_small_probe,
+                          "HK_G17P_AUX_FB_SMALL_PROBE", false)
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_mcache_aperture_probe,
+                          "HK_G17P_MCACHE_APERTURE_PROBE", false)
+
 static bool
 hk_agxdecode_trace_armed(void)
 {
@@ -418,6 +423,18 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    c->stencil.comp_base = cs->cr.stencil.meta;
    c->stencil.comp_stride = cs->cr.stencil.meta_stride;
 
+   /* Private matched-benchmark diagnostic, requiring a diagnostic kernel.
+    * The caller must know the captured small-primitive predicate applies.
+    * Do not enable this for arbitrary applications or desktop workloads.
+    */
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       debug_get_option_hk_g17p_aux_fb_small_probe())
+      c->flags |= (1u << 31);
+   if (dev->dev.chip == AGX_CHIP_G17P &&
+       debug_get_option_hk_g17p_mcache_aperture_probe())
+      c->flags |= (1u << 30);
+
+
    if (cs->cr.dbias_is_int == U_TRISTATE_YES) {
       c->flags |= DRM_ASAHI_RENDER_DBIAS_IS_INT;
    }
@@ -545,7 +562,8 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
          fprintf(stderr, "%s%u", i ? "," : "",
                  cs->g17p_draw_trace.color_formats[i]);
       }
-      fprintf(stderr, "] depth=%u\n", cs->g17p_draw_trace.depth_format);
+      fprintf(stderr, "] depth=%u zls=%#" PRIx64 "\n",
+              cs->g17p_draw_trace.depth_format, (uint64_t)c->zls_ctrl);
       fflush(stderr);
    }
 
