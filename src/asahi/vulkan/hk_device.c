@@ -51,6 +51,8 @@ static const struct debug_named_value hk_perf_options[] = {
    {"designedusccdmbarrier", HK_PERF_DESIGNEDUSCCDMBARRIER,
     "G13X designed set {0,1,2,4,5,6,8} plus USC cache invalidate (0x17f)"},
    {"alwayscdmbarrier", HK_PERF_ALWAYSCDMBARRIER, "Unconditional per-launch CDM barrier (disable dependency tracking)"},
+   {"trackcdmbarrier", HK_PERF_TRACKCDMBARRIER,
+    "Dependency-track the CDM barrier on chips other than G13"},
    DEBUG_NAMED_VALUE_END
 };
 /* clang-format on */
@@ -334,6 +336,15 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
    dev->cdm_barrier_mask =
       debug_get_num_option("HK_CDM_BARRIER_MASK", 0) & 0x07ffffff;
+
+   /* The dependency-tracked CDM barrier holds token-digest parity with the
+    * reference driver on G13 (M1 family) only. Other chips keep the
+    * per-launch barrier until they pass the same gate;
+    * HK_PERFTEST=trackcdmbarrier opts them in for that run.
+    */
+   if (pdev->dev.chip != AGX_CHIP_G13G && pdev->dev.chip != AGX_CHIP_G13X &&
+       !HK_PERF(dev, TRACKCDMBARRIER))
+      dev->perftest |= HK_PERF_ALWAYSCDMBARRIER;
 
    /* Bounded poll before blocking syncobj waits (see vk_device.sync_wait_poll_us).
     * Off by default; pays CPU to skip wake-up latency on short submit->signal
