@@ -1195,6 +1195,24 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          modifier = choose_drm_format_mod(dev, image->plane_count, pCreateInfo,
                                           mod_list_info->drmFormatModifierCount,
                                           mod_list_info->pDrmFormatModifiers);
+
+         /* v96c HK_G17P_WSI_LINEAR=1 (opt-in, G17P): give window-system
+          * images the LINEAR modifier whenever the compositor offers it, so
+          * a fullscreen swapchain can be scanned out directly: appledrm
+          * planes accept only LINEAR. The G17P PBE renders linear colour
+          * targets natively; the cost is that a composited (non-scanout)
+          * surface is sampled from a linear image. */
+         if (dev->dev.chip == AGX_CHIP_G17P &&
+             vk_find_struct_const(pCreateInfo->pNext,
+                                  WSI_IMAGE_CREATE_INFO_MESA) &&
+             debug_get_bool_option("HK_G17P_WSI_LINEAR", false)) {
+            for (uint32_t i = 0; i < mod_list_info->drmFormatModifierCount; ++i) {
+               if (mod_list_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_LINEAR) {
+                  modifier = DRM_FORMAT_MOD_LINEAR;
+                  break;
+               }
+            }
+         }
       }
 
       assert(modifier != DRM_FORMAT_MOD_INVALID);

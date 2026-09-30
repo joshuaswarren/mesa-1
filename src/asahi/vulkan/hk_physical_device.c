@@ -1506,6 +1506,8 @@ hk_codegen_env_hash(void)
       /* v96: prolog/epilog disk caching changes where a part comes from,
        * never its bytes (the verify mode proves it). */
       "PROLOG_DISK_CACHE",
+      /* v96c: only chooses a window-system image's modifier. */
+      "WSI_LINEAR",
    };
    const char *list[512];
    unsigned n = 0;
