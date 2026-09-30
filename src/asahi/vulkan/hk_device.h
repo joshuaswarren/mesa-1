@@ -120,9 +120,13 @@ enum hk_perftest {
    HK_PERF_NOCDMBARRIER = BITFIELD_BIT(5),
    HK_PERF_USCCDMBARRIER = BITFIELD_BIT(6),
    HK_PERF_DESIGNEDUSCCDMBARRIER = BITFIELD_BIT(7),
-   /* Restore the unconditional per-launch CDM barrier (the default is the
-    * dependency-tracked barrier keyed on vkCmdPipelineBarrier2). */
+   /* Restore the unconditional per-launch CDM barrier and the batch split at
+    * every vkCmdPipelineBarrier2. The default on G13 is the
+    * dependency-tracked barrier; other chips default to this.
+    */
    HK_PERF_ALWAYSCDMBARRIER = BITFIELD_BIT(8),
+   /* Use the dependency-tracked barrier on chips other than G13. */
+   HK_PERF_TRACKCDMBARRIER = BITFIELD_BIT(9),
 };
 
 #define HK_PERF(dev, flag) unlikely((dev)->perftest &HK_PERF_##flag)
