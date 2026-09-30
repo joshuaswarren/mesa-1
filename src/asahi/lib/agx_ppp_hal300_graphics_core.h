@@ -154,23 +154,23 @@ struct agx_ppp_hal300_graphics_fields {
    bool depth_write;
    bool stencil_active;
    /*
-    * Stencil word = (op bits << 24) | (reference << 16) | (read << 8) |
-    * write, witnessed for the always/replace and equal/keep pairs the
-    * capture matrix drew. Only those two operation encodings are grounded,
-    * so a caller asking for another one is refused.
-    *
-    * Not modelled: the always/replace draw's two face words carry bit 0
-    * (0x07200f01 where this packer writes 0x07200f00), on M5/25G76 and on
-    * the J873 alike, while the equal/keep draw's do not. It looks like a
-    * stencil-write enable but has no field here yet.
+    * References occupy the low byte of the face words. G18's native
+    * setStencilReferenceValue (26A428, 0x219660584) and separate-face setter
+    * (0x2196605d8) replace exactly those bytes at context +0x7ad4/+0x7ad8.
+    * The captured face bit 0 was reference 1, not a write-enable bit.
+    * Stencil words retain the common layout: write/read masks at 0/8,
+    * depth-pass/depth-fail/stencil-fail operations at 16/19/22 and compare
+    * at 25. In particular, captured 0x0e02ffff means always/replace.
     */
+   uint8_t front_stencil_reference;
+   uint8_t back_stencil_reference;
    uint32_t front_stencil;
    uint32_t back_stencil;
 };
 
 /* The two grounded stencil operation encodings. */
 #define AGX_PPP_HAL300_STENCIL_KEEP_ALWAYS UINT32_C(0x0e000000)
-#define AGX_PPP_HAL300_STENCIL_REPLACE_ALWAYS UINT32_C(0x0e000000)
+#define AGX_PPP_HAL300_STENCIL_REPLACE_ALWAYS UINT32_C(0x0e020000)
 #define AGX_PPP_HAL300_STENCIL_KEEP_EQUAL UINT32_C(0x04000000)
 
 struct agx_ppp_hal300_graphics_core {
@@ -181,7 +181,8 @@ struct agx_ppp_hal300_graphics_core {
 
 /* Opaque/translucent triangles, optionally up to two vec4 varyings
  * and D32 LESS/write.
- * No stencil, queries, discard, or MSAA. Attachment storage and clear/load/store
+ * Stencil state uses the shared word layout and separate face references.
+ * Queries and MSAA need additional state. Attachment storage and clear/load/store
  * setup are separate; packing this state alone does not enable depth rendering.
  * Caller must validate those semantic restrictions before using this profile.
  * On failure out is untouched. */

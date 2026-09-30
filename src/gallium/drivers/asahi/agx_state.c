@@ -6651,8 +6651,8 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
     * 65535 integer, and one ISP flag -- all three of which the driver and
     * the kernel already derive from the layout -- while no PPP record moves
     * at all. A combined depth-stencil plane used for depth alone is
-    * byte-identical to a plain D32 one. Stencil *operations* are a separate
-    * axis and still refused above.
+    * byte-identical to a plain D32 one. G18 stencil state is encoded below
+    * using the shared operation words and native per-face references.
     */
    /* The attachment's hardware format, from the driver's layout: the
     * pipe_resource keeps the API format, but u_transfer_helper allocates the
@@ -6664,7 +6664,9 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    const bool depth_format_ok =
       zs_format == PIPE_FORMAT_Z32_FLOAT ||
       zs_format == PIPE_FORMAT_Z16_UNORM ||
-      zs_format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT;
+      zs_format == PIPE_FORMAT_Z32_FLOAT_S8X24_UINT ||
+      (dev->chip == AGX_CHIP_G18G && zs_format == PIPE_FORMAT_S8_UINT &&
+       !ctx->zs->base.depth_enabled);
    const bool depth_attachment_ok =
       (batch->key.nr_cbufs || zsbuf->texture) &&
       (zsbuf->texture ? (zs_units_idle || depth_format_ok)
@@ -6747,8 +6749,9 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
    M5_DRAW_OUTSIDE(rast->base.depth_clamp, "depth clamp");
    M5_DRAW_OUTSIDE(!rast->base.depth_clip_near || !rast->base.depth_clip_far,
                    "depth clip disabled");
-   M5_DRAW_OUTSIDE(ctx->zs->base.stencil[0].enabled ||
-                      ctx->zs->base.stencil[1].enabled,
+   M5_DRAW_OUTSIDE(dev->chip != AGX_CHIP_G18G &&
+                      (ctx->zs->base.stencil[0].enabled ||
+                       ctx->zs->base.stencil[1].enabled),
                    "stencil test");
    M5_DRAW_OUTSIDE(ctx->active_queries && ctx->occlusion_query,
                    "occlusion query");
@@ -6875,6 +6878,16 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
          ctx->zs->base.depth_enabled ? ctx->zs->base.depth_func : 0,
       .depth_write =
          ctx->zs->base.depth_enabled && ctx->zs->base.depth_writemask,
+      .stencil_active = ctx->zs->base.stencil[0].enabled,
+      .front_stencil_reference = ctx->zs->base.stencil[0].enabled
+                                   ? ctx->stencil_ref.ref_value[0] : 0,
+      .back_stencil_reference = ctx->zs->base.stencil[0].enabled
+         ? ctx->stencil_ref.ref_value[ctx->zs->base.stencil[1].enabled ? 1 : 0]
+         : 0,
+      .front_stencil = agx_g17p_stencil_word(&ctx->zs->base.stencil[0]),
+      .back_stencil = agx_g17p_stencil_word(ctx->zs->base.stencil[1].enabled
+                                             ? &ctx->zs->base.stencil[1]
+                                             : &ctx->zs->base.stencil[0]),
    };
    struct agx_ppp_hal300_graphics_core graphics;
    if (!agx_ppp_hal300_graphics_core_pack(dev->chip, &graphics_fields, &graphics))

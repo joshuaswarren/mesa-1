@@ -14,8 +14,8 @@ agx_ppp_hal300_graphics_core_pack(
     * captures reproduce byte for byte for each shape they contain --
     * triangles, points, lines, the three pass types, depth less/always with
     * writes, stencil control, two- and four-component smooth varyings --
-    * apart from one stencil face bit that no caller can set on either chip
-    * (see the stencil note in the header). The shapes grounded
+    * including the stencil reference byte recovered from the G18 setters.
+    * The shapes grounded
     * only on G17G (flat, noperspective, colour-free, depth output, clip
     * distances, culling and winding) are carried to G18G on the strength of
     * that shared layout, without a G18G capture of their own. */
@@ -124,9 +124,11 @@ agx_ppp_hal300_graphics_core_pack(
        4 + (fields->point_size_output ? 1 : 0) +
            fields->clip_distance_words +
            fields->vertex_varying_components},
-      {0x020000e0, control, face, face,
-       fields->front_stencil ? fields->front_stencil : 0x0e000000,
-       fields->back_stencil ? fields->back_stencil : 0x0e000000, 0},
+      {0x020000e0, control,
+       face | fields->front_stencil_reference,
+       face | fields->back_stencil_reference,
+       fields->stencil_active ? fields->front_stencil : 0x0e000000,
+       fields->stencil_active ? fields->back_stencil : 0x0e000000, 0},
       /* HAL300 updateFragmentShaderISPState (M5/25G76, 4d2b10..4d2b38)
        * stores pass bits29..31 at context+780c. encodeAndEmitRenderState
        * loads them at 4e831c (7500+30c), preserves them at 4e83ac..4e83b8,
