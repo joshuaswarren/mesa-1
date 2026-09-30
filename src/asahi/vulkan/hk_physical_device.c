@@ -1500,8 +1500,9 @@ hk_codegen_env_hash(void)
       "TRACE", "DUMP", "_LOG", "PERF", "VERBOSE", "DEBUG_OBJECT", "SLOW_DRAW",
       "DISK_CACHE_ID", "LAZY_GENERIC", "FORCE_GENERIC", "BIND_PREDICT",
       "VARIANT_TRACE",
-      /* v96: HK_G17P_ZLS_ELIDE_UNTOUCHED only changes command recording. */
-      "ZLS_ELIDE",
+      /* v96: HK_G17P_ZLS_ELIDE_UNTOUCHED only changes command recording;
+       * HK_G17P_SLOW_SUBMIT_US only prints. */
+      "ZLS_ELIDE", "SLOW_SUBMIT",
    };
    const char *list[512];
    unsigned n = 0;
