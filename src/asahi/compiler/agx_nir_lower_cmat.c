@@ -165,12 +165,18 @@ mem_deref(nir_builder *b, nir_deref_instr *ptr, nir_def *stride,
           nir_def *major, nir_def *minor, enum glsl_base_type elem,
           unsigned nvec, unsigned scalar_bytes, unsigned tsz)
 {
+   const unsigned bits = ptr->def.bit_size;
    nir_def *row_comps = nir_udiv_imm(
-      b, nir_imul_imm(b, nir_imul(b, major, stride), scalar_bytes * nvec),
+      b,
+      nir_imul_imm(b,
+                   nir_imul(b, nir_u2uN(b, major, bits),
+                            nir_u2uN(b, stride, bits)),
+                   scalar_bytes * nvec),
       tsz);
    nir_deref_instr *c = nir_build_deref_cast(b, &ptr->def, ptr->modes,
                                              glsl_scalar_type(elem), tsz);
-   return nir_build_deref_ptr_as_array(b, c, nir_iadd(b, row_comps, minor));
+   return nir_build_deref_ptr_as_array(
+      b, c, nir_iadd(b, row_comps, nir_u2uN(b, minor, bits)));
 }
 
 static bool
