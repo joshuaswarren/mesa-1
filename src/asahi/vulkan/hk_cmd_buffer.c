@@ -1120,7 +1120,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
        * barrier word (hk_cmd_dispatch.c) instead of every launch flushing.
        * Chips without a digest-parity measurement keep the unconditional
        * per-launch barrier. */
-      if (!HK_PERF(dev, ALWAYSCDMBARRIER))
+      if (!HK_PERF(dev, ALWAYSCDMBARRIER) && !dev->cdm_defer_flush)
          cmd->state.cs.cdm_barrier_pending = true;
       return;
    }
