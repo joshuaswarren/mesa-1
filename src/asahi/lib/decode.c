@@ -22,6 +22,7 @@
 #include "agx3_cdm_decode_core.h"
 #include "agx3_cdm_direct_launch_semantic_core.h"
 #include "agx_ioto_core.h"
+#include "agx_m5_va.h"
 #include "agx_ppp_decode_core.h"
 #include "agx_va_runtime_hole.h"
 #include "agx_vdm_decode_core.h"
@@ -330,6 +331,21 @@ typedef unsigned (*decode_cmd)(struct agxdecode_ctx *ctx, const uint8_t *map,
 #define STATE_RET  (0xFFFFFFFCu)
 #define STATE_ERROR (0xFFFFFFFBu)
 
+/* Every refill, not just the first one, must stay inside a tracked BO. */
+static int
+agxdecode_fetch_stream(struct agxdecode_ctx *ctx, uint64_t va, void *buffer,
+                       size_t size)
+{
+   if (!lib_config.read_gpu_mem) {
+      struct agx_bo *alloc = agxdecode_find_mapped_gpu_mem_containing(ctx, va);
+      if (!alloc)
+         return 0;
+      size = MIN2(size, alloc->size - (va - alloc->va->addr));
+   }
+
+   return agxdecode_fetch_gpu_mem(ctx, va, size, buffer);
+}
+
 static void
 agxdecode_stateful(struct agxdecode_ctx *ctx, uint64_t va, const char *label,
                    decode_cmd decoder, bool verbose, decoder_params *params,
@@ -356,7 +372,7 @@ agxdecode_stateful(struct agxdecode_ctx *ctx, uint64_t va, const char *label,
    }
    fflush(agxdecode_dump_stream);
 
-   int len = agxdecode_fetch_gpu_mem(ctx, va, size, buf);
+   int len = agxdecode_fetch_stream(ctx, va, buf, size);
 
    int left = len;
    uint8_t *map = buf;
@@ -376,8 +392,8 @@ agxdecode_stateful(struct agxdecode_ctx *ctx, uint64_t va, const char *label,
 
       /* If we fail to decode, default to a hexdump (don't hang) */
       if (count == 0) {
-         u_hexdump(agxdecode_dump_stream, map, 8, false);
-         count = 8;
+         count = MIN2(8, left);
+         u_hexdump(agxdecode_dump_stream, map, count, false);
       }
 
       fflush(agxdecode_dump_stream);
@@ -386,7 +402,7 @@ agxdecode_stateful(struct agxdecode_ctx *ctx, uint64_t va, const char *label,
       } else if (count == STATE_LINK) {
          fprintf(agxdecode_dump_stream, "Linking to 0x%" PRIx64 "\n\n", link);
          va = link;
-         left = len = agxdecode_fetch_gpu_array(ctx, va, buf);
+         left = len = agxdecode_fetch_stream(ctx, va, buf, sizeof(buf));
          map = buf;
       } else if (count == STATE_CALL) {
          fprintf(agxdecode_dump_stream,
@@ -395,25 +411,29 @@ agxdecode_stateful(struct agxdecode_ctx *ctx, uint64_t va, const char *label,
          assert(sp < ARRAY_SIZE(stack));
          stack[sp++] = va + 8;
          va = link;
-         left = len = agxdecode_fetch_gpu_array(ctx, va, buf);
+         left = len = agxdecode_fetch_stream(ctx, va, buf, sizeof(buf));
          map = buf;
       } else if (count == STATE_RET) {
          assert(sp > 0);
          va = stack[--sp];
          fprintf(agxdecode_dump_stream, "Returning to 0x%" PRIx64 "\n\n", va);
-         left = len = agxdecode_fetch_gpu_array(ctx, va, buf);
+         left = len = agxdecode_fetch_stream(ctx, va, buf, sizeof(buf));
          map = buf;
       } else if (count == STATE_ERROR) {
          fprintf(agxdecode_dump_stream,
                  "Stopping at a non-canonical command record\n");
          break;
       } else {
+         if (count > (unsigned)left) {
+            fprintf(agxdecode_dump_stream, "Truncated command record\n");
+            break;
+         }
          va += count;
          map += count;
          left -= count;
 
          if (left < 512 && len == sizeof(buf)) {
-            left = len = agxdecode_fetch_gpu_array(ctx, va, buf);
+            left = len = agxdecode_fetch_stream(ctx, va, buf, sizeof(buf));
             map = buf;
          }
       }
@@ -705,6 +725,24 @@ agxdecode_ioto(UNUSED struct agxdecode_ctx *ctx, const uint8_t *map,
                decoder_params *params, UNUSED void *data)
 {
    const enum agx_chip chip = agxdecode_chip_from_params(params);
+   if (chip == AGX_CHIP_G18G) {
+      const char *display = NULL;
+      int length = agx3d_instr_length(map, available, &display);
+      if (length <= 0) {
+         fprintf(agxdecode_dump_stream, "Unknown or truncated G18 Ioto instruction\n");
+         return STATE_ERROR;
+      }
+
+      /* ISA decoders read a padded instruction, not an unaligned byte stream. */
+      BITSET_WORD instruction[6] = {0};
+      if ((unsigned)length > sizeof(instruction))
+         return STATE_ERROR;
+      memcpy(instruction, map, length);
+      agx3d_disassemble_instr(instruction, agxdecode_dump_stream, 0, length,
+                              verbose);
+      return display && !strcmp(display, "end") ? STATE_DONE : (unsigned)length;
+   }
+
    struct agx_ioto_program_record record;
    size_t consumed = 0;
 
@@ -1046,12 +1084,15 @@ agxdecode_ppp_agx3(struct agxdecode_ctx *ctx, enum agx_chip chip, uint64_t va,
    }
 }
 
-/* G17P carries PPP payload pointers as offsets from the render-context base.
+/* G17P and G18G carry PPP pointers as offsets from their render-context base.
  * Resolve that address only for decoder memory fetches; keep the raw packet
  * value visible so diagnostics cannot accidentally hide an encoder bug. */
 static uint64_t
-agxdecode_g17p_ppp_fetch_address(enum agx_chip chip, uint64_t wire_pointer)
+agxdecode_ppp_fetch_address(enum agx_chip chip, uint64_t wire_pointer)
 {
+   if (chip == AGX_CHIP_G18G && wire_pointer < (UINT64_C(1) << 39))
+      return AGX_M5_DRIVER_BASE + wire_pointer;
+
    if (chip == AGX_CHIP_G17P &&
        wire_pointer < AGX_G17P_VDM_USER_SIZE)
       return AGX_G17P_VDM_USER_BASE + wire_pointer;
@@ -1075,7 +1116,7 @@ agxdecode_vdm_agx3(struct agxdecode_ctx *ctx, const uint8_t *map,
 
    switch (record.kind) {
    case AGX_VDM_RECORD_PPP_STATE_UPDATE: {
-      const uint64_t fetch_pointer = agxdecode_g17p_ppp_fetch_address(
+      const uint64_t fetch_pointer = agxdecode_ppp_fetch_address(
          chip, record.data.ppp_state_update.pointer);
 
       fprintf(agxdecode_dump_stream,
@@ -1448,7 +1489,8 @@ agxdecode_drm_cmd_render(struct agxdecode_ctx *ctx,
 {
    const enum agx_chip chip = agxdecode_chip_from_params(params);
    decode_cmd graphics_program_decoder =
-      chip == AGX_CHIP_G17P ? agxdecode_ioto : agxdecode_usc;
+      chip == AGX_CHIP_G17P || chip == AGX_CHIP_G18G ? agxdecode_ioto
+                                                   : agxdecode_usc;
 
    DUMP_FIELD(c, "%x", flags);
    DUMP_FIELD(c, "0x%llx", vdm_ctrl_stream_base);
@@ -1586,6 +1628,14 @@ chip_id_to_params(decoder_params *params, uint32_t chip_id)
          .gpu_variant = 'G',
          .chip_id = chip_id,
          .num_clusters_total = 1,
+      };
+      break;
+   case 0x8152:
+      *params = (decoder_params){
+         .gpu_generation = 18,
+         .gpu_variant = 'G',
+         .chip_id = chip_id,
+         .num_clusters_total = 2,
       };
       break;
    case 0x8103:
