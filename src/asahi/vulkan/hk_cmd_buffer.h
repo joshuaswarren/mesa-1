@@ -357,6 +357,12 @@ struct hk_cs {
 
    /* Whether there is more than just the root chunk */
    bool stream_linked;
+   /* HK_CDM_DEFER_FLUSH: a launch was recorded without the trailing CDM
+    * barrier; it is emitted when the batch ends (Vulkan barrier, query,
+    * event, end of command buffer), which is where Vulkan requires the
+    * ordering.
+    */
+   bool cdm_flush_pending;
 
    /* Whether the sampler heap is required. Although we always must maintain the
     * heap for correctness, it's often not necessary since we can push lots of
@@ -683,6 +689,7 @@ hk_cs_destroy(struct hk_cs *cs)
 }
 
 void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+void hk_cs_finish_pending_flush(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 static void
 hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
@@ -690,6 +697,7 @@ hk_cmd_buffer_end_compute_internal(struct hk_cmd_buffer *cmd,
 {
    if (*ptr) {
       struct hk_cs *cs = *ptr;
+      hk_cs_finish_pending_flush(cmd, cs);
 
       /* This control stream may write immediates as it ends. Queue the writes
        * now that we're done emitting everything else.
