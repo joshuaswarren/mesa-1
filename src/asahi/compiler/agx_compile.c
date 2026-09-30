@@ -10578,10 +10578,11 @@ agx_compile_function_nir_attempt(nir_shader *nir, nir_function_impl *impl,
    /* The bottom-up register-pressure scheduler moves each load next to its use,
     * which serializes the memory round trips of small compute kernels (the
     * LLM decode chain: +1.7% tokens/s with it off, bit-identical results).
-    * Compute shaders therefore skip it unless AGX_SCHED_COMPUTE is set. */
+    * Compute shaders on G13 therefore skip it unless AGX_SCHED_COMPUTE is set.
+    * Other generations keep it until they are measured. */
    bool skip_sched = (agx_compiler_debug & AGX_DBG_NOSCHED) ||
                      (nir->info.stage == MESA_SHADER_COMPUTE &&
-                      !getenv("AGX_SCHED_COMPUTE"));
+                      ctx->key->dev.g13 && !getenv("AGX_SCHED_COMPUTE"));
    if (likely(!skip_sched)) {
       AGX_PASS(ctx, agx_pressure_schedule);
       if (agx_isa_is_agx3(ctx->key->dev.encoding))
@@ -13383,7 +13384,6 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       assign_coefficient_regs(nir, &info->varyings.fs);
    }
 
-<<<<<<< HEAD
    if (key->dev.encoding == AGX_ISA_ENCODING_AGX3C)
       NIR_PASS(_, nir, nir_opt_licm, NULL);
 
@@ -13445,13 +13445,11 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       }
    }
 
-=======
-   if (!getenv("AGX_LOCAL_FOLD_OFF")) {
+   if (key->dev.g13 && !getenv("AGX_LOCAL_FOLD_OFF")) {
       NIR_PASS(_, nir, agx_fold_shared_offsets);
       NIR_PASS(_, nir, nir_opt_dce);
    }
 
->>>>>>> 50cf0599131e (agx: fold constant shared-memory address deltas into the lload/lstore index)
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       nir_print_shader(nir, stdout);
 
