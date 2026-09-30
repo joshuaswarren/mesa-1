@@ -186,9 +186,15 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
       }
       fields[57] = 1;
       fields[158] = 4;
-      if (fields[77] == 0)
-         fields[56] = 2;
-      else
+      if (fields[77] == 0) {
+         /* G18 names the second coordinate explicitly. The original
+          * fullscreen texture witness stages X/Y at 0/2 (f19/f56=0/2),
+          * while the native three-comparison witness stages them at 4/0
+          * (f19/f56=4/0). G17's ordinary 2D operand is a contiguous pair;
+          * its rotated staging blocks must retain their Y half here.
+          * Array, cube and 3D operands have separate layouts. */
+         fields[56] = fields[76] == 1 ? fields[19] + 2 : 2;
+      } else
          fields[19] = 4;
       fields[62] |= fields[69];
       fields[69] = 0;
