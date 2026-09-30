@@ -349,7 +349,7 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
-   if (!HK_PERF(dev, ALWAYSCDMBARRIER)) {
+   if (!HK_PERF(dev, ALWAYSCDMBARRIER) && !dev->cdm_defer_flush) {
       /* The app declared a memory dependency: the next CDM launch carries the
        * full barrier set (hk_cmd_dispatch.c). Compute launches before the
        * barrier were already flushed by the previous launch's gating.

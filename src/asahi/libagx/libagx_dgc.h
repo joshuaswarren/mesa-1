@@ -443,6 +443,29 @@ agx_cdm_barrier_usc(GLOBAL uint32_t *out)
 }
 
 /*
+ * Barrier at the end of a batch in the deferred CDM flush mode. On G13G it is
+ * bits 4-8: the set that the deferred flush was measured with on M1
+ * (token digests identical over long streams and repeated runs). Other chips
+ * use agx_cdm_barrier.
+ */
+static inline GLOBAL uint32_t *
+agx_cdm_barrier_deferred(GLOBAL uint32_t *out, enum agx_chip chip)
+{
+   if (chip != AGX_CHIP_G13G)
+      return agx_cdm_barrier(out, chip);
+
+   agx_push(out, CDM_BARRIER, cfg) {
+      cfg.unk_4 = true;
+      cfg.unk_5 = true;
+      cfg.unk_6 = true;
+      cfg.unk_7 = true;
+      cfg.unk_8 = true;
+   }
+
+   return out;
+}
+
+/*
  * G13X candidate reduction: the designed set {unk_4, unk_5, unk_6, unk_8}
  * (the bits that held mlx-omarchy pinned digests 48/48 in the termA
  * battery) plus the USC cache invalidate (covers uniform/texture-state

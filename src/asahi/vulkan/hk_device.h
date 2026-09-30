@@ -101,6 +101,9 @@ struct hk_device {
    /* HK_CDM_BARRIER_MASK=<hex>: perftest-only override of the per-launch
     * CDM_BARRIER flag word (bits 0..26). 0 = unset. */
    uint32_t cdm_barrier_mask;
+   /* HK_CDM_DEFER_FLUSH (hk_device.c): emit the CDM barrier at the end of
+    * each compute batch, not after vkCmdPipelineBarrier2. */
+   bool cdm_defer_flush;
 
    struct {
       struct u_rwlock lock;
