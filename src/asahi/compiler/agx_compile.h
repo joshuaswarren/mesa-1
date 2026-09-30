@@ -269,6 +269,11 @@ struct agx_device_key {
     * kernel, but that's functionally a hardware feature.
     */
    bool soft_fault;
+
+   /* Is the target GPU generation 13 (M1 family)? Selects the compute
+    * codegen defaults that are measured on G13 only.
+    */
+   bool g13;
 };
 
 struct agx_shader_key {
