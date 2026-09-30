@@ -8479,9 +8479,13 @@ agx3_bank_scalar_tile_store_inputs(agx_context *ctx)
    bool progress = false;
    agx_builder b = agx_init_builder(ctx, agx_before_instr(first_store));
    agx_foreach_instr_global(ctx, store) {
+      /* v94 memory safety: test the opcode before reading src[0]; an
+       * instruction with no sources (e.g. stop) has no src[0] (ASan
+       * heap-buffer-overflow READ in agx3_bank_scalar_tile_store_inputs). */
+      if (store->op != AGX_OPCODE_ST_TILE)
+         continue;
       agx_index source = store->src[0];
-      if (store->op != AGX_OPCODE_ST_TILE || source.type != AGX_INDEX_NORMAL ||
-          agx_channels(source) != 1)
+      if (source.type != AGX_INDEX_NORMAL || agx_channels(source) != 1)
          continue;
 
       agx_foreach_instr_global(ctx, I) {
