@@ -46,14 +46,15 @@ hk_get_vk_version()
 }
 
 /* Cooperative matrices hold token-digest parity with the reference driver on
- * G13 (M1 family) only. Other chips need AGX_SIMDMAT=1 until they pass the
- * same gate. AGX_SIMDMAT=0 disables them everywhere.
+ * G13 (M1 family) and G14X (M2 Max). Other chips need AGX_SIMDMAT=1 until they
+ * pass the same gate. AGX_SIMDMAT=0 disables them everywhere.
  */
 static bool
 hk_cooperative_matrix_enabled(const struct agx_device *dev)
 {
    return debug_get_bool_option(
-      "AGX_SIMDMAT", dev->chip == AGX_CHIP_G13G || dev->chip == AGX_CHIP_G13X);
+      "AGX_SIMDMAT", dev->chip == AGX_CHIP_G13G || dev->chip == AGX_CHIP_G13X ||
+                        dev->chip == AGX_CHIP_G14X);
 }
 
 static void
