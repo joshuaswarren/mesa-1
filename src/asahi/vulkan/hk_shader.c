@@ -3493,6 +3493,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    result = hk_upload_shader(dev, shader);
    if (result != VK_SUCCESS)
       return vk_error(dev, result);
+   shader->compiled = true;
    return VK_SUCCESS;
 }
 
@@ -4645,9 +4646,18 @@ hk_compile_shaders(struct vk_device *vk_dev, uint32_t shader_count,
    return VK_SUCCESS;
 }
 
+/* Per-variant marker in a serialized hk_api_shader (shader binary version
+ * 25).  ABSENT replaces the size-based guess binary version 24 used, which
+ * mistook a compiled zero-byte fragment main for a never-compiled variant. */
+enum hk_serialized_variant {
+   HK_SERIALIZED_COMPILED = 0,
+   HK_SERIALIZED_DEFERRED = 1,
+   HK_SERIALIZED_ABSENT = 2,
+};
+
 static VkResult
 hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
-                      struct hk_shader *shader)
+                      struct hk_shader *shader, bool absent)
 {
    struct hk_shader_info info;
    blob_copy_bytes(blob, &info, sizeof(info));
@@ -4669,8 +4679,19 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
     * vertex variant of a hardware-only vertex shader) has no code. The
     * compile leaves it without link table, upload or packed counts; restore
     * exactly that, so a deserialized object equals the compiled one field
-    * for field (tools/objdiff.py). */
-   if (code_size == 0 && data_size == 0) {
+    * for field (tools/objdiff.py).
+    *
+    * The serializer marks such a variant explicitly (HK_SERIALIZED_ABSENT).
+    * Empty code alone does not identify it: a compiled G17P fragment shader
+    * whose main does nothing has code_size == 0 and data_size == 0, yet it
+    * needs its link table, upload and packed state like any other compiled
+    * variant.  Treating it as never compiled left it with neither a link
+    * table nor a lazy one, so every draw failed hk_get_fast_linked() and
+    * vkEndCommandBuffer returned VK_ERROR_FEATURE_NOT_PRESENT (zink: device
+    * lost) whenever the shader came from a pipeline cache or binary. */
+   if (absent) {
+      if (code_size != 0 || data_size != 0)
+         return vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       shader->b.info = b_info;
       shader->info = info;
       shader->agx3_vdm_state_update = agx3_vdm_state_update;
@@ -4689,9 +4710,11 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    shader->data_size = data_size;
    shader->b.info.binary_size = code_size;
 
-   shader->code_ptr = malloc(code_size);
-   if (shader->code_ptr == NULL)
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   if (code_size > 0) {
+      shader->code_ptr = malloc(code_size);
+      if (shader->code_ptr == NULL)
+         return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+   }
 
    if (data_size > 0) {
       shader->data_ptr = malloc(data_size);
@@ -4708,6 +4731,7 @@ hk_deserialize_shader(struct hk_device *dev, struct blob_reader *blob,
    result = hk_upload_shader(dev, shader);
    if (result != VK_SUCCESS)
       return vk_error(dev, result);
+   shader->compiled = true;
    return VK_SUCCESS;
 }
 
@@ -4766,7 +4790,8 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
 
    hk_foreach_variant(obj, shader) {
       VkResult result;
-      if (blob_read_uint8(blob) == 1) {
+      const uint8_t marker = blob_read_uint8(blob);
+      if (marker == HK_SERIALIZED_DEFERRED) {
          /* v56e: a deferred generic variant, rebuilt lazily. */
          const bool has_key = blob_read_uint8(blob);
          union hk_key key;
@@ -4790,8 +4815,12 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
          } else {
             result = VK_SUCCESS;
          }
+      } else if (marker == HK_SERIALIZED_COMPILED ||
+                 marker == HK_SERIALIZED_ABSENT) {
+         result = hk_deserialize_shader(dev, blob, shader,
+                                        marker == HK_SERIALIZED_ABSENT);
       } else {
-         result = hk_deserialize_shader(dev, blob, shader);
+         result = vk_error(dev, VK_ERROR_INCOMPATIBLE_SHADER_BINARY_EXT);
       }
 
       if (result != VK_SUCCESS) {
@@ -4834,7 +4863,7 @@ hk_shader_binary_payload_cacheable(struct hk_api_shader *obj)
     * and eager linked variants keep their existing per-object ownership. */
    hk_foreach_variant(obj, shader) {
       /* A never-compiled variant carries nothing to share. */
-      if (!shader->lazy && shader->code_size == 0)
+      if (!shader->lazy && !shader->compiled)
          continue;
       if (shader->lazy || shader->bo || shader->only_linked ||
           !shader->linked.ht)
@@ -4890,7 +4919,9 @@ hk_shader_binary_cache_clone(struct hk_device *dev,
          }
       }
       simple_mtx_init(&dst->linked.lock, mtx_plain);
-      dst->linked.lazy_ht = src->code_size != 0;
+      /* Every compiled variant links on demand, including one whose main
+       * compiled to zero bytes. */
+      dst->linked.lazy_ht = src->compiled;
    }
 
    hk_debug_dump_object(obj, "clone");
@@ -5054,7 +5085,7 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
       if (l) {
          simple_mtx_lock(&l->lock);
          if (!l->done && l->nir) {
-            blob_write_uint8(blob, 1);
+            blob_write_uint8(blob, HK_SERIALIZED_DEFERRED);
             blob_write_uint8(blob, l->has_key);
             blob_write_bytes(blob, &l->key, sizeof(l->key));
             blob_write_uint8(blob, l->has_rs);
@@ -5071,7 +5102,8 @@ hk_api_shader_serialize(struct vk_device *vk_dev,
          if (l->result != VK_SUCCESS)
             return false;
       }
-      blob_write_uint8(blob, 0);
+      blob_write_uint8(blob, shader->compiled ? HK_SERIALIZED_COMPILED
+                                              : HK_SERIALIZED_ABSENT);
       hk_shader_serialize(vk_dev, shader, blob);
    }
 

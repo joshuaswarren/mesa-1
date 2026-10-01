@@ -111,6 +111,7 @@ test_program_cache_lifetime(void)
    CHECK(!hk_agx3_shader_binary_version_supported(21));
    CHECK(!hk_agx3_shader_binary_version_supported(22));
    CHECK(!hk_agx3_shader_binary_version_supported(23));
+   CHECK(!hk_agx3_shader_binary_version_supported(24));
    CHECK(hk_agx3_shader_binary_version_supported(
       HK_AGX3_SHADER_BINARY_VERSION));
    CHECK(!hk_agx3_shader_binary_version_supported(

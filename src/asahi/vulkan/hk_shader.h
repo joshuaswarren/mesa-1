@@ -223,6 +223,15 @@ struct hk_shader {
       bool lazy_ht;
    } linked;
 
+   /* The variant was compiled (hk_compile_nir) or deserialized from a
+    * compiled variant.  False only for a variant that was never compiled,
+    * e.g. the software vertex variant of a shader without a tessellation or
+    * geometry successor.  A compiled variant may have zero bytes of code: a
+    * G17P fragment shader with no work (an empty main) is all prolog and
+    * epilog, so code_size == 0 does not mean "never compiled".
+    */
+   bool compiled;
+
    /* If there's only a single possibly linked variant, direct pointer. TODO:
     * Union with the cache to save some space?
     */
