@@ -1134,6 +1134,69 @@ spread_floor_halves(void)
    return (unsigned)floor;
 }
 
+/*
+ * AGX_G17P_BANK_COALESCE (default on; =0 restores the previous choice).
+ *
+ * A destination with a G17P bank constraint (e.g. a colour tile-store payload,
+ * limited to the tile-store bank by agx3_tile_store_bank()) used to skip every
+ * affinity heuristic and take the lowest free region. For the ordinary packed
+ * RGBA8 payload, `collect(fltnorm, fltnorm)` whose halves already sit in an
+ * aligned pair inside the bank, that forced a parallel copy: one extra MOV in
+ * front of every LSTCOL, on the fragment's critical tail. Apple's G17P
+ * fragments store the FLTNORM pair directly (fs-apple.bin +0x198/+0x1a8:
+ * fltnorm r2h, pixwait, lstcol r2).
+ *
+ * Try the ordinary collect/move affinity first, but accept it only when the
+ * whole region is free, aligned, and inside [dest_minimum, dest_limit). This
+ * never evicts or shuffles anything, so it cannot fail where find_regs()
+ * would have succeeded; otherwise fall through to find_regs() unchanged.
+ */
+static bool
+pick_bank_affinity(struct ra_ctx *rctx, agx_instr *I, unsigned d,
+                   unsigned count, unsigned align, unsigned *out)
+{
+   if (rctx->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       !(agx_get_codegen_flags() & AGX_CODEGEN_G17P_BANK_COALESCE))
+      return false;
+
+   const enum ra_class cls = ra_class_for_index(I->dest[d]);
+   const unsigned minimum = dest_minimum(rctx, I, d);
+   const unsigned limit = dest_limit(rctx, I, d);
+
+   if (I->op == AGX_OPCODE_COLLECT && d == 0) {
+      agx_foreach_ssa_src(I, s) {
+         if (ra_class_for_index(I->src[s]) != cls ||
+             !BITSET_TEST(rctx->visited, I->src[s].value))
+            continue;
+
+         const unsigned base = affinity_base_of_collect(rctx, I, s);
+         if (base == ~0u || (base % align) || base < minimum ||
+             base + count > limit || base + count > rctx->bound[cls])
+            continue;
+
+         if (!BITSET_TEST_COUNT(rctx->used_regs[cls], base, count)) {
+            *out = base;
+            return true;
+         }
+      }
+   }
+
+   if (I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_NORMAL &&
+       I->src[0].memory == I->dest[0].memory &&
+       I->src[0].size == I->dest[0].size &&
+       BITSET_TEST(rctx->visited, I->src[0].value)) {
+      const unsigned base = rctx->ssa_to_reg[I->src[0].value];
+      if (!(base % align) && base >= minimum && base + count <= limit &&
+          base + count <= rctx->bound[cls] &&
+          !BITSET_TEST_COUNT(rctx->used_regs[cls], base, count)) {
+         *out = base;
+         return true;
+      }
+   }
+
+   return false;
+}
+
 static unsigned
 pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
 {
@@ -1163,8 +1226,12 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
    }
 
    if (dest_minimum(rctx, I, d) > 0 ||
-       dest_limit(rctx, I, d) < rctx->bound[cls])
+       dest_limit(rctx, I, d) < rctx->bound[cls]) {
+      unsigned out;
+      if (pick_bank_affinity(rctx, I, d, count, align, &out))
+         return out;
       return find_regs(rctx, I, d, count, align);
+   }
 
    /* Try to allocate entire phi webs compatibly */
    unsigned phi_idx = phi_web_find(rctx->phi_web, idx.value);

@@ -85,6 +85,14 @@ enum agx_codegen_flag {
     * distance before its CND) plus a register-cache hint on its counter. */
    AGX_CODEGEN_G17P_EXIT_COMPARE              = BITFIELD_BIT(16),
    AGX_CODEGEN_G17P_COLOR_ILP                 = BITFIELD_BIT(17),
+   /* frg-codegen (2026-09-30): native light-fragment tail and loop-entry
+    * forms. Bit 18 was used by the unpromoted tile-wait experiment; it is
+    * skipped so no cache identity is shared with that library. */
+   AGX_CODEGEN_G17P_BANK_COALESCE             = BITFIELD_BIT(19),
+   AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE       = BITFIELD_BIT(20),
+   AGX_CODEGEN_G17P_TILE_WAIT_SINK            = BITFIELD_BIT(21),
+   AGX_CODEGEN_G17P_FLTNORM_LIVENESS          = BITFIELD_BIT(22),
+   AGX_CODEGEN_G17P_ENTRY_COMPARE             = BITFIELD_BIT(23),
 };
 
 uint32_t agx_get_codegen_flags(void);

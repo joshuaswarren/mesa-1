@@ -2968,7 +2968,14 @@ agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
       }
 
       d.src[i].value = src.value;
-      d.src[i].kill = false;
+      /* AGX_G17P_FLTNORM_LIVENESS (opt-in diagnostic): agx_opt_register_cache
+       * runs after RA and does mark post-RA register sources (the IR prints
+       * them as ^rN), so pass a proven last use as Apple does
+       * (fs-apple.bin +0x174/+0x198: f27 = f44 = 1). Otherwise keep the
+       * conservative still-live hint. */
+      d.src[i].kill =
+         (agx_get_codegen_flags() & AGX_CODEGEN_G17P_FLTNORM_LIVENESS) &&
+         agx3_src_is_register(src) && src.discard && !src.cache;
    }
 
    uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH];
@@ -4777,6 +4784,15 @@ agx3_cf_imm8(agx_index src)
           !src.abs && !src.neg;
 }
 
+/* An aligned 32-bit uniform the icmp first-operand uniform class addresses. */
+static bool
+agx3_cf_uniform32(agx_index src)
+{
+   return src.type == AGX_INDEX_UNIFORM && src.size == AGX_SIZE_32 &&
+          agx_channels(src) == 1 && !(src.value & 1) && src.value < 256 &&
+          !src.abs && !src.neg;
+}
+
 /* Emit the compare half of a fused AGX IR control-flow instruction. The flag
  * is consumed by the immediately following cnd instruction. Loop predicates
  * use distinct persistent slots by nesting depth; ordinary ifs reuse slot 0. */
@@ -5005,6 +5021,30 @@ agx3_emit_cf_compare(struct util_dynarray *emission, enum agx_isa_encoding enc,
                               bytes, &len))
          return false;
       return agx3_append(emission, bytes, len);
+   }
+
+   /* AGX_G17P_UNIFORM_IMM_COMPARE: an aligned 32-bit uniform against an
+    * 8-bit immediate, in either operand order, kept in place by
+    * agx_lower_uniform_sources(). Canonicalize the uniform to the first
+    * operand (swapping the relation, as the register/immediate path below
+    * does) and emit Apple's loop-guard form (fs-apple.bin +0x0c). */
+   if (!is_float && enc == AGX_ISA_ENCODING_AGX3B &&
+       (agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE)) {
+      const bool uniform_first = agx3_cf_uniform32(I->src[0]) &&
+                                 agx3_cf_imm8(I->src[1]);
+      const bool uniform_second = agx3_cf_imm8(I->src[0]) &&
+                                  agx3_cf_uniform32(I->src[1]);
+      if (uniform_first || uniform_second) {
+         const agx_index uniform = I->src[uniform_first ? 0 : 1];
+         const agx_index constant = I->src[uniform_first ? 1 : 0];
+         enum agx3_cf_icond cond;
+         if (!agx3_cf_map_icond(I->icond, &cond) ||
+             (uniform_second && !agx3_cf_swap_icond(&cond)) ||
+             !agx3_cf_icmp_uniform_imm(enc, cond, flag_slot, uniform.value,
+                                       (uint8_t)constant.value, bytes, &len))
+            return false;
+         return agx3_append(emission, bytes, len);
+      }
    }
 
    /* AGX_G17P_UNIFORM_COMPARE (v52b, default off): a register against an
@@ -7769,6 +7809,17 @@ agx3_apply_early_compares(agx_context *ctx, struct util_dynarray *emission,
    const struct agx3_instr_span *sp = spans->data;
    unsigned moved = 0;
 
+   /* AGX_G17P_ENTRY_COMPARE only lets a register-free compare cross waiting
+    * instructions when nothing in the shader writes the uniform file, so no
+    * outstanding uniform write can be what a crossed wait orders. */
+   bool writes_uniforms = false;
+   agx_foreach_instr_global(ctx, I) {
+      writes_uniforms |= I->op == AGX_OPCODE_UNIFORM_STORE ||
+                         I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
+                         I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
+                         I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3;
+   }
+
    util_dynarray_foreach(compares, struct agx3_early_compare, c) {
       const agx_instr *T = c->I;
       if ((T->op != AGX_OPCODE_IF_ICMP && T->op != AGX_OPCODE_WHILE_ICMP &&
@@ -7784,12 +7835,36 @@ agx3_apply_early_compares(agx_context *ctx, struct util_dynarray *emission,
       unsigned from = t;
       while (from > 0) {
          const struct agx3_instr_span *x = &sp[from - 1];
+         /* AGX_G17P_ENTRY_COMPARE (default on): BEGIN_CF emits no bytes on
+          * AGX3 (agx3_try_control_flow) and changes neither the exec mask nor
+          * any flag slot, so an empty BEGIN_CF span is crossable. Without
+          * this the first compare of a shader (e.g. a loop guard) is pinned
+          * against its CNDST; Apple hoists it (fs-apple.bin +0x0c icmp, four
+          * instructions ahead of the cndst at +0x76). */
+         if (x->I->op == AGX_OPCODE_BEGIN_CF &&
+             (agx_get_codegen_flags() & AGX_CODEGEN_G17P_ENTRY_COMPARE) &&
+             !x->wait && !x->slot && x->start == sp[from].start) {
+            from--;
+            continue;
+         }
          bool writes = false;
          agx_foreach_reg_src(T, s) {
             writes |= agx3_instr_touches_regs(x->I, true, T->src[s].value,
                                               agx_index_size_16(T->src[s]));
          }
-         if (writes || x->wait || x->slot ||
+         /* A compare with no register source (uniform against immediate)
+          * cannot depend on a crossed instruction's scoreboard wait: that
+          * wait orders the crossed instruction's own register reads only.
+          * Under AGX_G17P_ENTRY_COMPARE such a compare may cross a waiting
+          * synchronous ALU instruction; it still never crosses an
+          * instruction that starts an asynchronous (slotted) operation. */
+         bool reg_free = true;
+         agx_foreach_reg_src(T, s)
+            reg_free = false;
+         const bool wait_ok = !x->wait ||
+            (reg_free && !writes_uniforms &&
+             (agx_get_codegen_flags() & AGX_CODEGEN_G17P_ENTRY_COMPARE));
+         if (writes || !wait_ok || x->slot ||
              !agx3_early_compare_crossable(x->I))
             break;
          bool read_discarded = false;

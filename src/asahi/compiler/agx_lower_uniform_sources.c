@@ -255,9 +255,26 @@ agx_lower_uniform_sources(agx_context *ctx)
           * with a 32-bit register first operand. With an immediate, uniform
           * or 16-bit first operand keep copying the uniform, so the existing
           * register forms still encode the compare. */
+         const bool is_int_compare =
+            I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_WHILE_ICMP ||
+            I->op == AGX_OPCODE_BREAK_IF_ICMP;
+         /* AGX_G17P_UNIFORM_IMM_COMPARE (default on): an aligned 32-bit
+          * uniform against an 8-bit immediate is one native icmp (Apple's
+          * G17P loop guard, fs-apple.bin +0x0c: u6 == 0). Keep the uniform
+          * in place instead of copying it into a GPR first; the packer
+          * emits agx3_cf_icmp_uniform_imm() for either operand order. */
+         const bool uniform_imm_compare =
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+            (agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE) &&
+            is_int_compare && I->nr_srcs == 2 &&
+            I->src[s].type == AGX_INDEX_UNIFORM &&
+            I->src[s].size == AGX_SIZE_32 && !(I->src[s].value & 1) &&
+            I->src[s].value < 256 && !I->src[s].abs && !I->src[s].neg &&
+            I->src[1 - s].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1 - s].value <= UINT8_MAX && !I->src[1 - s].abs &&
+            !I->src[1 - s].neg;
          const bool copy_compare_uniform =
-            (I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_WHILE_ICMP ||
-             I->op == AGX_OPCODE_BREAK_IF_ICMP) &&
+            is_int_compare && !uniform_imm_compare &&
             (I->src[0].type != AGX_INDEX_NORMAL ||
              I->src[0].size != AGX_SIZE_32 || I->src[0].abs ||
              I->src[0].neg);
@@ -274,7 +291,8 @@ agx_lower_uniform_sources(agx_context *ctx)
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
              (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
               copy_compare_uniform ||
-              !(native_integer || vertex_tex_uniform || agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+              !(native_integer || vertex_tex_uniform || uniform_imm_compare ||
+                agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];
             idx.abs = idx.neg = false;

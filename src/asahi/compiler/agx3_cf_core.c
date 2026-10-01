@@ -143,6 +143,28 @@ agx3_cf_icmp_reg_uniform32(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
    return agx3_bind_compose(enc, "icmp", 1, base, 4, ov, 6, out, len);
 }
 
+/* An aligned 32-bit uniform against an 8-bit immediate: Apple's G17P loop
+ * guard reads the trip count straight from the uniform file instead of
+ * copying it into a GPR first. Same ten-byte ep1 point as agx3_cf_icmp_imm();
+ * the first operand's class f9 = 3 selects the uniform, whose half index is
+ * f3 (the register form's f2 is absent):
+ *   fs-apple.bin +0x0c  0a072380060087020000  u6 == 0, slot 0
+ * AGX3B only; no AGX3c witness. */
+bool
+agx3_cf_icmp_uniform_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
+                         unsigned slot, uint16_t uniform, uint8_t imm,
+                         uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
+{
+   if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || uniform >= 256 ||
+       (uniform & 1) || !out || !len)
+      return false;
+   const struct agx3_field_kv base[] = {KV(9, 3), KV(10, 2), KV(24, 1),
+                                        KV(25, 1)};
+   const struct agx3_field_kv ov[] = {KV(3, uniform), KV(16, imm),
+                                      KV(42, cond), KV(31, slot)};
+   return agx3_bind_compose(enc, "icmp", 1, base, 4, ov, 4, out, len);
+}
+
 bool
 agx3_cf_icmp_imm(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                  unsigned slot, uint16_t src0, uint8_t imm,

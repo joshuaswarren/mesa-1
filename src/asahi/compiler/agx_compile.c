@@ -207,6 +207,15 @@ AGX_V56_OPTION(agx_g17p_extract16_bfe, "AGX_G17P_EXTRACT16_BFE")
 /* v47 (neo-gpu-exec-mesa-v47): latency-aware list scheduling, default off. */
 AGX_C2_OPTION(agx_g17p_ilp_schedule, "AGX_G17P_ILP_SCHEDULE")
 AGX_C2_OPTION(agx_g17p_color_ilp, "AGX_G17P_COLOR_ILP")
+/* frg-codegen: see agx_debug.h. BANK_COALESCE, UNIFORM_IMM_COMPARE,
+ * TILE_WAIT_SINK and ENTRY_COMPARE follow the C2 master (default on);
+ * FLTNORM_LIVENESS is an opt-in diagnostic until hardware-qualified. */
+AGX_C2_OPTION(agx_g17p_bank_coalesce, "AGX_G17P_BANK_COALESCE")
+AGX_C2_OPTION(agx_g17p_uniform_imm_compare, "AGX_G17P_UNIFORM_IMM_COMPARE")
+AGX_C2_OPTION(agx_g17p_tile_wait_sink, "AGX_G17P_TILE_WAIT_SINK")
+AGX_C2_OPTION(agx_g17p_entry_compare, "AGX_G17P_ENTRY_COMPARE")
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_fltnorm_liveness,
+                           "AGX_G17P_FLTNORM_LIVENESS", false)
 /* Native light-fragment instruction forms. */
 AGX_V56_OPTION(agx_g17p_sr32_pixel_coord, "AGX_G17P_SR32_PIXEL_COORD")
 AGX_V56_OPTION(agx_g17p_bfe_immediate, "AGX_G17P_BFE_IMMEDIATE")
@@ -298,6 +307,16 @@ agx_get_codegen_flags(void)
               ? AGX_CODEGEN_G17P_ILP_SCHEDULE : 0) |
           (debug_get_option_agx_g17p_color_ilp()
               ? AGX_CODEGEN_G17P_COLOR_ILP : 0) |
+          (debug_get_option_agx_g17p_bank_coalesce()
+              ? AGX_CODEGEN_G17P_BANK_COALESCE : 0) |
+          (debug_get_option_agx_g17p_uniform_imm_compare()
+              ? AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE : 0) |
+          (debug_get_option_agx_g17p_tile_wait_sink()
+              ? AGX_CODEGEN_G17P_TILE_WAIT_SINK : 0) |
+          (debug_get_option_agx_g17p_fltnorm_liveness()
+              ? AGX_CODEGEN_G17P_FLTNORM_LIVENESS : 0) |
+          (debug_get_option_agx_g17p_entry_compare()
+              ? AGX_CODEGEN_G17P_ENTRY_COMPARE : 0) |
           (debug_get_option_agx_g17p_sr32_pixel_coord()
               ? AGX_CODEGEN_G17P_SR32_PIXEL_COORD : 0) |
           (debug_get_option_agx_g17p_bfe_immediate()
