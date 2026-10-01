@@ -892,33 +892,101 @@ sort_by_size(const void *a_, const void *b_, void *sizes_)
  *    If we move in parallel with the phi, the phi will still read the correct
  *    old register regardless and the destinations can't alias. So, insert a phi
  *    to do the copy in parallel along the incoming edges.
+ *
+ * The copies are one parallel move that insert_copy() scalarized: a vector
+ * value moves as one copy per component, padding included. Each copy is
+ * therefore matched against the whole register range a phi defined before
+ * this shuffle, and that phi is moved once. Matching only a phi's base
+ * register moved a vector phi with its first component and then failed to
+ * recognise the rest, which went down the live-in path: a second phi wrote
+ * the same registers again from whatever the predecessor held there -- a
+ * duplicate parallel-copy destination, or without assertions a clobbered
+ * value. Phis not yet given a register (the one being allocated and those
+ * after it) cannot hold a moved value. agx_as_register() of one is an
+ * assertion failure, and without assertions a comparison against a stale
+ * register field that can silently drop a copy.
  */
 static void
-agx_emit_move_before_phi(agx_context *ctx, agx_block *block,
-                         struct agx_copy *copy)
+agx_emit_moves_before_phi(struct ra_ctx *rctx, agx_block *block,
+                          const struct agx_copy *copies, unsigned nr_copies)
 {
-   assert(!copy->dest_mem && !copy->src.memory && "no memory shuffles");
+   struct phi_def {
+      agx_instr *phi;
+      unsigned base, width, new_base;
+      bool moved;
+   };
+   struct util_dynarray defs = UTIL_DYNARRAY_INIT;
 
-   /* Look for the phi writing the destination */
    agx_foreach_phi_in_block(block, phi) {
-      if (agx_is_equiv(agx_as_register(phi->dest[0]), copy->src) &&
-          !phi->dest[0].memory) {
+      const agx_index d = phi->dest[0];
+      struct phi_def def = {.phi = phi};
 
-         phi->dest[0].reg = copy->dest;
-         return;
+      if (d.memory)
+         continue;
+
+      if (d.type == AGX_INDEX_REGISTER) {
+         /* A move inserted by case 2 for an earlier shuffle of this block */
+         def.base = d.value;
+         def.width = agx_index_size_16(d);
+      } else if (d.type == AGX_INDEX_NORMAL && d.has_reg) {
+         def.base = d.reg;
+         def.width = MAX2(rctx->ncomps[d.value], agx_index_size_16(d));
+      } else {
+         continue;
+      }
+
+      util_dynarray_append(&defs, def);
+   }
+
+   for (unsigned i = 0; i < nr_copies; ++i) {
+      const struct agx_copy *copy = &copies[i];
+      assert(!copy->dest_mem && !copy->src.memory && "no memory shuffles");
+      assert(copy->src.type == AGX_INDEX_REGISTER);
+
+      struct phi_def *match = NULL;
+      util_dynarray_foreach(&defs, struct phi_def, def) {
+         if (copy->src.value >= def->base &&
+             copy->src.value < def->base + def->width) {
+            match = def;
+            break;
+         }
+      }
+
+      if (match) {
+         const unsigned offset = copy->src.value - match->base;
+         assert(copy->dest >= offset);
+         const unsigned new_base = copy->dest - offset;
+
+         assert((!match->moved || match->new_base == new_base) &&
+                "components of one value move together");
+         match->new_base = new_base;
+         match->moved = true;
+         continue;
+      }
+
+      /* There wasn't such a phi, so it's live-in. Insert a phi instead. */
+      agx_builder b = agx_init_builder(rctx->shader, agx_before_block(block));
+
+      agx_instr *phi = agx_phi_to(&b, agx_register_like(copy->dest, copy->src),
+                                  agx_num_predecessors(block));
+      assert(!copy->src.kill);
+
+      agx_foreach_src(phi, s) {
+         phi->src[s] = copy->src;
       }
    }
 
-   /* There wasn't such a phi, so it's live-in. Insert a phi instead. */
-   agx_builder b = agx_init_builder(ctx, agx_before_block(block));
+   util_dynarray_foreach(&defs, struct phi_def, def) {
+      if (!def->moved)
+         continue;
 
-   agx_instr *phi = agx_phi_to(&b, agx_register_like(copy->dest, copy->src),
-                               agx_num_predecessors(block));
-   assert(!copy->src.kill);
-
-   agx_foreach_src(phi, s) {
-      phi->src[s] = copy->src;
+      if (def->phi->dest[0].type == AGX_INDEX_REGISTER)
+         def->phi->dest[0].value = def->new_base;
+      else
+         def->phi->dest[0].reg = def->new_base;
    }
+
+   util_dynarray_fini(&defs);
 }
 
 static unsigned
@@ -947,9 +1015,9 @@ find_regs(struct ra_ctx *rctx, agx_instr *I, unsigned dest_idx, unsigned count,
        * insert instructions before the phi.
        */
       if (I->op == AGX_OPCODE_PHI) {
-         util_dynarray_foreach(&copies, struct agx_copy, copy) {
-            agx_emit_move_before_phi(rctx->shader, rctx->block, copy);
-         }
+         agx_emit_moves_before_phi(
+            rctx, rctx->block, copies.data,
+            util_dynarray_num_elements(&copies, struct agx_copy));
       } else {
          agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
          agx_emit_parallel_copies(
