@@ -1178,11 +1178,13 @@ modifier_get_score(uint64_t mod)
       return 10;
 
    /* Display-native compressed layout, scanned out by DCP directly.  Below
-    * GPU_TILED_COMPRESSED so composited buffers keep the established layout;
-    * it wins only where the display cannot take GPU_TILED_COMPRESSED, i.e. a
-    * compositor's scanout tranche (LINEAR + interchange). */
+    * GPU_TILED too: AGX3 never advertises GPU_TILED_COMPRESSED (see
+    * hk_can_compress()), so a compositor's main tranche built from this
+    * driver's modifier list is {GPU_TILED, interchange, LINEAR} and must keep
+    * choosing GPU_TILED.  Interchange then wins only against LINEAR, i.e. in a
+    * display (scanout) list that cannot take GPU tiling. */
    case DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED:
-      return 8;
+      return 3;
 
    case DRM_FORMAT_MOD_APPLE_GPU_TILED:
       return 5;
