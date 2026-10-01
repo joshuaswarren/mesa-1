@@ -717,10 +717,37 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
        * else -- eight-target MRT packs the low bank solid -- take the half
        * victim anyway and let find_best_region_to_evict() keep its new home
        * under AGX3_COPY_REG16_DEST_HALVES. */
-      if (!find_constrained_region(rctx, count, minimum, limit, agx3b, &base,
-                                   &span) &&
-          !(agx3b && find_constrained_region(rctx, count, minimum, limit, false,
-                                             &base, &span))) {
+      bool found =
+         find_constrained_region(rctx, count, minimum, limit, agx3b, &base,
+                                 &span) ||
+         (agx3b && find_constrained_region(rctx, count, minimum, limit, false,
+                                           &base, &span));
+
+      /* The tile-store bank (agx3_tile_store_bank()) is sized per colour
+       * target, one live payload each. A fragment can hold two payloads for
+       * the same target at once -- a vec4 stored on one path while another
+       * path's vec4 is still live, as dEQP-VK.glsl.opaque_type_indexing.
+       * sampler.*.fragment does -- and with the reserved prefix a 16-half
+       * bank then holds only one of them. The bank is a native placement
+       * preference, not an encoding bound (agx3_tile_value_ok() takes any
+       * half below 256), and Apple's own single-target fragments store from
+       * halves up to 31 (id_blend_4x stores RGBA8 from half 28). Widen to
+       * the 32- and then the 64-half bank native multi-target fragments use
+       * before giving up, instead of aborting the compile. Only a shader
+       * that would otherwise abort here takes this path. */
+      for (unsigned wide = 32; !found && agx3b && wide <= 64; wide *= 2) {
+         const bool tile_bank =
+            BITSET_TEST(rctx->low_gpr, dest.value) &&
+            limit == rctx->tile_gpr_limit;
+         if (!tile_bank || limit >= wide || wide > rctx->bound[RA_GPR])
+            continue;
+         found = find_constrained_region(rctx, count, minimum, wide, true,
+                                         &base, &span) ||
+                 find_constrained_region(rctx, count, minimum, wide, false,
+                                         &base, &span);
+      }
+
+      if (!found) {
          /* Not a refusal path.  The result feeds straight into
           * BITSET_SET_COUNT() and reg_to_ssa[], so continuing with a bad base
           * is an out-of-bounds write rather than a poor register choice: a
