@@ -1294,6 +1294,12 @@ hk_cmd_invalidate_graphics_state(struct hk_cmd_buffer *cmd)
    cmd->state.gfx.render = render_save;
    memcpy(cmd->state.gfx.descriptors.push, push, sizeof(push));
 
+   /* Every bound stage is gone, so vk_graphics_pipeline_cmd_bind() must not
+    * elide the application's rebind of the pipeline it last saw (often the
+    * one the secondary bound during replay): that left the primary drawing
+    * with no vertex shader (VK_ERROR_FEATURE_NOT_PRESENT). */
+   cmd->vk.last_graphics_pipeline = NULL;
+
    /* Dirty after clearing the cached state.  Doing this before memset loses
     * every dirty bit and lets a post-secondary rebind be elided. */
    hk_cmd_buffer_dirty_all(cmd);
