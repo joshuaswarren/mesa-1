@@ -1446,6 +1446,14 @@ drm_shim_bo_put(struct shim_bo *bo)
    if (shim_device.driver_bo_free)
       shim_device.driver_bo_free(bo);
 
+   /* Give the pages back. The backing memfd is a 4 GiB sparse file that is
+    * never truncated, so without this every page a process ever touched
+    * stays resident until it exits -- a long CTS run on the shim then holds
+    * gigabytes of dead buffers. It also hands the next allocation zeroed
+    * memory, as a fresh kernel BO would. */
+   fallocate(shim_device.mem_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+             bo->mem_addr, ALIGN_POT(bo->size, shim_page_size));
+
    mtx_lock(&shim_device.mem_lock);
    util_vma_heap_free(&shim_device.mem_heap, bo->mem_addr, bo->size);
    mtx_unlock(&shim_device.mem_lock);
