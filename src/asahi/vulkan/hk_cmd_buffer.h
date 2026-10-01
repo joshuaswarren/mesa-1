@@ -830,9 +830,6 @@ struct hk_graphics_state {
 
    bool generate_primitive_id;
 
-   /* Whether blend constants are required by the active blend state */
-   bool uses_blend_constant;
-
    /* Tessellation state */
    struct {
       uint64_t out_draws;
@@ -1383,6 +1380,42 @@ static inline struct hk_cmd_pool *
 hk_cmd_buffer_pool(struct hk_cmd_buffer *cmd)
 {
    return (struct hk_cmd_pool *)cmd->vk.pool;
+}
+
+/* Whether the current blend state reads the blend constants. Derived from
+ * the dynamic graphics state at each use rather than cached: the fragment
+ * stage program (its blend-constant uniform range) is built by bind-time and
+ * BeginRendering preparation as well as by the draw, and that preparation
+ * runs before the draw-time dirty-state flush. A cached copy refreshed only
+ * by that flush was stale there, so the first draw after a blend-equation
+ * change published a fragment program without the blend-constant range and
+ * the epilog read unwritten uniforms. Prepared programs are keyed by
+ * dynamic_graphics_state.generation, which covers every input here. */
+static inline bool
+hk_cmd_uses_blend_constant(const struct hk_cmd_buffer *cmd)
+{
+   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 3 ==
+                    VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA,
+                 "constant factors are contiguous");
+   const struct vk_color_blend_state *cb =
+      &cmd->vk.dynamic_graphics_state.cb;
+
+   for (unsigned i = 0; i < cb->attachment_count; ++i) {
+      const unsigned factors[] = {
+         cb->attachments[i].src_color_blend_factor,
+         cb->attachments[i].src_alpha_blend_factor,
+         cb->attachments[i].dst_color_blend_factor,
+         cb->attachments[i].dst_alpha_blend_factor,
+      };
+
+      for (unsigned j = 0; j < ARRAY_SIZE(factors); ++j) {
+         if (factors[j] >= VK_BLEND_FACTOR_CONSTANT_COLOR &&
+             factors[j] <= VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA)
+            return true;
+      }
+   }
+
+   return false;
 }
 
 /*

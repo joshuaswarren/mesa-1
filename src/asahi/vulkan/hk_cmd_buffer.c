@@ -2004,7 +2004,7 @@ hk_g17p_graphics_uniform_ranges(
    /* Diagnostic HK_G17P_APPLE_FS: Apple's own uniform DMA layout. */
    if (s->info.stage == MESA_SHADER_FRAGMENT && s->info.g17p_apple_fs) {
       if (agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer) ||
-          cmd->state.gfx.uses_blend_constant)
+          hk_cmd_uses_blend_constant(cmd))
          return hk_g17p_graphics_ranges_refused(range_count, 0);
       return hk_g17p_apple_fs_ranges(cmd, s, root_ptr, ranges,
                                      HK_AGX3_G17P_GRAPHICS_MAX_RANGES,
@@ -2090,7 +2090,7 @@ hk_g17p_graphics_uniform_ranges(
             .size_halfs = 4, .address = pointer,
          };
       }
-      if (cmd->state.gfx.uses_blend_constant) {
+      if (hk_cmd_uses_blend_constant(cmd)) {
          /* The non-monolithic blend epilog reads the four constants from
           * the base selected by its linked key. It is half4 for the standard
           * ABI and moves beyond the main shader footprint when HAL200 native
@@ -3221,7 +3221,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       const bool root_dependent =
          (vertex &&
           BITSET_LAST_BIT(s->info.vs.attrib_components_read) != 0) ||
-         (fragment && cmd->state.gfx.uses_blend_constant) ||
+         (fragment && hk_cmd_uses_blend_constant(cmd)) ||
          hk_agx3_g17p_graphics_needs_root(
             s->info.agx3_uses_root, linked->g17p_prolog_uses_root,
             s->info.set_count);
@@ -3293,7 +3293,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       }
 
       const bool compact_blend =
-         fragment && cmd->state.gfx.uses_blend_constant;
+         fragment && hk_cmd_uses_blend_constant(cmd);
       const bool compact_spills =
          fragment && agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer);
       const bool compact_same_program =
@@ -3391,7 +3391,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             (unsigned)s->info.stage, cmd->state.gfx.root, s->info.set_count,
             s->info.agx3_uses_root, s->info.agx3_combined_sampler_valid,
             s->info.agx3_indexed_sampler_valid,
-            cmd->state.gfx.uses_blend_constant, s->b.info.rodata.size_16,
+            hk_cmd_uses_blend_constant(cmd), s->b.info.rodata.size_16,
             s->b.info.rodata.base_uniform, nr_attribs, range_count,
             HK_AGX3_G17P_GRAPHICS_MAX_RANGES,
             cmd->state.gfx.draw_params != 0, cmd->state.gfx.draw_id_ptr != 0);
@@ -4217,7 +4217,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          hk_usc_upload_spilled_rt_descs(&b, cmd);
       }
 
-      if (cmd->state.gfx.uses_blend_constant) {
+      if (hk_cmd_uses_blend_constant(cmd)) {
          agx_usc_uniform(
             &b, 4, 8,
             root_ptr + hk_root_descriptor_offset(draw.blend_constant));

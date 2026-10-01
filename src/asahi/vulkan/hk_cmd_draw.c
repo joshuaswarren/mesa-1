@@ -8810,35 +8810,6 @@ hk_depth_bias_factor(VkFormat format, bool exact, bool force_unorm)
    }
 }
 
-static bool
-uses_blend_constant(const struct vk_color_blend_state *cb)
-{
-   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 1 ==
-                 VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR);
-
-   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 2 ==
-                 VK_BLEND_FACTOR_CONSTANT_ALPHA);
-
-   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 3 ==
-                 VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA);
-
-   for (unsigned i = 0; i < cb->attachment_count; ++i) {
-      unsigned factors[] = {
-         cb->attachments[i].src_color_blend_factor,
-         cb->attachments[i].src_alpha_blend_factor,
-         cb->attachments[i].dst_color_blend_factor,
-         cb->attachments[i].dst_alpha_blend_factor,
-      };
-
-      for (unsigned j = 0; j < ARRAY_SIZE(factors); ++j) {
-         if (factors[j] >= VK_BLEND_FACTOR_CONSTANT_COLOR &&
-             factors[j] <= VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA)
-            return true;
-      }
-   }
-
-   return false;
-}
 
 /* HAL200 texture and sampler heaps consume fragment uniform halves0..7. The
  * ordinary ABI's blend constants at halves4..11 therefore cannot coexist
@@ -9055,7 +9026,7 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
    }
 
    if (!key->epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P &&
-       uses_blend_constant(&dyn->cb) &&
+       hk_cmd_uses_blend_constant(cmd) &&
        (fs->info.agx3_combined_sampler_valid ||
         fs->info.agx3_indexed_sampler_valid) &&
        !hk_g17p_relocated_blend_constant_base(
@@ -9797,10 +9768,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       desc->root_dirty = true;
    }
 
-   if (IS_DIRTY(CB_BLEND_EQUATIONS) || IS_DIRTY(CB_BLEND_ENABLES)) {
-      gfx->uses_blend_constant = uses_blend_constant(&dyn->cb);
-   }
-
    if (IS_DIRTY(MS_SAMPLE_MASK)) {
       const uint16_t sample_mask = dyn->ms.sample_mask;
       if (desc->root.draw.api_sample_mask != sample_mask) {
@@ -10060,7 +10027,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          key.epilog.blend_constant_base = key.epilog.emrt_heap_base + 4;
       }
 
-      if (!key.epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
+      if (!key.epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P && hk_cmd_uses_blend_constant(cmd) &&
           (fs->info.agx3_combined_sampler_valid ||
            fs->info.agx3_indexed_sampler_valid) &&
           !hk_g17p_relocated_blend_constant_base(
