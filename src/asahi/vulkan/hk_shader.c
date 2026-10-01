@@ -1559,6 +1559,19 @@ lower_scaled_storage(nir_builder *b, nir_intrinsic_instr *intr, void *unused)
    return true;
 }
 
+/* Internal shaders: AGX_FOOTGUN_G17P_INTERNAL_SCALED_GUARD (default on,
+ * HK_G17P_INTERNAL_SCALED_GUARD=0 for A/B). Everything:
+ * AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD (opt-in). Both are shader-cache keyed
+ * through hk_physical_device_compiler_flags(). */
+static bool
+hk_scaled_sample_guard(const nir_shader *nir)
+{
+   const uint32_t flags = agx_get_footgun_flags();
+   return (nir->info.internal &&
+           (flags & AGX_FOOTGUN_G17P_INTERNAL_SCALED_GUARD)) ||
+          (flags & AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD);
+}
+
 /* Image-view formats are dynamic descriptor state. Recover scaled samples
  * from the integer descriptor result without changing ordinary float samples. */
 static bool
@@ -1624,9 +1637,19 @@ lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
     * is uniform for uniform descriptors and still exact for divergent ones.
     * dont_flatten keeps nir_opt_peephole_select (limit 64) from turning it
     * back into selects. The bits returned for kind == 0 are the raw sample,
-    * exactly as the unguarded final bcsel returns. */
-   const bool guard = agx_get_footgun_flags() &
-                      AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD;
+    * exactly as the unguarded final bcsel returns.
+    *
+    * Driver-internal shaders (vk_meta blits, resolves and copies) always take
+    * the guard. Their views are almost never scaled, they run once per pixel
+    * of a whole surface, and they have no constant program. The guard is not
+    * a global default: its branch reaches four Minecraft fragment constant
+    * programs as a uniform_store the AGX3 packer cannot encode, and those
+    * fragments then build without their constant program
+    * (hk_g17p_compile_fs_cprog()), a trade not yet measured. A vk_meta colour
+    * blit FS executes ~105 instructions per pixel on the path without a
+    * scaled view or custom border unguarded and ~57 guarded (static
+    * 211 -> 244). */
+   const bool guard = hk_scaled_sample_guard(b->shader);
    nir_def *placeholder = NULL;
    nir_if *guard_if = NULL;
    if (guard) {
@@ -2231,10 +2254,8 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_scaled_storage,
                nir_metadata_none, NULL);
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_scaled_sample,
-               (agx_get_footgun_flags() &
-                AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD)
-                  ? nir_metadata_none
-                  : nir_metadata_control_flow,
+               hk_scaled_sample_guard(nir) ? nir_metadata_none
+                                           : nir_metadata_control_flow,
                NULL);
    }
 

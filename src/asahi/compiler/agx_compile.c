@@ -381,6 +381,8 @@ DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_uniform_atomics,
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_shared_rhw,
                            "AGX_G17P_SHARED_RHW", false)
 AGX_C2_OPTION(agx_g17p_uniform_dma, "AGX_G17P_UNIFORM_DMA")
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_internal_scaled_guard,
+                           "HK_G17P_INTERNAL_SCALED_GUARD", true)
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_tex_uniform_operands,
                            "AGX_G17P_TEX_UNIFORM_OPERANDS", false)
 
@@ -402,7 +404,9 @@ agx_get_footgun_flags(void)
               ? AGX_FOOTGUN_G17P_SHARED_RHW : 0) |
           ((debug_get_option_agx_g17p_uniform_dma() ||
             debug_get_option_agx_g17p_fs_structure())
-              ? AGX_FOOTGUN_G17P_UNIFORM_DMA : 0);
+              ? AGX_FOOTGUN_G17P_UNIFORM_DMA : 0) |
+          (debug_get_option_hk_g17p_internal_scaled_guard()
+              ? AGX_FOOTGUN_G17P_INTERNAL_SCALED_GUARD : 0);
 }
 
 static agx_index

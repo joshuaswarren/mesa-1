@@ -104,7 +104,7 @@ uint32_t agx_get_codegen_flags(void);
 /* v50 agx3 footgun-audit candidates (neo-footgun-mesa-v50). A separate
  * namespace from agx_codegen_flag so it composes with later codegen bits;
  * Honeykrisp keys these into its shader cache at bits 35..39. All default
- * off until qualified on hardware. */
+ * off until qualified on hardware, except the internal-shader scaled guard. */
 enum agx_footgun_flag {
    /* hk: branch around the scaled-view texel conversion (kind == 0 skips). */
    AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD = BITFIELD_BIT(0),
@@ -116,6 +116,9 @@ enum agx_footgun_flag {
    /* hk+compiler (v51a): hoist constant-index descriptor/push loads of the
     * fragment shader into one launch-time uniform DMA range. */
    AGX_FOOTGUN_G17P_UNIFORM_DMA         = BITFIELD_BIT(3),
+   /* hk: the scaled-view guard for driver-internal (vk_meta) shaders only.
+    * Default on; HK_G17P_INTERNAL_SCALED_GUARD=0 is its A/B off-switch. */
+   AGX_FOOTGUN_G17P_INTERNAL_SCALED_GUARD = BITFIELD_BIT(4),
 };
 
 #define AGX_FOOTGUN_FLAG_BITS 5
