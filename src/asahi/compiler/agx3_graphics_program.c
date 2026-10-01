@@ -971,15 +971,28 @@ g17g_graphics_program_generate(
        !desc->nr_gprs || desc->nr_gprs > 256 || desc->scratch_size ||
        !desc->compiler_d_valid || desc->compiler_d > 256 ||
        (desc->writes_sample_mask && !desc->fragment) ||
+       (desc->threadgroup_memory_size_B &&
+        (desc->fragment || desc->threadgroup_memory_size_B < 256 ||
+         desc->threadgroup_memory_size_B > 32768 ||
+         (desc->threadgroup_memory_size_B & 63))) ||
        (desc->colour_classes > 1 && desc->colour_classes != 3) ||
        (!desc->fragment && desc->colour_classes) ||
        /* A render with no colour attachment has an empty imageblock. Apple's
         * own colour-free render emits the same fragment SPECLM spelling as a
         * colour one -- both carry 1700002c00001808 -- so the sample size may
         * be zero as well as the witnessed eight bytes. Other tile sizes and
-        * sample counts still need their own native evidence. */
+        * sample counts still need their own native evidence.
+        *
+        * msaa163: plus exactly one multisample imageblock, eight-byte samples
+        * at 4x in a 32x16 tile -- what Apple's M5 and G18 4x renders select
+        * for one RGBA8 target (MSAA notes s2.4). The caller admits it only
+        * under AGX_G18_MSAA4. */
        (desc->fragment &&
+        !(desc->imageblock.sample_size_B == 8 &&
+          desc->imageblock.nr_samples == 4 &&
+          desc->imageblock.tile_size_px == 32 * 16) &&
         ((desc->imageblock.sample_size_B != 8 &&
+          desc->imageblock.sample_size_B != 16 &&
           desc->imageblock.sample_size_B != 32 &&
           desc->imageblock.sample_size_B != 0) ||
          desc->imageblock.nr_samples != 1 ||
@@ -994,8 +1007,10 @@ g17g_graphics_program_generate(
     * for eight, and nothing else in the record moves. Bytes 0..6 -- which are
     * the per-tile-shape seed in HAL200's spelling -- are identical across
     * both, so Apple keeps the 32x32 tile for 32-byte samples rather than
-    * halving it, landing on exactly the 32 KiB structural bound. Other tile
-    * sizes and sample counts still need their own native evidence. */
+    * halving it, landing on exactly the 32 KiB structural bound. The byte is
+    * therefore a plain byte count, and sixteen-byte samples (RGBA32 and RGB32
+    * attachments) use it as such. Other tile sizes and sample counts still
+    * need their own native evidence. */
    static const uint8_t speclm[2][AGX_IOTO_SPECLM_SIZE] = {
       {0x07,0x00,0x00,0x0c,0x00,0x00,0x00,0x00},
       {0x17,0x00,0x00,0x2c,0x00,0x00,0x18,0x08},
@@ -1020,10 +1035,36 @@ g17g_graphics_program_generate(
       .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
    };
    memcpy(tail.bytes, speclm[desc->fragment], AGX_IOTO_SPECLM_SIZE);
+   if (desc->threadgroup_memory_size_B) {
+      /* The non-fragment spelling above is f0 3, f1 165. Threadgroup memory
+       * adds byte size f18 and enable f24, the same vector G17P uses
+       * (agx_ioto_g17p_runtime_compute_tail_build_shared); its agx3d
+       * re-encoding is Apple's G18 reduction SPECLM. */
+      struct agx_ioto_state shared = {0};
+      shared.f[0] = 3;
+      shared.f[1] = 165;
+      shared.f[18] = desc->threadgroup_memory_size_B;
+      shared.f[24] = 1;
+      if (!agx_ioto_state_pack_speclm(chip, &shared, tail.bytes,
+                                       AGX_IOTO_SPECLM_SIZE))
+         return false;
+   }
    if (desc->fragment && desc->imageblock.sample_size_B) {
       /* A colour-free render keeps the eight-byte spelling: Apple's own one
        * publishes the same record as a single-attachment render. */
       tail.bytes[7] = (uint8_t)desc->imageblock.sample_size_B;
+   }
+   if (desc->fragment && desc->imageblock.nr_samples == 4) {
+      /* msaa163: the 4x/32x16 spelling. Apple's M5 msaa4 render publishes
+       * 1700001c00009808 against 1700002c00001808 at 1x (and
+       * 1700002c00005808 at 2x): byte 3 is the tile height class (0x2c for
+       * 32 rows, 0x1c for 16) and byte 6 is 0x18 | log2(samples) << 6, i.e.
+       * f20 = log2(tile height) 5 -> 4 and f21 = log2(samples) 0 -> 2. The
+       * agx3d re-encoding of this vector is G18's own 4x SPECLM,
+       * 00d60000082031000000, identical in all four native 4x tile programs
+       * and the fragment program (MSAA notes s2.4). */
+      tail.bytes[3] = 0x1c;
+      tail.bytes[6] = 0x18 | (2u << 6);
    }
    if (!agx_ioto_state_pack_ldshdr(
           chip, &ldshdr, tail.bytes + AGX_IOTO_SPECLM_SIZE,

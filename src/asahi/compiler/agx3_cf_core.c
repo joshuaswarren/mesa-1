@@ -50,24 +50,39 @@ agx3_cf_icmp_reg16(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                    const struct agx3_cf_source_hints hints[2], uint16_t wait_mask,
                    uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
-   if (!agx3b(enc) || !icond_ok(cond) || !slot_ok(slot) || !src || !hints ||
-       !out || !len || (wait_mask != 0 && wait_mask != 32))
+   /* AGX3c is the same compare with its class constants f32/f33 = 3/82,
+    * waiting at f33 + slot (AGX3b's slot-6 f39 is the same rule): metal-nt
+    * applegpu_g17g breaks a loop on ushort a == b with icmp f41 after
+    * slot-8 loads, applegpu_g18g tests x < y with f34 after slot-1 loads
+    * (g18ref-out/probe/m6-libagx-forms3 lk3_break_eq16, lk3_if_lt16). */
+   const bool c = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((!agx3b(enc) && !c) || !icond_ok(cond) || !slot_ok(slot) || !src ||
+       !hints || !out || !len ||
+       (c ? (wait_mask >> 8) != 0 : (wait_mask != 0 && wait_mask != 32)))
       return false;
    for (unsigned i = 0; i < 2; ++i)
       if (src[i] >= 256 || (hints[i].cache && hints[i].discard))
          return false;
    const bool sign_extend = cond == AGX3_CF_ICOND_SLT || cond == AGX3_CF_ICOND_SGT;
    const struct agx3_field_kv base[] = {
-      KV(9,2), KV(10,1), KV(24,2), KV(25,1),
+      KV(9,2), KV(10,1), KV(24,2), KV(25,1), KV(32,3), KV(33,82),
    };
-   const struct agx3_field_kv fields[] = {
+   struct agx3_field_kv fields[19] = {
       KV(2,src[0]), KV(17,src[1]), KV(31,slot), KV(42,cond),
       KV(11,hints[0].cache), KV(13,hints[0].discard), KV(14,sign_extend),
       KV(26,hints[1].cache), KV(28,hints[1].discard), KV(29,sign_extend),
-      KV(39,wait_mask == 32),
    };
+   unsigned n = 10;
+   if (c) {
+      for (unsigned i = 0; i < 8; ++i)
+         if (wait_mask & (1u << i))
+            fields[n++] = (struct agx3_field_kv)KV(34 + i, 1);
+   } else {
+      fields[n++] = (struct agx3_field_kv)KV(39, wait_mask == 32);
+   }
    for (unsigned ep = 0; ep < 2; ++ep)
-      if (agx3_bind_compose(enc,"icmp",ep,base,4,fields,11,out,len))
+      if (agx3_bind_compose(enc, "icmp", ep, base, c ? 6 : 4, fields, n, out,
+                            len))
          return true;
    return false;
 }
@@ -166,9 +181,13 @@ agx3_cf_icmp_imm16_runtime(enum agx_isa_encoding enc, enum agx3_cf_icond cond,
                            struct agx3_cf_source_hints hint, uint16_t wait_mask,
                            uint8_t out[AGX3_CF_MAX_LENGTH], uint8_t *len)
 {
+   /* The source is the icmp's eight-bit half index on both encodings:
+    * Apple's own applegpu_g17g/g18g compares name halves up to 204 in f2
+    * (g18ref-out/probe/m6-high-cf16), and the 16-bit form round-trips
+    * 0..254 through the same field. */
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    if ((!agx3b(enc) && !gpu1) || !icond_ok(cond) || !slot_ok(slot) ||
-       src >= (gpu1 ? 128 : 256) ||
+       src >= 256 ||
        !out || !len || (hint.cache && hint.discard) ||
        (wait_mask != 0 && wait_mask != 32))
       return false;

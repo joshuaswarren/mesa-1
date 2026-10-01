@@ -152,6 +152,9 @@ static inline bool
 agx3_cdm_indirect_launch_target_grounded(enum agx_chip chip)
 {
    switch (chip) {
+   /* G18G: performEnqueueKernel's six-word store, AGXMetalG18G 0x219484680;
+    * the template's upper half of word 4 is 0 (hv/G18-INDIRECT-COMPUTE.md). */
+   case AGX_CHIP_G18G:
    case AGX_CHIP_G15G:
    case AGX_CHIP_G15S:
    case AGX_CHIP_G15C:
@@ -176,6 +179,8 @@ static inline bool
 agx3_cdm_indirect_launch_36_target_grounded(enum agx_chip chip)
 {
    switch (chip) {
+   /* G18G: the nine-word store, AGXMetalG18G 0x2194846b4. */
+   case AGX_CHIP_G18G:
    case AGX_CHIP_G15G:
    case AGX_CHIP_G15S:
    case AGX_CHIP_G15C:

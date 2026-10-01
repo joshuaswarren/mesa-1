@@ -108,10 +108,14 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
    /* G17G texture3d::read (gpu/m5-xfb-alu-reference.metal) stages the
     * third coordinate like the second and keeps the 2D fetch's fields with
     * f76 = 3: 0f061a0044806329 (xyzw) and 0f061a0044800321 (x). */
+   /* A per-lane level is grounded too (m6-fetch-lod fl_3d, applegpu_g17g
+    * and applegpu_g18g): the same fields with f139 = 4 and no f37, exactly
+    * the 2D register-level form's delta; only the staged words move (see
+    * AGX3_TEX_G18G_LEVEL_WORD). A constant nonzero level is not. */
    if (d->three_d &&
        ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) ||
         d->array || d->multisample ||
-        (enc == AGX_ISA_ENCODING_AGX3C && (d->lod_x64 || d->register_lod))))
+        (enc == AGX_ISA_ENCODING_AGX3C && d->lod_x64)))
       return false;
 
    const unsigned tk = d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
@@ -159,6 +163,7 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
     * Apple spells a non-zero immediate level on that form with a longer
     * page still, which has no Mesa caller and stays closed. */
    if (enc == AGX_ISA_ENCODING_AGX3C && d->array && !d->multisample &&
+       !d->staged_array &&
        (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
           AGX3_TEX_OPERAND_IMMEDIATE &&
        (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
@@ -246,7 +251,8 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
     * (m5-texture-read-reference), so this follows the operand kind.
     */
    const bool gpu1_array = enc == AGX_ISA_ENCODING_AGX3C && d->array &&
-                           !d->multisample && immediate_operands;
+                           !d->multisample && immediate_operands &&
+                           !d->staged_array;
    if (gpu1_array) {
       ov[n++] = (struct agx3_field_kv)KV(37, 3);
       ov[n++] = (struct agx3_field_kv)KV(31, d->layer_half);
@@ -311,6 +317,11 @@ agx3_tex_encode_fetch(enum agx_isa_encoding enc,
       eps[neps++] = 2;
    } else if (d->register_lod) {
       eps[neps++] = 1;
+      /* A staged array read with a per-lane level is Apple's 14-byte ep2
+       * (m6-fetch-lod fl_array, applegpu_g17g 0f061a0041816029010002000000):
+       * f77 = 2 with f139 = 4 has no ep1 spelling. */
+      if (d->array)
+         eps[neps++] = 2;
    } else {
       eps[neps++] = 0;
       eps[neps++] = 1;
@@ -1275,6 +1286,112 @@ agx3_tex_encode_image_write_rgba8_2d(
    return agx3_tex_encode_image_write_2d(enc, d, base, slot, out, len);
 }
 
+bool
+agx3_tex_encode_image_write_g18g(enum agx_isa_encoding enc,
+                                 const struct agx3_image_write_g18g_desc *d,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                 uint8_t *len)
+{
+   if (out == NULL || len == NULL)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (d == NULL)
+      return false;
+
+   /* The data sits just below X, Y just above it and a layer or z just above
+    * Y, all inside the seven-bit f116/f118 fields agx3_transcode_agx3d()
+    * derives from f5. The one-component form is the 2D integer write alone,
+    * as kick 19; everything else stages all four components. */
+   const bool third = d->dim == AGX3_IMAGE_WRITE_2D_ARRAY ||
+                      d->dim == AGX3_IMAGE_WRITE_3D;
+   const unsigned data_halves = 2u * d->components;
+   if (enc != AGX_ISA_ENCODING_AGX3C ||
+       (d->components != 1 && d->components != 4) ||
+       (d->components == 1 &&
+        (d->float_data || d->dim != AGX3_IMAGE_WRITE_2D)) ||
+       d->dim > AGX3_IMAGE_WRITE_3D || (d->x_half & 1) ||
+       d->x_half < data_halves || d->x_half + (third ? 4 : 2) > 126 ||
+       d->image_index > AGX3_IMAGE_WRITE_G18G_MAX_INDEX ||
+       d->slot < 1 || d->slot > AGX3_IMAGE_WRITE_G18G_MAX_SLOT)
+      return false;
+
+   /* Apple's applegpu_g17g image_write(texture2d<uint, access::write>), the
+    * kernel native run112 kick 19 ran as launch 1 (hv/tools/
+    * metal-workloads.metal), writes its uint4(v, 0, 0, 0) with
+    *
+    *   250411042420a0020080008c002000000100   f5 0 (bank 0)
+    *
+    * f10, f56 and f58 are this form's selectors; f114 4 stages one data
+    * component, the other three being zero (a uint4(v) splat is f114 5 and
+    * an RGBA write leaves it 0). f12 is the result slot, f59 the wait on
+    * staging slot 1, f13 the release of the staged operands. f5 here names
+    * the X half of G18G's layout, not G17G's bank: see the imgwci rule in
+    * agx3_transcode.c.
+    *
+    * The rest of the vector, from metal-nt -arch applegpu_g18g
+    * (scratchpad g18ref-out/probe/m6-image-write{,2,3,4}):
+    *
+    *  - f114 0 stages four components: iw_cs_rgba32f, iw2_{f4,u4,i4}_t*.
+    *  - f70 is the stored data type, 1 float and 0 integer, int and uint
+    *    byte-identical (iw2_u4_t0 = iw2_i4_t0), as on G17P.
+    *  - f72 3 is texture3d (iw_cs_rgba32ui_3d, iw4_f4_3d), whose z sits at
+    *    Y + 2; f73 2 is a 2D array whose PACK_IMGWIR layer sits at Y + 2
+    *    (iw_cs_r32i_array, iw4_f4_array, iw4_i4_array, iw_frag_rgba8_array).
+    *  - f91 is the immediate image index in the heap f79 names: 0..3 for a
+    *    kernel's four write textures (iw4_four), 1 and 2 beside reads.
+    *  - f12 is the slot the write signals, 1..4 across the four writes of
+    *    iw4_four, and f59..f63 the wait on its staging slot.
+    *  - f13 (and G18G's f117) releases the staged operands: every write that
+    *    alone reads its operands sets it, including four writes in one
+    *    kernel (iw4_four) and a write after a sample (iw4_sample_then_write);
+    *    Apple clears it only on a write whose staged X/Y a later write or an
+    *    in-flight sample still reads (iw3_two, iw4_two_apart, iw3_read2_write),
+    *    which this packer never shares.
+    *
+    * Mesa's heap is always the one at uniform half 0 (f79 0): Gallium's
+    * texture table, or the lowered state-0 write's resolved PBE. */
+   struct agx3_field_kv fields[24] = {
+      KV(5, d->x_half), KV(9, 5),   KV(10, 2),  KV(12, d->slot), KV(13, 1),
+      KV(24, 1),        KV(38, 1),  KV(51, 1),  KV(52, 1),       KV(56, 2),
+      KV(58, 0x57),     KV(58 + d->slot, 1),    KV(71, 2),
+      KV(72, d->dim == AGX3_IMAGE_WRITE_3D ? 3 : 1),             KV(74, 1),
+      KV(85, 3),        KV(86, 3),  KV(99, 1),  KV(100, 1),      KV(113, 1),
+      KV(114, d->components == 1 ? 4 : 0),
+   };
+   unsigned n = 21;
+   if (d->float_data)
+      fields[n++] = (struct agx3_field_kv)KV(70, 1);
+   if (d->dim == AGX3_IMAGE_WRITE_2D_ARRAY)
+      fields[n++] = (struct agx3_field_kv)KV(73, 2);
+   if (d->image_index)
+      fields[n++] = (struct agx3_field_kv)KV(91, d->image_index);
+   if (!agx3_bind_compose(enc, "imgwci", 0, fields, n, NULL, 0, out, len)) {
+      memset(out, 0, AGX3_TEX_MAX_LENGTH);
+      *len = 0;
+      return false;
+   }
+   return true;
+}
+
+bool
+agx3_tex_encode_image_write_g18g_r32(enum agx_isa_encoding enc,
+                                     uint16_t x_half,
+                                     uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                     uint8_t *len)
+{
+   /* Kick 19's vector: one integer component, 2D, index 0, slot 1. */
+   const struct agx3_image_write_g18g_desc d = {
+      .x_half = x_half,
+      .components = 1,
+      .float_data = false,
+      .dim = AGX3_IMAGE_WRITE_2D,
+      .image_index = 0,
+      .slot = 1,
+   };
+   return agx3_tex_encode_image_write_g18g(enc, &d, out, len);
+}
+
 static uint16_t
 word(const uint8_t *p, unsigned i)
 {
@@ -1566,6 +1683,25 @@ agx3_tex_stage_array_minimum_lod(enum agx_isa_encoding enc, uint16_t src,
 }
 
 bool
+agx3_tex_stage_typed_lod_g18g(uint16_t bank, uint16_t src, uint8_t slot,
+                              uint16_t wait_mask, bool src_cache,
+                              bool src_discard, enum agx3_tex_level_kind kind,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (bank > 120 || (bank & 7)) {
+      if (out && len) {
+         memset(out, 0, AGX3_TEX_MAX_LENGTH);
+         *len = 0;
+      }
+      return false;
+   }
+   return stage_typed_lod_half(AGX_ISA_ENCODING_AGX3C,
+                               bank + AGX3_TEX_G18G_LEVEL_WORD, src, slot,
+                               wait_mask, src_cache, src_discard, kind, out,
+                               len);
+}
+
+bool
 agx3_tex_stage_typed_lod(enum agx_isa_encoding enc, uint16_t src, uint8_t slot,
                          uint16_t wait_mask, bool src_cache, bool src_discard,
                          enum agx3_tex_level_kind kind,
@@ -1755,6 +1891,110 @@ agx3_tex_stage_array_layer(enum agx_isa_encoding enc, uint16_t src,
                                         src_cache, src_discard, out, len);
 }
 
+/* metal-nt -arch applegpu_g17g / applegpu_g18g (toolchain 27.1.266.1) on the
+ * same texture2d_array fragments, the layer a per-lane value:
+ *
+ *   image.read(uint2(v.xy), uint(v.z), 0)       read, level zero
+ *   image.sample(s, v.xy, uint(v.z))            filtered sample
+ *   G17G  pack_smpir f5 6 f16 src   smp f19 0            (X 0, Y 2, layer 6)
+ *   G18G  pack_smpir f5 2 f16 src   smp f19 4 f56 0      (X 4, Y 0, layer 2)
+ *
+ * and the corpus's m5_sample_array_level_zero pair shows the same move. The
+ * two PACK_SMPIR vectors differ in f5 alone (the source half follows
+ * register allocation). */
+bool
+agx3_tex_stage_array_layer_g18g(uint16_t src, uint8_t slot,
+                                uint16_t wait_mask, bool src_cache,
+                                bool src_discard,
+                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (src >= 128 || slot < 1 || slot > 8 || (wait_mask & ~0xffu) ||
+       (src_cache && src_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, AGX3_TEX_G18G_ARRAY_LAYER), KV(9, 5), KV(10, 2), KV(23, 2),
+      KV(24, 1), KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4), KV(56, 1),
+      KV(57, 119),
+   };
+   struct agx3_field_kv ov[12];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, src);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
+   for (unsigned i = 0; i < 8; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "pack_smpir", 0, base,
+                            11, ov, n, out, len);
+}
+
+/* metal-nt applegpu_g17g / applegpu_g18g, texture2d_array
+ * sample(s, v.xy, uint(v.z), level(v.x)) and bias(v.x), layer and level
+ * per-lane (m6-fetch-array-varying-layer):
+ *
+ *   G17G  pack_smpir f5 6 f16 layer f30 lod f37 2 f76 2 f77 16   smp f19 0
+ *   G18G  pack_smpir f5 2 f16 layer f30 lod f37 2 f76 2 f77 16   smp f19 4
+ *
+ * agx3_tex_stage_array_typed_lod()'s G17G vector with f5 = 2. */
+bool
+agx3_tex_stage_array_lod_g18g(uint16_t layer, uint16_t lod, uint8_t slot,
+                              uint16_t wait_mask, bool layer_cache,
+                              bool layer_discard, bool lod_cache,
+                              bool lod_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_array_typed_lod_g18g(
+      layer, lod, AGX3_TEX_LEVEL_FLOAT, slot, wait_mask, layer_cache,
+      layer_discard, lod_cache, lod_discard, out, len);
+}
+
+bool
+agx3_tex_stage_array_typed_lod_g18g(uint16_t layer, uint16_t lod,
+                                    enum agx3_tex_level_kind kind,
+                                    uint8_t slot, uint16_t wait_mask,
+                                    bool layer_cache, bool layer_discard,
+                                    bool lod_cache, bool lod_discard,
+                                    uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                    uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (layer >= 128 || (layer & 1) || lod >= 128 || slot < 1 || slot > 8 ||
+       (wait_mask & ~0xffu) || (layer_cache && layer_discard) ||
+       (lod_cache && lod_discard) ||
+       (kind != AGX3_TEX_LEVEL_FLOAT && kind != AGX3_TEX_LEVEL_INTEGER))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, AGX3_TEX_G18G_ARRAY_LAYER), KV(9, 5), KV(10, 2), KV(23, 2),
+      KV(24, 1), KV(37, 2), KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
+      KV(76, (unsigned)kind), KV(77, 16), KV(56, 1),
+      KV(57, 119),
+   };
+   struct agx3_field_kv ov[15];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(16, layer);
+   ov[n++] = (struct agx3_field_kv)KV(30, lod);
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(25, layer_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, layer_discard);
+   ov[n++] = (struct agx3_field_kv)KV(39, lod_cache);
+   ov[n++] = (struct agx3_field_kv)KV(41, lod_discard);
+   for (unsigned i = 0; i < 8; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "pack_smpir", 0, base,
+                            14, ov, n, out, len);
+}
+
 /* metal-nt -arch applegpu_g17p (AIR-NT 32023.917) stages a texture2d_array
  * write's layer with PACK_IMGWIR, whose operand fields are PACK_SMPIR's,
  * including the eighth source bit in bit 48:
@@ -1775,30 +2015,46 @@ agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 254 ||
-       (dest & 1) || dest > 8190 || slot < 1 || slot > 6 ||
-       (wait_mask & ~0x3f) || (src_cache && src_discard))
+   /* metal-nt -arch applegpu_g17g / applegpu_g18g stage a texture2d_array
+    * write's layer with the same PACK_IMGWIR vector plus the AGX3C selectors
+    * f56 1 and f57 118, the source a low-bank register and the destination
+    * the layer half:
+    *
+    *   G17G iw_cs_r32i_array  3700000a2500ab0a000040302800   f5 6  f16 0
+    *   G18G iw_cs_r32i_array  3702000a2500ab02000040302800   f5 2  f16 2
+    *   G18G iw4_f4_array      3702000a2500ab12000040302800   f5 10 f16 2
+    *
+    * The transcoder passes the vector through unchanged; composed in the
+    * agx3d table it is exactly Apple's G18G bytes. Eight AGX3C wait slots. */
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   const unsigned slots = gpu1 ? 8 : 6;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || (src & 1) ||
+       src > (gpu1 ? 126 : 254) || (dest & 1) ||
+       dest > (gpu1 ? 126 : 8190) || slot < 1 || slot > slots ||
+       (wait_mask & ~((1u << slots) - 1)) || (src_cache && src_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
       KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
+      KV(56, 1), KV(57, 118),
    };
-   struct agx3_field_kv ov[11];
+   struct agx3_field_kv ov[13];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(5, dest);
    ov[n++] = (struct agx3_field_kv)KV(16, src & 0x7f);
    ov[n++] = (struct agx3_field_kv)KV(12, slot);
    ov[n++] = (struct agx3_field_kv)KV(25, src_cache);
    ov[n++] = (struct agx3_field_kv)KV(27, src_discard);
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < slots; ++i)
       if (wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
    if (!agx3_bind_compose(enc, "pack_imgwir", 0, base,
-                          sizeof(base) / sizeof(base[0]), ov, n, out, len))
+                          gpu1 ? 10 : 8, ov, n, out, len))
       return false;
 
-   out[6] |= (src >> 7) & 1;
+   if (!gpu1)
+      out[6] |= (src >> 7) & 1;
    return true;
 }
 

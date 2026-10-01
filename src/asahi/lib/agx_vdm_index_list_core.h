@@ -150,13 +150,40 @@ agx_vdm_index_list_direct_is_hal300_inline(enum agx_chip chip)
  * only direct non-indexed draws; sessions -g1 and -g2 add direct indexed ones
  * (indexed-u16, indexed-strip, quad-strip, gears). Those are Mesa's HAL300
  * direct indexed words byte for byte, e.g. 69f20600 00018300 3 1 0 7 0000000f
- * 1 for three u16 triangles and 69f30900 ... for a restarted u16 strip. No
- * indirect draw is captured, so the indirect forms still fail closed. */
+ * 1 for three u16 triangles and 69f30900 ... for a restarted u16 strip.
+ *
+ * No indirect draw is captured, but AGXMetalG18G 26A428 emits the indirect
+ * forms below word for word: non-indexed at 0x219662e7c..0x219662eb0 and
+ * indexed, with its State Update, at 0x219663130..0x2196631fc. The G17G
+ * copies are instruction-identical, with the same header tables
+ * (hv/G18-INDIRECT-DBIAS-PBE.md section 1). */
 static inline bool
 agx_vdm_index_list_indexed_or_indirect_supported_inline(enum agx_chip chip)
 {
-   return agx_vdm_index_list_direct_target_supported_inline(chip) &&
-          chip != AGX_CHIP_G18G;
+   return agx_vdm_index_list_direct_target_supported_inline(chip);
+}
+
+/* HAL300's extra Index List word ("Unk 2", gated by header bit 27). Apple's
+ * setRenderPipelineStateCommon derives it per pipeline from word 4 of the
+ * UVS record {0x0c280000, ...}: n = byte 0 + byte 2, the vertex output count
+ * (AGXMetalG18G 0x219643220..0x2196432b4; G17G 0x216106df8..0x216106e8c).
+ * Every J873 capture has n <= 9 and 7. Only G18G takes the derived value;
+ * the other HAL300 chips keep the constant their captures show. */
+static inline uint32_t
+agx_vdm_index_list_hal300_unk2(enum agx_chip chip, uint32_t uvs_word4)
+{
+   const uint32_t n = (uvs_word4 & 0xffu) + ((uvs_word4 >> 16) & 0xffu);
+
+   if (chip != AGX_CHIP_G18G)
+      return 7u;
+
+   return n <= 9    ? 7u
+          : n <= 11 ? 6u
+          : n == 12 ? 5u
+          : n <= 15 ? 4u
+          : n <= 19 ? 3u
+          : n <= 23 ? 2u
+                    : 0u;
 }
 
 static inline bool
@@ -213,11 +240,11 @@ agx_vdm_index_list_direct_primitive_supported_inline(uint8_t primitive)
 }
 
 static inline bool
-agx_vdm_index_list_direct_pack_words(
+agx_vdm_index_list_direct_pack_words_unk2(
    enum agx_chip chip, uint8_t primitive, bool indexed, bool restart_enable,
    uint8_t index_size, uint64_t index_buffer, uint32_t count,
    uint32_t instances, uint32_t start, uint32_t index_buffer_size_word,
-   struct agx_vdm_index_list_direct_words *out)
+   uint32_t unk2, struct agx_vdm_index_list_direct_words *out)
 {
    if (!out)
       return false;
@@ -245,7 +272,7 @@ agx_vdm_index_list_direct_pack_words(
       out->words[2] = instances;
       out->words[3] = start;
       if (tail)
-         out->words[4] = 7;
+         out->words[4] = unk2;
       out->count = tail ? 5 : 4;
       return true;
    }
@@ -260,11 +287,23 @@ agx_vdm_index_list_direct_pack_words(
    out->words[4] = start;
    unsigned cursor = 5;
    if (hal300)
-      out->words[cursor++] = 7;
+      out->words[cursor++] = unk2;
    out->words[cursor++] = index_buffer_size_word;
    out->words[cursor++] = (uint32_t)((index_buffer >> 40) & (uint64_t)0xff);
    out->count = (uint8_t)cursor;
    return true;
+}
+
+static inline bool
+agx_vdm_index_list_direct_pack_words(
+   enum agx_chip chip, uint8_t primitive, bool indexed, bool restart_enable,
+   uint8_t index_size, uint64_t index_buffer, uint32_t count,
+   uint32_t instances, uint32_t start, uint32_t index_buffer_size_word,
+   struct agx_vdm_index_list_direct_words *out)
+{
+   return agx_vdm_index_list_direct_pack_words_unk2(
+      chip, primitive, indexed, restart_enable, index_size, index_buffer,
+      count, instances, start, index_buffer_size_word, 7u, out);
 }
 
 /*
@@ -283,10 +322,10 @@ agx_vdm_index_list_direct_pack_words(
  * exactly as the already-validated direct indexed packer does it.
  */
 static inline bool
-agx_vdm_index_list_indirect_pack_words(
+agx_vdm_index_list_indirect_pack_words_unk2(
    enum agx_chip chip, uint8_t primitive, bool indexed, bool restart_enable,
    uint8_t index_size, uint64_t index_buffer, uint64_t indirect_buffer,
-   uint32_t restart_index, uint32_t index_buffer_size_word,
+   uint32_t restart_index, uint32_t index_buffer_size_word, uint32_t unk2,
    struct agx_vdm_index_list_indirect_words *out)
 {
    if (!out)
@@ -315,7 +354,7 @@ agx_vdm_index_list_indirect_pack_words(
       out->words[1] = addr_hi;
       out->words[2] = addr_lo;
       if (hal300)
-         out->words[3] = 7u;
+         out->words[3] = unk2;
       out->count = hal300 ? 4u : 3u;
       return true;
    }
@@ -333,11 +372,23 @@ agx_vdm_index_list_indirect_pack_words(
    out->words[5] = addr_lo;
    unsigned cursor = 6;
    if (hal300)
-      out->words[cursor++] = 7u;
+      out->words[cursor++] = unk2;
    out->words[cursor++] = index_buffer_size_word;
    out->words[cursor++] = (uint32_t)((index_buffer >> 40) & 0xffu);
    out->count = (uint8_t)cursor;
    return true;
+}
+
+static inline bool
+agx_vdm_index_list_indirect_pack_words(
+   enum agx_chip chip, uint8_t primitive, bool indexed, bool restart_enable,
+   uint8_t index_size, uint64_t index_buffer, uint64_t indirect_buffer,
+   uint32_t restart_index, uint32_t index_buffer_size_word,
+   struct agx_vdm_index_list_indirect_words *out)
+{
+   return agx_vdm_index_list_indirect_pack_words_unk2(
+      chip, primitive, indexed, restart_enable, index_size, index_buffer,
+      indirect_buffer, restart_index, index_buffer_size_word, 7u, out);
 }
 
 /*

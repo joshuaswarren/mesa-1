@@ -31,6 +31,43 @@
  *    f19 = 4 where f77 is 2; and where G17G sets f69 it sets f62 instead.
  *    Mesa's tile reload has f62 = f69 = 0, a pair no witness shows; it is
  *    kept 0 on the reading that f69 folds into f62.
+ *  - imgwci, from Apple's image_write(texture2d<uint, access::write>) --
+ *    hv/tools/metal-workloads.metal, which native run112 kick 19 ran on the
+ *    J873 -- compiled by metal-nt 27.1.266.1 for both machines. The G18G text
+ *    is byte-identical to kick 19's code on the device:
+ *
+ *      G17G 250411042420a0020080008c002000000100  X@0 Y@2 data@4, f5 0
+ *      G18G 160340c00b002100000000000060          data@0 X@2 Y@4, f5 2
+ *
+ *    The two vectors are the same but for f5 and five G18G-only fields.
+ *    G17G implies Y and data from its bank (f5 + 2, f5 + 4); G18G names each
+ *    operand: f5 the X half, f116 the Y half, f118 the data half. Checked on
+ *    six more metal-nt G18G writes whose staging Apple laid out differently:
+ *    RGBA data 0..6/X 8/Y 10, RG data 0,2/X 4/Y 6, constant coordinates
+ *    X 0/data 2/Y 4, a 2D array X 6/Y 0/data 4, and two writes sharing
+ *    X 0/Y 2 with data 4 and data 6.
+ *    f117 equals f13 in every witness (both 0 only on the first of the two
+ *    writes that share coordinates, so read as the staged operands'
+ *    release); f119 is 1 in every witness and f120 is 4, which every form's
+ *    predicates require. Mesa's G18G packer stages the one-component layout
+ *    Apple's G18G compiler uses (data just below X, Y just above) and names
+ *    X in f5 (agx3_tex_encode_image_write_g18g_r32), so the rule below only
+ *    adds f116 = f5 + 2, f118 = f5 - 2 and the constants, and composes
+ *    kick 19's bytes exactly for X@2.
+ *
+ *    The four-component writes are the same rule with the data eight halves
+ *    below X: Apple's G18G compiler lays a lone RGBA write out as data
+ *    0..6, X 8, Y 10 (m6-image-write iw_cs_rgba32f, m6-image-write2
+ *    iw2_{f4,u4,i4}_t*), and Mesa's vector for that layout composes exactly
+ *    Apple's 160940c017002100008010000020 (float, slot 1) and
+ *    160940c017002300008000000020 (integer, staging slot 3). Its other
+ *    fields pass through, each within the values the G18G witnesses show:
+ *    the result slot f12 1..4 and one staging wait f59..f63 (m6-image-write4
+ *    iw4_four), f70, texture3d f72 3 and the 2D array's f73 2 (whose z or
+ *    layer is implicit at Y + 2: iw4_f4_3d, iw4_f4_array, iw_cs_r32i_array),
+ *    and the heap index f91 (0..3 in iw4_four) at heap half f79 0. Apple's
+ *    3D and array vectors differ from Mesa's only in f116/f118, where its
+ *    allocator put Y below X.
  *
  * Ioto resource programs (agx3_transcode_agx3d_ioto), measured on Apple's
  * G18G Ioto programs in the J873 native captures (every mode of sessions
@@ -74,7 +111,12 @@
  *  - the control flow no G17G/G18G pair shows: bl, brk, cndret, dbgrtn,
  *    yield, and cndcall outside Ioto programs;
  *  - a branch whose target is not an instruction boundary of the program;
- *  - smp with an f77 other than 0 or 2 (the only values the witnesses show).
+ *  - smp with an f77 other than 0 or 2 (the only values the witnesses show);
+ *  - any imgwci outside the forms agx3_tex_encode_image_write_g18g() emits:
+ *    a nonzero heap half f79, a register or uniform image index, no wait or
+ *    more than one, f114 splat (5) or RGB-and-one (2), the cube texture
+ *    type f72 4, and a one-component write other than kick 19's 2D integer
+ *    one.
  *
  * Not modelled: Apple's G18G vertex programs add a bit_andc/iself32/bit_and/
  * bit_or epilogue on float varyings that G17G does not. Its purpose is not
@@ -160,6 +202,81 @@ apply_ioto_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
    return true;
 }
 
+/* The constant part of every agx3c imgwci agx3_tex_encode_image_write_g18g()
+ * emits: Apple's G17G image_write vector (see the header) with the staged
+ * operands' release f13 set. */
+static const struct {
+   uint8_t field, value;
+} g18g_imgwci_fields[] = {
+   {9, 5},   {10, 2},  {13, 1},  {24, 1},  {38, 1},  {51, 1},  {52, 1},
+   {56, 2},  {58, 0x57}, {71, 2}, {74, 1}, {85, 3},  {86, 3},  {99, 1},
+   {100, 1}, {113, 1},
+};
+
+/* The last staging slot an imgwci waits on and the last it signals in
+ * Apple's G18G code (f59..f63 and f12 1..4 across m6-image-write{,2,3,4}). */
+#define G18G_IMGWCI_MAX_WAIT_SLOT   5
+#define G18G_IMGWCI_MAX_RESULT_SLOT 4
+/* Mesa's image heap indices: an immediate index below the sixteen texture
+ * state registers (agx_nir_lower_bindings). */
+#define G18G_IMGWCI_MAX_INDEX 15
+
+static bool
+apply_imgwci_rule(uint64_t fields[AGX3_MAX_FIELDS], const char **why)
+{
+   uint64_t expected[AGX3_MAX_FIELDS] = {0};
+   for (unsigned i = 0; i < ARRAY_SIZE(g18g_imgwci_fields); ++i)
+      expected[g18g_imgwci_fields[i].field] = g18g_imgwci_fields[i].value;
+
+   /* The operand fields the G18G witnesses vary, each within the values
+    * they show: one staging wait, the result slot, the data type, the
+    * texture type (2D, 2D array, 3D), the heap index at heap half 0, and
+    * one or four staged components (f114 4 only for the 2D integer write of
+    * kick 19). */
+   unsigned wait = 0, waits = 0;
+   for (unsigned s = 1; s <= 8; ++s) {
+      if (fields[58 + s]) {
+         wait = s;
+         waits++;
+      }
+   }
+   const uint64_t x = fields[5];
+   const bool array = fields[73] == 2;
+   const bool three_d = fields[72] == 3;
+   const bool one = fields[114] == 4;
+   const uint64_t data_halves = one ? 2 : 8;
+   bool witnessed =
+      waits == 1 && fields[58 + wait] == 1 &&
+      wait <= G18G_IMGWCI_MAX_WAIT_SLOT && fields[12] >= 1 &&
+      fields[12] <= G18G_IMGWCI_MAX_RESULT_SLOT && fields[70] <= 1 &&
+      (fields[72] == 1 || three_d) && (fields[73] == 0 || array) &&
+      !(three_d && array) && fields[79] == 0 &&
+      fields[91] <= G18G_IMGWCI_MAX_INDEX &&
+      (fields[114] == 0 ||
+       (one && fields[72] == 1 && !array && fields[70] == 0)) &&
+      !(x & 1) && x >= data_halves &&
+      x + (array || three_d ? 4 : 2) <= 126;
+   for (unsigned i = 0; i < AGX3_MAX_FIELDS && witnessed; ++i) {
+      witnessed = i == 5 || i == 12 || i == 58 + wait || i == 70 ||
+                  i == 72 || i == 73 || i == 91 || i == 114 ||
+                  fields[i] == expected[i];
+   }
+   if (!witnessed) {
+      *why = "image write outside the witnessed G18G imgwci forms";
+      return false;
+   }
+
+   /* G18G names Y and the data; a layer or z is implicit at Y + 2 in every
+    * witness (iw_cs_rgba32ui_3d, iw4_f4_3d, iw_cs_r32i_array, iw4_f4_array),
+    * which is where the packer stages it. */
+   fields[116] = x + 2;
+   fields[117] = fields[13];
+   fields[118] = x - data_halves;
+   fields[119] = 1;
+   fields[120] = 4;
+   return true;
+}
+
 static bool
 apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
                  const struct agx3_transcode_ioto *ioto, const char **why)
@@ -192,13 +309,30 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
           * while the native three-comparison witness stages them at 4/0
           * (f19/f56=4/0). G17's ordinary 2D operand is a contiguous pair;
           * its rotated staging blocks must retain their Y half here.
-          * Array, cube and 3D operands have separate layouts. */
-         fields[56] = fields[76] == 1 ? fields[19] + 2 : 2;
+          * 3D is the same: G18G reads Z at Y + 4 and a staged level or bias
+          * at Y + 2 whatever X is, and the G18G stagers place both to match
+          * (agx3_tex_core.h, AGX3_TEX_G18G_LEVEL_WORD). Array and cube
+          * operands have separate layouts. */
+         fields[56] = fields[76] == 1 || fields[76] == 3 ? fields[19] + 2 : 2;
       } else
          fields[19] = 4;
+      /* A comparison (f143) names its reference half on G18G -- f58, with
+       * f59 set -- where G17G reads it implicitly at X + 4. applegpu_g18g
+       * depth2d sample_compare (m6-shadow-lod): X 0, Y 2, reference 4 with
+       * f58 = 4; with a level or bias (f139 = 4 or 3) that word is Y + 2, so
+       * the reference moves up: X 4, Y 0, level 2, reference 6, f58 = 6. The
+       * G18G stagers keep a 2D reference at X + 4, or X + 6 with a staged
+       * level or bias. Only the 2D non-array shape is witnessed. */
+      if (fields[143] && fields[77] == 0 && fields[76] == 1) {
+         fields[58] = fields[19] +
+                      (fields[139] == 3 || fields[139] == 4 ? 6 : 4);
+         fields[59] = 1;
+      }
       fields[62] |= fields[69];
       fields[69] = 0;
    }
+   if (!strcmp(mnemonic, "imgwci") && !apply_imgwci_rule(fields, why))
+      return false;
    if (!strcmp(mnemonic, "lddev"))
       fields[87] = fields[75] ? 2 : 0;
    return true;

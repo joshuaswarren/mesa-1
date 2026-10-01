@@ -315,11 +315,27 @@ struct agx_uncompiled_shader {
    struct {
       uint64_t inputs_flat_shaded;
       uint64_t inputs_linear_shaded;
+      /* Every varying slot a fragment shader reads. */
+      uint64_t inputs_read;
+      /* The fragment shader reads the sample count (samples_log2), which
+       * G17G/G18G specialize at compile time as Apple's pipelines do. */
+      bool needs_sample_count;
       uint8_t cull_distance_size;
       bool has_edgeflags;
       bool uses_fbfetch;
       bool uses_sample_shading;
       bool writes_memory;
+
+      /* Some image intrinsic other than a read or a size/sample query:
+       * stores, atomics, texel addresses and anything not known to only
+       * read. G18G gives an image PBE only to such shaders. */
+      bool writes_images;
+
+      /* Some image intrinsic other than a read, a query or a store: the
+       * atomics and texel addresses whose libagx lowering reads the PBE's
+       * AGX2 software sideband. A G18G shader without one writes its
+       * images with native stores alone. */
+      bool reads_image_sideband;
 
       /* Number of bindful textures, images used */
       unsigned nr_bindful_textures, nr_bindful_images;
@@ -520,6 +536,9 @@ struct agx_batch {
     * stream is submitted once. */
    struct {
       uint32_t start, end;
+      /* G18G: the dispatch bound texture or image state; its command
+       * carries DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE. */
+      bool texture_state;
    } cdm_dispatch[AGX_MAX_CDM_DISPATCHES];
    unsigned cdm_dispatch_count;
 
@@ -598,8 +617,14 @@ struct asahi_gs_shader_key {
    uint64_t flat_varyings;
    uint64_t linear_varyings;
    uint64_t link_uvs;
+   /* When trim_rast_varyings is set, the copy program rasterizes only the
+    * user varyings in rast_varyings: the ones the bound fragment shader
+    * reads. Transform feedback is written by the copy program's own stores
+    * and is not affected. */
+   uint64_t rast_varyings;
+   uint64_t trim_rast_varyings;
 };
-static_assert(sizeof(struct asahi_gs_shader_key) == 24, "no holes");
+static_assert(sizeof(struct asahi_gs_shader_key) == 40, "no holes");
 
 union asahi_shader_key {
    struct asahi_vs_shader_key vs;

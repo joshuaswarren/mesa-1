@@ -87,8 +87,14 @@ agx3_iadd_encode(enum agx_isa_encoding encoding,
     * alongside saturation. */
    const bool g17g_wide_pair = !agx3b && d->src_a_is_register &&
                                !d->src_a_16 && !d->src_16 && d->shift == 0;
+   /* a - (b << n) is isub32 with the shift in f55, n = 1..4, exactly as
+    * iadd32 carries a shifted addend: metal-nt applegpu_g17g/g18g
+    * (g18ref-out/probe/m6-isub-shift, is_sub_shl1..4). */
+   const bool g17g_shifted_sub = !agx3b && d->subtract && !d->saturate &&
+                                 d->src_a_is_register && !d->src_a_16 &&
+                                 !d->src_16 && d->shift >= 1;
    if (!agx3b && (d->subtract || d->saturate) && !g17g_wide_pair &&
-       !g17g_imm_minus_reg)
+       !g17g_imm_minus_reg && !g17g_shifted_sub)
       return false;
    if ((d->src_a_sign_extend_32 || d->sign_extend_32) && !d->saturate)
       return false;

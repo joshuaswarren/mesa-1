@@ -204,6 +204,8 @@ AGX_V56_OPTION(agx_g17p_sr32_pixel_coord, "AGX_G17P_SR32_PIXEL_COORD")
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_bfe_immediate,
                            "AGX_G17P_BFE_IMMEDIATE", false)
 AGX_V56_OPTION(agx_g17p_unit_range_blend, "AGX_G17P_UNIT_RANGE_BLEND")
+/* msaa163: G18G 4x MSAA (AGX_CODEGEN_G18_MSAA4), default off. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g18_msaa4, "AGX_G18_MSAA4", false)
 /* v52a (neo-alu-mesa-v52a) ALU-issue candidates, default off.
  * AGX_G17P_APPLE_LOOP=1 is shorthand for the whole Apple loop shape:
  * rotation + loop-head hint + ILP interleave + uniform-CF lifetime hints. */
@@ -310,7 +312,14 @@ agx_get_codegen_flags(void)
               ? (AGX_CODEGEN_G17P_LOOP_ROTATE |
                  AGX_CODEGEN_G17P_LOOP_HEAD_HINT |
                  AGX_CODEGEN_G17P_ILP_SCHEDULE |
-                 AGX_CODEGEN_G17P_UNIFORM_CF_HINTS) : 0);
+                 AGX_CODEGEN_G17P_UNIFORM_CF_HINTS) : 0) |
+          (debug_get_option_agx_g18_msaa4() ? AGX_CODEGEN_G18_MSAA4 : 0);
+}
+
+bool
+agx_g18_msaa4_enabled(void)
+{
+   return debug_get_option_agx_g18_msaa4();
 }
 
 /* v52b (neo-alu-mesa-v52b) ALU-issue candidates, default off.
@@ -1228,7 +1237,11 @@ agx_pack_integer_8_agx3(agx_builder *b, const agx_index *channels,
                         unsigned nr_channels, enum agx_format format,
                         agx_index *packed)
 {
-   if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   /* AGX3c and AGX3d pack the same way: metal-nt applegpu_g17g/g18g give an
+    * RGBA8Sint output two channels per half -- bit_and 255, then the odd
+    * channel shifted by 8 into the same half -- ahead of one lstcol of
+    * mask 15 (g18ref-out/probe/m6-int8-tile i8_sint4, i8_uint4). */
+   if (!agx_encoding_is_agx3(b->shader->key->dev.encoding) ||
        format != AGX_FORMAT_I8 || nr_channels < 1 || nr_channels > 4)
       return 0;
 
@@ -1349,14 +1362,27 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
    agx_index coords = explicit ? agx_src_index(&instr->src[2]) : agx_null();
 
    b->shader->out->tag_write_disable = false;
-   return agx_st_tile(b, collected, agx_src_index(&instr->src[1]), coords,
-                      format,
-                      (nr_packed && (format == AGX_FORMAT_RGB10A2 ||
-                                     format == AGX_FORMAT_RGB9E5))
-                         ? 1
-                         : nir_intrinsic_write_mask(instr),
-                      nir_intrinsic_base(instr), explicit,
-                      nir_intrinsic_target(instr));
+   agx_instr *st = agx_st_tile(b, collected, agx_src_index(&instr->src[1]),
+                               coords, format,
+                               (nr_packed && (format == AGX_FORMAT_RGB10A2 ||
+                                              format == AGX_FORMAT_RGB9E5))
+                                  ? 1
+                                  : nir_intrinsic_write_mask(instr),
+                               nir_intrinsic_base(instr), explicit,
+                               nir_intrinsic_target(instr));
+
+   /* Apple's G18 4x fragment releases the colour class explicitly after its
+    * masked store (pixrel f14 0x20c: class 12 plus the final-release bit, the
+    * packer's g17p_final_release). Without it the 4x draw hung in every tile
+    * it covered (run165); 1x relies on the implicit release at end. */
+   if (b->shader->stage == MESA_SHADER_FRAGMENT &&
+       !b->shader->key->fs.ignore_tib_dependencies &&
+       b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       b->shader->key->dev.emit_agx3d && b->shader->key->fs.nr_samples == 4 &&
+       agx_g18_msaa4_enabled())
+      agx_signal_pix(b, 0xC);
+
+   return st;
 }
 
 /* Stage one G17P depth/stencil word under the class-1 transaction the first
@@ -1780,7 +1806,7 @@ agx_emit_local_load_pixel(agx_builder *b, agx_index dest,
    /* Apple's reads of 8-bit integer attachments load the bytes packed, two
     * per 16-bit register, and then shift and mask the channels out
     * (blend/native/tilemask.py uread_*). */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   if (agx_encoding_is_agx3(b->shader->key->dev.encoding) &&
        format == AGX_FORMAT_I8) {
       const unsigned nr_halfs = DIV_ROUND_UP(nr_comps, 2);
       agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
@@ -2661,6 +2687,18 @@ agx_expand_tex_to(agx_builder *b, nir_def *def, agx_index src, bool masked)
    return mask;
 }
 
+/* G17G/G18G texel fetches and image reads are witnessed with one channel or
+ * all four (the result-mask gate in agx3_emit_texture_fetch_g17g). They
+ * clobber four registers whatever the mask (agx_validate.c), so a partial
+ * read writes all four instead and the unread channels are simply dead. */
+static bool
+agx_fetch_masked(agx_builder *b, nir_def *def, bool masked)
+{
+   return masked &&
+          !(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+            nir_def_components_read(def) != 1);
+}
+
 static agx_instr *
 agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
 {
@@ -2726,7 +2764,8 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
    if (is_ms) {
       lod_mode = AGX_LOD_MODE_AUTO_LOD;
       lod = agx_zero();
-   } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   } else if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+               b->shader->key->dev.emit_agx3d) &&
               dim == GLSL_SAMPLER_DIM_2D && !is_array && !sparse &&
               nir_src_is_const(intr->src[3]) &&
               nir_src_as_uint(intr->src[3]) == 0) {
@@ -2734,7 +2773,12 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
        * native SMP, whose immediate level-zero form needs no PACK_SMPIR
        * staging. This applies to heap-indexed storage images and all formats;
        * neither the resource operand nor the component type changes the LOD.
-       */
+       *
+       * G18G too: native run112 kick 19's texture2d<uint, access::read>
+       * kernel reads with the 14-byte immediate-level smp (060145c0...,
+       * ep1), the form Mesa's own G18G texelFetch already takes, not the
+       * PACK_SMPIR + 24-byte register-level smp a run-time zero level
+       * costs. */
       lod_mode = AGX_LOD_MODE_AUTO_LOD;
       lod = agx_zero();
    }
@@ -2759,7 +2803,8 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
                                     agx_immediate(0), agx_null(),
                                     agx_tex_dim(dim, is_array), lod_mode, 0,
                                     false, sparse, nir_is_coherent(intr));
-   I->mask = agx_expand_tex_to(b, &intr->def, tmp, !sparse);
+   I->mask = agx_expand_tex_to(b, &intr->def, tmp,
+                               agx_fetch_masked(b, &intr->def, !sparse));
 
    b->shader->out->uses_txf = true;
    b->shader->out->sampler_state_count =
@@ -3004,6 +3049,43 @@ agx_emit_image_store(agx_builder *b, nir_intrinsic_instr *instr)
             break;
          }
       }
+   } else if (b->shader->key->dev.emit_agx3d) {
+      /* G18G's writes (agx3_emit_storage_image_write_g18g). An R32 integer
+       * image keeps native run112 kick 19's one-component form, which stores
+       * one 32-bit integer component and zeroes the rest: the whole texel
+       * only for a one-channel 32-bit integer format.
+       *
+       * Every other write stores four components, and as on G17P above it
+       * is the TYPE OF THE DATA that selects imgwci f70, never the image's
+       * format. metal-nt -arch applegpu_g18g writing float4, uint4 and int4
+       * to one texture2d<T, access::write> (m6-image-write iw_cs_rgba32f,
+       * m6-image-write2 iw2_{u4,i4}_t0, and the same through texture(1),
+       * (2), (5) and (14)):
+       *
+       *   float4  160940c017002100008010000020  f70 1
+       *   uint4   160940c017002300008000000020  f70 0
+       *   int4    160940c017002300008000000020  f70 0, byte-identical
+       *
+       * so a format-less writeonly image, which GL allows, is written the
+       * same way as a formatted one. The markers are the G17P branch's:
+       * AGX_FORMAT_U8NORM for float data, AGX_FORMAT_I8 for integer data.
+       * A store that names no type falls back to its declared format's
+       * class; with neither, it stays unnamed and the packer refuses it. */
+      const enum pipe_format format = nir_intrinsic_format(instr);
+      nir_alu_type stored =
+         nir_alu_type_get_base_type(nir_intrinsic_src_type(instr));
+      if (stored == nir_type_invalid && format != PIPE_FORMAT_NONE)
+         stored = util_format_is_pure_integer(format) ? nir_type_int
+                                                      : nir_type_float;
+      if ((format == PIPE_FORMAT_R32_UINT || format == PIPE_FORMAT_R32_SINT) &&
+          (stored == nir_type_uint || stored == nir_type_int))
+         write->format = AGX_FORMAT_I32;
+      else if (stored == nir_type_float)
+         write->format = AGX_FORMAT_U8NORM;
+      else if (stored == nir_type_uint || stored == nir_type_int)
+         write->format = AGX_FORMAT_I8;
+      else
+         write->format = AGX_NUM_FORMATS;
    }
    return write;
 }
@@ -3317,14 +3399,21 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return agx_get_sr_to(b, dst, AGX_SR_SAMPLES_LOG2);
 
    case nir_intrinsic_load_sample_mask_in:
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+          b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C) {
          /* Apple's G17P fragment ABI exposes the API-visible sample mask in
           * bits 4..7 of native W16 SR39.  Extract it before widening to NIR's
-          * uint32_t result; reading SR39 as W32 selects an unwitnessed form. */
+          * uint32_t result; reading SR39 as W32 selects an unwitnessed form.
+          * G17G and G18G keep it in bits 8..15 of the same word: their
+          * [[sample_mask]] fragments read SR39 and shift it right by 8 at
+          * 1x, 2x and 4x alike (metal-nt applegpu_g17g/applegpu_g18g,
+          * m6-sample-mask-in). */
+         const unsigned shift =
+            b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C ? 8 : 4;
          agx_index native = agx_temp(b->shader, AGX_SIZE_16);
          agx_index shifted = agx_temp(b->shader, AGX_SIZE_16);
          agx_get_sr_to(b, native, AGX_SR_INPUT_SAMPLE_MASK);
-         agx_ushr_to(b, shifted, native, agx_immediate(4));
+         agx_ushr_to(b, shifted, native, agx_immediate(shift));
          return agx_mov_to(b, dst, shifted);
       }
       return agx_get_sr_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
@@ -3349,9 +3438,18 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
        * fragments read exactly this, native W16 SR39, and pass it straight to
        * the tile access. Bits 0..3 are the covered samples -- the per-sample
        * form ANDs this same word with 1/2/4/8. Use the ordered coverage read
-       * so scheduling and CSE cannot reuse pre-depth coverage for tile stores. */
-      assert(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-             "only the G17P tile lowering leaves this for the backend");
+       * so scheduling and CSE cannot reuse pre-depth coverage for tile stores.
+       *
+       * msaa163: G18G's four-sample tile lowering (agx_nir_lower_g18_tile_
+       * samples, AGX_G18_MSAA4) leaves it too. Apple's G18 4x fragment reads
+       * the same W16 SR39 into a half and passes it unmodified to lstcol
+       * (rld 210a42000000: f21=39, f10/f24=1). */
+      assert((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+              (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+               b->shader->key->dev.emit_agx3d &&
+               b->shader->key->fs.nr_samples == 4 &&
+               agx_g18_msaa4_enabled())) &&
+             "only the G17P/G18G tile lowerings leave this for the backend");
       assert(instr->def.bit_size == 16 && "16-bit sample mask");
       return agx_get_sr_coverage_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
 
@@ -6792,6 +6890,8 @@ agx_emit_tex(agx_builder *b, nir_tex_instr *instr)
     * TODO: Check if it works with sparse.
     */
    bool masked = (instr->op != nir_texop_tg4) && !instr->is_sparse;
+   if (I->op == AGX_OPCODE_TEXTURE_LOAD)
+      masked = agx_fetch_masked(b, &instr->def, masked);
    I->mask = agx_expand_tex_to(b, &instr->def, tmp, masked);
 }
 

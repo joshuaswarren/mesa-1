@@ -9,9 +9,17 @@
 
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
 
+/* The register operands name halves 0..191 on AGX3b and the whole 256-half
+ * file on AGX3c/AGX3d: metal-nt applegpu_g17g and applegpu_g18g, under
+ * register pressure, store a vec3 through a base in half 214 (stdev f31=214),
+ * index stores with f16=216 and load into half 194 (lddev f2=194)
+ * (g18ref-out/probe/m6-high-base3 hb3_96, m6-high-base4 hb4_88_10). */
 static bool
-common_ok(const struct agx3_mem_desc *d)
+common_ok(enum agx_isa_encoding enc, const struct agx3_mem_desc *d)
 {
+   const bool wide = agx_encoding_is_g17_class(enc);
+   const unsigned base_max = wide ? 252 : 188, idx_max = wide ? 254 : 191;
+
    if (d == NULL || d->data >= 256 || d->mask < 1 || d->mask > 15 ||
        d->shift > 4)
       return false;
@@ -21,11 +29,11 @@ common_ok(const struct agx3_mem_desc *d)
    if (d->base_is_uniform) {
       if ((d->base & 3) != 0 || d->base > 508)
          return false;
-   } else if ((d->base & 1) != 0 || d->base > 188) {
+   } else if ((d->base & 1) != 0 || d->base > base_max) {
       return false;
    }
    if (d->idx_kind == AGX3_MEM_IDX_REG &&
-       ((d->idx_reg & 1) != 0 || d->idx_reg > 191))
+       ((d->idx_reg & 1) != 0 || d->idx_reg > idx_max))
       return false;
    if (d->idx_kind == AGX3_MEM_IDX_IMM) {
       if (d->idx_scaled) {
@@ -115,7 +123,7 @@ mem_load_fields(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
                 uint8_t ep, struct agx3_field_kv *base, unsigned *nbase,
                 struct agx3_field_kv *ov, unsigned *n)
 {
-   if (!common_ok(d) || d->slot < 1 ||
+   if (!common_ok(enc, d) || d->slot < 1 ||
        d->slot > (agx_encoding_is_g17_class(enc) ? 8 : 6) ||
        (enc == AGX_ISA_ENCODING_AGX3B ? ep != 0 : ep > 5))
       return false;
@@ -213,7 +221,7 @@ bool
 agx3_mem_encode_store(enum agx_isa_encoding enc, const struct agx3_mem_desc *d,
                       uint8_t out[AGX3_MEM_MAX_LENGTH], uint8_t *len)
 {
-   if (!common_ok(d) || d->last_load || d->agx3b_last_load)
+   if (!common_ok(enc, d) || d->last_load || d->agx3b_last_load)
       return false;
 
    /* G18G (agx3d) STDEV takes the agx3c field vector: the 248 aligned

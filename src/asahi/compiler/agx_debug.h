@@ -85,9 +85,17 @@ enum agx_codegen_flag {
    /* v53-c3: loop-exit compare placement (exit-compare cone at a fixed
     * distance before its CND) plus a register-cache hint on its counter. */
    AGX_CODEGEN_G17P_EXIT_COMPARE              = BITFIELD_BIT(16),
+   /* msaa163: G18G four-sample colour rendering resolved at end of tile
+    * (native run112 workload 8). AGX_G18_MSAA4, default off. Off, every G18G
+    * multisampled draw keeps its existing refusal and no emitted byte
+    * changes; on, only four-sample G18G tile programs and draws change. */
+   AGX_CODEGEN_G18_MSAA4                      = BITFIELD_BIT(17),
 };
 
 uint32_t agx_get_codegen_flags(void);
+
+/* AGX_G18_MSAA4 (default false): see AGX_CODEGEN_G18_MSAA4. */
+bool agx_g18_msaa4_enabled(void);
 
 /* v50 agx3 footgun-audit candidates (neo-footgun-mesa-v50). A separate
  * namespace from agx_codegen_flag so it composes with later codegen bits;

@@ -234,7 +234,11 @@ agx_draw_indirect_index_buffer_size_word(struct agx_draw d,
 {
    assert(d.indexed && agx_is_indirect(d.b));
 
-   const uint64_t dwords = ((uint64_t)agx_draw_index_range_B(d) + 3) >> 2;
+   /* Apple counts from the dword holding the first index: AGXMetalG18G
+    * 0x219663130..0x2196631fc adds IB & 3 before rounding up. */
+   const uint64_t dwords =
+      ((agx_draw_index_buffer(d) & 3) + (uint64_t)agx_draw_index_range_B(d) +
+       3) >> 2;
    if (dwords == 0 || dwords > (uint64_t)0xffffffffu)
       return false;
 
@@ -345,9 +349,12 @@ agx_cdm_launch(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_grid grid,
    return out;
 }
 
+/* `unk2` is the HAL300 Index List word the pipeline selects
+ * (agx_vdm_index_list_hal300_unk2); other generations ignore it. */
 static inline GLOBAL uint32_t *
-agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
-             enum agx_primitive topology)
+agx_vdm_draw_unk2(GLOBAL uint32_t *out, enum agx_chip chip,
+                  struct agx_draw draw, enum agx_primitive topology,
+                  uint32_t unk2)
 {
    uint64_t ib = draw.indexed ? agx_draw_index_buffer(draw) : 0;
 
@@ -359,7 +366,7 @@ agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
             agx_draw_indirect_index_buffer_size_word(draw, &size_word);
          struct agx_vdm_index_list_indirect_words words;
          const bool valid =
-            size_valid && agx_vdm_index_list_indirect_pack_words(
+            size_valid && agx_vdm_index_list_indirect_pack_words_unk2(
                              chip, (uint8_t)topology, draw.indexed,
                              draw.restart, (uint8_t)draw.index_size, ib,
                              draw.b.ptr,
@@ -367,7 +374,7 @@ agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
                                 ? agx_primitive_restart_index(
                                      draw.index_size)
                                 : 0,
-                             size_word, &words);
+                             size_word, unk2, &words);
          assert(valid);
          if (!valid)
             return out;
@@ -377,12 +384,12 @@ agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
          return out;
       } else {
          struct agx_vdm_index_list_direct_words words;
-         const bool valid = agx_vdm_index_list_direct_pack_words(
+         const bool valid = agx_vdm_index_list_direct_pack_words_unk2(
             chip, (uint8_t)topology, draw.indexed, draw.restart,
             (uint8_t)draw.index_size, ib, draw.b.count[0], draw.b.count[1],
             draw.indexed ? draw.index_bias : draw.start,
             draw.indexed ? (align(agx_draw_index_range_B(draw), 4) >> 2) : 0,
-            &words);
+            unk2, &words);
          assert(valid);
          if (!valid)
             return out;
@@ -450,6 +457,13 @@ agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
    }
 
    return out;
+}
+
+static inline GLOBAL uint32_t *
+agx_vdm_draw(GLOBAL uint32_t *out, enum agx_chip chip, struct agx_draw draw,
+             enum agx_primitive topology)
+{
+   return agx_vdm_draw_unk2(out, chip, draw, topology, 7u);
 }
 
 static inline uint32_t
@@ -534,7 +548,9 @@ agx_vdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
     * byte-witnessed G15--G17 identity.  Do not feed those chips through the
     * legacy genxml packet below: that packet is AGX2 and has a different
     * opcode/field layout.  Keep the unwitnessed G16P/G17A identities closed
-    * instead of guessing from their neighbouring families. */
+    * instead of guessing from their neighbouring families.  G18G's
+    * RenderContext::memoryBarrier appends the same word (26A428
+    * AGXMetalG18G 0x219642398..3a0). */
    switch (chip) {
    case AGX_CHIP_G15G:
    case AGX_CHIP_G15S:
@@ -547,6 +563,7 @@ agx_vdm_barrier(GLOBAL uint32_t *out, enum agx_chip chip)
    case AGX_CHIP_G17G:
    case AGX_CHIP_G17S:
    case AGX_CHIP_G17C:
+   case AGX_CHIP_G18G:
       *out++ = 0x21000960u;
       return out;
 

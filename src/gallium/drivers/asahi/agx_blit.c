@@ -8,6 +8,7 @@
  */
 
 #include <stdint.h>
+#include "asahi/compiler/agx_debug.h"
 #include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/layout/layout.h"
 #include "compiler/nir/nir_builder.h"
@@ -772,16 +773,38 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
    agx_legalize_compression(ctx, agx_resource(info->src.resource),
                             info->src.format);
 
-   if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P &&
+   /* msaa163 P4 (AGX_G18_MSAA4, default off): G18G folds the same resolves
+    * into the source batch's end of tile, where Apple's G18 4x render
+    * resolves too (MSAA notes s2.6); agx_build_g17g_bg_eot admits only the
+    * witnessed four-sample tile and drops anything else. */
+   const bool g18_msaa4 =
+      agx_device(ctx->base.screen)->chip == AGX_CHIP_G18G &&
+      agx_g18_msaa4_enabled();
+   const bool fold_resolves =
+      agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P || g18_msaa4;
+
+   if (fold_resolves &&
        agx_g17p_direct_resolve_blit_shape(info, true) &&
        agx_g17p_attach_direct_resolve(ctx, info->src.resource,
                                       info->dst.resource))
       return;
 
-   if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P &&
+   if (fold_resolves &&
        agx_g17p_staged_resolve_blit_shape(info) &&
        agx_g17p_staged_resolve_blit(ctx, info))
       return;
+
+   /* msaa163 P13: a multisample source that neither folds nor stages would
+    * reach u_blitter's txf_ms resolve, which has no grounded G18G encoding
+    * and would read a multisample image no render ever stored. Refuse it
+    * explicitly (MSAA notes F15). */
+   if (g18_msaa4 && util_res_sample_count(info->src.resource) > 1) {
+      mesa_loge("asahi: G18G multisample blit source %s %ux%u could not be "
+                "resolved at end of tile; refused (txf_ms is not grounded)",
+                util_format_name(info->src.format), info->src.box.width,
+                info->src.box.height);
+      return;
+   }
 
    if (asahi_compute_blit_supported(agx_device(ctx->base.screen)->chip,
                                     info)) {
@@ -811,8 +834,7 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
     * from the WSI image. Keep that copy in the same tile batch, and publish
     * the tile directly back to the WSI image when the swap resolve arrives.
     */
-   if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P &&
-       agx_g17p_direct_resolve_blit_shape(info, false))
+   if (fold_resolves && agx_g17p_direct_resolve_blit_shape(info, false))
       (void)agx_g17p_attach_direct_resolve(ctx, info->dst.resource,
                                           info->src.resource);
 }

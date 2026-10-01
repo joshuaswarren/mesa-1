@@ -8,6 +8,7 @@
 #include "util/simple_mtx.h"
 #include "util/u_debug.h"
 #include "agx_compile.h"
+#include "agx_debug.h"
 #include "agx3_code_container_core.h"
 #include "agx_device.h"
 #include "agx_linker.h"
@@ -22,6 +23,17 @@
 
 #include <inttypes.h>
 #include <stdlib.h>
+
+/* msaa163 (AGX_G18_MSAA4, default off): a G18G four-sample tile. Its
+ * background stores through the SR39 register mask and its end-of-tile program
+ * resolves through the ordinary 2D store (MSAA notes P4/P5). */
+static bool
+agx_g18_msaa4_tib(const struct agx_device *dev,
+                  const struct agx_tilebuffer_layout *tib)
+{
+   return dev->chip == AGX_CHIP_G18G && tib->nr_samples == 4 &&
+          agx_g18_msaa4_enabled();
+}
 
 static bool
 agx_g17p_rt0_eot_text_supported(const struct agx_shader_part *bin)
@@ -256,6 +268,24 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 
          NIR_PASS(_, shader, agx_nir_lower_g17p_tile_samples,
                   tib->nr_samples);
+      } else if (agx_g18_msaa4_tib(cache->dev, tib)) {
+         /* msaa163: the same fold, then G18's four-sample form. Apple's G18
+          * 4x background stores its clear through rld SR39 into the lstcol
+          * register form (f51=2, f55=1), exactly what this produces; the
+          * backend refuses any tile store left with an immediate mask. */
+         bool progress;
+         do {
+            progress = false;
+            NIR_PASS(progress, shader, nir_lower_vars_to_ssa);
+            NIR_PASS(progress, shader, nir_opt_copy_prop);
+            NIR_PASS(progress, shader, nir_opt_constant_folding);
+            NIR_PASS(progress, shader, nir_opt_loop_unroll);
+            NIR_PASS(progress, shader, nir_opt_dead_cf);
+            NIR_PASS(progress, shader, nir_opt_dce);
+         } while (progress);
+
+         NIR_PASS(_, shader, agx_nir_lower_g18_tile_samples,
+                  tib->nr_samples);
       }
    }
 
@@ -350,10 +380,19 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
 
    struct agx_shader_key compiler_key = {
       .dev = agx_gather_device_key(cache->dev),
-      .fs.ignore_tib_dependencies = true,
-      /* G17P multisample backgrounds store through the coverage register. */
+      /* A background owns its pixels first, so it normally skips the pixel
+       * protocol. Not G18's four-sample one: Apple's 4x background waits
+       * before its register-mask stores, and this background without the
+       * pixwait/pixrel pair stalled the 3D stage (run166c: the same 4x render
+       * with an empty background retires). */
+      .fs.ignore_tib_dependencies = !agx_g18_msaa4_tib(cache->dev, &key->tib),
+      /* G17P multisample backgrounds store through the coverage register,
+       * and so do G18G four-sample ones under AGX_G18_MSAA4 (msaa163). */
       .fs.nr_samples =
-         cache->dev->chip == AGX_CHIP_G17P ? key->tib.nr_samples : 0,
+         cache->dev->chip == AGX_CHIP_G17P ||
+               agx_g18_msaa4_tib(cache->dev, &key->tib)
+            ? key->tib.nr_samples
+            : 0,
       .reserved_preamble = key->reserved_preamble,
       .no_preamble = cache->dev->chip == AGX_CHIP_G17P ||
                      agx_chip_m5_paths(cache->dev->chip),
@@ -391,6 +430,21 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
       b.shader->info.outputs_written |= BITFIELD64_BIT(FRAG_RESULT_DATA0 + rt);
    }
 
+   /* Bring-up diagnostic for the G18 4x render hang (a 4x render with no draw
+    * stalls the 3D stage): replace the G18 4x clear-only background with an
+    * empty one. Reload backgrounds keep their program (their descriptor ABI is
+    * checked). Off by default; the image is wrong when set. */
+   bool reload = false;
+   for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+      reload |= key->op[rt] == AGX_BG_LOAD;
+   if (!reload && agx_g18_msaa4_tib(cache->dev, &key->tib) &&
+       debug_get_bool_option("AGX_G18_MSAA4_EMPTY_BG", false)) {
+      ralloc_free(b.shader);
+      b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, &agx_nir_options,
+                                         "agx_background_empty");
+      mesa_logw("asahi: G18 4x background replaced by an empty one (diagnostic)");
+   }
+
    return agx_compile_bg_eot_shader(cache, b.shader, &compiler_key, &key->tib);
 }
 
@@ -401,6 +455,27 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
    const bool g17g = agx_chip_m5_paths(cache->dev->chip);
    const bool g18_dual = cache->dev->chip == AGX_CHIP_G18G &&
                          agx_g17p_rgba8_mrt_mask(&key->tib) == 3;
+   /* msaa163: G18G's four-sample tile is resolved at end of tile into the
+    * single-sample PBE target, the shape Apple's G18 4x render uses: its
+    * end-of-tile code is the same program at 1x and 4x (byte-identical over
+    * 0x1400 bytes) and its resolve descriptor is the plain 1x one (MSAA
+    * notes s2.5). An unresolved multisample store stays refused (P11). */
+   const bool g18_resolve =
+      agx_g18_msaa4_tib(cache->dev, &key->tib) && !key->multisample_store;
+   /* Bring-up diagnostic for the G18 4x render hang: an end-of-tile program
+    * that stores nothing. It is compiled without g17g_rt0_eot, which would
+    * otherwise substitute Apple's native store text. Off by default. */
+   if (g18_resolve && debug_get_bool_option("AGX_G18_MSAA4_EMPTY_EOT", false)) {
+      nir_builder e = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "agx_eot_empty");
+      struct agx_shader_key empty_key = {
+         .dev = agx_gather_device_key(cache->dev),
+         .reserved_preamble = key->reserved_preamble,
+         .no_preamble = true,
+      };
+      mesa_logw("asahi: G18 4x end-of-tile replaced by an empty one (diagnostic)");
+      return agx_compile_bg_eot_shader(cache, e.shader, &empty_key, NULL);
+   }
    if (g17g) {
       /* The compiler substitutes Apple's 78-byte native text for the G17G RT0
        * store, and it has that text for a U8NORM imageblock only, so the gate
@@ -418,7 +493,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
        * the compiler would fail those shaders anyway, and refusing up front
        * keeps the fallback explicit.
        */
-      if (key->op[0] != AGX_EOT_STORE || key->tib.nr_samples != 1 ||
+      if (key->op[0] != AGX_EOT_STORE ||
+          (key->tib.nr_samples != 1 && !g18_resolve) ||
           key->tib.layered || key->tib.spilled[0] ||
           agx_tilebuffer_offset_B(&key->tib, 0) != 0 ||
           !agx_g17g_rt0_eot_physical_format_supported(
@@ -480,7 +556,8 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
     */
    const bool g17p = cache->dev->chip == AGX_CHIP_G17P;
    const bool store_multisample =
-      key->tib.nr_samples > 1 && (!g17p || key->multisample_store);
+      key->tib.nr_samples > 1 && !g18_resolve &&
+      (!g17p || key->multisample_store);
 
    /* AGX2 carries the sample in the store's coordinate vector, so its
     * multisample block store is a three-component GLSL_SAMPLER_DIM_MS one.

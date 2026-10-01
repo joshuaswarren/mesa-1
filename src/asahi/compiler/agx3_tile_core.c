@@ -26,14 +26,18 @@ one_or_zero(uint16_t value)
 /*
  * The sample-mask operand. The immediate alternative is witnessed at every 1x
  * width; the register alternative is witnessed at 2x and 4x on applegpu_g17p
- * (AGX3b). No AGX3c multisample witness exists, so the register form stays
- * AGX3b-only rather than being asserted for a part nobody has measured.
+ * (AGX3b). On AGX3c/AGX3d the register form is admitted only when the caller
+ * opts in (g17_register): the G18G/G17G 4x per-pixel store witness is
+ * 270605082901ad02000071440000 = {f44:10, f51:2, f55:1, wait f18}
+ * (native-msaa-reference-147), and nothing else is measured there.
  */
 static bool
 sample_ok(enum agx_isa_encoding enc, struct agx3_tile_sample s)
 {
    if (s.reg)
-      return is_b(enc) && s.value < 192;
+      return (is_b(enc) ||
+              (s.g17_register && agx_encoding_is_g17_class(enc))) &&
+             s.value < 192;
 
    return !s.kill && s.value <= 255;
 }
@@ -153,6 +157,10 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    /* lldcol gains f79 on G18G (the one aligned applegpu_g18g tile load has
     * f79 = 2, its G17G twin none), which is not modelled: refuse agx3d. */
    if (enc == AGX_ISA_ENCODING_AGX3D)
+      return false;
+
+   /* The AGX3c register-form opt-in is a store witness only. */
+   if (sample.g17_register)
       return false;
 
    /* Full-component loads, plus the G17P scalar, pair, and RGB565 forms.

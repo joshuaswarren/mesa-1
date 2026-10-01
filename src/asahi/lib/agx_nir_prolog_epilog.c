@@ -1563,6 +1563,9 @@ struct g17p_tile_sample_state {
    unsigned samples;
    nir_def *coverage;
    nir_block *block;
+   /* msaa163: G18G reads the coverage as the 16-bit active-sample word (W16
+    * SR39); its backend has no AGX3C encoding of load_sample_mask. */
+   bool g18;
 };
 
 static bool
@@ -1632,7 +1635,8 @@ lower_g17p_tile_sample(nir_builder *b, nir_intrinsic_instr *intr, void *data)
     * coverage, including the tests for this particular unrolled sample.
     * load_sample_mask is ordered and lowers to the same G17P SR39 read. */
    if (!state->coverage || state->block != intr->instr.block) {
-      state->coverage = nir_u2u16(b, nir_load_sample_mask(b));
+      state->coverage = state->g18 ? nir_load_active_samples_agx(b)
+                                   : nir_u2u16(b, nir_load_sample_mask(b));
       state->block = intr->instr.block;
    }
    nir_def *coverage = state->coverage;
@@ -1651,6 +1655,18 @@ agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples)
       return false;
 
    struct g17p_tile_sample_state state = {.samples = nr_samples};
+   return nir_shader_intrinsics_pass(s, lower_g17p_tile_sample,
+                                     nir_metadata_control_flow, &state);
+}
+
+bool
+agx_nir_lower_g18_tile_samples(nir_shader *s, unsigned nr_samples)
+{
+   /* The one G18G multisample witness is four samples (MSAA notes s2.5). */
+   if (nr_samples != 4)
+      return false;
+
+   struct g17p_tile_sample_state state = {.samples = nr_samples, .g18 = true};
    return nir_shader_intrinsics_pass(s, lower_g17p_tile_sample,
                                      nir_metadata_control_flow, &state);
 }

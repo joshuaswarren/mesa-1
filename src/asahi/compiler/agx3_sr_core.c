@@ -118,10 +118,16 @@ agx3_sr_encode(enum agx_isa_encoding enc, const struct agx3_sr_desc *d,
    /* Apple's throughput fragment (metal-nt applegpu_g17p, fragment.fields
     * offset 64) also opens with a marked 32-bit SR24 read,
     * 1ca1110601000000, so the pixel-coordinate pair qualifies too. */
+   /* G17G and G18G open a [[sample_mask]] fragment the same way, with the
+    * marked W16 SR39 read (m6-sample-mask-in: 248201002000b002 on
+    * applegpu_g17g, 2100420000080100 on applegpu_g18g). */
    if (d->first &&
-       (enc != AGX_ISA_ENCODING_AGX3B ||
-        !((d->sr == 39 && d->width == AGX3_SR_W16) ||
-          ((d->sr == 23 || d->sr == 24) && d->width == AGX3_SR_W32))))
+       (enc == AGX_ISA_ENCODING_AGX3C
+           ? !(d->sr == 39 && d->width == AGX3_SR_W16)
+           : (enc != AGX_ISA_ENCODING_AGX3B ||
+              !((d->sr == 39 && d->width == AGX3_SR_W16) ||
+                ((d->sr == 23 || d->sr == 24) &&
+                 d->width == AGX3_SR_W32)))))
       return false;
 
    struct agx3_field_kv base[5];

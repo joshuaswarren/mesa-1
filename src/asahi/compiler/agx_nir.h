@@ -102,6 +102,10 @@ struct agx_g17p_combined_sampler_binding {
  * texture, the write PBE, their access-control descriptor, and the coordinate
  * clamp vector. */
 #define AGX_G17P_STORAGE_ROOT_HALFS 16u
+/* G18G's write-only state-0 root is two pointers, halves 0..7: the resolved
+ * PBE and a sampler-shaped state record (native run112 kick 19 launch 1
+ * loads exactly these 16 bytes into u0..u3). */
+#define AGX_G18G_STORAGE_ROOT_HALFS 8u
 struct agx_g17p_txf_binding {
    uint32_t texture_offset_B;
 };

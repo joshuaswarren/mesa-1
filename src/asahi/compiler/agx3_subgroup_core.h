@@ -148,6 +148,16 @@ bool agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
                                  uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
                                  uint8_t *length);
 
+/* AGX3c `simdiballot` forms with no comparand register-against-constant:
+ * simd_ballot(true), and an unsigned less-than of two 32-bit registers whose
+ * last use this is. See agx3_subgroup_core.c for the witnesses. */
+bool agx3_subgroup_encode_ballot_true_gpu1(uint16_t dest, bool dest_cache,
+                                           uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
+                                           uint8_t *length);
+bool agx3_subgroup_encode_ballot_ult_reg_gpu1(
+   uint16_t dest, bool dest_cache, uint16_t src0, uint16_t src1,
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], uint8_t *length);
+
 bool agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
                                  const struct agx3_subgroup_reduce_desc *desc,
                                  uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],

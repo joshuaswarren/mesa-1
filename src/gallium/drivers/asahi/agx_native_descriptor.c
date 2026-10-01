@@ -396,9 +396,14 @@ agx_gallium_pack_native_pbe(
       legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED;
    if ((!array && !multisample &&
         legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
+       /* Gen10 linear is the J873 bgra8/gears/colour end-of-tile PBE
+        * (ffc60a02 00007f80 00005800 0003f010 for BGRA8 256x256, pitch
+        * 1024), which the codec reproduces; AGXMetalG18G's StateFields
+        * writes pitch/16-1 at word1[59:44] (0x219546d98). hk already admits
+        * it (8295c0d67c5); see hv/G18-INDIRECT-DBIAS-PBE.md section 3. */
        (legacy->layout == AGX_LAYOUT_LINEAR &&
-        (agx3_generation != AGX_PBE_AGX3_GENERATION_9 || legacy->level != 0 ||
-         legacy->levels != 1 || legacy->unk_mipmapped)) ||
+        (legacy->level != 0 || legacy->levels != 1 ||
+         legacy->unk_mipmapped)) ||
        (legacy->layout != AGX_LAYOUT_LINEAR &&
         legacy->layout != AGX_LAYOUT_TWIDDLED &&
         legacy->layout != AGX_LAYOUT_GPU) ||

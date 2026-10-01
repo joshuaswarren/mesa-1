@@ -217,8 +217,16 @@ agx3_atomic_encode_local(enum agx_isa_encoding enc,
           d->address_kill)
          return false;
    } else {
-      /* The no-result and addressed forms are isolated on AGX3b. */
-      if (enc != AGX_ISA_ENCODING_AGX3B || d->slot != 0)
+      /* The no-result and addressed forms are isolated on AGX3b. AGX3c has
+       * the no-result form at an immediate address: metal-nt applegpu_g17g
+       * and applegpu_g18g compile a threadgroup atomic_fetch_add whose
+       * result is unused to atomictg with the return form's fields less
+       * f2/f9/f12/f85 and f11/f75 (m6-libagx-forms lk_local_atomic_noret
+       * against lk_local_atomic_ret). */
+      if (d->slot != 0 ||
+          (enc != AGX_ISA_ENCODING_AGX3B &&
+           (enc != AGX_ISA_ENCODING_AGX3C ||
+            d->address_kind != AGX3_ATOMIC_INDEX_IMMEDIATE)))
          return false;
 
       if (d->address_kind == AGX3_ATOMIC_INDEX_IMMEDIATE) {
@@ -268,13 +276,15 @@ agx3_atomic_encode_local(enum agx_isa_encoding enc,
          enc == AGX_ISA_ENCODING_AGX3C ? 83 : 81, 1);
 
    if (enc == AGX_ISA_ENCODING_AGX3C) {
-      f[n++] = (struct agx3_field_kv)KV(11, 1);
+      if (d->returns_value)
+         f[n++] = (struct agx3_field_kv)KV(11, 1);
       f[n++] = (struct agx3_field_kv)KV(59, 15);
       f[n++] = (struct agx3_field_kv)KV(67, 1);
       f[n++] = (struct agx3_field_kv)KV(73, 7);
       f[n++] = (struct agx3_field_kv)KV(
          74, d->op == AGX3_ATOMIC_CMPXCHG ? 3 : 1);
-      f[n++] = (struct agx3_field_kv)KV(75, 1);
+      if (d->returns_value)
+         f[n++] = (struct agx3_field_kv)KV(75, 1);
       f[n++] = (struct agx3_field_kv)KV(95, 2);
       f[n++] = (struct agx3_field_kv)KV(98, 1);
    }

@@ -194,6 +194,22 @@ bool agx3_g17g_native_compute_dispatch_append(
    const struct agx3_compute_direct_grid *grid, uint8_t barrier_flags,
    struct agx3_compute_dispatch_sink *sink);
 
+/* 26A428 AGXMetalG18G indirect launches (hv/G18-INDIRECT-COMPUTE.md). Mode 2
+ * reads six u32 at grid_va: three global thread counts, then three local
+ * sizes. Mode 1 reads three threadgroup counts at groups_va and carries the
+ * local size in the record. Both append the caller's barrier. */
+#define AGX3_G17G_NATIVE_INDIRECT_GROUPS_MODE UINT32_C(0x08000000)
+#define AGX3_G17G_NATIVE_INDIRECT_LOCAL_MODE  UINT32_C(0x10000000)
+#define AGX3_G17G_NATIVE_INDIRECT_LOCAL_LAUNCH_SIZE  24u
+#define AGX3_G17G_NATIVE_INDIRECT_GROUPS_LAUNCH_SIZE 36u
+bool agx3_g17g_native_indirect_compute_launch_append(
+   const struct agx3_compute_program *program, uint64_t grid_va,
+   uint8_t barrier_flags, struct agx3_compute_dispatch_sink *sink);
+bool agx3_g17g_native_indirect_groups_compute_launch_append(
+   const struct agx3_compute_program *program, uint64_t groups_va,
+   const uint32_t local_size[3], uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink);
+
 /* Append the output-positive 40-byte A18 Pro add3 launch and its flags=0
  * barrier.  The witnessed grid is fixed at 64 global threads in groups of
  * 32.  This remains a bring-up API and does not expose a Vulkan capability. */

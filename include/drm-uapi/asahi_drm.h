@@ -1295,6 +1295,15 @@ enum drm_asahi_compute_flags {
 	 * three-buffer table from this command's three compute attachments.
 	 */
 	DRM_ASAHI_COMPUTE_G17P_ADD3_PROOF = (1L << 0),
+
+	/**
+	 * @DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE: G18G only. The command's
+	 * dispatch binds texture or image state (a texture table, a sampled
+	 * texture, a storage image). The kernel selects the compute mode the
+	 * native driver uses for such commands (desc+0x62a, register 0x1a458
+	 * 0x14c08a60 instead of 0x10c08860). Other kernels refuse the bit.
+	 */
+	DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE = (1L << 1),
 };
 
 /**

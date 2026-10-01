@@ -113,6 +113,13 @@ struct agx3_tex_fetch_desc {
     * array fetches. Witnesses in gpu/m5-fetch-array-lod-reference.metal.
     */
    uint16_t layer_half;
+   /*
+    * G18G stages a per-lane layer with PACK_SMPIR in its own block
+    * (agx3_tex_stage_array_layer_g18g) even for an immediate-operand fetch,
+    * so the sample takes the staged form f77 = 2 rather than the register
+    * form above, whose f37 = 3 names a uniform half.
+    */
+   bool staged_array;
    bool multisample;    /* 2D MS read; sample/layer may be staged separately */
    bool staged_sample;  /* MS sample and optional array layer in staging half4 */
    bool three_d;        /* G17P 3D read: third contiguous integer coordinate */
@@ -469,7 +476,8 @@ bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
 
 /* PACK_IMGWIR publishes an image write's layer register to staging half
  * `dest` (6 in bank 0), with the same operand fields as PACK_SMPIR's array
- * layer. */
+ * layer. AGX3C adds its f56/f57 selectors and takes the source from the low
+ * bank only. */
 bool agx3_tex_stage_image_write_layer(enum agx_isa_encoding enc, uint16_t src,
                                       uint16_t dest,
                                       uint8_t slot, uint16_t wait_mask,
@@ -485,6 +493,86 @@ bool agx3_tex_stage_array_layer_at(enum agx_isa_encoding enc, uint16_t bank,
                                    uint16_t src, uint8_t slot,
                                    uint16_t wait_mask, bool src_cache,
                                    bool src_discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
+
+/*
+ * G18G's staged array block, as Apple's G18G compiler lays it out for a
+ * texture2d_array read or sample whose layer is a per-lane value: X at half
+ * 4 (SMP f19 = 4), Y at half 0 (SMP f56 = 0), and the PACK_SMPIR layer word
+ * at half 2, where G17G's block is X 0, Y 2 and the layer at 6.
+ */
+#define AGX3_TEX_G18G_ARRAY_X     4
+#define AGX3_TEX_G18G_ARRAY_Y     0
+#define AGX3_TEX_G18G_ARRAY_LAYER 2
+
+/* The PACK_SMPIR of that block: G17G's own field vector with f5 = 2, which
+ * the G18G transcoder composes into Apple's G18G bytes. */
+bool agx3_tex_stage_array_layer_g18g(uint16_t src, uint8_t slot,
+                                     uint16_t wait_mask, bool src_cache,
+                                     bool src_discard,
+                                     uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                     uint8_t *len);
+
+/* The same block's layer paired with a per-lane float level or bias in one
+ * PACK_SMPIR word (f37 = 2, f76 = 2, f77 = 16), again with f5 = 2. */
+bool agx3_tex_stage_array_lod_g18g(uint16_t layer, uint16_t lod, uint8_t slot,
+                                   uint16_t wait_mask, bool layer_cache,
+                                   bool layer_discard, bool lod_cache,
+                                   bool lod_discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
+
+/* The same pair with the level's kind explicit: AGX3_TEX_LEVEL_FLOAT for a
+ * filtered sample's level or bias (above), AGX3_TEX_LEVEL_INTEGER (f76 = 3)
+ * for a texel fetch's uint level. metal-nt applegpu_g17g / applegpu_g18g
+ * texture2d_array read(coord, layer, lod) with a per-lane layer and level
+ * (m6-fetch-lod fl_array, fl_array_int):
+ *
+ *   G17G  pack_smpir f5 6 f16 layer f30 lod f37 2 f41 1 f76 3 f77 16
+ *   G18G  pack_smpir f5 2 f16 layer f30 lod f37 2 f41 1 f76 3 f77 16
+ */
+bool agx3_tex_stage_array_typed_lod_g18g(uint16_t layer, uint16_t lod,
+                                         enum agx3_tex_level_kind kind,
+                                         uint8_t slot, uint16_t wait_mask,
+                                         bool layer_cache, bool layer_discard,
+                                         bool lod_cache, bool lod_discard,
+                                         uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                         uint8_t *len);
+
+/*
+ * Where G18G reads a staged block's non-array operand words. G17G implies Y
+ * at X + 2 and reads the per-lane level or bias word at X + 6 and a 3D Z at
+ * X + 4. G18G names Y itself (SMP f56; the transcoder sets it to X + 2 for
+ * 2D and 3D) and reads the level or bias word at Y + 2 and a 3D Z at Y + 4.
+ * Every applegpu_g18g witness places them so, whatever X is:
+ *
+ *   read(uint2, lod)                     X 4   Y 0   L 2       (m6-fetch-lod)
+ *   two reads with levels in flight      X 8   Y 0   L 2,
+ *                                        X 10  Y 4   L 6       (m6-fetch-lod2)
+ *   three reads, third block             X 12  Y 8   L 10      (m6-fetch-lod2)
+ *   read(uint3, lod)                     X 8   Y 0   Z 4  L 2  (m6-fetch-lod)
+ *   read(uint3, 0), two in flight        X 16  Y 0   Z 4,
+ *                                        X 18  Y 8   Z 12      (m6-fetch-lod0)
+ *   sample(level()) / sample(bias())     X 4   Y 0   L 2       (m6-sample-lod)
+ *   sample 3D with and without level     X 8   Y 0   Z 4  L 2  (m6-sample-lod)
+ *
+ * Mesa keeps X at the block base and Y at X + 2 on both chips, so G18G's
+ * level word is X + 4 and its Z is X + 6. (A 2D shadow sample's reference is
+ * X + 4 on G17G, which is already G18G's Y + 2 word.)
+ */
+#define AGX3_TEX_G17G_LEVEL_WORD 6
+#define AGX3_TEX_G17G_Z_WORD     4
+#define AGX3_TEX_G18G_LEVEL_WORD 4
+#define AGX3_TEX_G18G_Z_WORD     6
+
+/* agx3_tex_stage_typed_lod_at()'s PACK_SMPIR, published into G18G's level
+ * word (bank + AGX3_TEX_G18G_LEVEL_WORD). The field vector is G17G's in every
+ * applegpu_g18g witness above, f5 alone following the block. */
+bool agx3_tex_stage_typed_lod_g18g(uint16_t bank, uint16_t src, uint8_t slot,
+                                   uint16_t wait_mask, bool src_cache,
+                                   bool src_discard,
+                                   enum agx3_tex_level_kind kind,
                                    uint8_t out[AGX3_TEX_MAX_LENGTH],
                                    uint8_t *len);
 
@@ -706,6 +794,42 @@ bool agx3_tex_encode_image_write_2d(
 bool agx3_tex_encode_image_write_rgba8_2d(
    enum agx_isa_encoding enc, const struct agx3_image_write_desc *d,
    uint8_t out[AGX3_IMAGE_WRITE_LENGTH], uint8_t *len);
+
+/* The G18G image writes, encoded in the agx3c table (18 bytes) for
+ * agx3_transcode_agx3d(), whose imgwci rule adds G18G's explicit Y and data
+ * fields. G18G names each operand half, and this packer stages them as
+ * Apple's G18G compiler does for a lone write: the data just below X, Y at
+ * X + 2 and a layer or z at X + 4:
+ *
+ *   components 1 (f114 4): data X-2           2D integer only (kick 19)
+ *   components 4 (f114 0): data X-8..X-2      2D, 2D array and 3D
+ *
+ * f5 names X, not G17G's bank. The write waits on its staging slot and
+ * signals that same slot, as native run112 kick 19 does; the image is
+ * f91's immediate index into the heap at uniform half 0. AGX3C only. */
+#define AGX3_IMAGE_WRITE_G18G_MAX_SLOT  4u
+#define AGX3_IMAGE_WRITE_G18G_MAX_INDEX 15u
+
+struct agx3_image_write_g18g_desc {
+   uint16_t x_half;
+   uint8_t components;
+   bool float_data;
+   enum agx3_image_write_dim dim;
+   uint8_t image_index;
+   uint8_t slot;
+};
+
+bool agx3_tex_encode_image_write_g18g(
+   enum agx_isa_encoding enc, const struct agx3_image_write_g18g_desc *d,
+   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+/* G18G's first grounded image write, native run112 kick 19: a 2D state-0
+ * write of one 32-bit integer component, staged data@x_half-2, X@x_half,
+ * Y@x_half+2 on staging slot 1 and signalling slot 1. */
+bool agx3_tex_encode_image_write_g18g_r32(enum agx_isa_encoding enc,
+                                          uint16_t x_half,
+                                          uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                          uint8_t *len);
 
 /* A native staging COPY must preserve a coordinate GPR if later work uses
  * it. CACHE/NONE/DISCARD are independent of the staging-bank release bit. */

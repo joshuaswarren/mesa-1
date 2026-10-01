@@ -408,6 +408,12 @@ void agx_nir_gather_fs_colour_exports(const nir_shader *s,
 bool agx_nir_lower_g17p_1x_tile_samples(nir_shader *s);
 bool agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples);
 
+/* msaa163 (AGX_G18_MSAA4): the four-sample G18G form of the lowering above.
+ * The live coverage is the 16-bit load_active_samples_agx, which the G18G
+ * backend reads as W16 SR39 -- Apple's G18 4x fragment passes that register
+ * straight to lstcol. Only four samples are admitted; callers gate it. */
+bool agx_nir_lower_g18_tile_samples(nir_shader *s, unsigned nr_samples);
+
 /* G17P currently exposes only single-sample rasterization. Collapse API
  * sample shading before split FS lowering so fast-linking never needs the
  * legacy AGX2 external sample-loop byte sequences. */

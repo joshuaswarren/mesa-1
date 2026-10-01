@@ -2059,7 +2059,10 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
       return -1;
    }
 
-   if (g18g_profile()) {
+   /* Offline triage only: accept (and drop) G18G submissions so one
+    * rejected submit does not poison the context and hide every later
+    * refusal in the same test. */
+   if (g18g_profile() && !getenv("ASAHI_SHIM_G18G_ACCEPT_SUBMIT")) {
       fprintf(stderr, "shim: G18G profile has no kernel contract and rejects "
                       "GPU submission\n");
       errno = EOPNOTSUPP;

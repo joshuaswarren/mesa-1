@@ -1366,10 +1366,16 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
           * by construction: the runtime polls for retirement inside the
           * ioctl, so dispatch N has completed before N+1 is issued. */
          const uint64_t cdm_base = batch->cdm.bo->va->addr;
+         /* G18G only: a dispatch that bound texture or image state asks the
+          * kernel for the native texture compute mode. M5's kernel refuses
+          * the bit, and no other chip takes this split. */
+         const bool g18g = dev->chip == AGX_CHIP_G18G;
          for (unsigned i = 0; i < m5_split_count; ++i) {
             struct drm_asahi_cmd_compute one = *compute;
             one.cdm_ctrl_stream_base = cdm_base + batch->cdm_dispatch[i].start;
             one.cdm_ctrl_stream_end = cdm_base + batch->cdm_dispatch[i].end;
+            if (g18g && batch->cdm_dispatch[i].texture_state)
+               one.flags |= DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE;
 
             util_dynarray_clear(&cmdbuf);
             util_dynarray_append(&cmdbuf, header);
@@ -1410,6 +1416,8 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
             struct drm_asahi_cmd_compute one = *compute;
             one.cdm_ctrl_stream_base = cdm_base + batch->cdm_dispatch[last].start;
             one.cdm_ctrl_stream_end = cdm_base + batch->cdm_dispatch[last].end;
+            if (g18g && batch->cdm_dispatch[last].texture_state)
+               one.flags |= DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE;
 
             util_dynarray_append(&cmdbuf, header);
             util_dynarray_append(&cmdbuf, one);
@@ -1451,9 +1459,12 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
       }
 
       /* Barrier on previous submission, or on the compute command that
-       * shares this submission. A split compute is a previous submission.
+       * shares this submission. A split compute is a previous submission,
+       * and so is every dispatch of an M5-path prepass: each went out as its
+       * own submission above, and naming one here would be a barrier on a
+       * command this submission does not contain.
        */
-      const bool compute_here = compute && !split_compute;
+      const bool compute_here = compute && !split_compute && !m5_split_prepass;
       struct drm_asahi_cmd_header header = agx_cmd_header(
          false, compute_here ? DRM_ASAHI_BARRIER_NONE : 0,
          compute_here ? 1 : 0);
@@ -1501,7 +1512,7 @@ agx_batch_submit(struct agx_context *ctx, struct agx_batch *batch,
                                seqid, 0);
 
    if (ret) {
-      if (compute && !split_compute) {
+      if (compute && !split_compute && !(m5_split_prepass && render)) {
          fprintf(stderr, "DRM_IOCTL_ASAHI_SUBMIT compute failed: %s\n",
                  strerror(submit_errno));
       }

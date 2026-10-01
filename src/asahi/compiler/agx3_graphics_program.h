@@ -42,6 +42,12 @@ struct agx3_g17p_graphics_program_desc {
    uint8_t colour_classes;
    struct agx_ioto_g17p_imageblock imageblock;
 
+   /* Compute only: threadgroup memory in bytes (0 = none). The SPECLM
+    * carries it as byte size f18 plus enable f24, the vector Apple's G18
+    * reduction kernel publishes (00d50001... = f18 0x100, f24 1 for 256 B).
+    * Callers set it only on G18G, where that witness exists. */
+   uint32_t threadgroup_memory_size_B;
+
    /* Persistent setup programs receive their command-buffer-owned root base
     * in r0:r1 from a compact launcher. Each range address is then an offset
     * of a source-VA qword in that root, and setup performs the execution-time

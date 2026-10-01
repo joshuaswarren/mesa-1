@@ -278,9 +278,31 @@ encode_gpu1(const struct agx3_isel_desc *d,
     *
     *   (k == 4) ? 0u : w      02 08 0f 84 26 80 07 02 82 00
     *   (k == 255) ? w : 7u    02 08 1f fe 86 00 17 02 22 87
-    *   (k == 3) ? 0 : j       02 00 0d 82 26 80 17 02 82 01   half result */
-   if (d->cmp_16 && (!d->cmp1_immediate || d->cmp1 > 255 ||
-                     d->cond != AGX3_ISEL_ICOND_EQ))
+    *   (k == 3) ? 0 : j       02 00 0d 82 26 80 17 02 82 01   half result
+    *
+    * Two half comparands (f24 = 1, the second a register: f38 = 2, f39 = 1,
+    * f31) are witnessed with a half result, for equality and unsigned
+    * less-than, on applegpu_g18g and applegpu_g17g alike
+    * (g18ref-out/probe/m6-alu-sel i_u16_*, i_s16_*, m6-alu-hints):
+    *
+    *   (a == b) ? 1 : 0     iseli16 h2 = ^h2 == ^h3 ? #1 : #0   f28, f43
+    *   (a != b) ? 1 : 0     iseli16 h2 = ^h2 == ^h3 ? #0 : #1   f28, f43
+    *   short a == short b   the same bytes as ushort
+    *   (a <  b) ? 1 : 0     iseli16 h2 = ^h2 <  ^h3 ? #1 : #0   f82 = 1
+    *   ... a, b reused      f25/f40, the comparands' cache hints
+    *   odd halves           h3 == h4, h2 == h3: any half index
+    *
+    * f28 and f43 widen the two halves by sign extension; Apple sets both for
+    * equality, where the extension cannot change the outcome, and neither
+    * for the unsigned relation. A 32-bit result of the same comparison is
+    * this select into the low half and a clear of the high one, so only the
+    * half result takes this form. */
+   const bool half_regs = d->cmp_16 && !d->cmp1_immediate;
+   if (half_regs && (!d->dest_16 || (d->cond != AGX3_ISEL_ICOND_EQ &&
+                                     d->cond != AGX3_ISEL_ICOND_ULT)))
+      return false;
+   if (d->cmp_16 && !half_regs &&
+       (d->cmp1 > 255 || d->cond != AGX3_ISEL_ICOND_EQ))
       return false;
    /* A narrow second comparand widens into a full-width comparison only.
     * Apple's kernels load each ushort lane into its own register, so every
@@ -329,9 +351,11 @@ encode_gpu1(const struct agx3_isel_desc *d,
       KV(11, d->dest_cache),
       KV(23, 2), KV(24, d->cmp_16 ? 1 : 2),
       /* Native ushort equality sets f28 with its half comparator. */
-      KV(28, d->cmp_16), KV(38, d->cmp1_immediate ? 1 : 2),
-      KV(39, (d->cmp1_immediate || d->cmp1_16) ? 1 : 2),
-      KV(43, d->cmp1_sign_extend),
+      KV(28, half_regs ? d->cond == AGX3_ISEL_ICOND_EQ : d->cmp_16),
+      KV(38, d->cmp1_immediate ? 1 : 2),
+      KV(39, (d->cmp1_immediate || d->cmp1_16 || half_regs) ? 1 : 2),
+      KV(43, half_regs ? d->cond == AGX3_ISEL_ICOND_EQ
+                       : d->cmp1_sign_extend),
       KV(53, ti ? 1 : 2), KV(54, d->dest_16 ? 1 : 2),
       KV(67, fi ? 1 : 2), KV(68, d->dest_16 ? 1 : 2),
       KV(72, 3), KV(73, d->dest_16 ? 96 : 97),

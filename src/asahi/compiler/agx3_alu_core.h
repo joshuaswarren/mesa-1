@@ -558,12 +558,17 @@ struct agx3_fsel32_gpu1_desc {
    bool cmp1_immediate; /* the second comparand is an 8-bit minifloat */
    uint16_t cmp1;       /* 32-bit register, or the minifloat */
    enum agx3_alu_hint cmp1_hint;
+   /* The second comparand is a 16-bit register, widened by the comparison
+    * (f41 = 1). `fseli16` only; see agx3_alu_fcmp_select16_gpu1(). */
+   bool cmp1_16;
 
    /* sel[0] is taken when the comparison holds. An immediate selected
-    * operand is a minifloat and moves the instruction to `fself32`. */
+    * operand is a minifloat and moves the instruction to `fself32`, unless
+    * sel_integer says it is an 8-bit integer, which `fseli32` carries. */
    bool sel_immediate[2];
    uint16_t sel[2];
    enum agx3_alu_hint sel_hint[2];
+   bool sel_integer;
 
    unsigned condition; /* enum agx_fcond: eq 0, lt 1, gt 2, ge 5, le 6 */
    uint16_t wait_mask;
@@ -608,11 +613,33 @@ bool agx3_alu_bit_reg16_gpu1(enum agx3_alu_op op, uint16_t dest,
                              enum agx3_alu_hint hint0, uint16_t src1,
                              enum agx3_alu_hint hint1, uint16_t wait_mask,
                              uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+/* dest = src0 op src1 for the named two-register logic ops, by truth table:
+ * ~(a | b) 0x1 bit_nor, a & ~b 0x2 bit_andc, ~(a & b) 0x7 bit_nand,
+ * ~(a ^ b) 0x9 bit_xnor, a | ~b 0xB bit_orc. `word` selects aligned 32-bit
+ * pairs, otherwise halves. Apple applegpu_g17g/g18g, both widths, one kernel
+ * per table (g18ref-out/probe/m6-bitops): the same operand fields as the
+ * AND/OR/XOR forms with f43 = 14/11/12/18/17. The one-sided forms keep their
+ * operand order (~a & b is bit_andc b, a; ~a | b is bit_orc b, a). */
+bool agx3_alu_bit_named_gpu1(unsigned truth_table, bool word, uint16_t dest,
+                             bool dest_cache, uint16_t src0,
+                             enum agx3_alu_hint hint0, uint16_t src1,
+                             enum agx3_alu_hint hint1, uint16_t wait_mask,
+                             uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 /* dest(16) = src(16) & immediate. Only AND is witnessed on G17G. */
 bool agx3_alu_bit_imm_gpu1(enum agx3_alu_op op, uint16_t dest, bool dest_cache,
                            uint16_t src, uint8_t immediate,
                            enum agx3_alu_hint hint, uint16_t wait_mask,
                            uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+/* dest(32) = src + immediate with the register in slot A and an 8-bit
+ * immediate in slot B, for the two shapes Apple emits that way: an unsigned
+ * saturating add of a 32-bit register (addsat(x, 1u)) and the sign
+ * extension of a half (int(short), `+ #0`). See agx3_alu_core.c. */
+bool agx3_alu_iadd32_reg_imm_gpu1(uint16_t dest, bool dest_cache, uint16_t src,
+                                  bool src_16, bool sign_extend,
+                                  enum agx3_alu_hint hint, uint8_t immediate,
+                                  bool saturate, uint16_t wait_mask,
+                                  uint8_t out[AGX3_ALU_MAX_LENGTH],
+                                  uint8_t *len);
 bool agx3_alu_fmul_mixed(enum agx_isa_encoding enc, uint16_t dest,
                           uint16_t f32, uint16_t f16,
                           enum agx3_alu_hint hint32, enum agx3_alu_hint hint16,

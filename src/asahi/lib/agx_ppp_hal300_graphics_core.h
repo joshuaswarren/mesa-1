@@ -166,6 +166,40 @@ struct agx_ppp_hal300_graphics_fields {
    uint8_t back_stencil_reference;
    uint32_t front_stencil;
    uint32_t back_stencil;
+   /*
+    * GL_RASTERIZER_DISCARD, as Apple's rasterizationEnabled = NO with a
+    * fragment function bound: the W-clamp/cull-2 record's third word gains
+    * bit 17 (0x80 -> 0x00020080) and nothing else here moves. 26A428
+    * AGXMetalG18G constructRenderPipeline sets pipe+0x3ec bit 17
+    * (0x219462740..760) and the draw emits that word unchanged
+    * (0x2196353e4..440); the cull record keeps its bit 17 clear. The other
+    * half of the state is the VDM vertex-program variant
+    * (agx_vdm_state_update_draw_info::rasterization_enabled). See
+    * hv/G18-RASTERIZER-DISCARD.md. G18G only: G17G has no witness.
+    */
+   bool rasterizer_discard;
+   /*
+    * G18G general varyings (hv/G18-VARYINGS.md): R1, R2 and R4 take the
+    * linker's words unchanged. AGXMetalG18G builds R1 from the compiler's
+    * per-class counts, AGX2 VARYING_COUNTS for 32- and 16-bit varyings
+    * (0x21954bbf8..0x21954bc6c), and R4 word 1 is AGX2 OUTPUT_SELECT, vertex
+    * half | fragment half (0x21954b7c8, 0x2195648a0); word 4 is the vertex
+    * output total. When set, vertex/fragment_varying_components,
+    * interpolation, point_size_output and clip_distance_words are ignored.
+    */
+   bool general_varyings;
+   uint32_t varying_counts_32; /* R1 word 1 */
+   uint32_t varying_counts_16; /* R1 word 2 */
+   uint32_t output_select;     /* R4 word 1 */
+   uint32_t uvs_words;         /* R4 word 4 */
+   /* Cull-2 bit 12: the fragment shader reads a hardware primitive ID
+    * (Apple: type-7 iteration -> fv+0x1040 -> pipe+0x3ec bit 12,
+    * 0x21969a420). */
+   bool needs_primitive_id;
+   /* Cull word bits 7..8 hold the provoking vertex selector plus one: 0
+    * first, 2 last (setProvokingVertexMode 0x2196601f8; the J873 captures
+    * carry 0x480 for first and 0x580 for last, gears 0x10582). G18G only. */
+   unsigned flat_shading_vertex;
 };
 
 /* The two grounded stencil operation encodings. */

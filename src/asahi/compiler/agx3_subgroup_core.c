@@ -182,12 +182,21 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
        * The field is seven bits (half 0xff spills the eighth into f16, the
        * source register), so lanes 0..127 encode and 128 up do not.
        */
-      if (enc != AGX_ISA_ENCODING_AGX3B)
+      /* AGX3c's SIMD broadcast is the same form with the class constants
+       * f42/f43 = 3/154: metal-nt applegpu_g17g and applegpu_g18g compile
+       * simd_shuffle(v, 31) and simd_broadcast(v, 31) to simdbcast f29=31
+       * f37=1 f38=1 f42=3 f43=154 (g18ref-out/probe/m6-libagx-forms3
+       * lk3_shuffle31, lk3_broadcast31). Its wait field and the other
+       * shuffles have no AGX3c witness. */
+      const bool c_bcast = is_c(enc) && !d->quad && !d->half &&
+                           d->op == AGX3_SUBGROUP_SHUFFLE_BROADCAST &&
+                           d->wait_mask == 0;
+      if (enc != AGX_ISA_ENCODING_AGX3B && !c_bcast)
          return false;
       if (d->lane > 0x7f || (d->wait_mask >> slots) != 0)
          return false;
 
-      struct agx3_field_kv ibase[8];
+      struct agx3_field_kv ibase[10];
       unsigned inb = 0;
       /* 16-bit data only narrows the width pair: simd_broadcast(ushort, 5)
        * is 4704560202040a200400 next to the 32-bit words above. */
@@ -202,6 +211,10 @@ agx3_subgroup_encode_shuffle(enum agx_isa_encoding enc,
       ibase[inb++] = (struct agx3_field_kv){d->src_live ? 25 : 27, 1};
       ibase[inb++] = (struct agx3_field_kv){37, 1};
       ibase[inb++] = (struct agx3_field_kv){38, 1};
+      if (c_bcast) {
+         ibase[inb++] = (struct agx3_field_kv){42, 3};
+         ibase[inb++] = (struct agx3_field_kv){43, 154};
+      }
 
       struct agx3_field_kv iov[14];
       unsigned inv = 0;
@@ -352,11 +365,19 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
    if (d->compare_immediate) {
       /* Fresh applegpu-nt G17P witnesses use this exact form for unsigned
        * equality/less-than/greater-than against immediates.  The latter is
-       * how Apple canonicalizes >= N (as > N - 1). */
-      if (enc != AGX_ISA_ENCODING_AGX3B || d->quad ||
-          d->type != AGX3_SUBGROUP_BALLOT_INTEGER ||
-          (d->condition != 1 && d->condition != 2 && d->condition != 4) ||
-          d->invert)
+       * how Apple canonicalizes >= N (as > N - 1).
+       *
+       * AGX3c takes it for equality in both senses: metal-nt applegpu_g17g
+       * and applegpu_g18g compile simd_ballot(x == 5), (x == 0) and
+       * (x != 0) of a uint or ushort to it, the last with f55
+       * (g18ref-out/probe/m6-libagx-forms, m6-libagx-forms2). */
+      if (d->quad || d->type != AGX3_SUBGROUP_BALLOT_INTEGER)
+         return false;
+      if (is_c(enc) ? d->condition != 4
+                    : (enc != AGX_ISA_ENCODING_AGX3B ||
+                       (d->condition != 1 && d->condition != 2 &&
+                        d->condition != 4) ||
+                       d->invert))
          return false;
    } else if (d->type == AGX3_SUBGROUP_BALLOT_INTEGER) {
       if (d->condition != 4 && d->condition != 5 && d->condition != 6)
@@ -387,6 +408,11 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
       d->type == AGX3_SUBGROUP_BALLOT_INTEGER && d->src_live;
    if ((!d->compare_immediate && !live_integer_ballot) || !d->src_live)
       ADD_FIELD(27, 1);
+   /* AGX3c's immediate form marks a source that stays live with f25:
+    * simd_ballot(x != 0) + x is f25 where the dead-x form has f27
+    * (m6-libagx-forms2 lk_ballot_ne16_live / ne32_live). */
+   if (is_c(enc) && d->compare_immediate && d->src_live)
+      ADD_FIELD(25, 1);
 
    const char *mnemonic;
    uint16_t cond_field, invert_field;
@@ -395,7 +421,11 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
       if (d->compare_immediate) {
          ADD_FIELD(38, 1);
          ADD_FIELD(39, 1);
-         ADD_FIELD(46, 1);
+         /* AGX3b's immediate marker. On AGX3c f46 is the slot-1 wait
+          * (f45 + slot: slot 8 is f53, slot 5 f50), which Apple's
+          * immediate witnesses carry only when they wait there. */
+         if (!is_c(enc))
+            ADD_FIELD(46, 1);
       } else if (d->condition == 4) {
          ADD_FIELD(38, 2);
          ADD_FIELD(39, 2);
@@ -432,6 +462,82 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
    if (d->compare_immediate)
       ov[no++] = (struct agx3_field_kv){30, d->compare_value};
    return agx3_bind_compose(enc, mnemonic, 0, base, nb, ov, no, out, length);
+}
+
+/*
+ * simd_ballot(true). agx_lower_pseudo() spells a ballot of a boolean as
+ * `icmp_ballot b, #0, ueq, invert`, and a constant-true predicate leaves
+ * `icmp_ballot #1, #0, ueq, invert` -- both operands immediate, which the
+ * register forms above cannot take. Apple compiles simd_ballot(true) to one
+ * instruction whose bytes are identical for applegpu_g17g and applegpu_g18g
+ * (g18ref-out/probe/m6-alu-misc, ballot_true):
+ *
+ *   simdiballot r0 = ballot(!(#1 ?0 #0))   27 01 20 1a 25 00 ae 02 30 00 08 40
+ *
+ * slot A the immediate 1 (f15, kind f23 = 1, width f24 = 1), slot B the
+ * immediate 0 (f38/f39 = 1), f54 = 0 and the invert bit f55 set. That is the
+ * very instruction Mesa's operands name, so it is emitted as witnessed, with
+ * only the destination (and its f11 cache hint, the same field as on the
+ * other simdiballot forms) varying. The witness carries no wait, and the
+ * caller retires any before.
+ */
+bool
+agx3_subgroup_encode_ballot_true_gpu1(uint16_t dest, bool dest_cache,
+                                      uint8_t out[AGX3_SUBGROUP_MAX_LENGTH],
+                                      uint8_t *length)
+{
+   if (out == NULL || length == NULL ||
+       !valid_reg(AGX_ISA_ENCODING_AGX3C, dest))
+      return false;
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {15, 1}, {23, 1}, {24, 1}, {38, 1}, {39, 1},
+      {44, 3}, {45, 157}, {55, 1},
+   };
+   const struct agx3_field_kv ov[] = {
+      {2, dest},
+      {11, dest_cache ? 1u : 0u},
+   };
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "simdiballot", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov,
+                            sizeof(ov) / sizeof(ov[0]), out, length);
+}
+
+/*
+ * simd_ballot(a < b) of two 32-bit registers, unsigned: slot B is a register
+ * (f31, kind f38 = 2, width f39 = 2) and f54 is the condition, 1 = ult as in
+ * enum agx_icond. applegpu_g18g (g18ref-out/probe/m6-alu-misc ballot_ult and
+ * m6-alu-hints h_ballot_ult_live), both operands read for the last time:
+ *
+ *   simdiballot r0 = ^r0 < ^r2          f16 0, f27, f31 4, f42, f54 = 1
+ *   simdiballot r2 = ^r2 < ^r3          f16 4, f27, f31 6, f42, f54 = 1
+ *
+ * Only that lifetime shape is witnessed (Apple multiplies first when the
+ * operands stay live), so live operands are refused, as is every other
+ * condition.
+ */
+bool
+agx3_subgroup_encode_ballot_ult_reg_gpu1(
+   uint16_t dest, bool dest_cache, uint16_t src0, uint16_t src1,
+   uint8_t out[AGX3_SUBGROUP_MAX_LENGTH], uint8_t *length)
+{
+   if (out == NULL || length == NULL ||
+       !valid_reg(AGX_ISA_ENCODING_AGX3C, dest) ||
+       !valid_reg(AGX_ISA_ENCODING_AGX3C, src0) ||
+       !valid_reg(AGX_ISA_ENCODING_AGX3C, src1))
+      return false;
+   const struct agx3_field_kv base[] = {
+      {9, 2}, {10, 2}, {23, 2}, {24, 2}, {27, 1}, {38, 2}, {39, 2},
+      {42, 1}, {44, 3}, {45, 157}, {54, 1},
+   };
+   const struct agx3_field_kv ov[] = {
+      {2, dest},
+      {11, dest_cache ? 1u : 0u},
+      {16, src0},
+      {31, src1},
+   };
+   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3C, "simdiballot", 0, base,
+                            sizeof(base) / sizeof(base[0]), ov,
+                            sizeof(ov) / sizeof(ov[0]), out, length);
 }
 
 struct reduce_form {
@@ -525,7 +631,7 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
        d->op != AGX3_SUBGROUP_REDUCE_FMUL)
       return false;
 
-   struct agx3_field_kv base[16];
+   struct agx3_field_kv base[24];
    unsigned nb = 0;
    ADD_FIELD(9, 2);
    ADD_FIELD(10, d->half ? 1 : 2);
@@ -562,8 +668,13 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
       /* G17P picks f25 while the source stays live and f27 on its final
        * read, for SIMD and quad forms alike: simd_prefix_inclusive_sum(),
        * which adds the source back afterwards, is bf01560403001609 (f25)
-       * next to the exclusive bf0156020204100b (f27). */
-      ADD_FIELD(!is_c(enc) && d->src_live ? 25 : 27, 1);
+       * next to the exclusive bf0156020204100b (f27). AGX3c's SIMD integer
+       * add does the same: metal-nt applegpu_g17g/g18g give the inclusive
+       * sum f25 and the exclusive one f27 (m6-libagx-forms
+       * lk_prefix_incl_load / lk_prefix_excl_load). */
+      const bool c_simd_iadd = is_c(enc) && !d->quad && !d->half &&
+                               d->op == AGX3_SUBGROUP_REDUCE_IADD;
+      ADD_FIELD((!is_c(enc) || c_simd_iadd) && d->src_live ? 25 : 27, 1);
       if (f->integer_class == 1)
          ADD_FIELD(28, 1);
       if (is_c(enc)) {
@@ -604,9 +715,16 @@ agx3_subgroup_encode_reduce(enum agx_isa_encoding enc,
     * Own-shader A18 Pro captures pin slot-6 signed min/max to this family:
     *   sRedimin 3f02560002001407, sRedimax bf02560002001407.
     */
+   /* AGX3c: the SIMD integer add waits at f45 + (slot - 1) on all eight
+    * slots, as on AGX3b. metal-nt applegpu_g17g puts a load on slot 8 and
+    * waits with f52; applegpu_g18g puts it on slot 1 and waits with f45
+    * (m6-libagx-waits2 lw2_prefix_*, m6-libagx-forms lk_local_atomic_*).
+    * The other AGX3c families have no wait witness. */
    const unsigned slots = is_c(enc) ? 8 : 6;
    if (d->wait_mask != 0) {
-      if (is_c(enc) || (d->wait_mask >> slots) != 0)
+      const bool c_iadd_wait = is_c(enc) && !d->quad && !d->half &&
+                               d->op == AGX3_SUBGROUP_REDUCE_IADD;
+      if ((is_c(enc) && !c_iadd_wait) || (d->wait_mask >> slots) != 0)
          return false;
       for (unsigned i = 0; i < slots; ++i)
          if (d->wait_mask & (1u << i))

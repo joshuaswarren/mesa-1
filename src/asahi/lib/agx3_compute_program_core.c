@@ -298,6 +298,78 @@ agx3_g17p_store_native_program_pointer(uint8_t *packed, uint64_t program_va)
       UINT32_C(0x40000000) | (uint32_t)((program_va >> 40) & 0xff));
 }
 
+/* ComputeProgramVariant::finalize adds only bit 27 or 28 to the direct
+ * template (AGXMetalG18G 0x21956f5b0, 0x21956f608; G17G 0x216031960,
+ * 0x2160319c0). performEnqueueKernel never 1D-masks these templates and puts
+ * the grid address in words 4..5 (0x2194846b4 nine words, 0x219484680 six).
+ * Words 1..3 are the direct record's program pointer. */
+static bool
+agx3_g17g_native_indirect_append(const struct agx3_compute_program *program,
+                                 uint32_t mode, uint64_t grid_va,
+                                 const uint32_t *local_size,
+                                 uint8_t barrier_flags,
+                                 struct agx3_compute_dispatch_sink *sink)
+{
+   const size_t launch = local_size
+                            ? AGX3_G17G_NATIVE_INDIRECT_GROUPS_LAUNCH_SIZE
+                            : AGX3_G17G_NATIVE_INDIRECT_LOCAL_LAUNCH_SIZE;
+   uint8_t staged[AGX3_G17G_NATIVE_INDIRECT_GROUPS_LAUNCH_SIZE +
+                  AGX3_CDM_BARRIER_SIZE] = {0};
+   if (!program || !agx_chip_m5_paths(program->chip) ||
+       !program->g17g_native_compute_live_bound || !program->program_va ||
+       program->program_va > UINT64_C(0xffffffffffff) ||
+       (program->program_va & (AGX_IOTO_PROGRAM_ALIGNMENT - 1)) != 0 ||
+       !grid_va || grid_va >= (UINT64_C(1) << 48) || (grid_va & 3) != 0 ||
+       program->launch_template.word0 >= (UINT32_C(1) << 27) ||
+       program->launch_template.word1 >= (UINT32_C(1) << 22) || !sink ||
+       !sink->data || sink->length > sink->capacity ||
+       launch + AGX3_CDM_BARRIER_SIZE > sink->capacity - sink->length)
+      return false;
+
+   agx3_cmdstream_store_le32(staged, program->launch_template.word0 | mode);
+   agx3_cmdstream_store_le32(
+      staged + 4, (uint32_t)(((program->program_va >> 38) & 0x3ff) << 22) |
+                     program->launch_template.word1);
+   agx3_g17p_store_native_program_pointer(staged + 8, program->program_va);
+   agx3_cmdstream_store_le32(staged + 16, (uint32_t)(grid_va >> 32));
+   agx3_cmdstream_store_le32(staged + 20, (uint32_t)grid_va);
+   for (unsigned axis = 0; local_size && axis < 3; ++axis) {
+      if (!local_size[axis] || local_size[axis] > 0x7ff)
+         return false;
+      agx3_cmdstream_store_le32(staged + 24 + axis * 4, local_size[axis]);
+   }
+
+   const struct agx3_cdm_barrier_info barrier = {
+      .chip = AGX_CHIP_G17G, .flags = barrier_flags,
+   };
+   if (!agx3_cdm_barrier_pack(&barrier, staged + launch))
+      return false;
+   memcpy(sink->data + sink->length, staged, launch + AGX3_CDM_BARRIER_SIZE);
+   sink->length += launch + AGX3_CDM_BARRIER_SIZE;
+   return true;
+}
+
+bool
+agx3_g17g_native_indirect_compute_launch_append(
+   const struct agx3_compute_program *program, uint64_t grid_va,
+   uint8_t barrier_flags, struct agx3_compute_dispatch_sink *sink)
+{
+   return agx3_g17g_native_indirect_append(
+      program, AGX3_G17G_NATIVE_INDIRECT_LOCAL_MODE, grid_va, NULL,
+      barrier_flags, sink);
+}
+
+bool
+agx3_g17g_native_indirect_groups_compute_launch_append(
+   const struct agx3_compute_program *program, uint64_t groups_va,
+   const uint32_t local_size[3], uint8_t barrier_flags,
+   struct agx3_compute_dispatch_sink *sink)
+{
+   return local_size && agx3_g17g_native_indirect_append(
+      program, AGX3_G17G_NATIVE_INDIRECT_GROUPS_MODE, groups_va, local_size,
+      barrier_flags, sink);
+}
+
 /* The six-word indirect launch.  Words 0..3 are the same program header the
  * direct record uses; mode 2 then replaces the direct record's own three
  * global and three local size words with words 4..5, the 48-bit address of a
