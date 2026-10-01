@@ -583,9 +583,19 @@ hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
       cmd->shader_perf_draw_bo_alloc_ns = 0;
       cmd->shader_perf_draw_active = true;
    }
+   /* Bind-time preparation is speculative. It runs from cmd_bind_shaders(),
+    * which vk_graphics_pipeline_cmd_bind() calls before the pipeline's static
+    * dynamic state is applied, and the application may still change dynamic
+    * state, descriptors or attachments before the draw. The draw re-derives
+    * and validates everything it consumes, so a refusal seen here (e.g. a
+    * sample-shaded fragment program against the not-yet-applied sample
+    * count) must not fail the command buffer. */
+   const VkResult prior_result = cmd->vk.record_result;
    cmd->state.gfx.g17p_bind_prepare = true;
    hk_cmd_prepare_bound_graphics_impl(cmd);
    cmd->state.gfx.g17p_bind_prepare = false;
+   if (prior_result == VK_SUCCESS)
+      cmd->vk.record_result = VK_SUCCESS;
    if (slow) {
       hk_slow_report(cmd, "bind", start);
       cmd->shader_perf_draw_active = false;
@@ -9940,9 +9950,10 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
           dyn->ms.rasterization_samples > 1) {
-         mesa_loge("G17P: per-sample fragment execution needs a fixed sample "
-                   "count; refusing a %u-sample draw that requests it",
-                   dyn->ms.rasterization_samples);
+         if (!prepare_only)
+            mesa_loge("G17P: per-sample fragment execution needs a fixed sample "
+                      "count; refusing a %u-sample draw that requests it",
+                      dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -9951,9 +9962,10 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       if (dev->dev.chip == AGX_CHIP_G17P &&
           fs->info.fs.epilog_key.sample_shading &&
           fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
-         mesa_loge("G17P: fragment unrolled for %u samples cannot run a "
-                   "%u-sample draw",
-                   fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
+         if (!prepare_only)
+            mesa_loge("G17P: fragment unrolled for %u samples cannot run a "
+                      "%u-sample draw",
+                      fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -9963,9 +9975,10 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
           fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
-         mesa_loge("G17P: fragment coverage updates compiled for %u samples "
-                   "cannot run a %u-sample draw",
-                   fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
+         if (!prepare_only)
+            mesa_loge("G17P: fragment coverage updates compiled for %u samples "
+                      "cannot run a %u-sample draw",
+                      fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
