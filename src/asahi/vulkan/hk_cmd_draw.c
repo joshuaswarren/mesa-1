@@ -7433,7 +7433,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       prepared->tail = memo_uploaded.tail;
       prepared->dynamic_generation = dyn->generation;
       prepared->descriptor_generation = gfx->descriptors.generation;
-      prepared->vertex_buffer_generation = gfx->vertex_buffer_generation;
+      prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
       prepared->root = gfx->root;
       prepared->valid = true;
       if (dev->g17p_diagnostics.launch_trace) {
@@ -7980,7 +7980,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    prepared->tail = uploaded.tail;
    prepared->dynamic_generation = dyn->generation;
    prepared->descriptor_generation = gfx->descriptors.generation;
-   prepared->vertex_buffer_generation = gfx->vertex_buffer_generation;
+   prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
    prepared->root = gfx->root;
    prepared->render_color0 = render->color_att_count == 1
       ? render->color_att[0].iview : NULL;
@@ -9895,6 +9895,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
 
       desc->root_dirty |= vertex_root_changed;
+      gfx->root_vertex_buffer_generation = gfx->vertex_buffer_generation;
    }
 
    if (vgt_dirty || IS_SHADER_DIRTY(FRAGMENT) ||

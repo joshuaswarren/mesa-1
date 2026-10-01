@@ -649,6 +649,12 @@ struct hk_graphics_state {
     * not advance its generation.  Prepared G17P roots snapshot this separate
     * identity so a post-BeginRendering bind cannot publish stale attrib VAs. */
    uint64_t vertex_buffer_generation;
+   /* The vertex_buffer_generation that descriptors.root.draw.attrib_* were
+    * last derived from (hk_flush_dynamic_state_slow()'s vertex-buffer
+    * block).  A prepared bind tail records this, not the live generation:
+    * a tail rebuilt outside a full flush (vkCmdBindIndexBuffer) must not
+    * vouch for a root whose attrib VAs predate the latest vertex binding. */
+   uint64_t root_vertex_buffer_generation;
 
    uint64_t root;
    struct agx_ptr prepared_root;
