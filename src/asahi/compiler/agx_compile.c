@@ -7335,10 +7335,19 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
     */
    if (preamble_size &&
        (!(agx_compiler_debug & AGX_DBG_NOPREAMBLE) || nir->info.internal)) {
+      /* AGX3 (byte_indices: the AGX3B encoding) has no texture/sampler
+       * state-store encoding: its descriptor lowering uses immediate native
+       * state slots, so a bindless handle hoisted into the image/sampler
+       * preamble class becomes a tex_state_store/sampler_state_store that
+       * the AGX3 packer refuses (an internal meta fragment shader storing
+       * through a bindless image failed vkCreateGraphicsPipelines). Keep
+       * bindless handles in the main shader there; nothing that compiles
+       * today hoists either class. */
+      const bool state_promotion = !byte_indices;
       unsigned sizes[] = {
          *preamble_size,
-         ts_count ? *ts_count : 1000 /* large finite */,
-         ss_count ? *ss_count : 1000 /* large finite */,
+         (ts_count && state_promotion) ? *ts_count : 1000 /* large finite */,
+         (ss_count && state_promotion) ? *ss_count : 1000 /* large finite */,
       };
 
       /* Don't clobber txf sampler */
@@ -7349,11 +7358,11 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
 
       *preamble_size = sizes[0];
 
-      if (ts_count)
+      if (ts_count && state_promotion)
          *ts_count = sizes[1];
 
       /* if something other than the txf sampler is written... */
-      if (ss_count && sizes[2] > 1)
+      if (ss_count && state_promotion && sizes[2] > 1)
          *ss_count = sizes[2];
    }
 
