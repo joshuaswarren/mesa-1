@@ -703,6 +703,22 @@ hk_dispatch_with_usc(struct hk_device *dev, struct hk_cs *cs,
    hk_dispatch_with_usc_launch(dev, cs, launch, usc, grid, local_size);
 }
 
+/* A kernel that samples (indexed sampler, texel fetch or storage image) takes
+ * a texture pointer table built from the draw's descriptors at dispatch time
+ * (hk_dispatch_g17p_native()). Bind-time preparation cannot know that table,
+ * so it must not build launch programs or dispatch templates for such a
+ * kernel: with no table the uniform-range builder refuses the kernel, and a
+ * template without the table would be wrong if it were ever consumed. */
+static bool
+hk_g17p_compute_uses_texture_pointers(const struct hk_shader *s)
+{
+   return s && (s->info.agx3_txf_texture_valid ||
+                s->info.agx3_storage_image_valid ||
+                s->info.agx3_sampled_storage_valid ||
+                s->info.agx3_indexed_storage_valid ||
+                s->info.agx3_indexed_sampler_valid);
+}
+
 static bool
 hk_g17p_compute_shader_supported(struct hk_shader *s,
                                  struct hk_linked_shader *linked)
@@ -1369,8 +1385,10 @@ hk_g17p_prewarm_linked_compute_program(struct hk_cmd_buffer *cmd,
 
    /* Once the graphics root is final, publish the exact direct and indirect
     * caller loaders into this command buffer's executable arena. The grid
-    * helper remains keyed to its draw-local argument address. */
+    * helper remains keyed to its draw-local argument address. A sampling
+    * kernel's loader depends on the draw's texture table; the draw builds it. */
    if (internal_graphics && cmd->state.gfx.root &&
+       !hk_g17p_compute_uses_texture_pointers(s) &&
        hk_g17p_compute_shader_supported(s, linked)) {
       const enum agx_ioto_g17p_compute_ldshdr_f1 kinds[] = {
          AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
@@ -1400,6 +1418,7 @@ hk_g17p_prepare_graphics_dispatch(
    *out = (struct hk_g17p_prepared_dispatch){0};
 
    if (dev->dev.chip != AGX_CHIP_G17P || !cmd->state.gfx.root ||
+       hk_g17p_compute_uses_texture_pointers(s) ||
        !hk_g17p_compute_shader_supported(s, linked))
       return false;
 
