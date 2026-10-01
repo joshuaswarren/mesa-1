@@ -2907,7 +2907,9 @@ hk_g17p_compact_range_address_ok(uint64_t address, unsigned size_halfs)
 }
 
 /*
- * HK_G17P_MDI_ONE_LEVEL (opt-in, default off until hardware A/B).
+ * HK_G17P_MDI_ONE_LEVEL (default on; HK_G17P_MDI_ONE_LEVEL=0 restores the
+ * compact two-level launcher).  Qualified by a Minecraft ABBA on hardware
+ * (mc-ta, +2.3% FPS over 4 sessions, 0 faults).
  *
  * Every record of an indexed-indirect multi-draw whose vertex shader reads
  * per-draw parameters (gl_BaseInstance/gl_BaseVertex, per-instance vertex
@@ -2928,7 +2930,7 @@ hk_g17p_compact_range_address_ok(uint64_t address, unsigned size_halfs)
  * (mc-ta/decode/ol_mc.dis): one round trip.  Native Metal's vertex ESL has
  * that one-level shape too (agx3-footguns K.1).
  *
- * With the knob set, indexed-indirect records (hk_g17p_emit_indirect_record)
+ * With the knob on, indexed-indirect records (hk_g17p_emit_indirect_record)
  * publish that one-level template instead.  The uniform values are loaded at
  * execution time from exactly the same source addresses (root fields,
  * device constants, the record's own indirect parameters), so GPU-written
@@ -2941,7 +2943,7 @@ hk_g17p_compact_range_address_ok(uint64_t address, unsigned size_halfs)
 bool
 hk_g17p_mdi_one_level_enabled(void)
 {
-   return HK_ENV_BOOL_ONCE("HK_G17P_MDI_ONE_LEVEL", false);
+   return HK_ENV_BOOL_ONCE("HK_G17P_MDI_ONE_LEVEL", true);
 }
 
 /* The setup composer shares one LDIMM address base between ranges within
