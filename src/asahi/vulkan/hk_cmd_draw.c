@@ -677,6 +677,15 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
       return;
    }
 
+   /* Shader objects bind stages one call at a time, so preparation can see
+    * an evaluation shader before (or after unbinding) its control shader.
+    * No draw can run with half a tessellation pair, and the transformed
+    * state below derives from both (hk_init_tess_params() reads the control
+    * shader's outputs): there is nothing to prepare yet. */
+   if (!gfx->shaders[MESA_SHADER_TESS_CTRL] !=
+       !gfx->shaders[MESA_SHADER_TESS_EVAL])
+      return;
+
    /* A tessellation/geometry draw necessarily records compute work before the
     * graphics stream. Allocate both ordered streams while binding state, not
     * in the first draw, preserving the established list order. */
