@@ -11,6 +11,9 @@
 #include "agx_debug.h"
 #include "agx_opcodes.h"
 
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vertex_abs_max,
+                          "AGX_G17P_VERTEX_ABS_MAX", false)
+
 /* AGX peephole optimizer responsible for instruction combining. It operates in
  * a forward direction and a backward direction, in each case traversing in
  * source order. SSA means the forward pass satisfies the invariant:
@@ -134,6 +137,33 @@ agx_g17p_tied_minmax(agx_context *ctx, const agx_instr *I)
 static void
 agx_optimizer_fmov(agx_context *ctx, agx_instr **defs, agx_instr *ins)
 {
+   /* Only the native full-width fmax(a, fabs(b)) form is qualified here.
+    * Update comparison AND selection together: a half-fold would change
+    * negative inputs and break the NaN-aware min/max tie.
+    */
+   if (debug_get_option_agx_g17p_vertex_abs_max() &&
+       ctx->stage == MESA_SHADER_VERTEX && !ctx->is_preamble &&
+       agx_g17p_tied_minmax(ctx, ins) && ins->fcond == AGX_FCOND_GTN &&
+       ins->dest[0].size == AGX_SIZE_32 && agx_channels(ins->dest[0]) == 1 &&
+       ins->src[0].size == AGX_SIZE_32 &&
+       agx_channels(ins->src[0]) == 1 && agx_channels(ins->src[1]) == 1 &&
+       (ins->src[0].type == AGX_INDEX_NORMAL ||
+        ins->src[0].type == AGX_INDEX_REGISTER) &&
+       !ins->src[0].abs && !ins->src[0].neg && !ins->src[0].memory &&
+       ins->src[1].type == AGX_INDEX_NORMAL &&
+       ins->src[1].size == AGX_SIZE_32 &&
+       !ins->src[1].abs && !ins->src[1].neg && !ins->src[1].memory) {
+      agx_instr *def = defs[ins->src[1].value];
+      if (def && agx_is_fmov(def) && !def->saturate &&
+          def->src[0].size == AGX_SIZE_32 && agx_channels(def->src[0]) == 1 &&
+          def->src[0].abs &&
+          !def->src[0].neg && !def->src[0].memory &&
+          (def->src[0].type == AGX_INDEX_NORMAL ||
+           def->src[0].type == AGX_INDEX_REGISTER)) {
+         ins->src[1] = ins->src[3] = def->src[0];
+      }
+   }
+
    agx_foreach_ssa_src(ins, s) {
       agx_index src = ins->src[s];
       if (agx_preserve_g17p_tied_fcmpsel(ctx, ins, s))
@@ -548,7 +578,8 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
           !(I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
             ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
             def->src[0].type == AGX_INDEX_UNIFORM &&
-            (agx_get_v57_flags() & AGX_V57_TEX_UNIFORM_OPERANDS)))
+            ((agx_get_v57_flags() & AGX_V57_TEX_UNIFORM_OPERANDS) ||
+             agx_vertex_tex_uniforms(ctx))))
          continue;
 
       agx_replace_src(I, s, def->src[0]);

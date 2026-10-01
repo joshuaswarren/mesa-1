@@ -5623,7 +5623,30 @@ static void test_threejs_width_kind_modifier_axes(void)
 }
 
 
+static void test_native_fmax_abs(void)
+{
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+   uint16_t src[] = {10, 0};
+   enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_DISCARD, AGX3_ALU_HINT_DISCARD};
+   assert(agx3_alu_fmax_abs_f32(AGX_ISA_ENCODING_AGX3B, 0, src, hints,
+                               true, bytes, &len));
+   exact(bytes, len, "020b3b01830a0000880000000200");
+   assert(!agx3_alu_fmax_abs_f32(AGX_ISA_ENCODING_AGX3B, 1, src, hints,
+                                true, bytes, &len));
+   src[1] = 1;
+   assert(!agx3_alu_fmax_abs_f32(AGX_ISA_ENCODING_AGX3B, 0, src, hints,
+                                true, bytes, &len));
+   src[1] = 256;
+   assert(!agx3_alu_fmax_abs_f32(AGX_ISA_ENCODING_AGX3B, 0, src, hints,
+                                true, bytes, &len));
+   src[1] = 0;
+   hints[0] = (enum agx3_alu_hint)99;
+   assert(!agx3_alu_fmax_abs_f32(AGX_ISA_ENCODING_AGX3B, 0, src, hints,
+                                true, bytes, &len));
+}
+
 int main(void){
+   test_native_fmax_abs();
    test_native_immediate_shifts32();
    test_native_popcount();
    test_native_minifloat_half_select();

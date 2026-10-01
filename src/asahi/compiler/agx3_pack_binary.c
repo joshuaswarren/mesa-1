@@ -1195,20 +1195,46 @@ agx3_emit_uvsw(struct util_dynarray *emission, enum agx_isa_encoding enc,
    const bool register_index = agx3_src_is_register(index) &&
       !index.memory && !index.abs && !index.neg &&
       index.size == AGX_SIZE_16 && agx_channels(index) == 1;
-   if (I->nr_dests != 0 || I->nr_srcs != 2 ||
+   const bool fused = I->op != AGX_OPCODE_ST_VARY;
+   if (I->nr_dests != 0 || (!fused && I->nr_srcs != 2) ||
        (index.type != AGX_INDEX_IMMEDIATE && !register_index) ||
        (register_index && defer_writeout) ||
-       !agx3_vary_reg32(I->src[1]))
+       (!fused && !agx3_vary_reg32(I->src[1])))
       return false;
 
-   uint8_t bytes[MAX2(AGX3_STAGE_MAX_LENGTH, AGX3_VARY_MAX_LENGTH)];
+   uint8_t bytes[MAX2(16, AGX3_VARY_MAX_LENGTH)];
    uint8_t len = 0;
    /* UVSW's f9=5/f5 operand is a staging-file address, not the GPR named
     * by ST_VARY IR. First transfer the source into that file and wait for
     * its actual producer; UVSW then waits for this staging write's slot. */
-   if (!agx3_stage_copy_source(enc, staging_half, I->src[1].value,
-                                I->src[1].kill, slot, wait_mask, bytes, &len) ||
-       !agx3_append(emission, bytes, len))
+   if (fused) {
+      const bool fma = I->op == AGX_OPCODE_ST_VARY_FMA_AGX3;
+      if ((I->op != AGX_OPCODE_ST_VARY_MUL_AGX3 && !fma) ||
+          I->nr_srcs != (fma ? 4 : 3) || register_index || !defer_writeout)
+         return false;
+      uint16_t src[3] = {0};
+      bool live[3] = {0}, discard[3] = {0};
+      const bool uniform0 = I->src[1].type == AGX_INDEX_UNIFORM;
+      for (unsigned s = 1; s < I->nr_srcs; ++s) {
+         agx_index x = I->src[s];
+         if (x.size != AGX_SIZE_32 || agx_channels(x) != 1 || x.abs ||
+             x.neg || x.memory ||
+             !(agx3_src_is_register(x) || (fma && s == 1 && uniform0)))
+            return false;
+         src[s - 1] = x.value;
+         if (x.type != AGX_INDEX_UNIFORM) {
+            discard[s - 1] = x.discard || x.kill;
+            live[s - 1] = x.cache && !discard[s - 1];
+         }
+      }
+      if (!agx3_stage_vertex_alu(enc, fma, staging_half, slot, src,
+                                uniform0, live, discard, wait_mask, bytes, &len))
+         return false;
+   } else if (!agx3_stage_copy_source(enc, staging_half, I->src[1].value,
+                                      I->src[1].kill, slot, wait_mask, bytes, &len)) {
+      return false;
+   }
+   if (!agx3_append(emission, bytes, len))
       return false;
    if (defer_writeout)
       return true;
@@ -5791,7 +5817,7 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             /* Earlier control flow and producers retain ordinary encoding
              * validation. The terminal output protocol owns only this final
              * block, with no conditional or earlier vertex writeout. */
-            if (I->op == AGX_OPCODE_ST_VARY || I->op == AGX_OPCODE_STOP)
+            if (agx_is_vertex_store(I) || I->op == AGX_OPCODE_STOP)
                return 0;
             continue;
          }
@@ -5802,11 +5828,13 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
             stopped = true;
             break;
          case AGX_OPCODE_ST_VARY:
-            if (I->nr_dests != 0 || I->nr_srcs != 2 ||
+         case AGX_OPCODE_ST_VARY_MUL_AGX3:
+         case AGX_OPCODE_ST_VARY_FMA_AGX3:
+            if (I->nr_dests != 0 || I->nr_srcs < 2 ||
                 I->src[0].type != AGX_INDEX_IMMEDIATE ||
                 I->src[0].value >= AGX3_MAX_VERTEX_OUTPUTS ||
                 outputs[I->src[0].value] ||
-                !agx3_vary_reg32(I->src[1]) ||
+                (I->op == AGX_OPCODE_ST_VARY && !agx3_vary_reg32(I->src[1])) ||
                 agx_channels(I->src[1]) != 1)
                return 0;
             outputs[I->src[0].value] = true;
@@ -5857,7 +5885,7 @@ agx3_outputs_are_terminal(agx_context *ctx, unsigned count,
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
          return false;
-      if (I->op == AGX_OPCODE_ST_VARY) {
+      if (agx_is_vertex_store(I)) {
          if (next >= count || I->src[0].type != AGX_INDEX_IMMEDIATE)
             return false;
          const unsigned component = I->src[0].value;
@@ -5917,7 +5945,7 @@ agx3_is_firefox_dense_output_suffix(agx_context *ctx, unsigned count)
          continue;
       started = true;
 
-      if (I->op == AGX_OPCODE_ST_VARY) {
+      if (agx_is_vertex_store(I)) {
          if (I->nr_dests != 0 || I->nr_srcs != 2 ||
              I->src[0].type != AGX_INDEX_IMMEDIATE ||
              I->src[0].value != next || next > last)
@@ -5971,7 +5999,7 @@ agx3_outputs_leave_staging_alone(agx_context *ctx)
 {
    bool started = false;
    agx_foreach_instr_global(ctx, I) {
-      if (I->op == AGX_OPCODE_ST_VARY) {
+      if (agx_is_vertex_store(I)) {
          started = true;
          continue;
       }
@@ -5999,8 +6027,10 @@ agx3_vertex_outputs_share_source(agx_context *ctx)
    agx_index first = agx_null();
    bool found = false;
    agx_foreach_instr_global(ctx, I) {
-      if (I->op != AGX_OPCODE_ST_VARY)
+      if (!agx_is_vertex_store(I))
          continue;
+      if (I->op != AGX_OPCODE_ST_VARY)
+         return false;
       if (!found) {
          first = I->src[1];
          found = true;
@@ -8656,13 +8686,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if (enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_VERTEX) {
       bool runtime_output_index = false;
       agx_foreach_instr_global(ctx, I) {
-         runtime_output_index |= I->op == AGX_OPCODE_ST_VARY &&
+         runtime_output_index |= agx_is_vertex_store(I) &&
                                  I->nr_srcs >= 1 &&
                                  I->src[0].type != AGX_INDEX_IMMEDIATE;
       }
       agx_foreach_block(ctx, block) {
          agx_foreach_instr_in_block(block, I) {
-            if (I->op == AGX_OPCODE_ST_VARY && I->nr_srcs >= 1 &&
+            if (agx_is_vertex_store(I) && I->nr_srcs >= 1 &&
                 I->src[0].type == AGX_INDEX_IMMEDIATE &&
                 I->src[0].value >= 4 && !g17p_user_output_protocol &&
                 !runtime_output_index)
@@ -9538,7 +9568,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             continue;
          }
 
-         if (I->op == AGX_OPCODE_ST_VARY) {
+         if (agx_is_vertex_store(I)) {
             /* Use a bounded staging allocation independent of GPR indices.
              * Each scalar is consumed immediately, before its slot/address
              * can be reused. A still-live general producer sharing the slot
@@ -11569,6 +11599,41 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_append(emission, bytes, length))
                AGX3_REFUSE(I);
             continue;
+         }
+
+         /* Native terrain fmax(a, fabs(b)) carries ABS on both comparison
+          * and selected-value slots. This is not a general select modifier.
+          */
+         if (enc == AGX_ISA_ENCODING_AGX3B && I->op == AGX_OPCODE_FCMPSEL &&
+             ctx->stage == MESA_SHADER_VERTEX && !ctx->is_preamble &&
+             I->nr_dests == 1 && I->nr_srcs == 4 && !I->invert_cond &&
+             !I->saturate && I->fcond == AGX_FCOND_GTN &&
+             I->src[1].abs && I->src[3].abs) {
+            bool valid = agx3_src_is_register(I->dest[0]) &&
+                         I->dest[0].size == AGX_SIZE_32 &&
+                         !I->dest[0].memory && agx_channels(I->dest[0]) == 1;
+            for (unsigned i = 0; i < 4; ++i) {
+               const agx_index x = I->src[i];
+               valid &= agx3_src_is_register(x) && x.size == AGX_SIZE_32 &&
+                        agx_channels(x) == 1 && !x.memory && !x.kill &&
+                        !x.neg && x.abs == (i % 2 == 1) &&
+                        !(x.cache && x.discard) &&
+                        agx_is_equiv(x, I->src[i ^ 2]) &&
+                        agx3_post_ra_hint(x) == agx3_post_ra_hint(I->src[i ^ 2]);
+            }
+            if (valid) {
+               if (wait && !agx3_retire_select_waits(emission, enc, I, wait))
+                  AGX3_REFUSE(I);
+               const uint16_t src[] = {I->src[0].value, I->src[1].value};
+               const enum agx3_alu_hint hints[] = {
+                  agx3_post_ra_hint(I->src[0]), agx3_post_ra_hint(I->src[1])};
+               uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
+               if (!agx3_alu_fmax_abs_f32(enc, I->dest[0].value, src, hints,
+                                        I->dest[0].cache, bytes, &len) ||
+                   !agx3_append(emission, bytes, len))
+                  AGX3_REFUSE(I);
+               continue;
+            }
          }
 
          /*

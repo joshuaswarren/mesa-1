@@ -816,6 +816,64 @@ ilp_block_has_memory(const agx_block *block)
    return false;
 }
 
+/* Schedule only a small, explicit arithmetic/tile domain. Schedule-class
+ * NONE alone is not a purity guarantee (e.g. DOORBELL and texture ops).
+ * SSA operands expose all data dependencies; physical register accesses and
+ * uniform writes stay on the original schedule. */
+static bool
+ilp_single_tile_blend(const agx_context *ctx, const agx_block *block)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT ||
+       !(agx_get_codegen_flags() & AGX_CODEGEN_G17P_COLOR_ILP))
+      return false;
+
+   unsigned loads = 0, stores = 0, load_target = 0, store_target = 0;
+   agx_foreach_instr_in_block(block, I) {
+      if (instr_after_logical_end(I))
+         break;
+      switch (I->op) {
+      case AGX_OPCODE_LD_TILE:
+         ++loads;
+         load_target = I->colour_target;
+         break;
+      case AGX_OPCODE_ST_TILE:
+         ++stores;
+         store_target = I->colour_target;
+         break;
+      case AGX_OPCODE_PHI:
+      case AGX_OPCODE_WAIT_PIX:
+      case AGX_OPCODE_MOV:
+      case AGX_OPCODE_MOV_IMM:
+      case AGX_OPCODE_SPLIT:
+      case AGX_OPCODE_COLLECT:
+      case AGX_OPCODE_BITOP:
+      case AGX_OPCODE_BFI:
+      case AGX_OPCODE_BFEIL:
+      case AGX_OPCODE_IADD:
+      case AGX_OPCODE_CONVERT:
+      case AGX_OPCODE_FADD:
+      case AGX_OPCODE_FMUL:
+      case AGX_OPCODE_FFMA:
+      case AGX_OPCODE_FLTNORM_AGX3:
+      case AGX_OPCODE_NORMFLT_AGX3:
+         break;
+      default:
+         return false;
+      }
+      agx_foreach_dest(I, d) {
+         if (I->dest[d].type != AGX_INDEX_NORMAL &&
+             I->dest[d].type != AGX_INDEX_NULL)
+            return false;
+      }
+      agx_foreach_src(I, src) {
+         if (I->src[src].type == AGX_INDEX_REGISTER)
+            return false;
+      }
+   }
+   return loads == 1 && stores == 1 && load_target == store_target;
+}
+
 void
 agx_ilp_schedule(agx_context *ctx)
 {
@@ -855,10 +913,15 @@ agx_ilp_schedule(agx_context *ctx)
    }
 
    agx_foreach_block(ctx, block) {
-      if (block->index < nr_blocks && in_loop[block->index] &&
-          !ilp_block_has_memory(block))
+      if (block->index >= nr_blocks)
+         continue;
+      if (in_loop[block->index] && !ilp_block_has_memory(block)) {
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
                             slack >= 0 && slack <= 256 ? (signed)slack : 2);
+      } else if (!in_loop[block->index] && ilp_single_tile_blend(ctx, block)) {
+         /* Hardware-qualified color-only budget; leave loop pressure alone. */
+         ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency, 8);
+      }
    }
 
    agx_foreach_instr_global(ctx, I) {

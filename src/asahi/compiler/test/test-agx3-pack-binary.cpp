@@ -50,6 +50,28 @@ extern "C" {
  * only immediate AGX3's single-sample tile group can represent. */
 static constexpr unsigned AGX_ALL_SAMPLES = 0xFF;
 
+TEST(AGX3VertexExportAlu, RegisterCacheTracksFusedArithmeticConsumers)
+{
+   void *mem = ralloc_context(NULL);
+   agx_shader_key key = {};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = agx_test_builder(mem);
+   b->shader->key = &key;
+   b->shader->stage = MESA_SHADER_VERTEX;
+   auto r = [](unsigned value) { return agx_register(value, AGX_SIZE_32); };
+   agx_instr *producer = agx_fmul_to(b, r(4), r(0), r(2));
+   agx_instr *first = agx_st_vary_mul_agx3(b, agx_immediate(0), r(4), r(6));
+   agx_instr *last = agx_st_vary_fma_agx3(b, agx_immediate(1), r(4), r(8), r(10));
+   agx_stop(b);
+   agx_opt_register_cache(b->shader);
+   EXPECT_TRUE(producer->dest[0].cache);
+   EXPECT_TRUE(first->src[1].cache);
+   EXPECT_FALSE(first->src[1].discard);
+   EXPECT_FALSE(last->src[1].cache);
+   EXPECT_TRUE(last->src[1].discard);
+   ralloc_free(mem);
+}
+
 static void
 append(std::vector<uint8_t> &v, const uint8_t *b, unsigned n)
 {
@@ -16936,5 +16958,149 @@ TEST_F(AGX3PackBinary, IndexedGatherKeepsNativeHandles)
             ralloc_free(b.shader);
          }
       }
+   }
+}
+
+TEST(AGX3VertexExportAlu, NativeTerrainProducerBytes)
+{
+   uint8_t out[16], len;
+   { /* Native terrain main+0x350, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {40, 16, 32};
+      const bool live[3] = {false, true, false}, discard[3] = {false, false, true};
+      const uint8_t expected[] = {0x29, 0x91, 0x26, 0x29, 0x82, 0x20, 0x42, 0x02, 0x00, 0x04};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 4, 2, src, true, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x360, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {28, 8, 0};
+      const bool live[3] = {false, false, false}, discard[3] = {true, true, false};
+      const uint8_t expected[] = {0x09, 0x09, 0x3d, 0x1d, 0x41, 0x20, 0x00, 0x08};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, false, 0, 3, src, false, live, discard, 1, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x368, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {30, 10, 0};
+      const bool live[3] = {false, false, false}, discard[3] = {true, true, false};
+      const uint8_t expected[] = {0x19, 0x0b, 0x3d, 0x1f, 0x41, 0x00, 0x00, 0x08};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, false, 2, 3, src, false, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x370, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {2, 12, 0};
+      const bool live[3] = {false, false, false}, discard[3] = {true, true, false};
+      const uint8_t expected[] = {0x39, 0x0d, 0x3d, 0x03, 0x41, 0x00, 0x00, 0x08};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, false, 6, 3, src, false, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x37c, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {4, 14, 0};
+      const bool live[3] = {false, false, false}, discard[3] = {true, true, false};
+      const uint8_t expected[] = {0x49, 0x0f, 0x3d, 0x05, 0x41, 0x00, 0x00, 0x08};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, false, 8, 3, src, false, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x3a6, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {42, 16, 12};
+      const bool live[3] = {false, true, false}, discard[3] = {false, false, true};
+      const uint8_t expected[] = {0x59, 0x91, 0x26, 0x2b, 0x81, 0x0c, 0x42, 0x02};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 10, 1, src, true, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x3ae, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {44, 16, 20};
+      const bool live[3] = {false, true, false}, discard[3] = {false, false, true};
+      const uint8_t expected[] = {0x69, 0x91, 0x26, 0x2d, 0x81, 0x14, 0x42, 0x02};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 12, 1, src, true, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x3e4, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {46, 16, 12};
+      const bool live[3] = {false, false, false}, discard[3] = {false, true, true};
+      const uint8_t expected[] = {0x79, 0x11, 0x2e, 0x2f, 0x81, 0x0c, 0x42, 0x02};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 14, 1, src, true, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+   { /* Native terrain main+0x404, exact decoded/recomposed witness. */
+      const uint16_t src[3] = {4, 6, 8};
+      const bool live[3] = {false, false, false}, discard[3] = {true, true, true};
+      const uint8_t expected[] = {0x89, 0x07, 0x3e, 0x05, 0x82, 0x08, 0x42, 0x00, 0x00, 0x14};
+      ASSERT_TRUE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 16, 6, src, false, live, discard, 0, out, &len));
+      ASSERT_EQ(len, sizeof(expected));
+      EXPECT_EQ(memcmp(out, expected, len), 0);
+   }
+}
+
+TEST(AGX3VertexExportAlu, RejectsUnqualifiedOperands)
+{
+   uint8_t out[16], len;
+   uint16_t src[3] = {0, 2, 4};
+   bool live[3] = {}, discard[3] = {};
+   EXPECT_FALSE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3C, true, 0, 1,
+                                      src, false, live, discard, 0, out, &len));
+   for (unsigned slot : {0u, 7u})
+      EXPECT_FALSE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 0, slot,
+                                         src, false, live, discard, 0, out, &len));
+   for (unsigned dest : {1u, 256u})
+      EXPECT_FALSE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, dest, 1,
+                                         src, false, live, discard, 0, out, &len));
+   EXPECT_FALSE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, false, 0, 1,
+                                      src, true, live, discard, 0, out, &len));
+   EXPECT_FALSE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 0, 1,
+                                      src, false, live, discard, 64, out, &len));
+   for (unsigned s = 0; s < 3; ++s) {
+      const unsigned old = src[s];
+      src[s] = 1;
+      EXPECT_FALSE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 0, 1,
+                                         src, false, live, discard, 0, out, &len));
+      src[s] = old;
+      live[s] = discard[s] = true;
+      EXPECT_FALSE(agx3_stage_vertex_alu(AGX_ISA_ENCODING_AGX3B, true, 0, 1,
+                                         src, false, live, discard, 0, out, &len));
+      live[s] = discard[s] = false;
+   }
+}
+
+TEST_F(AGX3PackBinary, FusedVertexExportsRetireEachSixSlotBatch)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (unsigned count : {5u, 6u, 7u, 12u, 15u}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_VERTEX;
+      for (unsigned c = 0; c < count; ++c) {
+         agx_st_vary_mul_agx3(b, agx_immediate(c),
+                              agx_register(0, AGX_SIZE_32),
+                              agx_register(2, AGX_SIZE_32));
+      }
+      agx_stop(b);
+      std::vector<uint8_t> want;
+      const uint16_t src[3] = {0, 2, 0};
+      const bool hints[3] = {};
+      uint8_t bytes[16], len;
+      for (unsigned first = 0; first < count; first += 6) {
+         unsigned end = std::min(count, first + 6);
+         for (unsigned c = first; c < end; ++c) {
+            ASSERT_TRUE(agx3_stage_vertex_alu(enc, false, 2 * c, c % 6 + 1,
+                                               src, false, hints, hints,
+                                               c == first && first ? 63 : 0,
+                                               bytes, &len));
+            append(want, bytes, len);
+         }
+         for (unsigned c = first; c < end; ++c) {
+            ASSERT_TRUE(agx3_vary_uvsw(enc, 2 * c, c, c % 6 + 1, true,
+                                        1u << (c % 6), bytes, &len));
+            append(want, bytes, len);
+         }
+      }
+      want.insert(want.end(), {0x0e, 0, 0, 0});
+      EXPECT_EQ(pack(b), want);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 2 * count);
    }
 }

@@ -68,6 +68,11 @@ struct alu_timing op_timings[] = {
    [AGX_OPCODE_FFMA]          = { F32, 2, 1 },
    [AGX_OPCODE_FADD]          = { F32, 2, 1 },
    [AGX_OPCODE_FMUL]          = { F32, 2, 1 },
+   /* Fused vertex stores perform the same ALU operation with a staging-file
+    * destination. This classification also drives upstream register-cache
+    * hints; it is not a measured latency for the subsequent UVSW. */
+   [AGX_OPCODE_ST_VARY_MUL_AGX3] = { F32, 2, 1 },
+   [AGX_OPCODE_ST_VARY_FMA_AGX3] = { F32, 2, 1 },
 
    [AGX_OPCODE_HFMA]          = { F16, 2, 1 },
    [AGX_OPCODE_HADD]          = { F16, 2, 1 },

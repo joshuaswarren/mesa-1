@@ -2794,12 +2794,10 @@ hk_g17p_zls_elide(struct hk_cmd_buffer *cmd)
          found = true;
       if (!found || cs->type != HK_CS_VDM)
          continue;
-      cs->cr.depth.buffer = 0;
-      cs->cr.depth.meta = 0;
-      cs->cr.depth.meta_stride = 0;
-      cs->cr.stencil.buffer = 0;
-      cs->cr.stencil.meta = 0;
-      cs->cr.stencil.meta_stride = 0;
+      /* An absent attachment must also have zero layer strides. The
+       * kernel rejects a nonzero stride with a zero base address. */
+      memset(&cs->cr.depth, 0, sizeof(cs->cr.depth));
+      memset(&cs->cr.stencil, 0, sizeof(cs->cr.stencil));
       memset(&cs->cr.zls_control, 0, sizeof(cs->cr.zls_control));
    }
    if (HK_ENV_BOOL_ONCE("HK_G17P_ZLS_ELIDE_TRACE", false))
@@ -5857,6 +5855,31 @@ hk_g17p_mono_layout_mismatch(const struct agx_shader_part *a,
    HK_MONO_FIELD(nr_preamble_gprs)
    HK_MONO_FIELD(agx3_preamble_uniform_inputs)
    HK_MONO_FIELD(agx3_preamble_tps_inputs)
+   HK_MONO_FIELD(preamble_scratch_size)
+   HK_MONO_FIELD(agx3_preamble_staging_known)
+   HK_MONO_FIELD(agx3_preamble_staging_halfs)
+   HK_MONO_FIELD(agx3_preamble_inputs.count)
+   HK_MONO_FIELD(agx3_preamble_inputs.storage_bytes)
+   if (a->info.has_preamble) {
+      /* G17 graphics Ioto still launches the API shader's constant program
+       * (hk_upload_usc_words_internal), while the linked main comes from m.
+       * Equal sizes/register counts do not prove that their uniform values
+       * agree. Keep the split link unless code and its frozen live-ins agree. */
+      if (memcmp(a->info.agx3_preamble_inputs.halves,
+                 m->info.agx3_preamble_inputs.halves,
+                 sizeof(a->info.agx3_preamble_inputs.halves)))
+         return "preamble inputs";
+      if (!a->binary || !m->binary || !a->info.preamble_size ||
+          a->info.preamble_offset > a->info.binary_size ||
+          m->info.preamble_offset > m->info.binary_size ||
+          a->info.preamble_size > a->info.binary_size - a->info.preamble_offset ||
+          m->info.preamble_size > m->info.binary_size - m->info.preamble_offset)
+         return "preamble extent";
+      if (memcmp((const uint8_t *)a->binary + a->info.preamble_offset,
+                 (const uint8_t *)m->binary + m->info.preamble_offset,
+                 a->info.preamble_size))
+         return "preamble code";
+   }
    HK_MONO_FIELD(texture_state_count)
    HK_MONO_FIELD(sampler_state_count)
    HK_MONO_FIELD(uses_txf)

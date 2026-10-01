@@ -7,6 +7,17 @@
 #include "agx_debug.h"
 #include "agx3_uniform_integer_instr.h"
 
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vertex_tex_uniforms,
+                          "AGX_G17P_VERTEX_TEX_UNIFORMS", false)
+
+bool
+agx_vertex_tex_uniforms(const agx_context *ctx)
+{
+   return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          ctx->stage == MESA_SHADER_VERTEX && !ctx->is_preamble &&
+          debug_get_option_agx_g17p_vertex_tex_uniforms();
+}
+
 /*
  * Not all instructions can take uniforms. Memory instructions can take
  * uniforms, but only for their base (first) source and only in the
@@ -250,10 +261,20 @@ agx_lower_uniform_sources(agx_context *ctx)
             (I->src[0].type != AGX_INDEX_NORMAL ||
              I->src[0].size != AGX_SIZE_32 || I->src[0].abs ||
              I->src[0].neg);
+         /* Qualify the native vertex sampler operands independently of the
+          * older option that also changes fragment sampling. The saved native
+          * terrain shader reads aligned texture/sampler indices directly from
+          * the low uniform file. Coordinate and LOD legalization is unchanged.
+          */
+         const bool vertex_tex_uniform =
+            agx_vertex_tex_uniforms(ctx) &&
+            I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
+            I->src[s].value <= 252 && !(I->src[s].value & 3) &&
+            (I->src[s].size == AGX_SIZE_32 || I->src[s].size == AGX_SIZE_64);
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
              (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
               copy_compare_uniform ||
-              !(native_integer || agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+              !(native_integer || vertex_tex_uniform || agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];
             idx.abs = idx.neg = false;

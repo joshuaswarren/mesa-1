@@ -84,6 +84,7 @@ enum agx_codegen_flag {
    /* v53-c3: loop-exit compare placement (exit-compare cone at a fixed
     * distance before its CND) plus a register-cache hint on its counter. */
    AGX_CODEGEN_G17P_EXIT_COMPARE              = BITFIELD_BIT(16),
+   AGX_CODEGEN_G17P_COLOR_ILP                 = BITFIELD_BIT(17),
 };
 
 uint32_t agx_get_codegen_flags(void);

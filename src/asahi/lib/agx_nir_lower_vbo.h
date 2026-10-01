@@ -40,6 +40,34 @@ struct agx_robustness {
 
 struct agx_velem_key;
 
+struct agx_vbo_binding {
+   uint32_t offset;
+   uint8_t binding;
+   uint8_t pad[3];
+};
+
+/* A contiguous pair of word-sized attributes, read through the first
+ * attribute's existing CPU-adjusted base. first/count are in 32-bit words.
+ * A zero count keeps the ordinary fetch. */
+struct agx_vbo_group {
+   uint8_t anchor;
+   uint8_t first;
+   uint8_t count;
+};
+
+void agx_vbo_group_32bit(const struct agx_velem_key *attribs,
+                         const struct agx_vbo_binding *bindings, uint16_t valid,
+                         struct agx_vbo_group *groups);
+
+void agx_vbo_group_mixed(const struct agx_velem_key *attribs,
+                         const struct agx_vbo_binding *bindings, uint16_t valid,
+                         struct agx_vbo_group *groups);
+
+bool agx_nir_lower_vbo_raw_grouped(nir_shader *shader,
+                                  const struct agx_velem_key *attribs,
+                                  struct agx_robustness rs, bool dynamic_strides,
+                                  const struct agx_vbo_group *groups);
+
 bool agx_nir_lower_vbo(nir_shader *shader, const struct agx_velem_key *attribs,
                        struct agx_robustness rs, bool dynamic_strides);
 

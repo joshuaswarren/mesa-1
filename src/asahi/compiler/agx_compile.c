@@ -138,7 +138,12 @@ agx_g17p_fs_native_uniforms(void)
  *    AGX_G17P_PIXEL_COORD_FOLD, AGX_G17P_SR32_PIXEL_COORD,
  *    AGX_G17P_UNIT_RANGE_BLEND and AGX_G17P_TIB_UNPACK_DIRECT (lab: light
  *    d32 +22% over C3 with no heavy/compute regression).
- * Still off: AGX_G17P_INLINE_BLEND, AGX_G17P_DISCARD_NO_RESTORE, the four
+ * Native ALU/blend defaults additionally enable BITOP_IMMEDIATES,
+ * EXTRACT16_BFE, BFE_IMMEDIATE and INLINE_BLEND. The unchanged shape/layout
+ * gates retain split linking when monolithic linking cannot preserve the ABI.
+ * Same-boot depth2 hardware comparison measured +3.65%; focused integer/blend
+ * CTS cases passed both ways. Full conformance remains a separate gate.
+ * Still off: AGX_G17P_DISCARD_NO_RESTORE, the four
  * null v52 flags, AGX_G17P_SPREAD_TEMPS and AGX_G17P_PHYSICAL_DISCARD. */
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_v56_defaults, "AGX_G17P_V56_DEFAULTS", true)
 static bool
@@ -186,24 +191,25 @@ DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_compact_bitops,
                            "AGX_G17P_COMPACT_BITOPS", true)
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_shifted_add,
                            "AGX_G17P_SHIFTED_ADD", true)
+/* Private qualification control. Honeykrisp includes AGX_* options in its
+ * codegen environment hash, keeping this candidate's cache entries separate. */
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vertex_export_alu,
+                           "AGX_G17P_VERTEX_EXPORT_ALU", false)
 AGX_C2_OPTION(agx_g17p_uniform_cf_hints, "AGX_G17P_UNIFORM_CF_HINTS")
 AGX_V56_OPTION(agx_g17p_pixel_coord_fold, "AGX_G17P_PIXEL_COORD_FOLD")
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_int_dest_cache,
                            "AGX_G17P_INT_DEST_CACHE", true)
-/* v46 execution-efficiency candidates (neo-gpu-exec-mesa-v46). Default off:
- * each changes emitted fragment code and is cache-keyed through
- * agx_get_codegen_flags(); enable only for the matched hardware A/B. */
+/* Native codegen controls are cache-keyed through agx_get_codegen_flags().
+ * Qualified defaults follow the V56 master; each option still overrides it. */
 AGX_V56_OPTION(agx_g17p_tib_unpack_direct, "AGX_G17P_TIB_UNPACK_DIRECT")
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_bitop_immediates,
-                           "AGX_G17P_BITOP_IMMEDIATES", false)
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_extract16_bfe,
-                           "AGX_G17P_EXTRACT16_BFE", false)
+AGX_V56_OPTION(agx_g17p_bitop_immediates, "AGX_G17P_BITOP_IMMEDIATES")
+AGX_V56_OPTION(agx_g17p_extract16_bfe, "AGX_G17P_EXTRACT16_BFE")
 /* v47 (neo-gpu-exec-mesa-v47): latency-aware list scheduling, default off. */
 AGX_C2_OPTION(agx_g17p_ilp_schedule, "AGX_G17P_ILP_SCHEDULE")
-/* v49 (neo-gpu-exec-mesa-v49) light-fragment candidates, default off. */
+AGX_C2_OPTION(agx_g17p_color_ilp, "AGX_G17P_COLOR_ILP")
+/* Native light-fragment instruction forms. */
 AGX_V56_OPTION(agx_g17p_sr32_pixel_coord, "AGX_G17P_SR32_PIXEL_COORD")
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_bfe_immediate,
-                           "AGX_G17P_BFE_IMMEDIATE", false)
+AGX_V56_OPTION(agx_g17p_bfe_immediate, "AGX_G17P_BFE_IMMEDIATE")
 AGX_V56_OPTION(agx_g17p_unit_range_blend, "AGX_G17P_UNIT_RANGE_BLEND")
 /* v52a (neo-alu-mesa-v52a) ALU-issue candidates, default off.
  * AGX_G17P_APPLE_LOOP=1 is shorthand for the whole Apple loop shape:
@@ -231,9 +237,8 @@ DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_discard_fold,
                            "AGX_G17P_DISCARD_FOLD", false)
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_input_mark,
                            "AGX_G17P_INPUT_MARK", false)
-/* v54 (neo-fs-blend-mesa-v54), default off, not in the v52 bundle. */
-DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_inline_blend,
-                           "AGX_G17P_INLINE_BLEND", false)
+/* Inline blending follows the qualified default; discard handling is separate. */
+AGX_V56_OPTION(agx_g17p_inline_blend, "AGX_G17P_INLINE_BLEND")
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_discard_no_restore,
                            "AGX_G17P_DISCARD_NO_RESTORE", false)
 
@@ -291,6 +296,8 @@ agx_get_codegen_flags(void)
               ? AGX_CODEGEN_G17P_EXTRACT16_BFE : 0) |
           (debug_get_option_agx_g17p_ilp_schedule()
               ? AGX_CODEGEN_G17P_ILP_SCHEDULE : 0) |
+          (debug_get_option_agx_g17p_color_ilp()
+              ? AGX_CODEGEN_G17P_COLOR_ILP : 0) |
           (debug_get_option_agx_g17p_sr32_pixel_coord()
               ? AGX_CODEGEN_G17P_SR32_PIXEL_COORD : 0) |
           (debug_get_option_agx_g17p_bfe_immediate()
@@ -2852,6 +2859,22 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       agx_ldcf_to(b, dst, cf_for_intrinsic(b, instr), 1);
       agx_emit_cached_split(b, dst, 3);
       return NULL;
+
+   case nir_intrinsic_unpack_vbo_unorm_4x8_agx: {
+      assert(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+      assert(stage == MESA_SHADER_VERTEX);
+      assert(instr->src[0].ssa->bit_size == 32);
+      agx_index packed = agx_src_index(&instr->src[0]);
+      agx_index halves[2];
+      for (unsigned i = 0; i < 2; ++i) {
+         halves[i] = agx_temp(b->shader, AGX_SIZE_16);
+         agx_subdivide_to(b, halves[i], packed, i);
+      }
+      agx_unpack_normalized_halves_agx3(
+         b, dst, halves, AGX_FORMAT_U8NORM, 4,
+         nir_def_components_read(&instr->def), false);
+      return NULL;
+   }
 
    case nir_intrinsic_load_agx:
    case nir_intrinsic_load_constant_agx:
@@ -6766,7 +6789,7 @@ static void
 agx_set_st_vary_final(agx_context *ctx)
 {
    agx_foreach_instr_global_rev(ctx, I) {
-      if (I->op == AGX_OPCODE_ST_VARY) {
+      if (agx_is_vertex_store(I)) {
          I->last = true;
          return;
       }
@@ -7255,7 +7278,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
       if (sizes[2] == 0)
          sizes[2]++;
 
-      NIR_PASS(_, nir, agx_nir_opt_preamble, sizes);
+      NIR_PASS(_, nir, agx_nir_opt_preamble, sizes, byte_indices);
 
       *preamble_size = sizes[0];
 
@@ -7738,6 +7761,110 @@ agx3_order_fragment_device_loads(agx_context *ctx)
       }
    }
 
+   return progress;
+}
+
+/* Fold a single-use floating-point producer into a terminal scalar export.
+ * This runs before RA so its input lifetimes extend to the export naturally;
+ * moving a physical-register ALU after RA would read overwritten operands.
+ * Restrict qualification to one block and a dense, ordered terminal bundle.
+ * The packer retains the existing six-slot staging/UVSW retirement protocol.
+ */
+static bool
+agx3_fuse_vertex_export_alu(agx_context *ctx)
+{
+   if (!debug_get_option_agx_g17p_vertex_export_alu() ||
+       ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_VERTEX || ctx->is_preamble ||
+       ctx->key->secondary || ctx->num_blocks != 1)
+      return false;
+
+   unsigned count = 0;
+   bool stopped = false;
+   agx_foreach_instr_global(ctx, I) {
+      if (stopped)
+         return false;
+      if (I->op == AGX_OPCODE_ST_VARY) {
+         if (I->nr_srcs != 2 || I->src[0].type != AGX_INDEX_IMMEDIATE ||
+             I->src[0].value != count || count >= AGX3_G17P_STAGING_OUTPUTS)
+            return false;
+         count++;
+      } else if (I->op == AGX_OPCODE_STOP) {
+         stopped = true;
+      } else if (count) {
+         return false;
+      }
+   }
+   if (!stopped || count < 5)
+      return false;
+
+   agx_instr **defs = calloc(ctx->alloc, sizeof(*defs));
+   unsigned *uses = calloc(ctx->alloc, sizeof(*uses));
+   if (!defs || !uses) {
+      free(defs);
+      free(uses);
+      return false;
+   }
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_src(I, s)
+         uses[I->src[s].value]++;
+      agx_foreach_dest(I, d) {
+         if (I->dest[d].type == AGX_INDEX_NORMAL)
+            defs[I->dest[d].value] = I;
+      }
+   }
+
+   bool progress = false;
+   agx_foreach_block(ctx, block) {
+      agx_foreach_instr_in_block_safe(block, I) {
+         if (I->op != AGX_OPCODE_ST_VARY ||
+             I->src[1].type != AGX_INDEX_NORMAL || I->src[1].memory ||
+             I->src[1].abs || I->src[1].neg ||
+             I->src[1].size != AGX_SIZE_32 || agx_channels(I->src[1]) != 1 ||
+             uses[I->src[1].value] != 1)
+            continue;
+         agx_instr *P = defs[I->src[1].value];
+         if (!P || P->nr_dests != 1 || P->dest[0].size != AGX_SIZE_32 ||
+             agx_channels(P->dest[0]) != 1 || P->saturate ||
+             (P->op != AGX_OPCODE_FMUL && P->op != AGX_OPCODE_FFMA))
+            continue;
+         const bool fma = P->op == AGX_OPCODE_FFMA;
+         bool valid = P->nr_srcs == (fma ? 3 : 2);
+         if (!valid)
+            continue;
+         agx_index sources[3] = {P->src[0], P->src[1], agx_null()};
+         if (fma) {
+            sources[2] = P->src[2];
+            /* The witnessed FMA puts the uniform in multiplier zero. */
+            if (sources[1].type == AGX_INDEX_UNIFORM &&
+                sources[0].type != AGX_INDEX_UNIFORM) {
+               agx_index tmp = sources[0];
+               sources[0] = sources[1];
+               sources[1] = tmp;
+            }
+         }
+         agx_foreach_src(P, s) {
+            agx_index src = sources[s];
+            valid &= src.size == AGX_SIZE_32 && agx_channels(src) == 1 &&
+                     !src.abs && !src.neg && !src.memory &&
+                     (src.type == AGX_INDEX_NORMAL ||
+                      (fma && s == 0 && src.type == AGX_INDEX_UNIFORM &&
+                       src.value < 256 && !(src.value & 1)));
+         }
+         if (!valid)
+            continue;
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         agx_instr *store = fma
+            ? agx_st_vary_fma_agx3(&b, I->src[0], sources[0], sources[1], sources[2])
+            : agx_st_vary_mul_agx3(&b, I->src[0], sources[0], sources[1]);
+         store->last = I->last;
+         agx_remove_instruction(P);
+         agx_remove_instruction(I);
+         progress = true;
+      }
+   }
+   free(defs);
+   free(uses);
    return progress;
 }
 
@@ -8759,11 +8886,14 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    AGX_PASS(ctx, agx_lower_uniform_sources);
 
-   /* AGX_G17P_UNIFORM_DMA: uniform sources the consuming instruction cannot
-    * read directly are copied once per USE by agx_lower_uniform_sources.
-    * DMA'd descriptor words feed several instructions each, so merge the
-    * identical block-local copies (and their half splits) again. */
-   if (key->g17p_uniform_dma && out->agx3_uniform_dma_valid &&
+   /* Legalization can introduce repeated half-to-float conversions and
+    * uniform-source copies after the main CSE pass. Merge them before vertex
+    * register allocation, retaining the legalized operand types. The existing
+    * DMA path also needs this for descriptor words used by several operations.
+    * Do not run copy propagation here: it could undo source legalization. */
+   if (((key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         ctx->stage == MESA_SHADER_VERTEX) ||
+        (key->g17p_uniform_dma && out->agx3_uniform_dma_valid)) &&
        !(agx_compiler_debug & AGX_DBG_NOOPT))
       AGX_PASS(ctx, agx_opt_cse);
 
@@ -8803,6 +8933,7 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       agx_print_shader(ctx, stdout);
 
    AGX_PASS(ctx, agx3_sink_vertex_outputs);
+   AGX_PASS(ctx, agx3_fuse_vertex_export_alu);
    AGX_PASS(ctx, agx3_order_g17p_mrt_tile_ops);
    AGX_PASS(ctx, agx3_bank_scalar_tile_store_inputs);
    AGX_PASS(ctx, agx3_mark_implicit_tex_coord_staging);

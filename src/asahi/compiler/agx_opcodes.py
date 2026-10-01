@@ -449,6 +449,8 @@ op("iterproj", (0x21, 8, _), srcs = 3, imms = [CHANNELS, INTERPOLATION])
 
 op("ldcf", (0xA1, 8, _), srcs = 1, imms = [CHANNELS])
 op("st_vary", None, dests = 0, srcs = 2, can_eliminate = False)
+op("st_vary_mul_agx3", None, dests = 0, srcs = 3, can_eliminate = False)
+op("st_vary_fma_agx3", None, dests = 0, srcs = 4, can_eliminate = False)
 op("no_varyings", (0x80000051, 4, _), dests = 0, can_eliminate = False)
 # Both AGX3 encodings end every hash-pinned shader region with the canonical
 # four-byte `end`.  This maps the compiler's unconditional terminator only;
