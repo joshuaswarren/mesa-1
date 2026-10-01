@@ -1774,7 +1774,15 @@ wsi_wl_surface_get_min_image_count(struct wsi_wl_display *display,
                                    const VkSurfacePresentModeKHR *present_mode)
 {
    if (present_mode) {
-      return present_mode->presentMode == VK_PRESENT_MODE_MAILBOX_KHR ?
+      /* IMMEDIATE only tears when the compositor honours the async
+       * tearing hint. Otherwise (a composited surface, or a direct-scanout
+       * plane without async page flips) the compositor keeps one image on
+       * screen and one queued for the next flip, exactly as for MAILBOX, and
+       * with three images the application gets one image back per refresh:
+       * IMMEDIATE silently degrades to the display rate. Give it the MAILBOX
+       * count so it never waits on the display. */
+      return present_mode->presentMode == VK_PRESENT_MODE_MAILBOX_KHR ||
+             present_mode->presentMode == VK_PRESENT_MODE_IMMEDIATE_KHR ?
              WSI_WL_BUMPED_NUM_IMAGES : WSI_WL_DEFAULT_NUM_IMAGES;
    }
 
@@ -3763,8 +3771,11 @@ wsi_wl_surface_create_swapchain(VkIcdSurfaceBase *icd_surface,
       /* With proper FIFO, we return a lower minImageCount to make FIFO viable without requiring the use of KHR_present_wait.
        * The image count for MAILBOX should be bumped for performance reasons in this case.
        * This matches strategy for X11. */
+      /* Size for the mode actually used, including a MESA_VK_WSI_PRESENT_MODE
+       * override. */
       const VkSurfacePresentModeKHR mode =
-            { VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_KHR, NULL, pCreateInfo->presentMode };
+            { VK_STRUCTURE_TYPE_SURFACE_PRESENT_MODE_KHR, NULL,
+              wsi_swapchain_get_present_mode(wsi_device, pCreateInfo) };
 
       uint32_t min_images = wsi_wl_surface_get_min_image_count(wsi_wl_surface->display, &mode);
       bool requires_image_count_bump = min_images == WSI_WL_BUMPED_NUM_IMAGES;
