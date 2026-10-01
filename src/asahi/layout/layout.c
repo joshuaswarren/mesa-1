@@ -254,6 +254,39 @@ ail_initialize_twiddled(struct ail_layout *layout)
    layout->size_B = (uint64_t)layout->layer_stride_B * layout->depth_px;
 }
 
+/*
+ * Interchange: macroblock (tx, ty) occupies 256 elements at
+ * (ty * tiles_x + tx) * 256 * blocksize.  Reporting a 16x16 tile and a stride
+ * of tiles_x * 16 elements makes every consumer that addresses tiles as
+ * "row-major tiles, twiddled inside" (libagx_fast_clear's
+ * libagx_twiddle_coordinates) land on the right macroblock.
+ */
+static void
+ail_initialize_interchange(struct ail_layout *layout)
+{
+   assert(layout->levels == 1 && layout->depth_px == 1 &&
+          layout->sample_count_sa == 1 && !layout->mipmapped_z &&
+          "Interchange layouts are single-level, single-layer, single-sample");
+   assert(util_format_get_blockwidth(layout->format) == 1 &&
+          util_format_get_blockheight(layout->format) == 1 &&
+          util_format_get_blocksize(layout->format) == 4 &&
+          "Interchange layouts are 32-bit uncompressed formats");
+   assert(layout->compressed && "Interchange layouts are always compressed");
+
+   const uint32_t tiles_x = DIV_ROUND_UP(layout->width_px, 16);
+   const uint32_t tiles_y = DIV_ROUND_UP(layout->height_px, 16);
+
+   layout->level_offsets_B[0] = 0;
+   layout->level_offsets_B[1] = (uint64_t)tiles_y * ail_get_interchange_stride_B(layout);
+   layout->stride_el[0] = tiles_x * 16;
+   layout->tilesize_el[0] = (struct ail_tile){16, 16};
+   layout->mip_tail_first_lod = 1;
+   layout->mip_tail_stride = 0;
+   layout->page_aligned_layers = false;
+   layout->layer_stride_B = layout->level_offsets_B[1];
+   layout->size_B = layout->layer_stride_B;
+}
+
 static void
 ail_initialize_compression(struct ail_layout *layout)
 {
@@ -371,6 +404,9 @@ ail_make_miptree(struct ail_layout *layout)
       break;
    case AIL_TILING_TWIDDLED:
       ail_initialize_twiddled(layout);
+      break;
+   case AIL_TILING_INTERCHANGE:
+      ail_initialize_interchange(layout);
       break;
    default:
       UNREACHABLE("Unsupported tiling");

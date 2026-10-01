@@ -36,6 +36,17 @@ enum ail_tiling {
     * Fully twiddled.
     */
    AIL_TILING_TWIDDLED,
+
+   /**
+    * G17P Interchange (descriptor Layout 3): 16x16-element macroblocks in
+    * row-major order, row pitch ceil(width / 16) * 256 * blocksize; inside a
+    * macroblock, 8x4 blocks in row-major order, each x-first Morton
+    * (AGXMetalG17P InterchangeTiledMemory).  This is the layout the display
+    * coprocessor scans out as an address-format-5 surface.  Always lossless
+    * compressed (8 bytes of metadata per macroblock, as for GPU tiling).
+    * Single level, single layer, single sample, 32-bit formats only.
+    */
+   AIL_TILING_INTERCHANGE,
 };
 
 /*
@@ -164,6 +175,15 @@ struct ail_layout {
    bool renderable;
 };
 
+/* Bytes per row of 16x16 macroblocks of an interchange layout. */
+static inline uint32_t
+ail_get_interchange_stride_B(const struct ail_layout *layout)
+{
+   assert(layout->tiling == AIL_TILING_INTERCHANGE && "Invalid usage");
+   return DIV_ROUND_UP(layout->width_px, 16) * 256 *
+          util_format_get_blocksize(layout->format);
+}
+
 static inline uint32_t
 ail_get_linear_stride_B(const struct ail_layout *layout, ASSERTED uint8_t level)
 {
@@ -188,6 +208,8 @@ ail_get_wsi_stride_B(const struct ail_layout *layout, unsigned level)
 
    if (layout->tiling == AIL_TILING_LINEAR)
       return ail_get_linear_stride_B(layout, level);
+   else if (layout->tiling == AIL_TILING_INTERCHANGE)
+      return ail_get_interchange_stride_B(layout);
    else
       return util_format_get_stride(layout->format, layout->width_px);
 }
@@ -569,6 +591,16 @@ ail_is_view_compatible(struct ail_layout *layout, enum pipe_format view)
  * We generally use ail enums instead of DRM format modifiers. These helpers
  * bridges the gap.
  */
+/*
+ * Aurora-private modifier for AIL_TILING_INTERCHANGE (always compressed): one
+ * memory plane, row pitch ail_get_interchange_stride_B(), the compression
+ * metadata right after the macroblocks.  Must equal appledrm's definition.
+ */
+#ifndef DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED
+#define DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED                            \
+   fourcc_mod_code(APPLE, 0x415552000003ULL)
+#endif
+
 static inline enum ail_tiling
 ail_drm_modifier_to_tiling(uint64_t modifier)
 {
@@ -578,6 +610,8 @@ ail_drm_modifier_to_tiling(uint64_t modifier)
    case DRM_FORMAT_MOD_APPLE_GPU_TILED:
    case DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED:
       return AIL_TILING_GPU;
+   case DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED:
+      return AIL_TILING_INTERCHANGE;
    default:
       UNREACHABLE("Unsupported modifier");
    }
@@ -591,6 +625,7 @@ ail_is_drm_modifier_compressed(uint64_t modifier)
    case DRM_FORMAT_MOD_APPLE_GPU_TILED:
       return false;
    case DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED:
+   case DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED:
       return true;
    default:
       UNREACHABLE("Unsupported modifier");

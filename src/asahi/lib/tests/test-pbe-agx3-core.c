@@ -698,6 +698,71 @@ check_gen9_array_multisample_vector(void)
    return 0;
 }
 
+/* G17P Interchange (layout 3), compressed: the descriptor the v6 hardware
+ * arm ix-pattern@mb rendered with (DCP showed the linear reference CRC).
+ * Interchange shares Linear's row-stride field, in macroblocks per row. */
+static int
+check_gen9_interchange_compressed(void)
+{
+   const uint64_t buffer = UINT64_C(0x4000100000);
+   const uint64_t meta = UINT64_C(0x4000120000);
+   const struct agx_pbe_agx3_2d_fields fields = {
+      .layout = 3,
+      .channels = 0x28,
+      .swizzle_r = 2,
+      .swizzle_g = 1,
+      .swizzle_b = 0,
+      .swizzle_a = 3,
+      .width = 256,
+      .height = 128,
+      .buffer = buffer,
+      .acceleration_buffer = meta,
+      .compressed = true,
+      .stride_B = 16 * 16, /* 16 macroblocks per row */
+   };
+   struct agx_pbe_agx3_descriptor packed;
+   CHECK(agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_9, &fields, &packed));
+
+   uint64_t w[4];
+   memcpy(w, packed.bytes, sizeof(w));
+   CHECK(((w[0] >> 4) & 3) == 3);                   /* Layout = Interchange */
+   CHECK((w[0] >> 59) & 1);                         /* compressed */
+   CHECK((w[1] & ((UINT64_C(1) << 40) - 1)) == buffer >> 4);
+   CHECK(((w[1] >> 44) & 0xffff) == 16 - 1);        /* macroblocks - 1 */
+   CHECK((w[1] >> 63) & 1);                         /* extended */
+   CHECK(w[2] == meta >> 4);
+   CHECK(w[3] == 0);
+
+   /* The same descriptor as GPU tiling except the layout and stride. */
+   struct agx_pbe_agx3_2d_fields gpu = fields;
+   gpu.layout = 2;
+   gpu.stride_B = 0;
+   struct agx_pbe_agx3_descriptor gpu_packed;
+   CHECK(agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_9, &gpu, &gpu_packed));
+   uint64_t g[4];
+   memcpy(g, gpu_packed.bytes, sizeof(g));
+   CHECK((w[0] ^ g[0]) == (UINT64_C(1) << 4));
+   CHECK((w[1] ^ g[1]) == (UINT64_C(15) << 44));
+   CHECK(w[2] == g[2] && w[3] == g[3]);
+
+   struct agx_pbe_agx3_2d_fields decoded;
+   CHECK(agx_pbe_agx3_2d_unpack(AGX_PBE_AGX3_GENERATION_9, packed.bytes,
+                                packed.length, &decoded));
+   CHECK(same_fields(AGX_PBE_AGX3_GENERATION_9, &decoded, &fields));
+
+   /* Fail closed: no stride, unaligned stride, Gen10, 48-bit buffer. */
+   struct agx_pbe_agx3_2d_fields bad = fields;
+   bad.stride_B = 0;
+   CHECK(!agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_9, &bad, &packed));
+   bad.stride_B = 16 * 16 + 4;
+   CHECK(!agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_9, &bad, &packed));
+   bad = fields;
+   CHECK(!agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_10, &bad, &packed));
+   bad.buffer = UINT64_C(1) << 44;
+   CHECK(!agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_9, &bad, &packed));
+   return 0;
+}
+
 int
 main(void)
 {
@@ -709,7 +774,8 @@ main(void)
        check_gen9_single_layer_packet() || check_gen9_native_mips() ||
        check_gen9_compressed_atlas_vector() ||
        check_gen9_multisample_vector() ||
-       check_gen9_array_multisample_vector())
+       check_gen9_array_multisample_vector() ||
+       check_gen9_interchange_compressed())
       return 1;
 
    printf("agx_pbe_agx3_core: %u checks passed\n", checks);

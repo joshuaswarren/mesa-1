@@ -16,6 +16,10 @@
 #define AGX_PBE_LAYOUT_LINEAR 0u
 #define AGX_PBE_LAYOUT_TWIDDLED 1u
 #define AGX_PBE_LAYOUT_GPU 2u
+/* G17P Interchange, Gen9 2D only: the Linear row-stride field, in macroblocks
+ * per row (HAL200 PBEStateEncoderGen9::StateFields handles layouts 0 and 3 on
+ * one path; Texture::getStride returns macroblocks for Interchange). */
+#define AGX_PBE_LAYOUT_INTERCHANGE 3u
 
 static void
 store_le64(uint8_t *dst, uint64_t value)
@@ -90,23 +94,25 @@ fields_valid(uint32_t generation,
 
    const uint32_t maximum_dimension = UINT32_C(1) << dimension_bits;
    const bool linear = fields->layout == AGX_PBE_LAYOUT_LINEAR;
+   const bool interchange = fields->layout == AGX_PBE_LAYOUT_INTERCHANGE;
+   const bool strided = linear || interchange;
    const bool stride_valid =
-      linear ? fields->stride_B >= 16 && !(fields->stride_B & 0xf) &&
-                  fields->stride_B - 16 < (UINT32_C(1) << 21)
-             : fields->stride_B == 0;
+      strided ? fields->stride_B >= 16 && !(fields->stride_B & 0xf) &&
+                   fields->stride_B - 16 < (UINT32_C(1) << 21)
+              : fields->stride_B == 0;
    const bool address_valid =
       fields->buffer && !(fields->buffer & 0xf) &&
-      !(fields->buffer >> (linear ? 44 : 48));
+      !(fields->buffer >> (strided ? 44 : 48));
    const bool compression_valid = fields->compressed
       ? generation == AGX_PBE_AGX3_GENERATION_9 &&
-           fields->layout == AGX_PBE_LAYOUT_GPU &&
+           (fields->layout == AGX_PBE_LAYOUT_GPU || interchange) &&
            fields->acceleration_buffer &&
            !(fields->acceleration_buffer & 0xf) &&
            !(fields->acceleration_buffer >> 48)
       : !fields->acceleration_buffer;
-   return (!linear || generation == AGX_PBE_AGX3_GENERATION_9) &&
+   return (!strided || generation == AGX_PBE_AGX3_GENERATION_9) &&
           (!fields->srgb || generation == AGX_PBE_AGX3_GENERATION_9) &&
-          (linear || fields->layout == AGX_PBE_LAYOUT_TWIDDLED ||
+          (strided || fields->layout == AGX_PBE_LAYOUT_TWIDDLED ||
            fields->layout == AGX_PBE_LAYOUT_GPU) &&
           channel_is_uncompressed(fields->channels) && fields->type <= 5 &&
           fields->swizzle_r <= 3 && fields->swizzle_g <= 3 &&
@@ -153,7 +159,8 @@ agx_pbe_agx3_2d_pack(uint32_t generation,
    const bool layer_flag = generation == AGX_PBE_AGX3_GENERATION_10 &&
                            fields->page_aligned_layers;
    uint64_t word1 = fields->buffer >> 4;
-   if (fields->layout == AGX_PBE_LAYOUT_LINEAR)
+   if (fields->layout == AGX_PBE_LAYOUT_LINEAR ||
+       fields->layout == AGX_PBE_LAYOUT_INTERCHANGE)
       word1 |= (uint64_t)(fields->stride_B - 16) << 40;
    else
       word1 |= (uint64_t)layer_flag << 60;
@@ -380,6 +387,9 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
       ? UINT64_C(1) << 61 : 0;
    const uint64_t word1_mask = layout == AGX_PBE_LAYOUT_LINEAR
       ? ((UINT64_C(1) << 61) - 1) | srgb_bit
+      : layout == AGX_PBE_LAYOUT_INTERCHANGE
+      ? ((UINT64_C(1) << 61) - 1) | srgb_bit |
+           (compressed ? UINT64_C(1) << 63 : 0)
       : ((UINT64_C(1) << 44) - 1) | srgb_bit |
            (compressed ? UINT64_C(1) << 63 : 0) |
            (generation == AGX_PBE_AGX3_GENERATION_10 ? UINT64_C(1) << 60 : 0);
@@ -405,7 +415,7 @@ agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
    fields->compressed = compressed;
    if (compressed)
       fields->acceleration_buffer = word2 << 4;
-   if (layout == AGX_PBE_LAYOUT_LINEAR) {
+   if (layout == AGX_PBE_LAYOUT_LINEAR || layout == AGX_PBE_LAYOUT_INTERCHANGE) {
       fields->buffer = (word1 & ((UINT64_C(1) << 40) - 1)) << 4;
       fields->stride_B = ((word1 >> 40) & ((UINT64_C(1) << 21) - 1)) + 16;
    } else {

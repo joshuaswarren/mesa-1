@@ -417,6 +417,11 @@ pack_texture(struct hk_device *dev, struct hk_image_view *view,
 
       if (layout->tiling == AIL_TILING_LINEAR) {
          cfg.stride = ail_get_linear_stride_B(layout, 0) - 16;
+      } else if (layout->tiling == AIL_TILING_INTERCHANGE) {
+         /* HAL200 encodeImageReadState gives Interchange the Linear row-stride
+          * field (word1[61:46]), in macroblocks per row minus one
+          * (Texture::getStride); genxml stores stride >> 4. */
+         cfg.stride = (layout->stride_el[0] / 16 - 1) << 4;
       } else {
          cfg.page_aligned_layers = layout->page_aligned_layers;
       }
@@ -569,6 +574,13 @@ pack_pbe(struct hk_device *dev, struct hk_image_view *view, unsigned view_plane,
 
          if (layout->tiling == AIL_TILING_LINEAR) {
             cfg.stride = ail_get_linear_stride_B(layout, level) - 4;
+            assert(cfg.levels == 1);
+         } else if (layout->tiling == AIL_TILING_INTERCHANGE) {
+            /* PBEStateEncoderGen9::StateFields: Interchange takes the Linear
+             * stride field, macroblocks per row minus one at word1[59:44];
+             * the codec encodes stride_B / 16 - 1 there (stride_B =
+             * stride + 4).  Hardware-verified: v6 ix-pattern@mb. */
+            cfg.stride = (layout->stride_el[0] / 16) * 16 - 4;
             assert(cfg.levels == 1);
          } else {
             cfg.page_aligned_layers = layout->page_aligned_layers;
