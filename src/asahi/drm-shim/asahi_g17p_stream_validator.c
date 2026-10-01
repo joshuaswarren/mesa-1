@@ -54,7 +54,13 @@ decode_pipeline_pair(const uint8_t pair[8])
    const uint32_t high = load_le32(pair);
    const uint32_t low = load_le32(pair + 4);
 
-   if (high & UINT32_C(0x003fffff))
+   /* The high word's low 22 bits are the stage-program template, not
+    * address. A fragment with a constant program carries its
+    * thread-invariant spill quads in bits 3..20
+    * (agx_ppp_hal200_fragment_ti_resources, the native
+    * FragmentProgramVariantESLState::finalize layout); nothing sets the
+    * remaining template bits. */
+   if (high & UINT32_C(0x003fffff) & ~UINT32_C(0x001ffff8))
       return 0;
 
    return ((uint64_t)(high >> 22) << 38) | ((uint64_t)low << 6);
@@ -176,37 +182,16 @@ read_owned(const struct asahi_g17p_stream_memory *memory, uint64_t address,
           memory->read(memory->data, address, dst, size);
 }
 
+/* Walk agx3b code at address with the generated decoder up to the 0xe stop,
+ * bounded by available. On success *end is the offset just past the stop. */
 static bool
-validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
-                     uint64_t address)
+code_reaches_stop(const struct asahi_g17p_stream_memory *memory,
+                  uint64_t address, size_t available, size_t *end)
 {
-   size_t available;
-   if ((address & 1) || !memory->span ||
-       !memory->span(memory->data, address, &available) || available < 4)
-      return fail_at(address, "shader entry is unaligned or unowned");
-
-   /* LDSHDR names +0x3c0 inside Apple's executable container. The dword at
-    * entry-0x80 is the exact 0x80 framing plus 64-byte-padded main span; use
-    * it instead of the page-rounded BO mapping as the executable bound. */
-   uint8_t container_head[4], block_head[4];
-   if (address < 0x3c0 ||
-       !read_owned(memory, address - 0x3c0, container_head,
-                   sizeof(container_head)) ||
-       !read_owned(memory, address - 0x80, block_head, sizeof(block_head)) ||
-       load_le32(container_head) != AGX3_CONTAINER_LEAD_SIZE)
-      return fail_at(address, "shader does not own a G17P code container");
-   const uint32_t block_size = load_le32(block_head);
-   if (block_size < 0x80 || (block_size & 63) || block_size - 0x80 > available)
-      return fail_at(address, "shader container has an invalid code span");
-   available = block_size - 0x80;
-
    FILE *sink = memory->verbose ? stderr : fopen("/dev/null", "w");
    if (!sink)
       return fail_at(address, "could not open disassembly sink");
 
-   /* The container's own span bounds the walk. A fixed 16 KiB bound used to
-    * reject complete fragment shaders past it -- 16bit_storage
-    * struct_mixed_types links a 27986-byte fragment -- as having no end. */
    size_t offset = 0;
    bool valid = false;
    while (offset < available) {
@@ -237,7 +222,39 @@ validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
 
    if (!memory->verbose)
       fclose(sink);
-   if (!valid)
+   *end = offset;
+   return valid;
+}
+
+static bool
+validate_shader_blob(const struct asahi_g17p_stream_memory *memory,
+                     uint64_t address)
+{
+   size_t available;
+   if ((address & 1) || !memory->span ||
+       !memory->span(memory->data, address, &available) || available < 4)
+      return fail_at(address, "shader entry is unaligned or unowned");
+
+   /* LDSHDR names +0x3c0 inside Apple's executable container. The dword at
+    * entry-0x80 is the exact 0x80 framing plus 64-byte-padded main span; use
+    * it instead of the page-rounded BO mapping as the executable bound. */
+   uint8_t container_head[4], block_head[4];
+   if (address < 0x3c0 ||
+       !read_owned(memory, address - 0x3c0, container_head,
+                   sizeof(container_head)) ||
+       !read_owned(memory, address - 0x80, block_head, sizeof(block_head)) ||
+       load_le32(container_head) != AGX3_CONTAINER_LEAD_SIZE)
+      return fail_at(address, "shader does not own a G17P code container");
+   const uint32_t block_size = load_le32(block_head);
+   if (block_size < 0x80 || (block_size & 63) || block_size - 0x80 > available)
+      return fail_at(address, "shader container has an invalid code span");
+   available = block_size - 0x80;
+
+   /* The container's own span bounds the walk. A fixed 16 KiB bound used to
+    * reject complete fragment shaders past it -- 16bit_storage
+    * struct_mixed_types links a 27986-byte fragment -- as having no end. */
+   size_t offset;
+   if (!code_reaches_stop(memory, address, available, &offset))
       return fail_at(address, "shader has no decodable terminal end");
    for (; offset < available; ++offset) {
       uint8_t byte;
@@ -260,6 +277,7 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
 
    available = MIN2(available, MAX_IOTO_PROGRAM_SIZE);
    uint64_t cursor = address;
+   unsigned branches = 0;
    bool seen_speclm = false, seen_ldshdr = false, seen_spectpr = false;
    bool seen_pixrel = false;
    uint32_t immediates[128] = {0};
@@ -276,6 +294,22 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
       if (!agx_ioto_decode_program_record(AGX_CHIP_G17P, bytes, readable,
                                            &record, &consumed) ||
           !consumed || consumed > readable) {
+         /* Once the state tail is complete, the program may continue into
+          * its constant program instead of terminating: hk's
+          * graphics_constant_suffix_replace swaps exactly this program's
+          * terminator for the shader's preamble, inline when it fits
+          * (AGX_IOTO_PRESHADER_INLINE_LIMIT). That is ordinary compiled
+          * code, a superset of the Ioto records, ending in its own stop;
+          * walk the remainder with the shader decoder. */
+         if (seen_speclm && seen_ldshdr && seen_spectpr &&
+             fragment == seen_pixrel) {
+            size_t end;
+            if (code_reaches_stop(memory, cursor, remain, &end))
+               return true;
+            return fail_at(cursor,
+                           "inline constant program has no decodable stop");
+         }
+
          fprintf(stderr, "shim: Ioto bytes");
          for (size_t j = 0; j < readable; ++j)
             fprintf(stderr, " %02x", bytes[j]);
@@ -476,6 +510,62 @@ validate_ioto_program(const struct asahi_g17p_stream_memory *memory,
                return fail_at(cursor, "invalid Ioto PIXREL");
             seen_pixrel = true;
             break;
+         case AGX_IOTO_KIND_B_EP0: {
+            /* An unconditional branch ends this linear run: the bytes after
+             * it are padding or another program, so a straight walk past it
+             * reads garbage. hk emits two:
+             *
+             *  - relative: the external-setup graphics launcher
+             *    (agx_ioto_g17p_external_setup_launcher_compose) jumps to
+             *    the persistent setup suffix holding the body and the
+             *    terminator. That suffix is Ioto; keep walking it, carrying
+             *    the state-tail and immediate tracking across.
+             *
+             *  - absolute: the constant program (agx_ioto_constant_program_
+             *    emit, hk_agx3_g17p_constant_program_from_binary) replaces
+             *    the program's terminator with a jump to the shader's
+             *    preamble. That is ordinary compiled code ending in its own
+             *    stop, not Ioto; the program is complete at the jump.
+             *
+             * GPU0 B: bits 25..71 hold the halfword target and bit 24
+             * selects an absolute target; clear, the target is a
+             * displacement from this record (agx_ioto_preshader_pack_branch
+             * and agx_ioto_constant_program_emit). */
+            if (consumed != 10 || ++branches > 4)
+               return fail_at(cursor, "Ioto branch chain is unbounded");
+            uint64_t field = 0;
+            for (unsigned b = 0; b < 6; ++b)
+               field |= (uint64_t)bytes[3 + b] << (8 * b);
+            const bool absolute = field & 1;
+            field &= ~UINT64_C(1);
+            const uint64_t target =
+               absolute ? field
+                        : (uint64_t)((int64_t)cursor +
+                                     ((int64_t)(field << 16) >> 16));
+            size_t target_available;
+            if (target >= (UINT64_C(1) << 48) ||
+                !memory->span(memory->data, target, &target_available) ||
+                target_available < 4)
+               return fail_at(cursor, "Ioto branch target is unowned");
+
+            if (absolute) {
+               if (!seen_speclm || !seen_ldshdr || !seen_spectpr ||
+                   fragment != seen_pixrel)
+                  return fail_at(cursor,
+                                 "incomplete Ioto graphics state tail");
+               size_t end;
+               if (!code_reaches_stop(memory, target, target_available,
+                                      &end))
+                  return fail_at(target,
+                                 "constant program has no decodable stop");
+               return true;
+            }
+
+            address = target;
+            available = MIN2(target_available, MAX_IOTO_PROGRAM_SIZE);
+            cursor = target;
+            continue;
+         }
          default:
             if (seen_speclm && !seen_spectpr)
                return fail_at(cursor, "foreign record inside Ioto state tail");

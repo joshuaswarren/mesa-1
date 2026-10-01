@@ -262,12 +262,15 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
   # two-level mip chain and three readbacks must be one compute stream; only
   # the final sample remains graphics. Regressing either fast path adds one or
   # more firmware render jobs, while regressing mip ordering removes the two
-  # strong compute launches.
+  # strong compute launches. The other two strong records are the fixture's
+  # two transfer pipeline barriers: since 89500458996 a barrier whose source
+  # scope is compute/transfer upgrades the open stream's launch tail to the
+  # strong flush in place instead of ending the stream.
   g17p_generated_mips_env = environment(g17p_queue_progress_environment)
   g17p_generated_mips_env.set('G17P_GENERATED_MIPS_SUBMIT_ONLY', '1')
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
   g17p_generated_mips_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS',
-                              '7,7,0,2')
+                              '7,7,0,4')
   # The raw copy and both mip filters make every fixture compute launch 2D.
   # Flattening the copy drops this to six; flattening the mip filters produces
   # four here and five in the odd fixture.
@@ -838,9 +841,12 @@ if with_tests and with_asahi_vk and host_machine.system() == 'linux'
     'ASAHI_SHIM_G17P_EXPECT_FRAG_CONSTANT_DRAWS', '6')
   g17p_layered_mip_blit_env.set('ASAHI_SHIM_G17P_EXPECT_COMPUTE', '1')
   g17p_layered_mip_blit_env.set(
-    # The one strong barrier is the host-read cache flush (6aae441547b),
-    # which strengthens the final launch's tail record in place.
-    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,1')
+    # One strong barrier is the host-read cache flush (6aae441547b), which
+    # strengthens the final launch's tail record in place. The other is the
+    # upload-to-blit pipeline barrier: since 89500458996 a barrier whose
+    # source scope is compute/transfer strengthens the last upload's tail in
+    # place instead of ending the stream.
+    'ASAHI_SHIM_G17P_EXPECT_COMPUTE_COUNTS', '13,13,0,2')
   test(
     'hk_g17p_layered_mip_blit',
     g17p_vulkan_layered_mip_blit,

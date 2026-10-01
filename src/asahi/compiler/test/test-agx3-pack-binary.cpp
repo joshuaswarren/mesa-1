@@ -19,6 +19,7 @@ extern "C" {
 #include <vector>
 #include <gtest/gtest.h>
 
+#include "agx_debug.h"
 #include "agx3_alu_core.h"
 #include "agx3_isel_core.h"
 #include "agx3_atomic_core.h"
@@ -129,6 +130,32 @@ class AGX3PackBinary : public testing::Test {
       return std::vector<uint8_t>(d, d + bin.size);
    }
 };
+
+/* AGX_G17P_INT_DEST_CACHE (default on since 253b68945fd, "G17P v56h")
+ * deposits the f11 destination register-cache hint on every AGX3b integer
+ * register add/subtract the packer emits; the hint is byte 4 bit 0 of these
+ * ten-byte forms. Expectations below that were written before that default
+ * are the hint-free encodings with the hint applied exactly when the flag is
+ * active, so they keep checking everything else either way. Several of them
+ * carry Apple captures (the "Apple:" comments) with f11 clear: the flag
+ * deliberately differs from those captures, and its CTS result on hardware
+ * was unchanged (253b68945fd). */
+static bool
+int_dest_cache(void)
+{
+   return agx_get_codegen_flags() & AGX_CODEGEN_G17P_INT_DEST_CACHE;
+}
+
+static bool
+packed_iadd_reg(enum agx_isa_encoding enc, uint16_t dest,
+                const uint16_t src[2], const enum agx3_alu_hint hints[2],
+                uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                uint8_t *len)
+{
+   return agx3_alu_integer_reg_shift_cache(enc, AGX3_ALU_IADD, dest, src,
+                                           hints, 0, int_dest_cache(),
+                                           wait_mask, out, len);
+}
 
 TEST_F(AGX3PackBinary, MultisampleTileBankCountsPartitionsNotStores)
 {
@@ -556,15 +583,25 @@ TEST_F(AGX3PackBinary, LargeGradientOperandsKeepLateDescriptorWait)
       sample->mask = 15;
       agx_stop(b);
       const auto code = pack(b);
+      /* The descriptor load's wait (slot mask 1) is retired on a carrier
+       * immediately before the first staging instruction, which then carries
+       * no wait itself: the staging copy's own wait field does not take
+       * effect on G17P (AGX_G17P_DRAIN_BEFORE_SAMPLE, default 3; hardware
+       * evidence in agx3_pack_binary.c). The independent load (mask 2) is
+       * still not drained. */
+      std::vector<uint8_t> want;
       uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
+      append(want, bytes, len);
       if (minimum) {
-         ASSERT_TRUE(agx3_tex_stage_typed_lod(enc, 44, 3, 1, false, false,
+         ASSERT_TRUE(agx3_tex_stage_typed_lod(enc, 44, 3, 0, false, false,
                                              AGX3_TEX_LEVEL_MINIMUM, bytes, &len));
       } else {
-         ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 24, 3, 1,
+         ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 24, 3, 0,
                                               false, false, bytes, &len));
       }
-      EXPECT_NE(std::search(code.begin(), code.end(), bytes, bytes + len),
+      append(want, bytes, len);
+      EXPECT_NE(std::search(code.begin(), code.end(), want.begin(), want.end()),
                 code.end());
    }
 }
@@ -609,7 +646,7 @@ TEST_F(AGX3PackBinary, StraightLineALU)
          const enum agx3_alu_hint hints[] = {
             AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
          uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
-         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 4, src,
+         ASSERT_TRUE(packed_iadd_reg(enc, 4, src,
                                           hints, 0, bytes, &len));
          append(want, bytes, len);
       } else {
@@ -3242,8 +3279,9 @@ TEST_F(AGX3PackBinary, IaddImmediateSignExtendsBareHalfSource)
    agx_stop(b);
    const auto code = pack(b);
    /* Apple: `o[i] = int(short a[i]) + 7`, f15 = 7 and f43 = 1. */
-   const uint8_t native[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
-                             0x0e, 0x00, 0x08, 0x15, 0x0c};
+   uint8_t native[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                       0x0e, 0x00, 0x08, 0x15, 0x0c};
+   native[4] |= int_dest_cache();
    ASSERT_EQ(code.size(), sizeof(native) + 4);
    EXPECT_EQ(memcmp(code.data(), native, sizeof(native)), 0);
 
@@ -3256,8 +3294,9 @@ TEST_F(AGX3PackBinary, IaddImmediateSignExtendsBareHalfSource)
    agx_iadd_to(b, agx_register(0, AGX_SIZE_32), src, agx_immediate(7), 0);
    agx_stop(b);
    const auto zext = pack(b);
-   const uint8_t native_u[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
-                               0x0e, 0x00, 0x08, 0x15, 0x04};
+   uint8_t native_u[] = {0x9f, 0x01, 0x54, 0x00, 0x02,
+                         0x0e, 0x00, 0x08, 0x15, 0x04};
+   native_u[4] |= int_dest_cache();
    ASSERT_EQ(zext.size(), sizeof(native_u) + 4);
    EXPECT_EQ(memcmp(zext.data(), native_u, sizeof(native_u)), 0);
 }
@@ -5511,7 +5550,7 @@ TEST_F(AGX3PackBinary, StaticSpillCopyReloadDependency)
          const uint16_t src[] = {2, 2};
          const enum agx3_alu_hint hints[] = {
             AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
-         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 4, src,
+         ASSERT_TRUE(packed_iadd_reg(enc, 4, src,
                                           hints, 2, bytes, &length));
       } else {
          ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 4, 2, 2, 0, 0,
@@ -6983,7 +7022,7 @@ TEST_F(AGX3PackBinary, ExportDoesNotConsumeRealReadWait)
          const uint16_t src[] = {4, 4};
          const enum agx3_alu_hint hints[] = {
             AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
-         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 6, src,
+         ASSERT_TRUE(packed_iadd_reg(enc, 6, src,
                                           hints, 1, bytes, &len));
       } else {
          ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 6, 4, 4, 0, 0,
@@ -7088,7 +7127,7 @@ TEST_F(AGX3PackBinary, TextureFetchWaitSurvivesFallthroughBlock)
          const uint16_t src[] = {0, 0};
          const enum agx3_alu_hint hints[] = {
             AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
-         ASSERT_TRUE(agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 8, src,
+         ASSERT_TRUE(packed_iadd_reg(enc, 8, src,
                                           hints, 1, ab, &al));
       } else {
          ASSERT_TRUE(agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 0, 0, 0, 0,
@@ -7564,7 +7603,7 @@ TEST_F(AGX3PackBinary, GetSrIndexedLoadAddStoreCarriesWait)
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
       ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
-                     ? agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 8, add_src,
+                     ? packed_iadd_reg(enc, 8, add_src,
                                             add_hints, 1u << 5, ab, &al)
                      : agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 6, 6, 0, 0,
                                         1u << 1, ab, &al));
@@ -7715,7 +7754,7 @@ TEST_F(AGX3PackBinary, LoadAddStoreCarriesWait)
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
       ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
-                     ? agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 8, add_src,
+                     ? packed_iadd_reg(enc, 8, add_src,
                                             add_hints, 1u << 5, ab, &al)
                      : agx3_alu_compose(enc, AGX3_ALU_IADD, 8, 6, 6, 0, 0,
                                         1u << 0, ab, &al));
@@ -7778,7 +7817,7 @@ TEST_F(AGX3PackBinary, LocalLoadAddStoreCarriesWait)
       uint8_t ab[AGX3_ALU_MAX_LENGTH];
       uint8_t al = 0;
       ASSERT_TRUE(enc == AGX_ISA_ENCODING_AGX3B
-                     ? agx3_alu_integer_reg(enc, AGX3_ALU_IADD, 2, add_src,
+                     ? packed_iadd_reg(enc, 2, add_src,
                                             add_hints, 1, ab, &al)
                      : agx3_alu_compose(enc, AGX3_ALU_IADD, 2, 0, 0, 0, 0, 1,
                                         ab, &al));
@@ -10948,8 +10987,9 @@ TEST_F(AGX3PackBinary, ImmediateIaddPreservesLiveSource)
       agx_iadd_to(b, agx_register(0, AGX_SIZE_32), agx_immediate(0), source, 2);
       agx_stop(b);
       auto bytes = pack(b);
-      const uint8_t native[] = {0x9f,0x01,0x54,0x00,0x02,0x00,0x08,0x88,
-                                (uint8_t)(killed ? 0x14 : 0x10),0x14};
+      uint8_t native[] = {0x9f,0x01,0x54,0x00,0x02,0x00,0x08,0x88,
+                          (uint8_t)(killed ? 0x14 : 0x10),0x14};
+      native[4] |= int_dest_cache();
       ASSERT_GE(bytes.size(), sizeof(native));
       EXPECT_EQ(memcmp(bytes.data(), native, sizeof(native)), 0);
    }
@@ -10978,10 +11018,11 @@ TEST_F(AGX3PackBinary, HighHalfZeroExtendUsesNarrowAdd)
       } else {
          /* The seven-bit half COPY cannot name the destination; the narrow
           * slot-B add of 0 zero-extends into an eight-bit one. */
-         const struct agx3_iadd_desc d = {
+         struct agx3_iadd_desc d = {
             .src_kill = true, .dest = (uint16_t)dest, .immediate = 0,
             .src = 54, .src_16 = true,
          };
+         d.dest_cache = int_dest_cache();
          uint8_t add[AGX3_IADD_MAX_LENGTH], add_len = 0;
          ASSERT_TRUE(agx3_iadd_encode(enc, &d, add, &add_len));
          append(want, add, add_len);
@@ -11062,6 +11103,7 @@ TEST_F(AGX3PackBinary, FirefoxFragmentSignedHalfAccumulatorUsesNativeIadd)
    d.src = 22;
    d.src_16 = true;
    d.sign_extend = true;
+   d.dest_cache = int_dest_cache();
    uint8_t bytes[AGX3_IADD_MAX_LENGTH], len = 0;
    ASSERT_TRUE(agx3_iadd_encode(AGX_ISA_ENCODING_AGX3B, &d, bytes, &len));
    std::vector<uint8_t> want(bytes, bytes + len);
@@ -13896,9 +13938,14 @@ TEST_F(AGX3PackBinary, SampleStagingWaitsOnlyForItsOwnProducers)
    const auto binary = pack(b);
    uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
    std::vector<uint8_t> staging;
-   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 2, bytes, &len));
+   /* One carrier retires both coordinate producers (slot masks 1 and 2) and
+    * the staging copies carry no wait: a staging copy's own wait field does
+    * not take effect on G17P (AGX_G17P_DRAIN_BEFORE_SAMPLE, default 3;
+    * hardware evidence in agx3_pack_binary.c). The unrelated slot-3 producer
+    * (mask 4) is still not waited. */
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 3, bytes, &len));
    append(staging, bytes, len);
-   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 4, 1, false, false,
+   ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 0, 4, 4, 0, false, false,
                                          bytes, &len));
    append(staging, bytes, len);
    ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 2, 6, 4, 0, false, false,
