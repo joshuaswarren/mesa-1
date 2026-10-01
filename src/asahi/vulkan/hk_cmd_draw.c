@@ -5791,12 +5791,21 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
                   fs->info.fs.interp.flat,
                   fs->info.fs.interp.linear);
 
-   if (memcmp(desc->root.draw.uvs_index, gfx->linked_varyings.slots,
-              sizeof(desc->root.draw.uvs_index))) {
-      memcpy(desc->root.draw.uvs_index, gfx->linked_varyings.slots,
-             sizeof(desc->root.draw.uvs_index));
-      desc->root_dirty = true;
+   /* The root holds one byte per varying slot while agx_varyings_vs::slots
+    * holds unsigned ints, so the table has to be narrowed element by element;
+    * a byte copy of the first VARYING_SLOT_MAX bytes of the unsigned array
+    * left every slot past POS at the wrong UVS index for any vertex stage
+    * that reads its varying placement from the root (shader objects,
+    * graphics pipeline libraries). */
+   bool uvs_index_changed = false;
+   for (unsigned i = 0; i < VARYING_SLOT_MAX; ++i) {
+      assert(gfx->linked_varyings.slots[i] <= UINT8_MAX);
+      const uint8_t slot = gfx->linked_varyings.slots[i];
+      uvs_index_changed |= desc->root.draw.uvs_index[i] != slot;
+      desc->root.draw.uvs_index[i] = slot;
    }
+   if (uvs_index_changed)
+      desc->root_dirty = true;
 
    /* Shader replacement changes the logical root only if the selected
     * immutable data address actually changes.  In particular, equivalent
