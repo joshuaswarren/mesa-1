@@ -2443,6 +2443,7 @@ agx3_emit_storage_image_write_g18g(struct util_dynarray *emission,
                                    mesa_shader_stage stage,
                                    struct agx3_staging_banks *banks,
                                    uint16_t bank_floor,
+                                   uint16_t bank_limit,
                                    uint16_t *outstanding)
 {
    const bool admitted_stage =
@@ -2458,6 +2459,8 @@ agx3_emit_storage_image_write_g18g(struct util_dynarray *emission,
    const unsigned bank_span = 16;
 
    if (enc != AGX_ISA_ENCODING_AGX3C || !admitted_stage || !banks ||
+       bank_floor + bank_span > bank_limit ||
+       bank_limit > AGX3_STAGED_WRITE_LIMIT ||
        I->nr_dests != 0 || I->nr_srcs != 5 ||
        (I->dim != AGX_DIM_2D && !array && !three_d) || !typed ||
        (wait_mask & ~UINT16_C(0xff)) ||
@@ -2503,7 +2506,7 @@ agx3_emit_storage_image_write_g18g(struct util_dynarray *emission,
    uint16_t bank = bank_floor;
    bool placed = false;
    for (unsigned start = bank_floor;
-        start + bank_span <= AGX3_STAGED_WRITE_LIMIT && !placed;
+        start + bank_span <= bank_limit && !placed;
         start += bank_span) {
       if (!agx3_staging_conflicts(banks, start, bank_span)) {
          bank = start;
@@ -10109,7 +10112,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    uint8_t stage_group_slot[3] = {0, 0, 0};
    uint8_t next_uvs_slot = 1;
    unsigned texture_ops_left = 0;
-   const agx_instr *g18g_low_bank_read = NULL;
+   bool g18g_low_bank_reads = true;
    bool g18g_low_bank_ops = true;
    unsigned tile_loads_left = 0;
    unsigned tile_loads_seen = 0;
@@ -10174,11 +10177,15 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
          }
          /* The compact bank arrangement is only for ordinary ALU around
-          * one plain image read/write pair. Other asynchronous, control-flow,
+          * plain image reads/writes. Other asynchronous, control-flow,
           * sample and staging users keep the conservative placement. */
          switch (scan_I->op) {
          case AGX_OPCODE_IMAGE_LOAD:
-            g18g_low_bank_read = scan_I;
+            g18g_low_bank_reads &=
+               scan_I->nr_srcs == 6 && scan_I->dim == AGX_DIM_2D &&
+               !scan_I->agx3_tex_coords_staged &&
+               agx3_tex_imm(scan_I->src[1], 0) &&
+               agx3_tex_imm(scan_I->src[2], 0);
             break;
          case AGX_OPCODE_IMAGE_WRITE:
          case AGX_OPCODE_GET_SR:
@@ -10634,17 +10641,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
     * checked against the floor below. */
    /* The captured G18G post-FS load/store kernel keeps write operands in
     * halves 0..15 and plain-image read coordinates in halves 16 and above.
-    * Reserving the worst-case half-80 floor wastes 72 staging halves for
-    * this shape. Validate the actual read and write extents below as well.
+    * The captured four-image M6 kernel also needs only f22=12 at a 1024-thread
+    * workgroup. Keep plain reads in their existing slot-1 block and reuse a
+    * single low write bank, retiring its outstanding owner before each reuse.
+    * Reserving the worst-case half-80 floor wastes staging for these shapes.
+    * Validate the actual read and write extents below as well.
     * This is independent of workgroup dimensions and application identity. */
    const bool g18g_compact_image_banks =
       ctx->key->dev.emit_agx3d && ctx->stage == MESA_SHADER_COMPUTE &&
-      g18g_low_bank_ops && image_writes_left == 1 && texture_ops_left == 1 &&
-      g18g_low_bank_read && g18g_low_bank_read->nr_srcs == 6 &&
-      g18g_low_bank_read->dim == AGX_DIM_2D &&
-      !g18g_low_bank_read->agx3_tex_coords_staged &&
-      agx3_tex_imm(g18g_low_bank_read->src[1], 0) &&
-      agx3_tex_imm(g18g_low_bank_read->src[2], 0);
+      g18g_low_bank_ops && g18g_low_bank_reads &&
+      image_writes_left > 0 && texture_ops_left > 0;
    const uint16_t g18g_image_write_floor =
       !ctx->key->dev.emit_agx3d || image_writes_left == 0 ||
       g18g_compact_image_banks ? 0
@@ -10731,10 +10737,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          }
          if ((enc == AGX_ISA_ENCODING_AGX3B &&
               I->op == AGX_OPCODE_IMAGE_LOAD) ||
-             /* Native G18G post-FS load/store: the sole image producer
-              * uses slot 1. Its read block then ends at half 24, rather
-              * than reserving the unused blocks below slot 5. The normal
-              * dependency allocator still owns all waits and retirement. */
+              /* Keep compact reads in the established slot-1 block ending
+               * at half 24. Reusing this slot retires its previous generation
+               * through the normal dependency allocator. */
              (g18g_compact_image_banks && I->op == AGX_OPCODE_IMAGE_LOAD) ||
              (g17p_storage_image_protocol &&
               (I->op == AGX_OPCODE_TEXTURE_SAMPLE ||
@@ -11831,8 +11836,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_IMAGE_WRITE && ctx->key->dev.emit_agx3d) {
             if (!agx3_emit_storage_image_write_g18g(
-                   emission, enc, I, wait, ctx->stage, &staging_banks,
-                   g18g_image_write_floor, &outstanding))
+                    emission, enc, I, wait, ctx->stage, &staging_banks,
+                    g18g_image_write_floor,
+                    g18g_compact_image_banks ? 16 : AGX3_STAGED_WRITE_LIMIT,
+                    &outstanding))
                AGX3_REFUSE(I);
             /* Every write holds a sixteen-half bank; the first, in bank 0,
              * reserves 16 halves (specTPR f22 8, native kick 19 6: a
@@ -14291,8 +14298,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              I->src[2].type == AGX_INDEX_IMMEDIATE && I->src[2].value <= 7 &&
              I->src[3].type == AGX_INDEX_IMMEDIATE && I->src[3].value <= 7) {
             const bool reg_comparand = I->src[1].type != AGX_INDEX_IMMEDIATE;
-            const uint16_t retire = wait & ~128u;
-            if (retire && !agx3_retire_slots_noop(emission, enc, retire))
+            /* A partial r0 identity can race an unrelated load into r0.
+             * Carry the wait on a select operand and include all of this
+             * select's dependencies, including a possible slot-8 producer
+             * of that operand. A lone native slot-8 wait stays on FSEL. */
+            const uint16_t retire = (wait & ~128u) ? wait : 0;
+            if (retire &&
+                !agx3_retire_select_waits(emission, enc, I, retire))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH], len;
             if (!agx3_alu_fcmp_bool16_gpu1(
@@ -14300,7 +14312,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                    agx3_post_ra_hint(I->src[0]), reg_comparand,
                    I->src[1].value, reg_comparand && I->src[1].discard,
                    (uint8_t)I->src[2].value, (uint8_t)I->src[3].value,
-                   I->fcond, wait & 128u, bytes, &len) ||
+                   I->fcond, retire ? 0 : wait, bytes, &len) ||
                 !agx3_append(emission, bytes, len))
                AGX3_REFUSE(I);
             outstanding &= (uint16_t)~retire;

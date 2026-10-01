@@ -2121,6 +2121,15 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
                                unsigned cf_base, unsigned nr_samples,
                                bool internal_kernel);
 
+static void
+agx_gallium_preprocess_nir(struct agx_device *dev, nir_shader *nir)
+{
+   if (dev->chip == AGX_CHIP_G18G)
+      agx_preprocess_nir_g18g(nir);
+   else
+      agx_preprocess_nir(nir);
+}
+
 /* Does not take ownership of key. Clones if necessary. */
 static struct agx_compiled_shader *
 agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
@@ -2168,7 +2177,17 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       }
 
       if (key->hw) {
-         NIR_PASS(_, nir, agx_nir_lower_point_size, true);
+         if (key->omit_point_size) {
+            /* Point size is ignored for lines. Keep the native G18 line
+             * output layout instead of inserting an unused point-size slot.
+             * XFB stores are handled before this rasterizer-only lowering.
+             */
+            NIR_PASS(_, nir, nir_remove_outputs, MESA_SHADER_FRAGMENT, 0,
+                     VARYING_BIT_PSIZ);
+            nir->info.outputs_written &= ~VARYING_BIT_PSIZ;
+         } else {
+            NIR_PASS(_, nir, agx_nir_lower_point_size, true);
+         }
          NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_nir_lower_clip_m1_1,
                   nir_metadata_control_flow, NULL);
 
@@ -2191,9 +2210,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       NIR_PASS(_, nir, poly_nir_lower_gs, &gs_count, &gs_copy, &pre_gs,
                &gs_info);
 
-      agx_preprocess_nir(gs_count);
-      agx_preprocess_nir(gs_copy);
-      agx_preprocess_nir(pre_gs);
+      agx_gallium_preprocess_nir(dev, gs_count);
+      agx_gallium_preprocess_nir(dev, gs_copy);
+      agx_gallium_preprocess_nir(dev, pre_gs);
    } else if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       struct asahi_fs_shader_key *key = &key_->fs;
 
@@ -2694,7 +2713,7 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
       NIR_PASS(_, nir, agx_nir_rebind_g17p_texture_crawls);
    NIR_PASS(_, nir, nir_lower_ssbo, NULL);
 
-   agx_preprocess_nir(nir);
+   agx_gallium_preprocess_nir(dev, nir);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT &&
        (nir->info.inputs_read & VARYING_BITS_TEX_ANY)) {
@@ -3165,7 +3184,8 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
     *
     * vb_mask, attributes, vertex_buffers: VERTEX
     */
-   if (!((ctx->dirty & (AGX_DIRTY_VS_PROG | AGX_DIRTY_VERTEX | AGX_DIRTY_XFB)) ||
+   if (!((ctx->dirty & (AGX_DIRTY_VS_PROG | AGX_DIRTY_VERTEX | AGX_DIRTY_XFB |
+                       AGX_DIRTY_PRIM)) ||
          ctx->stage[MESA_SHADER_TESS_EVAL].dirty ||
          ctx->stage[MESA_SHADER_GEOMETRY].dirty ||
          ctx->stage[MESA_SHADER_TESS_EVAL].shader ||
@@ -3178,10 +3198,13 @@ agx_update_vs(struct agx_batch *batch, unsigned index_size_B)
       .custom_borders = ctx->stage[MESA_SHADER_VERTEX].custom_borders,
    };
 
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   key.omit_point_size = key.hw && dev->chip == AGX_CHIP_G18G &&
+                         batch->reduced_prim == MESA_PRIM_LINES;
+
    agx_update_shader(ctx, &ctx->vs, MESA_SHADER_VERTEX,
                      (union asahi_shader_key *)&key);
 
-   struct agx_device *dev = agx_device(ctx->base.screen);
    struct agx_fast_link_key link_key = {
       .prolog.vs.hw = key.hw,
       .prolog.vs.uniform_base =
@@ -3754,7 +3777,7 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
 
    struct agx_device *dev = agx_device(ctx->base.screen);
    if (!prolog) {
-      agx_preprocess_nir(b.shader);
+      agx_gallium_preprocess_nir(dev, b.shader);
       NIR_PASS(_, b.shader, agx_nir_lower_texture);
       NIR_PASS(_, b.shader, agx_nir_lower_multisampled_image_store);
    }

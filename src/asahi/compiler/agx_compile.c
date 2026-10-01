@@ -7289,7 +7289,7 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
    nir_def *x = nir_mov_alu(b, alu->src[0], 1);
 
    if ((uintptr_t)data && x->bit_size <= 32) {
-      /* Native G17P sin/cos use three non-overlapping pieces of 2/pi.
+       /* Native sin/cos use three non-overlapping pieces of 2/pi.
        * The magic rounding add retains the quadrant in its low two bits.
        * Keep the explicit FMAs and subtraction order, including low pieces.
        * Native trig-fast text hashes are retained with the focused tests. */
@@ -7305,11 +7305,23 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
       r = nir_ffma(b, x, nir_imm_float(b, uif(0x25a94fe1)), r);
       nir_def *complement = nir_fsub(b, nir_imm_float(b, 1), nir_fabs(b, r));
       const bool cosine = alu->op == nir_op_fcos;
-      r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 1),
-                                 cosine ? nir_fneg(b, r) : complement,
-                                 cosine ? complement : r);
-      r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 2),
-                                 nir_fneg(b, r), r);
+       nir_def *odd = cosine ? nir_fneg(b, r) : complement;
+       nir_def *even = cosine ? complement : r;
+       if ((uintptr_t)data == 1) {
+          r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 1),
+                                     odd, even);
+          r = nir_bittest_select_agx3(b, quadrant, nir_imm_int(b, 2),
+                                     nir_fneg(b, r), r);
+       } else {
+          /* G18 has the same native f32 SINC (m6-alu-misc sin/cos), but
+           * not G17P's masked-select encoding. Test the rounded quadrant's
+           * integer bits with ordinary ALU and select the float operands.
+           */
+          r = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, quadrant, 1), 0),
+                        odd, even);
+          r = nir_bcsel(b, nir_ine_imm(b, nir_iand_imm(b, quadrant, 2), 0),
+                        nir_fneg(b, r), r);
+       }
       nir_def *result = nir_fmul(b, nir_fsinc_agx3(b, r), r);
       nir_def *small = cosine ? nir_imm_float(b, 1) : x;
 
@@ -7372,11 +7384,13 @@ agx_lower_sincos_impl(struct nir_builder *b, nir_instr *instr, void *data)
 }
 
 static bool
-agx_lower_sincos(nir_shader *shader, bool g17p)
+agx_lower_sincos(nir_shader *shader, bool g17p, bool g18g)
 {
+   /* Zero keeps AGX2 lowering; G17P alone uses its native masked select. */
+   const uintptr_t mode = g17p ? 1 : (g18g ? 2 : 0);
    return nir_shader_lower_instructions(shader, agx_lower_sincos_filter,
-                                        agx_lower_sincos_impl,
-                                        (void *)(uintptr_t)g17p);
+                                         agx_lower_sincos_impl,
+                                         (void *)mode);
 }
 
 static bool
@@ -9680,7 +9694,7 @@ agx3_scratch_word_size_align_cb(nir_intrinsic_op intrin, uint8_t bytes,
 }
 
 static void
-agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
+agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool g18g)
 {
    if (!nir)
       return;
@@ -9747,7 +9761,7 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
    NIR_PASS(_, nir, nir_lower_alu);
    NIR_PASS(_, nir, nir_lower_load_const_to_scalar);
    NIR_PASS(_, nir, nir_lower_flrp, 16 | 32 | 64, false);
-   NIR_PASS(_, nir, agx_lower_sincos, g17p);
+   NIR_PASS(_, nir, agx_lower_sincos, g17p, g18g);
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, agx_lower_front_face,
             nir_metadata_control_flow, NULL);
    if (g17p)
@@ -9832,13 +9846,20 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p)
 void
 agx_preprocess_nir(nir_shader *nir)
 {
-   agx_preprocess_nir_internal(nir, false);
+   agx_preprocess_nir_internal(nir, false, false);
 }
 
 void
 agx_preprocess_nir_g17p(nir_shader *nir)
 {
-   agx_preprocess_nir_internal(nir, true);
+   agx_preprocess_nir_internal(nir, true, false);
+}
+
+void
+agx_preprocess_nir_g18g(nir_shader *nir)
+{
+   /* Select G18 trig without inheriting G17P subgroup/shared-memory rules. */
+   agx_preprocess_nir_internal(nir, false, true);
 }
 
 static bool

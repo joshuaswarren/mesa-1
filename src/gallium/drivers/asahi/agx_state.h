@@ -588,6 +588,8 @@ struct asahi_vs_shader_key {
     */
    bool hw;
    bool custom_borders;
+   /* G18's native line state has no rasterizer point-size output. */
+   bool omit_point_size;
 };
 
 struct agx_vertex_elements {
