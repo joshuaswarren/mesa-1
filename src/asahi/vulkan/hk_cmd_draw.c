@@ -4253,8 +4253,19 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct agx_ptr prepared_out_draws = gfx->prepared_tess_out_draws;
 
-   if (!gfx->prepared_tess_params_filled)
-      hk_init_tess_params(cmd, out);
+   /* Always derive the state-dependent fields from this draw's state. The
+    * bind-time fill in hk_cmd_prepare_bound_graphics() runs from
+    * cmd_bind_shaders(), which vk_graphics_pipeline_cmd_bind() calls before
+    * it applies the pipeline's static dynamic state, so it saw a stale
+    * patch_control_points (0 on the first bind of a command buffer) and
+    * domain origin; both, and pipeline-statistics queries, may also change
+    * between bind and draw. With input_patch_size == 0 the first draw after a
+    * bind published nr_patches == 0 and a 20-byte TCS/count/coord blob while
+    * its launches, sized from the live state, still covered every patch, so
+    * the TCS output overran unrelated command-pool memory (e.g. the next
+    * draw's vertex and tessellation parameter blocks). Only tessellation
+    * draws reach this, and later draws of a binding already re-ran it. */
+   hk_init_tess_params(cmd, out);
 
    uint32_t draw_stride_el = 5;
    size_t draw_stride_B = draw_stride_el * sizeof(uint32_t);
