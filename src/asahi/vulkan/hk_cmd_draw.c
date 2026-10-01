@@ -9374,11 +9374,20 @@ hk_g17p_flush_prepared_dynamic_state(
 
    struct hk_linked_shader *linked_hw_vs =
       hw_vs == sw_vs ? linked_vs : hw_vs->only_linked;
-   bool vertex_exact = gfx->prepared_vertex_shader == hw_vs &&
-                       gfx->prepared_vertex_linked == linked_hw_vs &&
+   const bool vertex_program_exact =
+      gfx->prepared_vertex_shader == hw_vs &&
+      gfx->prepared_vertex_linked == linked_hw_vs;
+   bool vertex_exact = vertex_program_exact &&
                        gfx->prepared_vertex_root == gfx->root;
-   if (vertex_exact &&
-       (gfx->prepared_vertex_draw_params != gfx->draw_params ||
+   /* The launcher's compact root record names the root and the per-draw
+    * parameter sources. A transformed (tessellation/geometry) draw uploads
+    * its parameters above and so republishes the root after preparation;
+    * that is a pointer change like any other, not a different program.
+    * Retarget the record instead of refusing the draw (shader-object
+    * vert/tesc/tese[/geom]/frag pipelines failed every draw this way). */
+   if (vertex_program_exact &&
+       (!vertex_exact ||
+        gfx->prepared_vertex_draw_params != gfx->draw_params ||
         gfx->prepared_vertex_draw_id_ptr != gfx->draw_id_ptr)) {
       vertex_exact = hk_retarget_prepared_usc_root(
          cmd, hw_vs, linked_hw_vs, gfx->prepared_vertex_usc,
