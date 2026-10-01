@@ -2812,6 +2812,65 @@ hk_g17p_compile_vs_cprog(struct hk_device *dev, nir_shader **nir,
    return false;
 }
 
+/*
+ * The fragment constant program (v56c: formed when a fragment reads
+ * descriptor-backed memory it can hoist) is launched by the same bounded
+ * native protocol as the vertex one, and hk_g17p_basic_graphics_program_
+ * supported() refuses every draw of a fragment whose preamble falls outside
+ * it -- a CProg that spills beyond its imported-input TPS frame above all.
+ * Decide that once, here, exactly as hk_g17p_compile_vs_cprog() does for the
+ * vertex stage: compile a clone with the constant program and keep it only
+ * when it is launchable; otherwise build the fragment the way a
+ * push-constant-only fragment is built (no preamble), which is the v56b
+ * default path. A shader whose constant program does not compile at all (an
+ * unencodable preamble instruction) takes the same route.
+ *
+ * On success the clone replaces `*nir`. Otherwise `shader->b` is cleared,
+ * `*nir` is untouched and `key` (and the monolithic relink key) no longer
+ * asks for a preamble.
+ */
+static bool
+hk_g17p_compile_fs_cprog(nir_shader **nir, struct agx_shader_key *key,
+                         struct hk_shader *shader)
+{
+   nir_shader *attempt = nir_shader_clone(NULL, *nir);
+   if (!attempt)
+      return false;
+
+   const char *declined = "compile";
+   if (agx_compile_shader_nir(attempt, key, &shader->b)) {
+      const struct agx_shader_info *info = &shader->b.info;
+      if (!info->has_preamble || hk_g17p_native_cprog_qualified(info)) {
+         ralloc_free(*nir);
+         *nir = attempt;
+         return true;
+      }
+
+      declined = "cprog-shape";
+      mesa_logw("G17P fragment constant program not launchable (%s): "
+                "preamble=%uB tps=%uB inputs=%uB gprs=%u staging_known=%u; "
+                "compiling without it",
+                declined, info->preamble_size, info->preamble_scratch_size,
+                info->agx3_preamble_inputs.storage_bytes,
+                info->nr_preamble_gprs, info->agx3_preamble_staging_known);
+      free(shader->b.binary);
+   } else {
+      mesa_logw("G17P fragment constant program failed to compile; "
+                "compiling without it");
+   }
+
+   memset(&shader->b, 0, sizeof(shader->b));
+   ralloc_free(attempt);
+
+   key->no_preamble = true;
+   key->g17p_native_uniforms = false;
+   if (shader->g17p_mono_nir) {
+      shader->g17p_mono_key.no_preamble = true;
+      shader->g17p_mono_key.g17p_native_uniforms = false;
+   }
+   return false;
+}
+
 static VkResult
 hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                nir_shader *nir, VkShaderCreateFlagsEXT shader_flags,
@@ -3367,6 +3426,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                          HK_ENV_BOOL_ONCE("HK_G17P_VS_CPROG", true);
    bool compiled = vs_cprog &&
       hk_g17p_compile_vs_cprog(dev, &nir, &backend_key, shader);
+   if (!compiled && dev->dev.chip == AGX_CHIP_G17P &&
+       nir->info.stage == MESA_SHADER_FRAGMENT && !backend_key.no_preamble)
+      compiled = hk_g17p_compile_fs_cprog(&nir, &backend_key, shader);
    if (!compiled)
       compiled = agx_compile_shader_nir(nir, &backend_key, &shader->b);
 
