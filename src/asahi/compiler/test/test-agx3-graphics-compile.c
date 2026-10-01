@@ -874,6 +874,68 @@ test_g17p_background_clear(void)
    return ok;
 }
 
+static nir_shader *build_fs_alpha_discard_word(void);
+static nir_shader *build_fs_kill_then_alpha_discard_word(void);
+
+/* AGX_G17P_DISCARD_WORD: at one sample both non-constant coverage sources
+ * are reduced to bit 0 (FLAGS = 3); at four samples the whole masks are kept
+ * (FLAGS = 0). The first, no-tests update of the kill-then-discard shape
+ * keeps its constant live source, so only its target is reduced (FLAGS = 1).
+ * With AGX_G17P_DISCARD_WORD=0 every FLAGS stays 0. The binaries' coverage
+ * protocol is checked by the fs-*-discard-word cases. */
+static bool
+g17p_discard_word_case(nir_shader *(*build)(void), unsigned nr_samples,
+                       const unsigned *expected_flags, unsigned count)
+{
+   nir_shader *nir = build();
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+      .fs.nr_samples = nr_samples,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part);
+   const bool on =
+      agx_get_codegen_flags() & AGX_CODEGEN_G17P_DISCARD_WORD;
+
+   unsigned seen = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_sample_mask_agx)
+               continue;
+            const unsigned want =
+               (on && seen < count && nr_samples <= 1) ? expected_flags[seen]
+                                                       : 0;
+            ok &= nir_intrinsic_flags(intr) == want;
+            ++seen;
+         }
+      }
+   }
+   ok &= seen == count;
+
+   if (!ok)
+      fprintf(stderr, "AGX3b discard word mismatch (%ux, option %s, %u "
+                      "updates)\n",
+              MAX2(nr_samples, 1), on ? "on" : "off", seen);
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
+}
+
+static bool
+test_g17p_discard_word(void)
+{
+   static const unsigned one[] = {3}, two[] = {1, 3};
+   return g17p_discard_word_case(build_fs_alpha_discard_word, 1, one, 1) &&
+          g17p_discard_word_case(build_fs_alpha_discard_word, 4, one, 1) &&
+          g17p_discard_word_case(build_fs_kill_then_alpha_discard_word, 1,
+                                 two, 2);
+}
+
 static bool
 test_g17p_background_f16_clear_narrowing(void)
 {
@@ -1406,6 +1468,64 @@ build_fs_discard_then_tests(void)
    nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
                        nir_imm_intN_t(&b, 0xff, 16));
    fs_store_colour(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f));
+   return fs_finish(&b);
+}
+
+/* Minecraft's `if (colour.a == 0.0) discard;` as Honeykrisp's deferred
+ * lowering hands it to the backend: the dynamic tests_zs mask ORed into the
+ * killed set, and its complement as the live set. AGX_G17P_DISCARD_WORD
+ * reduces both to bit 0 at one sample; the single testing update must keep
+ * its class-1 transaction. */
+static nir_shader *
+build_fs_alpha_discard_word(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P alpha discard word FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *colour = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   nir_def *c = nir_feq(&b, nir_channel(&b, colour, 3), nir_imm_float(&b, 0));
+   nir_def *killed = nir_bcsel(&b, c, nir_imm_intN_t(&b, 0xff, 16),
+                               nir_imm_intN_t(&b, 0, 16));
+   nir_def *tests = nir_load_preamble(&b, 1, 16, .base = 0);
+   nir_sample_mask_agx(&b, nir_ior(&b, tests, killed),
+                       nir_ixor(&b, killed, nir_imm_intN_t(&b, 0xff, 16)));
+   fs_store_colour(&b, colour);
+   b.shader->info.fs.uses_discard = true;
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
+/* A dynamic no-tests kill (killed | 0 target, constant live 0) followed by
+ * the testing update with a dynamic live set: only the second owns class 1,
+ * and reducing the first's target must not turn it into a testing update. */
+static nir_shader *
+build_fs_kill_then_alpha_discard_word(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P kill then alpha discard word FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *colour = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   nir_def *first = nir_flt(&b, nir_channel(&b, colour, 0),
+                            nir_imm_float(&b, 0.5));
+   nir_sample_mask_agx(&b, nir_bcsel(&b, first, nir_imm_intN_t(&b, 0xff, 16),
+                                     nir_imm_intN_t(&b, 0, 16)),
+                       nir_imm_intN_t(&b, 0, 16));
+   nir_def *c = nir_feq(&b, nir_channel(&b, colour, 3), nir_imm_float(&b, 0));
+   nir_def *killed = nir_bcsel(&b, c, nir_imm_intN_t(&b, 0xff, 16),
+                               nir_imm_intN_t(&b, 0, 16));
+   nir_def *tests = nir_load_preamble(&b, 1, 16, .base = 0);
+   nir_sample_mask_agx(&b, nir_ior(&b, tests, killed),
+                       nir_ixor(&b, killed, nir_imm_intN_t(&b, 0xff, 16)));
+   fs_store_colour(&b, colour);
+   b.shader->info.fs.uses_discard = true;
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
    return fs_finish(&b);
 }
 
@@ -8170,6 +8290,15 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_balanced_coverage = true, .nr_samples = 2},
    {"fs-sample-mask-write", build_fs_sample_mask_write, true,
     .g17p_only = true, .expected_g17p_balanced_coverage = true},
+   {"fs-alpha-discard-word", build_fs_alpha_discard_word, true,
+    .g17p_only = true, .expected_g17p_balanced_coverage = true},
+   /* Four samples keep whole masks (the SR39 path); only the select uses
+    * the widening multiply. */
+   {"fs-alpha-discard-word-4x", build_fs_alpha_discard_word, true,
+    .g17p_only = true, .expected_g17p_balanced_coverage = true,
+    .nr_samples = 4},
+   {"fs-kill-then-alpha-discard-word", build_fs_kill_then_alpha_discard_word,
+    true, .g17p_only = true, .expected_g17p_balanced_coverage = true},
    {"fs-sample-mask-write-4x", build_fs_sample_mask_write, true,
     .g17p_only = true, .expected_g17p_sample_mask_input = true,
     .expected_g17p_balanced_coverage = true, .nr_samples = 4},
@@ -8969,6 +9098,7 @@ main(int argc, char **argv)
    RUN(test_g17p_multisample_eot_block_store);
    RUN(test_g17p_background_reload_staging);
    RUN(test_g17p_background_clear);
+   RUN(test_g17p_discard_word);
    RUN(test_g17p_background_f16_clear_narrowing);
    RUN(test_g17p_half_norm8_epilog);
    RUN(test_g17p_half_rgb10_epilog);

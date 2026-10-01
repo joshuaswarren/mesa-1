@@ -214,6 +214,8 @@ AGX_C2_OPTION(agx_g17p_bank_coalesce, "AGX_G17P_BANK_COALESCE")
 AGX_C2_OPTION(agx_g17p_uniform_imm_compare, "AGX_G17P_UNIFORM_IMM_COMPARE")
 AGX_C2_OPTION(agx_g17p_tile_wait_sink, "AGX_G17P_TILE_WAIT_SINK")
 AGX_C2_OPTION(agx_g17p_entry_compare, "AGX_G17P_ENTRY_COMPARE")
+AGX_C2_OPTION(agx_g17p_empty_then, "AGX_G17P_EMPTY_THEN")
+AGX_C2_OPTION(agx_g17p_discard_word, "AGX_G17P_DISCARD_WORD")
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_fltnorm_liveness,
                            "AGX_G17P_FLTNORM_LIVENESS", false)
 /* Native light-fragment instruction forms. */
@@ -317,6 +319,10 @@ agx_get_codegen_flags(void)
               ? AGX_CODEGEN_G17P_FLTNORM_LIVENESS : 0) |
           (debug_get_option_agx_g17p_entry_compare()
               ? AGX_CODEGEN_G17P_ENTRY_COMPARE : 0) |
+          (debug_get_option_agx_g17p_empty_then()
+              ? AGX_CODEGEN_G17P_EMPTY_THEN : 0) |
+          (debug_get_option_agx_g17p_discard_word()
+              ? AGX_CODEGEN_G17P_DISCARD_WORD : 0) |
           (debug_get_option_agx_g17p_sr32_pixel_coord()
               ? AGX_CODEGEN_G17P_SR32_PIXEL_COORD : 0) |
           (debug_get_option_agx_g17p_bfe_immediate()
@@ -738,6 +744,14 @@ agx_pad_to_32(agx_builder *b, agx_index s)
    agx_index dst = agx_vec_temp(b->shader, AGX_SIZE_32, 1);
    agx_emit_collect_to(b, dst, 2, srcs);
    return dst;
+}
+
+/* A 16-bit operand the AGX3B coverage-word path can use as a register. */
+static agx_index
+agx_g17p_reg16(agx_builder *b, agx_index x)
+{
+   assert(x.size == AGX_SIZE_16);
+   return x.type == AGX_INDEX_NORMAL ? x : agx_mov(b, x);
 }
 
 static agx_index
@@ -3079,11 +3093,21 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
                (!no_tests ? 2 : 0) | (force_early ? 1 : 0));
          }
 
+         /* AGX_G17P_DISCARD_WORD: agx_g17p_discard_word() reduced these
+          * sources to bit 0 already (FLAGS), and the select below is one
+          * widening 16x16->32 multiply rather than two padded collects. */
+         const bool discard_word =
+            agx_get_codegen_flags() & AGX_CODEGEN_G17P_DISCARD_WORD;
+         const unsigned reduced =
+            (discard_word && samples == 1) ? nir_intrinsic_flags(instr) : 0;
+
          if (samples == 1) {
             /* Apple's one-sample fragments read SR2 and repeat it in both
              * coverage nibbles. */
-            target = agx_and(b, target_in, agx_immediate(1));
-            keep = agx_and(b, live_in, agx_immediate(1));
+            target = (reduced & 1) ? agx_g17p_reg16(b, target_in)
+                                   : agx_and(b, target_in, agx_immediate(1));
+            keep = (reduced & 2) ? agx_g17p_reg16(b, live_in)
+                                 : agx_and(b, live_in, agx_immediate(1));
             agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
             agx_get_coverage_1x_agx3_to(b, t16);
             mid = agx_iadd(b, t16, t16, 4);
@@ -3118,13 +3142,21 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          }
 
          agx_index word = agx_iadd(b, keep, mid, 4);
-         agx_index zero = agx_mov_imm(b, 16, 0);
-         agx_index target32 = agx_temp(b->shader, AGX_SIZE_32);
-         agx_index word32 = agx_temp(b->shader, AGX_SIZE_32);
-         agx_emit_collect_to(b, target32, 2, (agx_index[]){target, zero});
-         agx_emit_collect_to(b, word32, 2, (agx_index[]){word, zero});
          agx_index selected = agx_temp(b->shader, AGX_SIZE_32);
-         agx_imad_to(b, selected, target32, word32, agx_zero(), 0);
+         if (discard_word) {
+            /* target is 0 or 1 and word < 0x1000, so the zero-extended
+             * 16x16->32 product (Apple's half-operand imadd form) equals
+             * the padded 32x32 one, high half zero. */
+            agx_imad_to(b, selected, agx_abs(target), agx_abs(word),
+                        agx_zero(), 0);
+         } else {
+            agx_index zero = agx_mov_imm(b, 16, 0);
+            agx_index target32 = agx_temp(b->shader, AGX_SIZE_32);
+            agx_index word32 = agx_temp(b->shader, AGX_SIZE_32);
+            agx_emit_collect_to(b, target32, 2, (agx_index[]){target, zero});
+            agx_emit_collect_to(b, word32, 2, (agx_index[]){word, zero});
+            agx_imad_to(b, selected, target32, word32, agx_zero(), 0);
+         }
          return agx_sample_mask_agx3(
             b, target, selected,
             (!no_tests ? 2 : 0) | (force_early ? 1 : 0));
@@ -7141,9 +7173,11 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
    return false;
 }
 
+static bool agx_g17p_discard_word(nir_shader *nir);
+
 static void
 agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
-                 bool byte_indices,
+                 bool byte_indices, bool discard_word,
                  uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count)
 {
    /* This runs only once up front since other optimizations don't affect it */
@@ -7281,6 +7315,20 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, bool uniform_atomics,
     * should work on unlowered fmin/fmax.
     */
    NIR_PASS(_, nir, agx_nir_lower_fminmax);
+
+   /* AGX_G17P_DISCARD_WORD: reduce one-sample coverage-update sources to bit
+    * 0 after the algebraic loops and right before preamble formation, so the
+    * uniform `tests_zs & 1` is hoisted. nir_opt_algebraic would otherwise
+    * refactor `b2i(c) | (u & 1)` back into `(b2i(c) | u) & 1` (an OR and an
+    * AND per fragment). */
+   if (discard_word) {
+      bool word = false;
+      NIR_PASS(word, nir, agx_g17p_discard_word);
+      if (word) {
+         NIR_PASS(_, nir, nir_opt_constant_folding);
+         NIR_PASS(_, nir, nir_opt_dce);
+      }
+   }
 
    /* Force preamble generation for internal shaders since hk's meta copies
     * depend on it for correctness with imgwblk intrinsics.
@@ -9811,6 +9859,178 @@ agx3_nir_lower_uniform_dma(nir_shader *nir, const struct agx_shader_key *key,
    return true;
 }
 
+/* AGX_G17P_DISCARD_WORD (frg-codegen v3, codegen bit 25, C2 default).
+ *
+ * At one sample the AGX3B coverage update reads only bit 0 of TARGET and LIVE
+ * (the sample_mask_agx case builds target = T & 1 and keep = L & 1). The NIR
+ * lowering builds both from whole-pixel masks, so a Minecraft-style
+ * `if (a == 0) discard;` reaches the backend as
+ *
+ *    sample_mask_agx(tests_zs | bcsel(c, 0xff, 0), bcsel(c, 0, 0xff))
+ *
+ * and then two ANDs, two padded collects and a 32x32 IMAD to select the word
+ * (Apple's native conditional discard is one FSEL and two IADDs). Rebuild each
+ * non-constant source from its bit 0 -- selects of constants carry 0/1
+ * directly and the uniform `tests_zs & 1` is hoisted into the preamble -- and
+ * record that in FLAGS (bit i: source i is already 0 or 1), so the backend
+ * drops its ANDs and selects with one widening IMAD. Constant sources are
+ * left untouched, so the backend's no-tests analysis sees exactly what it saw
+ * before. The value of bit 0 -- the only bit the one-sample path reads -- is
+ * unchanged by construction.
+ */
+static bool
+agx_g17p_bit0_const(nir_def *d, unsigned *v)
+{
+   nir_scalar s = nir_scalar_chase_movs(nir_get_scalar(d, 0));
+   if (!nir_scalar_is_const(s))
+      return false;
+   *v = nir_scalar_as_uint(s) & 1;
+   return true;
+}
+
+/* d = bcsel(c, #x, #y) with 0/1 constant arms, as built below. */
+static bool
+agx_g17p_bit0_const_select(nir_def *d, nir_def **c, unsigned *x, unsigned *y)
+{
+   nir_scalar s = nir_get_scalar(d, 0);
+   if (!nir_scalar_is_alu(s) || nir_scalar_alu_op(s) != nir_op_bcsel)
+      return false;
+   nir_alu_instr *alu = nir_def_as_alu(d);
+   if (!agx_g17p_bit0_const(alu->src[1].src.ssa, x) ||
+       !agx_g17p_bit0_const(alu->src[2].src.ssa, y) ||
+       alu->src[0].src.ssa->num_components != 1)
+      return false;
+   *c = alu->src[0].src.ssa;
+   return true;
+}
+
+static nir_def *agx_g17p_bit0(nir_builder *b, nir_scalar s, unsigned depth);
+
+static nir_def *
+agx_g17p_bit0_logic(nir_builder *b, nir_op op, nir_def *l, nir_def *r)
+{
+   /* Fold constants here: a source that only reduces to a constant must be
+    * recognised as one, so it keeps its original form (no-tests analysis). */
+   unsigned lv, rv;
+   if (agx_g17p_bit0_const(l, &lv) && agx_g17p_bit0_const(r, &rv)) {
+      return nir_imm_intN_t(b, op == nir_op_ior    ? (lv | rv)
+                               : op == nir_op_iand ? (lv & rv)
+                                                   : (lv ^ rv), 16);
+   }
+   for (unsigned i = 0; i < 2; ++i) {
+      nir_def *k = i ? r : l, *o = i ? l : r;
+      unsigned kv, x, y;
+      nir_def *c;
+      if (!agx_g17p_bit0_const(k, &kv))
+         continue;
+      if (op == nir_op_ior)
+         return kv ? nir_imm_intN_t(b, 1, 16) : o;
+      if (op == nir_op_iand)
+         return kv ? o : nir_imm_intN_t(b, 0, 16);
+      if (!kv)
+         return o;
+      /* bcsel(c, #x, #y) ^ 1 = bcsel(c, #!x, #!y): live = killed ^ 0xff. */
+      if (agx_g17p_bit0_const_select(o, &c, &x, &y))
+         return nir_bcsel(b, c, nir_imm_intN_t(b, !x, 16),
+                          nir_imm_intN_t(b, !y, 16));
+      return nir_ixor(b, o, nir_imm_intN_t(b, 1, 16));
+   }
+   /* Leave `x | bcsel(c, 1, 0)` as an OR: distributing it would give a
+    * select between a register or uniform and an immediate, which the AGX3B
+    * compare-select materializes with extra moves. */
+   return nir_build_alu2(b, op, l, r);
+}
+
+static nir_def *
+agx_g17p_bit0(nir_builder *b, nir_scalar s, unsigned depth)
+{
+   s = nir_scalar_chase_movs(s);
+   if (nir_scalar_is_const(s))
+      return nir_imm_intN_t(b, nir_scalar_as_uint(s) & 1, 16);
+
+   if (depth < 6 && nir_scalar_is_alu(s)) {
+      const nir_op op = nir_scalar_alu_op(s);
+      switch (op) {
+      case nir_op_u2u16:
+      case nir_op_u2u32:
+      case nir_op_i2i16:
+      case nir_op_i2i32:
+         /* Integer conversions keep bit 0. */
+         return agx_g17p_bit0(b, nir_scalar_chase_alu_src(s, 0), depth + 1);
+      case nir_op_b2i16:
+      case nir_op_b2i32: {
+         nir_scalar c = nir_scalar_chase_movs(nir_scalar_chase_alu_src(s, 0));
+         if (nir_scalar_is_const(c))
+            return nir_imm_intN_t(b, nir_scalar_as_bool(c) ? 1 : 0, 16);
+         return nir_b2i16(b, nir_channel(b, c.def, c.comp));
+      }
+      case nir_op_bcsel: {
+         nir_scalar cs = nir_scalar_chase_movs(nir_scalar_chase_alu_src(s, 0));
+         if (nir_scalar_is_const(cs))
+            return agx_g17p_bit0(
+               b, nir_scalar_chase_alu_src(s, nir_scalar_as_bool(cs) ? 1 : 2),
+               depth + 1);
+         nir_def *c = nir_channel(b, cs.def, cs.comp);
+         nir_def *x = agx_g17p_bit0(b, nir_scalar_chase_alu_src(s, 1), depth + 1);
+         nir_def *y = agx_g17p_bit0(b, nir_scalar_chase_alu_src(s, 2), depth + 1);
+         unsigned xv, yv;
+         if (agx_g17p_bit0_const(x, &xv) && agx_g17p_bit0_const(y, &yv) &&
+             xv == yv)
+            return x;
+         return nir_bcsel(b, c, x, y);
+      }
+      case nir_op_ior:
+      case nir_op_iand:
+      case nir_op_ixor:
+         return agx_g17p_bit0_logic(
+            b, op, agx_g17p_bit0(b, nir_scalar_chase_alu_src(s, 0), depth + 1),
+            agx_g17p_bit0(b, nir_scalar_chase_alu_src(s, 1), depth + 1));
+      default:
+         break;
+      }
+   }
+
+   nir_def *d = nir_channel(b, s.def, s.comp);
+   if (d->bit_size == 1)
+      return nir_b2i16(b, d);
+   if (d->bit_size != 16)
+      d = nir_u2u16(b, d);
+   return nir_iand_imm(b, d, 1);
+}
+
+static bool
+agx_g17p_discard_word_instr(nir_builder *b, nir_intrinsic_instr *intr,
+                            void *data)
+{
+   if (intr->intrinsic != nir_intrinsic_sample_mask_agx ||
+       nir_intrinsic_flags(intr))
+      return false;
+
+   b->cursor = nir_before_instr(&intr->instr);
+   unsigned flags = 0;
+   for (unsigned i = 0; i < 2; ++i) {
+      if (nir_src_is_const(intr->src[i]))
+         continue;
+      nir_def *bit0 = agx_g17p_bit0(b, nir_get_scalar(intr->src[i].ssa, 0), 0);
+      unsigned v;
+      /* A source that reduces to a constant keeps its original form; the
+       * no-tests decision reads constant sources. */
+      if (agx_g17p_bit0_const(bit0, &v))
+         continue;
+      nir_src_rewrite(&intr->src[i], bit0);
+      flags |= BITFIELD_BIT(i);
+   }
+   nir_intrinsic_set_flags(intr, flags);
+   return flags != 0;
+}
+
+static bool
+agx_g17p_discard_word(nir_shader *nir)
+{
+   return nir_shader_intrinsics_pass(nir, agx_g17p_discard_word_instr,
+                                     nir_metadata_control_flow, NULL);
+}
+
 bool
 agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                        struct agx_shader_part *out)
@@ -10039,9 +10259,26 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
       }
    }
 
+   /* AGX_G17P_EMPTY_THEN (default on): the rotation above copies a loop's
+    * header test into a guard `if (exit) {} else { loop }`, and the earlier
+    * nir_opt_if runs happened before it. On AGX3 that shape costs a CNDST
+    * plus a CNDEF (else flip) per invocation; inverted it is one inverted
+    * CNDST, the empty else is removed by agx_opt_empty_else, and the guard
+    * matches Apple's (fs-apple.bin +0x76 cndst invert, no else). */
+   if (is_g17p && (agx_get_codegen_flags() & AGX_CODEGEN_G17P_EMPTY_THEN))
+      NIR_PASS(_, nir, nir_opt_if_empty_then);
+
+   /* AGX_G17P_DISCARD_WORD: only the one-sample AGX3B coverage path reads
+    * bit 0 alone; sample loops and multisampled variants keep whole masks. */
+   const bool discard_word =
+      is_g17p && key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+      nir->info.stage == MESA_SHADER_FRAGMENT &&
+      MAX2(key->fs.nr_samples, 1) == 1 && !key->fs.inside_sample_loop &&
+      (agx_get_codegen_flags() & AGX_CODEGEN_G17P_DISCARD_WORD);
+
    agx_optimize_nir(
       nir, key->dev.soft_fault, uniform_atomics,
-      key->dev.encoding == AGX_ISA_ENCODING_AGX3B,
+      key->dev.encoding == AGX_ISA_ENCODING_AGX3B, discard_word,
       form_preamble ? &info->push_count : NULL,
       (form_preamble && key->promote_textures) ? &info->texture_state_count
                                               : NULL,

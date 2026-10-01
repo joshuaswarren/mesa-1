@@ -2506,7 +2506,10 @@ load("sysval_agx", [], [DESC_SET, BINDING, FLAGS], [CAN_REORDER, CAN_ELIMINATE])
 # Write out a sample mask for a targeted subset of samples, specified in the two
 # masks. Maps to the corresponding AGX instruction, the actual workings are
 # documented elsewhere as they are too complicated for this comment.
-intrinsic("sample_mask_agx", src_comp=[1, 1])
+#
+# FLAGS (AGX G17P one-sample coverage words): bit i set means source i is
+# already reduced to bit 0 (0 or 1), so the backend need not mask it.
+intrinsic("sample_mask_agx", src_comp=[1, 1], indices=[FLAGS])
 
 # For a given row of the polygon stipple given as an integer source in [0, 31],
 # load the 32-bit stipple pattern for that row.

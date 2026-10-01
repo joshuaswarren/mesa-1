@@ -93,6 +93,10 @@ enum agx_codegen_flag {
    AGX_CODEGEN_G17P_TILE_WAIT_SINK            = BITFIELD_BIT(21),
    AGX_CODEGEN_G17P_FLTNORM_LIVENESS          = BITFIELD_BIT(22),
    AGX_CODEGEN_G17P_ENTRY_COMPARE             = BITFIELD_BIT(23),
+   /* frg-codegen v2 (2026-10-01). */
+   AGX_CODEGEN_G17P_EMPTY_THEN                = BITFIELD_BIT(24),
+   /* frg-codegen v3 (2026-10-01): one-sample discard coverage word. */
+   AGX_CODEGEN_G17P_DISCARD_WORD              = BITFIELD_BIT(25),
 };
 
 uint32_t agx_get_codegen_flags(void);

@@ -356,9 +356,14 @@ struct hk_bg_eot {
  * remain harmless misses. */
 #define HK_G17P_BG_EOT_CACHE_ENTRIES 16
 #define HK_G17P_BG_EOT_CACHE_KEY_MAX 768
+struct hk_g17p_bg_eot_dev_entry;
+
 struct hk_g17p_bg_eot_cache_entry {
    uint8_t key[HK_G17P_BG_EOT_CACHE_KEY_MAX];
    struct hk_bg_eot program[4];
+   /* frg-codegen v4: the device-lifetime entry this pass fills or reuses
+    * (HK_G17P_BG_EOT_DEVICE_CACHE), or NULL. */
+   struct hk_g17p_bg_eot_dev_entry *dev_entry;
    uint64_t hash;
    uint16_t key_size;
    uint8_t valid_variants;
@@ -729,9 +734,6 @@ struct hk_graphics_state {
       struct agx_vdm_state_update encoded;
       bool valid;
    } g17p_vdm_update_memo;
-   struct hk_g17p_bg_eot_cache_entry
-      g17p_bg_eot_cache[HK_G17P_BG_EOT_CACHE_ENTRIES];
-   uint8_t g17p_bg_eot_cache_next;
 
    uint32_t shaders_dirty;
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
@@ -1213,6 +1215,14 @@ struct hk_ioto_arena {
 
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
+
+   /* frg-codegen v4: the per-recording BG/EOT cache (13.5 KiB) lives outside
+    * `state` so the full-state memset of every reset no longer clears it;
+    * hk_reset_cmd_buffer() invalidates the entries instead. Entries are only
+    * read when valid, so this is the same cache contract. */
+   struct hk_g17p_bg_eot_cache_entry
+      g17p_bg_eot_cache[HK_G17P_BG_EOT_CACHE_ENTRIES];
+   uint8_t g17p_bg_eot_cache_next;
 
    /* v94 HK_G17P_HOST_ENCODE bit1: set by hk_reset_cmd_buffer, cleared by
     * vkBeginCommandBuffer. */

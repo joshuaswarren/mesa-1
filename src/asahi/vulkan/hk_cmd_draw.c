@@ -1663,6 +1663,28 @@ hk_g17p_bg_eot_ops_uniform(const struct agx_bg_eot_key *key)
  * 3..20, register 15369) with n << 3. Linux uses 8 (0x40); native captures
  * show 8 on QID16 and 0 on QID18 for the same light pass (render-register
  * audit FINDINGS.md). */
+/* HK_G17P_PACKED_CLEAR (default on; =0 restores the FLTNORM clear): a
+ * single-sample R8G8B8A8_UNORM RT0 clear is packed on the CPU and the
+ * background program stores the word directly (COPY + LSTCOL instead of two
+ * FLTNORMs + LSTCOL per pixel). Apple's background clear converts per pixel
+ * (fltnorm, fltnorm, lstcol); this is one instruction per pixel cheaper. */
+static bool
+hk_g17p_packed_clear_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = HK_ENV_BOOL_ONCE("HK_G17P_PACKED_CLEAR", true);
+   return enabled;
+}
+
+/* The Vulkan float-to-UNORM conversion (round to nearest even, clamp, NaN to
+ * zero) of one clear component. */
+static uint32_t
+hk_g17p_unorm8(float x)
+{
+   return x == x ? (uint32_t)_mesa_float_to_unorm(x, 8) : 0;
+}
+
 static bool
 hk_g17p_ioto_immediate_enabled(void)
 {
@@ -1691,21 +1713,321 @@ hk_g17p_bg_resource_override(uint64_t *resource_spec)
    *resource_spec = (*resource_spec & ~field) | ((uint64_t)low << 3);
 }
 
+/* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE (default on).
+ *
+ * The per-recording cache above dies with every vkResetCommandBuffer, so an
+ * application that re-records each frame (the depth-2 benchmark, most games)
+ * regenerates and republishes its background and end-of-tile launch programs
+ * for every pass: about a third of the host-side recording cost of a light
+ * pass (frg-codegen/v4/hostpath profile). For the single-attachment,
+ * unspilled, non-resolving layouts the RT0 builder handles, the programs
+ * depend only on the BG/EOT key, the attachment's clear value and ops, and the
+ * descriptors of its image view -- all value-compared below -- plus
+ * device-lifetime state (the precompiled BG/EOT shaders, rodata). Build those
+ * programs and their argument blocks once into device-lifetime memory and
+ * reuse them from any command buffer. Entries are immutable and never freed
+ * before the device; the cache stops growing at a fixed bound. */
+#define HK_G17P_BG_EOT_DEV_ENTRIES       256
+#define HK_G17P_BG_EOT_DEV_CHUNK         (64 * 1024)
+#define HK_G17P_BG_EOT_DEV_MAX_CHUNKS    8
+#define HK_G17P_BG_EOT_DEV_PROGRAM_MAX   256
+#define HK_G17P_BG_EOT_DEV_DATA_MAX      512
+
+struct hk_g17p_bg_eot_dev_key {
+   struct agx_tilebuffer_layout tib;
+   uint32_t layers;
+   uint32_t color_attachment_count;
+   uint32_t incomplete_render_area;
+   uint32_t view;
+   uint32_t samples;
+   uint32_t format;
+   uint32_t load_op;
+   uint32_t store_op;
+   VkClearColorValue clear;
+   struct hk_native_pbe_descriptor eot, layered_eot;
+   struct hk_native_texture_descriptor background, layered_background;
+   uint32_t pbe_valid;
+   uint32_t pad;
+};
+
+struct hk_g17p_bg_eot_dev_entry {
+   struct hk_g17p_bg_eot_dev_key key;
+   uint64_t hash;
+   struct hk_bg_eot program[4];
+   uint8_t valid_variants;
+};
+
+struct hk_g17p_bg_eot_arena {
+   struct agx_bo *bo;
+   uint8_t *map;
+   uint64_t base;
+   uint32_t cursor, capacity;
+};
+
+struct hk_g17p_bg_eot_dev_cache {
+   simple_mtx_t lock;
+   struct hk_g17p_bg_eot_arena program, data;
+   struct agx_bo *bos[2 * HK_G17P_BG_EOT_DEV_MAX_CHUNKS];
+   unsigned bo_count, count;
+   bool full;
+   /* Open-addressed index: entry number + 1, or 0 when free. */
+   uint16_t index[2 * HK_G17P_BG_EOT_DEV_ENTRIES];
+   struct hk_g17p_bg_eot_dev_entry entries[HK_G17P_BG_EOT_DEV_ENTRIES];
+};
+
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache,
+                           "HK_G17P_BG_EOT_DEVICE_CACHE", true)
+/* Diagnostic: print every device-cache program and argument block in the
+ * launch-trace line format ("dev-" prefixed) so they can be compared with the
+ * per-recording builder's HK_G17P_LAUNCH_TRACE output. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache_trace,
+                           "HK_G17P_BG_EOT_DEVICE_CACHE_TRACE", false)
+
+void
+hk_g17p_bg_eot_dev_cache_init(struct hk_device *dev)
+{
+   dev->g17p_bg_eot_dev_cache = NULL;
+   if (dev->dev.chip != AGX_CHIP_G17P ||
+       !debug_get_option_hk_g17p_bg_eot_device_cache())
+      return;
+   struct hk_g17p_bg_eot_dev_cache *dc = calloc(1, sizeof(*dc));
+   if (!dc)
+      return;
+   simple_mtx_init(&dc->lock, mtx_plain);
+   dev->g17p_bg_eot_dev_cache = dc;
+}
+
+void
+hk_g17p_bg_eot_dev_cache_finish(struct hk_device *dev)
+{
+   struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
+   if (!dc)
+      return;
+   for (unsigned i = 0; i < dc->bo_count; ++i)
+      agx_bo_unreference(&dev->dev, dc->bos[i]);
+   simple_mtx_destroy(&dc->lock);
+   free(dc);
+   dev->g17p_bg_eot_dev_cache = NULL;
+}
+
+/* Make room for `need` bytes at `align` in an arena, opening a new chunk if
+ * required. Programs live in the USC window exactly like the per-recording
+ * Ioto arena; argument blocks in ordinary memory like hk_pool_upload(). */
+static bool
+hk_g17p_bg_eot_arena_room(struct hk_device *dev,
+                          struct hk_g17p_bg_eot_dev_cache *dc,
+                          struct hk_g17p_bg_eot_arena *a, bool exec,
+                          uint32_t need, uint32_t align)
+{
+   if (a->map && align_uintptr(a->cursor, align) + need <= a->capacity)
+      return true;
+   if (dc->bo_count >= ARRAY_SIZE(dc->bos))
+      return false;
+   struct agx_bo *bo = agx_bo_create(
+      &dev->dev, HK_G17P_BG_EOT_DEV_CHUNK,
+      exec ? AGX_IOTO_PROGRAM_ALIGNMENT : 0,
+      exec ? (AGX_BO_EXEC | AGX_BO_LOW_VA) : 0,
+      exec ? "G17P BG/EOT device programs" : "G17P BG/EOT device arguments");
+   if (!bo)
+      return false;
+   void *map = agx_bo_map(bo);
+   if (!map || !bo->va) {
+      agx_bo_unreference(&dev->dev, bo);
+      return false;
+   }
+   dc->bos[dc->bo_count++] = bo;
+   a->bo = bo;
+   a->map = map;
+   a->base = bo->va->addr;
+   a->cursor = 0;
+   a->capacity = bo->size > UINT32_MAX ? UINT32_MAX : (uint32_t)bo->size;
+   return align_uintptr(0, align) + need <= a->capacity;
+}
+
+static struct agx_ptr
+hk_g17p_bg_eot_arena_take(struct hk_g17p_bg_eot_arena *a, uint32_t size,
+                          uint32_t align)
+{
+   const uint32_t offset = (uint32_t)align_uintptr(a->cursor, align);
+   assert(a->map && offset + size <= a->capacity);
+   a->cursor = offset + size;
+   return (struct agx_ptr){.cpu = a->map + offset, .gpu = a->base + offset};
+}
+
+/* Allocation sites of the RT0 builder: the per-recording pool, or the
+ * device cache when one is being filled (its room was reserved up front). */
+static uint64_t
+hk_g17p_bg_eot_upload(struct hk_cmd_buffer *cmd,
+                      struct hk_g17p_bg_eot_dev_cache *dc, const void *data,
+                      uint32_t size, uint32_t alignment)
+{
+   if (!dc)
+      return hk_pool_upload(cmd, data, size, alignment);
+   struct agx_ptr T = hk_g17p_bg_eot_arena_take(&dc->data, size, alignment);
+   memcpy(T.cpu, data, size);
+   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
+      hk_g17p_trace_line("dev-argument", T.gpu, data, size);
+   return T.gpu;
+}
+
+static bool
+hk_g17p_bg_eot_reserve(struct hk_cmd_buffer *cmd,
+                       struct hk_g17p_bg_eot_dev_cache *dc, size_t capacity,
+                       const char *label, struct hk_ioto_reservation *r)
+{
+   if (!dc)
+      return hk_cmd_reserve_ioto_program(cmd, capacity, label, r);
+   assert(capacity <= HK_G17P_BG_EOT_DEV_PROGRAM_MAX);
+   struct agx_ptr T = hk_g17p_bg_eot_arena_take(
+      &dc->program, (uint32_t)capacity, AGX_IOTO_PROGRAM_ALIGNMENT);
+   *r = (struct hk_ioto_reservation){.map = T.cpu, .va = T.gpu};
+   return true;
+}
+
+static uint64_t
+hk_g17p_bg_eot_publish(struct hk_cmd_buffer *cmd,
+                       struct hk_g17p_bg_eot_dev_cache *dc,
+                       const struct hk_ioto_reservation *r, size_t length)
+{
+   if (!dc)
+      return hk_cmd_publish_ioto_program(cmd, r, length);
+   struct hk_g17p_bg_eot_arena *a = &dc->program;
+   assert(r->va >= a->base && length > 0);
+   const uint64_t offset = r->va - a->base;
+   /* Give back the over-reservation, as hk_cmd_publish_ioto_program does. */
+   a->cursor = (uint32_t)(offset + length);
+   if (agx_bo_sync_for_device(a->bo, offset, length))
+      return 0;
+   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
+      hk_g17p_trace_line("dev-program", r->va, r->map, length);
+   return r->va;
+}
+
+/* Fill the value key of a render pass whose BG/EOT programs the RT0 builder
+ * produces from the key, the single attachment's ops and clear value, and its
+ * image view's descriptors alone; return false for anything else (MRT,
+ * spills, mixed layouts, resolves), which keeps the per-recording path. */
+static bool
+hk_g17p_bg_eot_dev_key_init(struct hk_cmd_buffer *cmd,
+                            const VkRenderingInfo *info,
+                            bool incomplete_render_area,
+                            struct hk_g17p_bg_eot_dev_key *dk)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (!dev->g17p_bg_eot_dev_cache || info->colorAttachmentCount > 1 ||
+       agx_tilebuffer_spills(&render->tilebuffer) ||
+       agx_g17p_classify_mrt(&render->tilebuffer) == AGX_G17P_MRT_MIXED)
+      return false;
+
+   memset(dk, 0, sizeof(*dk));
+   memcpy(&dk->tib, &render->tilebuffer, sizeof(dk->tib));
+   dk->layers = render->cr.layers;
+   dk->color_attachment_count = info->colorAttachmentCount;
+   dk->incomplete_render_area = incomplete_render_area;
+   if (info->colorAttachmentCount == 1 &&
+       info->pColorAttachments[0].imageView != VK_NULL_HANDLE) {
+      const VkRenderingAttachmentInfo *att = &info->pColorAttachments[0];
+      const struct hk_image_view *iview = render->color_att[0].iview;
+      if (!iview || att->resolveMode != VK_RESOLVE_MODE_NONE ||
+          att->resolveImageView != VK_NULL_HANDLE)
+         return false;
+      dk->view = 1;
+      dk->samples = iview->vk.image->samples;
+      dk->format = iview->vk.format;
+      dk->load_op = att->loadOp;
+      dk->store_op = att->storeOp;
+      if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+         dk->clear = att->clearValue.color;
+      dk->eot = iview->planes[0].eot;
+      dk->layered_eot = iview->planes[0].layered_eot;
+      dk->background = iview->planes[0].background;
+      dk->layered_background = iview->planes[0].layered_background;
+      dk->pbe_valid = (iview->planes[0].eot_pbe_valid ? 1 : 0) |
+                      (iview->planes[0].layered_eot_pbe_valid ? 2 : 0);
+   }
+   return true;
+}
+
+static uint64_t
+hk_g17p_bg_eot_dev_hash(const struct hk_g17p_bg_eot_dev_key *dk)
+{
+   static_assert(sizeof(*dk) % sizeof(uint64_t) == 0,
+                 "word-addressable BG/EOT device key");
+   const uint8_t *bytes = (const uint8_t *)dk;
+   uint64_t hash = UINT64_C(0x9e3779b97f4a7c15);
+   for (unsigned i = 0; i < sizeof(*dk) / sizeof(uint64_t); ++i) {
+      uint64_t word;
+      memcpy(&word, bytes + i * sizeof(word), sizeof(word));
+      hash ^= word + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) +
+              (hash >> 2);
+   }
+   return hash;
+}
+
+static struct hk_g17p_bg_eot_dev_entry *
+hk_g17p_bg_eot_dev_find(struct hk_g17p_bg_eot_dev_cache *dc,
+                        const struct hk_g17p_bg_eot_dev_key *dk,
+                        uint64_t hash)
+{
+   const unsigned mask = ARRAY_SIZE(dc->index) - 1;
+   static_assert((ARRAY_SIZE(((struct hk_g17p_bg_eot_dev_cache *)0)->index) &
+                  (ARRAY_SIZE(((struct hk_g17p_bg_eot_dev_cache *)0)->index) -
+                   1)) == 0,
+                 "power-of-two index");
+   for (unsigned i = hash & mask;; i = (i + 1) & mask) {
+      if (!dc->index[i])
+         return NULL;
+      struct hk_g17p_bg_eot_dev_entry *e = &dc->entries[dc->index[i] - 1];
+      if (e->hash == hash && !memcmp(&e->key, dk, sizeof(*dk)))
+         return e;
+   }
+}
+
+/* The index is twice the entry bound, so a free slot always exists. */
+static struct hk_g17p_bg_eot_dev_entry *
+hk_g17p_bg_eot_dev_insert(struct hk_g17p_bg_eot_dev_cache *dc,
+                          const struct hk_g17p_bg_eot_dev_key *dk,
+                          uint64_t hash)
+{
+   if (dc->count >= HK_G17P_BG_EOT_DEV_ENTRIES)
+      return NULL;
+   const unsigned mask = ARRAY_SIZE(dc->index) - 1;
+   unsigned i = hash & mask;
+   while (dc->index[i])
+      i = (i + 1) & mask;
+   struct hk_g17p_bg_eot_dev_entry *e = &dc->entries[dc->count];
+   memcpy(&e->key, dk, sizeof(*dk));
+   e->hash = hash;
+   e->valid_variants = 0;
+   memset(e->program, 0, sizeof(e->program));
+   dc->index[i] = (uint16_t)(++dc->count);
+   return e;
+}
+
 static struct hk_bg_eot
 hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                      struct agx_bg_eot_key *key,
                      const VkRenderingInfo *info, bool store,
-                     bool partial_render)
+                     bool partial_render,
+                     struct hk_g17p_bg_eot_dev_cache *dc, bool *in_device)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (in_device)
+      *in_device = false;
    /* Classification compacts holes internally, so it is invariant under the
     * explicit key/view compaction below. Keep the result for all subsequent
     * BG/EOT routing instead of rescanning the eight targets twice. */
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    if (agx_tilebuffer_spills(&key->tib) ||
        mrt == AGX_G17P_MRT_MIXED ||
-       !hk_g17p_bg_eot_ops_uniform(key))
+       !hk_g17p_bg_eot_ops_uniform(key)) {
+      /* hk_g17p_bg_eot_dev_key_init() admits none of these layouts. */
+      assert(!dc);
+      if (dc)
+         return (struct hk_bg_eot){0};
       return hk_build_g17p_mixed_bg_eot(cmd, key, info, store);
+   }
 
    /* Vulkan keeps unused colour attachments as holes in the logical array.
     * Native BG/EOT programs number only live attachments. Compact the key and
@@ -1853,6 +2175,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return (struct hk_bg_eot){0};
    }
+   key->g17p_packed_clear =
+      !store && op == AGX_BG_CLEAR && !dual_mrt_active && !multi_mrt_active &&
+      hk_g17p_packed_clear_enabled() && agx_g17p_packed_clear_ok(&key->tib);
    if (!store && op == AGX_BG_CLEAR)
       key->reserved_preamble =
          multi_mrt_active ? 4 + 8 * attachment_count
@@ -1912,8 +2237,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
 
    struct hk_ioto_reservation program_reservation;
-   if (!hk_cmd_reserve_ioto_program(cmd, program_capacity, program_label,
-                                    &program_reservation))
+   if (!hk_g17p_bg_eot_reserve(cmd, dc, program_capacity, program_label,
+                               &program_reservation))
       return (struct hk_bg_eot){0};
 
    void *program_map = program_reservation.map;
@@ -2029,7 +2354,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          : dual_mrt_active ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
                          : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
       const uint64_t pbe_argument_va =
-         hk_pool_upload(cmd, pbe_arguments, pbe_argument_size, 32);
+         hk_g17p_bg_eot_upload(cmd, dc, pbe_arguments, pbe_argument_size, 32);
       if (!pbe_argument_va)
          return (struct hk_bg_eot){0};
       if (hk_g17p_launch_trace_enabled())
@@ -2174,13 +2499,23 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             for (unsigned rt = 1; rt < attachment_count; ++rt)
                clear_values[rt] = info->pColorAttachments[rt].clearValue.color;
          }
+         if (key->g17p_packed_clear) {
+            /* The background program reads one packed word at uniform 4. */
+            const float *c = att_info->clearValue.color.float32;
+            const uint32_t packed = hk_g17p_unorm8(c[0]) |
+                                    (hk_g17p_unorm8(c[1]) << 8) |
+                                    (hk_g17p_unorm8(c[2]) << 16) |
+                                    (hk_g17p_unorm8(c[3]) << 24);
+            memset(&clear_values[0], 0, sizeof(clear_values[0]));
+            clear_values[0].uint32[0] = packed;
+         }
          const size_t clear_size =
             multi_mrt_active ? 16 * attachment_count
             : rgba8_mrt && dual_mrt_active ? 32
             : r11g11b10_mrt && dual_mrt_active ? 28
             : wboit_mrt && dual_mrt_active ? 20 : 16;
          desc.clear_value_va =
-            hk_pool_upload(cmd, clear_values, clear_size, 16);
+            hk_g17p_bg_eot_upload(cmd, dc, clear_values, clear_size, 16);
          if (!desc.clear_value_va)
             return (struct hk_bg_eot){0};
          /* v51x HK_G17P_IOTO_IMMEDIATE: LDIMM the (immutable, record-time)
@@ -2212,14 +2547,14 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             ? (2 * attachment_count - 1) * AGX_TEXTURE_GEN9_LENGTH : dual_mrt_active
             ? 3 * AGX_TEXTURE_GEN9_LENGTH : AGX_TEXTURE_GEN9_LENGTH;
          const uint64_t texture_va =
-            hk_pool_upload(cmd, textures, texture_size,
+            hk_g17p_bg_eot_upload(cmd, dc, textures, texture_size,
                            AGX_TEXTURE_GEN9_LENGTH);
          const uint64_t sampler_va =
             dev->rodata.bo && dev->rodata.bo->va ? dev->rodata.bo->va->addr : 0;
          if (!texture_va || !sampler_va)
             return (struct hk_bg_eot){0};
          const uint64_t pointers[2] = {texture_va, sampler_va};
-         const uint64_t table = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
+         const uint64_t table = hk_g17p_bg_eot_upload(cmd, dc, pointers, sizeof(pointers), 8);
          if (!table)
             return (struct hk_bg_eot){0};
          desc.texture_pointer_va = table;
@@ -2244,7 +2579,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
 
    const uint64_t published =
-      hk_cmd_publish_ioto_program(cmd, &program_reservation, program_length);
+      hk_g17p_bg_eot_publish(cmd, dc, &program_reservation,
+                             program_length);
    if (!published)
       return (struct hk_bg_eot){0};
 
@@ -2265,6 +2601,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                  : shader->info.nr_gprs);
    }
 
+   if (in_device)
+      *in_device = dc != NULL;
    return (struct hk_bg_eot){
       .usc = published,
       .rsrc_spec = resource_spec,
@@ -2342,7 +2680,7 @@ hk_g17p_bg_eot_cache_get(struct hk_cmd_buffer *cmd,
    struct hk_g17p_bg_eot_cache_entry *cached = NULL;
    for (unsigned i = 0; i < HK_G17P_BG_EOT_CACHE_ENTRIES; ++i) {
       struct hk_g17p_bg_eot_cache_entry *entry =
-         &gfx->g17p_bg_eot_cache[i];
+         &cmd->g17p_bg_eot_cache[i];
       if (!entry->valid) {
          if (!cached)
             cached = entry;
@@ -2357,15 +2695,37 @@ hk_g17p_bg_eot_cache_get(struct hk_cmd_buffer *cmd,
    }
 
    if (!cached)
-      cached = &gfx->g17p_bg_eot_cache[
-         gfx->g17p_bg_eot_cache_next++ % HK_G17P_BG_EOT_CACHE_ENTRIES];
+      cached = &cmd->g17p_bg_eot_cache[
+         cmd->g17p_bg_eot_cache_next++ % HK_G17P_BG_EOT_CACHE_ENTRIES];
 
    memcpy(cached->key, &cache_key, sizeof(cache_key));
    cached->hash = hash;
    cached->key_size = sizeof(cache_key);
    cached->valid_variants = 0;
    cached->direct_color_resolve_variants = 0;
+   cached->dev_entry = NULL;
    cached->valid = true;
+
+   /* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE: one value lookup per new
+    * pass. A hit fills every variant this recording will ask for; a miss
+    * attaches a fresh device entry that hk_build_bg_eot() fills. */
+   struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
+   struct hk_g17p_bg_eot_dev_key dkey;
+   if (dc && hk_g17p_bg_eot_dev_key_init(cmd, info, incomplete_render_area,
+                                         &dkey)) {
+      const uint64_t dhash = hk_g17p_bg_eot_dev_hash(&dkey);
+      simple_mtx_lock(&dc->lock);
+      struct hk_g17p_bg_eot_dev_entry *de =
+         hk_g17p_bg_eot_dev_find(dc, &dkey, dhash);
+      if (!de && !dc->full)
+         de = hk_g17p_bg_eot_dev_insert(dc, &dkey, dhash);
+      if (de) {
+         memcpy(cached->program, de->program, sizeof(cached->program));
+         cached->valid_variants = de->valid_variants;
+      }
+      cached->dev_entry = de;
+      simple_mtx_unlock(&dc->lock);
+   }
    return cached;
 }
 
@@ -2378,7 +2738,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    /* Construct the key */
-   struct agx_bg_eot_key key = {.tib = render->tilebuffer};
+   /* Zero the padding too: the G17P device cache compares keys bytewise. */
+   struct agx_bg_eot_key key;
+   memset(&key, 0, sizeof(key));
+   key.tib = render->tilebuffer;
    static_assert(AGX_BG_EOT_NONE == 0, "default initializer");
 
    key.tib.layered = (render->cr.layers > 1);
@@ -2489,8 +2852,42 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
          return cache->program[variant];
       }
 
-      const struct hk_bg_eot program =
-         hk_build_g17p_bg_eot(cmd, &key, info, store, partial_render);
+      /* frg-codegen v4: build this variant into the device-lifetime entry
+       * hk_g17p_bg_eot_cache_get() attached, so every later recording of the
+       * same pass reuses it (HK_G17P_BG_EOT_DEVICE_CACHE). */
+      struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
+      struct hk_g17p_bg_eot_dev_entry *de = cache ? cache->dev_entry : NULL;
+      struct hk_bg_eot program = {0};
+      bool built = false;
+      if (dc && de) {
+         simple_mtx_lock(&dc->lock);
+         if (de->valid_variants & BITFIELD_BIT(variant)) {
+            program = de->program[variant];
+            built = true;
+         } else if (hk_g17p_bg_eot_arena_room(
+                       dev, dc, &dc->program, true,
+                       HK_G17P_BG_EOT_DEV_PROGRAM_MAX,
+                       AGX_IOTO_PROGRAM_ALIGNMENT) &&
+                    hk_g17p_bg_eot_arena_room(
+                       dev, dc, &dc->data, false,
+                       HK_G17P_BG_EOT_DEV_DATA_MAX, 32)) {
+            bool in_device = false;
+            program = hk_build_g17p_bg_eot(cmd, &key, info, store,
+                                           partial_render, dc, &in_device);
+            built = true;
+            if (program.usc && in_device &&
+                !vk_command_buffer_has_error(&cmd->vk)) {
+               de->program[variant] = program;
+               de->valid_variants |= BITFIELD_BIT(variant);
+            }
+         } else {
+            dc->full = true;
+         }
+         simple_mtx_unlock(&dc->lock);
+      }
+      if (!built)
+         program = hk_build_g17p_bg_eot(cmd, &key, info, store,
+                                        partial_render, NULL, NULL);
       if (cache && program.usc && !vk_command_buffer_has_error(&cmd->vk)) {
          cache->program[variant] = program;
          cache->valid_variants |= BITFIELD_BIT(variant);

@@ -310,6 +310,9 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    hk_sync_reset(cmd);
 
    memset(&cmd->state, 0, sizeof(cmd->state));
+   for (unsigned i = 0; i < HK_G17P_BG_EOT_CACHE_ENTRIES; ++i)
+      cmd->g17p_bg_eot_cache[i].valid = false;
+   cmd->g17p_bg_eot_cache_next = 0;
    /* v94 bit1: nothing has been recorded since this reset. */
    cmd->g17p_pristine = true;
 }
@@ -840,7 +843,10 @@ hk_trace_cmd_error(const char *file, unsigned line, VkResult error)
       mesa_loge("command buffer error %d set at %s:%u", (int)error, file, line);
 }
 
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_host_encode, "HK_G17P_HOST_ENCODE", 0)
+/* frg-codegen v4: bit1 (redundant reset elision) is the default; an explicit
+ * vkResetCommandBuffer followed by vkBeginCommandBuffer no longer resets the
+ * buffer twice. HK_G17P_HOST_ENCODE=0 restores the double reset. */
+DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_host_encode, "HK_G17P_HOST_ENCODE", 2)
 
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
