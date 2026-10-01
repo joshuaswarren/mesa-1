@@ -11883,8 +11883,12 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       hk_reserve_scratch(cmd, cs, hw_vs);
       struct hk_linked_shader *linked_hw_vs =
          (hw_vs == sw_vs) ? linked_vs : hw_vs->only_linked;
+      /* HK_G17P_MDI_ONE_LEVEL: publish this record's vertex setup as the
+       * one-level template (hk_g17p_publish_one_level_record()). */
+      gfx->g17p_vs_one_level = hk_g17p_mdi_one_level_enabled();
       const uint64_t pipeline_program =
          hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
+      gfx->g17p_vs_one_level = false;
       gfx->prepared_vertex_usc = 0;
       gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 

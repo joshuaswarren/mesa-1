@@ -17,6 +17,7 @@
 #include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx_debug.h"
 #include "hk_agx3_vdm_decode.h"
+#include "asahi/lib/agx_ioto_load_core.h"
 #include "hk_buffer.h"
 #include "hk_cmd_pool.h"
 #include "hk_descriptor_set.h"
@@ -2719,15 +2720,19 @@ static bool
 hk_g17p_graphics_template_lookup(
    struct hk_linked_shader *linked,
    const struct hk_agx3_g17p_graphics_program_desc *desc, void *output,
-   size_t capacity, uint16_t *written)
+   size_t capacity, uint16_t *written,
+   const struct hk_g17p_graphics_template_entry **used)
 {
    struct hk_g17p_graphics_template_entry *entry =
       p_atomic_read(&linked->g17p_graphics_templates);
    for (; entry; entry = entry->next) {
       if (hk_agx3_g17p_graphics_program_template_relocate(
              AGX_CHIP_G17P, &entry->desc, desc, &entry->program, output,
-             capacity, written))
+             capacity, written)) {
+         if (used)
+            *used = entry;
          return true;
+      }
    }
    return false;
 }
@@ -2736,7 +2741,8 @@ static ATTRIBUTE_NOINLINE bool
 hk_g17p_graphics_template_generate(
    struct hk_linked_shader *linked,
    const struct hk_agx3_g17p_graphics_program_desc *desc, void *output,
-   size_t capacity, uint16_t *written)
+   size_t capacity, uint16_t *written,
+   const struct hk_g17p_graphics_template_entry **used)
 {
    if (desc->uniform_range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
       return false;
@@ -2770,6 +2776,8 @@ hk_g17p_graphics_template_generate(
                 AGX_CHIP_G17P, &entry->desc, desc, &entry->program, output,
                 capacity, written)) {
             free(candidate);
+            if (used)
+               *used = entry;
             return true;
          }
       }
@@ -2783,6 +2791,8 @@ hk_g17p_graphics_template_generate(
    memcpy(output, candidate->program.program.bytes,
           candidate->program.program.length);
    *written = candidate->program.program.length;
+   if (used)
+      *used = candidate;
    return true;
 }
 
@@ -2896,6 +2906,250 @@ hk_g17p_compact_range_address_ok(uint64_t address, unsigned size_halfs)
           address <= UINT64_MAX - (bytes - 1);
 }
 
+/*
+ * HK_G17P_MDI_ONE_LEVEL (opt-in, default off until hardware A/B).
+ *
+ * Every record of an indexed-indirect multi-draw whose vertex shader reads
+ * per-draw parameters (gl_BaseInstance/gl_BaseVertex, per-instance vertex
+ * attributes, gl_DrawID) republishes its vertex program: the record's draw
+ * parameters live at the record's own indirect address, so the vertex setup
+ * program that loads them into uniforms differs per record.
+ *
+ * The production compact launcher (hk_g17p_publish_compact_graphics()) makes
+ * that per-record publication cheap on the CPU -- an 80-byte root of source
+ * addresses plus a 118-byte relocated launcher -- but its shared external
+ * setup chases every uniform range through that root, and every LDDEV
+ * (pointer, then each 4-dword payload chunk) is followed by its own 4-NOP
+ * drain.  For Minecraft's terrain VS (five ranges) that is 13 serialized
+ * device-load round trips at the head of every record, on the TA critical
+ * path (offline decode, mc-ta/decode/vext_mcenv.dis).  The linked-shader
+ * template path that the compact launcher replaced bakes the same absolute
+ * range addresses into LDIMMs and issues all 8 LDDEVs before a single drain
+ * (mc-ta/decode/ol_mc.dis): one round trip.  Native Metal's vertex ESL has
+ * that one-level shape too (agx3-footguns K.1).
+ *
+ * With the knob set, indexed-indirect records (hk_g17p_emit_indirect_record)
+ * publish that one-level template instead.  The uniform values are loaded at
+ * execution time from exactly the same source addresses (root fields,
+ * device constants, the record's own indirect parameters), so GPU-written
+ * indirect buffers and drawIndirectCount predication keep their semantics.
+ * To keep the CPU cost per record close to the compact path, the next record
+ * of the same linked shader relocates the same template entry with only the
+ * draw-parameter/draw-ID addresses re-derived, exactly as the compact patch
+ * path re-derives its root record.
+ */
+bool
+hk_g17p_mdi_one_level_enabled(void)
+{
+   return HK_ENV_BOOL_ONCE("HK_G17P_MDI_ONE_LEVEL", false);
+}
+
+/* The setup composer shares one LDIMM address base between ranges within
+ * INT16_MAX bytes of each other (agx3_graphics_program.c,
+ * graphics_ranges_close()).  A patched range must own its base: it may be
+ * close to no other range, in the template and in every patched record. */
+static bool
+hk_g17p_one_level_range_isolated(const struct agx3_ioto_uniform_range *ranges,
+                                 unsigned count, unsigned index)
+{
+   const uint64_t a = ranges[index].address;
+   const uint64_t a_end = a + (uint64_t)ranges[index].size_halfs * 2;
+   for (unsigned r = 0; r < count; ++r) {
+      if (r == index)
+         continue;
+      const uint64_t b = ranges[r].address;
+      const uint64_t b_end = b + (uint64_t)ranges[r].size_halfs * 2;
+      const uint64_t gap = a_end <= b ? b - a_end
+                           : b_end <= a ? a - b_end
+                                        : 0;
+      if (gap <= (uint64_t)INT16_MAX + 8)
+         return false;
+   }
+   return true;
+}
+
+/* HK_G17P_MDI_ONE_LEVEL_VERIFY=1 (diagnostic, CPU-heavy): compose each
+ * one-level record program again with the uncached reference composer (the
+ * HK_G17P_LAUNCH_TRACE / fail-closed fallback path) for the same descriptor
+ * and VA, and compare bytes. */
+static unsigned hk_g17p_one_level_verify_calls;
+static unsigned hk_g17p_one_level_verify_mismatches;
+
+static void
+hk_g17p_one_level_verify_report(void)
+{
+   fprintf(stderr, "G17P MDI one-level verify: checked=%u mismatched=%u\n",
+           p_atomic_read(&hk_g17p_one_level_verify_calls),
+           p_atomic_read(&hk_g17p_one_level_verify_mismatches));
+}
+
+static void
+hk_g17p_one_level_verify(struct hk_device *dev,
+                         const struct hk_agx3_g17p_graphics_program_desc *desc,
+                         const void *published, uint16_t length,
+                         const char *form)
+{
+   if (!HK_ENV_BOOL_ONCE("HK_G17P_MDI_ONE_LEVEL_VERIFY", false))
+      return;
+
+   if (p_atomic_inc_return(&hk_g17p_one_level_verify_calls) == 1)
+      atexit(hk_g17p_one_level_verify_report);
+   struct hk_agx3_g17p_graphics_program *reference =
+      malloc(sizeof(*reference));
+   const bool ok = reference &&
+      hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, desc,
+                                                   reference) &&
+      reference->length == length &&
+      !memcmp(reference->bytes, published, length);
+   if (!ok) {
+      p_atomic_inc(&hk_g17p_one_level_verify_mismatches);
+      mesa_loge("G17P MDI one-level verify MISMATCH (%s): program=%" PRIx64
+                " length=%u reference=%u",
+                form, desc->program_va, (unsigned)length,
+                reference ? (unsigned)reference->length : 0);
+   }
+   free(reference);
+}
+
+static uint64_t
+hk_g17p_publish_one_level_record(
+   struct hk_cmd_buffer *cmd, struct hk_shader *s,
+   struct hk_linked_shader *linked,
+   struct hk_g17p_graphics_ioto_cache_entry *cached,
+   uint64_t linked_shader_va, uint64_t rodata_va, uint64_t dma_set_base,
+   const struct agx_tilebuffer_layout *tib)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const __typeof__(cached->one_level) *one = &cached->one_level;
+
+   if (!one->valid || one->source_shader != s || one->linked != linked ||
+       one->linked_shader_va != linked_shader_va ||
+       one->rodata_va != rodata_va || one->root != gfx->root ||
+       one->dma_set_base != dma_set_base ||
+       one->tile_size_px != tib->tile_size ||
+       one->sample_size_B != tib->sample_size_B ||
+       one->nr_samples != tib->nr_samples ||
+       one->has_draw_params != (gfx->draw_params != 0) ||
+       one->has_draw_id != (gfx->draw_id_ptr != 0) || !one->entry ||
+       one->range_count > HK_AGX3_G17P_GRAPHICS_MAX_RANGES)
+      return 0;
+
+   const struct hk_g17p_graphics_template_entry *entry = one->entry;
+   const uint64_t base[4] = {
+      [HK_G17P_RANGE_SOURCE_CONSTANT] = 0,
+      [HK_G17P_RANGE_SOURCE_ROOT] = gfx->root,
+      [HK_G17P_RANGE_SOURCE_DRAW_PARAMS] = gfx->draw_params,
+      [HK_G17P_RANGE_SOURCE_DRAW_ID] = gfx->draw_id_ptr,
+   };
+   struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   for (unsigned r = 0; r < one->range_count; ++r) {
+      if (one->source[r] > HK_G17P_RANGE_SOURCE_DRAW_ID)
+         return 0;
+      ranges[r] = one->ranges[r];
+      ranges[r].address = base[one->source[r]] + one->source_offset[r];
+      if (!hk_g17p_compact_range_address_ok(ranges[r].address,
+                                            ranges[r].size_halfs))
+         return 0;
+   }
+
+   struct hk_ioto_reservation reservation;
+   if (one->patch) {
+      /* Rewrite only the LDIMM pairs that address the draw-parameter /
+       * draw-ID ranges; every other byte is the template's own (the root,
+       * constants and linked shader are part of the identity above). */
+      uint8_t patch[ARRAY_SIZE(one->sites)][2][AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+      bool ok = one->length != 0 && one->length <= sizeof(one->bytes);
+      for (unsigned i = 0; ok && i < one->site_count; ++i) {
+         const __typeof__(one->sites[0]) *site = &one->sites[i];
+         const uint64_t target = ranges[site->range].address + site->delta;
+         uint8_t low_length = 0, high_length = 0;
+         ok = site->range < one->range_count &&
+              agx_ioto_load_pack_ldimm(dev->dev.chip, site->dest_half,
+                                       (uint32_t)target, patch[i][0],
+                                       &low_length) &&
+              agx_ioto_load_pack_ldimm(dev->dev.chip, site->dest_half + 2,
+                                       (uint32_t)(target >> 32), patch[i][1],
+                                       &high_length) &&
+              low_length == site->low_length &&
+              high_length == site->high_length &&
+              (size_t)site->offset + low_length + high_length <= one->length;
+      }
+      for (unsigned i = 0; ok && i < one->site_count; ++i)
+         ok = hk_g17p_one_level_range_isolated(ranges, one->range_count,
+                                               one->sites[i].range);
+      if (ok) {
+         if (!hk_cmd_reserve_ioto_program(cmd, one->length,
+                                          "G17P MDI one-level vertex setup",
+                                          &reservation))
+            return 0;
+         if (!agx_va_in_usc_window(&dev->dev, reservation.va))
+            return 0;
+         uint8_t *map = reservation.map;
+         memcpy(map, one->bytes, one->length);
+         for (unsigned i = 0; i < one->site_count; ++i) {
+            const __typeof__(one->sites[0]) *site = &one->sites[i];
+            memcpy(map + site->offset, patch[i][0], site->low_length);
+            memcpy(map + site->offset + site->low_length, patch[i][1],
+                   site->high_length);
+         }
+         {
+            struct hk_agx3_g17p_graphics_program_desc check = entry->desc;
+            check.uniform_ranges = ranges;
+            check.uniform_range_count = one->range_count;
+            check.program_va = reservation.va;
+            hk_g17p_one_level_verify(dev, &check, map, one->length, "patch");
+         }
+         const uint64_t published =
+            hk_cmd_publish_ioto_program(cmd, &reservation, one->length);
+         if (published && dev->g17p_diagnostics.compact_ioto_trace) {
+            fprintf(stderr,
+                    "G17P one-level record: shader=%" PRIx64
+                    " program=%" PRIx64 " len=%u draw_params=%" PRIx64
+                    " draw_id=%" PRIx64 " patched=%u\n",
+                    linked_shader_va, published, (unsigned)one->length,
+                    gfx->draw_params, gfx->draw_id_ptr, one->site_count);
+            hk_g17p_trace_line("one-level-program", published,
+                               reservation.map, one->length);
+         }
+         return published;
+      }
+   }
+
+   if (!hk_cmd_reserve_ioto_program(cmd, one->capacity,
+                                    "G17P MDI one-level vertex setup",
+                                    &reservation))
+      return 0;
+   if (!agx_va_in_usc_window(&dev->dev, reservation.va))
+      return 0;
+
+   struct hk_agx3_g17p_graphics_program_desc target = entry->desc;
+   target.uniform_ranges = ranges;
+   target.uniform_range_count = one->range_count;
+   target.program_va = reservation.va;
+   uint16_t length = 0;
+   if (!hk_agx3_g17p_graphics_program_template_relocate(
+          dev->dev.chip, &entry->desc, &target, &entry->program,
+          reservation.map, one->capacity, &length) ||
+       length == 0 || length > one->capacity)
+      return 0;
+   hk_g17p_one_level_verify(dev, &target, reservation.map, length,
+                            "relocate");
+
+   const uint64_t published =
+      hk_cmd_publish_ioto_program(cmd, &reservation, length);
+   if (published && dev->g17p_diagnostics.compact_ioto_trace) {
+      fprintf(stderr,
+              "G17P one-level record: shader=%" PRIx64 " program=%" PRIx64
+              " len=%u draw_params=%" PRIx64 " draw_id=%" PRIx64 "\n",
+              linked_shader_va, published, (unsigned)length,
+              gfx->draw_params, gfx->draw_id_ptr);
+      hk_g17p_trace_line("one-level-program", published, reservation.map,
+                         length);
+   }
+   return published;
+}
+
 static uint64_t
 hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked,
@@ -2997,6 +3251,39 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          return cached->program;
       }
 
+      /* HK_G17P_MDI_ONE_LEVEL: an indexed-indirect record publishes the
+       * one-level template (see hk_g17p_publish_one_level_record()), never
+       * the two-level compact launcher. */
+      const bool one_level = vertex && fast_cacheable &&
+                             cmd->state.gfx.g17p_vs_one_level;
+      if (one_level) {
+         const uint64_t published = hk_g17p_publish_one_level_record(
+            cmd, s, linked, cached, linked_shader_va, rodata_va,
+            dma_set_base, tib);
+         if (published) {
+            cached->program = published;
+            cached->source_shader = s;
+            cached->linked_shader_va = linked_shader_va;
+            cached->rodata_va = rodata_va;
+            cached->root = cmd->state.gfx.root;
+            cached->draw_params = cmd->state.gfx.draw_params;
+            cached->draw_id_ptr = cmd->state.gfx.draw_id_ptr;
+            cached->root_dependent = root_dependent;
+            cached->dma_set_base = dma_set_base;
+            cached->tile_size_px = tib->tile_size;
+            cached->sample_size_B = tib->sample_size_B;
+            cached->nr_samples = tib->nr_samples;
+            cached->key_size = 0;
+            cached->fast_valid = fast_cacheable;
+            cached->valid = true;
+            hk_g17p_graphics_ioto_cache_stat(
+               dev, HK_G17P_GRAPHICS_IOTO_TEMPLATE_HIT);
+            return published;
+         }
+         if (vk_command_buffer_has_error(&cmd->vk))
+            return 0;
+      }
+
       const bool compact_blend =
          fragment && cmd->state.gfx.uses_blend_constant;
       const bool compact_spills =
@@ -3021,7 +3308,8 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
        * root record directly.  This is every record of an indexed-indirect
        * multi-draw and every draw after a descriptor push. */
       bool compact_attempted = false;
-      if (compact_same_program && vertex && cached->compact.patchable &&
+      if (!one_level && compact_same_program && vertex &&
+          cached->compact.patchable &&
           (!cached->compact.uses_root || cmd->state.gfx.root != 0) &&
           cached->compact.has_draw_params ==
              (cmd->state.gfx.draw_params != 0) &&
@@ -3139,7 +3427,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
        * Rebuild only the root record and launcher, with the identical
        * allocation sequence.  The address checks are the ones those bounds
        * and hk_g17p_graphics_compact_ranges() apply. */
-      if (!compact_attempted && compact_same_program &&
+      if (!one_level && !compact_attempted && compact_same_program &&
           cached->compact.range_count == range_count) {
          bool same_layout = true;
          for (size_t r = 0; r < range_count; ++r) {
@@ -3312,7 +3600,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
        * the mandatory shader-state load before the native external-preshader
        * branch enters immutable linked-shader setup. The inline template is
        * retained as a fail-closed fallback, not as the ordinary hot path. */
-      if (!diagnostics && !compact_attempted) {
+      if (!diagnostics && !compact_attempted && !one_level) {
          struct agx3_ioto_uniform_range
             compact_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
          memcpy(compact_ranges, ranges,
@@ -3476,15 +3764,20 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       }
 
       uint16_t program_length = 0;
+      const struct hk_g17p_graphics_template_entry *template_entry = NULL;
       const bool template_hit =
          !diagnostics &&
          hk_g17p_graphics_template_lookup(linked, &desc, program_map,
-                                           program_capacity, &program_length);
+                                           program_capacity, &program_length,
+                                           &template_entry);
       bool generated = false;
       if (!template_hit && !diagnostics) {
          generated = hk_g17p_graphics_template_generate(
-            linked, &desc, program_map, program_capacity, &program_length);
+            linked, &desc, program_map, program_capacity, &program_length,
+            &template_entry);
       }
+      if (!template_hit && !generated)
+         template_entry = NULL;
 
       /* The linked-shader template is only an optimization.  In particular,
        * its allocation may fail even though ordinary command recording can
@@ -3522,6 +3815,156 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          hk_cmd_publish_ioto_program(cmd, &reservation, program_length);
       if (!published)
          return 0;
+
+      if (one_level) {
+         /* Record how the next indexed-indirect record re-derives these
+          * ranges; any range uploaded while collecting is not re-derivable
+          * and leaves the record path on the general template lookup. */
+         __typeof__(cached->one_level) *one = &cached->one_level;
+         bool patchable = template_entry &&
+                          range_count <= HK_G17P_GRAPHICS_ROOT_MAX_RANGES;
+         const uint64_t base[4] = {
+            [HK_G17P_RANGE_SOURCE_CONSTANT] = 0,
+            [HK_G17P_RANGE_SOURCE_ROOT] = cmd->state.gfx.root,
+            [HK_G17P_RANGE_SOURCE_DRAW_PARAMS] = cmd->state.gfx.draw_params,
+            [HK_G17P_RANGE_SOURCE_DRAW_ID] = cmd->state.gfx.draw_id_ptr,
+         };
+         for (size_t r = 0; patchable && r < range_count; ++r) {
+            if (sources[r] > HK_G17P_RANGE_SOURCE_DRAW_ID ||
+                (sources[r] != HK_G17P_RANGE_SOURCE_CONSTANT &&
+                 (!base[sources[r]] || ranges[r].address < base[sources[r]]))) {
+               patchable = false;
+               break;
+            }
+            one->ranges[r] = ranges[r];
+            one->source[r] = sources[r];
+            one->source_offset[r] = ranges[r].address - base[sources[r]];
+         }
+         one->valid = patchable;
+         hk_g17p_one_level_verify(dev, &desc, program_map, program_length,
+                                  "template");
+         if (dev->g17p_diagnostics.compact_ioto_trace) {
+            fprintf(stderr,
+                    "G17P one-level template: shader=%" PRIx64
+                    " program=%" PRIx64 " len=%u ranges=%zu patchable=%u"
+                    " template=%u\n",
+                    linked_shader_va, published, (unsigned)program_length,
+                    range_count, patchable, template_hit);
+            hk_g17p_trace_line("one-level-program", published, program_map,
+                               program_length);
+         }
+         one->patch = false;
+         if (patchable &&
+             program_length <= sizeof(one->bytes) &&
+             template_entry->program.relocation_count <=
+                ARRAY_SIZE(template_entry->program.relocations)) {
+            /* Position independence: the same ranges relocated at another
+             * program VA must give identical bytes (an external constant
+             * program reached through a PC-relative branch would not). */
+            struct hk_agx3_g17p_graphics_program_desc moved = desc;
+            moved.program_va = published + 0x1000;
+            uint8_t again[sizeof(one->bytes)];
+            uint16_t again_length = 0;
+            bool patch = hk_agx3_g17p_graphics_program_template_relocate(
+                            dev->dev.chip, &template_entry->desc, &moved,
+                            &template_entry->program, again, sizeof(again),
+                            &again_length) &&
+                         again_length == program_length &&
+                         !memcmp(again, program_map, program_length);
+            unsigned sites = 0;
+            const struct agx_ioto_load_relocation *rels =
+               template_entry->program.relocations;
+            for (unsigned i = 0;
+                 patch && i < template_entry->program.relocation_count; ++i) {
+               const struct agx_ioto_load_relocation *rel = &rels[i];
+               unsigned range = UINT_MAX;
+               for (unsigned r = 0;
+                    r < template_entry->desc.uniform_range_count; ++r) {
+                  const struct agx3_ioto_uniform_range *tr =
+                     &template_entry->desc.uniform_ranges[r];
+                  const uint64_t bytes = (uint64_t)tr->size_halfs * 2;
+                  if (bytes >= 4 && rel->address >= tr->address &&
+                      rel->address <= tr->address + bytes - 4 &&
+                      !((rel->address - tr->address) & 3)) {
+                     range = r;
+                     break;
+                  }
+               }
+               if (range >= range_count) {
+                  patch = false;
+                  break;
+               }
+               if (sources[range] != HK_G17P_RANGE_SOURCE_DRAW_PARAMS &&
+                   sources[range] != HK_G17P_RANGE_SOURCE_DRAW_ID)
+                  continue;
+               if (!hk_g17p_one_level_range_isolated(
+                      template_entry->desc.uniform_ranges,
+                      template_entry->desc.uniform_range_count, range) ||
+                   !hk_g17p_one_level_range_isolated(ranges, range_count,
+                                                     range)) {
+                  patch = false;
+                  break;
+               }
+               const uint64_t delta =
+                  rel->address - template_entry->desc.uniform_ranges[range].address;
+               /* The published bytes must already hold exactly this
+                * record's address in that LDIMM pair. */
+               uint8_t low[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+               uint8_t high[AGX_IOTO_LOAD_LDIMM_MAX_SIZE];
+               uint8_t low_length = 0, high_length = 0;
+               const uint64_t now = ranges[range].address + delta;
+               if (sites >= ARRAY_SIZE(one->sites) ||
+                   rel->offset > UINT16_MAX || rel->dest_half > UINT16_MAX - 2 ||
+                   !agx_ioto_load_pack_ldimm(dev->dev.chip, rel->dest_half,
+                                             (uint32_t)now, low, &low_length) ||
+                   !agx_ioto_load_pack_ldimm(dev->dev.chip,
+                                             rel->dest_half + 2,
+                                             (uint32_t)(now >> 32), high,
+                                             &high_length) ||
+                   low_length != rel->low_length ||
+                   high_length != rel->high_length ||
+                   rel->offset + low_length + high_length > program_length ||
+                   memcmp((const uint8_t *)program_map + rel->offset, low,
+                          low_length) ||
+                   memcmp((const uint8_t *)program_map + rel->offset +
+                             low_length,
+                          high, high_length)) {
+                  patch = false;
+                  break;
+               }
+               one->sites[sites++] = (__typeof__(one->sites[0])){
+                  .offset = (uint16_t)rel->offset,
+                  .dest_half = rel->dest_half,
+                  .low_length = low_length,
+                  .high_length = high_length,
+                  .range = (uint8_t)range,
+                  .delta = delta,
+               };
+            }
+            if (patch) {
+               memcpy(one->bytes, program_map, program_length);
+               one->length = program_length;
+               one->site_count = (uint8_t)sites;
+               one->patch = true;
+            }
+         }
+         if (patchable) {
+            one->entry = template_entry;
+            one->source_shader = s;
+            one->linked = linked;
+            one->linked_shader_va = linked_shader_va;
+            one->rodata_va = rodata_va;
+            one->root = cmd->state.gfx.root;
+            one->dma_set_base = dma_set_base;
+            one->capacity = program_capacity;
+            one->tile_size_px = tib->tile_size;
+            one->sample_size_B = tib->sample_size_B;
+            one->nr_samples = tib->nr_samples;
+            one->range_count = (uint8_t)range_count;
+            one->has_draw_params = cmd->state.gfx.draw_params != 0;
+            one->has_draw_id = cmd->state.gfx.draw_id_ptr != 0;
+         }
+      }
 
       if (!diagnostics) {
          memcpy(cached->key, &key, key_size);

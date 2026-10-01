@@ -569,6 +569,49 @@ struct hk_g17p_graphics_ioto_cache_entry {
    /* AGX_G17P_UNIFORM_DMA span source when it is a descriptor-set pointer
     * (see hk_g17p_dma_set_base); 0 otherwise. */
    uint64_t dma_set_base;
+
+   /* HK_G17P_MDI_ONE_LEVEL: the last one-level (absolute-address) vertex
+    * setup published for an indexed-indirect multi-draw record.  The next
+    * record of the same linked shader, root, descriptor-set DMA base and
+    * render layout differs only in its draw-parameter / draw-ID addresses,
+    * so it relocates the same linked-shader template (`entry`, owned by
+    * `linked`) to those addresses instead of re-deriving every range. */
+   struct {
+      struct agx3_ioto_uniform_range ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      uint64_t source_offset[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      uint8_t source[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      const void *entry;
+      const void *source_shader;
+      const void *linked;
+      uint64_t linked_shader_va;
+      uint64_t rodata_va;
+      uint64_t root;
+      uint64_t dma_set_base;
+      size_t capacity;
+      uint16_t tile_size_px;
+      uint8_t sample_size_B;
+      uint8_t nr_samples;
+      uint8_t range_count;
+      bool has_draw_params;
+      bool has_draw_id;
+      bool valid;
+      /* Patch form: the template's bytes at its published VA, valid for
+       * any record because the program is position-independent (checked
+       * by relocation at a second VA), with only the LDIMM pairs that
+       * address the draw-parameter/draw-ID ranges rewritten per record. */
+      bool patch;
+      uint8_t site_count;
+      uint16_t length;
+      struct {
+         uint16_t offset;
+         uint16_t dest_half;
+         uint8_t low_length;
+         uint8_t high_length;
+         uint8_t range;
+         uint64_t delta;
+      } sites[4];
+      uint8_t bytes[512];
+   } one_level;
 };
 
 struct hk_prepared_fast_link_vs {
@@ -620,6 +663,9 @@ struct hk_graphics_state {
    struct agx_ptr prepared_geometry_params;
    bool prepared_geometry_params_filled;
    uint64_t prepared_vertex_usc;
+   /* HK_G17P_MDI_ONE_LEVEL: set only around the vertex-program upload of an
+    * indexed-indirect record in hk_g17p_emit_indirect_record(). */
+   bool g17p_vs_one_level;
    struct agx_ptr prepared_vertex_compact_root;
    const struct hk_shader *prepared_vertex_shader;
    const struct hk_linked_shader *prepared_vertex_linked;
@@ -1755,6 +1801,9 @@ void hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  * 48-bit Ioto program VA consumed by HAL200 VDM state. */
 uint64_t hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
                               const struct hk_shader *s);
+/* HK_G17P_MDI_ONE_LEVEL (hk_cmd_buffer.c). */
+bool hk_g17p_mdi_one_level_enabled(void);
+
 uint64_t hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked);
 uint64_t hk_prepare_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
