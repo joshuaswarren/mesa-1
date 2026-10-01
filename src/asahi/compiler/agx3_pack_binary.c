@@ -3098,9 +3098,12 @@ agx3_emit_normflt(struct util_dynarray *emission, enum agx_isa_encoding enc,
  * side effects. `last` sets the end-of-sequence bit, which Apple puts on the
  * final release of the whole fragment program.
  */
+static uint32_t agx3_g17p_colour_writeout(uint32_t writeout, unsigned pair);
+
 static bool
 agx3_emit_pixel(struct util_dynarray *emission, enum agx_isa_encoding enc,
-                const agx_instr *I, uint16_t wait_mask, bool last)
+                const agx_instr *I, uint16_t wait_mask, bool last,
+                unsigned colour_pair)
 {
    if (I->nr_dests != 0 || I->nr_srcs != 0 ||
        (last && I->op != AGX_OPCODE_SIGNAL_PIX))
@@ -3108,10 +3111,12 @@ agx3_emit_pixel(struct util_dynarray *emission, enum agx_isa_encoding enc,
 
    uint8_t bytes[AGX3_PIXEL_MAX_LENGTH];
    uint8_t len = 0;
+   const uint32_t writeout =
+      agx3_g17p_colour_writeout(I->writeout, colour_pair);
    const bool ok =
       I->op == AGX_OPCODE_WAIT_PIX
-         ? agx3_pixel_wait(enc, I->writeout, wait_mask, bytes, &len)
-         : agx3_pixel_release(enc, I->writeout, last, wait_mask, bytes, &len);
+         ? agx3_pixel_wait(enc, writeout, wait_mask, bytes, &len)
+         : agx3_pixel_release(enc, writeout, last, wait_mask, bytes, &len);
 
    return ok && agx3_append(emission, bytes, len);
 }
@@ -6661,6 +6666,74 @@ agx3_g17p_mrt_class_pair(unsigned partition)
    return partition < 3 ? partition : 0;
 }
 
+/* Class pair of the one colour partition a non-MRT colour transaction
+ * (the single-store colour protocol or the one-load/one-store blend
+ * protocol) touches.
+ *
+ * Pixel classes order fragments per tile partition, not per program: every
+ * fragment of a render that accesses a partition must use that partition's
+ * classes, or two overlapping fragments that touch the same tile bytes under
+ * different classes are not ordered against each other. The MRT protocol
+ * already selects a lone store's classes from its partition (keyed: its
+ * ordinal among the key's partitions; unkeyed: its own colour target, see
+ * lone_sparse_store). The colour and blend protocols used to emit class pair
+ * 0 unconditionally, which is right only when that partition's pair is 0.
+ *
+ * dEQP-VK.renderpasses.dynamic_rendering.graphics_pipeline_library.
+ * suballocation.attachment_allocation.grow_shrink.2 hit the difference on
+ * G17P: attachment 0 (RGBA8) sits at tile byte 2 behind the R16 attachment 3,
+ * i.e. partition 1. A split-linked two-target epilog stored it under classes
+ * 48/0x230, while the next draw's inline-blend (monolithic, non-secondary,
+ * hence no MRT protocol) program stored it under 12/0x20c with a loader
+ * release of 0x2f3 that frees 48 at entry. On hardware the earlier draw's
+ * value survived in part of a tile, as unordered stores would allow; one
+ * draw per render (HK_G17P_DRAW_SPLIT=every) passed.
+ *
+ * Returns false when the partition cannot be identified, so the program
+ * fails closed instead of synchronizing on the wrong partition. */
+static bool
+agx3_g17p_lone_colour_pair(agx_context *ctx, unsigned *pair)
+{
+   const agx_instr *tile = NULL;
+   *pair = 0;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+         continue;
+      if (tile && (tile->pixel_offset != I->pixel_offset ||
+                   tile->colour_target != I->colour_target))
+         return false;
+      tile = I;
+   }
+   if (!tile)
+      return true;
+
+   const BITSET_WORD *partitions = ctx->key->g17p_tile_partitions;
+   if (__bitset_is_empty(partitions,
+                         BITSET_WORDS(AGX_G17P_MAX_BYTES_PER_SAMPLE))) {
+      *pair = agx3_g17p_mrt_class_pair(tile->colour_target);
+      return true;
+   }
+
+   if (tile->pixel_offset >= AGX_G17P_MAX_BYTES_PER_SAMPLE ||
+       !BITSET_TEST(partitions, tile->pixel_offset))
+      return false;
+   unsigned ordinal = 0;
+   for (unsigned offset = 0; offset < tile->pixel_offset; ++offset)
+      ordinal += BITSET_TEST(partitions, offset) ? 1 : 0;
+   *pair = agx3_g17p_mrt_class_pair(ordinal);
+   return true;
+}
+
+/* The IR's colour wait/release masks (8 read, 4 write, 12 both) name class
+ * pair 0; move them to `pair`. Depth/coverage class 1 is unaffected. */
+static uint32_t
+agx3_g17p_colour_writeout(uint32_t writeout, unsigned pair)
+{
+   if (!pair || !writeout || (writeout & ~UINT32_C(0xc)))
+      return writeout;
+   return writeout << (2 * pair);
+}
+
 /* A multisample background reload writes every sample of one tilebuffer
  * partition explicitly after fetching it from the multisample attachment.
  * These are not multiple render targets: the per-sample MSAA lowering unrolls
@@ -8700,11 +8773,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       g17p_pixel_protocol && !g17p_mrt.valid
          ? agx3_g17p_deferred_write_wait(ctx, g17p_blend_protocol)
          : NULL;
+   /* The partition a non-MRT colour transaction belongs to selects its
+    * classes, exactly as the MRT protocol selects a lone store's. */
+   unsigned g17p_lone_pair = 0;
+   if (enc == AGX_ISA_ENCODING_AGX3B && ctx->stage == MESA_SHADER_FRAGMENT &&
+       !g17p_mrt.valid && (g17p_colour_protocol || g17p_blend_protocol) &&
+       !agx3_g17p_lone_colour_pair(ctx, &g17p_lone_pair))
+      goto fail;
+   /* The fused colour link template is the class-12 form only. */
    agx3_g17p_colour_link_info(ctx, g17p_colour_protocol &&
-                                  g17p_deferred_write != NULL);
+                                  g17p_deferred_write != NULL &&
+                                  g17p_lone_pair == 0);
    ctx->agx3_colour_link.colour_classes =
       g17p_mrt.valid ? g17p_mrt.classes
-                     : (g17p_colour_protocol || g17p_blend_protocol ? 1 : 0);
+                     : (g17p_colour_protocol || g17p_blend_protocol
+                           ? BITFIELD_BIT(g17p_lone_pair)
+                           : 0);
    ctx->agx3_colour_link.straight_line = list_length(&ctx->blocks) == 1;
    ctx->agx3_colour_link.branch_free = list_length(&ctx->blocks) == 1;
    agx_foreach_instr_global(ctx, entry_I) {
@@ -10272,7 +10356,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                g17p_colour_open = true;
             }
             if (!agx3_emit_pixel(emission, enc, I, wait,
-                                 I == g17p_final_release))
+                                 I == g17p_final_release, g17p_lone_pair))
                AGX3_REFUSE(I);
             continue;
          }
@@ -10458,7 +10542,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   g17p_colour_open = true;
                }
                if (!agx3_emit_pixel(emission, enc, g17p_deferred_write, 0,
-                                    false))
+                                    false, g17p_lone_pair))
                   AGX3_REFUSE(I);
             }
             /* Apple's per-sample RGBA32 fragments store from halves 24 and
@@ -10481,8 +10565,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                uint8_t release[AGX3_PIXEL_MAX_LENGTH];
                uint8_t release_len = 0;
                if (!g17p_colour_open ||
-                   !agx3_pixel_release(enc, 0xc, true, 0, release,
-                                      &release_len) ||
+                   !agx3_pixel_release(
+                      enc, agx3_g17p_colour_writeout(0xc, g17p_lone_pair),
+                      true, 0, release, &release_len) ||
                    !agx3_append(emission, release, release_len))
                   AGX3_REFUSE(I);
             }
@@ -10625,7 +10710,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                AGX3_REFUSE(I);
             if (g17p_deferred_zs_wait &&
                 !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0,
-                                 false))
+                                 false, 0))
                AGX3_REFUSE(I);
             g17p_deferred_zs_wait = NULL;
 
@@ -10744,7 +10829,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                       bytes, &len) ||
                 !agx3_append(emission, bytes, len) ||
                 !agx3_emit_pixel(emission, enc, g17p_deferred_zs_wait, 0,
-                                 false))
+                                 false, 0))
                AGX3_REFUSE(I);
             const struct agx3_zs_desc d = {
                .value = 0, .value_kill = true, .slot = 1, .wait_mask = 1,
