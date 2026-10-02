@@ -9441,6 +9441,21 @@ hk_g17p_flush_prepared_dynamic_state(
          gfx->prepared_vertex_compact_root);
    }
    if (!vertex_exact) {
+      /* Nothing could be retargeted: the bind-time launcher has no compact
+       * root record (it came from the exact-last cache or the inline
+       * composer, which embed the preparation-time root and draw pointers),
+       * or it names another program. Nothing references it yet. Publish a
+       * launcher for this draw's root and pointers, as the authoritative
+       * builder does, and encode the prepared VDM state update around it
+       * instead of failing the command buffer. */
+      const uint64_t program = hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
+      if (program && !vk_command_buffer_has_error(&cmd->vk)) {
+         gfx->prepared_vertex_usc = program;
+         gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
+         vertex_exact = hk_g17p_prepare_vdm_state_update(cmd);
+      }
+   }
+   if (!vertex_exact) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return true;
    }
