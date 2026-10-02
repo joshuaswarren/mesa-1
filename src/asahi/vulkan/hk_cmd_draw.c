@@ -7268,6 +7268,11 @@ translate_object_type(enum mesa_prim topology)
       return AGX_OBJECT_TYPE_TRIANGLE;
 }
 
+/* What bind-time preparation records when the bound state has no hardware
+ * primitive yet (see hk_g17p_prepare_native_bind_tail()). Not a value of
+ * enum agx_primitive, so no prepared bind tail ever matches it. */
+#define HK_G17P_NO_HW_TOPOLOGY ((enum agx_primitive)0xff)
+
 static enum agx_primitive
 translate_hw_primitive_topology(enum mesa_prim prim)
 {
@@ -7423,6 +7428,12 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if ((fragment_program & UINT64_C(0x3f)) != 0 ||
        fragment_program >= (UINT64_C(1) << 48))
       return hk_g17p_bind_tail_refused(__LINE__);
+
+   /* No hardware primitive to describe (bind-time preparation, see
+    * hk_g17p_prepare_native_bind_tail()). The prepared fragment program is
+    * consumed above all the same; it was prepared for this binding only. */
+   if (gfx->topology == HK_G17P_NO_HW_TOPOLOGY)
+      return false;
 
    /* Every input below except the fragment stage program is identical to the
     * last successful build: only the root, descriptor or vertex-buffer
@@ -8310,8 +8321,26 @@ hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd)
        vk_command_buffer_has_error(&cmd->vk))
       return;
 
+   /* Bind-time preparation is speculative and may run while the bound state
+    * cannot be drawn yet: a patch-list topology still set while a meta
+    * operation binds its vertex and fragment shaders, say. That is no
+    * hardware primitive, and translate_hw_primitive_topology() treats it as
+    * unreachable (undefined behaviour without assertions). Record that there
+    * is none instead; nothing else here changes. In particular the steps
+    * below still run, since the draw relies on several of them (the
+    * tile-buffer sample count, the root's never-in-shader bit, the VS->FS
+    * varying linkage), and hk_g17p_build_native_bind_tail() still consumes
+    * the fragment program prepared for this binding before it declines.
+    * Skipping those (sweep2 0005) left that program to a later binding's
+    * bind tail and failed 245 tessellation render-pass cases on hardware.
+    * Optimised builds already behaved this way: the lookup the compiler made
+    * of the unreachable switch read a value that is no hardware primitive,
+    * and the build declined at the object-type field. */
    const enum mesa_prim prim = hk_rast_prim(cmd);
-   gfx->topology = translate_hw_primitive_topology(prim);
+   const bool hw_prim =
+      prim <= MESA_PRIM_TRIANGLE_FAN && prim != MESA_PRIM_LINE_LOOP;
+   gfx->topology = hw_prim ? translate_hw_primitive_topology(prim)
+                           : HK_G17P_NO_HW_TOPOLOGY;
    gfx->object_type = translate_object_type(prim);
 
    unsigned provoking;
