@@ -1918,6 +1918,19 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       nr_flushes++;
    }
 
+   /* Tile hazards against this queue's earlier submissions need the point
+    * the queue has completed; fetched only when a partial-tile render pass
+    * instance is submitted while such a footprint may still be running. On
+    * failure every earlier submission is treated as still running. */
+   uint64_t completed = 0;
+   if (hk_sync_submit_needs_completed(
+          queue, (struct hk_cmd_buffer *const *)submit->command_buffers,
+          submit->command_buffer_count)) {
+      uint64_t point = 0;
+      if (drmSyncobjQuery(dev->dev.fd, &queue->drm.syncobj, &point, 1) == 0)
+         completed = point;
+   }
+
    /* Every command's barrier fields come from recorded dependencies. Legacy
     * kernels attach input syncs only to the first command, requiring a chain.
     * A kernel advertising per-command waits needs no such execution edge. */
@@ -1926,7 +1939,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                           submit->command_buffer_count, flush_sstt,
                           wait_count > 0 &&
                           !(dev->dev.params.features &
-                            DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS));
+                            DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS),
+                          completed);
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =

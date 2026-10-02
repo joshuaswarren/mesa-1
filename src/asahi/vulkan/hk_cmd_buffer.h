@@ -1289,6 +1289,10 @@ struct hk_cmd_buffer {
    /* Recorded dependencies between control streams, see hk_sync.h. */
    struct hk_sync_state sync;
 
+   /* Tile hazards: struct hk_sync_pass_record for every recorded pass
+    * instance footprint, in recording order. Cleared by hk_sync_reset. */
+   struct util_dynarray sync_pass_records;
+
    /* Are we currently inside a vk_meta operation? This alters sample location
     * behaviour.
     */

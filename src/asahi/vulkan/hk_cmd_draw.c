@@ -3358,6 +3358,34 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    hk_merge_render_iview(
       render, render->depth_att.iview ?: render->stencil_att.iview, true);
 
+   /* Tile hazards (hk_sync.h): every attachment this instance may store,
+    * before its first control stream exists. */
+   {
+      const uint32_t pass_layers = render->view_mask
+                                      ? util_last_bit(render->view_mask)
+                                      : render->layer_count;
+      const struct hk_image_view *written[2 * HK_MAX_RTS + 2];
+      unsigned nr_written = 0;
+      for (uint32_t i = 0; i < render->color_att_count; i++) {
+         written[nr_written++] = render->color_att[i].iview;
+         written[nr_written++] = render->color_att[i].resolve_iview;
+      }
+      written[nr_written++] = render->depth_att.iview;
+      written[nr_written++] = render->stencil_att.iview;
+      for (unsigned i = 0; i < nr_written; ++i) {
+         const struct hk_image_view *iview = written[i];
+         if (!iview)
+            continue;
+         const uint32_t level = iview->vk.base_mip_level;
+         hk_sync_pass_footprint(
+            cmd, iview->vk.image, level, iview->vk.base_array_layer,
+            iview->vk.base_array_layer + MAX2(pass_layers, 1),
+            u_minify(iview->vk.image->extent.width, level),
+            u_minify(iview->vk.image->extent.height, level), render->area);
+      }
+      hk_sync_pass_footprints_done(cmd);
+   }
+
    /* Infer for attachmentless. samples is inferred at draw-time. */
    render->cr.width =
       MAX2(render->cr.width, render->area.offset.x + render->area.extent.width);
