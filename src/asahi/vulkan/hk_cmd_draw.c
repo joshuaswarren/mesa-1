@@ -6066,6 +6066,23 @@ hk_prolog_epilog_insert(struct hk_device *dev, const struct hk_internal_key *key
    return true;
 }
 
+static unsigned
+hk_g17p_count_zs_writes(nir_shader *shader)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_store_zs_agx)
+               count++;
+         }
+      }
+   }
+   return count;
+}
+
 static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
                             hk_internal_builder_t builder, bool preprocess_nir,
@@ -6102,6 +6119,22 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 
    if (preprocess_nir)
       agx_preprocess_nir(b.shader);
+
+   /* A pixel-shaded multisample epilog that reads the tile (blending, for
+    * one) is wrapped in the sample loop, which preprocessing unrolls --
+    * depth/stencil write included. Each sample's
+    * Z/S write then sits between the colour transactions of the samples
+    * around it, a shape the G17P pixel protocol cannot express, and the
+    * epilog fails to compile (any 2x/4x draw that blends and writes
+    * FragDepth or FragStencilRef: VK_ERROR_FEATURE_NOT_PRESENT at
+    * vkEndCommandBuffer). The sample-shaded epilog hoists its per-sample
+    * writes into the one leading class-1 transaction; do the same here. Only
+    * an epilog left with several Z/S writes is touched, so every shape that
+    * compiled before is unchanged. */
+   if (builder == build_g17p_fs_epilog &&
+       !((const struct agx_fs_epilog_key *)key->key)->link.sample_shading &&
+       hk_g17p_count_zs_writes(b.shader) > 1)
+      NIR_PASS(_, b.shader, agx_nir_hoist_g17p_zs_writes);
 
    struct agx_shader_key backend_key = {
       .dev = agx_gather_device_key(&dev->dev),
