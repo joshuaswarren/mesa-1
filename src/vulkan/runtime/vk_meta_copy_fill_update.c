@@ -2115,10 +2115,20 @@ static bool
 aspect_masks_valid(struct vk_image *src_img, struct vk_image *dst_img,
                    const VkImageCopy2 *region)
 {
+   /* Only multi-planar formats take plane aspects. A single-plane YCbCr
+    * format (G8B8G8R8_422_UNORM, B8G8R8G8_422_UNORM, ...) has YCbCr info but
+    * one plane, and is copied through VK_IMAGE_ASPECT_COLOR_BIT
+    * (VUID-vkCmdCopyImage-srcImage-08713 and -dstImage-08714 only apply to
+    * multi-planar formats).
+    */
    const struct vk_format_ycbcr_info *src_ycbcr_info =
-      vk_format_get_ycbcr_info(src_img->format);
+      vk_format_get_plane_count(src_img->format) > 1
+         ? vk_format_get_ycbcr_info(src_img->format)
+         : NULL;
    const struct vk_format_ycbcr_info *dst_ycbcr_info =
-      vk_format_get_ycbcr_info(dst_img->format);
+      vk_format_get_plane_count(dst_img->format) > 1
+         ? vk_format_get_ycbcr_info(dst_img->format)
+         : NULL;
 
    if (!src_ycbcr_info && !dst_ycbcr_info) {
       ASSERTED const VkImageAspectFlags valid_aspects =
