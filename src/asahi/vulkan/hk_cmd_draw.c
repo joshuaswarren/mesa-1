@@ -11680,7 +11680,15 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          }
       }
 
-      if (geom && !prepared_tess_gs_emitted) {
+      /* The prepared tessellation batch returns the tessellator's indexed
+       * draw, not the geometry shader's output draw, even when it appended
+       * the GS setup/vertex/main launches itself (gs_emitted). The GS
+       * prerast step must still run: with gs_emitted it only selects the
+       * rasterization draw (and consumes the flag); without it, the batch
+       * held tessellation only and the GS has not run at all. Skipping it
+       * rasterized the tessellator's index buffer through the GS rast
+       * program, so only part of patch 0 was drawn. */
+      if (geom) {
          const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
          draw = hk_launch_gs_prerast(cmd, ccs, draw);
          if (perf_trace) {
