@@ -620,6 +620,44 @@ hk_set_root_draw_ptr(struct hk_graphics_state *gfx, uint64_t *field,
    }
 }
 
+/* Everything hk_upload_usc_words() builds a fragment program from: the
+ * shader and its linked program, the root (descriptor bindings reach the
+ * program through it, and it moves when they change), the uniform-DMA set
+ * base, the tile-buffer layout (tile size, sample size and count, spilling)
+ * and whether blending reads the blend constant. A bind-time fragment
+ * program is valid for exactly this key. */
+static inline struct hk_g17p_prepared_fragment_key
+hk_g17p_prepared_fragment_key(const struct hk_cmd_buffer *cmd,
+                              const struct hk_shader *fs,
+                              const struct hk_linked_shader *linked)
+{
+   const struct agx_tilebuffer_layout *tib = &cmd->state.gfx.render.tilebuffer;
+   return (struct hk_g17p_prepared_fragment_key){
+      .shader = fs,
+      .linked = linked,
+      .root = cmd->state.gfx.root,
+      .dma_set_base = hk_g17p_dma_set_base(cmd, fs),
+      .tile_size_px = tib->tile_size,
+      .sample_size_B = tib->sample_size_B,
+      .nr_samples = tib->nr_samples,
+      .spills = agx_tilebuffer_spills(tib),
+      .blend_constant = hk_cmd_uses_blend_constant(cmd),
+   };
+}
+
+static inline bool
+hk_g17p_prepared_fragment_key_equal(
+   const struct hk_g17p_prepared_fragment_key *a,
+   const struct hk_g17p_prepared_fragment_key *b)
+{
+   return a->shader == b->shader && a->linked == b->linked &&
+          a->root == b->root && a->dma_set_base == b->dma_set_base &&
+          a->tile_size_px == b->tile_size_px &&
+          a->sample_size_B == b->sample_size_B &&
+          a->nr_samples == b->nr_samples && a->spills == b->spills &&
+          a->blend_constant == b->blend_constant;
+}
+
 static void
 hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
 {
@@ -868,9 +906,12 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
    }
 
    struct hk_shader *fs = hk_bound_fs(cmd);
-   if (!gfx->prepared_fragment_usc)
+   if (!gfx->prepared_fragment_usc) {
       gfx->prepared_fragment_usc =
          hk_upload_usc_words(cmd, fs, gfx->linked[MESA_SHADER_FRAGMENT]);
+      gfx->prepared_fragment_key = hk_g17p_prepared_fragment_key(
+         cmd, fs, gfx->linked[MESA_SHADER_FRAGMENT]);
+   }
 
    hk_g17p_prepare_native_bind_tail(cmd);
    (void)hk_g17p_prepare_vdm_state_update(cmd);
@@ -7419,7 +7460,22 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if (!fs || !linked_fs)
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   const uint64_t fragment_program = gfx->prepared_fragment_usc
+   /* Bind-time preparation leaves its fragment program behind whenever the
+    * bind tail it was prepared for already matched (or preparation stopped
+    * before building one). Consume it only while every input it was built
+    * from is unchanged: after a fragment shader swap with no other state
+    * change, the next tail would otherwise launch the previous fragment
+    * shader, and after a render pass with a different tile-buffer layout,
+    * a program built for the old one. */
+   bool prepared_fragment_exact = false;
+   if (gfx->prepared_fragment_usc) {
+      const struct hk_g17p_prepared_fragment_key key =
+         hk_g17p_prepared_fragment_key(cmd, fs, linked_fs);
+      prepared_fragment_exact =
+         hk_g17p_prepared_fragment_key_equal(&key,
+                                             &gfx->prepared_fragment_key);
+   }
+   const uint64_t fragment_program = prepared_fragment_exact
       ? gfx->prepared_fragment_usc
       : hk_upload_usc_words(cmd, fs, linked_fs);
    gfx->prepared_fragment_usc = 0;

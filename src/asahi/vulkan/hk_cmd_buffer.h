@@ -504,6 +504,18 @@ enum hk_g17p_range_source {
    HK_G17P_RANGE_SOURCE_UPLOADED,
 };
 
+struct hk_g17p_prepared_fragment_key {
+   const struct hk_shader *shader;
+   const struct hk_linked_shader *linked;
+   uint64_t root;
+   uint64_t dma_set_base;
+   uint16_t tile_size_px;
+   uint8_t sample_size_B;
+   uint8_t nr_samples;
+   bool spills;
+   bool blend_constant;
+};
+
 struct hk_g17p_graphics_ioto_cache_entry {
    uint8_t key[HK_G17P_GRAPHICS_IOTO_KEY_MAX];
    uint64_t program;
@@ -687,6 +699,10 @@ struct hk_graphics_state {
    struct agx_vdm_state_update prepared_vdm_state_update;
    bool prepared_vdm_state_update_valid;
    uint64_t prepared_fragment_usc;
+   /* What prepared_fragment_usc was published for: the inputs of
+    * hk_upload_usc_words() for a fragment shader. A leftover program must
+    * not be consumed once any of them changed. */
+   struct hk_g17p_prepared_fragment_key prepared_fragment_key;
 
    struct {
       struct hk_g17p_prepared_dispatch tess_vs;
