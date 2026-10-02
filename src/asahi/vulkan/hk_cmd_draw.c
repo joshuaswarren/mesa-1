@@ -602,6 +602,24 @@ hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
    }
 }
 
+/* Bind-time preparation points the root's parameter-block fields at the
+ * blocks it reserves for the next draw. A published root is immutable and
+ * hk_cmd_buffer_prepare_graphics_root() keeps reusing the last one while the
+ * root is clean, so a moved pointer must dirty it. Otherwise the second
+ * transformed draw after a shader or pipeline change runs its VS/TCS/
+ * tessellator/GS launches against the previous draw's root, i.e. the
+ * previous draw's parameter blocks, and leaves its own unwritten
+ * (shader_object.binding.swap_*, pipeline.*.dynamic_control_points.*). */
+static inline void
+hk_set_root_draw_ptr(struct hk_graphics_state *gfx, uint64_t *field,
+                     uint64_t value)
+{
+   if (*field != value) {
+      *field = value;
+      gfx->descriptors.root_dirty = true;
+   }
+}
+
 static void
 hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
 {
@@ -723,10 +741,10 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
       if (!gfx->prepared_vertex_params.gpu)
          return;
    }
-   gfx->descriptors.root.draw.vertex_params =
-      gfx->prepared_vertex_params.gpu;
-   gfx->descriptors.root.draw.vertex_outputs =
-      hk_bound_sw_vs(gfx)->b.info.outputs;
+   hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.vertex_params,
+                        gfx->prepared_vertex_params.gpu);
+   hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.vertex_outputs,
+                        hk_bound_sw_vs(gfx)->b.info.outputs);
 
    /* The transformed vertex-parameter block is mostly shader-owned state.
     * Initialize that immutable base while binding the shaders, leaving the
@@ -744,8 +762,8 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
          hk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
       if (!gfx->prepared_tess_params.gpu)
          return;
-      gfx->descriptors.root.draw.tess_params =
-         gfx->prepared_tess_params.gpu;
+      hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.tess_params,
+                           gfx->prepared_tess_params.gpu);
    }
    if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
       hk_init_tess_params(cmd, gfx->prepared_tess_params.cpu);
@@ -773,8 +791,8 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
          hk_pool_alloc(cmd, sizeof(struct poly_geometry_params), 8);
       if (!gfx->prepared_geometry_params.gpu)
          return;
-      gfx->descriptors.root.draw.geometry_params =
-         gfx->prepared_geometry_params.gpu;
+      hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.geometry_params,
+                           gfx->prepared_geometry_params.gpu);
    }
 
    /* With tessellation feeding geometry, the GS parameter block is indirect
