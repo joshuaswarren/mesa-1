@@ -3249,8 +3249,12 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
           cached->linked_shader_va == linked_shader_va &&
           cached->rodata_va == rodata_va &&
           cached->root == cmd->state.gfx.root &&
-          cached->draw_params == cmd->state.gfx.draw_params &&
-          cached->draw_id_ptr == cmd->state.gfx.draw_id_ptr &&
+          /* Only vertex uniform ranges name draw parameters and draw ID.
+           * Their per-draw uploads cannot change a fragment launcher whose
+           * shader, root, DMA source and render layout still match. */
+          (fragment ||
+           (cached->draw_params == cmd->state.gfx.draw_params &&
+            cached->draw_id_ptr == cmd->state.gfx.draw_id_ptr)) &&
           cached->root_dependent == root_dependent &&
           cached->dma_set_base == dma_set_base &&
           cached->tile_size_px == tib->tile_size &&
