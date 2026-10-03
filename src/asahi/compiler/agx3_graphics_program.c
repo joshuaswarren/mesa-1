@@ -721,63 +721,40 @@ graphics_range_end(const struct agx3_ioto_uniform_range *range,
 }
 
 static bool
-graphics_ranges_close(const struct agx3_ioto_uniform_range *a,
-                      const struct agx3_ioto_uniform_range *b,
-                      bool *close)
-{
-   uint64_t a_end, b_end;
-   if (!close || !graphics_range_end(a, &a_end) ||
-       !graphics_range_end(b, &b_end))
-      return false;
-
-   if (a->address <= b_end && b->address <= a_end) {
-      *close = true;
-   } else if (a_end < b->address) {
-      *close = b->address - a_end <= INT16_MAX;
-   } else {
-      *close = a->address - b_end <= INT16_MAX;
-   }
-   return true;
-}
-
-static unsigned
-graphics_component_root(unsigned parent[AGX3_G17P_GRAPHICS_MAX_RANGES],
-                        unsigned i)
-{
-   while (parent[i] != i) {
-      parent[i] = parent[parent[i]];
-      i = parent[i];
-   }
-   return i;
-}
-
-static bool
 graphics_range_components(
    const struct agx3_ioto_uniform_range *ranges, size_t count,
    unsigned parent[AGX3_G17P_GRAPHICS_MAX_RANGES])
 {
+   uint64_t ends[AGX3_G17P_GRAPHICS_MAX_RANGES];
+   unsigned order[AGX3_G17P_GRAPHICS_MAX_RANGES];
    for (unsigned i = 0; i < count; ++i) {
-      uint64_t ignored;
-      if (!graphics_range_end(&ranges[i], &ignored))
+      if (!graphics_range_end(&ranges[i], &ends[i]))
          return false;
-      parent[i] = i;
-   }
 
-   for (unsigned i = 0; i < count; ++i) {
-      for (unsigned j = i + 1; j < count; ++j) {
-         bool close;
-         if (!graphics_ranges_close(&ranges[i], &ranges[j], &close))
-            return false;
-         if (close) {
-            unsigned a = graphics_component_root(parent, i);
-            unsigned b = graphics_component_root(parent, j);
-            parent[b] = a;
-         }
+      /* The intervals lie on a line: after sorting, a component extends
+       * until the next start lies beyond the largest end plus INT16_MAX.
+       * Validate each range once instead of doing so for every pair. */
+      unsigned j = i;
+      while (j && ranges[order[j - 1]].address > ranges[i].address) {
+         order[j] = order[j - 1];
+         --j;
       }
+      order[j] = i;
    }
 
-   for (unsigned i = 0; i < count; ++i)
-      parent[i] = graphics_component_root(parent, i);
+   unsigned root = 0;
+   uint64_t end = 0;
+   for (unsigned j = 0; j < count; ++j) {
+      unsigned i = order[j];
+      if (!j || (ranges[i].address > end &&
+                 ranges[i].address - end > INT16_MAX)) {
+         root = i;
+         end = ends[i];
+      } else {
+         end = MAX2(end, ends[i]);
+      }
+      parent[i] = root;
+   }
    return true;
 }
 
@@ -820,6 +797,11 @@ graphics_program_shape_equal(
                                   bp))
       return false;
 
+   unsigned ab[AGX3_G17P_GRAPHICS_MAX_RANGES];
+   unsigned ba[AGX3_G17P_GRAPHICS_MAX_RANGES];
+   for (unsigned i = 0; i < a->uniform_range_count; ++i)
+      ab[i] = ba[i] = AGX3_G17P_GRAPHICS_MAX_RANGES;
+
    for (unsigned i = 0; i < a->uniform_range_count; ++i) {
       if (a->uniform_ranges[i].start_halfs !=
              b->uniform_ranges[i].start_halfs ||
@@ -827,17 +809,21 @@ graphics_program_shape_equal(
              b->uniform_ranges[i].size_halfs)
          return false;
 
-      for (unsigned j = 0; j < a->uniform_range_count; ++j) {
-         const bool a_same = ap[i] == ap[j];
-         const bool b_same = bp[i] == bp[j];
-         if (a_same != b_same ||
-             (a_same && a->uniform_ranges[i].address -
-                           a->uniform_ranges[j].address !=
-                           b->uniform_ranges[i].address -
-                           b->uniform_ranges[j].address))
-            return false;
+      /* Require the same partition in both directions. Within a component
+       * every range must move by the same amount: comparing to one anchor
+       * establishes all pairwise offsets without a quadratic second walk. */
+      const unsigned ar = ap[i], br = bp[i];
+      if (ab[ar] == AGX3_G17P_GRAPHICS_MAX_RANGES && ba[br] == AGX3_G17P_GRAPHICS_MAX_RANGES) {
+         ab[ar] = br;
+         ba[br] = ar;
+      } else if (ab[ar] != br || ba[br] != ar) {
+         return false;
       }
+      if (a->uniform_ranges[i].address - a->uniform_ranges[ar].address !=
+          b->uniform_ranges[i].address - b->uniform_ranges[ar].address)
+         return false;
    }
+
    return true;
 }
 

@@ -98,6 +98,10 @@ struct agx_bo {
    /* Mapping */
    struct agx_va *va;
 
+   /* Gallium's compact G17P command address. Protected by vma_lock and
+    * retained through BO-cache reuse; released with the final GEM handle. */
+   uint64_t g17p_vdm_alias;
+
    /* Suffixed to force agx_bo_map access */
    void *_map;
 
@@ -167,6 +171,7 @@ int agx_bo_export(struct agx_device *dev, struct agx_bo *bo);
 bool agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo);
 
 void agx_bo_free(struct agx_device *dev, struct agx_bo *bo);
+uint64_t agx_bo_get_g17p_vdm_alias(struct agx_device *dev, struct agx_bo *bo);
 struct agx_bo *agx_bo_cache_fetch(struct agx_device *dev, size_t size,
                                   size_t align, uint32_t flags,
                                   const bool dontwait);

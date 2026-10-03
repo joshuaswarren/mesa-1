@@ -27,7 +27,13 @@ agx_g17p_vdm_alias_heap_init(struct util_vma_heap *heap)
    util_vma_heap_init(heap, AGX_G17P_VDM_ALIAS_BASE,
                       AGX_G17P_VDM_ALIAS_SIZE);
    heap->alloc_high = false;
-   return heap->free_size == AGX_G17P_VDM_ALIAS_SIZE;
+   if (!util_vma_heap_alloc_addr(heap, AGX_G17P_VDM_ALIAS_RESERVED_START,
+                                 AGX_G17P_VDM_ALIAS_RESERVED_END -
+                                    AGX_G17P_VDM_ALIAS_RESERVED_START)) {
+      util_vma_heap_finish(heap);
+      return false;
+   }
+   return heap->free_size == AGX_G17P_VDM_ALIAS_AVAILABLE_SIZE;
 }
 
 bool
@@ -55,8 +61,10 @@ agx_g17p_vdm_alias_range_valid(uint64_t addr, uint64_t size)
        size > UINT64_MAX - addr)
       return false;
 
-   return addr + size <=
-          AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END;
+   const uint64_t end = addr + size;
+   return end <= AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END &&
+          (end <= AGX_G17P_VDM_ALIAS_RESERVED_START ||
+           addr >= AGX_G17P_VDM_ALIAS_RESERVED_END);
 }
 
 bool

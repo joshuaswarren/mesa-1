@@ -422,6 +422,11 @@ struct agx_batch {
    uint32_t syncobj;
    uint32_t draws;
 
+   /* Executable storage is owned by this batch's pipeline pool. */
+   uint64_t g17p_fragment_program;
+   struct agx_compiled_shader *g17p_fragment_shader;
+   struct agx_linked_shader *g17p_fragment_linked;
+
    struct agx_tilebuffer_layout tilebuffer_layout;
 
    /* PIPE_CLEAR_* bitmask */

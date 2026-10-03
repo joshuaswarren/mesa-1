@@ -689,6 +689,61 @@ main(void)
       refused, sizeof(refused), &refused_size));
    CHECK(refused_size == UINT16_C(0xa5a5));
 
+   /* Components may be interleaved in uniform order and connected only
+    * transitively through the 16-bit address-cache window. Moving whole
+    * components may also reverse their address order. Neither operation
+    * changes the program, except for its relocated immediate addresses. */
+   struct agx3_ioto_uniform_range chained_ranges[] = {
+      {.start_halfs = 0, .size_halfs = 2, .address = UINT64_C(0x400002e340)},
+      {.start_halfs = 2, .size_halfs = 2, .address = UINT64_C(0x4000212340)},
+      {.start_halfs = 4, .size_halfs = 2, .address = UINT64_C(0x4000412340)},
+      {.start_halfs = 6, .size_halfs = 2, .address = UINT64_C(0x4000028340)},
+      {.start_halfs = 8, .size_halfs = 2, .address = UINT64_C(0x4000216340)},
+      {.start_halfs = 10, .size_halfs = 2, .address = UINT64_C(0x4000022340)},
+   };
+   struct agx3_g17p_graphics_program_desc chained_desc = template_desc;
+   chained_desc.uniform_ranges = chained_ranges;
+   chained_desc.uniform_range_count = ARRAY_SIZE(chained_ranges);
+   struct agx3_g17p_graphics_program_template chained_template;
+   CHECK(agx3_g17p_graphics_program_template_generate(
+      AGX_CHIP_G17P, &chained_desc, &chained_template));
+
+   struct agx3_ioto_uniform_range chained_moved[ARRAY_SIZE(chained_ranges)];
+   memcpy(chained_moved, chained_ranges, sizeof(chained_moved));
+   const uint64_t shifts[] = {0x600000, 0x800000, 0, 0x600000, 0x800000,
+                              0x600000};
+   for (unsigned i = 0; i < ARRAY_SIZE(chained_moved); ++i)
+      chained_moved[i].address += shifts[i];
+   struct agx3_g17p_graphics_program_desc chained_target = chained_desc;
+   chained_target.uniform_ranges = chained_moved;
+   struct agx3_g17p_graphics_program chained_reference;
+   CHECK(agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &chained_target, &chained_reference));
+   uint8_t chained_output[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   uint16_t chained_length;
+   CHECK(agx3_g17p_graphics_program_template_relocate(
+      AGX_CHIP_G17P, &chained_desc, &chained_target, &chained_template,
+      chained_output, sizeof(chained_output), &chained_length));
+   CHECK(chained_length == chained_reference.length);
+   CHECK(memcmp(chained_output, chained_reference.bytes, chained_length) == 0);
+
+   /* Altering an offset within a component, splitting one component, or
+    * merging two components must fall back to full generation. */
+   chained_moved[3].address += 4;
+   CHECK(!agx3_g17p_graphics_program_template_relocate(
+      AGX_CHIP_G17P, &chained_desc, &chained_target, &chained_template,
+      chained_output, sizeof(chained_output), &chained_length));
+   chained_moved[3].address -= 4;
+   chained_moved[4].address += 0x100000;
+   CHECK(!agx3_g17p_graphics_program_template_relocate(
+      AGX_CHIP_G17P, &chained_desc, &chained_target, &chained_template,
+      chained_output, sizeof(chained_output), &chained_length));
+   chained_moved[4].address -= 0x100000;
+   chained_moved[2].address = chained_moved[1].address + 0x4000;
+   CHECK(!agx3_g17p_graphics_program_template_relocate(
+      AGX_CHIP_G17P, &chained_desc, &chained_target, &chained_template,
+      chained_output, sizeof(chained_output), &chained_length));
+
    /* Large ranges cross allocator rounds and therefore materialize the same
     * source more than once after the address cache is cleared.  Every such
     * site must relocate, not only the first LDIMM pair for each range. */

@@ -3745,16 +3745,104 @@ agx_update_descriptors(struct agx_batch *batch, struct agx_compiled_shader *cs)
       agx_pool_upload_aligned(&batch->pool, unif, sizeof(*unif), 16);
 }
 
+struct agx_g17p_graphics_template {
+   struct agx_g17p_graphics_template *next;
+   struct agx3_g17p_graphics_program_desc desc;
+   struct agx3_ioto_uniform_range ranges[AGX3_G17P_GRAPHICS_MAX_RANGES];
+   struct agx3_g17p_graphics_program_template program;
+};
+
+#define AGX_G17P_GRAPHICS_TEMPLATE_LIMIT 8u
+
+static bool
+agx_g17p_graphics_program_cached(struct agx_linked_shader *linked,
+                                 const struct agx3_g17p_graphics_program_desc *desc,
+                                 void *output, size_t capacity,
+                                 size_t *written)
+{
+   struct agx_g17p_graphics_template **slot =
+      &linked->g17p_graphics_templates;
+   unsigned count = 0;
+   while (*slot) {
+      struct agx_g17p_graphics_template *entry = *slot;
+      uint16_t length;
+      /* The composer checks the complete shader/imageblock state, range
+       * layout, address-cache topology and immediate instruction widths.
+       * Only the draw-varying addresses may be patched; a different shape
+       * goes through full generation instead. */
+      if (agx3_g17p_graphics_program_template_relocate(
+             AGX_CHIP_G17P, &entry->desc, desc, &entry->program, output,
+             capacity, &length)) {
+         *slot = entry->next;
+         entry->next = linked->g17p_graphics_templates;
+         linked->g17p_graphics_templates = entry;
+         *written = length;
+         return true;
+      }
+      slot = &entry->next;
+      ++count;
+   }
+
+   struct agx_g17p_graphics_template *entry =
+      rzalloc(linked, struct agx_g17p_graphics_template);
+   if (!entry)
+      return agx3_g17p_graphics_program_write_unpublished(
+         AGX_CHIP_G17P, desc, output, capacity, written);
+
+   entry->desc = *desc;
+   memcpy(entry->ranges, desc->uniform_ranges,
+          desc->uniform_range_count * sizeof(entry->ranges[0]));
+   entry->desc.uniform_ranges = entry->ranges;
+   if (!agx3_g17p_graphics_program_template_generate(
+          AGX_CHIP_G17P, &entry->desc, &entry->program) ||
+       entry->program.program.length > capacity) {
+      ralloc_free(entry);
+      return false;
+   }
+
+   /* Bound memory and lookup cost even when an application keeps changing
+    * its uniform allocation layout. The coldest entry is evicted. */
+   if (count == AGX_G17P_GRAPHICS_TEMPLATE_LIMIT) {
+      slot = &linked->g17p_graphics_templates;
+      while ((*slot)->next)
+         slot = &(*slot)->next;
+      ralloc_free(*slot);
+      *slot = NULL;
+   }
+   entry->next = linked->g17p_graphics_templates;
+   linked->g17p_graphics_templates = entry;
+   *written = entry->program.program.length;
+   memcpy(output, entry->program.program.bytes, *written);
+   return true;
+}
+
 static uint32_t
 agx_build_g17p_graphics_program(struct agx_batch *batch,
                                 struct agx_compiled_shader *cs,
                                 struct agx_linked_shader *linked,
                                 uint64_t *full_va)
 {
-   struct agx_device *dev = agx_device(batch->ctx->base.screen);
+   struct agx_context *ctx = batch->ctx;
+   struct agx_device *dev = agx_device(ctx->base.screen);
    if (!linked || !linked->bo || !linked->bo->va || !linked->size ||
        cs->b.info.has_preamble || cs->b.info.preamble_scratch_size)
       return 0;
+
+   /* Indirect records change their vertex parameters, not their fragment
+    * inputs. Keep the immutable fragment setup in this batch instead of
+    * rebuilding and uploading it for every record. Be conservative about
+    * all fixed-function and fragment state; shader changes are checked too.
+    * The cache is cleared whenever the batch's executable pool is replaced. */
+   const unsigned vertex_dirty =
+      AGX_DIRTY_VS | AGX_DIRTY_VS_PROG | AGX_DIRTY_VERTEX;
+   if (cs->stage == MESA_SHADER_FRAGMENT &&
+       !(ctx->dirty & ~vertex_dirty) && batch->g17p_fragment_program &&
+       batch->g17p_fragment_shader == cs &&
+       batch->g17p_fragment_linked == linked) {
+      if (full_va)
+         *full_va = batch->g17p_fragment_program;
+      return agx_usc_addr(dev, batch->g17p_fragment_program);
+   }
 
    struct agx3_ioto_uniform_range
       ranges[AGX3_G17P_GRAPHICS_MAX_RANGES];
@@ -3901,18 +3989,22 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
          .tile_size_px = batch->tilebuffer_layout.tile_size,
       },
    };
-   struct agx3_g17p_graphics_program program;
-   if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &program) ||
-       program.length > capacity)
+   size_t program_length;
+   if (!agx_g17p_graphics_program_cached(linked, &desc, t.cpu, capacity,
+                                         &program_length))
       return 0;
 
-   memcpy(t.cpu, program.bytes, program.length);
    if (agx_bo_sync_for_device(program_bo,
                               t.gpu - program_bo->va->addr,
-                              program.length))
+                              program_length))
       return 0;
    if (full_va)
       *full_va = t.gpu;
+   if (cs->stage == MESA_SHADER_FRAGMENT) {
+      batch->g17p_fragment_program = t.gpu;
+      batch->g17p_fragment_shader = cs;
+      batch->g17p_fragment_linked = linked;
+   }
    return agx_usc_addr(dev, t.gpu);
 }
 

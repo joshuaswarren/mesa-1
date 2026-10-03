@@ -61,7 +61,8 @@
 /* Native TVB blocks are sparse 128-KiB mappings with 32-KiB page IDs
  * 0x11..0xc7. Their last range ends at compact 0x658000; the fixed scene,
  * discard and status mappings also live below this bound. Start command BOs
- * at +8 MiB, above the complete retained render pool. Bind-tail and draw-state
+ * at +8 MiB, above the cold retained render pool. Additional kernel arenas are reserved
+ * separately below. Bind-tail and draw-state
  * records carry unsigned 32-bit context offsets; PPP/stream pointers are wider.
  * Use that narrowest encoding's entire range, rather than limiting live command
  * BOs to the original bring-up window's 24 MiB. This reserves virtual addresses,
@@ -72,6 +73,18 @@
    (AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_START)
 #define AGX_G17P_VDM_ALIAS_SIZE                                         \
    (AGX_G17P_VDM_ALIAS_OFFSET_END - AGX_G17P_VDM_ALIAS_OFFSET_START)
+
+/* The kernel also owns compact render-state aliases, both growing TVB
+ * arenas, and dynamic render-target backing above +32 MiB (currently ending
+ * at +0x64000000). Keep the rest of the lower half reserved so cached command
+ * aliases cannot run into these arenas as their live footprint grows. */
+#define AGX_G17P_VDM_ALIAS_RESERVED_START \
+   (AGX_G17P_VDM_USER_BASE + UINT64_C(0x02000000))
+#define AGX_G17P_VDM_ALIAS_RESERVED_END \
+   (AGX_G17P_VDM_USER_BASE + UINT64_C(0x80000000))
+#define AGX_G17P_VDM_ALIAS_AVAILABLE_SIZE \
+   (AGX_G17P_VDM_ALIAS_SIZE - \
+    (AGX_G17P_VDM_ALIAS_RESERVED_END - AGX_G17P_VDM_ALIAS_RESERVED_START))
 
 /*
  * Reduce the kernel-reported user VA window to the power-of-two window the

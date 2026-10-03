@@ -13,9 +13,15 @@
 #include "nir_lower_blend.h"
 #include "util/macros.h"
 
+struct agx_g17p_graphics_template;
+
 struct agx_linked_shader {
    /* Mapped executable memory */
    struct agx_bo *bo;
+
+   /* Gallium-owned, bounded Ioto template cache. Entries are ralloc children
+    * of this linked shader and contain no live batch allocations. */
+   struct agx_g17p_graphics_template *g17p_graphics_templates;
 
    /* Exact executable byte count. BO allocations are page-rounded, so the
     * BO size is not a safe disassembler bound. */

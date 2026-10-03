@@ -3,6 +3,30 @@ Asahi
 
 The Asahi driver aims to provide an OpenGL implementation for the Apple M1.
 
+Native G17P command setup
+-------------------------
+
+Gallium caches up to eight uniform-loading program templates per linked
+shader. A draw reuses a template only when the composer validates the shader,
+uniform layout, address-cache components, imageblock state and immediate widths.
+It relocates the draw's source addresses into fresh batch-owned executable
+storage. A changed shape goes through full generation. Fragment setup can also
+be reused within the same batch when only vertex parameters change; fragment
+and fixed-function state changes invalidate that reuse.
+
+Compact command-buffer aliases are owned by their buffer objects rather than
+individual batches. The mapping stays valid through idle BO-cache reuse and is
+unbound when the buffer is destroyed. Batches retain their ordinary BO references
+until completion. First mapping publication is serialized across contexts, and
+an unsuccessful unbind does not return the address to the allocator. Under
+address pressure, idle cached BOs are evicted before allocation is retried.
+
+The allocator excludes the kernel's compact render-state, growing tile-buffer
+and dynamic render-target arenas. Command buffers may use the gap from +8 MiB
+to +32 MiB and the upper half of the four-GiB compact aperture. This reservation
+is independent of how much tile-buffer memory is currently allocated.
+These changes apply to G17P; M1/M2 continue using their existing setup path.
+
 Wrap (macOS only)
 -----------------
 

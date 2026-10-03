@@ -479,12 +479,14 @@ test_g17p_vdm_command_alias_heap(void)
    assert(0x200000 + 2 * command_bo_size < ((uint64_t)native_tvb_pages[6] + 4) * 0x8000);
    assert(AGX_G17P_VDM_ALIAS_OFFSET_START == 0x800000);
 
-   const unsigned capacity = AGX_G17P_VDM_ALIAS_SIZE / command_bo_size;
+   const unsigned capacity = AGX_G17P_VDM_ALIAS_AVAILABLE_SIZE / command_bo_size;
    uint64_t last = first;
    for (unsigned i = 1; i < capacity; ++i) {
       last = util_vma_heap_alloc(&heap, command_bo_size, PAGE);
       assert(last != 0);
       assert(agx_g17p_vdm_alias_range_valid(last, command_bo_size));
+      if (i == 192)
+         assert(last == AGX_G17P_VDM_ALIAS_RESERVED_END);
    }
    assert(last + command_bo_size ==
           AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END);
@@ -502,11 +504,21 @@ test_g17p_vdm_command_alias_heap(void)
    uint32_t compact = 0;
    assert(agx_g17p_vdm_alias_compact(first, &compact));
    assert(compact == AGX_G17P_VDM_ALIAS_OFFSET_START);
-   /* SuperTuxKart creates more than the old 192 live 128-KiB command BOs
-    * during pipeline warmup. Offsets must survive the former +32-MiB bound. */
-   assert(agx_g17p_vdm_alias_compact(
+   /* More than 192 live 128-KiB command BOs must skip the driver's compact
+    * arenas, not bind over its render-state aliases and TVB growth backing. */
+   assert(!agx_g17p_vdm_alias_compact(
       AGX_G17P_VDM_USER_BASE + UINT64_C(0x02000000), &compact));
-   assert(compact == UINT32_C(0x02000000));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_ALIAS_RESERVED_START - PAGE, 2 * PAGE));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_USER_BASE + UINT64_C(0x04000000), PAGE));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_USER_BASE + UINT64_C(0x50000000), PAGE));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_ALIAS_RESERVED_END - PAGE, 2 * PAGE));
+   assert(agx_g17p_vdm_alias_compact(
+      AGX_G17P_VDM_ALIAS_RESERVED_END, &compact));
+   assert(compact == UINT32_C(0x80000000));
    assert(agx_g17p_vdm_alias_compact(last + command_bo_size - 1, &compact));
    assert(compact == UINT32_MAX);
    assert(!agx_g17p_vdm_alias_compact(
