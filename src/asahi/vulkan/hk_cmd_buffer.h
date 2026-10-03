@@ -1574,8 +1574,12 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
    /* A recorded dependency may have ordered the open general compute stream
     * after work that follows it in the list. It is then ended, and the work
-    * goes into a stream positioned after that requirement. */
-   if (*ptr && ptr == &cmd->current_cs.cs && cmd->sync.cs_check_pending)
+    * goes into a stream positioned after that requirement. Work of a new
+    * stage class must also update the reused stream's kind and dependencies,
+    * so later barriers include transfers and meta graphics emitted there. */
+   if (*ptr && ptr == &cmd->current_cs.cs &&
+       (cmd->sync.cs_check_pending ||
+        (hk_sync_general_cs_kind(cmd) & ~(*ptr)->sync.kind)))
       hk_sync_check_cs(cmd);
 
    if ((*ptr) == NULL) {

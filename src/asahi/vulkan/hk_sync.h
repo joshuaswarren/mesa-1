@@ -265,6 +265,13 @@ void hk_sync_after_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 void hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                             struct hk_cs **slot, bool compute);
 void hk_sync_check_cs(struct hk_cmd_buffer *cmd);
+
+/* Stage class of work entering the open general compute stream. Keep this
+ * equivalent to stream_kind() for &cmd->current_cs.cs. */
+#define hk_sync_general_cs_kind(cmd)                                           \
+   ((cmd)->sync.kind_override ? (cmd)->sync.kind_override                       \
+    : (cmd)->sync.xfer_depth  ? HK_SYNC_XFER                                    \
+                              : HK_SYNC_COMPUTE)
 void hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 void hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
                    struct hk_cs *from);
