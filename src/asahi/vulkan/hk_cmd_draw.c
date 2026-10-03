@@ -11634,6 +11634,27 @@ hk_g17p_emit_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t *out,
    return true;
 }
 
+/* Capture the selected last producer at each successful emission, never
+ * infer a stream's layer range from the command buffer's final bindings.
+ */
+static void
+hk_g17p_note_layer_zero_draw(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
+{
+   if (hk_cmd_buffer_device(cmd)->dev.chip != AGX_CHIP_G17P ||
+       cmd->state.gfx.render.view_mask ||
+       cmd->state.gfx.shaders[MESA_SHADER_GEOMETRY] ||
+       cmd->state.gfx.shaders[MESA_SHADER_TESS_EVAL]) {
+      cs->g17p_layer_zero_unknown = true;
+      return;
+   }
+
+   const struct hk_shader *vs = hk_bound_hw_vs(&cmd->state.gfx);
+   if (vs && vs->info.g17p_default_layer_zero)
+      cs->g17p_layer_zero_draws++;
+   else
+      cs->g17p_layer_zero_unknown = true;
+}
+
 static __attribute__((hot)) void
 hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
              struct agx_draw draw_)
@@ -12119,6 +12140,7 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          }
       }
 
+      hk_g17p_note_layer_zero_draw(cmd, cs);
       cs->stats.cmds++;
    }
 }
@@ -12527,6 +12549,7 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
    if (!hk_g17p_emit_draw(cmd, cs, cs->current, draw, gfx->topology, false,
                           tail_emitted))
       return;
+   hk_g17p_note_layer_zero_draw(cmd, cs);
    cs->stats.cmds++;
 }
 

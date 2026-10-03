@@ -1028,6 +1028,14 @@ struct hk_cs {
     */
    struct util_dynarray imm_writes;
 
+   /* Number of successfully emitted draws whose last raster producer is
+    * positively known to export only the default Layer=0, without multiview.
+    * Compare with stats.cmds: untracked emitters conservatively disqualify.
+    * The wider proof count does not wrap with stats.cmds.
+    */
+   uint64_t g17p_layer_zero_draws;
+   bool g17p_layer_zero_unknown;
+
    /* Statistics */
    struct {
       uint32_t calls, cmds, flushes, merged;

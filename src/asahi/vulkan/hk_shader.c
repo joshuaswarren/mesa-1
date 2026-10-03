@@ -2650,7 +2650,8 @@ hk_g17p_saturate_layer_viewport(nir_builder *b, nir_intrinsic_instr *intr,
 
 static void
 hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
-               bool layer_as_varying, bool skip_default_layer)
+               bool layer_as_varying, bool skip_default_layer,
+               bool original_vertex_stage)
 {
    /* Point size must be clamped, excessively large points don't render
     * properly on G13.
@@ -2669,6 +2670,10 @@ hk_lower_hw_vs(nir_shader *nir, struct hk_shader *shader, bool kill_psiz,
 
    /* Native fragment Layer reads use a flat coefficient, including for
     * independently compiled stages whose VS does not explicitly write Layer. */
+   shader->info.g17p_default_layer_zero =
+      original_vertex_stage && layer_as_varying && !skip_default_layer &&
+      !nir->info.layer_viewport_relative &&
+      !(nir->info.outputs_written & VARYING_BIT_LAYER);
    if (layer_as_varying && !skip_default_layer)
       NIR_PASS(_, nir, agx_nir_lower_default_layer);
 
@@ -3246,7 +3251,8 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          hk_lower_hw_vs(nir, shader, kill_psiz,
                         dev->dev.chip == AGX_CHIP_G17P,
                         sw_stage == MESA_SHADER_VERTEX && key &&
-                           key->vs.skip_default_layer);
+                           key->vs.skip_default_layer,
+                        sw_stage == MESA_SHADER_VERTEX);
          outputs = nir->info.outputs_written;
       } else {
          NIR_PASS(_, nir, poly_nir_lower_vs_before_gs);
@@ -4136,7 +4142,7 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
                   NULL);
       }
       hk_lower_hw_vs(rast, shader, false,
-                     dev->dev.chip == AGX_CHIP_G17P, false);
+                     dev->dev.chip == AGX_CHIP_G17P, false, false);
       shader->info.gs = count_variant->info.gs;
       main_variant->info.gs = count_variant->info.gs;
 
