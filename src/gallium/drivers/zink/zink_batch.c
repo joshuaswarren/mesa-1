@@ -545,7 +545,7 @@ zink_start_batch(struct zink_context *ctx)
    struct zink_batch_state *bs = ctx->bs;
 
    bs->ctx = ctx;
-   bs->usage.unflushed = true;
+   p_atomic_set(&bs->usage.unflushed, true);
 
    VkCommandBufferBeginInfo cbbi = {0};
    cbbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
@@ -654,7 +654,7 @@ submit_queue(void *data, void *gdata, int thread_index)
       bs->fence.batch_id = (uint32_t)p_atomic_inc_return(&screen->curr_batch);
    bs->usage.usage = bs->fence.batch_id;
    assert(bs->usage.usage);
-   bs->usage.unflushed = false;
+   p_atomic_set(&bs->usage.unflushed, false);
 
    uint64_t batch_id = bs->fence.batch_id;
    /* first submit is just for acquire waits since they have a separate array */
@@ -843,7 +843,13 @@ submit_queue(void *data, void *gdata, int thread_index)
 
    bs->usage.submit_count++;
 end:
+   /* Pair the notification with the cross-context waiter's predicate check.
+    * Otherwise the submission can finish between that check and cnd_wait,
+    * leaving the waiter asleep with no future submission to wake it.
+    */
+   mtx_lock(&bs->usage.mtx);
    cnd_broadcast(&bs->usage.flush);
+   mtx_unlock(&bs->usage.mtx);
 
    post_submit(bs, screen);
 
@@ -1206,15 +1212,18 @@ zink_batch_usage_unflushed_wait(struct zink_context *ctx, struct zink_batch_usag
          return true;
       } else { //multi-context
          mtx_lock(&u->mtx);
-         if (trywait) {
-            struct timespec ts = {0, 10000};
-            cnd_timedwait(&u->flush, &u->mtx, &ts);
-         } else
+         while (zink_batch_usage_is_unflushed(u)) {
+            if (trywait) {
+               struct timespec ts = {0, 10000};
+               cnd_timedwait(&u->flush, &u->mtx, &ts);
+               break;
+            }
             cnd_wait(&u->flush, &u->mtx);
+         }
          mtx_unlock(&u->mtx);
       }
    }
-   return !u->unflushed;
+   return !zink_batch_usage_is_unflushed(u);
 }
 
 static void
