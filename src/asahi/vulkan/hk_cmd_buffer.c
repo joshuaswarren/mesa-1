@@ -899,6 +899,7 @@ merge_control_streams(struct hk_cmd_buffer *cmd)
    list_for_each_entry_safe(struct hk_cs, cs, &cmd->control_streams, node) {
       if (cs->type == HK_CS_CDM && last && last->type == HK_CS_CDM &&
           !last->timestamp.end.handle &&
+          !(last->timestamp.start.handle && cs->g17p_timestamp_query) &&
           !(last->timestamp.start.handle && cs->timestamp.start.handle)) {
 
          hk_sync_merge(cmd, last, cs);

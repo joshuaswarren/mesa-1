@@ -1042,6 +1042,12 @@ struct hk_cs {
       struct agx_timestamp_req end;
    } timestamp;
 
+   /* G17P query commands observe timestamp writes from earlier streams.
+    * Firmware start timestamps reach query memory only at retirement, so a
+    * producer cannot be merged across this consumer boundary.
+    */
+   bool g17p_timestamp_query;
+
    /* Recorded dependencies, see hk_sync.h. */
    struct hk_sync_stream sync;
 
@@ -1188,6 +1194,8 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    a->timestamp.end = b->timestamp.end;
    if (!a->timestamp.start.handle)
       a->timestamp.start = b->timestamp.start;
+
+   a->g17p_timestamp_query |= b->g17p_timestamp_query;
 
    a->stats.calls += b->stats.calls;
    a->stats.cmds += b->stats.cmds;

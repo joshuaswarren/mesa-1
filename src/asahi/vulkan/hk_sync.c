@@ -597,12 +597,39 @@ hk_sync_get_cs_after(struct hk_cmd_buffer *cmd,
    return cs;
 }
 
+/* A standalone G17P timestamp still needs an executable command carrier.
+ * Only an otherwise empty timestamp producer uses this owned scratch store;
+ * ordinary compute and barriers keep their existing streams unchanged.
+ */
+static void
+stamp_carrier_launch(struct hk_cmd_buffer *cmd)
+{
+   struct hk_cs *cs = cmd->current_cs.cs;
+   if (hk_cmd_buffer_device(cmd)->dev.chip != AGX_CHIP_G17P || !cs ||
+       (!cs->timestamp.start.handle && !cs->timestamp.end.handle) ||
+       cs->stats.cmds || cs->stats.flushes || cs->imm_writes.size)
+      return;
+
+   struct agx_ptr scratch = hk_pool_alloc(cmd, 16, 16);
+   if (!scratch.gpu)
+      return;
+   hk_g17p_meta_fill_addr(cmd, &cmd->current_cs.cs, scratch.gpu, 4, 0);
+}
+
 void
 hk_sync_end_cs_if_timestamped(struct hk_cmd_buffer *cmd)
 {
    struct hk_cs *cs = cmd->current_cs.cs;
-   if (cs && cs->timestamp.end.handle)
+   if (!cs)
+      return;
+
+   const bool g17p_start =
+      hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P &&
+      cs->timestamp.start.handle;
+   if (cs->timestamp.end.handle || g17p_start) {
+      stamp_carrier_launch(cmd);
       hk_cmd_buffer_end_compute(cmd);
+   }
 }
 
 /* The stream on the same subqueue that precedes cs in the list. */
@@ -731,8 +758,10 @@ hk_sync_flush_pending_timestamp(struct hk_cmd_buffer *cmd)
    struct hk_cs *tail = last_stream(cmd);
    if (tail && !tail->timestamp.end.handle) {
       tail->timestamp.end = req;
-      if (tail == cmd->current_cs.cs)
+      if (tail == cmd->current_cs.cs) {
+         stamp_carrier_launch(cmd);
          hk_cmd_buffer_end_compute(cmd);
+      }
       return;
    }
 
@@ -742,6 +771,7 @@ hk_sync_flush_pending_timestamp(struct hk_cmd_buffer *cmd)
    if (!cs)
       return;
    cs->timestamp.start = req;
+   stamp_carrier_launch(cmd);
    hk_cmd_buffer_end_compute(cmd);
 }
 
@@ -808,8 +838,10 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
 
       /* Later compute would move the stamp past itself; keep the stream
        * boundary so the stamp stays at the recorded position. */
-      if (tail == cmd->current_cs.cs)
+      if (tail == cmd->current_cs.cs) {
+         stamp_carrier_launch(cmd);
          hk_cmd_buffer_end_compute(cmd);
+      }
       return;
    }
 
@@ -817,6 +849,7 @@ hk_sync_write_timestamp(struct hk_cmd_buffer *cmd, VkPipelineStageFlags2 stage,
    if (!cs)
       return;
    cs->timestamp.end = req;
+   stamp_carrier_launch(cmd);
    hk_cmd_buffer_end_compute(cmd);
 }
 
