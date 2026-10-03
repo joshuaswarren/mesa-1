@@ -93,5 +93,22 @@ Local AArch64 results on 2026-09-10:
 - focused `agx3_pack_test --gtest_filter="*Firefox*:*VertexIndexedTexture*"`:
   10,232,294 proven-subset pack checks, 0 failures.
 
-No live Firefox result is claimed here because no local Firefox binary is
-available and Neo was explicitly out of scope.
+That September run did not include live Firefox because no local Firefox
+binary was available and Neo was explicitly out of scope.
+
+## Native Gallium staging regression (2026-10-03)
+
+The same driver-side WebGL2 shader exposed a native G17P failure on a MacBook
+Neo: combining `texelFetch` and `textureLod` returned `{2,5,106,128}` rather
+than `{17,123,201,255}`. Each texture operation passed in isolation. Fetches
+and filtered samples tracked their shared sampler-private banks independently,
+allowing one asynchronous consumer's coordinates to be overwritten by the other.
+
+The packer now accounts for both consumers in the shared staging-bank ledger.
+It selects a free bank when possible and waits only when an overlapping bank
+must be reused. `FetchAndSampleKeepIndependentStagingBanks` covers both operation
+orders and checks that a free bank avoids a full drain. The regression fails
+without this fix, passes with it, and the exact-pixel WebGL2 test passes on Neo.
+Native OpenGL Minecraft 26.3 also renders its world and UI on that device with
+the graphics-uniform-range and dword-alignment fixes applied. This is bounded
+application evidence, not an OpenGL conformance claim.
