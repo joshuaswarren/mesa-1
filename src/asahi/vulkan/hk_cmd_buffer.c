@@ -1111,8 +1111,37 @@ hk_cmd_bind_shaders(struct vk_command_buffer *vk_cmd, uint32_t stage_count,
       hk_cmd_prepare_bound_graphics(cmd);
 }
 
+/* Only ordinary G17P graphics programs whose descriptor values are fetched
+ * through the root/table in GPU memory qualify.  CPU-decoded combined sampler
+ * programs and variant selection retain the existing publication path.
+ */
+static bool
+hk_g17p_can_retain_descriptor_root(struct hk_cmd_buffer *cmd,
+                                  const struct hk_descriptor_state *desc)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   if (hk_cmd_buffer_device(cmd)->dev.chip != AGX_CHIP_G17P ||
+       desc != &gfx->descriptors ||
+       gfx->shaders[MESA_SHADER_GEOMETRY] ||
+       gfx->shaders[MESA_SHADER_TESS_CTRL] ||
+       gfx->shaders[MESA_SHADER_TESS_EVAL])
+      return false;
+
+   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
+   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
+   if (!vs || !fs || vs->g17p_ordinary_variants ||
+       fs->g17p_ordinary_variants || fs->g17p_sample_variants)
+      return false;
+
+   const struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
+   const struct hk_shader *hw_fs = hk_fs_variant(fs, 1);
+   return hw_vs && hw_fs && hw_vs->compiled && hw_fs->compiled &&
+          !hw_fs->info.agx3_combined_sampler_valid &&
+          !hw_fs->info.g17p_apple_fs;
+}
+
 static void
-hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
+hk_bind_descriptor_sets(struct hk_cmd_buffer *cmd,
                         struct hk_descriptor_state *desc,
                         const VkBindDescriptorSetsInfoKHR *info)
 {
@@ -1135,6 +1164,7 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
    uint8_t dyn_buffer_start =
       pipeline_layout->dynamic_descriptor_offset[info->firstSet];
 
+   bool root_changed = false;
    uint32_t next_dyn_offset = 0;
    for (uint32_t i = 0; i < info->descriptorSetCount; ++i) {
       unsigned s = i + info->firstSet;
@@ -1143,9 +1173,11 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
       if (desc->sets[s] != set ||
           (desc->push_active & BITFIELD_BIT(s))) {
          if (set != NULL) {
+            root_changed |= desc->root.sets[s] != hk_descriptor_set_addr(set);
             desc->root.sets[s] = hk_descriptor_set_addr(set);
             desc->set_sizes[s] = set->size;
          } else {
+            root_changed |= desc->root.sets[s] != 0;
             desc->root.sets[s] = 0;
             desc->set_sizes[s] = 0;
          }
@@ -1157,6 +1189,8 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
       desc->push_active &= ~BITFIELD_BIT(s);
       desc->push_dirty &= ~BITFIELD_BIT(s);
 
+      root_changed |=
+         desc->root.set_dynamic_buffer_start[s] != dyn_buffer_start;
       desc->root.set_dynamic_buffer_start[s] = dyn_buffer_start;
 
       if (pipeline_layout->set_layouts[s] != NULL) {
@@ -1167,6 +1201,11 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
             for (uint32_t j = 0; j < set_layout->vk.dynamic_descriptor_count; j++) {
                struct hk_buffer_address addr = set->dynamic_buffers[j];
                addr.base_addr += info->pDynamicOffsets[next_dyn_offset + j];
+               const struct hk_buffer_address *old =
+                  &desc->root.dynamic_buffers[dyn_buffer_start + j];
+               root_changed |= old->base_addr != addr.base_addr ||
+                               old->size != addr.size ||
+                               old->sparse_map_page != addr.sparse_map_page;
                desc->root.dynamic_buffers[dyn_buffer_start + j] = addr;
             }
             next_dyn_offset += set->layout->vk.dynamic_descriptor_count;
@@ -1180,7 +1219,11 @@ hk_bind_descriptor_sets(UNUSED struct hk_cmd_buffer *cmd,
    assert(dyn_buffer_start <= HK_MAX_DYNAMIC_BUFFERS);
    assert(next_dyn_offset <= info->dynamicOffsetCount);
 
-   desc->root_dirty = true;
+   /* Preserve all descriptor bookkeeping even if the root's immutable bytes
+    * can be reused.  Other paths keep the prior unconditional invalidation.
+    */
+   desc->root_dirty |= root_changed ||
+      !hk_g17p_can_retain_descriptor_root(cmd, desc);
    desc->generation++;
 }
 
