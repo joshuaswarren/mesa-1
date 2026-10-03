@@ -108,6 +108,9 @@ fail_pop:
 fail_push:
    mtx_destroy(&queue->submit.mutex);
 fail_mutex:
+   list_del(&queue->link);
+   simple_mtx_destroy(&queue->lock);
+   vk_object_base_finish(&queue->base);
    return result;
 }
 
