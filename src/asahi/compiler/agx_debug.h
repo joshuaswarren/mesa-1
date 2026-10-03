@@ -6,6 +6,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "util/macros.h"
 
 #ifdef __cplusplus
