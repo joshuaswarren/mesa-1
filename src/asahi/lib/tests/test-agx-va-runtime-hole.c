@@ -484,40 +484,24 @@ test_g17p_vdm_command_alias_heap(void)
     * window minus those arenas, never the whole window. */
    const uint64_t capacity_bytes = agx_g17p_vdm_alias_heap_capacity();
    assert(capacity_bytes < AGX_G17P_VDM_ALIAS_SIZE);
-   assert(capacity_bytes ==
-          AGX_G17P_VDM_ALIAS_SIZE -
-             (AGX_G17P_KERNEL_RENDER_USER_ALIAS_END -
-              AGX_G17P_KERNEL_RENDER_USER_ALIAS_START) -
-             (AGX_G17P_KERNEL_TVB_GROWTH_END -
-              AGX_G17P_KERNEL_TVB_GROWTH_START) -
-             (AGX_G17P_KERNEL_TVB_PAIR1_END - AGX_G17P_KERNEL_TVB_PAIR1_START) -
-             (AGX_G17P_KERNEL_RT_DYNAMIC_END - AGX_G17P_KERNEL_RT_DYNAMIC_START));
+   assert(capacity_bytes == AGX_G17P_VDM_ALIAS_AVAILABLE_SIZE);
    assert(heap.free_size == capacity_bytes - command_bo_size);
 
    /* Firefox (WebRender + WebGL) holds 32 batches x (512-KiB encoder +
     * 256-KiB pool alias) = exactly the 24 MiB below the render-state alias
     * arena; the next command BO must continue above the arena, not into it. */
-   const uint64_t arena_start =
-      AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RENDER_USER_ALIAS_START;
-   const uint64_t arena_end =
-      AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RENDER_USER_ALIAS_END;
+   const uint64_t arena_start = AGX_G17P_VDM_ALIAS_RESERVED_START;
+   const uint64_t arena_end = AGX_G17P_VDM_ALIAS_RESERVED_END;
    assert(agx_g17p_vdm_alias_kernel_reserved(arena_start, PAGE));
    assert(agx_g17p_vdm_alias_kernel_reserved(arena_start - PAGE, PAGE + 1));
    assert(!agx_g17p_vdm_alias_kernel_reserved(arena_start - PAGE, PAGE));
    assert(!agx_g17p_vdm_alias_kernel_reserved(arena_end, PAGE));
    assert(!agx_g17p_vdm_alias_kernel_reserved(arena_start, 0));
 
-   /* The free regions between the arenas, low to high. Two of them are not
-    * multiples of a command BO, so the heap ends with that much unusable tail
-    * rather than zero. */
+   /* Exhaust both free regions, including the jump over all kernel arenas. */
    const uint64_t free_regions[][2] = {
       {AGX_G17P_VDM_ALIAS_BASE, arena_start},
-      {arena_end, AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_GROWTH_START},
-      {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_GROWTH_END,
-       AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_PAIR1_START},
-      {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_PAIR1_END,
-       AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RT_DYNAMIC_START},
-      {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RT_DYNAMIC_END,
+      {arena_end,
        AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END},
    };
    unsigned capacity = 0;
@@ -527,8 +511,8 @@ test_g17p_vdm_command_alias_heap(void)
       capacity += bytes / command_bo_size;
       unusable += bytes % command_bo_size;
    }
-   assert(capacity_bytes == 0x1800000 + 0x1e00000 + 0x7918000 + 0x3418000 + 0xa8000000);
-   assert(capacity == 192 + 240 + 968 + 416 + 21504);
+   assert(capacity_bytes == UINT64_C(0x1800000) + UINT64_C(0x80000000));
+   assert(capacity == 192 + 16384);
 
    const uint64_t below_arena = (arena_start - AGX_G17P_VDM_ALIAS_BASE) / command_bo_size;
    uint64_t last = first;
@@ -559,11 +543,21 @@ test_g17p_vdm_command_alias_heap(void)
    uint32_t compact = 0;
    assert(agx_g17p_vdm_alias_compact(first, &compact));
    assert(compact == AGX_G17P_VDM_ALIAS_OFFSET_START);
-   /* SuperTuxKart creates more than the old 192 live 128-KiB command BOs
-    * during pipeline warmup. Offsets must survive the former +32-MiB bound. */
-   assert(agx_g17p_vdm_alias_compact(
+   /* More than 192 live 128-KiB command BOs must skip the driver's compact
+    * arenas, not bind over its render-state aliases and TVB growth backing. */
+   assert(!agx_g17p_vdm_alias_compact(
       AGX_G17P_VDM_USER_BASE + UINT64_C(0x02000000), &compact));
-   assert(compact == UINT32_C(0x02000000));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_ALIAS_RESERVED_START - PAGE, 2 * PAGE));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_USER_BASE + UINT64_C(0x04000000), PAGE));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_USER_BASE + UINT64_C(0x50000000), PAGE));
+   assert(!agx_g17p_vdm_alias_range_valid(
+      AGX_G17P_VDM_ALIAS_RESERVED_END - PAGE, 2 * PAGE));
+   assert(agx_g17p_vdm_alias_compact(
+      AGX_G17P_VDM_ALIAS_RESERVED_END, &compact));
+   assert(compact == UINT32_C(0x80000000));
    assert(agx_g17p_vdm_alias_compact(last + command_bo_size - 1, &compact));
    assert(compact == UINT32_MAX);
    assert(!agx_g17p_vdm_alias_compact(

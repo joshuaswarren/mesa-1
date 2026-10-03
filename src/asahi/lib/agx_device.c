@@ -155,6 +155,20 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
    if (bo->_map)
       dev->ops.bo_munmap(dev, bo);
 
+   if (bo->g17p_vdm_alias) {
+      /* Batches retain the BO until completion. Keep the compact alias mapped
+       * while the idle BO is cached, but never recycle its VA over an old
+       * mapping if an unbind fails (for example, a quarantined VM). */
+      int ret = agx_bo_bind(dev, NULL, bo->g17p_vdm_alias, bo->size, 0,
+                            DRM_ASAHI_BIND_UNBIND);
+      if (!ret) {
+         simple_mtx_lock(&dev->vma_lock);
+         util_vma_heap_free(&dev->g17p_vdm_alias_heap, bo->g17p_vdm_alias,
+                            bo->size);
+         simple_mtx_unlock(&dev->vma_lock);
+      }
+   }
+
    /* Free the VA. No need to unmap the BO or unbind the VA, as the kernel will
     * take care of that when we close it.
     */
@@ -272,6 +286,55 @@ agx_drm_bo_bind(struct agx_device *dev, struct drm_asahi_gem_bind_op *ops,
    return ret;
 }
 #endif /* HAVE_LIBDRM */
+
+uint64_t
+agx_bo_get_g17p_vdm_alias(struct agx_device *dev, struct agx_bo *bo)
+{
+   if (!bo || dev->chip != AGX_CHIP_G17P)
+      return 0;
+
+   /* A screen may have several contexts. Serialize first publication so they
+    * share one mapping, and never expose an alias before VM_BIND succeeds. */
+   uint64_t alias = 0;
+   for (unsigned attempt = 0; attempt < 2; ++attempt) {
+      simple_mtx_lock(&dev->vma_lock);
+      alias = bo->g17p_vdm_alias;
+      if (!alias) {
+         alias = util_vma_heap_alloc(&dev->g17p_vdm_alias_heap, bo->size,
+                                     AIL_PAGESIZE);
+         if (alias) {
+            const uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
+            const bool valid = agx_g17p_vdm_alias_range_valid(alias, bo->size);
+            const int ret = valid ? agx_bo_bind(dev, bo, alias, bo->size, 0,
+                                                flags) : -EINVAL;
+            const int bind_errno = valid && ret ? errno : 0;
+            if (!valid || ret) {
+               mesa_loge("asahi: G17P VDM alias %#" PRIx64
+                         " size=%#" PRIx64 " for BO %u: %s (ret=%d errno=%d)",
+                         alias, (uint64_t)bo->size, bo->handle,
+                         valid ? "kernel refused bind" : "invalid or reserved range",
+                         ret, bind_errno);
+               util_vma_heap_free(&dev->g17p_vdm_alias_heap, alias, bo->size);
+               simple_mtx_unlock(&dev->vma_lock);
+               return 0;
+            }
+            bo->g17p_vdm_alias = alias;
+         }
+      }
+      simple_mtx_unlock(&dev->vma_lock);
+      if (alias || attempt)
+         break;
+
+      /* The compact address window is finite. Evict idle cached BOs before
+       * refusing a new mapping, without reversing cache_lock -> vma_lock. */
+      agx_bo_cache_evict_all(dev);
+   }
+   if (!alias)
+      mesa_loge("asahi: G17P compact VDM alias window exhausted after cache "
+                "eviction for BO %u size=%#" PRIx64,
+                bo->handle, (uint64_t)bo->size);
+   return alias;
+}
 
 /*
  * Convenience helper to bind a single BO regardless of kernel module.

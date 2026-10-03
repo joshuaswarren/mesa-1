@@ -91,57 +91,10 @@ agx_encoder_allocate(struct agx_batch *batch, struct agx_device *dev)
    return (struct agx_encoder){.bo = bo, .current = map, .end = map + bo->size};
 }
 
-static void agx_g17p_vdm_alias_free(struct agx_device *dev, uint64_t alias,
-                                    uint64_t size);
-
-static uint64_t
-agx_g17p_vdm_alias_alloc(struct agx_device *dev, uint64_t size)
-{
-   simple_mtx_lock(&dev->vma_lock);
-   const uint64_t alias = util_vma_heap_alloc(
-      &dev->g17p_vdm_alias_heap, size, AIL_PAGESIZE);
-   simple_mtx_unlock(&dev->vma_lock);
-
-   if (agx_g17p_vdm_alias_range_valid(alias, size))
-      return alias;
-
-   if (alias)
-      agx_g17p_vdm_alias_free(dev, alias, size);
-   return 0;
-}
-
-static void
-agx_g17p_vdm_alias_free(struct agx_device *dev, uint64_t alias, uint64_t size)
-{
-   simple_mtx_lock(&dev->vma_lock);
-   util_vma_heap_free(&dev->g17p_vdm_alias_heap, alias, size);
-   simple_mtx_unlock(&dev->vma_lock);
-}
-
 struct agx_g17p_vdm_alias {
    struct agx_bo *bo;
    uint64_t address;
 };
-
-/* Name the condition before the assertion fires: an exhausted window and a
- * bind the kernel refused look identical from the caller. */
-static void
-agx_g17p_vdm_alias_report(const char *what, struct agx_bo *bo, uint64_t alias,
-                          int ret)
-{
-   const char *reason =
-      !alias ? "the compact VDM alias window is exhausted"
-      : agx_g17p_vdm_alias_kernel_reserved(alias, bo->size)
-         ? "the address is a kernel-reserved arena (the table in "
-           "agx_va_runtime_hole.h is out of step with g17_resources.rs)"
-         : "the kernel refused the bind";
-   fprintf(stderr,
-           "asahi: no G17P VDM alias for the %s BO %#llx (%#llx bytes) at "
-           "%#llx (ret=%d): %s\n",
-           what, (unsigned long long)bo->va->addr,
-           (unsigned long long)bo->size, (unsigned long long)alias, ret,
-           reason);
-}
 
 uint64_t
 agx_batch_get_g17p_vdm_alias(struct agx_batch *batch, struct agx_bo *bo,
@@ -164,14 +117,8 @@ agx_batch_get_g17p_vdm_alias(struct agx_batch *batch, struct agx_bo *bo,
    }
 
    if (!alias) {
-      alias = agx_g17p_vdm_alias_alloc(dev, bo->size);
-      const uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
-      const int ret = alias ? agx_bo_bind(dev, bo, alias, bo->size, 0, flags)
-                            : -1;
-      if (!alias || ret)
-         agx_g17p_vdm_alias_report("batch", bo, alias, ret);
-      assert(alias && ret == 0);
-      if (!alias || ret)
+      alias = agx_bo_get_g17p_vdm_alias(dev, bo);
+      if (!alias)
          return 0;
 
       const struct agx_g17p_vdm_alias entry = {bo, alias};
@@ -187,31 +134,13 @@ agx_encoder_bind_vdm_alias(struct agx_device *dev, struct agx_encoder *encoder)
    if (dev->chip != AGX_CHIP_G17P)
       return;
 
-   const uint64_t alias =
-      agx_g17p_vdm_alias_alloc(dev, encoder->bo->size);
-   const uint32_t flags = DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE;
-   const int ret = alias ? agx_bo_bind(dev, encoder->bo, alias,
-                                      encoder->bo->size, 0, flags)
-                         : -1;
-   if (!alias || ret)
-      agx_g17p_vdm_alias_report("encoder", encoder->bo, alias, ret);
-   assert(alias && ret == 0);
-   if (!alias || ret)
-      return;
-
-   encoder->g17p_vdm_alias = alias;
+   encoder->g17p_vdm_alias = agx_bo_get_g17p_vdm_alias(dev, encoder->bo);
+   assert(encoder->g17p_vdm_alias);
 }
 
 static void
 agx_encoder_cleanup(struct agx_device *dev, struct agx_encoder *encoder)
 {
-   if (encoder->g17p_vdm_alias) {
-      agx_bo_bind(dev, NULL, encoder->g17p_vdm_alias, encoder->bo->size, 0,
-                  DRM_ASAHI_BIND_UNBIND);
-      agx_g17p_vdm_alias_free(dev, encoder->g17p_vdm_alias,
-                              encoder->bo->size);
-   }
-
    agx_bo_unreference(dev, encoder->bo);
 }
 
@@ -226,6 +155,9 @@ agx_batch_init(struct agx_context *ctx,
    batch->ctx = ctx;
    util_copy_framebuffer_state(&batch->key, key);
    batch->seqnum = ++ctx->batches.seqnum;
+   batch->g17p_fragment_program = 0;
+   batch->g17p_fragment_shader = NULL;
+   batch->g17p_fragment_linked = NULL;
 
    agx_bo_reference(screen->rodata);
    agx_pool_init(&batch->pool, dev, "Batch pool", 0, true);
@@ -429,12 +361,6 @@ agx_batch_cleanup(struct agx_context *ctx, struct agx_batch *batch, bool reset)
    }
 
    agx_bo_unreference(dev, screen->rodata);
-   util_dynarray_foreach(&batch->g17p_vdm_aliases,
-                         struct agx_g17p_vdm_alias, entry) {
-      agx_bo_bind(dev, NULL, entry->address, entry->bo->size, 0,
-                  DRM_ASAHI_BIND_UNBIND);
-      agx_g17p_vdm_alias_free(dev, entry->address, entry->bo->size);
-   }
    agx_encoder_cleanup(dev, &batch->vdm);
    agx_encoder_cleanup(dev, &batch->cdm);
    agx_pool_cleanup(&batch->pool);

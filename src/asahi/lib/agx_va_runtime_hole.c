@@ -18,17 +18,10 @@ static const struct agx_va_interval g17p_kernel_reserved[] = {
    {AGX_G17P_RENDER_AUX_ALIAS_START, AGX_G17P_RENDER_AUX_ALIAS_END},
 };
 
-/* Kernel client-root reservations inside the compact VDM window, as absolute
- * addresses. See the table in agx_va_runtime_hole.h for the derivations. */
+/* Reserve the growing kernel arenas together, including their expansion
+ * space. Allocation and range validation must use the same exclusion. */
 static const struct agx_va_interval g17p_vdm_kernel_reserved[] = {
-   {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RENDER_USER_ALIAS_START,
-    AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RENDER_USER_ALIAS_END},
-   {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_GROWTH_START,
-    AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_GROWTH_END},
-   {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_PAIR1_START,
-    AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_TVB_PAIR1_END},
-   {AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RT_DYNAMIC_START,
-    AGX_G17P_VDM_USER_BASE + AGX_G17P_KERNEL_RT_DYNAMIC_END},
+   {AGX_G17P_VDM_ALIAS_RESERVED_START, AGX_G17P_VDM_ALIAS_RESERVED_END},
 };
 
 bool
@@ -117,8 +110,10 @@ agx_g17p_vdm_alias_range_valid(uint64_t addr, uint64_t size)
        size > UINT64_MAX - addr)
       return false;
 
-   return addr + size <=
-          AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END;
+   const uint64_t end = addr + size;
+   return end <= AGX_G17P_VDM_USER_BASE + AGX_G17P_VDM_ALIAS_OFFSET_END &&
+          (end <= AGX_G17P_VDM_ALIAS_RESERVED_START ||
+           addr >= AGX_G17P_VDM_ALIAS_RESERVED_END);
 }
 
 bool
