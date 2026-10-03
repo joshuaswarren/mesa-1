@@ -14629,6 +14629,41 @@ TEST_F(AGX3PackBinary, SampleStagingWaitsOnlyForItsOwnProducers)
    EXPECT_EQ(std::search(binary.begin(), found, bytes, bytes + len), found);
 }
 
+TEST_F(AGX3PackBinary, FetchAndSampleKeepIndependentStagingBanks)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (bool fetch_first : {false, true}) {
+      agx_builder *b = builder(enc);
+      b->shader->stage = MESA_SHADER_VERTEX;
+      for (unsigned i = 0; i < 2; ++i) {
+         agx_index dest = agx_register(16 + 8 * i, AGX_SIZE_32);
+         dest.channels_m1 = 3;
+         agx_index coords = agx_register(4 + 4 * i, AGX_SIZE_32);
+         coords.channels_m1 = 1;
+         const bool fetch = (i == 0) == fetch_first;
+         auto *texture = agx_texture_sample_to(
+            b, dest, coords, agx_immediate(0), agx_immediate(0),
+            agx_immediate(0), agx_immediate(0), agx_null(), AGX_DIM_2D,
+            fetch ? AGX_LOD_MODE_AUTO_LOD : AGX_LOD_MODE_LOD_MIN,
+            0, false, false, false, AGX_GATHER_NONE, false);
+         if (fetch)
+            texture->op = AGX_OPCODE_TEXTURE_LOAD;
+         texture->mask = 15;
+      }
+      agx_stop(b);
+      const auto binary = pack(b);
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
+      /* The second operation must use bank 8 while the first consumes bank
+       * 0. No full shader drain is needed when another bank is available. */
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 8, 8, 2, 0, false, false,
+                                            bytes, &len));
+      auto second = std::search(binary.begin(), binary.end(), bytes, bytes + len);
+      ASSERT_NE(second, binary.end()) << "fetch_first=" << fetch_first;
+      ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 1, bytes, &len));
+      EXPECT_EQ(std::search(binary.begin(), second, bytes, bytes + len), second);
+   }
+}
+
 TEST_F(AGX3PackBinary, IndexedShadowLevelZeroKeepsNativeHandles)
 {
    for (bool cube : {false, true}) {

@@ -118,8 +118,8 @@ struct hk_agx3_g17p_graphics_program_desc {
  * a fragment program's own worst case is five. hk_cmd_buffer.c static-asserts
  * this derivation against the collector.
  */
-/* Honeykrisp's collector emits at most seven ranges. Gallium uses the
- * larger shared builder budget for arbitrary attribute bindings. */
+/* Honeykrisp has a fixed seven-range collector and a matching cache key.
+ * Gallium needs a larger budget in the shared program composer. */
 #define HK_AGX3_G17P_GRAPHICS_MAX_RANGES 7u
 #define HK_AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 #define HK_AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE \

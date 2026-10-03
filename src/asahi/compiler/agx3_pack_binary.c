@@ -6903,14 +6903,15 @@ agx3_g17p_no_sample_group(void)
 static bool
 agx3_take_staging_group(struct util_dynarray *emission,
                         enum agx_isa_encoding enc, uint8_t stage_group_slot[3],
+                        struct agx3_staging_banks *banks,
                         uint16_t *outstanding, uint16_t outstanding_here,
                         uint8_t slot, uint16_t *bank_base)
 {
    uint16_t busy[3];
    for (unsigned g = 0; g < 3; ++g)
-      busy[g] = stage_group_slot[g]
+      busy[g] = (stage_group_slot[g]
                    ? (uint16_t)(1u << (stage_group_slot[g] - 1))
-                   : 0;
+                   : 0) | agx3_staging_conflicts(banks, g * 8, 8);
 
    int chosen = -1;
    for (unsigned g = 0; g < 3 && chosen < 0; ++g)
@@ -6921,6 +6922,7 @@ agx3_take_staging_group(struct util_dynarray *emission,
          return false;
       *outstanding &= (uint16_t)~busy[0];
       *outstanding |= (uint16_t)(1u << (slot - 1));
+      agx3_staging_forget(banks, busy[0]);
       chosen = 0;
    }
    *bank_base = (uint16_t)(chosen * 8);
@@ -12253,8 +12255,37 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ((I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS ||
                   I->lod_mode == AGX_LOD_MODE_LOD_MIN) &&
                  I->src[1].type == AGX_INDEX_IMMEDIATE));
+            const bool staged_scalar =
+               I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN ||
+               (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
+                I->src[1].type != AGX_INDEX_IMMEDIATE);
+            const bool staged_compare = I->shadow;
+            const bool staged_sample_offset = I->offset && I->offset_xyz == 0;
+            const uint16_t sample_span =
+                    ((I->dim == AGX_DIM_CUBE ||
+                     I->dim == AGX_DIM_CUBE_ARRAY) ? 8
+                    : native_staged_coords ? 4
+                    : vertex_explicit_lod
+                       ? (I->lod_mode == AGX_LOD_MODE_LOD_GRAD
+                             ? (I->dim == AGX_DIM_3D ? 40 : 24)
+                             : 16)
+                    : (I->lod_mode == AGX_LOD_MODE_LOD_GRAD ||
+                       I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN)
+                         ? (I->dim == AGX_DIM_3D ? 32 : 16)
+                    : (staged_scalar || staged_sample_offset ||
+                       (I->dim == AGX_DIM_2D_ARRAY && !I->query_lod) ||
+                       I->dim == AGX_DIM_3D)
+                       ? 8
+                    : staged_compare ? 6
+                    : enc == AGX_ISA_ENCODING_AGX3B ? 4
+                                                   : I->src[0].value + 4);
             uint16_t bank_base = 0;
             if (enc == AGX_ISA_ENCODING_AGX3B) {
+               /* Texel fetches and filtered samples publish into the same
+                * sampler-private file. A sample must not overwrite a bank
+                * still consumed by a fetch (and vice versa). */
+               agx3_staging_release(&staging_banks, outstanding_here);
                uint16_t busy[3];
                for (unsigned g = 0; g < 3; ++g)
                   busy[g] = stage_group_slot[g]
@@ -12262,7 +12293,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                : 0;
                if (rotatable_staging) {
                   if (!agx3_take_staging_group(emission, enc,
-                                               stage_group_slot, &outstanding,
+                                               stage_group_slot, &staging_banks,
+                                               &outstanding,
                                                outstanding_here, slot,
                                                &bank_base))
                      AGX3_REFUSE(I);
@@ -12270,8 +12302,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                   uint16_t retire = 0;
                   for (unsigned g = 0; g < 3; ++g)
                      retire |= (uint16_t)(outstanding_here & busy[g]);
+                  retire |= agx3_staging_conflicts(&staging_banks, 0,
+                                                    sample_span);
                   if (agx3_g17p_force_staging_drain())
-                     retire = (uint16_t)(busy[0] | busy[1] | busy[2]);
+                     retire |= (uint16_t)(busy[0] | busy[1] | busy[2]);
                   if (agx3_g17p_force_staging_drain())
                      fprintf(stderr,
                              "G17Pstage dim=%u shadow=%u slot=%u wait=0x%x "
@@ -12287,6 +12321,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                      outstanding &= (uint16_t)~retire;
                      if (slot)
                         outstanding |= (uint16_t)(1u << (slot - 1));
+                     agx3_staging_forget(&staging_banks, retire);
                   }
                   for (unsigned g = 0; g < 3; ++g)
                      stage_group_slot[g] = slot;
@@ -12382,43 +12417,28 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * independent staging requirement dominated. Keep the extents
              * stage- and dimension-specific, independent of post-RA source
              * placement and scoreboard slot. */
-            const bool staged_scalar =
-               I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
-               I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN ||
-               (I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS &&
-                I->src[1].type != AGX_INDEX_IMMEDIATE);
-            const bool staged_compare = I->shadow;
             /* A G17G staged block sits at 8 * (slot - 1); the footprint must
              * reach past the highest half its stagers write. */
             const uint16_t g17g_block_base =
                enc == AGX_ISA_ENCODING_AGX3C && agx3_g17g_staged_block(I)
                   ? 8u * (slot - 1)
                   : 0;
-            const bool staged_sample_offset = I->offset && I->offset_xyz == 0;
             const unsigned sample_staging_end =
-                    (enc == AGX_ISA_ENCODING_AGX3C ? g17g_block_base : bank_base) + ((I->dim == AGX_DIM_CUBE ||
-                     I->dim == AGX_DIM_CUBE_ARRAY) ? 8
-                    : native_staged_coords ? 4
-                    : vertex_explicit_lod
-                       ? (I->lod_mode == AGX_LOD_MODE_LOD_GRAD
-                             ? (I->dim == AGX_DIM_3D ? 40 : 24)
-                             : 16)
-                    : (I->lod_mode == AGX_LOD_MODE_LOD_GRAD ||
-                       I->lod_mode == AGX_LOD_MODE_LOD_GRAD_MIN)
-                         ? (I->dim == AGX_DIM_3D ? 32 : 16)
-                    : (staged_scalar || staged_sample_offset ||
-                       (I->dim == AGX_DIM_2D_ARRAY && !I->query_lod) ||
-                       I->dim == AGX_DIM_3D)
-                       ? 8
-                    : staged_compare ? 6
-                    : enc == AGX_ISA_ENCODING_AGX3B ? 4
-                                                   : I->src[0].value + 4);
+               (enc == AGX_ISA_ENCODING_AGX3C ? g17g_block_base : bank_base) +
+               sample_span;
             ctx->agx3_staging_halfs =
                MAX2(ctx->agx3_staging_halfs, sample_staging_end);
             /* For the G18G image-write bank floor
              * (AGX3_G18G_READ_STAGING_LIMIT). */
             g18g_other_staging_end =
                MAX2(g18g_other_staging_end, sample_staging_end);
+            if (enc == AGX_ISA_ENCODING_AGX3B && slot) {
+               agx3_staging_release(&staging_banks, outstanding);
+               if (!agx3_staging_hold(&staging_banks, bank_base,
+                                      rotatable_staging ? 8 : sample_span,
+                                      slot))
+                  AGX3_REFUSE(I);
+            }
             continue;
          }
 
