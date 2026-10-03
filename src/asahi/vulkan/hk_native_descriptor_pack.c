@@ -88,9 +88,20 @@ hk_pack_native_texture(unsigned generation,
        * AGX_TEXTURE_BUFFER_WIDTH * 16 - 16, and maxImageArrayLayers is far
        * below 65536), so this is a guard on a latent overrun rather than a
        * behaviour change. */
-      if (legacy->layout == AGX_LAYOUT_LINEAR
-             ? ((legacy->stride >> 4) > 0xffffu)
-             : (legacy->depth > 0x10000u))
+      /* Interchange takes the row-stride field like Linear (HAL200
+       * encodeImageReadState handles layouts 0 and 3 on one path). */
+      const bool strided = legacy->layout == AGX_LAYOUT_LINEAR ||
+                           legacy->layout == AGX_LAYOUT_INTERCHANGE;
+      if (strided ? ((legacy->stride >> 4) > 0xffffu)
+                  : (legacy->depth > 0x10000u))
+         return false;
+      /* Interchange images are single-layer, single-level 2D; the layered
+       * background descriptor every colour view also packs is a one-layer
+       * 2D array. */
+      if (legacy->layout == AGX_LAYOUT_INTERCHANGE &&
+          ((legacy->dimension != AGX_TEXTURE_DIMENSION_2D &&
+            legacy->dimension != AGX_TEXTURE_DIMENSION_2D_ARRAY) ||
+           legacy->depth != 1 || has_levels))
          return false;
 
       /* HAL200 encodeImageReadState clears word1[62] for ordinary non-array
@@ -124,8 +135,8 @@ hk_pack_native_texture(unsigned generation,
          .address = legacy->address,
          .srgb = legacy->srgb,
          .srgb_2_channel = legacy->srgb_2_channel,
-         .stride = legacy->layout == AGX_LAYOUT_LINEAR ? legacy->stride : 0,
-         .depth = legacy->layout == AGX_LAYOUT_LINEAR ? 1 : legacy->depth,
+         .stride = strided ? legacy->stride : 0,
+         .depth = strided ? 1 : legacy->depth,
          .page_aligned_layers = plain_2d ? false : legacy->page_aligned_layers,
          .extended = extended,
          .acceleration_buffer =
@@ -238,9 +249,10 @@ hk_pack_native_pbe(unsigned generation,
       generation == 9 &&
       (legacy->dimension == AGX_TEXTURE_DIMENSION_2D_MULTISAMPLED ||
        array_multisample);
+   const bool interchange = legacy->layout == AGX_LAYOUT_INTERCHANGE;
    const bool compressed_2d = legacy->compressed && generation == 9 &&
                               legacy->dimension == AGX_TEXTURE_DIMENSION_2D &&
-                              legacy->layout == AGX_LAYOUT_GPU &&
+                              (legacy->layout == AGX_LAYOUT_GPU || interchange) &&
                               !multisample;
    if ((!layered && !multisample &&
         legacy->dimension != AGX_TEXTURE_DIMENSION_2D) ||
@@ -249,7 +261,9 @@ hk_pack_native_pbe(unsigned generation,
          legacy->unk_mipmapped)) ||
        (legacy->layout != AGX_LAYOUT_LINEAR &&
         legacy->layout != AGX_LAYOUT_TWIDDLED &&
-        legacy->layout != AGX_LAYOUT_GPU) ||
+        legacy->layout != AGX_LAYOUT_GPU &&
+        !(interchange && generation == 9 && !layered && !multisample &&
+          legacy->level == 0 && legacy->levels == 1)) ||
        legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
        (multisample ? (legacy->samples != AGX_SAMPLE_COUNT_2 &&
                        legacy->samples != AGX_SAMPLE_COUNT_4)
@@ -264,7 +278,7 @@ hk_pack_native_pbe(unsigned generation,
                             legacy->unk_mipmapped)) ||
        (generation != 9 && legacy->srgb) ||
        (legacy->extended != legacy->compressed) ||
-       (legacy->layout == AGX_LAYOUT_LINEAR
+       (legacy->layout == AGX_LAYOUT_LINEAR || interchange
            ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
                                              : legacy->stride != 0) ||
        (!legacy->compressed && legacy->acceleration_buffer) ||
@@ -288,7 +302,7 @@ hk_pack_native_pbe(unsigned generation,
       .buffer = legacy->buffer,
       .compressed = legacy->compressed,
       .acceleration_buffer = legacy->acceleration_buffer,
-      .stride_B = legacy->layout == AGX_LAYOUT_LINEAR
+      .stride_B = legacy->layout == AGX_LAYOUT_LINEAR || interchange
                      ? legacy->stride + 4
                      : 0,
       .page_aligned_layers = legacy->page_aligned_layers,

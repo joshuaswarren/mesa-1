@@ -356,9 +356,14 @@ struct hk_bg_eot {
  * remain harmless misses. */
 #define HK_G17P_BG_EOT_CACHE_ENTRIES 16
 #define HK_G17P_BG_EOT_CACHE_KEY_MAX 768
+struct hk_g17p_bg_eot_dev_entry;
+
 struct hk_g17p_bg_eot_cache_entry {
    uint8_t key[HK_G17P_BG_EOT_CACHE_KEY_MAX];
    struct hk_bg_eot program[4];
+   /* frg-codegen v4: the device-lifetime entry this pass fills or reuses
+    * (HK_G17P_BG_EOT_DEVICE_CACHE), or NULL. */
+   struct hk_g17p_bg_eot_dev_entry *dev_entry;
    uint64_t hash;
    uint16_t key_size;
    uint8_t valid_variants;
@@ -428,6 +433,14 @@ struct hk_rendering_state {
    bool zls_precise;
    struct agx_zls_control_packed zls_control_only, zls_control_last;
    const void *zls_first_cs;
+
+   /* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED (opt-in): the pass may drop its
+    * depth/stencil attachment from every control stream when no draw or
+    * clear in it tests, writes, bounds-tests or clears depth/stencil and
+    * neither aspect has a CLEAR load op or a resolve (see
+    * hk_g17p_zls_elide()). */
+   bool g17p_zls_elide_ok;
+   bool g17p_depth_touched;
 };
 
 struct hk_index_buffer_state {
@@ -489,6 +502,18 @@ enum hk_g17p_range_source {
    /* Uploaded while collecting the ranges (combined-sampler pointers,
     * spilled render-target descriptors): not re-derivable. */
    HK_G17P_RANGE_SOURCE_UPLOADED,
+};
+
+struct hk_g17p_prepared_fragment_key {
+   const struct hk_shader *shader;
+   const struct hk_linked_shader *linked;
+   uint64_t root;
+   uint64_t dma_set_base;
+   uint16_t tile_size_px;
+   uint8_t sample_size_B;
+   uint8_t nr_samples;
+   bool spills;
+   bool blend_constant;
 };
 
 struct hk_g17p_graphics_ioto_cache_entry {
@@ -561,6 +586,49 @@ struct hk_g17p_graphics_ioto_cache_entry {
    /* AGX_G17P_UNIFORM_DMA span source when it is a descriptor-set pointer
     * (see hk_g17p_dma_set_base); 0 otherwise. */
    uint64_t dma_set_base;
+
+   /* HK_G17P_MDI_ONE_LEVEL: the last one-level (absolute-address) vertex
+    * setup published for an indexed-indirect multi-draw record.  The next
+    * record of the same linked shader, root, descriptor-set DMA base and
+    * render layout differs only in its draw-parameter / draw-ID addresses,
+    * so it relocates the same linked-shader template (`entry`, owned by
+    * `linked`) to those addresses instead of re-deriving every range. */
+   struct {
+      struct agx3_ioto_uniform_range ranges[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      uint64_t source_offset[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      uint8_t source[HK_G17P_GRAPHICS_ROOT_MAX_RANGES];
+      const void *entry;
+      const void *source_shader;
+      const void *linked;
+      uint64_t linked_shader_va;
+      uint64_t rodata_va;
+      uint64_t root;
+      uint64_t dma_set_base;
+      size_t capacity;
+      uint16_t tile_size_px;
+      uint8_t sample_size_B;
+      uint8_t nr_samples;
+      uint8_t range_count;
+      bool has_draw_params;
+      bool has_draw_id;
+      bool valid;
+      /* Patch form: the template's bytes at its published VA, valid for
+       * any record because the program is position-independent (checked
+       * by relocation at a second VA), with only the LDIMM pairs that
+       * address the draw-parameter/draw-ID ranges rewritten per record. */
+      bool patch;
+      uint8_t site_count;
+      uint16_t length;
+      struct {
+         uint16_t offset;
+         uint16_t dest_half;
+         uint8_t low_length;
+         uint8_t high_length;
+         uint8_t range;
+         uint64_t delta;
+      } sites[4];
+      uint8_t bytes[512];
+   } one_level;
 };
 
 struct hk_prepared_fast_link_vs {
@@ -575,6 +643,14 @@ struct hk_prepared_fast_link_vs {
 
 struct hk_graphics_state {
    struct hk_ordinary_fs_selection ordinary_fs;
+   /* v96: per-draw selection of a vertex object's ordinary hardware variant
+    * (hk_select_ordinary_vs()). Valid for `api` at descriptor `generation`;
+    * UINT64_MAX marks a bind-time prediction the draw must re-prove. */
+   struct {
+      struct hk_api_shader *api;
+      uint64_t generation;
+      bool valid, ordinary;
+   } ordinary_vs;
    /* v57d: set while hk_cmd_prepare_bound_graphics() runs (bind time). */
    bool g17p_bind_prepare;
    struct hk_rendering_state render;
@@ -585,6 +661,12 @@ struct hk_graphics_state {
     * not advance its generation.  Prepared G17P roots snapshot this separate
     * identity so a post-BeginRendering bind cannot publish stale attrib VAs. */
    uint64_t vertex_buffer_generation;
+   /* The vertex_buffer_generation that descriptors.root.draw.attrib_* were
+    * last derived from (hk_flush_dynamic_state_slow()'s vertex-buffer
+    * block).  A prepared bind tail records this, not the live generation:
+    * a tail rebuilt outside a full flush (vkCmdBindIndexBuffer) must not
+    * vouch for a root whose attrib VAs predate the latest vertex binding. */
+   uint64_t root_vertex_buffer_generation;
 
    uint64_t root;
    struct agx_ptr prepared_root;
@@ -604,6 +686,9 @@ struct hk_graphics_state {
    struct agx_ptr prepared_geometry_params;
    bool prepared_geometry_params_filled;
    uint64_t prepared_vertex_usc;
+   /* HK_G17P_MDI_ONE_LEVEL: set only around the vertex-program upload of an
+    * indexed-indirect record in hk_g17p_emit_indirect_record(). */
+   bool g17p_vs_one_level;
    struct agx_ptr prepared_vertex_compact_root;
    const struct hk_shader *prepared_vertex_shader;
    const struct hk_linked_shader *prepared_vertex_linked;
@@ -614,6 +699,10 @@ struct hk_graphics_state {
    struct agx_vdm_state_update prepared_vdm_state_update;
    bool prepared_vdm_state_update_valid;
    uint64_t prepared_fragment_usc;
+   /* What prepared_fragment_usc was published for: the inputs of
+    * hk_upload_usc_words() for a fragment shader. A leftover program must
+    * not be consumed once any of them changed. */
+   struct hk_g17p_prepared_fragment_key prepared_fragment_key;
 
    struct {
       struct hk_g17p_prepared_dispatch tess_vs;
@@ -667,9 +756,6 @@ struct hk_graphics_state {
       struct agx_vdm_state_update encoded;
       bool valid;
    } g17p_vdm_update_memo;
-   struct hk_g17p_bg_eot_cache_entry
-      g17p_bg_eot_cache[HK_G17P_BG_EOT_CACHE_ENTRIES];
-   uint8_t g17p_bg_eot_cache_next;
 
    uint32_t shaders_dirty;
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
@@ -765,9 +851,6 @@ struct hk_graphics_state {
    } g17p_spilled_rt_descs;
 
    bool generate_primitive_id;
-
-   /* Whether blend constants are required by the active blend state */
-   bool uses_blend_constant;
 
    /* Tessellation state */
    struct {
@@ -1152,6 +1235,14 @@ struct hk_ioto_arena {
 struct hk_cmd_buffer {
    struct vk_command_buffer vk;
 
+   /* frg-codegen v4: the per-recording BG/EOT cache (13.5 KiB) lives outside
+    * `state` so the full-state memset of every reset no longer clears it;
+    * hk_reset_cmd_buffer() invalidates the entries instead. Entries are only
+    * read when valid, so this is the same cache contract. */
+   struct hk_g17p_bg_eot_cache_entry
+      g17p_bg_eot_cache[HK_G17P_BG_EOT_CACHE_ENTRIES];
+   uint8_t g17p_bg_eot_cache_next;
+
    /* v94 HK_G17P_HOST_ENCODE bit1: set by hk_reset_cmd_buffer, cleared by
     * vkBeginCommandBuffer. */
    bool g17p_pristine;
@@ -1197,6 +1288,10 @@ struct hk_cmd_buffer {
 
    /* Recorded dependencies between control streams, see hk_sync.h. */
    struct hk_sync_state sync;
+
+   /* Tile hazards: struct hk_sync_pass_record for every recorded pass
+    * instance footprint, in recording order. Cleared by hk_sync_reset. */
+   struct util_dynarray sync_pass_records;
 
    /* Are we currently inside a vk_meta operation? This alters sample location
     * behaviour.
@@ -1313,6 +1408,42 @@ hk_cmd_buffer_pool(struct hk_cmd_buffer *cmd)
    return (struct hk_cmd_pool *)cmd->vk.pool;
 }
 
+/* Whether the current blend state reads the blend constants. Derived from
+ * the dynamic graphics state at each use rather than cached: the fragment
+ * stage program (its blend-constant uniform range) is built by bind-time and
+ * BeginRendering preparation as well as by the draw, and that preparation
+ * runs before the draw-time dirty-state flush. A cached copy refreshed only
+ * by that flush was stale there, so the first draw after a blend-equation
+ * change published a fragment program without the blend-constant range and
+ * the epilog read unwritten uniforms. Prepared programs are keyed by
+ * dynamic_graphics_state.generation, which covers every input here. */
+static inline bool
+hk_cmd_uses_blend_constant(const struct hk_cmd_buffer *cmd)
+{
+   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 3 ==
+                    VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA,
+                 "constant factors are contiguous");
+   const struct vk_color_blend_state *cb =
+      &cmd->vk.dynamic_graphics_state.cb;
+
+   for (unsigned i = 0; i < cb->attachment_count; ++i) {
+      const unsigned factors[] = {
+         cb->attachments[i].src_color_blend_factor,
+         cb->attachments[i].src_alpha_blend_factor,
+         cb->attachments[i].dst_color_blend_factor,
+         cb->attachments[i].dst_alpha_blend_factor,
+      };
+
+      for (unsigned j = 0; j < ARRAY_SIZE(factors); ++j) {
+         if (factors[j] >= VK_BLEND_FACTOR_CONSTANT_COLOR &&
+             factors[j] <= VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA)
+            return true;
+      }
+   }
+
+   return false;
+}
+
 /*
  * The hardware vertex shader is supplied by the last geometry stage. The
  * geometry pipeline is vertex->tess->geometry so we search backwards.
@@ -1328,6 +1459,9 @@ hk_bound_hw_vs(struct hk_graphics_state *gfx)
       return &gs->variants[HK_GS_VARIANT_RAST];
    else if (tes)
       return &tes->variants[HK_VS_VARIANT_HW];
+   else if (vs->g17p_ordinary_variants && gfx->ordinary_vs.valid &&
+            gfx->ordinary_vs.api == vs && gfx->ordinary_vs.ordinary)
+      return &vs->variants[HK_VS_VARIANT_HW_ORDINARY];
    else
       return &vs->variants[HK_VS_VARIANT_HW];
 }
@@ -1338,7 +1472,9 @@ hk_bound_sw_vs(struct hk_graphics_state *gfx)
    struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
 
-   if (hw_vs == &vs->variants[HK_VS_VARIANT_HW])
+   if (hw_vs == &vs->variants[HK_VS_VARIANT_HW] ||
+       (vs->g17p_ordinary_variants &&
+        hw_vs == &vs->variants[HK_VS_VARIANT_HW_ORDINARY]))
       return hw_vs;
    else
       return &vs->variants[HK_VS_VARIANT_SW];
@@ -1413,6 +1549,8 @@ hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 }
 
 bool hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
+/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED: a depth/stencil clear touched it. */
+void hk_g17p_note_depth_clear(struct hk_cmd_buffer *cmd);
 
 bool hk_g17p_split_trace_enabled(void);
 void hk_g17p_note_gfx_split(struct hk_cmd_buffer *cmd, const char *reason,
@@ -1732,6 +1870,9 @@ void hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  * 48-bit Ioto program VA consumed by HAL200 VDM state. */
 uint64_t hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
                               const struct hk_shader *s);
+/* HK_G17P_MDI_ONE_LEVEL (hk_cmd_buffer.c). */
+bool hk_g17p_mdi_one_level_enabled(void);
+
 uint64_t hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked);
 uint64_t hk_prepare_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,

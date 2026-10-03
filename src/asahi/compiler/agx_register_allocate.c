@@ -717,10 +717,37 @@ assign_regs_by_copying(struct ra_ctx *rctx, agx_index dest, const agx_instr *I,
        * else -- eight-target MRT packs the low bank solid -- take the half
        * victim anyway and let find_best_region_to_evict() keep its new home
        * under AGX3_COPY_REG16_DEST_HALVES. */
-      if (!find_constrained_region(rctx, count, minimum, limit, agx3b, &base,
-                                   &span) &&
-          !(agx3b && find_constrained_region(rctx, count, minimum, limit, false,
-                                             &base, &span))) {
+      bool found =
+         find_constrained_region(rctx, count, minimum, limit, agx3b, &base,
+                                 &span) ||
+         (agx3b && find_constrained_region(rctx, count, minimum, limit, false,
+                                           &base, &span));
+
+      /* The tile-store bank (agx3_tile_store_bank()) is sized per colour
+       * target, one live payload each. A fragment can hold two payloads for
+       * the same target at once -- a vec4 stored on one path while another
+       * path's vec4 is still live, as dEQP-VK.glsl.opaque_type_indexing.
+       * sampler.*.fragment does -- and with the reserved prefix a 16-half
+       * bank then holds only one of them. The bank is a native placement
+       * preference, not an encoding bound (agx3_tile_value_ok() takes any
+       * half below 256), and Apple's own single-target fragments store from
+       * halves up to 31 (id_blend_4x stores RGBA8 from half 28). Widen to
+       * the 32- and then the 64-half bank native multi-target fragments use
+       * before giving up, instead of aborting the compile. Only a shader
+       * that would otherwise abort here takes this path. */
+      for (unsigned wide = 32; !found && agx3b && wide <= 64; wide *= 2) {
+         const bool tile_bank =
+            BITSET_TEST(rctx->low_gpr, dest.value) &&
+            limit == rctx->tile_gpr_limit;
+         if (!tile_bank || limit >= wide || wide > rctx->bound[RA_GPR])
+            continue;
+         found = find_constrained_region(rctx, count, minimum, wide, true,
+                                         &base, &span) ||
+                 find_constrained_region(rctx, count, minimum, wide, false,
+                                         &base, &span);
+      }
+
+      if (!found) {
          /* Not a refusal path.  The result feeds straight into
           * BITSET_SET_COUNT() and reg_to_ssa[], so continuing with a bad base
           * is an out-of-bounds write rather than a poor register choice: a
@@ -865,33 +892,101 @@ sort_by_size(const void *a_, const void *b_, void *sizes_)
  *    If we move in parallel with the phi, the phi will still read the correct
  *    old register regardless and the destinations can't alias. So, insert a phi
  *    to do the copy in parallel along the incoming edges.
+ *
+ * The copies are one parallel move that insert_copy() scalarized: a vector
+ * value moves as one copy per component, padding included. Each copy is
+ * therefore matched against the whole register range a phi defined before
+ * this shuffle, and that phi is moved once. Matching only a phi's base
+ * register moved a vector phi with its first component and then failed to
+ * recognise the rest, which went down the live-in path: a second phi wrote
+ * the same registers again from whatever the predecessor held there -- a
+ * duplicate parallel-copy destination, or without assertions a clobbered
+ * value. Phis not yet given a register (the one being allocated and those
+ * after it) cannot hold a moved value. agx_as_register() of one is an
+ * assertion failure, and without assertions a comparison against a stale
+ * register field that can silently drop a copy.
  */
 static void
-agx_emit_move_before_phi(agx_context *ctx, agx_block *block,
-                         struct agx_copy *copy)
+agx_emit_moves_before_phi(struct ra_ctx *rctx, agx_block *block,
+                          const struct agx_copy *copies, unsigned nr_copies)
 {
-   assert(!copy->dest_mem && !copy->src.memory && "no memory shuffles");
+   struct phi_def {
+      agx_instr *phi;
+      unsigned base, width, new_base;
+      bool moved;
+   };
+   struct util_dynarray defs = UTIL_DYNARRAY_INIT;
 
-   /* Look for the phi writing the destination */
    agx_foreach_phi_in_block(block, phi) {
-      if (agx_is_equiv(agx_as_register(phi->dest[0]), copy->src) &&
-          !phi->dest[0].memory) {
+      const agx_index d = phi->dest[0];
+      struct phi_def def = {.phi = phi};
 
-         phi->dest[0].reg = copy->dest;
-         return;
+      if (d.memory)
+         continue;
+
+      if (d.type == AGX_INDEX_REGISTER) {
+         /* A move inserted by case 2 for an earlier shuffle of this block */
+         def.base = d.value;
+         def.width = agx_index_size_16(d);
+      } else if (d.type == AGX_INDEX_NORMAL && d.has_reg) {
+         def.base = d.reg;
+         def.width = MAX2(rctx->ncomps[d.value], agx_index_size_16(d));
+      } else {
+         continue;
+      }
+
+      util_dynarray_append(&defs, def);
+   }
+
+   for (unsigned i = 0; i < nr_copies; ++i) {
+      const struct agx_copy *copy = &copies[i];
+      assert(!copy->dest_mem && !copy->src.memory && "no memory shuffles");
+      assert(copy->src.type == AGX_INDEX_REGISTER);
+
+      struct phi_def *match = NULL;
+      util_dynarray_foreach(&defs, struct phi_def, def) {
+         if (copy->src.value >= def->base &&
+             copy->src.value < def->base + def->width) {
+            match = def;
+            break;
+         }
+      }
+
+      if (match) {
+         const unsigned offset = copy->src.value - match->base;
+         assert(copy->dest >= offset);
+         const unsigned new_base = copy->dest - offset;
+
+         assert((!match->moved || match->new_base == new_base) &&
+                "components of one value move together");
+         match->new_base = new_base;
+         match->moved = true;
+         continue;
+      }
+
+      /* There wasn't such a phi, so it's live-in. Insert a phi instead. */
+      agx_builder b = agx_init_builder(rctx->shader, agx_before_block(block));
+
+      agx_instr *phi = agx_phi_to(&b, agx_register_like(copy->dest, copy->src),
+                                  agx_num_predecessors(block));
+      assert(!copy->src.kill);
+
+      agx_foreach_src(phi, s) {
+         phi->src[s] = copy->src;
       }
    }
 
-   /* There wasn't such a phi, so it's live-in. Insert a phi instead. */
-   agx_builder b = agx_init_builder(ctx, agx_before_block(block));
+   util_dynarray_foreach(&defs, struct phi_def, def) {
+      if (!def->moved)
+         continue;
 
-   agx_instr *phi = agx_phi_to(&b, agx_register_like(copy->dest, copy->src),
-                               agx_num_predecessors(block));
-   assert(!copy->src.kill);
-
-   agx_foreach_src(phi, s) {
-      phi->src[s] = copy->src;
+      if (def->phi->dest[0].type == AGX_INDEX_REGISTER)
+         def->phi->dest[0].value = def->new_base;
+      else
+         def->phi->dest[0].reg = def->new_base;
    }
+
+   util_dynarray_fini(&defs);
 }
 
 static unsigned
@@ -920,9 +1015,9 @@ find_regs(struct ra_ctx *rctx, agx_instr *I, unsigned dest_idx, unsigned count,
        * insert instructions before the phi.
        */
       if (I->op == AGX_OPCODE_PHI) {
-         util_dynarray_foreach(&copies, struct agx_copy, copy) {
-            agx_emit_move_before_phi(rctx->shader, rctx->block, copy);
-         }
+         agx_emit_moves_before_phi(
+            rctx, rctx->block, copies.data,
+            util_dynarray_num_elements(&copies, struct agx_copy));
       } else {
          agx_builder b = agx_init_builder(rctx->shader, agx_before_instr(I));
          agx_emit_parallel_copies(
@@ -1134,6 +1229,69 @@ spread_floor_halves(void)
    return (unsigned)floor;
 }
 
+/*
+ * AGX_G17P_BANK_COALESCE (default on; =0 restores the previous choice).
+ *
+ * A destination with a G17P bank constraint (e.g. a colour tile-store payload,
+ * limited to the tile-store bank by agx3_tile_store_bank()) used to skip every
+ * affinity heuristic and take the lowest free region. For the ordinary packed
+ * RGBA8 payload, `collect(fltnorm, fltnorm)` whose halves already sit in an
+ * aligned pair inside the bank, that forced a parallel copy: one extra MOV in
+ * front of every LSTCOL, on the fragment's critical tail. Apple's G17P
+ * fragments store the FLTNORM pair directly (fs-apple.bin +0x198/+0x1a8:
+ * fltnorm r2h, pixwait, lstcol r2).
+ *
+ * Try the ordinary collect/move affinity first, but accept it only when the
+ * whole region is free, aligned, and inside [dest_minimum, dest_limit). This
+ * never evicts or shuffles anything, so it cannot fail where find_regs()
+ * would have succeeded; otherwise fall through to find_regs() unchanged.
+ */
+static bool
+pick_bank_affinity(struct ra_ctx *rctx, agx_instr *I, unsigned d,
+                   unsigned count, unsigned align, unsigned *out)
+{
+   if (rctx->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       !(agx_get_codegen_flags() & AGX_CODEGEN_G17P_BANK_COALESCE))
+      return false;
+
+   const enum ra_class cls = ra_class_for_index(I->dest[d]);
+   const unsigned minimum = dest_minimum(rctx, I, d);
+   const unsigned limit = dest_limit(rctx, I, d);
+
+   if (I->op == AGX_OPCODE_COLLECT && d == 0) {
+      agx_foreach_ssa_src(I, s) {
+         if (ra_class_for_index(I->src[s]) != cls ||
+             !BITSET_TEST(rctx->visited, I->src[s].value))
+            continue;
+
+         const unsigned base = affinity_base_of_collect(rctx, I, s);
+         if (base == ~0u || (base % align) || base < minimum ||
+             base + count > limit || base + count > rctx->bound[cls])
+            continue;
+
+         if (!BITSET_TEST_COUNT(rctx->used_regs[cls], base, count)) {
+            *out = base;
+            return true;
+         }
+      }
+   }
+
+   if (I->op == AGX_OPCODE_MOV && I->src[0].type == AGX_INDEX_NORMAL &&
+       I->src[0].memory == I->dest[0].memory &&
+       I->src[0].size == I->dest[0].size &&
+       BITSET_TEST(rctx->visited, I->src[0].value)) {
+      const unsigned base = rctx->ssa_to_reg[I->src[0].value];
+      if (!(base % align) && base >= minimum && base + count <= limit &&
+          base + count <= rctx->bound[cls] &&
+          !BITSET_TEST_COUNT(rctx->used_regs[cls], base, count)) {
+         *out = base;
+         return true;
+      }
+   }
+
+   return false;
+}
+
 static unsigned
 pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
 {
@@ -1163,8 +1321,12 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
    }
 
    if (dest_minimum(rctx, I, d) > 0 ||
-       dest_limit(rctx, I, d) < rctx->bound[cls])
+       dest_limit(rctx, I, d) < rctx->bound[cls]) {
+      unsigned out;
+      if (pick_bank_affinity(rctx, I, d, count, align, &out))
+         return out;
       return find_regs(rctx, I, d, count, align);
+   }
 
    /* Try to allocate entire phi webs compatibly */
    unsigned phi_idx = phi_web_find(rctx->phi_web, idx.value);

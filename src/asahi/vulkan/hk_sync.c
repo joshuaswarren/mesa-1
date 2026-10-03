@@ -65,6 +65,120 @@ void
 hk_sync_reset(struct hk_cmd_buffer *cmd)
 {
    memset(&cmd->sync, 0, sizeof(cmd->sync));
+   util_dynarray_clear(&cmd->sync_pass_records);
+}
+
+/* Tile hazards: see hk_sync.h. */
+static bool
+footprints_share_tile(const struct hk_sync_footprint *a,
+                      const struct hk_sync_footprint *b)
+{
+   return a->image == b->image && a->level == b->level &&
+          a->layer0 < b->layer1 && b->layer0 < a->layer1 &&
+          a->cx0 <= b->cx1 && b->cx0 <= a->cx1 && a->cy0 <= b->cy1 &&
+          b->cy0 <= a->cy1;
+}
+
+void
+hk_sync_pass_footprint(struct hk_cmd_buffer *cmd, const void *image,
+                       uint32_t level, uint32_t layer0, uint32_t layer1,
+                       uint32_t level_width, uint32_t level_height,
+                       VkRect2D area)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   const int64_t w = level_width, h = level_height;
+   const int64_t x0 = MAX2((int64_t)area.offset.x, 0);
+   const int64_t y0 = MAX2((int64_t)area.offset.y, 0);
+   const int64_t x1 = MIN2((int64_t)area.offset.x + area.extent.width, w);
+   const int64_t y1 = MIN2((int64_t)area.offset.y + area.extent.height, h);
+   const int64_t cell = 1 << HK_SYNC_TILE_CELL_LOG2;
+
+   if (!image || layer1 <= layer0 || x1 <= x0 || y1 <= y0)
+      return;
+
+   /* Every tile the area touches is covered entirely. */
+   if (x0 % cell == 0 && y0 % cell == 0 && (x1 % cell == 0 || x1 == w) &&
+       (y1 % cell == 0 || y1 == h))
+      return;
+
+   assert(st->pass_fp_count < HK_SYNC_MAX_PASS_FOOTPRINTS);
+   if (st->pass_fp_count >= HK_SYNC_MAX_PASS_FOOTPRINTS)
+      return;
+
+   st->pass_fp[st->pass_fp_count++] = (struct hk_sync_footprint){
+      .image = image,
+      .level = level,
+      .layer0 = layer0,
+      .layer1 = layer1,
+      .cx0 = (int32_t)(x0 >> HK_SYNC_TILE_CELL_LOG2),
+      .cx1 = (int32_t)((x1 - 1) >> HK_SYNC_TILE_CELL_LOG2),
+      .cy0 = (int32_t)(y0 >> HK_SYNC_TILE_CELL_LOG2),
+      .cy1 = (int32_t)((y1 - 1) >> HK_SYNC_TILE_CELL_LOG2),
+   };
+}
+
+void
+hk_sync_pass_footprints_done(struct hk_cmd_buffer *cmd)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   struct hk_cs *wait = NULL;
+
+   if (st->pass_fp_count == 0)
+      return;
+
+   util_dynarray_foreach(&cmd->sync_pass_records, struct hk_sync_pass_record,
+                         rec) {
+      if (!rec->last || (wait && rec->last->sync.seq <= wait->sync.seq))
+         continue;
+      for (unsigned i = 0; i < st->pass_fp_count; ++i) {
+         if (footprints_share_tile(&rec->fp, &st->pass_fp[i])) {
+            wait = rec->last;
+            break;
+         }
+      }
+   }
+
+   st->pass_tile_wait = wait;
+   if (wait && hk_sync_trace_enabled())
+      fprintf(stderr, "hk_sync: tile hazard: pass waits on seq=%u\n",
+              wait->sync.seq);
+}
+
+/* Record the footprints of the pass instance that ends, with its streams. */
+static void
+pass_footprints_commit(struct hk_cmd_buffer *cmd)
+{
+   struct hk_sync_state *st = &cmd->sync;
+   struct hk_cs *last = st->last_any[HK_SYNC_VDM];
+
+   if (st->pass_fp_count && st->pass_vdm && last) {
+      for (unsigned i = 0; i < st->pass_fp_count; ++i) {
+         const struct hk_sync_pass_record rec = {
+            .fp = st->pass_fp[i],
+            .first = st->pass_vdm,
+            .last = last,
+         };
+         util_dynarray_append(&cmd->sync_pass_records, rec);
+      }
+   }
+
+   st->pass_fp_count = 0;
+   st->pass_tile_wait = NULL;
+}
+
+static void
+records_replace_stream(struct hk_cmd_buffer *cmd, struct hk_cs *from,
+                       struct hk_cs *to)
+{
+   util_dynarray_foreach(&cmd->sync_pass_records, struct hk_sync_pass_record,
+                         rec) {
+      if (rec->first == from)
+         rec->first = to;
+      if (rec->last == from)
+         rec->last = to;
+   }
+   if (cmd->sync.pass_tile_wait == from)
+      cmd->sync.pass_tile_wait = to;
 }
 
 /*
@@ -345,6 +459,14 @@ hk_sync_stream_created(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_sync_stream_wait(cs, st->internal);
 
    if (!compute) {
+      /* Tile hazard: the pass instance shares a partly covered tile with an
+       * earlier render that nothing else orders it after. */
+      if (st->in_pass && st->pass_tile_wait) {
+         const struct hk_sync_dep tile[HK_SYNC_NUM_SQ] = {
+            {.cut = st->pass_tile_wait}, {0}};
+         hk_sync_stream_wait(cs, tile);
+      }
+
       /* A stream that continues a render pass instance, whether after a
        * split or when resuming a suspended instance, loads the tile buffer
        * the previous stream of the instance stored. */
@@ -519,6 +641,8 @@ hk_sync_forget_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
    replace_pointer(&st->last_any[sq], cs, prev);
    replace_pointer(&st->internal[sq].cut, cs, prev);
    replace_pointer(&st->pass_vdm, cs, NULL);
+   if (sq == HK_SYNC_VDM)
+      records_replace_stream(cmd, cs, prev);
 
    list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node)
       replace_pointer(&it->sync.dep[sq].cut, cs, prev);
@@ -554,6 +678,8 @@ hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
    }
    replace_pointer(&st->last_any[sq], from, into);
    replace_pointer(&st->internal[sq].cut, from, into);
+   if (sq == HK_SYNC_VDM)
+      records_replace_stream(cmd, from, into);
 
    list_for_each_entry(struct hk_cs, it, &cmd->control_streams, node) {
       if (it != into && it != from)
@@ -702,6 +828,8 @@ hk_sync_begin_rendering(struct hk_cmd_buffer *cmd, bool resuming)
    st->pass_vdm = NULL;
    st->resume_pending = resuming;
    st->heap_pass = false;
+   st->pass_fp_count = 0;
+   st->pass_tile_wait = NULL;
 }
 
 void
@@ -719,6 +847,7 @@ void
 hk_sync_end_rendering(struct hk_cmd_buffer *cmd)
 {
    struct hk_sync_state *st = &cmd->sync;
+   pass_footprints_commit(cmd);
    st->in_pass = false;
    st->pass_vdm = NULL;
    st->resume_pending = false;
@@ -825,12 +954,84 @@ resolve_dep(const struct submit_state *ss, const struct hk_sync_dep *dep,
    return v;
 }
 
+/* Tile hazards across submissions (hk_sync.h). */
+static bool
+recent_may_run(const struct hk_sync_queue *q, uint64_t completed)
+{
+   return q->recent_count && q->recent_max > completed;
+}
+
+bool
+hk_sync_submit_needs_completed(const struct hk_queue *queue,
+                               struct hk_cmd_buffer *const *cmdbufs,
+                               unsigned count)
+{
+   const struct hk_sync_queue *q = &queue->sync;
+   if (!q->recent_count)
+      return false;
+   for (unsigned i = 0; i < count; ++i) {
+      if (util_dynarray_num_elements(&cmdbufs[i]->sync_pass_records,
+                                     struct hk_sync_pass_record))
+         return true;
+   }
+   return false;
+}
+
+static bool
+recent_conflict(const struct hk_sync_queue *q, const struct hk_sync_footprint *fp,
+                uint64_t completed)
+{
+   if (!recent_may_run(q, completed))
+      return false;
+   /* A dropped entry may still be running: assume it shares the tile. */
+   if (q->evicted > completed)
+      return true;
+   const uint32_t n = MIN2(q->recent_count, HK_SYNC_RECENT_FOOTPRINTS);
+   for (uint32_t i = 0; i < n; ++i) {
+      if (q->recent[i].point > completed &&
+          footprints_share_tile(&q->recent[i].fp, fp))
+         return true;
+   }
+   return false;
+}
+
+static void
+recent_add(struct hk_sync_queue *q, const struct hk_sync_footprint *fp,
+           uint64_t point)
+{
+   struct hk_sync_recent *slot = &q->recent[q->recent_next];
+   if (q->recent_count >= HK_SYNC_RECENT_FOOTPRINTS)
+      q->evicted = MAX2(q->evicted, slot->point);
+   *slot = (struct hk_sync_recent){.fp = *fp, .point = point};
+   q->recent_next = (q->recent_next + 1) % HK_SYNC_RECENT_FOOTPRINTS;
+   q->recent_count = MIN2(q->recent_count + 1, HK_SYNC_RECENT_FOOTPRINTS);
+   q->recent_max = MAX2(q->recent_max, point);
+}
+
+/* Raise a resolved barrier field to at least v (-1 none, 0 earlier ioctls). */
+static void
+barrier_at_least(uint16_t *barrier, hk_sync_value v)
+{
+   const hk_sync_value cur =
+      *barrier == DRM_ASAHI_BARRIER_NONE ? HK_SYNC_NONE : *barrier;
+   if (v > cur)
+      *barrier = (uint16_t)v;
+}
+
+struct submit_footprint {
+   struct hk_sync_footprint fp;
+   hk_sync_value index;
+};
+
 void
 hk_sync_resolve_submit(struct hk_queue *queue,
                        struct hk_cmd_buffer *const *cmdbufs, unsigned count,
-                       bool first_cdm_is_flush, bool chain_first)
+                       bool first_cdm_is_flush, bool chain_first,
+                       uint64_t completed)
 {
    struct submit_state ss = {.queue = queue};
+   struct util_dynarray submitted;
+   util_dynarray_init(&submitted, NULL);
 
    for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
       for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
@@ -876,6 +1077,41 @@ hk_sync_resolve_submit(struct hk_queue *queue,
             cs->sync.barrier[sq] =
                v < 0 ? DRM_ASAHI_BARRIER_NONE : (uint16_t)v;
          }
+      }
+
+      /* Tile hazards: an instance sharing a tile with an instance of an
+       * earlier command buffer of this submission waits on that one, and
+       * with a possibly still running earlier submission on everything
+       * before this ioctl. Within the command buffer the recorded
+       * dependency already orders it. */
+      util_dynarray_foreach(&cmd->sync_pass_records,
+                            struct hk_sync_pass_record, rec) {
+         if (!rec->first || !rec->last)
+            continue;
+         hk_sync_value v = HK_SYNC_NONE;
+         util_dynarray_foreach(&submitted, struct submit_footprint, e) {
+            if (e->index > v && footprints_share_tile(&e->fp, &rec->fp))
+               v = e->index;
+         }
+         if (v == HK_SYNC_NONE &&
+             recent_conflict(&queue->sync, &rec->fp, completed))
+            v = 0;
+         if (v != HK_SYNC_NONE) {
+            barrier_at_least(&rec->first->sync.barrier[HK_SYNC_VDM], v);
+            if (hk_sync_trace_enabled())
+               fprintf(stderr, "hk_sync: tile hazard: cb=%u vdm #%u waits "
+                               "on %d\n", i, rec->first->sync.index, v);
+         }
+      }
+      util_dynarray_foreach(&cmd->sync_pass_records,
+                            struct hk_sync_pass_record, rec) {
+         if (!rec->last)
+            continue;
+         const struct submit_footprint e = {
+            .fp = rec->fp,
+            .index = (hk_sync_value)rec->last->sync.index,
+         };
+         util_dynarray_append(&submitted, e);
       }
 
       /* This command buffer's tail requirement joins the carry, resolved
@@ -947,6 +1183,12 @@ hk_sync_resolve_submit(struct hk_queue *queue,
          }
       }
    }
+
+   /* Every footprint of this ioctl stays live on the queue until the
+    * timeline point it signals (queue_submit has already advanced it). */
+   util_dynarray_foreach(&submitted, struct submit_footprint, e)
+      recent_add(&queue->sync, &e->fp, queue->drm.timeline_value);
+   util_dynarray_fini(&submitted);
 
    if (hk_sync_trace_enabled()) {
       for (unsigned i = 0; i < count; ++i) {

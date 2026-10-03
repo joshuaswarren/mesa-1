@@ -12,6 +12,61 @@
 
 #define KV(f, v) {(uint16_t)(f), (uint64_t)(v)}
 
+bool
+agx3_stage_vertex_alu(enum agx_isa_encoding enc, bool fma,
+                      uint16_t dest, uint8_t slot, const uint16_t src[3],
+                      bool uniform0, const bool live[3], const bool discard[3],
+                      uint16_t wait_mask, uint8_t out[16], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !live || !discard ||
+       !out || !len || dest >= 256 || (dest & 1) || slot < 1 || slot > 6 ||
+       wait_mask > 0x3f || (uniform0 && !fma))
+      return false;
+   for (unsigned s = 0; s < (fma ? 3 : 2); ++s) {
+      if (src[s] >= 256 || (src[s] & 1) || (live[s] && discard[s]))
+         return false;
+   }
+   if (uniform0 && (live[0] || discard[0]))
+      return false;
+
+   /* Exact native witnesses are recorded with their full field vectors in
+    * vertex/native-terrain-fields.json. 0x360 is a staged FMUL, 0x350 a
+    * uniform/register/register FMA, and 0x404 an all-register FMA. */
+   const struct agx3_field_kv base[] = {
+      KV(9, 5), KV(10, 2), KV(25, 2), KV(26, 2), KV(43, 2),
+      KV(60, 2),
+   };
+   struct agx3_field_kv fields[24] = {
+      KV(5, dest), KV(12, slot), KV(18, src[1]),
+      KV(42, uniform0 ? 3 : 2), KV(uniform0 ? 36 : 35, src[0]),
+      KV(27, live[1]), KV(29, discard[1]),
+   };
+   unsigned n = 7;
+   if (!uniform0) {
+      fields[n++] = (struct agx3_field_kv)KV(44, live[0]);
+      fields[n++] = (struct agx3_field_kv)KV(46, discard[0]);
+   }
+   if (fma) {
+      fields[n++] = (struct agx3_field_kv)KV(52, src[2]);
+      fields[n++] = (struct agx3_field_kv)KV(59, 2);
+      fields[n++] = (struct agx3_field_kv)KV(61, live[2]);
+      fields[n++] = (struct agx3_field_kv)KV(63, discard[2]);
+      fields[n++] = (struct agx3_field_kv)KV(77, 2);
+      fields[n++] = (struct agx3_field_kv)KV(91, 2);
+   } else {
+      fields[n++] = (struct agx3_field_kv)KV(74, 2);
+   }
+   for (unsigned s = 0; s < 6; ++s)
+      fields[n++] = (struct agx3_field_kv)KV((fma ? 97 : 80) + s,
+                                           (wait_mask >> s) & 1);
+   for (unsigned ep = 0; ep <= (fma ? 5 : 3); ++ep) {
+      if (agx3_bind_compose(enc, fma ? "f32fma" : "f32mul", ep,
+                           base, 6, fields, n, out, len))
+         return true;
+   }
+   return false;
+}
+
 static bool
 b_only(enum agx_isa_encoding enc)
 {

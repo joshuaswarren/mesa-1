@@ -7,6 +7,17 @@
 #include "agx_debug.h"
 #include "agx3_uniform_integer_instr.h"
 
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vertex_tex_uniforms,
+                          "AGX_G17P_VERTEX_TEX_UNIFORMS", false)
+
+bool
+agx_vertex_tex_uniforms(const agx_context *ctx)
+{
+   return ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          ctx->stage == MESA_SHADER_VERTEX && !ctx->is_preamble &&
+          debug_get_option_agx_g17p_vertex_tex_uniforms();
+}
+
 /*
  * Not all instructions can take uniforms. Memory instructions can take
  * uniforms, but only for their base (first) source and only in the
@@ -244,16 +255,44 @@ agx_lower_uniform_sources_block(agx_context *ctx, agx_block *block)
           * with a 32-bit register first operand. With an immediate, uniform
           * or 16-bit first operand keep copying the uniform, so the existing
           * register forms still encode the compare. */
+         const bool is_int_compare =
+            I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_WHILE_ICMP ||
+            I->op == AGX_OPCODE_BREAK_IF_ICMP;
+         /* AGX_G17P_UNIFORM_IMM_COMPARE (default on): an aligned 32-bit
+          * uniform against an 8-bit immediate is one native icmp (Apple's
+          * G17P loop guard, fs-apple.bin +0x0c: u6 == 0). Keep the uniform
+          * in place instead of copying it into a GPR first; the packer
+          * emits agx3_cf_icmp_uniform_imm() for either operand order. */
+         const bool uniform_imm_compare =
+            ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+            (agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE) &&
+            is_int_compare && I->nr_srcs == 2 &&
+            I->src[s].type == AGX_INDEX_UNIFORM &&
+            I->src[s].size == AGX_SIZE_32 && !(I->src[s].value & 1) &&
+            I->src[s].value < 256 && !I->src[s].abs && !I->src[s].neg &&
+            I->src[1 - s].type == AGX_INDEX_IMMEDIATE &&
+            I->src[1 - s].value <= UINT8_MAX && !I->src[1 - s].abs &&
+            !I->src[1 - s].neg;
          const bool copy_compare_uniform =
-            (I->op == AGX_OPCODE_IF_ICMP || I->op == AGX_OPCODE_WHILE_ICMP ||
-             I->op == AGX_OPCODE_BREAK_IF_ICMP) &&
+            is_int_compare && !uniform_imm_compare &&
             (I->src[0].type != AGX_INDEX_NORMAL ||
              I->src[0].size != AGX_SIZE_32 || I->src[0].abs ||
              I->src[0].neg);
+         /* Qualify the native vertex sampler operands independently of the
+          * older option that also changes fragment sampling. The saved native
+          * terrain shader reads aligned texture/sampler indices directly from
+          * the low uniform file. Coordinate and LOD legalization is unchanged.
+          */
+         const bool vertex_tex_uniform =
+            agx_vertex_tex_uniforms(ctx) &&
+            I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
+            I->src[s].value <= 252 && !(I->src[s].value & 3) &&
+            (I->src[s].size == AGX_SIZE_32 || I->src[s].size == AGX_SIZE_64);
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
              (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
               copy_compare_uniform ||
-              !(native_integer || agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
+              !(native_integer || vertex_tex_uniform || uniform_imm_compare ||
+                agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];
             idx.abs = idx.neg = false;

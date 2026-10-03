@@ -2,6 +2,7 @@
 #include "asahi/lib/agx_nir_lower_vbo.h"
 #include "asahi/lib/agx_linker.h"
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx_compiler.h"
 #include "asahi/compiler/agx_nir.h"
 #include "compiler/nir/nir_builder.h"
 #include "compiler/nir/nir_format_convert.h"
@@ -11,6 +12,7 @@
 #include "util/format/u_format.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include "util/u_debug.h"
 
 #define CHECK(x) do { if (!(x)) { fprintf(stderr,"VBO FAIL line%d: %s\n",__LINE__,#x); abort(); } } while (0)
 static const nir_shader_compiler_options options = {0};
@@ -604,10 +606,313 @@ check_instance_divisor_compiles(uint32_t divisor)
    free(part.binary);
    ralloc_free(b.shader);
 }
+static void
+check_grouped_32bit_fetch(void)
+{
+   struct agx_velem_key attrs[AGX_MAX_ATTRIBS] = {0};
+   struct agx_vbo_binding bindings[AGX_MAX_ATTRIBS] = {0};
+   struct agx_vbo_group groups[AGX_MAX_ATTRIBS];
+   attrs[0] = (struct agx_velem_key){.format = PIPE_FORMAT_R32G32B32_SINT,
+      .stride = 16, .divisor = 1, .instanced = true};
+   attrs[1] = (struct agx_velem_key){.format = PIPE_FORMAT_R32_FLOAT,
+      .stride = 16, .divisor = 1, .instanced = true};
+   bindings[0] = (struct agx_vbo_binding){.binding = 1, .offset = 0};
+   bindings[1] = (struct agx_vbo_binding){.binding = 1, .offset = 12};
+   agx_vbo_group_32bit(attrs, bindings, 3, groups);
+   CHECK(groups[0].anchor == 0 && groups[0].first == 0 && groups[0].count == 4);
+   CHECK(groups[1].anchor == 0 && groups[1].first == 3 && groups[1].count == 4);
+
+   /* Distinct bindings, gaps, overlaps, different rates/divisors/strides,
+    * unused inputs, and narrower formats cannot become one fetch. */
+   for (unsigned axis = 0; axis < 9; ++axis) {
+      struct agx_velem_key a[AGX_MAX_ATTRIBS];
+      struct agx_vbo_binding v[AGX_MAX_ATTRIBS];
+      memcpy(a, attrs, sizeof(a)); memcpy(v, bindings, sizeof(v));
+      uint16_t valid = 3;
+      switch (axis) {
+      case 0: v[1].binding = 2; break;
+      case 1: v[1].offset = 16; break;
+      case 2: v[1].offset = 8; break;
+      case 3: a[1].instanced = false; break;
+      case 4: a[1].divisor = 2; break;
+      case 5: a[1].stride = 32; break;
+      case 6: valid = 1; break;
+      case 7: a[1].format = PIPE_FORMAT_R16G16_FLOAT; break;
+      case 8: v[0].offset = UINT32_MAX - 3; v[1].offset = 8; break;
+      }
+      agx_vbo_group_32bit(a, v, valid, groups);
+      CHECK(!groups[0].count && !groups[1].count);
+   }
+   agx_vbo_group_32bit(attrs, bindings, 3, groups);
+
+   for (unsigned mode = 0; mode < 4; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
+         &agx_nir_options, "contiguous mixed integer/float vertex inputs");
+      nir_def *pos = nir_load_input(&b, 3, 32, nir_imm_int(&b, 0),
+                                    .base = 0, .dest_type = nir_type_int32);
+      nir_def *visibility = nir_load_input(&b, 1, 32, nir_imm_int(&b, 0),
+                                           .base = 1, .dest_type = nir_type_float32);
+      nir_store_output(&b, pos, nir_imm_int(&b, 0), .base = 0,
+                       .write_mask = 7, .src_type = nir_type_int32);
+      nir_store_output(&b, visibility, nir_imm_int(&b, 0), .base = 1,
+                       .write_mask = 1, .src_type = nir_type_float32);
+      struct agx_velem_key a[AGX_MAX_ATTRIBS]; memcpy(a, attrs, sizeof(a));
+      bool dynamic = mode == 2;
+      if (dynamic) a[0].stride = a[1].stride = 0;
+      struct agx_robustness rs = {.soft_fault = mode != 3,
+         .level = mode == 1 ? AGX_ROBUSTNESS_GL : AGX_ROBUSTNESS_DISABLED};
+      CHECK(agx_nir_lower_vbo_raw_grouped(b.shader, a, rs, dynamic, groups));
+      for (unsigned i = 0; i < 3; ++i) {
+         fold(b.shader);
+         nir_opt_cse(b.shader);
+      }
+      struct loads l = find_loads(b.shader);
+      CHECK(l.n == (mode == 0 ? 1 : 2));
+      if (mode == 0) {
+         CHECK(l.load[0]->def.num_components == 4);
+         const uint32_t values[4] = {0x80000000, 0xffffffff, 0x12345678,
+                                      0x3e800000};
+         replace_load(l.load[0], values); fold(b.shader);
+         CHECK(nir_src_is_const(l.output[0]->src[0]));
+         CHECK(nir_src_is_const(l.output[1]->src[0]));
+         const nir_const_value *position = nir_src_as_const_value(l.output[0]->src[0]);
+         for (unsigned c = 0; c < 3; ++c) CHECK(position[c].u32 == values[c]);
+         CHECK(nir_src_as_uint(l.output[1]->src[0]) == values[3]);
+      }
+      ralloc_free(b.shader);
+   }
+}
+
+static void
+check_grouped_mixed_fetch(void)
+{
+   /* Both memory orders and API colour swizzles, per-vertex/per-instance,
+    * and the robust/dynamic/no-soft-fault fallbacks. */
+   for (unsigned variant = 0; variant < 8; ++variant) {
+      const bool reverse = variant & 1;
+      const bool bgra = variant & 2;
+      struct agx_velem_key attrs[AGX_MAX_ATTRIBS] = {0};
+      struct agx_vbo_binding bindings[AGX_MAX_ATTRIBS] = {0};
+      struct agx_vbo_group groups[AGX_MAX_ATTRIBS];
+      attrs[0] = (struct agx_velem_key){.format = PIPE_FORMAT_R32G32B32_FLOAT,
+         .stride = 28, .instanced = !!(variant & 4), .divisor = 3};
+      attrs[1] = attrs[0];
+      attrs[1].format = bgra ? PIPE_FORMAT_B8G8R8A8_UNORM
+                            : PIPE_FORMAT_R8G8B8A8_UNORM;
+      bindings[0] = (struct agx_vbo_binding){.binding = 2,
+                                            .offset = reverse ? 12 : 8};
+      bindings[1] = (struct agx_vbo_binding){.binding = 2,
+                                            .offset = reverse ? 8 : 20};
+      agx_vbo_group_32bit(attrs, bindings, 3, groups);
+      CHECK(!groups[0].count && !groups[1].count);
+      agx_vbo_group_mixed(attrs, bindings, 3, groups);
+      CHECK(groups[0].count == 4 && groups[1].count == 4);
+      CHECK(groups[0].anchor == (reverse ? 1 : 0));
+      CHECK(groups[1].anchor == groups[0].anchor);
+      CHECK(groups[0].first == (reverse ? 1 : 0));
+      CHECK(groups[1].first == (reverse ? 0 : 3));
+
+      for (unsigned mode = 0; mode < 4; ++mode) {
+         nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
+            &agx_nir_options, "float3 plus packed UNORM8 vertex input");
+         for (unsigned a = 0; a < 2; ++a) {
+            unsigned nr = a ? 4 : 3;
+            nir_def *in = nir_load_input(&b, nr, 32, nir_imm_int(&b, 0),
+                                         .base = a, .dest_type = nir_type_float32);
+            nir_store_output(&b, in, nir_imm_int(&b, 0), .base = a,
+                             .write_mask = BITFIELD_MASK(nr),
+                             .src_type = nir_type_float32);
+         }
+         struct agx_velem_key a[AGX_MAX_ATTRIBS]; memcpy(a, attrs, sizeof(a));
+         if (mode == 2) a[0].stride = a[1].stride = 0;
+         struct agx_robustness rs = {.soft_fault = mode != 3,
+            .level = mode == 1 ? AGX_ROBUSTNESS_GL : AGX_ROBUSTNESS_DISABLED};
+         CHECK(agx_nir_lower_vbo_raw_grouped(b.shader, a, rs, mode == 2, groups));
+         for (unsigned i = 0; i < 3; ++i) { fold(b.shader); nir_opt_cse(b.shader); }
+         struct loads l = find_loads(b.shader);
+         CHECK(l.n == (mode == 0 ? 1 : 2));
+         nir_intrinsic_instr *unpack = NULL;
+         nir_foreach_function_impl(impl, b.shader) {
+            nir_foreach_block(block, impl) {
+               nir_foreach_instr(instr, block) {
+                  if (instr->type != nir_instr_type_intrinsic) continue;
+                  nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                  if (intr->intrinsic == nir_intrinsic_unpack_vbo_unorm_4x8_agx) {
+                     CHECK(!unpack); unpack = intr;
+                  }
+               }
+            }
+         }
+         CHECK(!!unpack == (mode == 0));
+         if (mode == 0) {
+            CHECK(nir_intrinsic_format(l.load[0]) == PIPE_FORMAT_R32_UINT);
+            CHECK(l.load[0]->def.num_components == 4);
+            /* Preserve all position bits, including a NaN and negative zero,
+             * while passing precisely the fourth word to native NORMFLT. */
+            uint32_t words[4];
+            const uint32_t xyz[] = {0x7fc12345, 0x80000000, 0xbf800000};
+            for (unsigned c = 0; c < 3; ++c) words[groups[0].first + c] = xyz[c];
+            words[groups[1].first] = 0xff7e2103;
+            replace_load(l.load[0], words); fold(b.shader);
+            CHECK(nir_src_as_uint(unpack->src[0]) == 0xff7e2103);
+            const nir_const_value *pos = nir_src_as_const_value(l.output[0]->src[0]);
+            for (unsigned c = 0; c < 3; ++c) CHECK(pos[c].u32 == xyz[c]);
+            nir_builder cb = nir_builder_at(nir_before_instr(&unpack->instr));
+            nir_def *values[4];
+            const uint8_t bytes[] = {3, 33, 126, 255};
+            for (unsigned c = 0; c < 4; ++c)
+               values[c] = nir_imm_float(&cb, ref_unorm(bytes[c], 8));
+            nir_def_rewrite_uses(&unpack->def, nir_vec(&cb, values, 4));
+            fold(b.shader);
+            const nir_const_value *col = nir_src_as_const_value(l.output[1]->src[0]);
+            for (unsigned c = 0; c < 4; ++c) {
+               unsigned lane = bgra && c < 3 ? 2 - c : c;
+               CHECK(col[c].u32 == f2u(ref_unorm(bytes[lane], 8)));
+            }
+         }
+         ralloc_free(b.shader);
+      }
+      for (unsigned axis = 0; axis < 10; ++axis) {
+         struct agx_velem_key a[AGX_MAX_ATTRIBS]; memcpy(a, attrs, sizeof(a));
+         struct agx_vbo_binding v[AGX_MAX_ATTRIBS]; memcpy(v, bindings, sizeof(v));
+         uint16_t valid = 3;
+         switch (axis) {
+         case 0: v[1].binding++; break;
+         case 1: v[1].offset++; break;
+         case 2: a[1].stride += 4; break;
+         case 3: a[1].instanced = !a[0].instanced; break;
+         case 4: a[1].divisor++; break;
+         case 5: a[1].format = PIPE_FORMAT_R8G8B8A8_SNORM; break;
+         case 6: a[1].format = PIPE_FORMAT_R8G8B8_UNORM; break;
+         case 7: valid = 1; break;
+         case 8: v[0].offset = UINT32_MAX - 3; v[1].offset = 8; break;
+         case 9: a[0].stride = a[1].stride = 29; break;
+         }
+         agx_vbo_group_mixed(a, v, valid, groups);
+         CHECK(!groups[0].count && !groups[1].count);
+      }
+   }
+}
+
+static void
+check_uniform_sub_preamble(void)
+{
+   const bool enabled = debug_get_bool_option("AGX_G17P_VERTEX_UNIFORM_SUB", false);
+   for (unsigned mode = 0; mode < 6; ++mode) {
+      const bool g17p = mode != 1;
+      mesa_shader_stage stage = mode == 2 ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
+      unsigned bits = mode == 3 ? 16 : 32;
+      unsigned comps = mode == 5 ? 2 : 1;
+      nir_builder b = nir_builder_init_simple_shader(stage, &agx_nir_options,
+                                                    "uniform negate cost");
+      nir_def *uniform = nir_load_constant_agx(&b, comps, bits,
+         nir_imm_int64(&b, 0x10000), nir_imm_int(&b, 0),
+         .format = bits == 16 ? PIPE_FORMAT_R16_UINT : PIPE_FORMAT_R32_UINT);
+      nir_def *neg = nir_ineg(&b, uniform);
+      nir_def *varying = stage == MESA_SHADER_VERTEX
+         ? nir_load_vertex_id(&b)
+         : nir_f2u32(&b, nir_channel(&b, nir_load_frag_coord(&b), 0));
+      varying = nir_u2uN(&b, varying, bits);
+      nir_def *sum = mode == 4 ? neg : nir_iadd(&b, neg, varying);
+      nir_store_output(&b, sum, nir_imm_int(&b, 0), .base = 0,
+                       .write_mask = BITFIELD_MASK(comps));
+      nir_divergence_analysis(b.shader);
+      unsigned sizes[3] = {0, 0, 1};
+      CHECK(agx_nir_opt_preamble(b.shader, sizes, g17p));
+      unsigned main_neg = 0, pre_neg = 0;
+      nir_function_impl *preamble = nir_shader_get_preamble(b.shader);
+      nir_foreach_function_impl(impl, b.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type == nir_instr_type_alu &&
+                   nir_instr_as_alu(instr)->op == nir_op_ineg) {
+                  if (impl == preamble) pre_neg++; else main_neg++;
+               }
+            }
+         }
+      }
+      fprintf(stderr, "uniform-sub mode=%u enabled=%u main=%u pre=%u\n", mode, enabled, main_neg, pre_neg);
+      if (enabled && (mode == 0 || mode == 5)) {
+         CHECK(main_neg == 1 && pre_neg == 0);
+      } else {
+         CHECK(main_neg == 0 && pre_neg == 1);
+      }
+      ralloc_free(b.shader);
+   }
+}
+
+static void
+check_common_word_index(void)
+{
+   const bool enabled = debug_get_bool_option("AGX_G17P_VBO_COMMON_INDEX", false);
+   for (unsigned mode = 0; mode < 4; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX,
+         &agx_nir_options, "mixed-width interleaved fetch index");
+      struct agx_velem_key attrs[AGX_MAX_ATTRIBS] = {0};
+      const enum pipe_format formats[] = {PIPE_FORMAT_R32G32B32_FLOAT,
+         PIPE_FORMAT_R8G8B8A8_UNORM, PIPE_FORMAT_R16G16_SINT};
+      for (unsigned i = 0; i < 3; ++i) {
+         const unsigned nr = i == 0 ? 3 : i == 1 ? 4 : 2;
+         nir_def *in = nir_load_input(&b, nr, 32, nir_imm_int(&b, 0),
+                                      .base = i);
+         nir_store_output(&b, in, nir_imm_int(&b, 0), .base = i,
+                          .write_mask = BITFIELD_MASK(nr));
+         attrs[i] = (struct agx_velem_key){.format = formats[i],
+                                          .stride = mode == 2 ? 0 : 28};
+      }
+      struct agx_robustness rs = {.soft_fault = mode != 3,
+         .level = mode == 1 ? AGX_ROBUSTNESS_GL : AGX_ROBUSTNESS_DISABLED};
+      CHECK(agx_nir_lower_vbo_raw(b.shader, attrs, rs, mode == 2));
+      for (unsigned i = 0; i < 3; ++i) { fold(b.shader); nir_opt_cse(b.shader); }
+      struct loads l = find_loads(b.shader);
+      CHECK(l.n == 3);
+      for (unsigned i = 0; i < 3; ++i) {
+         const unsigned field = nir_intrinsic_base(l.load[i]);
+         CHECK(!!(field & AGX_NIR_MEMORY_INDEX_BYTES) == (enabled && mode == 0));
+         if (enabled && mode == 0) {
+            CHECK((field & 7) == 2);
+            CHECK(l.load[i]->src[1].ssa == l.load[0]->src[1].ssa);
+         }
+      }
+      if (enabled && mode == 0) {
+         const uint32_t indices[] = {0, 1, 103, UINT32_MAX / 28,
+            UINT32_MAX / 28 + 1, UINT32_MAX / 14 + 1, UINT32_MAX / 7};
+         for (unsigned n = 0; n < ARRAY_SIZE(indices); ++n) {
+            nir_shader *s = nir_shader_clone(NULL, b.shader);
+            nir_foreach_function_impl(impl, s) {
+               nir_foreach_block(block, impl) {
+                  nir_foreach_instr_safe(instr, block) {
+                     if (instr->type != nir_instr_type_intrinsic) continue;
+                     nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+                     if (intr->intrinsic != nir_intrinsic_load_vertex_id) continue;
+                     nir_builder c = nir_builder_at(nir_before_instr(instr));
+                     nir_def_rewrite_uses(&intr->def, nir_imm_int(&c, indices[n]));
+                  }
+               }
+            }
+            fold(s);
+            struct loads actual = find_loads(s);
+            CHECK(actual.n == 3);
+            for (unsigned i = 0; i < actual.n; ++i) {
+               CHECK(nir_src_is_const(actual.load[i]->src[1]));
+               uint64_t word = nir_src_as_uint(actual.load[i]->src[1]);
+               CHECK((word << 2) == (uint64_t)indices[n] * 28u);
+            }
+            ralloc_free(s);
+         }
+      }
+      ralloc_free(b.shader);
+   }
+}
+
 int main(void)
 {
    glsl_type_singleton_init_or_ref();
    check_prolog();
+   check_grouped_32bit_fetch();
+   check_common_word_index();
+   check_grouped_mixed_fetch();
+   check_uniform_sub_preamble();
 
    /* 1. Which path each format takes. */
    const struct { enum pipe_format f; unsigned stride; enum shape shape;

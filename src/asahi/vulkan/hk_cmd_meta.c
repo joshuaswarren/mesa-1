@@ -187,7 +187,17 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
       cmd->vk.last_graphics_pipeline = NULL;
       assert(save->dynamic.vi == &cmd->state.gfx._dynamic_vi);
       assert(save->dynamic.ms.sample_locations == &cmd->state.gfx._dynamic_sl);
+      /* The generation must not go back with the state it describes.
+       * Restoring it would let the next meta operation, which repeats the
+       * same state changes from the same starting point, reach the very
+       * generation an earlier one had: a bind tail prepared for that earlier
+       * operation then "matches" with stale viewport/scissor state (two
+       * vkCmdClearAttachments rectangles in one dynamic-rendering instance
+       * split by a barrier drew the second one through the first's
+       * viewport). Everything restored is dirty below anyway. */
+      const uint64_t generation = cmd->vk.dynamic_graphics_state.generation;
       cmd->vk.dynamic_graphics_state = save->dynamic;
+      cmd->vk.dynamic_graphics_state.generation = generation + 1;
       cmd->state.gfx._dynamic_vi = save->_dynamic_vi;
       cmd->state.gfx._dynamic_sl = save->_dynamic_sl;
       memcpy(cmd->vk.dynamic_graphics_state.dirty,
@@ -3894,6 +3904,12 @@ hk_CmdClearAttachments(VkCommandBuffer commandBuffer, uint32_t attachmentCount,
 
    struct vk_meta_rendering_info render_info;
    hk_meta_init_render(cmd, &render_info);
+
+   for (uint32_t i = 0; i < attachmentCount; ++i) {
+      if (pAttachments[i].aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT |
+                                        VK_IMAGE_ASPECT_STENCIL_BIT))
+         hk_g17p_note_depth_clear(cmd);
+   }
 
    struct hk_meta_save save;
    hk_meta_begin(cmd, &save, VK_PIPELINE_BIND_POINT_GRAPHICS);

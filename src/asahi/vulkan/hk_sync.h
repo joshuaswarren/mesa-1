@@ -95,6 +95,58 @@ struct agx_timestamp_req {
    uint32_t offset_B;
 };
 
+/*
+ * Tile hazards. A render pass instance's load, store and resolve operations
+ * only affect pixels inside its render area (Vulkan 1.4, "Render Pass Load
+ * Operations" / "Render Pass Store Operations"), so two instances that write
+ * pixel-disjoint parts of one attachment need no application barrier. The
+ * hardware loads and stores whole tiles, however: a tile the render area only
+ * partly covers is reloaded from memory and stored back whole. Two instances
+ * that share such a tile race when they run concurrently -- the later one can
+ * reload the tile before the earlier one stored it and then write the stale
+ * pixels back -- and with per-command barriers nothing else orders them.
+ *
+ * hk therefore records a footprint for every attachment an instance writes
+ * whose render area leaves some tile partly covered, and orders an instance
+ * after the latest earlier one whose footprint shares a tile with its own.
+ * An area that covers each of its tiles entirely is never recorded: a
+ * pixel-disjoint instance cannot touch those tiles, and an instance that
+ * overlaps it pixel-wise needs an application barrier anyway. Footprints use
+ * 32x32-pixel cells, the largest tile (agx_select_tile_size); smaller tiles
+ * nest inside them, so the test is conservative for every layout.
+ *
+ * The rule applies within a command buffer at recording, across the command
+ * buffers of one submission and against this queue's earlier, possibly still
+ * running submissions at submit time. Other queues and other processes are
+ * not covered (see the g1fix notes).
+ */
+#define HK_SYNC_TILE_CELL_LOG2 5
+#define HK_SYNC_MAX_PASS_FOOTPRINTS 20
+#define HK_SYNC_RECENT_FOOTPRINTS 256
+
+struct hk_sync_footprint {
+   /* Identity of the written image; compared, never dereferenced. */
+   const void *image;
+   uint32_t level;
+   /* Layers [layer0, layer1). */
+   uint32_t layer0, layer1;
+   /* Inclusive 32x32 cell bounds. */
+   int32_t cx0, cx1, cy0, cy1;
+};
+
+/* A recorded pass instance footprint and its first and last render stream. */
+struct hk_sync_pass_record {
+   struct hk_sync_footprint fp;
+   struct hk_cs *first, *last;
+};
+
+/* A footprint of an earlier submission on this queue and the queue timeline
+ * point that submission signals. */
+struct hk_sync_recent {
+   struct hk_sync_footprint fp;
+   uint64_t point;
+};
+
 /* Per-stream state, embedded in hk_cs. */
 struct hk_sync_stream {
    /* Recording order. Equal to list order for every pair the tracking
@@ -156,12 +208,27 @@ struct hk_sync_state {
    /* A top-of-pipe timestamp waiting for the next stream to carry it as its
     * start timestamp. */
    struct agx_timestamp_req pending_start_ts;
+
+   /* Tile hazards: the partial-tile footprints of the open pass instance and
+    * the latest earlier render stream it shares a tile with. The command
+    * buffer keeps the recorded instances (hk_cmd_buffer::sync_pass_records). */
+   struct hk_sync_footprint pass_fp[HK_SYNC_MAX_PASS_FOOTPRINTS];
+   uint8_t pass_fp_count;
+   struct hk_cs *pass_tile_wait;
 };
 
 /* Per-queue state: kinds of streams ever submitted on each subqueue. A
  * dependency on earlier submits of a kind that never ran is no dependency. */
 struct hk_sync_queue {
    uint8_t ever[HK_SYNC_NUM_SQ];
+
+   /* Tile hazards across submissions: a ring of the footprints recently
+    * submitted on this queue. An entry is live until the queue timeline
+    * reaches its point. `evicted` is the latest point of an entry the ring
+    * dropped, which keeps the check conservative while that point is live. */
+   struct hk_sync_recent recent[HK_SYNC_RECENT_FOOTPRINTS];
+   uint32_t recent_next, recent_count;
+   uint64_t recent_max, evicted;
 };
 
 void hk_sync_reset(struct hk_cmd_buffer *cmd);
@@ -223,6 +290,20 @@ void hk_sync_first_render_stream(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 void hk_sync_end_rendering(struct hk_cmd_buffer *cmd);
 void hk_sync_heap_used(struct hk_cmd_buffer *cmd);
 
+/* Tile hazards: a written attachment of the pass instance being begun, then
+ * the end of the list, before the instance creates its first stream. */
+void hk_sync_pass_footprint(struct hk_cmd_buffer *cmd, const void *image,
+                            uint32_t level, uint32_t layer0, uint32_t layer1,
+                            uint32_t level_width, uint32_t level_height,
+                            VkRect2D area);
+void hk_sync_pass_footprints_done(struct hk_cmd_buffer *cmd);
+/* Whether a submission records tile-hazard footprints, and whether the
+ * queue may still be running one, so the caller fetches the completed
+ * timeline point only when it can matter. */
+bool hk_sync_submit_needs_completed(const struct hk_queue *queue,
+                                    struct hk_cmd_buffer *const *cmdbufs,
+                                    unsigned count);
+
 /* The driver's own resolve pass after a render: waits on the render. */
 void hk_sync_resolve_begin(struct hk_cmd_buffer *cmd);
 void hk_sync_resolve_end(struct hk_cmd_buffer *cmd);
@@ -240,6 +321,6 @@ void hk_sync_resolve_end(struct hk_cmd_buffer *cmd);
 void hk_sync_resolve_submit(struct hk_queue *queue,
                             struct hk_cmd_buffer *const *cmdbufs,
                             unsigned count, bool first_cdm_is_flush,
-                            bool chain_first);
+                            bool chain_first, uint64_t completed);
 
 bool hk_sync_trace_enabled(void);

@@ -89,7 +89,20 @@ enum agx_codegen_flag {
     * (native run112 workload 8). AGX_G18_MSAA4, default off. Off, every G18G
     * multisampled draw keeps its existing refusal and no emitted byte
     * changes; on, only four-sample G18G tile programs and draws change. */
-   AGX_CODEGEN_G18_MSAA4                      = BITFIELD_BIT(17),
+   AGX_CODEGEN_G18_MSAA4                      = BITFIELD_BIT(26),
+   AGX_CODEGEN_G17P_COLOR_ILP                 = BITFIELD_BIT(17),
+   /* frg-codegen (2026-09-30): native light-fragment tail and loop-entry
+    * forms. Bit 18 was used by the unpromoted tile-wait experiment; it is
+    * skipped so no cache identity is shared with that library. */
+   AGX_CODEGEN_G17P_BANK_COALESCE             = BITFIELD_BIT(19),
+   AGX_CODEGEN_G17P_UNIFORM_IMM_COMPARE       = BITFIELD_BIT(20),
+   AGX_CODEGEN_G17P_TILE_WAIT_SINK            = BITFIELD_BIT(21),
+   AGX_CODEGEN_G17P_FLTNORM_LIVENESS          = BITFIELD_BIT(22),
+   AGX_CODEGEN_G17P_ENTRY_COMPARE             = BITFIELD_BIT(23),
+   /* frg-codegen v2 (2026-10-01). */
+   AGX_CODEGEN_G17P_EMPTY_THEN                = BITFIELD_BIT(24),
+   /* frg-codegen v3 (2026-10-01): one-sample discard coverage word. */
+   AGX_CODEGEN_G17P_DISCARD_WORD              = BITFIELD_BIT(25),
 };
 
 uint32_t agx_get_codegen_flags(void);
@@ -100,7 +113,7 @@ bool agx_g18_msaa4_enabled(void);
 /* v50 agx3 footgun-audit candidates (neo-footgun-mesa-v50). A separate
  * namespace from agx_codegen_flag so it composes with later codegen bits;
  * Honeykrisp keys these into its shader cache at bits 35..39. All default
- * off until qualified on hardware. */
+ * off until qualified on hardware, except the internal-shader scaled guard. */
 enum agx_footgun_flag {
    /* hk: branch around the scaled-view texel conversion (kind == 0 skips). */
    AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD = BITFIELD_BIT(0),
@@ -112,6 +125,9 @@ enum agx_footgun_flag {
    /* hk+compiler (v51a): hoist constant-index descriptor/push loads of the
     * fragment shader into one launch-time uniform DMA range. */
    AGX_FOOTGUN_G17P_UNIFORM_DMA         = BITFIELD_BIT(3),
+   /* hk: the scaled-view guard for driver-internal (vk_meta) shaders only.
+    * Default on; HK_G17P_INTERNAL_SCALED_GUARD=0 is its A/B off-switch. */
+   AGX_FOOTGUN_G17P_INTERNAL_SCALED_GUARD = BITFIELD_BIT(4),
 };
 
 #define AGX_FOOTGUN_FLAG_BITS 5

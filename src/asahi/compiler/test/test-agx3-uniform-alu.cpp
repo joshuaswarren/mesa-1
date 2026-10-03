@@ -7,6 +7,52 @@
 #include "agx3_binder.h"
 #include "agx3_uniform_alu.h"
 #include "agx_test.h"
+#include "util/u_debug.h"
+
+TEST(AGX3UniformALU, VertexTextureUniformQualification)
+{
+   /* Run in separate processes with AGX_G17P_VERTEX_TEX_UNIFORMS=0 and 1.
+    * Keep the older all-stage AGX_G17P_TEX_UNIFORM_OPERANDS option disabled.
+    */
+   const bool enabled =
+      debug_get_bool_option("AGX_G17P_VERTEX_TEX_UNIFORMS", false);
+   for (auto encoding : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
+      for (auto stage : {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT}) {
+         for (bool preamble : {false, true}) {
+            for (unsigned value : {0u, 12u, 252u, 2u, 254u, 256u}) {
+               for (auto size : {AGX_SIZE_16, AGX_SIZE_32, AGX_SIZE_64}) {
+                  void *mem = ralloc_context(NULL);
+                  agx_shader_key key = {};
+                  key.dev.encoding = encoding;
+                  agx_builder *b = agx_test_builder(mem);
+                  b->shader->key = &key;
+                  b->shader->stage = stage;
+                  b->shader->is_preamble = preamble;
+                  agx_index texture = agx_mov(b, agx_uniform(value, size));
+                  agx_index sampler = agx_mov(b, agx_uniform(value, size));
+                  agx_instr *I = agx_texture_sample_to(
+                     b, agx_temp(b->shader, AGX_SIZE_32),
+                     agx_register(0, AGX_SIZE_32),
+                     agx_uniform(8, AGX_SIZE_32), agx_uniform(0, AGX_SIZE_64),
+                     texture, sampler,
+                     agx_null(), AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0,
+                     false, false, false, AGX_GATHER_NONE, false);
+                  agx_optimizer_forward(b->shader);
+                  agx_lower_uniform_sources(b->shader);
+                  const bool keep = enabled &&
+                     encoding == AGX_ISA_ENCODING_AGX3B &&
+                     stage == MESA_SHADER_VERTEX && !preamble &&
+                     value <= 252 && !(value & 3) && size != AGX_SIZE_16;
+                  EXPECT_EQ(I->src[3].type == AGX_INDEX_UNIFORM, keep);
+                  EXPECT_EQ(I->src[4].type == AGX_INDEX_UNIFORM, keep);
+                  EXPECT_NE(I->src[1].type, AGX_INDEX_UNIFORM);
+                  ralloc_free(mem);
+               }
+            }
+         }
+      }
+   }
+}
 
 TEST(AGX3UniformALU, AppleArithmeticWitnesses)
 {

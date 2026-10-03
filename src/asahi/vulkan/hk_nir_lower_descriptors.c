@@ -1270,13 +1270,17 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
                        (v57_flags & HK_ORDINARY_V57_VERTEX);
    if (nir->info.stage != MESA_SHADER_FRAGMENT && !vertex)
       return false;
-   /* Vertex objects never get ordinary variants: keep the proof dynamic.
+   /* Without v96 vertex variants a vertex object keeps the proof dynamic.
     * v57d: the requirement list is still reported (vertex_guard_out) so the
-    * driver's per-draw trace can evaluate the dynamic guard on the CPU. */
+    * driver's per-draw trace can evaluate the dynamic guard on the CPU. With
+    * HK_ORDINARY_V96_VERTEX_VARIANTS the proof is reported like a fragment
+    * one and the caller builds a generic and an ordinary program. */
    struct hk_ordinary_descriptor_requirements *vertex_guard_out = NULL;
    if (vertex) {
-      vertex_guard_out = requirements;
-      requirements = NULL;
+      if (!(v57_flags & HK_ORDINARY_V96_VERTEX_VARIANTS) || !requirements) {
+         vertex_guard_out = requirements;
+         requirements = NULL;
+      }
       allow_single_sample = true;
    }
    const bool allow_txf = v57_flags & HK_ORDINARY_V57_TXF;
@@ -1412,7 +1416,7 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
     * region's runtime guard to one arm (flicker bisect). "slow" is the
     * complete generic path and is correct for every descriptor; "fast" is
     * correct only for ordinary descriptors. Unset keeps the runtime guard. */
-   if (vertex) {
+   if (vertex && !requirements) {
       const char *arm = getenv("HK_G17P_ORDINARY_VS_GUARD");
       if (arm && !strcmp(arm, "slow"))
          ordinary = nir_imm_false(&b);

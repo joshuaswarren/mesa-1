@@ -458,6 +458,11 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
       if (options & nir_divergence_across_subgroups)
          is_divergent = true;
       break;
+   case nir_intrinsic_load_ordinary_descriptor_guard_agx:
+      /* A marker around its descriptor-derived source (hk ordinary variants);
+       * a vertex object reaches here before its variants resolve it. */
+      is_divergent = src_divergent(instr->src[0], state);
+      break;
    case nir_intrinsic_load_input_vertex:
       is_divergent = src_divergent(instr->src[1], state);
       assert(stage == MESA_SHADER_FRAGMENT);

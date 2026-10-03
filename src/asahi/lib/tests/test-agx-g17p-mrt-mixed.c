@@ -22,6 +22,7 @@
 #include "agx3_sr_core.h"
 #include "agx_bg_eot_key.h"
 #include "agx_compile.h"
+#include "agx_debug.h"
 #include "agx_linker.h"
 #include "agx_nir.h"
 #include "agx_nir_texture.h"
@@ -1400,6 +1401,39 @@ static const struct {
      {120, 0x1aa59cf1e9af7435ull}}},
 };
 
+/* AGX_G17P_BANK_COALESCE (default on) lets a tile-store payload collect or
+ * move reuse the registers its sources already occupy inside the store bank.
+ * These pinned programs then lose only their payload copies (IADD moves);
+ * every other instruction is unchanged (offline decode of each pair, frg-codegen
+ * 2026-09-30). The origin/agx3 pins still apply with AGX_G17P_BANK_COALESCE=0. */
+static const struct {
+   const char *name;
+   struct golden_program pinned, coalesced;
+} coalesced_pins[] = {
+   {"rgba8x1", {146, 0xdf656c77cfaa5bfbull}, {136, 0x969152e67322a06eull}},
+   {"rgba16fx1", {124, 0xaacc42d2bae1faf7ull}, {104, 0xa27b42db1b1fff11ull}},
+   {"rgba16fx1", {112, 0x3714dc17ee32e2f4ull}, {92, 0x400ca82f639cb36eull}},
+   {"rgba8x2", {282, 0x7920072e80dba50aull}, {262, 0xf69f9d211ece1000ull}},
+   {"rgba32fx2", {138, 0x8d1aa0edcf65a202ull}, {58, 0xb506ff6dd8d33e02ull}},
+   {"rgba32fx3", {202, 0xed0c467782f8f8e0ull}, {82, 0x1aee9e66285d6ee8ull}},
+   {"rgba32ux4", {254, 0x0a0b4e4dce2827feull}, {134, 0x5bc1ff72b1a931aeull}},
+   {"wboit", {208, 0x6c14b87b171d6988ull}, {188, 0xd0a5f42ceaac95a2ull}},
+};
+
+static const struct golden_program *
+current_golden(const char *name, const struct golden_program *golden)
+{
+   if (!(agx_get_codegen_flags() & AGX_CODEGEN_G17P_BANK_COALESCE))
+      return golden;
+   for (unsigned i = 0; i < ARRAY_SIZE(coalesced_pins); ++i) {
+      if (!strcmp(coalesced_pins[i].name, name) &&
+          coalesced_pins[i].pinned.size == golden->size &&
+          coalesced_pins[i].pinned.hash == golden->hash)
+         return &coalesced_pins[i].coalesced;
+   }
+   return golden;
+}
+
 static int
 check_golden(const char *name, bool ok, struct agx_shader_part *part,
              const struct golden_program *golden)
@@ -1407,6 +1441,7 @@ check_golden(const char *name, bool ok, struct agx_shader_part *part,
    if (!golden->size)
       return 0;
 
+   golden = current_golden(name, golden);
    if (!ok || part->info.binary_size != golden->size ||
        fnv1a(part->binary, part->info.binary_size) != golden->hash) {
       fprintf(stderr, "FAIL: %s changed from origin/agx3 (got {%u, 0x%016llxull})\n",

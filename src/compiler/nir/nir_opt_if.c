@@ -1561,6 +1561,53 @@ nir_opt_if_impl(nir_function_impl *impl, nir_opt_if_options options)
    return progress_safe || progress || progress_regs;
 }
 
+/* Only the empty-then inversion of opt_if_simplification(), for callers whose
+ * loop-shaping passes (e.g. a rotation that copies the header test into a
+ * guard) create `if (c) {} else { work }` after their general nir_opt_if run,
+ * and which must not have the rest of nir_opt_if reshape their loops. */
+static bool
+opt_if_empty_then_cf_list(nir_builder *b, struct exec_list *cf_list)
+{
+   bool progress = false;
+   foreach_list_typed(nir_cf_node, cf_node, node, cf_list) {
+      switch (cf_node->type) {
+      case nir_cf_node_block:
+         break;
+
+      case nir_cf_node_if: {
+         nir_if *nif = nir_cf_node_as_if(cf_node);
+         progress |= opt_if_empty_then_cf_list(b, &nif->then_list);
+         progress |= opt_if_empty_then_cf_list(b, &nif->else_list);
+         progress |= opt_if_simplification(b, nif);
+         break;
+      }
+
+      case nir_cf_node_loop: {
+         nir_loop *loop = nir_cf_node_as_loop(cf_node);
+         assert(!nir_loop_has_continue_construct(loop));
+         progress |= opt_if_empty_then_cf_list(b, &loop->body);
+         break;
+      }
+
+      case nir_cf_node_function:
+         UNREACHABLE("Invalid cf type");
+      }
+   }
+   return progress;
+}
+
+bool
+nir_opt_if_empty_then(nir_shader *shader)
+{
+   bool progress = false;
+   nir_foreach_function_impl(impl, shader) {
+      nir_builder b = nir_builder_create(impl);
+      bool impl_progress = opt_if_empty_then_cf_list(&b, &impl->body);
+      progress |= nir_progress(impl_progress, impl, nir_metadata_none);
+   }
+   return progress;
+}
+
 bool
 nir_opt_if(nir_shader *shader, nir_opt_if_options options)
 {

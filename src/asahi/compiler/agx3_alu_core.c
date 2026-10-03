@@ -4572,6 +4572,46 @@ agx3_alu_fmax_f32(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 bool
+agx3_alu_fmax_abs_f32(enum agx_isa_encoding enc, uint16_t dest,
+                     const uint16_t src[2],
+                     const enum agx3_alu_hint hints[2], bool dest_cache,
+                     uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3B || !src || !hints || !out || !len ||
+       dest >= 256 || (dest & 1))
+      return false;
+   for (unsigned i = 0; i < 2; ++i) {
+      if (src[i] >= 256 || (src[i] & 1) ||
+          (unsigned)hints[i] > AGX3_ALU_HINT_CACHE)
+         return false;
+   }
+
+   /* Matched native Minecraft terrain: 020b3b01830a0000880000000200.
+    * f64 and f98 apply ABS to both halves of the second tied operand.
+    * The f0 destination placement selects floating values, unlike the
+    * general integer-valued select. Keep this separate from that encoder.
+    * No negate, half-width, immediate, or producer-wait form is admitted.
+    */
+   const struct agx3_field_kv f[] = {
+      {0, 1}, {17, dest}, {24, 2}, {25, 2}, {26, dest_cache},
+      {35, src[0]}, {42, 2}, {43, 2},
+      {44, hints[0] == AGX3_ALU_HINT_CACHE},
+      {46, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {52, src[1]}, {59, 2}, {60, 2},
+      {61, hints[1] == AGX3_ALU_HINT_CACHE},
+      {63, hints[1] == AGX3_ALU_HINT_DISCARD}, {64, 1},
+      {69, src[0]}, {76, 2}, {77, 2},
+      {78, hints[0] == AGX3_ALU_HINT_CACHE},
+      {80, hints[0] == AGX3_ALU_HINT_DISCARD},
+      {86, src[1]}, {93, 2}, {94, 2},
+      {95, hints[1] == AGX3_ALU_HINT_CACHE},
+      {97, hints[1] == AGX3_ALU_HINT_DISCARD}, {98, 1}, {110, 7},
+   };
+   return agx3_bind_compose(enc, "fsel", 30, NULL, 0, f,
+                           sizeof(f) / sizeof(f[0]), out, len);
+}
+
+bool
 agx3_alu_fmin_f32_imm(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
                       uint8_t minifloat, enum agx3_alu_hint hint,
                       bool dest_cache, uint16_t wait_mask,

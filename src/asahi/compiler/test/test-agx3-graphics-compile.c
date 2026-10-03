@@ -875,6 +875,68 @@ test_g17p_background_clear(void)
    return ok;
 }
 
+static nir_shader *build_fs_alpha_discard_word(void);
+static nir_shader *build_fs_kill_then_alpha_discard_word(void);
+
+/* AGX_G17P_DISCARD_WORD: at one sample both non-constant coverage sources
+ * are reduced to bit 0 (FLAGS = 3); at four samples the whole masks are kept
+ * (FLAGS = 0). The first, no-tests update of the kill-then-discard shape
+ * keeps its constant live source, so only its target is reduced (FLAGS = 1).
+ * With AGX_G17P_DISCARD_WORD=0 every FLAGS stays 0. The binaries' coverage
+ * protocol is checked by the fs-*-discard-word cases. */
+static bool
+g17p_discard_word_case(nir_shader *(*build)(void), unsigned nr_samples,
+                       const unsigned *expected_flags, unsigned count)
+{
+   nir_shader *nir = build();
+   struct agx_shader_key key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .no_preamble = true,
+      .fs.nr_samples = nr_samples,
+   };
+   struct agx_shader_part part = {0};
+   bool ok = agx_compile_shader_nir(nir, &key, &part);
+   const bool on =
+      agx_get_codegen_flags() & AGX_CODEGEN_G17P_DISCARD_WORD;
+
+   unsigned seen = 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_sample_mask_agx)
+               continue;
+            const unsigned want =
+               (on && seen < count && nr_samples <= 1) ? expected_flags[seen]
+                                                       : 0;
+            ok &= nir_intrinsic_flags(intr) == want;
+            ++seen;
+         }
+      }
+   }
+   ok &= seen == count;
+
+   if (!ok)
+      fprintf(stderr, "AGX3b discard word mismatch (%ux, option %s, %u "
+                      "updates)\n",
+              MAX2(nr_samples, 1), on ? "on" : "off", seen);
+   free(part.binary);
+   ralloc_free(nir);
+   return ok;
+}
+
+static bool
+test_g17p_discard_word(void)
+{
+   static const unsigned one[] = {3}, two[] = {1, 3};
+   return g17p_discard_word_case(build_fs_alpha_discard_word, 1, one, 1) &&
+          g17p_discard_word_case(build_fs_alpha_discard_word, 4, one, 1) &&
+          g17p_discard_word_case(build_fs_kill_then_alpha_discard_word, 1,
+                                 two, 2);
+}
+
 static bool
 test_g17p_background_f16_clear_narrowing(void)
 {
@@ -1308,32 +1370,37 @@ test_g17p_divergent_quad_loop(void)
     * C3 ILP schedule issues the loop body's independent DFDX and counter
     * increment ahead of the quad add. The pre-RA SSA of this shader is
     * identical to the pass-off build's (only the SR80 zero extension
-    * differs); loop control (CNDLT, backward B, CNDEND) is unchanged. */
+    * differs); loop control (CNDLT, backward B, CNDEND) is unchanged.
+    *
+    * AGX_G17P_BITOP_IMMEDIATES, default on since 2b2e972d60b ("Mesa W",
+    * hardware-accepted), folds the one `ldimm` + register bitop of the loop
+    * setup into the immediate-operand bitop (234 -> 232 bytes). With that
+    * flag off the previous 234-byte pin still matches exactly. */
    static const uint8_t expected[] = {
       0x2f,0x05,0x54,0x02,0x03,0x00,0x04,0x02,0x10,0x00,
       0xaf,0x00,0x54,0x02,0x03,0x04,0x00,0x48,0x20,0x01,
       0x2f,0x05,0x54,0x04,0x03,0x02,0x00,0x02,0x10,0x00,
       0x19,0x05,0x3f,0x03,0x00,0x01,0x00,0x00,0x2c,0xa0,
-      0x10,0x06,0x3c,0x01,0x4b,0x05,0x37,0x07,0x00,0x20,
-      0x00,0x00,0x00,0x00,0x9f,0x01,0x54,0x06,0x03,0x02,
-      0x20,0x88,0x15,0x04,0x4b,0x00,0x00,0x00,0x5b,0x00,
-      0x00,0x00,0x6b,0x00,0x00,0x00,0x0f,0x05,0x54,0x19,
-      0x0f,0x05,0x54,0x1a,0x0a,0x0d,0x23,0x07,0x02,0x00,
-      0x05,0x00,0x00,0x00,0x8f,0x04,0x54,0x02,0xc7,0x00,
-      0x54,0x0e,0x03,0x08,0x02,0x2c,0x02,0x00,0x37,0x05,
-      0x54,0x10,0x03,0x04,0x92,0x40,0x00,0x00,0x9f,0x01,
-      0x54,0x0c,0x03,0x02,0x30,0x88,0x11,0x04,0x9f,0x01,
-      0x54,0x0a,0x03,0x14,0x38,0xa8,0x11,0x05,0x49,0x11,
-      0x00,0x09,0x0f,0x00,0x54,0xc6,0xff,0xff,0xff,0xff,
-      0xff,0x00,0x0f,0x06,0x04,0x02,0x00,0x00,0x0f,0x06,
-      0x04,0x01,0x00,0x00,0xa7,0x07,0x54,0x02,0x02,0x14,
-      0x8c,0x20,0xa7,0x07,0x54,0x04,0x02,0x0c,0x8c,0x20,
-      0x87,0x02,0x54,0x00,0x06,0x00,0x87,0x02,0x54,0x0c,
-      0x08,0x00,0x97,0x04,0x54,0x02,0x02,0x04,0x22,0x54,
-      0x44,0xc2,0x97,0x04,0x54,0x03,0x02,0x08,0xc2,0x50,
-      0x44,0xc8,0xe7,0x06,0x54,0x02,0x00,0x00,0x01,0x4e,
-      0x00,0x00,0x00,0x00,0x07,0x02,0x54,0x0c,0x02,0x00,
-      0x0e,0x00,0x00,0x00,
+      0x10,0x06,0x3b,0x05,0x07,0x81,0x10,0x22,0x00,0x00,
+      0x00,0x00,0x9f,0x01,0x54,0x06,0x03,0x02,0x18,0x88,
+      0x15,0x04,0x4b,0x00,0x00,0x00,0x5b,0x00,0x00,0x00,
+      0x6b,0x00,0x00,0x00,0x0f,0x05,0x54,0x19,0x0f,0x05,
+      0x54,0x1a,0x0a,0x0d,0x23,0x07,0x02,0x00,0x05,0x00,
+      0x00,0x00,0x8f,0x04,0x54,0x02,0xc7,0x00,0x54,0x0e,
+      0x03,0x08,0x02,0x2c,0x02,0x00,0x37,0x05,0x54,0x10,
+      0x03,0x04,0x92,0x40,0x00,0x00,0x9f,0x01,0x54,0x0c,
+      0x03,0x02,0x30,0x88,0x11,0x04,0x9f,0x01,0x54,0x0a,
+      0x03,0x14,0x38,0xa8,0x11,0x05,0x49,0x11,0x00,0x09,
+      0x0f,0x00,0x54,0xc6,0xff,0xff,0xff,0xff,0xff,0x00,
+      0x0f,0x06,0x04,0x02,0x00,0x00,0x0f,0x06,0x04,0x01,
+      0x00,0x00,0xa7,0x07,0x54,0x02,0x02,0x14,0x8c,0x20,
+      0xa7,0x07,0x54,0x04,0x02,0x0c,0x8c,0x20,0x87,0x02,
+      0x54,0x00,0x06,0x00,0x87,0x02,0x54,0x0c,0x08,0x00,
+      0x97,0x04,0x54,0x02,0x02,0x04,0x22,0x54,0x44,0xc2,
+      0x97,0x04,0x54,0x03,0x02,0x08,0xc2,0x50,0x44,0xc8,
+      0xe7,0x06,0x54,0x02,0x00,0x00,0x01,0x4e,0x00,0x00,
+      0x00,0x00,0x07,0x02,0x54,0x0c,0x02,0x00,0x0e,0x00,
+      0x00,0x00,
    };
    nir_shader *nir = build_fs_divergent_quad_loop();
    struct agx_shader_key key = {
@@ -1485,6 +1552,64 @@ build_fs_discard_then_tests(void)
    nir_sample_mask_agx(&b, nir_imm_intN_t(&b, 0xff, 16),
                        nir_imm_intN_t(&b, 0xff, 16));
    fs_store_colour(&b, nir_imm_vec4(&b, 0.25f, 0.5f, 0.75f, 1.0f));
+   return fs_finish(&b);
+}
+
+/* Minecraft's `if (colour.a == 0.0) discard;` as Honeykrisp's deferred
+ * lowering hands it to the backend: the dynamic tests_zs mask ORed into the
+ * killed set, and its complement as the live set. AGX_G17P_DISCARD_WORD
+ * reduces both to bit 0 at one sample; the single testing update must keep
+ * its class-1 transaction. */
+static nir_shader *
+build_fs_alpha_discard_word(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P alpha discard word FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *colour = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   nir_def *c = nir_feq(&b, nir_channel(&b, colour, 3), nir_imm_float(&b, 0));
+   nir_def *killed = nir_bcsel(&b, c, nir_imm_intN_t(&b, 0xff, 16),
+                               nir_imm_intN_t(&b, 0, 16));
+   nir_def *tests = nir_load_preamble(&b, 1, 16, .base = 0);
+   nir_sample_mask_agx(&b, nir_ior(&b, tests, killed),
+                       nir_ixor(&b, killed, nir_imm_intN_t(&b, 0xff, 16)));
+   fs_store_colour(&b, colour);
+   b.shader->info.fs.uses_discard = true;
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   return fs_finish(&b);
+}
+
+/* A dynamic no-tests kill (killed | 0 target, constant live 0) followed by
+ * the testing update with a dynamic live set: only the second owns class 1,
+ * and reducing the first's target must not turn it into a testing update. */
+static nir_shader *
+build_fs_kill_then_alpha_discard_word(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_FRAGMENT, &agx_nir_options,
+      "G17P kill then alpha discard word FS");
+   nir_def *bary = nir_load_barycentric_pixel(
+      &b, 32, .interp_mode = INTERP_MODE_SMOOTH);
+   nir_def *colour = nir_load_interpolated_input(
+      &b, 4, 32, bary, nir_imm_int(&b, 0), .base = 0, .component = 0,
+      .io_semantics.location = VARYING_SLOT_VAR0, .io_semantics.num_slots = 1);
+   nir_def *first = nir_flt(&b, nir_channel(&b, colour, 0),
+                            nir_imm_float(&b, 0.5));
+   nir_sample_mask_agx(&b, nir_bcsel(&b, first, nir_imm_intN_t(&b, 0xff, 16),
+                                     nir_imm_intN_t(&b, 0, 16)),
+                       nir_imm_intN_t(&b, 0, 16));
+   nir_def *c = nir_feq(&b, nir_channel(&b, colour, 3), nir_imm_float(&b, 0));
+   nir_def *killed = nir_bcsel(&b, c, nir_imm_intN_t(&b, 0xff, 16),
+                               nir_imm_intN_t(&b, 0, 16));
+   nir_def *tests = nir_load_preamble(&b, 1, 16, .base = 0);
+   nir_sample_mask_agx(&b, nir_ior(&b, tests, killed),
+                       nir_ixor(&b, killed, nir_imm_intN_t(&b, 0xff, 16)));
+   fs_store_colour(&b, colour);
+   b.shader->info.fs.uses_discard = true;
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
    return fs_finish(&b);
 }
 
@@ -1640,14 +1765,16 @@ test_g17p_pipeline_statistics_fs_prolog(void)
    /* 206 bytes with the default native immediate-count shifts (the
     * `>> 29` no longer materializes its count), compact bitops and the
     * iadd destination-cache hint; the pre-RA SSA is identical to the
-    * 224-byte pass-off build's. */
+    * 224-byte pass-off build's. 202 bytes since AGX_G17P_BITOP_IMMEDIATES
+    * became default (2b2e972d60b, "Mesa W", hardware-accepted); with that
+    * flag off the 206-byte pin (hash 0x2e6111e5306e2f2f) still matches. */
    const bool ok = semantic && compiled && part.binary &&
-                   part.info.main_offset == 0 && part.info.main_size == 206 &&
-                   part.info.binary_size == 206 && part.info.nr_gprs == 16 &&
+                   part.info.main_offset == 0 && part.info.main_size == 202 &&
+                   part.info.binary_size == 202 && part.info.nr_gprs == 16 &&
                    !part.info.has_preamble && part.info.push_count == 0 &&
                    part.info.agx3_staging_known &&
                    part.info.agx3_staging_halfs == 0 &&
-                   hash == UINT64_C(0x2e6111e5306e2f2f) &&
+                   hash == UINT64_C(0x7ba573195a6d08cd) &&
                    g17p_sample_mask_input_protocol(&part);
 
    if (!ok || getenv("AGX3_DUMP_BINARY")) {
@@ -2080,6 +2207,24 @@ test_g17p_blended_payloads_beyond_bank(void)
    return ok;
 }
 
+/* Tile-load match with byte 3, the destination register, ignored: the load
+ * form (format, slot 6 scoreboard, mask) is the contract. The destination
+ * depends on scheduling: AGX_G17P_COLOR_ILP, default on since 2b2e972d60b
+ * ("Mesa W", hardware-accepted), issues the f16 negation constants first,
+ * moving R16_FLOAT2/3 tile loads off r0. */
+static bool
+tile_load_present(const struct agx_shader_part *part, const uint8_t *load,
+                  size_t size)
+{
+   for (unsigned offset = 0; offset + size <= part->info.binary_size;
+        ++offset) {
+      const uint8_t *at = (const uint8_t *)part->binary + offset;
+      if (!memcmp(at, load, 3) && !memcmp(at + 4, load + 4, size - 4))
+         return true;
+   }
+   return false;
+}
+
 static bool
 test_g17p_fragment_io_matrix(void)
 {
@@ -2161,29 +2306,13 @@ test_g17p_fragment_io_matrix(void)
             : cases[i].format == PIPE_FORMAT_R32_UINT
                ? 2
                : 1;
-         exact_pair_load = false;
-         for (unsigned offset = 0;
-              offset + sizeof(pair_loads[width]) <= part.info.binary_size;
-              ++offset) {
-            if (!memcmp((const uint8_t *)part.binary + offset,
-                        pair_loads[width], sizeof(pair_loads[width]))) {
-               exact_pair_load = true;
-               break;
-            }
-         }
+         exact_pair_load = tile_load_present(&part, pair_loads[width],
+                                             sizeof(pair_loads[width]));
       }
       if (compiled && cases[i].format == PIPE_FORMAT_R16_FLOAT &&
           cases[i].components == 3) {
-         exact_pair_load = false;
-         for (unsigned offset = 0;
-              offset + sizeof(rgb565_load) <= part.info.binary_size;
-              ++offset) {
-            if (!memcmp((const uint8_t *)part.binary + offset, rgb565_load,
-                        sizeof(rgb565_load))) {
-               exact_pair_load = true;
-               break;
-            }
-         }
+         exact_pair_load =
+            tile_load_present(&part, rgb565_load, sizeof(rgb565_load));
       }
       if (compiled != cases[i].expect_ok ||
           (cases[i].expect_ok && !terminated) ||
@@ -9107,6 +9236,15 @@ static const struct agx3_graphics_case cases[] = {
     .expected_g17p_balanced_coverage = true, .nr_samples = 2},
    {"fs-sample-mask-write", build_fs_sample_mask_write, true,
     .g17p_only = true, .expected_g17p_balanced_coverage = true},
+   {"fs-alpha-discard-word", build_fs_alpha_discard_word, true,
+    .g17p_only = true, .expected_g17p_balanced_coverage = true},
+   /* Four samples keep whole masks (the SR39 path); only the select uses
+    * the widening multiply. */
+   {"fs-alpha-discard-word-4x", build_fs_alpha_discard_word, true,
+    .g17p_only = true, .expected_g17p_balanced_coverage = true,
+    .nr_samples = 4},
+   {"fs-kill-then-alpha-discard-word", build_fs_kill_then_alpha_discard_word,
+    true, .g17p_only = true, .expected_g17p_balanced_coverage = true},
    {"fs-sample-mask-write-4x", build_fs_sample_mask_write, true,
     .g17p_only = true, .expected_g17p_sample_mask_input = true,
     .expected_g17p_balanced_coverage = true, .nr_samples = 4},
@@ -9945,6 +10083,7 @@ main(int argc, char **argv)
    RUN(test_g17p_multisample_eot_block_store);
    RUN(test_g17p_background_reload_staging);
    RUN(test_g17p_background_clear);
+   RUN(test_g17p_discard_word);
    RUN(test_g17p_background_f16_clear_narrowing);
    RUN(test_g17p_half_norm8_epilog);
    RUN(test_g17p_half_rgb10_epilog);

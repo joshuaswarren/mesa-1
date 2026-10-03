@@ -369,6 +369,12 @@ bool agx3_alu_fcmp_select(enum agx_isa_encoding enc,
                           const struct agx3_fsel_desc *d,
                           uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
 
+/* Native terrain's fmax(a, fabs(b)), full-width register operands only. */
+bool agx3_alu_fmax_abs_f32(enum agx_isa_encoding enc, uint16_t dest,
+                         const uint16_t src[2],
+                         const enum agx3_alu_hint hints[2], bool dest_cache,
+                         uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *len);
+
 /* The same select with an absolute value on either comparison source. ABS is
  * not a bit on the form above: it moves to a longer endpoint (ten bytes ->
  * fourteen) whose integer-select destination block is the same f3/f11/f12.

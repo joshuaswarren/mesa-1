@@ -51,6 +51,15 @@ extern "C" {
 /* copy is 10 bytes, ldimm.ep2 is 10 bytes, clr.ep0 is 4. */
 #define AGX3_STAGE_MAX_LENGTH 10u
 
+/* Scalar vertex export producers witnessed in native G17P terrain. FMA
+ * allows a uniform in source zero; all other operands are general registers.
+ * Indices are 16-bit halves. Live/discard hints belong to general sources. */
+bool agx3_stage_vertex_alu(enum agx_isa_encoding enc, bool fma,
+                           uint16_t dest, uint8_t slot,
+                           const uint16_t src[3], bool uniform0,
+                           const bool live[3], const bool discard[3],
+                           uint16_t wait_mask, uint8_t out[16], uint8_t *len);
+
 /*
  * staging[dest] <- reg[src], 32-bit, taking scoreboard slot `slot`.
  *

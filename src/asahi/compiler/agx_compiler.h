@@ -472,6 +472,14 @@ typedef struct {
    bool agx3_tex_coords_staged : 1;
 } agx_instr;
 
+static inline bool
+agx_is_vertex_store(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_ST_VARY ||
+          I->op == AGX_OPCODE_ST_VARY_MUL_AGX3 ||
+          I->op == AGX_OPCODE_ST_VARY_FMA_AGX3;
+}
+
 bool agx_instrs_equal_for_cse(const agx_instr *i1, const agx_instr *i2);
 
 static inline void
@@ -1109,6 +1117,7 @@ agx_builder_insert(agx_cursor *cursor, agx_instr *I)
    UNREACHABLE("Invalid cursor option");
 }
 
+bool agx_vertex_tex_uniforms(const agx_context *ctx);
 bool agx_instr_accepts_uniform(enum agx_isa_encoding encoding,
                                enum agx_opcode op, unsigned src_index,
                                unsigned value, enum agx_size size);
@@ -1260,7 +1269,7 @@ void agx_emit_parallel_copies(agx_builder *b, struct agx_copy *copies,
 void agx_compute_liveness(agx_context *ctx);
 void agx_liveness_ins_update(struct u_sparse_bitset *live, agx_instr *I);
 
-bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes);
+bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);

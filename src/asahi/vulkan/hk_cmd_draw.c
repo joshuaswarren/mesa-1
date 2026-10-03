@@ -46,6 +46,7 @@
 #include "hk_private.h"
 #include "hk_ppp_state.h"
 #include "hk_shader.h"
+#include "util/disk_cache.h"
 #include "agx_debug.h"
 #include "asahi/lib/agx3_g17p_grid_helper_core.h"
 
@@ -504,6 +505,7 @@ static void hk_flush_shaders(struct hk_cmd_buffer *cmd);
 static bool hk_g17p_tess_is_native(const struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs(struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure);
+static void hk_select_ordinary_vs(struct hk_cmd_buffer *cmd);
 static uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 static enum mesa_prim hk_gs_in_prim(struct hk_cmd_buffer *cmd);
 
@@ -583,13 +585,79 @@ hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
       cmd->shader_perf_draw_bo_alloc_ns = 0;
       cmd->shader_perf_draw_active = true;
    }
+   /* Bind-time preparation is speculative. It runs from cmd_bind_shaders(),
+    * which vk_graphics_pipeline_cmd_bind() calls before the pipeline's static
+    * dynamic state is applied, and the application may still change dynamic
+    * state, descriptors or attachments before the draw. The draw re-derives
+    * and validates everything it consumes, so a refusal seen here (e.g. a
+    * sample-shaded fragment program against the not-yet-applied sample
+    * count) must not fail the command buffer. */
+   const VkResult prior_result = cmd->vk.record_result;
    cmd->state.gfx.g17p_bind_prepare = true;
    hk_cmd_prepare_bound_graphics_impl(cmd);
    cmd->state.gfx.g17p_bind_prepare = false;
+   if (prior_result == VK_SUCCESS)
+      cmd->vk.record_result = VK_SUCCESS;
    if (slow) {
       hk_slow_report(cmd, "bind", start);
       cmd->shader_perf_draw_active = false;
    }
+}
+
+/* Bind-time preparation points the root's parameter-block fields at the
+ * blocks it reserves for the next draw. A published root is immutable and
+ * hk_cmd_buffer_prepare_graphics_root() keeps reusing the last one while the
+ * root is clean, so a moved pointer must dirty it. Otherwise the second
+ * transformed draw after a shader or pipeline change runs its VS/TCS/
+ * tessellator/GS launches against the previous draw's root, i.e. the
+ * previous draw's parameter blocks, and leaves its own unwritten
+ * (shader_object.binding.swap_*, pipeline.*.dynamic_control_points.*). */
+static inline void
+hk_set_root_draw_ptr(struct hk_graphics_state *gfx, uint64_t *field,
+                     uint64_t value)
+{
+   if (*field != value) {
+      *field = value;
+      gfx->descriptors.root_dirty = true;
+   }
+}
+
+/* Everything hk_upload_usc_words() builds a fragment program from: the
+ * shader and its linked program, the root (descriptor bindings reach the
+ * program through it, and it moves when they change), the uniform-DMA set
+ * base, the tile-buffer layout (tile size, sample size and count, spilling)
+ * and whether blending reads the blend constant. A bind-time fragment
+ * program is valid for exactly this key. */
+static inline struct hk_g17p_prepared_fragment_key
+hk_g17p_prepared_fragment_key(const struct hk_cmd_buffer *cmd,
+                              const struct hk_shader *fs,
+                              const struct hk_linked_shader *linked)
+{
+   const struct agx_tilebuffer_layout *tib = &cmd->state.gfx.render.tilebuffer;
+   return (struct hk_g17p_prepared_fragment_key){
+      .shader = fs,
+      .linked = linked,
+      .root = cmd->state.gfx.root,
+      .dma_set_base = hk_g17p_dma_set_base(cmd, fs),
+      .tile_size_px = tib->tile_size,
+      .sample_size_B = tib->sample_size_B,
+      .nr_samples = tib->nr_samples,
+      .spills = agx_tilebuffer_spills(tib),
+      .blend_constant = hk_cmd_uses_blend_constant(cmd),
+   };
+}
+
+static inline bool
+hk_g17p_prepared_fragment_key_equal(
+   const struct hk_g17p_prepared_fragment_key *a,
+   const struct hk_g17p_prepared_fragment_key *b)
+{
+   return a->shader == b->shader && a->linked == b->linked &&
+          a->root == b->root && a->dma_set_base == b->dma_set_base &&
+          a->tile_size_px == b->tile_size_px &&
+          a->sample_size_B == b->sample_size_B &&
+          a->nr_samples == b->nr_samples && a->spills == b->spills &&
+          a->blend_constant == b->blend_constant;
 }
 
 static void
@@ -610,6 +678,9 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
        !gfx->shaders[MESA_SHADER_FRAGMENT] ||
        vk_command_buffer_has_error(&cmd->vk))
       return;
+
+   /* v96: predict the ordinary vertex variant before preparing its link. */
+   hk_select_ordinary_vs(cmd);
 
    /* v56e: if the fragment program this state would select is a deferred
     * generic variant (typically because the draw's descriptors are not bound
@@ -664,6 +735,15 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
       return;
    }
 
+   /* Shader objects bind stages one call at a time, so preparation can see
+    * an evaluation shader before (or after unbinding) its control shader.
+    * No draw can run with half a tessellation pair, and the transformed
+    * state below derives from both (hk_init_tess_params() reads the control
+    * shader's outputs): there is nothing to prepare yet. */
+   if (!gfx->shaders[MESA_SHADER_TESS_CTRL] !=
+       !gfx->shaders[MESA_SHADER_TESS_EVAL])
+      return;
+
    /* A tessellation/geometry draw necessarily records compute work before the
     * graphics stream. Allocate both ordered streams while binding state, not
     * in the first draw, preserving the established list order. */
@@ -701,10 +781,10 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
       if (!gfx->prepared_vertex_params.gpu)
          return;
    }
-   gfx->descriptors.root.draw.vertex_params =
-      gfx->prepared_vertex_params.gpu;
-   gfx->descriptors.root.draw.vertex_outputs =
-      hk_bound_sw_vs(gfx)->b.info.outputs;
+   hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.vertex_params,
+                        gfx->prepared_vertex_params.gpu);
+   hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.vertex_outputs,
+                        hk_bound_sw_vs(gfx)->b.info.outputs);
 
    /* The transformed vertex-parameter block is mostly shader-owned state.
     * Initialize that immutable base while binding the shaders, leaving the
@@ -722,8 +802,8 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
          hk_pool_alloc(cmd, sizeof(struct poly_tess_params), 4);
       if (!gfx->prepared_tess_params.gpu)
          return;
-      gfx->descriptors.root.draw.tess_params =
-         gfx->prepared_tess_params.gpu;
+      hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.tess_params,
+                           gfx->prepared_tess_params.gpu);
    }
    if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
       hk_init_tess_params(cmd, gfx->prepared_tess_params.cpu);
@@ -751,8 +831,8 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
          hk_pool_alloc(cmd, sizeof(struct poly_geometry_params), 8);
       if (!gfx->prepared_geometry_params.gpu)
          return;
-      gfx->descriptors.root.draw.geometry_params =
-         gfx->prepared_geometry_params.gpu;
+      hk_set_root_draw_ptr(gfx, &gfx->descriptors.root.draw.geometry_params,
+                           gfx->prepared_geometry_params.gpu);
    }
 
    /* With tessellation feeding geometry, the GS parameter block is indirect
@@ -828,9 +908,12 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
    }
 
    struct hk_shader *fs = hk_bound_fs(cmd);
-   if (!gfx->prepared_fragment_usc)
+   if (!gfx->prepared_fragment_usc) {
       gfx->prepared_fragment_usc =
          hk_upload_usc_words(cmd, fs, gfx->linked[MESA_SHADER_FRAGMENT]);
+      gfx->prepared_fragment_key = hk_g17p_prepared_fragment_key(
+         cmd, fs, gfx->linked[MESA_SHADER_FRAGMENT]);
+   }
 
    hk_g17p_prepare_native_bind_tail(cmd);
    (void)hk_g17p_prepare_vdm_state_update(cmd);
@@ -1291,6 +1374,12 @@ hk_cmd_invalidate_graphics_state(struct hk_cmd_buffer *cmd)
    cmd->state.gfx.render = render_save;
    memcpy(cmd->state.gfx.descriptors.push, push, sizeof(push));
 
+   /* Every bound stage is gone, so vk_graphics_pipeline_cmd_bind() must not
+    * elide the application's rebind of the pipeline it last saw (often the
+    * one the secondary bound during replay): that left the primary drawing
+    * with no vertex shader (VK_ERROR_FEATURE_NOT_PRESENT). */
+   cmd->vk.last_graphics_pipeline = NULL;
+
    /* Dirty after clearing the cached state.  Doing this before memset loses
     * every dirty bit and lets a post-secondary rebind be elided. */
    hk_cmd_buffer_dirty_all(cmd);
@@ -1660,6 +1749,28 @@ hk_g17p_bg_eot_ops_uniform(const struct agx_bg_eot_key *key)
  * 3..20, register 15369) with n << 3. Linux uses 8 (0x40); native captures
  * show 8 on QID16 and 0 on QID18 for the same light pass (render-register
  * audit FINDINGS.md). */
+/* HK_G17P_PACKED_CLEAR (default on; =0 restores the FLTNORM clear): a
+ * single-sample R8G8B8A8_UNORM RT0 clear is packed on the CPU and the
+ * background program stores the word directly (COPY + LSTCOL instead of two
+ * FLTNORMs + LSTCOL per pixel). Apple's background clear converts per pixel
+ * (fltnorm, fltnorm, lstcol); this is one instruction per pixel cheaper. */
+static bool
+hk_g17p_packed_clear_enabled(void)
+{
+   static int enabled = -1;
+   if (enabled < 0)
+      enabled = HK_ENV_BOOL_ONCE("HK_G17P_PACKED_CLEAR", true);
+   return enabled;
+}
+
+/* The Vulkan float-to-UNORM conversion (round to nearest even, clamp, NaN to
+ * zero) of one clear component. */
+static uint32_t
+hk_g17p_unorm8(float x)
+{
+   return x == x ? (uint32_t)_mesa_float_to_unorm(x, 8) : 0;
+}
+
 static bool
 hk_g17p_ioto_immediate_enabled(void)
 {
@@ -1688,21 +1799,321 @@ hk_g17p_bg_resource_override(uint64_t *resource_spec)
    *resource_spec = (*resource_spec & ~field) | ((uint64_t)low << 3);
 }
 
+/* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE (default on).
+ *
+ * The per-recording cache above dies with every vkResetCommandBuffer, so an
+ * application that re-records each frame (the depth-2 benchmark, most games)
+ * regenerates and republishes its background and end-of-tile launch programs
+ * for every pass: about a third of the host-side recording cost of a light
+ * pass (frg-codegen/v4/hostpath profile). For the single-attachment,
+ * unspilled, non-resolving layouts the RT0 builder handles, the programs
+ * depend only on the BG/EOT key, the attachment's clear value and ops, and the
+ * descriptors of its image view -- all value-compared below -- plus
+ * device-lifetime state (the precompiled BG/EOT shaders, rodata). Build those
+ * programs and their argument blocks once into device-lifetime memory and
+ * reuse them from any command buffer. Entries are immutable and never freed
+ * before the device; the cache stops growing at a fixed bound. */
+#define HK_G17P_BG_EOT_DEV_ENTRIES       256
+#define HK_G17P_BG_EOT_DEV_CHUNK         (64 * 1024)
+#define HK_G17P_BG_EOT_DEV_MAX_CHUNKS    8
+#define HK_G17P_BG_EOT_DEV_PROGRAM_MAX   256
+#define HK_G17P_BG_EOT_DEV_DATA_MAX      512
+
+struct hk_g17p_bg_eot_dev_key {
+   struct agx_tilebuffer_layout tib;
+   uint32_t layers;
+   uint32_t color_attachment_count;
+   uint32_t incomplete_render_area;
+   uint32_t view;
+   uint32_t samples;
+   uint32_t format;
+   uint32_t load_op;
+   uint32_t store_op;
+   VkClearColorValue clear;
+   struct hk_native_pbe_descriptor eot, layered_eot;
+   struct hk_native_texture_descriptor background, layered_background;
+   uint32_t pbe_valid;
+   uint32_t pad;
+};
+
+struct hk_g17p_bg_eot_dev_entry {
+   struct hk_g17p_bg_eot_dev_key key;
+   uint64_t hash;
+   struct hk_bg_eot program[4];
+   uint8_t valid_variants;
+};
+
+struct hk_g17p_bg_eot_arena {
+   struct agx_bo *bo;
+   uint8_t *map;
+   uint64_t base;
+   uint32_t cursor, capacity;
+};
+
+struct hk_g17p_bg_eot_dev_cache {
+   simple_mtx_t lock;
+   struct hk_g17p_bg_eot_arena program, data;
+   struct agx_bo *bos[2 * HK_G17P_BG_EOT_DEV_MAX_CHUNKS];
+   unsigned bo_count, count;
+   bool full;
+   /* Open-addressed index: entry number + 1, or 0 when free. */
+   uint16_t index[2 * HK_G17P_BG_EOT_DEV_ENTRIES];
+   struct hk_g17p_bg_eot_dev_entry entries[HK_G17P_BG_EOT_DEV_ENTRIES];
+};
+
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache,
+                           "HK_G17P_BG_EOT_DEVICE_CACHE", true)
+/* Diagnostic: print every device-cache program and argument block in the
+ * launch-trace line format ("dev-" prefixed) so they can be compared with the
+ * per-recording builder's HK_G17P_LAUNCH_TRACE output. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache_trace,
+                           "HK_G17P_BG_EOT_DEVICE_CACHE_TRACE", false)
+
+void
+hk_g17p_bg_eot_dev_cache_init(struct hk_device *dev)
+{
+   dev->g17p_bg_eot_dev_cache = NULL;
+   if (dev->dev.chip != AGX_CHIP_G17P ||
+       !debug_get_option_hk_g17p_bg_eot_device_cache())
+      return;
+   struct hk_g17p_bg_eot_dev_cache *dc = calloc(1, sizeof(*dc));
+   if (!dc)
+      return;
+   simple_mtx_init(&dc->lock, mtx_plain);
+   dev->g17p_bg_eot_dev_cache = dc;
+}
+
+void
+hk_g17p_bg_eot_dev_cache_finish(struct hk_device *dev)
+{
+   struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
+   if (!dc)
+      return;
+   for (unsigned i = 0; i < dc->bo_count; ++i)
+      agx_bo_unreference(&dev->dev, dc->bos[i]);
+   simple_mtx_destroy(&dc->lock);
+   free(dc);
+   dev->g17p_bg_eot_dev_cache = NULL;
+}
+
+/* Make room for `need` bytes at `align` in an arena, opening a new chunk if
+ * required. Programs live in the USC window exactly like the per-recording
+ * Ioto arena; argument blocks in ordinary memory like hk_pool_upload(). */
+static bool
+hk_g17p_bg_eot_arena_room(struct hk_device *dev,
+                          struct hk_g17p_bg_eot_dev_cache *dc,
+                          struct hk_g17p_bg_eot_arena *a, bool exec,
+                          uint32_t need, uint32_t align)
+{
+   if (a->map && align_uintptr(a->cursor, align) + need <= a->capacity)
+      return true;
+   if (dc->bo_count >= ARRAY_SIZE(dc->bos))
+      return false;
+   struct agx_bo *bo = agx_bo_create(
+      &dev->dev, HK_G17P_BG_EOT_DEV_CHUNK,
+      exec ? AGX_IOTO_PROGRAM_ALIGNMENT : 0,
+      exec ? (AGX_BO_EXEC | AGX_BO_LOW_VA) : 0,
+      exec ? "G17P BG/EOT device programs" : "G17P BG/EOT device arguments");
+   if (!bo)
+      return false;
+   void *map = agx_bo_map(bo);
+   if (!map || !bo->va) {
+      agx_bo_unreference(&dev->dev, bo);
+      return false;
+   }
+   dc->bos[dc->bo_count++] = bo;
+   a->bo = bo;
+   a->map = map;
+   a->base = bo->va->addr;
+   a->cursor = 0;
+   a->capacity = bo->size > UINT32_MAX ? UINT32_MAX : (uint32_t)bo->size;
+   return align_uintptr(0, align) + need <= a->capacity;
+}
+
+static struct agx_ptr
+hk_g17p_bg_eot_arena_take(struct hk_g17p_bg_eot_arena *a, uint32_t size,
+                          uint32_t align)
+{
+   const uint32_t offset = (uint32_t)align_uintptr(a->cursor, align);
+   assert(a->map && offset + size <= a->capacity);
+   a->cursor = offset + size;
+   return (struct agx_ptr){.cpu = a->map + offset, .gpu = a->base + offset};
+}
+
+/* Allocation sites of the RT0 builder: the per-recording pool, or the
+ * device cache when one is being filled (its room was reserved up front). */
+static uint64_t
+hk_g17p_bg_eot_upload(struct hk_cmd_buffer *cmd,
+                      struct hk_g17p_bg_eot_dev_cache *dc, const void *data,
+                      uint32_t size, uint32_t alignment)
+{
+   if (!dc)
+      return hk_pool_upload(cmd, data, size, alignment);
+   struct agx_ptr T = hk_g17p_bg_eot_arena_take(&dc->data, size, alignment);
+   memcpy(T.cpu, data, size);
+   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
+      hk_g17p_trace_line("dev-argument", T.gpu, data, size);
+   return T.gpu;
+}
+
+static bool
+hk_g17p_bg_eot_reserve(struct hk_cmd_buffer *cmd,
+                       struct hk_g17p_bg_eot_dev_cache *dc, size_t capacity,
+                       const char *label, struct hk_ioto_reservation *r)
+{
+   if (!dc)
+      return hk_cmd_reserve_ioto_program(cmd, capacity, label, r);
+   assert(capacity <= HK_G17P_BG_EOT_DEV_PROGRAM_MAX);
+   struct agx_ptr T = hk_g17p_bg_eot_arena_take(
+      &dc->program, (uint32_t)capacity, AGX_IOTO_PROGRAM_ALIGNMENT);
+   *r = (struct hk_ioto_reservation){.map = T.cpu, .va = T.gpu};
+   return true;
+}
+
+static uint64_t
+hk_g17p_bg_eot_publish(struct hk_cmd_buffer *cmd,
+                       struct hk_g17p_bg_eot_dev_cache *dc,
+                       const struct hk_ioto_reservation *r, size_t length)
+{
+   if (!dc)
+      return hk_cmd_publish_ioto_program(cmd, r, length);
+   struct hk_g17p_bg_eot_arena *a = &dc->program;
+   assert(r->va >= a->base && length > 0);
+   const uint64_t offset = r->va - a->base;
+   /* Give back the over-reservation, as hk_cmd_publish_ioto_program does. */
+   a->cursor = (uint32_t)(offset + length);
+   if (agx_bo_sync_for_device(a->bo, offset, length))
+      return 0;
+   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
+      hk_g17p_trace_line("dev-program", r->va, r->map, length);
+   return r->va;
+}
+
+/* Fill the value key of a render pass whose BG/EOT programs the RT0 builder
+ * produces from the key, the single attachment's ops and clear value, and its
+ * image view's descriptors alone; return false for anything else (MRT,
+ * spills, mixed layouts, resolves), which keeps the per-recording path. */
+static bool
+hk_g17p_bg_eot_dev_key_init(struct hk_cmd_buffer *cmd,
+                            const VkRenderingInfo *info,
+                            bool incomplete_render_area,
+                            struct hk_g17p_bg_eot_dev_key *dk)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (!dev->g17p_bg_eot_dev_cache || info->colorAttachmentCount > 1 ||
+       agx_tilebuffer_spills(&render->tilebuffer) ||
+       agx_g17p_classify_mrt(&render->tilebuffer) == AGX_G17P_MRT_MIXED)
+      return false;
+
+   memset(dk, 0, sizeof(*dk));
+   memcpy(&dk->tib, &render->tilebuffer, sizeof(dk->tib));
+   dk->layers = render->cr.layers;
+   dk->color_attachment_count = info->colorAttachmentCount;
+   dk->incomplete_render_area = incomplete_render_area;
+   if (info->colorAttachmentCount == 1 &&
+       info->pColorAttachments[0].imageView != VK_NULL_HANDLE) {
+      const VkRenderingAttachmentInfo *att = &info->pColorAttachments[0];
+      const struct hk_image_view *iview = render->color_att[0].iview;
+      if (!iview || att->resolveMode != VK_RESOLVE_MODE_NONE ||
+          att->resolveImageView != VK_NULL_HANDLE)
+         return false;
+      dk->view = 1;
+      dk->samples = iview->vk.image->samples;
+      dk->format = iview->vk.format;
+      dk->load_op = att->loadOp;
+      dk->store_op = att->storeOp;
+      if (att->loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR)
+         dk->clear = att->clearValue.color;
+      dk->eot = iview->planes[0].eot;
+      dk->layered_eot = iview->planes[0].layered_eot;
+      dk->background = iview->planes[0].background;
+      dk->layered_background = iview->planes[0].layered_background;
+      dk->pbe_valid = (iview->planes[0].eot_pbe_valid ? 1 : 0) |
+                      (iview->planes[0].layered_eot_pbe_valid ? 2 : 0);
+   }
+   return true;
+}
+
+static uint64_t
+hk_g17p_bg_eot_dev_hash(const struct hk_g17p_bg_eot_dev_key *dk)
+{
+   static_assert(sizeof(*dk) % sizeof(uint64_t) == 0,
+                 "word-addressable BG/EOT device key");
+   const uint8_t *bytes = (const uint8_t *)dk;
+   uint64_t hash = UINT64_C(0x9e3779b97f4a7c15);
+   for (unsigned i = 0; i < sizeof(*dk) / sizeof(uint64_t); ++i) {
+      uint64_t word;
+      memcpy(&word, bytes + i * sizeof(word), sizeof(word));
+      hash ^= word + UINT64_C(0x9e3779b97f4a7c15) + (hash << 6) +
+              (hash >> 2);
+   }
+   return hash;
+}
+
+static struct hk_g17p_bg_eot_dev_entry *
+hk_g17p_bg_eot_dev_find(struct hk_g17p_bg_eot_dev_cache *dc,
+                        const struct hk_g17p_bg_eot_dev_key *dk,
+                        uint64_t hash)
+{
+   const unsigned mask = ARRAY_SIZE(dc->index) - 1;
+   static_assert((ARRAY_SIZE(((struct hk_g17p_bg_eot_dev_cache *)0)->index) &
+                  (ARRAY_SIZE(((struct hk_g17p_bg_eot_dev_cache *)0)->index) -
+                   1)) == 0,
+                 "power-of-two index");
+   for (unsigned i = hash & mask;; i = (i + 1) & mask) {
+      if (!dc->index[i])
+         return NULL;
+      struct hk_g17p_bg_eot_dev_entry *e = &dc->entries[dc->index[i] - 1];
+      if (e->hash == hash && !memcmp(&e->key, dk, sizeof(*dk)))
+         return e;
+   }
+}
+
+/* The index is twice the entry bound, so a free slot always exists. */
+static struct hk_g17p_bg_eot_dev_entry *
+hk_g17p_bg_eot_dev_insert(struct hk_g17p_bg_eot_dev_cache *dc,
+                          const struct hk_g17p_bg_eot_dev_key *dk,
+                          uint64_t hash)
+{
+   if (dc->count >= HK_G17P_BG_EOT_DEV_ENTRIES)
+      return NULL;
+   const unsigned mask = ARRAY_SIZE(dc->index) - 1;
+   unsigned i = hash & mask;
+   while (dc->index[i])
+      i = (i + 1) & mask;
+   struct hk_g17p_bg_eot_dev_entry *e = &dc->entries[dc->count];
+   memcpy(&e->key, dk, sizeof(*dk));
+   e->hash = hash;
+   e->valid_variants = 0;
+   memset(e->program, 0, sizeof(e->program));
+   dc->index[i] = (uint16_t)(++dc->count);
+   return e;
+}
+
 static struct hk_bg_eot
 hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                      struct agx_bg_eot_key *key,
                      const VkRenderingInfo *info, bool store,
-                     bool partial_render)
+                     bool partial_render,
+                     struct hk_g17p_bg_eot_dev_cache *dc, bool *in_device)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (in_device)
+      *in_device = false;
    /* Classification compacts holes internally, so it is invariant under the
     * explicit key/view compaction below. Keep the result for all subsequent
     * BG/EOT routing instead of rescanning the eight targets twice. */
    const enum agx_g17p_mrt_layout mrt = agx_g17p_classify_mrt(&key->tib);
    if (agx_tilebuffer_spills(&key->tib) ||
        mrt == AGX_G17P_MRT_MIXED ||
-       !hk_g17p_bg_eot_ops_uniform(key))
+       !hk_g17p_bg_eot_ops_uniform(key)) {
+      /* hk_g17p_bg_eot_dev_key_init() admits none of these layouts. */
+      assert(!dc);
+      if (dc)
+         return (struct hk_bg_eot){0};
       return hk_build_g17p_mixed_bg_eot(cmd, key, info, store);
+   }
 
    /* Vulkan keeps unused colour attachments as holes in the logical array.
     * Native BG/EOT programs number only live attachments. Compact the key and
@@ -1850,6 +2261,9 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
       return (struct hk_bg_eot){0};
    }
+   key->g17p_packed_clear =
+      !store && op == AGX_BG_CLEAR && !dual_mrt_active && !multi_mrt_active &&
+      hk_g17p_packed_clear_enabled() && agx_g17p_packed_clear_ok(&key->tib);
    if (!store && op == AGX_BG_CLEAR)
       key->reserved_preamble =
          multi_mrt_active ? 4 + 8 * attachment_count
@@ -1909,8 +2323,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
 
    struct hk_ioto_reservation program_reservation;
-   if (!hk_cmd_reserve_ioto_program(cmd, program_capacity, program_label,
-                                    &program_reservation))
+   if (!hk_g17p_bg_eot_reserve(cmd, dc, program_capacity, program_label,
+                               &program_reservation))
       return (struct hk_bg_eot){0};
 
    void *program_map = program_reservation.map;
@@ -2026,7 +2440,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          : dual_mrt_active ? AGX_IOTO_G17P_RGBA8_MRT_PBE_ARGUMENT_SIZE
                          : AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE;
       const uint64_t pbe_argument_va =
-         hk_pool_upload(cmd, pbe_arguments, pbe_argument_size, 32);
+         hk_g17p_bg_eot_upload(cmd, dc, pbe_arguments, pbe_argument_size, 32);
       if (!pbe_argument_va)
          return (struct hk_bg_eot){0};
       if (hk_g17p_launch_trace_enabled())
@@ -2171,13 +2585,23 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             for (unsigned rt = 1; rt < attachment_count; ++rt)
                clear_values[rt] = info->pColorAttachments[rt].clearValue.color;
          }
+         if (key->g17p_packed_clear) {
+            /* The background program reads one packed word at uniform 4. */
+            const float *c = att_info->clearValue.color.float32;
+            const uint32_t packed = hk_g17p_unorm8(c[0]) |
+                                    (hk_g17p_unorm8(c[1]) << 8) |
+                                    (hk_g17p_unorm8(c[2]) << 16) |
+                                    (hk_g17p_unorm8(c[3]) << 24);
+            memset(&clear_values[0], 0, sizeof(clear_values[0]));
+            clear_values[0].uint32[0] = packed;
+         }
          const size_t clear_size =
             multi_mrt_active ? 16 * attachment_count
             : rgba8_mrt && dual_mrt_active ? 32
             : r11g11b10_mrt && dual_mrt_active ? 28
             : wboit_mrt && dual_mrt_active ? 20 : 16;
          desc.clear_value_va =
-            hk_pool_upload(cmd, clear_values, clear_size, 16);
+            hk_g17p_bg_eot_upload(cmd, dc, clear_values, clear_size, 16);
          if (!desc.clear_value_va)
             return (struct hk_bg_eot){0};
          /* v51x HK_G17P_IOTO_IMMEDIATE: LDIMM the (immutable, record-time)
@@ -2209,14 +2633,14 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             ? (2 * attachment_count - 1) * AGX_TEXTURE_GEN9_LENGTH : dual_mrt_active
             ? 3 * AGX_TEXTURE_GEN9_LENGTH : AGX_TEXTURE_GEN9_LENGTH;
          const uint64_t texture_va =
-            hk_pool_upload(cmd, textures, texture_size,
+            hk_g17p_bg_eot_upload(cmd, dc, textures, texture_size,
                            AGX_TEXTURE_GEN9_LENGTH);
          const uint64_t sampler_va =
             dev->rodata.bo && dev->rodata.bo->va ? dev->rodata.bo->va->addr : 0;
          if (!texture_va || !sampler_va)
             return (struct hk_bg_eot){0};
          const uint64_t pointers[2] = {texture_va, sampler_va};
-         const uint64_t table = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
+         const uint64_t table = hk_g17p_bg_eot_upload(cmd, dc, pointers, sizeof(pointers), 8);
          if (!table)
             return (struct hk_bg_eot){0};
          desc.texture_pointer_va = table;
@@ -2241,7 +2665,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
 
    const uint64_t published =
-      hk_cmd_publish_ioto_program(cmd, &program_reservation, program_length);
+      hk_g17p_bg_eot_publish(cmd, dc, &program_reservation,
+                             program_length);
    if (!published)
       return (struct hk_bg_eot){0};
 
@@ -2262,6 +2687,8 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
                  : shader->info.nr_gprs);
    }
 
+   if (in_device)
+      *in_device = dc != NULL;
    return (struct hk_bg_eot){
       .usc = published,
       .rsrc_spec = resource_spec,
@@ -2339,7 +2766,7 @@ hk_g17p_bg_eot_cache_get(struct hk_cmd_buffer *cmd,
    struct hk_g17p_bg_eot_cache_entry *cached = NULL;
    for (unsigned i = 0; i < HK_G17P_BG_EOT_CACHE_ENTRIES; ++i) {
       struct hk_g17p_bg_eot_cache_entry *entry =
-         &gfx->g17p_bg_eot_cache[i];
+         &cmd->g17p_bg_eot_cache[i];
       if (!entry->valid) {
          if (!cached)
             cached = entry;
@@ -2354,15 +2781,37 @@ hk_g17p_bg_eot_cache_get(struct hk_cmd_buffer *cmd,
    }
 
    if (!cached)
-      cached = &gfx->g17p_bg_eot_cache[
-         gfx->g17p_bg_eot_cache_next++ % HK_G17P_BG_EOT_CACHE_ENTRIES];
+      cached = &cmd->g17p_bg_eot_cache[
+         cmd->g17p_bg_eot_cache_next++ % HK_G17P_BG_EOT_CACHE_ENTRIES];
 
    memcpy(cached->key, &cache_key, sizeof(cache_key));
    cached->hash = hash;
    cached->key_size = sizeof(cache_key);
    cached->valid_variants = 0;
    cached->direct_color_resolve_variants = 0;
+   cached->dev_entry = NULL;
    cached->valid = true;
+
+   /* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE: one value lookup per new
+    * pass. A hit fills every variant this recording will ask for; a miss
+    * attaches a fresh device entry that hk_build_bg_eot() fills. */
+   struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
+   struct hk_g17p_bg_eot_dev_key dkey;
+   if (dc && hk_g17p_bg_eot_dev_key_init(cmd, info, incomplete_render_area,
+                                         &dkey)) {
+      const uint64_t dhash = hk_g17p_bg_eot_dev_hash(&dkey);
+      simple_mtx_lock(&dc->lock);
+      struct hk_g17p_bg_eot_dev_entry *de =
+         hk_g17p_bg_eot_dev_find(dc, &dkey, dhash);
+      if (!de && !dc->full)
+         de = hk_g17p_bg_eot_dev_insert(dc, &dkey, dhash);
+      if (de) {
+         memcpy(cached->program, de->program, sizeof(cached->program));
+         cached->valid_variants = de->valid_variants;
+      }
+      cached->dev_entry = de;
+      simple_mtx_unlock(&dc->lock);
+   }
    return cached;
 }
 
@@ -2512,7 +2961,10 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    /* Construct the key */
-   struct agx_bg_eot_key key = {.tib = render->tilebuffer};
+   /* Zero the padding too: the G17P device cache compares keys bytewise. */
+   struct agx_bg_eot_key key;
+   memset(&key, 0, sizeof(key));
+   key.tib = render->tilebuffer;
    static_assert(AGX_BG_EOT_NONE == 0, "default initializer");
 
    key.tib.layered = (render->cr.layers > 1);
@@ -2623,8 +3075,42 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
          return cache->program[variant];
       }
 
-      const struct hk_bg_eot program =
-         hk_build_g17p_bg_eot(cmd, &key, info, store, partial_render);
+      /* frg-codegen v4: build this variant into the device-lifetime entry
+       * hk_g17p_bg_eot_cache_get() attached, so every later recording of the
+       * same pass reuses it (HK_G17P_BG_EOT_DEVICE_CACHE). */
+      struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
+      struct hk_g17p_bg_eot_dev_entry *de = cache ? cache->dev_entry : NULL;
+      struct hk_bg_eot program = {0};
+      bool built = false;
+      if (dc && de) {
+         simple_mtx_lock(&dc->lock);
+         if (de->valid_variants & BITFIELD_BIT(variant)) {
+            program = de->program[variant];
+            built = true;
+         } else if (hk_g17p_bg_eot_arena_room(
+                       dev, dc, &dc->program, true,
+                       HK_G17P_BG_EOT_DEV_PROGRAM_MAX,
+                       AGX_IOTO_PROGRAM_ALIGNMENT) &&
+                    hk_g17p_bg_eot_arena_room(
+                       dev, dc, &dc->data, false,
+                       HK_G17P_BG_EOT_DEV_DATA_MAX, 32)) {
+            bool in_device = false;
+            program = hk_build_g17p_bg_eot(cmd, &key, info, store,
+                                           partial_render, dc, &in_device);
+            built = true;
+            if (program.usc && in_device &&
+                !vk_command_buffer_has_error(&cmd->vk)) {
+               de->program[variant] = program;
+               de->valid_variants |= BITFIELD_BIT(variant);
+            }
+         } else {
+            dc->full = true;
+         }
+         simple_mtx_unlock(&dc->lock);
+      }
+      if (!built)
+         program = hk_build_g17p_bg_eot(cmd, &key, info, store,
+                                        partial_render, NULL, NULL);
       if (cache && program.usc && !vk_command_buffer_has_error(&cmd->vk)) {
          cache->program[variant] = program;
          cache->valid_variants |= BITFIELD_BIT(variant);
@@ -2874,6 +3360,82 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
 DEBUG_GET_ONCE_BOOL_OPTION(hk_zls_precise_depth_store,
                            "HK_ZLS_PRECISE_DEPTH_STORE", false)
 
+/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED=1 (opt-in).
+ *
+ * Minecraft opens every full-screen pass with loadOp LOAD / storeOp STORE on
+ * its D32 attachment, including passes whose pipelines neither test nor
+ * write depth (GUI). Such a pass leaves the attachment's contents exactly as
+ * they were, so loading and storing them (up to 2 x 14.9 MB at 2408x1506;
+ * less when agx3 compresses the D32 image) is pure traffic. When the pass
+ * ends with nothing
+ * having touched depth/stencil, drop the attachment from every control
+ * stream of the pass: no ZLS load/store, and no depth base for the kernel,
+ * whose partial-render word forces Z/S load+store whenever a base is present
+ * (g17_uapi.rs partial_depth_flags), which would otherwise store tile depth
+ * that was never loaded. Not eligible: CLEAR load ops (the clear itself
+ * changes the attachment), resolves, suspended/resumed passes and passes
+ * recorded in secondaries. Depth/stencil input-attachment reads inside the
+ * pass cannot see the dropped tile contents, but G17P does not expose
+ * dynamicRenderingLocalReadDepthStencilAttachments, and a separate subpass
+ * reads the (unchanged) image from memory. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_zls_elide_untouched,
+                           "HK_G17P_ZLS_ELIDE_UNTOUCHED", false)
+
+static bool
+hk_g17p_zls_attachment_elidable(const VkRenderingAttachmentInfo *att)
+{
+   return !att || !att->imageView ||
+          (att->loadOp != VK_ATTACHMENT_LOAD_OP_CLEAR &&
+           att->resolveMode == VK_RESOLVE_MODE_NONE);
+}
+
+static inline void
+hk_g17p_note_depth_use(struct hk_cmd_buffer *cmd)
+{
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (likely(!render->g17p_zls_elide_ok) || render->g17p_depth_touched)
+      return;
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd->vk.dynamic_graphics_state;
+   if (dyn->ds.depth.test_enable || dyn->ds.depth.write_enable ||
+       dyn->ds.depth.bounds_test.enable || dyn->ds.stencil.test_enable)
+      render->g17p_depth_touched = true;
+}
+
+void
+hk_g17p_note_depth_clear(struct hk_cmd_buffer *cmd)
+{
+   cmd->state.gfx.render.g17p_depth_touched = true;
+}
+
+/* Returns whether the pass's depth/stencil attachment was dropped. */
+static bool
+hk_g17p_zls_elide(struct hk_cmd_buffer *cmd)
+{
+   struct hk_rendering_state *render = &cmd->state.gfx.render;
+   if (!render->g17p_zls_elide_ok || render->g17p_depth_touched ||
+       !render->zls_first_cs)
+      return false;
+   bool found = false;
+   list_for_each_entry(struct hk_cs, cs, &cmd->control_streams, node) {
+      if (cs == render->zls_first_cs)
+         found = true;
+      if (!found || cs->type != HK_CS_VDM)
+         continue;
+      /* An absent attachment must also have zero layer strides. The
+       * kernel rejects a nonzero stride with a zero base address. */
+      memset(&cs->cr.depth, 0, sizeof(cs->cr.depth));
+      memset(&cs->cr.stencil, 0, sizeof(cs->cr.stencil));
+      memset(&cs->cr.zls_control, 0, sizeof(cs->cr.zls_control));
+   }
+   if (HK_ENV_BOOL_ONCE("HK_G17P_ZLS_ELIDE_TRACE", false))
+      fprintf(stderr, "G17P ZLS elided: %ux%u depth=%p stencil=%p\n",
+              render->cr.width, render->cr.height,
+              (void *)render->depth_att.iview,
+              (void *)render->stencil_att.iview);
+   return true;
+}
+
 static void
 hk_pack_zls_control_final(struct agx_zls_control_packed *packed,
                           struct ail_layout *z_layout,
@@ -2942,6 +3504,34 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    hk_merge_render_iview(
       render, render->depth_att.iview ?: render->stencil_att.iview, true);
+
+   /* Tile hazards (hk_sync.h): every attachment this instance may store,
+    * before its first control stream exists. */
+   {
+      const uint32_t pass_layers = render->view_mask
+                                      ? util_last_bit(render->view_mask)
+                                      : render->layer_count;
+      const struct hk_image_view *written[2 * HK_MAX_RTS + 2];
+      unsigned nr_written = 0;
+      for (uint32_t i = 0; i < render->color_att_count; i++) {
+         written[nr_written++] = render->color_att[i].iview;
+         written[nr_written++] = render->color_att[i].resolve_iview;
+      }
+      written[nr_written++] = render->depth_att.iview;
+      written[nr_written++] = render->stencil_att.iview;
+      for (unsigned i = 0; i < nr_written; ++i) {
+         const struct hk_image_view *iview = written[i];
+         if (!iview)
+            continue;
+         const uint32_t level = iview->vk.base_mip_level;
+         hk_sync_pass_footprint(
+            cmd, iview->vk.image, level, iview->vk.base_array_layer,
+            iview->vk.base_array_layer + MAX2(pass_layers, 1),
+            u_minify(iview->vk.image->extent.width, level),
+            u_minify(iview->vk.image->extent.height, level), render->area);
+      }
+      hk_sync_pass_footprints_done(cmd);
+   }
 
    /* Infer for attachmentless. samples is inferred at draw-time. */
    render->cr.width =
@@ -3265,6 +3855,16 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    render->zls_precise = debug_get_option_hk_zls_precise_depth_store() &&
                          z_layout != NULL;
+   render->g17p_depth_touched = false;
+   render->g17p_zls_elide_ok =
+      dev->dev.chip == AGX_CHIP_G17P &&
+      debug_get_option_hk_g17p_zls_elide_untouched() &&
+      (z_layout != NULL || s_layout != NULL) &&
+      !(render->flags & (VK_RENDERING_SUSPENDING_BIT |
+                         VK_RENDERING_RESUMING_BIT |
+                         VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) &&
+      hk_g17p_zls_attachment_elidable(attach_z) &&
+      hk_g17p_zls_attachment_elidable(attach_s);
    if (render->zls_precise) {
       hk_pack_zls_control_final(&render->zls_control_only, z_layout,
                                 s_layout, attach_z, attach_s,
@@ -3513,11 +4113,13 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
    struct hk_cs *cs = cmd->current_cs.gfx;
    if (cs) {
       cs->cr.eot.main = render->cr.eot.main;
+      const bool zls_elided = hk_g17p_zls_elide(cmd);
 
       /* HK_ZLS_PRECISE_DEPTH_STORE: see hk_pack_zls_control_final(). A
        * suspended pass continues in a later command buffer, which reloads
-       * depth, so it keeps the forced store. */
-      if (render->zls_precise &&
+       * depth, so it keeps the forced store. An elided pass has no
+       * depth/stencil to store. */
+      if (render->zls_precise && !zls_elided &&
           !(render->flags & VK_RENDERING_SUSPENDING_BIT)) {
          cs->cr.zls_control = cs == render->zls_first_cs
                                  ? render->zls_control_only
@@ -3976,6 +4578,63 @@ hk_bound_fs(struct hk_cmd_buffer *cmd)
    return hk_bound_fs_select(cmd, true);
 }
 
+/* v96 HK_G17P_ORDINARY_VS_VARIANTS: choose the hardware vertex program of a
+ * vertex object with an ordinary variant for the current descriptors, before
+ * anything reads hk_bound_hw_vs() for the draw. The proof is the fragment
+ * one (hk_ordinary_descriptor_reason()) over the vertex requirements; it is
+ * re-evaluated whenever the descriptor generation or the object changes. At
+ * bind time the descriptors still belong to an earlier draw, so the choice
+ * is predicted (the object's last choice, else ordinary) and recorded with
+ * an impossible generation so the draw always re-proves it. A changed choice
+ * dirties the vertex stage, which relinks and republishes it. */
+static void
+hk_select_ordinary_vs(struct hk_cmd_buffer *cmd)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
+   if (!vs || !vs->g17p_ordinary_variants)
+      return;
+
+   __typeof__(gfx->ordinary_vs) *c = &gfx->ordinary_vs;
+   uint64_t generation = gfx->descriptors.generation;
+   if (c->valid && c->api == vs && c->generation == generation)
+      return;
+
+   bool ordinary;
+   enum hk_ordinary_reason reason = HK_ORDINARY_PREDICTED;
+   if (gfx->g17p_bind_prepare) {
+      if (c->valid && c->api == vs)
+         return; /* keep the current choice until the draw re-proves it */
+      ordinary = !hk_g17p_ordinary_force_generic();
+      generation = UINT64_MAX;
+   } else {
+      reason = hk_g17p_ordinary_force_generic()
+         ? HK_ORDINARY_FORCED_GENERIC
+         : hk_ordinary_descriptor_reason(
+              hk_api_ordinary_requirements(vs), gfx->descriptors.sets,
+              gfx->descriptors.root.sets, gfx->descriptors.push,
+              gfx->descriptors.push_active, HK_MAX_SETS, NULL);
+      ordinary = reason == HK_ORDINARY_OK;
+   }
+
+   const bool changed = !c->valid || c->api != vs || c->ordinary != ordinary;
+   c->api = vs;
+   c->generation = generation;
+   c->valid = true;
+   c->ordinary = ordinary;
+   if (changed) {
+      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_VERTEX);
+      if (debug_get_option_hk_g17p_ordinary_variant_trace())
+         fprintf(stderr,
+                 "G17P ordinary vertex variant: site=%s variant=%s reason=%s"
+                 " vs=%08x generation=%" PRIu64 "\n",
+                 gfx->g17p_bind_prepare ? "bind" : "draw",
+                 ordinary ? "ordinary" : "generic",
+                 hk_ordinary_reason_name(reason), hk_ordinary_trace_id(vs),
+                 gfx->descriptors.generation);
+   }
+}
+
 /* v57d: the variant bind-time preparation should build. The draw's
  * descriptors are normally pushed or bound after the pipeline, so the proof
  * over the current state describes the previous draw; v57c's peek therefore
@@ -4254,8 +4913,19 @@ hk_upload_tess_params(struct hk_cmd_buffer *cmd, struct poly_tess_params *out,
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    const struct agx_ptr prepared_out_draws = gfx->prepared_tess_out_draws;
 
-   if (!gfx->prepared_tess_params_filled)
-      hk_init_tess_params(cmd, out);
+   /* Always derive the state-dependent fields from this draw's state. The
+    * bind-time fill in hk_cmd_prepare_bound_graphics() runs from
+    * cmd_bind_shaders(), which vk_graphics_pipeline_cmd_bind() calls before
+    * it applies the pipeline's static dynamic state, so it saw a stale
+    * patch_control_points (0 on the first bind of a command buffer) and
+    * domain origin; both, and pipeline-statistics queries, may also change
+    * between bind and draw. With input_patch_size == 0 the first draw after a
+    * bind published nr_patches == 0 and a 20-byte TCS/count/coord blob while
+    * its launches, sized from the live state, still covered every patch, so
+    * the TCS output overran unrelated command-pool memory (e.g. the next
+    * draw's vertex and tessellation parameter blocks). Only tessellation
+    * draws reach this, and later draws of a binding already re-ran it. */
+   hk_init_tess_params(cmd, out);
 
    uint32_t draw_stride_el = 5;
    size_t draw_stride_B = draw_stride_el * sizeof(uint32_t);
@@ -5341,6 +6011,8 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    /* Selection may dirty FS before the ordinary early-out below. */
    if (fs_obj->g17p_ordinary_variants)
       hk_bound_fs(cmd);
+   /* v96: and the vertex ordinary-variant choice may dirty the VS. */
+   hk_select_ordinary_vs(cmd);
    const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
                   MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
@@ -5376,19 +6048,33 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
                   fs->info.fs.interp.flat,
                   fs->info.fs.interp.linear);
 
-   if (memcmp(desc->root.draw.uvs_index, gfx->linked_varyings.slots,
-              sizeof(desc->root.draw.uvs_index))) {
-      memcpy(desc->root.draw.uvs_index, gfx->linked_varyings.slots,
-             sizeof(desc->root.draw.uvs_index));
-      desc->root_dirty = true;
+   /* The root holds one byte per varying slot while agx_varyings_vs::slots
+    * holds unsigned ints, so the table has to be narrowed element by element;
+    * a byte copy of the first VARYING_SLOT_MAX bytes of the unsigned array
+    * left every slot past POS at the wrong UVS index for any vertex stage
+    * that reads its varying placement from the root (shader objects,
+    * graphics pipeline libraries). */
+   bool uvs_index_changed = false;
+   for (unsigned i = 0; i < VARYING_SLOT_MAX; ++i) {
+      assert(gfx->linked_varyings.slots[i] <= UINT8_MAX);
+      const uint8_t slot = gfx->linked_varyings.slots[i];
+      uvs_index_changed |= desc->root.draw.uvs_index[i] != slot;
+      desc->root.draw.uvs_index[i] = slot;
    }
+   if (uvs_index_changed)
+      desc->root_dirty = true;
 
    /* Shader replacement changes the logical root only if the selected
     * immutable data address actually changes.  In particular, equivalent
     * shader objects must not clone the root and invalidate both native IOTO
     * programs merely because their API handles differ. */
+   /* v96: an ordinary vertex variant has its own constant data. */
+   struct hk_api_shader *vs_api = gfx->shaders[MESA_SHADER_VERTEX];
    const uint64_t vs_constant_data_addr = hk_upload_constant_data(
-      cmd, hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]));
+      cmd, vs_api && vs_api->g17p_ordinary_variants &&
+              !gfx->shaders[MESA_SHADER_GEOMETRY] &&
+              !gfx->shaders[MESA_SHADER_TESS_EVAL]
+         ? hk_bound_hw_vs(gfx) : hk_any_variant(vs_api));
    const uint64_t fs_constant_data_addr =
       hk_upload_constant_data(cmd, fs);
    if (desc->root.draw.vs_constant_data_addr != vs_constant_data_addr) {
@@ -5402,6 +6088,151 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
 }
 
 static void build_g17p_fs_epilog(nir_builder *b, const void *key_);
+static void build_fs_prolog(nir_builder *b, const void *key);
+
+/* v96: prolog/epilog parts persist in the device's disk cache. The in-memory
+ * table above is per process, so every launch used to compile each part again
+ * on the render thread at the first bind or draw that needed it (the whole
+ * MC corpus: ~87 compiles even with a warm pipeline cache). The disk key
+ * names the builder by a stable id and covers every input of the compile
+ * below; the cache identity already carries the build, the GPU and the
+ * codegen flags/environment. HK_G17P_PROLOG_DISK_CACHE=0 is the A/B
+ * off-switch. */
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_prolog_disk_cache,
+                           "HK_G17P_PROLOG_DISK_CACHE", true)
+
+static uint8_t
+hk_prolog_epilog_builder_id(hk_internal_builder_t builder)
+{
+   if (builder == agx_nir_vs_prolog_raw)
+      return 1;
+   if (builder == agx_nir_vs_prolog)
+      return 2;
+   if (builder == build_fs_prolog)
+      return 3;
+   if (builder == build_g17p_fs_epilog)
+      return 4;
+   if (builder == agx_nir_fs_epilog)
+      return 5;
+   return 0;
+}
+
+static bool
+hk_prolog_epilog_disk_key(struct hk_device *dev, const struct hk_internal_key *key,
+                          bool preprocess_nir, bool stop, unsigned cf_base,
+                          const BITSET_WORD *g17p_tile_partitions,
+                          unsigned nr_samples, cache_key out)
+{
+   struct disk_cache *cache = dev->vk.physical->disk_cache;
+   const uint8_t builder = hk_prolog_epilog_builder_id(key->builder);
+   if (!cache || !builder || !debug_get_option_hk_g17p_prolog_disk_cache())
+      return false;
+
+   const struct agx_device_key dk = agx_gather_device_key(&dev->dev);
+   struct {
+      char magic[8];
+      uint32_t builder, stop, preprocess, cf_base, nr_samples, key_size;
+      uint32_t chip, encoding, g13x_coherency, soft_fault;
+      BITSET_WORD partitions[ARRAY_SIZE(((struct agx_shader_key *)0)->g17p_tile_partitions)];
+   } h;
+   memset(&h, 0, sizeof(h));
+   memcpy(h.magic, "hkpe-v1", 8);
+   h.builder = builder;
+   h.stop = stop;
+   h.preprocess = preprocess_nir;
+   h.cf_base = cf_base;
+   h.nr_samples = nr_samples;
+   h.key_size = key->key_size;
+   h.chip = dk.chip;
+   h.encoding = dk.encoding;
+   h.g13x_coherency = dk.needs_g13x_coherency;
+   h.soft_fault = dk.soft_fault;
+   if (g17p_tile_partitions)
+      memcpy(h.partitions, g17p_tile_partitions, sizeof(h.partitions));
+
+   const size_t size = sizeof(h) + key->key_size;
+   uint8_t *buf = alloca(size);
+   memcpy(buf, &h, sizeof(h));
+   memcpy(buf + sizeof(h), key->key, key->key_size);
+   disk_cache_compute_key(cache, buf, size, out);
+   return true;
+}
+
+/* A stored part is its agx_shader_info followed by the binary. */
+static struct agx_shader_part *
+hk_prolog_epilog_disk_get(struct hk_device *dev, const cache_key disk_key)
+{
+   size_t size = 0;
+   uint8_t *data = disk_cache_get(dev->vk.physical->disk_cache, disk_key, &size);
+   if (!data)
+      return NULL;
+
+   struct agx_shader_part *part = NULL;
+   struct agx_shader_info info;
+   if (size >= sizeof(info)) {
+      memcpy(&info, data, sizeof(info));
+      if (size == sizeof(info) + info.binary_size && info.binary_size) {
+         part = rzalloc(dev->prolog_epilog.ht, struct agx_shader_part);
+         void *binary = part ? malloc(info.binary_size) : NULL;
+         if (binary) {
+            part->info = info;
+            memcpy(binary, data + sizeof(info), info.binary_size);
+            part->binary = binary;
+         } else {
+            ralloc_free(part);
+            part = NULL;
+         }
+      }
+   }
+   free(data);
+   return part;
+}
+
+static void
+hk_prolog_epilog_disk_put(struct hk_device *dev, const cache_key disk_key,
+                          const struct agx_shader_part *part)
+{
+   const size_t size = sizeof(part->info) + part->info.binary_size;
+   uint8_t *data = malloc(size);
+   if (!data)
+      return;
+   memcpy(data, &part->info, sizeof(part->info));
+   memcpy(data + sizeof(part->info), part->binary, part->info.binary_size);
+   disk_cache_put(dev->vk.physical->disk_cache, disk_key, data, size, NULL);
+   free(data);
+}
+
+static bool
+hk_prolog_epilog_insert(struct hk_device *dev, const struct hk_internal_key *key,
+                        struct agx_shader_part *part)
+{
+   /* The key is on the caller's stack, so clone it before using it as a hash
+    * table key. The clone is logically owned by the hash table. */
+   size_t total_key_size = sizeof(*key) + key->key_size;
+   void *cloned_key = ralloc_memdup(dev->prolog_epilog.ht, key, total_key_size);
+   if (!cloned_key)
+      return false;
+
+   _mesa_hash_table_insert(dev->prolog_epilog.ht, cloned_key, part);
+   return true;
+}
+
+static unsigned
+hk_g17p_count_zs_writes(nir_shader *shader)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic ==
+                   nir_intrinsic_store_zs_agx)
+               count++;
+         }
+      }
+   }
+   return count;
+}
 
 static struct agx_shader_part *
 hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
@@ -5415,6 +6246,23 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    if (ent)
       return ent->data;
 
+   cache_key disk_key;
+   const bool disk =
+      hk_prolog_epilog_disk_key(dev, key, preprocess_nir, stop, cf_base,
+                                g17p_tile_partitions, nr_samples, disk_key);
+   /* HK_G17P_PROLOG_DISK_CACHE_VERIFY=1 (gate): compile every part even on a
+    * disk hit and compare the stored bytes with the fresh compile. */
+   const bool verify = disk && HK_ENV_BOOL_ONCE("HK_G17P_PROLOG_DISK_CACHE_VERIFY", false);
+   struct agx_shader_part *cached =
+      disk ? hk_prolog_epilog_disk_get(dev, disk_key) : NULL;
+   if (cached && !verify) {
+      if (hk_prolog_epilog_insert(dev, key, cached))
+         return cached;
+      free(cached->binary);
+      ralloc_free(cached);
+      return NULL;
+   }
+
    hk_slow_tl.prolog_epilog_compiles++;
 
    nir_builder b = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
@@ -5422,6 +6270,22 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
 
    if (preprocess_nir)
       agx_preprocess_nir(b.shader);
+
+   /* A pixel-shaded multisample epilog that reads the tile (blending, for
+    * one) is wrapped in the sample loop, which preprocessing unrolls --
+    * depth/stencil write included. Each sample's
+    * Z/S write then sits between the colour transactions of the samples
+    * around it, a shape the G17P pixel protocol cannot express, and the
+    * epilog fails to compile (any 2x/4x draw that blends and writes
+    * FragDepth or FragStencilRef: VK_ERROR_FEATURE_NOT_PRESENT at
+    * vkEndCommandBuffer). The sample-shaded epilog hoists its per-sample
+    * writes into the one leading class-1 transaction; do the same here. Only
+    * an epilog left with several Z/S writes is touched, so every shape that
+    * compiled before is unchanged. */
+   if (builder == build_g17p_fs_epilog &&
+       !((const struct agx_fs_epilog_key *)key->key)->link.sample_shading &&
+       hk_g17p_count_zs_writes(b.shader) > 1)
+      NIR_PASS(_, b.shader, agx_nir_hoist_g17p_zs_writes);
 
    struct agx_shader_key backend_key = {
       .dev = agx_gather_device_key(&dev->dev),
@@ -5486,19 +6350,28 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       return NULL;
    }
 
-   /* ..and cache it before we return. The key is on the stack right now, so
-    * clone it before using it as a hash table key. The clone is logically owned
-    * by the hash table.
-    */
-   size_t total_key_size = sizeof(*key) + key->key_size;
-   void *cloned_key = ralloc_memdup(dev->prolog_epilog.ht, key, total_key_size);
-   if (!cloned_key) {
+   if (cached) {
+      /* Verify mode: the stored part must be the fresh compile, byte for
+       * byte (info and binary). */
+      const bool same =
+         !memcmp(&cached->info, &part->info, sizeof(part->info)) &&
+         !memcmp(cached->binary, part->binary, part->info.binary_size);
+      fprintf(stderr, "G17P prolog/epilog disk cache verify: builder=%u size=%u %s\n",
+              hk_prolog_epilog_builder_id(builder), part->info.binary_size,
+              same ? "MATCH" : "MISMATCH");
+      free(cached->binary);
+      ralloc_free(cached);
+   }
+
+   /* ..and cache it before we return. */
+   if (!hk_prolog_epilog_insert(dev, key, part)) {
       free(part->binary);
       ralloc_free(part);
       return NULL;
    }
 
-   _mesa_hash_table_insert(dev->prolog_epilog.ht, cloned_key, part);
+   if (disk && !cached)
+      hk_prolog_epilog_disk_put(dev, disk_key, part);
    return part;
 }
 
@@ -5695,6 +6568,31 @@ hk_g17p_mono_layout_mismatch(const struct agx_shader_part *a,
    HK_MONO_FIELD(nr_preamble_gprs)
    HK_MONO_FIELD(agx3_preamble_uniform_inputs)
    HK_MONO_FIELD(agx3_preamble_tps_inputs)
+   HK_MONO_FIELD(preamble_scratch_size)
+   HK_MONO_FIELD(agx3_preamble_staging_known)
+   HK_MONO_FIELD(agx3_preamble_staging_halfs)
+   HK_MONO_FIELD(agx3_preamble_inputs.count)
+   HK_MONO_FIELD(agx3_preamble_inputs.storage_bytes)
+   if (a->info.has_preamble) {
+      /* G17 graphics Ioto still launches the API shader's constant program
+       * (hk_upload_usc_words_internal), while the linked main comes from m.
+       * Equal sizes/register counts do not prove that their uniform values
+       * agree. Keep the split link unless code and its frozen live-ins agree. */
+      if (memcmp(a->info.agx3_preamble_inputs.halves,
+                 m->info.agx3_preamble_inputs.halves,
+                 sizeof(a->info.agx3_preamble_inputs.halves)))
+         return "preamble inputs";
+      if (!a->binary || !m->binary || !a->info.preamble_size ||
+          a->info.preamble_offset > a->info.binary_size ||
+          m->info.preamble_offset > m->info.binary_size ||
+          a->info.preamble_size > a->info.binary_size - a->info.preamble_offset ||
+          m->info.preamble_size > m->info.binary_size - m->info.preamble_offset)
+         return "preamble extent";
+      if (memcmp((const uint8_t *)a->binary + a->info.preamble_offset,
+                 (const uint8_t *)m->binary + m->info.preamble_offset,
+                 a->info.preamble_size))
+         return "preamble code";
+   }
    HK_MONO_FIELD(texture_state_count)
    HK_MONO_FIELD(sampler_state_count)
    HK_MONO_FIELD(uses_txf)
@@ -6630,6 +7528,11 @@ translate_object_type(enum mesa_prim topology)
       return AGX_OBJECT_TYPE_TRIANGLE;
 }
 
+/* What bind-time preparation records when the bound state has no hardware
+ * primitive yet (see hk_g17p_prepare_native_bind_tail()). Not a value of
+ * enum agx_primitive, so no prepared bind tail ever matches it. */
+#define HK_G17P_NO_HW_TOPOLOGY ((enum agx_primitive)0xff)
+
 static enum agx_primitive
 translate_hw_primitive_topology(enum mesa_prim prim)
 {
@@ -6776,7 +7679,22 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if (!fs || !linked_fs)
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   const uint64_t fragment_program = gfx->prepared_fragment_usc
+   /* Bind-time preparation leaves its fragment program behind whenever the
+    * bind tail it was prepared for already matched (or preparation stopped
+    * before building one). Consume it only while every input it was built
+    * from is unchanged: after a fragment shader swap with no other state
+    * change, the next tail would otherwise launch the previous fragment
+    * shader, and after a render pass with a different tile-buffer layout,
+    * a program built for the old one. */
+   bool prepared_fragment_exact = false;
+   if (gfx->prepared_fragment_usc) {
+      const struct hk_g17p_prepared_fragment_key key =
+         hk_g17p_prepared_fragment_key(cmd, fs, linked_fs);
+      prepared_fragment_exact =
+         hk_g17p_prepared_fragment_key_equal(&key,
+                                             &gfx->prepared_fragment_key);
+   }
+   const uint64_t fragment_program = prepared_fragment_exact
       ? gfx->prepared_fragment_usc
       : hk_upload_usc_words(cmd, fs, linked_fs);
    gfx->prepared_fragment_usc = 0;
@@ -6785,6 +7703,12 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if ((fragment_program & UINT64_C(0x3f)) != 0 ||
        fragment_program >= (UINT64_C(1) << 48))
       return hk_g17p_bind_tail_refused(__LINE__);
+
+   /* No hardware primitive to describe (bind-time preparation, see
+    * hk_g17p_prepare_native_bind_tail()). The prepared fragment program is
+    * consumed above all the same; it was prepared for this binding only. */
+   if (gfx->topology == HK_G17P_NO_HW_TOPOLOGY)
+      return false;
 
    /* Every input below except the fragment stage program is identical to the
     * last successful build: only the root, descriptor or vertex-buffer
@@ -6841,7 +7765,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       prepared->tail = memo_uploaded.tail;
       prepared->dynamic_generation = dyn->generation;
       prepared->descriptor_generation = gfx->descriptors.generation;
-      prepared->vertex_buffer_generation = gfx->vertex_buffer_generation;
+      prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
       prepared->root = gfx->root;
       prepared->valid = true;
       if (dev->g17p_diagnostics.launch_trace) {
@@ -7388,7 +8312,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    prepared->tail = uploaded.tail;
    prepared->dynamic_generation = dyn->generation;
    prepared->descriptor_generation = gfx->descriptors.generation;
-   prepared->vertex_buffer_generation = gfx->vertex_buffer_generation;
+   prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
    prepared->root = gfx->root;
    prepared->render_color0 = render->color_att_count == 1
       ? render->color_att[0].iview : NULL;
@@ -7672,8 +8596,26 @@ hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd)
        vk_command_buffer_has_error(&cmd->vk))
       return;
 
+   /* Bind-time preparation is speculative and may run while the bound state
+    * cannot be drawn yet: a patch-list topology still set while a meta
+    * operation binds its vertex and fragment shaders, say. That is no
+    * hardware primitive, and translate_hw_primitive_topology() treats it as
+    * unreachable (undefined behaviour without assertions). Record that there
+    * is none instead; nothing else here changes. In particular the steps
+    * below still run, since the draw relies on several of them (the
+    * tile-buffer sample count, the root's never-in-shader bit, the VS->FS
+    * varying linkage), and hk_g17p_build_native_bind_tail() still consumes
+    * the fragment program prepared for this binding before it declines.
+    * Skipping those (sweep2 0005) left that program to a later binding's
+    * bind tail and failed 245 tessellation render-pass cases on hardware.
+    * Optimised builds already behaved this way: the lookup the compiler made
+    * of the unreachable switch read a value that is no hardware primitive,
+    * and the build declined at the object-type field. */
    const enum mesa_prim prim = hk_rast_prim(cmd);
-   gfx->topology = translate_hw_primitive_topology(prim);
+   const bool hw_prim =
+      prim <= MESA_PRIM_TRIANGLE_FAN && prim != MESA_PRIM_LINE_LOOP;
+   gfx->topology = hw_prim ? translate_hw_primitive_topology(prim)
+                           : HK_G17P_NO_HW_TOPOLOGY;
    gfx->object_type = translate_object_type(prim);
 
    unsigned provoking;
@@ -8388,35 +9330,6 @@ hk_depth_bias_factor(VkFormat format, bool exact, bool force_unorm)
    }
 }
 
-static bool
-uses_blend_constant(const struct vk_color_blend_state *cb)
-{
-   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 1 ==
-                 VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR);
-
-   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 2 ==
-                 VK_BLEND_FACTOR_CONSTANT_ALPHA);
-
-   static_assert(VK_BLEND_FACTOR_CONSTANT_COLOR + 3 ==
-                 VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA);
-
-   for (unsigned i = 0; i < cb->attachment_count; ++i) {
-      unsigned factors[] = {
-         cb->attachments[i].src_color_blend_factor,
-         cb->attachments[i].src_alpha_blend_factor,
-         cb->attachments[i].dst_color_blend_factor,
-         cb->attachments[i].dst_alpha_blend_factor,
-      };
-
-      for (unsigned j = 0; j < ARRAY_SIZE(factors); ++j) {
-         if (factors[j] >= VK_BLEND_FACTOR_CONSTANT_COLOR &&
-             factors[j] <= VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA)
-            return true;
-      }
-   }
-
-   return false;
-}
 
 /* HAL200 texture and sampler heaps consume fragment uniform halves0..7. The
  * ordinary ABI's blend constants at halves4..11 therefore cannot coexist
@@ -8633,7 +9546,7 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
    }
 
    if (!key->epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P &&
-       uses_blend_constant(&dyn->cb) &&
+       hk_cmd_uses_blend_constant(cmd) &&
        (fs->info.agx3_combined_sampler_valid ||
         fs->info.agx3_indexed_sampler_valid) &&
        !hk_g17p_relocated_blend_constant_base(
@@ -8947,15 +9860,39 @@ hk_g17p_flush_prepared_dynamic_state(
 
    struct hk_linked_shader *linked_hw_vs =
       hw_vs == sw_vs ? linked_vs : hw_vs->only_linked;
-   bool vertex_exact = gfx->prepared_vertex_shader == hw_vs &&
-                       gfx->prepared_vertex_linked == linked_hw_vs &&
+   const bool vertex_program_exact =
+      gfx->prepared_vertex_shader == hw_vs &&
+      gfx->prepared_vertex_linked == linked_hw_vs;
+   bool vertex_exact = vertex_program_exact &&
                        gfx->prepared_vertex_root == gfx->root;
-   if (vertex_exact &&
-       (gfx->prepared_vertex_draw_params != gfx->draw_params ||
+   /* The launcher's compact root record names the root and the per-draw
+    * parameter sources. A transformed (tessellation/geometry) draw uploads
+    * its parameters above and so republishes the root after preparation;
+    * that is a pointer change like any other, not a different program.
+    * Retarget the record instead of refusing the draw (shader-object
+    * vert/tesc/tese[/geom]/frag pipelines failed every draw this way). */
+   if (vertex_program_exact &&
+       (!vertex_exact ||
+        gfx->prepared_vertex_draw_params != gfx->draw_params ||
         gfx->prepared_vertex_draw_id_ptr != gfx->draw_id_ptr)) {
       vertex_exact = hk_retarget_prepared_usc_root(
          cmd, hw_vs, linked_hw_vs, gfx->prepared_vertex_usc,
          gfx->prepared_vertex_compact_root);
+   }
+   if (!vertex_exact) {
+      /* Nothing could be retargeted: the bind-time launcher has no compact
+       * root record (it came from the exact-last cache or the inline
+       * composer, which embed the preparation-time root and draw pointers),
+       * or it names another program. Nothing references it yet. Publish a
+       * launcher for this draw's root and pointers, as the authoritative
+       * builder does, and encode the prepared VDM state update around it
+       * instead of failing the command buffer. */
+      const uint64_t program = hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
+      if (program && !vk_command_buffer_has_error(&cmd->vk)) {
+         gfx->prepared_vertex_usc = program;
+         gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
+         vertex_exact = hk_g17p_prepare_vdm_state_update(cmd);
+      }
    }
    if (!vertex_exact) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -9375,10 +10312,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       desc->root_dirty = true;
    }
 
-   if (IS_DIRTY(CB_BLEND_EQUATIONS) || IS_DIRTY(CB_BLEND_ENABLES)) {
-      gfx->uses_blend_constant = uses_blend_constant(&dyn->cb);
-   }
-
    if (IS_DIRTY(MS_SAMPLE_MASK)) {
       const uint16_t sample_mask = dyn->ms.sample_mask;
       if (desc->root.draw.api_sample_mask != sample_mask) {
@@ -9500,6 +10433,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
 
       desc->root_dirty |= vertex_root_changed;
+      gfx->root_vertex_buffer_generation = gfx->vertex_buffer_generation;
    }
 
    if (vgt_dirty || IS_SHADER_DIRTY(FRAGMENT) ||
@@ -9535,9 +10469,10 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->info.fs.uses_sample_shading &&
           dyn->ms.rasterization_samples > 1) {
-         mesa_loge("G17P: per-sample fragment execution needs a fixed sample "
-                   "count; refusing a %u-sample draw that requests it",
-                   dyn->ms.rasterization_samples);
+         if (!prepare_only)
+            mesa_loge("G17P: per-sample fragment execution needs a fixed sample "
+                      "count; refusing a %u-sample draw that requests it",
+                      dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -9546,9 +10481,10 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       if (dev->dev.chip == AGX_CHIP_G17P &&
           fs->info.fs.epilog_key.sample_shading &&
           fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
-         mesa_loge("G17P: fragment unrolled for %u samples cannot run a "
-                   "%u-sample draw",
-                   fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
+         if (!prepare_only)
+            mesa_loge("G17P: fragment unrolled for %u samples cannot run a "
+                      "%u-sample draw",
+                      fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -9558,9 +10494,10 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        */
       if (dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
           fs->info.fs.g17p_samples != MAX2(dyn->ms.rasterization_samples, 1)) {
-         mesa_loge("G17P: fragment coverage updates compiled for %u samples "
-                   "cannot run a %u-sample draw",
-                   fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
+         if (!prepare_only)
+            mesa_loge("G17P: fragment coverage updates compiled for %u samples "
+                      "cannot run a %u-sample draw",
+                      fs->info.fs.g17p_samples, dyn->ms.rasterization_samples);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return;
       }
@@ -9638,7 +10575,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          key.epilog.blend_constant_base = key.epilog.emrt_heap_base + 4;
       }
 
-      if (!key.epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P && gfx->uses_blend_constant &&
+      if (!key.epilog.native_spills && dev->dev.chip == AGX_CHIP_G17P && hk_cmd_uses_blend_constant(cmd) &&
           (fs->info.agx3_combined_sampler_valid ||
            fs->info.agx3_indexed_sampler_valid) &&
           !hk_g17p_relocated_blend_constant_base(
@@ -11040,6 +11977,9 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
        (draw_.b.count[0] == 0 || draw_.b.count[1] == 0))
       return;
 
+   hk_g17p_note_depth_use(cmd);
+   hk_select_ordinary_vs(cmd);
+
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
@@ -11251,7 +12191,15 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          }
       }
 
-      if (geom && !prepared_tess_gs_emitted) {
+      /* The prepared tessellation batch returns the tessellator's indexed
+       * draw, not the geometry shader's output draw, even when it appended
+       * the GS setup/vertex/main launches itself (gs_emitted). The GS
+       * prerast step must still run: with gs_emitted it only selects the
+       * rasterization draw (and consumes the flag); without it, the batch
+       * held tessellation only and the GS has not run at all. Skipping it
+       * rasterized the tessellator's index buffer through the GS rast
+       * program, so only part of patch 0 was drawn. */
+      if (geom) {
          const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
          draw = hk_launch_gs_prerast(cmd, ccs, draw);
          if (perf_trace) {
@@ -11766,6 +12714,14 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
           vk_topology_to_mesa(dyn->ia.primitive_topology)))
       return false;
 
+   /* v96: likewise the vertex ordinary-variant choice must already be
+    * proven for these descriptors (hk_select_ordinary_vs()). */
+   struct hk_api_shader *vs_obj = gfx->shaders[MESA_SHADER_VERTEX];
+   if (vs_obj->g17p_ordinary_variants &&
+       !(gfx->ordinary_vs.valid && gfx->ordinary_vs.api == vs_obj &&
+         gfx->ordinary_vs.generation == desc->generation))
+      return false;
+
    /* hk_bound_fs() must answer from its cache without dirtying the FS. */
    if (fs_obj->g17p_ordinary_variants &&
        !(gfx->ordinary_fs.valid && gfx->ordinary_fs.api == fs_obj &&
@@ -11815,6 +12771,11 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
    struct hk_cs *cs = cmd->current_cs.gfx;
 
+   /* An eligible multi-draw may emit even its first record here, so this
+    * direct path must record depth/stencil use exactly as hk_draw_impl()
+    * does for HK_G17P_ZLS_ELIDE_UNTOUCHED. */
+   hk_g17p_note_depth_use(cmd);
+
    /* The general path from here on, with its no-op branches removed. */
    hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
    if (vk_command_buffer_has_error(&cmd->vk))
@@ -11863,8 +12824,12 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       hk_reserve_scratch(cmd, cs, hw_vs);
       struct hk_linked_shader *linked_hw_vs =
          (hw_vs == sw_vs) ? linked_vs : hw_vs->only_linked;
+      /* HK_G17P_MDI_ONE_LEVEL: publish this record's vertex setup as the
+       * one-level template (hk_g17p_publish_one_level_record()). */
+      gfx->g17p_vs_one_level = hk_g17p_mdi_one_level_enabled();
       const uint64_t pipeline_program =
          hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
+      gfx->g17p_vs_one_level = false;
       gfx->prepared_vertex_usc = 0;
       gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 

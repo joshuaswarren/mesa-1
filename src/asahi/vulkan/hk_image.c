@@ -489,6 +489,72 @@ hk_can_compress_format(const struct agx_device *dev, VkFormat format)
    return hk_can_compress(dev, format, 0, 64, 64, 1, 0, 0, NULL, false);
 }
 
+bool
+hk_interchange_format(const struct agx_device *dev, VkFormat format)
+{
+   if (dev->chip != AGX_CHIP_G17P || (dev->debug & AGX_DBG_NOCOMPRESS))
+      return false;
+
+   switch (format) {
+   case VK_FORMAT_B8G8R8A8_UNORM:
+   case VK_FORMAT_B8G8R8A8_SRGB:
+   case VK_FORMAT_R8G8B8A8_UNORM:
+   case VK_FORMAT_R8G8B8A8_SRGB:
+      return true;
+   default:
+      return false;
+   }
+}
+
+bool
+hk_interchange_supported(const struct agx_device *dev, VkFormat format,
+                         VkImageType type, VkImageCreateFlags flags,
+                         VkImageUsageFlags usage, const void *pNext)
+{
+   if (!hk_interchange_format(dev, format) || type != VK_IMAGE_TYPE_2D)
+      return false;
+
+   /* Same restrictions as any compressed image: no storage, host copies or
+    * sparse, and views only of compatible formats.  Feedback-loop usage is
+    * accepted here exactly as for an explicit GPU_TILED_COMPRESSED modifier
+    * (zink adds it to every imported render-target dmabuf); allocation never
+    * chooses interchange for it, see choose_drm_format_mod(). */
+   if (usage & (VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT | VK_IMAGE_USAGE_STORAGE_BIT))
+      return false;
+   if (flags & (VK_IMAGE_CREATE_SPARSE_ALIASED_BIT |
+                VK_IMAGE_CREATE_SPARSE_BINDING_BIT |
+                VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT |
+                VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT |
+                VK_IMAGE_CREATE_DISJOINT_BIT))
+      return false;
+
+   if (flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT) {
+      const struct VkImageFormatListCreateInfo *list =
+         pNext ? vk_find_struct_const(pNext, IMAGE_FORMAT_LIST_CREATE_INFO)
+               : NULL;
+      if (!list || !list->viewFormatCount)
+         return false;
+      const enum pipe_format p_format = hk_format_to_pipe_format(format);
+      for (unsigned i = 0; i < list->viewFormatCount; ++i) {
+         if (!ail_formats_compatible(
+                p_format, hk_format_to_pipe_format(list->pViewFormats[i])))
+            return false;
+      }
+   }
+   return true;
+}
+
+static bool
+hk_interchange_create_info(struct hk_device *dev, const VkImageCreateInfo *info)
+{
+   return hk_interchange_supported(&dev->dev, info->format, info->imageType,
+                                   info->flags, info->usage, info->pNext) &&
+          info->mipLevels == 1 && info->arrayLayers == 1 &&
+          info->samples == VK_SAMPLE_COUNT_1_BIT && info->extent.width >= 16 &&
+          info->extent.height >= 16 && info->extent.width <= 16384 &&
+          info->extent.height <= 16384;
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_GetPhysicalDeviceImageFormatProperties2(
    VkPhysicalDevice physicalDevice,
@@ -630,6 +696,19 @@ hk_GetPhysicalDeviceImageFormatProperties2(
       return VK_ERROR_FORMAT_NOT_SUPPORTED;
    }
 
+   const VkPhysicalDeviceImageDrmFormatModifierInfoEXT *drm_mod_info =
+      vk_find_struct_const(pImageFormatInfo->pNext,
+                           PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
+   const bool interchange =
+      pImageFormatInfo->tiling == VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT &&
+      drm_mod_info &&
+      drm_mod_info->drmFormatModifier == DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED;
+   if (interchange &&
+       !hk_interchange_supported(&pdev->dev, pImageFormatInfo->format,
+                                 pImageFormatInfo->type, pImageFormatInfo->flags,
+                                 pImageFormatInfo->usage, pImageFormatInfo->pNext))
+      return VK_ERROR_FORMAT_NOT_SUPPORTED;
+
    const uint32_t max_dim = 16384;
    VkExtent3D maxExtent;
    uint32_t maxArraySize;
@@ -656,6 +735,10 @@ hk_GetPhysicalDeviceImageFormatProperties2(
    uint32_t maxMipLevels = util_logbase2(max_dim) + 1;
    if (ycbcr_info != NULL || pImageFormatInfo->tiling == VK_IMAGE_TILING_LINEAR)
       maxMipLevels = 1;
+   if (interchange) {
+      maxMipLevels = 1;
+      maxArraySize = 1;
+   }
 
    VkSampleCountFlags sampleCounts = VK_SAMPLE_COUNT_1_BIT;
    if (pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
@@ -1096,6 +1179,15 @@ modifier_get_score(uint64_t mod)
    case DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED:
       return 10;
 
+   /* Display-native compressed layout, scanned out by DCP directly.  Below
+    * GPU_TILED too: AGX3 never advertises GPU_TILED_COMPRESSED (see
+    * hk_can_compress()), so a compositor's main tranche built from this
+    * driver's modifier list is {GPU_TILED, interchange, LINEAR} and must keep
+    * choosing GPU_TILED.  Interchange then wins only against LINEAR, i.e. in a
+    * display (scanout) list that cannot take GPU tiling. */
+   case DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED:
+      return 3;
+
    case DRM_FORMAT_MOD_APPLE_GPU_TILED:
       return 5;
 
@@ -1121,9 +1213,17 @@ choose_drm_format_mod(struct hk_device *dev, uint8_t plane_count,
          can_compress = false;
    }
 
+   const bool interchange =
+      plane_count == 1 &&
+      !(info->usage & VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT) &&
+      hk_interchange_create_info(dev, info);
+
    for (uint32_t i = 0; i < modifier_count; ++i) {
       if (!can_compress &&
           modifiers[i] == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED)
+         continue;
+      if (!interchange &&
+          modifiers[i] == DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED)
          continue;
 
       uint32_t score = modifier_get_score(modifiers[i]);
@@ -1197,6 +1297,24 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          modifier = choose_drm_format_mod(dev, image->plane_count, pCreateInfo,
                                           mod_list_info->drmFormatModifierCount,
                                           mod_list_info->pDrmFormatModifiers);
+
+         /* v96c HK_G17P_WSI_LINEAR=1 (opt-in, G17P): give window-system
+          * images the LINEAR modifier whenever the compositor offers it, so
+          * a fullscreen swapchain can be scanned out directly: appledrm
+          * planes accept only LINEAR. The G17P PBE renders linear colour
+          * targets natively; the cost is that a composited (non-scanout)
+          * surface is sampled from a linear image. */
+         if (dev->dev.chip == AGX_CHIP_G17P &&
+             vk_find_struct_const(pCreateInfo->pNext,
+                                  WSI_IMAGE_CREATE_INFO_MESA) &&
+             debug_get_bool_option("HK_G17P_WSI_LINEAR", false)) {
+            for (uint32_t i = 0; i < mod_list_info->drmFormatModifierCount; ++i) {
+               if (mod_list_info->pDrmFormatModifiers[i] == DRM_FORMAT_MOD_LINEAR) {
+                  modifier = DRM_FORMAT_MOD_LINEAR;
+                  break;
+               }
+            }
+         }
       }
 
       assert(modifier != DRM_FORMAT_MOD_INVALID);
@@ -1211,6 +1329,21 @@ hk_image_init(struct hk_device *dev, struct hk_image *image,
          dev, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
          "DRM modifier provides %u planes for a %u-plane image",
          mod_explicit_info->drmFormatModifierPlaneCount, image->plane_count);
+   }
+
+   if (image->vk.drm_format_mod == DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED) {
+      if (!hk_interchange_create_info(dev, pCreateInfo))
+         return vk_errorf(dev, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+                          "interchange modifier on an ineligible image");
+
+      /* The row pitch is part of the modifier's contract with appledrm. */
+      const uint64_t pitch_B = DIV_ROUND_UP(pCreateInfo->extent.width, 16) *
+                               256 * vk_format_get_blocksize(pCreateInfo->format);
+      if (mod_explicit_info &&
+          mod_explicit_info->pPlaneLayouts[0].rowPitch != pitch_B)
+         return vk_errorf(dev, VK_ERROR_INVALID_DRM_FORMAT_MODIFIER_PLANE_LAYOUT_EXT,
+                          "interchange plane row pitch 0x%" PRIx64 " != 0x%" PRIx64,
+                          mod_explicit_info->pPlaneLayouts[0].rowPitch, pitch_B);
    }
 
    const struct vk_format_ycbcr_info *ycbcr_info =

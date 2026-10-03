@@ -21,6 +21,7 @@
 uint64_t agx_best_modifiers[] = {
    DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED,
    DRM_FORMAT_MOD_APPLE_GPU_TILED,
+   DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED,
    DRM_FORMAT_MOD_LINEAR,
 };
 
@@ -38,6 +39,19 @@ hk_modifier_features(const struct agx_device *dev, uint64_t mod,
    if (mod == DRM_FORMAT_MOD_APPLE_GPU_TILED_COMPRESSED &&
        !hk_can_compress_format(dev, vk_format))
       return 0;
+
+   /* Interchange: the 32-bit RGBA formats on G17P; never storage or host
+    * copies (compressed). */
+   if (mod == DRM_FORMAT_MOD_APPLE_INTERCHANGE_COMPRESSED) {
+      if (!hk_interchange_format(dev, vk_format))
+         return 0;
+      return props->optimalTilingFeatures &
+             ~(VK_FORMAT_FEATURE_2_STORAGE_IMAGE_BIT |
+               VK_FORMAT_FEATURE_2_STORAGE_IMAGE_ATOMIC_BIT |
+               VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT |
+               VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT |
+               VK_FORMAT_FEATURE_2_HOST_IMAGE_TRANSFER_BIT_EXT);
+   }
 
    if (mod == DRM_FORMAT_MOD_LINEAR)
       return props->linearTilingFeatures;

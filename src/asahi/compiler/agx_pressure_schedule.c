@@ -7,6 +7,7 @@
 /* Bottom-up local scheduler to reduce register pressure */
 
 #include <stdio.h>
+#include <string.h>
 #include "util/dag.h"
 #include "util/u_debug.h"
 #include "agx_debug.h"
@@ -660,6 +661,54 @@ ilp_place_exit_compare(agx_block *block, struct sched_node **nodes,
    return changed;
 }
 
+/*
+ * AGX_G17P_TILE_WAIT_SINK (default on; =0 restores the plain ILP order).
+ *
+ * WAIT_PIX has no SSA result; the list scheduler above gives it an ALU
+ * latency and ranks it by the critical path to the tile access it guards, so
+ * it tends to be hoisted as early as its barrier edges allow. In the colour
+ * block of the light fragment it placed the class-4 (write) wait twelve
+ * instructions ahead of LSTCOL, and the class-8 (read) wait three ahead of
+ * LLDCOL, so the in-order warp could block on the pixel protocol before
+ * independent arithmetic. Apple's G17P fragments put each wait immediately
+ * ahead of the tile access it orders (fs-apple.bin +0x106 pixwait 8 ->
+ * lldcol, +0x1a2 pixwait 4 -> lstcol), which is also what the pressure
+ * scheduler's own "sink wait_pix" heuristic does.
+ *
+ * Move each WAIT_PIX down to just before its first dependent in the chosen
+ * order. It only moves later, never past anything that depends on it, and
+ * every instruction it depends on stays earlier, so all DAG edges hold.
+ */
+static void
+ilp_sink_pixel_waits(struct sched_node **order, unsigned n,
+                     const struct util_dynarray *dependents)
+{
+   for (unsigned p = 0; p < n; ++p) {
+      if (order[p]->instr->op != AGX_OPCODE_WAIT_PIX)
+         continue;
+
+      const unsigned w = order[p]->index;
+      unsigned q = p + 1;
+      for (; q < n; ++q) {
+         bool depends = false;
+         util_dynarray_foreach(&dependents[w], unsigned, d)
+            depends |= *d == order[q]->index;
+         if (depends)
+            break;
+      }
+
+      /* No dependent inside the block: leave it where it is. */
+      if (q == n || q == p + 1)
+         continue;
+
+      struct sched_node *wait = order[p];
+      memmove(&order[p], &order[p + 1], (q - 1 - p) * sizeof(order[0]));
+      order[q - 1] = wait;
+      /* The instruction now at p has not been examined yet. */
+      --p;
+   }
+}
+
 static void
 ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
                    bool native_uniforms, unsigned alu_latency,
@@ -744,6 +793,13 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
       for (unsigned i = 0; i < n; ++i)
          changed |= order[i]->index != i;
    }
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       (agx_get_codegen_flags() & AGX_CODEGEN_G17P_TILE_WAIT_SINK)) {
+      ilp_sink_pixel_waits(order, n, dependents);
+      changed = false;
+      for (unsigned i = 0; i < n; ++i)
+         changed |= order[i]->index != i;
+   }
    if (!changed)
       return;
 
@@ -815,6 +871,64 @@ ilp_block_has_memory(const agx_block *block)
    return false;
 }
 
+/* Schedule only a small, explicit arithmetic/tile domain. Schedule-class
+ * NONE alone is not a purity guarantee (e.g. DOORBELL and texture ops).
+ * SSA operands expose all data dependencies; physical register accesses and
+ * uniform writes stay on the original schedule. */
+static bool
+ilp_single_tile_blend(const agx_context *ctx, const agx_block *block)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       ctx->stage != MESA_SHADER_FRAGMENT ||
+       !(agx_get_codegen_flags() & AGX_CODEGEN_G17P_COLOR_ILP))
+      return false;
+
+   unsigned loads = 0, stores = 0, load_target = 0, store_target = 0;
+   agx_foreach_instr_in_block(block, I) {
+      if (instr_after_logical_end(I))
+         break;
+      switch (I->op) {
+      case AGX_OPCODE_LD_TILE:
+         ++loads;
+         load_target = I->colour_target;
+         break;
+      case AGX_OPCODE_ST_TILE:
+         ++stores;
+         store_target = I->colour_target;
+         break;
+      case AGX_OPCODE_PHI:
+      case AGX_OPCODE_WAIT_PIX:
+      case AGX_OPCODE_MOV:
+      case AGX_OPCODE_MOV_IMM:
+      case AGX_OPCODE_SPLIT:
+      case AGX_OPCODE_COLLECT:
+      case AGX_OPCODE_BITOP:
+      case AGX_OPCODE_BFI:
+      case AGX_OPCODE_BFEIL:
+      case AGX_OPCODE_IADD:
+      case AGX_OPCODE_CONVERT:
+      case AGX_OPCODE_FADD:
+      case AGX_OPCODE_FMUL:
+      case AGX_OPCODE_FFMA:
+      case AGX_OPCODE_FLTNORM_AGX3:
+      case AGX_OPCODE_NORMFLT_AGX3:
+         break;
+      default:
+         return false;
+      }
+      agx_foreach_dest(I, d) {
+         if (I->dest[d].type != AGX_INDEX_NORMAL &&
+             I->dest[d].type != AGX_INDEX_NULL)
+            return false;
+      }
+      agx_foreach_src(I, src) {
+         if (I->src[src].type == AGX_INDEX_REGISTER)
+            return false;
+      }
+   }
+   return loads == 1 && stores == 1 && load_target == store_target;
+}
+
 void
 agx_ilp_schedule(agx_context *ctx)
 {
@@ -854,10 +968,15 @@ agx_ilp_schedule(agx_context *ctx)
    }
 
    agx_foreach_block(ctx, block) {
-      if (block->index < nr_blocks && in_loop[block->index] &&
-          !ilp_block_has_memory(block))
+      if (block->index >= nr_blocks)
+         continue;
+      if (in_loop[block->index] && !ilp_block_has_memory(block)) {
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
                             slack >= 0 && slack <= 256 ? (signed)slack : 2);
+      } else if (!in_loop[block->index] && ilp_single_tile_blend(ctx, block)) {
+         /* Hardware-qualified color-only budget; leave loop pressure alone. */
+         ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency, 8);
+      }
    }
 
    agx_foreach_instr_global(ctx, I) {

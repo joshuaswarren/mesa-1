@@ -53,6 +53,14 @@ main(void)
 
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       if (i == LIBAGX_FILL_UINT4 ||
+          /* Qualified with G17P lossless colour compression (2a747b85c24):
+           * compressed render-pass clears dispatch it for metadata/body. */
+          (i >= LIBAGX_FAST_CLEAR_0 && i <= LIBAGX_FAST_CLEAR_14) ||
+          /* Adjacency index materialisation, qualified in
+           * target_supports_program() with its host oracle
+           * (test-poly-adj-map). */
+          i == LIBAGX_WRITE_ADJ_INDICES ||
+          i == LIBAGX_WRITE_ADJ_INDICES_INDIRECT ||
           /* Qualified in agx_supports_precompiled() (src/asahi/clc/
            * asahi_clc.c) after this list was first written.  This list is a
            * deliberate second copy: it is a tripwire, so a kernel that starts
@@ -157,6 +165,16 @@ main(void)
       }
    }
 
+   /* The fingerprints below were re-pinned against agx3 92a8b2d13e3, whose
+    * generated libagx_shaders.c is byte-identical to the int4fix desktop
+    * build that passed the Neo broad CTS gate (2026-10-01). Since the
+    * previous pins the default G17P code generation (253b68945fd v56h,
+    * 2b2e972d60b "Mesa W") promotes integer constants into a 128-byte block
+    * ahead of main (main_offset 128, larger push_count) and the internal
+    * kernels' argument uniforms moved up 12 halves; sizes and register counts
+    * changed with them. Byte counts quoted in the comments describe the
+    * kernels as first pinned. */
+
    /* G17P compressed and ordinary R8/RGBA8/BGRA8 uploads use one raw
     * copy-image launch per slice. Its native 2D grid and CPU-reduced tile
     * geometry eliminate per-element division, trimming the binary from 4,056
@@ -176,11 +194,11 @@ main(void)
    static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(copy_image_info->preamble_offset == 0);
    CHECK(copy_image_info->main_offset == 0);
-   CHECK(copy_image_info->main_size == 1606);
-   CHECK(copy_image_info->binary_size == 1606);
+   CHECK(copy_image_info->main_size == 1414);
+   CHECK(copy_image_info->binary_size == 1414);
    CHECK(copy_image_info->nr_gprs == 22);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
-   CHECK(copy_image_info->push_count == 42);
+   CHECK(copy_image_info->push_count == 54);
    CHECK(copy_image_info->workgroup_size[0] == 32);
    CHECK(copy_image_info->workgroup_size[1] == 1);
    CHECK(copy_image_info->workgroup_size[2] == 1);
@@ -190,7 +208,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0xbc86c399457f3a6a));
+         UINT64_C(0x75d08f991b654176));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -209,12 +227,12 @@ main(void)
       (const uint8_t *)resolve_blob + sizeof(*resolve_info);
    static const uint8_t resolve_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(resolve_info->preamble_offset == 0);
-   CHECK(resolve_info->main_offset == 0);
-   CHECK(resolve_info->main_size == 4686);
-   CHECK(resolve_info->binary_size == 4686);
-   CHECK(resolve_info->nr_gprs == 42);
+   CHECK(resolve_info->main_offset == 128);
+   CHECK(resolve_info->main_size == 3854);
+   CHECK(resolve_info->binary_size == 3982);
+   CHECK(resolve_info->nr_gprs == 36);
    CHECK(resolve_info->nr_preamble_gprs == 0);
-   CHECK(resolve_info->push_count == 42);
+   CHECK(resolve_info->push_count == 70);
    CHECK(resolve_info->workgroup_size[0] == 32);
    CHECK(resolve_info->workgroup_size[1] == 1);
    CHECK(resolve_info->workgroup_size[2] == 1);
@@ -224,7 +242,7 @@ main(void)
    CHECK(resolve_info->agx3_staging_known);
    CHECK(resolve_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(resolve_binary, resolve_info->binary_size) ==
-         UINT64_C(0x3ec2844f60948ce4));
+         UINT64_C(0xf89623416b66406d));
    CHECK(memcmp(resolve_binary + resolve_info->binary_size -
                    sizeof(resolve_end),
                 resolve_end, sizeof(resolve_end)) == 0);
@@ -248,11 +266,11 @@ main(void)
       (const uint8_t *)mipmap_blob + sizeof(*mipmap_info);
    CHECK(mipmap_info->preamble_offset == 0);
    CHECK(mipmap_info->main_offset == 0);
-   CHECK(mipmap_info->main_size == 3190);
-   CHECK(mipmap_info->binary_size == 3190);
-   CHECK(mipmap_info->nr_gprs == 38);
+   CHECK(mipmap_info->main_size == 2830);
+   CHECK(mipmap_info->binary_size == 2830);
+   CHECK(mipmap_info->nr_gprs == 34);
    CHECK(mipmap_info->nr_preamble_gprs == 0);
-   CHECK(mipmap_info->push_count == 28);
+   CHECK(mipmap_info->push_count == 40);
    CHECK(mipmap_info->workgroup_size[0] == 32);
    CHECK(mipmap_info->workgroup_size[1] == 1);
    CHECK(mipmap_info->workgroup_size[2] == 1);
@@ -262,7 +280,7 @@ main(void)
    CHECK(mipmap_info->agx3_staging_known);
    CHECK(mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(mipmap_binary, mipmap_info->binary_size) ==
-         UINT64_C(0xd412eb7d64cc5c54));
+         UINT64_C(0x116791239c583bfd));
    CHECK(memcmp(mipmap_binary + mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -282,12 +300,12 @@ main(void)
    const uint8_t *odd_mipmap_binary =
       (const uint8_t *)odd_mipmap_blob + sizeof(*odd_mipmap_info);
    CHECK(odd_mipmap_info->preamble_offset == 0);
-   CHECK(odd_mipmap_info->main_offset == 0);
-   CHECK(odd_mipmap_info->main_size == 3442);
-   CHECK(odd_mipmap_info->binary_size == 3442);
+   CHECK(odd_mipmap_info->main_offset == 128);
+   CHECK(odd_mipmap_info->main_size == 3084);
+   CHECK(odd_mipmap_info->binary_size == 3212);
    CHECK(odd_mipmap_info->nr_gprs == 36);
    CHECK(odd_mipmap_info->nr_preamble_gprs == 0);
-   CHECK(odd_mipmap_info->push_count == 28);
+   CHECK(odd_mipmap_info->push_count == 44);
    CHECK(odd_mipmap_info->workgroup_size[0] == 32);
    CHECK(odd_mipmap_info->workgroup_size[1] == 1);
    CHECK(odd_mipmap_info->workgroup_size[2] == 1);
@@ -297,7 +315,7 @@ main(void)
    CHECK(odd_mipmap_info->agx3_staging_known);
    CHECK(odd_mipmap_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(odd_mipmap_binary, odd_mipmap_info->binary_size) ==
-         UINT64_C(0x1256365ce6cd378b));
+         UINT64_C(0xb399b4b4e1828d33));
    CHECK(memcmp(odd_mipmap_binary + odd_mipmap_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -313,12 +331,12 @@ main(void)
       (const uint8_t *)byte_count_blob + sizeof(*byte_count_info);
    static const uint8_t byte_count_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(byte_count_info->preamble_offset == 0);
-   CHECK(byte_count_info->main_offset == 0);
-   CHECK(byte_count_info->main_size == 332);
-   CHECK(byte_count_info->binary_size == 332);
-   CHECK(byte_count_info->nr_gprs == 16);
+   CHECK(byte_count_info->main_offset == 128);
+   CHECK(byte_count_info->main_size == 304);
+   CHECK(byte_count_info->binary_size == 432);
+   CHECK(byte_count_info->nr_gprs == 12);
    CHECK(byte_count_info->nr_preamble_gprs == 0);
-   CHECK(byte_count_info->push_count == 16);
+   CHECK(byte_count_info->push_count == 32);
    CHECK(byte_count_info->workgroup_size[0] == 1);
    CHECK(byte_count_info->workgroup_size[1] == 1);
    CHECK(byte_count_info->workgroup_size[2] == 1);
@@ -328,7 +346,7 @@ main(void)
    CHECK(byte_count_info->agx3_staging_known);
    CHECK(byte_count_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(byte_count_binary, byte_count_info->binary_size) ==
-         UINT64_C(0xa698ddb6b7dcd46c));
+         UINT64_C(0x70b42dd787c3d837));
    CHECK(memcmp(byte_count_binary + byte_count_info->binary_size -
                    sizeof(byte_count_end),
                 byte_count_end, sizeof(byte_count_end)) == 0);
@@ -340,14 +358,15 @@ main(void)
    const struct {
       unsigned index;
       uint32_t size;
+      uint16_t push_count;
       uint64_t hash;
    } robust_index[] = {
-      {LIBAGX_DRAW_ROBUST_INDEX_0, 3282,
-       UINT64_C(0x4d6a2a534eb147d2)},
-      {LIBAGX_DRAW_ROBUST_INDEX_1, 3354,
-       UINT64_C(0x35d000696c7b7865)},
-      {LIBAGX_DRAW_ROBUST_INDEX_2, 3352,
-       UINT64_C(0xa8a7f8b341b3355f)},
+      {LIBAGX_DRAW_ROBUST_INDEX_0, 3332, 54,
+       UINT64_C(0x8781d3fa33d42e7e)},
+      {LIBAGX_DRAW_ROBUST_INDEX_1, 3394, 58,
+       UINT64_C(0x862e57e86dbac1c8)},
+      {LIBAGX_DRAW_ROBUST_INDEX_2, 3394, 56,
+       UINT64_C(0xa79a191219121586)},
    };
    static const uint8_t robust_end[] = {0x0e, 0x00, 0x00, 0x00};
    for (unsigned i = 0; i < ARRAY_SIZE(robust_index); ++i) {
@@ -368,12 +387,12 @@ main(void)
                  "robust-index[%u]: size=%u hash=%#" PRIx64 "\n", i,
                  robust_info->binary_size, robust_hash);
       CHECK(robust_info->preamble_offset == 0);
-      CHECK(robust_info->main_offset == 0);
-      CHECK(robust_info->main_size == robust_index[i].size);
+      CHECK(robust_info->main_offset == 128);
+      CHECK(robust_info->main_size == robust_index[i].size - 128);
       CHECK(robust_info->binary_size == robust_index[i].size);
       CHECK(robust_info->nr_gprs == 56);
       CHECK(robust_info->nr_preamble_gprs == 0);
-      CHECK(robust_info->push_count == 32);
+      CHECK(robust_info->push_count == robust_index[i].push_count);
       CHECK(robust_info->workgroup_size[0] == 32);
       CHECK(robust_info->workgroup_size[1] == 1);
       CHECK(robust_info->workgroup_size[2] == 1);
@@ -399,7 +418,7 @@ main(void)
    CHECK(info->binary_size == sizeof(expected));
    CHECK(info->nr_gprs == 16);
    CHECK(info->nr_preamble_gprs == 0);
-   CHECK(info->push_count == 14);
+   CHECK(info->push_count == 26);
    CHECK(info->workgroup_size[0] == 32);
    CHECK(info->workgroup_size[1] == 1);
    CHECK(info->workgroup_size[2] == 1);
@@ -424,10 +443,10 @@ main(void)
    static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(xfb_info->preamble_offset == 0);
    CHECK(xfb_info->main_offset == 0);
-   CHECK(xfb_info->main_size == 168);
-   CHECK(xfb_info->binary_size == 168);
+   CHECK(xfb_info->main_size == 162);
+   CHECK(xfb_info->binary_size == 162);
    CHECK(xfb_info->nr_gprs == 12);
-   CHECK(xfb_info->push_count == 4);
+   CHECK(xfb_info->push_count == 16);
    CHECK(xfb_info->workgroup_size[0] == 4);
    CHECK(xfb_info->workgroup_size[1] == 1);
    CHECK(xfb_info->workgroup_size[2] == 1);
@@ -451,12 +470,12 @@ main(void)
    const uint8_t *ia_binary =
       (const uint8_t *)ia_blob + sizeof(*ia_info);
    CHECK(ia_info->preamble_offset == 0);
-   CHECK(ia_info->main_offset == 0);
-   CHECK(ia_info->main_size == 1364);
-   CHECK(ia_info->binary_size == 1364);
-   CHECK(ia_info->nr_gprs == 26);
+   CHECK(ia_info->main_offset == 128);
+   CHECK(ia_info->main_size == 1252);
+   CHECK(ia_info->binary_size == 1380);
+   CHECK(ia_info->nr_gprs == 28);
    CHECK(ia_info->nr_preamble_gprs == 0);
-   CHECK(ia_info->push_count == 28);
+   CHECK(ia_info->push_count == 44);
    CHECK(ia_info->workgroup_size[0] == 1);
    CHECK(ia_info->workgroup_size[1] == 1);
    CHECK(ia_info->workgroup_size[2] == 1);
@@ -466,7 +485,7 @@ main(void)
    CHECK(ia_info->agx3_staging_known);
    CHECK(ia_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(ia_binary, ia_info->binary_size) ==
-         UINT64_C(0xccb20ed438e45f04));
+         UINT64_C(0xa7601b6b0a9eacb4));
    CHECK(memcmp(ia_binary + ia_info->binary_size - sizeof(end), end,
                 sizeof(end)) == 0);
 
@@ -488,12 +507,12 @@ main(void)
       /* The top-level loop has the native guard/entry/exit scopes. Native
        * descriptor scheduling assigns independent slots and uses per-slot
        * dependent wait carriers while keeping adjacent producers overlapped. */
-      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2884, 3012, 48, 40,
-       {1024, 1, 1}, 4, UINT64_C(0xf620f3d617876470)},
-      {LIBAGX_COPY_QUERY, 0, 890, 890, 24, 25, {32, 1, 1}, 0,
-       UINT64_C(0x28b92f478b1714d4)},
-      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 82, 82, 8, 10, {1, 1, 1}, 0,
-       UINT64_C(0xd292b1db166dd1e9)},
+      {LIBAGX_INCREMENT_IA_RESTART_NONNULL, 128, 2638, 2766, 44, 66,
+       {1024, 1, 1}, 4, UINT64_C(0x135b087e7f3ae651)},
+      {LIBAGX_COPY_QUERY, 0, 802, 802, 24, 37, {32, 1, 1}, 0,
+       UINT64_C(0xb93e707e6841381f)},
+      {LIBAGX_INCREMENT_CS_INVOCATIONS, 0, 82, 82, 8, 22, {1, 1, 1}, 0,
+       UINT64_C(0xa0c268972f000612)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(statistics); ++i) {
       const uint32_t *statistics_blob = libagx_g17p[statistics[i].index];
@@ -542,8 +561,8 @@ main(void)
       uint32_t size;
       uint64_t hash;
    } predicate[] = {
-      {LIBAGX_PREDICATE_INDIRECT_0, 622, UINT64_C(0xd312d6837034a3df)},
-      {LIBAGX_PREDICATE_INDIRECT_1, 760, UINT64_C(0xa7af1ba09fd87252)},
+      {LIBAGX_PREDICATE_INDIRECT_0, 558, UINT64_C(0x694da09230b03781)},
+      {LIBAGX_PREDICATE_INDIRECT_1, 686, UINT64_C(0xc4c1e02f4a270e85)},
    };
    for (unsigned i = 0; i < ARRAY_SIZE(predicate); ++i) {
       const uint32_t *predicate_blob = libagx_g17p[predicate[i].index];
@@ -558,9 +577,9 @@ main(void)
       CHECK(predicate_info->main_offset == 0);
       CHECK(predicate_info->main_size == predicate[i].size);
       CHECK(predicate_info->binary_size == predicate[i].size);
-      CHECK(predicate_info->nr_gprs == 24);
+      CHECK(predicate_info->nr_gprs == 18);
       CHECK(predicate_info->nr_preamble_gprs == 0);
-      CHECK(predicate_info->push_count == 14);
+      CHECK(predicate_info->push_count == 26);
       CHECK(predicate_info->workgroup_size[0] == 32);
       CHECK(predicate_info->workgroup_size[1] == 1);
       CHECK(predicate_info->workgroup_size[2] == 1);
@@ -596,7 +615,7 @@ main(void)
    CHECK(conditional_info->binary_size == 180);
    CHECK(conditional_info->nr_gprs == 6);
    CHECK(conditional_info->nr_preamble_gprs == 0);
-   CHECK(conditional_info->push_count == 16);
+   CHECK(conditional_info->push_count == 28);
    CHECK(conditional_info->workgroup_size[0] == 1);
    CHECK(conditional_info->workgroup_size[1] == 1);
    CHECK(conditional_info->workgroup_size[2] == 1);
@@ -606,7 +625,7 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0x89f7e9a45c600e83));
+         UINT64_C(0xc0f57f69909964bb));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);
@@ -620,8 +639,8 @@ main(void)
     * The Mesa ABI form addresses both pointers from its uniforms, leaving
     * exactly that load, store and end. */
    static const uint8_t timestamp_expected[] = {
-      0x67, 0x00, 0x54, 0x00, 0x01, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
-      0x40, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x67, 0x00, 0x54, 0x00, 0x04, 0x00, 0x00, 0x00, 0x19, 0x00, 0x00,
+      0x80, 0x02, 0x00, 0xe7, 0x10, 0x54, 0x00, 0x03, 0x00, 0x00, 0x00,
       0x19, 0x00, 0x00, 0x90, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
    };
    const uint32_t *timestamp_blob = libagx_g17p[LIBAGX_COPY_TIMESTAMP];
@@ -636,7 +655,7 @@ main(void)
    CHECK(timestamp_info->binary_size == sizeof(timestamp_expected));
    CHECK(timestamp_info->nr_gprs == 4);
    CHECK(timestamp_info->nr_preamble_gprs == 0);
-   CHECK(timestamp_info->push_count == 8);
+   CHECK(timestamp_info->push_count == 20);
    CHECK(timestamp_info->workgroup_size[0] == 1);
    CHECK(timestamp_info->workgroup_size[1] == 1);
    CHECK(timestamp_info->workgroup_size[2] == 1);
@@ -661,12 +680,12 @@ main(void)
    const uint8_t *factors_binary =
       (const uint8_t *)factors_blob + sizeof(*factors_info);
    CHECK(factors_info->preamble_offset == 0);
-   CHECK(factors_info->main_offset == 0);
-   CHECK(factors_info->main_size == 1510);
-   CHECK(factors_info->binary_size == 1510);
+   CHECK(factors_info->main_offset == 128);
+   CHECK(factors_info->main_size == 1282);
+   CHECK(factors_info->binary_size == 1410);
    CHECK(factors_info->nr_gprs == 28);
    CHECK(factors_info->nr_preamble_gprs == 0);
-   CHECK(factors_info->push_count == 10);
+   CHECK(factors_info->push_count == 30);
    CHECK(factors_info->workgroup_size[0] == 32);
    CHECK(factors_info->workgroup_size[1] == 1);
    CHECK(factors_info->workgroup_size[2] == 1);
@@ -676,7 +695,7 @@ main(void)
    CHECK(factors_info->agx3_staging_known);
    CHECK(factors_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(factors_binary, factors_info->binary_size) ==
-         UINT64_C(0x897af867361b9f42));
+         UINT64_C(0xc35a55da13cfe766));
    CHECK(memcmp(factors_binary + factors_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
 
@@ -693,12 +712,12 @@ main(void)
    const uint8_t *setup_binary =
       (const uint8_t *)setup_blob + sizeof(*setup_info);
    CHECK(setup_info->preamble_offset == 0);
-   CHECK(setup_info->main_offset == 0);
-   CHECK(setup_info->main_size == 2186);
-   CHECK(setup_info->binary_size == 2186);
-   CHECK(setup_info->nr_gprs == 48);
+   CHECK(setup_info->main_offset == 128);
+   CHECK(setup_info->main_size == 2138);
+   CHECK(setup_info->binary_size == 2266);
+   CHECK(setup_info->nr_gprs == 40);
    CHECK(setup_info->nr_preamble_gprs == 0);
-   CHECK(setup_info->push_count == 40);
+   CHECK(setup_info->push_count == 58);
    CHECK(setup_info->workgroup_size[0] == 1);
    CHECK(setup_info->workgroup_size[1] == 1);
    CHECK(setup_info->workgroup_size[2] == 1);
@@ -708,7 +727,7 @@ main(void)
    CHECK(setup_info->agx3_staging_known);
    CHECK(setup_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(setup_binary, setup_info->binary_size) ==
-         UINT64_C(0xbf22b41150f292ab));
+         UINT64_C(0xaf4799f3590fa587));
    CHECK(memcmp(setup_binary + setup_info->binary_size - sizeof(end),
                 end, sizeof(end)) == 0);
 

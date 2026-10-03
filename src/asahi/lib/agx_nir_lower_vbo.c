@@ -4,6 +4,10 @@
  */
 
 #include "agx_nir_lower_vbo.h"
+#include "util/u_debug.h"
+
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vbo_common_index,
+                          "AGX_G17P_VBO_COMMON_INDEX", false)
 #include "asahi/compiler/agx_nir.h"
 #include "asahi/layout/layout.h"
 #include "compiler/nir/nir_builder.h"
@@ -18,7 +22,80 @@ struct ctx {
    struct agx_robustness rs;
    bool dynamic_strides;
    bool native_raw;
+   const struct agx_vbo_group *groups;
 };
+
+static unsigned
+vbo_32bit_components(enum pipe_format format)
+{
+   if (!format)
+      return 0;
+   const struct util_format_description *d = util_format_description(format);
+   int c = util_format_get_first_non_void_channel(format);
+   return c >= 0 && d->is_array && d->layout == UTIL_FORMAT_LAYOUT_PLAIN &&
+          d->colorspace == UTIL_FORMAT_COLORSPACE_RGB && d->channel[c].size == 32
+             ? util_format_get_nr_components(format) : 0;
+}
+
+static bool
+vbo_unorm8_word(enum pipe_format format)
+{
+   return format == PIPE_FORMAT_R8G8B8A8_UNORM ||
+          format == PIPE_FORMAT_B8G8R8A8_UNORM;
+}
+
+static unsigned
+vbo_group_words(enum pipe_format format, bool mixed_unorm8)
+{
+   return mixed_unorm8 && vbo_unorm8_word(format)
+             ? 1 : vbo_32bit_components(format);
+}
+
+static void
+agx_vbo_group_words(const struct agx_velem_key *attribs,
+                    const struct agx_vbo_binding *bindings, uint16_t valid,
+                    struct agx_vbo_group *groups, bool mixed_unorm8)
+{
+   memset(groups, 0, sizeof(*groups) * AGX_MAX_ATTRIBS);
+   for (unsigned a = 0; a < AGX_MAX_ATTRIBS; ++a) {
+      if (!(valid & BITFIELD_BIT(a)) || groups[a].count)
+         continue;
+      unsigned ac = vbo_group_words(attribs[a].format, mixed_unorm8);
+      if (!ac || ac >= 4 || (bindings[a].offset & 3) ||
+          (attribs[a].stride & 3))
+         continue;
+      for (unsigned b = 0; b < AGX_MAX_ATTRIBS; ++b) {
+         unsigned bc = (valid & BITFIELD_BIT(b))
+                          ? vbo_group_words(attribs[b].format, mixed_unorm8) : 0;
+         if (a == b || groups[b].count || !bc || ac + bc > 4 ||
+             bindings[a].binding != bindings[b].binding ||
+             (uint64_t)bindings[a].offset + ac * 4 != bindings[b].offset ||
+             attribs[a].stride != attribs[b].stride ||
+             attribs[a].instanced != attribs[b].instanced ||
+             attribs[a].divisor != attribs[b].divisor)
+            continue;
+         groups[a] = (struct agx_vbo_group){a, 0, ac + bc};
+         groups[b] = (struct agx_vbo_group){a, ac, ac + bc};
+         break;
+      }
+   }
+}
+
+void
+agx_vbo_group_32bit(const struct agx_velem_key *attribs,
+                    const struct agx_vbo_binding *bindings, uint16_t valid,
+                    struct agx_vbo_group *groups)
+{
+   agx_vbo_group_words(attribs, bindings, valid, groups, false);
+}
+
+void
+agx_vbo_group_mixed(const struct agx_velem_key *attribs,
+                    const struct agx_vbo_binding *bindings, uint16_t valid,
+                    struct agx_vbo_group *groups)
+{
+   agx_vbo_group_words(attribs, bindings, valid, groups, true);
+}
 
 /* G17P's general multiply-high encoding is not hardware-qualified yet, while
  * nir_opt_idiv_const lowers non-power-of-two udiv to multiply-high. Vertex
@@ -315,7 +392,19 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
       el = nir_bcsel(b, oob, nir_imm_int(b, 0), el);
    }
 
-   nir_def *base = nir_load_vbo_base_agx(b, buf_handle);
+   const struct agx_vbo_group *group = ctx->groups ? &ctx->groups[index] : NULL;
+   const bool grouped_unorm8 = vbo_unorm8_word(attrib.format);
+   const bool grouped = group && group->count && intr->def.bit_size == 32 &&
+      ctx->rs.level == AGX_ROBUSTNESS_DISABLED && ctx->rs.soft_fault &&
+      !ctx->dynamic_strides &&
+      ((interchange_format == PIPE_FORMAT_R32_UINT && desc->is_array &&
+        desc->channel[chan].size == 32) || grouped_unorm8);
+   if (grouped) {
+      interchange_align = 4;
+      interchange_format = PIPE_FORMAT_R32_UINT;
+   }
+   nir_def *base_handle = grouped ? nir_imm_int(b, group->anchor) : buf_handle;
+   nir_def *base = nir_load_vbo_base_agx(b, base_handle);
 
    assert((stride % interchange_align) == 0 && "must be aligned");
 
@@ -331,6 +420,22 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
       shift = util_logbase2(stride_el);
       stride_el = 1;
+   }
+
+   /* A static, word-aligned interleaved buffer can share one word index
+    * across its byte, half and word loads. G17P's explicit byte-index flag
+    * makes the hardware scale independent of the access width. Keep the
+    * multiply in words rather than bytes so full-width attributes retain
+    * their existing 34-bit byte-address span. Narrow accesses then use that
+    * same span instead of wrapping their scaled multiply at 32/33 bits.
+    * This does not fix the existing word-index overflow beyond that span.
+    */
+   if (ctx->native_raw && !ctx->dynamic_strides && !(stride & 3) &&
+       !util_is_power_of_two_or_zero(stride) &&
+       ctx->rs.level == AGX_ROBUSTNESS_DISABLED && ctx->rs.soft_fault &&
+       debug_get_option_agx_g17p_vbo_common_index()) {
+      stride_el = stride / 4;
+      shift = 2 | AGX_NIR_MEMORY_INDEX_BYTES;
    }
 
    nir_def *stride_el_def = nir_imm_int(b, stride_el);
@@ -349,6 +454,22 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    if (ctx->rs.level >= AGX_ROBUSTNESS_D3D && rs_address_fixup) {
       base = nir_bcsel(b, oob, nir_imm_int64(b, 0), base);
+   }
+
+   if (grouped && grouped_unorm8) {
+      nir_def *raw = nir_load_constant_agx(
+         b, group->count, 32, base, stride_offset_el,
+         .format = PIPE_FORMAT_R32_UINT, .base = shift);
+      nir_def *value = nir_unpack_vbo_unorm_4x8_agx(
+         b, nir_channel(b, raw, group->first));
+      nir_def *channels[4];
+      for (unsigned i = 0; i < intr->num_components; ++i) {
+         unsigned c = nir_intrinsic_component(intr) + i;
+         channels[i] = apply_swizzle_channel(b, value, desc->swizzle[c], false);
+      }
+      nir_def_rewrite_uses(&intr->def,
+                          nir_vec(b, channels, intr->num_components));
+      return true;
    }
 
    /* G17P formats with a native conversion (g17p_fetch_class above). The
@@ -447,8 +568,15 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    /* Load the raw vector */
    nir_def *memory = nir_load_constant_agx(
-      b, interchange_comps, interchange_register_size, base, stride_offset_el,
+      b, grouped ? group->count : interchange_comps,
+      interchange_register_size, base, stride_offset_el,
       .format = interchange_format, .base = shift);
+   if (grouped) {
+      unsigned components[4];
+      for (unsigned c = 0; c < interchange_comps; ++c)
+         components[c] = group->first + c;
+      memory = nir_swizzle(b, memory, components, interchange_comps);
+   }
 
    /* For scalar loads, it's faster to fix up the output than the address. */
    if (ctx->rs.level >= AGX_ROBUSTNESS_D3D && !rs_address_fixup) {
@@ -519,7 +647,8 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
 static bool
 lower_vbo(nir_shader *shader, const struct agx_velem_key *attribs,
-          struct agx_robustness robustness, bool dynamic_strides, bool native_raw)
+          struct agx_robustness robustness, bool dynamic_strides, bool native_raw,
+          const struct agx_vbo_group *groups)
 {
    assert(shader->info.stage == MESA_SHADER_VERTEX);
 
@@ -535,6 +664,7 @@ lower_vbo(nir_shader *shader, const struct agx_velem_key *attribs,
       .rs = robustness,
       .dynamic_strides = dynamic_strides,
       .native_raw = native_raw,
+      .groups = groups,
    };
 
    return nir_shader_intrinsics_pass(shader, pass, nir_metadata_control_flow,
@@ -545,12 +675,22 @@ bool
 agx_nir_lower_vbo(nir_shader *shader, const struct agx_velem_key *attribs,
                   struct agx_robustness robustness, bool dynamic_strides)
 {
-   return lower_vbo(shader, attribs, robustness, dynamic_strides, false);
+   return lower_vbo(shader, attribs, robustness, dynamic_strides, false, NULL);
 }
 
 bool
 agx_nir_lower_vbo_raw(nir_shader *shader, const struct agx_velem_key *attribs,
                       struct agx_robustness robustness, bool dynamic_strides)
 {
-   return lower_vbo(shader, attribs, robustness, dynamic_strides, true);
+   return lower_vbo(shader, attribs, robustness, dynamic_strides, true, NULL);
+}
+
+bool
+agx_nir_lower_vbo_raw_grouped(nir_shader *shader,
+                              const struct agx_velem_key *attribs,
+                              struct agx_robustness robustness,
+                              bool dynamic_strides,
+                              const struct agx_vbo_group *groups)
+{
+   return lower_vbo(shader, attribs, robustness, dynamic_strides, true, groups);
 }

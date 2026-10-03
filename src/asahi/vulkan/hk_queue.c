@@ -36,6 +36,7 @@
 #include <xf86drm.h>
 #include "util/list.h"
 #include "util/macros.h"
+#include "util/os_time.h"
 #include "util/u_atomic.h"
 #include "util/u_debug.h"
 #include "util/u_dynarray.h"
@@ -1811,11 +1812,27 @@ hk_sparse_submission_updates_sstt(const struct vk_queue_submit *submission)
    return false;
 }
 
+/* v96 HK_G17P_SLOW_SUBMIT_US=N (diagnostic, runtime-only): print every
+ * submission whose host-side work took N us or longer, split into command
+ * construction (sync resolve, attachment lists, command fill) and the ioctl. */
+static uint64_t
+hk_g17p_slow_submit_us(void)
+{
+   static int64_t cached = -1;
+   if (unlikely(cached < 0)) {
+      const char *v = getenv("HK_G17P_SLOW_SUBMIT_US");
+      cached = v ? strtoull(v, NULL, 0) : 0;
+   }
+   return cached;
+}
+
 static VkResult
 queue_submit(struct hk_device *dev, struct hk_queue *queue,
              struct vk_queue_submit *submit)
 {
    bool flush_sstt = false;
+   const uint64_t slow_us = hk_g17p_slow_submit_us();
+   const uint64_t slow_t0 = slow_us ? os_time_get_nano() : 0;
 
    /* TODO: Support asynchronous sparse queue? */
    if (submit->buffer_bind_count || submit->image_bind_count ||
@@ -1915,6 +1932,19 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
       nr_flushes++;
    }
 
+   /* Tile hazards against this queue's earlier submissions need the point
+    * the queue has completed; fetched only when a partial-tile render pass
+    * instance is submitted while such a footprint may still be running. On
+    * failure every earlier submission is treated as still running. */
+   uint64_t completed = 0;
+   if (hk_sync_submit_needs_completed(
+          queue, (struct hk_cmd_buffer *const *)submit->command_buffers,
+          submit->command_buffer_count)) {
+      uint64_t point = 0;
+      if (drmSyncobjQuery(dev->dev.fd, &queue->drm.syncobj, &point, 1) == 0)
+         completed = point;
+   }
+
    /* Every command's barrier fields come from recorded dependencies. Legacy
     * kernels attach input syncs only to the first command, requiring a chain.
     * A kernel advertising per-command waits needs no such execution edge. */
@@ -1923,7 +1953,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
                           submit->command_buffer_count, flush_sstt,
                           wait_count > 0 &&
                           !(dev->dev.params.features &
-                            DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS));
+                            DRM_ASAHI_FEATURE_PER_COMMAND_INPUT_SYNCS),
+                          completed);
 
    for (unsigned i = 0; i < submit->command_buffer_count; ++i) {
       struct hk_cmd_buffer *cmdbuf =
@@ -2010,6 +2041,7 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    };
 
    VkResult result;
+   const uint64_t slow_t1 = slow_us ? os_time_get_nano() : 0;
    if (command_count <= max_commands_per_submit(dev)) {
       hk_g17p_faulttrace_capture(dev, queue, payload.data, payload.size,
                                  faulttrace_extra.data,
@@ -2021,6 +2053,18 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
    } else {
       result = queue_submit_looped(dev, queue, &submit_ioctl, command_count,
                                    queue->drm.virt_ring_idx);
+   }
+   if (slow_us) {
+      const uint64_t slow_t2 = os_time_get_nano();
+      if ((slow_t2 - slow_t0) / 1000 >= slow_us)
+         fprintf(stderr,
+                 "G17P slow submit: us=%.1f build_us=%.1f ioctl_us=%.1f "
+                 "streams=%u vdm=%u cdm=%u draws=%u command_buffers=%u "
+                 "waits=%u signals=%u payload_B=%u result=%d\n",
+                 (slow_t2 - slow_t0) / 1000.0, (slow_t1 - slow_t0) / 1000.0,
+                 (slow_t2 - slow_t1) / 1000.0, command_count, nr_vdm, nr_cdm,
+                 nr_draws, submit->command_buffer_count, wait_count,
+                 submit->signal_count, payload.size, result);
    }
 
    util_dynarray_fini(&payload);

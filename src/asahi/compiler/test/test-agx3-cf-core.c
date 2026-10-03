@@ -702,10 +702,69 @@ test_uniform_compare(void)
 }
 
 
+/* frg-codegen: Apple's G17P loop guard compares the trip-count uniform with
+ * an immediate directly (fs-apple.bin +0x0c, 0a072380060087020000). */
+static void
+test_uniform_imm_compare(void)
+{
+   uint8_t out[AGX3_CF_MAX_LENGTH], len = 0;
+   ++checks;
+   if (!agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ, 0,
+                                 6, 0, out, &len) ||
+       !hex_is(out, len, "0a072380060087020000")) {
+      fprintf(stderr, "uniform/immediate compare fs-apple +0x0c mismatch\n");
+      ++failures;
+   }
+   /* The register form of the same compare differs only in the operand
+    * class and index: f9 = 2 / f2 = register instead of f9 = 3 / f3. */
+   uint8_t reg[AGX3_CF_MAX_LENGTH], reg_len = 0;
+   ++checks;
+   if (!agx3_cf_icmp_imm(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ, 0, 4, 0,
+                         reg, &reg_len) ||
+       !hex_is(reg, reg_len, "0a052380060007020000")) {
+      fprintf(stderr, "register/immediate compare control mismatch\n");
+      ++failures;
+   }
+   /* Other uniforms, relations, immediates and slots compose (the packer
+    * relies on the whole even-index domain below 256). */
+   static const uint16_t uniforms[] = {0, 2, 18, 64, 128, 254};
+   static const enum agx3_cf_icond conds[] = {
+      AGX3_CF_ICOND_EQ, AGX3_CF_ICOND_ULT, AGX3_CF_ICOND_UGT,
+      AGX3_CF_ICOND_SLT, AGX3_CF_ICOND_SGT};
+   for (unsigned u = 0; u < ARRAY_SIZE(uniforms); ++u) {
+      for (unsigned c = 0; c < ARRAY_SIZE(conds); ++c) {
+         ++checks;
+         uint8_t a[AGX3_CF_MAX_LENGTH], b[AGX3_CF_MAX_LENGTH], la = 0, lb = 0;
+         if (!agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3B, conds[c], 1,
+                                       uniforms[u], 7, a, &la) ||
+             !agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3B, conds[c], 1,
+                                       uniforms[u] == 254 ? 0 : uniforms[u] + 2,
+                                       7, b, &lb) ||
+             la != 10 || lb != 10 || !memcmp(a, b, la)) {
+            fprintf(stderr, "uniform/immediate compare u%u cond %u\n",
+                    uniforms[u], conds[c]);
+            ++failures;
+         }
+      }
+   }
+   REJECT(agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3C, AGX3_CF_ICOND_EQ,
+                                   0, 6, 0, out, &len));
+   REJECT(agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                   0, 7, 0, out, &len));
+   REJECT(agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                   0, 256, 0, out, &len));
+   REJECT(agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3B,
+                                   (enum agx3_cf_icond)3, 0, 6, 0, out, &len));
+   REJECT(agx3_cf_icmp_uniform_imm(AGX_ISA_ENCODING_AGX3B, AGX3_CF_ICOND_EQ,
+                                   6, 6, 0, out, &len));
+}
+
+
 int
 main(void)
 {
    test_uniform_compare();
+   test_uniform_imm_compare();
    test_float_minifloat_compare();
    test_float_zero_compare();
    test_half_register_compare();

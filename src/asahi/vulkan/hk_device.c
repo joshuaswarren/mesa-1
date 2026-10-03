@@ -865,6 +865,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       result = VK_ERROR_OUT_OF_HOST_MEMORY;
       goto fail_rodata;
    }
+   hk_g17p_bg_eot_dev_cache_init(dev);
 
    dev->g17p_compute_program_cache.report_stats =
       debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
@@ -997,6 +998,7 @@ fail_queues:
 fail_internal_shaders:
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);
 fail_bg_eot:
+   hk_g17p_bg_eot_dev_cache_finish(dev);
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_rodata:
    agx_bo_unreference(&dev->dev, dev->rodata.heap_bo);
@@ -1084,6 +1086,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
    agx_bo_unreference(&dev->dev, dev->rodata.indexed_heap_pointers_bo);
    agx_bo_unreference(&dev->dev, dev->rodata.bo);
    agx_bo_unreference(&dev->dev, dev->heap);
+   hk_g17p_bg_eot_dev_cache_finish(dev);
    agx_bg_eot_cleanup(&dev->bg_eot);
    hk_finish_vm_status_mirror(dev);
    agx_close_device(&dev->dev);

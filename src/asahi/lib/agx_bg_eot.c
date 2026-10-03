@@ -418,6 +418,21 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
       bool layered = key->tib.layered;
       assert(nr > 0);
 
+      if (key->g17p_packed_clear && key->op[rt] == AGX_BG_CLEAR &&
+          cache->dev->chip == AGX_CHIP_G17P && rt == 0 &&
+          agx_g17p_packed_clear_ok(&key->tib)) {
+         /* One raw tile word: the driver packed the clear colour exactly as
+          * the R8G8B8A8_UNORM FLTNORM pair would, so store its 32 bits. */
+         nir_def *packed = nir_load_preamble(&b, 1, 32, 4 + (rt * 8));
+         nir_store_local_pixel_agx(&b, packed,
+                                   nir_imm_intN_t(&b, 0xFF, 16),
+                                   nir_undef(&b, 2, 16),
+                                   .base = agx_tilebuffer_offset_B(&key->tib, rt),
+                                   .write_mask = 0x1,
+                                   .format = PIPE_FORMAT_R32_UINT, .target = rt);
+         continue;
+      }
+
       nir_store_output(
          &b, build_background_op(&b, key->op[rt], rt, nr, source_msaa, layered,
                                  cache->dev->chip == AGX_CHIP_G17P ||

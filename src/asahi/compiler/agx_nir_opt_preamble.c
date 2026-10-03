@@ -6,6 +6,10 @@
 
 #include "compiler/nir/nir_builder.h"
 #include "util/macros.h"
+#include "util/u_debug.h"
+
+DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_vertex_uniform_sub,
+                          "AGX_G17P_VERTEX_UNIFORM_SUB", false)
 #include "agx_compiler.h"
 #include "nir.h"
 #include "nir_builder_opcodes.h"
@@ -75,9 +79,36 @@ all_uses_float(nir_def *def)
    return true;
 }
 
-static float
-alu_cost(nir_alu_instr *alu)
+/* G17P folds a full-width integer negate into an unshifted subtract,
+ * including a uniform subtrahend. Extracting that negate into the constant
+ * program adds work there without removing a main-program instruction. */
+static bool
+ineg_only_used_by_iadd(nir_alu_instr *alu)
 {
+   if (alu->op != nir_op_ineg || alu->def.bit_size != 32 ||
+       alu->def.num_components > 4)
+      return false;
+
+   nir_foreach_use_including_if(use, &alu->def) {
+      if (nir_src_is_if(use))
+         return false;
+      nir_instr *instr = nir_src_parent_instr(use);
+      if (instr->type != nir_instr_type_alu)
+         return false;
+      nir_alu_instr *consumer = nir_instr_as_alu(instr);
+      if (consumer->op != nir_op_iadd || consumer->def.bit_size != 32 ||
+          consumer->def.num_components > 4)
+         return false;
+   }
+   return true;
+}
+
+static float
+alu_cost(nir_alu_instr *alu, bool fold_uniform_sub)
+{
+   if (fold_uniform_sub && ineg_only_used_by_iadd(alu))
+      return 0.0;
+
    /* TODO: Model 64-bit better */
    if (alu->def.bit_size == 64)
       return 10.0f;
@@ -258,7 +289,7 @@ instr_cost(nir_instr *instr, const void *data)
       return 20.0;
 
    case nir_instr_type_alu:
-      return alu_cost(nir_instr_as_alu(instr));
+      return alu_cost(nir_instr_as_alu(instr), *(const bool *)data);
 
    default:
       return 1.0;
@@ -303,7 +334,8 @@ rewrite_cost(nir_def *def, const void *data)
 static bool
 avoid_instr(const nir_instr *instr, const void *data)
 {
-   return false;
+   return *(const bool *)data && instr->type == nir_instr_type_alu &&
+          ineg_only_used_by_iadd(nir_instr_as_alu(instr));
 }
 
 static const nir_opt_preamble_options preamble_options = {
@@ -426,10 +458,14 @@ lower_preamble(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
-agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes)
+agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p)
 {
    bool progress = false;
-   NIR_PASS(progress, nir, nir_opt_preamble, &preamble_options, sizes);
+   const bool fold_uniform_sub = g17p && nir->info.stage == MESA_SHADER_VERTEX &&
+      debug_get_option_agx_g17p_vertex_uniform_sub();
+   nir_opt_preamble_options options = preamble_options;
+   options.cb_data = &fold_uniform_sub;
+   NIR_PASS(progress, nir, nir_opt_preamble, &options, sizes);
 
    int16_t heap[512];
    memset(heap, ~0, sizeof(heap));

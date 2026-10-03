@@ -2470,6 +2470,15 @@ load("constant_agx", [1, 1], [ACCESS, BASE, FORMAT, SIGN_EXTEND],
 # src[] = { value, address, index }.
 store("agx", [1, 1], [ACCESS, BASE, FORMAT, SIGN_EXTEND])
 
+# G17P vertex UNORM8 conversion after a shared raw fetch. Source is one
+# little-endian packed 32-bit RGBA word; result is four 32-bit floats using
+# the same native conversion as a normalized load_constant_agx. Keeping it
+# separate from the memory operation allows a float3 and adjacent colour to
+# share a 16-byte fetch without changing the conversion's rounding.
+intrinsic("unpack_vbo_unorm_4x8_agx", src_comp=[1], dest_comp=4,
+          bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
+
+
 # Logical complement of load_front_face, mapping to an AGX system value
 system_value("back_face_agx", 1, bit_sizes=[1, 32])
 
@@ -2497,7 +2506,10 @@ load("sysval_agx", [], [DESC_SET, BINDING, FLAGS], [CAN_REORDER, CAN_ELIMINATE])
 # Write out a sample mask for a targeted subset of samples, specified in the two
 # masks. Maps to the corresponding AGX instruction, the actual workings are
 # documented elsewhere as they are too complicated for this comment.
-intrinsic("sample_mask_agx", src_comp=[1, 1])
+#
+# FLAGS (AGX G17P one-sample coverage words): bit i set means source i is
+# already reduced to bit 0 (0 or 1), so the backend need not mask it.
+intrinsic("sample_mask_agx", src_comp=[1, 1], indices=[FLAGS])
 
 # For a given row of the polygon stipple given as an integer source in [0, 31],
 # load the 32-bit stipple pattern for that row.
