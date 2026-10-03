@@ -177,9 +177,13 @@ shared_var_info(const struct glsl_type *type, unsigned *size, unsigned *align)
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_region,
                           "HK_G17P_ORDINARY_REGION", false)
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_single_sample,
-                          "HK_G17P_ORDINARY_SINGLE_SAMPLE", false)
+                          "HK_G17P_ORDINARY_SINGLE_SAMPLE", true)
+/* G17P's generic sampled-image lowering implements scaled formats and custom
+ * borders for every sample. Compile a second fragment program without those
+ * operations and select it only after proving all required descriptors at the
+ * draw. Mutable/unsupported descriptor layouts retain the generic program. */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_variants,
-                          "HK_G17P_ORDINARY_VARIANTS", false)
+                          "HK_G17P_ORDINARY_VARIANTS", true)
 /* v57, opt-in (see hk_ordinary_descriptor.h). */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_vs, "HK_G17P_ORDINARY_VS", false)
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_group_vbo32, "HK_G17P_GROUP_VBO32", false)
