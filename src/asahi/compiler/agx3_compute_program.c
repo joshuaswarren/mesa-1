@@ -58,9 +58,10 @@ agx3_g17p_compute_program_generate(
    struct agx3_g17p_compute_program staged = {0};
    size_t written = 0;
    if (!desc->uniform_range_count) {
-      if (!agx_ioto_g17p_no_resource_program_compose_trusted(
-             desc->program_va, &tail, staged.bytes, sizeof(staged.bytes),
-             &written))
+      if (!agx_ioto_g17p_program_compose_with_preshader(
+             desc->program_va, NULL, 0, NULL, 0, &tail,
+             AGX_IOTO_G17P_PROGRAM_VERTEX_COMPUTE, 0, desc->preshader,
+             staged.bytes, sizeof(staged.bytes), &written))
          return false;
    } else {
       uint8_t body[AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE];
@@ -93,10 +94,11 @@ agx3_g17p_compute_program_generate(
       if (!agx3_ioto_uniform_program_body_generate(
              chip, &load_desc, workspace, &body_size, &copy_offset) ||
           copy_offset > body_size ||
-          !agx_ioto_g17p_resource_program_compose_trusted(
+          !agx_ioto_g17p_program_compose_with_preshader(
              desc->program_va, body, copy_offset, body + copy_offset,
-             body_size - copy_offset, &tail, staged.bytes,
-             sizeof(staged.bytes), &written))
+             body_size - copy_offset, &tail,
+             AGX_IOTO_G17P_PROGRAM_VERTEX_COMPUTE, 0, desc->preshader,
+             staged.bytes, sizeof(staged.bytes), &written))
          return false;
    }
 

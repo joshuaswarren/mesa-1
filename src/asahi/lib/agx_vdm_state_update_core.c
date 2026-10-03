@@ -9,6 +9,26 @@
 
 #include <string.h>
 
+bool
+agx_vdm_state_update_encode_preamble_counts(
+   enum agx_chip chip, uint32_t ipr_bytes, uint32_t spill_bytes,
+   struct agx_vdm_state_update_preamble_counts *counts)
+{
+   if (counts)
+      memset(counts, 0, sizeof(*counts));
+
+   /* The largest even 12-bit count is 0xffe. Validate before addition so
+    * malformed metadata cannot wrap the rounding arithmetic. */
+   if (!counts || chip != AGX_CHIP_G17P ||
+       ipr_bytes > UINT32_C(0xffe) * 4 ||
+       spill_bytes > UINT32_C(0x3ffff) * 4)
+      return false;
+
+   counts->ipr_dwords = ((ipr_bytes + 7) / 8) * 2;
+   counts->spill_dwords = (spill_bytes + 3) / 4;
+   return true;
+}
+
 static void
 agx_vdm_state_update_store_le32(uint8_t *dst, uint32_t value)
 {

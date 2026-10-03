@@ -304,6 +304,12 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
    if (d == NULL || out == NULL || length == NULL)
       return false;
 
+   if (d->src_cache &&
+       (enc != AGX_ISA_ENCODING_AGX3B || d->quad || d->src_half ||
+        d->type != AGX3_SUBGROUP_BALLOT_INTEGER || d->compare_immediate ||
+        !d->src_live))
+      return false;
+
    /*
     * The 16-bit quad ballot of a register against zero. metal-nt -arch
     * applegpu_g17p, quad_any(x != 0) and quad_all(x == 0) of a buffer-loaded
@@ -411,7 +417,9 @@ agx3_subgroup_encode_ballot(enum agx_isa_encoding enc,
    /* AGX3c's immediate form marks a source that stays live with f25:
     * simd_ballot(x != 0) + x is f25 where the dead-x form has f27
     * (m6-libagx-forms2 lk_ballot_ne16_live / ne32_live). */
-   if (is_c(enc) && d->compare_immediate && d->src_live)
+   /* The signed-register live witness 17075404030002182206 also sets
+    * f25. Preserve its cache hint independently of f27's discard flag. */
+   if ((is_c(enc) && d->compare_immediate && d->src_live) || d->src_cache)
       ADD_FIELD(25, 1);
 
    const char *mnemonic;

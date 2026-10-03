@@ -643,6 +643,77 @@ test_g17s_minimal_compute_admission(void)
 }
 
 static int
+test_g17p_compute_preamble(void)
+{
+   static const uint8_t code[] = {
+      0x67, 0x00, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x19, 0x00, 0x00, 0x40, 0x02, 0x00, 0x0b, 0x01,
+      0x07, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
+      0x4b, 0x00, 0x01, 0x04, 0x5b, 0x02, 0x01, 0x04,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t branch[] = {
+      0x0f, 0x00, 0x54, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x00,
+   };
+   uint8_t binary[128 + sizeof(code)];
+   memset(binary, 0xa5, sizeof(binary));
+   memcpy(binary + 128, code, sizeof(code));
+   const struct agx3_ioto_uniform_range range = {
+      .start_halfs = 0, .size_halfs = 8, .address = UINT64_C(0x10000024000),
+   };
+   struct agx3_cdm_direct_template_sources sources;
+   CHECK(agx3_cdm_direct_template_sources_compute(false, false, false, &sources));
+   for (unsigned resources = 0; resources < 2; ++resources) {
+      struct agx3_g17p_compute_program_desc desc = {
+         .program_va = UINT64_C(0x100000b0000),
+         .shader_va = UINT64_C(0x10000000100),
+         .uniform_ranges = resources ? &range : NULL,
+         .uniform_range_count = resources,
+         .shader_binary_size = 96,
+         .nr_gprs = 8,
+         .compiler_d_valid = true,
+         .compiler_d = 32,
+         .launch_sources = sources,
+      };
+      struct agx3_g17p_compute_program baseline, program;
+      CHECK(agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &baseline));
+      struct agx_ioto_preshader_desc preamble = {0};
+      CHECK(agx_ioto_preshader_bind_range(
+         binary, sizeof(binary), UINT64_C(0x123456789a3c), sizeof(binary),
+         128, sizeof(code), &preamble));
+      desc.preshader = &preamble;
+      CHECK(agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &program));
+      const size_t prefix = baseline.length - AGX_IOTO_PRESHADER_ABSENT_SIZE;
+      CHECK(program.length == prefix + sizeof(code));
+      CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+      CHECK(memcmp(program.bytes + prefix, code, sizeof(code)) == 0);
+      CHECK(memcmp(&program.launch, &baseline.launch, sizeof(program.launch)) == 0);
+
+      preamble.force_external = true;
+      CHECK(agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &program));
+      CHECK(program.length == prefix + sizeof(branch));
+      CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+      CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
+      CHECK(memcmp(&program.launch, &baseline.launch, sizeof(program.launch)) == 0);
+
+      preamble.force_external = false;
+      preamble.code = NULL;
+      preamble.code_size = AGX_IOTO_PRESHADER_INLINE_LIMIT + 2;
+      CHECK(agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &program));
+      CHECK(program.length == prefix + sizeof(branch));
+      CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
+      CHECK(memcmp(&program.launch, &baseline.launch, sizeof(program.launch)) == 0);
+
+      const struct agx3_g17p_compute_program before = program;
+      preamble.external_va |= 1;
+      CHECK(!agx3_g17p_compute_program_generate(AGX_CHIP_G17P, &desc, &program));
+      CHECK(memcmp(&before, &program, sizeof(program)) == 0);
+   }
+   puts("G17P compute preamble composition cases passed");
+   return 0;
+}
+
+static int
 test_g17p_dynamic_compute_program(void)
 {
    struct agx3_cdm_direct_template_sources sources;
@@ -1327,10 +1398,13 @@ test_g17p_basic_graphics_program(void)
    }
    resource.uniform_ranges = firefox_indexed_vertex;
 
-   /* The complete vertex worst case: the six above plus a gl_DrawID range.
-    * The Ioto loader bounds a program by load chunks and body size, never by
-    * how many ranges produced them, so the driver budget must admit all seven
-    * or a legal program is refused fail-closed. */
+   /* The complete Honeykrisp vertex worst case: the six above plus a
+    * gl_DrawID range. The Ioto loader bounds a program by load chunks and
+    * body size, never by how many ranges produced them, so the driver budget
+    * must admit all seven or a legal program is refused fail-closed. (The GL
+    * driver's collector is data-dependent and needs more -- Firefox's
+    * WebRender vertex shaders push nine -- so the budget is no longer exactly
+    * seven; it only has to be at least this.) */
    const struct agx3_ioto_uniform_range firefox_drawid_vertex[] = {
       {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
       {.start_halfs = 8, .size_halfs = 24, .address = 0x2000},
@@ -1381,14 +1455,27 @@ test_g17p_basic_graphics_program(void)
    CHECK(!hk_agx3_g17p_basic_graphics_program_generate(AGX_CHIP_G17P,
                                                        &resource, &program));
 
-   /* One range beyond the budget stays refused: the budget is derived from
-    * the collector, not a soft hint. */
+   /* An eighth range is legal: the GL driver's WebRender vertex programs
+    * push eight or nine, and the loader never counts ranges. */
+   struct agx3_ioto_uniform_range eight_ranges[
+      ARRAY_SIZE(firefox_drawid_vertex) + 1];
+   memcpy(eight_ranges, firefox_drawid_vertex, sizeof(firefox_drawid_vertex));
+   eight_ranges[ARRAY_SIZE(firefox_drawid_vertex)] =
+      (struct agx3_ioto_uniform_range){
+         .start_halfs = 80, .size_halfs = 2, .address = 0x7000};
+   size_t eight_bound = 0;
+   CHECK(hk_agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, eight_ranges, ARRAY_SIZE(eight_ranges), &eight_bound));
+   CHECK(eight_bound > drawid_bound);
+
+   /* One range beyond the budget stays refused: the budget is a real
+    * capacity of the composer's workspace, not a soft hint. */
    struct agx3_ioto_uniform_range over_budget[
       HK_AGX3_G17P_GRAPHICS_MAX_RANGES + 1];
-   for (unsigned i = 0; i < ARRAY_SIZE(over_budget); ++i)
+   for (unsigned i = 0; i < ARRAY_SIZE(over_budget); ++i) {
       over_budget[i] = (struct agx3_ioto_uniform_range){
-         .start_halfs = 2 * i, .size_halfs = 2,
-         .address = 0x1000 + 0x40 * i};
+         .start_halfs = 2 * i, .size_halfs = 2, .address = 0x7000 + 0x10 * i};
+   }
    size_t over_bound = 789;
    CHECK(!hk_agx3_g17p_graphics_program_bound(
       AGX_CHIP_G17P, over_budget, ARRAY_SIZE(over_budget), &over_bound));
@@ -3340,7 +3427,7 @@ main(void)
        test_coverage_initial_pixel_dependencies() ||
        test_g17p_precompiled_fill_program() || test_exact_target_order() || test_terminal_suffix_modes() ||
        test_fail_closed() || test_g17s_minimal_compute_admission() ||
-       test_g17p_dynamic_compute_program() ||
+       test_g17p_dynamic_compute_program() || test_g17p_compute_preamble() ||
        test_g17p_direct_add3_compute_bridge() ||
        test_g17p_no_resource_program_bridge() ||
        test_g17p_basic_graphics_program() || test_g17p_rt0_eot_program() ||

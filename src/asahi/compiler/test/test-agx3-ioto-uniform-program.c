@@ -401,7 +401,7 @@ test_cprog_publication(void)
          const unsigned selected = (mask >> (2 * word)) & 3;
          uint8_t uniform[AGX3_COPY_MAX_LENGTH], length;
          CHECK(agx3_copy_encode_reg_to_uniform(AGX_ISA_ENCODING_AGX3B,
-            2 * word, source + 2 * word, !selected, uniform, &length));
+            2 * word, source + 2 * word, !selected, 0, uniform, &length));
          CHECK(offset + length <= written);
          CHECK(!memcmp(f.body + offset, uniform, length));
          offset += length;
@@ -464,6 +464,106 @@ test_cprog_publication_refusals(void)
 }
 
 static bool
+test_cprog_program_body(void)
+{
+   /* Visit high uniforms first. Packed TPS positions must follow the input
+    * bitmap, regardless of range order or allocator round boundaries. */
+   const struct agx3_ioto_uniform_range ranges[] = {
+      {.start_halfs = 20, .size_halfs = 4, .address = 0x20},
+      {.start_halfs = 0, .size_halfs = 4, .address = 0x1000},
+   };
+   const struct agx_ioto_cprog_inputs inputs = {
+      .known = true,
+      .uniform_halfs = {(UINT64_C(1) << 1) | (UINT64_C(1) << 3) |
+                        (UINT64_C(1) << 20) | (UINT64_C(3) << 22)},
+   };
+   const uint16_t expected_tps[] = {10, 11, 12, 8, 9};
+   for (unsigned rollover = 0; rollover < 2; ++rollover) {
+      struct fixture baseline, f;
+      struct agx3_ioto_uniform_program_desc desc =
+         program_desc(AGX_CHIP_G17P, ranges, ARRAY_SIZE(ranges));
+      /* Leave room for one four-dword allocation before the native
+       * allocator limit. Workspace capacity alone never triggers rollover. */
+      desc.initial_gpr_dwords = rollover ? 92 : 0;
+      struct agx3_ioto_uniform_program_workspace ws = workspace(&baseline);
+      size_t base_length, base_copy_offset;
+      CHECK(agx3_ioto_uniform_program_body_generate(
+         AGX_CHIP_G17P, &desc, ws, &base_length, &base_copy_offset));
+
+      const struct agx_ioto_cprog_inputs empty = {.known = true};
+      desc.preshader_inputs = &empty;
+      ws = workspace(&f);
+      size_t length, copy_offset;
+      CHECK(agx3_ioto_uniform_program_body_generate(
+         AGX_CHIP_G17P, &desc, ws, &length, &copy_offset));
+      CHECK(length == base_length && copy_offset == base_copy_offset);
+      CHECK(memcmp(f.body, baseline.body, length) == 0);
+
+      desc.preshader_inputs = &inputs;
+      size_t bound, chunks;
+      CHECK(agx3_ioto_uniform_program_body_bound_with_inputs(
+         AGX_CHIP_G17P, ranges, ARRAY_SIZE(ranges), &inputs, &bound, &chunks));
+      CHECK(chunks == 2 && bound == 2 * 78 + 5 * 10);
+      ws.body_capacity = bound - 1;
+      length = 19;
+      copy_offset = 23;
+      CHECK(!agx3_ioto_uniform_program_body_generate(
+         AGX_CHIP_G17P, &desc, ws, &length, &copy_offset));
+      CHECK(length == 19 && copy_offset == 23);
+      ws.body_capacity++;
+      CHECK(agx3_ioto_uniform_program_body_generate(
+         AGX_CHIP_G17P, &desc, ws, &length, &copy_offset));
+      CHECK(length == base_length + 50 && length <= bound);
+      CHECK(copy_offset == base_copy_offset + (rollover ? 30 : 0));
+
+      size_t cursor = 0, base_cursor = 0;
+      unsigned stores = 0, uniform_copies = 0;
+      while (cursor < length) {
+         struct agx_ioto_program_record record;
+         size_t consumed;
+         CHECK(agx_ioto_decode_program_record(
+            AGX_CHIP_G17P, f.body + cursor, length - cursor, &record, &consumed));
+         CHECK(consumed != 0);
+         struct agx3_static_spill_store_desc store;
+         if (agx3_static_spill_decode_store(AGX_ISA_ENCODING_AGX3B,
+                                             f.body + cursor, consumed, &store)) {
+            CHECK(stores < ARRAY_SIZE(expected_tps));
+            CHECK(store.tps_half == expected_tps[stores++]);
+            CHECK(store.width == AGX3_MEM_W16);
+            CHECK(store.src_kill && store.slot == 6 && store.wait_mask == 0);
+         } else {
+            struct agx_ioto_program_record original;
+            size_t original_size;
+            CHECK(agx_ioto_decode_program_record(
+               AGX_CHIP_G17P, baseline.body + base_cursor,
+               base_length - base_cursor, &original, &original_size));
+            CHECK(original_size == consumed && original.kind == record.kind);
+            if (record.kind == AGX_IOTO_PROGRAM_RECORD_IOTO &&
+                (record.ioto.kind == AGX_IOTO_KIND_COPY_EP0 ||
+                 record.ioto.kind == AGX_IOTO_KIND_COPY_EP1)) {
+               ++uniform_copies;
+               /* Ignore only the witnessed source-lifetime flag. */
+               record.bytes[2] &= ~0x08;
+               original.bytes[2] &= ~0x08;
+            }
+            CHECK(memcmp(record.bytes, original.bytes, consumed) == 0);
+            base_cursor += original_size;
+         }
+         cursor += consumed;
+      }
+      CHECK(stores == 5 && uniform_copies == 4 && base_cursor == base_length);
+      size_t suffix_offset = SIZE_MAX;
+      CHECK(agx_ioto_program_copy_suffix_offset(
+         AGX_CHIP_G17P, f.body + copy_offset, length - copy_offset,
+         &suffix_offset));
+      CHECK(suffix_offset == 0);
+      CHECK(agx3_ioto_uniform_program_generate(
+         AGX_CHIP_G17P, &desc, ws, f.output, sizeof(f.output), &length));
+   }
+   return true;
+}
+
+static bool
 test_cprog_rollover(void)
 {
    struct fixture f = {0};
@@ -514,6 +614,49 @@ test_cprog_rollover(void)
    return true;
 }
 
+static bool
+test_cprog_program_failures(void)
+{
+   struct fixture f;
+   const struct agx3_ioto_uniform_range ranges[] = {
+      {.start_halfs = 20, .size_halfs = 4, .address = 0x20},
+      {.start_halfs = 20, .size_halfs = 4, .address = 0x1000},
+   };
+   struct agx3_ioto_uniform_program_desc desc =
+      program_desc(AGX_CHIP_G17P, ranges, 1);
+   struct agx_ioto_cprog_inputs inputs = {
+      .known = true, .uniform_halfs = {UINT64_C(1) << 20},
+   };
+   desc.preshader_inputs = &inputs;
+   CHECK(generate_fails_unchanged(AGX_CHIP_G15G, &desc, workspace(&f), 256));
+   inputs.known = false;
+   CHECK(generate_fails_unchanged(AGX_CHIP_G17P, &desc, workspace(&f), 256));
+   inputs.known = true;
+   desc.fast_path_enabled = true;
+   CHECK(generate_fails_unchanged(AGX_CHIP_G17P, &desc, workspace(&f), 256));
+   desc.fast_path_enabled = false;
+   desc.range_count = 2;
+   CHECK(generate_fails_unchanged(AGX_CHIP_G17P, &desc, workspace(&f), 256));
+   desc.range_count = 1;
+   inputs.uniform_halfs[7] = UINT64_C(1) << 63;
+   CHECK(generate_fails_unchanged(AGX_CHIP_G17P, &desc, workspace(&f), 256));
+
+   size_t bound = 31, chunks = 37;
+   CHECK(!agx3_ioto_uniform_program_body_bound_with_inputs(
+      AGX_CHIP_G17P, ranges, 1, &inputs, &bound, &chunks));
+   CHECK(bound == 31 && chunks == 37);
+   inputs.uniform_halfs[0] = 0;
+   const struct agx3_ioto_uniform_range last = {510, 2, 0x1000};
+   desc.ranges = &last;
+   CHECK(agx3_ioto_uniform_program_body_bound_with_inputs(
+      AGX_CHIP_G17P, &last, 1, &inputs, &bound, &chunks));
+   CHECK(bound == 78 + 10 && chunks == 1);
+   size_t length, offset;
+   CHECK(agx3_ioto_uniform_program_body_generate(
+      AGX_CHIP_G17P, &desc, workspace(&f), &length, &offset));
+   return true;
+}
+
 int
 main(void)
 {
@@ -521,7 +664,8 @@ main(void)
        !test_bounds_and_cohorts() ||
        !test_preloaded_base_survives_rollover() || !test_fail_closed() ||
        !test_cprog_publication() || !test_cprog_publication_refusals() ||
-       !test_cprog_rollover())
+       !test_cprog_rollover() || !test_cprog_program_body() ||
+       !test_cprog_program_failures())
       return 1;
 
    printf("agx3_ioto_uniform_program: %u checks passed\n", checks);

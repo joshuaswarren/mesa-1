@@ -28,6 +28,20 @@ struct agx_vdm_state_update_info {
    uint32_t raw_vertex_unknown;
 };
 
+struct agx_vdm_state_update_preamble_counts {
+   uint16_t ipr_dwords;
+   uint32_t spill_dwords;
+};
+
+/* Convert G17P ShaderInfo fields 37/31 (thread-invariant IPR/spill bytes)
+ * to the native 12/18-bit state-load counts. IPR allocation is rounded to an
+ * even dword count. Reject overflow instead of truncating either field, and
+ * clear the result on failure. This neither sets shader flags nor emits a
+ * state update. Other chips need their own producer qualification. */
+bool agx_vdm_state_update_encode_preamble_counts(
+   enum agx_chip chip, uint32_t ipr_bytes, uint32_t spill_bytes,
+   struct agx_vdm_state_update_preamble_counts *counts);
+
 struct agx_vdm_state_update {
    uint8_t bytes[AGX_VDM_STATE_UPDATE_LENGTH];
    uint8_t length;
@@ -72,10 +86,13 @@ enum agx_vdm_state_update_draw_path {
 /*
  * Structural inputs used by Apple's VertexProgramVariant template builder.
  *
- * The two state-load counts and the VsStateConfig fields are deliberately
- * named after their proven producer/position.  Their higher-level compiler
- * meanings are not yet grounded, and they are not interchangeable with the
- * AGX2 Counts, VDM_STATE_VERTEX_OUTPUTS, or VDM_STATE_VERTEX_UNKNOWN words.
+ * The 12-bit count is round_up(ceil(thread_invariant_largest_ipr_bytes / 4), 2)
+ * from ShaderInfo field 37. It measures the thread-invariant IPR footprint,
+ * not temporary GPRs. On G17P, the 18-bit count is
+ * ceil(thread_invariant_spill_buffer_bytes / 4), from field 31. VsStateConfig
+ * fields remain named after their producer/position; their higher-level
+ * meanings are not yet grounded. These are not interchangeable with AGX2 Counts,
+ * VDM_STATE_VERTEX_OUTPUTS, or VDM_STATE_VERTEX_UNKNOWN words.
  */
 struct agx_vdm_state_update_template_info {
    uint64_t pipeline;

@@ -10,6 +10,7 @@
 #include "asahi/lib/agx_ioto_state_core.h"
 
 #define AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE 6144u
+
 #define AGX3_G17P_GRAPHICS_MAX_LOAD_CHUNKS 128u
 /* Every nonempty range requires at least one load chunk. Range storage must
  * cover that existing workspace budget, rather than the five ranges used by
@@ -66,6 +67,7 @@ struct agx3_g17p_graphics_program_desc {
    /* v51x: optional CPU source copies parallel to uniform_ranges (see
     * agx3_ioto_uniform_program_desc::range_cpu). */
    const void *const *uniform_range_cpu;
+   const struct agx_ioto_preshader_desc *preshader;
 };
 
 struct agx3_g17p_graphics_program {
@@ -247,6 +249,11 @@ bool agx3_g17p_rt0_eot_program_generate(
 bool agx3_g17p_graphics_program_bound(
    enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
    size_t range_count, size_t *size);
+
+bool agx3_g17p_graphics_program_bound_with_preshader(
+   enum agx_chip chip, const struct agx3_ioto_uniform_range *ranges,
+   size_t range_count, const struct agx_ioto_preshader_desc *preshader,
+   size_t *size);
 
 bool agx3_g17p_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,

@@ -62,16 +62,19 @@ test_g17g_programs(void)
        * one-target render with byte 7 alone moved 0x08 -> 0x20, keeping the
        * 32x32 tile at exactly the 32 KiB bound. */
       if (fragment) {
-         struct agx3_g17p_graphics_program_desc mrt = desc;
-         mrt.imageblock.sample_size_B = 32;
          struct agx3_g17p_graphics_program mrt_output;
-         CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &mrt,
-                                                    &mrt_output));
-         uint8_t expected_mrt[28];
-         memcpy(expected_mrt, expected_tail[1], sizeof(expected_mrt));
-         expected_mrt[7] = 0x20;
-         CHECK(mrt_output.length == output.length);
-         CHECK(memcmp(mrt_output.bytes, expected_mrt, 28) == 0);
+         const uint8_t mrt_sizes[] = {16, 32};
+         for (unsigned i = 0; i < sizeof(mrt_sizes); ++i) {
+            struct agx3_g17p_graphics_program_desc mrt = desc;
+            mrt.imageblock.sample_size_B = mrt_sizes[i];
+            CHECK(agx3_g17g_graphics_program_generate(AGX_CHIP_G17G, &mrt,
+                                                       &mrt_output));
+            uint8_t expected_mrt[28];
+            memcpy(expected_mrt, expected_tail[1], sizeof(expected_mrt));
+            expected_mrt[7] = mrt_sizes[i];
+            CHECK(mrt_output.length == output.length);
+            CHECK(memcmp(mrt_output.bytes, expected_mrt, 28) == 0);
+         }
 
          /* A colour-free render keeps the eight-byte spelling. */
          struct agx3_g17p_graphics_program_desc bare = desc;
@@ -82,7 +85,7 @@ test_g17g_programs(void)
          CHECK(memcmp(bare_output.bytes, expected_tail[1], 28) == 0);
 
          /* Every other sample size is still unwitnessed. */
-         const uint8_t ungrounded[] = {4, 12, 16, 24, 40, 64};
+         const uint8_t ungrounded[] = {4, 12, 24, 40, 64};
          for (unsigned i = 0; i < sizeof(ungrounded); ++i) {
             struct agx3_g17p_graphics_program_desc bad = desc;
             bad.imageblock.sample_size_B = ungrounded[i];
@@ -421,6 +424,91 @@ eot_offset(struct agx3_g17p_rt0_eot_program_desc *desc, unsigned rt)
    return offsets[rt];
 }
 
+static int
+test_preamble_programs(void)
+{
+   /* Compiler-produced G17P uniform-pointer preamble, including its END. */
+   static const uint8_t code[] = {
+      0x67, 0x00, 0x54, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x19, 0x00, 0x00, 0x40, 0x02, 0x00, 0x0b, 0x01,
+      0x07, 0x01, 0x00, 0x20, 0x00, 0x80, 0x00, 0x00,
+      0x4b, 0x00, 0x01, 0x04, 0x5b, 0x02, 0x01, 0x04,
+      0x0e, 0x00, 0x00, 0x00,
+   };
+   static const uint8_t branch[] = {
+      0x0f, 0x00, 0x54, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x00,
+   };
+   uint8_t binary[128 + sizeof(code)];
+   memset(binary, 0xa5, sizeof(binary));
+   memcpy(binary + 128, code, sizeof(code));
+   const struct agx3_ioto_uniform_range range = {
+      .start_halfs = 0, .size_halfs = 8, .address = UINT64_C(0x10000024000),
+   };
+   for (unsigned stage = 0; stage < 3; ++stage) {
+      for (unsigned resources = 0; resources < 2; ++resources) {
+         struct agx3_g17p_graphics_program_desc desc = {
+            .program_va = UINT64_C(0x10000100000),
+            .shader_va = UINT64_C(0x100002003c0),
+            .uniform_ranges = resources ? &range : NULL,
+            .uniform_range_count = resources,
+            .shader_binary_size = 128,
+            .nr_gprs = 16,
+            .fragment = stage != 0,
+            .writes_sample_mask = stage == 2,
+            .imageblock = AGX_IOTO_G17P_IMAGEBLOCK_8B_1X_32X32,
+         };
+         struct agx3_g17p_graphics_program baseline, program;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &baseline));
+         struct agx_ioto_preshader_desc preamble = {0};
+         CHECK(agx_ioto_preshader_bind_range(
+            binary, sizeof(binary), UINT64_C(0x123456789a3c), sizeof(binary),
+            128, sizeof(code), &preamble));
+         desc.preshader = &preamble;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         const size_t prefix = baseline.length - AGX_IOTO_PRESHADER_ABSENT_SIZE;
+         CHECK(program.length == prefix + sizeof(code));
+         CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+         CHECK(memcmp(program.bytes + prefix, code, sizeof(code)) == 0);
+         size_t old_bound, bound;
+         CHECK(agx3_g17p_graphics_program_bound(
+            AGX_CHIP_G17P, desc.uniform_ranges, resources, &old_bound));
+         CHECK(agx3_g17p_graphics_program_bound_with_preshader(
+            AGX_CHIP_G17P, desc.uniform_ranges, resources, &preamble, &bound));
+         CHECK(bound == old_bound - AGX_IOTO_PRESHADER_ABSENT_SIZE + sizeof(code));
+         CHECK(program.length <= bound);
+
+         preamble.force_external = true;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         CHECK(program.length == prefix + sizeof(branch));
+         CHECK(memcmp(program.bytes, baseline.bytes, prefix) == 0);
+         CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
+
+         /* The automatic external selection retains the same branch. */
+         preamble.force_external = false;
+         preamble.code = NULL;
+         preamble.code_size = AGX_IOTO_PRESHADER_INLINE_LIMIT + 2;
+         CHECK(agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         CHECK(program.length == prefix + sizeof(branch));
+         CHECK(memcmp(program.bytes + prefix, branch, sizeof(branch)) == 0);
+
+         const struct agx3_g17p_graphics_program before = program;
+         preamble.external_va |= 1;
+         CHECK(!agx3_g17p_graphics_program_generate(
+            AGX_CHIP_G17P, &desc, &program));
+         CHECK(memcmp(&before, &program, sizeof(program)) == 0);
+         bound = 123;
+         CHECK(!agx3_g17p_graphics_program_bound_with_preshader(
+            AGX_CHIP_G17P, desc.uniform_ranges, resources, &preamble, &bound));
+         CHECK(bound == 123);
+      }
+   }
+   return 0;
+}
+
 int
 main(void)
 {
@@ -681,6 +769,7 @@ main(void)
    CHECK(agx3_g17p_graphics_program_template_generate(
       AGX_CHIP_G17P, &overlap_desc, &rooted_template));
 
+   CHECK(test_preamble_programs() == 0);
    uint16_t blend_base = UINT16_C(0xa5a5);
    CHECK(agx3_g17p_fragment_blend_constant_base(AGX_CHIP_G17P, 0,
                                                  &blend_base));
@@ -941,6 +1030,92 @@ main(void)
       CHECK(relocated_size == reference.length);
       CHECK(memcmp(relocated, reference.bytes, reference.length) == 0);
    }
+   /* Firefox's WebRender through the GL driver (J700, 2026-09-18) reaches a
+    * nine-source vertex shape that a seven-range budget refused outright:
+    * the texture/sampler pointer pair, six attributes' VBO bases and clamps,
+    * draw parameters, the stage table's texture and UBO bases, the UBO size,
+    * two 16-bit root sysvals, and two halves of promoted constants.  The
+    * loader bounds a program by chunks and body size, never by range count,
+    * so the ninth source must compose like the first. */
+   struct agx3_ioto_uniform_range webrender_vertex_ranges[] = {
+      {.start_halfs = 0, .size_halfs = 8, .address = 0x1000},
+      {.start_halfs = 8, .size_halfs = 24, .address = 0x2048},
+      {.start_halfs = 32, .size_halfs = 12, .address = 0x2148},
+      {.start_halfs = 44, .size_halfs = 4, .address = 0x3000},
+      {.start_halfs = 48, .size_halfs = 8, .address = 0x4000},
+      {.start_halfs = 56, .size_halfs = 2, .address = 0x4108},
+      {.start_halfs = 58, .size_halfs = 2, .address = 0x2260},
+      {.start_halfs = 60, .size_halfs = 2, .address = 0x2270},
+      {.start_halfs = 62, .size_halfs = 2, .address = 0x5000},
+   };
+   const size_t webrender_vertex_range_count =
+      sizeof(webrender_vertex_ranges) / sizeof(webrender_vertex_ranges[0]);
+   CHECK(webrender_vertex_range_count > 7);
+   CHECK(webrender_vertex_range_count <= AGX3_G17P_GRAPHICS_MAX_RANGES);
+   struct agx3_g17p_graphics_program_desc webrender_vertex_desc = {
+      .program_va = UINT64_C(0x10000500000),
+      .shader_va = UINT64_C(0x100006003c0),
+      .uniform_ranges = webrender_vertex_ranges,
+      .uniform_range_count = webrender_vertex_range_count,
+      .shader_binary_size = 640,
+      .nr_gprs = 24,
+   };
+   struct agx3_g17p_graphics_program webrender_vertex_program;
+   size_t webrender_vertex_bound = 0;
+   CHECK(agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, webrender_vertex_ranges, webrender_vertex_range_count,
+      &webrender_vertex_bound));
+   CHECK(agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &webrender_vertex_desc, &webrender_vertex_program));
+   CHECK(webrender_vertex_program.length <= webrender_vertex_bound);
+   CHECK(webrender_vertex_program.length <=
+         AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE);
+   const struct agx3_g17p_graphics_program webrender_vertex_baseline =
+      webrender_vertex_program;
+   for (unsigned i = 0; i < webrender_vertex_range_count; ++i) {
+      webrender_vertex_ranges[i].address += 0x40;
+      CHECK(agx3_g17p_graphics_program_generate(
+         AGX_CHIP_G17P, &webrender_vertex_desc, &webrender_vertex_program));
+      CHECK(webrender_vertex_program.length ==
+            webrender_vertex_baseline.length);
+      CHECK(memcmp(webrender_vertex_program.bytes,
+                   webrender_vertex_baseline.bytes,
+                   webrender_vertex_program.length) != 0);
+      webrender_vertex_ranges[i].address -= 0x40;
+   }
+
+   /* The budget is still a budget: one past it is refused, and the refusal
+    * leaves the caller's program untouched. */
+   struct agx3_ioto_uniform_range
+      over_budget[AGX3_G17P_GRAPHICS_MAX_RANGES + 1];
+   for (unsigned i = 0; i < AGX3_G17P_GRAPHICS_MAX_RANGES + 1; ++i) {
+      over_budget[i] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 2 * i, .size_halfs = 2, .address = 0x8000 + 0x10 * i,
+      };
+   }
+   struct agx3_g17p_graphics_program_desc over_budget_desc =
+      webrender_vertex_desc;
+   over_budget_desc.uniform_ranges = over_budget;
+   over_budget_desc.uniform_range_count = AGX3_G17P_GRAPHICS_MAX_RANGES + 1;
+   size_t over_budget_bound = 0;
+   CHECK(!agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, over_budget, AGX3_G17P_GRAPHICS_MAX_RANGES + 1,
+      &over_budget_bound));
+   struct agx3_g17p_graphics_program untouched = webrender_vertex_baseline;
+   CHECK(!agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &over_budget_desc, &untouched));
+   CHECK(memcmp(&untouched, &webrender_vertex_baseline,
+                sizeof(untouched)) == 0);
+   /* J700's 32-range workload fits the byte budget. The shared descriptor
+    * limit also permits larger, coalescible lists; it does not promise that
+    * every uncoalesced list fits the program's byte limit. */
+   over_budget_desc.uniform_range_count = 32;
+   CHECK(agx3_g17p_graphics_program_bound(
+      AGX_CHIP_G17P, over_budget, over_budget_desc.uniform_range_count,
+      &over_budget_bound));
+   CHECK(agx3_g17p_graphics_program_generate(
+      AGX_CHIP_G17P, &over_budget_desc, &untouched));
+   CHECK(untouched.length <= over_budget_bound);
 
    uint64_t clear_spec = 0, reload_spec = 0, none_spec = 0;
    CHECK(agx3_g17p_rt0_bg_resource_spec(

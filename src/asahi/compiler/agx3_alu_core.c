@@ -583,6 +583,7 @@ agx3_alu_fadd_minifloat(enum agx_isa_encoding enc, uint16_t dest, uint16_t src,
       {9, 2}, {10, 2}, {25, 1}, {26, 2}, {42, 2}, {43, 2},
       {50, 3}, {51, 48},
    };
+   /* Six operand/hint fields plus at most six independent wait fields. */
    struct agx3_field_kv fields[12] = {
       {2, dest}, {35, src}, {17, immediate}, {46, hint == AGX3_ALU_HINT_DISCARD},
       {44, hint == AGX3_ALU_HINT_CACHE}, {11, dest_cache},

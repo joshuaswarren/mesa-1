@@ -217,6 +217,23 @@ bool agx_ioto_g17g_resource_program_compose_classes(
  * state. The default profile loader then copies those results into CProg and
  * terminates. pre_copy_body and copies are validated as separate record spans;
  * the latter may contain COPY records only. */
+enum agx_ioto_g17p_program_stage {
+   AGX_IOTO_G17P_PROGRAM_VERTEX_COMPUTE,
+   AGX_IOTO_G17P_PROGRAM_FRAGMENT,
+   AGX_IOTO_G17P_PROGRAM_COVERAGE_FRAGMENT,
+};
+
+/* Compose the native loader, including its terminal constant program. Empty
+ * resource spans are valid. A NULL preshader emits the ordinary absent form.
+ * Preshader bytes are staged before output is written, so they may alias it. */
+bool agx_ioto_g17p_program_compose_with_preshader(
+   uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
+   const void *copies, size_t copies_size,
+   const struct agx_ioto_state_tail_output *packed_tail,
+   enum agx_ioto_g17p_program_stage stage, unsigned colour_classes,
+   const struct agx_ioto_preshader_desc *preshader, void *output,
+   size_t capacity, size_t *written);
+
 bool agx_ioto_g17p_resource_program_compose(
    uint64_t program_va, const void *pre_copy_body, size_t pre_copy_body_size,
    const void *copies, size_t copies_size,

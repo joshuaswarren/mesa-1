@@ -437,6 +437,12 @@ test_ballot_vectors(void)
    static const uint8_t int_lt_c[] = {
       0x27, 0x00, 0x40, 0x1a, 0x25, 0x00, 0xae, 0x02, 0x38, 0x00, 0x00, 0x04,
    };
+   /* Metal 32023.917, applegpu_g17p: x = as_type<int>(tid * tid),
+    * b = simd_ballot(x < 0), out[tid] = b + x. The b-only control is
+    * int_lt_b above. The source stays live across this register comparison. */
+   static const uint8_t int_lt_live_b[] = {
+      0x17, 0x07, 0x54, 0x04, 0x03, 0x00, 0x02, 0x18, 0x22, 0x06,
+   };
    static const uint8_t quad_int_ne_b[] = {
       0x17, 0x02, 0x54, 0x00, 0x03, 0x08, 0x00, 0xf8, 0xa2, 0x12,
    };
@@ -505,6 +511,17 @@ test_ballot_vectors(void)
    CHECK(bytes_equal(out, length, int_lt_b, sizeof(int_lt_b)));
    CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3C, &d, out, &length));
    CHECK(bytes_equal(out, length, int_lt_c, sizeof(int_lt_c)));
+
+   d.dest = 4;
+   d.dest_cache = true;
+   d.src_live = true;
+   d.src_cache = true;
+   CHECK(agx3_subgroup_encode_ballot(AGX_ISA_ENCODING_AGX3B, &d, out, &length));
+   CHECK(bytes_equal(out, length, int_lt_live_b, sizeof(int_lt_live_b)));
+   d.dest = 0;
+   d.dest_cache = false;
+   d.src_live = false;
+   d.src_cache = false;
 
    d.quad = true;
    d.src = 4;

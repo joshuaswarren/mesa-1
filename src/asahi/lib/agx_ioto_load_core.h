@@ -33,6 +33,27 @@ extern "C" {
 #define AGX_IOTO_LOAD_NOP_SIZE            2u
 #define AGX_IOTO_LOAD_GPU0_ROUND_NOP_SIZE 8u
 
+#define AGX_IOTO_CPROG_UNIFORM_HALFS 512u
+#define AGX_IOTO_CPROG_UNIFORM_WORDS (AGX_IOTO_CPROG_UNIFORM_HALFS / 64u)
+
+/* Live source uniform halves of a compiled preamble. Known-empty differs
+ * from missing metadata. This describes inputs, not a qualified entry ABI. */
+struct agx_ioto_cprog_inputs {
+   uint64_t uniform_halfs[AGX_IOTO_CPROG_UNIFORM_WORDS];
+   bool known;
+};
+
+/* G17P default TPS input layout: source indices are packed in increasing
+ * order at TPS byte 16. Offset is relative to that payload, for
+ * agx3_ioto_pack_cprog_copy(). Output arguments are unchanged on failure.
+ * Frame size covers input storage only, not compiler pressure spills. */
+bool agx_ioto_cprog_input_offset(enum agx_chip chip,
+                                const struct agx_ioto_cprog_inputs *inputs,
+                                uint16_t source_half, uint16_t *offset_bytes);
+bool agx_ioto_cprog_input_frame(enum agx_chip chip,
+                               const struct agx_ioto_cprog_inputs *inputs,
+                               uint16_t *input_halfs, uint16_t *frame_bytes);
+
 enum agx_ioto_load_encoding {
    AGX_IOTO_LOAD_ENCODING_UNSUPPORTED = 0,
    AGX_IOTO_LOAD_ENCODING_GPU0,
@@ -126,7 +147,19 @@ struct agx_ioto_load_emit_ops {
    bool (*pack_copy)(void *context, enum agx_chip chip,
                      const struct agx_ioto_inflight_load *load, uint8_t dword,
                      uint8_t lane_code,
-                     struct agx_ioto_load_raw_record *record);
+                      struct agx_ioto_load_raw_record *record);
+   /* Optional copies from the same loaded registers after the ordinary
+    * uniform copy. Both callbacks must be supplied together. The bound
+    * callback is pure; extra copies are validated and appended within the
+    * same transaction. Currently qualified only for default G17P TPS inputs. */
+   bool (*extra_copy_bound)(void *context, enum agx_chip chip,
+                            const struct agx_ioto_inflight_load *load,
+                            size_t *bytes);
+   bool (*pack_extra_copies)(void *context, enum agx_chip chip,
+                             const struct agx_ioto_inflight_load *load,
+                             uint8_t dword,
+                             struct agx_ioto_load_raw_record records[2],
+                             uint8_t *count);
    void *context;
 
    /* Only the in-tree native packer may set this. Its callbacks construct
@@ -288,10 +321,16 @@ agx_ioto_load_allocator_reserve(struct agx_ioto_load_core *core,
 int agx_ioto_load_compare(const struct agx_ioto_inflight_load *a,
                           const struct agx_ioto_inflight_load *b);
 
-/* Maximum bytes a finish call may append for the current pending set. */
+/* Maximum ordinary load/uniform-copy bytes for the current pending set.
+ * Use the with_ops variant when optional input copies are enabled. */
 bool agx_ioto_load_finish_worst_case_size(const struct agx_ioto_load_core *core,
                                           bool complete_round,
                                           size_t *required);
+
+/* Includes optional input copies. NULL ops retains the original bound. */
+bool agx_ioto_load_finish_worst_case_size_with_ops(
+   const struct agx_ioto_load_core *core, bool complete_round,
+   const struct agx_ioto_load_emit_ops *ops, size_t *required);
 
 /* false emits/marks only loads; true also resets allocation, emits the GPU0
  * four-NOP pad when configured, emits copies, and consumes pending loads. */

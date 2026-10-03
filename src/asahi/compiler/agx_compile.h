@@ -7,6 +7,7 @@
 
 #include "compiler/nir/nir.h"
 #include "asahi/lib/agx_chip.h"
+#include "asahi/lib/agx_ioto_load_core.h"
 #include "agx3_fltnorm_core.h"
 #include "agx3_cprog_input.h"
 #include "util/bitset.h"
@@ -123,7 +124,8 @@ struct agx_shader_info {
     * launchers need its extent independently of the main function's offset. */
    unsigned main_size, preamble_size;
 
-   /* Does the shader have a preamble? If so, it is at offset preamble_offset.
+   /* Does the shader have a preamble? If so, it is preamble_size bytes long
+    * at offset preamble_offset.
     * The main shader is at offset main_offset. The preamble is executed first.
     */
    bool has_preamble;
@@ -201,14 +203,20 @@ struct agx_shader_info {
     */
    uint16_t nr_gprs, nr_preamble_gprs;
 
-   /* Half of the AGX3 compiler staging footprint. The launch path doubles
-    * this value to reproduce Apple ShaderInfo fields 38/42. */
+   /* AGX3 IPR footprints in halfwords. The launch path doubles these values
+    * to obtain bytes: ShaderInfo fields 38/42 for main, and field 37
+    * (thread_invariant_largest_ipr_bytes) for the preamble. These are not
+    * temporary GPR counts. */
    uint16_t agx3_staging_halfs;
    bool agx3_staging_known;
    /* Separate thread-invariant IPR footprint for native CProg. It must not
     * inherit the main program's texture/staging domain or its GPR count. */
    uint16_t agx3_preamble_staging_halfs;
    bool agx3_preamble_staging_known;
+
+   /* Live uniform inputs after optimization, lowering, and register allocation.
+    * Retained separately from resource sizes and hardware entry policy. */
+   struct agx_ioto_cprog_inputs agx3_preamble_encoded_inputs;
 
    /* Output mask set during driver lowering */
    uint64_t outputs;
@@ -252,6 +260,9 @@ struct agx_precompiled_kernel_info {
    bool uses_txf;
    bool agx3_staging_known;
    uint16_t agx3_staging_halfs;
+   bool agx3_preamble_staging_known;
+   uint16_t agx3_preamble_staging_halfs;
+   struct agx_ioto_cprog_inputs agx3_preamble_encoded_inputs;
 
    /* AGX3 kernels read the printf buffer address from a 64-bit uniform at this
     * half, the first multiple of 4 after their arguments, or 0 if they do not
@@ -290,6 +301,9 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .uses_txf = info->uses_txf,
       .agx3_staging_known = info->agx3_staging_known,
       .agx3_staging_halfs = info->agx3_staging_halfs,
+      .agx3_preamble_staging_known = info->agx3_preamble_staging_known,
+      .agx3_preamble_staging_halfs = info->agx3_preamble_staging_halfs,
+      .agx3_preamble_encoded_inputs = info->agx3_preamble_encoded_inputs,
       .agx3_tps_size =
          (uint16_t)MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
    };

@@ -61,6 +61,76 @@ check_program_sizes(void)
 }
 
 static int
+check_bound_range(void)
+{
+   uint8_t binary[512] = {0};
+   const size_t offset = 128, size = 258;
+   const uint64_t base = UINT64_C(0x123456789a3c);
+   struct agx_ioto_preshader_desc desc = {
+      .force_external = true,
+      .request_prelude = true,
+      .suppress_prelude = true,
+   };
+   CHECK(agx_ioto_preshader_bind_range(binary, sizeof(binary), base,
+                                       sizeof(binary), offset, size, &desc));
+   CHECK(desc.code == binary + offset && desc.code_size == size);
+   CHECK(desc.external_va == UINT64_C(0x123456789abc));
+   CHECK(desc.force_external && desc.request_prelude && desc.suppress_prelude);
+
+   /* Independent external B fixture: includes the original binary's offset,
+    * and keeps the caller's prelude suppression. These are range/packing
+    * checks, not execution of the synthetic buffer contents. */
+   static const uint8_t branch[] = {
+      0x0f, 0x00, 0x54, 0xbc, 0x9a, 0x78, 0x56, 0x34, 0x12, 0x00,
+   };
+   struct agx_ioto_preshader_output output;
+   CHECK(agx_ioto_preshader_emit(AGX_CHIP_G17P, &desc, &output));
+   CHECK(output.mode == AGX_IOTO_PRESHADER_MODE_EXTERNAL);
+   CHECK(output.length == sizeof(branch));
+   CHECK(memcmp(output.bytes, branch, sizeof(branch)) == 0);
+
+   struct {
+      size_t cpu_size, gpu_size, offset, size;
+      uint64_t base;
+   } invalid[] = {
+      {512, 512, 128, 0, base},
+      {126, 512, 128, 4, base},
+      {130, 512, 128, 4, base},
+      {512, 126, 128, 4, base},
+      {512, 130, 128, 4, base},
+      {512, 512, 129, 4, base},
+      {512, 512, 128, 3, base},
+      {512, 512, 128, 4, base | 1},
+      {512, 512, 128, 4, AGX_IOTO_PRESHADER_NO_VA},
+      {512, 512, 128, 4, UINT64_C(1) << 48},
+      {512, 512, 128, 4, (UINT64_C(1) << 48) - 128},
+      {512, 512, 128, 4, (UINT64_C(1) << 48) - 130},
+      {SIZE_MAX, SIZE_MAX, SIZE_MAX - 1, 4, base},
+      {SIZE_MAX, SIZE_MAX, 2, SIZE_MAX - 1, base},
+   };
+   uint8_t saved[sizeof(desc)];
+   memcpy(saved, &desc, sizeof(desc));
+   for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+      CHECK(!agx_ioto_preshader_bind_range(
+         binary, invalid[i].cpu_size, invalid[i].base, invalid[i].gpu_size,
+         invalid[i].offset, invalid[i].size, &desc));
+      CHECK(memcmp(saved, &desc, sizeof(desc)) == 0);
+   }
+   CHECK(!agx_ioto_preshader_bind_range(NULL, 512, base, 512, 128, 4, &desc));
+   CHECK(memcmp(saved, &desc, sizeof(desc)) == 0);
+   CHECK(!agx_ioto_preshader_bind_range(binary, 512, base, 512, 128, 4, NULL));
+
+   /* Both buffer ends and the top of the GPU address domain are inclusive
+    * bounds for the final byte, not reasons to discard a valid range. */
+   CHECK(agx_ioto_preshader_bind_range(binary, 132,
+                                       (UINT64_C(1) << 48) - 132,
+                                       132, 128, 4, &desc));
+   CHECK(desc.external_va == (UINT64_C(1) << 48) - 4);
+   CHECK(desc.code == binary + 128 && desc.code_size == 4);
+   return 0;
+}
+
+static int
 check_branch(enum agx_chip chip, bool gpu1)
 {
    static const uint64_t addresses[] = {
@@ -413,7 +483,7 @@ int
 main(void)
 {
    if (check_g17p_absolute_constant_program() ||
-       check_program_sizes() || check_branch_witnesses() ||
+       check_program_sizes() || check_bound_range() || check_branch_witnesses() ||
        check_constant_program_refusals())
       return 1;
 

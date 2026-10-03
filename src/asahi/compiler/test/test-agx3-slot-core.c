@@ -23,9 +23,140 @@ stdev(uint16_t a){ struct agx3_slot_instr I={0}; I.is_async=true; I.latches_srcs
 static struct agx3_slot_instr
 mov(uint16_t d){ struct agx3_slot_instr I={0}; I.nr_dsts=1; I.dst[0]=d; return I; }
 
+static struct agx3_slot_instr
+input_reload(uint16_t dest, uint16_t tps_half)
+{
+   struct agx3_slot_instr I = {
+      .is_async = true,
+      .preferred_slot = 2,
+      .nr_srcs = 2,
+      .nr_dsts = 4,
+      .src = {AGX3_SLOT_TPS_TOKEN_BASE + tps_half,
+              AGX3_SLOT_TPS_TOKEN_BASE + tps_half + 1},
+      .dst = {dest, dest + 1, AGX3_SLOT_TPS_TOKEN_BASE + tps_half,
+              AGX3_SLOT_TPS_TOKEN_BASE + tps_half + 1},
+   };
+   return I;
+}
+
+static void
+check_live_inputs(void)
+{
+   const uint16_t input = AGX3_SLOT_TPS_TOKEN_BASE + 8;
+   struct agx3_slot_result r[8];
+   const struct agx3_slot_live_range live = {input, 4, 6};
+
+   /* A release fence includes outstanding entry producers even before any
+    * instruction reads their results. Wait only the still-pending slots. */
+   for (unsigned consume = 0; consume < 2; ++consume) {
+      const struct agx3_slot_live_range ranges[] = {
+         {input, 2, 6}, {input + 2, 2, 3},
+      };
+      const struct agx3_slot_instr fence = {.drain = true};
+      const struct agx3_slot_instr p[] = {
+         consume ? st(input) : mov(8), fence, st(input), st(input + 2), fence,
+      };
+      CHECK(agx3_slot_assign_with_live(p, 5, 6, ranges, 2, r));
+      CHECK(r[0].wait_mask == (consume ? 32 : 0));
+      CHECK(r[1].wait_mask == (consume ? 4 : 36));
+      CHECK(r[2].wait_mask == 0 && r[3].wait_mask == 0 && r[4].wait_mask == 0);
+   }
+
+   /* Native G17P pointer-input entry: the loader's TPS writes signal slot 6,
+    * the first RLD waits 6 and publishes on 2, and the second RLD publishes
+    * on 2 without repeating the loader wait. Their GPR consumer waits 2. */
+   {
+      const struct agx3_slot_instr p[] = {
+         input_reload(0, 8), input_reload(2, 10), alu(4, 0, 2), st(4),
+      };
+      CHECK(agx3_slot_assign_with_live(p, 4, 6, &live, 1, r));
+      CHECK(r[0].slot == 2 && r[0].wait_mask == 32);
+      CHECK(r[1].slot == 2 && r[1].wait_mask == 0);
+      CHECK(r[2].slot == 0 && r[2].wait_mask == 2);
+      CHECK(r[3].slot == 0 && r[3].wait_mask == 0);
+   }
+
+   /* An unrelated GPR with the same half index does not read TPS. A later
+    * overwrite of any pending input must wait before it replaces the value;
+    * that retires the entire incoming slot, including disjoint ranges. */
+   {
+      const struct agx3_slot_live_range ranges[] = {
+         {input, 2, 6}, {input + 10, 2, 6},
+      };
+      const struct agx3_slot_instr p[] = {
+         mov(8), mov(input + 1), st(input + 10), st(input),
+      };
+      CHECK(agx3_slot_assign_with_live(p, 4, 6, ranges, 2, r));
+      CHECK(r[0].wait_mask == 0);
+      CHECK(r[1].wait_mask == 32);
+      CHECK(r[2].wait_mask == 0 && r[3].wait_mask == 0);
+   }
+
+   /* Retiring the loader does not make a new producer on slot 6 ready. Old
+    * input aliases must not steal the new GPR result's dependency either. */
+   {
+      struct agx3_slot_instr fresh = ld(20);
+      fresh.preferred_slot = 6;
+      const struct agx3_slot_instr p[] = {
+         st(input), fresh, mov(input), st(input + 3), st(20), st(20),
+      };
+      CHECK(agx3_slot_assign_with_live(p, 6, 6, &live, 1, r));
+      CHECK(r[0].wait_mask == 32);
+      CHECK(r[1].slot == 6 && r[1].wait_mask == 0);
+      CHECK(r[2].wait_mask == 0 && r[3].wait_mask == 0);
+      CHECK(r[4].wait_mask == 32 && r[5].wait_mask == 0);
+   }
+
+   /* An instruction with an internal slot-6 producer must retire the
+    * incoming generation before reusing it, even if it reads no TPS. */
+   {
+      struct agx3_slot_instr compound = ld(20);
+      compound.preferred_slot = 1;
+      compound.transient_slots = 32;
+      const struct agx3_slot_instr p[] = {compound, st(input), st(20)};
+      CHECK(agx3_slot_assign_with_live(p, 3, 6, &live, 1, r));
+      CHECK(r[0].slot == 1 && r[0].wait_mask == 32);
+      CHECK(r[1].wait_mask == 0 && r[2].wait_mask == 1);
+   }
+
+   /* The full 512-half input domain still needs only one producer wait.
+    * Probe every half independently to catch truncated imported ranges. */
+   const struct agx3_slot_live_range full = {input, 512, 6};
+   for (unsigned half = 0; half < 512; ++half) {
+      const struct agx3_slot_instr p[] = {
+         st(input + half), st(input + (511 - half)),
+      };
+      CHECK(agx3_slot_assign_with_live(p, 2, 6, &full, 1, r));
+      CHECK(r[0].wait_mask == 32 && r[1].wait_mask == 0);
+   }
+
+   /* Invalid entry metadata is rejected before any output result changes. */
+   const struct agx3_slot_live_range invalid[] = {
+      {input, 0, 6}, {input, 1, 0}, {input, 1, 7},
+      {AGX3_SLOT_NUM_TOKENS, 1, 6}, {AGX3_SLOT_NUM_TOKENS - 1, 2, 6},
+      {UINT16_MAX, UINT16_MAX, 6},
+   };
+   const struct agx3_slot_instr p = st(input);
+   memset(r, 0xa5, sizeof(r));
+   struct agx3_slot_result before[8];
+   memcpy(before, r, sizeof(r));
+   for (unsigned i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i) {
+      CHECK(!agx3_slot_assign_with_live(&p, 1, 6, &invalid[i], 1, r));
+      CHECK(memcmp(r, before, sizeof(r)) == 0);
+   }
+   const struct agx3_slot_live_range overlap[] = {
+      {input, 4, 6}, {input + 3, 2, 6},
+   };
+   CHECK(!agx3_slot_assign_with_live(&p, 1, 6, overlap, 2, r));
+   CHECK(memcmp(r, before, sizeof(r)) == 0);
+   CHECK(!agx3_slot_assign_with_live(&p, 1, 6, NULL, 1, r));
+   CHECK(memcmp(r, before, sizeof(r)) == 0);
+}
+
 int main(void)
 {
    struct agx3_slot_result r[64];
+   check_live_inputs();
 
    /* SMP latches only its staging group through completion. A descriptor
     * GPR may be reused immediately; a staging rewrite must wait for SMP. */

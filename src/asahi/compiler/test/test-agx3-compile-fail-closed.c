@@ -1169,7 +1169,8 @@ check_constant_data_compute(enum agx_isa_encoding encoding, bool soft_fault)
  * uniform dwords. Each dword uses Apple's byte-exact reg-to-uniform copy form;
  * this checks the complete compiler path which Gallium's blitter VS needs. */
 static bool
-check_preamble_compute(enum agx_isa_encoding encoding)
+check_preamble_compute(enum agx_isa_encoding encoding, bool enable,
+                       unsigned uniform_loads)
 {
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_COMPUTE, &agx_nir_options, "AGX3 generated preamble");
@@ -1181,8 +1182,24 @@ check_preamble_compute(enum agx_isa_encoding encoding)
    nir_def *output = nir_load_global_constant(&b, 1, 64, root, .align_mul = 8,
                                               .access = ACCESS_CAN_SPECULATE);
    nir_def *index = nir_channel(&b, nir_load_global_invocation_id(&b, 32), 0);
+
+   /* Keep a nontrivial uniform calculation live through a varying store.
+    * This exercises a real compiler-generated external preamble, rather than
+    * padding the short fixture to cross the native 256-byte inline limit. */
+   nir_def *value = index;
+   if (uniform_loads) {
+      nir_def *sum = nir_imm_int(&b, 0);
+      for (unsigned i = 0; i < uniform_loads; ++i) {
+         nir_def *input = nir_load_global_constant(
+            &b, 1, 32, nir_iadd_imm(&b, root, 8 + i * sizeof(uint32_t)),
+            .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+         sum = nir_ixor(&b, nir_imul_imm(&b, sum, 33), input);
+      }
+      value = nir_ixor(&b, sum, index);
+   }
+
    nir_store_global(
-      &b, index,
+      &b, value,
       nir_iadd(&b, output,
                nir_u2u64(&b, nir_imul_imm(&b, index, sizeof(uint32_t)))),
       .align_mul = 4);
@@ -1192,18 +1209,184 @@ check_preamble_compute(enum agx_isa_encoding encoding)
    struct agx_shader_key key = {0};
    key.dev.encoding = encoding;
    key.reserved_preamble = 4 * (1 + 1);
+   key.no_preamble = !enable;
    key.has_scratch = true;
    key.promote_constants = true;
    key.promote_textures = true;
    struct agx_shader_part part = {0};
    const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
-   /* Both G17P and G17G have a witnessed reg-to-uniform copy (the G17G one
-    * is every Metal fragment preamble's pointer publication). */
-   const bool valid = compiled && part.binary != NULL &&
-                      part.info.has_preamble && part.info.binary_size > 8;
+   const bool supported = encoding == AGX_ISA_ENCODING_AGX3B ||
+                          encoding == AGX_ISA_ENCODING_AGX2 ||
+                          encoding == AGX_ISA_ENCODING_AGX3C;
+   bool valid = supported ? compiled && part.binary != NULL
+                          : !compiled && part.binary == NULL;
+   if (supported && valid) {
+      const struct agx_shader_info *info = &part.info;
+      valid = info->has_preamble == enable &&
+              (info->preamble_size != 0) == enable &&
+              (info->nr_preamble_gprs != 0) == enable &&
+              info->preamble_offset <= info->binary_size &&
+              info->preamble_size <= info->binary_size - info->preamble_offset &&
+              info->main_offset <= info->binary_size &&
+              info->main_size <= info->binary_size - info->main_offset;
+
+      if (encoding == AGX_ISA_ENCODING_AGX3B) {
+         valid &= info->agx3_staging_known &&
+                  info->agx3_preamble_staging_known == enable;
+         /* Constant loads return directly to GPRs. These preambles therefore
+          * need temporary registers but no IPR staging; a known zero must
+          * remain distinct from missing metadata and from the GPR count. */
+         valid &= info->agx3_preamble_staging_halfs == 0;
+         valid &= info->agx3_preamble_encoded_inputs.known == enable &&
+                  info->agx3_preamble_encoded_inputs.uniform_halfs[0] ==
+                     (enable ? UINT64_C(0xf) : 0);
+         for (unsigned w = 1; w < AGX_IOTO_CPROG_UNIFORM_WORDS; ++w)
+            valid &= info->agx3_preamble_encoded_inputs.uniform_halfs[w] == 0;
+      } else if (encoding == AGX_ISA_ENCODING_AGX2) {
+         valid &= !info->agx3_preamble_staging_known &&
+                  info->agx3_preamble_staging_halfs == 0;
+      }
+
+      if (valid && enable) {
+         valid = info->preamble_offset + info->preamble_size <= info->main_offset ||
+                 info->main_offset + info->main_size <= info->preamble_offset;
+         if (uniform_loads)
+            valid &= info->preamble_size > 256 && info->scratch_size == 0 &&
+                     info->preamble_scratch_size == 0;
+      }
+
+      /* G17P's constant-program suffix must copy the executable through END,
+       * without including inter-function padding or adjacent constant data. */
+      if (valid && enable && encoding == AGX_ISA_ENCODING_AGX3B) {
+         static const uint8_t end[] = {0x0e, 0x00, 0x00, 0x00};
+         valid = info->preamble_size >= sizeof(end) &&
+                 memcmp((const uint8_t *)part.binary + info->preamble_offset +
+                           info->preamble_size - sizeof(end),
+                        end, sizeof(end)) == 0;
+      }
+
+      if (valid) {
+         const struct agx_precompiled_kernel_info compact =
+            agx_compact_kernel_info(&part.info);
+         valid = compact.preamble_offset == info->preamble_offset &&
+                 compact.preamble_size == info->preamble_size &&
+                 compact.agx3_preamble_staging_halfs ==
+                    info->agx3_preamble_staging_halfs &&
+                 compact.agx3_preamble_staging_known ==
+                    info->agx3_preamble_staging_known &&
+                 compact.agx3_preamble_encoded_inputs.known ==
+                    info->agx3_preamble_encoded_inputs.known &&
+                 memcmp(compact.agx3_preamble_encoded_inputs.uniform_halfs,
+                        info->agx3_preamble_encoded_inputs.uniform_halfs,
+                        sizeof(info->agx3_preamble_encoded_inputs.uniform_halfs)) == 0;
+      }
+   }
+   if (supported && (uniform_loads || !valid)) {
+      fprintf(stderr,
+              "preamble workload encoding=%u enabled=%u inputs=%u main=%u "
+              "preamble=%u gprs=%u preamble_gprs=%u staging_halfs=%u "
+              "preamble_staging_halfs=%u valid=%u\n",
+              encoding, enable, uniform_loads, part.info.main_size,
+              part.info.preamble_size, part.info.nr_gprs,
+              part.info.nr_preamble_gprs, part.info.agx3_staging_halfs,
+              part.info.agx3_preamble_staging_halfs, valid);
+   }
    if (!valid)
       fprintf(stderr, "AGX3 generated 64-bit preamble write failed\n");
 
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+/* A preamble has uniform inputs, but no per-invocation entry-register ABI. */
+enum preamble_input_test {
+   PREAMBLE_UNIFORM_INPUT,
+   PREAMBLE_ENTRY_GPR,
+   MAIN_ENTRY_GPR,
+   PREAMBLE_SPARSE_UNIFORMS,
+   PREAMBLE_CONSTANT_ONLY,
+};
+
+static bool
+check_preamble_entry_gpr(enum agx_isa_encoding encoding,
+                         enum preamble_input_test input)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "preamble input ABI");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *root = nir_load_preamble(&b, 1, 64, .base = 0);
+   nir_def *store_value = nir_load_preamble(&b, 1, 32, .base = 4);
+   if (input == MAIN_ENTRY_GPR)
+      store_value = nir_ixor(&b, store_value, nir_load_vertex_id_zero_base(&b));
+   nir_store_global(&b, store_value, root, .align_mul = 4);
+
+   nir_builder p = nir_builder_create(nir_shader_get_preamble(b.shader));
+   p.cursor = nir_after_impl(p.impl);
+   nir_def *value;
+   if (input == PREAMBLE_ENTRY_GPR) {
+      /* Software vertex invocation data arrives in a fixed GPR. It is not
+       * a draw/dispatch-uniform input and must not be used by a preamble. */
+      value = nir_load_vertex_id_zero_base(&p);
+   } else if (input == PREAMBLE_CONSTANT_ONLY) {
+      value = nir_imm_int(&p, 47);
+      /* Dead input references must not survive into the input bitmap. */
+      nir_load_preamble(&p, 1, 64, .base = 196);
+   } else if (input == PREAMBLE_SPARSE_UNIFORMS) {
+      nir_def *a = nir_load_global_constant(
+         &p, 1, 32, nir_load_preamble(&p, 1, 64, .base = 8),
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+      nir_def *b = nir_load_global_constant(
+         &p, 1, 32, nir_load_preamble(&p, 1, 64, .base = 508),
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+      value = nir_ixor(&p, a, b);
+      value = nir_ixor(&p, value, nir_load_preamble(&p, 1, 32, .base = 64));
+      value = nir_ixor(&p, value, nir_u2u32(&p, nir_load_preamble(&p, 1, 16, .base = 127)));
+      nir_load_preamble(&p, 1, 64, .base = 196);
+   } else {
+      value = nir_load_global_constant(
+         &p, 1, 32, nir_load_preamble(&p, 1, 64, .base = 0),
+         .align_mul = 4, .access = ACCESS_CAN_SPECULATE);
+   }
+   nir_store_preamble(&p, value, .base = 4,
+                      .preamble_class = nir_preamble_class_general);
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key key = {0};
+   key.dev.encoding = encoding;
+   key.reserved_preamble = 8;
+   key.no_preamble = true; /* Preserve the explicit preamble without adding one. */
+   key.has_scratch = true;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   bool valid = input == PREAMBLE_ENTRY_GPR
+                         ? !compiled && !part.binary &&
+                              !part.info.has_preamble && !part.info.binary_size
+                         : compiled && part.binary && part.info.has_preamble;
+   if (compiled && valid) {
+      struct agx_ioto_cprog_inputs expected = {0};
+      if (encoding != AGX_ISA_ENCODING_AGX2) {
+         expected.known = true;
+         if (input == PREAMBLE_SPARSE_UNIFORMS) {
+            expected.uniform_halfs[0] = 0xf00;
+            expected.uniform_halfs[1] = UINT64_C(0x8000000000000003);
+            expected.uniform_halfs[7] = UINT64_C(0xf000000000000000);
+         } else if (input != PREAMBLE_CONSTANT_ONLY) {
+            expected.uniform_halfs[0] = 0xf;
+         }
+      }
+      const struct agx_precompiled_kernel_info compact = agx_compact_kernel_info(&part.info);
+      valid &= part.info.agx3_preamble_encoded_inputs.known == expected.known &&
+               compact.agx3_preamble_encoded_inputs.known == expected.known &&
+               memcmp(part.info.agx3_preamble_encoded_inputs.uniform_halfs, expected.uniform_halfs,
+                      sizeof(expected.uniform_halfs)) == 0 &&
+               memcmp(compact.agx3_preamble_encoded_inputs.uniform_halfs, expected.uniform_halfs,
+                      sizeof(expected.uniform_halfs)) == 0;
+   }
+   fprintf(stderr, "preamble input encoding=%u mode=%u compiled=%u valid=%u\n",
+           encoding, input, compiled, valid);
    free(part.binary);
    ralloc_free(b.shader);
    return valid;
@@ -2473,8 +2656,25 @@ main(int argc, char **argv)
       if (!check_constant_data_compute(encodings[i], false) ||
           !check_constant_data_compute(encodings[i], true))
          return 1;
-      if (!check_preamble_compute(encodings[i]))
+      if (!check_preamble_compute(encodings[i], true, 0))
          return 1;
+      if (encodings[i] == AGX_ISA_ENCODING_AGX3B &&
+          (!check_preamble_compute(encodings[i], false, 0) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, false, 0) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true, 0) ||
+           !check_preamble_compute(encodings[i], false, 32) ||
+           !check_preamble_compute(encodings[i], true, 32) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, false, 32) ||
+           !check_preamble_compute(AGX_ISA_ENCODING_AGX2, true, 32)))
+         return 1;
+      if (encodings[i] == AGX_ISA_ENCODING_AGX3B) {
+         for (unsigned input = PREAMBLE_UNIFORM_INPUT; input <= PREAMBLE_CONSTANT_ONLY;
+              ++input) {
+            if (!check_preamble_entry_gpr(encodings[i], input) ||
+                !check_preamble_entry_gpr(AGX_ISA_ENCODING_AGX2, input))
+               return 1;
+         }
+      }
       if (!check_constant_array_ordering(encodings[i], true) ||
           !check_constant_array_ordering(encodings[i], false))
          return 1;

@@ -92,6 +92,9 @@ struct agx3_subgroup_ballot_desc {
    bool dest_half;
    bool dest_cache;
    bool src_live;
+   /* Source cache hint for G17P's full-width integer register comparison.
+    * Native live operands occur both with and without this hint. */
+   bool src_cache;
    uint8_t condition;
    bool invert;
    uint16_t wait_mask;

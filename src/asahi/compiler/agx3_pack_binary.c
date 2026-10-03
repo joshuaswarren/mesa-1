@@ -6168,6 +6168,8 @@ agx3_emit_subgroup_ballot(struct util_dynarray *emission,
       .src_half = src_half,
       .dest_cache = I->dest[0].cache,
       .src_live = !I->src[0].discard,
+      .src_cache = enc == AGX_ISA_ENCODING_AGX3B && !quad && !is_float &&
+                   !compare_immediate && !src_half && src.cache,
       .condition = condition,
       .invert = compare_immediate ? immediate_invert : I->invert_cond,
       .wait_mask = 0,
