@@ -20,6 +20,7 @@
 
 #include "agx_compile.h"
 #include "agx_debug.h"
+#include "d12_nir_g17p_txf.h"
 #include "agx_helpers.h"
 #include "agx_nir.h"
 #include "disasm.h"
@@ -1534,17 +1535,34 @@ d12_pipeline_state_create_compute(struct d12_device *device,
       return E_INVALIDARG;
    }
 
-   NIR_PASS(_, nir, agx_nir_lower_texture);
-   /* Multisampled image stores lower the same way in every stage; the
-    * FS-only placement left compute MS stores to hit the backend raw.
-    */
+   bool native_txf_compiler_only = false;
+   if (native_compute &&
+       !d12_nir_g17p_txf_supported(nir, &native_txf_compiler_only)) {
+      mesa_loge("CreateComputePipelineState: native texture compilation subset refused");
+      ralloc_free(nir);
+      return E_NOTIMPL;
+   }
+   if (native_txf_compiler_only)
+      NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
+               descriptor_generation);
+   else
+      NIR_PASS(_, nir, agx_nir_lower_texture);
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
-   agx_preprocess_nir(nir);
+   if (native_txf_compiler_only &&
+       !d12_nir_lower_g17p_txf(nir, descriptor_generation)) {
+      mesa_loge("CreateComputePipelineState: native table fetch lowering refused");
+      ralloc_free(nir);
+      return E_NOTIMPL;
+   }
+   if (native_txf_compiler_only)
+      agx_preprocess_nir_g17p(nir);
+   else
+      agx_preprocess_nir(nir);
 
-   /* Must follow preprocessing: emitting the uniform read earlier lets the
-    * compiler reassign its register.
-    */
+   /* Uniform indices become stable after preprocessing. */
    NIR_PASS(_, nir, d12_dxil_lower_root);
+   if (native_txf_compiler_only)
+      NIR_PASS(_, nir, d12_nir_shift_g17p_txf_root);
 
    struct agx_shader_key key = {
       .dev = agx_gather_device_key(&device->dev),
@@ -1661,6 +1679,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    pso->device_ref_active = true;
    pso->device = device;
    pso->is_compute = true;
+   pso->g17p_txf_compiler_only = native_txf_compiler_only;
    memcpy(pso->texture_shapes, texture_shapes, sizeof(texture_shapes));
    pso->info = part.info;
    if (!native_compute)

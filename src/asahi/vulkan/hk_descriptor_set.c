@@ -249,6 +249,20 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
    for (unsigned plane = view_planes; plane < plane_count; ++plane)
       hk_set_null_native_texture(generation, &desc[plane].tex);
 
+   /* When the semantic struct already matches the native layout, publish it
+    * with one bulk copy. This avoids the intermediate packed array while
+    * preserving the existing whole-descriptor destination copy. In particular,
+    * do not split mapped descriptor BO writes into separate texture/tail copies.
+    */
+   static_assert(sizeof(desc[0]) == sizeof(desc[0].tex) + sizeof(desc[0].sw),
+                 "sampled descriptor has no holes");
+   if (native.texture == offsetof(struct hk_sampled_image_descriptor, tex) &&
+       native.sampler == offsetof(struct hk_sampled_image_descriptor, sw) &&
+       native.stride == sizeof(desc[0])) {
+      write_desc(set, binding, elem, desc, native.stride * plane_count);
+      return;
+   }
+
    /* Only the written planes are read, so only they need zeroing. */
    uint8_t packed[3 * HK_MAX_DESCRIPTOR_SIZE];
    assert(native.stride * plane_count <= sizeof(packed));

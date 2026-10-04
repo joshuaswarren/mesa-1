@@ -44,6 +44,7 @@ libd3d12agx_files = files(
   'd12_g17p_vdm_storage.c',
   'd12_native_render_resources_core.c',
   'd12_pipeline.c',
+  'd12_nir_g17p_txf.c',
   'd12_present_blt_math.c',
   'd12_present_format_core.c',
   'd12_query.c',
@@ -485,6 +486,15 @@ d3d12agx_dxil_compile = executable(
   link_with : [
     libasahi_compiler, libasahi_lib, libasahi_layout, libagx2_disasm,
   ],
+)
+
+# CPU-only production lowering/ISA checks. Never creates a DRM device or queue.
+d3d12agx_g17p_txf_lower_tests = executable(
+  'd3d12agx_g17p_txf_lower_tests',
+  files('d12_nir_g17p_txf.c', 'tests/d12_nir_g17p_txf_tests.c'),
+  include_directories : [inc_include, inc_src, inc_asahi],
+  dependencies : [idep_nir, idep_mesautil, idep_agx_pack, idep_libagx],
+  link_with : [libasahi_compiler, libasahi_lib, libasahi_layout],
 )
 
 # Original first depth pair with strict full-frame checks. Separate partial

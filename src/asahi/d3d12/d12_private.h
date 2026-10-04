@@ -1075,6 +1075,8 @@ struct d12_pipeline_state {
    struct agx_shader_info info;
    /* Native compute code_va is the CODE entry, never the allocation base. */
    bool g17p_compute_container;
+   /* Compiled native fetch ABI; no qualified dispatch pointer-prefix producer. */
+   bool g17p_txf_compiler_only;
    uint64_t g17p_rodata_va;
 
    /* VERTEX ATTRIBUTES. Resolved at PSO creation by matching each

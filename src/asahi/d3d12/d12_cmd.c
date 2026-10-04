@@ -6164,6 +6164,7 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
    struct agx_device *dev = &list->device->dev;
    const struct agx_shader_info *info = &pso->info;
    if (dev->chip != AGX_CHIP_G17P || !pso->g17p_compute_container ||
+       pso->g17p_txf_compiler_only ||
        !pso->code_bo || !pso->code_va || !u->root ||
        !info->main_size || !info->nr_gprs || !info->agx3_staging_known ||
        info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
