@@ -206,6 +206,7 @@ struct d12_queue_op {
     * per submit and exhaust system memory before either queue could run.
     */
    struct util_dynarray bos;
+   struct util_dynarray g17p_vdm_storage;
    void *payload;
    size_t payload_size;
    unsigned nr_vdm;
@@ -534,6 +535,10 @@ d12_queue_op_destroy(struct d12_queue_op *op)
       util_dynarray_foreach(&op->bos, struct agx_bo *, bo)
          agx_bo_unreference(&op->submit_device->dev, *bo);
       util_dynarray_fini(&op->bos);
+      util_dynarray_foreach(&op->g17p_vdm_storage,
+                            struct d12_g17p_vdm_storage *, storage)
+         d12_g17p_vdm_storage_unref(*storage);
+      util_dynarray_fini(&op->g17p_vdm_storage);
    }
    if (op->list)
       ID3D12GraphicsCommandList_Release(&op->list->iface);
@@ -885,12 +890,21 @@ d12_queue_op_capture_bos(struct d12_queue_op *op,
                          struct d12_cmd_list *list)
 {
    util_dynarray_init(&op->bos, NULL);
+   util_dynarray_init(&op->g17p_vdm_storage, NULL);
    op->bos_initialized = true;
    op->submit_device = list->device;
 
    d12_queue_op_capture_bo(op, list->stream_bo);
    d12_queue_op_capture_bo(op, list->usc_bo);
    d12_queue_op_capture_bo(op, list->sparse_registry_bo);
+   util_dynarray_foreach(&list->g17p_vdm_storage,
+                         struct d12_g17p_vdm_storage *, storage) {
+      d12_g17p_vdm_storage_ref(*storage);
+      util_dynarray_append_typed(&op->g17p_vdm_storage,
+                                 struct d12_g17p_vdm_storage *, *storage);
+      d12_queue_op_capture_bo(op, (*storage)->bo);
+   }
+
 
    /* Scratch addresses are packed directly into the DRM command payload. */
    for (unsigned i = 0; i < list->segment_count; i++) {
@@ -1139,6 +1153,11 @@ d12_queue_op_build_read_set(struct d12_queue_op *op,
    struct agx_bo **captured = util_dynarray_begin(&op->bos);
    for (unsigned i = 0; i < captured_count; ++i)
       complete &= d12_queue_read_set_add_bo(op, captured[i]);
+
+   util_dynarray_foreach(&op->g17p_vdm_storage,
+                         struct d12_g17p_vdm_storage *, storage)
+      complete &= d12_queue_read_set_add_range(op, (*storage)->alias,
+                                              (*storage)->bo->size);
 
    /* Every render command names the occlusion buffer even when counting is
     * disabled. Device rodata contains the null region and heap descriptor

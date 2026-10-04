@@ -1563,7 +1563,18 @@ struct d12_fragment_state_cache_entry {
    uint16_t size;
 };
 
+/* Native PPP uploads keep their low VDM alias until the last submitted
+ * operation retires, independently of command-list Reset/release. */
+struct d12_g17p_vdm_storage {
+   uint32_t refcount;
+   struct agx_device *dev;
+   struct agx_bo *bo;
+   uint64_t alias;
+   size_t used;
+};
+
 struct d12_cmd_list {
+   struct util_dynarray g17p_vdm_storage;
    ID3D12GraphicsCommandList iface; /* must be first */
    uint32_t refcount;
    struct d12_private_data_store private_data;
@@ -2208,3 +2219,9 @@ HRESULT d12_platform_set_bo_resident(struct d12_device *device,
 HRESULT d12_platform_open_shared_handle_by_name(struct d12_device *device,
                                                 LPCWSTR name, DWORD access,
                                                 HANDLE *handle);
+
+void d12_g17p_vdm_storage_ref(struct d12_g17p_vdm_storage *storage);
+void d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage);
+void d12_list_g17p_vdm_storage_reset(struct d12_cmd_list *list);
+void *d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
+                            size_t alignment, uint64_t *compact_va);

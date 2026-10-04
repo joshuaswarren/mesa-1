@@ -748,6 +748,7 @@ d12_list_begin_recording(struct d12_cmd_list *list)
 {
    d12_list_release_segment_scratch(list);
    d12_list_read_tracker_reset(list);
+   d12_list_g17p_vdm_storage_reset(list);
    list->stream_cur = d12_list_stream_map(list);
    list->data_floor = list->stream_bo->size;
    list->usc_offset = 0;
@@ -11048,6 +11049,8 @@ d12_list_Release(ID3D12GraphicsCommandList6 *iface)
       /* Submitted queue operations own the exact BOs they reference. */
       d12_list_release_segment_scratch(list);
       d12_list_read_tracker_fini(list);
+      d12_list_g17p_vdm_storage_reset(list);
+      util_dynarray_fini(&list->g17p_vdm_storage);
 
       if (list->stream_bo)
          agx_bo_unreference(&list->device->dev, list->stream_bo);
@@ -14413,6 +14416,7 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
    list->allocator = allocator;
    list->pso = initial_state;
    d12_private_data_store_init(&list->private_data, (IUnknown *)&list->iface);
+   util_dynarray_init(&list->g17p_vdm_storage, NULL);
    util_dynarray_init(&list->descriptor_fixups, NULL);
    util_dynarray_init(&list->indirect_constant_fixups, NULL);
    util_dynarray_init(&list->indirect_argument_fixups, NULL);

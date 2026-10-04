@@ -41,6 +41,7 @@ libd3d12agx_files = files(
   'd12_device_removal_core.c',
   'd12_fence.c',
   'd12_format.c',
+  'd12_g17p_vdm_storage.c',
   'd12_pipeline.c',
   'd12_present_blt_math.c',
   'd12_present_format_core.c',
