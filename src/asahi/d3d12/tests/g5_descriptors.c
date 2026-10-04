@@ -43,6 +43,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "d12_test_contract.h"
 
 static int failures = 0;
 
@@ -85,7 +86,7 @@ slurp(const char *path, size_t *size)
 static ID3D12Resource *
 make_buffer(ID3D12Device *dev, UINT64 size)
 {
-   D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_UPLOAD};
+   D3D12_HEAP_PROPERTIES heap = D12_TEST_UMA_HEAP;
    D3D12_RESOURCE_DESC desc = {
       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
       .Width = size,
@@ -94,14 +95,18 @@ make_buffer(ID3D12Device *dev, UINT64 size)
       .MipLevels = 1,
       .SampleDesc = {.Count = 1},
       .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
    };
 
    ID3D12Resource *res = NULL;
-   if (FAILED(ID3D12Device_CreateCommittedResource(
+   HRESULT hr = ID3D12Device_CreateCommittedResource(
           dev, &heap, D3D12_HEAP_FLAG_NONE, &desc,
           D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
-          (void **)&res)))
+          (void **)&res);
+   if (hr != S_OK || !res) {
+      if (res) ID3D12Resource_Release(res);
       return NULL;
+   }
    return res;
 }
 
@@ -123,8 +128,9 @@ main(int argc, char **argv)
    ID3D12Device *dev = NULL;
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&dev);
+   TEST_OBJECT(hr, dev, "checked D3D12CreateDevice dev");
    CHECK(hr == S_OK && dev, "D3D12CreateDevice");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    /* ---- The root signature: ONE table covering three register ranges ---- */
@@ -164,8 +170,9 @@ main(int argc, char **argv)
    ID3DBlob *rs_blob = NULL;
    hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1_0,
                                     &rs_blob, NULL);
+   TEST_OBJECT(hr, rs_blob, "checked D3D12SerializeRootSignature rs_blob");
    CHECK(hr == S_OK && rs_blob, "serialize a descriptor-table root signature");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12RootSignature *root_sig = NULL;
@@ -173,9 +180,10 @@ main(int argc, char **argv)
       dev, 0, ID3D10Blob_GetBufferPointer(rs_blob),
       ID3D10Blob_GetBufferSize(rs_blob), &IID_ID3D12RootSignature,
       (void **)&root_sig);
+   TEST_OBJECT(hr, root_sig, "checked ID3D12Device_CreateRootSignature root_sig");
    CHECK(hr == S_OK && root_sig, "parse it back (round trip)");
    ID3D10Blob_Release(rs_blob);
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    /* Blobs produced by Microsoft's own compiler must parse too: agreeing
@@ -195,6 +203,7 @@ main(int argc, char **argv)
       hr = ID3D12Device_CreateRootSignature(dev, 0, blob, blob_size,
                                             &IID_ID3D12RootSignature,
                                             (void **)&rs);
+   TEST_OBJECT(hr, rs, "checked ID3D12Device_CreateRootSignature rs");
       char what[160];
       snprintf(what, sizeof(what), "parse a dxc-produced blob (%s)",
                strrchr(argv[i], '/') ? strrchr(argv[i], '/') + 1 : argv[i]);
@@ -227,9 +236,9 @@ main(int argc, char **argv)
 
    struct wide *src_map = NULL;
    uint32_t *dst_map = NULL, *cb_map = NULL;
-   ID3D12Resource_Map(src, 0, NULL, (void **)&src_map);
-   ID3D12Resource_Map(dst, 0, NULL, (void **)&dst_map);
-   ID3D12Resource_Map(cb, 0, NULL, (void **)&cb_map);
+   TEST_CALL(d12_test_map(src, false, (void **)&src_map), "checked CPU initialization map src");
+   TEST_CALL(d12_test_map(dst, false, (void **)&dst_map), "checked CPU initialization map dst");
+   TEST_CALL(d12_test_map(cb, false, (void **)&cb_map), "checked CPU initialization map cb");
 
    for (unsigned i = 0; i < N; i++) {
       src_map[i].a = i * 7 + 1;
@@ -250,8 +259,9 @@ main(int argc, char **argv)
    ID3D12DescriptorHeap *heap = NULL;
    hr = ID3D12Device_CreateDescriptorHeap(dev, &hd, &IID_ID3D12DescriptorHeap,
                                           (void **)&heap);
+   TEST_OBJECT(hr, heap, "checked ID3D12Device_CreateDescriptorHeap heap");
    CHECK(hr == S_OK && heap, "create a shader-visible CBV/SRV/UAV heap");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    UINT inc = ID3D12Device_GetDescriptorHandleIncrementSize(
@@ -261,6 +271,7 @@ main(int argc, char **argv)
    D3D12_GPU_DESCRIPTOR_HANDLE gpu =
       d12_test_descriptor_heap_get_gpu_start(heap);
    CHECK(inc && cpu.ptr && gpu.ptr, "heap start handles are usable");
+   if (!inc || !cpu.ptr || !gpu.ptr) return 1;
 
    /* Table slot 0: the SRV. Its 12-byte stride is the shader's, not four. */
    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {
@@ -309,13 +320,21 @@ main(int argc, char **argv)
          .SampleDesc = {.Count = 1},
       };
       ID3D12Resource *tex = NULL;
-      ID3D12Device_CreateCommittedResource(
+      TEST_OBJECT(ID3D12Device_CreateCommittedResource(
          dev, &dh, D3D12_HEAP_FLAG_NONE, &td, D3D12_RESOURCE_STATE_COMMON,
-         NULL, &IID_ID3D12Resource, (void **)&tex);
+         NULL, &IID_ID3D12Resource, (void **)&tex), tex, "checked ID3D12Device_CreateCommittedResource tex");
 
       if (tex) {
-         struct { uint8_t bytes[32]; } scratch = {0};
-         D3D12_CPU_DESCRIPTOR_HANDLE h = {.ptr = (SIZE_T)&scratch};
+         ID3D12DescriptorHeap *scratch_heap = NULL;
+         const D3D12_DESCRIPTOR_HEAP_DESC scratch_hd = {
+            .Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,.NumDescriptors = 1};
+         TEST_OBJECT(ID3D12Device_CreateDescriptorHeap(dev, &scratch_hd,
+                     &IID_ID3D12DescriptorHeap, (void **)&scratch_heap),
+                     scratch_heap, "create real diagnostic descriptor storage");
+         D3D12_CPU_DESCRIPTOR_HANDLE h = d12_test_descriptor_heap_get_cpu_start(scratch_heap);
+         CHECK(h.ptr != 0, "diagnostic descriptor handle is valid");
+         if (!h.ptr) return 1;
+         uint8_t *scratch = (uint8_t *)h.ptr;
 
          D3D12_SHADER_RESOURCE_VIEW_DESC tsrv = {
             .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
@@ -327,15 +346,16 @@ main(int argc, char **argv)
          ID3D12Device_CreateShaderResourceView(dev, tex, &tsrv, h);
 
          bool recorded = false;
-         for (unsigned i = 0; i < sizeof(scratch); i++)
-            recorded |= scratch.bytes[i] != 0;
+         for (unsigned i = 0; i < inc; i++)
+            recorded |= scratch[i] != 0;
          CHECK(recorded, "a TEXTURE2D shader resource view is recorded");
 
          /* 3D has a different descriptor shape we do not build. Accepting
           * it would point the texture unit at a 2D interpretation of a
           * volume.
           */
-         memset(&scratch, 0, sizeof(scratch));
+         /* CreateShaderResourceView clears an invalid descriptor itself;
+          * do not scribble over heap-owned descriptor reference state. */
          D3D12_SHADER_RESOURCE_VIEW_DESC bad = {
             .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
             .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE3D,
@@ -346,9 +366,10 @@ main(int argc, char **argv)
          ID3D12Device_CreateShaderResourceView(dev, tex, &bad, h);
 
          bool empty = true;
-         for (unsigned i = 0; i < sizeof(scratch); i++)
-            empty &= scratch.bytes[i] == 0;
+         for (unsigned i = 0; i < inc; i++)
+            empty &= scratch[i] == 0;
          CHECK(empty, "an unsupported view dimension is still refused");
+         ID3D12DescriptorHeap_Release(scratch_heap);
          ID3D12Resource_Release(tex);
       }
    }
@@ -363,43 +384,53 @@ main(int argc, char **argv)
    hr = ID3D12Device_CreateComputePipelineState(dev, &pd,
                                                 &IID_ID3D12PipelineState,
                                                 (void **)&pso);
+   TEST_OBJECT(hr, pso, "checked ID3D12Device_CreateComputePipelineState pso");
    CHECK(hr == S_OK && pso, "compile a shader using t2, u3 and b1");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12CommandAllocator *alloc = NULL;
    ID3D12GraphicsCommandList *list = NULL;
-   ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+   TEST_OBJECT(ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                        &IID_ID3D12CommandAllocator,
-                                       (void **)&alloc);
-   ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                       (void **)&alloc), alloc, "checked ID3D12Device_CreateCommandAllocator alloc");
+   TEST_OBJECT(ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                   alloc, NULL,
                                   &IID_ID3D12GraphicsCommandList,
-                                  (void **)&list);
+                                  (void **)&list), list, "checked ID3D12Device_CreateCommandList list");
 
    ID3D12GraphicsCommandList_SetDescriptorHeaps(list, 1, &heap);
    ID3D12GraphicsCommandList_SetComputeRootSignature(list, root_sig);
    ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(list, 0, gpu);
    ID3D12GraphicsCommandList_SetPipelineState(list, pso);
+   ID3D12Resource_Unmap(src, 0, NULL);src_map = NULL;
+   d12_test_transition(list, src, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   ID3D12Resource_Unmap(dst, 0, NULL);dst_map = NULL;
+   d12_test_transition(list, dst, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+   ID3D12Resource_Unmap(cb, 0, NULL);cb_map = NULL;
+   d12_test_transition(list, cb, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
    ID3D12GraphicsCommandList_Dispatch(list, N / 64, 1, 1);
+   d12_test_transition(list, src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+   d12_test_transition(list, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+   d12_test_transition(list, cb, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER, D3D12_RESOURCE_STATE_COMMON);
    hr = ID3D12GraphicsCommandList_Close(list);
    CHECK(hr == S_OK, "record a dispatch bound through a descriptor table");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12CommandQueue *queue = NULL;
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE};
-   ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
-                                   (void **)&queue);
+   TEST_OBJECT(ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
+                                   (void **)&queue), queue, "checked ID3D12Device_CreateCommandQueue queue");
    ID3D12Fence *fence = NULL;
-   ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
-                            (void **)&fence);
+   TEST_OBJECT(ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
+                            (void **)&fence), fence, "checked ID3D12Device_CreateFence fence");
 
-   ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
-   ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-   ID3D12CommandQueue_Signal(queue, fence, 1);
-   ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
-   CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1, "GPU dispatch complete");
+   TEST_CALL(d12_test_submit_closed(dev, list, queue, fence, 1), "GPU dispatch complete");
+   TEST_CALL(d12_test_map(src, true, (void **)&src_map), "map actual fenced src bytes");
+   TEST_CALL(d12_test_map(dst, true, (void **)&dst_map), "map actual fenced dst bytes");
+   TEST_CALL(d12_test_map(cb, true, (void **)&cb_map), "map actual fenced cb bytes");
+
 
    /* ---- Grade against the same arithmetic on the CPU ---- */
 
@@ -433,6 +464,8 @@ main(int argc, char **argv)
    if (argc > 2 + 3) {
       size_t sp_size;
       void *sp_cs = slurp(argv[argc - 1], &sp_size);
+      CHECK(sp_cs != NULL, "required register-space shader is available");
+      if (!sp_cs) return 1;
       if (sp_cs) {
          D3D12_DESCRIPTOR_RANGE sp_ranges[] = {
             {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0, 0,
@@ -453,13 +486,13 @@ main(int argc, char **argv)
                                              .pParameters = &sp_param};
 
          ID3DBlob *sb = NULL;
-         D3D12SerializeRootSignature(&sp_rsd, D3D_ROOT_SIGNATURE_VERSION_1_0,
-                                     &sb, NULL);
+         TEST_OBJECT(D3D12SerializeRootSignature(&sp_rsd, D3D_ROOT_SIGNATURE_VERSION_1_0,
+                                     &sb, NULL), sb, "checked D3D12SerializeRootSignature sb");
          ID3D12RootSignature *sp_rs = NULL;
-         ID3D12Device_CreateRootSignature(
+         TEST_OBJECT(ID3D12Device_CreateRootSignature(
             dev, 0, ID3D10Blob_GetBufferPointer(sb),
             ID3D10Blob_GetBufferSize(sb), &IID_ID3D12RootSignature,
-            (void **)&sp_rs);
+            (void **)&sp_rs), sp_rs, "checked ID3D12Device_CreateRootSignature sp_rs");
          ID3D10Blob_Release(sb);
 
          D3D12_COMPUTE_PIPELINE_STATE_DESC sp_pd = {
@@ -469,6 +502,7 @@ main(int argc, char **argv)
          ID3D12PipelineState *sp_pso = NULL;
          hr = ID3D12Device_CreateComputePipelineState(
             dev, &sp_pd, &IID_ID3D12PipelineState, (void **)&sp_pso);
+   TEST_OBJECT(hr, sp_pso, "checked ID3D12Device_CreateComputePipelineState sp_pso");
          CHECK(hr == S_OK && sp_pso,
                "compile t0/space0, t0/space2, t0/space5 and u0/space3 "
                "without collision");
@@ -490,14 +524,14 @@ main(int argc, char **argv)
          D3D12_ROOT_SIGNATURE_DESC only0_rsd = {.NumParameters = 1,
                                                 .pParameters = &only0_param};
          ID3DBlob *ob = NULL;
-         D3D12SerializeRootSignature(&only0_rsd,
+         TEST_OBJECT(D3D12SerializeRootSignature(&only0_rsd,
                                      D3D_ROOT_SIGNATURE_VERSION_1_0, &ob,
-                                     NULL);
+                                     NULL), ob, "checked D3D12SerializeRootSignature ob");
          ID3D12RootSignature *only0_rs = NULL;
-         ID3D12Device_CreateRootSignature(
+         TEST_OBJECT(ID3D12Device_CreateRootSignature(
             dev, 0, ID3D10Blob_GetBufferPointer(ob),
             ID3D10Blob_GetBufferSize(ob), &IID_ID3D12RootSignature,
-            (void **)&only0_rs);
+            (void **)&only0_rs), only0_rs, "checked ID3D12Device_CreateRootSignature only0_rs");
          ID3D10Blob_Release(ob);
 
          D3D12_COMPUTE_PIPELINE_STATE_DESC bad_pd = {
@@ -533,16 +567,17 @@ main(int argc, char **argv)
       D3D12_ROOT_SIGNATURE_DESC bad_rsd = {.NumParameters = 1,
                                            .pParameters = &uav_param};
       ID3DBlob *b = NULL;
-      D3D12SerializeRootSignature(&bad_rsd, D3D_ROOT_SIGNATURE_VERSION_1_0,
-                                  &b, NULL);
+      TEST_OBJECT(D3D12SerializeRootSignature(&bad_rsd, D3D_ROOT_SIGNATURE_VERSION_1_0,
+                                  &b, NULL), b, "checked D3D12SerializeRootSignature b");
       ID3D12RootSignature *bad_rs = NULL;
-      ID3D12Device_CreateRootSignature(dev, 0, ID3D10Blob_GetBufferPointer(b),
+      TEST_OBJECT(ID3D12Device_CreateRootSignature(dev, 0, ID3D10Blob_GetBufferPointer(b),
                                        ID3D10Blob_GetBufferSize(b),
                                        &IID_ID3D12RootSignature,
-                                       (void **)&bad_rs);
+                                       (void **)&bad_rs), bad_rs, "checked ID3D12Device_CreateRootSignature bad_rs");
       ID3D10Blob_Release(b);
 
-      ID3D12GraphicsCommandList_Reset(list, alloc, NULL);
+      TEST_CALL(ID3D12CommandAllocator_Reset(alloc), "reset fenced allocator for negative binding test");
+      TEST_CALL(ID3D12GraphicsCommandList_Reset(list, alloc, NULL), "reset list for negative binding test");
       ID3D12GraphicsCommandList_SetComputeRootSignature(list, bad_rs);
       ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(list, 0, gpu);
       CHECK(FAILED(ID3D12GraphicsCommandList_Close(list)),
@@ -550,9 +585,9 @@ main(int argc, char **argv)
       ID3D12RootSignature_Release(bad_rs);
    }
 
-   ID3D12Resource_Unmap(src, 0, NULL);
-   ID3D12Resource_Unmap(dst, 0, NULL);
-   ID3D12Resource_Unmap(cb, 0, NULL);
+   { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(src, 0, &empty); }
+   { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(dst, 0, &empty); }
+   { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(cb, 0, &empty); }
    ID3D12Fence_Release(fence);
    ID3D12CommandQueue_Release(queue);
    ID3D12GraphicsCommandList_Release(list);
