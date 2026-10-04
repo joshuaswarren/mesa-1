@@ -1145,6 +1145,9 @@ void agx_ilp_schedule(agx_context *ctx);
 bool agx3_lower_uniform_program(agx_context *ctx);
 /* Success/refusal, not a progress flag. Call only for AGX3B preambles. */
 bool agx3_lower_cprog_inputs(agx_context *ctx);
+bool agx3_cprog_spill_provenance(const agx_context *ctx);
+bool agx3_cprog_certify_static_spill(const agx_context *ctx,
+                                      bool imports_only_before_ra);
 bool agx3_lower_uniform_half_exports(agx_context *ctx);
 bool agx3_analyze_preamble_uniform_inputs(agx_context *ctx, bool *has_inputs);
 /* UVSW carries the UVS index and the staging address in two independent

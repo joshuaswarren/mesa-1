@@ -707,6 +707,7 @@ if with_tests
          'test/test-mrt-terminal-tail.cpp',
          'test/test-agx3-pack-binary.cpp',
          'test/test-agx3-lower-uniform-program.cpp',
+         'test/test-agx3-cprog-spill-certificate.cpp',
          'test/test-agx3-sr.cpp',
          'test/test-agx3-uniform-alu.cpp',
          'test/test-agx3-integer-fusion.cpp',

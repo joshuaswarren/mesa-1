@@ -2030,6 +2030,39 @@ agx3_tile_store_bank(agx_context *ctx)
           : raw32_bank || mrt_bank || sample_bank ? 32 : 16;
 }
 
+/* The packer places dynamic cube CEM scratch above every allocated operand.
+ * Reserve that storage before spilling/RA, including the extra packed layer
+ * word used by bias+minimum. Cube-array face staging has a seven-bit limit.
+ * Keep the allocation budget aligned to the largest SSA vector, so rounding
+ * demand for live-range splitting cannot exceed the reduced file. */
+static unsigned
+agx3_cube_register_budget(agx_context *ctx)
+{
+   unsigned budget = AGX3B_NUM_REGS;
+   unsigned alignment = 8;
+   agx_foreach_instr_global(ctx, I) {
+      agx_foreach_ssa_dest(I, d)
+         alignment = MAX2(alignment,
+                         util_next_power_of_two(agx_index_size_16(I->dest[d])));
+      if (I->op != AGX_OPCODE_TEXTURE_SAMPLE || I->nr_srcs != 6 ||
+          (I->dim != AGX_DIM_CUBE && I->dim != AGX_DIM_CUBE_ARRAY))
+         continue;
+
+      const bool bias_min = I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS_MIN;
+      const bool register_lod = bias_min ||
+         ((I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
+           I->lod_mode == AGX_LOD_MODE_AUTO_LOD_BIAS) &&
+          I->src[1].type != AGX_INDEX_IMMEDIATE);
+      if (!register_lod && I->src[3].type == AGX_INDEX_IMMEDIATE &&
+          I->src[4].type == AGX_INDEX_IMMEDIATE)
+         continue;
+
+      budget = MIN2(budget, I->dim == AGX_DIM_CUBE_ARRAY ? 112 :
+                    AGX3B_NUM_REGS - 8 - (bias_min ? 2 : 0));
+   }
+   return ROUND_DOWN_TO(budget, alignment);
+}
+
 void
 agx_ra(agx_context *ctx)
 {
@@ -2072,34 +2105,10 @@ agx_ra(agx_context *ctx)
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
       max_possible_regs = MIN2(max_possible_regs, AGX3B_NUM_REGS);
 
-   /* A cube-array sample whose texture or sampler descriptor is a register
-    * publishes CEM's face through agx3_tex_stage_cube_array_layer(), which
-    * names it in the seven-bit f30 operand. The plain cube's cube_z and
-    * cube_lod forms carry an eighth bit and reach half 255; this one stops
-    * at half 127. The packer reserves the CEM scratch immediately ABOVE
-    * whatever this allocation used, so a shader that reaches half 126 puts
-    * the face at half 128 and the entire pipeline is refused -- measured as
-    * VK_ERROR_FEATURE_NOT_PRESENT with "cube staging face=half128" on
-    * dEQP-VK.pipeline.*.image.*.view_type.cube_array.*.count_8.*, where the
-    * GLSL sampler array is indexed by a loop counter.
-    *
-    * Budget the scratch inside the file instead. The bound must survive the
-    * ROUND_DOWN_TO(reg_file_alignment) below, which is 8 or 16 halves, so
-    * use a multiple of both: the scratch then ends at half 126 at the
-    * latest. Shaders of this exact shape lose the halves above 112 and spill
-    * instead; every other shader keeps the full file.
-    */
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-      agx_foreach_instr_global(ctx, I) {
-         if (I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
-             I->dim == AGX_DIM_CUBE_ARRAY && I->nr_srcs == 6 &&
-             (I->src[3].type != AGX_INDEX_IMMEDIATE ||
-              I->src[4].type != AGX_INDEX_IMMEDIATE)) {
-            max_possible_regs = MIN2(max_possible_regs, 112);
-            break;
-         }
-      }
-   }
+   /* Match the CEM scratch extent reserved by agx3_pack_binary. */
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      max_possible_regs = MIN2(max_possible_regs,
+                               agx3_cube_register_budget(ctx));
 
    /* A multisample-array read packs its normalized layer beside another
     * operand, and the packer reserves one transient word for it immediately

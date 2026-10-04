@@ -130,6 +130,10 @@ struct agx_shader_info {
    /* The machine program consumes the frozen layout through native TPS RLDs.
     * Older uniform-read programs must not silently select this loader ABI. */
    bool agx3_preamble_tps_inputs;
+   /* Versioned compiler proof: imported inputs followed only by RA-created
+    * static spill slots. Set only after final IR validation and successful pack.
+    * This occupies existing alignment padding, but all ABI layouts are checked. */
+   uint8_t agx3_preamble_static_spill_version;
    struct agx3_cprog_inputs agx3_preamble_inputs;
    unsigned preamble_offset, main_offset;
 
@@ -539,6 +543,16 @@ bool agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
 
 /* Returns false when the selected backend cannot encode the shader.  On
  * failure, out is cleared and owns no allocation. */
+/* Private extension range ends at the audited 360-byte CProg frame, including
+ * its last spill word. Hardware qualification is required before publication. */
+#define AGX3_CPROG_STATIC_SPILL_MAX_B 360u
+#define AGX3_CPROG_STATIC_SPILL_VERSION 1u
+/* Fragment TI resources have a separate hardware qualification scope. Keep
+ * the published vertex version/range unchanged and never cross-admit tags. */
+#define AGX3_CPROG_FS_STATIC_SPILL_MAX_B 192u
+#define AGX3_CPROG_FS_STATIC_SPILL_VERSION 2u
+bool agx3_cprog_static_spill_info_valid(const struct agx_shader_info *info);
+
 bool agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
                             struct agx_shader_part *out);
 
