@@ -2497,7 +2497,10 @@ compile_gfx_stage(struct d12_device *device,
    }
 
    NIR_PASS(_, nir, agx_nir_lower_texture);
-   agx_preprocess_nir(nir);
+   if (device->dev.chip == AGX_CHIP_G17P)
+      agx_preprocess_nir_g17p(nir);
+   else
+      agx_preprocess_nir(nir);
    NIR_PASS(_, nir, d12_dxil_lower_root_mask, api_sample_mask);
 
    if (stage == MESA_SHADER_FRAGMENT && split_fs) {
@@ -2623,6 +2626,8 @@ compile_gfx_stage(struct d12_device *device,
       .dev = agx_gather_device_key(&device->dev),
       /* Allocas live in per-thread scratch, and large shaders spill. */
       .has_scratch = true,
+      /* Native stage publication below admits only the no-CProg ABI. */
+      .no_preamble = device->dev.chip == AGX_CHIP_G17P,
       /* Constant promotion is still outside this texture-binding change;
        * see the validation note on the compute key above. */
       .promote_constants = false,
@@ -2638,7 +2643,7 @@ compile_gfx_stage(struct d12_device *device,
    };
 
    memset(out, 0, sizeof(*out));
-   agx_compile_shader_nir(nir, &key, out);
+   const bool compiled = agx_compile_shader_nir(nir, &key, out);
    out->info.uses_sampler_heap |= d12_binding_map_uses_sampler_heap(map);
    out->info.sampler_state_count =
       MAX2(out->info.sampler_state_count, runtime_samplers);
@@ -2660,7 +2665,7 @@ compile_gfx_stage(struct d12_device *device,
                        out->info.binary_size - out->info.main_offset, stderr);
    }
 
-   return out->binary && out->info.binary_size;
+   return compiled && out->binary && out->info.binary_size;
 }
 
 /*

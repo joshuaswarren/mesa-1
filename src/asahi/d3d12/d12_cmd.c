@@ -31,6 +31,7 @@
 
 #include "agx_helpers.h"
 #include "asahi/compiler/agx3_compute_program.h"
+#include "asahi/compiler/agx3_graphics_program.h"
 #include "agx_abi.h"
 #include "agx_nir_texture.h"
 #include "agx_usc.h"
@@ -6068,6 +6069,104 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    seg->dispatches++;
 }
 
+/* First bounded graphics-stage producer: monolithic native VS/FS with
+ * command-owned root/draw/blend ranges. This supplies Ioto bytes only; the
+ * independent VDM-context, PPP, background and EOT gates remain mandatory.
+ * Texture, preamble and promoted-constant ABIs are deliberately not admitted. */
+static uint32_t
+d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
+                  bool fragment, const struct agx_tilebuffer_layout *tib,
+                  uint64_t root_gpu, uint64_t draw_gpu, uint64_t blend_gpu)
+{
+   struct agx_device *dev = &list->device->dev;
+   const struct agx_shader_info *info = &st->info;
+   const struct agx_linked_shader *linked = &st->linked;
+   if (dev->chip != AGX_CHIP_G17P || !linked->bo || !linked->bo->va ||
+       !linked->entry_offset || !linked->size || linked->size > UINT32_MAX ||
+       linked->bo->va->addr > UINT64_MAX - linked->entry_offset ||
+       linked->entry_offset > linked->bo->size ||
+       linked->size > linked->bo->size - linked->entry_offset ||
+       !linked->nr_gprs || !linked->g17p_compiler_d_valid ||
+       info->stage != (fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX) ||
+       info->has_preamble || info->nr_preamble_gprs ||
+       info->preamble_scratch_size || info->rodata.size_16 ||
+       info->agx3_uniform_dma_valid || info->texture_state_count ||
+       info->sampler_state_count || info->uses_sampler_heap || linked->uses_txf ||
+       !root_gpu || !tib || tib->nr_samples != 1)
+      goto fail;
+
+   struct agx3_ioto_uniform_range ranges[3];
+   size_t count = 0;
+   if (fragment && blend_gpu)
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 4, .size_halfs = 8, .address = blend_gpu,
+      };
+   ranges[count++] = (struct agx3_ioto_uniform_range){
+      .start_halfs = fragment ? D12_UNIFORM_FRAGMENT_ROOT : D12_UNIFORM_ROOT,
+      .size_halfs = D12_UNIFORM_ROOT_REGS, .address = root_gpu,
+   };
+   if (draw_gpu)
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = D12_UNIFORM_DRAW,
+         .size_halfs = D12_UNIFORM_DRAW_REGS, .address = draw_gpu,
+      };
+   for (size_t i = 0; i < count; i++) {
+      const size_t size = (size_t)ranges[i].size_halfs * 2;
+      /* This subset consumes only immutable command-list uploads. */
+      if (!d12_list_stream_contains(list, ranges[i].address, size) ||
+          agx_bo_sync_for_device(list->stream_bo,
+             ranges[i].address - list->stream_bo->va->addr, size))
+         goto fail;
+   }
+
+   const uint64_t shader_va = linked->bo->va->addr + linked->entry_offset;
+   uint32_t relative_program = 0;
+   uint8_t *cpu = d12_list_alloc_usc(list, AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE,
+                                   &relative_program);
+   const uint64_t program_va = dev->shader_base + relative_program;
+   const struct agx3_g17p_graphics_program_desc desc = {
+      .program_va = program_va,
+      .shader_va = shader_va,
+      .uniform_ranges = ranges,
+      .uniform_range_count = count,
+      .shader_binary_size = linked->size,
+      .scratch_size = MAX2(linked->scratch_size,
+                           linked->agx3_spectpr_scratch_size),
+      .nr_gprs = linked->nr_gprs,
+      .compiler_d_valid = linked->g17p_compiler_d_valid,
+      .compiler_d = linked->g17p_compiler_d,
+      .fragment = fragment,
+      .writes_sample_mask = fragment &&
+         ((linked->fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_PUNCH_THROUGH ||
+          (linked->fragment_control.opaque[0] >> 29) ==
+             AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH),
+      .colour_classes = fragment ? linked->g17p_colour_classes : 0,
+      .imageblock = {
+         .sample_size_B = tib->sample_size_B,
+         .nr_samples = tib->nr_samples,
+         .tile_size_px = tib->tile_size,
+      },
+   };
+   struct agx3_g17p_graphics_program generated;
+   if (!cpu || !agx_va_in_usc_window(dev, program_va) ||
+       !agx_va_in_usc_window(dev, shader_va) ||
+       linked->size > AGX_USC_WINDOW_SIZE - (shader_va - dev->shader_base) ||
+       !agx3_g17p_graphics_program_generate(dev->chip, &desc, &generated))
+      goto fail;
+   const size_t offset = program_va - list->usc_bo->va->addr;
+   memcpy(cpu, generated.bytes, generated.length);
+   list->usc_offset = offset + generated.length;
+   if (agx_bo_sync_for_device(list->usc_bo, offset, generated.length))
+      goto fail;
+   d12_list_track_read_bo(list, linked->bo);
+   return relative_program;
+
+fail:
+   mesa_loge("native graphics-stage Ioto producer rejected metadata/resources");
+   list->state = D12_LIST_ERROR;
+   return 0;
+}
+
 /*
  * Build the USC words that bind one linked graphics stage: our root
  * uniform, the stage's shared config, then the linker's packed program
@@ -6084,6 +6183,17 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
                   const struct d12_dispatch_uniforms *poly)
 {
    struct d12_device *device = list->device;
+
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      if (textures_gpu || pbes_gpu || heap_gpu || heap_textures_gpu ||
+          heap_pbes_gpu || heap_samplers_gpu || poly) {
+         mesa_loge("native graphics texture/poly stage producer unavailable");
+         list->state = D12_LIST_ERROR;
+         return 0;
+      }
+      return d12_gfx_stage_g17p(list, st, fragment, tib,
+                                 root_gpu, draw_gpu, blend_gpu);
+   }
 
    uint32_t usc;
    uint8_t *cpu = d12_list_alloc_usc(list, agx_usc_size(18), &usc);
