@@ -16,6 +16,7 @@
 
 #include "d12_private.h"
 #include "d12_agx3_cmdstream_core.h"
+#include "d12_native_render_resources_core.h"
 #include "d12_read_set_core.h"
 #include "d12_write_set_core.h"
 
@@ -344,7 +345,8 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
    /* Background object values: hk's base constant, with the stencil clear
     * value in the low byte.
     */
-   c->isp_bgobjdepth = seg->isp_bgobjdepth;
+   c->isp_bgobjdepth = device->dev.chip == AGX_CHIP_G17P && !seg->ds
+      ? fui(1.0f) : seg->isp_bgobjdepth;
    c->isp_bgobjvals = 0x300 | seg->stencil_clear;
 
    /*
@@ -457,14 +459,23 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
    c->sampler_heap = seg->sampler_heap;
    c->sampler_count = seg->sampler_count;
 
-   static_assert(sizeof(c->bg.rsrc_spec) == sizeof(seg->bg_counts),
-                 "counts word must match rsrc_spec");
-   memcpy(&c->bg.rsrc_spec, &seg->bg_counts, sizeof(seg->bg_counts));
-   memcpy(&c->eot.rsrc_spec, &seg->eot_counts, sizeof(seg->eot_counts));
-   memcpy(&c->partial_bg.rsrc_spec, &seg->partial_bg_counts,
-          sizeof(seg->partial_bg_counts));
-   memcpy(&c->partial_eot.rsrc_spec, &seg->partial_eot_counts,
-          sizeof(seg->partial_eot_counts));
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      const struct d12_native_render_resource_specs specs = {
+         .bg = seg->g17p_bg_resources, .eot = seg->g17p_eot_resources,
+         .partial_bg = seg->g17p_partial_bg_resources,
+         .partial_eot = seg->g17p_partial_eot_resources,
+      };
+      d12_native_render_resource_specs_pack(&specs, c);
+   } else {
+      static_assert(sizeof(c->bg.rsrc_spec) == sizeof(seg->bg_counts),
+                    "counts word must match rsrc_spec");
+      memcpy(&c->bg.rsrc_spec, &seg->bg_counts, sizeof(seg->bg_counts));
+      memcpy(&c->eot.rsrc_spec, &seg->eot_counts, sizeof(seg->eot_counts));
+      memcpy(&c->partial_bg.rsrc_spec, &seg->partial_bg_counts,
+             sizeof(seg->partial_bg_counts));
+      memcpy(&c->partial_eot.rsrc_spec, &seg->partial_eot_counts,
+             sizeof(seg->partial_eot_counts));
+   }
 
    /* The scissor array carries both the XY bounds and the depth clip range
     * that draws index into. Occlusion scratch must be valid memory whether

@@ -1446,6 +1446,8 @@ struct d12_segment {
    bool merge_unused_rts;
    uint32_t bg_usc, eot_usc; /* agx_usc_addr()-encoded */
    uint32_t partial_bg_usc, partial_eot_usc;
+   uint64_t g17p_bg_resources, g17p_eot_resources;
+   uint64_t g17p_partial_bg_resources, g17p_partial_eot_resources;
    struct agx_counts_packed bg_counts, eot_counts;
    struct agx_counts_packed partial_bg_counts, partial_eot_counts;
    bool has_draws;
@@ -2255,4 +2257,4 @@ uint32_t d12_build_g17p_bg_eot(
    const float legacy_color[4],
    const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
    const struct agx_tilebuffer_layout *tib,
-   struct agx_counts_packed *out_resources);
+   uint64_t *out_resources);

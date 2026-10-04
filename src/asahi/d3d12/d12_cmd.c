@@ -1871,7 +1871,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
                      const float legacy_color[4],
                      const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
                      const struct agx_tilebuffer_layout *tib,
-                     struct agx_counts_packed *out_resources)
+                     uint64_t *out_resources)
 {
    struct d12_device *device = list->device;
    struct agx_device *dev = &device->dev;
@@ -2046,8 +2046,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
        agx_bo_sync_for_device(list->stream_bo, list->data_floor,
                               list->stream_bo->size - list->data_floor))
       goto fail;
-   _Static_assert(sizeof(*out_resources) == sizeof(resource_spec), "native resource width");
-   memcpy(out_resources, &resource_spec, sizeof(resource_spec));
+   *out_resources = resource_spec;
    d12_list_track_read_bo(list, shader->bo);
    return relative;
 fail:
@@ -2066,13 +2065,13 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
                      const float legacy_color[4],
                      const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
                      const struct agx_tilebuffer_layout *tib,
-                     struct agx_counts_packed *out_counts)
+                     struct agx_counts_packed *out_counts, uint64_t *out_native_resources)
 {
    struct d12_device *device = list->device;
 
    if (device->dev.chip == AGX_CHIP_G17P &&
        d12_g17p_graphics_producers_qualified)
-      return d12_build_g17p_bg_eot(list, seg, legacy_color, ops, tib, out_counts);
+      return d12_build_g17p_bg_eot(list, seg, legacy_color, ops, tib, out_native_resources);
 
    /* This builder emits AGX2 USC resource/state words. A clear-only list
     * never reaches the vertex-state guard, so reject here until native
@@ -2876,13 +2875,13 @@ d12_list_begin_render(struct d12_cmd_list *list,
    }
 
    seg->bg_usc = d12_build_bg_eot_usc(
-      list, seg, color, main_bg, &seg->tib, &seg->bg_counts);
+      list, seg, color, main_bg, &seg->tib, &seg->bg_counts, &seg->g17p_bg_resources);
    seg->eot_usc = d12_build_bg_eot_usc(
-      list, seg, NULL, main_eot, &seg->tib, &seg->eot_counts);
+      list, seg, NULL, main_eot, &seg->tib, &seg->eot_counts, &seg->g17p_eot_resources);
    seg->partial_bg_usc = d12_build_bg_eot_usc(
-      list, seg, NULL, partial_bg, &seg->tib, &seg->partial_bg_counts);
+      list, seg, NULL, partial_bg, &seg->tib, &seg->partial_bg_counts, &seg->g17p_partial_bg_resources);
    seg->partial_eot_usc = d12_build_bg_eot_usc(
-      list, seg, NULL, partial_eot, &seg->tib, &seg->partial_eot_counts);
+      list, seg, NULL, partial_eot, &seg->tib, &seg->partial_eot_counts, &seg->g17p_partial_eot_resources);
    if (!seg->bg_usc || !seg->eot_usc || !seg->partial_bg_usc ||
        !seg->partial_eot_usc)
       return NULL;

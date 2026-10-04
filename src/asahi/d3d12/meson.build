@@ -42,6 +42,7 @@ libd3d12agx_files = files(
   'd12_fence.c',
   'd12_format.c',
   'd12_g17p_vdm_storage.c',
+  'd12_native_render_resources_core.c',
   'd12_pipeline.c',
   'd12_present_blt_math.c',
   'd12_present_format_core.c',
