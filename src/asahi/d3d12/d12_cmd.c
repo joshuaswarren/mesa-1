@@ -61,10 +61,25 @@
  * hundreds of thousands of tiny meta dispatches. */
 #define D12_MAX_DISPATCHES_PER_SEGMENT 8192
 
-/* Qualification switch stays closed until this coherent producer chain has
- * passed native compilation and compiler-only PSO checks. No runtime option
- * bypasses the incomplete/unqualified renderer. */
-static const bool d12_g17p_graphics_producers_qualified = false;
+/* Physical-device rendering remains closed. Only the loaded in-tree noop
+ * DRM shim supplies this optional callback, and it requires explicit metadata
+ * qualification plus stream validator hooks. Environment alone is insufficient. */
+#ifndef _WIN32
+extern bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
+   __attribute__((weak, visibility("default")));
+#endif
+
+static bool
+d12_g17p_shim_graphics_enabled(const struct agx_device *dev)
+{
+#ifndef _WIN32
+   return asahi_noop_d3d12_graphics_qualification_allowed &&
+          asahi_noop_d3d12_graphics_qualification_allowed(dev->fd);
+#else
+   (void)dev;
+   return false;
+#endif
+}
 
 _Static_assert(offsetof(struct d12_cmd_list, iface) == 0,
                "Command-list COM interface must remain at object offset zero");
@@ -1174,7 +1189,7 @@ d12_list_close_cdm(struct d12_cmd_list *list)
       d12_list_emit_vdm_terminate(list);
       seg->stream_end = list->stream_cur - d12_list_stream_map(list);
       if (list->device->dev.chip == AGX_CHIP_G17P &&
-          d12_g17p_graphics_producers_qualified && list->state != D12_LIST_ERROR) {
+          d12_g17p_shim_graphics_enabled(&list->device->dev) && list->state != D12_LIST_ERROR) {
          const size_t size = seg->stream_end - seg->stream_start;
          uint64_t compact;
          void *copy = d12_list_alloc_g17p_vdm(list, size, 64, &compact);
@@ -2070,7 +2085,7 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
    struct d12_device *device = list->device;
 
    if (device->dev.chip == AGX_CHIP_G17P &&
-       d12_g17p_graphics_producers_qualified)
+       d12_g17p_shim_graphics_enabled(&list->device->dev))
       return d12_build_g17p_bg_eot(list, seg, legacy_color, ops, tib, out_native_resources);
 
    /* This builder emits AGX2 USC resource/state words. A clear-only list
@@ -2894,7 +2909,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
       return NULL;
 
    if (list->device->dev.chip == AGX_CHIP_G17P &&
-       d12_g17p_graphics_producers_qualified) {
+       d12_g17p_shim_graphics_enabled(&list->device->dev)) {
       if (!list->device->dev.g17p_render_context_bo) {
          list->state = D12_LIST_ERROR;
          return NULL;
@@ -8449,7 +8464,7 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
                         uint32_t fs_usc, unsigned vertex_count,
                         unsigned instance_count, unsigned first_vertex)
 {
-   if (!d12_g17p_graphics_producers_qualified ||
+   if (!d12_g17p_shim_graphics_enabled(&list->device->dev) ||
        !seg->agx3_active_context_selector_valid ||
        !pso->vs.g17p_root_only || !pso->fs.g17p_root_only ||
        pso->vs.g17p_writes_memory || pso->fs.g17p_writes_memory ||

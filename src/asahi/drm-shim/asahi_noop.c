@@ -101,6 +101,20 @@ shim_params(void)
    return &params_g13g;
 }
 
+/* This symbol is available only from the actual loaded noop driver. D3D12
+ * has a weak reference so normal clients retain the closed hardware gate. */
+bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
+   __attribute__((visibility("default")));
+
+bool
+asahi_noop_d3d12_graphics_qualification_allowed(int fd)
+{
+   const char *enable = getenv("AURORA_D3D12_SHIM_GRAPHICS");
+   const char *validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
+   return drm_shim_fd_lookup(fd) != NULL && shim_params() == &params_g17p &&
+          enable && !strcmp(enable, "1") && validate && !strcmp(validate, "1");
+}
+
 struct asahi_bo {
    struct shim_bo base;
    uint32_t offset;

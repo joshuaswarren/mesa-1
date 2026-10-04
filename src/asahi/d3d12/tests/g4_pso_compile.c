@@ -152,6 +152,7 @@ int main(int argc, char **argv)
    UINT64 completed = ID3D12Fence_GetCompletedValue(fence);
    if (completed == UINT64_MAX || completed < 1) {hr = E_FAIL; goto done;}
    hr = ID3D12Device_GetDeviceRemovedReason(device);
+   phase_complete = hr == S_OK;
 
 done:
    const bool passed = phase_complete && hr == S_OK && pso;
