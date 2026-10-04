@@ -976,3 +976,58 @@ TEST_F(Optimizer, IfInvertedCondition)
          agx_zero(), 1, AGX_ICOND_UEQ, true, NULL),
       agx_if_fcmp(b, hx, hy, 1, AGX_FCOND_LT, true, NULL));
 }
+
+TEST_F(Optimizer, G17PTileSampleConstantsStayInRegisters)
+{
+   /* The packer's existing G17PMultisampleTileSampleOperandIsARegister
+    * regression accepts registers and rejects these raw mask immediates.
+    * Optimizing a valid MOV+store must not recreate a refused operand.
+    */
+   for (unsigned mask : {0u, 1u, 3u, 15u, 32u, 64u}) {
+      SCOPED_TRACE(mask);
+      agx_builder *b = agx_test_builder(mem_ctx);
+      struct agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      b->shader->key = &key;
+      agx_index coverage = agx_mov_imm(b, 16, mask);
+      agx_instr *store = agx_st_tile(b, hx, coverage, agx_null(),
+                                    AGX_FORMAT_I16, 1, 0, false, 0);
+      agx_optimize_and_dce(b->shader);
+      EXPECT_EQ(store->src[1].type, AGX_INDEX_NORMAL);
+      EXPECT_EQ(store->src[1].size, AGX_SIZE_16);
+      EXPECT_EQ(store->src[1].value, coverage.value);
+      unsigned moves = 0;
+      agx_foreach_instr_global(b->shader, I) {
+         if (I->op == AGX_OPCODE_MOV_IMM) {
+            EXPECT_EQ(I->imm, mask);
+            EXPECT_EQ(I->dest[0].value, coverage.value);
+            moves++;
+         }
+      }
+      EXPECT_EQ(moves, 1u);
+   }
+}
+
+TEST_F(Optimizer, TileSampleImmediateControls)
+{
+   for (enum agx_isa_encoding enc : {AGX_ISA_ENCODING_AGX2,
+                                      AGX_ISA_ENCODING_AGX3B,
+                                      AGX_ISA_ENCODING_AGX3C}) {
+      for (unsigned mask : {0u, 255u}) {
+         if (enc == AGX_ISA_ENCODING_AGX3B && mask == 0)
+            continue;
+         SCOPED_TRACE(unsigned(enc));
+         SCOPED_TRACE(mask);
+         agx_builder *b = agx_test_builder(mem_ctx);
+         struct agx_shader_key key = {};
+         key.dev.encoding = enc;
+         b->shader->key = &key;
+         agx_instr *store = agx_st_tile(
+            b, hx, agx_mov_imm(b, 16, mask), agx_null(),
+            AGX_FORMAT_I16, 1, 0, false, 0);
+         agx_optimize_and_dce(b->shader);
+         EXPECT_EQ(store->src[1].type, AGX_INDEX_IMMEDIATE);
+         EXPECT_EQ(store->src[1].value, mask);
+      }
+   }
+}

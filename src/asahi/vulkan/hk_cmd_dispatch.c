@@ -767,6 +767,11 @@ hk_g17p_compute_shader_supported(struct hk_shader *s,
           s->info.set_count <= HK_AGX3_G17P_MAX_ROOT_SETS;
 }
 
+/* Software VS adds an indexing-parameter range to the seven hardware-VS
+ * ranges. Keep its eight-range collectors and exact-program cache together;
+ * the compute composer independently bounds the generated load program. */
+#define HK_G17P_COMPUTE_MAX_RANGES 8u
+
 /* Uniform ABI for compute-emulated vertex work.  Geometry variants use the
  * ordinary root-at-zero compute ABI; the software vertex variant additionally
  * consumes the same VBO, draw-parameter and vertex-parameter ranges that the
@@ -783,7 +788,7 @@ hk_g17p_internal_graphics_uniform_ranges(
    struct hk_linked_shader *linked, uint64_t root_ptr,
    uint64_t texture_pointers,
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
+      ranges[HK_G17P_COMPUTE_MAX_RANGES],
    size_t *range_count)
 {
    /* Uniform DMA (v51a/b) is only enabled for hardware graphics stages;
@@ -795,24 +800,36 @@ hk_g17p_internal_graphics_uniform_ranges(
       return hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers,
                                              ranges, range_count);
 
+   if (!!texture_pointers != s->info.agx3_indexed_sampler_valid)
+      return false;
+   const unsigned uniform_base = s->info.agx3_indexed_sampler_valid
+      ? AGX_ABI_G17P_TEXTURE_POINTER_HALFS : 0;
+
    const unsigned nr_vbos = DIV_ROUND_UP(
       BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
    size_t count = 0;
+   if (texture_pointers) {
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 0,
+         .size_halfs = uniform_base,
+         .address = texture_pointers,
+      };
+   }
    if (nr_vbos) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_VBO_BASE(0),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_VBO_BASE(0),
          .size_halfs = 4 * nr_vbos,
          .address = root_ptr + hk_root_descriptor_offset(draw.attrib_base),
       };
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_VBO_CLAMP(nr_vbos, 0),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_VBO_CLAMP(nr_vbos, 0),
          .size_halfs = 2 * nr_vbos,
          .address = root_ptr + hk_root_descriptor_offset(draw.attrib_clamps),
       };
    }
    if (cmd->state.gfx.draw_params) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_FIRST_VERTEX(nr_vbos),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_FIRST_VERTEX(nr_vbos),
          .size_halfs = 4,
          .address = cmd->state.gfx.draw_params,
       };
@@ -822,22 +839,23 @@ hk_g17p_internal_graphics_uniform_ranges(
        * rejected outright, so publish the containing dword. See the same
        * range in hk_cmd_buffer.c. */
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_DRAW_ID(nr_vbos),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_DRAW_ID(nr_vbos),
          .size_halfs = 2,
          .address = cmd->state.gfx.draw_id_ptr,
       };
    }
    if (linked->sw_indexing) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
-         .start_halfs = AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos),
+         .start_halfs = uniform_base + AGX_ABI_VUNI_VERTEX_PARAMS(nr_vbos),
          .size_halfs = 4,
          .address = root_ptr + hk_root_descriptor_offset(draw.vertex_params),
       };
    }
 
-   const unsigned root_uniform = AGX_ABI_VUNI_COUNT_VK(nr_vbos);
+   const unsigned root_uniform =
+      uniform_base + AGX_ABI_VUNI_COUNT_VK(nr_vbos);
    if (s->info.agx3_uses_root || s->info.set_count) {
-      if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES ||
+      if (count >= HK_G17P_COMPUTE_MAX_RANGES ||
           !hk_agx3_g17p_root_range(root_uniform, s->info.set_count, root_ptr,
                                    &ranges[count]))
          return false;
@@ -846,7 +864,7 @@ hk_g17p_internal_graphics_uniform_ranges(
 
    if (s->b.info.rodata.size_16) {
       const struct agx_rodata *rodata = &s->b.info.rodata;
-      if (count >= HK_AGX3_G17P_GRAPHICS_MAX_RANGES || !s->bo || !s->bo->va ||
+      if (count >= HK_G17P_COMPUTE_MAX_RANGES || !s->bo || !s->bo->va ||
           !hk_agx3_g17p_rodata_range(
              rodata->base_uniform, rodata->size_16, s->bo->va->addr,
              rodata->offset, s->bo->size, &ranges[count]))
@@ -1123,7 +1141,7 @@ struct hk_g17p_exact_compute_program {
    bool internal_graphics;
    size_t range_count;
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      ranges[HK_G17P_COMPUTE_MAX_RANGES];
    uint64_t program_va;
    const uint8_t *program_bytes;
    uint16_t program_length;
@@ -1164,7 +1182,7 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               enum agx_ioto_g17p_compute_ldshdr_f1 kind,
                               const char *trace,
                               struct agx3_ioto_uniform_range
-                                 ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES],
+                                 ranges[HK_G17P_COMPUTE_MAX_RANGES],
                               size_t *range_count_out,
                               uint64_t *program_va_out,
                               struct hk_g17p_compute_program_ref *out)
@@ -1190,7 +1208,7 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    size_t range_count;
    const bool ranges_ok = apple_cs
       ? hk_g17p_apple_cs_ranges(cmd, s, root_ptr, ranges,
-                                HK_AGX3_G17P_GRAPHICS_MAX_RANGES, &range_count)
+                                HK_G17P_COMPUTE_MAX_RANGES, &range_count)
       : internal_graphics
       ? hk_g17p_internal_graphics_uniform_ranges(
            cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
@@ -1286,7 +1304,7 @@ hk_g17p_prewarm_linked_compute_program_kind(
       uses_texture_pointers ? dummy_root + 0x2000 : 0;
 
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t range_count;
    const bool vertex_graphics =
       internal_graphics && s->info.stage == MESA_SHADER_VERTEX;
@@ -1396,7 +1414,7 @@ hk_g17p_prewarm_linked_compute_program(struct hk_cmd_buffer *cmd,
       };
       for (unsigned i = 0; i < ARRAY_SIZE(kinds); ++i) {
          struct agx3_ioto_uniform_range
-            ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+            ranges[HK_G17P_COMPUTE_MAX_RANGES];
          size_t range_count;
          uint64_t program_va;
          struct hk_g17p_compute_program_ref program;
@@ -1422,7 +1440,7 @@ hk_g17p_prepare_graphics_dispatch(
        !hk_g17p_compute_shader_supported(s, linked))
       return false;
 
-   struct agx3_ioto_uniform_range ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+   struct agx3_ioto_uniform_range ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t range_count;
    uint64_t program_va;
    struct hk_g17p_compute_program_ref program;
@@ -1496,7 +1514,7 @@ hk_g17p_prepare_graphics_dispatch(
    helper_root->cs.grid_helper_sparse_map_addr = 0;
 
    struct agx3_ioto_uniform_range
-      helper_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      helper_ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t helper_range_count;
    uint64_t helper_program_va;
    struct hk_g17p_compute_program_ref helper_program;
@@ -1666,7 +1684,7 @@ hk_g17p_append_indirect_launch(
    memcpy(helper_root_ptr.cpu, &helper_root, sizeof(helper_root));
 
    struct agx3_ioto_uniform_range
-      helper_ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      helper_ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t helper_range_count;
    uint64_t helper_program_va;
    struct hk_g17p_compute_program_ref helper_program;
@@ -2580,7 +2598,7 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    }
 
    struct agx3_ioto_uniform_range
-      ranges[HK_AGX3_G17P_GRAPHICS_MAX_RANGES];
+      ranges[HK_G17P_COMPUTE_MAX_RANGES];
    size_t range_count;
    uint64_t program_va;
    struct hk_g17p_compute_program_ref program;
