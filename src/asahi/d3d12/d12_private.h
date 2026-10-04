@@ -2264,6 +2264,7 @@ uint32_t d12_build_g17p_bg_eot(
    const struct agx_tilebuffer_layout *tib,
    uint64_t *out_resources);
 
-/* Metadata-only native D32 qualification; never admits a physical DRM fd. */
+/* Bounded D32 qualification: registered shim metadata or separately opted-in
+ * verified physical Asahi render fd. Every segment shape check is mandatory. */
 bool d12_g17p_depth_enabled(const struct agx_device *dev);
 bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
