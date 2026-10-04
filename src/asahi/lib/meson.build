@@ -335,6 +335,18 @@ if with_tests
   )
 
   test(
+    'asahi-g17p-conditional-exports',
+    executable(
+      'asahi-g17p-conditional-exports',
+      files('tests/test-agx-g17p-conditional-exports.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-sample-count',
     executable(
       'asahi-sample-count',

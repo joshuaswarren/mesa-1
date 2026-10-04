@@ -4031,6 +4031,31 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
       if (I->op != AGX_OPCODE_FFMA || I->nr_srcs != 3 || I->saturate)
          continue;
 
+      /* A literal nonnegative finite minifloat times literal positive zero
+       * is exactly positive zero. Every minifloat below 0x80 is finite and
+       * nonnegative (agx_minifloat_decode); no run-time multiplier is folded.
+       * Keep the floating-point addition: a bitwise move would preserve -0
+       * where the original FMA produces +0 under round-to-nearest.  The native
+       * minifloat ADD form also retains floating-point denormal/NaN handling.
+       * Do not generalize this to zero times a variable (which may be NaN or
+       * infinity), or to a negated zero product.
+       */
+      if (I->nr_dests == 1 && I->dest[0].size == AGX_SIZE_32 &&
+          agx_channels(I->dest[0]) == 1 &&
+          I->src[0].type == AGX_INDEX_IMMEDIATE && I->src[0].value < 0x80 &&
+          !I->src[0].abs && !I->src[0].neg && !I->src[0].memory &&
+          I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value < 0x80 &&
+          !I->src[1].abs && !I->src[1].neg && !I->src[1].memory &&
+          (I->src[0].value == 0 || I->src[1].value == 0) &&
+          I->src[2].type != AGX_INDEX_NULL &&
+          I->src[2].size == AGX_SIZE_32 && agx_channels(I->src[2]) == 1) {
+         I->op = AGX_OPCODE_FADD;
+         I->nr_srcs = 2;
+         I->src[0] = I->src[2];
+         I->src[1] = agx_zero();
+         continue;
+      }
+
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
       agx_foreach_src(I, s) {
          if (I->src[s].size != AGX_SIZE_16 ||
@@ -7703,11 +7728,11 @@ agx_should_dump(nir_shader *nir, unsigned agx_dbg_bit)
       agx_validate(ctx, #pass);                                                \
    } while (0)
 
-/* G17P constant programs write the uniform file with 32-bit COPY records,
- * including half-valued expressions. Coalesce adjacent scalar halves before
- * RA so both values occupy one real GPR pair and one aligned uniform pair.
- * An isolated half is handled by the packer's separately guarded padding
- * path; odd starts and non-adjacent live halves remain fail-closed. */
+/* G17P constant programs export whole 32-bit uniform words. Track both halves
+ * of each word through disjoint exports, in either order, so separated scalar
+ * results can use the existing COPY encoding. Only SSA/immediate values may
+ * be delayed; all observable uniform reads, unknown writes and barriers end
+ * the candidate range. Nothing moves across a basic-block boundary. */
 bool
 agx3_coalesce_uniform_half_stores(agx_context *ctx)
 {
@@ -7717,51 +7742,96 @@ agx3_coalesce_uniform_half_stores(agx_context *ctx)
 
    bool progress = false;
    agx_foreach_block(ctx, block) {
-      agx_instr *pending = NULL;
-      unsigned pending_base = 0;
+      agx_instr *pending[256] = {0};
 
       agx_foreach_instr_in_block_safe(block, I) {
-         const bool scalar_half =
-            I->op == AGX_OPCODE_UNIFORM_STORE && I->nr_srcs == 2 &&
-            I->mask == 1 && I->src[0].size == AGX_SIZE_16 &&
-            agx_channels(I->src[0]) == 1 &&
-            I->src[1].type == AGX_INDEX_IMMEDIATE && !I->src[1].abs &&
-            !I->src[1].neg;
-         if (!scalar_half) {
-            if (I->op == AGX_OPCODE_UNIFORM_STORE)
-               pending = NULL;
-            /* Native arithmetic exports write the same fixed uniform file.
-             * Do not move the pending half past an overlapping write. */
-            if (pending &&
-                (I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
-                 I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
-                 I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3) &&
-                I->imm < pending_base + 2 && I->imm + 2 > pending_base)
-               pending = NULL;
-            if (pending != NULL) {
-               agx_foreach_src(I, s) {
-                  if (I->src[s].type == AGX_INDEX_UNIFORM)
-                     pending = NULL;
-               }
-            }
-            continue;
+         /* A fixed-file read observes preceding exports at this point.
+          * LOAD_CPROG_AGX3 instead reads immutable imported TPS storage,
+          * which is not changed by any uniform export in this program. */
+         agx_foreach_src(I, s) {
+            if (I->src[s].type == AGX_INDEX_UNIFORM)
+               memset(pending, 0, sizeof(pending));
+         }
+         agx_foreach_dest(I, d) {
+            if (I->dest[d].type == AGX_INDEX_UNIFORM)
+               memset(pending, 0, sizeof(pending));
          }
 
-         const unsigned base = I->src[1].value;
-         if (pending != NULL && !(pending_base & 1) &&
-             base == pending_base + 1) {
-            agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
-            agx_index halves[2] = {pending->src[0], I->src[0]};
-            agx_index pair = agx_vec_temp(ctx, AGX_SIZE_32, 1);
-            agx_emit_collect_to(&b, pair, 2, halves);
-            agx_uniform_store(&b, pair, agx_immediate(pending_base), 1);
-            agx_remove_instruction(pending);
-            agx_remove_instruction(I);
-            pending = NULL;
-            progress = true;
-         } else {
-            pending = I;
-            pending_base = base;
+         if (I->op == AGX_OPCODE_UNIFORM_STORE) {
+            if (I->nr_srcs != 2 || !I->mask || I->mask > 15 ||
+                I->src[1].type != AGX_INDEX_IMMEDIATE || I->src[1].abs ||
+                I->src[1].neg || I->src[1].memory) {
+               memset(pending, 0, sizeof(pending));
+               continue;
+            }
+
+            const unsigned base = I->src[1].value;
+            const agx_index value = I->src[0];
+            const unsigned stride = agx_size_align_16(value.size);
+            const bool scalar_half =
+               I->mask == 1 && value.size == AGX_SIZE_16 &&
+               agx_channels(value) == 1 && !value.abs && !value.neg &&
+               !value.memory &&
+               (value.type == AGX_INDEX_NORMAL ||
+                value.type == AGX_INDEX_IMMEDIATE) && base < 512;
+
+            if (scalar_half) {
+               agx_instr *other = pending[base / 2];
+               if (other && (other->src[1].value ^ base) == 1) {
+                  agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+                  agx_index halves[2];
+                  halves[base & 1] = value;
+                  halves[(base & 1) ^ 1] = other->src[0];
+                  /* Stores accept 16-bit immediates, but COLLECT accepts
+                   * only 8-bit ones. Keep wide half constants in SSA. */
+                  for (unsigned h = 0; h < 2; ++h) {
+                     if (halves[h].type == AGX_INDEX_IMMEDIATE &&
+                         halves[h].value >= 256)
+                        halves[h] = agx_mov_imm(&b, 16, halves[h].value);
+                  }
+                  agx_index pair = agx_vec_temp(ctx, AGX_SIZE_32, 1);
+                  agx_emit_collect_to(&b, pair, 2, halves);
+                  agx_uniform_store(&b, pair, agx_immediate(base & ~1u), 1);
+                  agx_remove_instruction(other);
+                  agx_remove_instruction(I);
+                  pending[base / 2] = NULL;
+                  progress = true;
+               } else {
+                  /* A repeated write replaces only this candidate. Its
+                   * preceding instruction remains unless another pass
+                   * proves it dead. */
+                  pending[base / 2] = I;
+               }
+               continue;
+            }
+
+            /* A non-candidate export invalidates every pair it overlaps.
+             * Disjoint exports leave other pending SSA values available. */
+            for (unsigned c = 0; c < 4; ++c) {
+               if (!(I->mask & BITFIELD_BIT(c)))
+                  continue;
+               if (base >= 512 || (c + 1) * stride > 512 - base) {
+                  memset(pending, 0, sizeof(pending));
+                  break;
+               }
+               for (unsigned h = 0; h < stride; ++h)
+                  pending[(base + c * stride + h) / 2] = NULL;
+            }
+         } else if (I->op == AGX_OPCODE_UNIFORM_FADD_AGX3 ||
+                    I->op == AGX_OPCODE_UNIFORM_FMUL_AGX3 ||
+                    I->op == AGX_OPCODE_UNIFORM_FFMA_AGX3) {
+            if (I->imm > 510) {
+               memset(pending, 0, sizeof(pending));
+            } else {
+               pending[I->imm / 2] = NULL;
+               pending[(I->imm + 1) / 2] = NULL;
+            }
+         } else if (!agx_opcodes_info[I->op].can_eliminate ||
+                    agx_opcodes_info[I->op].schedule_class ==
+                       AGX_SCHEDULE_CLASS_BARRIER ||
+                    agx_opcodes_info[I->op].schedule_class ==
+                       AGX_SCHEDULE_CLASS_INVALID) {
+            memset(pending, 0, sizeof(pending));
          }
       }
    }

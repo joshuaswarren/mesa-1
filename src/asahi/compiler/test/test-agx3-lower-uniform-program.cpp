@@ -861,3 +861,96 @@ TEST(AGX3UniformNIR, AGX2PreambleRetainsItsExtent)
 {
    compile_arithmetic_uniform_program(AGX_ISA_ENCODING_AGX2, false);
 }
+
+TEST(AGX3UniformNIR, LiteralPositiveZeroProductsCompile)
+{
+   for (float constant : {0.0f, 2.0f, 3.0f, 4.0f, 5.0f, 31.0f}) {
+      for (bool swap : {false, true}) {
+         nir_builder n = nir_builder_init_simple_shader(
+            MESA_SHADER_COMPUTE, &agx_nir_options, "literal positive zero FMA");
+         n.fp_math_ctrl = 0; /* Preserve NaNs, signed zero and fused semantics. */
+         n.shader->info.internal = false;
+         for (unsigned d = 0; d < 3; d++)
+            n.shader->info.workgroup_size[d] = 1;
+         nir_def *base = nir_load_preamble(&n, 1, 64, .base = 0);
+         nir_def *output = nir_load_preamble(&n, 1, 64, .base = 4);
+         nir_def *x = nir_load_global_constant(&n, 1, 32, base,
+                                               .align_mul = 4);
+         nir_def *c = nir_imm_float(&n, constant);
+         nir_def *z = nir_imm_float(&n, 0.0f);
+         nir_def *result = nir_ffma(&n, swap ? z : c, swap ? c : z, x);
+         nir_store_global(&n, result, output, .align_mul = 4);
+         agx_preprocess_nir(n.shader);
+         struct agx_shader_key key = {};
+         key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+         key.reserved_preamble = 8;
+         key.no_preamble = true;
+         struct agx_shader_part part = {};
+         ASSERT_TRUE(agx_compile_shader_nir(n.shader, &key, &part))
+            << "constant=" << constant << " swap=" << swap;
+         EXPECT_GT(part.info.main_size, 0u);
+         free(part.binary);
+         ralloc_free(n.shader);
+      }
+   }
+}
+
+TEST_F(AGX3UniformProgram, ReverseHalvesPairAcrossDisjointWrite)
+{
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_index high = agx_temp(b->shader, AGX_SIZE_16);
+   agx_index low = agx_temp(b->shader, AGX_SIZE_16);
+   agx_preload_to(b, high, agx_register(1, AGX_SIZE_16));
+   agx_preload_to(b, low, agx_register(3, AGX_SIZE_16));
+   agx_uniform_store(b, high, agx_immediate(281), 1);
+   agx_uniform_store(b, input(4), agx_immediate(100), 1);
+   agx_uniform_store(b, low, agx_immediate(280), 1);
+   ASSERT_TRUE(agx3_coalesce_uniform_half_stores(b->shader));
+   unsigned stores = 0, pairs = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op == AGX_OPCODE_COLLECT) {
+         ASSERT_EQ(I->nr_srcs, 2u);
+         EXPECT_TRUE(agx_is_equiv(I->src[0], low));
+         EXPECT_TRUE(agx_is_equiv(I->src[1], high));
+         pairs++;
+      }
+      if (I->op == AGX_OPCODE_UNIFORM_STORE) {
+         EXPECT_EQ(I->src[0].size, AGX_SIZE_32);
+         EXPECT_TRUE(I->src[1].value == 100 || I->src[1].value == 280);
+         stores++;
+      }
+   }
+   EXPECT_EQ(pairs, 1u);
+   EXPECT_EQ(stores, 2u);
+}
+
+TEST_F(AGX3UniformProgram, HalfPairRetainsWideImmediateBits)
+{
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_uniform_store(b, agx_immediate(65535), agx_immediate(280), 1);
+   agx_uniform_store(b, agx_immediate(256), agx_immediate(281), 1);
+   ASSERT_TRUE(agx3_coalesce_uniform_half_stores(b->shader));
+   unsigned constants = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op == AGX_OPCODE_MOV_IMM) {
+         EXPECT_TRUE(I->imm == 65535 || I->imm == 256);
+         constants++;
+      }
+      if (I->op == AGX_OPCODE_COLLECT) {
+         for (unsigned s = 0; s < I->nr_srcs; s++)
+            EXPECT_EQ(I->src[s].type, AGX_INDEX_NORMAL);
+      }
+   }
+   EXPECT_EQ(constants, 2u);
+}
+
+TEST_F(AGX3UniformProgram, HalfReadPreventsPairMotion)
+{
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_index half = agx_temp(b->shader, AGX_SIZE_16);
+   agx_preload_to(b, half, agx_register(1, AGX_SIZE_16));
+   agx_uniform_store(b, half, agx_immediate(280), 1);
+   agx_mov(b, agx_uniform(280, AGX_SIZE_16));
+   agx_uniform_store(b, half, agx_immediate(281), 1);
+   EXPECT_FALSE(agx3_coalesce_uniform_half_stores(b->shader));
+}
