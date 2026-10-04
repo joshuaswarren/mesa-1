@@ -489,6 +489,7 @@ struct d12_cpu_subresource {
    uint32_t blocksize_B;
    uint32_t texture_pitch_B;
    bool empty;
+   bool tiled;
 };
 
 static HRESULT
@@ -540,7 +541,18 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
        (b->bottom % block_height && b->bottom != height))
       return E_INVALIDARG;
 
-   if (res->layout.tiling != AIL_TILING_LINEAR)
+   const bool tiled = res->layout.tiling != AIL_TILING_LINEAR;
+   if (tiled &&
+       (res->device->dev.chip != AGX_CHIP_G17P ||
+        (res->layout.tiling != AIL_TILING_GPU && res->layout.tiling != AIL_TILING_TWIDDLED) ||
+        res->heap_props.CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_WRITE_BACK ||
+        res->heap_props.MemoryPoolPreference != D3D12_MEMORY_POOL_L0 ||
+        res->desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN || res->reserved ||
+        res->layout.levels != 1 || res->desc.DepthOrArraySize != 1 ||
+        res->layout.sample_count_sa != 1 || res->layout.compressed ||
+        (format != PIPE_FORMAT_R8G8B8A8_UNORM && format != PIPE_FORMAT_B8G8R8A8_UNORM) ||
+        res->offset_B > res->bo->size ||
+        res->layout.size_B > res->bo->size - res->offset_B))
       return E_INVALIDARG;
 
    void *mapping = agx_bo_map(res->bo);
@@ -556,8 +568,12 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
       .width_el = right_el - b->left / block_width,
       .height_el = bottom_el - b->top / block_height,
       .blocksize_B = blocksize,
-      .texture_pitch_B = ail_get_linear_stride_B(&res->layout, 0),
+      .texture_pitch_B = tiled ? 0 : ail_get_linear_stride_B(&res->layout, 0),
+      .tiled = tiled,
    };
+
+   if (tiled)
+      return S_OK;
 
    const uint64_t last =
       (uint64_t)(out->y_el + out->height_el - 1) * out->texture_pitch_B +
@@ -588,8 +604,19 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (src_row_pitch < row_bytes)
+   if (src_row_pitch < row_bytes ||
+       (surface.tiled && src_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
+
+   if (surface.tiled) {
+      /* UNKNOWN-layout UMA textures expose no CPU pointer. AIL owns the
+       * resource's actual tiled layout; only caller-provided bytes are stored. */
+      ail_tile(surface.map, (void *)src, &res->layout, 0, src_row_pitch,
+               surface.x_el, surface.y_el, surface.width_el, surface.height_el);
+      if (agx_bo_sync_for_device(res->bo, res->offset_B, res->layout.size_B))
+         return E_FAIL;
+      return S_OK;
+   }
 
    uint8_t *dst = surface.map +
                   (uint64_t)surface.y_el * surface.texture_pitch_B +
@@ -620,8 +647,17 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (dst_row_pitch < row_bytes)
+   if (dst_row_pitch < row_bytes ||
+       (surface.tiled && dst_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
+
+   if (surface.tiled) {
+      /* Copy the real EOT-written resource bytes after the caller's fence and
+       * COMMON transition; this does not invoke a shader or synthesize pixels. */
+      ail_detile(surface.map, dst, &res->layout, 0, dst_row_pitch,
+                 surface.x_el, surface.y_el, surface.width_el, surface.height_el);
+      return S_OK;
+   }
 
    const uint8_t *src = surface.map +
                         (uint64_t)surface.y_el * surface.texture_pitch_B +
