@@ -119,6 +119,7 @@ d12_g17p_depth_segment_supported(const struct d12_segment *seg)
        ds->bo->size > limit - ds->bo->va->addr ||
        ds->reserved || ds->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
        ds->desc.Format != DXGI_FORMAT_D32_FLOAT ||
+       !(ds->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ||
        ds->layout.format != PIPE_FORMAT_Z32_FLOAT || ds->stencil_bo ||
        ds->layout.compressed || ds->layout.levels != 1 ||
        !ds->layout.width_px || !ds->layout.height_px ||
