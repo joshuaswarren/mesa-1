@@ -1892,6 +1892,9 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    struct agx_device *dev = &device->dev;
    struct d12_resource *rt = seg->rt[0];
    const enum agx_bg_eot_op op = ops[0];
+   const char *failure_stage = "attachment-shape";
+   struct agx_bg_eot_shader *shader = NULL;
+   uint64_t stride = 0;
    if (dev->chip != AGX_CHIP_G17P || !out_resources || !rt || !rt->bo || seg->ds ||
        rt->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
        rt->layout.sample_count_sa != 1 ||
@@ -1902,26 +1905,31 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
        (op != AGX_BG_CLEAR && op != AGX_BG_LOAD && op != AGX_EOT_STORE &&
         op != AGX_BG_EOT_NONE))
       goto fail;
+   failure_stage = "extra-attachment";
    for (unsigned i = 1; i < AGX_MAX_RENDER_TARGETS; i++)
       if (seg->rt[i] || ops[i] != AGX_BG_EOT_NONE)
          goto fail;
-   const uint64_t stride = ail_get_linear_stride_B(&rt->layout, 0);
+   failure_stage = "attachment-stride-address";
+   stride = ail_get_linear_stride_B(&rt->layout, 0);
    if (stride < 16 || stride > UINT32_MAX || !seg->rt_address[0])
       goto fail;
    struct agx_bg_eot_key key = {.tib = *tib};
    key.op[0] = op;
    if (op == AGX_BG_CLEAR)
       key.reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
-   struct agx_bg_eot_shader *shader = agx_get_bg_eot_shader(&device->bg_eot, &key);
+   failure_stage = "aux-shader-metadata";
+   shader = agx_get_bg_eot_shader(&device->bg_eot, &key);
    if (!shader || !shader->bo || !shader->info.main_size ||
        !shader->info.nr_gprs || shader->info.has_preamble ||
        shader->info.rodata.size_16 || shader->info.scratch_size ||
        !shader->info.agx3_staging_known ||
        shader->ptr > UINT64_MAX - shader->info.main_offset)
       goto fail;
+   failure_stage = "aux-shader-usc-window";
    const uint64_t shader_va = shader->ptr + shader->info.main_offset;
    if (!agx_va_in_usc_window(dev, shader_va))
       goto fail;
+   failure_stage = "program-allocation";
    uint32_t relative = 0;
    uint8_t *cpu = d12_list_alloc_usc(list, AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE,
                                    &relative);
@@ -1955,10 +1963,12 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          if (fmt->swizzle[c] == PIPE_SWIZZLE_Z) semantic.swizzle_b = c;
          if (fmt->swizzle[c] == PIPE_SWIZZLE_W) semantic.swizzle_a = c;
       }
+      failure_stage = "eot-pbe-pack";
       uint8_t pbe[32];
       if (!d12_pack_pbe_generation(agx_chip_descriptor_generation(dev->chip),
                                   pbe, &semantic))
          goto fail;
+      failure_stage = "eot-pbe-upload";
       const uint64_t argument = d12_list_upload(list, pbe, sizeof(pbe), 32);
       if (!argument)
          goto fail;
@@ -1971,6 +1981,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          .staging_halfs = shader->info.agx3_staging_halfs,
          .imageblock = imageblock,
       };
+      failure_stage = "eot-program-generate";
       struct agx3_g17p_rt0_eot_program generated;
       if (!agx3_g17p_rt0_eot_program_generate(dev->chip, &desc, &generated))
          goto fail;
@@ -1978,6 +1989,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
       length = generated.length;
       resource_spec = AGX_IOTO_G17P_EOT_RESOURCE_SPEC;
    } else if (op == AGX_BG_EOT_NONE) {
+      failure_stage = "empty-shader-resources";
       if (shader->info.push_count || shader->info.uses_txf)
          goto fail;
       const struct agx3_g17p_graphics_program_desc desc = {
@@ -1987,6 +1999,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          .compiler_d = (uint32_t)shader->info.agx3_staging_halfs * 2,
          .fragment = true, .imageblock = imageblock,
       };
+      failure_stage = "empty-program-generate";
       struct agx3_g17p_graphics_program generated;
       if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &generated) ||
           !agx3_g17p_rt0_bg_resource_spec(dev->chip, AGX3_G17P_RT0_BG_NONE,
@@ -2004,10 +2017,12 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          .op = op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR : AGX3_G17P_RT0_BG_RELOAD,
          .imageblock = imageblock,
       };
+      failure_stage = "background-shader-resources";
       if (!agx3_g17p_rt0_bg_shader_resources_match(desc.op,
              shader->info.push_count, shader->info.uses_txf))
          goto fail;
       if (op == AGX_BG_CLEAR) {
+         failure_stage = "clear-argument";
          const float *color = seg->render_pass ? seg->rt_clear[0] : legacy_color;
          if (!color)
             goto fail;
@@ -2030,21 +2045,25 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          texture.width = rt->layout.width_px;
          texture.height = rt->layout.height_px;
          texture.stride = stride - 16;
+         failure_stage = "reload-texture-pack";
          uint8_t packed[32];
          if (!device->rodata_bo || !device->rodata_bo->va ||
              !d12_pack_texture_generation(agx_chip_descriptor_generation(dev->chip),
                                           packed, &texture, 1))
             goto fail;
+         failure_stage = "reload-texture-upload";
          const uint64_t table_va = d12_list_upload(list, packed, sizeof(packed), 32);
          if (!table_va)
             goto fail;
          const uint64_t pointers[2] = {table_va, device->rodata_bo->va->addr};
+         failure_stage = "reload-pointer-upload";
          const uint64_t pointers_va = d12_list_upload(list, pointers, sizeof(pointers), 8);
          if (!pointers_va)
             goto fail;
          desc.texture_pointer_va = pointers_va;
          desc.sampler_pointer_va = pointers_va + 8;
       }
+      failure_stage = "background-program-generate";
       struct agx3_g17p_rt0_bg_program generated;
       if (!agx3_g17p_rt0_bg_program_generate(dev->chip, &desc, &generated) ||
           !agx3_g17p_rt0_bg_resource_spec(dev->chip, desc.op, &resource_spec))
@@ -2052,11 +2071,13 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
       memcpy(program, generated.bytes, generated.length);
       length = generated.length;
    }
+   failure_stage = "generated-program-length";
    if (!length || length > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE)
       goto fail;
    memcpy(cpu, program, length);
    const size_t offset = program_va - list->usc_bo->va->addr;
    list->usc_offset = offset + length;
+   failure_stage = "program-arguments-publish";
    if (agx_bo_sync_for_device(list->usc_bo, offset, length) ||
        agx_bo_sync_for_device(list->stream_bo, list->data_floor,
                               list->stream_bo->size - list->data_floor))
@@ -2065,7 +2086,23 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    d12_list_track_read_bo(list, shader->bo);
    return relative;
 fail:
-   mesa_loge("native single-target background/EOT producer rejected metadata/resources");
+   mesa_loge("native BG/EOT rejected stage=%s op=%u rt=%u fmt=%u tiling=%u "
+             "levels=%u samples=%u/%u layers=%u stride=%llu address=%llx "
+             "shader=%u main=%u@%u binary=%u gprs=%u pre=%u rodata=%u "
+             "scratch=%u staging=%u/%u push=%u txf=%u tile=%u sample_bytes=%u",
+             failure_stage, (unsigned)op, rt != NULL,
+             (unsigned)seg->rt_view_format[0], rt ? (unsigned)rt->layout.tiling : 0,
+             rt ? rt->layout.levels : 0, rt ? rt->layout.sample_count_sa : 0,
+             tib->nr_samples, seg->layers, (unsigned long long)stride,
+             (unsigned long long)seg->rt_address[0], shader != NULL,
+             shader ? shader->info.main_size : 0, shader ? shader->info.main_offset : 0,
+             shader ? shader->info.binary_size : 0, shader ? shader->info.nr_gprs : 0,
+             shader ? shader->info.has_preamble : 0, shader ? shader->info.rodata.size_16 : 0,
+             shader ? shader->info.scratch_size : 0,
+             shader ? shader->info.agx3_staging_known : 0,
+             shader ? shader->info.agx3_staging_halfs : 0,
+             shader ? shader->info.push_count : 0, shader ? shader->info.uses_txf : 0,
+             tib->tile_size, tib->sample_size_B);
    list->state = D12_LIST_ERROR;
    return 0;
 }
