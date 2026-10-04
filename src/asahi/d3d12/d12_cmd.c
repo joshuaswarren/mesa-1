@@ -113,7 +113,10 @@ bool
 d12_g17p_depth_segment_supported(const struct d12_segment *seg)
 {
    const struct d12_resource *ds = seg ? seg->ds : NULL;
+   const uint64_t limit = UINT64_C(1) << 48;
    if (!ds || !ds->bo || !ds->bo->va || !seg->rt[0] ||
+       !ds->bo->va->addr || ds->bo->va->addr >= limit ||
+       ds->bo->size > limit - ds->bo->va->addr ||
        ds->reserved || ds->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
        ds->desc.Format != DXGI_FORMAT_D32_FLOAT ||
        ds->layout.format != PIPE_FORMAT_Z32_FLOAT || ds->stencil_bo ||
@@ -123,6 +126,7 @@ d12_g17p_depth_segment_supported(const struct d12_segment *seg)
         ds->layout.tiling != AIL_TILING_TWIDDLED) ||
        seg->ds_level || seg->dsv_flags || seg->stencil_address ||
        seg->layers != 1 || !seg->width_px || !seg->height_px ||
+       seg->width_px > 16384 || seg->height_px > 16384 ||
        seg->width_px > ds->layout.width_px ||
        seg->height_px > ds->layout.height_px ||
        !ds->layout.size_B || ds->layout.layer_stride_B < AIL_PAGESIZE ||
