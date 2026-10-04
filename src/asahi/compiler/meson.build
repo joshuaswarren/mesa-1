@@ -700,6 +700,7 @@ if with_tests
          'test/test-preamble-image-payload.cpp',
          'test/test-cprog-cleanup.cpp',
          'test/test-inline-mrt.cpp',
+         'test/test-mrt-terminal-tail.cpp',
          'test/test-agx3-pack-binary.cpp',
          'test/test-agx3-lower-uniform-program.cpp',
          'test/test-agx3-sr.cpp',

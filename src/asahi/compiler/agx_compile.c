@@ -8229,12 +8229,13 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
       return true;
    }
 
+   agx_block *tail = agx_reconverged_mrt_tail(ctx);
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
         (ctx->key->no_stop ||
          !(agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND))) ||
-       list_length(&ctx->blocks) != 1)
+       (list_length(&ctx->blocks) != 1 && !tail))
       AGX3_ORDER_REFUSE();
 
    /* A multisample epilog stores every target through the coverage word
@@ -8251,6 +8252,8 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
     * unchanged. Admit exactly that leading wait, depth write and signal. */
    unsigned depth_ops = 0, sample_masks = 0;
    agx_foreach_block(ctx, block) {
+      if (tail && block != tail)
+         continue;
       agx_foreach_instr_in_block(block, I) {
          const bool colour_started = first_wait || load_count || store_count;
          switch (I->op) {

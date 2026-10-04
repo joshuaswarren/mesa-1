@@ -6959,13 +6959,14 @@ static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_protocol(agx_context *ctx)
 {
    struct agx3_g17p_mrt_protocol p = {0};
+   agx_block *tail = agx_reconverged_mrt_tail(ctx);
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->agx3_mrt_tile_ops_ordered ||
        (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
         (ctx->key->no_stop ||
          !(agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND))) ||
-       (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1)) {
+       (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1 && !tail)) {
       /* Not a refusal by itself -- a single-target shader legitimately has no
        * MRT protocol -- so report only when the key names two or more tile
        * partitions, which is when the protocol is the thing a later tile op
@@ -7003,34 +7004,38 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    }
 
    bool depth_written = false, tile_ops = false, tile_loads = false;
-   agx_foreach_instr_global(ctx, I) {
-      /* A depth export may finish its own class-1 transaction first. */
-      if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !tile_ops)
-         depth_written = true;
-      if ((!ctx->key->g17p_emrt && agx3_is_cf_op(I)) ||
-          (I->op == AGX_OPCODE_SIGNAL_PIX &&
-           (!depth_written || I->writeout != 1 ||
-            (tile_ops && !ctx->key->g17p_emrt))))
-         return agx3_g17p_mrt_refused(__LINE__);
-      if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+   agx_foreach_block(ctx, block) {
+      if (tail && block != tail)
          continue;
-      if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
-         return agx3_g17p_mrt_refused(__LINE__);
-
-      tile_ops = true;
-      tile_loads |= I->op == AGX_OPCODE_LD_TILE;
-      unsigned i;
-      for (i = 0; i < p.count; ++i) {
-         if (p.offsets[i] == I->pixel_offset)
-            break;
-      }
-      if (i == p.count) {
-         if (partitions || p.count == ARRAY_SIZE(p.offsets))
+      agx_foreach_instr_in_block(block, I) {
+         /* A depth export may finish its own class-1 transaction first. */
+         if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !tile_ops)
+            depth_written = true;
+         if ((!ctx->key->g17p_emrt && agx3_is_cf_op(I)) ||
+             (I->op == AGX_OPCODE_SIGNAL_PIX &&
+              (!depth_written || I->writeout != 1 ||
+               (tile_ops && !ctx->key->g17p_emrt))))
             return agx3_g17p_mrt_refused(__LINE__);
-         p.targets[p.count] = I->colour_target;
-         p.offsets[p.count++] = I->pixel_offset;
-      } else if (!partitions && p.targets[i] != I->colour_target) {
-         return agx3_g17p_mrt_refused(__LINE__);
+         if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
+            continue;
+         if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
+            return agx3_g17p_mrt_refused(__LINE__);
+
+         tile_ops = true;
+         tile_loads |= I->op == AGX_OPCODE_LD_TILE;
+         unsigned i;
+         for (i = 0; i < p.count; ++i) {
+            if (p.offsets[i] == I->pixel_offset)
+               break;
+         }
+         if (i == p.count) {
+            if (partitions || p.count == ARRAY_SIZE(p.offsets))
+               return agx3_g17p_mrt_refused(__LINE__);
+            p.targets[p.count] = I->colour_target;
+            p.offsets[p.count++] = I->pixel_offset;
+         } else if (!partitions && p.targets[i] != I->colour_target) {
+            return agx3_g17p_mrt_refused(__LINE__);
+         }
       }
    }
    /* A lone attachment that is not attachment zero is still a multi-target
