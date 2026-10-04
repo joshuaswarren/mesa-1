@@ -270,41 +270,48 @@ main(int argc, char **argv)
    hr = ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
    printf("       fence wait blocked for %llu ms\n",
           (unsigned long long)(test_monotonic_ms() - wait_start_ms));
-   CHECK(hr == S_OK && ID3D12Fence_GetCompletedValue(fence) >= 1,
+   const UINT64 completed = ID3D12Fence_GetCompletedValue(fence);
+   CHECK(hr == S_OK && completed != UINT64_MAX && completed >= 1,
          "GPU dispatch complete (fence reached 1)");
-   if (FAILED(hr) || ID3D12Fence_GetCompletedValue(fence) < 1) {
+   if (FAILED(hr) || completed == UINT64_MAX || completed < 1) {
       blocked_stage = "Wait fence";
       blocked_hr = FAILED(hr) ? hr : E_FAIL;
       goto cleanup;
    }
 
-   /* Diagnostic: is a miss a fence-ordering bug or a visibility delay?
-    * If the data appears on a later read, the wait returned too early.
-    */
-   if (map[0] != 7) {
-      for (int spin = 0; spin < 100 && map[0] != 7; spin++) {
-         test_sleep_ms(1);
-      }
-      printf("       NOTE: value after re-read spin: %u (fence returned "
-             "before the write was visible)\n",
-             map[0]);
+   hr = ID3D12Device_GetDeviceRemovedReason(dev);
+   CHECK(hr == S_OK, "device remains available after dispatch fence");
+   if (FAILED(hr)) {
+      blocked_stage = "Device removed after dispatch";
+      blocked_hr = hr;
+      goto cleanup;
    }
 
-   /* The verdict: every element computed by our compiled shader. */
+   /* Freeze the first post-fence observation before any diagnostic delay.
+    * A later visible write must never repair an early completion verdict. */
+   uint32_t observed[NUM_ELEMENTS];
+   const volatile uint32_t *visible = map;
+   for (unsigned i = 0; i < NUM_ELEMENTS; i++)
+      observed[i] = visible[i];
+
    int bad = -1;
    for (unsigned i = 0; i < NUM_ELEMENTS; i++) {
-      if (map[i] != i * 3 + 7) {
+      if (observed[i] != i * 3 + 7 && bad < 0)
          bad = (int)i;
-         break;
-      }
    }
-   CHECK(bad < 0, "all 256 elements equal tid*3+7, computed on the GPU");
+   CHECK(bad < 0, "all 256 elements equal tid*3+7 immediately after GPU fence");
    if (bad >= 0) {
-      printf("       element %d: got 0x%08x want 0x%08x\n", bad, map[bad],
-             bad * 3 + 7);
+      printf("       element %d at fence: got 0x%08x want 0x%08x\n",
+             bad, observed[bad], bad * 3 + 7);
+      /* Diagnostic only: the failure above is final even if memory changes. */
+      for (int spin = 0; spin < 100 && visible[bad] != (unsigned)bad * 3 + 7;
+           spin++)
+         test_sleep_ms(1);
+      printf("       NOTE: value after re-read spin: %u (initial fence "
+             "observation failed and remains a failure)\n", visible[bad]);
    } else {
-      printf("       spot check: [0]=%u [1]=%u [64]=%u [255]=%u\n", map[0],
-             map[1], map[64], map[255]);
+      printf("       spot check: [0]=%u [1]=%u [64]=%u [255]=%u\n",
+             observed[0], observed[1], observed[64], observed[255]);
    }
 
 cleanup:
