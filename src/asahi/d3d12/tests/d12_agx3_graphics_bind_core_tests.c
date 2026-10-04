@@ -46,7 +46,7 @@ int main(void)
       assert(out.bytes[0xa8 + byte] == 0);
 
    const struct d12_agx3_triangle_bind_desc good = d;
-   for (unsigned fault = 0; fault < 12; ++fault) {
+   for (unsigned fault = 0; fault < 16; ++fault) {
       d = good;
       switch (fault) {
       case 0: d.compact_va = 0; break;
@@ -61,6 +61,10 @@ int main(void)
       case 9: d.has_preamble = true; break;
       case 10: d.viewport.viewport_count = 2; break;
       case 11: d.raster.depth_bias_enable = true; break;
+      case 12: d.needs_quad_derivatives = true; break;
+      case 13: d.linked_fragment_control = 1u << 29; break;
+      case 14: d.raw_output_select = 1u << 21; break;
+      case 15: d.cull_mode = 4; break;
       }
       memset(&out, 0xa5, sizeof(out));
       const struct d12_agx3_triangle_bind poison = out;

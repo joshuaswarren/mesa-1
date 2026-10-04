@@ -11,6 +11,7 @@ d12_agx3_triangle_bind_generate(
 {
    if (chip != AGX_CHIP_G17P || !d || !output ||
        (d->uvs_size != 4 && d->uvs_size != 5) || d->user_size ||
+       d->raw_output_select != (d->uvs_size == 5 ? (1u << 18) : 0) ||
        d->coefficient_bindings || d->reads_z || d->writes_memory ||
        d->writes_depth || d->has_preamble || d->needs_quad_derivatives ||
        (d->linked_fragment_control >> 29) != 0 ||
