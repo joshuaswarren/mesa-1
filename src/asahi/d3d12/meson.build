@@ -394,6 +394,13 @@ d3d12agx_g5_texture = executable(
   link_with : [libd3d12agx],
 )
 
+d3d12agx_g5_texture_compile_only = executable(
+  'd3d12agx_g5_texture_compile_only',
+  files('tests/g5_texture_compile_only.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 # Build-time only: generates committable probe DXIL so the suites do not
 # need dxc (absent on aarch64) or the LGPL corpus. Nothing links it.
 d3d12agx_make_probe = executable(
