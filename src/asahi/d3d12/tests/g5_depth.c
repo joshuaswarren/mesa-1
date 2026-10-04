@@ -37,6 +37,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef D12_D32_FIRST_PAIR_PROBE
+#include "d12_d32_pair_oracle.h"
+#endif
 
 static int failures = 0;
 
@@ -366,6 +369,17 @@ main(int argc, char **argv)
       return 2;
    }
 
+#ifdef D12_D32_FIRST_PAIR_PROBE
+   const char *physical = getenv("AURORA_D3D12_PHYSICAL_D32");
+   const char *baseline = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
+   const char *preload = getenv("LD_PRELOAD");
+   if (!physical || strcmp(physical, "1") || !baseline || strcmp(baseline, "1") ||
+       (preload && preload[0])) {
+      fprintf(stderr, "D32 physical pair requires explicit admission and no preload\n");
+      return 2;
+   }
+   bool pair_complete = false;
+#endif
    struct ctx c = {0};
    ID3D12DescriptorHeap *rtv_heap = NULL, *dsv_heap = NULL;
    ID3D12Resource *ds24 = NULL;
@@ -529,6 +543,7 @@ main(int argc, char **argv)
       make_pso(c.dev, c.root, vs, vs_size, ps, ps_size, TRUE,
                D3D12_DEPTH_WRITE_MASK_ALL, D3D12_COMPARISON_FUNC_LESS,
                DXGI_FORMAT_D32_FLOAT);
+#ifndef D12_D32_FIRST_PAIR_PROBE
    pso_greater =
       make_pso(c.dev, c.root, vs, vs_size, ps, ps_size, TRUE,
                D3D12_DEPTH_WRITE_MASK_ALL, D3D12_COMPARISON_FUNC_GREATER,
@@ -562,6 +577,9 @@ main(int argc, char **argv)
    REQUIRE(pso_less && pso_greater && pso_write && pso_nowrite && pso_nods &&
             pso_slope && pso_slope_cw,
          "compile seven pipelines differing in depth state");
+#else
+   REQUIRE(pso_less, "compile original first-pair D32 pipeline");
+#endif
    printf("\n-- pair 1: same pipeline, depth 0.75 vs 0.125 against a 0.25 "
           "clear\n");
 
@@ -570,12 +588,27 @@ main(int argc, char **argv)
    REQUIRE(end_frame(&c), "far draw executes");
    expect_pixel(c.map, IN_X, IN_Y,RED,
                 "0.75 LESS 0.25 is false: the triangle is rejected");
+#ifdef D12_D32_FIRST_PAIR_PROBE
+   unsigned triangle = 0;
+   unsigned bad = d12_d32_pair_pixel_mismatches(c.map, STRIDE, false, &triangle);
+   printf("D32 FAR PIXELS total=65536 triangle=%u mismatches=%u fence=%llu\n",
+          triangle, bad, (unsigned long long)c.fence_value);
+   REQUIRE(bad == 0 && triangle == 10965, "all original far-frame pixels");
+#endif
 
    REQUIRE(begin_frame(&c, 0.25f), "begin depth frame");
    draw_at_depth(&c, pso_less, 0.125f);
    REQUIRE(end_frame(&c), "near draw executes");
    expect_pixel(c.map, IN_X, IN_Y,BLUE,
                 "0.125 LESS 0.25 is true: the triangle is drawn");
+#ifdef D12_D32_FIRST_PAIR_PROBE
+   bad = d12_d32_pair_pixel_mismatches(c.map, STRIDE, true, &triangle);
+   printf("D32 NEAR PIXELS total=65536 triangle=%u mismatches=%u fence=%llu\n",
+          triangle, bad, (unsigned long long)c.fence_value);
+   REQUIRE(bad == 0 && triangle == 10965, "all original near-frame pixels");
+   pair_complete = true;
+   goto cleanup; /* Separate first-pair probe; mandatory full G5 still runs below. */
+#endif
 
    printf("\n-- pair 2: identical values, LESS vs GREATER\n");
 
@@ -754,6 +787,13 @@ cleanup:
    if (c.root) ID3D12RootSignature_Release(c.root);
    if (c.dev) ID3D12Device_Release(c.dev);
    free(vs); free(ps); free(vs_depth); free(ps_green); free(vs_depth_cw);
+#ifdef D12_D32_FIRST_PAIR_PROBE
+   bool failed = failures || c.blocked_stage || !pair_complete;
+   printf(failed ? "\nD32 FIRST PAIR: FAIL\n" :
+          "\nD32 FIRST PAIR: PASS ACTUAL_PIXELS_PARTIAL_NOT_FULL_G5\n");
+   return failed;
+#else
    printf(failures || c.blocked_stage ? "\nG5 DEPTH: %d FAILURES\n" : "\nG5 DEPTH: ALL PASS\n", failures);
    return failures || c.blocked_stage;
+#endif
 }

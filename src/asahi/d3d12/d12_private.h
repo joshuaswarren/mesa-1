@@ -2217,6 +2217,9 @@ HRESULT d12_device_backend_init(struct d12_device *device,
                                 D3D_FEATURE_LEVEL feature_level);
 void d12_device_backend_cleanup(struct d12_device *device);
 
+#ifndef _WIN32
+bool d12_platform_is_real_asahi_render_fd(int fd);
+#endif
 bool d12_platform_open_device(struct d12_device *device, IUnknown *adapter);
 void d12_platform_close_device(struct d12_device *device);
 void d12_platform_signal_event(HANDLE event);
@@ -2261,6 +2264,7 @@ uint32_t d12_build_g17p_bg_eot(
    const struct agx_tilebuffer_layout *tib,
    uint64_t *out_resources);
 
-/* Metadata-only native D32 qualification; never admits a physical DRM fd. */
-bool d12_g17p_depth_metadata_enabled(const struct agx_device *dev);
+/* Bounded D32 qualification: registered shim metadata or separately opted-in
+ * verified physical Asahi render fd. Every segment shape check is mandatory. */
+bool d12_g17p_depth_enabled(const struct agx_device *dev);
 bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
