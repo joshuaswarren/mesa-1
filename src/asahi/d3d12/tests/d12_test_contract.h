@@ -62,3 +62,20 @@ d12_test_submit_closed(ID3D12Device *dev, ID3D12GraphicsCommandList *list,
    if (completed == UINT64_MAX || completed < value) return E_FAIL;
    return ID3D12Device_GetDeviceRemovedReason(dev);
 }
+
+/* Opaque texture bytes are transferred through the public CPU API in COMMON.
+ * A reading caller must first observe its exact GPU fence. */
+static inline HRESULT
+d12_test_opaque_texture_transfer(ID3D12Resource *resource, void *bytes,
+                                 UINT row_pitch, UINT size, bool write)
+{
+   if (!resource || !bytes || !row_pitch || !size) return E_INVALIDARG;
+   HRESULT hr = ID3D12Resource_Map(resource, 0, NULL, NULL);
+   if (hr != S_OK) return hr;
+   if (write)
+      hr = ID3D12Resource_WriteToSubresource(resource, 0, NULL, bytes, row_pitch, size);
+   else
+      hr = ID3D12Resource_ReadFromSubresource(resource, bytes, row_pitch, size, 0, NULL);
+   ID3D12Resource_Unmap(resource, 0, NULL);
+   return hr;
+}

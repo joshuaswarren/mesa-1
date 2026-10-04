@@ -47,6 +47,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "d12_test_contract.h"
 
 static int failures = 0;
 
@@ -152,7 +153,7 @@ main(int argc, char **argv)
 {
    if (argc < 5) {
       printf("usage: %s tri.dxil solid.dxil vb_vs.dxil vb_ps.dxil\n", argv[0]);
-      return 77;
+      return 2;
    }
 
    size_t tri_size = 0, solid_size = 0, vs_size = 0, ps_size = 0;
@@ -168,6 +169,7 @@ main(int argc, char **argv)
    ID3D12Device *dev = NULL;
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&dev);
+   TEST_OBJECT(hr, dev, "checked D3D12CreateDevice dev");
    CHECK(hr == S_OK && dev, "D3D12CreateDevice");
    if (!dev)
       return 1;
@@ -178,13 +180,16 @@ main(int argc, char **argv)
    ID3DBlob *sig = NULL;
    hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig,
                                     NULL);
+   TEST_OBJECT(hr, sig, "checked D3D12SerializeRootSignature sig");
    ID3D12RootSignature *root_sig = NULL;
    if (hr == S_OK)
       hr = ID3D12Device_CreateRootSignature(
          dev, 0, ID3D10Blob_GetBufferPointer(sig),
          ID3D10Blob_GetBufferSize(sig), &IID_ID3D12RootSignature,
          (void **)&root_sig);
+   TEST_OBJECT(hr, root_sig, "checked ID3D12Device_CreateRootSignature root_sig");
    CHECK(hr == S_OK && root_sig, "create root signature");
+   ID3D10Blob_Release(sig);
    if (!root_sig)
       return 1;
 
@@ -217,7 +222,10 @@ main(int argc, char **argv)
       .RTVFormats = {DXGI_FORMAT_R8G8B8A8_UNORM},
       .SampleDesc = {.Count = 1},
       .SampleMask = ~0u,
-   };
+         .RasterizerState = {.FillMode = D3D12_FILL_MODE_SOLID, .CullMode = D3D12_CULL_MODE_NONE, .DepthClipEnable = TRUE},
+      .PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+};
+   control_pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
 
    D3D12_GRAPHICS_PIPELINE_STATE_DESC subject_pd = control_pd;
    subject_pd.VS = (D3D12_SHADER_BYTECODE){vbvs, vs_size};
@@ -227,10 +235,12 @@ main(int argc, char **argv)
    ID3D12PipelineState *control_pso = NULL, *subject_pso = NULL;
    hr = ID3D12Device_CreateGraphicsPipelineState(
       dev, &control_pd, &IID_ID3D12PipelineState, (void **)&control_pso);
+   TEST_OBJECT(hr, control_pso, "checked ID3D12Device_CreateGraphicsPipelineState control_pso");
    CHECK(hr == S_OK && control_pso, "control PSO (SV_VertexID) compiles");
 
    hr = ID3D12Device_CreateGraphicsPipelineState(
       dev, &subject_pd, &IID_ID3D12PipelineState, (void **)&subject_pso);
+   TEST_OBJECT(hr, subject_pso, "checked ID3D12Device_CreateGraphicsPipelineState subject_pso");
    CHECK(hr == S_OK && subject_pso,
          "subject PSO compiles WITH a non-empty D3D12_INPUT_LAYOUT_DESC");
    if (!control_pso || !subject_pso)
@@ -263,12 +273,13 @@ main(int argc, char **argv)
       dev, &up, D3D12_HEAP_FLAG_NONE, &bd,
       D3D12_RESOURCE_STATE_GENERIC_READ, NULL, &IID_ID3D12Resource,
       (void **)&vb);
+   TEST_OBJECT(hr, vb, "checked ID3D12Device_CreateCommittedResource vb");
    CHECK(hr == S_OK && vb, "create the vertex buffer");
    if (!vb)
       return 1;
 
    void *vbmap = NULL;
-   ID3D12Resource_Map(vb, 0, NULL, &vbmap);
+   TEST_CALL(d12_test_map(vb, false, &vbmap), "checked vertex upload map");
    CHECK(vbmap != NULL, "map the vertex buffer");
    if (!vbmap)
       return 1;
@@ -293,14 +304,15 @@ main(int argc, char **argv)
       .MipLevels = 1,
       .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
       .SampleDesc = {.Count = 1},
+      .Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
       .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
    };
    ID3D12Resource *rt[2] = {NULL, NULL};
    for (int i = 0; i < 2; i++) {
-      ID3D12Device_CreateCommittedResource(
+      TEST_OBJECT(ID3D12Device_CreateCommittedResource(
          dev, &heap, D3D12_HEAP_FLAG_NONE, &td,
-         D3D12_RESOURCE_STATE_RENDER_TARGET, NULL, &IID_ID3D12Resource,
-         (void **)&rt[i]);
+         D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
+         (void **)&rt[i]), rt[i], "checked ID3D12Device_CreateCommittedResource rt[i]");
    }
    CHECK(rt[0] && rt[1], "create both render targets");
    if (!rt[0] || !rt[1])
@@ -317,6 +329,13 @@ main(int argc, char **argv)
    CHECK(fp.Footprint.Width == W && fp.Footprint.Height == H && rows == H &&
             row_bytes == (UINT64)W * 4,
          "get a valid render-target readback footprint");
+   CHECK(fp.Footprint.RowPitch >= W * 4 && fp.Footprint.RowPitch % 256 == 0 &&
+         fp.Footprint.Depth == 1 && total >= (UINT64)fp.Footprint.RowPitch * H,
+         "readback pitch/depth/size are valid");
+   if (fp.Footprint.Width != W || fp.Footprint.Height != H || rows != H ||
+       row_bytes != (UINT64)W * 4 || fp.Footprint.RowPitch < W * 4 ||
+       fp.Footprint.RowPitch % 256 || fp.Footprint.Depth != 1 ||
+       total < (UINT64)fp.Footprint.RowPitch * H) return 1;
 
    D3D12_HEAP_PROPERTIES readback_heap = {
       .Type = D3D12_HEAP_TYPE_READBACK,
@@ -335,12 +354,11 @@ main(int argc, char **argv)
    for (int i = 0; i < 2; i++) {
       hr = ID3D12Device_CreateCommittedResource(
          dev, &readback_heap, D3D12_HEAP_FLAG_NONE, &readback_desc,
-         D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
+         D3D12_RESOURCE_STATE_COPY_DEST, NULL, &IID_ID3D12Resource,
          (void **)&readback[i]);
-      if (SUCCEEDED(hr))
-         hr = ID3D12Resource_Map(readback[i], 0, NULL, (void **)&map[i]);
-      if (SUCCEEDED(hr) && map[i])
-         memset(map[i], 0x55, (size_t)total);
+   TEST_OBJECT(hr, readback[i], "checked ID3D12Device_CreateCommittedResource readback[i]");
+      TEST_CALL(d12_test_map(readback[i], false, (void **)&map[i]), "checked readback poison map");
+      memset(map[i], 0x55, (size_t)total);
    }
    CHECK(readback[0] && readback[1] && map[0] && map[1],
          "create and map both readback buffers");
@@ -350,40 +368,49 @@ main(int argc, char **argv)
    D3D12_DESCRIPTOR_HEAP_DESC hd = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
                                     .NumDescriptors = 2};
    ID3D12DescriptorHeap *rtv_heap = NULL;
-   ID3D12Device_CreateDescriptorHeap(dev, &hd, &IID_ID3D12DescriptorHeap,
-                                     (void **)&rtv_heap);
+   TEST_OBJECT(ID3D12Device_CreateDescriptorHeap(dev, &hd, &IID_ID3D12DescriptorHeap,
+                                     (void **)&rtv_heap), rtv_heap, "checked ID3D12Device_CreateDescriptorHeap rtv_heap");
    UINT inc = ID3D12Device_GetDescriptorHandleIncrementSize(
       dev, D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
    D3D12_CPU_DESCRIPTOR_HANDLE rtv0 =
       d12_test_descriptor_heap_get_cpu_start(rtv_heap);
+   CHECK(rtv0.ptr != 0, "valid RTV descriptor handle");
+   if (!rtv0.ptr) return 1;
+   CHECK(inc && rtv0.ptr <= SIZE_MAX - inc, "RTV descriptor increment bounds");
+   if (!inc || rtv0.ptr > SIZE_MAX - inc) return 1;
    D3D12_CPU_DESCRIPTOR_HANDLE rtv1 = {rtv0.ptr + inc};
    ID3D12Device_CreateRenderTargetView(dev, rt[0], NULL, rtv0);
    ID3D12Device_CreateRenderTargetView(dev, rt[1], NULL, rtv1);
 
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_DIRECT};
    ID3D12CommandQueue *queue = NULL;
-   ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
-                                   (void **)&queue);
+   TEST_OBJECT(ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
+                                   (void **)&queue), queue, "checked ID3D12Device_CreateCommandQueue queue");
    ID3D12CommandAllocator *alloc = NULL;
-   ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
+   TEST_OBJECT(ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                        &IID_ID3D12CommandAllocator,
-                                       (void **)&alloc);
+                                       (void **)&alloc), alloc, "checked ID3D12Device_CreateCommandAllocator alloc");
    ID3D12GraphicsCommandList *list = NULL;
-   ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+   TEST_OBJECT(ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                   alloc, NULL, &IID_ID3D12GraphicsCommandList,
-                                  (void **)&list);
+                                  (void **)&list), list, "checked ID3D12Device_CreateCommandList list");
    ID3D12Fence *fence = NULL;
-   ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
-                            (void **)&fence);
-   ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
+   TEST_OBJECT(ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
+                            (void **)&fence), fence, "checked ID3D12Device_CreateFence fence");
 
    const FLOAT clear[4] = {0.0f, 0.0f, 0.0f, 1.0f};
    D3D12_VIEWPORT vp = {.Width = W, .Height = H, .MaxDepth = 1.0f};
    D3D12_RECT sc = {.right = W, .bottom = H};
 
-   ID3D12GraphicsCommandList_Reset(list, alloc, NULL);
+   for (int i = 0; i < 2; i++) {
+      ID3D12Resource_Unmap(readback[i], 0, NULL);map[i] = NULL;
+   }
+   TEST_CALL(ID3D12GraphicsCommandList_Close(list), "close initial empty graphics list");
+   TEST_CALL(ID3D12CommandAllocator_Reset(alloc), "reset idle allocator");
+   TEST_CALL(ID3D12GraphicsCommandList_Reset(list, alloc, NULL), "reset checked graphics list");
 
    /* Control: no vertex buffer bound at all. */
+   d12_test_transition(list, rt[0], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
    ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv0, clear, 0, NULL);
    ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv0, FALSE, NULL);
    ID3D12GraphicsCommandList_RSSetViewports(list, 1, &vp);
@@ -395,6 +422,7 @@ main(int argc, char **argv)
    ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
 
    /* Subject: identical state, plus the vertex buffer. */
+   d12_test_transition(list, rt[1], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
    ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv1, clear, 0, NULL);
    ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv1, FALSE, NULL);
    ID3D12GraphicsCommandList_SetPipelineState(list, subject_pso);
@@ -412,8 +440,10 @@ main(int argc, char **argv)
          .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
          .SubresourceIndex = 0,
       };
+      d12_test_transition(list, rt[i], D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
       ID3D12GraphicsCommandList_CopyTextureRegion(list, &dst, 0, 0, 0, &src,
                                                   NULL);
+      d12_test_transition(list, rt[i], D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
    }
 
    hr = ID3D12GraphicsCommandList_Close(list);
@@ -421,9 +451,9 @@ main(int argc, char **argv)
    if (hr != S_OK)
       goto teardown;
 
-   ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-   ID3D12CommandQueue_Signal(queue, fence, 1);
-   ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
+   TEST_CALL(d12_test_submit_closed(dev, list, queue, fence, 1), "exact fenced vertex-buffer draw/copy");
+   for (int i = 0; i < 2; i++)
+      TEST_CALL(d12_test_map(readback[i], true, (void **)&map[i]), "read actual GPU copy only after fence");
    CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1,
          "the GPU completes both draws");
 
@@ -493,7 +523,7 @@ main(int argc, char **argv)
 teardown:
    for (int i = 0; i < 2; i++) {
       if (map[i])
-         ID3D12Resource_Unmap(readback[i], 0, NULL);
+         { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(readback[i], 0, &empty); }
       if (readback[i])
          ID3D12Resource_Release(readback[i]);
    }
