@@ -140,16 +140,27 @@ make_root_sig(ID3D12Device *dev, const D3D12_ROOT_PARAMETER *params,
    };
 
    ID3DBlob *blob = NULL;
-   if (FAILED(D3D12SerializeRootSignature(&rsd,
-                                          D3D_ROOT_SIGNATURE_VERSION_1_0,
-                                          &blob, NULL)))
+   HRESULT hr = D3D12SerializeRootSignature(&rsd,
+                                            D3D_ROOT_SIGNATURE_VERSION_1_0,
+                                            &blob, NULL);
+   if (hr != S_OK || !blob) {
+      if (blob)
+         ID3D10Blob_Release(blob);
       return NULL;
+   }
 
    ID3D12RootSignature *rs = NULL;
-   ID3D12Device_CreateRootSignature(dev, 0, ID3D10Blob_GetBufferPointer(blob),
-                                    ID3D10Blob_GetBufferSize(blob),
-                                    &IID_ID3D12RootSignature, (void **)&rs);
+   hr = ID3D12Device_CreateRootSignature(dev, 0,
+                                         ID3D10Blob_GetBufferPointer(blob),
+                                         ID3D10Blob_GetBufferSize(blob),
+                                         &IID_ID3D12RootSignature, (void **)&rs);
    ID3D10Blob_Release(blob);
+   if (hr != S_OK || !rs) {
+      if (rs)
+         ID3D12RootSignature_Release(rs);
+      return NULL;
+   }
+
    return rs;
 }
 
