@@ -107,9 +107,12 @@ d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
       *slot = storage;
       offset = 0;
    }
+   uint8_t *map = agx_bo_map(storage->bo);
+   if (!map)
+      goto fail;
    *compact_va = storage->alias - AGX_G17P_VDM_USER_BASE + offset;
    storage->used = offset + size;
-   return (uint8_t *)agx_bo_map(storage->bo) + offset;
+   return map + offset;
 fail:
    if (list)
       list->state = D12_LIST_ERROR;
