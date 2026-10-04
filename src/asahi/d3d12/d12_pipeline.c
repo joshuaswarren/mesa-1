@@ -2495,7 +2495,7 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
       if (cull_distance_size)
          *cull_distance_size = nir->info.cull_distance_array_size;
-      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs, false);
 
       /* Indexed output stores read their UVS index through
        * load_uvs_index_agx, which the driver must lower. Honeykrisp
@@ -2589,7 +2589,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
                NULL);
       NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
 
-      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs, false);
 
       struct agx_varyings_vs linked = {0};
       agx_assign_uvs(&linked, uvs, 0, 0);

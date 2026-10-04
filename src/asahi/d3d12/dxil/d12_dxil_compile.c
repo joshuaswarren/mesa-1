@@ -337,7 +337,7 @@ main(int argc, char **argv)
        * different key, different PASSES.
        */
       NIR_PASS(_, nir, agx_nir_lower_vs_input_to_prolog);
-      NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, &uvs, false);
 
       /* Same constant lowering the driver does (see d12_pipeline.c). */
       struct agx_varyings_vs linked = {0};
@@ -453,7 +453,7 @@ main(int argc, char **argv)
              !strcmp(extra[i].name, "gs rast")) {
             struct agx_unlinked_uvs_layout euvs = {0};
             extra[i].s->info.stage = MESA_SHADER_VERTEX;
-            NIR_PASS(_, extra[i].s, agx_nir_lower_uvs, &euvs);
+            NIR_PASS(_, extra[i].s, agx_nir_lower_uvs, &euvs, false);
 
             struct agx_varyings_vs elinked = {0};
             agx_assign_uvs(&elinked, &euvs, 0, 0);

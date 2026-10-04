@@ -29,6 +29,45 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifndef _WIN32
+#include <errno.h>
+#include <time.h>
+#endif
+
+static uint64_t
+test_monotonic_ms(void)
+{
+#ifdef _WIN32
+   return GetTickCount64();
+#else
+   struct timespec now;
+   if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+      perror("clock_gettime");
+      exit(1);
+   }
+   return (uint64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+#endif
+}
+
+static void
+test_sleep_ms(unsigned milliseconds)
+{
+#ifdef _WIN32
+   Sleep(milliseconds);
+#else
+   struct timespec delay = {
+      .tv_sec = milliseconds / 1000,
+      .tv_nsec = (long)(milliseconds % 1000) * 1000000,
+   };
+   while (nanosleep(&delay, &delay) != 0) {
+      if (errno != EINTR) {
+         perror("nanosleep");
+         exit(1);
+      }
+   }
+#endif
+}
+
 static int failures = 0;
 
 #define CHECK(cond, what)                                                    \
@@ -203,10 +242,10 @@ main(int argc, char **argv)
       goto cleanup;
    }
 
-   const ULONGLONG wait_start_ms = GetTickCount64();
+   const uint64_t wait_start_ms = test_monotonic_ms();
    hr = ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
    printf("       fence wait blocked for %llu ms\n",
-          (unsigned long long)(GetTickCount64() - wait_start_ms));
+          (unsigned long long)(test_monotonic_ms() - wait_start_ms));
    CHECK(hr == S_OK && ID3D12Fence_GetCompletedValue(fence) >= 1,
          "GPU dispatch complete (fence reached 1)");
 
@@ -215,7 +254,7 @@ main(int argc, char **argv)
     */
    if (map[0] != 7) {
       for (int spin = 0; spin < 100 && map[0] != 7; spin++) {
-         Sleep(1);
+         test_sleep_ms(1);
       }
       printf("       NOTE: value after re-read spin: %u (fence returned "
              "before the write was visible)\n",
