@@ -12,7 +12,7 @@
 
 static unsigned checks;
 #define CHECK(c) do { ++checks; if (!(c)) { \
-   fprintf(stderr, "FAIL:%u %s\n", __LINE__, #c); exit(1); } } while (0)
+   fprintf(stderr, "FAIL:%u %s\n", (unsigned)__LINE__, #c); exit(1); } } while (0)
 
 static nir_tex_instr *
 make_fetch(nir_builder *b, nir_def *offset)
@@ -74,7 +74,7 @@ int main(void)
    const uint32_t offsets[] = {0,32,96,8192,UINT32_MAX & ~31u};
    for (unsigned i=0; i<sizeof(offsets)/sizeof(offsets[0]); i++) {
       nir_builder b = builder();
-      nir_tex_instr *t = make_fetch(&b, nir_imm_int(b, offsets[i]));
+      nir_tex_instr *t = make_fetch(&b, nir_imm_int(&b, offsets[i]));
       bool found = false;
       CHECK(d12_nir_g17p_txf_supported(b.shader, &found) && found);
       CHECK(d12_nir_lower_g17p_txf(b.shader, 9));
@@ -89,8 +89,8 @@ int main(void)
    }
    /* A late unsupported fetch refuses before ANY earlier fetch is changed. */
    for (unsigned bad=0; bad<8; bad++) {
-      nir_builder b=builder();make_fetch(&b,nir_imm_int(b,32));
-      nir_tex_instr*t=make_fetch(&b,nir_imm_int(b,64));
+      nir_builder b=builder();make_fetch(&b,nir_imm_int(&b,32));
+      nir_tex_instr*t=make_fetch(&b,nir_imm_int(&b,bad==6?1:64));
       int h=nir_tex_instr_src_index(t,nir_tex_src_texture_handle);
       nir_intrinsic_instr*handle=nir_src_as_intrinsic(t->src[h].src);
       switch(bad) {
@@ -100,7 +100,7 @@ int main(void)
       case 3:t->is_shadow=true;break;
       case 4:t->coord_components=3;break;
       case 5:nir_intrinsic_set_desc_set(handle,D12_UNIFORM_HEAP_TEXTURES);break;
-      case 6:handle->src[0]=nir_src_for_ssa(nir_imm_int(&b,1));break;
+      case 6:break; /* Unaligned input built above with intact SSA use lists. */
       case 7:b.shader->info.stage=MESA_SHADER_FRAGMENT;break;
       }
       char *before=snapshot(b.shader);bool found=false;
