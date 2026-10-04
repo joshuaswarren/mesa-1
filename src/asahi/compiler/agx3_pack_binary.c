@@ -1382,7 +1382,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
       agx_channels(I->src[3]) == 1 && !(I->src[3].value & 1) &&
       I->src[3].value <= 252 &&
       !(I->src[3].cache && (I->src[3].discard || I->src[3].kill)) &&
-      agx3_tex_plain_uniform64(I->src[2]);
+      (agx3_tex_plain_uniform64(I->src[2]) || agx3_tex_imm(I->src[2], 0));
    /* Apple's lane-indexed image read publishes coordinates and uint LOD on
     * staging slot 2, then issues the texture result on slot 1. Keep those two
     * independent scoreboard domains; reusing slot 1 for both is not a native
@@ -6962,7 +6962,9 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->agx3_mrt_tile_ops_ordered ||
-       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
+       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
+        (ctx->key->no_stop ||
+         !(agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND))) ||
        (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1)) {
       /* Not a refusal by itself -- a single-target shader legitimately has no
        * MRT protocol -- so report only when the key names two or more tile

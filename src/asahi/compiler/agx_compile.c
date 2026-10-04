@@ -2589,6 +2589,15 @@ agx_emit_image_load(agx_builder *b, agx_index dst, nir_intrinsic_instr *intr)
       lod = lod32;
    }
 
+   /* G17P indexed-image lowering puts the native heap index in the 64-bit
+    * resource operand. Its SMP encoding does not consume the legacy uniform
+    * base. Drop that bookkeeping operand before CProg input import, so it
+    * does not become an unused register operand or an extra TPS load.
+    */
+   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+       texture.size == AGX_SIZE_64)
+      bindless = agx_zero();
+
    agx_index coords = agx_emit_collect(b, coord_comps, coord);
    agx_index tmp = agx_vec_temp(b->shader, dst.size, sparse ? 8 : 4);
 
@@ -8222,7 +8231,9 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
-       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
+       (!ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
+        (ctx->key->no_stop ||
+         !(agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND))) ||
        list_length(&ctx->blocks) != 1)
       AGX3_ORDER_REFUSE();
 
@@ -10378,6 +10389,16 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (is_g17p && key->g17p_uniform_dma && !form_preamble &&
        agx3_nir_lower_uniform_dma(nir, key, info))
       NIR_PASS(_, nir, nir_opt_dce);
+
+   /* Late NIR cleanup can remove main-program uses of values exported by
+    * preamble extraction. Preserve their SSA uses inside the CProg, while
+    * dropping writes to general uniform slots nobody reads anymore.
+    */
+   if (is_g17p && form_preamble) {
+      NIR_PASS(_, nir, agx_nir_remove_unused_preamble_exports,
+               key->reserved_preamble);
+      NIR_PASS(_, nir, nir_opt_dce);
+   }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
       info->varyings.fs.nr_cf = key->fs.cf_base;

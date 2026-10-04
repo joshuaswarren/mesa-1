@@ -516,3 +516,73 @@ agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p)
 
    return progress;
 }
+
+/* General preamble exports are read through load_preamble, or implicitly as
+ * the base of a bindless image/sampler token. Image/sampler-class exports use
+ * separate native state and are deliberately left alone.
+ */
+bool
+agx_nir_remove_unused_preamble_exports(nir_shader *nir, unsigned reserved)
+{
+   if (!nir_shader_get_entrypoint(nir)->preamble)
+      return false;
+
+   bool read[512] = {false};
+   for (unsigned h = 0; h < MIN2(reserved, ARRAY_SIZE(read)); h++)
+      read[h] = true;
+
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            unsigned base, size;
+            if (intr->intrinsic == nir_intrinsic_load_preamble &&
+                nir_intrinsic_preamble_class(intr) == nir_preamble_class_general) {
+               base = nir_intrinsic_base(intr);
+               size = MAX2(intr->def.bit_size, 16) * intr->def.num_components / 16;
+            } else if (intr->intrinsic == nir_intrinsic_bindless_image_agx ||
+                       intr->intrinsic == nir_intrinsic_bindless_sampler_agx) {
+               base = nir_intrinsic_desc_set(intr);
+               size = 4;
+            } else {
+               continue;
+            }
+            if (base >= ARRAY_SIZE(read) || size > ARRAY_SIZE(read) - base)
+               return false;
+            for (unsigned h = 0; h < size; h++)
+               read[base + h] = true;
+         }
+      }
+   }
+
+   bool progress = false;
+   nir_function_impl *impl = nir_shader_get_preamble(nir);
+   nir_foreach_block(block, impl) {
+      nir_foreach_instr_safe(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_store_preamble ||
+             nir_intrinsic_preamble_class(intr) != nir_preamble_class_general)
+            continue;
+         unsigned base = nir_intrinsic_base(intr);
+         nir_def *value = intr->src[0].ssa;
+         unsigned size = MAX2(value->bit_size, 16) * value->num_components / 16;
+         if (base >= ARRAY_SIZE(read) || size > ARRAY_SIZE(read) - base)
+            continue;
+         bool live = false;
+         for (unsigned h = 0; h < size; h++)
+            live |= read[base + h];
+         if (!live) {
+            nir_instr_remove(instr);
+            progress = true;
+         }
+      }
+   }
+   nir_foreach_function_impl(other, nir) {
+      nir_progress(other == impl && progress, other, nir_metadata_control_flow);
+   }
+   return progress;
+}
