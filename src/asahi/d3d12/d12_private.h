@@ -962,6 +962,8 @@ ID3DBlob *d12_blob_create(const void *data, size_t size);
 
 /* One linked graphics stage */
 struct d12_gfx_stage {
+   /* Frontend scan before texture lowering: only root/buffer resources. */
+   bool g17p_root_only;
    struct agx_shader_info info;
    struct agx_linked_shader linked;
 

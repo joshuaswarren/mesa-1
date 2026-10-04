@@ -2388,7 +2388,7 @@ compile_gfx_stage(struct d12_device *device,
                   struct agx_fs_epilog_link_info *fs_epilog_link,
                   struct d12_flat_transport *flat_transport,
                   uint8_t *cull_distance_size,
-                  struct agx_shader_part *out)
+                  struct agx_shader_part *out, bool *root_only)
 {
    const uint32_t descriptor_generation =
       (uint32_t)agx_chip_descriptor_generation(device->dev.chip);
@@ -2443,6 +2443,19 @@ compile_gfx_stage(struct d12_device *device,
     * same boundary, before agx_preprocess_nir.
     */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   *root_only = nir->info.num_textures == 0 && nir->info.num_images == 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex ||
+                (instr->type == nir_instr_type_intrinsic &&
+                 nir_instr_as_intrinsic(instr)->intrinsic ==
+                    nir_intrinsic_bindless_image_agx))
+               *root_only = false;
+         }
+      }
+   }
+
    nir->info.clip_distance_array_size =
       MAX2(nir->info.clip_distance_array_size, translated_clip_size);
    nir->info.cull_distance_array_size =
@@ -4236,7 +4249,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    if (!compile_gfx_stage(device, map, vs_dxil, vs_size, MESA_SHADER_VERTEX,
                           &tib, 0xffff, 0, &pso->uvs, &fetch, NULL, NULL, NULL,
-                          NULL, &cull_distance_size, &vs_part)) {
+                          NULL, &cull_distance_size, &vs_part, &pso->vs.g17p_root_only)) {
       free(pso);
       return E_INVALIDARG;
    }
@@ -4262,7 +4275,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                           &fs_outputs,
                           &use_fs_epilog, &fs_epilog_link,
                           allow_flat_geometry ? &flat_transport : NULL,
-                          &cull_distance_size, &fs_part)) {
+                          &cull_distance_size, &fs_part, &pso->fs.g17p_root_only)) {
       free(vs_part.binary);
       free(pso);
       return E_INVALIDARG;

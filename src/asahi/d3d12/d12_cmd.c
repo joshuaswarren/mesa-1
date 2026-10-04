@@ -6088,6 +6088,7 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        linked->size > linked->bo->size - linked->entry_offset ||
        !linked->nr_gprs || !linked->g17p_compiler_d_valid ||
        info->stage != (fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX) ||
+       !st->g17p_root_only || info->scratch_size || linked->scratch_size ||
        info->has_preamble || info->nr_preamble_gprs ||
        info->preamble_scratch_size || info->rodata.size_16 ||
        info->agx3_uniform_dma_valid || info->texture_state_count ||
@@ -6185,7 +6186,9 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    struct d12_device *device = list->device;
 
    if (device->dev.chip == AGX_CHIP_G17P) {
-      if (textures_gpu || pbes_gpu || heap_gpu || heap_textures_gpu ||
+      /* Unused null texture/PBE home cells are always uploaded by the
+       * binding collector; the frontend usage proof decides admission. */
+      if (!st->g17p_root_only || heap_gpu || heap_textures_gpu ||
           heap_pbes_gpu || heap_samplers_gpu || poly) {
          mesa_loge("native graphics texture/poly stage producer unavailable");
          list->state = D12_LIST_ERROR;
