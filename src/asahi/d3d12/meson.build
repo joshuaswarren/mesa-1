@@ -138,7 +138,6 @@ libd3d12agx_core = static_library(
   ],
   link_with : [
     libasahi_lib, libasahi_layout, libasahi_compiler, libagx2_disasm,
-        libagx3b_disasm,
     libagx3b_disasm,
     libpoly_nir,
   ],
@@ -278,6 +277,7 @@ if d12_is_windows
       link_whole : [libd3d12agx_core, libd3d12agx_umd_glue],
       link_with : [
         libasahi_lib, libasahi_layout, libasahi_compiler, libagx2_disasm,
+        libagx3b_disasm,
         libpoly_nir,
       ],
       gnu_symbol_visibility : 'hidden',
