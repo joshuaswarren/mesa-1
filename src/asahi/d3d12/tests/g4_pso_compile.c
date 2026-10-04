@@ -7,6 +7,7 @@
 #include <directx/d3d12.h>
 #include "d12_test_abi.h"
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,10 +41,15 @@ static bool shim_loaded(void)
 int main(int argc, char **argv)
 {
    unsigned mode = 0, base = 1;
+   bool depth_metadata = false;
    if (argc == 4 && !strcmp(argv[1], "--record-only")) { mode = 1; base = 2; }
    if (argc == 4 && !strcmp(argv[1], "--shim-submit-only")) { mode = 2; base = 2; }
-   if (argc != (int)base + 2 || !shim_loaded()) {
-      fprintf(stderr, "usage under loaded G17P DRM shim: %s [--record-only|--shim-submit-only] tri.dxil solid.dxil\n", argv[0]);
+   if (argc == 4 && !strcmp(argv[1], "--depth-record-only")) { mode = 1; base = 2; depth_metadata = true; }
+   if (argc == 4 && !strcmp(argv[1], "--depth-shim-submit-only")) { mode = 2; base = 2; depth_metadata = true; }
+   const char *depth_enable = getenv("AURORA_D3D12_SHIM_DEPTH_METADATA");
+   if (argc != (int)base + 2 || !shim_loaded() ||
+       (depth_metadata && (!depth_enable || strcmp(depth_enable, "1")))) {
+      fprintf(stderr, "usage under loaded G17P DRM shim: %s [--record-only|--shim-submit-only|--depth-record-only|--depth-shim-submit-only] tri.dxil solid.dxil\n", argv[0]);
       return 2;
    }
    size_t vs_size = 0, fs_size = 0;
@@ -53,8 +59,9 @@ int main(int argc, char **argv)
    ID3DBlob *blob = NULL;
    ID3D12RootSignature *root = NULL;
    ID3D12PipelineState *pso = NULL;
-   ID3D12Resource *target = NULL;
-   ID3D12DescriptorHeap *rtv_heap = NULL;
+   ID3D12Resource *target = NULL, *depth = NULL;
+   ID3D12DescriptorHeap *rtv_heap = NULL, *dsv_heap = NULL;
+   D3D12_CPU_DESCRIPTOR_HANDLE dsv = {0};
    ID3D12CommandAllocator *allocator = NULL;
    ID3D12GraphicsCommandList *list = NULL;
    ID3D12CommandQueue *queue = NULL;
@@ -83,16 +90,31 @@ int main(int argc, char **argv)
       .SampleDesc = {.Count = 1}, .SampleMask = ~0u,
    };
    desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
+   if (depth_metadata) {
+      desc.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+      desc.DepthStencilState.DepthEnable = TRUE;
+      desc.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+      desc.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+   }
    hr = ID3D12Device_CreateGraphicsPipelineState(device, &desc,
                                                 &IID_ID3D12PipelineState, (void **)&pso);
    if (hr != S_OK || !pso) goto done;
    if (!mode) { phase_complete = true; goto done; }
-   phase = mode == 1 ? "RECORD ONLY" : "SHIM SUBMIT ONLY";
+   phase = depth_metadata
+      ? (mode == 1 ? "DEPTH RECORD ONLY" : "DEPTH SHIM SUBMIT ONLY")
+      : (mode == 1 ? "RECORD ONLY" : "SHIM SUBMIT ONLY");
    if (mode == 2) {
       const char *validate = getenv("ASAHI_SHIM_VALIDATE_G17P_STREAM");
       const char *expected = getenv("ASAHI_SHIM_G17P_EXPECT_VALID_STREAM");
       if (!validate || strcmp(validate, "1") || !expected || strcmp(expected, "1")) {
          hr = E_FAIL; goto done;
+      }
+      if (depth_metadata) {
+         const char *context = getenv("ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS");
+         const char *expected_context = getenv("ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS");
+         if (!context || strcmp(context, "1") || !expected_context || strcmp(expected_context, "1")) {
+            hr = E_FAIL; goto done;
+         }
       }
    }
    const D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
@@ -116,7 +138,26 @@ int main(int argc, char **argv)
           &IID_ID3D12DescriptorHeap, (void **)&rtv_heap);
    if (hr != S_OK || !rtv_heap) goto done;
    D3D12_CPU_DESCRIPTOR_HANDLE rtv = d12_test_descriptor_heap_get_cpu_start(rtv_heap);
+   if (!rtv.ptr) {hr = E_FAIL; goto done;}
    ID3D12Device_CreateRenderTargetView(device, target, NULL, rtv);
+   if (depth_metadata) {
+      const D3D12_RESOURCE_DESC ds = {
+         .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+         .Width = 256, .Height = 256, .DepthOrArraySize = 1, .MipLevels = 1,
+         .Format = DXGI_FORMAT_D32_FLOAT, .SampleDesc = {.Count = 1},
+         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+         .Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL,
+      };
+      hr = ID3D12Device_CreateCommittedResource(device, &heap, D3D12_HEAP_FLAG_NONE,
+         &ds, D3D12_RESOURCE_STATE_DEPTH_WRITE, NULL, &IID_ID3D12Resource, (void **)&depth);
+      if (hr != S_OK || !depth) goto done;
+      const D3D12_DESCRIPTOR_HEAP_DESC dh = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,.NumDescriptors = 1};
+      hr = ID3D12Device_CreateDescriptorHeap(device, &dh, &IID_ID3D12DescriptorHeap, (void **)&dsv_heap);
+      if (hr != S_OK || !dsv_heap) goto done;
+      dsv = d12_test_descriptor_heap_get_cpu_start(dsv_heap);
+      if (!dsv.ptr) {hr = E_FAIL; goto done;}
+      ID3D12Device_CreateDepthStencilView(device, depth, NULL, dsv);
+   }
    hr = ID3D12Device_CreateCommandAllocator(device, D3D12_COMMAND_LIST_TYPE_DIRECT,
           &IID_ID3D12CommandAllocator, (void **)&allocator);
    if (hr != S_OK || !allocator) goto done;
@@ -127,7 +168,9 @@ int main(int argc, char **argv)
    const D3D12_VIEWPORT viewport = {.Width = 256, .Height = 256, .MaxDepth = 1};
    const D3D12_RECT scissor = {.right = 256, .bottom = 256};
    ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, clear, 0, NULL);
-   ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE, NULL);
+   if (depth_metadata)
+      ID3D12GraphicsCommandList_ClearDepthStencilView(list, dsv, D3D12_CLEAR_FLAG_DEPTH, 0.25f, 0, 0, NULL);
+   ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE, depth_metadata ? &dsv : NULL);
    ID3D12GraphicsCommandList_RSSetViewports(list, 1, &viewport);
    ID3D12GraphicsCommandList_RSSetScissorRects(list, 1, &scissor);
    ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, root);
@@ -157,7 +200,7 @@ int main(int argc, char **argv)
    hr = ID3D12Device_GetDeviceRemovedReason(device);
    phase_complete = hr == S_OK;
 
-done:
+done:;
    const bool passed = phase_complete && hr == S_OK && pso;
    printf("G17P %s: %s HRESULT=0x%08x %s\n", phase,
           passed ? "PASS" : "FAIL", (unsigned)hr,
@@ -166,6 +209,8 @@ done:
    if (queue) ID3D12CommandQueue_Release(queue);
    if (list) ID3D12GraphicsCommandList_Release(list);
    if (allocator) ID3D12CommandAllocator_Release(allocator);
+   if (dsv_heap) ID3D12DescriptorHeap_Release(dsv_heap);
+   if (depth) ID3D12Resource_Release(depth);
    if (rtv_heap) ID3D12DescriptorHeap_Release(rtv_heap);
    if (target) ID3D12Resource_Release(target);
    if (pso) ID3D12PipelineState_Release(pso);

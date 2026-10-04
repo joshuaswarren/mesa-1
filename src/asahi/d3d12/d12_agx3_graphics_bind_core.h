@@ -24,6 +24,12 @@ struct d12_agx3_triangle_bind_desc {
    unsigned cull_mode;
    bool front_face_ccw;
    bool depth_clip;
+   /* Cold fixed-function depth words. The caller must own/validate D32 ZLS
+    * storage and live admission independently; these bytes admit no draw. */
+   bool has_depth;
+   bool depth_test;
+   bool depth_write;
+   uint8_t depth_compare;
    struct agx_ppp_hal200_raster_fields raster;
    struct agx_ppp_viewport_payload_fields viewport;
 };

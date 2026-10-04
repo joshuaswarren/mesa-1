@@ -2260,3 +2260,7 @@ uint32_t d12_build_g17p_bg_eot(
    const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
    const struct agx_tilebuffer_layout *tib,
    uint64_t *out_resources);
+
+/* Metadata-only native D32 qualification; never admits a physical DRM fd. */
+bool d12_g17p_depth_metadata_enabled(const struct agx_device *dev);
+bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
