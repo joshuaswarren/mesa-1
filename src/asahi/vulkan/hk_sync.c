@@ -8,6 +8,7 @@
 #include "hk_sync.h"
 
 #include <stdio.h>
+#include <inttypes.h>
 #include <string.h>
 #include <strings.h>
 
@@ -968,6 +969,7 @@ struct submit_state {
    hk_sync_value last[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
    /* Requirement every later stream of each kind carries. */
    hk_sync_value carry[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
+   uint64_t carry_absolute[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
    uint32_t count[HK_SYNC_NUM_SQ];
 };
 
@@ -993,6 +995,21 @@ resolve_dep(const struct submit_state *ss, const struct hk_sync_dep *dep,
       v = value_max(v, (hk_sync_value)dep->cut->sync.index);
    v = value_max(v, resolve_prior(ss, dep->prior, sq));
    return v;
+}
+
+static uint64_t
+resolve_absolute(const struct submit_state *ss, const struct hk_sync_dep *dep,
+                 unsigned sq)
+{
+   const uint64_t base = ss->queue->sync.submitted[sq];
+   uint64_t value = dep->cut ? base + dep->cut->sync.index : 0;
+   u_foreach_bit(k, dep->prior) {
+      const uint64_t earlier = ss->last[k][sq] > 0
+         ? base + ss->last[k][sq]
+         : ss->queue->sync.last_absolute[k][sq];
+      value = MAX2(value, earlier);
+   }
+   return value;
 }
 
 /* Tile hazards across submissions (hk_sync.h). */
@@ -1064,12 +1081,30 @@ struct submit_footprint {
    hk_sync_value index;
 };
 
-void
+bool
 hk_sync_resolve_submit(struct hk_queue *queue,
                        struct hk_cmd_buffer *const *cmdbufs, unsigned count,
                        bool first_cdm_is_flush, bool chain_first,
                        uint64_t completed)
 {
+   /* Validate all ordinal arithmetic before mutating command or queue state.
+    * Relative fields reserve UINT16_MAX for NONE. Historical ordinals use
+    * zero for absence, so wrapping either representation is invalid. */
+   if (queue->sync.exact_prior) {
+      uint64_t added[HK_SYNC_NUM_SQ] = {0, first_cdm_is_flush ? 1 : 0};
+      for (unsigned i = 0; i < count; ++i) {
+         list_for_each_entry(struct hk_cs, cs, &cmdbufs[i]->control_streams, node) {
+            const unsigned sq = hk_sync_sq(cs);
+            if (++added[sq] >= DRM_ASAHI_BARRIER_NONE)
+               return false;
+         }
+      }
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+         if (queue->sync.submitted[sq] > UINT64_MAX - added[sq])
+            return false;
+      }
+   }
+
    struct submit_state ss = {.queue = queue};
    struct util_dynarray submitted;
    util_dynarray_init(&submitted, NULL);
@@ -1078,6 +1113,7 @@ hk_sync_resolve_submit(struct hk_queue *queue,
       for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
          ss.last[k][sq] = HK_SYNC_NONE;
          ss.carry[k][sq] = HK_SYNC_NONE;
+         ss.carry_absolute[k][sq] = queue->sync.tail[k][sq];
       }
    }
 
@@ -1085,6 +1121,10 @@ hk_sync_resolve_submit(struct hk_queue *queue,
       /* A sparse-binding flush opens the payload; it is a compute command
        * everything must follow, handled by the chain below. */
       ss.count[HK_SYNC_CDM] = 1;
+      if (queue->sync.exact_prior) {
+         for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k)
+            ss.last[k][HK_SYNC_CDM] = 1;
+      }
    }
 
    for (unsigned i = 0; i < count; ++i) {
@@ -1112,11 +1152,25 @@ hk_sync_resolve_submit(struct hk_queue *queue,
                           d->cut->sync.seq);
                d->cut = latest_before(cmd, sq, cs);
             }
-            hk_sync_value v = resolve_dep(&ss, &cs->sync.dep[sq], sq);
-            u_foreach_bit(k, cs->sync.kind)
-               v = value_max(v, ss.carry[k][sq]);
-            cs->sync.barrier[sq] =
-               v < 0 ? DRM_ASAHI_BARRIER_NONE : (uint16_t)v;
+            cs->sync.prior[sq] = 0;
+            if (queue->sync.exact_prior) {
+               uint64_t v = resolve_absolute(&ss, &cs->sync.dep[sq], sq);
+               u_foreach_bit(k, cs->sync.kind)
+                  v = MAX2(v, ss.carry_absolute[k][sq]);
+               const uint64_t base = queue->sync.submitted[sq];
+               if (v > base) {
+                  cs->sync.barrier[sq] = (uint16_t)(v - base);
+               } else {
+                  cs->sync.barrier[sq] = DRM_ASAHI_BARRIER_NONE;
+                  cs->sync.prior[sq] = v;
+               }
+            } else {
+               hk_sync_value v = resolve_dep(&ss, &cs->sync.dep[sq], sq);
+               u_foreach_bit(k, cs->sync.kind)
+                  v = value_max(v, ss.carry[k][sq]);
+               cs->sync.barrier[sq] =
+                  v < 0 ? DRM_ASAHI_BARRIER_NONE : (uint16_t)v;
+            }
          }
       }
 
@@ -1161,6 +1215,9 @@ hk_sync_resolve_submit(struct hk_queue *queue,
          for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
             ss.carry[k][sq] = value_max(
                ss.carry[k][sq], resolve_dep(&ss, &cmd->sync.req[k][sq], sq));
+            if (queue->sync.exact_prior)
+               ss.carry_absolute[k][sq] = MAX2(ss.carry_absolute[k][sq],
+                  resolve_absolute(&ss, &cmd->sync.req[k][sq], sq));
          }
       }
 
@@ -1237,7 +1294,8 @@ hk_sync_resolve_submit(struct hk_queue *queue,
                              node) {
             fprintf(stderr,
                     "hk_sync: submit cb=%u %s #%u kind=%#x vdm_barrier=%d "
-                    "cdm_barrier=%d\n",
+                    "cdm_barrier=%d prior_vdm=%" PRIu64 " prior_cdm=%" PRIu64
+                    " base_vdm=%" PRIu64 " base_cdm=%" PRIu64 " exact=%u\n",
                     i, cs->type == HK_CS_VDM ? "vdm" : "cdm", cs->sync.index,
                     cs->sync.kind,
                     cs->sync.barrier[0] == DRM_ASAHI_BARRIER_NONE
@@ -1245,9 +1303,25 @@ hk_sync_resolve_submit(struct hk_queue *queue,
                        : cs->sync.barrier[0],
                     cs->sync.barrier[1] == DRM_ASAHI_BARRIER_NONE
                        ? -1
-                       : cs->sync.barrier[1]);
+                       : cs->sync.barrier[1],
+                    cs->sync.prior[0], cs->sync.prior[1],
+                    queue->sync.submitted[0], queue->sync.submitted[1],
+                    queue->sync.exact_prior);
          }
       }
+   }
+
+   if (queue->sync.exact_prior) {
+      for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
+         for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq) {
+            queue->sync.tail[k][sq] = ss.carry_absolute[k][sq];
+            if (ss.last[k][sq] > 0)
+               queue->sync.last_absolute[k][sq] =
+                  queue->sync.submitted[sq] + ss.last[k][sq];
+         }
+      }
+      for (unsigned sq = 0; sq < HK_SYNC_NUM_SQ; ++sq)
+         queue->sync.submitted[sq] += ss.count[sq];
    }
 
    /* This queue has now run these kinds. */
@@ -1258,4 +1332,5 @@ hk_sync_resolve_submit(struct hk_queue *queue,
    }
    if (first_cdm_is_flush)
       queue->sync.ever[HK_SYNC_CDM] |= HK_SYNC_ALL;
+   return true;
 }
