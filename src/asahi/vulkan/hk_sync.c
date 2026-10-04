@@ -696,7 +696,15 @@ hk_sync_merge(struct hk_cmd_buffer *cmd, struct hk_cs *into,
    const unsigned sq = hk_sync_sq(from);
    assert(sq == hk_sync_sq(into));
 
-   hk_sync_stream_wait(into, from->sync.dep);
+   /* A cut at the destination covers its entire earlier subqueue prefix.
+    * The destination itself is now ordered by the merged command stream,
+    * but earlier commands still need their dependency, including any
+    * timestamps the kernel publishes only after command retirement. */
+   struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
+   memcpy(dep, from->sync.dep, sizeof(dep));
+   if (dep[sq].cut == into)
+      dep[sq].cut = previous_on_sq(cmd, into);
+   hk_sync_stream_wait(into, dep);
    into->sync.kind |= from->sync.kind;
 
    for (unsigned k = 0; k < HK_SYNC_NUM_KINDS; ++k) {
