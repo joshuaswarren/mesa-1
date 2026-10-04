@@ -330,6 +330,13 @@ d3d12agx_render_ppm = executable(
   link_with : [libd3d12agx],
 )
 
+d3d12agx_g4_pso_compile = executable(
+  'd3d12agx_g4_pso_compile',
+  files('tests/g4_pso_compile.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_g4_triangle = executable(
   'd3d12agx_g4_triangle',
   files('tests/g4_triangle.c'),
