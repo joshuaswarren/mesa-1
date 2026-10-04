@@ -18,6 +18,7 @@ endif
 libd3d12agx_files = files(
   'd12_agx3_cmdstream_core.h',
   'd12_agx3_index_list_core.c',
+  'd12_agx3_graphics_bind_core.c',
   'd12_agx3_isa_core.c',
   'd12_agx3_ppp_hal300_depth_bias_scissor_core.c',
   'd12_agx3_ppp_hal300_depth_stencil_core.c',
