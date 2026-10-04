@@ -44,6 +44,25 @@ def_size(nir_def *def, unsigned *size, unsigned *align,
    *class = preamble_class(def);
 }
 
+static void
+def_size_g17p(nir_def *def, unsigned *size, unsigned *align,
+              nir_preamble_class *class)
+{
+   def_size(def, size, align, class);
+   nir_intrinsic_instr *intr = nir_def_as_intrinsic_or_null(def);
+   if (!intr || intr->intrinsic != nir_intrinsic_bindless_image_agx ||
+       intr->src[0].ssa->bit_size != 64)
+      return;
+
+   /* G17P cannot export texture state, so its native image descriptor is
+    * carried in general uniforms. The opaque token is 32 bits; reserve the
+    * 64-bit payload that lower_store_preamble actually exports instead.
+    * Image-class slot units and the other encodings stay unchanged.
+    */
+   *class = nir_preamble_class_general;
+   *size = *align = 4;
+}
+
 static bool
 all_uses_float(nir_def *def)
 {
@@ -361,6 +380,11 @@ static const nir_opt_preamble_options preamble_options = {
    .preamble_storage_size[nir_preamble_class_sampler] = 16,
 };
 
+struct preamble_image {
+   int16_t heap;
+   uint8_t bit_size;
+};
+
 /*
  * Bindless image handles can't be stored to uniforms, so we move them back to
  * the main shader. Effectively un-optimizing the preamble.
@@ -368,16 +392,19 @@ static const nir_opt_preamble_options preamble_options = {
 static bool
 lower_store_preamble(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 {
-   int16_t *heaps = data;
+   struct preamble_image *images = data;
    if (intr->intrinsic != nir_intrinsic_store_preamble ||
-       nir_intrinsic_preamble_class(intr) == nir_preamble_class_image)
+       nir_intrinsic_preamble_class(intr) != nir_preamble_class_general)
       return false;
 
    nir_intrinsic_instr *handle = nir_src_as_intrinsic(intr->src[0]);
    if (!handle || handle->intrinsic != nir_intrinsic_bindless_image_agx)
       return false;
 
-   heaps[nir_intrinsic_base(intr)] = nir_intrinsic_desc_set(handle);
+   images[nir_intrinsic_base(intr)] = (struct preamble_image) {
+      .heap = nir_intrinsic_desc_set(handle),
+      .bit_size = handle->src[0].ssa->bit_size,
+   };
    nir_src_rewrite(&intr->src[0], handle->src[0].ssa);
    return true;
 }
@@ -413,15 +440,21 @@ lower_preamble(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    if (intr->intrinsic != nir_intrinsic_load_preamble)
       return false;
 
-   int16_t *heaps = data;
+   struct preamble_image *images = data;
    b->cursor = nir_after_instr(&intr->instr);
 
    unsigned base = nir_intrinsic_base(intr);
    nir_def *new_ = NULL;
    bool ts = nir_intrinsic_preamble_class(intr) == nir_preamble_class_image;
    bool ss = nir_intrinsic_preamble_class(intr) == nir_preamble_class_sampler;
-   if (!ts && heaps[base] >= 0) {
-      new_ = nir_bindless_image_agx(b, &intr->def, .desc_set = heaps[base]);
+   if (nir_intrinsic_preamble_class(intr) == nir_preamble_class_general &&
+       images[base].heap >= 0) {
+      /* Reload the exported descriptor payload, then recreate the opaque
+       * token for its users. The token's own width is not the payload width.
+       */
+      intr->def.bit_size = images[base].bit_size;
+      new_ = nir_bindless_image_agx(b, &intr->def,
+                                   .desc_set = images[base].heap);
    }
 
    nir_foreach_use_safe(use, &intr->def) {
@@ -465,9 +498,11 @@ agx_nir_opt_preamble(nir_shader *nir, unsigned *sizes, bool g17p)
       debug_get_option_agx_g17p_vertex_uniform_sub();
    nir_opt_preamble_options options = preamble_options;
    options.cb_data = &fold_uniform_sub;
+   if (g17p)
+      options.def_size = def_size_g17p;
    NIR_PASS(progress, nir, nir_opt_preamble, &options, sizes);
 
-   int16_t heap[512];
+   struct preamble_image heap[512];
    memset(heap, ~0, sizeof(heap));
 
    if (progress) {

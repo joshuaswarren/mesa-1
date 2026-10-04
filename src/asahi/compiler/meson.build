@@ -697,6 +697,7 @@ if with_tests
          'test/test-lower-parallel-copy.cpp',
          'test/test-lower-spill.cpp',
          'test/test-repair-ssa.cpp',
+         'test/test-preamble-image-payload.cpp',
          'test/test-agx3-pack-binary.cpp',
          'test/test-agx3-lower-uniform-program.cpp',
          'test/test-agx3-sr.cpp',
