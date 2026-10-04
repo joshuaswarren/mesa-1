@@ -33,7 +33,11 @@ agx_g17p_vdm_alias_heap_init(struct util_vma_heap *heap)
       util_vma_heap_finish(heap);
       return false;
    }
-   return heap->free_size == AGX_G17P_VDM_ALIAS_AVAILABLE_SIZE;
+   if (heap->free_size != AGX_G17P_VDM_ALIAS_AVAILABLE_SIZE) {
+      util_vma_heap_finish(heap);
+      return false;
+   }
+   return true;
 }
 
 bool
