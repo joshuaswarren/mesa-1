@@ -391,7 +391,8 @@ finite_root_range_count(const struct d12_binding_map *map, unsigned klass,
       return 0;
 
    unsigned count = 0;
-   while (count < D12_MAX_RESOURCE_BINDINGS) {
+   while (count < D12_MAX_RESOURCE_BINDINGS &&
+          count <= UINT32_MAX - reg && count <= UINT32_MAX - base_slot) {
       unsigned next = d12_binding_map_find_entry(
          map, klass, space, reg + count);
       if (next == ~0u || map->entries[next].unbounded ||
@@ -638,9 +639,9 @@ resource_slot_for_global(struct trans_ctx *ctx, uint32_t value_id)
 /*
  * Resolve a DXIL resource reference to a root-table slot.
  *
- * `klass` and `range_id` name an entry in dx.resources; `index` is relative
- * to that entry's lower bound, as required by the DXIL createHandle contract.
- * An array declared at t4[8] and indexed at element 2 therefore names t6.
+ * `klass` and `range_id` name an entry in dx.resources; classic DXIL
+ * createHandle carries the absolute shader register. DXC adds the resource
+ * lower bound when constructing the call: element 2 of t4[8] carries index 6.
  * Bounds checking catches a resource reference that does not correspond to
  * anything declared, which would otherwise silently read slot garbage.
  */
@@ -657,29 +658,30 @@ resolve_binding_slot(struct trans_ctx *ctx, unsigned klass,
 
       unsigned count = d12_range_count(rb);
 
-      if (index > UINT32_MAX - rb->lower_bound) {
-         trans_fail(ctx, "resource range index overflows its register");
-         return false;
-      }
-      unsigned reg = rb->lower_bound + index;
-
-      if (count && index >= count) {
+      if (index < rb->lower_bound ||
+          (count && index - rb->lower_bound >= count)) {
          trans_fail(ctx, "resource index is outside its declared range");
          return false;
       }
 
-      /* An UNBOUNDED range has one mapped slot at its lower bound and
-       * everything above it resolves by arithmetic, exactly as the
-       * dynamic path does -- a constant index is just the degenerate
-       * dynamic one.
-       */
-      if (!count && index) {
+      unsigned reg = index;
+      unsigned relative = index - rb->lower_bound;
+
+      /* Match the dynamic shader-unbounded/finite-root path: arithmetic
+       * must stay inside the same contiguous API descriptor range. */
+      if (!count) {
          unsigned base = d12_binding_map_find(ctx->map, klass, rb->space,
                                               rb->lower_bound);
-         if (base != ~0u) {
-            *out_slot = base + (reg - rb->lower_bound);
-            return true;
+         unsigned finite_count = base == ~0u ? 0 :
+            finite_root_range_count(ctx->map, klass, rb->space,
+                                    rb->lower_bound, base);
+         if (!finite_count || relative >= finite_count ||
+             relative > UINT32_MAX - base) {
+            trans_fail(ctx, "resource index is outside its API root range");
+            return false;
          }
+         *out_slot = base + relative;
+         return true;
       }
 
       *out_slot = d12_binding_map_find(ctx->map, klass, rb->space, reg);
@@ -3218,6 +3220,11 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
             return false;
          }
 
+         if (count && (count - 1 > UINT32_MAX - rb->lower_bound ||
+                       count - 1 > UINT32_MAX - base_slot)) {
+            trans_fail(ctx, "resource range overflows its register or slot");
+            return false;
+         }
          if (count && !rooted_heap) {
             unsigned last_slot = d12_binding_map_find(
                ctx->map, (unsigned)klass, rb->space,
@@ -3265,17 +3272,18 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
             return false;
 
          nir_def *index32 = nir_u2u32(b, idx);
-         nir_def *slot_def = index32;
+         nir_def *relative = nir_iadd_imm(b, index32, -rb->lower_bound);
+         nir_def *slot_def = relative;
 
          if (rooted_heap) {
-            slot_def = nir_iadd_imm(
-               b, slot_def, rb->lower_bound - rooted_reg);
+            slot_def = nir_iadd_imm(b, index32, -rooted_reg);
          } else {
-            slot_def = nir_iadd_imm(b, slot_def, base_slot);
+            slot_def = nir_iadd_imm(b, relative, base_slot);
 
             if (!count && !native_segment) {
-               nir_def *valid =
-                  nir_ult(b, index32, nir_imm_int(b, finite_count));
+               nir_def *valid = nir_iand(
+                  b, nir_uge(b, index32, nir_imm_int(b, rb->lower_bound)),
+                  nir_ult(b, relative, nir_imm_int(b, finite_count)));
                slot_def = nir_bcsel(b, valid, slot_def,
                                     nir_imm_int(b, base_slot));
                ctx->handle_valid[inst->result_value] = valid;
@@ -3292,7 +3300,7 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
          return true;
       }
 
-      /* A constant access into an unbounded range uses the same rooted
+      /* A constant access into a rooted range uses the same rooted
        * descriptor-array handle as the dynamic case above.  It must not be
        * mistaken for base_slot + index in the finite root table. */
       for (unsigned i = 0; i < ctx->mod->num_resources; i++) {
@@ -3307,12 +3315,20 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
             continue;
 
          unsigned count = d12_range_count(rb);
-         if (index > UINT32_MAX - rb->lower_bound ||
-             (count && index >= count)) {
+         if (index > UINT32_MAX || index < rb->lower_bound ||
+             (count && index - rb->lower_bound >= count)) {
             trans_fail(ctx, "resource index is outside its declared range");
             return false;
          }
-         unsigned reg = rb->lower_bound + (unsigned)index;
+         unsigned reg = (unsigned)index;
+         unsigned checked_slot = 0, checked_reg = 0;
+         if (!unbounded_root_for_register(
+                ctx->map, (unsigned)klass, rb->space, reg,
+                &checked_slot, &checked_reg) ||
+             checked_slot != base_slot || checked_reg != rooted_reg) {
+            trans_fail(ctx, "resource index is outside its API root range");
+            return false;
+         }
 
          ctx->handle_base[inst->result_value] = base_slot;
          ctx->handle_heap[inst->result_value] = 3;
@@ -3323,6 +3339,10 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
          return true;
       }
 
+      if (index > UINT32_MAX || klass > UINT32_MAX || range_id > UINT32_MAX) {
+         trans_fail(ctx, "resource handle operand exceeds 32 bits");
+         return false;
+      }
       unsigned slot;
       if (!resolve_binding_slot(ctx, (unsigned)klass, (unsigned)range_id,
                                 (unsigned)index, &slot))
