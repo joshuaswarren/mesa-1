@@ -66,6 +66,9 @@
  * bypasses the incomplete/unqualified renderer. */
 static const bool d12_g17p_graphics_producers_qualified = false;
 
+_Static_assert(offsetof(struct d12_cmd_list, iface) == 0,
+               "Command-list COM interface must remain at object offset zero");
+
 static bool d12_pack_texture_generation(
    enum agx_descriptor_generation generation, void *out,
    const struct AGX_TEXTURE *legacy, unsigned semantic_sample_count);

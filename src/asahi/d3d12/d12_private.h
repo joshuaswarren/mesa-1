@@ -1576,8 +1576,8 @@ struct d12_g17p_vdm_storage {
 };
 
 struct d12_cmd_list {
-   struct util_dynarray g17p_vdm_storage;
    ID3D12GraphicsCommandList iface; /* must be first */
+   struct util_dynarray g17p_vdm_storage;
    uint32_t refcount;
    struct d12_private_data_store private_data;
 
