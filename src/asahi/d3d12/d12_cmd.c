@@ -121,6 +121,8 @@ d12_g17p_depth_segment_supported(const struct d12_segment *seg)
        ds->desc.Format != DXGI_FORMAT_D32_FLOAT ||
        ds->layout.format != PIPE_FORMAT_Z32_FLOAT || ds->stencil_bo ||
        ds->layout.compressed || ds->layout.levels != 1 ||
+       !ds->layout.width_px || !ds->layout.height_px ||
+       ds->layout.width_px > 16384 || ds->layout.height_px > 16384 ||
        ds->layout.depth_px != 1 || ds->layout.sample_count_sa != 1 ||
        (ds->layout.tiling != AIL_TILING_GPU &&
         ds->layout.tiling != AIL_TILING_TWIDDLED) ||
@@ -131,6 +133,8 @@ d12_g17p_depth_segment_supported(const struct d12_segment *seg)
        seg->height_px > ds->layout.height_px ||
        !ds->layout.size_B || ds->layout.layer_stride_B < AIL_PAGESIZE ||
        ds->layout.layer_stride_B % AIL_PAGESIZE ||
+       ds->layout.layer_stride_B / AIL_PAGESIZE >
+          (UINT32_MAX >> 14) + UINT64_C(1) ||
        (seg->ds_address & (AIL_PAGESIZE - 1)) ||
        seg->ds_address < ds->bo->va->addr)
       return false;
