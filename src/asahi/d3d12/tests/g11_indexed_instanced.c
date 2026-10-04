@@ -481,7 +481,8 @@ main(int argc, char **argv)
       TEST_CALL(d12_test_opaque_texture_transfer(rt[i], map[i], STRIDE, STRIDE * H, false),
                 "read actual indexed/instance pixels only after fence");
    }
-   CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1,
+   CHECK(ID3D12Fence_GetCompletedValue(fence) != UINT64_MAX &&
+         ID3D12Fence_GetCompletedValue(fence) >= 1,
          "the GPU completes an indexed draw and an instanced draw");
 
    if (!map[0] || !map[1] || !map[2]) {

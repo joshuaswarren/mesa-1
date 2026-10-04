@@ -454,7 +454,8 @@ main(int argc, char **argv)
    TEST_CALL(d12_test_submit_closed(dev, list, queue, fence, 1), "exact fenced vertex-buffer draw/copy");
    for (int i = 0; i < 2; i++)
       TEST_CALL(d12_test_map(readback[i], true, (void **)&map[i]), "read actual GPU copy only after fence");
-   CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1,
+   CHECK(ID3D12Fence_GetCompletedValue(fence) != UINT64_MAX &&
+         ID3D12Fence_GetCompletedValue(fence) >= 1,
          "the GPU completes both draws");
 
    {
