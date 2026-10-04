@@ -11341,8 +11341,30 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
           !vk_command_buffer_has_error(&cmd->vk)) {
          /* The indexed fast link also changes the vertex identity captured by
           * the immutable HAL200 tail.  Refresh it alongside the dispatch so
-          * varying linkage and tail construction stay out of the first draw. */
-         hk_g17p_prepare_native_bind_tail(cmd);
+          * varying linkage and tail construction stay out of the first draw.
+          *
+          * Index binding prelinks only the vertex stage. Fragment selection
+          * or render state may have changed since the last complete binding,
+          * leaving a valid cache entry for a different fragment transaction.
+          * In particular, a sampled colour draw followed by a depth-only draw
+          * must not pair the old linked code with the new shader's metadata.
+          * Only refresh the tail when the complete fragment key is current;
+          * the draw resolves any incomplete binding before publishing it.
+          * Do not compile a deferred fragment variant merely to test this.
+          */
+         struct hk_shader *fs = hk_bound_fs_select(cmd, false);
+         struct hk_fast_link_key_fs fs_key;
+         const bool fragment_exact =
+            hk_shader_is_compiled(fs) && gfx->fast_link_fs.valid &&
+            gfx->fast_link_fs.shader == fs &&
+            gfx->linked[MESA_SHADER_FRAGMENT] &&
+            hk_fill_fast_link_key_fs(cmd, fs, hk_bound_hw_vs(gfx),
+                                     &fs_key, false) &&
+            memcmp(&gfx->fast_link_fs.key, &fs_key, sizeof(fs_key)) == 0;
+         if (fragment_exact)
+            hk_g17p_prepare_native_bind_tail(cmd);
+         else
+            gfx->g17p_bind_tail.valid = false;
 
          if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
             struct hk_shader *vs = hk_bound_sw_vs(gfx);
