@@ -138,6 +138,8 @@ libd3d12agx_core = static_library(
   ],
   link_with : [
     libasahi_lib, libasahi_layout, libasahi_compiler, libagx2_disasm,
+        libagx3b_disasm,
+    libagx3b_disasm,
     libpoly_nir,
   ],
   c_args : [no_override_init_args, d12_core_strict_args],
@@ -163,6 +165,7 @@ libd3d12agx = shared_library(
   ],
   link_with : [
     libasahi_lib, libasahi_layout, libasahi_compiler, libagx2_disasm,
+    libagx3b_disasm,
     libpoly_nir,
   ],
   vs_module_defs : files('d3d12agx.def')[0],
