@@ -11740,6 +11740,24 @@ d12_copy_texture_region(struct d12_cmd_list *list,
       return;
    }
 
+   /* libagx_copy_image now uses the same CPU-reduced tile geometry and
+    * two-dimensional grid as Honeykrisp's raw image-copy caller. Its Morton
+    * encoder expands seven bits per axis, so refuse geometry outside that
+    * contract instead of silently truncating tiled addresses. */
+   const struct d12_copy_surface *surfaces[] = {&d, &s};
+   for (unsigned i = 0; i < ARRAY_SIZE(surfaces); ++i) {
+      const struct d12_copy_surface *surface = surfaces[i];
+      if (surface->tiled &&
+          (!surface->stride_el ||
+           !util_is_power_of_two_nonzero(surface->tile_width_el) ||
+           !util_is_power_of_two_nonzero(surface->tile_height_el) ||
+           surface->tile_width_el > 128 || surface->tile_height_el > 128)) {
+         mesa_loge("CopyTextureRegion: tiled geometry exceeds copy kernel contract");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+   }
+
    struct libagx_copy_image_args args = {
       .width_el = plan.width_el,
       .height_el = plan.height_el,
@@ -11749,12 +11767,16 @@ d12_copy_texture_region(struct d12_cmd_list *list,
       .src_y_el = plan.source_y_el,
       .dest_pitch_B = d.pitch_B,
       .src_pitch_B = s.pitch_B,
-      .dest_stride_el = d.stride_el,
-      .src_stride_el = s.stride_el,
-      .dest_tile_width_el = d.tile_width_el,
-      .dest_tile_height_el = d.tile_height_el,
-      .src_tile_width_el = s.tile_width_el,
-      .src_tile_height_el = s.tile_height_el,
+      .dest_tiles_per_row =
+         d.tiled ? ((uint64_t)d.stride_el + d.tile_width_el - 1) >>
+                      util_logbase2(d.tile_width_el) : 0,
+      .src_tiles_per_row =
+         s.tiled ? ((uint64_t)s.stride_el + s.tile_width_el - 1) >>
+                      util_logbase2(s.tile_width_el) : 0,
+      .dest_tile_width_log2 = d.tiled ? util_logbase2(d.tile_width_el) : 0,
+      .dest_tile_height_log2 = d.tiled ? util_logbase2(d.tile_height_el) : 0,
+      .src_tile_width_log2 = s.tiled ? util_logbase2(s.tile_width_el) : 0,
+      .src_tile_height_log2 = s.tiled ? util_logbase2(s.tile_height_el) : 0,
       .blocksize_B = s.blocksize_B,
       .dest_tiled = d.tiled,
       .src_tiled = s.tiled,
@@ -11770,8 +11792,7 @@ d12_copy_texture_region(struct d12_cmd_list *list,
       args.src = s.base +
                  (uint64_t)(plan.source_front_px + z) * s.slice_stride_B;
       d12_list_dispatch_precomp(list, LIBAGX_COPY_IMAGE, &args, sizeof(args),
-                                agx_1d((uint64_t)plan.width_el *
-                                       plan.height_el));
+                                agx_2d(plan.width_el, plan.height_el));
       if (list->state == D12_LIST_ERROR)
          return;
    }
