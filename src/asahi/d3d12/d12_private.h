@@ -2225,3 +2225,10 @@ void d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage);
 void d12_list_g17p_vdm_storage_reset(struct d12_cmd_list *list);
 void *d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
                             size_t alignment, uint64_t *compact_va);
+
+uint32_t d12_build_g17p_bg_eot(
+   struct d12_cmd_list *list, const struct d12_segment *seg,
+   const float legacy_color[4],
+   const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
+   const struct agx_tilebuffer_layout *tib,
+   struct agx_counts_packed *out_resources);

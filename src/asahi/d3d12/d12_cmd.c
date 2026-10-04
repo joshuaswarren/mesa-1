@@ -1841,6 +1841,199 @@ d12_list_dispatch_indirect_patches(
    return true;
 }
 
+/* Native one-layer, one-sample RGBA8/BGRA8 tile traffic. The legacy
+ * builder remains guarded until the renderer wires this producer together
+ * with native PPP/VDM lifetime and render-command qualification. */
+uint32_t
+d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
+                     const float legacy_color[4],
+                     const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
+                     const struct agx_tilebuffer_layout *tib,
+                     struct agx_counts_packed *out_resources)
+{
+   struct d12_device *device = list->device;
+   struct agx_device *dev = &device->dev;
+   struct d12_resource *rt = seg->rt[0];
+   const enum agx_bg_eot_op op = ops[0];
+   if (dev->chip != AGX_CHIP_G17P || !out_resources || !rt || !rt->bo || seg->ds ||
+       rt->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+       rt->layout.sample_count_sa != 1 ||
+       seg->layers != 1 || tib->nr_samples != 1 || seg->rt_level[0] != 0 ||
+       rt->layout.tiling != AIL_TILING_LINEAR || rt->layout.levels != 1 ||
+       (seg->rt_view_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
+        seg->rt_view_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM) ||
+       (op != AGX_BG_CLEAR && op != AGX_BG_LOAD && op != AGX_EOT_STORE &&
+        op != AGX_BG_EOT_NONE))
+      goto fail;
+   for (unsigned i = 1; i < AGX_MAX_RENDER_TARGETS; i++)
+      if (seg->rt[i] || ops[i] != AGX_BG_EOT_NONE)
+         goto fail;
+   const uint64_t stride = ail_get_linear_stride_B(&rt->layout, 0);
+   if (stride < 16 || stride > UINT32_MAX || !seg->rt_address[0])
+      goto fail;
+   struct agx_bg_eot_key key = {.tib = *tib};
+   key.op[0] = op;
+   if (op == AGX_BG_CLEAR)
+      key.reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+   struct agx_bg_eot_shader *shader = agx_get_bg_eot_shader(&device->bg_eot, &key);
+   if (!shader || !shader->bo || !shader->info.main_size ||
+       !shader->info.nr_gprs || shader->info.has_preamble ||
+       shader->info.rodata.size_16 || shader->info.scratch_size ||
+       !shader->info.agx3_staging_known ||
+       shader->ptr > UINT64_MAX - shader->info.main_offset)
+      goto fail;
+   const uint64_t shader_va = shader->ptr + shader->info.main_offset;
+   if (!agx_va_in_usc_window(dev, shader_va))
+      goto fail;
+   uint32_t relative = 0;
+   uint8_t *cpu = d12_list_alloc_usc(list, AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE,
+                                   &relative);
+   if (!cpu)
+      goto fail;
+   const uint64_t program_va = dev->shader_base + relative;
+   uint64_t resource_spec = 0;
+   uint8_t program[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   size_t length = 0;
+   const struct agx_ioto_g17p_imageblock imageblock = {
+      .sample_size_B = tib->sample_size_B, .nr_samples = tib->nr_samples,
+      .tile_size_px = tib->tile_size,
+   };
+   if (op == AGX_EOT_STORE) {
+      const enum pipe_format pf = seg->rt_view_format[0];
+      const struct util_format_description *fmt = util_format_description(pf);
+      struct AGX_PBE semantic = {AGX_PBE_header};
+      semantic.dimension = AGX_TEXTURE_DIMENSION_2D;
+      semantic.layout = AGX_LAYOUT_LINEAR;
+      semantic.channels = ail_pixel_format[pf].channels;
+      semantic.type = ail_pixel_format[pf].type;
+      semantic.buffer = seg->rt_address[0];
+      semantic.width = rt->layout.width_px;
+      semantic.height = rt->layout.height_px;
+      semantic.levels = semantic.layers = 1;
+      semantic.stride = stride - 4;
+      semantic.swizzle_r = semantic.swizzle_g = semantic.swizzle_b = semantic.swizzle_a = 0;
+      for (unsigned c = 0; c < 4; c++) {
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_X) semantic.swizzle_r = c;
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_Y) semantic.swizzle_g = c;
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_Z) semantic.swizzle_b = c;
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_W) semantic.swizzle_a = c;
+      }
+      uint8_t pbe[32];
+      if (!d12_pack_pbe_generation(agx_chip_descriptor_generation(dev->chip),
+                                  pbe, &semantic))
+         goto fail;
+      const uint64_t argument = d12_list_upload(list, pbe, sizeof(pbe), 32);
+      if (!argument)
+         goto fail;
+      const struct agx3_g17p_rt0_eot_program_desc desc = {
+         .program_va = program_va, .shader_va = shader_va,
+         .pbe_argument_va = argument, .attachment_count = 1,
+         .imageblock_offset_B = agx_tilebuffer_offset_B(tib, 0),
+         .shader_binary_size = shader->info.binary_size,
+         .nr_gprs = shader->info.nr_gprs,
+         .staging_halfs = shader->info.agx3_staging_halfs,
+         .imageblock = imageblock,
+      };
+      struct agx3_g17p_rt0_eot_program generated;
+      if (!agx3_g17p_rt0_eot_program_generate(dev->chip, &desc, &generated))
+         goto fail;
+      memcpy(program, generated.bytes, generated.length);
+      length = generated.length;
+      resource_spec = AGX_IOTO_G17P_EOT_RESOURCE_SPEC;
+   } else if (op == AGX_BG_EOT_NONE) {
+      if (shader->info.push_count || shader->info.uses_txf)
+         goto fail;
+      const struct agx3_g17p_graphics_program_desc desc = {
+         .program_va = program_va, .shader_va = shader_va,
+         .shader_binary_size = shader->info.binary_size,
+         .nr_gprs = shader->info.nr_gprs, .compiler_d_valid = true,
+         .compiler_d = (uint32_t)shader->info.agx3_staging_halfs * 2,
+         .fragment = true, .imageblock = imageblock,
+      };
+      struct agx3_g17p_graphics_program generated;
+      if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &generated) ||
+          !agx3_g17p_rt0_bg_resource_spec(dev->chip, AGX3_G17P_RT0_BG_NONE,
+                                         &resource_spec))
+         goto fail;
+      memcpy(program, generated.bytes, generated.length);
+      length = generated.length;
+   } else {
+      struct agx3_g17p_rt0_bg_program_desc desc = {
+         .program_va = program_va, .shader_va = shader_va,
+         .shader_binary_size = shader->info.binary_size,
+         .nr_gprs = shader->info.nr_gprs,
+         .staging_halfs = shader->info.agx3_staging_halfs,
+         .clear_push_halfs = shader->info.push_count, .staging_known = true,
+         .op = op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR : AGX3_G17P_RT0_BG_RELOAD,
+         .imageblock = imageblock,
+      };
+      if (!agx3_g17p_rt0_bg_shader_resources_match(desc.op,
+             shader->info.push_count, shader->info.uses_txf))
+         goto fail;
+      if (op == AGX_BG_CLEAR) {
+         const float *color = seg->render_pass ? seg->rt_clear[0] : legacy_color;
+         if (!color)
+            goto fail;
+         desc.clear_value_va = d12_list_upload(list, color, 16, 16);
+         if (!desc.clear_value_va)
+            goto fail;
+      } else {
+         const enum pipe_format pf = seg->rt_view_format[0];
+         const struct util_format_description *fmt = util_format_description(pf);
+         struct AGX_TEXTURE texture = {AGX_TEXTURE_header};
+         texture.dimension = AGX_TEXTURE_DIMENSION_2D;
+         texture.layout = AGX_LAYOUT_LINEAR;
+         texture.channels = ail_pixel_format[pf].channels;
+         texture.type = ail_pixel_format[pf].type;
+         texture.swizzle_r = agx_channel_from_pipe(fmt->swizzle[0]);
+         texture.swizzle_g = agx_channel_from_pipe(fmt->swizzle[1]);
+         texture.swizzle_b = agx_channel_from_pipe(fmt->swizzle[2]);
+         texture.swizzle_a = agx_channel_from_pipe(fmt->swizzle[3]);
+         texture.address = d12_sparse_read_address(device, seg->rt_address[0]);
+         texture.width = rt->layout.width_px;
+         texture.height = rt->layout.height_px;
+         texture.stride = stride - 16;
+         uint8_t packed[32];
+         if (!device->rodata_bo || !device->rodata_bo->va ||
+             !d12_pack_texture_generation(agx_chip_descriptor_generation(dev->chip),
+                                          packed, &texture, 1))
+            goto fail;
+         const uint64_t table_va = d12_list_upload(list, packed, sizeof(packed), 32);
+         if (!table_va)
+            goto fail;
+         const uint64_t pointers[2] = {table_va, device->rodata_bo->va->addr};
+         const uint64_t pointers_va = d12_list_upload(list, pointers, sizeof(pointers), 8);
+         if (!pointers_va)
+            goto fail;
+         desc.texture_pointer_va = pointers_va;
+         desc.sampler_pointer_va = pointers_va + 8;
+      }
+      struct agx3_g17p_rt0_bg_program generated;
+      if (!agx3_g17p_rt0_bg_program_generate(dev->chip, &desc, &generated) ||
+          !agx3_g17p_rt0_bg_resource_spec(dev->chip, desc.op, &resource_spec))
+         goto fail;
+      memcpy(program, generated.bytes, generated.length);
+      length = generated.length;
+   }
+   if (!length || length > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE)
+      goto fail;
+   memcpy(cpu, program, length);
+   const size_t offset = program_va - list->usc_bo->va->addr;
+   list->usc_offset = offset + length;
+   if (agx_bo_sync_for_device(list->usc_bo, offset, length) ||
+       agx_bo_sync_for_device(list->stream_bo, list->data_floor,
+                              list->stream_bo->size - list->data_floor))
+      goto fail;
+   _Static_assert(sizeof(*out_resources) == sizeof(resource_spec), "native resource width");
+   memcpy(out_resources, &resource_spec, sizeof(resource_spec));
+   d12_list_track_read_bo(list, shader->bo);
+   return relative;
+fail:
+   mesa_loge("native single-target background/EOT producer rejected metadata/resources");
+   list->state = D12_LIST_ERROR;
+   return 0;
+}
+
 /*
  * Build the USC words for a background (clear) or end-of-tile (store)
  * program targeting the render segment's selected subresources. Mirrors

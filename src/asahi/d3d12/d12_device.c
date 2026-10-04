@@ -4926,9 +4926,13 @@ d12_device_backend_init(struct d12_device *device,
       goto fail_bg;
 
    /* Sampler 0, tessellation descriptor, then the zero-backed NULL region. */
+   const unsigned sampler_size =
+      agx_chip_sampler_heap_element_size(device->dev.chip);
+   if (!sampler_size)
+      goto fail_oclqry;
    device->rodata_bo =
       agx_bo_create(&device->dev,
-                    ALIGN_POT(AGX_SAMPLER_LENGTH, 16) +
+                    ALIGN_POT(sampler_size, 16) +
                        sizeof(struct poly_heap) + D12_NULL_REGION_SIZE,
                     0, 0, "d3d12 rodata");
    if (!device->rodata_bo)
@@ -4941,11 +4945,27 @@ d12_device_backend_init(struct d12_device *device,
    if (!rodata)
       goto fail_rodata;
 
-   agx_pack_txf_sampler((struct agx_sampler_packed *)rodata);
-   agx_pack(&device->dev.txf_sampler, USC_SAMPLER, cfg) {
-      cfg.start = 0;
-      cfg.count = 1;
-      cfg.buffer = device->rodata_bo->va->addr;
+   memset(rodata, 0, sampler_size);
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      if (sampler_size != 32 || agx_chip_sampler_generation(device->dev.chip) !=
+                               AGX_SAMPLER_GENERATION_GEN4_HAL200)
+         goto fail_rodata;
+      agx_pack(rodata, SAMPLER_HAL200, cfg) {
+         cfg.minimum_lod = 0.0f;
+         cfg.maximum_lod = INFINITY;
+         cfg.maximum_anisotropy = 1;
+         cfg.mip_filter = AGX_MIP_FILTER_NEAREST;
+         cfg.wrap_s = cfg.wrap_t = cfg.wrap_r = AGX_WRAP_CLAMP_TO_BORDER;
+         cfg.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+      }
+      memset(&device->dev.txf_sampler, 0, sizeof(device->dev.txf_sampler));
+   } else {
+      agx_pack_txf_sampler((struct agx_sampler_packed *)rodata);
+      agx_pack(&device->dev.txf_sampler, USC_SAMPLER, cfg) {
+         cfg.start = 0;
+         cfg.count = 1;
+         cfg.buffer = device->rodata_bo->va->addr;
+      }
    }
 
    /* Match Honeykrisp's 128 MiB geometry/tessellation heap. */
@@ -4954,7 +4974,7 @@ d12_device_backend_init(struct d12_device *device,
    if (!device->heap_bo)
       goto fail_rodata;
 
-   const size_t heap_off = ALIGN_POT(AGX_SAMPLER_LENGTH, 16);
+   const size_t heap_off = ALIGN_POT(sampler_size, 16);
    const size_t null_off = heap_off + sizeof(struct poly_heap);
    device->heap_desc_va = device->rodata_bo->va->addr + heap_off;
    device->null_va = device->rodata_bo->va->addr + null_off;
