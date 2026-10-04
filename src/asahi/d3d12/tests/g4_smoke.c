@@ -160,22 +160,48 @@ main(int argc, char **argv)
       list, 0, ID3D12Resource_GetGPUVirtualAddress(buf));
    ID3D12GraphicsCommandList_Dispatch(list, NUM_GROUPS, 1, 1);
 
+   ID3D12CommandQueue *queue = NULL;
+   ID3D12Fence *fence = NULL;
+   const char *blocked_stage = NULL;
+   HRESULT blocked_hr = S_OK;
+
    hr = ID3D12GraphicsCommandList_Close(list);
    CHECK(hr == S_OK, "Close command list");
+   if (FAILED(hr)) {
+      blocked_stage = "Close";
+      blocked_hr = hr;
+      goto cleanup;
+   }
 
-   ID3D12CommandQueue *queue = NULL;
    D3D12_COMMAND_QUEUE_DESC qdesc = {.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE};
-   ID3D12Device_CreateCommandQueue(dev, &qdesc, &IID_ID3D12CommandQueue,
-                                   (void **)&queue);
-   ID3D12Fence *fence = NULL;
-   ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
-                            (void **)&fence);
+   hr = ID3D12Device_CreateCommandQueue(dev, &qdesc, &IID_ID3D12CommandQueue,
+                                        (void **)&queue);
+   CHECK(hr == S_OK && queue, "CreateCommandQueue");
+   if (FAILED(hr) || !queue) {
+      blocked_stage = "CreateCommandQueue";
+      blocked_hr = FAILED(hr) ? hr : E_FAIL;
+      goto cleanup;
+   }
+   hr = ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
+                                 (void **)&fence);
+   CHECK(hr == S_OK && fence, "CreateFence");
+   if (FAILED(hr) || !fence) {
+      blocked_stage = "CreateFence";
+      blocked_hr = FAILED(hr) ? hr : E_FAIL;
+      goto cleanup;
+   }
 
    CHECK(map[0] == 0xDEADBEEF, "buffer still poisoned before execution");
 
    ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
    ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-   ID3D12CommandQueue_Signal(queue, fence, 1);
+   hr = ID3D12CommandQueue_Signal(queue, fence, 1);
+   CHECK(hr == S_OK, "Signal after execution");
+   if (FAILED(hr)) {
+      blocked_stage = "Signal";
+      blocked_hr = hr;
+      goto cleanup;
+   }
 
    const ULONGLONG wait_start_ms = GetTickCount64();
    hr = ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
@@ -213,9 +239,15 @@ main(int argc, char **argv)
              map[1], map[64], map[255]);
    }
 
+cleanup:
+   if (blocked_stage)
+      printf("G4 SMOKE BLOCKED: stage=%s HRESULT=0x%08x (not a hardware pass)\n",
+             blocked_stage, (unsigned)blocked_hr);
    ID3D12Resource_Unmap(buf, 0, NULL);
-   ID3D12Fence_Release(fence);
-   ID3D12CommandQueue_Release(queue);
+   if (fence)
+      ID3D12Fence_Release(fence);
+   if (queue)
+      ID3D12CommandQueue_Release(queue);
    ID3D12GraphicsCommandList_Release(list);
    ID3D12CommandAllocator_Release(alloc);
    ID3D12Resource_Release(buf);
