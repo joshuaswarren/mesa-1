@@ -69,7 +69,9 @@ int main(int argc, char **argv)
    REQUIRE(dev,"device object");
    D3D12_FEATURE_DATA_ARCHITECTURE1 arch={.NodeIndex=0};
    CALL(ID3D12Device_CheckFeatureSupport(dev,D3D12_FEATURE_ARCHITECTURE1,&arch,sizeof(arch)),"UMA architecture");
-   REQUIRE(arch.UMA && arch.CacheCoherentUMA,"cache coherent UMA required");
+   REQUIRE(arch.UMA,"UMA required");
+   printf("ARCH UMA=%u CacheCoherentUMA=%u (driver performs explicit CPU cache maintenance)\n",
+          (unsigned)arch.UMA,(unsigned)arch.CacheCoherentUMA);
    D3D12_HEAP_PROPERTIES hp={.Type=D3D12_HEAP_TYPE_CUSTOM,
       .CPUPageProperty=D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,.MemoryPoolPreference=D3D12_MEMORY_POOL_L0,
       .CreationNodeMask=1,.VisibleNodeMask=1};

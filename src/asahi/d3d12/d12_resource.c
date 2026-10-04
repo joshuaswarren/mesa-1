@@ -10,6 +10,7 @@
 #include "d12_core_caps.h"
 #include "d12_sparse_residency_core.h"
 #include "util/os_misc.h"
+#include "util/cache_ops.h"
 
 static_assert(AIL_PAGESIZE == D12_AGX_SPARSE_PAGE_SIZE_B,
               "portable sparse page size must match AIL");
@@ -550,6 +551,7 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
         res->desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN || res->reserved ||
         res->layout.levels != 1 || res->desc.DepthOrArraySize != 1 ||
         res->layout.sample_count_sa != 1 || res->layout.compressed ||
+        !util_has_cache_ops() ||
         (format != PIPE_FORMAT_R8G8B8A8_UNORM && format != PIPE_FORMAT_B8G8R8A8_UNORM) ||
         res->offset_B > res->bo->size ||
         res->layout.size_B > res->bo->size - res->offset_B))
@@ -613,6 +615,9 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
        * resource's actual tiled layout; only caller-provided bytes are stored. */
       ail_tile(surface.map, (void *)src, &res->layout, 0, src_row_pitch,
                surface.x_el, surface.y_el, surface.width_el, surface.height_el);
+      /* Non-coherent UMA is intentionally advertised. Publish dirty CPU
+       * cache lines before the resource can return to GPU ownership. */
+      util_flush_range(surface.map, res->layout.size_B);
       if (agx_bo_sync_for_device(res->bo, res->offset_B, res->layout.size_B))
          return E_FAIL;
       return S_OK;
@@ -654,6 +659,9 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
    if (surface.tiled) {
       /* Copy the real EOT-written resource bytes after the caller's fence and
        * COMMON transition; this does not invoke a shader or synthesize pixels. */
+      /* The caller synchronized GPU completion before this CPU access.
+       * Drop clean/stale CPU lines before reading actual EOT writes. */
+      util_flush_inval_range(surface.map, res->layout.size_B);
       ail_detile(surface.map, dst, &res->layout, 0, dst_row_pitch,
                  surface.x_el, surface.y_el, surface.width_el, surface.height_el);
       return S_OK;
