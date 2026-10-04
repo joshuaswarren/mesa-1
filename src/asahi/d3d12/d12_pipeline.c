@@ -1411,7 +1411,7 @@ fail:
 }
 
 static void
-d12_disassemble_compute(bool native, uint8_t *code, size_t size, FILE *fp)
+d12_disassemble_shader(bool native, uint8_t *code, size_t size, FILE *fp)
 {
    if (native)
       agx3b_disassemble(code, size, fp);
@@ -1596,7 +1596,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
               part.info.nr_preamble_gprs, part.info.rodata.size_16);
       if (part.info.has_preamble) {
          fprintf(stderr, "; driver preamble\n");
-         d12_disassemble_compute(
+         d12_disassemble_shader(
             native_compute,
             (uint8_t *)part.binary + part.info.preamble_offset,
                           part.info.main_offset > part.info.preamble_offset
@@ -1605,7 +1605,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
                           stderr);
       }
       fprintf(stderr, "; driver main\n");
-      d12_disassemble_compute(
+      d12_disassemble_shader(
          native_compute, (uint8_t *)part.binary + part.info.main_offset,
          part.info.binary_size - part.info.main_offset, stderr);
    }
@@ -1675,14 +1675,14 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    if (getenv("D3D12AGX_DUMP_SHADERS")) {
       if (part.info.has_preamble) {
          fprintf(stderr, "; preamble +0x%x\n", part.info.preamble_offset);
-         d12_disassemble_compute(
+         d12_disassemble_shader(
             native_compute,
             (uint8_t *)part.binary + part.info.preamble_offset,
                           part.info.main_offset - part.info.preamble_offset,
                           stderr);
       }
       fprintf(stderr, "; main +0x%x\n", part.info.main_offset);
-      d12_disassemble_compute(
+      d12_disassemble_shader(
          native_compute, (uint8_t *)part.binary + part.info.main_offset,
          part.info.binary_size - part.info.main_offset, stderr);
    }
@@ -2670,13 +2670,13 @@ compile_gfx_stage(struct d12_device *device,
               out->info.has_preamble);
       if (out->info.has_preamble) {
          fprintf(stderr, "; preamble +0x%x\n", out->info.preamble_offset);
-         agx2_disassemble((uint8_t *)out->binary +
+         d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)out->binary +
                              out->info.preamble_offset,
                           out->info.main_offset - out->info.preamble_offset,
                           stderr);
       }
       fprintf(stderr, "; main +0x%x\n", out->info.main_offset);
-      agx2_disassemble((uint8_t *)out->binary + out->info.main_offset,
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)out->binary + out->info.main_offset,
                        out->info.binary_size - out->info.main_offset, stderr);
    }
 
@@ -2737,7 +2737,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
               nir->info.name ? nir->info.name : "program",
               uvs ? " (raster)" : "", out->info.push_count);
       fprintf(stderr, "; main +0x%x\n", out->info.main_offset);
-      agx2_disassemble((uint8_t *)out->binary + out->info.main_offset,
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)out->binary + out->info.main_offset,
                        out->info.binary_size - out->info.main_offset,
                        stderr);
    }
@@ -5008,12 +5008,12 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    if (getenv("D3D12AGX_DUMP_SHADERS")) {
       fprintf(stderr, "; VS main +0x%x\n", vs_part.info.main_offset);
-      agx2_disassemble((uint8_t *)vs_part.binary +
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)vs_part.binary +
                           vs_part.info.main_offset,
                        vs_part.info.binary_size - vs_part.info.main_offset,
                        stderr);
       fprintf(stderr, "; FS main +0x%x\n", fs_part.info.main_offset);
-      agx2_disassemble((uint8_t *)fs_part.binary +
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)fs_part.binary +
                           fs_part.info.main_offset,
                        fs_part.info.binary_size - fs_part.info.main_offset,
                        stderr);
