@@ -36,8 +36,10 @@
  *
  * At submission the cuts become exact prefix indices, cross-command-buffer
  * dependencies are resolved against the other command buffers in the same
- * submission, and anything that reaches back before the submission becomes
- * the kernel's "all earlier submits" value.
+ * submission. With EXACT_PRIOR_BARRIERS, dependencies reaching before this
+ * submission name exact queue-local hardware ordinals; destination requirements
+ * persist across submissions. Older kernels retain the "all earlier submits"
+ * representation and existing per-submit requirement lifetime.
  */
 #pragma once
 
@@ -161,6 +163,9 @@ struct hk_sync_stream {
    /* Resolved barrier fields for the ioctl being built. */
    uint16_t barrier[HK_SYNC_NUM_SQ];
 
+   /* Exact historical source prefixes, resolved afresh at each submission. */
+   uint64_t prior[HK_SYNC_NUM_SQ];
+
    uint8_t kind;
 
    struct hk_sync_dep dep[HK_SYNC_NUM_SQ];
@@ -221,6 +226,10 @@ struct hk_sync_state {
  * dependency on earlier submits of a kind that never ran is no dependency. */
 struct hk_sync_queue {
    uint8_t ever[HK_SYNC_NUM_SQ];
+   bool exact_prior;
+   uint64_t submitted[HK_SYNC_NUM_SQ];
+   uint64_t last_absolute[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
+   uint64_t tail[HK_SYNC_NUM_KINDS][HK_SYNC_NUM_SQ];
 
    /* Tile hazards across submissions: a ring of the footprints recently
     * submitted on this queue. An entry is live until the queue timeline
@@ -325,7 +334,7 @@ void hk_sync_resolve_end(struct hk_cmd_buffer *cmd);
  * follow the first hardware command (the kernel attaches the ioctl's input
  * syncs only to it).
  */
-void hk_sync_resolve_submit(struct hk_queue *queue,
+bool hk_sync_resolve_submit(struct hk_queue *queue,
                             struct hk_cmd_buffer *const *cmdbufs,
                             unsigned count, bool first_cdm_is_flush,
                             bool chain_first, uint64_t completed);

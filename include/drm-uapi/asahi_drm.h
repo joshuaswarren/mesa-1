@@ -267,6 +267,8 @@ enum drm_asahi_feature {
 	 * replaces the VM_STATUS query. Registration may still be refused.
 	 */
 	DRM_ASAHI_FEATURE_VM_STATUS_MIRROR = (1UL) << 4,
+	/** Exact queue-local prior hardware command prefixes in extended payloads. */
+	DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS = (1UL) << 5,
 };
 
 #define DRM_ASAHI_PARAM_GROUP_VM_STATUS 1
@@ -1244,6 +1246,19 @@ struct drm_asahi_cmd_render {
 	__u32 bg_partial_rsrc_spec_hi;
 };
 
+/* Feature-gated extensions preserve the legacy packet sizes used by other
+ * clients. Ordinals are 1-based per logical queue and hardware command type,
+ * counting every submitted hardware command including maintenance commands.
+ * Zero means absent. Nonzero values must not exceed that engine's sequence
+ * at the beginning of this ioctl; they merge with the header's relative
+ * barrier prefix. NONE in the header does not disable these dependencies.
+ */
+struct drm_asahi_cmd_render_with_prior {
+	struct drm_asahi_cmd_render legacy;
+	__u64 prior_vdm;
+	__u64 prior_cdm;
+};
+
 /**
  * struct drm_asahi_cmd_compute - Command to submit compute
  *
@@ -1284,6 +1299,16 @@ struct drm_asahi_cmd_compute {
 
 	/** @ts: Timestamps for the compute command */
 	struct drm_asahi_timestamps ts;
+};
+
+struct drm_asahi_cmd_compute_with_prior {
+	struct drm_asahi_cmd_compute legacy;
+	/* Canonical kernel compute payload already has scs_layout at byte64.
+	 * Mesa's legacy compute packet ends before it. Keep this zero until the
+	 * shader-context scratch contract is implemented here. */
+	__u64 scs_layout;
+	__u64 prior_vdm;
+	__u64 prior_cdm;
 };
 
 /**
