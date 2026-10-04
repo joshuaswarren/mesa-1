@@ -1854,6 +1854,16 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
 {
    struct d12_device *device = list->device;
 
+   /* This builder emits AGX2 USC resource/state words. A clear-only list
+    * never reaches the vertex-state guard, so reject here until native
+    * BG/EOT Ioto programs and render resource specifications are supplied. */
+   if (agx_chip_command_stream_generation(device->dev.chip) !=
+       AGX_CS_GENERATION_AGX2) {
+      mesa_loge("native graphics background/EOT producer unavailable");
+      list->state = D12_LIST_ERROR;
+      return 0;
+   }
+
    uint32_t usc;
    size_t usc_size = agx_usc_size(3 + 8);
    uint8_t *cpu = d12_list_alloc_usc(list, usc_size, &usc);
