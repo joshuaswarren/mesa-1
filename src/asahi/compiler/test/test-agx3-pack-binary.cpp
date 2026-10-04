@@ -2947,6 +2947,9 @@ TEST_F(AGX3PackBinary, GtkConvertCicpAbsoluteMinifloatFsel)
 TEST_F(AGX3PackBinary, GtkConvertCicpAbsoluteMinifloatRefusesModifiers)
 {
    for (unsigned mode = 0; mode < 8; ++mode) {
+      /* Comparator negation is covered by NegatedMinifloat ordered-byte tests. */
+      if (mode == 4)
+         continue;
       agx_builder *b = builder(mode == 0 ? AGX_ISA_ENCODING_AGX3C
                                          : AGX_ISA_ENCODING_AGX3B);
       agx_index dest = agx_register(0, mode == 1 ? AGX_SIZE_16
@@ -3164,7 +3167,8 @@ TEST_F(AGX3PackBinary, FmulMinifloatRefusesUngroundedModes)
        * destination width independently of f26, and Apple emits the
        * mixed-width multiply directly. See the focused tests above and
        * FmulMinifloatNarrowsIntoHalfDestination below. */
-      if (variant == 1 || variant == 5 || variant == 8)
+      /* Negated f32 is covered by NegatedMinifloat signed-immediate tests. */
+      if (variant == 1 || variant == 4 || variant == 5 || variant == 8)
          continue;
       agx_builder *b = builder(variant == 0 ? AGX_ISA_ENCODING_AGX3C
                                            : AGX_ISA_ENCODING_AGX3B);

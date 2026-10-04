@@ -12113,6 +12113,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const agx_index compare = I->src[zero_first ? 1 : 0];
             if (zero.type == AGX_INDEX_IMMEDIATE && zero.value == 0 &&
                 compare.type == AGX_INDEX_REGISTER && !compare.memory &&
+                /* A negated f32 compare uses the signed-immediate form below. */
+                !(compare.neg && compare.size == AGX_SIZE_32 &&
+                  agx3_fcond_witnessed_select(I->fcond)) &&
                 agx_channels(compare) == 1 &&
                 (compare.size == AGX_SIZE_16 || compare.size == AGX_SIZE_32)) {
                unsigned condition = I->fcond;
@@ -12248,7 +12251,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                I->src[0].type == AGX_INDEX_IMMEDIATE))) {
             const bool immediate_first =
                I->src[0].type == AGX_INDEX_IMMEDIATE;
-            const agx_index immediate = I->src[immediate_first ? 0 : 1];
+            agx_index immediate = I->src[immediate_first ? 0 : 1];
             const agx_index compare = I->src[immediate_first ? 1 : 0];
             const unsigned true_src = I->invert_cond ? 3 : 2;
             const unsigned false_src = I->invert_cond ? 2 : 3;
@@ -12257,13 +12260,22 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                            agx_channels(compare) != 1;
             for (unsigned i = 0; i < 4; ++i)
                invalid |= (I->src[i].abs && i != (immediate_first ? 1 : 0)) ||
-                          I->src[i].neg || I->src[i].kill || I->src[i].memory ||
+                          (I->src[i].neg && i != (immediate_first ? 1 : 0)) ||
+                          I->src[i].kill || I->src[i].memory ||
                           (I->src[i].cache && I->src[i].discard);
             if (invalid)
                AGX3_REFUSE(I);
 
-            const unsigned condition =
+            unsigned condition =
                immediate_first ? agx3_fcond_reverse(I->fcond) : I->fcond;
+            /* -r cmp k is r reverse(cmp) -k for every ordered relation,
+             * including signed zeros and unordered NaN inputs. Preserve ABS
+             * and the chosen values; only the comparison is reversed. */
+            if (compare.neg) {
+               immediate.value ^= 0x80;
+               condition = agx3_fcond_reverse(condition);
+            }
+
             const enum agx3_alu_hint hints[4] = {
                agx3_post_ra_hint(compare), AGX3_ALU_HINT_NONE,
                agx3_post_ra_hint(I->src[true_src]),
@@ -14327,11 +14339,20 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
               I->src[1].type == AGX_INDEX_IMMEDIATE)) {
             const bool immediate_first =
                I->src[0].type == AGX_INDEX_IMMEDIATE;
-            const agx_index imm = I->src[immediate_first ? 0 : 1];
-            const agx_index reg = I->src[immediate_first ? 1 : 0];
+            agx_index imm = I->src[immediate_first ? 0 : 1];
+            agx_index reg = I->src[immediate_first ? 1 : 0];
             uint8_t bytes[AGX3_ALU_MAX_LENGTH];
             uint8_t len = 0;
             const bool multiply = I->op == AGX_OPCODE_FMUL;
+            /* Use the already-supported signed minifloat encoding for -r * k.
+             * This changes neither the multiplication nor its rounding, and
+             * leaves ABS, widths, cache/discard hints and waits intact. */
+            if (enc == AGX_ISA_ENCODING_AGX3B && multiply && reg.neg &&
+                imm.value <= UINT8_MAX && !imm.memory && !imm.abs && !imm.neg) {
+               imm.value ^= 0x80;
+               reg.neg = false;
+            }
+
             if (!multiply && !I->saturate && reg.abs && !reg.neg && !reg.kill &&
                 imm.value == 0x80 && !imm.memory && !imm.abs && !imm.neg &&
                 agx3_src_is_register(reg) && !reg.memory &&
