@@ -3075,10 +3075,38 @@ bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,
     * absolute value -- the shape is fcmpsel [d16 s0=32:reg.abs s1=32:reg
     * s2=16:reg s3=16:imm0], which is what a half-precision `(abs(a) < b) ?
     * c : 0.0` compiles to. */
-   if (abs_compare &&
-       (compare_zero ||
-        (condition > 2 && compare_abs[0] == compare_abs[1])))
+   if (abs_compare && compare_zero)
       return false;
+
+   /* Ordered GE/LE with two absolute comparators needs the general fsel
+    * endpoint selector. Preserve the already-normalized operands and the
+    * native wait directly; no extra instructions or temporary registers. */
+   if (compare_abs[0] && compare_abs[1] && condition > 2) {
+      const struct agx3_fsel_desc d = {
+         .dest = dest,
+         .dest_16 = dest_16,
+         .dest_cache = dest_cache,
+         .cmp0 = src[0],
+         .cmp0_hint = hints[0],
+         .cmp0_abs = compare_abs[0],
+         .cmp1 = src[1],
+         .cmp1_hint = hints[1],
+         .cmp1_abs = compare_abs[1],
+         .cmp1_neg = negate_second,
+         .sel0_kind = immediate[0] ? AGX3_FSEL_SEL_IMMEDIATE
+                                  : AGX3_FSEL_SEL_REGISTER,
+         .sel1_kind = immediate[1] ? AGX3_FSEL_SEL_IMMEDIATE
+                                  : AGX3_FSEL_SEL_REGISTER,
+         .sel0 = src[2],
+         .sel1 = src[3],
+         .sel0_hint = hints[2],
+         .sel1_hint = hints[3],
+         .sel_16 = dest_16,
+         .condition = condition,
+         .wait_mask = wait_mask,
+      };
+      return agx3_alu_fcmp_select(enc, &d, out, len);
+   }
 
    /* f65 negates the SECOND compare source. Apple's applegpu_g17p output for
     * `select(x, y, a < -b)` differs from `select(x, y, a < b)` in exactly that

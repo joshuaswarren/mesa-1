@@ -702,6 +702,7 @@ if with_tests
          'test/test-preamble-half-exports.cpp',
          'test/test-signed-zero-fma.cpp',
          'test/test-negated-minifloat.cpp',
+         'test/test-dual-absolute-select.cpp',
          'test/test-inline-mrt.cpp',
          'test/test-mrt-terminal-tail.cpp',
          'test/test-agx3-pack-binary.cpp',

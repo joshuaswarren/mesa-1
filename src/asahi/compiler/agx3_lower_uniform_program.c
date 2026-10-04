@@ -119,7 +119,9 @@ fail:
 /* Native scalar-half witnesses export an aligned dword, with an unused upper
  * uniform half. Give RA that real dword operand rather than widening an
  * arbitrary post-RA half-register (which may be odd or have a live neighbour).
- * Existing half-pair coalescing runs first; this handles only proven padding.
+ * Existing half-pair coalescing runs first. Handle proven scalar padding on
+ * either side of a live half and complete half vectors with exact word
+ * coverage, without changing any live half's uniform address.
  */
 bool
 agx3_lower_uniform_half_exports(agx_context *ctx)
@@ -181,24 +183,53 @@ agx3_lower_uniform_half_exports(agx_context *ctx)
 
    bool progress = false;
    agx_foreach_instr_global_safe(ctx, I) {
-      if (I->op != AGX_OPCODE_UNIFORM_STORE || I->nr_srcs != 2 || I->mask != 1)
+      if (I->op != AGX_OPCODE_UNIFORM_STORE || I->nr_srcs != 2)
          continue;
       const agx_index value = I->src[0];
       const unsigned base = I->src[1].value;
+
+      /* An aligned vector of two or four halves already covers whole words.
+       * Repack its SSA operand before RA, preserving every written half and
+       * the store position. This uses the existing 32-bit COPY encoding and
+       * needs no padding or neighbor overwrite. */
+      const unsigned halves = agx_channels(value);
+      if (value.type == AGX_INDEX_NORMAL && value.size == AGX_SIZE_16 &&
+          !value.memory && !value.abs && !value.neg && !(base & 1) &&
+          (halves == 2 || halves == 4) &&
+          I->mask == BITFIELD_MASK(halves) && base <= 512 - halves) {
+         agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+         agx_instr *split = agx_split(&b, halves, value);
+         agx_index words = agx_vec_temp(ctx, AGX_SIZE_32, halves / 2);
+         agx_instr *collect = agx_collect_to(&b, words, halves);
+         for (unsigned h = 0; h < halves; ++h) {
+            split->dest[h] = agx_temp(ctx, AGX_SIZE_16);
+            collect->src[h] = split->dest[h];
+         }
+         I->src[0] = words;
+         I->mask = BITFIELD_MASK(halves / 2);
+         progress = true;
+         continue;
+      }
+
+      if (I->mask != 1)
+         continue;
       if (value.type != AGX_INDEX_NORMAL || value.size != AGX_SIZE_16 ||
           agx_channels(value) != 1 || value.memory || value.abs || value.neg ||
-          (base & 1) || base > 510 || occupied[base + 1])
+          base >= 512 || occupied[base ^ 1])
          continue;
 
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
-      /* Native scalar-half programs clear the upper half before COPY. */
+      /* COPY writes an aligned word. Keep the live half in its original
+       * lane and clear only the unoccupied neighbour. A late DCE can leave
+       * just the odd half of an allocated pair live. */
       agx_index word = agx_temp(ctx, AGX_SIZE_32);
       agx_instr *collect = agx_collect_to(&b, word, 2);
-      collect->src[0] = value;
-      collect->src[1] = agx_immediate(0);
+      collect->src[base & 1] = value;
+      collect->src[(base & 1) ^ 1] = agx_immediate(0);
       I->src[0] = word;
+      I->src[1] = agx_immediate(base & ~1u);
       if (ctx->out)
-         ctx->out->push_count = MAX2(ctx->out->push_count, base + 2);
+         ctx->out->push_count = MAX2(ctx->out->push_count, (base & ~1u) + 2);
       progress = true;
    }
    return progress;

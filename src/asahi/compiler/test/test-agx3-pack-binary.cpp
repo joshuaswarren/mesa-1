@@ -2980,7 +2980,7 @@ TEST_F(AGX3PackBinary, GtkConvertCicpAbsoluteMinifloatRefusesModifiers)
    }
 }
 
-TEST_F(AGX3PackBinary, OrderedAbsoluteFselRefusesUnwitnessedDoubleAbs)
+TEST_F(AGX3PackBinary, OrderedAbsoluteFselUsesGeneralEndpoint)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    agx_index a = agx_register(2, AGX_SIZE_32);
@@ -2990,7 +2990,22 @@ TEST_F(AGX3PackBinary, OrderedAbsoluteFselRefusesUnwitnessedDoubleAbs)
                   agx_register(6, AGX_SIZE_32),
                   agx_register(8, AGX_SIZE_32), AGX_FCOND_GE);
    agx_stop(b);
-   EXPECT_TRUE(pack(b, false).empty());
+   const struct agx3_fsel_desc d = {
+      .dest = 0, .cmp0 = 2, .cmp0_abs = true,
+      .cmp1 = 4, .cmp1_abs = true,
+      .sel0_kind = AGX3_FSEL_SEL_REGISTER,
+      .sel1_kind = AGX3_FSEL_SEL_REGISTER,
+      .sel0 = 6, .sel1 = 8, .condition = AGX_FCOND_GE,
+   };
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], length;
+   ASSERT_TRUE(agx3_alu_fcmp_select(AGX_ISA_ENCODING_AGX3B, &d, bytes,
+                                   &length));
+   struct agx3_encoded_end end;
+   ASSERT_TRUE(agx3_pack_end(AGX_ISA_ENCODING_AGX3B, &end));
+   std::vector<uint8_t> want;
+   append(want, bytes, length);
+   append(want, end.bytes, end.length);
+   EXPECT_EQ(pack(b), want);
 }
 
 TEST_F(AGX3PackBinary, AbsoluteCompareFselUsesNativeLongForm)
