@@ -50,10 +50,11 @@ static bool covered(unsigned x, unsigned y)
 int main(int argc, char **argv)
 {
    bool cpu_only = argc==4 && !strcmp(argv[1], "--cpu-roundtrip-only");
-   bool pixels = argc==4 && !strcmp(argv[1], "--pixels");
+   bool texture_copy = argc==4 && !strcmp(argv[1], "--texture-readback");
+   bool pixels = argc==4 && (!strcmp(argv[1], "--pixels") || texture_copy);
    const char *enable=getenv("AURORA_D3D12_PHYSICAL_BASELINE");
    if ((!cpu_only && !pixels) || (pixels && (noop_loaded() || !enable || strcmp(enable,"1")))) {
-      fprintf(stderr,"usage: %s --cpu-roundtrip-only|--pixels tri.dxil solid.dxil (physical pixels requires exact opt-in and no noop shim)\n",argv[0]);return 2;
+      fprintf(stderr,"usage: %s --cpu-roundtrip-only|--pixels|--texture-readback tri.dxil solid.dxil (physical pixels requires exact opt-in and no noop shim)\n",argv[0]);return 2;
    }
    int result=1;const char *stage="shader input";HRESULT hr=E_FAIL;
    size_t vs_size=0,fs_size=0;void *vs=slurp(argv[2],&vs_size),*fs=slurp(argv[3],&fs_size);
@@ -62,6 +63,9 @@ int main(int argc, char **argv)
    ID3D12PipelineState *pso=NULL;ID3D12Resource *rt=NULL;ID3D12DescriptorHeap *heap=NULL;
    ID3D12CommandAllocator *alloc=NULL;ID3D12GraphicsCommandList *list=NULL;
    ID3D12CommandQueue *queue=NULL;ID3D12Fence *fence=NULL;bool mapped=false;
+   ID3D12Resource *copy_buffer=NULL;uint8_t *copy_map=NULL;
+   D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint={0};
+   UINT64 copy_size=0;
 #define REQUIRE(ok,label) do {stage=(label);if (!(ok)) goto cleanup;} while(0)
 #define CALL(call,label) do {hr=(call);REQUIRE(hr==S_OK,label);} while(0)
    REQUIRE(vs && fs && poison && readback,"shader/CPU storage");
@@ -139,10 +143,67 @@ int main(int argc, char **argv)
    }
    printf("PIXEL ORACLE total=%u model_triangle=%u mismatches=%u first=%u,%u fence=%llu\n",W*H,tri,bad,first_x,first_y,(unsigned long long)done);
    REQUIRE(!bad && tri>0 && tri<W*H,"every real pixel matches independent CPU geometry/color oracle");
+   if (texture_copy) {
+      ID3D12Resource_Unmap(rt,0,NULL);mapped=false;
+      /* Independent GPU copy to a legal READBACK buffer with footprint-sized
+       * prefix/suffix canaries. The CPU detile result above remains unchanged. */
+      UINT rows=0;UINT64 row_bytes=0,total=0;
+      ID3D12Device_GetCopyableFootprints(dev,&desc,0,1,512,&footprint,&rows,&row_bytes,&total);
+      REQUIRE(rows==H && row_bytes==PITCH && footprint.Footprint.Width==W &&
+         footprint.Footprint.Height==H && footprint.Offset==512 &&
+         footprint.Footprint.RowPitch>=PITCH && footprint.Footprint.RowPitch%256==0,
+         "GPU copy footprint geometry");
+      copy_size=footprint.Offset+(UINT64)footprint.Footprint.RowPitch*H+512;
+      const D3D12_HEAP_PROPERTIES rb={.Type=D3D12_HEAP_TYPE_READBACK};
+      const D3D12_RESOURCE_DESC buffer={.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER,
+         .Width=copy_size,.Height=1,.DepthOrArraySize=1,.MipLevels=1,
+         .SampleDesc={.Count=1},.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR};
+      CALL(ID3D12Device_CreateCommittedResource(dev,&rb,D3D12_HEAP_FLAG_NONE,&buffer,
+         D3D12_RESOURCE_STATE_COPY_DEST,NULL,&IID_ID3D12Resource,(void **)&copy_buffer),
+         "create GPU-copy READBACK buffer");REQUIRE(copy_buffer,"READBACK object");
+      const D3D12_RANGE empty={0,0};
+      CALL(ID3D12Resource_Map(copy_buffer,0,&empty,(void **)&copy_map),"poison READBACK buffer");
+      REQUIRE(copy_map,"READBACK pointer");memset(copy_map,0x7b,(size_t)copy_size);
+      memset(copy_map+footprint.Offset,0x33,(size_t)footprint.Footprint.RowPitch*H);
+      ID3D12Resource_Unmap(copy_buffer,0,NULL);copy_map=NULL;
+      CALL(ID3D12CommandAllocator_Reset(alloc),"reset idle allocator for GPU texture copy");
+      CALL(ID3D12GraphicsCommandList_Reset(list,alloc,NULL),"reset list for GPU texture copy");
+      barrier.Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;
+      barrier.Transition.StateAfter=D3D12_RESOURCE_STATE_COPY_SOURCE;
+      ID3D12GraphicsCommandList_ResourceBarrier(list,1,&barrier);
+      const D3D12_TEXTURE_COPY_LOCATION dst={.pResource=copy_buffer,
+         .Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT,.PlacedFootprint=footprint};
+      const D3D12_TEXTURE_COPY_LOCATION src={.pResource=rt,
+         .Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,.SubresourceIndex=0};
+      ID3D12GraphicsCommandList_CopyTextureRegion(list,&dst,0,0,0,&src,NULL);
+      barrier.Transition.StateBefore=D3D12_RESOURCE_STATE_COPY_SOURCE;
+      barrier.Transition.StateAfter=D3D12_RESOURCE_STATE_COMMON;
+      ID3D12GraphicsCommandList_ResourceBarrier(list,1,&barrier);
+      CALL(ID3D12GraphicsCommandList_Close(list),"Close native GPU CopyTextureRegion");
+      ID3D12CommandQueue_ExecuteCommandLists(queue,1,lists);
+      CALL(ID3D12Device_GetDeviceRemovedReason(dev),"device after GPU texture copy submit");
+      CALL(ID3D12CommandQueue_Signal(queue,fence,2),"signal GPU texture copy");
+      CALL(ID3D12Fence_SetEventOnCompletion(fence,2,NULL),"GPU texture copy fence2");
+      done=ID3D12Fence_GetCompletedValue(fence);
+      REQUIRE(done!=UINT64_MAX && done>=2,"fence2 observed");
+      CALL(ID3D12Device_GetDeviceRemovedReason(dev),"device after GPU texture copy fence");
+      const D3D12_RANGE range={0,(SIZE_T)copy_size};
+      CALL(ID3D12Resource_Map(copy_buffer,0,&range,(void **)&copy_map),"read actual GPU copy bytes");
+      REQUIRE(copy_map,"post-copy READBACK pointer");unsigned copy_bad=0,canary_bad=0;
+      for(unsigned y=0;y<H;y++)
+         for(unsigned x=0;x<PITCH;x++)
+            copy_bad+=copy_map[footprint.Offset+(UINT64)y*footprint.Footprint.RowPitch+x]!=readback[y*PITCH+x];
+      for(UINT64 i=0;i<footprint.Offset;i++) canary_bad+=copy_map[i]!=0x7b;
+      for(UINT64 i=footprint.Offset+(UINT64)footprint.Footprint.RowPitch*H;i<copy_size;i++) canary_bad+=copy_map[i]!=0x7b;
+      printf("GPU COPY ORACLE bytes=%u mismatches=%u canary_mismatches=%u fence=%llu\n",BYTES,copy_bad,canary_bad,(unsigned long long)done);
+      REQUIRE(!copy_bad && !canary_bad,"GPU CopyTextureRegion equals independent real CPU-detile oracle; canaries intact");
+   }
    result=0;
 cleanup:
-   printf("G17P %s: %s stage=%s HRESULT=0x%08x %s\n",cpu_only?"CPU ROUNDTRIP ONLY":"PHYSICAL BASELINE PIXELS",
+   printf("G17P %s: %s stage=%s HRESULT=0x%08x %s\n",cpu_only?"CPU ROUNDTRIP ONLY":texture_copy?"PHYSICAL TEXTURE READBACK":"PHYSICAL BASELINE PIXELS",
       result?"FAIL":"PASS",stage,(unsigned)hr,cpu_only?"NO_GPU_SUBMISSION":"NOT_FULL_G4_OR_SUITE_PARITY");
+   if(copy_map)ID3D12Resource_Unmap(copy_buffer,0,NULL);
+   if(copy_buffer)ID3D12Resource_Release(copy_buffer);
    if(mapped)ID3D12Resource_Unmap(rt,0,NULL);
    if(fence)ID3D12Fence_Release(fence);if(queue)ID3D12CommandQueue_Release(queue);
    if(list)ID3D12GraphicsCommandList_Release(list);if(alloc)ID3D12CommandAllocator_Release(alloc);
