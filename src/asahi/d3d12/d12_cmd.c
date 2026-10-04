@@ -15,6 +15,8 @@
 #include "d12_private.h"
 #include "d12_buffer_view_core.h"
 #include "d12_agx3_cmdstream_core.h"
+#include "d12_agx3_graphics_bind_core.h"
+#include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 #include "d12_agx3_ppp_hal300_depth_bias_scissor_core.h"
 #include "d12_agx3_ppp_hal300_depth_stencil_core.h"
 #include "d12_agx3_ppp_viewport_payload_core.h"
@@ -58,6 +60,11 @@
 /* Keep a single kernel command bounded even for command lists containing
  * hundreds of thousands of tiny meta dispatches. */
 #define D12_MAX_DISPATCHES_PER_SEGMENT 8192
+
+/* Qualification switch stays closed until this coherent producer chain has
+ * passed native compilation and compiler-only PSO checks. No runtime option
+ * bypasses the incomplete/unqualified renderer. */
+static const bool d12_g17p_graphics_producers_qualified = false;
 
 static bool d12_pack_texture_generation(
    enum agx_descriptor_generation generation, void *out,
@@ -1163,6 +1170,18 @@ d12_list_close_cdm(struct d12_cmd_list *list)
       struct d12_segment *seg = &list->segments[list->segment_count - 1];
       d12_list_emit_vdm_terminate(list);
       seg->stream_end = list->stream_cur - d12_list_stream_map(list);
+      if (list->device->dev.chip == AGX_CHIP_G17P &&
+          d12_g17p_graphics_producers_qualified && list->state != D12_LIST_ERROR) {
+         const size_t size = seg->stream_end - seg->stream_start;
+         uint64_t compact;
+         void *copy = d12_list_alloc_g17p_vdm(list, size, 64, &compact);
+         if (copy) {
+            memcpy(copy, d12_list_stream_map(list) + seg->stream_start, size);
+            seg->g17p_vdm_control_base = AGX_G17P_VDM_USER_BASE + compact;
+            if (agx_bo_sync_for_device(list->stream_bo, 0, list->stream_bo->size))
+               list->state = D12_LIST_ERROR;
+         }
+      }
       list->render_open = false;
    }
 }
@@ -2048,6 +2067,10 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
 {
    struct d12_device *device = list->device;
 
+   if (device->dev.chip == AGX_CHIP_G17P &&
+       d12_g17p_graphics_producers_qualified)
+      return d12_build_g17p_bg_eot(list, seg, legacy_color, ops, tib, out_counts);
+
    /* This builder emits AGX2 USC resource/state words. A clear-only list
     * never reaches the vertex-state guard, so reject here until native
     * BG/EOT Ioto programs and render resource specifications are supplied. */
@@ -2868,7 +2891,32 @@ d12_list_begin_render(struct d12_cmd_list *list,
    if (!d12_list_emit_initial_vdm_barrier(list))
       return NULL;
 
-   if (agx_chip_command_stream_generation(list->device->dev.chip) ==
+   if (list->device->dev.chip == AGX_CHIP_G17P &&
+       d12_g17p_graphics_producers_qualified) {
+      if (!list->device->dev.g17p_render_context_bo) {
+         list->state = D12_LIST_ERROR;
+         return NULL;
+      }
+      struct d12_agx3_ppp_w_clamp_cull2 initial;
+      const struct d12_agx3_ppp_w_clamp_cull2_fields fields = {.cull2_raw = 0x80};
+      uint64_t compact;
+      void *payload = d12_list_alloc_g17p_vdm(list, sizeof(initial.bytes), 4, &compact);
+      if (!payload || !d12_agx3_encode_ppp_w_clamp_cull2(
+             list->device->dev.chip, &fields, &initial)) {
+         list->state = D12_LIST_ERROR;
+         return NULL;
+      }
+      memcpy(payload, initial.bytes, initial.length);
+      if (!agx_ppp_emit_state(list->device->dev.chip, &list->stream_cur,
+                              compact, initial.length)) {
+         list->state = D12_LIST_ERROR;
+         return NULL;
+      }
+      /* Same direct-render sentinel as HK CS initialization: no guessed
+       * context cycling and no mutable device-global PPP payload. */
+      seg->agx3_active_context_selector_valid = true;
+      seg->agx3_raw_active_context_selector = UINT32_MAX;
+   } else    if (agx_chip_command_stream_generation(list->device->dev.chip) ==
        AGX_CS_GENERATION_HAL300) {
       struct d12_agx3_ppp_w_clamp_cull2 initial;
       const struct d12_agx3_ppp_w_clamp_cull2_fields fields = {
@@ -8393,6 +8441,131 @@ d12_emit_ppp_state(struct d12_cmd_list *list, uint8_t **out, uint64_t gpu,
    return false;
 }
 
+static bool
+d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
+                        struct d12_pipeline_state *pso, uint32_t vs_usc,
+                        uint32_t fs_usc, unsigned vertex_count,
+                        unsigned instance_count, unsigned first_vertex)
+{
+   if (!d12_g17p_graphics_producers_qualified ||
+       !seg->agx3_active_context_selector_valid ||
+       !pso->vs.g17p_root_only || !pso->fs.g17p_root_only ||
+       pso->vs.g17p_writes_memory || pso->fs.g17p_writes_memory ||
+       pso->has_gs || pso->has_tess || pso->has_mesh || pso->nr_vb_attribs ||
+       pso->raster.polygon_mode != AGX_POLYGON_MODE_FILL ||
+       pso->raster.depth_bias || pso->raster.slope_scaled_depth_bias ||
+       seg->ds || seg->tib.nr_samples != 1 || list->viewport_count != 1 ||
+       list->scissor_count != 1 || list->topology != MESA_PRIM_TRIANGLES ||
+       pso->fs.info.writes_sample_mask || pso->fs.info.reads_tib ||
+       seg->scissor_count >= D12_SCISSORS_PER_SEGMENT ||
+       seg->depth_bias_count >= D12_DEPTH_BIASES_PER_SEGMENT ||
+       list->active_occlusion_queries || list->active_pipeline_stats_heap)
+      goto fail;
+   if (!d12_segment_ensure_viewport_arrays(list, seg))
+      goto fail;
+   struct d12_viewport_hw_state states[D12_VIEWPORT_STATE_MAX];
+   if (d12_viewport_build_hw_state(list->viewport_count, list->viewports,
+          list->scissor_count, list->scissors, seg->width_px, seg->height_px,
+          states) != 1)
+      goto fail;
+   uint64_t compact;
+   void *payload = d12_list_alloc_g17p_vdm(list, AGX_G17P_BIND_STATE_BYTES, 64, &compact);
+   if (!payload)
+      goto fail;
+   struct d12_agx3_triangle_bind_desc desc = {
+      .compact_va = compact,
+      .fragment_program = list->device->dev.shader_base + fs_usc,
+      .linked_fragment_control = pso->fs.linked.fragment_control.opaque[0],
+      .raw_output_select = pso->uvs.osel.opaque[0],
+      .uvs_size = pso->uvs.size, .user_size = pso->uvs.user_size,
+      .coefficient_bindings = pso->fs.linked.cf.nr_bindings,
+      .reads_z = pso->fs.linked.cf.reads_z,
+      .writes_memory = pso->fs.g17p_writes_memory,
+      .writes_depth = pso->fs.info.depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED,
+      .needs_quad_derivatives = pso->fs.info.needs_quad_derivatives,
+      .has_preamble = pso->fs.info.has_preamble,
+      .cull_mode = pso->raster.cull_front | (pso->raster.cull_back << 1),
+      .front_face_ccw = pso->raster.front_face_ccw,
+      .depth_clip = pso->raster.depth_clip,
+      .raster = {
+         .scissor_enable = true,
+         .min_x = states[0].clip[0], .min_y = states[0].clip[1],
+         .max_x = states[0].clip[2], .max_y = states[0].clip[3],
+         .max_z_raw = fui(1.0f),
+      },
+      .viewport.viewport_count = 1,
+   };
+   uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
+   agx_pack(region_clip, REGION_CLIP, cfg) {
+      cfg.enable = true;
+      cfg.min_x = states[0].clip[0] / 32;
+      cfg.min_y = states[0].clip[1] / 32;
+      cfg.max_x = DIV_ROUND_UP(MAX2(states[0].clip[2], 1), 32);
+      cfg.max_y = DIV_ROUND_UP(MAX2(states[0].clip[3], 1), 32);
+   }
+   memcpy(&desc.viewport.region_clip_raw[0], region_clip, sizeof(region_clip));
+   desc.viewport.viewports[0] = (struct agx_ppp_viewport_transform_raw){
+      .translate_x = fui(states[0].transform[0]), .scale_x = fui(states[0].transform[3]),
+      .translate_y = fui(states[0].transform[1]), .scale_y = fui(states[0].transform[4]),
+      .translate_z = fui(states[0].transform[2]), .scale_z = fui(states[0].transform[5]),
+   };
+   uint8_t control[AGX_VIEWPORT_CONTROL_LENGTH];
+   agx_pack(control, VIEWPORT_CONTROL, cfg) ;
+   memcpy(&desc.viewport.viewport_control_raw, control, sizeof(control));
+   struct d12_agx3_triangle_bind generated;
+   if (!d12_agx3_triangle_bind_generate(list->device->dev.chip, &desc, &generated))
+      goto fail;
+   memcpy(payload, generated.bytes, sizeof(generated.bytes));
+   uint8_t *scissor = d12_list_data_cpu(list, seg->scissor_base);
+   uint8_t *depth_bias = d12_list_data_cpu(list, seg->depth_bias_base);
+   if (!scissor || !depth_bias)
+      goto fail;
+   memcpy(scissor + seg->scissor_count * AGX_SCISSOR_LENGTH,
+          generated.raster.scissor, sizeof(generated.raster.scissor));
+   memcpy(depth_bias + seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH,
+          generated.raster.depth_bias, sizeof(generated.raster.depth_bias));
+   seg->scissor_count++;
+   seg->depth_bias_count++;
+   uint64_t draw_compact;
+   void *draw_payload = d12_list_alloc_g17p_vdm(list, 8, 4, &draw_compact);
+   uint32_t draw_offset;
+   if (!draw_payload || !agx_g17p_upload_draw_indices(draw_payload, 8, draw_compact,
+          seg->scissor_count * AGX_SCISSOR_LENGTH,
+          seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH, 1, &draw_offset))
+      goto fail;
+   struct d12_agx3_vdm_state_update_draw_info info = {
+      .source_layout = pso->vs.agx3_vdm_state_update.source_layout,
+      .draw_path = D12_AGX3_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED,
+      .rasterization_enabled = pso->rasterization_enabled,
+      .template_info = pso->vs.agx3_vdm_state_update.template_info,
+   };
+   info.template_info.pipeline = list->device->dev.shader_base + vs_usc;
+   info.template_info.raw_active_context_selector = seg->agx3_raw_active_context_selector;
+   struct d12_agx3_vdm_state_update vertex;
+   const struct agx_vdm_hal200_direct_draw_fields draw_fields = {
+      .draw_state_context_offset = draw_offset, .primitive = AGX_PRIMITIVE_TRIANGLES,
+      .vertex_count = vertex_count, .instance_count = instance_count,
+      .vertex_start = first_vertex,
+   };
+   struct agx_vdm_hal200_direct_draw draw;
+   if (!d12_agx3_encode_vdm_state_update_draw(list->device->dev.chip, &info, &vertex) ||
+       !agx_vdm_hal200_direct_draw_pack(list->device->dev.chip, &draw_fields, &draw) ||
+       !d12_list_check_stream_space(list))
+      goto fail;
+   uint8_t *out = list->stream_cur;
+   memcpy(out, vertex.bytes, vertex.length); out += vertex.length;
+   memcpy(out, generated.upload.tail.bytes, generated.upload.tail.length);
+   out += generated.upload.tail.length;
+   memcpy(out, draw.bytes, draw.length); out += draw.length;
+   list->stream_cur = out;
+   seg->has_draws = true;
+   return true;
+fail:
+   mesa_loge("native baseline triangle producer rejected draw/state/resources");
+   list->state = D12_LIST_ERROR;
+   return false;
+}
+
 static void
 d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
               unsigned instance_count, unsigned first_vertex,
@@ -8917,6 +9090,21 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             .varyings = varyings,
          };
       }
+   }
+
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      if (indexed || indirect_args || indirect_ibv || list->predicate_gpu ||
+          indirect_patch_count || indirect_constant_patch_count ||
+          indirect_root_patch_count || indirect_vb_patch_count ||
+          first_instance || first_vertex || first_index || vertex_count != 3 ||
+          instance_count != 1) {
+         mesa_loge("native baseline supports only a direct first triangle");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+      d12_emit_g17p_triangle(list, seg, pso, vs_usc, fs_usc,
+                             vertex_count, instance_count, first_vertex);
+      return;
    }
 
    if (!d12_list_check_stream_space(list))

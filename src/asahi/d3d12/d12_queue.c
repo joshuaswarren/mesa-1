@@ -329,7 +329,8 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
 {
    memset(c, 0, sizeof(*c));
 
-   c->vdm_ctrl_stream_base = list->stream_bo->va->addr + seg->stream_start;
+   c->vdm_ctrl_stream_base = seg->g17p_vdm_control_base
+      ? seg->g17p_vdm_control_base : list->stream_bo->va->addr + seg->stream_start;
 
    agx_pack(&c->ppp_ctrl, CR_PPP_CONTROL, cfg) {
       cfg.enable_w_clamp = true;
