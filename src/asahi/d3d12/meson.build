@@ -486,3 +486,14 @@ d3d12agx_dxil_compile = executable(
     libasahi_compiler, libasahi_lib, libasahi_layout, libagx2_disasm,
   ],
 )
+
+# Original first depth pair with strict full-frame checks. Separate partial
+# physical qualification probe; mandatory full G5 target is unchanged.
+d3d12agx_g5_d32_first_pair = executable(
+  'd3d12agx_g5_d32_first_pair',
+  files('tests/g5_depth.c'),
+  c_args : ['-DD12_D32_FIRST_PAIR_PROBE=1'],
+  include_directories : [inc_include, inc_src, inc_asahi],
+  dependencies : [dep_dxheaders_d12],
+  link_with : libd3d12agx,
+)
