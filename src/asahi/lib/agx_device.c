@@ -870,9 +870,65 @@ agx_create_fixed_bo(struct agx_device *dev, size_t size,
    return bo;
 }
 
+/* The caller retains its fd/platform handle when open fails. Track only
+ * completed common initialization stages; never run full close on a partial
+ * device or destroy a mutex whose initialization was not reached. */
+enum agx_device_init_stage {
+   AGX_INIT_VIRTIO = BITFIELD_BIT(0),
+   AGX_INIT_BO_MAP = BITFIELD_BIT(1),
+   AGX_INIT_HEAPS = BITFIELD_BIT(2),
+   AGX_INIT_ALIAS_HEAP = BITFIELD_BIT(3),
+   AGX_INIT_GLSL = BITFIELD_BIT(4),
+   AGX_INIT_PRINTF = BITFIELD_BIT(5),
+   AGX_INIT_CONTEXT_SLOTS = BITFIELD_BIT(6),
+};
+
+static void
+agx_cleanup_partial_device(struct agx_device *dev, unsigned initialized)
+{
+   if (initialized & AGX_INIT_GLSL) {
+      if (initialized & AGX_INIT_CONTEXT_SLOTS)
+         agx_g17p_unbind_render_context_low_slots(
+            dev, ARRAY_SIZE(agx_g17p_render_context_low_slots));
+      agx_bo_unreference(dev, dev->printf.bo);
+      agx_bo_unreference(dev, dev->usc_base_bo);
+      agx_bo_unreference(dev, dev->g17p_render_context_bo);
+      agx_bo_unreference(dev, dev->scratch_bo);
+      agx_bo_unreference(dev, dev->zero_bo);
+      if (initialized & AGX_INIT_PRINTF)
+         u_printf_destroy(&dev->printf);
+      agx_bo_cache_evict_all(dev);
+      glsl_type_singleton_decref();
+   }
+
+   if (dev->replay_heap_initialized)
+      util_vma_heap_finish(&dev->replay_heap);
+   if (initialized & AGX_INIT_ALIAS_HEAP)
+      util_vma_heap_finish(&dev->g17p_vdm_alias_heap);
+   if (initialized & AGX_INIT_HEAPS) {
+      util_vma_heap_finish(&dev->usc_heap);
+      util_vma_heap_finish(&dev->main_heap);
+      simple_mtx_destroy(&dev->vma_lock);
+   }
+   if (initialized & AGX_INIT_BO_MAP) {
+      util_sparse_array_finish(&dev->bo_map);
+      simple_mtx_destroy(&dev->bo_cache.lock);
+      simple_mtx_destroy(&dev->bo_map_lock);
+      agxdecode_destroy_context(dev->agxdecode);
+   }
+#ifdef HAVE_LIBDRM
+   if (initialized & AGX_INIT_VIRTIO) {
+      vdrm_device_close(dev->vdrm);
+      dev->vdrm = NULL;
+   }
+#endif
+}
+
 bool
 agx_open_device(void *memctx, struct agx_device *dev)
 {
+   unsigned initialized = 0;
+
    dev->debug =
       debug_get_flags_option("ASAHI_MESA_DEBUG", agx_debug_options, 0);
 
@@ -904,7 +960,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
       drmVersionPtr version = drmGetVersion(dev->fd);
       if (!version) {
          fprintf(stderr, "cannot get version: %s", strerror(errno));
-         return false;
+         goto fail;
       }
 
       if (!strcmp(version->name, "asahi")) {
@@ -916,10 +972,13 @@ agx_open_device(void *memctx, struct agx_device *dev)
             fprintf(
                stderr,
                "Error opening virtio-gpu device for Asahi native context\n");
-            return false;
+            drmFreeVersion(version);
+            goto fail;
          }
+         initialized |= AGX_INIT_VIRTIO;
       } else {
-         return false;
+         drmFreeVersion(version);
+         goto fail;
       }
 
       drmFreeVersion(version);
@@ -927,20 +986,20 @@ agx_open_device(void *memctx, struct agx_device *dev)
       /* No backend preset and no libdrm to probe one with -- shouldn't
        * happen: every non-HAVE_LIBDRM caller (agx_win_open_device) presets
        * dev->ops itself. */
-      return false;
+      goto fail;
 #endif
    }
 
    params_size = dev->ops.get_params(dev, &dev->params, sizeof(dev->params));
    if (params_size <= 0) {
       fprintf(stderr, "Failed to query AGX device parameters: %m\n");
-      return false;
+      goto fail;
    }
    if ((size_t)params_size < sizeof(dev->params)) {
       fprintf(stderr,
               "AGX parameter reply is too short (%zd, expected at least %zu)\n",
               params_size, sizeof(dev->params));
-      return false;
+      goto fail;
    }
 
    dev->chip = agx_chip_from_params(&dev->params);
@@ -984,14 +1043,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
                  dev->params.num_clusters_total);
       }
 
-#ifdef HAVE_LIBDRM
-      if (dev->is_virtio) {
-         vdrm_device_close(dev->vdrm);
-         dev->vdrm = NULL;
-      }
-#endif
-
-      return false;
+      goto fail;
    }
 
    const char *product = agx_chip_exact_product_name(dev->chip);
@@ -1144,14 +1196,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
       if (errno != 0 || end == usc_base_env || *end != '\0') {
          fprintf(stderr, "ASAHI_G17P_USC_BASE=\"%s\" is not a number\n",
                  usc_base_env);
-         return false;
+         goto fail;
       }
 
       if ((requested & 0xffffffffull) != 0) {
          fprintf(stderr,
                  "ASAHI_G17P_USC_BASE 0x%llx is not 4GiB aligned\n",
                  requested);
-         return false;
+         goto fail;
       }
 
       dev->shader_base = requested;
@@ -1161,7 +1213,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
       /* Our robustness implementation requires the bottom unmapped */
       fprintf(stderr, "Unexpected address layout, can't cope\n");
       assert(0);
-      return false;
+      goto fail;
    }
 
    uint64_t shader_size = 0x100000000ull;
@@ -1228,7 +1280,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               (unsigned long long)user_start,
               (unsigned long long)dev->params.vm_start,
               (unsigned long long)dev->params.vm_end);
-      return false;
+      goto fail;
    }
 
    // Put the kernel heap at the top of the address space.
@@ -1250,7 +1302,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    int ret = dev->ops.simple_ioctl(dev, DRM_IOCTL_ASAHI_VM_CREATE, &vm_create);
    if (ret) {
       fprintf(stderr, "DRM_IOCTL_ASAHI_VM_CREATE failed: %m\n");
-      return false;
+      goto fail;
    }
 
    dev->agxdecode = agxdecode_new_context(dev->shader_base);
@@ -1263,6 +1315,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
    simple_mtx_init(&dev->bo_cache.lock, mtx_plain);
    list_inithead(&dev->bo_cache.lru);
    dev->bo_cache.trim_generation = 1;
+   initialized |= AGX_INIT_BO_MAP;
 
    for (unsigned i = 0; i < ARRAY_SIZE(dev->bo_cache.buckets); ++i)
       list_inithead(&dev->bo_cache.buckets[i]);
@@ -1281,7 +1334,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               "sparse aliasing\n",
               (unsigned long long)dev->params.vm_start,
               (unsigned long long)dev->params.vm_end);
-      return false;
+      goto fail;
    }
 
    /* Every vkAllocateMemory() binds a read-only shadow of the allocation at
@@ -1314,7 +1367,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               "read-only alias below %#llx\n",
               (unsigned long long)user_start,
               (unsigned long long)user_limit);
-      return false;
+      goto fail;
    }
 
    dev->sparse_ro_offset = user_size;
@@ -1324,11 +1377,14 @@ agx_open_device(void *memctx, struct agx_device *dev)
    simple_mtx_init(&dev->vma_lock, mtx_plain);
    util_vma_heap_init(&dev->main_heap, user_start, user_size);
    util_vma_heap_init(&dev->usc_heap, dev->shader_base, shader_size);
+   initialized |= AGX_INIT_HEAPS;
    if (dev->chip == AGX_CHIP_G17P &&
        !agx_g17p_vdm_alias_heap_init(&dev->g17p_vdm_alias_heap)) {
       fprintf(stderr, "Failed to initialize G17P low VDM alias heap\n");
-      return false;
+      goto fail;
    }
+   if (dev->chip == AGX_CHIP_G17P)
+      initialized |= AGX_INIT_ALIAS_HEAP;
 
    /* util_vma_heap_init() defaults to alloc_high, which puts every shader and
     * Ioto program within a few pages of the TOP of the 4GiB USC window.  The
@@ -1357,7 +1413,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
           dev->sparse_ro_offset, &dev->usc_heap, dev->shader_base,
           shader_size)) {
       fprintf(stderr, "Failed to reserve firmware runtime-graph GPU VA\n");
-      return false;
+      goto fail;
    }
 
    /* Keep captured addresses unavailable to ordinary allocations between
@@ -1368,7 +1424,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          &dev->main_heap, &dev->replay_heap, user_size);
       if (!dev->replay_heap_initialized) {
          fprintf(stderr, "Failed to reserve capture/replay GPU VA\n");
-         return false;
+         goto fail;
       }
    }
 
@@ -1376,12 +1432,13 @@ agx_open_device(void *memctx, struct agx_device *dev)
        !dev->ops.va_init(dev, user_start, user_size, dev->shader_base,
                          shader_size)) {
       fprintf(stderr, "Failed to initialize process GPU VA allocator\n");
-      return false;
+      goto fail;
    }
 
    dev->vm_id = vm_create.vm_id;
 
    glsl_type_singleton_init_or_ref();
+   initialized |= AGX_INIT_GLSL;
 
    if (agx_chip_uses_legacy_precompiled_programs(dev->chip)) {
       if (agx_gather_device_key(dev).needs_g13x_coherency == U_TRISTATE_YES)
@@ -1404,7 +1461,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
                              DRM_ASAHI_BIND_READ, "Zero page");
       if (bo == NULL) {
          fprintf(stderr, "Failed to bind zero page");
-         return false;
+         goto fail;
       }
 
       dev->zero_bo = bo;
@@ -1416,7 +1473,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "Scratch page");
       if (bo == NULL) {
          fprintf(stderr, "Failed to bind scratch page");
-         return false;
+         goto fail;
       }
 
       dev->scratch_bo = bo;
@@ -1424,7 +1481,10 @@ agx_open_device(void *memctx, struct agx_device *dev)
       /* The contents of the scratch page are undefined, but making them nonzero
        * helps fuzz for bugs where we incorrectly read from the write section.
        */
-      memset(agx_bo_map(dev->scratch_bo), 0xCA, AIL_PAGESIZE);
+      void *map = agx_bo_map(dev->scratch_bo);
+      if (!map)
+         goto fail;
+      memset(map, 0xCA, AIL_PAGESIZE);
    }
 
    if (dev->chip == AGX_CHIP_G17P) {
@@ -1436,7 +1496,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          "G17P native render context");
       if (context == NULL) {
          fprintf(stderr, "Failed to bind G17P native render context");
-         return false;
+         goto fail;
       }
 
       if (getenv("ASAHI_G17P_CONTEXT_TRACE")) {
@@ -1458,25 +1518,23 @@ agx_open_device(void *memctx, struct agx_device *dev)
                  DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE);
       }
 
+      dev->g17p_render_context_bo = context;
       void *context_map = agx_bo_map(context);
       if (context_map == NULL) {
          fprintf(stderr, "Failed to map G17P native render context");
-         return false;
+         goto fail;
       }
       memset(context_map, 0, AGX_G17P_RENDER_CONTEXT_SIZE);
       /* Publish fixed Bind0 exactly once, before any command buffer can
        * reference this context. Mutable PPP payloads use retained uploads. */
       if (!agx_g17p_bind0_initialize(context_map, AGX_G17P_RENDER_CONTEXT_SIZE))
-         return false;
+         goto fail;
       if (agx_bo_sync_for_device(context, 0, AGX_G17P_RENDER_CONTEXT_SIZE))
-         return false;
+         goto fail;
 
-      if (!agx_g17p_bind_render_context_low_slots(dev, context)) {
-         agx_bo_unreference(dev, context);
-         return false;
-      }
-
-      dev->g17p_render_context_bo = context;
+      if (!agx_g17p_bind_render_context_low_slots(dev, context))
+         goto fail;
+      initialized |= AGX_INIT_CONTEXT_SLOTS;
    }
 
    struct agx_bo *bo =
@@ -1489,7 +1547,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
               DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "Printf/abort");
    if (bo == NULL) {
       fprintf(stderr, "Failed to bind printf buffer");
-      return false;
+      goto fail;
    }
 
    if (dev->chip == AGX_CHIP_G17P &&
@@ -1499,14 +1557,19 @@ agx_open_device(void *memctx, struct agx_device *dev)
            dev->main_heap_size - LIBAGX_PRINTF_BUFFER_SIZE)) {
       fprintf(stderr, "G17P printf buffer escaped the allocator-owned heap");
       agx_bo_unreference(dev, bo);
-      return false;
+      goto fail;
    }
 
    dev->printf_buffer_address =
       dev->chip == AGX_CHIP_G17P ? bo->va->addr
                                  : LIBAGX_PRINTF_BUFFER_ADDRESS;
 
-   u_printf_init(&dev->printf, bo, agx_bo_map(bo));
+   dev->printf.bo = bo;
+   uint32_t *printf_map = agx_bo_map(bo);
+   if (!printf_map)
+      goto fail;
+   u_printf_init(&dev->printf, bo, printf_map);
+   initialized |= AGX_INIT_PRINTF;
 
    /* G17P: make the USC exec window's base page resident.
     *
@@ -1534,7 +1597,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
       if (!reserved) {
          fprintf(stderr, "Failed to reserve the USC window base page\n");
-         return false;
+         goto fail;
       }
 
       struct agx_bo *usc_base = agx_create_fixed_bo(
@@ -1542,24 +1605,28 @@ agx_open_device(void *memctx, struct agx_device *dev)
          DRM_ASAHI_BIND_READ | DRM_ASAHI_BIND_WRITE, "G17P USC window base");
       if (usc_base == NULL) {
          fprintf(stderr, "Failed to bind the USC window base page\n");
-         return false;
+         goto fail;
       }
 
+      dev->usc_base_bo = usc_base;
       void *map = agx_bo_map(usc_base);
       if (map == NULL) {
          fprintf(stderr, "Failed to map the USC window base page\n");
-         return false;
+         goto fail;
       }
 
       memset(map, 0, usc_base_size);
       agx3_build_container_lead(map);
       if (agx_bo_sync_for_device(usc_base, 0, usc_base_size))
-         return false;
+         goto fail;
 
-      dev->usc_base_bo = usc_base;
    }
 
    return true;
+
+fail:
+   agx_cleanup_partial_device(dev, initialized);
+   return false;
 }
 
 void
