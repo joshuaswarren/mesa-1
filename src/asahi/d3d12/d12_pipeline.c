@@ -19,6 +19,7 @@
 #include "asahi/lib/agx_ioto_program_core.h"
 
 #include "agx_compile.h"
+#include "agx_debug.h"
 #include "agx_helpers.h"
 #include "agx_nir.h"
 #include "disasm.h"
@@ -1611,7 +1612,9 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    }
 
    if (!compiled || !part.binary || !part.info.binary_size) {
-      mesa_loge("CreateComputePipelineState: AGX compile produced no code");
+      const char *refusal = agx_last_compile_refusal();
+      mesa_loge("CreateComputePipelineState: AGX compile produced no code: %s",
+                refusal && refusal[0] ? refusal : "no compiler reason recorded");
       free(part.binary);
       return E_FAIL;
    }
