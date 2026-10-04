@@ -12,6 +12,8 @@
  * recorded operation becomes real GPU work at ExecuteCommandLists.
  */
 
+#include "d12_g17p_txf_prefix_core.h"
+#include "util/mesa-blake3.h"
 #include "d12_private.h"
 #include "d12_buffer_view_core.h"
 #include "d12_agx3_cmdstream_core.h"
@@ -4593,6 +4595,8 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
    memcpy(cache->texture_shapes, texture_shapes, sizeof(cache->texture_shapes));
    cache->root = *out_root;
    cache->textures = *out_textures;
+   cache->texture_table = heap_gpu;
+   cache->texture_table_size_B = heap_size;
    cache->pbes = *out_pbes;
    cache->heap = *out_heap;
    cache->heap_textures = *out_heap_textures;
@@ -6139,6 +6143,23 @@ d12_segment_bind_sampler_heap(struct d12_cmd_list *list,
    return true;
 }
 
+/* No physical texture path: this opt-in only reaches the actual registered
+ * noop fd whose native CDM stream validator is explicitly enabled. */
+bool
+d12_g17p_txf_metadata_enabled(const struct agx_device *dev)
+{
+#ifndef _WIN32
+   const char *enable = getenv("AURORA_D3D12_SHIM_TEXTURE_METADATA");
+   return dev && dev->chip == AGX_CHIP_G17P && dev->g17p_render_context_bo &&
+          enable && !strcmp(enable, "1") &&
+          asahi_noop_d3d12_graphics_qualification_allowed &&
+          asahi_noop_d3d12_graphics_qualification_allowed(dev->fd);
+#else
+   (void)dev;
+   return false;
+#endif
+}
+
 /* First native API-compute producer: monolithic, direct buffer compute.
  * Texture/sampler, indirect, preamble and legacy scratch contracts retain
  * their own guards until a matching native producer exists. */
@@ -6150,23 +6171,108 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
 {
    struct agx_device *dev = &list->device->dev;
    const struct agx_shader_info *info = &pso->info;
+   const bool txf_metadata = pso->g17p_txf_compiler_only;
    if (dev->chip != AGX_CHIP_G17P || !pso->g17p_compute_container ||
-       pso->g17p_txf_compiler_only ||
+       (txf_metadata && !d12_g17p_txf_metadata_enabled(dev)) ||
        !pso->code_bo || !pso->code_va || !u->root ||
        !info->main_size || !info->nr_gprs || !info->agx3_staging_known ||
        info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
        info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
        info->imageblock_stride || info->texture_state_count ||
-       info->sampler_state_count || info->uses_sampler_heap || info->uses_txf ||
+       info->uses_sampler_heap ||
+       (txf_metadata ? (!info->uses_txf || info->sampler_state_count != 1)
+                     : (info->sampler_state_count || info->uses_txf)) ||
        info->uses_ray_traversal ||
        (info->rodata.size_16 && !pso->g17p_rodata_va))
       goto fail;
 
-   struct agx3_ioto_uniform_range ranges[8];
+   struct agx3_ioto_uniform_range ranges[10];
    unsigned range_count = 0;
+   if (txf_metadata) {
+      const struct d12_binding_upload_cache *cache = &list->binding_upload_cache[1];
+      struct agx_bo *sampler_bo = list->device->rodata_bo;
+      if (!u->textures || !cache->valid || cache->root != u->root ||
+          cache->textures != u->textures ||
+          !sampler_bo || !sampler_bo->va || sampler_bo->size < 32 ||
+          !d12_list_stream_contains(list, u->root, sizeof(uint64_t)) ||
+          !d12_list_stream_contains(list, u->textures, sizeof(uint64_t)) ||
+          !d12_list_stream_contains(list, cache->texture_table,
+                                    cache->texture_table_size_B))
+         goto fail;
+      uint8_t *stream_cpu = d12_list_stream_map(list);
+      if (!stream_cpu)
+         goto fail;
+      const uint8_t *texture_cell_cpu =
+         stream_cpu + (u->textures - list->stream_bo->va->addr);
+      uint64_t texture_table;
+      memcpy(&texture_table, texture_cell_cpu, sizeof(texture_table));
+      if (texture_table != cache->texture_table)
+         goto fail;
+      const uint64_t sampler_table = sampler_bo->va->addr;
+      const uint64_t sampler_cell = d12_list_upload(
+         list, &sampler_table, sizeof(sampler_table), 8);
+      const struct d12_g17p_txf_prefix_sources sources = {
+         .root_cell = u->root, .texture_cell = u->textures,
+         .sampler_cell = sampler_cell, .texture_table = texture_table,
+         .texture_table_size_B = cache->texture_table_size_B,
+         .sampler_table = sampler_table,
+      };
+      struct d12_g17p_txf_range prefix[4];
+      if (!d12_g17p_txf_prefix_ranges(&sources, prefix))
+         goto fail;
+      for (unsigned i = 0; i < 4; ++i)
+         ranges[range_count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = prefix[i].start_halfs,
+            .size_halfs = prefix[i].size_halfs,
+            .address = prefix[i].address,
+         };
+      if (agx_bo_sync_for_device(sampler_bo, 0, 32) ||
+          agx_bo_sync_for_device(list->stream_bo,
+             texture_table - list->stream_bo->va->addr,
+             cache->texture_table_size_B))
+         goto fail;
+      d12_list_track_read_bo(list, sampler_bo);
+      d12_list_track_read_range(list, texture_table,
+                                cache->texture_table_size_B);
+      if (!pso->code_bo->va || pso->code_va < pso->code_bo->va->addr ||
+          info->main_size > pso->code_bo->size ||
+          pso->code_va - pso->code_bo->va->addr >
+             pso->code_bo->size - info->main_size)
+         goto fail;
+      const uint8_t *code_cpu = agx_bo_map(pso->code_bo);
+      const uint8_t *sampler_cpu = agx_bo_map(sampler_bo);
+      if (!code_cpu || !sampler_cpu)
+         goto fail;
+      blake3_hash code_hash, table_hash, sampler_hash;
+      char code_hex[BLAKE3_HEX_LEN], table_hex[BLAKE3_HEX_LEN];
+      char sampler_hex[BLAKE3_HEX_LEN];
+      _mesa_blake3_compute(code_cpu + pso->code_va - pso->code_bo->va->addr,
+                           info->main_size, code_hash);
+      _mesa_blake3_compute(stream_cpu + texture_table - list->stream_bo->va->addr,
+                           cache->texture_table_size_B, table_hash);
+      _mesa_blake3_compute(sampler_cpu, 32, sampler_hash);
+      _mesa_blake3_format(code_hex, code_hash);
+      _mesa_blake3_format(table_hex, table_hash);
+      _mesa_blake3_format(sampler_hex, sampler_hash);
+      mesa_logi("native Texture.Load CODE: va=0x%llx size=%u blake3=%s "
+                "table-blake3=%s sampler32-blake3=%s",
+                (unsigned long long)pso->code_va, info->main_size,
+                code_hex, table_hex, sampler_hex);
+      mesa_logi("native Texture.Load metadata: table=0x%llx span=%llu "
+                "texture-cell=0x%llx sampler-cell=0x%llx sampler=0x%llx "
+                "root-cell=0x%llx halves=0/4/8/query16 fd-policy=registered-shim-only",
+                (unsigned long long)texture_table,
+                (unsigned long long)cache->texture_table_size_B,
+                (unsigned long long)u->textures,
+                (unsigned long long)sampler_cell,
+                (unsigned long long)sampler_table,
+                (unsigned long long)u->root);
+   }
 #define D12_G17P_RANGE(field, base, size)                                       do {                                                                             if (u->field) {                                                                  ranges[range_count++] = (struct agx3_ioto_uniform_range){                        .start_halfs = base, .size_halfs = size, .address = u->field,             };                                                                        }                                                                         } while (0)
-   D12_G17P_RANGE(root, D12_UNIFORM_ROOT, D12_UNIFORM_ROOT_REGS);
-   D12_G17P_RANGE(textures, D12_UNIFORM_TEXTURES, D12_UNIFORM_TEXTURE_REGS);
+   if (!txf_metadata) {
+      D12_G17P_RANGE(root, D12_UNIFORM_ROOT, D12_UNIFORM_ROOT_REGS);
+      D12_G17P_RANGE(textures, D12_UNIFORM_TEXTURES, D12_UNIFORM_TEXTURE_REGS);
+   }
    D12_G17P_RANGE(heap, D12_UNIFORM_HEAP, D12_UNIFORM_HEAP_REGS);
    D12_G17P_RANGE(pbes, D12_UNIFORM_PBES, D12_UNIFORM_PBE_REGS);
    D12_G17P_RANGE(heap_textures, D12_UNIFORM_HEAP_TEXTURES,
@@ -6392,6 +6498,7 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
                 .heap_pbes = heap_pbes_gpu, .heap_samplers = heap_samplers_gpu,
              }, x, y, z))
          return;
+      seg->g17p_txf_metadata_only |= pso->g17p_txf_compiler_only;
       seg->dispatches++;
       return;
    }

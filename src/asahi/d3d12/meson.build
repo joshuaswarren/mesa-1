@@ -42,6 +42,7 @@ libd3d12agx_files = files(
   'd12_fence.c',
   'd12_format.c',
   'd12_g17p_vdm_storage.c',
+  'd12_g17p_txf_prefix_core.c',
   'd12_native_render_resources_core.c',
   'd12_pipeline.c',
   'd12_nir_g17p_txf.c',
@@ -495,4 +496,16 @@ d3d12agx_g17p_txf_lower_tests = executable(
   include_directories : [inc_include, inc_src, inc_asahi],
   dependencies : [idep_nir, idep_mesautil, idep_agx_pack, idep_libagx],
   link_with : [libasahi_compiler, libasahi_lib, libasahi_layout],
+)
+
+# Source-only bounded metadata diagnostics; neither target admits a GPU feature.
+d3d12agx_g17p_txf_prefix_core_tests = executable(
+  'd3d12agx_g17p_txf_prefix_core_tests',
+  files('d12_g17p_txf_prefix_core.c', 'tests/d12_g17p_txf_prefix_core_tests.c'),
+)
+d3d12agx_g5_texture_native_metadata = executable(
+  'd3d12agx_g5_texture_native_metadata',
+  files('tests/g5_texture_native_metadata.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : libd3d12agx,
 )

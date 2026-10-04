@@ -1390,6 +1390,8 @@ struct d12_read_tracker {
 };
 
 struct d12_segment {
+   /* Recorded native texture launch remains registered-shim metadata only. */
+   bool g17p_txf_metadata_only;
    /* Base addresses of the render target SLICES this pass writes. Array and
     * 3D RTVs may select a bounded layer range; layers are contiguous at
     * layer_stride_B, so the view carries an offset the resource does not.
@@ -1538,6 +1540,7 @@ struct d12_binding_upload_cache {
    const struct d12_descriptor *sources[D12_MAX_RESOURCE_BINDINGS];
    uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS];
    uint64_t root, textures, pbes;
+   uint64_t texture_table, texture_table_size_B;
    uint64_t heap, heap_textures, heap_pbes, heap_samplers;
    uint64_t tables;
    uint32_t table_count;
@@ -2264,3 +2267,6 @@ uint32_t d12_build_g17p_bg_eot(
 /* Metadata-only native D32 qualification; never admits a physical DRM fd. */
 bool d12_g17p_depth_metadata_enabled(const struct agx_device *dev);
 bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
+
+/* Native Texture.Load metadata producer never admits a physical DRM fd. */
+bool d12_g17p_txf_metadata_enabled(const struct agx_device *dev);

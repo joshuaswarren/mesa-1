@@ -2458,6 +2458,12 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          payload_size += sizeof(header);
 
          if (compute) {
+            if (seg->g17p_txf_metadata_only &&
+                !d12_g17p_txf_metadata_enabled(&device->dev)) {
+               mesa_loge("native Texture.Load submission remains registered-shim-only");
+               payload_valid = false;
+               break;
+            }
             struct drm_asahi_cmd_compute cmd = {
                .cdm_ctrl_stream_base =
                   list->stream_bo->va->addr + seg->stream_start,
