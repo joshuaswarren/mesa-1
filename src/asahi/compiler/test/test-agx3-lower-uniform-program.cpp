@@ -1150,3 +1150,134 @@ TEST_F(AGX3UniformProgram, ThreeHalfVectorLastPaddingStaysInUniformFile)
    EXPECT_EQ(store->src[1].value, 508u);
    EXPECT_EQ(info.push_count, 512u);
 }
+
+static agx_index
+half_vec3_input(agx_builder *b, unsigned first_reg)
+{
+   agx_index value = agx_vec_temp(b->shader, AGX_SIZE_16, 3);
+   agx_index halves[3];
+   agx_builder pre = agx_init_builder(b->shader, agx_before_block(agx_start_block(b->shader)));
+   for (unsigned h = 0; h < 3; ++h) {
+      halves[h] = agx_temp(b->shader, AGX_SIZE_16);
+      agx_preload_to(&pre, halves[h], agx_register(first_reg + 2 * h, AGX_SIZE_16));
+   }
+   agx_instr *collect = agx_collect_to(b, value, 3);
+   for (unsigned h = 0; h < 3; ++h)
+      collect->src[h] = halves[h];
+   return value;
+}
+
+TEST_F(AGX3CProgImports, AdjacentHalfVectorsPairEveryLiveLane)
+{
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_index values[2] = {half_vec3_input(b, 1), half_vec3_input(b, 7)};
+   agx_uniform_store(b, values[0], agx_immediate(24), 7);
+   agx_uniform_store(b, values[1], agx_immediate(27), 7);
+   agx_stop(b);
+   ASSERT_TRUE(agx3_coalesce_uniform_half_stores(b->shader));
+   agx_index halves[6] = {};
+   unsigned splits = 0, stores = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_SPLIT)
+         continue;
+      for (unsigned v = 0; v < 2; ++v) {
+         if (!agx_is_equiv(I->src[0], values[v]))
+            continue;
+         ASSERT_EQ(I->nr_dests, 3u);
+         for (unsigned h = 0; h < 3; ++h)
+            halves[3 * v + h] = I->dest[h];
+         splits++;
+      }
+   }
+   ASSERT_EQ(splits, 2u);
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_UNIFORM_STORE)
+         continue;
+      ASSERT_EQ(I->src[0].size, AGX_SIZE_32);
+      ASSERT_EQ(I->mask, 1u);
+      ASSERT_GE(I->src[1].value, 24u);
+      ASSERT_LE(I->src[1].value, 28u);
+      const unsigned offset = I->src[1].value - 24;
+      ASSERT_EQ(offset & 1, 0u);
+      agx_instr *collect = list_entry(I->link.prev, agx_instr, link);
+      ASSERT_EQ(collect->op, AGX_OPCODE_COLLECT);
+      ASSERT_EQ(collect->nr_srcs, 2u);
+      EXPECT_TRUE(agx_is_equiv(collect->src[0], halves[offset]));
+      EXPECT_TRUE(agx_is_equiv(collect->src[1], halves[offset + 1]));
+      stores++;
+   }
+   EXPECT_EQ(stores, 3u);
+   agx_validate(b->shader, "adjacent half exports");
+   agx_dce(b->shader, false);
+   agx_pressure_schedule(b->shader);
+   agx_ra(b->shader);
+   agx_lower_pseudo(b->shader);
+   agx_opt_register_cache(b->shader);
+   struct util_dynarray binary = UTIL_DYNARRAY_INIT;
+   EXPECT_TRUE(agx3_pack_binary(b->shader, &binary));
+   EXPECT_GT(binary.size, 0u);
+   util_dynarray_fini(&binary);
+}
+
+TEST_F(AGX3UniformProgram, ScalarAndThreeHalfVectorShareExactWord)
+{
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_index low = agx_temp(b->shader, AGX_SIZE_16);
+   agx_preload_to(b, low, agx_register(1, AGX_SIZE_16));
+   agx_index vector = half_vec3_input(b, 3);
+   agx_uniform_store(b, low, agx_immediate(24), 1);
+   agx_uniform_store(b, vector, agx_immediate(25), 7);
+   ASSERT_TRUE(agx3_coalesce_uniform_half_stores(b->shader));
+   unsigned stores = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_UNIFORM_STORE)
+         continue;
+      EXPECT_EQ(I->src[0].size, AGX_SIZE_32);
+      EXPECT_EQ(I->mask, 1u);
+      EXPECT_TRUE(I->src[1].value == 24 || I->src[1].value == 26);
+      if (I->src[1].value == 24) {
+         agx_instr *collect = list_entry(I->link.prev, agx_instr, link);
+         ASSERT_EQ(collect->op, AGX_OPCODE_COLLECT);
+         EXPECT_TRUE(agx_is_equiv(collect->src[0], low));
+      }
+      stores++;
+   }
+   EXPECT_EQ(stores, 2u);
+}
+
+TEST_F(AGX3UniformProgram, ThreeHalfDecompositionPreservesReadBarrier)
+{
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_index values[2] = {half_vec3_input(b, 1), half_vec3_input(b, 7)};
+   agx_uniform_store(b, values[0], agx_immediate(24), 7);
+   agx_mov(b, agx_uniform(26, AGX_SIZE_16));
+   agx_uniform_store(b, values[1], agx_immediate(27), 7);
+   ASSERT_TRUE(agx3_coalesce_uniform_half_stores(b->shader));
+   unsigned half_stores = 0, word_stores = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I->op != AGX_OPCODE_UNIFORM_STORE)
+         continue;
+      if (I->src[0].size == AGX_SIZE_16) {
+         EXPECT_TRUE(I->src[1].value == 26 || I->src[1].value == 27);
+         half_stores++;
+      } else {
+         EXPECT_TRUE(I->src[1].value == 24 || I->src[1].value == 28);
+         word_stores++;
+      }
+   }
+   EXPECT_EQ(half_stores, 2u);
+   EXPECT_EQ(word_stores, 2u);
+}
+
+TEST_F(AGX3UniformProgram, SafePaddedThreeHalfAndFullVectorsStayIntact)
+{
+   b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
+   agx_index value = half_vec3_input(b, 1);
+   agx_instr *store = agx_uniform_store(b, value, agx_immediate(24), 7);
+   agx_instr *pair = agx_uniform_store(b, agx_vec_temp(b->shader, AGX_SIZE_16, 2), agx_immediate(32), 3);
+   agx_instr *quad = agx_uniform_store(b, agx_vec_temp(b->shader, AGX_SIZE_16, 4), agx_immediate(36), 15);
+   EXPECT_FALSE(agx3_coalesce_uniform_half_stores(b->shader));
+   EXPECT_EQ(store->mask, 7u);
+   EXPECT_EQ(pair->mask, 3u);
+   EXPECT_EQ(quad->mask, 15u);
+}

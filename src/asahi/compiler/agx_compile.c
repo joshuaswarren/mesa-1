@@ -7748,7 +7748,48 @@ agx3_coalesce_uniform_half_stores(agx_context *ctx)
        !ctx->is_preamble)
       return false;
 
+   /* Three-half exports may share a 32-bit word with another live export.
+    * Expose their individual halves to the existing ordered coalescer, rather
+    * than padding across a neighbour. Keep an aligned vec3 with an unwritten
+    * fourth half intact for the existing whole-vector padding path. */
+   bool written[512] = {false};
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op != AGX_OPCODE_UNIFORM_STORE || I->nr_srcs != 2 ||
+          I->src[1].type != AGX_INDEX_IMMEDIATE || I->mask > 15)
+         continue;
+      const unsigned base = I->src[1].value;
+      const unsigned stride = agx_size_align_16(I->src[0].size);
+      for (unsigned c = 0; c < 4; ++c) {
+         if (!(I->mask & BITFIELD_BIT(c)) || base >= 512 ||
+             (c + 1) * stride > 512 - base)
+            continue;
+         for (unsigned h = 0; h < stride; ++h)
+            written[base + c * stride + h] = true;
+      }
+   }
+
    bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (I->op != AGX_OPCODE_UNIFORM_STORE || I->nr_srcs != 2 ||
+          I->mask != 7 || I->src[1].type != AGX_INDEX_IMMEDIATE ||
+          I->src[1].abs || I->src[1].neg || I->src[1].memory)
+         continue;
+      const agx_index value = I->src[0];
+      const unsigned base = I->src[1].value;
+      if (value.type != AGX_INDEX_NORMAL || value.size != AGX_SIZE_16 ||
+          agx_channels(value) != 3 || value.memory || value.abs || value.neg ||
+          base > 509 || (!(base & 1) && !written[base + 3]))
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_instr *split = agx_split(&b, 3, value);
+      for (unsigned h = 0; h < 3; ++h) {
+         split->dest[h] = agx_temp(ctx, AGX_SIZE_16);
+         agx_uniform_store(&b, split->dest[h], agx_immediate(base + h), 1);
+      }
+      agx_remove_instruction(I);
+      progress = true;
+   }
    agx_foreach_block(ctx, block) {
       agx_instr *pending[256] = {0};
 
