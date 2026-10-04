@@ -1069,6 +1069,9 @@ struct d12_pipeline_state {
    struct agx_bo *code_bo;
    uint64_t code_va;
    struct agx_shader_info info;
+   /* Native compute code_va is the CODE entry, never the allocation base. */
+   bool g17p_compute_container;
+   uint64_t g17p_rodata_va;
 
    /* VERTEX ATTRIBUTES. Resolved at PSO creation by matching each
     * D3D12_INPUT_ELEMENT_DESC's (SemanticName, SemanticIndex) against the
