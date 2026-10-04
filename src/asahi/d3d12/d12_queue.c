@@ -324,7 +324,26 @@ d12_default_sample_positions(unsigned nr_samples)
    return packed;
 }
 
-static void
+/* Mirror the existing native kernel address checks before any ioctl. This
+ * identifies the exact UAPI field; it does not relax alignment or residency. */
+static const char *
+d12_g17p_render_address_error(const struct drm_asahi_cmd_render *c)
+{
+   if (!c->vdm_ctrl_stream_base || (c->vdm_ctrl_stream_base & 3))
+      return "vdm_ctrl_stream_base";
+   if (!c->isp_scissor_base || (c->isp_scissor_base & 7))
+      return "isp_scissor_base";
+   if (c->isp_dbias_base & 7)
+      return "isp_dbias_base";
+   if (c->isp_oclqry_base & 7)
+      return "isp_oclqry_base";
+   if ((c->sampler_heap == 0) != (c->sampler_count == 0) ||
+       (c->sampler_count && (c->sampler_heap & 7)))
+      return "sampler_heap/count";
+   return NULL;
+}
+
+static bool
 d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                     const struct d12_segment *seg,
                     struct drm_asahi_cmd_render *c)
@@ -510,6 +529,24 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
     * same run as the fault and match, exactly as the tessellation VA map
     * did for the last one.
     */
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      const char *field = d12_g17p_render_address_error(c);
+      if (field) {
+         mesa_loge("G17P render submission metadata refused: field=%s "
+                   "vdm=0x%llx scissor=0x%llx dbias=0x%llx "
+                   "oclqry=0x%llx sampler=0x%llx/%u extent=%ux%u "
+                   "draws=%u empty_tiles=%u", field,
+                   (unsigned long long)c->vdm_ctrl_stream_base,
+                   (unsigned long long)c->isp_scissor_base,
+                   (unsigned long long)c->isp_dbias_base,
+                   (unsigned long long)c->isp_oclqry_base,
+                   (unsigned long long)c->sampler_heap, c->sampler_count,
+                   c->width_px, c->height_px, seg->has_draws,
+                   seg->process_empty_tiles);
+         return false;
+      }
+   }
+
    if (getenv("D3D12AGX_DUMP_RENDER_CMD")) {
       mesa_logi("render cmd: vdm_base=0x%llx (stream_bo 0x%llx..0x%llx, "
                 "seg %zu..%zu, dispatches=%u)",
@@ -529,6 +566,7 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                 (unsigned long long)c->bg.usc, (unsigned long long)c->eot.usc,
                 c->width_px, c->height_px, c->layers, c->samples);
    }
+   return true;
 }
 
 static void
@@ -2424,7 +2462,10 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
             nr_cdm++;
          } else {
             struct drm_asahi_cmd_render cmd;
-            d12_fill_render_cmd(device, list, seg, &cmd);
+            if (!d12_fill_render_cmd(device, list, seg, &cmd)) {
+               payload_valid = false;
+               break;
+            }
             memcpy(payload + payload_size, &cmd, sizeof(cmd));
             payload_size += sizeof(cmd);
             nr_vdm++;
@@ -2432,7 +2473,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
       }
 
       if (!payload_valid) {
-         mesa_loge("ExecuteCommandLists: invalid GPU write tracker; device "
+         mesa_loge("ExecuteCommandLists: invalid GPU submission metadata or write tracker; device "
                    "removed before submission");
          free(payload);
          d12_device_mark_removed(device, DXGI_ERROR_DEVICE_REMOVED);

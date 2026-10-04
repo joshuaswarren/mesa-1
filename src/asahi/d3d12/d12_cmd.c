@@ -46,6 +46,9 @@
 #include "util/format/u_format.h"
 #include "util/u_math.h"
 
+static bool d12_segment_ensure_viewport_arrays(struct d12_cmd_list *list,
+                                                struct d12_segment *seg);
+
 /* A legal ExecuteIndirect count call may retain thousands of software-
  * geometry placeholders until the count is known on the GPU.  Keep one
  * bounded command-list allocation large enough for that worst case; reset
@@ -2960,6 +2963,12 @@ d12_list_begin_render(struct d12_cmd_list *list,
          list->state = D12_LIST_ERROR;
          return NULL;
       }
+      /* The native render UAPI requires a resident, nonzero scissor base
+       * even for PROCESS_EMPTY_TILES clears with no draw. Draws previously
+       * allocated these arrays lazily, leaving clear-only segments at zero.
+       * Use the same owned, zeroed, aligned arrays without consuming indices. */
+      if (!d12_segment_ensure_viewport_arrays(list, seg))
+         return NULL;
       struct d12_agx3_ppp_w_clamp_cull2 initial;
       const struct d12_agx3_ppp_w_clamp_cull2_fields fields = {.cull2_raw = 0x80};
       uint64_t compact;
