@@ -98,8 +98,13 @@ d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
       storage = d12_g17p_vdm_storage_create(&list->device->dev);
       if (!storage)
          goto fail;
-      util_dynarray_append_typed(&list->g17p_vdm_storage,
-                                 struct d12_g17p_vdm_storage *, storage);
+      struct d12_g17p_vdm_storage **slot = util_dynarray_grow(
+         &list->g17p_vdm_storage, struct d12_g17p_vdm_storage *, 1);
+      if (!slot) {
+         d12_g17p_vdm_storage_unref(storage);
+         goto fail;
+      }
+      *slot = storage;
       offset = 0;
    }
    *compact_va = storage->alias - AGX_G17P_VDM_USER_BASE + offset;

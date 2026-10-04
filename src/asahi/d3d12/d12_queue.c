@@ -196,6 +196,7 @@ struct d12_queue_op {
    struct d12_cmd_list *list;
    struct d12_device *submit_device;
    bool bos_initialized;
+   bool capture_failed;
    /*
     * A command list is mutable as soon as ExecuteCommandLists returns: the
     * application may Reset it while this operation is still waiting behind
@@ -882,8 +883,13 @@ d12_queue_op_capture_bo(struct d12_queue_op *op, struct agx_bo *bo)
          return;
    }
 
+   struct agx_bo **slot = util_dynarray_grow(&op->bos, struct agx_bo *, 1);
+   if (!slot) {
+      op->capture_failed = true;
+      return;
+   }
    agx_bo_reference(bo);
-   util_dynarray_append_typed(&op->bos, struct agx_bo *, bo);
+   *slot = bo;
 }
 
 static void
@@ -900,12 +906,16 @@ d12_queue_op_capture_bos(struct d12_queue_op *op,
    d12_queue_op_capture_bo(op, list->sparse_registry_bo);
    util_dynarray_foreach(&list->g17p_vdm_storage,
                          struct d12_g17p_vdm_storage *, storage) {
+      struct d12_g17p_vdm_storage **slot = util_dynarray_grow(
+         &op->g17p_vdm_storage, struct d12_g17p_vdm_storage *, 1);
+      if (!slot) {
+         op->capture_failed = true;
+         return;
+      }
       d12_g17p_vdm_storage_ref(*storage);
-      util_dynarray_append_typed(&op->g17p_vdm_storage,
-                                 struct d12_g17p_vdm_storage *, *storage);
+      *slot = *storage;
       d12_queue_op_capture_bo(op, (*storage)->bo);
    }
-
 
    /* Scratch addresses are packed directly into the DRM command payload. */
    for (unsigned i = 0; i < list->segment_count; i++) {
@@ -2446,6 +2456,14 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
 
       d12_queue_op_capture_bos(op, list);
       d12_queue_op_build_read_set(op, list);
+      if (op->capture_failed) {
+         /* AddRef below has not occurred; partial snapshots own only their
+          * captured BO/alias references, not a command-list reference. */
+         op->list = NULL;
+         d12_queue_op_destroy(op);
+         d12_device_mark_removed(device, E_OUTOFMEMORY);
+         break;
+      }
 
       /* Reset is legal as soon as ExecuteCommandLists returns.  Mark this
        * recording submitted before handing it back to the application, and
