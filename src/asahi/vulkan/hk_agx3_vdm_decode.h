@@ -23,7 +23,7 @@ extern "C" {
 /* Bump whenever the Honeykrisp shader payload below changes.  Vulkan shader
  * binaries carry this version outside the driver-private blob, so stale
  * layouts are rejected before any fields are consumed. */
-#define HK_AGX3_SHADER_BINARY_VERSION 27u
+#define HK_AGX3_SHADER_BINARY_VERSION 28u
 
 /* A G17P vertex program writes at most 128 UVS words: Apple's compiler emits
  * position plus thirty-one float4 user locations. Its fragment linker refuses

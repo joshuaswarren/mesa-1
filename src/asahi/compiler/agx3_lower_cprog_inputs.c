@@ -202,15 +202,31 @@ cprog_canonical_inputs(const struct agx_shader_info *info,
           canonical->storage_bytes == info->agx3_preamble_inputs.storage_bytes;
 }
 
+static unsigned
+cprog_static_spill_limit(mesa_shader_stage stage)
+{
+   switch (stage) {
+   case MESA_SHADER_VERTEX:
+      return AGX3_CPROG_STATIC_SPILL_MAX_B;
+   case MESA_SHADER_FRAGMENT:
+      return AGX3_CPROG_FS_STATIC_SPILL_MAX_B;
+   default:
+      return 0;
+   }
+}
+
 bool
 agx3_cprog_static_spill_info_valid(const struct agx_shader_info *info)
 {
    struct agx3_cprog_inputs canonical;
-   return info && info->stage == MESA_SHADER_VERTEX &&
-          info->agx3_preamble_static_spill_version == AGX3_CPROG_STATIC_SPILL_VERSION &&
+   if (!info || !cprog_static_spill_limit(info->stage))
+      return false;
+   const unsigned version = info->stage == MESA_SHADER_FRAGMENT
+      ? AGX3_CPROG_FS_STATIC_SPILL_VERSION : AGX3_CPROG_STATIC_SPILL_VERSION;
+   return info->agx3_preamble_static_spill_version == version &&
           cprog_canonical_inputs(info, &canonical) &&
           info->preamble_scratch_size > canonical.storage_bytes &&
-          info->preamble_scratch_size <= AGX3_CPROG_STATIC_SPILL_MAX_B &&
+          info->preamble_scratch_size <= cprog_static_spill_limit(info->stage) &&
           !(info->preamble_scratch_size & 3);
 }
 
@@ -219,7 +235,8 @@ agx3_cprog_spill_provenance(const agx_context *ctx)
 {
    struct agx3_cprog_inputs canonical;
    if (!ctx || !ctx->key || !ctx->is_preamble ||
-       ctx->stage != MESA_SHADER_VERTEX || ctx->any_scratch ||
+       !cprog_static_spill_limit(ctx->stage) || !ctx->out ||
+       !ctx->nir || ctx->nir->info.stage != ctx->stage || ctx->any_scratch ||
        ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        !ctx->agx3_cprog_inputs_lowered ||
        !cprog_canonical_inputs(ctx->out, &canonical) ||
@@ -248,13 +265,14 @@ agx3_cprog_certify_static_spill(const agx_context *ctx,
 {
    struct agx3_cprog_inputs canonical;
    if (!imports_only_before_ra || !ctx || !ctx->key || !ctx->is_preamble ||
-       ctx->stage != MESA_SHADER_VERTEX || ctx->any_scratch ||
+       !cprog_static_spill_limit(ctx->stage) || !ctx->out ||
+       !ctx->nir || ctx->nir->info.stage != ctx->stage || ctx->any_scratch ||
        ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
        !ctx->agx3_cprog_inputs_lowered ||
        !cprog_canonical_inputs(ctx->out, &canonical) ||
        ctx->spill_base_B != canonical.storage_bytes ||
        ctx->scratch_size_B <= ctx->spill_base_B ||
-       ctx->scratch_size_B > AGX3_CPROG_STATIC_SPILL_MAX_B ||
+       ctx->scratch_size_B > cprog_static_spill_limit(ctx->stage) ||
        ctx->out->preamble_scratch_size != align(ctx->scratch_size_B, 4))
       return false;
 

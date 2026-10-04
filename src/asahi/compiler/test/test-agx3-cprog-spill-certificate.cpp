@@ -102,7 +102,7 @@ TEST_F(CProgCertificate, NoImportAndMetadataMismatchRejected) {
    info.agx3_preamble_inputs.count=4;info.agx3_preamble_inputs.storage_bytes=48;EXPECT_FALSE(certify());
 }
 TEST_F(CProgCertificate, OtherStageAndEncodingRejected) {
-   import();spill();b->shader->stage=MESA_SHADER_FRAGMENT;EXPECT_FALSE(certify());
+   import();spill();b->shader->stage=MESA_SHADER_COMPUTE;EXPECT_FALSE(certify());
    b->shader->stage=MESA_SHADER_VERTEX;key.dev.encoding=AGX_ISA_ENCODING_AGX2;EXPECT_FALSE(certify());
 }
 TEST_F(CProgCertificate, HiddenTPSAndOtherStorageRejected) {
@@ -192,4 +192,112 @@ TEST_F(CProgCertificate, Extension360WordBoundary) {
 TEST_F(CProgCertificate, Extension360HalfBoundary) {
    import();auto ops=spill(360,358,true);EXPECT_TRUE(certify());
    ops.store->src[1]=agx_immediate(360);EXPECT_FALSE(certify());
+}
+
+class FragmentCProgCertificate : public CProgCertificate {
+protected:
+   FragmentCProgCertificate() {
+      b->shader->stage=info.stage=b->shader->nir->info.stage=MESA_SHADER_FRAGMENT;
+   }
+};
+TEST_F(FragmentCProgCertificate, SeparateStageVersionContract) {
+   info.preamble_scratch_size=192;
+   info.agx3_preamble_static_spill_version=AGX3_CPROG_FS_STATIC_SPILL_VERSION;
+   EXPECT_TRUE(agx3_cprog_static_spill_info_valid(&info));
+   info.agx3_preamble_static_spill_version=AGX3_CPROG_STATIC_SPILL_VERSION;
+   EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.agx3_preamble_static_spill_version=0;
+   EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.agx3_preamble_static_spill_version=3;
+   EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.agx3_preamble_static_spill_version=AGX3_CPROG_FS_STATIC_SPILL_VERSION;
+   info.stage=MESA_SHADER_VERTEX;EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.stage=MESA_SHADER_COMPUTE;EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.stage=MESA_SHADER_GEOMETRY;EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.stage=MESA_SHADER_FRAGMENT;info.preamble_scratch_size=196;
+   EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.preamble_scratch_size=191;EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.preamble_scratch_size=32;EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.preamble_scratch_size=64;EXPECT_TRUE(agx3_cprog_static_spill_info_valid(&info));
+   info.preamble_scratch_size=104;EXPECT_TRUE(agx3_cprog_static_spill_info_valid(&info));
+}
+TEST_F(FragmentCProgCertificate, ProvenanceAnd192WordBoundary) {
+   import();ASSERT_TRUE(agx3_cprog_spill_provenance(b->shader));
+   auto ops=spill(192,188);EXPECT_TRUE(certify());EXPECT_FALSE(certify(false));
+   EXPECT_FALSE(agx3_cprog_spill_provenance(b->shader));
+   ops.load->src[0]=agx_immediate(192);EXPECT_FALSE(certify());
+   ops.load->src[0]=agx_immediate(188);b->shader->scratch_size_B=196;
+   info.preamble_scratch_size=196;EXPECT_FALSE(certify());
+}
+TEST_F(FragmentCProgCertificate, Last192HalfAndRoundedFrame) {
+   import();auto ops=spill(192,190,true);EXPECT_TRUE(certify());
+   ops.store->src[1]=agx_immediate(192);EXPECT_FALSE(certify());
+   ops.store->src[1]=agx_immediate(190);b->shader->scratch_size_B=194;
+   info.preamble_scratch_size=196;EXPECT_FALSE(certify());
+}
+TEST_F(FragmentCProgCertificate, ImportsCannotBeSpillOrExport) {
+   import();auto ops=spill(64,60);EXPECT_TRUE(certify());
+   ops.store->src[1]=agx_immediate(28);EXPECT_FALSE(certify());
+   ops.store->src[1]=agx_immediate(60);ops.load->src[0]=agx_immediate(16);EXPECT_FALSE(certify());
+   ops.load->src[0]=agx_immediate(60);
+   agx_uniform_store(b,agx_register(4,AGX_SIZE_32),agx_immediate(16),1);
+   EXPECT_FALSE(certify());
+}
+TEST_F(FragmentCProgCertificate, DynamicOffsetsAndOtherStorageRejected) {
+   import();auto ops=spill(104,100);EXPECT_TRUE(certify());
+   ops.store->src[1]=agx_register(8,AGX_SIZE_32);EXPECT_FALSE(certify());
+   ops.store->src[1]=agx_immediate(100);
+   const agx_opcode forbidden[]={AGX_OPCODE_ATOMIC,AGX_OPCODE_LOCAL_ATOMIC,
+      AGX_OPCODE_LOCAL_LOAD,AGX_OPCODE_LOCAL_STORE,AGX_OPCODE_STACK_MAP,
+      AGX_OPCODE_STACK_UNMAP,AGX_OPCODE_STACK_ADJUST,AGX_OPCODE_SCS_LOAD_AGX3,
+      AGX_OPCODE_SCS_STORE_AGX3,AGX_OPCODE_SCS_LOAD_UNIFORM_INDEXED_AGX3,
+      AGX_OPCODE_SCS_STORE_UNIFORM_INDEXED_AGX3};
+   for(auto op:forbidden) {
+      auto *i=agx_alloc_instr(b,op,0,0);agx_builder_insert(&b->cursor,i);
+      EXPECT_FALSE(certify())<<op;list_del(&i->link);
+      b->cursor=agx_after_block(agx_start_block(b->shader));
+   }
+}
+TEST_F(FragmentCProgCertificate, ExistingScratchAndStageMismatchRejected) {
+   import();b->shader->nir->info.stage=MESA_SHADER_VERTEX;
+   EXPECT_FALSE(agx3_cprog_spill_provenance(b->shader));
+   b->shader->nir->info.stage=MESA_SHADER_FRAGMENT;b->shader->scratch_size_B=48;
+   EXPECT_FALSE(agx3_cprog_spill_provenance(b->shader));
+   b->shader->scratch_size_B=32;b->shader->any_scratch=true;
+   EXPECT_FALSE(agx3_cprog_spill_provenance(b->shader));
+   b->shader->any_scratch=false;spill(64,60);b->shader->nir->info.stage=MESA_SHADER_VERTEX;
+   EXPECT_FALSE(certify());
+}
+TEST_F(FragmentCProgCertificate, Pack192ByteBoundary) {
+   import();ASSERT_TRUE(agx3_cprog_spill_provenance(b->shader));
+   spill(192,188);agx_uniform_store(b,agx_register(4,AGX_SIZE_32),agx_immediate(64),1);
+   agx_stop(b);ASSERT_TRUE(certify());
+   struct util_dynarray binary=UTIL_DYNARRAY_INIT;
+   ASSERT_TRUE(agx3_pack_binary(b->shader,&binary));ASSERT_TRUE(certify());
+   const uint8_t *code=(const uint8_t *)binary.data;
+   agx3_static_spill_load_desc imports={},reload={};agx3_static_spill_store_desc store={};
+   ASSERT_TRUE(agx3_static_spill_decode_load(AGX_ISA_ENCODING_AGX3B,code,8,&imports));
+   ASSERT_TRUE(agx3_static_spill_decode_store(AGX_ISA_ENCODING_AGX3B,code+8,10,&store));
+   ASSERT_TRUE(agx3_static_spill_decode_load(AGX_ISA_ENCODING_AGX3B,code+18,8,&reload));
+   EXPECT_EQ(imports.tps_half,8u);EXPECT_NE(imports.wait_mask&32u,0u);
+   EXPECT_EQ(store.tps_half,94u);EXPECT_EQ(reload.tps_half,94u);
+   EXPECT_NE(store.wait_mask&(1u<<(imports.slot-1)),0u);
+   EXPECT_NE(reload.wait_mask&(1u<<(store.slot-1)),0u);
+   uint8_t carrier[AGX3_ALU_MAX_LENGTH],length=0;
+   ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B,0,
+      1u<<(reload.slot-1),carrier,&length));
+   ASSERT_GE(binary.size,26u+length);EXPECT_EQ(memcmp(code+26,carrier,length),0);
+   util_dynarray_fini(&binary);
+}
+
+TEST_F(FragmentCProgCertificate, OutputStagePublishedAfterCertification) {
+   /* agx_compile_shader_nir fills info.stage only after function compilation.
+    * Match that real phase: context/NIR identify FS while output is zeroed. */
+   info.stage=MESA_SHADER_VERTEX;
+   import();EXPECT_TRUE(agx3_cprog_spill_provenance(b->shader));
+   spill(192,188);EXPECT_TRUE(certify());
+   info.agx3_preamble_static_spill_version=AGX3_CPROG_FS_STATIC_SPILL_VERSION;
+   EXPECT_FALSE(agx3_cprog_static_spill_info_valid(&info));
+   info.stage=MESA_SHADER_FRAGMENT;
+   EXPECT_TRUE(agx3_cprog_static_spill_info_valid(&info));
 }

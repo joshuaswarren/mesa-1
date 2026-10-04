@@ -9303,7 +9303,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* Packing is complete: the certificate never describes an unencodable IR.
     * No machine-code or scheduling change is made by this analysis. */
    if (agx3_cprog_certify_static_spill(ctx, imports_only_before_ra))
-      out->agx3_preamble_static_spill_version = AGX3_CPROG_STATIC_SPILL_VERSION;
+      out->agx3_preamble_static_spill_version =
+         ctx->stage == MESA_SHADER_FRAGMENT
+            ? AGX3_CPROG_FS_STATIC_SPILL_VERSION
+            : AGX3_CPROG_STATIC_SPILL_VERSION;
 
    unsigned nr_gprs = ctx->max_reg + 1;
 

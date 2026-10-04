@@ -547,6 +547,10 @@ bool agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
  * its last spill word. Hardware qualification is required before publication. */
 #define AGX3_CPROG_STATIC_SPILL_MAX_B 360u
 #define AGX3_CPROG_STATIC_SPILL_VERSION 1u
+/* Fragment TI resources have a separate hardware qualification scope. Keep
+ * the published vertex version/range unchanged and never cross-admit tags. */
+#define AGX3_CPROG_FS_STATIC_SPILL_MAX_B 192u
+#define AGX3_CPROG_FS_STATIC_SPILL_VERSION 2u
 bool agx3_cprog_static_spill_info_valid(const struct agx_shader_info *info);
 
 bool agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
