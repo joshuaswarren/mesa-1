@@ -1878,7 +1878,7 @@ d12_list_dispatch_indirect_patches(
    return true;
 }
 
-/* Native one-layer, one-sample RGBA8/BGRA8 tile traffic. The legacy
+/* Native one-layer, one-sample tiled RGBA8/BGRA8 tile traffic. The legacy
  * builder remains guarded until the renderer wires this producer together
  * with native PPP/VDM lifetime and render-command qualification. */
 uint32_t
@@ -1894,12 +1894,13 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    const enum agx_bg_eot_op op = ops[0];
    const char *failure_stage = "attachment-shape";
    struct agx_bg_eot_shader *shader = NULL;
-   uint64_t stride = 0;
+
    if (dev->chip != AGX_CHIP_G17P || !out_resources || !rt || !rt->bo || seg->ds ||
        rt->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
        rt->layout.sample_count_sa != 1 ||
        seg->layers != 1 || tib->nr_samples != 1 || seg->rt_level[0] != 0 ||
-       rt->layout.tiling != AIL_TILING_LINEAR || rt->layout.levels != 1 ||
+       (rt->layout.tiling != AIL_TILING_GPU &&
+        rt->layout.tiling != AIL_TILING_TWIDDLED) || rt->layout.levels != 1 ||
        (seg->rt_view_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
         seg->rt_view_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM) ||
        (op != AGX_BG_CLEAR && op != AGX_BG_LOAD && op != AGX_EOT_STORE &&
@@ -1909,9 +1910,8 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    for (unsigned i = 1; i < AGX_MAX_RENDER_TARGETS; i++)
       if (seg->rt[i] || ops[i] != AGX_BG_EOT_NONE)
          goto fail;
-   failure_stage = "attachment-stride-address";
-   stride = ail_get_linear_stride_B(&rt->layout, 0);
-   if (stride < 16 || stride > UINT32_MAX || !seg->rt_address[0])
+   failure_stage = "attachment-address";
+   if (!seg->rt_address[0])
       goto fail;
    struct agx_bg_eot_key key = {.tib = *tib};
    key.op[0] = op;
@@ -1948,14 +1948,14 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
       const struct util_format_description *fmt = util_format_description(pf);
       struct AGX_PBE semantic = {AGX_PBE_header};
       semantic.dimension = AGX_TEXTURE_DIMENSION_2D;
-      semantic.layout = AGX_LAYOUT_LINEAR;
+      semantic.layout = agx_translate_layout(rt->layout.tiling);
       semantic.channels = ail_pixel_format[pf].channels;
       semantic.type = ail_pixel_format[pf].type;
       semantic.buffer = seg->rt_address[0];
       semantic.width = rt->layout.width_px;
       semantic.height = rt->layout.height_px;
       semantic.levels = semantic.layers = 1;
-      semantic.stride = stride - 4;
+      semantic.page_aligned_layers = rt->layout.page_aligned_layers;
       semantic.swizzle_r = semantic.swizzle_g = semantic.swizzle_b = semantic.swizzle_a = 0;
       for (unsigned c = 0; c < 4; c++) {
          if (fmt->swizzle[c] == PIPE_SWIZZLE_X) semantic.swizzle_r = c;
@@ -2034,7 +2034,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          const struct util_format_description *fmt = util_format_description(pf);
          struct AGX_TEXTURE texture = {AGX_TEXTURE_header};
          texture.dimension = AGX_TEXTURE_DIMENSION_2D;
-         texture.layout = AGX_LAYOUT_LINEAR;
+         texture.layout = agx_translate_layout(rt->layout.tiling);
          texture.channels = ail_pixel_format[pf].channels;
          texture.type = ail_pixel_format[pf].type;
          texture.swizzle_r = agx_channel_from_pipe(fmt->swizzle[0]);
@@ -2044,7 +2044,8 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          texture.address = d12_sparse_read_address(device, seg->rt_address[0]);
          texture.width = rt->layout.width_px;
          texture.height = rt->layout.height_px;
-         texture.stride = stride - 16;
+         texture.depth = 1;
+         texture.page_aligned_layers = rt->layout.page_aligned_layers;
          failure_stage = "reload-texture-pack";
          uint8_t packed[32];
          if (!device->rodata_bo || !device->rodata_bo->va ||
@@ -2087,13 +2088,13 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    return relative;
 fail:
    mesa_loge("native BG/EOT rejected stage=%s op=%u rt=%u fmt=%u tiling=%u "
-             "levels=%u samples=%u/%u layers=%u stride=%llu address=%llx "
+             "levels=%u samples=%u/%u layers=%u address=%llx "
              "shader=%u main=%u@%u binary=%u gprs=%u pre=%u rodata=%u "
              "scratch=%u staging=%u/%u push=%u txf=%u tile=%u sample_bytes=%u",
              failure_stage, (unsigned)op, rt != NULL,
              (unsigned)seg->rt_view_format[0], rt ? (unsigned)rt->layout.tiling : 0,
              rt ? rt->layout.levels : 0, rt ? rt->layout.sample_count_sa : 0,
-             tib->nr_samples, seg->layers, (unsigned long long)stride,
+             tib->nr_samples, seg->layers,
              (unsigned long long)seg->rt_address[0], shader != NULL,
              shader ? shader->info.main_size : 0, shader ? shader->info.main_offset : 0,
              shader ? shader->info.binary_size : 0, shader ? shader->info.nr_gprs : 0,

@@ -100,6 +100,9 @@ int main(int argc, char **argv)
       .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
       .Width = 256, .Height = 256, .DepthOrArraySize = 1, .MipLevels = 1,
       .Format = DXGI_FORMAT_R8G8B8A8_UNORM, .SampleDesc = {.Count = 1},
+      /* Gen9 native PBE storage is tiled; do not request an unimplemented
+       * linear PBE or reinterpret linear backing with a tiled descriptor. */
+      .Layout = D3D12_TEXTURE_LAYOUT_64KB_UNDEFINED_SWIZZLE,
       .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
    };
    hr = ID3D12Device_CreateCommittedResource(device, &heap, D3D12_HEAP_FLAG_NONE,
