@@ -35,10 +35,10 @@ static bool noop_loaded(void)
    while (fgets(line, sizeof(line), f)) if (strstr(line, "libasahi_noop_drm_shim.so")) found = true;
    fclose(f);return found;
 }
-static bool covered(unsigned x, unsigned y)
+static bool covered(unsigned x, unsigned y, unsigned height)
 {
    /* tri.dxil: clip (1,-1),(-1,-1),(5,1); D3D pixel centres/top-left rule. */
-   const float p[3][2] = {{W,H},{0,H},{3*W,0}};
+   const float p[3][2] = {{W,height},{0,height},{3*W,0}};
    for (unsigned e=0;e<3;e++) {
       unsigned a=e,b=(e+1)%3;float dx=p[b][0]-p[a][0],dy=p[b][1]-p[a][1];
       float edge=dx*((float)y+0.5f-p[a][1])-dy*((float)x+0.5f-p[a][0]);
@@ -51,10 +51,11 @@ int main(int argc, char **argv)
 {
    bool cpu_only = argc==4 && !strcmp(argv[1], "--cpu-roundtrip-only");
    bool texture_copy = argc==4 && !strcmp(argv[1], "--texture-readback");
-   bool pixels = argc==4 && (!strcmp(argv[1], "--pixels") || texture_copy);
+   bool reuse = argc==4 && !strcmp(argv[1], "--viewport-reuse");
+   bool pixels = argc==4 && (!strcmp(argv[1], "--pixels") || texture_copy || reuse);
    const char *enable=getenv("AURORA_D3D12_PHYSICAL_BASELINE");
    if ((!cpu_only && !pixels) || (pixels && (noop_loaded() || !enable || strcmp(enable,"1")))) {
-      fprintf(stderr,"usage: %s --cpu-roundtrip-only|--pixels|--texture-readback tri.dxil solid.dxil (physical pixels requires exact opt-in and no noop shim)\n",argv[0]);return 2;
+      fprintf(stderr,"usage: %s --cpu-roundtrip-only|--pixels|--texture-readback|--viewport-reuse tri.dxil solid.dxil (physical pixels requires exact opt-in and no noop shim)\n",argv[0]);return 2;
    }
    int result=1;const char *stage="shader input";HRESULT hr=E_FAIL;
    size_t vs_size=0,fs_size=0;void *vs=slurp(argv[2],&vs_size),*fs=slurp(argv[3],&fs_size);
@@ -138,11 +139,50 @@ int main(int argc, char **argv)
    unsigned bad=0,tri=0,first_x=0,first_y=0;
    for(unsigned y=0;y<H;y++) for(unsigned x=0;x<W;x++) {
       const uint8_t expected_tri[4]={0x40,0x80,0xbf,0xff},expected_clear[4]={0xff,0,0,0xff};
-      bool in=covered(x,y);tri+=in;
+      bool in=covered(x,y,H);tri+=in;
       if(memcmp(readback+y*PITCH+x*4,in?expected_tri:expected_clear,4)) {if(!bad){first_x=x;first_y=y;}bad++;}
    }
    printf("PIXEL ORACLE total=%u model_triangle=%u mismatches=%u first=%u,%u fence=%llu\n",W*H,tri,bad,first_x,first_y,(unsigned long long)done);
    REQUIRE(!bad && tri>0 && tri<W*H,"every real pixel matches independent CPU geometry/color oracle");
+   if (reuse) {
+      ID3D12Resource_Unmap(rt,0,NULL);mapped=false;
+      CALL(ID3D12CommandAllocator_Reset(alloc),"reset fenced allocator for second graphics render");
+      CALL(ID3D12GraphicsCommandList_Reset(list,alloc,NULL),"reset fenced graphics list");
+      barrier.Transition.StateBefore=D3D12_RESOURCE_STATE_COMMON;
+      barrier.Transition.StateAfter=D3D12_RESOURCE_STATE_RENDER_TARGET;
+      ID3D12GraphicsCommandList_ResourceBarrier(list,1,&barrier);
+      ID3D12GraphicsCommandList_ClearRenderTargetView(list,rtv,clear,0,NULL);
+      ID3D12GraphicsCommandList_OMSetRenderTargets(list,1,&rtv,FALSE,NULL);
+      const D3D12_VIEWPORT half={.Width=W,.Height=H/2,.MaxDepth=1};
+      ID3D12GraphicsCommandList_RSSetViewports(list,1,&half);
+      ID3D12GraphicsCommandList_RSSetScissorRects(list,1,&sc);
+      ID3D12GraphicsCommandList_SetGraphicsRootSignature(list,root);
+      ID3D12GraphicsCommandList_SetPipelineState(list,pso);
+      ID3D12GraphicsCommandList_IASetPrimitiveTopology(list,D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      ID3D12GraphicsCommandList_DrawInstanced(list,3,1,0,0);
+      barrier.Transition.StateBefore=D3D12_RESOURCE_STATE_RENDER_TARGET;
+      barrier.Transition.StateAfter=D3D12_RESOURCE_STATE_COMMON;
+      ID3D12GraphicsCommandList_ResourceBarrier(list,1,&barrier);
+      CALL(ID3D12GraphicsCommandList_Close(list),"Close second graphics render");
+      ID3D12CommandQueue_ExecuteCommandLists(queue,1,lists);
+      CALL(ID3D12Device_GetDeviceRemovedReason(dev),"device after reused graphics submit");
+      CALL(ID3D12CommandQueue_Signal(queue,fence,2),"signal reused graphics list");
+      CALL(ID3D12Fence_SetEventOnCompletion(fence,2,NULL),"exact reused graphics fence2");
+      done=ID3D12Fence_GetCompletedValue(fence);
+      REQUIRE(done!=UINT64_MAX && done>=2,"reused graphics fence2 observed");
+      CALL(ID3D12Device_GetDeviceRemovedReason(dev),"device after reused graphics fence");
+      CALL(ID3D12Resource_Map(rt,0,NULL,NULL),"map opaque second render after fence");mapped=true;
+      memset(readback,0x5a,BYTES);
+      CALL(ID3D12Resource_ReadFromSubresource(rt,readback,PITCH,BYTES,0,NULL),"read actual second render bytes");
+      unsigned second_bad=0,second_tri=0;
+      for(unsigned y=0;y<H;y++) for(unsigned x=0;x<W;x++) {
+         const uint8_t tc[4]={0x40,0x80,0xbf,0xff},cc[4]={0xff,0,0,0xff};
+         bool in=covered(x,y,H/2);second_tri+=in;
+         second_bad+=memcmp(readback+y*PITCH+x*4,in?tc:cc,4)!=0;
+      }
+      printf("REUSED VIEWPORT ORACLE total=%u model_triangle=%u mismatches=%u fence=%llu\n",W*H,second_tri,second_bad,(unsigned long long)done);
+      REQUIRE(!second_bad && second_tri>0 && second_tri<tri,"every reused-list pixel matches independent half-height geometry");
+   }
    if (texture_copy) {
       ID3D12Resource_Unmap(rt,0,NULL);mapped=false;
       /* Independent GPU copy to a legal READBACK buffer with footprint-sized
@@ -204,7 +244,7 @@ int main(int argc, char **argv)
    }
    result=0;
 cleanup:
-   printf("G17P %s: %s stage=%s HRESULT=0x%08x %s\n",cpu_only?"CPU ROUNDTRIP ONLY":texture_copy?"PHYSICAL TEXTURE READBACK":"PHYSICAL BASELINE PIXELS",
+   printf("G17P %s: %s stage=%s HRESULT=0x%08x %s\n",cpu_only?"CPU ROUNDTRIP ONLY":texture_copy?"PHYSICAL TEXTURE READBACK":reuse?"PHYSICAL VIEWPORT REUSE":"PHYSICAL BASELINE PIXELS",
       result?"FAIL":"PASS",stage,(unsigned)hr,cpu_only?"NO_GPU_SUBMISSION":"NOT_FULL_G4_OR_SUITE_PARITY");
    if(copy_map) {const D3D12_RANGE no_writes={0,0};ID3D12Resource_Unmap(copy_buffer,0,&no_writes);}
    if(copy_buffer)ID3D12Resource_Release(copy_buffer);
