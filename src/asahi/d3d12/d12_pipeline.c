@@ -4312,10 +4312,11 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          .no_stop = true,
          .fs.cf_base = prolog_key.cf_base,
       };
-      agx_compile_shader_nir(fb.shader, &prolog_backend_key, &fs_prolog);
+      const bool prolog_compiled =
+         agx_compile_shader_nir(fb.shader, &prolog_backend_key, &fs_prolog);
       ralloc_free(fb.shader);
 
-      if (!fs_prolog.binary || !fs_prolog.info.binary_size) {
+      if (!prolog_compiled || !fs_prolog.binary || !fs_prolog.info.binary_size) {
          free(fs_prolog.binary);
          free(fs_part.binary);
          free(vs_part.binary);
@@ -4411,7 +4412,10 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       nir_builder eb =
          nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
       agx_nir_fs_epilog(&eb, &epilog_key);
-      agx_preprocess_nir(eb.shader);
+      if (device->dev.chip == AGX_CHIP_G17P)
+         agx_preprocess_nir_g17p(eb.shader);
+      else
+         agx_preprocess_nir(eb.shader);
 
       struct agx_shader_key epilog_backend_key = {
          .dev = agx_gather_device_key(&device->dev),
@@ -4419,7 +4423,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          /* The one-sample fast-link footer appends the terminating stop. */
          .no_stop = true,
       };
-      agx_compile_shader_nir(eb.shader, &epilog_backend_key, &fs_epilog);
+      const bool epilog_compiled =
+         agx_compile_shader_nir(eb.shader, &epilog_backend_key, &fs_epilog);
       ralloc_free(eb.shader);
 
       bool any_colour_write = false;
@@ -4431,8 +4436,9 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          !epilog_key.blend.alpha_to_coverage && !fs_epilog_link.write_z &&
          !fs_epilog_link.write_s;
 
-      if ((!fs_epilog.binary || !fs_epilog.info.binary_size) &&
-          !intentionally_empty) {
+      if (!epilog_compiled ||
+          ((!fs_epilog.binary || !fs_epilog.info.binary_size) &&
+           !intentionally_empty)) {
          free(fs_epilog.binary);
          free(fs_part.binary);
          free(vs_part.binary);
@@ -4466,8 +4472,18 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    struct agx_shader_part prolog;
    memset(&prolog, 0, sizeof(prolog));
-   agx_compile_shader_nir(pb.shader, &prolog_backend_key, &prolog);
+   const bool prolog_compiled =
+      agx_compile_shader_nir(pb.shader, &prolog_backend_key, &prolog);
    ralloc_free(pb.shader);
+   if (!prolog_compiled || !prolog.binary || !prolog.info.binary_size) {
+      free(prolog.binary);
+      free(fs_prolog.binary);
+      free(fs_epilog.binary);
+      free(vs_part.binary);
+      free(fs_part.binary);
+      free(pso);
+      return E_INVALIDARG;
+   }
 
    /* Link: this uploads executable memory and bakes the USC/PPP words. */
    bool vs_linked = agx_fast_link(&pso->vs.linked, &device->dev, false,
