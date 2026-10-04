@@ -2,8 +2,8 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * ID3D12Resource for committed buffers: one agx_bo with a writeback (cached,
- * coherent on Apple UMA) CPU mapping. Textures are a later milestone (G3).
+ * ID3D12Resource storage and CPU access. G17P UMA is cached and requires
+ * explicit buffer and opaque texture cache maintenance.
  */
 
 #include "d12_private.h"
@@ -410,6 +410,51 @@ d12_resource_GetDevice(ID3D12Resource *iface, REFIID riid, void **out)
    return ID3D12Device_QueryInterface(&res->device->iface, riid, out);
 }
 
+/* G17P CPU-visible buffers are cached but CacheCoherentUMA is false. Keep
+ * cache operations within the resource's BO window, including placed offsets.
+ * Callers still synchronize GPU access with a fence before a reading Map. */
+static bool
+d12_resource_buffer_cache_range(const struct d12_resource *res,
+                                const D3D12_RANGE *range,
+                                size_t *begin, size_t *size)
+{
+   uint64_t width = res->desc.Width;
+   if (!res->bo || width > SIZE_MAX || res->offset_B > res->bo->size ||
+       width > res->bo->size - res->offset_B)
+      return false;
+
+   uint64_t first = range ? range->Begin : 0;
+   uint64_t last = range ? range->End : width;
+   if (first > width || last > width)
+      return false;
+   *begin = first;
+   *size = first < last ? last - first : 0;
+   if (*size) {
+      /* The platform helper rounds to cache lines. Its maximum granule
+       * must remain inside the owned BO, even for an unaligned range. */
+      size_t granule = util_cache_granularity();
+      if (!granule || (granule & (granule - 1)))
+         return false;
+      uint64_t final_line = (res->offset_B + last - 1) &
+                            ~((uint64_t)granule - 1);
+      if (final_line > res->bo->size ||
+          granule > res->bo->size - final_line)
+         return false;
+   }
+   return true;
+}
+
+static bool
+d12_resource_needs_buffer_cache_ops(const struct d12_resource *res)
+{
+#ifndef _WIN32
+   return res->device->dev.chip == AGX_CHIP_G17P &&
+          res->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+#else
+   return false;
+#endif
+}
+
 static HRESULT STDMETHODCALLTYPE
 d12_resource_Map(ID3D12Resource *iface, UINT subresource,
                  const D3D12_RANGE *read_range, void **data)
@@ -436,7 +481,8 @@ d12_resource_Map(ID3D12Resource *iface, UINT subresource,
         res->desc.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN))
       return E_INVALIDARG;
 
-   /* Persistent coherent mapping; ranges are an optimization hint only.
+   /* Persistent mapping; a noncoherent G17P buffer reads through explicit
+    * cache maintenance of the caller's read range.
     * offset_B is nonzero for a PLACED resource, which is a window into a
     * heap -- mapping the BO base would hand back the start of the heap.
     *
@@ -449,6 +495,17 @@ d12_resource_Map(ID3D12Resource *iface, UINT subresource,
    if (!mapping)
       return E_OUTOFMEMORY;
 
+   if (d12_resource_needs_buffer_cache_ops(res)) {
+      size_t begin, size;
+      if (!util_has_cache_ops())
+         return E_FAIL;
+      if (!d12_resource_buffer_cache_range(res, read_range, &begin, &size))
+         return E_INVALIDARG;
+      if (size)
+         util_flush_inval_range((uint8_t *)mapping + res->offset_B + begin,
+                               size);
+   }
+
    if (data)
       *data = (uint8_t *)mapping + res->offset_B;
    return S_OK;
@@ -458,7 +515,20 @@ static void STDMETHODCALLTYPE
 d12_resource_Unmap(ID3D12Resource *iface, UINT subresource,
                    const D3D12_RANGE *written_range)
 {
-   /* Coherent UMA: nothing to flush. */
+   struct d12_resource *res = d12_resource_from_iface(iface);
+   if (subresource || res->reserved ||
+       res->heap_props.Type == D3D12_HEAP_TYPE_DEFAULT ||
+       res->heap_props.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ||
+       !d12_resource_needs_buffer_cache_ops(res) || !util_has_cache_ops())
+      return;
+
+   size_t begin, size;
+   if (!d12_resource_buffer_cache_range(res, written_range, &begin, &size) ||
+       !size)
+      return;
+   void *mapping = agx_bo_map(res->bo);
+   if (mapping)
+      util_flush_range((uint8_t *)mapping + res->offset_B + begin, size);
 }
 
 static D12_AGGREGATE_RETURN(D3D12_RESOURCE_DESC) STDMETHODCALLTYPE
