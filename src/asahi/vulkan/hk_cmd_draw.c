@@ -590,6 +590,24 @@ hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
     * and validates everything it consumes, so a refusal seen here (e.g. a
     * sample-shaded fragment program against the not-yet-applied sample
     * count) must not fail the command buffer. */
+
+   /* A push descriptor set is complete once it is pushed; only its upload,
+    * and with it the set address in the root, waits for the next draw.
+    * Upload it before preparing, so the root and every launch program whose
+    * UNIFORM_DMA span names the set (hk_g17p_dma_set_base()) are built for
+    * the address the draw will use. A set pushed before vkCmdBindPipeline
+    * otherwise left the prepared fragment program reading the zero page:
+    * the draw-time flush rewrites the same prepared root and so moves no
+    * identity the bind tail is matched on. This upload is not speculative,
+    * so it runs outside the refusal-forgiving window below. */
+   struct hk_descriptor_state *gfx_desc = &cmd->state.gfx.descriptors;
+   if (gfx_desc->push_dirty &&
+       hk_cmd_buffer_device(cmd)->dev.chip == AGX_CHIP_G17P &&
+       cmd->current_cs.gfx && cmd->state.gfx.shaders[MESA_SHADER_VERTEX] &&
+       cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT] &&
+       !vk_command_buffer_has_error(&cmd->vk))
+      hk_cmd_buffer_flush_push_descriptors(cmd, gfx_desc);
+
    const VkResult prior_result = cmd->vk.record_result;
    cmd->state.gfx.g17p_bind_prepare = true;
    hk_cmd_prepare_bound_graphics_impl(cmd);
@@ -7609,6 +7627,8 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       prepared->descriptor_generation = gfx->descriptors.generation;
       prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
       prepared->root = gfx->root;
+      prepared->fragment_shader = fs;
+      prepared->fragment_dma_set_base = hk_g17p_dma_set_base(cmd, fs);
       prepared->valid = true;
       if (dev->g17p_diagnostics.launch_trace) {
          const struct agx_vdm_hal200_bind_pair *pairs = memo_uploaded.pairs;
@@ -8156,6 +8176,8 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    prepared->descriptor_generation = gfx->descriptors.generation;
    prepared->vertex_buffer_generation = gfx->root_vertex_buffer_generation;
    prepared->root = gfx->root;
+   prepared->fragment_shader = fs;
+   prepared->fragment_dma_set_base = hk_g17p_dma_set_base(cmd, fs);
    prepared->render_color0 = render->color_att_count == 1
       ? render->color_att[0].iview : NULL;
    prepared->render_depth = render->depth_att.iview;
@@ -8265,11 +8287,18 @@ hk_g17p_prepared_bind_tail_matches(
 {
    const struct hk_graphics_state *gfx = &cmd->state.gfx;
 
+   /* The tail launches a fragment program whose UNIFORM_DMA span, when it is
+    * set-sourced, names the set address the root held when the program was
+    * built (hk_g17p_dma_set_base()). A push descriptor set gets its address
+    * when it is flushed, which moves that address without a new descriptor
+    * generation or root identity. */
    return prepared->valid &&
           prepared->descriptor_generation == gfx->descriptors.generation &&
           prepared->vertex_buffer_generation ==
              gfx->vertex_buffer_generation &&
           prepared->root == gfx->root &&
+          prepared->fragment_dma_set_base ==
+             hk_g17p_dma_set_base(cmd, prepared->fragment_shader) &&
           hk_g17p_bind_tail_state_matches(cmd, prepared);
 }
 

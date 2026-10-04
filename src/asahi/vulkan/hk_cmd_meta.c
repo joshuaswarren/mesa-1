@@ -101,6 +101,7 @@ hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
               VkPipelineBindPoint bind_point)
 {
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
+   save->in_meta = cmd->in_meta;
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       save->dynamic = cmd->vk.dynamic_graphics_state;
@@ -220,7 +221,7 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
    }
 
    memcpy(desc->root.push, save->push, sizeof(save->push));
-   cmd->in_meta = false;
+   cmd->in_meta = save->in_meta;
 }
 
 void

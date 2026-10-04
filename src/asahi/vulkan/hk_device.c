@@ -784,9 +784,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
    dev->dev.fd = open(path, O_RDWR | O_CLOEXEC);
    if (dev->dev.fd < 0) {
-      drmFreeDevice(&drm_device);
       result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                          "failed to open device %s", path);
+      drmFreeDevice(&drm_device);
       goto fail_init;
    }
 
@@ -1016,6 +1016,8 @@ fail_samplers:
 fail_dev:
    hk_finish_vm_status_mirror(dev);
    agx_close_device(&dev->dev);
+   /* agx_close_device owns the DRM fd after agx_open_device succeeds. */
+   goto fail_init;
 fail_fd:
    close(dev->dev.fd);
 fail_init:

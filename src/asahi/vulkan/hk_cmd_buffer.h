@@ -152,6 +152,10 @@ struct hk_g17p_prepared_bind_tail {
    uint64_t descriptor_generation;
    uint64_t vertex_buffer_generation;
    uint64_t root;
+   /* The fragment shader variant the tail launches and the uniform-DMA set
+    * base its program was built with (hk_g17p_dma_set_base()). */
+   const struct hk_shader *fragment_shader;
+   uint64_t fragment_dma_set_base;
    struct hk_image_view *render_color0;
    struct hk_image_view *render_depth;
    struct hk_image_view *render_stencil;
@@ -1958,6 +1962,8 @@ struct hk_meta_save {
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
    struct hk_addr_range vb0;
    struct hk_descriptor_set *desc0;
+   /* Nested meta must retain the outer query/conditional-rendering scope. */
+   bool in_meta;
    bool has_push_desc0;
    bool push_active0;
    enum agx_visibility_mode occlusion;

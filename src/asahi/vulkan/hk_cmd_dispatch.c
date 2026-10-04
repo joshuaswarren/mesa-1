@@ -2793,15 +2793,20 @@ dispatch_grid(struct hk_cmd_buffer *cmd, struct agx_grid grid, bool in_threads)
       agx_workgroup(s->b.info.workgroup_size[0], s->b.info.workgroup_size[1],
                     s->b.info.workgroup_size[2]);
 
-   uint64_t stat = hk_pipeline_stat_addr(
-      cmd, VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT);
+   /* Internal compute work must not contribute to the application's active
+    * pipeline query. This also honours hk_pipeline_stat_addr's !in_meta
+    * contract in debug builds; graphics meta pauses its own counters. */
+   if (!cmd->in_meta) {
+      uint64_t stat = hk_pipeline_stat_addr(
+         cmd, VK_QUERY_PIPELINE_STATISTIC_COMPUTE_SHADER_INVOCATIONS_BIT);
 
-   if (hk_stat_enabled(stat)) {
-      perf_debug(cmd, "CS invocation statistic");
-      uint64_t grid = cmd->state.cs.descriptors.root.cs.group_count_addr;
+      if (hk_stat_enabled(stat)) {
+         perf_debug(cmd, "CS invocation statistic");
+         uint64_t grid = cmd->state.cs.descriptors.root.cs.group_count_addr;
 
-      libagx_increment_cs_invocations(cmd, agx_1d(1), AGX_BARRIER_ALL, grid,
-                                      stat, agx_workgroup_threads(local_size));
+         libagx_increment_cs_invocations(cmd, agx_1d(1), AGX_BARRIER_ALL, grid,
+                                         stat, agx_workgroup_threads(local_size));
+      }
    }
 
    if (!agx_is_indirect(grid) && !in_threads) {
