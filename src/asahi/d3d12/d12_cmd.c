@@ -8591,7 +8591,8 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
        pso->raster.depth_bias || pso->raster.slope_scaled_depth_bias ||
        (seg->ds && (!d12_g17p_depth_metadata_enabled(&list->device->dev) ||
                     !d12_g17p_depth_segment_supported(seg) ||
-                    pso->ds.stencil_test)) ||
+                    pso->ds.stencil_test ||
+                    pso->ds.dsv_format != DXGI_FORMAT_D32_FLOAT)) ||
        seg->tib.nr_samples != 1 || list->viewport_count != 1 ||
        list->scissor_count != 1 || list->topology != MESA_PRIM_TRIANGLES ||
        pso->fs.info.writes_sample_mask || pso->fs.info.reads_tib ||
