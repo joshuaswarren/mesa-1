@@ -6246,9 +6246,9 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
       blake3_hash code_hash, table_hash, sampler_hash;
       char code_hex[BLAKE3_HEX_LEN], table_hex[BLAKE3_HEX_LEN];
       char sampler_hex[BLAKE3_HEX_LEN];
-      _mesa_blake3_compute(code_cpu + pso->code_va - pso->code_bo->va->addr,
+      _mesa_blake3_compute(code_cpu + (pso->code_va - pso->code_bo->va->addr),
                            info->main_size, code_hash);
-      _mesa_blake3_compute(stream_cpu + texture_table - list->stream_bo->va->addr,
+      _mesa_blake3_compute(stream_cpu + (texture_table - list->stream_bo->va->addr),
                            cache->texture_table_size_B, table_hash);
       _mesa_blake3_compute(sampler_cpu, 32, sampler_hash);
       _mesa_blake3_format(code_hex, code_hash);
