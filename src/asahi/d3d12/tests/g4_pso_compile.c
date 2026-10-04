@@ -109,6 +109,13 @@ int main(int argc, char **argv)
       if (!validate || strcmp(validate, "1") || !expected || strcmp(expected, "1")) {
          hr = E_FAIL; goto done;
       }
+      if (depth_metadata) {
+         const char *context = getenv("ASAHI_SHIM_G17P_ENFORCE_CONTEXT_VIEWS");
+         const char *expected_context = getenv("ASAHI_SHIM_G17P_EXPECT_CONTEXT_VIEWS");
+         if (!context || strcmp(context, "1") || !expected_context || strcmp(expected_context, "1")) {
+            hr = E_FAIL; goto done;
+         }
+      }
    }
    const D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
    const D3D12_RESOURCE_DESC resource = {
