@@ -8974,6 +8974,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    agx_context *ctx = rzalloc(NULL, agx_context);
    ctx->nir = nir;
    ctx->is_preamble = impl->function->is_preamble;
+   if (ctx->is_preamble)
+      out->agx3_preamble_static_spill_version = 0;
    ctx->out = out;
    ctx->key = key;
    ctx->stage = nir->info.stage;
@@ -9150,6 +9152,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       return false;
    }
 
+   /* Record provenance before RA can create stack instructions. */
+   const bool imports_only_before_ra = agx3_cprog_spill_provenance(ctx);
    AGX_PASS(ctx, agx_ra);
 
    /* Apple's G17P compiler publishes a 16-byte scratch footprint for compute,
@@ -9295,6 +9299,11 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
          return false;
       }
    }
+
+   /* Packing is complete: the certificate never describes an unencodable IR.
+    * No machine-code or scheduling change is made by this analysis. */
+   if (agx3_cprog_certify_static_spill(ctx, imports_only_before_ra))
+      out->agx3_preamble_static_spill_version = AGX3_CPROG_STATIC_SPILL_VERSION;
 
    unsigned nr_gprs = ctx->max_reg + 1;
 

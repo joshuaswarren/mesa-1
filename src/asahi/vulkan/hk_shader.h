@@ -625,8 +625,9 @@ hk_g17p_native_cprog_qualified(const struct agx_shader_info *info)
    return info->has_preamble && info->preamble_size &&
           info->agx3_preamble_staging_known && info->nr_preamble_gprs &&
           info->nr_preamble_gprs <= 256 &&
-          info->preamble_scratch_size ==
-             info->agx3_preamble_inputs.storage_bytes &&
+          (info->preamble_scratch_size ==
+              info->agx3_preamble_inputs.storage_bytes ||
+           agx3_cprog_static_spill_info_valid(info)) &&
           (!!info->agx3_preamble_inputs.count ==
            info->agx3_preamble_tps_inputs);
 }
