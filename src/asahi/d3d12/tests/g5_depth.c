@@ -282,8 +282,10 @@ make_pso(ID3D12Device *dev, ID3D12RootSignature *root, const void *vs, size_t vs
    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
    ID3D12PipelineState *pso = NULL;
    if (S_OK != (ID3D12Device_CreateGraphicsPipelineState(
-          dev, &pd, &IID_ID3D12PipelineState, (void **)&pso)))
+          dev, &pd, &IID_ID3D12PipelineState, (void **)&pso))) {
+      if (pso) ID3D12PipelineState_Release(pso);
       return NULL;
+   }
    return pso;
 }
 
@@ -314,8 +316,10 @@ make_cull_pso(ID3D12Device *dev, ID3D12RootSignature *root, const void *vs, size
    pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
    ID3D12PipelineState *pso = NULL;
    if (S_OK != (ID3D12Device_CreateGraphicsPipelineState(
-          dev, &pd, &IID_ID3D12PipelineState, (void **)&pso)))
+          dev, &pd, &IID_ID3D12PipelineState, (void **)&pso))) {
+      if (pso) ID3D12PipelineState_Release(pso);
       return NULL;
+   }
    return pso;
 }
 
