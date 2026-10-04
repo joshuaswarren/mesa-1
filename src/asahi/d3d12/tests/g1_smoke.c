@@ -83,6 +83,8 @@ main(void)
    ID3D12CommandQueue *queue = NULL;
    hr = ID3D12Device_CreateCommandQueue(dev, &qdesc, &IID_ID3D12CommandQueue,
                                         (void **)&queue);
+   printf("       CreateCommandQueue HRESULT=0x%08" PRIx32 " object=%s\n",
+          (uint32_t)hr, queue ? "yes" : "no");
    CHECK(hr == S_OK && queue, "CreateCommandQueue(DIRECT)");
 
    ID3D12Fence *fence = NULL;
@@ -221,7 +223,11 @@ main(void)
       ID3D12Heap *heap = NULL;
       D3D12_HEAP_DESC hd = {.SizeInBytes = 4096};
       hr = ID3D12Device_CreateHeap(dev, &hd, &IID_ID3D12Heap, (void **)&heap);
+      printf("       CreateHeap HRESULT=0x%08" PRIx32 " object=%s\n",
+             (uint32_t)hr, heap ? "yes" : "no");
       CHECK(hr == E_NOTIMPL, "unimplemented CreateHeap returns E_NOTIMPL");
+      if (heap)
+         ID3D12Heap_Release(heap);
 
       /* A struct-returning unimplemented method must also be safe: the
        * generic-cast approach would corrupt the return here.
