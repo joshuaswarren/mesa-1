@@ -15,6 +15,7 @@
 
 #include "agx_linker.h"
 #include "asahi/lib/agx3_code_container_core.h"
+#include "asahi/lib/agx_vdm_state_update_core.h"
 #include "asahi/lib/agx_ioto_program_core.h"
 
 #include "agx_compile.h"
@@ -4950,6 +4951,27 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    }
 
    agx_assign_uvs(&pso->varyings, &pso->uvs, 0, 0);
+   if (device->dev.chip == AGX_CHIP_G17P && !pso->has_gs && !pso->has_tess &&
+       !pso->has_mesh && pso->vs.g17p_root_only && !pso->vs.info.has_preamble) {
+      const struct agx_g17p_vertex_compile_info compiler_info = {
+         .hardware_vertex = pso->vs.info.stage == MESA_SHADER_VERTEX,
+         .has_preamble = pso->vs.info.has_preamble,
+         .nr_preamble_gprs = pso->vs.info.nr_preamble_gprs,
+         .preamble_scratch_size = pso->vs.info.preamble_scratch_size,
+         .uvs_written = pso->uvs.written,
+         .position_off = pso->uvs.group_offs[UVS_POSITION],
+         .varyings_off = pso->uvs.group_offs[UVS_VARYINGS],
+         .psiz_off = pso->uvs.group_offs[UVS_PSIZ],
+         .layer_viewport_off = pso->uvs.group_offs[UVS_LAYER_VIEWPORT],
+         .clip_off = pso->uvs.group_offs[UVS_CLIP_DIST],
+         .uvs_size = pso->uvs.size,
+         .user_size = pso->uvs.user_size,
+      };
+      if (!d12_agx3_g17p_vertex_program_info(device->dev.chip, &compiler_info,
+                                             &pso->vs.agx3_vdm_state_update))
+         mesa_loge("native graphics final UVS state producer refused layout");
+   }
+
 
    pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
    pso->refcount = 1;

@@ -186,3 +186,33 @@ d12_agx3_encode_vdm_state_update_draw(
    out->length = shared.length;
    return true;
 }
+
+bool
+d12_agx3_g17p_vertex_program_info(
+   enum agx_chip chip, const struct agx_g17p_vertex_compile_info *compiler_info,
+   struct d12_agx3_vdm_state_update_program_info *program)
+{
+   if (program)
+      memset(program, 0, sizeof(*program));
+   struct agx_vdm_state_update_program_info shared;
+   if (!program || !agx_g17p_vertex_program_info(chip, compiler_info, &shared))
+      return false;
+   program->source_layout =
+      D12_AGX3_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT;
+   const struct agx_vdm_state_update_template_info *t = &shared.template_info;
+   program->template_info = (struct d12_agx3_vdm_state_update_template_info){
+      .pipeline = t->pipeline,
+      .raw_state_load_count_12 = t->raw_state_load_count_12,
+      .raw_state_load_count_18 = t->raw_state_load_count_18,
+      .raw_vs_output_count_0 = t->raw_vs_output_count_0,
+      .raw_vs_output_count_2 = t->raw_vs_output_count_2,
+      .raw_vs_output_count_1_extra = t->raw_vs_output_count_1_extra,
+      .raw_vs_output_selector = t->raw_vs_output_selector,
+      .raw_vs_output_flag_6 = t->raw_vs_output_flag_6,
+      .pre_hal300_flag_group_nonzero = t->pre_hal300_flag_group_nonzero,
+      .pre_hal300_flag_bit_4 = t->pre_hal300_flag_bit_4,
+      .raw_active_context_selector = t->raw_active_context_selector,
+      .variant = (enum d12_agx3_vdm_state_update_template_variant)t->variant,
+   };
+   return true;
+}

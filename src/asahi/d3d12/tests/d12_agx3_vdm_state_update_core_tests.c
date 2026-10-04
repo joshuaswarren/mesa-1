@@ -486,12 +486,78 @@ check_native_draw_template_bridge(void)
    return 0;
 }
 
+static int
+check_final_vertex_uvs_producer(void)
+{
+   struct agx_g17p_vertex_compile_info info = {
+      .hardware_vertex = true,
+      .position_off = 0, .varyings_off = 4,
+      .psiz_off = 4, .layer_viewport_off = 4, .clip_off = 4,
+      .uvs_size = 4,
+   };
+   struct d12_agx3_vdm_state_update_program_info d12;
+   struct agx_vdm_state_update_program_info shared;
+   CHECK(d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &info, &d12));
+   CHECK(agx_g17p_vertex_program_info(AGX_CHIP_G17P, &info, &shared));
+   CHECK(d12.source_layout ==
+         D12_AGX3_VDM_STATE_UPDATE_SOURCE_LAYOUT_AGX3_VERTEX_PROGRAM_VARIANT);
+   CHECK(d12.template_info.raw_vs_output_count_0 == 4);
+   CHECK(d12.template_info.raw_state_load_count_12 == 0);
+   CHECK(d12.template_info.raw_state_load_count_18 == 0);
+   CHECK(d12.template_info.raw_active_context_selector == UINT32_MAX);
+   CHECK(d12.template_info.raw_vs_output_count_0 ==
+         shared.template_info.raw_vs_output_count_0);
+
+   /* The default D3D vertex path appends a one-word point size. */
+   info.layer_viewport_off = info.clip_off = info.uvs_size = 5;
+   CHECK(d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &info, &d12));
+   CHECK(d12.template_info.raw_vs_output_count_0 == 5);
+
+   /* Each corrupted final-layout axis must keep the caller unqualified. */
+   const struct agx_g17p_vertex_compile_info good = info;
+   for (unsigned bad = 0; bad < 9; ++bad) {
+      info = good;
+      switch (bad) {
+      case 0: info.hardware_vertex = false; break;
+      case 1: info.position_off = 1; break;
+      case 2: info.varyings_off = 3; break;
+      case 3: info.psiz_off = 6; break;
+      case 4: info.layer_viewport_off = 7; break;
+      case 5: info.clip_off = 8; break;
+      case 6: info.uvs_size = 4; break;
+      case 7: info.has_preamble = true; break;
+      case 8: info.nr_preamble_gprs = 1; break;
+      }
+      memset(&d12, 0xa5, sizeof(d12));
+      CHECK(!d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &info, &d12));
+      CHECK(d12.source_layout == D12_AGX3_VDM_STATE_UPDATE_SOURCE_LAYOUT_UNSPECIFIED);
+   }
+   info = good;
+   CHECK(!d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17S, &info, &d12));
+   CHECK(!d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, NULL, &d12));
+   CHECK(!d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &info, NULL));
+
+   /* Apple's compiler bounds all-f32 outputs at position + 31 float4s. */
+   info = (struct agx_g17p_vertex_compile_info){
+      .hardware_vertex = true, .varyings_off = 4,
+      .psiz_off = 128, .layer_viewport_off = 128, .clip_off = 128,
+      .uvs_size = 128, .user_size = 124,
+   };
+   CHECK(d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &info, &d12));
+   CHECK(d12.template_info.raw_vs_output_count_0 == 128);
+   info.user_size = 125;
+   info.psiz_off = info.layer_viewport_off = info.clip_off = info.uvs_size = 129;
+   CHECK(!d12_agx3_g17p_vertex_program_info(AGX_CHIP_G17P, &info, &d12));
+   return 0;
+}
+
 int
 main(void)
 {
    if (check_targets_and_shared_equality() ||
        check_domains_and_corruptions() || check_template_bridge() ||
-       check_native_draw_template_bridge() || check_rejections())
+       check_native_draw_template_bridge() || check_rejections() ||
+       check_final_vertex_uvs_producer())
       return 1;
 
    printf("d12_agx3_vdm_state_update_core: %u checks passed\n", checks);
