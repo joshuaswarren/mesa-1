@@ -1423,10 +1423,11 @@ drm_shim_bo_lookup(struct shim_fd *shim_fd, int handle)
    struct hash_entry *entry =
       _mesa_hash_table_search(shim_fd->handles, (void *)(uintptr_t)handle);
    struct shim_bo *bo = entry ? entry->data : NULL;
-   mtx_unlock(&shim_fd->handle_lock);
 
+   /* Keep the handle's reference alive until this lookup owns its own. */
    if (bo)
       p_atomic_inc(&bo->refcount);
+   mtx_unlock(&shim_fd->handle_lock);
 
    return bo;
 }

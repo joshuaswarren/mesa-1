@@ -15,10 +15,15 @@
 
 #include "asahi_g17p_stream_validator.h"
 #include "util/macros.h"
+#include "util/simple_mtx.h"
 #include "drm-shim/drm_shim.h"
 #include "drm-uapi/asahi_drm.h"
 
 bool drm_shim_driver_prefers_first_render_node = true;
+
+/* Bind/unbind mutate the shared mapping array and own its BO references.
+ * Submission validation retains pointers into that array while walking it. */
+static simple_mtx_t shim_mapping_lock = SIMPLE_MTX_INITIALIZER;
 
 /*
  * T8103 / M1, the AGX2 identity Honeykrisp is already conformant on.  This is
@@ -1522,7 +1527,17 @@ asahi_ioctl_gem_create(int fd, unsigned long request, void *arg)
    struct drm_asahi_gem_create *create = arg;
    struct asahi_bo *bo = calloc(1, sizeof(*bo));
 
-   drm_shim_bo_init(&bo->base, create->size);
+   if (!bo) {
+      errno = ENOMEM;
+      return -1;
+   }
+
+   int ret = drm_shim_bo_init(&bo->base, create->size);
+   if (ret) {
+      free(bo);
+      errno = -ret;
+      return -1;
+   }
 
    assert(UINT64_MAX - asahi.next_offset > create->size);
    bo->offset = asahi.next_offset;
@@ -1704,7 +1719,7 @@ static struct {
 } shim_vm;
 
 static int
-asahi_ioctl_vm_create(int fd, unsigned long request, void *arg)
+asahi_ioctl_vm_create_unlocked(int fd, unsigned long request, void *arg)
 {
    struct drm_asahi_vm_create *create = arg;
 
@@ -1716,7 +1731,7 @@ asahi_ioctl_vm_create(int fd, unsigned long request, void *arg)
 }
 
 static int
-asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
+asahi_ioctl_vm_bind_unlocked(int fd, unsigned long request, void *arg)
 {
    const struct drm_asahi_vm_bind *bind = arg;
    const struct drm_asahi_params_global *params = shim_params();
@@ -1967,7 +1982,7 @@ g17p_stream_reject(const char *what)
 }
 
 static int
-asahi_ioctl_submit(int fd, unsigned long request, void *arg)
+asahi_ioctl_submit_unlocked(int fd, unsigned long request, void *arg)
 {
    const struct drm_asahi_submit *submit = arg;
    submit_calls++;
@@ -2173,6 +2188,33 @@ asahi_ioctl_submit(int fd, unsigned long request, void *arg)
    }
 
    return cursor == submit->cmdbuf_size ? 0 : -EINVAL;
+}
+
+static int
+asahi_ioctl_vm_bind(int fd, unsigned long request, void *arg)
+{
+   simple_mtx_lock(&shim_mapping_lock);
+   int ret = asahi_ioctl_vm_bind_unlocked(fd, request, arg);
+   simple_mtx_unlock(&shim_mapping_lock);
+   return ret;
+}
+
+static int
+asahi_ioctl_vm_create(int fd, unsigned long request, void *arg)
+{
+   simple_mtx_lock(&shim_mapping_lock);
+   int ret = asahi_ioctl_vm_create_unlocked(fd, request, arg);
+   simple_mtx_unlock(&shim_mapping_lock);
+   return ret;
+}
+
+static int
+asahi_ioctl_submit(int fd, unsigned long request, void *arg)
+{
+   simple_mtx_lock(&shim_mapping_lock);
+   int ret = asahi_ioctl_submit_unlocked(fd, request, arg);
+   simple_mtx_unlock(&shim_mapping_lock);
+   return ret;
 }
 
 static ioctl_fn_t driver_ioctls[] = {
