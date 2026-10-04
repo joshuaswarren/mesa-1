@@ -171,18 +171,18 @@ submit_and_wait(ID3D12Device *dev, ID3D12GraphicsCommandList *list,
                 ID3D12CommandQueue *queue, ID3D12Fence *fence, UINT64 value)
 {
    HRESULT hr = ID3D12GraphicsCommandList_Close(list);
-   if (FAILED(hr))
+   if (hr != S_OK)
       return hr;
    ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
    ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
    hr = ID3D12Device_GetDeviceRemovedReason(dev);
-   if (FAILED(hr))
+   if (hr != S_OK)
       return hr;
    hr = ID3D12CommandQueue_Signal(queue, fence, value);
-   if (FAILED(hr))
+   if (hr != S_OK)
       return hr;
    hr = ID3D12Fence_SetEventOnCompletion(fence, value, NULL);
-   if (FAILED(hr))
+   if (hr != S_OK)
       return hr;
    UINT64 completed = ID3D12Fence_GetCompletedValue(fence);
    printf("       fence requested=%llu completed=%llu\n",
@@ -190,6 +190,39 @@ submit_and_wait(ID3D12Device *dev, ID3D12GraphicsCommandList *list,
    if (completed == UINT64_MAX || completed < value)
       return E_FAIL;
    return ID3D12Device_GetDeviceRemovedReason(dev);
+}
+
+/* Opaque CPU-visible UMA textures expose no linear pointer. Transfer real
+ * bytes through the D3D12 subresource API only while the texture is COMMON,
+ * and after the caller has observed its render fence. */
+static HRESULT
+cpu_texture_transfer(ID3D12Resource *resource, void *bytes,
+                     UINT row_pitch, UINT size, bool write)
+{
+   HRESULT hr = ID3D12Resource_Map(resource, 0, NULL, NULL);
+   if (hr != S_OK)
+      return hr;
+   if (write)
+      hr = ID3D12Resource_WriteToSubresource(resource, 0, NULL, bytes,
+                                            row_pitch, size);
+   else
+      hr = ID3D12Resource_ReadFromSubresource(resource, bytes, row_pitch,
+                                              size, 0, NULL);
+   ID3D12Resource_Unmap(resource, 0, NULL);
+   return hr;
+}
+
+static void
+transition(ID3D12GraphicsCommandList *list, ID3D12Resource *resource,
+           D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after)
+{
+   D3D12_RESOURCE_BARRIER barrier = {
+      .Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION,
+      .Transition = {.pResource = resource,
+                     .Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
+                     .StateBefore = before, .StateAfter = after},
+   };
+   ID3D12GraphicsCommandList_ResourceBarrier(list, 1, &barrier);
 }
 
 int
@@ -254,15 +287,26 @@ main(int argc, char **argv)
       .RTVFormats = {DXGI_FORMAT_R8G8B8A8_UNORM},
       .SampleDesc = {.Count = 1},
       .SampleMask = ~0u,
+      .RasterizerState = {.FillMode = D3D12_FILL_MODE_SOLID,
+                          .CullMode = D3D12_CULL_MODE_NONE,
+                          .DepthClipEnable = TRUE},
+      .PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
    };
+   pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
    hr = ID3D12Device_CreateGraphicsPipelineState(dev, &pd,
                                                  &IID_ID3D12PipelineState,
                                                  (void **)&pso);
    REQUIRE(hr == S_OK && pso,
            "CreateGraphicsPipelineState compiles VS+PS from DXIL to AGX", hr);
 
-   /* Render target */
-   D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
+   /* Legal opaque GPU-tiled UMA resource, with explicit CPU subresource
+    * transfer rather than a DEFAULT heap mapping. */
+   D3D12_HEAP_PROPERTIES heap = {
+      .Type = D3D12_HEAP_TYPE_CUSTOM,
+      .CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK,
+      .MemoryPoolPreference = D3D12_MEMORY_POOL_L0,
+      .CreationNodeMask = 1, .VisibleNodeMask = 1,
+   };
    D3D12_RESOURCE_DESC td = {
       .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
       .Width = W,
@@ -271,11 +315,13 @@ main(int argc, char **argv)
       .MipLevels = 1,
       .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
       .SampleDesc = {.Count = 1},
-      .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+      .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+               D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
    };
    hr = ID3D12Device_CreateCommittedResource(
       dev, &heap, D3D12_HEAP_FLAG_NONE, &td,
-      D3D12_RESOURCE_STATE_RENDER_TARGET, NULL, &IID_ID3D12Resource,
+      D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
       (void **)&rt);
    REQUIRE(hr == S_OK && rt, "create 256x256 render target", hr);
 
@@ -290,9 +336,11 @@ main(int argc, char **argv)
       d12_test_descriptor_heap_get_cpu_start(rtv_heap);
    ID3D12Device_CreateRenderTargetView(dev, rt, NULL, rtv);
 
-   hr = ID3D12Resource_Map(rt, 0, NULL, (void **)&map);
-   REQUIRE(hr == S_OK && map, "map render target", hr);
+   map = malloc(STRIDE * H);
+   REQUIRE(map, "CPU storage for opaque render target", E_OUTOFMEMORY);
    memset(map, 0x55, STRIDE * H);
+   REQUIRE_HR(cpu_texture_transfer(rt, map, STRIDE, STRIDE * H, true),
+              "write render-target poison through legal CPU API");
 
    /* Record: clear to red, then draw a green triangle. */
    hr = ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
@@ -306,6 +354,7 @@ main(int argc, char **argv)
    REQUIRE(hr == S_OK && list, "CreateCommandList", hr);
 
    const FLOAT clear_red[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+   transition(list, rt, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
    ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, clear_red, 0,
                                                    NULL);
    ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE, NULL);
@@ -339,8 +388,12 @@ main(int argc, char **argv)
       goto cleanup;
    }
 
+   transition(list, rt, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
    REQUIRE_HR(submit_and_wait(dev, list, queue, fence, 1),
               "GPU render complete (fence 1)");
+   memset(map, 0x33, STRIDE * H);
+   REQUIRE_HR(cpu_texture_transfer(rt, map, STRIDE, STRIDE * H, false),
+              "read actual fenced opaque render-target bytes");
 
 #define PIXEL(x, y) (map + (y) * STRIDE + (x) * 4)
 
@@ -424,8 +477,13 @@ main(int argc, char **argv)
     */
    {
       memset(map, 0x55, STRIDE * H);
+      REQUIRE_HR(cpu_texture_transfer(rt, map, STRIDE, STRIDE * H, true),
+                 "poison idle opaque target before viewport reuse");
+      REQUIRE_HR(ID3D12CommandAllocator_Reset(alloc), "Reset fenced allocator");
       REQUIRE_HR(ID3D12GraphicsCommandList_Reset(list, alloc, NULL),
                  "Reset command list");
+      transition(list, rt, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE, NULL);
       ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, clear_red, 0,
                                                       NULL);
       D3D12_VIEWPORT half = {.Width = W, .Height = H / 2, .MaxDepth = 1.0f};
@@ -436,8 +494,12 @@ main(int argc, char **argv)
       ID3D12GraphicsCommandList_IASetPrimitiveTopology(
          list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
       ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
+      transition(list, rt, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
       REQUIRE_HR(submit_and_wait(dev, list, queue, fence, 2),
                  "GPU render/copy complete (fence 2)");
+      memset(map, 0x33, STRIDE * H);
+      REQUIRE_HR(cpu_texture_transfer(rt, map, STRIDE, STRIDE * H, false),
+                 "read actual half-height viewport pixels after fence2");
 
       unsigned half_cov = 0;
       for (unsigned y = 0; y < H; y++) {
@@ -458,6 +520,12 @@ main(int argc, char **argv)
        */
       static bool half_ref[H][W];
       rasterise_reference(half_ref, H / 2);
+      unsigned half_mismatch = 0;
+      for (unsigned y = 0; y < H; y++) for (unsigned x = 0; x < W; x++) {
+         const uint8_t tc[4] = {0x40,0x80,0xbf,0xff}, cc[4] = {0xff,0,0,0xff};
+         half_mismatch += memcmp(PIXEL(x, y), half_ref[y][x] ? tc : cc, 4) != 0;
+      }
+      CHECK(!half_mismatch, "every half-height pixel matches the original CPU model");
       unsigned lx = 0, ly = 0;
       bool found = false;
       for (unsigned y = 0; y < H && !found; y++)
@@ -472,9 +540,8 @@ main(int argc, char **argv)
             "area below the viewport keeps the clear colour");
    }
 
-   /* THE INDEPENDENT CHECK. Everything above reads the texture through our
-    * own mapping, which only works because our textures happen to be linear
-    * -- our harness both draws the image and grades it. This instead pulls
+   /* THE INDEPENDENT CHECK. Everything above reads the opaque texture
+    * through the CPU subresource API. This instead pulls
     * the pixels out the way any real application (and every pixel assertion
     * in the vkd3d suite) does: GetCopyableFootprints to learn the layout,
     * then CopyTextureRegion into a plain buffer.
@@ -484,10 +551,12 @@ main(int argc, char **argv)
       D3D12_PLACED_SUBRESOURCE_FOOTPRINT fp = {0};
       UINT rows = 0;
       UINT64 row_bytes = 0, total = 0;
-      ID3D12Device_GetCopyableFootprints(dev, &rtd, 0, 1, 0, &fp, &rows,
+      ID3D12Device_GetCopyableFootprints(dev, &rtd, 0, 1, 512, &fp, &rows,
                                          &row_bytes, &total);
 
       REQUIRE(fp.Footprint.Width == W && fp.Footprint.Height == H &&
+                 fp.Footprint.Depth == 1 && fp.Offset == 512 &&
+                 fp.Footprint.Format == DXGI_FORMAT_R8G8B8A8_UNORM &&
                  rows == H && row_bytes == (UINT64)W * 4,
               "GetCopyableFootprints describes the render target", E_FAIL);
       REQUIRE(fp.Footprint.RowPitch % 256 == 0 &&
@@ -495,10 +564,11 @@ main(int argc, char **argv)
                  total >= (UINT64)fp.Footprint.RowPitch * H,
               "footprint row pitch honours the 256-byte D3D12 alignment", E_FAIL);
 
+      UINT64 copy_size = fp.Offset + fp.Footprint.RowPitch * (UINT64)H + 512;
       D3D12_HEAP_PROPERTIES rb = {.Type = D3D12_HEAP_TYPE_READBACK};
       D3D12_RESOURCE_DESC bd = {
          .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-         .Width = fp.Footprint.RowPitch * (UINT64)H,
+         .Width = copy_size,
          .Height = 1,
          .DepthOrArraySize = 1,
          .MipLevels = 1,
@@ -506,17 +576,23 @@ main(int argc, char **argv)
          .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
       };
       hr = ID3D12Device_CreateCommittedResource(
-         dev, &rb, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COMMON,
+         dev, &rb, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST,
          NULL, &IID_ID3D12Resource, (void **)&dstbuf);
       REQUIRE(hr == S_OK && dstbuf, "create readback buffer from the footprint", hr);
 
-      hr = ID3D12Resource_Map(dstbuf, 0, NULL, (void **)&rbmap);
+      const D3D12_RANGE empty = {0, 0};
+      hr = ID3D12Resource_Map(dstbuf, 0, &empty, (void **)&rbmap);
       REQUIRE(hr == S_OK && rbmap, "map readback buffer", hr);
-      memset(rbmap, 0x33, (size_t)(fp.Footprint.RowPitch * (UINT64)H));
+      memset(rbmap, 0x7b, (size_t)copy_size);
+      memset(rbmap + fp.Offset, 0x33, (size_t)(fp.Footprint.RowPitch * (UINT64)H));
+      ID3D12Resource_Unmap(dstbuf, 0, NULL);rbmap = NULL;
 
       /* Re-render, then copy the texture out through the API. */
+      REQUIRE_HR(ID3D12CommandAllocator_Reset(alloc), "Reset fenced allocator");
       REQUIRE_HR(ID3D12GraphicsCommandList_Reset(list, alloc, NULL),
                  "Reset command list");
+      transition(list, rt, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
+      ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE, NULL);
       ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, clear_red, 0,
                                                       NULL);
       ID3D12GraphicsCommandList_RSSetViewports(list, 1, &vp);
@@ -537,14 +613,20 @@ main(int argc, char **argv)
          .Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
          .SubresourceIndex = 0,
       };
+      transition(list, rt, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
       ID3D12GraphicsCommandList_CopyTextureRegion(list, &dloc, 0, 0, 0, &sloc,
                                                   NULL);
+      transition(list, rt, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
       REQUIRE_HR(submit_and_wait(dev, list, queue, fence, 3),
                  "GPU render/copy complete (fence 3)");
+      const D3D12_RANGE read_range = {0, (SIZE_T)copy_size};
+      REQUIRE_HR(ID3D12Resource_Map(dstbuf, 0, &read_range, (void **)&rbmap),
+                 "map actual GPU copy only after fence3");
+      REQUIRE(rbmap, "GPU-copy readback pointer", E_FAIL);
 
       /* Same two sample points as above, read out through the API. */
-      const uint8_t *c = rbmap + iy * fp.Footprint.RowPitch + ix * 4;
-      const uint8_t *k = rbmap + oy * fp.Footprint.RowPitch + ox * 4;
+      const uint8_t *c = rbmap + fp.Offset + iy * fp.Footprint.RowPitch + ix * 4;
+      const uint8_t *k = rbmap + fp.Offset + oy * fp.Footprint.RowPitch + ox * 4;
       printf("       via CopyTextureRegion: inside %02x%02x%02x  "
              "outside %02x%02x%02x\n",
              c[0], c[1], c[2], k[0], k[1], k[2]);
@@ -554,7 +636,22 @@ main(int argc, char **argv)
       CHECK(k[0] == 0xff && k[1] == 0x00 && k[2] == 0x00,
             "clear colour read back through CopyTextureRegion");
 
-      ID3D12Resource_Unmap(dstbuf, 0, NULL);
+      unsigned copy_mismatch = 0, canary_mismatch = 0;
+      for (unsigned y = 0; y < H; y++) {
+         for (unsigned x = 0; x < W; x++) {
+            const uint8_t tc[4] = {0x40,0x80,0xbf,0xff}, cc[4] = {0xff,0,0,0xff};
+            const uint8_t *pixel = rbmap + fp.Offset + y * fp.Footprint.RowPitch + x * 4;
+            copy_mismatch += memcmp(pixel, ref[y][x] ? tc : cc, 4) != 0;
+         }
+         for (UINT x = W * 4; x < fp.Footprint.RowPitch; x++)
+            canary_mismatch += rbmap[fp.Offset + y * fp.Footprint.RowPitch + x] != 0x33;
+      }
+      for (UINT64 i = 0; i < fp.Offset; i++) canary_mismatch += rbmap[i] != 0x7b;
+      for (UINT64 i = fp.Offset + fp.Footprint.RowPitch * (UINT64)H; i < copy_size; i++)
+         canary_mismatch += rbmap[i] != 0x7b;
+      printf("       GPU readback all-pixel mismatches=%u canary mismatches=%u\n", copy_mismatch, canary_mismatch);
+      CHECK(!copy_mismatch && !canary_mismatch, "every GPU-copy pixel matches original model; canaries intact");
+      ID3D12Resource_Unmap(dstbuf, 0, &empty);
       rbmap = NULL;
       ID3D12Resource_Release(dstbuf);
       dstbuf = NULL;
@@ -567,7 +664,7 @@ main(int argc, char **argv)
     * crash.
     */
    {
-      D3D12_HEAP_PROPERTIES dh = {.Type = D3D12_HEAP_TYPE_DEFAULT};
+      D3D12_HEAP_PROPERTIES dh = heap;
       D3D12_RESOURCE_DESC bd2 = {
          .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
          .Width = 64,
@@ -576,11 +673,13 @@ main(int argc, char **argv)
          .MipLevels = 1,
          .Format = DXGI_FORMAT_B8G8R8A8_UNORM,
          .SampleDesc = {.Count = 1},
-         .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+         .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                  D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
       };
       hr = ID3D12Device_CreateCommittedResource(
          dev, &dh, D3D12_HEAP_FLAG_NONE, &bd2,
-         D3D12_RESOURCE_STATE_RENDER_TARGET, NULL, &IID_ID3D12Resource,
+         D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
          (void **)&bgra);
       REQUIRE(hr == S_OK && bgra, "create a BGRA8 render target", hr);
 
@@ -593,26 +692,39 @@ main(int argc, char **argv)
          d12_test_descriptor_heap_get_cpu_start(h2);
       ID3D12Device_CreateRenderTargetView(dev, bgra, NULL, rtv2);
 
-      hr = ID3D12Resource_Map(bgra, 0, NULL, (void **)&m2);
-      REQUIRE(hr == S_OK && m2, "map BGRA render target", hr);
-      memset(m2, 0x11, 64 * ((64 * 4 + 63) & ~63u));
+      m2 = malloc(64 * 64 * 4);
+      REQUIRE(m2, "CPU storage for opaque BGRA target", E_OUTOFMEMORY);
+      memset(m2, 0x11, 64 * 64 * 4);
+      REQUIRE_HR(cpu_texture_transfer(bgra, m2, 64 * 4, 64 * 64 * 4, true),
+                 "poison opaque BGRA target through legal CPU API");
 
       /* Clear to pure red. In BGRA memory order that must land as
        * 00 00 ff ff, NOT ff 00 00 ff.
        */
+      REQUIRE_HR(ID3D12CommandAllocator_Reset(alloc), "Reset fenced allocator");
       REQUIRE_HR(ID3D12GraphicsCommandList_Reset(list, alloc, NULL),
                  "Reset command list");
+      transition(list, bgra, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_RENDER_TARGET);
       ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv2, clear_red,
                                                       0, NULL);
+      transition(list, bgra, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COMMON);
       REQUIRE_HR(submit_and_wait(dev, list, queue, fence, 4),
                  "GPU render/copy complete (fence 4)");
+      memset(m2, 0x33, 64 * 64 * 4);
+      REQUIRE_HR(cpu_texture_transfer(bgra, m2, 64 * 4, 64 * 64 * 4, false),
+                 "read actual BGRA clear only after fence4");
 
       printf("       BGRA8 cleared to red -> memory %02x %02x %02x %02x\n",
              m2[0], m2[1], m2[2], m2[3]);
       CHECK(m2[0] == 0x00 && m2[1] == 0x00 && m2[2] == 0xff && m2[3] == 0xff,
             "BGRA8 channel order is honoured (red is not swapped to blue)");
 
-      ID3D12Resource_Unmap(bgra, 0, NULL);
+      unsigned bgra_mismatch = 0;
+      const uint8_t expected_bgra_red[4] = {0,0,0xff,0xff};
+      for (unsigned i = 0; i < 64 * 64; i++)
+         bgra_mismatch += memcmp(m2 + i * 4, expected_bgra_red, 4) != 0;
+      CHECK(!bgra_mismatch, "every BGRA8 pixel retains red with correct channel order");
+      free(m2);
       m2 = NULL;
       ID3D12DescriptorHeap_Release(h2);
       h2 = NULL;
@@ -700,12 +812,12 @@ cleanup:
    if (blocked_stage)
       printf("G4 TRIANGLE BLOCKED: stage=%s HRESULT=0x%08x (not a hardware pass)\n",
              blocked_stage, (unsigned)blocked_hr);
-   if (map)
-      ID3D12Resource_Unmap(rt, 0, NULL);
-   if (rbmap)
-      ID3D12Resource_Unmap(dstbuf, 0, NULL);
-   if (m2)
-      ID3D12Resource_Unmap(bgra, 0, NULL);
+   free(map);
+   if (rbmap) {
+      const D3D12_RANGE empty = {0, 0};
+      ID3D12Resource_Unmap(dstbuf, 0, &empty);
+   }
+   free(m2);
    if (dstbuf)
       ID3D12Resource_Release(dstbuf);
    if (bgra)
