@@ -150,6 +150,12 @@ struct hk_shader_info {
    uint8_t cull_distance_array_size;
    uint8_t set_count;
 
+   /* Positive proof recorded before inserting the default Layer output.
+    * Only original vertex hardware variants qualify.  False is unknown.
+    * Serialized with shader binary version 26 or newer.
+    */
+   bool g17p_default_layer_zero;
+
    /* The bounded G17P graphics/compute path lowers one Gen9 combined
     * image/sampler to native texture/sampler state 0. Command recording joins
     * the bound descriptor set and native sampler heap into those CProg slots.

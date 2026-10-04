@@ -1255,7 +1255,7 @@ hk_nir_lower_descriptors(nir_shader *nir,
    return pass_lower_descriptors || pass_lower_ssbo || pass_sparse_buffers;
 }
 
-/* Offline opt-in: create one descriptor-uniform fast/slow shader region.
+/* Create one descriptor-uniform fast/slow shader region.
  * Restrict eager descriptor reads to fixed, required combined-image bindings.
  * Calls stay separate until feature lowering, then are inlined. */
 bool
@@ -1433,7 +1433,6 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
    nir_split_var_copies(nir);
    nir_lower_var_copies(nir);
    nir_metadata_invalidate(nir);
-   fprintf(stderr, "HK ordinary descriptor region: resources=%u samples=%u\n", count, samples);
    return true;
 }
 

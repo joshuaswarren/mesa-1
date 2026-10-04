@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <xf86drm.h>
+#include <errno.h>
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/os_time.h"
@@ -51,6 +52,9 @@ DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_aux_fb_small_probe,
                           "HK_G17P_AUX_FB_SMALL_PROBE", false)
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_mcache_aperture_probe,
                           "HK_G17P_MCACHE_APERTURE_PROBE", false)
+
+DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_layer_zero_trace,
+                          "HK_G17P_LAYER_ZERO_TRACE", false)
 
 static bool
 hk_agxdecode_trace_armed(void)
@@ -317,6 +321,31 @@ hk_g17p_trace_render_command(const struct hk_device *dev,
    fflush(stderr);
 }
 
+/* Neither attachment storage nor empty-tile operations may observe the
+ * layers eliminated below.  Draws and their XY coverage remain untouched.
+ */
+static bool
+hk_g17p_attachmentless_render(const struct hk_device *dev,
+                                    const struct hk_cs *cs)
+{
+   if (dev->dev.chip != AGX_CHIP_G17P ||
+       cs->tib.sample_size_B != 0 || cs->cr.process_empty_tiles ||
+       cs->cr.depth.buffer || cs->cr.depth.meta ||
+       cs->cr.stencil.buffer || cs->cr.stencil.meta)
+      return false;
+
+   /* The tilebuffer builder normalizes an attachmentless sample count to
+    * one.  Check attachment formats explicitly; nr_samples is not a tag.
+    * This also excludes colour attachments spilled outside the tilebuffer.
+    */
+   for (unsigned i = 0; i < ARRAY_SIZE(cs->tib.logical_format); ++i) {
+      if (cs->tib.logical_format[i] != PIPE_FORMAT_NONE)
+         return false;
+   }
+
+   return true;
+}
+
 static void
 asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
                        struct drm_asahi_cmd_render *c,
@@ -393,8 +422,14 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       cfg.fixed_point_format = 1;
    }
 
-   c->width_px = cs->cr.width;
-   c->height_px = cs->cr.height;
+   const bool empty_attachmentless =
+      cs->stats.cmds == 0 && hk_g17p_attachmentless_render(dev, cs);
+   const bool layer_zero_attachmentless =
+      cs->stats.cmds > 0 && !cs->g17p_layer_zero_unknown &&
+      cs->g17p_layer_zero_draws == cs->stats.cmds &&
+      hk_g17p_attachmentless_render(dev, cs);
+   c->width_px = empty_attachmentless ? 1 : cs->cr.width;
+   c->height_px = empty_attachmentless ? 1 : cs->cr.height;
 
    c->isp_bgobjdepth = cs->cr.isp_bgobjdepth;
    c->isp_bgobjvals = cs->cr.isp_bgobjvals;
@@ -454,7 +489,26 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
 
    /* Can be 0 for attachmentless rendering with no draws */
    c->samples = MAX2(cs->tib.nr_samples, 1);
-   c->layers = cs->cr.layers;
+   c->layers = (empty_attachmentless || layer_zero_attachmentless)
+                  ? 1 : cs->cr.layers;
+
+   if (dev->dev.chip == AGX_CHIP_G17P && cs->cr.layers > 1 &&
+       debug_get_option_hk_g17p_layer_zero_trace()) {
+      static int count;
+      if (p_atomic_inc_return(&count) <= 64) {
+         const int saved_errno = errno;
+         fprintf(stderr,
+                 "HK_G17P_LAYER_ZERO pid=%ld stream=%#" PRIx64
+                 " dims=%ux%u layers=%u->%u draws=%u proven=%" PRIu64
+                 " attachmentless=%u normalized=%u\n",
+                 (long)getpid(), (uint64_t)c->vdm_ctrl_stream_base,
+                 c->width_px, c->height_px, cs->cr.layers, c->layers,
+                 cs->stats.cmds, cs->g17p_layer_zero_draws,
+                 (unsigned)hk_g17p_attachmentless_render(dev, cs),
+                 (unsigned)layer_zero_attachmentless);
+         errno = saved_errno;
+      }
+   }
 
    /* Drawing max size will OOM and fail submission. But vkd3d-proton does this
     * for emulating no-attachment rendering. Clamp to something reasonable and
@@ -472,8 +526,8 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
    c->sample_size_B = cs->tib.sample_size_B;
 
    float tan_60 = 1.732051f;
-   c->isp_merge_upper_x = fui(tan_60 / cs->cr.width);
-   c->isp_merge_upper_y = fui(tan_60 / cs->cr.height);
+   c->isp_merge_upper_x = fui(tan_60 / c->width_px);
+   c->isp_merge_upper_y = fui(tan_60 / c->height_px);
 
    c->bg.usc = cs->cr.bg.main.usc | 4;
    c->eot.usc = cs->cr.eot.main.usc | 4;

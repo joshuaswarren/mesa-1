@@ -367,7 +367,8 @@ radv_device_finish_meta(struct radv_device *device)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   if (pdev->emulate_etc2)
+   /* ETC2 state is initialized only after common meta init succeeds. */
+   if (pdev->emulate_etc2 && device->meta_state.device.cache)
       vk_texcompress_etc2_finish(&device->vk, &device->meta_state.etc_decode);
 
    if (pdev->emulate_astc) {
@@ -378,10 +379,11 @@ radv_device_finish_meta(struct radv_device *device)
    radv_device_finish_accel_struct_build_state(device);
 
    vk_common_DestroyPipelineCache(radv_device_to_handle(device), device->meta_state.cache, NULL);
-   mtx_destroy(&device->meta_state.mtx);
-
-   if (device->meta_state.device.cache)
+   /* This mutex is initialized only after common meta init succeeds. */
+   if (device->meta_state.device.cache) {
+      mtx_destroy(&device->meta_state.mtx);
       vk_meta_device_finish(&device->vk, &device->meta_state.device);
+   }
 }
 
 VkResult

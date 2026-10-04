@@ -152,6 +152,10 @@ struct hk_g17p_prepared_bind_tail {
    uint64_t descriptor_generation;
    uint64_t vertex_buffer_generation;
    uint64_t root;
+   /* The fragment shader variant the tail launches and the uniform-DMA set
+    * base its program was built with (hk_g17p_dma_set_base()). */
+   const struct hk_shader *fragment_shader;
+   uint64_t fragment_dma_set_base;
    struct hk_image_view *render_color0;
    struct hk_image_view *render_depth;
    struct hk_image_view *render_stencil;
@@ -1028,6 +1032,14 @@ struct hk_cs {
     */
    struct util_dynarray imm_writes;
 
+   /* Number of successfully emitted draws whose last raster producer is
+    * positively known to export only the default Layer=0, without multiview.
+    * Compare with stats.cmds: untracked emitters conservatively disqualify.
+    * The wider proof count does not wrap with stats.cmds.
+    */
+   uint64_t g17p_layer_zero_draws;
+   bool g17p_layer_zero_unknown;
+
    /* Statistics */
    struct {
       uint32_t calls, cmds, flushes, merged;
@@ -1041,6 +1053,12 @@ struct hk_cs {
       struct agx_timestamp_req start;
       struct agx_timestamp_req end;
    } timestamp;
+
+   /* G17P query commands observe timestamp writes from earlier streams.
+    * Firmware start timestamps reach query memory only at retirement, so a
+    * producer cannot be merged across this consumer boundary.
+    */
+   bool g17p_timestamp_query;
 
    /* Recorded dependencies, see hk_sync.h. */
    struct hk_sync_stream sync;
@@ -1188,6 +1206,8 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    a->timestamp.end = b->timestamp.end;
    if (!a->timestamp.start.handle)
       a->timestamp.start = b->timestamp.start;
+
+   a->g17p_timestamp_query |= b->g17p_timestamp_query;
 
    a->stats.calls += b->stats.calls;
    a->stats.cmds += b->stats.cmds;
@@ -1566,8 +1586,12 @@ hk_cmd_buffer_get_cs_general(struct hk_cmd_buffer *cmd, struct hk_cs **ptr,
 
    /* A recorded dependency may have ordered the open general compute stream
     * after work that follows it in the list. It is then ended, and the work
-    * goes into a stream positioned after that requirement. */
-   if (*ptr && ptr == &cmd->current_cs.cs && cmd->sync.cs_check_pending)
+    * goes into a stream positioned after that requirement. Work of a new
+    * stage class must also update the reused stream's kind and dependencies,
+    * so later barriers include transfers and meta graphics emitted there. */
+   if (*ptr && ptr == &cmd->current_cs.cs &&
+       (cmd->sync.cs_check_pending ||
+        (hk_sync_general_cs_kind(cmd) & ~(*ptr)->sync.kind)))
       hk_sync_check_cs(cmd);
 
    if ((*ptr) == NULL) {
@@ -1941,6 +1965,8 @@ struct hk_meta_save {
    struct hk_api_shader *shaders[MESA_SHADER_MESH + 1];
    struct hk_addr_range vb0;
    struct hk_descriptor_set *desc0;
+   /* Nested meta must retain the outer query/conditional-rendering scope. */
+   bool in_meta;
    bool has_push_desc0;
    bool push_active0;
    enum agx_visibility_mode occlusion;

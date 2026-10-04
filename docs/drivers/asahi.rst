@@ -3,6 +3,23 @@ Asahi
 
 The Asahi driver aims to provide an OpenGL implementation for the Apple M1.
 
+Native G17P sampled-image specialization
+--------------------------------------
+
+Honeykrisp builds ordinary and generic fragment programs for eligible fixed
+combined-image bindings, including shaders with a single sample. Before each
+draw, it proves that every required bound descriptor uses an ordinary format
+and requires no custom-border emulation. Only then does it select the program
+without those per-sample conversions and border operations. Scaled formats,
+custom-border samplers and unsupported or mutable descriptor layouts keep the
+generic program. Descriptor changes invalidate the selection.
+
+This removes unnecessary texture-emulation work from native Vulkan world
+rendering on MacBook Neo. The selection applies only to G17P; vertex
+specialization remains experimental. ``HK_G17P_ORDINARY_VARIANTS=0`` disables
+it for comparison, and ``HK_G17P_ORDINARY_FORCE_GENERIC=1`` retains the variants
+while forcing the complete generic fragment path.
+
 Native G17P command setup
 -------------------------
 

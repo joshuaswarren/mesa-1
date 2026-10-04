@@ -695,6 +695,8 @@ record_pixel_matrix(VkCommandBuffer command_buffer,
                            165.0f / 255.0f, 165.0f / 255.0f}},
    };
 
+   const bool push_before_pipeline =
+      getenv("G17P_PUSH_DESCRIPTOR_BEFORE_PIPELINE") != NULL;
    const uint32_t render_case_count = G17P_ARRAY_CONTROL ? 2 : 4;
    for (uint32_t i = 0; i < render_case_count; ++i) {
       image_barrier(command_buffer, outputs[i].image, 0,
@@ -719,8 +721,9 @@ record_pixel_matrix(VkCommandBuffer command_buffer,
          .pColorAttachments = &color_attachment,
       };
       vkCmdBeginRendering(command_buffer, &rendering);
-      vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                        pipelines[i]);
+      if (!push_before_pipeline || i < 2)
+         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipelines[i]);
       if (i == 0) {
          vkCmdBindDescriptorSets(command_buffer,
                                  VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -742,6 +745,10 @@ record_pixel_matrix(VkCommandBuffer command_buffer,
                                    pipeline_layouts[i], 0, 2,
                                    pushed_separate_writes);
       }
+      /* A pushed set may precede the pipeline using it. */
+      if (push_before_pipeline && i >= 2)
+         vkCmdBindPipeline(command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                           pipelines[i]);
       vkCmdSetViewport(command_buffer, 0, 1, &viewport);
       vkCmdSetScissor(command_buffer, 0, 1, &scissor);
       vkCmdDraw(command_buffer, 3, 1, 0, 0);

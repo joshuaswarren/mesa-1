@@ -52,6 +52,10 @@
 #include "mesa-blake3.h"
 #include "ralloc.h"
 
+/* Persisted offsets are 64-bit, including on 32-bit clients. Mesa's large-file
+ * build contract must apply to the stdio positioning API as well. */
+static_assert(sizeof(off_t) >= sizeof(int64_t), "FOZ requires 64-bit off_t");
+
 #define FOZ_REF_MAGIC_SIZE 16
 
 static const uint8_t stream_reference_magic_and_version[FOZ_REF_MAGIC_SIZE] = {
@@ -119,15 +123,21 @@ create_foz_db_filenames(const char *cache_path,
 static void
 update_foz_index(struct foz_db *foz_db, FILE *db_idx, unsigned file_idx)
 {
-   uint64_t offset = ftell(db_idx);
-   fseek(db_idx, 0, SEEK_END);
-   uint64_t len = ftell(db_idx);
+   off_t current = ftello(db_idx);
+   if (current < 0 || fseeko(db_idx, 0, SEEK_END) != 0)
+      return;
+   off_t end = ftello(db_idx);
+   if (end < 0)
+      return;
+   uint64_t offset = current;
+   uint64_t len = end;
    uint64_t parsed_offset = offset;
 
    if (offset == len)
       return;
 
-   fseek(db_idx, offset, SEEK_SET);
+   if (fseeko(db_idx, (off_t)offset, SEEK_SET) != 0)
+      return;
    while (offset < len) {
       char bytes_to_read[FOSSILIZE_BLOB_HASH_LENGTH + sizeof(struct foz_payload_header)];
       struct foz_payload_header *header;
@@ -187,7 +197,7 @@ update_foz_index(struct foz_db *foz_db, FILE *db_idx, unsigned file_idx)
    }
 
 
-   fseek(db_idx, parsed_offset, SEEK_SET);
+   fseeko(db_idx, (off_t)parsed_offset, SEEK_SET);
 }
 
 /* exclusive flock with timeout. timeout is in nanoseconds */
@@ -213,8 +223,11 @@ load_foz_dbs(struct foz_db *foz_db, FILE *db_idx, uint8_t file_idx,
              bool read_only)
 {
    /* Scan through the archive and get the list of cache entries. */
-   fseek(db_idx, 0, SEEK_END);
-   size_t len = ftell(db_idx);
+   if (fseeko(db_idx, 0, SEEK_END) != 0)
+      goto fail;
+   off_t len = ftello(db_idx);
+   if (len < 0)
+      goto fail;
    rewind(db_idx);
 
    /* Try not to take the lock if len >= the size of the header, but if it is smaller we take the
@@ -226,8 +239,11 @@ load_foz_dbs(struct foz_db *foz_db, FILE *db_idx, uint8_t file_idx,
          goto fail;
 
       /* Compute length again so we know nobody else did it in the meantime */
-      fseek(db_idx, 0, SEEK_END);
-      len = ftell(db_idx);
+      if (fseeko(db_idx, 0, SEEK_END) != 0)
+         goto fail;
+      len = ftello(db_idx);
+      if (len < 0)
+         goto fail;
       rewind(db_idx);
    }
 
@@ -609,13 +625,26 @@ foz_read_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
    }
 
    uint8_t file_idx = entry->file_idx;
-   if (fseek(foz_db->file[file_idx], entry->offset, SEEK_SET) < 0)
+   /* The index and data file must identify the same cache object. A valid
+    * payload checksum alone cannot detect an index pointing at another item. */
+   if (entry->offset < FOSSILIZE_BLOB_HASH_LENGTH ||
+       entry->offset > INT64_MAX ||
+       fseeko(foz_db->file[file_idx],
+              (off_t)(entry->offset - FOSSILIZE_BLOB_HASH_LENGTH), SEEK_SET) != 0)
       goto fail;
 
-   uint32_t header_size = sizeof(struct foz_payload_header);
-   if (fread(&entry->header, 1, header_size, foz_db->file[file_idx]) !=
-       header_size)
+   uint8_t header[FOSSILIZE_BLOB_HASH_LENGTH +
+                  sizeof(struct foz_payload_header)];
+   if (fread(header, 1, sizeof(header), foz_db->file[file_idx]) != sizeof(header))
       goto fail;
+
+   char expected_key[BLAKE3_HEX_LEN];
+   _mesa_blake3_format(expected_key, entry->key);
+   if (memcmp(header, expected_key, FOSSILIZE_BLOB_HASH_LENGTH) != 0)
+      goto fail;
+
+   memcpy(&entry->header, header + FOSSILIZE_BLOB_HASH_LENGTH,
+          sizeof(entry->header));
 
    /* Check for collision using full 160bit hash for increased assurance
     * against potential collisions.
@@ -694,7 +723,8 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
    header.payload_size = blob_size;
    header.crc = util_hash_crc32(blob, blob_size);
 
-   fseek(foz_db->file[0], 0, SEEK_END);
+   if (fseeko(foz_db->file[0], 0, SEEK_END) != 0)
+      goto fail;
 
    /* Write hash header to db */
    char hash_str[BLAKE3_HEX_LEN];
@@ -703,7 +733,10 @@ foz_write_entry(struct foz_db *foz_db, const uint8_t *cache_key_160bit,
        FOSSILIZE_BLOB_HASH_LENGTH)
       goto fail;
 
-   uint64_t offset = ftell(foz_db->file[0]);
+   off_t current = ftello(foz_db->file[0]);
+   if (current < 0)
+      goto fail;
+   uint64_t offset = current;
 
    /* Write db entry header */
    if (fwrite(&header, 1, sizeof(header), foz_db->file[0]) != sizeof(header))

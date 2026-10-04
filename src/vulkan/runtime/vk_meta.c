@@ -28,6 +28,7 @@
 #include "vk_command_buffer.h"
 #include "vk_device.h"
 #include "vk_format.h"
+#include "vk_log.h"
 #include "vk_pipeline.h"
 #include "vk_util.h"
 
@@ -87,6 +88,9 @@ vk_meta_device_init(struct vk_device *device,
 
    meta->cache = _mesa_hash_table_create(NULL, cache_key_hash,
                                                cache_key_equal);
+   if (meta->cache == NULL)
+      return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+
    simple_mtx_init(&meta->cache_mtx, mtx_plain);
 
    meta->cmd_draw_rects = vk_meta_draw_rects;

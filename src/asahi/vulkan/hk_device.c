@@ -784,9 +784,9 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    const char *path = drm_device->nodes[DRM_NODE_RENDER];
    dev->dev.fd = open(path, O_RDWR | O_CLOEXEC);
    if (dev->dev.fd < 0) {
-      drmFreeDevice(&drm_device);
       result = vk_errorf(dev, VK_ERROR_INITIALIZATION_FAILED,
                          "failed to open device %s", path);
+      drmFreeDevice(&drm_device);
       goto fail_init;
    }
 
@@ -942,7 +942,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    result = hk_device_init_meta(dev);
    if (result != VK_SUCCESS)
-      goto fail_mem_cache;
+      goto fail_accel_struct;
 
    /* Precompile an empty fragment shader that can be used to handle API-level
     * null fragment shaders. We do this at device-time to make binds cheap.
@@ -985,7 +985,7 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
 fail_meta:
    hk_device_finish_meta(dev);
-   hk_g17p_compute_program_cache_finish(dev);
+fail_accel_struct:
    hk_device_finish_accel_struct_state(dev);
 fail_mem_cache:
    vk_pipeline_cache_destroy(dev->vk.mem_cache, NULL);
@@ -998,6 +998,8 @@ fail_queues:
 fail_internal_shaders:
    hk_destroy_internal_shaders(dev, &dev->prolog_epilog, true);
 fail_bg_eot:
+   /* Prewarming may have populated only part of this cache. */
+   hk_g17p_compute_program_cache_finish(dev);
    hk_g17p_bg_eot_dev_cache_finish(dev);
    agx_bg_eot_cleanup(&dev->bg_eot);
 fail_rodata:
@@ -1014,6 +1016,8 @@ fail_samplers:
 fail_dev:
    hk_finish_vm_status_mirror(dev);
    agx_close_device(&dev->dev);
+   /* agx_close_device owns the DRM fd after agx_open_device succeeds. */
+   goto fail_init;
 fail_fd:
    close(dev->dev.fd);
 fail_init:
