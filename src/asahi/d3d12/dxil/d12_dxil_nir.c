@@ -327,8 +327,8 @@ struct trans_ctx {
    uint8_t *handle_heap;      /* 0 none, 1 resource heap, 2 sampler heap */
    uint32_t *handle_kind_v;   /* decoded resource kind, per value */
    uint32_t *handle_stride_v; /* structured stride, per value */
-   /* Runtime validity for a shader-unbounded handle backed by a finite
-    * API descriptor range.  NULL means the handle is statically valid. */
+   /* Runtime validity for dynamically indexed classic handles. NULL means
+    * the handle is statically valid. Invalid handles use a safe lookup base. */
    nir_def **handle_valid;
 
    uint8_t *ptr_space;      /* value index -> D12_PTR_*, 0 = not a pointer */
@@ -3247,9 +3247,6 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
                return false;
             }
          }
-         const bool native_segment =
-            !rooted_heap &&
-            d12_texture_shape_from_kind(rb->kind) != D12_TEXTURE_SHAPE_NONE;
          unsigned finite_count = 0;
          if (!count && !rooted_heap) {
             finite_count = finite_root_range_count(
@@ -3273,22 +3270,39 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
 
          nir_def *index32 = nir_u2u32(b, idx);
          nir_def *relative = nir_iadd_imm(b, index32, -rb->lower_bound);
-         nir_def *slot_def = relative;
+         nir_def *valid =
+            nir_uge(b, index32, nir_imm_int(b, rb->lower_bound));
+         if (count)
+            valid = nir_iand(b, valid,
+                             nir_ult(b, relative, nir_imm_int(b, count)));
 
+         nir_def *slot_def;
          if (rooted_heap) {
             slot_def = nir_iadd_imm(b, index32, -rooted_reg);
+            unsigned entry = d12_binding_map_find_entry(
+               ctx->map, (unsigned)klass, rb->space, rooted_reg);
+            if (entry == ~0u) {
+               trans_fail(ctx, "rooted resource array has no API range");
+               return false;
+            }
+            unsigned root_count = ctx->map->entries[entry].range_count;
+            if (root_count)
+               valid = nir_iand(b, valid,
+                                nir_ult(b, slot_def,
+                                        nir_imm_int(b, root_count)));
          } else {
             slot_def = nir_iadd_imm(b, relative, base_slot);
-
-            if (!count && !native_segment) {
-               nir_def *valid = nir_iand(
-                  b, nir_uge(b, index32, nir_imm_int(b, rb->lower_bound)),
-                  nir_ult(b, relative, nir_imm_int(b, finite_count)));
-               slot_def = nir_bcsel(b, valid, slot_def,
-                                    nir_imm_int(b, base_slot));
-               ctx->handle_valid[inst->result_value] = valid;
-            }
+            if (!count)
+               valid = nir_iand(b, valid,
+                                nir_ult(b, relative,
+                                        nir_imm_int(b, finite_count)));
          }
+
+         /* Avoid wrapped/out-of-range root-table lookup even before the
+          * resource operation consumes validity for robust buffer access. */
+         slot_def = nir_bcsel(b, valid, slot_def,
+                              nir_imm_int(b, rooted_heap ? 0 : base_slot));
+         ctx->handle_valid[inst->result_value] = valid;
 
          ctx->handle_base[inst->result_value] = base_slot;
          if (rooted_heap) {
