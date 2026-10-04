@@ -289,6 +289,13 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_unroll_restart") ||
           !strcmp(func->name, "libagx_gs_setup_indirect") ||
           !strcmp(func->name, "libagx_prefix_sum_geom") ||
+          /* D3D12 placement-signal producer: KERNEL(1), two 64-bit
+           * arguments and one naturally aligned 64-bit global store. Compile
+           * through the real AGX3b backend with rebased arguments and no
+           * preamble; queue construction separately validates all resulting
+           * staging/TPS/rodata metadata before native Ioto publication.
+           * Enabling this exact catalogue entry is not an execution claim. */
+          !strcmp(func->name, "libagx_write_u64") ||
           !strcmp(func->name, "libagx_copy_uchar") ||
           !strcmp(func->name, "libagx_copy_uint4") ||
           !strcmp(func->name, "libagx_fill") ||
