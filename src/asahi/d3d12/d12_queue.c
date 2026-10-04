@@ -571,6 +571,15 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
       mesa_logi("  bg.usc=0x%llx eot.usc=0x%llx  %ux%ux%u samples=%u",
                 (unsigned long long)c->bg.usc, (unsigned long long)c->eot.usc,
                 c->width_px, c->height_px, c->layers, c->samples);
+      if (seg->ds)
+         mesa_logi("  native D32 metadata: zls=0x%llx pixels=0x%x "
+                   "depth-stride=0x%x clear=0x%x load=%u store=%u "
+                   "fd-policy=registered-shim-only",
+                   (unsigned long long)c->zls_ctrl, c->isp_zls_pixels,
+                   c->depth.stride, c->isp_bgobjdepth,
+                   (unsigned)!seg->depth_cleared,
+                   (unsigned)(seg->depth_cleared ||
+                              !(seg->dsv_flags & D3D12_DSV_FLAG_READ_ONLY_DEPTH)));
    }
    return true;
 }
