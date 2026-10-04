@@ -259,13 +259,15 @@ main(void)
       goto cleanup;
    }
    hr = ID3D12Fence_SetEventOnCompletion(fence, 2, NULL);
-   CHECK(hr == S_OK && memcmp(rb_map, up_map, 64) == 0,
-         "reused list's copy landed (first 64B now from offset 0)");
+   CHECK(hr == S_OK && ID3D12Fence_GetCompletedValue(fence) >= 2,
+         "reused GPU work complete (fence reached 2)");
    if (FAILED(hr) || ID3D12Fence_GetCompletedValue(fence) < 2) {
       blocked_stage = "Wait fence2";
       blocked_hr = FAILED(hr) ? hr : E_FAIL;
       goto cleanup;
    }
+   CHECK(hr == S_OK && memcmp(rb_map, up_map, 64) == 0,
+         "reused list's copy landed (first 64B now from offset 0)");
 
 cleanup:
    if (up_map && upload)

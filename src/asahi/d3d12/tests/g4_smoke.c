@@ -109,6 +109,16 @@ main(int argc, char **argv)
    fclose(f);
 
    ID3D12Device *dev = NULL;
+   ID3D12RootSignature *root_sig = NULL;
+   ID3D12PipelineState *pso = NULL;
+   ID3D12Resource *buf = NULL;
+   uint32_t *map = NULL;
+   ID3D12CommandAllocator *alloc = NULL;
+   ID3D12GraphicsCommandList *list = NULL;
+   ID3D12CommandQueue *queue = NULL;
+   ID3D12Fence *fence = NULL;
+   const char *blocked_stage = NULL;
+   HRESULT blocked_hr = S_OK;
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&dev);
    CHECK(hr == S_OK && dev, "D3D12CreateDevice");
@@ -134,7 +144,6 @@ main(int argc, char **argv)
    if (FAILED(hr))
       return 1;
 
-   ID3D12RootSignature *root_sig = NULL;
    hr = ID3D12Device_CreateRootSignature(
       dev, 0, ID3D10Blob_GetBufferPointer(rs_blob),
       ID3D10Blob_GetBufferSize(rs_blob), &IID_ID3D12RootSignature,
@@ -147,7 +156,6 @@ main(int argc, char **argv)
       .pRootSignature = root_sig,
       .CS = {.pShaderBytecode = dxil, .BytecodeLength = dxil_size},
    };
-   ID3D12PipelineState *pso = NULL;
    hr = ID3D12Device_CreateComputePipelineState(dev, &pso_desc,
                                                 &IID_ID3D12PipelineState,
                                                 (void **)&pso);
@@ -157,7 +165,10 @@ main(int argc, char **argv)
       return 1;
 
    /* Output buffer, poisoned so stale zeroes cannot fake a pass. */
-   D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_UPLOAD};
+   /* UPLOAD is staging and cannot carry ALLOW_UNORDERED_ACCESS. The
+    * advertised GPU_UPLOAD heap supports both a real UAV and CPU poison/
+    * readback mapping on this UMA device, without relaxing validation. */
+   D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_GPU_UPLOAD};
    D3D12_RESOURCE_DESC bd = {
       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
       .Width = NUM_ELEMENTS * 4,
@@ -168,30 +179,47 @@ main(int argc, char **argv)
       .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
       .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
    };
-   ID3D12Resource *buf = NULL;
    hr = ID3D12Device_CreateCommittedResource(
       dev, &heap, D3D12_HEAP_FLAG_NONE, &bd,
       D3D12_RESOURCE_STATE_UNORDERED_ACCESS, NULL, &IID_ID3D12Resource,
       (void **)&buf);
    CHECK(hr == S_OK && buf, "create UAV buffer");
+   if (FAILED(hr) || !buf) {
+      blocked_stage = "CreateCommittedResource UAV";
+      blocked_hr = FAILED(hr) ? hr : E_FAIL;
+      goto cleanup;
+   }
 
-   uint32_t *map = NULL;
-   ID3D12Resource_Map(buf, 0, NULL, (void **)&map);
-   CHECK(map != NULL, "map UAV buffer");
+   hr = ID3D12Resource_Map(buf, 0, NULL, (void **)&map);
+   CHECK(hr == S_OK && map, "map UAV buffer");
+   if (FAILED(hr) || !map) {
+      blocked_stage = "Map UAV";
+      blocked_hr = FAILED(hr) ? hr : E_FAIL;
+      goto cleanup;
+   }
    for (unsigned i = 0; i < NUM_ELEMENTS; i++)
       map[i] = 0xDEADBEEF;
 
    /* Record: bind the pipeline and the UAV, dispatch. */
-   ID3D12CommandAllocator *alloc = NULL;
-   ID3D12GraphicsCommandList *list = NULL;
-   ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
-                                       &IID_ID3D12CommandAllocator,
-                                       (void **)&alloc);
+   hr = ID3D12Device_CreateCommandAllocator(
+      dev, D3D12_COMMAND_LIST_TYPE_COMPUTE, &IID_ID3D12CommandAllocator,
+      (void **)&alloc);
+   CHECK(hr == S_OK && alloc, "CreateCommandAllocator(COMPUTE)");
+   if (FAILED(hr) || !alloc) {
+      blocked_stage = "CreateCommandAllocator";
+      blocked_hr = FAILED(hr) ? hr : E_FAIL;
+      goto cleanup;
+   }
    hr = ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                        alloc, NULL,
                                        &IID_ID3D12GraphicsCommandList,
                                        (void **)&list);
    CHECK(hr == S_OK && list, "CreateCommandList(COMPUTE)");
+   if (FAILED(hr) || !list) {
+      blocked_stage = "CreateCommandList";
+      blocked_hr = FAILED(hr) ? hr : E_FAIL;
+      goto cleanup;
+   }
 
    ID3D12GraphicsCommandList_SetComputeRootSignature(list, root_sig);
    ID3D12GraphicsCommandList_SetPipelineState(list, pso);
@@ -199,10 +227,6 @@ main(int argc, char **argv)
       list, 0, ID3D12Resource_GetGPUVirtualAddress(buf));
    ID3D12GraphicsCommandList_Dispatch(list, NUM_GROUPS, 1, 1);
 
-   ID3D12CommandQueue *queue = NULL;
-   ID3D12Fence *fence = NULL;
-   const char *blocked_stage = NULL;
-   HRESULT blocked_hr = S_OK;
 
    hr = ID3D12GraphicsCommandList_Close(list);
    CHECK(hr == S_OK, "Close command list");
@@ -248,6 +272,11 @@ main(int argc, char **argv)
           (unsigned long long)(test_monotonic_ms() - wait_start_ms));
    CHECK(hr == S_OK && ID3D12Fence_GetCompletedValue(fence) >= 1,
          "GPU dispatch complete (fence reached 1)");
+   if (FAILED(hr) || ID3D12Fence_GetCompletedValue(fence) < 1) {
+      blocked_stage = "Wait fence";
+      blocked_hr = FAILED(hr) ? hr : E_FAIL;
+      goto cleanup;
+   }
 
    /* Diagnostic: is a miss a fence-ordering bug or a visibility delay?
     * If the data appears on a later read, the wait returned too early.
@@ -282,16 +311,22 @@ cleanup:
    if (blocked_stage)
       printf("G4 SMOKE BLOCKED: stage=%s HRESULT=0x%08x (not a hardware pass)\n",
              blocked_stage, (unsigned)blocked_hr);
-   ID3D12Resource_Unmap(buf, 0, NULL);
+   if (map && buf)
+      ID3D12Resource_Unmap(buf, 0, NULL);
    if (fence)
       ID3D12Fence_Release(fence);
    if (queue)
       ID3D12CommandQueue_Release(queue);
-   ID3D12GraphicsCommandList_Release(list);
-   ID3D12CommandAllocator_Release(alloc);
-   ID3D12Resource_Release(buf);
-   ID3D12PipelineState_Release(pso);
-   ID3D12RootSignature_Release(root_sig);
+   if (list)
+      ID3D12GraphicsCommandList_Release(list);
+   if (alloc)
+      ID3D12CommandAllocator_Release(alloc);
+   if (buf)
+      ID3D12Resource_Release(buf);
+   if (pso)
+      ID3D12PipelineState_Release(pso);
+   if (root_sig)
+      ID3D12RootSignature_Release(root_sig);
    CHECK(ID3D12Device_Release(dev) == 0, "device refcount reaches 0");
 
    printf(failures ? "G4 SMOKE: %d FAILURES\n" : "G4 SMOKE: ALL PASS\n",
