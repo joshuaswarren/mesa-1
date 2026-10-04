@@ -695,6 +695,20 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
        vk_command_buffer_has_error(&cmd->vk))
       return;
 
+   /* Pipeline binding prepares shaders before the pipeline's static state is
+    * applied. Rendering/subpass changes can likewise retain the previous
+    * rasterization state. Do not combine a known attachment layout with a
+    * different sample count while preparing a speculative epilog: its spill
+    * decision and rebuilt tilebuffer layout would describe different draws.
+    * HK does not expose mixed-sample rendering. Unknown/attachmentless sample
+    * counts keep the existing path; the authoritative draw handles them.
+    */
+   const unsigned samples =
+      cmd->vk.dynamic_graphics_state.ms.rasterization_samples;
+   const unsigned render_samples = gfx->render.tilebuffer.nr_samples;
+   const bool samples_incomplete = dev->dev.chip == AGX_CHIP_G17P && samples &&
+                                   render_samples && samples != render_samples;
+
    /* v96: predict the ordinary vertex variant before preparing its link. */
    hk_select_ordinary_vs(cmd);
 
@@ -729,7 +743,14 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
     * the draw path still performs the authoritative lookup. */
    hk_prelink_graphics(cmd, false, AGX_INDEX_SIZE_U16,
                        cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable,
-                       false);
+                       samples_incomplete);
+
+   /* The vertex link is independent of framebuffer sample state. Preserve
+    * that useful preparation, but wait for coherent state before preparing
+    * the fragment link or any combined shader/root state.
+    */
+   if (samples_incomplete)
+      return;
 
    /* Preparation must consume the same complete shader/root state as the
     * authoritative draw path.  In particular, transformed pipelines use the
