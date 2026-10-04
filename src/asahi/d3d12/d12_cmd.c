@@ -92,6 +92,50 @@ d12_g17p_baseline_graphics_enabled(const struct agx_device *dev)
 #endif
 }
 
+bool
+d12_g17p_depth_metadata_enabled(const struct agx_device *dev)
+{
+#ifndef _WIN32
+   const char *enable = getenv("AURORA_D3D12_SHIM_DEPTH_METADATA");
+   return enable && !strcmp(enable, "1") && dev->chip == AGX_CHIP_G17P &&
+          dev->g17p_render_context_bo &&
+          asahi_noop_d3d12_graphics_qualification_allowed &&
+          asahi_noop_d3d12_graphics_qualification_allowed(dev->fd);
+#else
+   (void)dev;
+   return false;
+#endif
+}
+
+/* First native ZLS subset: D32 only, no compression, stencil, arrays/MSAA,
+ * mip or read-only view. Bounds/stride are checked before UAPI construction. */
+bool
+d12_g17p_depth_segment_supported(const struct d12_segment *seg)
+{
+   const struct d12_resource *ds = seg ? seg->ds : NULL;
+   if (!ds || !ds->bo || !ds->bo->va || !seg->rt[0] ||
+       ds->reserved || ds->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+       ds->desc.Format != DXGI_FORMAT_D32_FLOAT ||
+       ds->layout.format != PIPE_FORMAT_Z32_FLOAT || ds->stencil_bo ||
+       ds->layout.compressed || ds->layout.levels != 1 ||
+       ds->layout.depth_px != 1 || ds->layout.sample_count_sa != 1 ||
+       (ds->layout.tiling != AIL_TILING_GPU &&
+        ds->layout.tiling != AIL_TILING_TWIDDLED) ||
+       seg->ds_level || seg->dsv_flags || seg->stencil_address ||
+       seg->layers != 1 || !seg->width_px || !seg->height_px ||
+       seg->width_px > ds->layout.width_px ||
+       seg->height_px > ds->layout.height_px ||
+       !ds->layout.size_B || ds->layout.layer_stride_B < AIL_PAGESIZE ||
+       ds->layout.layer_stride_B % AIL_PAGESIZE ||
+       (seg->ds_address & (AIL_PAGESIZE - 1)) ||
+       seg->ds_address < ds->bo->va->addr)
+      return false;
+   const uint64_t offset = seg->ds_address - ds->bo->va->addr;
+   return offset <= ds->bo->size &&
+          ds->layout.size_B <= ds->bo->size - offset &&
+          ds->layout.layer_stride_B <= ds->bo->size - offset;
+}
+
 _Static_assert(offsetof(struct d12_cmd_list, iface) == 0,
                "Command-list COM interface must remain at object offset zero");
 
@@ -1906,7 +1950,9 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    const char *failure_stage = "attachment-shape";
    struct agx_bg_eot_shader *shader = NULL;
 
-   if (dev->chip != AGX_CHIP_G17P || !out_resources || !rt || !rt->bo || seg->ds ||
+   if (dev->chip != AGX_CHIP_G17P || !out_resources || !rt || !rt->bo ||
+       (seg->ds && (!d12_g17p_depth_metadata_enabled(dev) ||
+                    !d12_g17p_depth_segment_supported(seg))) ||
        rt->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
        rt->layout.sample_count_sa != 1 ||
        seg->layers != 1 || tib->nr_samples != 1 || seg->rt_level[0] != 0 ||
@@ -2586,7 +2632,8 @@ d12_list_begin_render(struct d12_cmd_list *list,
 
    /* Native depth has no qualified producer yet, including clear-only
     * passes which never reach the triangle draw admission guard. */
-   if (dsv && list->device->dev.chip == AGX_CHIP_G17P) {
+   if (dsv && list->device->dev.chip == AGX_CHIP_G17P &&
+       !d12_g17p_depth_metadata_enabled(&list->device->dev)) {
       mesa_loge("native depth render producer remains closed");
       list->state = D12_LIST_ERROR;
       return NULL;
@@ -8534,7 +8581,10 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
        pso->has_gs || pso->has_tess || pso->has_mesh || pso->nr_vb_attribs ||
        pso->raster.polygon_mode != AGX_POLYGON_MODE_FILL ||
        pso->raster.depth_bias || pso->raster.slope_scaled_depth_bias ||
-       seg->ds || seg->tib.nr_samples != 1 || list->viewport_count != 1 ||
+       (seg->ds && (!d12_g17p_depth_metadata_enabled(&list->device->dev) ||
+                    !d12_g17p_depth_segment_supported(seg) ||
+                    pso->ds.stencil_test)) ||
+       seg->tib.nr_samples != 1 || list->viewport_count != 1 ||
        list->scissor_count != 1 || list->topology != MESA_PRIM_TRIANGLES ||
        pso->fs.info.writes_sample_mask || pso->fs.info.reads_tib ||
        seg->scissor_count >= D12_SCISSORS_PER_SEGMENT ||
@@ -8567,6 +8617,10 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
       .cull_mode = pso->raster.cull_front | (pso->raster.cull_back << 1),
       .front_face_ccw = pso->raster.front_face_ccw,
       .depth_clip = pso->raster.depth_clip,
+      .has_depth = seg->ds != NULL,
+      .depth_test = pso->ds.depth_test,
+      .depth_write = pso->ds.depth_write,
+      .depth_compare = pso->ds.depth_func,
       .raster = {
          .scissor_enable = true,
          .min_x = states[0].clip[0], .min_y = states[0].clip[1],
@@ -13974,7 +14028,8 @@ static bool
 d12_list_attach_ds(struct d12_cmd_list *list,
                    const struct d12_descriptor *dsv)
 {
-   if (list->device->dev.chip == AGX_CHIP_G17P) {
+   if (list->device->dev.chip == AGX_CHIP_G17P &&
+       !d12_g17p_depth_metadata_enabled(&list->device->dev)) {
       mesa_loge("native depth attach/clear producer remains closed");
       list->state = D12_LIST_ERROR;
       return false;
@@ -14015,6 +14070,12 @@ d12_list_attach_ds(struct d12_cmd_list *list,
    if (seg->layers != ds_layers) {
       mesa_loge("render pass and depth/stencil have mismatched layer counts "
                 "%u and %u", seg->layers, ds_layers);
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+   if (list->device->dev.chip == AGX_CHIP_G17P &&
+       !d12_g17p_depth_segment_supported(seg)) {
+      mesa_loge("native D32 attachment rejected storage/view/extent metadata");
       list->state = D12_LIST_ERROR;
       return false;
    }

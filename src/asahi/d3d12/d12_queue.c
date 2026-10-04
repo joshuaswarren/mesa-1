@@ -349,7 +349,9 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                     struct drm_asahi_cmd_render *c)
 {
    memset(c, 0, sizeof(*c));
-   if (device->dev.chip == AGX_CHIP_G17P && seg->ds) {
+   if (device->dev.chip == AGX_CHIP_G17P && seg->ds &&
+       (!d12_g17p_depth_metadata_enabled(&device->dev) ||
+        !d12_g17p_depth_segment_supported(seg))) {
       mesa_loge("native depth submission refused before unqualified ZLS metadata");
       return false;
    }
