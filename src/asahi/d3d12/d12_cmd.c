@@ -30,6 +30,8 @@
 #include "d12_texture_copy_math.h"
 
 #include "agx_helpers.h"
+#include "asahi/compiler/agx3_compute_program.h"
+#include "agx_abi.h"
 #include "agx_nir_texture.h"
 #include "agx_usc.h"
 #include "agx_vdm_state_update_core.h"
@@ -1440,6 +1442,124 @@ d12_list_track_precompiled_reads(struct d12_cmd_list *list,
 #undef D12_PRECOMP_ARGS
 }
 
+/* Native direct precompiled compute uses the same metadata/argument/Ioto
+ * join as Gallium. Each recording owns its uploaded arguments and program;
+ * the existing command-list storage and read-set references retain them
+ * until the actual submitted timeline point retires. */
+static bool
+d12_list_append_g17p_precomp(struct d12_cmd_list *list,
+                            const struct agx_precompiled_shader *prog,
+                            const void *args, size_t args_size,
+                            struct agx_grid grid, uint8_t **cursor)
+{
+   struct agx_device *dev = &list->device->dev;
+   if (dev->chip != AGX_CHIP_G17P || !prog || !prog->bo || !args ||
+       !args_size || args_size > UINT16_MAX * 2u || agx_is_indirect(grid) ||
+       !prog->info.main_size || !prog->info.nr_gprs ||
+       prog->info.nr_preamble_gprs || !prog->info.agx3_staging_known ||
+       (prog->info.rodata.size_16 && !prog->rodata_offset) ||
+       (prog->info.printf_uniform &&
+        (prog->info.printf_uniform < AGX_ABI_AGX3_PRECOMP_ARG_HALFS ||
+         !dev->printf_buffer_address)) ||
+       prog->entry_offset > UINT64_MAX - prog->ptr ||
+       prog->rodata_offset > UINT64_MAX - prog->ptr ||
+       !prog->b.workgroup.x || !prog->b.workgroup.y || !prog->b.workgroup.z)
+      goto fail;
+
+   const size_t printf_offset = prog->info.printf_uniform
+      ? (size_t)(prog->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
+      : 0;
+   const size_t uploaded_size = ALIGN_POT(
+      prog->info.printf_uniform ? MAX2(args_size, printf_offset + 8) : args_size,
+      4);
+   if (uploaded_size / 2 > UINT16_MAX)
+      goto fail;
+   const uint64_t data_gpu = d12_list_upload_zero(list, uploaded_size, 4);
+   if (!data_gpu)
+      return false;
+   uint8_t *data_cpu = d12_list_stream_map(list) +
+      (data_gpu - list->stream_bo->va->addr);
+   memcpy(data_cpu, args, args_size);
+   if (prog->info.printf_uniform)
+      memcpy(data_cpu + printf_offset, &dev->printf_buffer_address,
+             sizeof(uint64_t));
+
+   struct agx3_ioto_uniform_range ranges[2] = {{
+      .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
+      .size_halfs = uploaded_size / 2,
+      .address = data_gpu,
+   }};
+   unsigned range_count = 1;
+   if (prog->info.rodata.size_16) {
+      ranges[range_count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = prog->info.rodata.base_uniform,
+         .size_halfs = prog->info.rodata.size_16,
+         .address = prog->ptr + prog->rodata_offset,
+      };
+   }
+   struct agx3_cdm_direct_template_sources launch_sources;
+   if (!agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                  &launch_sources))
+      goto fail;
+   uint32_t relative_program = 0;
+   uint8_t *program_cpu = d12_list_alloc_usc(
+      list, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE, &relative_program);
+   const uint64_t program_va = dev->shader_base + relative_program;
+   const struct agx3_g17p_compute_program_desc desc = {
+      .program_va = program_va,
+      .shader_va = prog->ptr + prog->entry_offset,
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+      .shader_binary_size = prog->info.main_size,
+      .scratch_size = prog->info.agx3_tps_size,
+      .nr_gprs = prog->info.nr_gprs,
+      .compiler_d_valid = prog->info.agx3_staging_known,
+      .compiler_d = (uint32_t)prog->info.agx3_staging_halfs * 2,
+      .threadgroup_memory_size_B = prog->info.local_size
+         ? MAX2(256u, ALIGN_POT(prog->info.local_size, 64u)) : 0,
+      .launch_sources = launch_sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   struct agx3_g17p_compute_program generated;
+   if (!program_cpu || !agx_va_in_usc_window(dev, program_va) ||
+       !agx_va_in_usc_window(dev, desc.shader_va) ||
+       !agx3_g17p_compute_program_generate(dev->chip, &desc, &generated))
+      goto fail;
+   memcpy(program_cpu, generated.bytes, generated.length);
+   const size_t program_offset = program_va - list->usc_bo->va->addr;
+   /* This was the last allocation from the program BO; retain only the
+    * actual generated span so repeated small copies do not spend 6 KiB each. */
+   list->usc_offset = program_offset + generated.length;
+   if (agx_bo_sync_for_device(list->usc_bo, program_offset, generated.length) ||
+       agx_bo_sync_for_device(list->stream_bo,
+                              data_gpu - list->stream_bo->va->addr,
+                              uploaded_size))
+      goto fail;
+
+   const struct agx3_compute_direct_grid direct = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {grid.count[0], grid.count[1], grid.count[2]},
+      .local_size = {prog->b.workgroup.x, prog->b.workgroup.y,
+                     prog->b.workgroup.z},
+      .dimensions = grid.count[2] != 1 || prog->b.workgroup.z != 1 ? 3
+         : grid.count[1] != 1 || prog->b.workgroup.y != 1 ? 2 : 1,
+   };
+   struct agx3_compute_dispatch_sink sink = {
+      .data = *cursor,
+      .capacity = D12_DISPATCH_STREAM_MARGIN,
+   };
+   if (!agx3_g17p_native_compute_dispatch_append_with_barrier(
+          &generated.launch, &direct, 0x5, &sink))
+      goto fail;
+   *cursor += sink.length;
+   return true;
+
+fail:
+   mesa_loge("native G17P precompiled compute producer rejected metadata/resources");
+   list->state = D12_LIST_ERROR;
+   return false;
+}
+
 /*
  * Dispatch a precompiled libagx kernel, exactly as hk_dispatch_precomp does.
  */
@@ -1456,8 +1576,19 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
       return;
    }
 
-   if (!d12_list_require_legacy_compute(list))
+   const bool native = device->dev.chip == AGX_CHIP_G17P;
+   if (native) {
+      /* Native graphics/indirect integration is a separate producer gate. */
+      if (pre_gfx || agx_is_indirect(grid)) {
+         mesa_loge("native precompiled graphics/indirect launch unavailable");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+      if (!grid.count[0] || !grid.count[1] || !grid.count[2])
+         return;
+   } else if (!d12_list_require_legacy_compute(list)) {
       return;
+   }
 
    /* Tessellation runs its libagx kernels ahead of the draw that consumes
     * them, so they go in the pre-graphics stream rather than ending the
@@ -1488,25 +1619,6 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
    if (!d12_list_track_precompiled_reads(list, idx, args, args_size))
       d12_list_mark_read_set_incomplete(list);
 
-   uint64_t data_gpu = d12_list_upload(list, args, args_size, 4);
-   if (!data_gpu)
-      return;
-
-   uint32_t usc;
-   uint8_t *usc_cpu = d12_list_alloc_usc(list, agx_usc_size(15), &usc);
-   if (!usc_cpu)
-      return;
-
-   agx_usc_words_precomp((uint32_t *)usc_cpu, &prog->b, data_gpu, args_size);
-
-   if (getenv("D3D12AGX_DUMP_USC")) {
-      fprintf(stderr, "precomp USC @%u:", usc);
-      for (unsigned i = 0; i < 32; i++)
-         fprintf(stderr, " %02x", usc_cpu[i]);
-      fprintf(stderr, "\n  data_gpu=0x%llx size=%zu\n",
-              (unsigned long long)data_gpu, args_size);
-   }
-
    uint8_t **cur = pre_gfx ? &list->pregfx_cur : &list->stream_cur;
 
    if (pre_gfx) {
@@ -1519,11 +1631,35 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
       return;
    }
 
-   if (!d12_list_emit_legacy_cdm_launch(list, cur, grid, prog->b.workgroup,
-                                        prog->b.launch, usc))
-      return;
-   if (!d12_list_emit_cdm_cache_flush(list, cur))
-      return;
+   if (native) {
+      if (!d12_list_append_g17p_precomp(list, prog, args, args_size, grid, cur))
+         return;
+   } else {
+      uint64_t data_gpu = d12_list_upload(list, args, args_size, 4);
+      if (!data_gpu)
+         return;
+
+      uint32_t usc;
+      uint8_t *usc_cpu = d12_list_alloc_usc(list, agx_usc_size(15), &usc);
+      if (!usc_cpu)
+         return;
+
+      agx_usc_words_precomp((uint32_t *)usc_cpu, &prog->b, data_gpu, args_size);
+
+      if (getenv("D3D12AGX_DUMP_USC")) {
+         fprintf(stderr, "precomp USC @%u:", usc);
+         for (unsigned i = 0; i < 32; i++)
+            fprintf(stderr, " %02x", usc_cpu[i]);
+         fprintf(stderr, "\n  data_gpu=0x%llx size=%zu\n",
+                 (unsigned long long)data_gpu, args_size);
+      }
+
+      if (!d12_list_emit_legacy_cdm_launch(list, cur, grid, prog->b.workgroup,
+                                           prog->b.launch, usc))
+         return;
+      if (!d12_list_emit_cdm_cache_flush(list, cur))
+         return;
+   }
    seg->dispatches++;
    d12_segment_track_precompiled_write(seg, idx, args, args_size);
 }
@@ -5614,6 +5750,115 @@ d12_segment_bind_sampler_heap(struct d12_cmd_list *list,
    return true;
 }
 
+/* First native API-compute producer: monolithic, direct buffer compute.
+ * Texture/sampler, indirect, preamble and legacy scratch contracts retain
+ * their own guards until a matching native producer exists. */
+static bool
+d12_list_append_g17p_pso(struct d12_cmd_list *list,
+                        const struct d12_pipeline_state *pso,
+                        const struct d12_dispatch_uniforms *u,
+                        unsigned x, unsigned y, unsigned z)
+{
+   struct agx_device *dev = &list->device->dev;
+   const struct agx_shader_info *info = &pso->info;
+   if (dev->chip != AGX_CHIP_G17P || !pso->g17p_compute_container ||
+       !pso->code_bo || !pso->code_va || !u->root ||
+       !info->main_size || !info->nr_gprs || !info->agx3_staging_known ||
+       info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
+       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
+       info->imageblock_stride || info->texture_state_count ||
+       info->sampler_state_count || info->uses_sampler_heap || info->uses_txf ||
+       info->uses_ray_traversal ||
+       (info->rodata.size_16 && !pso->g17p_rodata_va))
+      goto fail;
+
+   struct agx3_ioto_uniform_range ranges[8];
+   unsigned range_count = 0;
+#define D12_G17P_RANGE(field, base, size)                                       do {                                                                             if (u->field) {                                                                  ranges[range_count++] = (struct agx3_ioto_uniform_range){                        .start_halfs = base, .size_halfs = size, .address = u->field,             };                                                                        }                                                                         } while (0)
+   D12_G17P_RANGE(root, D12_UNIFORM_ROOT, D12_UNIFORM_ROOT_REGS);
+   D12_G17P_RANGE(textures, D12_UNIFORM_TEXTURES, D12_UNIFORM_TEXTURE_REGS);
+   D12_G17P_RANGE(heap, D12_UNIFORM_HEAP, D12_UNIFORM_HEAP_REGS);
+   D12_G17P_RANGE(pbes, D12_UNIFORM_PBES, D12_UNIFORM_PBE_REGS);
+   D12_G17P_RANGE(heap_textures, D12_UNIFORM_HEAP_TEXTURES,
+                  D12_UNIFORM_HEAP_TEXTURE_REGS);
+   D12_G17P_RANGE(heap_pbes, D12_UNIFORM_HEAP_PBES, D12_UNIFORM_HEAP_PBE_REGS);
+   D12_G17P_RANGE(heap_samplers, D12_UNIFORM_HEAP_SAMPLERS,
+                  D12_UNIFORM_HEAP_SAMPLER_REGS);
+#undef D12_G17P_RANGE
+   if (info->rodata.size_16) {
+      ranges[range_count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = info->rodata.base_uniform,
+         .size_halfs = info->rodata.size_16,
+         .address = pso->g17p_rodata_va,
+      };
+   }
+   struct agx3_cdm_direct_template_sources launch_sources;
+   if (!agx3_cdm_direct_template_sources_compute(
+          info->uses_resource_info_query, false, false, &launch_sources))
+      goto fail;
+   uint32_t relative_program = 0;
+   uint8_t *program_cpu = d12_list_alloc_usc(
+      list, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE, &relative_program);
+   const uint64_t program_va = dev->shader_base + relative_program;
+   const struct agx3_g17p_compute_program_desc desc = {
+      .program_va = program_va,
+      .shader_va = pso->code_va,
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+      .shader_binary_size = info->main_size,
+      .scratch_size = info->agx3_spectpr_scratch_size,
+      .nr_gprs = info->nr_gprs,
+      .compiler_d_valid = info->agx3_staging_known,
+      .compiler_d = (uint32_t)info->agx3_staging_halfs * 2,
+      .threadgroup_memory_size_B = info->local_size
+         ? MAX2(256u, ALIGN_POT(info->local_size, 64u)) : 0,
+      .launch_sources = launch_sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   struct agx3_g17p_compute_program generated;
+   if (!program_cpu || !agx_va_in_usc_window(dev, program_va) ||
+       !agx_va_in_usc_window(dev, pso->code_va) ||
+       !agx3_g17p_compute_program_generate(dev->chip, &desc, &generated))
+      goto fail;
+   memcpy(program_cpu, generated.bytes, generated.length);
+   const size_t offset = program_va - list->usc_bo->va->addr;
+   list->usc_offset = offset + generated.length;
+   if (agx_bo_sync_for_device(list->usc_bo, offset, generated.length))
+      goto fail;
+   for (unsigned i = 0; i < range_count; i++) {
+      if (d12_list_stream_contains(list, ranges[i].address,
+                                    (size_t)ranges[i].size_halfs * 2) &&
+          agx_bo_sync_for_device(list->stream_bo,
+                                 ranges[i].address - list->stream_bo->va->addr,
+                                 (size_t)ranges[i].size_halfs * 2))
+         goto fail;
+   }
+
+   const struct agx3_compute_direct_grid grid = {
+      .source = AGX3_CDM_DIRECT_GRID_THREADGROUP_COUNTS,
+      .size = {x, y, z},
+      .local_size = {info->workgroup_size[0], info->workgroup_size[1],
+                     info->workgroup_size[2]},
+      .dimensions = z != 1 || info->workgroup_size[2] != 1 ? 3
+         : y != 1 || info->workgroup_size[1] != 1 ? 2 : 1,
+   };
+   struct agx3_compute_dispatch_sink sink = {
+      .data = list->stream_cur,
+      .capacity = D12_DISPATCH_STREAM_MARGIN,
+   };
+   if (!d12_list_check_stream_space(list) ||
+       !agx3_g17p_native_compute_dispatch_append_with_barrier(
+          &generated.launch, &grid, 0x5, &sink))
+      goto fail;
+   list->stream_cur += sink.length;
+   return true;
+
+fail:
+   mesa_loge("native direct buffer-compute producer rejected metadata/resources");
+   list->state = D12_LIST_ERROR;
+   return false;
+}
+
 static void
 d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
                       unsigned z, uint64_t indirect_args,
@@ -5631,12 +5876,23 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    if (list->state != D12_LIST_RECORDING)
       return;
 
-   if (!d12_list_require_legacy_compute(list))
+   const bool native = list->device->dev.chip == AGX_CHIP_G17P;
+   if (!native && !d12_list_require_legacy_compute(list))
       return;
 
    if (!d12_command_has_compute_pipeline(pso != NULL,
                                          pso ? pso->is_compute : false))
       return;
+   if (native) {
+      if (indirect_args || list->predicate_gpu || patch_count ||
+          constant_patch_count || root_patch_count) {
+         mesa_loge("native indirect/predicated compute producer unavailable");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+      if (!x || !y || !z)
+         return;
+   }
 
    d12_list_track_pso_reads(list, pso);
    d12_list_track_bound_reads(list, true, D12_WRITE_VIS_COMPUTE);
@@ -5736,6 +5992,19 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
     * requires. */
    if (d12_indirect_root_has_uav(root_patches, root_patch_count))
       d12_segment_mark_write_set_incomplete(seg, D12_WRITE_COMPUTE);
+
+   if (native) {
+      if (!d12_list_append_g17p_pso(
+             list, pso,
+             &(struct d12_dispatch_uniforms){
+                .root = root_gpu, .textures = textures_gpu, .pbes = pbes_gpu,
+                .heap = heap_gpu, .heap_textures = heap_textures_gpu,
+                .heap_pbes = heap_pbes_gpu, .heap_samplers = heap_samplers_gpu,
+             }, x, y, z))
+         return;
+      seg->dispatches++;
+      return;
+   }
 
    uint8_t *usc_cpu = NULL;
    uint32_t usc = d12_list_build_compute_usc(
