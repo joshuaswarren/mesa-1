@@ -24,6 +24,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #include "d12_frontend.h"
 #include "d12_agx3_vdm_state_update_core.h"
@@ -1979,6 +1980,27 @@ struct d12_command_signature {
    D3D12_COMMAND_SIGNATURE_DESC desc;
    D3D12_INDIRECT_ARGUMENT_DESC *arguments;
 };
+
+/* Direct interface-to-object casts rely on every COM interface being first.
+ * Protect all shared frontend objects in every C/C++ translation unit. */
+#ifdef __cplusplus
+#define D12_ASSERT_IFACE_FIRST(type) static_assert(offsetof(struct type, iface) == 0, #type " COM interface must be first")
+#else
+#define D12_ASSERT_IFACE_FIRST(type) _Static_assert(offsetof(struct type, iface) == 0, #type " COM interface must be first")
+#endif
+D12_ASSERT_IFACE_FIRST(d12_device);
+D12_ASSERT_IFACE_FIRST(d12_resource);
+D12_ASSERT_IFACE_FIRST(d12_heap);
+D12_ASSERT_IFACE_FIRST(d12_descriptor_heap);
+D12_ASSERT_IFACE_FIRST(d12_query_heap);
+D12_ASSERT_IFACE_FIRST(d12_root_signature);
+D12_ASSERT_IFACE_FIRST(d12_pipeline_state);
+D12_ASSERT_IFACE_FIRST(d12_cmd_allocator);
+D12_ASSERT_IFACE_FIRST(d12_cmd_list);
+D12_ASSERT_IFACE_FIRST(d12_fence);
+D12_ASSERT_IFACE_FIRST(d12_queue);
+D12_ASSERT_IFACE_FIRST(d12_command_signature);
+#undef D12_ASSERT_IFACE_FIRST
 
 static inline struct d12_device *
 d12_device_from_iface(void *iface)
