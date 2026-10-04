@@ -2912,8 +2912,25 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    unsigned nr_vbos = 0;
    bool kill_psiz = false;
 
+   /* The last VS/TES variant may pass xfb_info owned by this very NIR.
+    * Resource lowering can replace and free that NIR below. Preserve its
+    * transform-feedback layout before any such replacement or stage lowering,
+    * and use the shader-owned copy for the remaining compile decisions. */
+   if (xfb_info) {
+      assert(xfb_info->output_count < ARRAY_SIZE(shader->info.xfb_outputs));
+      memcpy(&shader->info.xfb_info, xfb_info,
+             nir_xfb_info_size(xfb_info->output_count));
+      typed_memcpy(shader->info.xfb_stride, nir->info.xfb_stride, 4);
+      xfb_info = &shader->info.xfb_info;
+   }
+
    if (dev->dev.chip == AGX_CHIP_G17P &&
-       nir->info.stage == MESA_SHADER_VERTEX && hw) {
+       nir->info.stage == MESA_SHADER_VERTEX) {
+      /* Software vertex variants feed geometry/tessellation through CDM.
+       * They use the same indexed texture heap and shifted vertex uniforms
+       * as hardware VS variants; legacy descriptor-base/index operands do
+       * not encode as native G17P texture fetches. Lower before changing the
+       * NIR stage so both variants retain the vertex preamble convention. */
       nir_shader *candidate = nir_shader_clone(NULL, nir);
       if (candidate && agx_nir_lower_g17p_indexed_samplers(candidate)) {
          ralloc_free(nir);
@@ -3549,14 +3566,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
                  compiler_info.uvs_size, compiler_info.user_size);
    }
 
-   if (xfb_info) {
-      assert(xfb_info->output_count < ARRAY_SIZE(shader->info.xfb_outputs));
-
-      memcpy(&shader->info.xfb_info, xfb_info,
-             nir_xfb_info_size(xfb_info->output_count));
-
-      typed_memcpy(shader->info.xfb_stride, nir->info.xfb_stride, 4);
-   }
 
    if (nir->constant_data_size > 0) {
       uint32_t data_size = align(nir->constant_data_size, HK_MIN_UBO_ALIGNMENT);
