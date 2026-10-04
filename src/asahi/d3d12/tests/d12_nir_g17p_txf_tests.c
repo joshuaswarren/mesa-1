@@ -78,12 +78,26 @@ int main(void)
       bool found = false;
       CHECK(d12_nir_g17p_txf_supported(b.shader, &found) && found);
       CHECK(d12_nir_lower_g17p_txf(b.shader, 9));
-      NIR_PASS(_, b.shader, nir_opt_constant_folding);
       int idx = nir_tex_instr_src_index(t, nir_tex_src_texture_offset);
       CHECK(idx>=0 && nir_src_bit_size(t->src[idx].src)==64);
-      CHECK(nir_src_is_const(t->src[idx].src));
-      CHECK(nir_src_as_uint(t->src[idx].src)==offsets[i]/32);
+      /* Constant folding canonically moves a constant texture_offset into
+       * texture_index and removes that source (try_fold_tex_offset). Keep a
+       * separate actual SSA use so its folded arithmetic still has to be64. */
+      nir_intrinsic_instr *index_sink = nir_store_global(
+         &b, t->src[idx].src.ssa, nir_load_root_agx(&b),
+         .align_mul=8, .write_mask=1);
+      NIR_PASS(_, b.shader, nir_opt_constant_folding);
+      CHECK(nir_src_bit_size(index_sink->src[0])==64);
+      CHECK(nir_src_is_const(index_sink->src[0]));
+      CHECK(nir_src_as_uint(index_sink->src[0])==offsets[i]/32);
+      CHECK(nir_tex_instr_src_index(t,nir_tex_src_texture_offset)<0);
+      CHECK(t->texture_index==offsets[i]/32);
       CHECK(nir_tex_instr_src_index(t,nir_tex_src_texture_handle)<0);
+      CHECK(t->coord_components==2);
+      int coord=nir_tex_instr_src_index(t,nir_tex_src_coord);
+      CHECK(coord>=0 && nir_src_num_components(t->src[coord].src)==2);
+      CHECK(nir_src_comp_as_uint(t->src[coord].src,0)==1);
+      CHECK(nir_src_comp_as_uint(t->src[coord].src,1)==2);
       CHECK(nir_src_as_uint(t->src[nir_tex_instr_src_index(t,nir_tex_src_lod)].src)==0);
       nir_validate_shader(b.shader,"native exact index test");ralloc_free(b.shader);
    }
@@ -115,10 +129,13 @@ int main(void)
    char*after=snapshot(b.shader);CHECK(!strcmp(before,after));free(before);free(after);ralloc_free(b.shader);
    /* Real gen9 lowering -> adapter -> G17P preprocess -> ISA compiler. */
    b=builder();nir_def*lane=nir_channel(&b,nir_load_local_invocation_id(&b),0);
-   make_fetch(&b,nir_imul_imm(&b,lane,32));
+   nir_tex_instr *dynamic = make_fetch(&b,nir_imul_imm(&b,lane,32));
    bool found=false;CHECK(d12_nir_g17p_txf_supported(b.shader,&found)&&found);
    NIR_PASS(_,b.shader,agx_nir_lower_texture_for_generation,9);
    CHECK(d12_nir_lower_g17p_txf(b.shader,9));
+   int native_index=nir_tex_instr_src_index(dynamic,nir_tex_src_texture_offset);
+   CHECK(native_index>=0 && nir_src_bit_size(dynamic->src[native_index].src)==64);
+   CHECK(!nir_src_is_const(dynamic->src[native_index].src));
    /* Model the driver's root placeholder publication at its actual phase. */
    agx_preprocess_nir_g17p(b.shader);
    NIR_PASS(_,b.shader,nir_shader_intrinsics_pass,lower_test_root,
