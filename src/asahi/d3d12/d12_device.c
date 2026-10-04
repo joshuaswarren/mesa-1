@@ -1738,25 +1738,9 @@ d12_device_CreateRootSignature(ID3D12Device2 *iface, UINT node_mask,
  * which is what a caller placing them consecutively in one heap needs.
  */
 /*
- * ABI NOTE, and this cost a segfault to find. Aggregates larger than a
- * register are returned through an explicit RetVal POINTER here, not by
- * value: the callee writes the struct through arg 1 and returns that same
- * pointer. That is widl's WIDL_EXPLICIT_AGGREGATE_RETURNS convention, which
- * the vkd3d test binary is built with (_agxtest/gen/vkd3d_d3d12.h defines
- * it) and which matches what MSVC does on Windows for a struct this size.
- *
- * The Windows branch of DirectX-Headers declares this explicit return
- * pointer ABI.  Accidentally compiling against its non-Windows branch
- * instead makes the caller read the by-value result as a pointer and
- * dereference it. With SizeInBytes = 0 in x0 that is a null dereference,
- * which is exactly how
- * test_resource_allocation_info crashed -- inside the TEST, one instruction
- * after the call (`ldp x3, x21, [x0]`), which is why it looked like a test
- * bug rather than ours.
- *
- * Only GetResourceAllocationInfo and GetCustomHeapProperties take this
- * form among the methods we implement; GetDesc and the descriptor-handle
- * getters really are by-value, which is why they have always worked.
+ * DirectX-Headers C interfaces use an explicit aggregate return pointer on
+ * Windows and a by-value return on Linux. Keep this method and its internal
+ * caller on the same platform ABI as the vtable, using the existing helpers.
  */
 /*
  * Resolve an abstract heap type into the concrete properties this adapter
@@ -1804,11 +1788,10 @@ d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
    D12_RETURN_AGGREGATE(props);
 }
 
-static D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE
-d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
-                                     D3D12_RESOURCE_ALLOCATION_INFO *ret,
-                                     UINT visible_mask, UINT count,
-                                     const D3D12_RESOURCE_DESC *descs)
+static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
+d12_device_GetResourceAllocationInfo(
+   ID3D12Device2 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
+   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC *descs)
 {
    struct d12_device *device = d12_device_from_iface(iface);
    D3D12_RESOURCE_ALLOCATION_INFO info = {0, 0};
@@ -1823,17 +1806,13 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
    if (!count) {
       info.SizeInBytes = 0;
       info.Alignment = 1;
-      if (ret)
-         *ret = info;
-      return ret;
+      D12_RETURN_AGGREGATE(info);
    }
 
    if (!descs) {
       info.SizeInBytes = UINT64_MAX;
       info.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-      if (ret)
-         *ret = info;
-      return ret;
+      D12_RETURN_AGGREGATE(info);
    }
 
    uint64_t total = 0;
@@ -1887,9 +1866,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
       if (d->Alignment != 0 && d->Alignment != align && !want_small) {
          info.SizeInBytes = UINT64_MAX;
          info.Alignment = align;
-         if (ret)
-            *ret = info;
-         return ret;
+         D12_RETURN_AGGREGATE(info);
       }
 
       if (d->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
@@ -1911,9 +1888,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
              * ALIGNMENT` even on the UINT64_MAX path. */
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            if (ret)
-               *ret = info;
-            return ret;
+            D12_RETURN_AGGREGATE(info);
          }
 
          /* Block-aware size of ONE SLICE OF LEVEL 0; the small-placement
@@ -1946,9 +1921,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
          } else {
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            if (ret)
-               *ret = info;
-            return ret;
+            D12_RETURN_AGGREGATE(info);
          }
       }
 
@@ -1958,9 +1931,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
 
    info.SizeInBytes = align64(total, max_align);
    info.Alignment = max_align;
-   if (ret)
-         *ret = info;
-      return ret;
+   D12_RETURN_AGGREGATE(info);
 }
 
 void
@@ -1977,8 +1948,13 @@ d12_device_get_resource_allocation_info_runtime(
    };
    if (!device || !desc)
       return;
+#ifdef _WIN32
    (void)d12_device_GetResourceAllocationInfo(
       (ID3D12Device2 *)&device->iface, info, visible_mask, 1, desc);
+#else
+   *info = d12_device_GetResourceAllocationInfo(
+      (ID3D12Device2 *)&device->iface, visible_mask, 1, desc);
+#endif
 }
 
 static HRESULT STDMETHODCALLTYPE
