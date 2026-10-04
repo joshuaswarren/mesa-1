@@ -2584,6 +2584,14 @@ d12_list_begin_render(struct d12_cmd_list *list,
       return NULL;
    }
 
+   /* Native depth has no qualified producer yet, including clear-only
+    * passes which never reach the triangle draw admission guard. */
+   if (dsv && list->device->dev.chip == AGX_CHIP_G17P) {
+      mesa_loge("native depth render producer remains closed");
+      list->state = D12_LIST_ERROR;
+      return NULL;
+   }
+
    if (dsv && (!dsv->resource || dsv->kind != D12_DESC_DSV)) {
       mesa_loge("render pass received an invalid DSV descriptor");
       list->state = D12_LIST_ERROR;
@@ -13966,6 +13974,12 @@ static bool
 d12_list_attach_ds(struct d12_cmd_list *list,
                    const struct d12_descriptor *dsv)
 {
+   if (list->device->dev.chip == AGX_CHIP_G17P) {
+      mesa_loge("native depth attach/clear producer remains closed");
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+
    struct d12_resource *ds = dsv->resource;
    if (!list->render_open) {
       mesa_loge("depth/stencil needs an open render pass; clear the colour "

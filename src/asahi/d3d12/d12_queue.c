@@ -349,6 +349,10 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                     struct drm_asahi_cmd_render *c)
 {
    memset(c, 0, sizeof(*c));
+   if (device->dev.chip == AGX_CHIP_G17P && seg->ds) {
+      mesa_loge("native depth submission refused before unqualified ZLS metadata");
+      return false;
+   }
 
    c->vdm_ctrl_stream_base = seg->g17p_vdm_control_base
       ? seg->g17p_vdm_control_base : list->stream_bo->va->addr + seg->stream_start;
