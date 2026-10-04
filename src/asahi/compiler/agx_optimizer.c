@@ -310,6 +310,13 @@ agx_optimizer_inline_imm(agx_context *ctx, agx_instr **defs, agx_instr *I)
 
       if (I->op == AGX_OPCODE_ST_TILE && s == 0)
          continue;
+      /* G17P tile stores only encode the whole-pixel 0xff mask as an
+       * immediate. Keep all other masks, including zero coverage, in the
+       * 16-bit register already produced by instruction selection.
+       */
+      if (ctx->key && ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          I->op == AGX_OPCODE_ST_TILE && s == 1 && def->imm != 0xff)
+         continue;
       if (I->op == AGX_OPCODE_ZS_EMIT && s != 0)
          continue;
       /* G17P names an explicit level and an implicit-LOD bias in the same
