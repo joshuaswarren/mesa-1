@@ -150,7 +150,8 @@ int main(int argc, char **argv)
       UINT rows=0;UINT64 row_bytes=0,total=0;
       ID3D12Device_GetCopyableFootprints(dev,&desc,0,1,512,&footprint,&rows,&row_bytes,&total);
       REQUIRE(rows==H && row_bytes==PITCH && footprint.Footprint.Width==W &&
-         footprint.Footprint.Height==H && footprint.Offset==512 &&
+         footprint.Footprint.Height==H && footprint.Footprint.Depth==1 &&
+         footprint.Footprint.Format==DXGI_FORMAT_R8G8B8A8_UNORM && footprint.Offset==512 &&
          footprint.Footprint.RowPitch>=PITCH && footprint.Footprint.RowPitch%256==0,
          "GPU copy footprint geometry");
       copy_size=footprint.Offset+(UINT64)footprint.Footprint.RowPitch*H+512;
@@ -193,6 +194,9 @@ int main(int argc, char **argv)
       for(unsigned y=0;y<H;y++)
          for(unsigned x=0;x<PITCH;x++)
             copy_bad+=copy_map[footprint.Offset+(UINT64)y*footprint.Footprint.RowPitch+x]!=readback[y*PITCH+x];
+      for(unsigned y=0;y<H;y++)
+         for(unsigned x=PITCH;x<footprint.Footprint.RowPitch;x++)
+            canary_bad+=copy_map[footprint.Offset+(UINT64)y*footprint.Footprint.RowPitch+x]!=0x33;
       for(UINT64 i=0;i<footprint.Offset;i++) canary_bad+=copy_map[i]!=0x7b;
       for(UINT64 i=footprint.Offset+(UINT64)footprint.Footprint.RowPitch*H;i<copy_size;i++) canary_bad+=copy_map[i]!=0x7b;
       printf("GPU COPY ORACLE bytes=%u mismatches=%u canary_mismatches=%u fence=%llu\n",BYTES,copy_bad,canary_bad,(unsigned long long)done);
@@ -202,7 +206,7 @@ int main(int argc, char **argv)
 cleanup:
    printf("G17P %s: %s stage=%s HRESULT=0x%08x %s\n",cpu_only?"CPU ROUNDTRIP ONLY":texture_copy?"PHYSICAL TEXTURE READBACK":"PHYSICAL BASELINE PIXELS",
       result?"FAIL":"PASS",stage,(unsigned)hr,cpu_only?"NO_GPU_SUBMISSION":"NOT_FULL_G4_OR_SUITE_PARITY");
-   if(copy_map)ID3D12Resource_Unmap(copy_buffer,0,NULL);
+   if(copy_map) {const D3D12_RANGE no_writes={0,0};ID3D12Resource_Unmap(copy_buffer,0,&no_writes);}
    if(copy_buffer)ID3D12Resource_Release(copy_buffer);
    if(mapped)ID3D12Resource_Unmap(rt,0,NULL);
    if(fence)ID3D12Fence_Release(fence);if(queue)ID3D12CommandQueue_Release(queue);
