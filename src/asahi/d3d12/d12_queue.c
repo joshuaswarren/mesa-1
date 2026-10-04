@@ -27,6 +27,8 @@
 #include "drm-uapi/drm.h"
 
 #include "agx_helpers.h"
+#include "asahi/compiler/agx3_compute_program.h"
+#include "agx_abi.h"
 #include "agx_usc.h"
 #include "clc/asahi_clc.h"
 #include "util/u_math.h"
@@ -1242,13 +1244,17 @@ d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
    mtx_unlock(&queue->lock);
 }
 
+_Static_assert(sizeof(struct libagx_write_u64_args) == 16,
+               "queue signal arguments must fit their reserved stream slot");
+
 static HRESULT
 d12_queue_signal_arena_init(struct d12_queue *queue)
 {
    struct agx_device *dev = &queue->device->dev;
-   if (agx_chip_command_stream_generation(dev->chip) !=
-       AGX_CS_GENERATION_AGX2) {
-      mesa_loge("legacy USC queue-signal launch rejected for %s",
+   const bool native = dev->chip == AGX_CHIP_G17P;
+   if (!native && agx_chip_command_stream_generation(dev->chip) !=
+                     AGX_CS_GENERATION_AGX2) {
+      mesa_loge("queue-signal producer unavailable for %s",
                 agx_chip_name(dev->chip));
       return E_NOTIMPL;
    }
@@ -1261,15 +1267,33 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
    uint8_t *stream_map;
    uint8_t *usc_map;
    uint32_t common_control_size = 0;
-   const uint32_t usc_size = agx_usc_size(15);
+   const uint32_t usc_size = native ? AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE
+                                    : agx_usc_size(15);
+   const uint32_t usc_stride = native ? AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE
+                                      : D12_QUEUE_SIGNAL_USC_STRIDE;
+   const uint32_t usc_arena_size = native
+      ? usc_stride * D12_QUEUE_SIGNAL_SLOT_COUNT : D12_QUEUE_SIGNAL_ARENA_SIZE;
 
    if (!program || !program->bo || !dev->params.max_attachments)
+      return E_FAIL;
+
+   /* Only the precompiler's native code container and fully described Ioto
+    * ABI may pass the G17P producer gate. No legacy USC words are reused. */
+   if (native &&
+       (!program->info.main_size || !program->info.nr_gprs ||
+        program->info.nr_preamble_gprs || program->info.printf_uniform ||
+        !program->info.agx3_staging_known ||
+        (program->info.rodata.size_16 && !program->rodata_offset) ||
+        program->entry_offset > UINT64_MAX - program->ptr ||
+        program->rodata_offset > UINT64_MAX - program->ptr ||
+        program->b.workgroup.x != 1 || program->b.workgroup.y != 1 ||
+        program->b.workgroup.z != 1))
       return E_FAIL;
 
    stream = agx_bo_create(dev, D12_QUEUE_SIGNAL_ARENA_SIZE, 0,
                           AGX_BO_WRITEBACK,
                           "d3d12 ddi fence signal stream arena");
-   usc = agx_bo_create(dev, D12_QUEUE_SIGNAL_ARENA_SIZE, 0,
+   usc = agx_bo_create(dev, usc_arena_size, 0,
                        AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
                        "d3d12 ddi fence signal usc arena");
    scratch = agx_bo_create(dev, AIL_PAGESIZE, 0, AGX_BO_WRITEBACK,
@@ -1297,33 +1321,104 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
        * not fit before copying into the tightly packed arena slot. */
       uint32_t control_words[4096 / sizeof(uint32_t)] = {0};
 
-      if (!d12_queue_signal_slot_layout(slot, 0, usc_size,
-                                        &control_offset, &data_offset,
-                                        &usc_offset))
+      if (!d12_queue_signal_slot_layout_program(
+             slot, 0, usc_size, usc_stride, usc_arena_size,
+             &control_offset, &data_offset, &usc_offset))
          goto fail;
 
-      agx_usc_words_precomp((uint32_t *)(usc_map + usc_offset), &program->b,
-                            stream->va->addr + data_offset,
-                            sizeof(struct libagx_write_u64_args));
-      uint8_t *control = (uint8_t *)agx_cdm_launch(
-         control_words, dev->chip, agx_1d(1), program->b.workgroup,
-         program->b.launch,
-         agx_usc_addr(dev, usc->va->addr + usc_offset));
-      control = d12_queue_emit_cdm_cache_flush(dev, control);
+      uint8_t *control;
+      if (native) {
+         struct agx3_ioto_uniform_range ranges[2] = {{
+            .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
+            .size_halfs = sizeof(struct libagx_write_u64_args) / 2,
+            .address = stream->va->addr + data_offset,
+         }};
+         unsigned range_count = 1;
+         if (program->info.rodata.size_16) {
+            ranges[range_count++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = program->info.rodata.base_uniform,
+               .size_halfs = program->info.rodata.size_16,
+               .address = program->ptr + program->rodata_offset,
+            };
+         }
+         struct agx3_cdm_direct_template_sources launch_sources;
+         if (!agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                       &launch_sources))
+            goto fail;
+         const struct agx3_g17p_compute_program_desc desc = {
+            .program_va = usc->va->addr + usc_offset,
+            .shader_va = program->ptr + program->entry_offset,
+            .uniform_ranges = ranges,
+            .uniform_range_count = range_count,
+            .shader_binary_size = program->info.main_size,
+            .scratch_size = program->info.agx3_tps_size,
+            .nr_gprs = program->info.nr_gprs,
+            .compiler_d_valid = program->info.agx3_staging_known,
+            .compiler_d = (uint32_t)program->info.agx3_staging_halfs * 2,
+            .threadgroup_memory_size_B = program->info.local_size
+               ? MAX2(256u, ALIGN_POT(program->info.local_size, 64u)) : 0,
+            .launch_sources = launch_sources,
+            .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+         };
+         struct agx3_g17p_compute_program generated;
+         if (!agx_va_in_usc_window(dev, desc.program_va) ||
+             !agx_va_in_usc_window(dev, desc.shader_va) ||
+             !agx3_g17p_compute_program_generate(dev->chip, &desc, &generated) ||
+             generated.length > usc_size)
+            goto fail;
+         memcpy(usc_map + usc_offset, generated.bytes, generated.length);
+         if (!slot && getenv("D3D12AGX_DUMP_SYNC")) {
+            mesa_logi("native queue signal producer: code=%u gprs=%u "
+                      "staging_halfs=%u tps=%u rodata_halfs=%u ioto=%u "
+                      "stride=%u slots=%u local=1x1x1",
+                      program->info.main_size, program->info.nr_gprs,
+                      program->info.agx3_staging_halfs,
+                      program->info.agx3_tps_size,
+                      program->info.rodata.size_16, generated.length,
+                      usc_stride, D12_QUEUE_SIGNAL_SLOT_COUNT);
+         }
+         const struct agx3_compute_direct_grid grid = {
+            .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+            .size = {1, 1, 1},
+            .local_size = {program->b.workgroup.x, program->b.workgroup.y,
+                           program->b.workgroup.z},
+            .dimensions = program->b.workgroup.z != 1 ? 3
+               : program->b.workgroup.y != 1 ? 2 : 1,
+         };
+         struct agx3_compute_dispatch_sink sink = {
+            .data = (uint8_t *)control_words,
+            .capacity = sizeof(control_words),
+         };
+         if (!agx3_g17p_native_compute_dispatch_append_with_barrier(
+                &generated.launch, &grid, 0x5, &sink))
+            goto fail;
+         control = (uint8_t *)control_words + sink.length;
+      } else {
+         agx_usc_words_precomp((uint32_t *)(usc_map + usc_offset), &program->b,
+                               stream->va->addr + data_offset,
+                               sizeof(struct libagx_write_u64_args));
+         control = (uint8_t *)agx_cdm_launch(
+            control_words, dev->chip, agx_1d(1), program->b.workgroup,
+            program->b.launch,
+            agx_usc_addr(dev, usc->va->addr + usc_offset));
+         control = d12_queue_emit_cdm_cache_flush(dev, control);
+      }
       if (!control)
          goto fail;
       const uint32_t control_size =
          (uint32_t)(control - (uint8_t *)control_words);
-      if (!d12_queue_signal_slot_layout(slot, control_size, usc_size,
-                                        &control_offset, &data_offset,
-                                        &usc_offset) ||
+      if (!d12_queue_signal_slot_layout_program(
+             slot, control_size, usc_size, usc_stride, usc_arena_size,
+             &control_offset, &data_offset, &usc_offset) ||
           (common_control_size && common_control_size != control_size))
          goto fail;
       common_control_size = control_size;
       memcpy(stream_map + control_offset, control_words, control_size);
    }
 
-   if (!common_control_size)
+   if (!common_control_size ||
+       agx_bo_sync_for_device(usc, 0, usc->size) ||
+       agx_bo_sync_for_device(stream, 0, stream->size))
       goto fail;
    queue->signal_stream_bo = stream;
    queue->signal_usc_bo = usc;
@@ -1331,6 +1426,8 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
    agx_bo_reference(program->bo);
    queue->signal_program_bo = program->bo;
    queue->signal_control_size = common_control_size;
+   queue->signal_program_stride = usc_stride;
+   queue->signal_program_size = usc_size;
    return S_OK;
 
 fail:
@@ -1354,6 +1451,8 @@ d12_queue_signal_arena_cleanup(struct d12_queue *queue)
    queue->signal_program_bo = NULL;
    queue->dependency_scratch_bo = NULL;
    queue->signal_control_size = 0;
+   queue->signal_program_stride = 0;
+   queue->signal_program_size = 0;
    queue->signal_slots = 0;
 }
 
@@ -1401,9 +1500,11 @@ d12_queue_prepare_internal_write(struct d12_queue *queue,
 
    op->signal_slot = (uint32_t)slot;
    op->signal_slot_valid = true;
-   if (!d12_queue_signal_slot_layout(
-          op->signal_slot, queue->signal_control_size, agx_usc_size(15),
-          &control_offset, &data_offset, &usc_offset)) {
+   if (!d12_queue_signal_slot_layout_program(
+          op->signal_slot, queue->signal_control_size,
+          queue->signal_program_size, queue->signal_program_stride,
+          queue->signal_usc_bo->size, &control_offset, &data_offset,
+          &usc_offset)) {
       d12_queue_release_signal_slot(queue, op);
       return false;
    }
@@ -1415,6 +1516,11 @@ d12_queue_prepare_internal_write(struct d12_queue *queue,
    };
    memcpy((uint8_t *)agx_bo_map(queue->signal_stream_bo) + data_offset,
           &shader_args, sizeof(shader_args));
+   if (agx_bo_sync_for_device(queue->signal_stream_bo, data_offset,
+                              sizeof(shader_args))) {
+      d12_queue_release_signal_slot(queue, op);
+      return false;
+   }
 
    op->submit_device = queue->device;
    op->payload_size = 2 * sizeof(struct drm_asahi_cmd_header) +

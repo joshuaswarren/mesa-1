@@ -130,6 +130,35 @@ test_signal_arena_layout_and_slots(void)
    assert(!d12_queue_signal_slot_layout(0, 1, 1, NULL, &data, &usc));
 }
 
+static void
+test_native_signal_program_slots(void)
+{
+   const uint32_t stride = 6144;
+   const uint32_t arena = stride * D12_QUEUE_SIGNAL_SLOT_COUNT;
+   uint32_t control, data, program;
+   for (uint32_t slot = 0; slot < D12_QUEUE_SIGNAL_SLOT_COUNT; slot++) {
+      assert(d12_queue_signal_slot_layout_program(
+         slot, 44, stride, stride, arena, &control, &data, &program));
+      assert(control == slot * D12_QUEUE_SIGNAL_STREAM_STRIDE);
+      assert(data == control + D12_QUEUE_SIGNAL_DATA_OFFSET);
+      assert(program == slot * stride && !(program & 63));
+      assert((uint64_t)program + stride <= arena);
+   }
+   control = data = program = 0xfeed;
+   assert(!d12_queue_signal_slot_layout_program(
+      63, 44, stride, stride, arena - 1, &control, &data, &program));
+   assert(control == 0xfeed && data == 0xfeed && program == 0xfeed);
+   assert(!d12_queue_signal_slot_layout_program(
+      0, 44, stride + 1, stride, arena, &control, &data, &program));
+   assert(!d12_queue_signal_slot_layout_program(
+      0, 44, 16, stride + 1, arena, &control, &data, &program));
+   assert(!d12_queue_signal_slot_layout_program(
+      63, 44, 16, UINT32_MAX & ~63u, UINT32_MAX,
+      &control, &data, &program));
+   assert(!d12_queue_signal_slot_layout_program(
+      64, 44, stride, stride, arena, &control, &data, &program));
+}
+
 int
 main(void)
 {
@@ -137,6 +166,7 @@ main(void)
    test_markers_do_not_serialize_submission();
    test_invalid_transitions();
    test_signal_arena_layout_and_slots();
+   test_native_signal_program_slots();
    puts("d12 queue timeline core tests: pass");
    return 0;
 }

@@ -1939,6 +1939,9 @@ struct d12_queue {
    struct agx_bo *signal_program_bo;
    struct agx_bo *dependency_scratch_bo;
    uint32_t signal_control_size;
+   /* USC records on AGX2; stable full Ioto program slots on G17P. */
+   uint32_t signal_program_stride;
+   uint32_t signal_program_size;
    uint64_t signal_slots;
    uint32_t stop;
    uint32_t retire_stop;

@@ -75,29 +75,42 @@ d12_queue_timeline_has_capacity(const struct d12_queue_timeline_state *state,
 }
 
 bool
-d12_queue_signal_slot_layout(uint32_t slot, uint32_t control_size,
-                             uint32_t usc_size, uint32_t *control_offset,
-                             uint32_t *data_offset, uint32_t *usc_offset)
+d12_queue_signal_slot_layout_program(
+   uint32_t slot, uint32_t control_size, uint32_t program_size,
+   uint32_t program_stride, uint32_t program_arena_size,
+   uint32_t *control_offset, uint32_t *data_offset,
+   uint32_t *program_offset)
 {
    if (slot >= D12_QUEUE_SIGNAL_SLOT_COUNT ||
-       control_size > D12_QUEUE_SIGNAL_DATA_OFFSET ||
-       usc_size > D12_QUEUE_SIGNAL_USC_STRIDE || !control_offset ||
-       !data_offset || !usc_offset)
+       control_size > D12_QUEUE_SIGNAL_DATA_OFFSET || !program_stride ||
+       (program_stride & 63u) || program_size > program_stride ||
+       !control_offset || !data_offset || !program_offset)
       return false;
 
    const uint32_t control = slot * D12_QUEUE_SIGNAL_STREAM_STRIDE;
    const uint32_t data = control + D12_QUEUE_SIGNAL_DATA_OFFSET;
-   const uint32_t usc = slot * D12_QUEUE_SIGNAL_USC_STRIDE;
+   const uint64_t program = (uint64_t)slot * program_stride;
    if (control > D12_QUEUE_SIGNAL_ARENA_SIZE -
                     D12_QUEUE_SIGNAL_STREAM_STRIDE ||
        data > D12_QUEUE_SIGNAL_ARENA_SIZE - 16u ||
-       usc > D12_QUEUE_SIGNAL_ARENA_SIZE - usc_size)
+       program > program_arena_size ||
+       program_size > program_arena_size - program)
       return false;
 
    *control_offset = control;
    *data_offset = data;
-   *usc_offset = usc;
+   *program_offset = program;
    return true;
+}
+
+bool
+d12_queue_signal_slot_layout(uint32_t slot, uint32_t control_size,
+                             uint32_t usc_size, uint32_t *control_offset,
+                             uint32_t *data_offset, uint32_t *usc_offset)
+{
+   return d12_queue_signal_slot_layout_program(
+      slot, control_size, usc_size, D12_QUEUE_SIGNAL_USC_STRIDE,
+      D12_QUEUE_SIGNAL_ARENA_SIZE, control_offset, data_offset, usc_offset);
 }
 
 int
