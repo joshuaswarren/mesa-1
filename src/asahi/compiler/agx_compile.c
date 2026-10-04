@@ -4030,7 +4030,7 @@ agx_lower_agx3_mixed_width_transcendental(agx_context *ctx)
       I->src[0] = widened;
    }
 }
-static void
+void
 agx_lower_agx3_fma_sources(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
@@ -4040,28 +4040,27 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
       if (I->op != AGX_OPCODE_FFMA || I->nr_srcs != 3 || I->saturate)
          continue;
 
-      /* A literal nonnegative finite minifloat times literal positive zero
-       * is exactly positive zero. Every minifloat below 0x80 is finite and
-       * nonnegative (agx_minifloat_decode); no run-time multiplier is folded.
-       * Keep the floating-point addition: a bitwise move would preserve -0
-       * where the original FMA produces +0 under round-to-nearest.  The native
-       * minifloat ADD form also retains floating-point denormal/NaN handling.
-       * Do not generalize this to zero times a variable (which may be NaN or
-       * infinity), or to a negated zero product.
+      /* Both literal minifloats are finite. If either is signed zero, their
+       * exact product is zero with the XOR of their signs. Keep the floating
+       * point addition with that signed zero: a bitwise move would change
+       * signed-zero, denormal or NaN behavior, and replacing -0 with +0 would
+       * change the result for a -0 addend. No run-time multiplier is folded.
        */
       if (I->nr_dests == 1 && I->dest[0].size == AGX_SIZE_32 &&
           agx_channels(I->dest[0]) == 1 &&
-          I->src[0].type == AGX_INDEX_IMMEDIATE && I->src[0].value < 0x80 &&
+          I->src[0].type == AGX_INDEX_IMMEDIATE && I->src[0].value <= 0xff &&
           !I->src[0].abs && !I->src[0].neg && !I->src[0].memory &&
-          I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value < 0x80 &&
+          I->src[1].type == AGX_INDEX_IMMEDIATE && I->src[1].value <= 0xff &&
           !I->src[1].abs && !I->src[1].neg && !I->src[1].memory &&
-          (I->src[0].value == 0 || I->src[1].value == 0) &&
+          ((I->src[0].value & 0x7f) == 0 ||
+           (I->src[1].value & 0x7f) == 0) &&
           I->src[2].type != AGX_INDEX_NULL &&
           I->src[2].size == AGX_SIZE_32 && agx_channels(I->src[2]) == 1) {
+         const unsigned sign = (I->src[0].value ^ I->src[1].value) & 0x80;
          I->op = AGX_OPCODE_FADD;
          I->nr_srcs = 2;
          I->src[0] = I->src[2];
-         I->src[1] = agx_zero();
+         I->src[1] = agx_immediate(sign);
          continue;
       }
 
@@ -10400,6 +10399,8 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (is_g17p && form_preamble) {
       NIR_PASS(_, nir, agx_nir_remove_unused_preamble_exports,
                key->reserved_preamble);
+      NIR_PASS(_, nir, agx_nir_coalesce_preamble_half_exports,
+               key->reserved_preamble, info->push_count);
       NIR_PASS(_, nir, nir_opt_dce);
    }
 

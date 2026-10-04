@@ -1269,11 +1269,14 @@ void agx_liveness_ins_update(struct u_sparse_bitset *live, agx_instr *I);
 
 bool agx_nir_opt_preamble(nir_shader *s, unsigned *sizes, bool g17p);
 bool agx_nir_remove_unused_preamble_exports(nir_shader *s, unsigned reserved);
+bool agx_nir_coalesce_preamble_half_exports(nir_shader *s, unsigned reserved,
+                                          unsigned allocated);
 agx_block *agx_reconverged_mrt_tail(agx_context *ctx);
 bool agx_nir_lower_load_mask(nir_shader *shader);
 bool agx_nir_lower_ubo(nir_shader *shader);
 bool agx_nir_lower_shared_bitsize(nir_shader *shader, bool element_indices);
 bool agx_nir_lower_frag_sidefx(nir_shader *s, bool g17p);
+void agx_lower_agx3_fma_sources(agx_context *ctx);
 void agx_lower_agx3_half_converts(agx_context *ctx);
 bool agx_lower_agx3_cf_constants(agx_context *ctx);
 bool agx_lower_agx3_half_iadd_constants(agx_context *ctx);
