@@ -15,7 +15,8 @@ d12_agx3_triangle_bind_generate(
        d->coefficient_bindings || d->reads_z || d->writes_memory ||
        d->writes_depth || d->has_preamble || d->needs_quad_derivatives ||
        (d->linked_fragment_control >> 29) != 0 ||
-       d->viewport.viewport_count != 1 || d->raster.depth_bias_enable)
+       d->viewport.viewport_count != 1 || d->raster.depth_bias_enable ||
+       d->depth_compare > 7)
       return false;
    struct d12_agx3_triangle_bind staged = {0};
    uint32_t output_size, output_select;
@@ -57,6 +58,13 @@ d12_agx3_triangle_bind_generate(
        !agx_ppp_hal200_cull_provoking_pack(chip, 0, cull.words[0], &cull.words[0]) ||
        !agx_ppp_hal200_depth_clip_pack(chip, d->depth_clip, cull.words[0],
                                       &cull.words[0]))
+      return false;
+   /* Reuse HK's exact native PRIMARY_FACE compare/write encoder for both
+    * rasterizer faces. Without storage the API depth test is inert. */
+   if (!agx_ppp_hal200_depth_face_pack(chip, d->has_depth && d->depth_test,
+          d->depth_write, d->depth_compare, primary.words[1], &primary.words[1]) ||
+       !agx_ppp_hal200_depth_face_pack(chip, d->has_depth && d->depth_test,
+          d->depth_write, d->depth_compare, primary.words[3], &primary.words[3]))
       return false;
    outputs.words[5] = primary.words[0];
    struct agx_ppp_hal200_graphics_core f, o, p, s, c;

@@ -71,6 +71,35 @@ int main(void)
       assert(!d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
       assert(memcmp(&out, &poison, sizeof(out)) == 0);
    }
+   /* Closed native-depth byte producer: compare/write state is checked on
+    * both faces, with no-DSV and disabled-test API semantics preserved. */
+   unsigned depth_cases = 0;
+   for (unsigned storage = 0; storage < 2; storage++)
+      for (unsigned test = 0; test < 2; test++)
+         for (unsigned write = 0; write < 2; write++)
+            for (unsigned compare = 0; compare < 8; compare++) {
+               d = good;
+               d.has_depth = storage; d.depth_test = test;
+               d.depth_write = write; d.depth_compare = compare;
+               assert(d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
+               struct agx_ppp_hal200_graphics_fields face;
+               assert(agx_ppp_hal200_graphics_core_unpack(AGX_CHIP_G17P,
+                  AGX_PPP_HAL200_GRAPHICS_PRIMARY_FACE, out.bytes + 0x30,
+                  AGX_PPP_HAL200_PRIMARY_FACE_LENGTH, &face));
+               const unsigned expected_compare = storage && test ? compare : 7;
+               const unsigned disabled_write = !(storage && test && write);
+               assert(((face.words[1] >> 24) & 7) == expected_compare);
+               assert(((face.words[3] >> 24) & 7) == expected_compare);
+               assert(((face.words[1] >> 21) & 1) == disabled_write);
+               assert(((face.words[3] >> 21) & 1) == disabled_write);
+               depth_cases++;
+            }
+   d = good; d.depth_compare = 8;
+   memset(&out, 0xa5, sizeof(out));
+   const struct d12_agx3_triangle_bind poison = out;
+   assert(!d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
+   assert(memcmp(&out, &poison, sizeof(out)) == 0);
+   printf("PASS cold native depth PRIMARY_FACE producer: %u compare/write/storage cases\n", depth_cases);
    d = good;
    assert(!d12_agx3_triangle_bind_generate(AGX_CHIP_G17S, &d, &out));
    assert(!d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, NULL, &out));
