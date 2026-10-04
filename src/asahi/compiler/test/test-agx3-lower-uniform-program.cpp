@@ -1073,6 +1073,80 @@ TEST_F(AGX3UniformProgram, VectorHalfExportRejectsUnalignedAndSparseWrites)
    agx_index quad = agx_vec_temp(b->shader, AGX_SIZE_16, 4);
    agx_uniform_store(b, pair, agx_immediate(25), 3);
    agx_uniform_store(b, triple, agx_immediate(40), 7);
+   agx_mov(b, agx_uniform(43, AGX_SIZE_16));
    agx_uniform_store(b, quad, agx_immediate(48), 5);
    EXPECT_FALSE(agx3_lower_uniform_half_exports(b->shader));
+}
+
+TEST_F(AGX3CProgImports, ThreeHalfVectorPadsOnlyUnusedFourthLane)
+{
+   info.push_count = 27;
+   agx_index value = agx_vec_temp(b->shader, AGX_SIZE_16, 3);
+   agx_index halves[3];
+   for (unsigned h = 0; h < 3; ++h) {
+      halves[h] = agx_temp(b->shader, AGX_SIZE_16);
+      agx_preload_to(b, halves[h], agx_register(1 + 2 * h, AGX_SIZE_16));
+   }
+   agx_instr *input = agx_collect_to(b, value, 3);
+   for (unsigned h = 0; h < 3; ++h)
+      input->src[h] = halves[h];
+   agx_instr *store = agx_uniform_store(b, value, agx_immediate(24), 7);
+   agx_stop(b);
+   ASSERT_TRUE(agx3_lower_uniform_half_exports(b->shader));
+   EXPECT_EQ(store->src[0].size, AGX_SIZE_32);
+   EXPECT_EQ(agx_channels(store->src[0]), 2u);
+   EXPECT_EQ(store->mask, 3u);
+   EXPECT_EQ(store->src[1].value, 24u);
+   EXPECT_EQ(info.push_count, 28u);
+   agx_instr *words = list_entry(store->link.prev, agx_instr, link);
+   ASSERT_EQ(words->op, AGX_OPCODE_COLLECT);
+   EXPECT_EQ(words->nr_srcs, 4u);
+   EXPECT_EQ(words->src[3].type, AGX_INDEX_IMMEDIATE);
+   EXPECT_EQ(words->src[3].value, 0u);
+   agx_validate(b->shader, "padded half vector");
+   agx_dce(b->shader, false);
+   agx_pressure_schedule(b->shader);
+   agx_ra(b->shader);
+   agx_lower_pseudo(b->shader);
+   agx_opt_register_cache(b->shader);
+   struct util_dynarray binary = UTIL_DYNARRAY_INIT;
+   EXPECT_TRUE(agx3_pack_binary(b->shader, &binary));
+   EXPECT_GT(binary.size, 0u);
+   util_dynarray_fini(&binary);
+}
+
+TEST_F(AGX3UniformProgram, ThreeHalfVectorPreservesEachFourthLaneHazard)
+{
+   for (unsigned kind = 0; kind < 5; ++kind) {
+      agx_builder *test = agx_test_builder(memctx);
+      agx_shader_key test_key = {};
+      test_key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      test->shader->key = &test_key;
+      test->shader->is_preamble = true;
+      agx_shader_info info = {};
+      test->shader->out = &info;
+      agx_index value = agx_vec_temp(test->shader, AGX_SIZE_16, 3);
+      agx_uniform_store(test, value, agx_immediate(24), 7);
+      if (kind == 0) test_key.reserved_preamble = 28;
+      if (kind == 1) agx_uniform_store(test, agx_immediate(1), agx_immediate(27), 1);
+      if (kind == 2) agx_mov(test, agx_uniform(27, AGX_SIZE_16));
+      if (kind == 3) {
+         test->shader->agx3_cprog_inputs_lowered = true;
+         info.agx3_preamble_inputs.halves[0] = UINT64_C(1) << 27;
+      }
+      if (kind == 4) {info.rodata.base_uniform = 27; info.rodata.size_16 = 1;}
+      EXPECT_FALSE(agx3_lower_uniform_half_exports(test->shader)) << kind;
+   }
+}
+
+TEST_F(AGX3UniformProgram, ThreeHalfVectorLastPaddingStaysInUniformFile)
+{
+   agx_shader_info info = {};
+   info.push_count = 511;
+   b->shader->out = &info;
+   agx_index value = agx_vec_temp(b->shader, AGX_SIZE_16, 3);
+   agx_instr *store = agx_uniform_store(b, value, agx_immediate(508), 7);
+   ASSERT_TRUE(agx3_lower_uniform_half_exports(b->shader));
+   EXPECT_EQ(store->src[1].value, 508u);
+   EXPECT_EQ(info.push_count, 512u);
 }

@@ -119,9 +119,9 @@ fail:
 /* Native scalar-half witnesses export an aligned dword, with an unused upper
  * uniform half. Give RA that real dword operand rather than widening an
  * arbitrary post-RA half-register (which may be odd or have a live neighbour).
- * Existing half-pair coalescing runs first. Handle proven scalar padding on
- * either side of a live half and complete half vectors with exact word
- * coverage, without changing any live half's uniform address.
+ * Existing half-pair coalescing runs first. Handle proven padding for odd
+ * half counts and complete half vectors with exact word coverage, without
+ * changing any live half's uniform address.
  */
 bool
 agx3_lower_uniform_half_exports(agx_context *ctx)
@@ -191,22 +191,31 @@ agx3_lower_uniform_half_exports(agx_context *ctx)
       /* An aligned vector of two or four halves already covers whole words.
        * Repack its SSA operand before RA, preserving every written half and
        * the store position. This uses the existing 32-bit COPY encoding and
-       * needs no padding or neighbor overwrite. */
+       * needs no padding or neighbor overwrite. Three halves may add a zero
+       * upper half only when that exact neighbor is proven unused. */
       const unsigned halves = agx_channels(value);
+      const unsigned stored_halves = ALIGN_POT(halves, 2);
+      const bool padded_vec3 = halves == 3 && base <= 508 &&
+                               !occupied[base + 3];
       if (value.type == AGX_INDEX_NORMAL && value.size == AGX_SIZE_16 &&
           !value.memory && !value.abs && !value.neg && !(base & 1) &&
-          (halves == 2 || halves == 4) &&
-          I->mask == BITFIELD_MASK(halves) && base <= 512 - halves) {
+          (halves == 2 || halves == 4 || padded_vec3) &&
+          I->mask == BITFIELD_MASK(halves) && base <= 512 - stored_halves) {
          agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
          agx_instr *split = agx_split(&b, halves, value);
-         agx_index words = agx_vec_temp(ctx, AGX_SIZE_32, halves / 2);
-         agx_instr *collect = agx_collect_to(&b, words, halves);
+         agx_index words = agx_vec_temp(ctx, AGX_SIZE_32, stored_halves / 2);
+         agx_instr *collect = agx_collect_to(&b, words, stored_halves);
          for (unsigned h = 0; h < halves; ++h) {
             split->dest[h] = agx_temp(ctx, AGX_SIZE_16);
             collect->src[h] = split->dest[h];
          }
+         if (padded_vec3) {
+            collect->src[3] = agx_immediate(0);
+            if (ctx->out)
+               ctx->out->push_count = MAX2(ctx->out->push_count, base + 4);
+         }
          I->src[0] = words;
-         I->mask = BITFIELD_MASK(halves / 2);
+         I->mask = BITFIELD_MASK(stored_halves / 2);
          progress = true;
          continue;
       }
