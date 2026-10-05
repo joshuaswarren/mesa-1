@@ -6156,8 +6156,7 @@ d12_segment_bind_sampler_heap(struct d12_cmd_list *list,
    return true;
 }
 
-/* No physical texture path: this opt-in only reaches the actual registered
- * noop fd whose native CDM stream validator is explicitly enabled. */
+/* Metadata admission belongs only to the registered, validated noop fd. */
 bool
 d12_g17p_txf_metadata_enabled(const struct agx_device *dev)
 {
@@ -6173,9 +6172,27 @@ d12_g17p_txf_metadata_enabled(const struct agx_device *dev)
 #endif
 }
 
-/* First native API-compute producer: monolithic, direct buffer compute.
- * Texture/sampler, indirect, preamble and legacy scratch contracts retain
- * their own guards until a matching native producer exists. */
+/* The bounded native indexed txf producer uses the same physical baseline
+ * and exact-prior-barrier contract as direct compute. A shim flag cannot
+ * admit a real fd, and the physical baseline cannot admit a noop fd. */
+bool
+d12_g17p_txf_physical_enabled(const struct agx_device *dev)
+{
+#ifndef _WIN32
+   const char *baseline = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
+   return dev && dev->chip == AGX_CHIP_G17P &&
+          baseline && !strcmp(baseline, "1") &&
+          dev->g17p_render_context_bo &&
+          (dev->params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) &&
+          d12_platform_is_real_asahi_render_fd(dev->fd);
+#else
+   (void)dev;
+   return false;
+#endif
+}
+
+/* Monolithic native compute, including bounded indexed txf. Indirect,
+ * API samplers, preamble and legacy scratch retain their own guards. */
 static bool
 d12_list_append_g17p_pso(struct d12_cmd_list *list,
                         const struct d12_pipeline_state *pso,
@@ -6184,16 +6201,17 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
 {
    struct agx_device *dev = &list->device->dev;
    const struct agx_shader_info *info = &pso->info;
-   const bool txf_metadata = pso->g17p_txf_compiler_only;
+   const bool native_txf = pso->g17p_native_txf;
    if (dev->chip != AGX_CHIP_G17P || !pso->g17p_compute_container ||
-       (txf_metadata && !d12_g17p_txf_metadata_enabled(dev)) ||
+       (native_txf && !d12_g17p_txf_metadata_enabled(dev) &&
+        !d12_g17p_txf_physical_enabled(dev)) ||
        !pso->code_bo || !pso->code_va || !u->root ||
        !info->main_size || !info->nr_gprs || !info->agx3_staging_known ||
        info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
        info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
        info->imageblock_stride || info->texture_state_count ||
        info->uses_sampler_heap ||
-       (txf_metadata ? (!info->uses_txf || info->sampler_state_count != 1)
+       (native_txf ? (!info->uses_txf || info->sampler_state_count != 1)
                      : (info->sampler_state_count || info->uses_txf)) ||
        info->uses_ray_traversal ||
        (info->rodata.size_16 && !pso->g17p_rodata_va))
@@ -6201,7 +6219,7 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
 
    struct agx3_ioto_uniform_range ranges[10];
    unsigned range_count = 0;
-   if (txf_metadata) {
+   if (native_txf) {
       const struct d12_binding_upload_cache *cache = &list->binding_upload_cache[1];
       struct agx_bo *sampler_bo = list->device->rodata_bo;
       if (!u->textures || !cache->valid || cache->root != u->root ||
@@ -6273,16 +6291,18 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
                 code_hex, table_hex, sampler_hex);
       mesa_logi("native Texture.Load metadata: table=0x%llx span=%llu "
                 "texture-cell=0x%llx sampler-cell=0x%llx sampler=0x%llx "
-                "root-cell=0x%llx halves=0/4/8/query16 fd-policy=registered-shim-only",
+                "root-cell=0x%llx halves=0/4/8/query16 fd-policy=%s",
                 (unsigned long long)texture_table,
                 (unsigned long long)cache->texture_table_size_B,
                 (unsigned long long)u->textures,
                 (unsigned long long)sampler_cell,
                 (unsigned long long)sampler_table,
-                (unsigned long long)u->root);
+                (unsigned long long)u->root,
+                d12_g17p_txf_metadata_enabled(dev)
+                   ? "registered-shim-only" : "physical-asahi");
    }
 #define D12_G17P_RANGE(field, base, size)                                       do {                                                                             if (u->field) {                                                                  ranges[range_count++] = (struct agx3_ioto_uniform_range){                        .start_halfs = base, .size_halfs = size, .address = u->field,             };                                                                        }                                                                         } while (0)
-   if (!txf_metadata) {
+   if (!native_txf) {
       D12_G17P_RANGE(root, D12_UNIFORM_ROOT, D12_UNIFORM_ROOT_REGS);
       D12_G17P_RANGE(textures, D12_UNIFORM_TEXTURES, D12_UNIFORM_TEXTURE_REGS);
    }
@@ -6511,7 +6531,12 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
                 .heap_pbes = heap_pbes_gpu, .heap_samplers = heap_samplers_gpu,
              }, x, y, z))
          return;
-      seg->g17p_txf_metadata_only |= pso->g17p_txf_compiler_only;
+      if (pso->g17p_native_txf) {
+         if (d12_g17p_txf_metadata_enabled(&list->device->dev))
+            seg->g17p_txf_metadata_only = true;
+         else
+            seg->g17p_txf_physical = true;
+      }
       seg->dispatches++;
       return;
    }

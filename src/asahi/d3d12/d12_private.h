@@ -1075,8 +1075,8 @@ struct d12_pipeline_state {
    struct agx_shader_info info;
    /* Native compute code_va is the CODE entry, never the allocation base. */
    bool g17p_compute_container;
-   /* Compiled native fetch ABI; no qualified dispatch pointer-prefix producer. */
-   bool g17p_txf_compiler_only;
+   /* Native indexed Texture.Load ABI with texture/sampler pointer prefix. */
+   bool g17p_native_txf;
    uint64_t g17p_rodata_va;
 
    /* VERTEX ATTRIBUTES. Resolved at PSO creation by matching each
@@ -1390,8 +1390,9 @@ struct d12_read_tracker {
 };
 
 struct d12_segment {
-   /* Recorded native texture launch remains registered-shim metadata only. */
+   /* Revalidate the admission used when recording each native texture path. */
    bool g17p_txf_metadata_only;
+   bool g17p_txf_physical;
    /* Base addresses of the render target SLICES this pass writes. Array and
     * 3D RTVs may select a bounded layer range; layers are contiguous at
     * layer_stride_B, so the view carries an offset the resource does not.
@@ -2274,3 +2275,4 @@ bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
 
 /* Native Texture.Load metadata producer never admits a physical DRM fd. */
 bool d12_g17p_txf_metadata_enabled(const struct agx_device *dev);
+bool d12_g17p_txf_physical_enabled(const struct agx_device *dev);

@@ -2476,6 +2476,12 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
                payload_valid = false;
                break;
             }
+            if (seg->g17p_txf_physical &&
+                !d12_g17p_txf_physical_enabled(&device->dev)) {
+               mesa_loge("native Texture.Load physical admission revoked");
+               payload_valid = false;
+               break;
+            }
             struct drm_asahi_cmd_compute cmd = {
                .cdm_ctrl_stream_base =
                   list->stream_bo->va->addr + seg->stream_start,
