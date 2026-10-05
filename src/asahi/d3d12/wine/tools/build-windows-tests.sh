@@ -16,7 +16,9 @@ dxh=$src/subprojects/DirectX-Headers-1.0/include
 [[ -d $dxh ]] || dxh=$(ls -d "$src"/subprojects/DirectX-Headers*/include | head -1)
 mkdir -p "$out/suites" "$out/samples"
 
-cflags=(-O2 -std=c11 -D_WIN32_WINNT=0x0A00 -DINITGUID -Wno-ignored-attributes
+# -static: llvm-mingw otherwise links libc++/libunwind as DLLs that no Wine
+# prefix has, and the exe dies at import time (STATUS_DLL_NOT_FOUND).
+cflags=(-O2 -std=c11 -D_WIN32_WINNT=0x0A00 -DINITGUID -Wno-ignored-attributes -static
         -I"$dxh" -I"$src/src/asahi/d3d12" -I"$src/src/asahi/d3d12/tests")
 for name in g1_smoke g2_smoke g3_smoke g4_smoke g4_triangle g5_depth \
             g5_descriptors g5_atomics g5_control_flow g5_wave g5_texture \
@@ -39,7 +41,7 @@ if [[ -n $samples ]]; then
       extra=-DSAMPLE_NONE
       [[ $name == HelloTexture ]] && extra=-DSAMPLE_PRECOMPILED
       mkdir -p "$out/samples/$cls"
-      "$cxx" -O2 -std=c++17 -municode -D_WIN32_WINNT=0x0A00 -DUNICODE -D_UNICODE -DNOMINMAX \
+      "$cxx" -O2 -std=c++17 -static -municode -D_WIN32_WINNT=0x0A00 -DUNICODE -D_UNICODE -DNOMINMAX \
          -DWIDL_EXPLICIT_AGGREGATE_RETURNS "-D_uuidof=__uuidof" \
          -DSAMPLE_CLASS=$cls "-DSAMPLE_HEADER=\"$cls.h\"" "${extra[@]}" \
          -Wno-ignored-attributes -Wno-nonportable-include-path -Wno-address-of-temporary \

@@ -9,6 +9,10 @@
 # Usage: neo-run-proton.sh <tool-name> <prefix-dir> <log-dir> <timeout-s> <exe> [args...]
 # Env:   STEAM_ROOT (default /home/user/.local/share/Aurora-Steam-ARM64-20261005)
 #        RUN_USER (default user), EXTRA_ENV (space separated VAR=VALUE list)
+#        PROTON_VERB (default run): "run" is what Steam does (prefix setup incl.
+#        the tool's dxvk/vkd3d-proton install, then the steam.exe shim);
+#        "runinprefix" skips the prefix setup, so under the vkd3d-proton tool
+#        it silently used Wine's own d3d12 instead of vkd3d-proton.
 set -u
 tool=$1; prefix=$2; logdir=$3; timeout_s=$4; shift 4
 steam_root=${STEAM_ROOT:-/home/user/.local/share/Aurora-Steam-ARM64-20261005}
@@ -47,12 +51,12 @@ exe_dir=$(dirname "$1")
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 log=$logdir/run-$stamp.log
 {
-   echo "tool=$tool prefix=$prefix exe=$1 args=${*:2} timeout=$timeout_s"
+   echo "tool=$tool prefix=$prefix exe=$1 args=${*:2} timeout=$timeout_s verb=${PROTON_VERB:-run}"
    echo "session env: ${sess_env[*]}"
 } > "$log"
 
-# runinprefix passes everything after the verb to wine; the exe directory is
-# only the cwd (an extra leading path made wine open an Explorer window on it).
+# Everything after the verb is the command line; the exe directory is only
+# the cwd (an extra leading path made wine open an Explorer window on it).
 timeout --signal=TERM --kill-after=10s "$timeout_s" \
    runuser -u "$run_user" -- env -i HOME=/home/$run_user USER=$run_user LOGNAME=$run_user \
       PATH=/usr/local/bin:/usr/bin:/bin \
@@ -60,11 +64,11 @@ timeout --signal=TERM --kill-after=10s "$timeout_s" \
       STEAM_COMPAT_CLIENT_INSTALL_PATH="$steam_root" \
       STEAM_COMPAT_DATA_PATH="$prefix" \
       STEAM_COMPAT_INSTALL_PATH="$exe_dir" \
-      STEAM_COMPAT_APP_ID=0 SteamAppId=0 SteamGameId=0 \
+      STEAM_COMPAT_APP_ID=0 SteamAppId=0 SteamGameId=0 PROTON_VERB="${PROTON_VERB:-run}" \
       PROTON_LOG=1 PROTON_LOG_DIR="$logdir" \
       WINEDEBUG=${WINEDEBUG:-err+all,fixme-all,+loaddll} \
       ${EXTRA_ENV:-} \
-      bash -c 'cd "$1" && shift && exec "$0" runinprefix "$@"' "$tooldir/aurora-proton" "$exe_dir" "$@" \
+      bash -c 'cd "$1" && shift && exec "$0" "$PROTON_VERB" "$@"' "$tooldir/aurora-proton" "$exe_dir" "$@" \
       >> "$log" 2>&1
 rc=$?
 echo "exit=$rc" >> "$log"
