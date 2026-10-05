@@ -1158,10 +1158,9 @@ d12_device_CreateRootSignature(ID3D12Device2 *iface, UINT node_mask,
  * pool, so the pool preference is always L0 and the only thing that varies is
  * how the CPU sees the memory.
  *
- * GPU_UPLOAD is write-combined because that is what it is for -- the CPU
- * streams into it and never reads back, and write-combining is what makes
- * those writes cheap.  UPLOAD is write-combined for the same reason;
- * READBACK is write-back because the CPU reads it.
+ * UPLOAD and GPU_UPLOAD follow the opened adapter's cache-coherent UMA
+ * contract: write-back on coherent UMA, write-combined otherwise. READBACK
+ * is write-back. This must agree with the public architecture query.
  */
 static D12_AGGREGATE_RETURN(D3D12_HEAP_PROPERTIES) STDMETHODCALLTYPE
 d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
@@ -1175,15 +1174,21 @@ d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
       .VisibleNodeMask = node_mask ? node_mask : 1,
    };
 
-   (void)iface;
+   const struct d12_core_caps *caps = &d12_device_from_iface(iface)->caps;
 
    switch (heap_type) {
    case D3D12_HEAP_TYPE_DEFAULT:
       props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
+      props.MemoryPoolPreference = caps->uma ? D3D12_MEMORY_POOL_L0
+                                            : D3D12_MEMORY_POOL_L1;
       break;
    case D3D12_HEAP_TYPE_UPLOAD:
    case D3D12_HEAP_TYPE_GPU_UPLOAD:
-      props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+      props.CPUPageProperty = caps->cache_coherent_uma
+         ? D3D12_CPU_PAGE_PROPERTY_WRITE_BACK
+         : D3D12_CPU_PAGE_PROPERTY_WRITE_COMBINE;
+      if (heap_type == D3D12_HEAP_TYPE_GPU_UPLOAD && !caps->uma)
+         props.MemoryPoolPreference = D3D12_MEMORY_POOL_L1;
       break;
    case D3D12_HEAP_TYPE_READBACK:
       props.CPUPageProperty = D3D12_CPU_PAGE_PROPERTY_WRITE_BACK;
