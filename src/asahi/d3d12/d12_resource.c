@@ -642,6 +642,8 @@ struct d12_cpu_subresource {
    uint32_t y_el;
    uint32_t width_el;
    uint32_t height_el;
+   uint32_t z, depth;
+   uint64_t slice_stride_B;
    uint32_t blocksize_B;
    uint32_t texture_pitch_B;
    bool empty;
@@ -655,7 +657,12 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
 {
    memset(out, 0, sizeof(*out));
 
-   if (res->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+   const bool volume = res->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D;
+   const bool legacy = res->device->dev.params.gpu_generation == 13 ||
+                       res->device->dev.params.gpu_generation == 14;
+   if ((res->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D &&
+        !(legacy && (volume || res->desc.Dimension ==
+                               D3D12_RESOURCE_DIMENSION_TEXTURE1D))) ||
        res->heap_props.Type != D3D12_HEAP_TYPE_CUSTOM ||
        res->heap_props.CPUPageProperty ==
           D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ||
@@ -668,7 +675,8 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
    const uint32_t blocksize = util_format_get_blocksize(format);
    const uint32_t width = res->layout.width_px;
    const uint32_t height = res->layout.height_px;
-   const D3D12_BOX whole = {0, 0, 0, width, height, 1};
+   const uint32_t depth = volume ? res->layout.depth_px : 1;
+   const D3D12_BOX whole = {0, 0, 0, width, height, depth};
    const D3D12_BOX *b = box ? box : &whole;
 
    /* Coordinates must still name the resource even when the box is empty:
@@ -677,16 +685,13 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
     * the conformance test.
     */
    if (b->left > width || b->right > width || b->top > height ||
-       b->bottom > height || b->front > 1 || b->back > 1)
+       b->bottom > height || b->front > depth || b->back > depth)
       return E_INVALIDARG;
 
    if (b->left >= b->right || b->top >= b->bottom || b->front >= b->back) {
       out->empty = true;
       return S_OK;
    }
-
-   if (b->front != 0 || b->back != 1)
-      return E_INVALIDARG;
 
    /* BC regions are expressed in pixels but copied in whole format blocks.
     * The right/bottom edge may be the image edge; interior coordinates must
@@ -708,7 +713,7 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
         res->heap_props.CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_WRITE_BACK ||
         res->heap_props.MemoryPoolPreference != D3D12_MEMORY_POOL_L0 ||
         res->desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN || res->reserved ||
-        res->layout.levels != 1 || res->desc.DepthOrArraySize != 1 ||
+        res->layout.levels != 1 || (!volume && res->desc.DepthOrArraySize != 1) ||
         res->layout.sample_count_sa != 1 || res->layout.compressed ||
         !util_has_cache_ops() ||
         (format != PIPE_FORMAT_R8G8B8A8_UNORM && format != PIPE_FORMAT_B8G8R8A8_UNORM) ||
@@ -728,6 +733,8 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
       .y_el = b->top / block_height,
       .width_el = right_el - b->left / block_width,
       .height_el = bottom_el - b->top / block_height,
+      .z = b->front, .depth = b->back - b->front,
+      .slice_stride_B = res->layout.layer_stride_B,
       .blocksize_B = blocksize,
       .texture_pitch_B = tiled ? 0 : ail_get_linear_stride_B(&res->layout, 0),
       .tiled = tiled,
@@ -737,6 +744,7 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
       return S_OK;
 
    const uint64_t last =
+      (uint64_t)(out->z + out->depth - 1) * out->slice_stride_B +
       (uint64_t)(out->y_el + out->height_el - 1) * out->texture_pitch_B +
       (uint64_t)(out->x_el + out->width_el) * blocksize;
    if (last > res->layout.size_B ||
@@ -752,8 +760,6 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
                                 const D3D12_BOX *dst_box, const void *src,
                                 UINT src_row_pitch, UINT src_depth_pitch)
 {
-   (void)src_depth_pitch;
-
    struct d12_resource *res = d12_resource_from_iface(iface);
    struct d12_cpu_subresource surface;
    HRESULT hr = d12_resource_cpu_subresource(res, dst_subresource, dst_box,
@@ -765,15 +771,21 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (src_row_pitch < row_bytes ||
+   const uint64_t slice_bytes =
+      (uint64_t)(surface.height_el - 1) * src_row_pitch + row_bytes;
+   if ((surface.depth > 1 && src_depth_pitch < slice_bytes) ||
+       src_row_pitch < row_bytes ||
        (surface.tiled && src_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
 
    if (surface.tiled) {
       /* UNKNOWN-layout UMA textures expose no CPU pointer. AIL owns the
        * resource's actual tiled layout; only caller-provided bytes are stored. */
-      ail_tile(surface.map, (void *)src, &res->layout, 0, src_row_pitch,
-               surface.x_el, surface.y_el, surface.width_el, surface.height_el);
+      for (uint32_t z = 0; z < surface.depth; ++z)
+         ail_tile(surface.map + (uint64_t)(surface.z + z) * surface.slice_stride_B,
+                  (void *)((const uint8_t *)src + (uint64_t)z * src_depth_pitch),
+                  &res->layout, 0, src_row_pitch, surface.x_el, surface.y_el,
+                  surface.width_el, surface.height_el);
       /* Non-coherent UMA is intentionally advertised. Publish dirty CPU
        * cache lines before the resource can return to GPU ownership. */
       util_flush_range(surface.map, res->layout.size_B);
@@ -785,9 +797,12 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
    uint8_t *dst = surface.map +
                   (uint64_t)surface.y_el * surface.texture_pitch_B +
                   (uint64_t)surface.x_el * surface.blocksize_B;
-   for (uint32_t y = 0; y < surface.height_el; ++y)
-      memcpy(dst + (uint64_t)y * surface.texture_pitch_B,
-             (const uint8_t *)src + (uint64_t)y * src_row_pitch, row_bytes);
+   for (uint32_t z = 0; z < surface.depth; ++z)
+      for (uint32_t y = 0; y < surface.height_el; ++y)
+         memcpy(dst + (uint64_t)(surface.z + z) * surface.slice_stride_B +
+                      (uint64_t)y * surface.texture_pitch_B,
+                (const uint8_t *)src + (uint64_t)z * src_depth_pitch +
+                                      (uint64_t)y * src_row_pitch, row_bytes);
 
    return S_OK;
 }
@@ -798,8 +813,6 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
                                  UINT src_subresource,
                                  const D3D12_BOX *src_box)
 {
-   (void)dst_depth_pitch;
-
    struct d12_resource *res = d12_resource_from_iface(iface);
    struct d12_cpu_subresource surface;
    HRESULT hr = d12_resource_cpu_subresource(res, src_subresource, src_box,
@@ -811,7 +824,10 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (dst_row_pitch < row_bytes ||
+   const uint64_t slice_bytes =
+      (uint64_t)(surface.height_el - 1) * dst_row_pitch + row_bytes;
+   if ((surface.depth > 1 && dst_depth_pitch < slice_bytes) ||
+       dst_row_pitch < row_bytes ||
        (surface.tiled && dst_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
 
@@ -821,17 +837,23 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
       /* The caller synchronized GPU completion before this CPU access.
        * Drop clean/stale CPU lines before reading actual EOT writes. */
       util_flush_inval_range(surface.map, res->layout.size_B);
-      ail_detile(surface.map, dst, &res->layout, 0, dst_row_pitch,
-                 surface.x_el, surface.y_el, surface.width_el, surface.height_el);
+      for (uint32_t z = 0; z < surface.depth; ++z)
+         ail_detile(surface.map + (uint64_t)(surface.z + z) * surface.slice_stride_B,
+                    (uint8_t *)dst + (uint64_t)z * dst_depth_pitch,
+                    &res->layout, 0, dst_row_pitch, surface.x_el, surface.y_el,
+                    surface.width_el, surface.height_el);
       return S_OK;
    }
 
    const uint8_t *src = surface.map +
                         (uint64_t)surface.y_el * surface.texture_pitch_B +
                         (uint64_t)surface.x_el * surface.blocksize_B;
-   for (uint32_t y = 0; y < surface.height_el; ++y)
-      memcpy((uint8_t *)dst + (uint64_t)y * dst_row_pitch,
-             src + (uint64_t)y * surface.texture_pitch_B, row_bytes);
+   for (uint32_t z = 0; z < surface.depth; ++z)
+      for (uint32_t y = 0; y < surface.height_el; ++y)
+         memcpy((uint8_t *)dst + (uint64_t)z * dst_depth_pitch +
+                                (uint64_t)y * dst_row_pitch,
+                src + (uint64_t)(surface.z + z) * surface.slice_stride_B +
+                      (uint64_t)y * surface.texture_pitch_B, row_bytes);
 
    return S_OK;
 }
