@@ -6390,7 +6390,8 @@ emit_if(agx_context *ctx, nir_if *nif)
 
    agx_instr *if_ = agx_if_icmp(&_b, cond, agx_zero(), 1, AGX_ICOND_UEQ, true,
                                 NULL /* filled in later */);
-   const bool divergent = nir_src_is_divergent(&nif->condition);
+   const bool divergent = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ||
+                          nir_src_is_divergent(&nif->condition);
    ctx->loop_nesting++;
    ctx->total_nesting++;
    ctx->divergent_nesting += divergent;
@@ -6435,7 +6436,8 @@ emit_loop(agx_context *ctx, nir_loop *nloop)
    assert(!nir_loop_has_continue_construct(nloop));
    /* We only track nesting within the innermost loop, so push and reset */
    unsigned pushed_nesting = ctx->loop_nesting;
-   const bool divergent = nir_loop_is_divergent(nloop);
+   const bool divergent = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX2 ||
+                          nir_loop_is_divergent(nloop);
    ctx->loop_nesting = 0;
    ctx->total_nesting++;
    ctx->divergent_nesting += divergent;
@@ -8531,8 +8533,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    }
 
    ctx->alloc = impl->ssa_alloc;
-   /* Uniform control-flow hints need divergence metadata for this final IR. */
-   nir_divergence_analysis(nir);
+   /* AGX3 uniform control-flow hints need divergence metadata for this final
+    * IR. AGX2 keeps upstream's conservative hints. */
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX2)
+      nir_divergence_analysis(nir);
    emit_cf_list(ctx, &impl->body);
    agx_emit_phis_deferred(ctx);
 

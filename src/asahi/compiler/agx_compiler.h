@@ -509,8 +509,8 @@ typedef struct agx_block {
    bool divergent;
 
    /* Some enclosing if or loop may diverge within the subgroup (NIR
-    * divergence analysis). Equal to divergent unless AGX_G17P_UNIFORM_CF_HINTS
-    * is set; used only for register-cache discard hints.
+    * divergence analysis on AGX3; equal to divergent on AGX2). Used only for
+    * register-cache discard hints.
     */
    bool cf_divergent;
 
