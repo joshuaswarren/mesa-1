@@ -287,6 +287,7 @@ agx_lower_uniform_sources(agx_context *ctx)
       /* An unwitnessed descriptor pair (agx3_tex_uniform_pair_unwitnessed)
        * materializes its uniform operand, keeping the register form. */
       const bool copy_tex_uniform =
+         I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
          agx3_tex_uniform_pair_unwitnessed(ctx, I, I->src[3], I->src[4]);
 
       /* Exports end the block and admit no instruction between them; place
