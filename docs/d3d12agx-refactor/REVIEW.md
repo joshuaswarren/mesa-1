@@ -373,6 +373,9 @@ on the M1 Pro and run under the Phase 2 kit environment.
 | 2d65607c6de | test | `render_pass_split` live test (fails against cc55230bb1e: the clear reaches a quarter of the target) |
 | 39bffe4c69b | A (correctness) | a UAV or aliasing barrier, or a transition out of UNORDERED_ACCESS, inside a render whose draws write memory ends the render (hk's split for a memory-scope barrier in a pass) |
 | 53e8807e597 | G17P | bind-state and draw-index records reused across identical draws (256 B of VDM slab per draw before) |
+| fa3e5c0d645 | review fixes | a declared pass's entry traffic applied once per attachment (a split pass lost the CLEAR of targets the first render did not write); EndRenderPass applies clears no draw's render applied; depth/stencil stores retired only for renders without draws; a colour-less pipeline absorbs clears only with one bound format; bind descriptor padding; Clear* rejected in bundles |
+| 107ee4f204c | test | `render_pass_split` declares a second cleared target no draw writes |
+| 5758992ff6a | bench | the passes bench skips a shape the device cannot record (the Neo: linear 1080p RTV) |
 
 ### How the G17P costs were found
 
@@ -394,39 +397,58 @@ shape stored and reloaded. Clears are now pending on the list until the render
 that writes the view absorbs them (per attachment, so MRT clears merge too),
 or until a command that could observe the view forces a clear-only render.
 Because clears are recorded rather than emitted, a later clear or discard of
-an attachment retires the previous render's write-back of it.
+an attachment retires the previous render's write-back of it. Colour only:
+the ZLS unit has one store bit for the whole render, partial renders
+included, so a render with draws keeps its depth and stencil stores
+(Honeykrisp's `hk_pack_zls_control` forces them for the same reason; its
+`HK_ZLS_PRECISE_DEPTH_STORE` mode, off by default, is the path to follow when
+it becomes the default).
 
 `d3d12agx_microbench --only passes`, 16 frames at 1920x1080 RGBA8 + D32, GPU
 wall, best of three, before = cc55230bb1e library with the same binary:
 
-| shape | M1 Pro before | M1 Pro after | M2 before | M2 after |
-|---|---|---|---|---|
-| ClearRTV, bind, 4 draws | 2.69 ms | 2.30 ms | 3.3-3.9 ms | 2.6-2.7 ms |
-| ClearDSV, ClearRTV, bind, 4 draws | 6.82 ms | 2.37 ms | 7.4 ms | 2.4-2.8 ms |
-| the same + DiscardResource(depth) | 6.81 ms | 2.30 ms | 6.5-7.2 ms | 2.3-2.8 ms |
+| shape | M1 Pro before | M1 Pro after (ec8fed) | M1 Pro head (depth stores kept) | M2 before | M2 after (ec8fed) |
+|---|---|---|---|---|---|
+| ClearRTV, bind, 4 draws | 2.69 ms | 2.30 ms | 2.39 ms | 3.3-3.9 ms | 2.6-2.7 ms |
+| ClearDSV, ClearRTV, bind, 4 draws | 6.82 ms | 2.37 ms | 3.06 ms | 7.4 ms | 2.4-2.8 ms |
+| the same + DiscardResource(depth) | 6.81 ms | 2.30 ms | 3.06 ms | 6.5-7.2 ms | 2.3-2.8 ms |
 
 The remaining 140 us per frame is the fixed cost of one 1080p render (tile
 walk with the clear background program); solid-colour stores compress well on
-AGX, which is why the colour-only shape gained less than the depth shapes.
+AGX, which is why the colour-only shape gained less than the depth shapes. The
+head keeps the depth store of every render with draws (about 45 us per 1080p
+D32 frame on G13), the price of the review's partial-render argument above.
+On the Neo the bench reports 0: a 1080p RTV created without
+SIMULTANEOUS_ACCESS is a linear texture (`d12_resource.c`, `linear_ok`) and
+the native G17P background/end-of-tile builder admits only GPU-tiled or
+twiddled targets. That default deserves its own change: linear render targets
+are the wrong default on a tiler for AGX2 too.
 
 ### Measured (debugoptimized; medians of 3 unless stated)
 
-| metric | M1 Pro a63e8 | M1 Pro 2d656 | M2 2d656 | Neo cc552 (before G17P fixes) | Neo 2d656 |
-|---|---|---|---|---|---|
-| record plain draw | 93 ns | 96 ns | 83 ns | 218 ns | see below |
-| record draw + root constant | 248 ns | 239 ns | 221 ns | 839 ns | |
-| record dispatch | 67 ns | 65 ns | 62 ns | 710 ns | |
-| record dispatch_texture | 137 ns | 132 ns | 110 ns | 9 864 ns | |
-| ExecuteCommandLists 20k draws, call | 9 us | 33 us (includes the inline submit ioctl since B11) | 23 us | 2 188 us | |
-| 20k draws GPU wall | 7.9 ms | 7.4 ms | 6.3 ms | 31.4 ms | |
-| ExecuteCommandLists 20k dispatches, call | 13 us | 54 us (inline ioctl) | 16 us | 33 us | |
-| 20k dispatches GPU wall | 105 ms | 2.0 ms | 2.0 ms | 44 ms | |
-| Reset after submit | 11 us | 4.7 us | 2.5 us | 8.2 us | |
-| one-draw round trip, median | 228 us | 210 us | 149 us | 256 us | |
-| graphics PSO, first (cold disk cache after a rebuild / warm) | 540 us | 370 us warm | 540 us | 2 290 / 670 us | |
+| metric | M1 Pro a63e8 | M1 Pro 2d656 | M2 2d656 | Neo cc552 (before G17P fixes) | Neo 1b20e (G17P fixes, h-7241) | Neo 53e88 (+ bind cache) |
+|---|---|---|---|---|---|---|
+| record plain draw | 93 ns | 96 ns | 83 ns | 218 ns | 191 ns | 89 ns |
+| record draw + root constant | 248 ns | 239 ns | 221 ns | 839 ns | 816 ns | 800 ns |
+| record dispatch | 67 ns | 65 ns | 62 ns | 710 ns | 39 ns | 42 ns |
+| record dispatch_texture | 137 ns | 132 ns | 110 ns | 9 864 ns | 5 133 ns | 4 862 ns |
+| ExecuteCommandLists 20k draws, call | 9 us | 33 us (includes the inline submit ioctl since B11) | 23 us | 2 188 us | 24 us | (bench aborted, see passes) |
+| 20k draws GPU wall | 7.9 ms | 7.4 ms | 6.3 ms | 31.4 ms | 21.0 ms | |
+| ExecuteCommandLists 20k dispatches, call | 13 us | 54 us (inline ioctl) | 16 us | 33 us | 22 us | |
+| 20k dispatches GPU wall | 105 ms | 2.0 ms | 2.0 ms | 44 ms | 39.8 ms (45.7 with the strong word, A/B) | |
+| Reset after submit | 11 us | 4.7 us | 2.5 us | 8.2 us | 3.3 us | |
+| one-draw round trip, median | 228 us | 210 us | 149 us | 256 us | 132 us | |
+| graphics PSO, first (cold disk cache after a rebuild / warm) | 540 us | 370 us warm | 540 us | 2 290 / 670 us | 2 560 / 680 us | |
+
+The Neo's 20k dispatches still cost 2 us of GPU each with the weak barrier
+word: the launch itself, not the flush, is the cost on G17P (A/B: strong
+45.7 ms, weak 39.8 ms). The remaining 5 us per native Texture.Load dispatch at
+record time is the per-dispatch prefix work (sampler cell upload, range
+building, syncs), the next thing to cache.
 
 Frozen 17 suites: M1 Pro 11/17 and M2 11/17 after every commit of this pass;
-Neo 9/17 at 9b1afcfb219 and cc55230bb1e (h-6529). `device_interfaces`,
-`render_pass_split`, `pso_threads`, `pso_library_race`, `bundle_state`,
-`execute_indirect_count` and the queue/fence contract test pass on the M1 Pro
-at the head. Raw logs and JSON records: `reports/d3d12-stats/t-1082-*`.
+Neo 9/17 at 9b1afcfb219 and cc55230bb1e (h-6529), at 1b20e71cef2 and
+53e8807e597 (h-7241). `device_interfaces`, `render_pass_split`,
+`pso_threads`, `pso_library_race`, `bundle_state`, `execute_indirect_count`
+and the queue/fence contract test pass on the M1 Pro at the head; meson host
+tests OK. Raw logs and JSON records: `reports/d3d12-stats/t-1082-*`.
