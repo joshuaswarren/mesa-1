@@ -179,9 +179,19 @@ void
 zink_batch_rp(struct zink_context *ctx);
 
 void
-zink_batch_no_rp(struct zink_context *ctx);
+zink_batch_no_rp_site(struct zink_context *ctx, const char *site);
 void
-zink_batch_no_rp_safe(struct zink_context *ctx);
+zink_batch_no_rp_safe_site(struct zink_context *ctx, const char *site);
+
+/* ZINK_RP_STATS=<path>: count render pass ends (and batch flushes) per call
+ * site; see zink_rp_stats_note(). */
+#define ZINK_RP_SITE __FILE__ ":" ZINK_RP_STR(__LINE__)
+#define ZINK_RP_STR(x) ZINK_RP_STR2(x)
+#define ZINK_RP_STR2(x) #x
+#define zink_batch_no_rp(ctx) zink_batch_no_rp_site(ctx, ZINK_RP_SITE)
+#define zink_batch_no_rp_safe(ctx) zink_batch_no_rp_safe_site(ctx, ZINK_RP_SITE)
+void
+zink_rp_stats_note(struct zink_context *ctx, const char *kind, const char *site);
 
 static inline VkPipelineStageFlags
 zink_pipeline_flags_from_pipe_stage(mesa_shader_stage pstage)
