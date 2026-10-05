@@ -2470,11 +2470,9 @@ load("constant_agx", [1, 1], [ACCESS, BASE, FORMAT, SIGN_EXTEND],
 # src[] = { value, address, index }.
 store("agx", [1, 1], [ACCESS, BASE, FORMAT, SIGN_EXTEND])
 
-# G17P vertex UNORM8 conversion after a shared raw fetch. Source is one
-# little-endian packed 32-bit RGBA word; result is four 32-bit floats using
-# the same native conversion as a normalized load_constant_agx. Keeping it
-# separate from the memory operation allows a float3 and adjacent colour to
-# share a 16-byte fetch without changing the conversion's rounding.
+# No longer produced. Intrinsic indices are serialized into the libagx
+# bindings that the build's vtn_bindgen2 generates, so removing this entry
+# renumbers the intrinsics after it; keep it until those tools are rebuilt.
 intrinsic("unpack_vbo_unorm_4x8_agx", src_comp=[1], dest_comp=4,
           bit_sizes=[32], flags=[CAN_ELIMINATE, CAN_REORDER])
 

@@ -2967,22 +2967,6 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       agx_emit_cached_split(b, dst, 3);
       return NULL;
 
-   case nir_intrinsic_unpack_vbo_unorm_4x8_agx: {
-      assert(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
-      assert(stage == MESA_SHADER_VERTEX);
-      assert(instr->src[0].ssa->bit_size == 32);
-      agx_index packed = agx_src_index(&instr->src[0]);
-      agx_index halves[2];
-      for (unsigned i = 0; i < 2; ++i) {
-         halves[i] = agx_temp(b->shader, AGX_SIZE_16);
-         agx_subdivide_to(b, halves[i], packed, i);
-      }
-      agx_unpack_normalized_halves_agx3(
-         b, dst, halves, AGX_FORMAT_U8NORM, 4,
-         nir_def_components_read(&instr->def), false);
-      return NULL;
-   }
-
    case nir_intrinsic_load_agx:
    case nir_intrinsic_load_constant_agx:
       agx_emit_load(b, dst, instr);
