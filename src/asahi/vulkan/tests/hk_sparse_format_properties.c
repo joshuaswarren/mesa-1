@@ -61,7 +61,10 @@ int main(int argc, char **argv)
    VkPhysicalDeviceProperties properties;
    vkGetPhysicalDeviceProperties(device, &properties);
    if (!expect_sparse)
-      CHECK(strcmp(properties.deviceName, "Apple A18 Pro GPU") == 0);
+      /* "Apple A18 Pro (G17P <revision>)" since the exact product name
+       * gained the GPU codename and revision (a682a30b929). */
+      CHECK(strncmp(properties.deviceName, "Apple A18 Pro (G17P ",
+                    strlen("Apple A18 Pro (G17P ")) == 0);
 
    VkPhysicalDeviceImageFormatInfo2 info = {
       .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
