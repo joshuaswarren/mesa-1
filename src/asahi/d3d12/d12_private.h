@@ -18,6 +18,7 @@
 
 #define COBJMACROS
 #include "d12_debug.h"
+#include "d12_core_caps.h"
 #include <wsl/winadapter.h>
 #include <directx/d3d12.h>
 
@@ -402,6 +403,7 @@ struct d12_device {
 
    /* The real GPU. Owned: closed on final release. */
    struct agx_device dev;
+   struct d12_core_caps caps;
 
    /* Platform sync objects use one provider surface on DRM and D3DKMT. */
    struct util_sync_provider *sync;

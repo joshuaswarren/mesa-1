@@ -31,6 +31,11 @@ extern "C" {
 struct d12_core_caps {
    uint32_t max_feature_level;
    uint32_t max_shader_model;
+   uint32_t max_root_signature_version;
+   uint32_t sample_counts;
+   uint32_t max_sampler_heap_size;
+   uint32_t max_view_heap_size;
+   bool dynamic_depth_bias;
    uint32_t node_count;
    uint32_t resource_binding_tier;
    uint32_t tiled_resources_tier;
@@ -67,6 +72,7 @@ struct d12_core_caps {
    bool tile_based_deferred_renderer;
    bool native_16bit_shader_ops;
    bool typed_uav_load_additional_formats;
+   bool full_texture_sampling;
    bool wave_ops;
    uint32_t wave_lane_count_min;
    uint32_t wave_lane_count_max;
@@ -82,6 +88,30 @@ struct d12_core_caps {
    uint32_t write_buffer_immediate_support_flags;
 };
 
+/* Inputs copied from the opened AGX device, never inferred from a model name.
+ * Compiler bits describe connected translation/backend paths, not silicon. */
+struct d12_core_caps_device_info {
+   uint32_t generation;
+   uint32_t active_cores;
+   uint64_t vm_start;
+   uint64_t vm_end;
+   bool isolated_mmu;
+   bool cache_coherent_uma;
+   bool compiler_wave_ops;
+   bool compiler_int64;
+   bool compiler_native_16bit;
+};
+
+void d12_core_caps_init(struct d12_core_caps *caps,
+                        const struct d12_core_caps_device_info *info);
+bool d12_core_caps_supports_feature_level(const struct d12_core_caps *caps,
+                                          uint32_t level);
+uint32_t d12_core_caps_choose_feature_level(const struct d12_core_caps *caps,
+                                           const uint32_t *requested,
+                                           uint32_t count);
+
+/* Conservative allocation policy for frontends without an opened adapter.
+ * CheckFeatureSupport must use the caps belonging to its device. */
 const struct d12_core_caps *d12_core_get_caps(void);
 
 /*

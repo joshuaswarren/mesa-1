@@ -34,6 +34,7 @@ libd3d12agx_files = files(
   'd12_agx3_vdm_state_update_core.c',
   'd12_attachment_view_core.c',
   'd12_core_caps.c',
+  'd12_core_caps_query.c',
   'd12_dxbc_wrap.c',
   'd12_cmd.c',
   'd12_debug.c',
@@ -721,3 +722,25 @@ d3d12agx_g5_texture_native_metadata = executable(
   dependencies : [dep_dxheaders_d12],
   link_with : libd3d12agx,
 )
+
+# The derivation test has no COM or Mesa dependency and needs no GPU.
+d3d12agx_core_caps_tests = executable(
+  'd3d12agx_core_caps_tests',
+  files('d12_core_caps.c', 'tests/d12_core_caps_tests.c'),
+)
+test('d3d12agx_core_caps', d3d12agx_core_caps_tests, suite : ['asahi', 'd3d12'])
+
+executable(
+  'd3d12agx_caps_queries',
+  files('tests/caps_queries.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
+if host_machine.system() != 'windows'
+  executable(
+    'd3d12agx_caps_probe',
+    files('tests/caps_probe.c'),
+    dependencies : [dep_dxheaders_d12, dep_dl],
+  )
+endif

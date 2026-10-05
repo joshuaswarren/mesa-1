@@ -4,194 +4,142 @@
  */
 
 #include "d12_core_caps.h"
+#include <stddef.h>
+#include <string.h>
 
-/*
- * This is capability policy, not a hardware wish list.  Values are raised
- * only when every frontend can honour the corresponding D3D12 contract.
- */
-static const struct d12_core_caps d12_agx_caps = {
-   /*
-    * Feature level 12_0. Its three requirements over 11_1 are Resource
-    * Binding Tier 2, Tiled Resources Tier 2 and typed UAV loads for the
-    * additional format set; all three are implemented and asserted below and
-    * in the host suite. 12_1 additionally requires conservative
-    * rasterization and rasterizer-ordered views, neither of which exists
-    * here.
-    *
-    * One inherited requirement is not met: Direct3D 11-class hardware is
-    * expected to rasterize 8x MSAA and this driver offers at most 4x. That
-    * is a limit of the command path rather than descriptor representability:
-    * DescriptorGen10 and AIL model the live-measured M5 8x allocation, but
-    * HAL300's Gen7 PPP raster state is still proven only through 4x. AGX2 is
-    * what this driver can currently execute and Honeykrisp advertises 1/2/4.
-    * The gap was equally real while this said 11_0, so it is not a
-    * consequence of the level claimed. CheckFeatureSupport reports zero
-    * quality levels for 8x, which is the discoverable, truthful answer an
-    * application is required to consult.
-    */
-   .max_feature_level = D12_CORE_FEATURE_LEVEL_12_0,
-   .max_shader_model = D12_CORE_SHADER_MODEL_6_2,
-   .node_count = 1,
-   /*
-    * Resource Binding Tier 2. Tier 1's per-stage ceilings are 128 SRVs and
-    * 16 samplers; this driver binds an unbounded descriptor range through a
-    * rooted heap pointer rather than a per-register root slot, so a shader
-    * addresses the whole shader-visible heap, and a sampler heap carries the
-    * full 2,048 logical descriptors. Tier 2 also allows a bound descriptor
-    * table to contain descriptors the shader does not access: every slot is
-    * initialised to the resident null region at heap creation, so reading one
-    * returns a null descriptor rather than faulting.
-    *
-    * One narrow deviation: AGX resolves the logical sampler heap into at most
-    * 1,024 distinct native sampler states (Honeykrisp programs the same
-    * bound). Exact deduplication means 2,048 logical samplers work whenever
-    * 1,024 or fewer are distinct; beyond that the command list fails with a
-    * named error rather than sampling through the wrong state. Raising that
-    * bound needs hardware confirmation that the firmware accepts a larger
-    * sampler heap, which has not been done.
-    */
-   .resource_binding_tier = 2,
-   /*
-    * Tiled Resources Tier 2. Over Tier 1 this requires three things, all
-    * implemented and covered by host tests:
-    *   - a mip level that is an integer multiple of the standard tile shape
-    *     is never packed. AGX packs from the first level below one hardware
-    *     tile and the standard tile is two hardware tiles per axis, so such a
-    *     level is always twice the packing threshold
-    *     (d12_sparse_standard_tile_level_is_nonpacked);
-    *   - shader instructions for LOD clamp and for mapped status, which are
-    *     the descriptor's minimum-LOD field and the hardware sparse feedback
-    *     lane the DXIL translator publishes as CheckAccessFullyMapped; and
-    *   - reads of NULL-mapped tiles return zero and writes to them are
-    *     discarded, which the read-only sparse alias and the separate write
-    *     addressing provide.
-    * Tier 3 additionally requires tiled Texture3D, which is not implemented.
-    */
-   .tiled_resources_tier = 2,
-   /*
-    * Resource Heap Tier 2: one heap may hold buffers, non-render-target
-    * textures and render-target/depth-stencil textures together.
-    *
-    * Tier 1 exists because a discrete GPU may place the three categories in
-    * differently configured memory. AGX is UMA with one allocation kind, so
-    * the category never affected placement here; the driver only ever
-    * enforced the DENY flags an application itself asked for, which is
-    * required at both tiers. Reporting Tier 1 made applications split
-    * allocations into separate heaps for no reason.
-    */
-   .resource_heap_tier = 2,
-   /*
-    * Render passes, Tier 1.
-    *
-    * This is the feature a tile-based deferred renderer is structurally
-    * better at than the immediate-mode hardware D3D12 was designed around.
-    * An OMSetRenderTargets binding says nothing about the edges of the work,
-    * so every attachment has to be seeded from memory on entry and written
-    * back on exit; the per-attachment access types say directly when neither
-    * is needed, and DISCARD then removes a whole memory round trip for the
-    * render target rather than merely hinting at one.
-    *
-    * Tier 2 additionally promises that UAV writes inside a pass cost nothing
-    * extra. They plausibly do not here -- a fragment shader writes a UAV the
-    * same way inside a pass as outside one -- but that is a performance
-    * claim, and it has not been measured on hardware.
-    */
-   .render_passes_tier = 1,
-   /*
-    * GPU upload heaps exist so a discrete GPU with a resizable BAR can let
-    * the CPU write straight into device memory instead of staging through
-    * system memory and copying. AGX is UMA: there is one pool, every
-    * allocation is already both CPU-writable and GPU-addressable, and the
-    * staging copy this heap type removes never had anything to do.
-    */
-   .gpu_upload_heap = true,
-   /*
-    * Programmable sample positions, tier 1.
-    *
-    * AGX already takes the sample pattern as data: PPP_MULTISAMPLECTL holds
-    * one byte per sample, X in the low nibble and Y in the high one, in
-    * sixteenths of a pixel from the top left. The driver was writing a fixed
-    * default into it. Tier 1 is one pattern for the whole render target,
-    * which is exactly the scope of that one register; tier 2 would need a
-    * per-pixel pattern, which has nowhere to live.
-    */
-   .programmable_sample_positions_tier = 1,
-   /*
-    * Mesh shaders, tier 1 -- the only tier there is.
-    *
-    * The renderer already compiles mesh and amplification pipelines: the
-    * mesh shader runs as compute, an amplification shader hands off through
-    * DispatchMesh, and a generated ms_rast program feeds the hardware vertex
-    * stage from the mesh output buffer. That path was built and then never
-    * advertised, so nothing could reach it.
-    */
-   .mesh_shader_tier = 1,
-   /* DXIL i64 becomes 64-bit NIR and the AGX backend lowers what it does not
-    * execute natively. */
-   .int64_shader_ops = true,
-   /* The FRAGMENT_STENCIL state is emitted per face from independent
-    * reference values and read/write masks. */
-   .independent_front_and_back_stencil = true,
-   /* AGX_PRIMITIVE_TRIANGLE_FAN is a native primitive, strip cut included. */
-   .triangle_fan = true,
-   .dynamic_index_buffer_strip_cut = true,
-   /* AGX's sampler has a pixel-coordinates bit; the D3D12 flag drives it
-    * directly rather than through a shader fallback. */
-   .non_normalized_coordinate_samplers = true,
+/* Allocation limits shared with the DDI frontend. These are not adapter
+ * feature answers. Adapter queries use d12_core_caps_init below. */
+static const struct d12_core_caps d12_allocation_caps = {
+   .max_feature_level = D12_CORE_FEATURE_LEVEL_11_0,
    .gpu_virtual_address_bits = 39,
-   .uma = true,
-   .cache_coherent_uma = false,
-   .isolated_mmu = true,
-   .tile_based_deferred_renderer = true,
-   .native_16bit_shader_ops = true,
-   .typed_uav_load_additional_formats = true,
-   .wave_ops = true,
-   .wave_lane_count_min = 32,
-   .wave_lane_count_max = 32,
-   /* The static policy cannot know the adapter's active core count. Report
-    * one guaranteed hardware wave instead of inventing an adapter total. */
-   .total_lane_count = 32,
-   .predication = true,
-   .hardware_copy = false,
-   .copy_queue_timestamp_queries = true,
-   .texture_copy_between_dimensions = true,
-   /* The fragment epilog lowers CONST_ALPHA/INV_CONST_ALPHA against the A
-    * component of the four-float blend constant uploaded for every draw. */
-   .alpha_blend_factor = true,
-   .output_merger_logic_op = true,
-   .write_buffer_immediate_support_flags =
-      D12_CORE_COMMAND_LIST_SUPPORT_DIRECT |
-      D12_CORE_COMMAND_LIST_SUPPORT_COMPUTE |
-      D12_CORE_COMMAND_LIST_SUPPORT_COPY,
+   .gpu_upload_heap = true,
 };
+
+void
+d12_core_caps_init(struct d12_core_caps *caps,
+                   const struct d12_core_caps_device_info *info)
+{
+   memset(caps, 0, sizeof(*caps));
+   if (!info || !info->active_cores || info->vm_end <= info->vm_start)
+      return;
+
+   const bool legacy = info->generation == 13 || info->generation == 14;
+   const bool native = info->generation == 17;
+   if (!legacy && !native)
+      return;
+
+   /* bit length of the highest userspace VA, rather than a fixed 39. */
+   for (uint64_t addr = info->vm_end - 1; addr; addr >>= 1)
+      caps->gpu_virtual_address_bits++;
+   caps->node_count = 1;
+   caps->uma = true;
+   caps->cache_coherent_uma = info->cache_coherent_uma;
+   caps->isolated_mmu = info->isolated_mmu;
+   /* D3D12 tile-based rendering is an API efficiency promise, distinct
+    * from the physical tile buffer. Match the conservative native reference. */
+   caps->tile_based_deferred_renderer = false;
+   caps->resource_heap_tier = 2; /* one BO allocation kind, mixed placements */
+   caps->gpu_upload_heap = true; /* committed/placed GPU_UPLOAD use that BO */
+   caps->max_root_signature_version = 2; /* integer static samplers unproven */
+   caps->max_shader_model = D12_CORE_SHADER_MODEL_6_0;
+   /* Tier 2 requires 2048 distinct samplers. Deduplication cannot meet
+    * that contract with the current 1024-entry hardware table. */
+   caps->resource_binding_tier = 1;
+   caps->max_sampler_heap_size = 1024; /* distinct native states, no dedup promise */
+   caps->max_view_heap_size = 1000000; /* rooted descriptor index range */
+   /* 8x MSAA is still unavailable, including at FL11_0. Withholding FL12
+    * does not close that inherited baseline-conformance gap. */
+   caps->sample_counts = legacy ? (1u | 2u | 4u) : 1u;
+   caps->wave_ops = info->compiler_wave_ops;
+   caps->int64_shader_ops = info->compiler_int64;
+   caps->native_16bit_shader_ops = info->compiler_native_16bit;
+   if (caps->wave_ops) {
+      caps->wave_lane_count_min = 32;
+      caps->wave_lane_count_max = 32;
+      /* One executable wave per active core is a conservative lower bound.
+       * The UAPI does not expose SIMD occupancy; do not copy Proton's guessed
+       * 32*subgroupSize fallback as a hardware measurement. */
+      caps->total_lane_count = info->active_cores <= UINT32_MAX / 32
+                                 ? info->active_cores * 32 : 32;
+   }
+
+   /* G17P's bounded raster path is not the full AGX2 path. Do not derive its
+    * sample, sparse, stencil, sampler or pre-raster promises from chip age.
+    * A compiler accepting a mesh shader does not implement DispatchMesh. */
+   /* Sparse feedback/default-mapping witnesses fail, including a missing
+    * SM5 texture-feedback opcode. A BO bind hook alone is not a tiled tier. */
+   caps->tiled_resources_tier = 0;
+   caps->typed_uav_load_additional_formats = legacy;
+   caps->full_texture_sampling = legacy;
+   caps->programmable_sample_positions_tier = legacy ? 1 : 0;
+   caps->render_passes_tier = legacy ? 1 : 0;
+   /* The required modern depth/stencil PSO stream is not accepted yet. */
+   caps->independent_front_and_back_stencil = false;
+   caps->triangle_fan = legacy;
+   caps->dynamic_index_buffer_strip_cut = legacy;
+   /* The upstream non-normalized-coordinate test fails its integer static
+    * sampler variant on G13. Keep this contract off until both routes pass. */
+   caps->non_normalized_coordinate_samplers = false;
+   caps->dynamic_depth_bias = false;
+   /* ExecuteIndirect + predication fails the upstream state witness. */
+   caps->predication = false;
+   caps->texture_copy_between_dimensions = legacy;
+   caps->alpha_blend_factor = legacy;
+   caps->output_merger_logic_op = legacy;
+   /* Copy-queue timestamps remain off until GPU timestamp execution is
+    * qualified; CPU clock values are not a timestamp-query implementation. */
+   caps->write_buffer_immediate_support_flags = legacy
+      ? D12_CORE_COMMAND_LIST_SUPPORT_DIRECT |
+        D12_CORE_COMMAND_LIST_SUPPORT_COMPUTE |
+        D12_CORE_COMMAND_LIST_SUPPORT_COPY : 0;
+   caps->max_feature_level = caps->resource_binding_tier >= 2 &&
+                             caps->tiled_resources_tier >= 2 &&
+                             caps->typed_uav_load_additional_formats
+                                ? D12_CORE_FEATURE_LEVEL_12_0
+                                : D12_CORE_FEATURE_LEVEL_11_0;
+}
 
 const struct d12_core_caps *
 d12_core_get_caps(void)
 {
-   return &d12_agx_caps;
+   return &d12_allocation_caps;
 }
 
 bool
-d12_core_supports_feature_level(uint32_t minimum_feature_level)
+d12_core_caps_supports_feature_level(const struct d12_core_caps *caps,
+                                     uint32_t level)
 {
-   return minimum_feature_level >= D12_CORE_FEATURE_LEVEL_11_0 &&
-          minimum_feature_level <= d12_agx_caps.max_feature_level;
+   /* Reject enum holes, not just numbers inside the interval. */
+   return caps && level <= caps->max_feature_level &&
+          (level == D12_CORE_FEATURE_LEVEL_11_0 ||
+           level == D12_CORE_FEATURE_LEVEL_11_1 ||
+           level == D12_CORE_FEATURE_LEVEL_12_0 ||
+           level == D12_CORE_FEATURE_LEVEL_12_1);
 }
 
 uint32_t
-d12_core_choose_feature_level(const uint32_t *requested,
-                              uint32_t requested_count)
+d12_core_caps_choose_feature_level(const struct d12_core_caps *caps,
+                                   const uint32_t *requested, uint32_t count)
 {
    uint32_t best = 0;
-
-   if (!requested)
-      return 0;
-
-   for (uint32_t i = 0; i < requested_count; ++i) {
-      uint32_t level = requested[i];
-      if (d12_core_supports_feature_level(level) && level > best)
-         best = level;
-   }
-
+   if (requested)
+      for (uint32_t i = 0; i < count; ++i)
+         /* FEATURE_LEVELS negotiation accepts arbitrary requested values below
+          * the device maximum, unlike D3D12CreateDevice's enum validation. */
+         if (caps && requested[i] <= caps->max_feature_level &&
+             requested[i] > best)
+            best = requested[i];
    return best;
+}
+
+bool
+d12_core_supports_feature_level(uint32_t level)
+{
+   return d12_core_caps_supports_feature_level(d12_core_get_caps(), level);
+}
+
+uint32_t
+d12_core_choose_feature_level(const uint32_t *requested, uint32_t count)
+{
+   return d12_core_caps_choose_feature_level(d12_core_get_caps(), requested, count);
 }

@@ -14,7 +14,7 @@ d12 = Path(__file__).resolve().parents[2]
 caps = (d12 / "d12_core_caps.c").read_text()
 caps_h = (d12 / "d12_core_caps.h").read_text()
 adapter = (d12 / "umd/d12_umd_adapter.c").read_text()
-device = (d12 / "d12_device.c").read_text()
+device = (d12 / "d12_device.c").read_text() + (d12 / "d12_core_caps_query.c").read_text()
 resource = (d12 / "d12_resource.c").read_text()
 sparse_core = (d12 / "d12_sparse_residency_core.h").read_text()
 format_core = (d12 / "d12_format_caps_core.h").read_text()
@@ -23,10 +23,10 @@ dxil = (d12 / "dxil/d12_dxil_nir.c").read_text()
 validation = (d12 / "d12_command_validation_core.h").read_text()
 
 # The level itself, and the three requirements it adds over 11_1.
-assert ".max_feature_level = D12_CORE_FEATURE_LEVEL_12_0," in caps
-assert ".resource_binding_tier = 2," in caps
-assert ".tiled_resources_tier = 2," in caps
-assert ".typed_uav_load_additional_formats = true," in caps
+assert "caps->resource_binding_tier >= 2" in caps
+assert "caps->resource_binding_tier = 1;" in caps
+assert "caps->tiled_resources_tier = 0;" in caps
+assert "caps->typed_uav_load_additional_formats = legacy;" in caps
 
 # Both frontends must report one policy. The DDI speaks its own enumeration,
 # so the translation is pinned to the WDK values by a static assertion.
@@ -83,6 +83,6 @@ assert resource.count("d12_sample_count_supported(") == 2
 assert "samples != 1 && samples != 2 && samples != 4" not in resource
 
 print(
-    "feature-level-12: PASS "
-    "(binding tier 2 + tiled tier 2 + typed UAV loads + TIR, one policy)"
+    "feature-level derivation: PASS "
+    "(binding tier 1 and tiled tier 0 withhold FL12; implementation routes retained)"
 )
