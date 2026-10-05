@@ -3870,12 +3870,10 @@ d12_list_reroot_bindings(struct d12_cmd_list *list,
    const unsigned root_count = cache->table_count;
    uint64_t null_buf = 0, null_counters = 0;
 
-   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+   for (unsigned i = 0; i < root_count; i++) {
       if (memcmp(&cache->table[i], &raw_table[i], sizeof(raw_table[i])) == 0)
          continue;
       cache->table[i] = raw_table[i];
-      if (i >= root_count)
-         continue;
 
       uint64_t addrs[D12_ROOT_TABLE_ENTRIES];
       if (!d12_root_plane_slot(list, &raw_table[i], sources[i], i, &null_buf,
@@ -3940,7 +3938,7 @@ d12_list_reroot_bindings(struct d12_cmd_list *list,
 
    /* Mutable shader-visible table slots are refreshed at submission into
     * the planes of every upload that flattened them. */
-   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+   for (unsigned i = 0; i < root_count; i++) {
       if (!sources[i])
          continue;
       struct d12_descriptor_fixup fixup = {
@@ -4083,14 +4081,22 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       }
    }
 
+   /* Slots past the bound root signature's binding map are unreachable by
+    * its shaders: every per-slot pass below stops at root_count. */
+   const unsigned root_count = rs ? MAX2(rs->map.resource_count, 1) : 1;
+   if (root_count > D12_MAX_RESOURCE_BINDINGS) {
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+
    struct d12_descriptor effective_table[D12_MAX_RESOURCE_BINDINGS];
-   memcpy(effective_table, raw_table, sizeof(effective_table));
-   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++)
+   memcpy(effective_table, raw_table, root_count * sizeof(*raw_table));
+   for (unsigned i = 0; i < root_count; i++)
       d12_apply_texture_shape(&effective_table[i], texture_shapes[i]);
    const struct d12_descriptor *table = effective_table;
 
-   unsigned last_texture = rs ? MAX2(rs->map.resource_count, 1) : 1;
-   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+   unsigned last_texture = root_count;
+   for (unsigned i = 0; i < root_count; i++) {
       if ((table[i].kind == D12_DESC_SRV || table[i].kind == D12_DESC_UAV) &&
           table[i].resource &&
           (table[i].resource->desc.Dimension ==
@@ -4212,7 +4218,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
     */
    uint64_t null_buf = 0, null_counters = 0;
    uint64_t addrs[D12_ROOT_TABLE_ENTRIES];
-   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+   for (unsigned i = 0; i < root_count; i++) {
       if (!d12_root_plane_slot(list, &table[i], sources[i], i, &null_buf,
                                &null_counters, addrs))
          return false;
@@ -4229,12 +4235,6 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
     * record tens of thousands of root-descriptor changes in one list, and a
     * fixed 6 KiB upload per dispatch exhausts an otherwise-small 32 MiB
     * command arena. */
-   unsigned root_count = rs ? MAX2(rs->map.resource_count, 1) : 1;
-   if (root_count > D12_MAX_RESOURCE_BINDINGS) {
-      list->state = D12_LIST_ERROR;
-      return false;
-   }
-
    uint64_t compact[D12_ROOT_TABLE_ENTRIES];
    memcpy(compact, addrs + D12_ROOT_RESOURCE_BASE,
           root_count * sizeof(uint64_t));
@@ -4749,7 +4749,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
     * where this draw/dispatch flattened each source slot so the queue can
     * refresh it after Close and immediately before submission.
     */
-   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+   for (unsigned i = 0; i < root_count; i++) {
       if (!sources[i])
          continue;
 
@@ -4787,10 +4787,13 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
    cache->sampler_heap = list->sampler_descriptor_heap;
    memcpy(cache->compact, compact, 4 * root_count * sizeof(uint64_t));
    cache->pbe_table = pbe_heap_gpu;
-   memcpy(cache->table, raw_table, sizeof(cache->table));
-   memcpy(cache->samplers, sampler_table, sizeof(cache->samplers));
-   memcpy(cache->sources, sources, sizeof(cache->sources));
-   memcpy(cache->texture_shapes, texture_shapes, sizeof(cache->texture_shapes));
+   /* Hits compare compare_slots / compare_samplers entries, the same
+    * bounds, so only the reachable prefix of each snapshot is kept. */
+   memcpy(cache->table, raw_table, compare_slots * sizeof(*raw_table));
+   memcpy(cache->samplers, sampler_table,
+          compare_samplers * sizeof(*sampler_table));
+   memcpy(cache->sources, sources, compare_slots * sizeof(*sources));
+   memcpy(cache->texture_shapes, texture_shapes, compare_slots);
    cache->root = *out_root;
    cache->textures = *out_textures;
    cache->texture_table = heap_gpu;
