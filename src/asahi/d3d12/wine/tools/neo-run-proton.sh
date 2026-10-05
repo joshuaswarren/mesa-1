@@ -51,6 +51,8 @@ log=$logdir/run-$stamp.log
    echo "session env: ${sess_env[*]}"
 } > "$log"
 
+# runinprefix passes everything after the verb to wine; the exe directory is
+# only the cwd (an extra leading path made wine open an Explorer window on it).
 timeout --signal=TERM --kill-after=10s "$timeout_s" \
    runuser -u "$run_user" -- env -i HOME=/home/$run_user USER=$run_user LOGNAME=$run_user \
       PATH=/usr/local/bin:/usr/bin:/bin \
@@ -62,7 +64,7 @@ timeout --signal=TERM --kill-after=10s "$timeout_s" \
       PROTON_LOG=1 PROTON_LOG_DIR="$logdir" \
       WINEDEBUG=${WINEDEBUG:-err+all,fixme-all,+loaddll} \
       ${EXTRA_ENV:-} \
-      bash -c 'cd "$1" && exec "$0" runinprefix "$@"' "$tooldir/aurora-proton" "$exe_dir" "$@" \
+      bash -c 'cd "$1" && shift && exec "$0" runinprefix "$@"' "$tooldir/aurora-proton" "$exe_dir" "$@" \
       >> "$log" 2>&1
 rc=$?
 echo "exit=$rc" >> "$log"
