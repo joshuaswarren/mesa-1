@@ -1787,8 +1787,30 @@ void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 bool hk_g17p_smooth_varyings_supported(
    struct hk_cmd_buffer *cmd, const struct hk_linked_shader *linked);
-bool hk_g17p_launch_trace_enabled(void);
-bool hk_g17p_draw_trace_enabled(void);
+/* HK_G17P_LAUNCH_TRACE / HK_G17P_DRAW_TRACE, read once.  Inline because the
+ * draw path checks them several times per draw; -1 until initialized. */
+extern int hk_g17p_launch_trace_state;
+extern int hk_g17p_draw_trace_state;
+int hk_g17p_launch_trace_init(void);
+int hk_g17p_draw_trace_init(void);
+
+static inline bool
+hk_g17p_launch_trace_enabled(void)
+{
+   int enabled = hk_g17p_launch_trace_state;
+   if (unlikely(enabled < 0))
+      enabled = hk_g17p_launch_trace_init();
+   return enabled != 0;
+}
+
+static inline bool
+hk_g17p_draw_trace_enabled(void)
+{
+   int enabled = hk_g17p_draw_trace_state;
+   if (unlikely(enabled < 0))
+      enabled = hk_g17p_draw_trace_init();
+   return enabled != 0;
+}
 bool hk_g17p_strong_dispatch_flush_enabled(void);
 bool hk_g17p_verbose_enabled(void);
 void hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,

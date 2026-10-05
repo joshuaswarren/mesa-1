@@ -658,25 +658,27 @@ hk_g17p_sync_push_descriptors(void)
    return enabled != 0;
 }
 
-__attribute__((hot)) bool
-hk_g17p_launch_trace_enabled(void)
+int hk_g17p_launch_trace_state = -1;
+
+int
+hk_g17p_launch_trace_init(void)
 {
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_LAUNCH_TRACE", false);
-   return enabled != 0;
+   const int enabled = HK_ENV_BOOL_ONCE("HK_G17P_LAUNCH_TRACE", false) ? 1 : 0;
+   hk_g17p_launch_trace_state = enabled;
+   return enabled;
 }
 
 /* One short line per submitted graphics stream.  This trace exists for real
  * applications where HK_G17P_LAUNCH_TRACE changes timing and produces too
  * much output to find the program whose fragment timestamp never ended. */
-__attribute__((hot)) bool
-hk_g17p_draw_trace_enabled(void)
+int hk_g17p_draw_trace_state = -1;
+
+int
+hk_g17p_draw_trace_init(void)
 {
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_DRAW_TRACE", false);
-   return enabled != 0;
+   const int enabled = HK_ENV_BOOL_ONCE("HK_G17P_DRAW_TRACE", false) ? 1 : 0;
+   hk_g17p_draw_trace_state = enabled;
+   return enabled;
 }
 
 /*
