@@ -29,6 +29,12 @@ typedef struct _drmVersion {
    char *desc;
 } drmVersion, *drmVersionPtr;
 
+/* drm.h maps DRM_CLOEXEC/DRM_RDWR to the open(2) flags; mingw has no
+ * O_CLOEXEC, so give it the Linux value (asm-generic fcntl.h). */
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 02000000
+#endif
+
 #define DRM_NODE_PRIMARY 0
 #define DRM_NODE_CONTROL 1
 #define DRM_NODE_RENDER  2

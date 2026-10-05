@@ -28,6 +28,13 @@ void *os_mmap(void *addr, size_t length, int prot, int flags, int fd,
               int64_t offset);
 int os_munmap(void *addr, size_t length);
 
+/* agx_device.c calls munmap(2) directly in agx_drm_bo_munmap. */
+static inline int
+munmap(void *addr, size_t length)
+{
+   return os_munmap(addr, length);
+}
+
 /* Loads the unixlib (once). False when d3d12.so is missing or this is not a
  * Wine builtin module; every DRM call then fails with ENOSYS. */
 bool d12_wine_unixlib_init(void);

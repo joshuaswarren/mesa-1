@@ -57,7 +57,7 @@
 #include "util/u_printf.h"
 #include "git_sha1.h"
 #include "nir_serialize.h"
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(AGX_WINE_UNIXLIB)
 #include "agx_device_d3dkmt.h"
 #endif
 
@@ -1671,7 +1671,7 @@ agx_close_device(struct agx_device *dev)
 
    /* Non-DRM winsyses own their platform handles and tear them down after
     * the common BO caches and VMA heaps have been finalized here. */
-#ifdef _WIN32
+#if defined(_WIN32) && !defined(AGX_WINE_UNIXLIB)
    if (dev->ops.simple_ioctl == agx_device_d3dkmt_ops.simple_ioctl)
       agx_d3dkmt_close_device(dev);
 #else
