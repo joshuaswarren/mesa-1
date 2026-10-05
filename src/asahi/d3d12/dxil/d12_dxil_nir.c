@@ -30,6 +30,7 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "d12_nir_integer.h"
+#include "d12_nir_sparse_buffer.h"
 
 #include "util/simple_mtx.h"
 #define XXH_INLINE_ALL
@@ -1611,45 +1612,9 @@ buffer_residency_status(struct trans_ctx *ctx, const struct handle_ref *h,
                         nir_def *map, nir_def *base, nir_def *byte_offset,
                         nir_def *access_size_B, nir_def *element_valid)
 {
-   nir_builder *b = ctx->b;
-   nir_def *size_B = resource_view_size_bytes(ctx, h);
-   nir_def *offset = nir_u2u64(b, byte_offset);
-   nir_def *view_size = nir_u2u64(b, size_B);
-   nir_def *last_requested = nir_uadd_sat(
-      b, offset,
-      nir_u2u64(b, nir_iadd_imm(b, nir_umax_imm(b, access_size_B, 1), -1)));
-   nir_def *valid = nir_iand(b, nir_ult(b, offset, view_size),
-                            nir_ult(b, last_requested, view_size));
-   if (element_valid)
-      valid = nir_iand(b, valid, element_valid);
-   nir_def *has_map = nir_ine_imm(b, map, 0);
-   nir_def *needs_map = nir_iand(b, valid, has_map);
-
-   nir_def *phase = nir_u2u64(
-      b, nir_iand_imm(b, nir_u2u32(b, base),
-                      D12_SPARSE_BUFFER_TILE_SIZE - 1));
-   nir_def *first_tile =
-      nir_ushr_imm(b, nir_iadd(b, phase, offset), 16);
-   nir_def *last_tile =
-      nir_ushr_imm(b, nir_iadd(b, phase, last_requested), 16);
-   first_tile = nir_bcsel(b, needs_map, first_tile, nir_imm_int64(b, 0));
-   last_tile = nir_bcsel(b, needs_map, last_tile, nir_imm_int64(b, 0));
-
-   nir_def *safe_map = nir_bcsel(
-      b, needs_map, map, root_plane(ctx, D12_ROOT_PLANE_ZERO));
-   nir_def *first_word = nir_load_global(
-      b, 1, 32,
-      nir_iadd(b, safe_map, nir_imul_imm(b, first_tile, 4)),
-      .align_mul = 4);
-   nir_def *last_word = nir_load_global(
-      b, 1, 32,
-      nir_iadd(b, safe_map, nir_imul_imm(b, last_tile, 4)),
-      .align_mul = 4);
-   nir_def *mapped = nir_iand(b, nir_ine_imm(b, first_word, 0),
-                              nir_ine_imm(b, last_word, 0));
-   nir_def *resident =
-      nir_iand(b, valid, nir_ior(b, nir_inot(b, has_map), mapped));
-   return nir_bcsel(b, resident, nir_imm_int(b, ~0u), nir_imm_int(b, 0));
+   return d12_nir_buffer_residency_status(
+      ctx->b, map, base, byte_offset, resource_view_size_bytes(ctx, h),
+      access_size_B, element_valid, root_plane(ctx, D12_ROOT_PLANE_ZERO));
 }
 
 /* Select a real buffer address only when the complete atomic operand is

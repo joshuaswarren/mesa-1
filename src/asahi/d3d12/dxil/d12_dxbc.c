@@ -51,6 +51,7 @@
 #include "agx_nir_texture.h"
 #include "nir.h"
 #include "nir_builder.h"
+#include "d12_nir_sparse_buffer.h"
 #include "util/log.h"
 #include "util/u_math.h"
 
@@ -326,6 +327,8 @@ enum d12_dxbc_op {
    D12_DXBC_OP_LD_S = 223,
    D12_DXBC_OP_LD_MS_S = 224,
    D12_DXBC_OP_LD_UAV_TYPED_S = 225,
+   D12_DXBC_OP_LD_RAW_S = 226,
+   D12_DXBC_OP_LD_STRUCTURED_S = 227,
    D12_DXBC_OP_SAMPLE_L_S = 228,
    D12_DXBC_OP_SAMPLE_C_LZ_S = 229,
    D12_DXBC_OP_SAMPLE_CLAMP_S = 230,
@@ -2350,6 +2353,87 @@ robust_load_buffer_vec4(struct d12_dxbc_ctx *ctx, nir_def *address,
    return nir_vec(b, values, ARRAY_SIZE(values));
 }
 
+/* The metadata header and the prebiased coherent map use the same ABI as
+ * DXIL. Its zero page is entry 2; the two residency arrays and read-only
+ * sparse VA offset follow the four original header entries. */
+static nir_def *
+buffer_metadata_pointer(struct d12_dxbc_ctx *ctx, unsigned offset_B)
+{
+   nir_builder *b = &ctx->b;
+   nir_def *header = nir_load_global(b, 3, 64, nir_load_root_agx(b),
+                                    .align_mul = 8);
+   return nir_load_global(b, 1, 64,
+                         nir_iadd_imm(b, nir_channel(b, header, 1), offset_B),
+                         .align_mul = 8);
+}
+
+static nir_def *
+buffer_feedback_code(struct d12_dxbc_ctx *ctx,
+                      const struct d12_dxbc_operand *resource,
+                      nir_def *byte, nir_def *access_size_B,
+                      nir_def **read_address)
+{
+   nir_builder *b = &ctx->b;
+   bool uav = resource->file == D12_DXBC_FILE_UAV;
+   nir_def *descriptor = uav ? uav_rooted_descriptor(ctx, resource)
+                             : srv_rooted_descriptor(ctx, resource);
+   nir_def *index = descriptor ? rooted_native_index(ctx, descriptor)
+                    : uav ? uav_binding_slot(ctx, resource)
+                          : srv_binding_slot(ctx, resource);
+   if (!index)
+      return NULL;
+   nir_def *zero_page = buffer_metadata_pointer(ctx, 16);
+   nir_def *table = buffer_metadata_pointer(ctx, descriptor ? 40 : 32);
+   nir_def *has_table = nir_ine_imm(b, table, 0);
+   nir_def *safe_table = nir_bcsel(b, has_table, table, zero_page);
+   nir_def *safe_index = nir_bcsel(b, has_table, index, nir_imm_int(b, 0));
+   nir_def *map = nir_load_global(
+      b, 1, 64, nir_iadd(b, safe_table,
+                         nir_imul_imm(b, nir_u2u64(b, safe_index), 8)),
+      .align_mul = 8);
+   map = nir_bcsel(b, has_table, map, nir_imm_int64(b, 0));
+   nir_def *zero = nir_imm_int(b, 0);
+   nir_def *base = uav ? uav_buffer_address(ctx, resource, zero, zero, 0)
+                       : srv_buffer_address(ctx, resource, zero, zero, 0);
+   nir_def *size = buffer_view_size_bytes(ctx, resource);
+   if (ctx->error || !base)
+      return NULL;
+   nir_def *status = d12_nir_buffer_residency_status(
+      b, map, base, byte, size, access_size_B, NULL, zero_page);
+   if (read_address) {
+      nir_def *ro_offset = buffer_metadata_pointer(ctx, 48);
+      *read_address = nir_bcsel(b, nir_ine_imm(b, map, 0),
+                                nir_ior(b, *read_address, ro_offset),
+                                *read_address);
+   }
+   /* Match the existing AGX opaque status convention (resident bit 0 is
+    * clear), so texture and buffer codes share CHECK_ACCESS_FULLY_MAPPED. */
+   return nir_iand_imm(b, nir_inot(b, status), 1);
+}
+
+static nir_def *
+buffer_vector_feedback(struct d12_dxbc_ctx *ctx,
+                        const struct d12_dxbc_operand *resource,
+                        const struct d12_dxbc_operand *dst, nir_def *byte,
+                        nir_def **read_address)
+{
+   if (dst->file == D12_DXBC_FILE_NULL || !dst->mask) {
+      fail(ctx, "buffer feedback needs a data destination component mask");
+      return NULL;
+   }
+   unsigned first = 4, last = 0;
+   for (unsigned c = 0; c < 4; c++) {
+      if (dst->mask & (1u << c)) {
+         first = MIN2(first, resource->swizzle[c]);
+         last = MAX2(last, resource->swizzle[c]);
+      }
+   }
+   nir_builder *b = &ctx->b;
+   return buffer_feedback_code(ctx, resource,
+      nir_iadd_imm(b, nir_u2u64(b, nir_channel(b, byte, 0)), first * 4),
+      nir_imm_int(b, (last - first + 1) * 4), read_address);
+}
+
 static void
 robust_store_buffer_masked(struct d12_dxbc_ctx *ctx, nir_def *address,
                            nir_def *byte_offset, nir_def *size_bytes,
@@ -3537,6 +3621,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
       case D12_DXBC_OP_LD_S: ordinary_opcode = D12_DXBC_OP_LD; break;
       case D12_DXBC_OP_LD_MS_S: ordinary_opcode = D12_DXBC_OP_LD_MS; break;
       case D12_DXBC_OP_LD_UAV_TYPED_S: ordinary_opcode = D12_DXBC_OP_LD_UAV_TYPED; break;
+      case D12_DXBC_OP_LD_RAW_S: ordinary_opcode = D12_DXBC_OP_LD_RAW; break;
+      case D12_DXBC_OP_LD_STRUCTURED_S: ordinary_opcode = D12_DXBC_OP_LD_STRUCTURED; break;
       case D12_DXBC_OP_SAMPLE_L_S: ordinary_opcode = D12_DXBC_OP_SAMPLE_L; break;
       case D12_DXBC_OP_SAMPLE_C_LZ_S: ordinary_opcode = D12_DXBC_OP_SAMPLE_C_LZ; break;
       case D12_DXBC_OP_SAMPLE_CLAMP_S:
@@ -4271,6 +4357,10 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          uint32_t reg = o[ri].index[0];
          bool uav = o[ri].file == D12_DXBC_FILE_UAV;
          bool tgsm = o[ri].file == D12_DXBC_FILE_TGSM;
+         if (sparse && tgsm) {
+            fail(ctx, "buffer feedback requires an SRV or UAV operand");
+            return;
+         }
          unsigned stride =
             tgsm ? (reg < D12_DXBC_MAX_SIG ? ctx->tgsm[reg].stride : 0)
                  : (uav ? ctx->uav_stride : ctx->srv_stride)
@@ -4300,10 +4390,17 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          nir_def *size = buffer_view_size_bytes(ctx, &o[ri]);
          if (ctx->error)
             return;
+         nir_def *code = sparse
+                            ? buffer_vector_feedback(ctx, &o[ri], &o[0], byte, &addr)
+                            : NULL;
+         if (ctx->error)
+            return;
          nir_def *val = robust_load_buffer_vec4(ctx, addr, byte, size);
          unsigned sw[4] = {o[ri].swizzle[0], o[ri].swizzle[1],
                            o[ri].swizzle[2], o[ri].swizzle[3]};
          DST(nir_swizzle(b, val, sw, 4));
+         if (code)
+            write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
          break;
       }
 
@@ -4328,6 +4425,10 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
 
          nir_def *zero = nir_imm_int(b, 0);
          bool tgsm = o[ri].file == D12_DXBC_FILE_TGSM;
+         if (sparse && tgsm) {
+            fail(ctx, "buffer feedback requires an SRV or UAV operand");
+            return;
+         }
          nir_def *addr = tgsm
                             ? tgsm_byte_offset(ctx, &o[ri], zero, SRC(1))
                          : o[ri].file == D12_DXBC_FILE_UAV
@@ -4348,10 +4449,17 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          nir_def *size = buffer_view_size_bytes(ctx, &o[ri]);
          if (ctx->error)
             return;
+         nir_def *code = sparse
+                            ? buffer_vector_feedback(ctx, &o[ri], &o[0], SRC(1), &addr)
+                            : NULL;
+         if (ctx->error)
+            return;
          nir_def *val = robust_load_buffer_vec4(ctx, addr, SRC(1), size);
          unsigned sw[4] = {o[ri].swizzle[0], o[ri].swizzle[1],
                            o[ri].swizzle[2], o[ri].swizzle[3]};
          DST(nir_swizzle(b, val, sw, 4));
+         if (code)
+            write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
          break;
       }
 
@@ -4414,6 +4522,10 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          }
          if (!found) {
             fail(ctx, "UAV load with no resource operand");
+            return;
+         }
+         if (sparse && !uav) {
+            fail(ctx, "typed UAV feedback requires a UAV operand");
             return;
          }
 
@@ -4505,11 +4617,6 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             break;
          }
 
-         if (sparse) {
-            fail(ctx, "DXBC buffer feedback requires buffer residency translation");
-            return;
-         }
-
          if (uav) {
             nir_def *coord = nir_channel(b, SRC(1), 0);
             nir_def *descriptor = uav_rooted_descriptor(ctx, resource);
@@ -4549,6 +4656,17 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             unsigned rs[4] = {resource->swizzle[0], resource->swizzle[1],
                               resource->swizzle[2], resource->swizzle[3]};
             DST(nir_swizzle(b, &tex->def, rs, 4));
+            if (sparse) {
+               nir_def *count, *stride;
+               buffer_view_info(ctx, resource, &count, &stride);
+               nir_def *code = buffer_feedback_code(
+                  ctx, resource,
+                  nir_imul(b, nir_u2u64(b, coord), nir_u2u64(b, stride)),
+                  stride, NULL);
+               if (ctx->error || !code)
+                  return;
+               write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
+            }
             break;
          }
 
@@ -5205,10 +5323,6 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          bool is_buffer =
             is_ld && !is_ld_ms && tex_reg < D12_DXBC_MAX_SIG &&
             ctx->srv_dim[tex_reg] == D12_DXBC_RESOURCE_DIMENSION_BUFFER;
-         if (sparse && is_buffer) {
-            fail(ctx, "DXBC buffer feedback requires buffer residency translation");
-            return;
-         }
          unsigned resource_dim = tex_reg < D12_DXBC_MAX_SIG
                                     ? ctx->srv_dim[tex_reg]
                                     : D12_DXBC_RESOURCE_DIMENSION_TEXTURE_2D;
@@ -5417,7 +5531,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                                                : sampler_dim;
          tex->is_array = !is_buffer && is_array;
          tex->is_shadow = compare;
-         tex->is_sparse = sparse;
+         tex->is_sparse = sparse && !is_buffer;
          tex->dest_type = nir_type_float32;
          tex->coord_components = is_buffer          ? 1
                                  : physical_1d_load ? (is_array ? 3 : 2)
@@ -5557,7 +5671,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             }
          }
 
-         nir_def_init(&tex->instr, &tex->def, sparse ? 5 : 4, 32);
+         nir_def_init(&tex->instr, &tex->def, tex->is_sparse ? 5 : 4, 32);
          nir_builder_instr_insert(b, &tex->instr);
 
          /* The RESOURCE operand's swizzle reorders the result. */
@@ -5576,9 +5690,22 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             result = nir_bcsel(b, view_min_lod_oob,
                                nir_imm_vec4(b, 0, 0, 0, 0), result);
          DST(result);
-         if (sparse)
-            write_dst(ctx, &feedback_dst,
-                      nir_replicate(b, nir_channel(b, &tex->def, 4), 4));
+         if (sparse) {
+            nir_def *code;
+            if (is_buffer) {
+               nir_def *count, *stride;
+               buffer_view_info(ctx, tex_operand, &count, &stride);
+               code = buffer_feedback_code(
+                  ctx, tex_operand,
+                  nir_imul(b, nir_u2u64(b, buffer_coord), nir_u2u64(b, stride)),
+                  stride, NULL);
+               if (ctx->error || !code)
+                  return;
+            } else {
+               code = nir_channel(b, &tex->def, 4);
+            }
+            write_dst(ctx, &feedback_dst, nir_replicate(b, code, 4));
+         }
          break;
       }
 
