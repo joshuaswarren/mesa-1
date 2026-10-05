@@ -39,19 +39,6 @@
 /* Minimum tile size in pixels, architectural. */
 #define MIN_TILE_SIZE_PX (16 * 16)
 
-/* Legacy opt-in capacity-only diagnostic. Explicit device limits take
- * precedence. This does not supply a raster-sample budget and must not be
- * used as the G17P device policy: 32x32 at4x lost the device in that test.
- */
-static bool
-agx_tile_allows_full_32k(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("AGX_TILE_32K", false);
-   return enabled != 0;
-}
-
 /* Select the largest tile size satisfying both independent budgets. */
 static uint16_t
 agx_select_tile_size(unsigned sample_size_B, unsigned nr_samples,
@@ -177,8 +164,7 @@ agx_build_tilebuffer_layout_with_limits(const enum pipe_format *formats,
    tib.sample_size_B = align(offset_B, 8);
    tib.tile_size = agx_select_tile_size(
       tib.sample_size_B, nr_samples,
-      max_bytes_per_tile ? max_bytes_per_tile
-                        : (agx_tile_allows_full_32k() ? 32768 : MAX_BYTES_PER_TILE),
+      max_bytes_per_tile ? max_bytes_per_tile : MAX_BYTES_PER_TILE,
       max_samples_per_tile);
 
    agx_tilebuffer_pack_usc(&tib);

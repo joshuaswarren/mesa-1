@@ -112,22 +112,12 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
     * fetch and the ordinary read.  See buffer_texel_resident() in
     * agx_nir_lower_texture.c.
     *
-    * The environment variable restores the shadow for A/B measurement only.
-    * It is a diagnostic, never a shipping configuration: with the shadow the
-    * shader's residency lookup indexes from the wrong base and every page
-    * reads non-resident.
-    *
     * For a non-sparse buffer hk_buffer_address() returns the same address
     * either way (the shadow only exists for buffer->va != NULL), so this
     * cannot move an ordinary texel buffer.
     */
-   static int ro_alias = -1;
-   if (unlikely(ro_alias < 0)) {
-      ro_alias =
-         HK_ENV_BOOL_ONCE("HK_G17P_SPARSE_TEXEL_RO_ALIAS", false) ? 1 : 0;
-   }
    const bool g17p = device->dev.chip == AGX_CHIP_G17P;
-   const uint64_t sampled_base = (g17p && !ro_alias) ? rw_base : ro_base;
+   const uint64_t sampled_base = g17p ? rw_base : ro_base;
 
    uint32_t tail_offset_B = view->vk.offset & 0xf;
    uint32_t tail_offset_el = tail_offset_B / util_format_get_blocksize(format);

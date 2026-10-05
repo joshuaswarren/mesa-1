@@ -372,8 +372,8 @@ struct hk_g17p_bg_eot_dev_entry;
 struct hk_g17p_bg_eot_cache_entry {
    uint8_t key[HK_G17P_BG_EOT_CACHE_KEY_MAX];
    struct hk_bg_eot program[4];
-   /* frg-codegen v4: the device-lifetime entry this pass fills or reuses
-    * (HK_G17P_BG_EOT_DEVICE_CACHE), or NULL. */
+   /* frg-codegen v4: the device-lifetime entry this pass fills or reuses,
+    * or NULL. */
    struct hk_g17p_bg_eot_dev_entry *dev_entry;
    uint64_t hash;
    uint16_t key_size;
@@ -437,19 +437,17 @@ struct hk_rendering_state {
    struct agx_tilebuffer_layout tilebuffer;
    struct hk_render_registers cr;
 
-   /* HK_ZLS_PRECISE_DEPTH_STORE (v50, default off): the ZLS words for the
-    * stream that ends the pass, when it is also the first stream (only) or
-    * a later one (last). Depth honours storeOp there; stencil keeps the
-    * forced store. zls_first_cs is the stream BeginRendering created. */
+   /* The ZLS words for the stream that ends the pass, when it is also the
+    * first stream (only) or a later one (last). Depth honours storeOp there;
+    * stencil keeps the forced store. zls_first_cs is the stream
+    * BeginRendering created. */
    bool zls_precise;
    struct agx_zls_control_packed zls_control_only, zls_control_last;
    const void *zls_first_cs;
 
-   /* Preserve untouched NONE/NONE attachments. The broader
-    * HK_G17P_ZLS_ELIDE_UNTOUCHED path remains opt-in. The pass may drop its
+   /* Preserve untouched NONE/NONE attachments: the pass drops its
     * depth/stencil attachment from every control stream when no draw or
-    * clear in it tests, writes, bounds-tests or clears depth/stencil and
-    * neither aspect has a CLEAR load op or a resolve (see
+    * clear in it tests, writes, bounds-tests or clears depth/stencil (see
     * hk_g17p_zls_elide()). */
    bool g17p_zls_elide_ok;
    bool g17p_depth_touched;
@@ -1637,7 +1635,7 @@ hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 }
 
 bool hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
-/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED: a depth/stencil clear touched it. */
+/* A depth/stencil clear touched the pass's attachment (ZLS elision). */
 void hk_g17p_note_depth_clear(struct hk_cmd_buffer *cmd);
 
 bool hk_g17p_split_trace_enabled(void);

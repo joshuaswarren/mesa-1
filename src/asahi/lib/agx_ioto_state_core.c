@@ -434,8 +434,7 @@ agx_ioto_g17p_fragment_speclm_build(
     * The imageblock bound here is structural -- a tile larger than 32 KiB has
     * nowhere to live. Which tile a given format and sample count actually gets
     * is agx_select_tile_size()'s policy, and that stays one byte more
-    * conservative than this unless AGX_TILE_32K says otherwise, so nothing
-    * reaches exactly 32768 by default.
+    * conservative than this, so nothing reaches exactly 32768.
     */
 
    /* Fresh HAL200 LdShdrTransformFragment witnesses recover three complete

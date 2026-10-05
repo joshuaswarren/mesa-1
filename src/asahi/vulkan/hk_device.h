@@ -134,7 +134,7 @@ struct hk_device {
    bool radix_sort_failed;
    simple_mtx_t radix_sort_lock;
    struct agx_bg_eot_cache bg_eot;
-   /* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE (hk_cmd_draw.c). */
+   /* frg-codegen v4 BG/EOT device cache (hk_cmd_draw.c). */
    struct hk_g17p_bg_eot_dev_cache *g17p_bg_eot_dev_cache;
 
    /* VK_KHR_ray_tracing_pipeline shader group handles.  A handle is one
@@ -178,9 +178,6 @@ struct hk_device {
       bool draw_trace;
       bool compact_ioto_trace;
       bool graphics_ioto_cache_stats;
-      bool nonpoint_no_psiz;
-      bool hal200_about_flags1;
-      bool force_tri_merge_disable;
    } g17p_diagnostics;
 
    struct {

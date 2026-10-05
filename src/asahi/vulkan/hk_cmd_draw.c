@@ -90,12 +90,6 @@
  * existing behavior. */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_interdraw_barrier,
                            "HK_G17P_INTERDRAW_BARRIER", false)
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_nonpoint_no_psiz,
-                           "HK_G17P_NONPOINT_NO_PSIZ", false)
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_hal200_about_flags1,
-                           "HK_G17P_HAL200_ABOUT_FLAGS1", false)
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_force_tri_merge_disable,
-                           "HK_G17P_FORCE_TRI_MERGE_DISABLE", false)
 DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_dirty_bisect,
                            "HK_G17P_DIRTY_BISECT", 0)
 /* v46 execution-efficiency A/B (neo-gpu-exec-mesa-v46), default off.
@@ -1781,24 +1775,12 @@ hk_g17p_bg_eot_ops_uniform(const struct agx_bg_eot_key *key)
  * uniforms whose source memory is CPU-known and immutable for the command
  * buffer -- clear values, the root table, shader rodata -- with LDIMM instead
  * of LDDEV, so the background and fragment launches issue no memory loads.
- *
- * HK_G17P_BG_RSRC_LOW=<n>: replace the BG resource-spec low field (bits
- * 3..20, register 15369) with n << 3. Linux uses 8 (0x40); native captures
- * show 8 on QID16 and 0 on QID18 for the same light pass (render-register
- * audit FINDINGS.md). */
-/* HK_G17P_PACKED_CLEAR (default on; =0 restores the FLTNORM clear): a
- * single-sample R8G8B8A8_UNORM RT0 clear is packed on the CPU and the
- * background program stores the word directly (COPY + LSTCOL instead of two
- * FLTNORMs + LSTCOL per pixel). Apple's background clear converts per pixel
- * (fltnorm, fltnorm, lstcol); this is one instruction per pixel cheaper. */
-static bool
-hk_g17p_packed_clear_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_PACKED_CLEAR", true);
-   return enabled;
-}
+ */
+/* Packed clear: a single-sample R8G8B8A8_UNORM RT0 clear is packed on the
+ * CPU and the background program stores the word directly (COPY + LSTCOL
+ * instead of two FLTNORMs + LSTCOL per pixel). Apple's background clear
+ * converts per pixel (fltnorm, fltnorm, lstcol); this is one instruction per
+ * pixel cheaper. */
 
 /* The Vulkan float-to-UNORM conversion (round to nearest even, clamp, NaN to
  * zero) of one clear component. */
@@ -1817,26 +1799,7 @@ hk_g17p_ioto_immediate_enabled(void)
    return enabled;
 }
 
-static void
-hk_g17p_bg_resource_override(uint64_t *resource_spec)
-{
-   static int64_t low = -2;
-   if (low == -2) {
-      const char *v = getenv("HK_G17P_BG_RSRC_LOW");
-      low = v && *v ? strtoll(v, NULL, 0) : -1;
-      if (low > (1 << 18) - 1)
-         low = -1;
-      if (low >= 0)
-         mesa_logi_once("HK_G17P_BG_RSRC_LOW: BG resource field %" PRId64,
-                        low);
-   }
-   if (low < 0 || !resource_spec)
-      return;
-   const uint64_t field = ((UINT64_C(1) << 18) - 1) << 3;
-   *resource_spec = (*resource_spec & ~field) | ((uint64_t)low << 3);
-}
-
-/* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE (default on).
+/* frg-codegen v4 BG/EOT device cache.
  *
  * The per-recording cache above dies with every vkResetCommandBuffer, so an
  * application that re-records each frame (the depth-2 benchmark, most games)
@@ -1898,20 +1861,12 @@ struct hk_g17p_bg_eot_dev_cache {
    struct hk_g17p_bg_eot_dev_entry entries[HK_G17P_BG_EOT_DEV_ENTRIES];
 };
 
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache,
-                           "HK_G17P_BG_EOT_DEVICE_CACHE", true)
-/* Diagnostic: print every device-cache program and argument block in the
- * launch-trace line format ("dev-" prefixed) so they can be compared with the
- * per-recording builder's HK_G17P_LAUNCH_TRACE output. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_bg_eot_device_cache_trace,
-                           "HK_G17P_BG_EOT_DEVICE_CACHE_TRACE", false)
 
 void
 hk_g17p_bg_eot_dev_cache_init(struct hk_device *dev)
 {
    dev->g17p_bg_eot_dev_cache = NULL;
-   if (dev->dev.chip != AGX_CHIP_G17P ||
-       !debug_get_option_hk_g17p_bg_eot_device_cache())
+   if (dev->dev.chip != AGX_CHIP_G17P)
       return;
    struct hk_g17p_bg_eot_dev_cache *dc = calloc(1, sizeof(*dc));
    if (!dc)
@@ -1988,8 +1943,6 @@ hk_g17p_bg_eot_upload(struct hk_cmd_buffer *cmd,
       return hk_pool_upload(cmd, data, size, alignment);
    struct agx_ptr T = hk_g17p_bg_eot_arena_take(&dc->data, size, alignment);
    memcpy(T.cpu, data, size);
-   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
-      hk_g17p_trace_line("dev-argument", T.gpu, data, size);
    return T.gpu;
 }
 
@@ -2021,8 +1974,6 @@ hk_g17p_bg_eot_publish(struct hk_cmd_buffer *cmd,
    a->cursor = (uint32_t)(offset + length);
    if (agx_bo_sync_for_device(a->bo, offset, length))
       return 0;
-   if (debug_get_option_hk_g17p_bg_eot_device_cache_trace())
-      hk_g17p_trace_line("dev-program", r->va, r->map, length);
    return r->va;
 }
 
@@ -2300,7 +2251,7 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
    }
    key->g17p_packed_clear =
       !store && op == AGX_BG_CLEAR && !dual_mrt_active && !multi_mrt_active &&
-      hk_g17p_packed_clear_enabled() && agx_g17p_packed_clear_ok(&key->tib);
+      agx_g17p_packed_clear_ok(&key->tib);
    if (!store && op == AGX_BG_CLEAR)
       key->reserved_preamble =
          multi_mrt_active ? 4 + 8 * attachment_count
@@ -2698,7 +2649,6 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
          return (struct hk_bg_eot){0};
       }
-      hk_g17p_bg_resource_override(&resource_spec);
    }
 
    const uint64_t published =
@@ -2829,7 +2779,7 @@ hk_g17p_bg_eot_cache_get(struct hk_cmd_buffer *cmd,
    cached->dev_entry = NULL;
    cached->valid = true;
 
-   /* frg-codegen v4 HK_G17P_BG_EOT_DEVICE_CACHE: one value lookup per new
+   /* frg-codegen v4 BG/EOT device cache: one value lookup per new
     * pass. A hit fills every variant this recording will ask for; a miss
     * attaches a fresh device entry that hk_build_bg_eot() fills. */
    struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
@@ -2977,7 +2927,7 @@ hk_build_bg_eot(struct hk_cmd_buffer *cmd, const VkRenderingInfo *info,
 
       /* frg-codegen v4: build this variant into the device-lifetime entry
        * hk_g17p_bg_eot_cache_get() attached, so every later recording of the
-       * same pass reuses it (HK_G17P_BG_EOT_DEVICE_CACHE). */
+       * same pass reuses it (BG/EOT device cache). */
       struct hk_g17p_bg_eot_dev_cache *dc = dev->g17p_bg_eot_dev_cache;
       struct hk_g17p_bg_eot_dev_entry *de = cache ? cache->dev_entry : NULL;
       struct hk_bg_eot program = {0};
@@ -3229,7 +3179,7 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
 }
 
-/* HK_ZLS_PRECISE_DEPTH_STORE (default on; =0 restores the forced store).
+/* Precise depth store for the stream that ends a pass.
  *
  * hk_pack_zls_control() forces the depth store on ("|| true") because a pass
  * split across several of Honeykrisp's own control streams needs every stream
@@ -3251,29 +3201,6 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
  * derives their ZLS word with both load and store forced
  * (g17_uapi.rs partial_depth_flags). Stencil keeps its forced store: the
  * existing TODO documents a CTS failure without it. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_zls_precise_depth_store,
-                           "HK_ZLS_PRECISE_DEPTH_STORE", true)
-
-/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED=1 (opt-in).
- *
- * Minecraft opens every full-screen pass with loadOp LOAD / storeOp STORE on
- * its D32 attachment, including passes whose pipelines neither test nor
- * write depth (GUI). Such a pass leaves the attachment's contents exactly as
- * they were, so loading and storing them (up to 2 x 14.9 MB at 2408x1506;
- * less when agx3 compresses the D32 image) is pure traffic. When the pass
- * ends with nothing
- * having touched depth/stencil, drop the attachment from every control
- * stream of the pass: no ZLS load/store, and no depth base for the kernel,
- * whose partial-render word forces Z/S load+store whenever a base is present
- * (g17_uapi.rs partial_depth_flags), which would otherwise store tile depth
- * that was never loaded. Not eligible: CLEAR load ops (the clear itself
- * changes the attachment), resolves, suspended/resumed passes and passes
- * recorded in secondaries. Depth/stencil input-attachment reads inside the
- * pass cannot see the dropped tile contents, but G17P does not expose
- * dynamicRenderingLocalReadDepthStencilAttachments, and a separate subpass
- * reads the (unchanged) image from memory. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_zls_elide_untouched,
-                           "HK_G17P_ZLS_ELIDE_UNTOUCHED", false)
 
 static bool
 hk_g17p_zls_attachment_elidable(const VkRenderingAttachmentInfo *att)
@@ -3337,11 +3264,6 @@ hk_g17p_zls_elide(struct hk_cmd_buffer *cmd)
       memset(&cs->cr.stencil, 0, sizeof(cs->cr.stencil));
       memset(&cs->cr.zls_control, 0, sizeof(cs->cr.zls_control));
    }
-   if (HK_ENV_BOOL_ONCE("HK_G17P_ZLS_ELIDE_TRACE", false))
-      fprintf(stderr, "G17P ZLS elided: %ux%u depth=%p stencil=%p\n",
-              render->cr.width, render->cr.height,
-              (void *)render->depth_att.iview,
-              (void *)render->stencil_att.iview);
    return true;
 }
 
@@ -3513,46 +3435,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
       formats, render->color_att_count, render->tilebuffer.nr_samples, layered,
       max_sample_size_B,
       native_tile_limits ? 32768 : 0, native_tile_limits ? 2048 : 0);
-
-   /* HK_G17P_TILE (v51 diagnostic, default unset): cap the tilebuffer
-    * (USC/utile) tile at 32x16 or 16x16 for a tile-size A/B. Only the three
-    * witnessed encodings exist end to end (Mesa SPECLM seeds, USC layout,
-    * kernel UTILE_CONFIG (w/16)<<12|(h/16)<<14 and its (32,32)/(32,16)/(16,16)
-    * geometry check); the 32x32 binning tile is fixed. Larger requests are
-    * refused, and a cap the BG/EOT gates do not admit falls back to the
-    * default layout. Attachmentless passes (samples unknown) are untouched. */
-   if (dev->dev.chip == AGX_CHIP_G17P && render->tilebuffer.nr_samples) {
-      static int forced_px = -1;
-      if (forced_px < 0) {
-         const char *t = getenv("HK_G17P_TILE");
-         forced_px = 0;
-         if (t && !strcmp(t, "32x16"))
-            forced_px = 32 * 16;
-         else if (t && !strcmp(t, "16x16"))
-            forced_px = 16 * 16;
-         else if (t && strcmp(t, "32x32"))
-            mesa_loge("HK_G17P_TILE=%s refused: G17P encodes only 32x32, "
-                      "32x16 and 16x16 tilebuffer tiles", t);
-      }
-      if (forced_px && forced_px < render->tilebuffer.tile_size) {
-         const unsigned cap = forced_px * render->tilebuffer.nr_samples;
-         struct agx_tilebuffer_layout forced =
-            agx_build_tilebuffer_layout_with_limits(
-               formats, render->color_att_count,
-               render->tilebuffer.nr_samples, layered, max_sample_size_B,
-               32768, MIN2(cap, 2048));
-         if (forced.tile_size == (unsigned)forced_px &&
-             hk_agx3_g17p_rt0_tile_layout_supported(&forced)) {
-            render->tilebuffer = forced;
-            mesa_logi_once("HK_G17P_TILE: tilebuffer tile capped at %u px",
-                           forced_px);
-         } else {
-            mesa_logi_once("HK_G17P_TILE: %u px not admitted for this "
-                           "layout; keeping %u px", forced_px,
-                           render->tilebuffer.tile_size);
-         }
-      }
-   }
 
    if (dev->dev.chip == AGX_CHIP_G17P)
       render->g17p_rt0_layout_supported =
@@ -3759,16 +3641,12 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    hk_pack_zls_control(&render->cr.zls_control_partial, z_layout, s_layout,
                        attach_z, attach_s, incomplete_render_area, true);
 
-   render->zls_precise = debug_get_option_hk_zls_precise_depth_store() &&
-                         z_layout != NULL;
+   render->zls_precise = z_layout != NULL;
    render->g17p_depth_touched = false;
    const bool preserve_none = hk_g17p_zls_attachment_none(attach_z) &&
                               hk_g17p_zls_attachment_none(attach_s);
    render->g17p_zls_elide_ok =
-      dev->dev.chip == AGX_CHIP_G17P &&
-      (preserve_none ||
-       (debug_get_option_hk_g17p_zls_elide_untouched() &&
-        !(render->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT))) &&
+      dev->dev.chip == AGX_CHIP_G17P && preserve_none &&
       (z_layout != NULL || s_layout != NULL) &&
       !(render->flags & (VK_RENDERING_SUSPENDING_BIT |
                          VK_RENDERING_RESUMING_BIT)) &&
@@ -4024,7 +3902,7 @@ hk_CmdEndRendering(VkCommandBuffer commandBuffer)
       cs->cr.eot.main = render->cr.eot.main;
       const bool zls_elided = hk_g17p_zls_elide(cmd);
 
-      /* HK_ZLS_PRECISE_DEPTH_STORE: see hk_pack_zls_control_final(). A
+      /* Precise depth store: see hk_pack_zls_control_final(). A
        * suspended pass continues in a later command buffer, which reloads
        * depth, so it keeps the forced store. An elided pass has no
        * depth/stencil to store. */
@@ -6417,7 +6295,7 @@ build_g17p_fs_epilog(nir_builder *b, const void *key_)
 }
 
 /*
- * v54 AGX_G17P_INLINE_BLEND: one fragment program with the colour epilog
+ * Inline blend: one fragment program with the colour epilog
  * compiled into it, as Apple's compiler blends inline (native throughput
  * fragment 0x10c..0x174: LLDCOL, normflt, f32add, fltnorm, LSTCOL in the
  * main program; no export copies, no separate epilog).
@@ -6634,15 +6512,7 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
                            const struct agx_fs_epilog_key *ekey,
                            const BITSET_WORD *partitions)
 {
-   static bool logged;
-#define HK_MONO_REFUSE(why)                                                    \
-   do {                                                                        \
-      if (!logged) {                                                           \
-         logged = true;                                                        \
-         mesa_logi("AGX_G17P_INLINE_BLEND: split link kept (%s)", why);        \
-      }                                                                        \
-      goto fail;                                                               \
-   } while (0)
+#define HK_MONO_REFUSE(why) goto fail
 
    void *mem = ralloc_context(NULL);
    struct agx_shader_part *part = NULL;
@@ -6663,8 +6533,6 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
       HK_MONO_REFUSE("nir");
 
    nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   if (HK_ENV_NUM_ONCE("AGX_G17P_INLINE_BLEND_TRACE", 0) > 1)
-      nir_print_shader(nir, stderr);
    nir_foreach_block(block, impl) {
       nir_foreach_instr(instr, block) {
          if (instr->type == nir_instr_type_intrinsic &&
@@ -6728,9 +6596,6 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
       NIR_PASS(_, nir, nir_opt_dce);
    }
 
-   if (HK_ENV_NUM_ONCE("AGX_G17P_INLINE_BLEND_TRACE", 0) > 2)
-      nir_print_shader(nir, stderr);
-
    struct agx_shader_key key = shader->g17p_mono_key;
    key.no_stop = false;
    key.secondary = false;
@@ -6770,22 +6635,6 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
    }
 
    const char *why = hk_g17p_mono_layout_mismatch(&shader->b, part);
-   if (why && HK_ENV_PRESENT_ONCE("AGX_G17P_INLINE_BLEND_TRACE"))
-      fprintf(stderr,
-              "AGX_G17P_INLINE_BLEND: %s main push=%u rodata=%u@%u dma=%u/%u/%u/%u "
-              "mono push=%u rodata=%u@%u dma=%u/%u/%u/%u\n",
-              why, shader->b.info.push_count, shader->b.info.rodata.size_16,
-              shader->b.info.rodata.base_uniform,
-              shader->b.info.agx3_uniform_dma_valid,
-              shader->b.info.agx3_uniform_dma_pointer,
-              shader->b.info.agx3_uniform_dma_dest,
-              shader->b.info.agx3_uniform_dma_halfs,
-              part->info.push_count, part->info.rodata.size_16,
-              part->info.rodata.base_uniform,
-              part->info.agx3_uniform_dma_valid,
-              part->info.agx3_uniform_dma_pointer,
-              part->info.agx3_uniform_dma_dest,
-              part->info.agx3_uniform_dma_halfs);
    if (why)
       HK_MONO_REFUSE(why);
 
@@ -6855,7 +6704,7 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
          BITSET_ZERO(g17p_tile_partitions);
    }
 
-   /* v54 AGX_G17P_INLINE_BLEND: try one monolithic fragment program first;
+   /* Inline blend: try one monolithic fragment program first;
     * any refusal falls through to the split link below, unchanged. */
    if (dev->dev.chip == AGX_CHIP_G17P &&
        (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND) &&
@@ -7532,24 +7381,6 @@ hk_g17p_bind_tail_refused(unsigned line)
 }
 
 static bool
-hk_g17p_nonpoint_no_psiz_diagnostic(bool enabled,
-                                    const struct hk_graphics_state *gfx,
-                                    const struct hk_shader *vs)
-{
-   if (!vs || !enabled ||
-       gfx->topology == AGX_PRIMITIVE_POINTS)
-      return false;
-
-   /* A terminal point-size word can be removed without shifting any later
-    * layer/viewport or clip output. */
-   return vs->info.uvs.group_offs[UVS_PSIZ] + 1 ==
-             vs->info.uvs.group_offs[UVS_LAYER_VIEWPORT] &&
-          vs->info.uvs.group_offs[UVS_LAYER_VIEWPORT] ==
-             vs->info.uvs.group_offs[UVS_CLIP_DIST] &&
-          vs->info.uvs.group_offs[UVS_CLIP_DIST] == vs->info.uvs.size;
-}
-
-static bool
 hk_g17p_bind_tail_state_matches(
    const struct hk_cmd_buffer *cmd,
    const struct hk_g17p_prepared_bind_tail *prepared);
@@ -7707,52 +7538,17 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
    if (!vs)
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   /* Native EXP-O2A changes both point-size enable and the output count with
-    * the draw primitive: triangles do not consume the terminal point-size
-    * word. Dynamic-topology pipelines currently retain the default
-    * gl_PointSize write in their one HW variant, so provide an exact,
-    * default-off A/B for that missing variant selection. Restrict it to a
-    * terminal point-size word with no layer/viewport or clip outputs; changing
-    * a middle UVS word would require rewriting the remaining output layout. */
-   const bool nonpoint_no_psiz =
-      hk_g17p_nonpoint_no_psiz_diagnostic(
-         dev->g17p_diagnostics.nonpoint_no_psiz, gfx, vs);
-   const uint32_t active_output_size =
-      vs->info.uvs.size - (nonpoint_no_psiz ? 1 : 0);
-   const uint32_t active_output_select =
-      vs->info.uvs.osel.opaque[0] &
-      ~(nonpoint_no_psiz ? BITFIELD_BIT(18) : 0);
-
    uint32_t output_size;
-   if (!agx_ppp_hal200_output_size_pack(
-          active_output_size, 0, &output_size))
+   if (!agx_ppp_hal200_output_size_pack(vs->info.uvs.size, 0, &output_size))
       return hk_g17p_bind_tail_refused(__LINE__);
 
    uint32_t output_select;
    if (!agx_ppp_hal200_output_select_pack(
-          dev->dev.chip, active_output_select,
+          dev->dev.chip, vs->info.uvs.osel.opaque[0],
           linked_fs->b.cf.nr_bindings != 0, linked_fs->b.cf.reads_z,
           &output_select))
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   if (nonpoint_no_psiz)
-      mesa_logi_once("G17P non-point terminal PointSize A/B active");
-
-   /* Trace-only falsifier for the deterministic Omarchy About VF_CPF fault.
-    * The retained faulting trace has exactly this sampled-fragment contract:
-    * two coefficient bindings, position + smooth float2 + point size (size 7,
-    * selector 0x50000), and a zero final FragmentProgram record word.  Metal
-    * copies the low nibble of compiler metadata field 32 into this word;
-    * retained tex2/vary3 records carry 1.  Mesa has no demonstrated semantic
-    * equivalent for that compiler-profile class, so keep this opt-in and
-    * shape-specific. */
-   const bool about_flags1_diagnostic =
-      dev->g17p_diagnostics.hal200_about_flags1 &&
-      fs->b.info.g17p_sampled_fragment &&
-      linked_fs->b.cf.nr_bindings == 2 && !linked_fs->b.cf.reads_z &&
-      output_size == 7 && output_select == UINT32_C(0x00050000);
-   if (about_flags1_diagnostic)
-      mesa_loge_once("G17P HAL200 About flags=1 diagnostic active");
    if (hk_g17p_fs_complexity_override())
       mesa_logi_once("G17P FragmentProgram complexity nibble %u A/B active",
                      hk_g17p_fs_complexity_override());
@@ -7766,8 +7562,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       .unknown_0c = 0,
       .stage_program = fragment_program,
       .stage_program_template = 0,
-      .flags = (about_flags1_diagnostic ? BITFIELD_BIT(0) : 0) |
-               hk_g17p_fs_complexity_override(),
+      .flags = hk_g17p_fs_complexity_override(),
    };
    if (fs->b.info.has_preamble &&
        (!fs->b.info.agx3_preamble_staging_known ||
@@ -8086,8 +7881,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       .shader_tri_merge_disable =
          fs->b.info.needs_quad_derivatives ||
          (render->tilebuffer.nr_samples > 1 &&
-          fs->info.fs.epilog_key.write_z) ||
-         dev->g17p_diagnostics.force_tri_merge_disable,
+          fs->info.fs.epilog_key.write_z),
 
       /* Native forces bit26 for type2 and conditionally for type3 from the
        * draw-buffer state. Keep the already-qualified conservative type3
@@ -8653,11 +8447,6 @@ hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd)
       gfx->generate_primitive_id;
    info.template_info.raw_active_context_selector =
       cs->agx3_raw_active_context_selector;
-   if (hk_g17p_nonpoint_no_psiz_diagnostic(
-          dev->g17p_diagnostics.nonpoint_no_psiz, gfx, hw_vs)) {
-      assert(info.template_info.raw_vs_output_count_0 > 0);
-      --info.template_info.raw_vs_output_count_0;
-   }
 
    gfx->prepared_vdm_state_update_valid =
       hk_agx3_encode_vdm_state_update_draw(
@@ -9862,16 +9651,6 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       cs->agx3_raw_active_context_selector = 1;
    info.template_info.raw_active_context_selector =
       cs->agx3_raw_active_context_selector;
-
-   /* Keep VertexProgramVariant's UVS footprint coupled to the HAL200
-    * output state selected below. Native non-point draws omit the
-    * terminal PointSize word from both records. */
-   if (dev->dev.chip == AGX_CHIP_G17P &&
-       hk_g17p_nonpoint_no_psiz_diagnostic(
-          dev->g17p_diagnostics.nonpoint_no_psiz, gfx, hw_vs)) {
-      assert(info.template_info.raw_vs_output_count_0 > 0);
-      --info.template_info.raw_vs_output_count_0;
-   }
 
    struct agx_vdm_state_update encoded;
    if (!hk_g17p_encode_vdm_state_update(cmd, dev->dev.chip, &info,
@@ -12596,7 +12375,7 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
 
    /* An eligible multi-draw may emit even its first record here, so this
     * direct path must record depth/stencil use exactly as hk_draw_impl()
-    * does for HK_G17P_ZLS_ELIDE_UNTOUCHED. */
+    * does for ZLS elision. */
    hk_g17p_note_depth_use(cmd);
 
    /* The general path from here on, with its no-op branches removed. */

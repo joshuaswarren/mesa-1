@@ -31,25 +31,14 @@ driver. Do not transfer `asahi_devenv_icd.aarch64.json` unchanged when its
 `library_path` still begins with the build-container path `/src`.
 
 When running from a full build tree, select a relocated manifest with
-`F39_VK_DRIVER_FILES` and use one cell per recovered GPU session:
+`F39_VK_DRIVER_FILES`:
 
 ```sh
 F39_VK_DRIVER_FILES=/absolute/path/f39-asahi.json \
   timeout 90s src/asahi/isa/probes/run-f39-about-vf-cpf.sh \
   _build-full --hardware-baseline
-
-F39_VK_DRIVER_FILES=/absolute/path/f39-asahi.json \
-  timeout 90s src/asahi/isa/probes/run-f39-about-vf-cpf.sh \
-  _build-full --hardware-flags1
 ```
 
-Each cell has an inner 20-second timeout. The script requires the final traced
-FragmentProgram word to be zero for baseline and one for `flags1`; the latter
-must also log diagnostic activation. A GPU fault or timeout is a failed cell,
-even if the expected word was traced. Run the second cell only after the first
-session has recovered from any device loss.
-
-This A/B test can establish whether the final record word is causal for this
-shader. It cannot derive a production value: Metal sources the low nibble from
-private compiler metadata field 32, for which Mesa has no proven semantic
-equivalent.
+The run has an inner 20-second timeout and requires the final traced
+FragmentProgram word to be zero. A GPU fault or timeout is a failed run, even
+if the expected word was traced.
