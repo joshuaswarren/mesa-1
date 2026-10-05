@@ -235,6 +235,32 @@ struct d12_descriptor_registry {
    uint32_t retired_count;
 };
 
+/* Driver-generated shader parts (vertex prolog, fragment prolog/epilog),
+ * compiled once per device and shared by every pipeline that links them:
+ * the same table Honeykrisp keeps as hk_device::prolog_epilog. See
+ * d12_shader_cache.c. */
+struct d12_device;
+struct hash_table;
+struct nir_builder;
+typedef void (*d12_part_builder_t)(struct nir_builder *b, const void *key);
+
+struct d12_shader_cache {
+   simple_mtx_t lock;
+   struct hash_table *parts; /* struct d12_part_key -> agx_shader_part */
+};
+
+void d12_shader_cache_init(struct d12_shader_cache *cache);
+void d12_shader_cache_finish(struct d12_device *device);
+
+/* The cached part for (builder, key). Owned by the cache: never freed by
+ * the caller, valid for the device's lifetime. NULL when the compile was
+ * refused. A successful compile with no code is a valid (empty) part. */
+const struct agx_shader_part *
+d12_shader_cache_part(struct d12_device *device, d12_part_builder_t builder,
+                      const void *key, size_t key_size,
+                      const struct agx_shader_key *backend_key,
+                      bool preprocess);
+
 struct d12_device {
    /* One vtable answers every IID from ID3D12Device to ID3D12Device15: the
     * newer interfaces are strict supersets, so the slots are appended to the
@@ -354,6 +380,8 @@ struct d12_device {
     * immediately publishes the same transition to the D3D12 core layer.
     */
    struct d12_device_removal_state removal;
+
+   struct d12_shader_cache shader_cache;
 };
 
 static inline bool

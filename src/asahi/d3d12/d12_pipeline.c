@@ -62,6 +62,18 @@ d12_upload_executable(struct agx_bo *bo, const void *binary, size_t size)
  * there is no state to derive from the blob yet.
  */
 
+/* agx_fast_link only reads its parts; cached parts are shared and const. */
+static bool
+d12_link(struct agx_linked_shader *linked, struct agx_device *dev,
+         bool fragment, struct agx_shader_part *main,
+         const struct agx_shader_part *prolog,
+         const struct agx_shader_part *epilog, unsigned nr_samples_shaded)
+{
+   return agx_fast_link(linked, dev, fragment, main,
+                        (struct agx_shader_part *)prolog,
+                        (struct agx_shader_part *)epilog, nr_samples_shaded);
+}
+
 static struct d12_root_signature *
 d12_root_sig_from_iface(ID3D12RootSignature *iface)
 {
@@ -3789,7 +3801,7 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
 
    /* Every compiled part is released at `fail` on both paths. */
    struct agx_shader_part ms_part = {0}, setup_part = {0}, rast_part = {0};
-   struct agx_shader_part prolog = {0}, as_part = {0}, as_setup_part = {0};
+   struct agx_shader_part as_part = {0}, as_setup_part = {0};
 
    /* The mesh shader itself, as compute. */
    nir_shader *ms = dxil_to_nir_stage(
@@ -3857,13 +3869,17 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
       .secondary = true,
       .no_stop = true,
    };
-   nir_builder pb = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
-   agx_nir_vs_prolog(&pb, &pk);
-   agx_compile_shader_nir(pb.shader, &pbk, &prolog);
-   ralloc_free(pb.shader);
+   const struct agx_shader_part *prolog =
+      d12_shader_cache_part(device, agx_nir_vs_prolog, &pk, sizeof(pk), &pbk,
+                            false);
+   if (!prolog) {
+      hr = E_INVALIDARG;
+      goto fail;
+   }
 
-   bool linked = agx_fast_link(&pso->ms_rast.linked, &device->dev, false,
-                               &rast_part, &prolog, NULL, 0);
+   bool linked = d12_link(&pso->ms_rast.linked, &device->dev, false,
+                          &rast_part, prolog->info.binary_size ? prolog : NULL,
+                          NULL, 0);
    if (!linked) {
       hr = E_OUTOFMEMORY;
       goto fail;
@@ -3981,7 +3997,6 @@ fail:
    free(ms_part.binary);
    free(setup_part.binary);
    free(rast_part.binary);
-   free(prolog.binary);
    free(as_part.binary);
    free(as_setup_part.binary);
    if (FAILED(hr)) {
@@ -4314,12 +4329,13 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    /* Every compiled part is released at `cleanup` on both paths. */
    struct agx_shader_part vs_part = {0}, fs_part = {0};
-   struct agx_shader_part fs_prolog = {0}, fs_epilog = {0}, prolog = {0};
    struct agx_shader_part sw_vs_part = {0}, tcs_part = {0}, tes_part = {0};
-   struct agx_shader_part tes_prolog = {0};
    struct agx_shader_part gs_sw_part = {0}, gs_count_part = {0};
    struct agx_shader_part gs_pre_part = {0}, gs_main_part = {0};
-   struct agx_shader_part gs_rast_part = {0}, rast_prolog = {0};
+   struct agx_shader_part gs_rast_part = {0};
+   /* Prologs and epilogs are device-cached and shared, never freed here. */
+   const struct agx_shader_part *fs_prolog = NULL, *fs_epilog = NULL;
+   const struct agx_shader_part *prolog = NULL;
    HRESULT hr = S_OK;
    uint8_t cull_distance_size = 0;
    struct agx_fs_epilog_link_info fs_epilog_link = {0};
@@ -4382,21 +4398,17 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          .cf_base = fs_part.info.varyings.fs.nr_cf,
       };
 
-      nir_builder fb =
-         nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
-      agx_nir_fs_prolog(&fb, &prolog_key);
-
       struct agx_shader_key prolog_backend_key = {
          .dev = agx_gather_device_key(&device->dev),
          .secondary = true,
          .no_stop = true,
          .fs.cf_base = prolog_key.cf_base,
       };
-      const bool prolog_compiled =
-         agx_compile_shader_nir(fb.shader, &prolog_backend_key, &fs_prolog);
-      ralloc_free(fb.shader);
+      fs_prolog = d12_shader_cache_part(device, agx_nir_fs_prolog,
+                                        &prolog_key, sizeof(prolog_key),
+                                        &prolog_backend_key, false);
 
-      if (!prolog_compiled || !fs_prolog.binary || !fs_prolog.info.binary_size) {
+      if (!fs_prolog || !fs_prolog->binary || !fs_prolog->info.binary_size) {
          hr = E_INVALIDARG;
          goto fail;
       }
@@ -4479,23 +4491,15 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
             epilog_key.remap[i] = i;
       }
 
-      nir_builder eb =
-         nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
-      agx_nir_fs_epilog(&eb, &epilog_key);
-      if (device->dev.chip == AGX_CHIP_G17P)
-         agx_preprocess_nir_g17p(eb.shader);
-      else
-         agx_preprocess_nir(eb.shader);
-
       struct agx_shader_key epilog_backend_key = {
          .dev = agx_gather_device_key(&device->dev),
          .secondary = true,
          /* The one-sample fast-link footer appends the terminating stop. */
          .no_stop = true,
       };
-      const bool epilog_compiled =
-         agx_compile_shader_nir(eb.shader, &epilog_backend_key, &fs_epilog);
-      ralloc_free(eb.shader);
+      fs_epilog = d12_shader_cache_part(device, agx_nir_fs_epilog,
+                                        &epilog_key, sizeof(epilog_key),
+                                        &epilog_backend_key, true);
 
       bool any_colour_write = false;
       for (unsigned i = 0; i < nr_rt; i++)
@@ -4506,8 +4510,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          !epilog_key.blend.alpha_to_coverage && !fs_epilog_link.write_z &&
          !fs_epilog_link.write_s;
 
-      if (!epilog_compiled ||
-          ((!fs_epilog.binary || !fs_epilog.info.binary_size) &&
+      if (!fs_epilog ||
+          ((!fs_epilog->binary || !fs_epilog->info.binary_size) &&
            !intentionally_empty)) {
          hr = E_INVALIDARG;
          goto fail;
@@ -4525,10 +4529,6 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       .static_vi = true,
    };
 
-   nir_builder pb =
-      nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
-   agx_nir_vs_prolog(&pb, &prolog_key);
-
    struct agx_shader_key prolog_backend_key = {
       .dev = agx_gather_device_key(&device->dev),
       /* Allocas live in per-thread scratch, and large shaders spill. */
@@ -4537,23 +4537,22 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       .no_stop = true,
    };
 
-   const bool prolog_compiled =
-      agx_compile_shader_nir(pb.shader, &prolog_backend_key, &prolog);
-   ralloc_free(pb.shader);
+   prolog = d12_shader_cache_part(device, agx_nir_vs_prolog, &prolog_key,
+                                  sizeof(prolog_key), &prolog_backend_key,
+                                  false);
    /* Static VI needs no fixup instructions on G13/G14. An empty successful
     * compile is a valid no-op there; failed compiles and missing nonempty
     * binaries remain errors. Keep G17P's nonempty-prolog requirement. */
-   const bool empty_prolog = !prolog.info.binary_size;
-   if (!prolog_compiled || (!empty_prolog && !prolog.binary) ||
+   const bool empty_prolog = prolog && !prolog->info.binary_size;
+   if (!prolog || (!empty_prolog && !prolog->binary) ||
        (empty_prolog && device->dev.chip == AGX_CHIP_G17P)) {
       hr = E_INVALIDARG;
       goto fail;
    }
 
    /* Link: this uploads executable memory and bakes the USC/PPP words. */
-   bool vs_linked = agx_fast_link(&pso->vs.linked, &device->dev, false,
-                                  &vs_part, empty_prolog ? NULL : &prolog,
-                                  NULL, 0);
+   bool vs_linked = d12_link(&pso->vs.linked, &device->dev, false, &vs_part,
+                             empty_prolog ? NULL : prolog, NULL, 0);
    if (!vs_linked) {
       hr = E_OUTOFMEMORY;
       goto fail;
@@ -4589,10 +4588,10 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       pso->vs.preamble_va =
          pso->vs.code_bo->va->addr + vs_part.info.preamble_offset;
    }
-   bool fs_linked = agx_fast_link(
+   bool fs_linked = d12_link(
       &pso->fs.linked, &device->dev, true, &fs_part,
-      fs_prolog.binary ? &fs_prolog : NULL,
-      use_fs_epilog && fs_epilog.binary ? &fs_epilog : NULL,
+      fs_prolog && fs_prolog->binary ? fs_prolog : NULL,
+      use_fs_epilog && fs_epilog && fs_epilog->binary ? fs_epilog : NULL,
       use_fs_epilog ? 1 : 0);
    if (!fs_linked) {
       hr = E_OUTOFMEMORY;
@@ -4683,14 +4682,11 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          *cs[i].info = cs[i].part->info;
       }
 
-      nir_builder tb =
-         nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
-      agx_nir_vs_prolog(&tb, &prolog_key);
-      agx_compile_shader_nir(tb.shader, &prolog_backend_key, &tes_prolog);
-      ralloc_free(tb.shader);
-
-      bool tes_linked = agx_fast_link(&pso->tes.linked, &device->dev, false,
-                                      &tes_part, &tes_prolog, NULL, 0);
+      /* The domain shader is a hardware vertex stage and takes the same
+       * static_vi prolog as pso->vs. */
+      bool tes_linked = d12_link(&pso->tes.linked, &device->dev, false,
+                                 &tes_part, empty_prolog ? NULL : prolog,
+                                 NULL, 0);
       if (!tes_linked) {
          hr = E_OUTOFMEMORY;
          goto fail;
@@ -4872,15 +4868,9 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
        * prolog leaves both IDs undefined, so every invocation reads the
        * wrong slot of the vertex buffer.
        */
-      nir_builder rb =
-         nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
-      agx_nir_vs_prolog(&rb, &prolog_key);
-      agx_compile_shader_nir(rb.shader, &prolog_backend_key, &rast_prolog);
-      ralloc_free(rb.shader);
-
-      bool gs_rast_linked = agx_fast_link(
+      bool gs_rast_linked = d12_link(
          &pso->gs_rast.linked, &device->dev, false, &gs_rast_part,
-         &rast_prolog, NULL, 0);
+         empty_prolog ? NULL : prolog, NULL, 0);
       if (!gs_rast_linked) {
          hr = E_OUTOFMEMORY;
          goto fail;
@@ -5035,19 +5025,14 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 fail:
    free(vs_part.binary);
    free(fs_part.binary);
-   free(fs_prolog.binary);
-   free(fs_epilog.binary);
-   free(prolog.binary);
    free(sw_vs_part.binary);
    free(tcs_part.binary);
    free(tes_part.binary);
-   free(tes_prolog.binary);
    free(gs_sw_part.binary);
    free(gs_count_part.binary);
    free(gs_pre_part.binary);
    free(gs_main_part.binary);
    free(gs_rast_part.binary);
-   free(rast_prolog.binary);
 
    if (FAILED(hr)) {
       d12_pso_release_bos(device, pso);

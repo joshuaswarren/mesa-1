@@ -5717,6 +5717,7 @@ d12_device_backend_init(struct d12_device *device,
    simple_mtx_init(&device->sparse_resource_lock, mtx_plain);
    d12_device_g17p_vdm_pool_init(device);
    list_inithead(&device->sparse_resources);
+   d12_shader_cache_init(&device->shader_cache);
    agx_scratch_init(&device->dev, &device->scratch_vs);
    agx_scratch_init(&device->dev, &device->scratch_fs);
    agx_scratch_init(&device->dev, &device->scratch_cs);
@@ -5753,6 +5754,7 @@ d12_device_backend_cleanup(struct d12_device *device)
    agx_scratch_fini(&device->scratch_fs);
    agx_scratch_fini(&device->scratch_cs);
    d12_device_g17p_vdm_pool_fini(device);
+   d12_shader_cache_finish(device);
    simple_mtx_destroy(&device->scratch_lock);
    d12_descriptor_registry_destroy(device);
    simple_mtx_destroy(&device->descriptor_heap_lock);

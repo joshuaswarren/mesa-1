@@ -518,6 +518,19 @@ main(int argc, char **argv)
       printf("MICROBENCH_JSON {\"only\": \"pso\", \"pso_gfx_create_ms_median\": %.3f, "
              "\"pso_cs_create_ms_median\": %.3f}\n",
              pso_gfx_median_ms, pso_cs_median_ms);
+      /* Release everything so a leak checker sees only the driver. */
+      ID3D12PipelineState_Release(b.pso_tri);
+      ID3D12PipelineState_Release(b.pso_tri_consts);
+      ID3D12PipelineState_Release(b.pso_cs);
+      ID3D12RootSignature_Release(b.rs_empty);
+      ID3D12RootSignature_Release(b.rs_consts);
+      ID3D12RootSignature_Release(b.rs_table);
+      ID3D12Fence_Release(b.fence);
+      ID3D12CommandQueue_Release(b.queue);
+      ID3D12Device_Release(b.dev);
+      free(vs);
+      free(ps);
+      free(cs);
       return 0;
    }
 

@@ -58,6 +58,7 @@ libd3d12agx_files = files(
   'd12_queue_timeline_core.c',
   'd12_resource.c',
   'd12_root_sig.c',
+  'd12_shader_cache.c',
   'd12_texture_copy_math.c',
   'd12_viewport_math.c',
   'd12_write_set_core.c',
