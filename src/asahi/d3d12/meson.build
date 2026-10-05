@@ -309,6 +309,14 @@ executable(
   link_with : [libd3d12agx],
 )
 
+# Live: PSO lifetime under a pipeline library from several threads.
+executable(
+  'd3d12agx_pso_library_race',
+  files('tests/pso_library_race.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 # CPU-side microbenchmark: record/submit cost, descriptor writes, PSO creation.
 d3d12agx_microbench = executable(
   'd3d12agx_microbench',

@@ -602,12 +602,11 @@ d12_pso_add_ref(struct d12_pipeline_state *pso)
    ULONG refs = p_atomic_inc_return(&pso->refcount);
 
    /* A library-owned PSO can have no public references while its compiled
-    * object and private-data store remain cached. Reacquiring it makes the
-    * device-child reference live again. */
-   if (refs == 1 && !pso->device_ref_active) {
-      d12_device_add_ref(pso->device);
-      pso->device_ref_active = true;
-   }
+    * object and private-data store remain cached. Reacquiring it starts a
+    * new public epoch, which holds one lifetime reference. The library's
+    * own reference is what keeps the object alive across this call. */
+   if (refs == 1)
+      p_atomic_inc(&pso->lifetime);
 
    return refs;
 }
@@ -692,15 +691,22 @@ d12_pso_release_bos(struct d12_device *device,
       agx_bo_unreference(&device->dev, pso->as_setup_bo);
 }
 
+/* Release BOs while the device reference is still live, then the device. */
 static void
 d12_pso_destroy(struct d12_pipeline_state *pso)
 {
    d12_pso_release_bos(pso->device, pso);
    free(pso->cached_blob);
    d12_private_data_store_destroy(&pso->private_data);
-   if (pso->device_ref_active)
-      d12_device_release(pso->device);
+   d12_device_release(pso->device);
    free(pso);
+}
+
+static void
+d12_pso_lifetime_unref(struct d12_pipeline_state *pso)
+{
+   if (!p_atomic_dec_return(&pso->lifetime))
+      d12_pso_destroy(pso);
 }
 
 static ULONG STDMETHODCALLTYPE
@@ -709,16 +715,10 @@ d12_pso_Release(ID3D12PipelineState *iface)
    struct d12_pipeline_state *pso = d12_pso_from_iface(iface);
    uint32_t refs = p_atomic_dec_return(&pso->refcount);
 
-   if (!refs) {
-      if (!p_atomic_read(&pso->library_refcount)) {
-         /* Ordinary PSOs must release their BOs while their device reference
-          * is still live. */
-         d12_pso_destroy(pso);
-      } else if (pso->device_ref_active) {
-         d12_device_release(pso->device);
-         pso->device_ref_active = false;
-      }
-   }
+   /* The public epoch ends: drop its lifetime reference. A library entry
+    * may still hold one, in which case nothing else happens here. */
+   if (!refs)
+      d12_pso_lifetime_unref(pso);
 
    return refs;
 }
@@ -726,15 +726,13 @@ d12_pso_Release(ID3D12PipelineState *iface)
 void
 d12_pipeline_state_library_ref(struct d12_pipeline_state *pso)
 {
-   p_atomic_inc(&pso->library_refcount);
+   p_atomic_inc(&pso->lifetime);
 }
 
 void
 d12_pipeline_state_library_unref(struct d12_pipeline_state *pso)
 {
-   uint32_t refs = p_atomic_dec_return(&pso->library_refcount);
-   if (!refs && !p_atomic_read(&pso->refcount))
-      d12_pso_destroy(pso);
+   d12_pso_lifetime_unref(pso);
 }
 
 D12_DEFINE_PRIVATE_DATA_METHODS(d12_pso, ID3D12PipelineState,
@@ -1724,7 +1722,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
 
    pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
    pso->refcount = 1;
-   pso->device_ref_active = true;
+   pso->lifetime = 1;
    pso->device = device;
    pso->is_compute = true;
    pso->g17p_native_txf = entry->out.native_txf;
@@ -5108,7 +5106,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
    pso->refcount = 1;
-   pso->device_ref_active = true;
+   pso->lifetime = 1;
    pso->device = device;
    pso->is_compute = false;
    d12_private_data_store_init(&pso->private_data, (IUnknown *)&pso->iface);

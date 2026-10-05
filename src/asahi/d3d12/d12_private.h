@@ -1242,16 +1242,23 @@ struct d12_pipeline_library_key {
 /* A compiled pipeline: AGX machine code produced from the app's DXIL. */
 struct d12_pipeline_state {
    ID3D12PipelineState iface; /* must be first */
-   uint32_t refcount;
-   /* Pipeline libraries retain a hidden ownership reference. It deliberately
-    * does not change the public COM count: a stored PSO may reach public
-    * refcount zero, retain its private data, and later be returned again from
-    * the same library as required by D3D12. */
-   uint32_t library_refcount;
-   bool device_ref_active;
+   uint32_t refcount; /* public COM count */
+
+   /*
+    * Ownership is ONE atomic count: one reference for the public COM
+    * count while it is non-zero, plus one per pipeline-library entry. The
+    * object is destroyed when this reaches zero, by whichever release got
+    * there, so a library and the application releasing concurrently can
+    * never both decide to free it or race its device reference.
+    *
+    * The public count deliberately stays separate: a stored PSO may reach
+    * public refcount zero, retain its private data, and later be returned
+    * again from the same library, as D3D12 requires.
+    */
+   uint32_t lifetime;
    struct d12_private_data_store private_data;
 
-   struct d12_device *device; /* holds a device ref */
+   struct d12_device *device; /* holds a device ref for the lifetime */
    /* Driver-private validation blob returned by GetCachedBlob: the shader
     * bytes and the canonical root layout (plus the library key for graphics
     * PSOs). A supplied CachedPSO must match it exactly; the recreation
