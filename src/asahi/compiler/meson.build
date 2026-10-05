@@ -700,6 +700,7 @@ if with_tests
          'test/test-preamble-image-payload.cpp',
          'test/test-cprog-cleanup.cpp',
          'test/test-preamble-half-exports.cpp',
+         'test/test-demote-early-kill.cpp',
          'test/test-signed-zero-fma.cpp',
          'test/test-negated-minifloat.cpp',
          'test/test-dual-absolute-select.cpp',

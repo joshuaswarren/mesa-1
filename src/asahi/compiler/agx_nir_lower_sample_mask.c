@@ -246,6 +246,233 @@ accumulate_demote(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 /*
+ * Deferring every demote to one end-of-shader coverage update keeps demoted
+ * lanes alive as quad helpers, but it also moves the depth/stencil test to
+ * the end of the shader, so fragments that fail the test still run the whole
+ * shader. When demoted lanes provably never execute an operation that reads
+ * other lanes of the quad or subgroup after their demote, keeping them alive
+ * has no observable effect and the immediate lowering is equivalent. It
+ * kills and tests right after the last discard, as Apple's G17P code does
+ * with MOVMSK (e.g. HLSL/OpKill "if (c) discard; if (!c) { ... }").
+ *
+ * The proof is structural and conservative: demotes and the guarded code
+ * must sit in top-level control flow, and every later quad-dependent
+ * instruction must be inside a top-level if whose branch excludes the
+ * demoted lanes by an exact boolean negation of the demote's guard.
+ */
+static bool
+quad_dependent_instr(const nir_instr *instr)
+{
+   if (instr->type == nir_instr_type_tex)
+      return nir_tex_instr_has_implicit_derivative(nir_instr_as_tex(instr));
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+
+   const nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+   if (nir_intrinsic_infos[intr->intrinsic].flags &
+       (NIR_INTRINSIC_SUBGROUP | NIR_INTRINSIC_QUADGROUP))
+      return true;
+
+   switch (intr->intrinsic) {
+   case nir_intrinsic_ddx:
+   case nir_intrinsic_ddx_fine:
+   case nir_intrinsic_ddx_coarse:
+   case nir_intrinsic_ddy:
+   case nir_intrinsic_ddy_fine:
+   case nir_intrinsic_ddy_coarse:
+   case nir_intrinsic_is_helper_invocation:
+   case nir_intrinsic_load_helper_invocation:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+is_demote(const nir_instr *instr)
+{
+   return instr->type == nir_instr_type_intrinsic &&
+          nir_instr_as_intrinsic(instr)->intrinsic ==
+             nir_intrinsic_demote_samples;
+}
+
+static bool
+cf_list_has(struct exec_list *list, bool (*pred)(const nir_instr *))
+{
+   foreach_list_typed(nir_cf_node, node, node, list) {
+      nir_foreach_block_in_cf_node(block, node) {
+         nir_foreach_instr(instr, block) {
+            if (pred(instr))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+static bool
+cf_node_has(nir_cf_node *node, bool (*pred)(const nir_instr *))
+{
+   nir_foreach_block_in_cf_node(block, node) {
+      nir_foreach_instr(instr, block) {
+         if (pred(instr))
+            return true;
+      }
+   }
+   return false;
+}
+
+static nir_alu_instr *
+bool_alu(nir_def *def)
+{
+   return def->bit_size == 1 && def->num_components == 1
+             ? nir_def_as_alu_or_null(def)
+             : NULL;
+}
+
+static bool
+same_srcs(const nir_alu_instr *a, const nir_alu_instr *b, bool swapped)
+{
+   return nir_op_infos[a->op].num_inputs == 2 &&
+          nir_op_infos[b->op].num_inputs == 2 &&
+          nir_alu_srcs_equal(a, b, 0, swapped ? 1 : 0) &&
+          nir_alu_srcs_equal(a, b, 1, swapped ? 0 : 1);
+}
+
+/* a == !b, exactly (1-bit booleans only). */
+static bool
+bool_negation(nir_def *a, nir_def *b)
+{
+   nir_alu_instr *x = bool_alu(a), *y = bool_alu(b);
+   if (x && x->op == nir_op_inot && x->src[0].src.ssa == b &&
+       x->src[0].swizzle[0] == 0)
+      return true;
+   if (y && y->op == nir_op_inot && y->src[0].src.ssa == a &&
+       y->src[0].swizzle[0] == 0)
+      return true;
+   if (!x || !y)
+      return false;
+
+   static const nir_op pairs[][2] = {
+      {nir_op_ieq, nir_op_ine},
+      {nir_op_feq, nir_op_fneu},
+      {nir_op_ilt, nir_op_ige},
+      {nir_op_ult, nir_op_uge},
+   };
+   for (unsigned i = 0; i < ARRAY_SIZE(pairs); ++i) {
+      for (unsigned o = 0; o < 2; ++o) {
+         if (x->op == pairs[i][o] && y->op == pairs[i][!o]) {
+            const bool commutative = i < 2;
+            if (same_srcs(x, y, false) ||
+                (commutative && same_srcs(x, y, true)))
+               return true;
+         }
+      }
+   }
+   return false;
+}
+
+static bool
+bool_equal(nir_def *a, nir_def *b)
+{
+   if (a == b)
+      return true;
+   nir_alu_instr *x = bool_alu(a);
+   return x && x->op == nir_op_inot && x->src[0].swizzle[0] == 0 &&
+          bool_negation(x->src[0].src.ssa, b);
+}
+
+static bool
+demoted_lanes_reach_quad_ops(nir_shader *shader)
+{
+   nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   bool seen = false, all = false;
+   nir_def *guard = NULL;
+   bool guard_negated = false;
+
+   foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+      if (cf_node_has(node, is_demote)) {
+         if (node->type == nir_cf_node_block) {
+            /* Unconditionally executed demote. demote_if(c) arrives here as
+             * demote_samples(bcsel(c, samples, 0)), which demotes only lanes
+             * satisfying c. No quad operation may follow it in the same
+             * block. */
+            bool after = false;
+            nir_foreach_instr(instr, nir_cf_node_as_block(node)) {
+               if (is_demote(instr)) {
+                  nir_def *mask = nir_instr_as_intrinsic(instr)->src[0].ssa;
+                  nir_alu_instr *sel = nir_def_as_alu_or_null(mask);
+                  nir_def *cond = NULL;
+                  bool negated = false;
+                  if (sel && sel->op == nir_op_bcsel &&
+                      sel->src[0].swizzle[0] == 0) {
+                     if (nir_src_is_const(sel->src[2].src) &&
+                         nir_src_as_uint(sel->src[2].src) == 0) {
+                        cond = sel->src[0].src.ssa;
+                     } else if (nir_src_is_const(sel->src[1].src) &&
+                                nir_src_as_uint(sel->src[1].src) == 0) {
+                        cond = sel->src[0].src.ssa;
+                        negated = true;
+                     }
+                  }
+                  if (!cond)
+                     all = true;
+                  else if (!seen && !guard) {
+                     guard = cond;
+                     guard_negated = negated;
+                  } else if (!(guard == cond && guard_negated == negated))
+                     all = true;
+                  after = true;
+               } else if (after && quad_dependent_instr(instr)) {
+                  return true;
+               }
+            }
+         } else if (node->type == nir_cf_node_if) {
+            nir_if *nif = nir_cf_node_as_if(node);
+            const bool in_then = cf_list_has(&nif->then_list, is_demote);
+            const bool in_else = cf_list_has(&nif->else_list, is_demote);
+            if (cf_node_has(node, quad_dependent_instr))
+               return true;
+            nir_def *cond = nif->condition.ssa;
+            if (in_then && in_else) {
+               all = true;
+            } else if (!seen && !guard) {
+               guard = cond;
+               guard_negated = in_else;
+            } else if (!(guard && cond == guard &&
+                         guard_negated == in_else)) {
+               all = true;
+            }
+         } else {
+            return true;
+         }
+         seen = true;
+         continue;
+      }
+
+      if (!seen || !cf_node_has(node, quad_dependent_instr))
+         continue;
+      if (all || node->type != nir_cf_node_if)
+         return true;
+
+      /* Demoted lanes satisfy `guard` (or its negation). A branch excludes
+       * them if its condition contradicts that. */
+      nir_if *nif = nir_cf_node_as_if(node);
+      nir_def *cond = nif->condition.ssa;
+      const bool then_excluded = guard_negated ? bool_equal(cond, guard)
+                                               : bool_negation(cond, guard);
+      const bool else_excluded = guard_negated ? bool_negation(cond, guard)
+                                               : bool_equal(cond, guard);
+      if ((cf_list_has(&nif->then_list, quad_dependent_instr) &&
+           !then_excluded) ||
+          (cf_list_has(&nif->else_list, quad_dependent_instr) &&
+           !else_excluded))
+         return true;
+   }
+   return false;
+}
+
+/*
  * Native G16G variant. A MOVMSK coverage update takes the killed lanes out of
  * the quad: derivatives and quad operations after a demote then read stale
  * neighbours and helperInvocationEXT() lanes stop contributing
@@ -277,6 +504,10 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
       (BITFIELD64_BIT(FRAG_RESULT_STENCIL) | BITFIELD64_BIT(FRAG_RESULT_DEPTH));
 
    const bool early = shader->info.fs.early_fragment_tests;
+   if (!early && !writes_zs && shader->info.fs.uses_discard &&
+       !demoted_lanes_reach_quad_ops(shader))
+      return agx_nir_lower_sample_mask(shader);
+
    if (early) {
       if (shader->info.fs.uses_discard || writes_zs ||
           shader->info.writes_memory)
