@@ -3,9 +3,30 @@
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 static unsigned reference_calls;
 static unsigned unreference_calls;
+static unsigned error_calls;
+
+/* hk_cmd_buffer_retain_bo() reports allocation failure through
+ * vk_command_buffer_set_error(), which hk routes through hk_trace_cmd_error()
+ * and the runtime's __vk_errorf(). Neither runs on the paths below; count any
+ * call so an unexpected error fails the test. */
+void
+hk_trace_cmd_error(UNUSED const char *file, UNUSED unsigned line,
+                   UNUSED VkResult error)
+{
+   error_calls++;
+}
+
+VkResult
+__vk_errorf(UNUSED const void *obj, VkResult error, UNUSED const char *file,
+            UNUSED int line, UNUSED const char *format, ...)
+{
+   error_calls++;
+   return error;
+}
 
 void
 agx_bo_reference(struct agx_bo *bo)
@@ -70,6 +91,37 @@ main(void)
    assert(unreference_calls == 4);
    assert(shader.refcnt == 1);
 
+   /* Enough distinct BOs to grow the retained set several times, each
+    * retained twice (the second through the set, not the one-entry cache,
+    * because the BOs in between evict it): one reference per distinct BO. */
+   enum { MANY = 1500 };
+   static struct agx_bo many[MANY];
+   const unsigned refs_before = reference_calls;
+   for (unsigned round = 0; round < 2; ++round) {
+      for (unsigned i = 0; i < MANY; ++i) {
+         if (round == 0)
+            many[i].refcnt = 1;
+         hk_cmd_buffer_retain_bo(&cmd, &many[i]);
+      }
+   }
+   assert(reference_calls == refs_before + MANY);
+   assert(util_dynarray_num_elements(&cmd.large_bos, struct agx_bo *) == MANY);
+   for (unsigned i = 0; i < MANY; ++i)
+      assert(many[i].refcnt == 2);
+   hk_cmd_buffer_release_bos(&cmd, &dev);
+   for (unsigned i = 0; i < MANY; ++i)
+      assert(many[i].refcnt == 1);
+
+   /* After a reset the set is empty again: a BO retained before counts
+    * once more. */
+   hk_cmd_buffer_retain_bo(&cmd, &many[7]);
+   hk_cmd_buffer_retain_bo(&cmd, &many[7]);
+   assert(many[7].refcnt == 2);
+   hk_cmd_buffer_release_bos(&cmd, &dev);
+   assert(many[7].refcnt == 1);
+   assert(error_calls == 0);
+
+   free(cmd.retained_set);
    util_dynarray_fini(&cmd.large_bos);
    puts("G17P command-buffer BO retain/reset/destroy ordering PASS");
    return 0;
