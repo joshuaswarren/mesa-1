@@ -3064,8 +3064,13 @@ d12_list_retire_attachment_store(struct d12_cmd_list *list,
       }
       if (changed)
          d12_segment_rebuild_eot(list, seg);
-   } else if (seg->ds == view->resource && seg->ds_address == view->address &&
+   } else if (!seg->has_draws && seg->ds == view->resource &&
+              seg->ds_address == view->address &&
               seg->ds_level == view->texture_plane && seg->layers == layers) {
+      /* The ZLS unit has one store bit for the whole render, partial
+       * renders included, so a render with draws keeps its depth and
+       * stencil stores as Honeykrisp does (hk_pack_zls_control); only a
+       * render that drew nothing cannot spill. */
       if (depth)
          seg->depth_store_dead = true;
       if (stencil && seg->stencil_address == view->counter_address)
@@ -3174,30 +3179,34 @@ d12_list_begin_render(struct d12_cmd_list *list,
              sizeof(seg->rt_clear));
       seg->depth_plan = list->render_pass_depth_plan;
       seg->stencil_plan = list->render_pass_stencil_plan;
-      if (list->render_pass_segments) {
-         /* This render resumes a pass the driver had to split (a tile
-          * layout change, a full scissor array, a query). The pass's
-          * entry traffic was applied by its first render; applying a
-          * CLEAR or DISCARD again here would throw that render away. */
-         for (unsigned i = 0; i < AGX_MAX_RENDER_TARGETS; i++)
-            seg->rt_plan[i].load = D12_RP_LOAD_PRESERVE;
-         seg->depth_plan.load = D12_RP_LOAD_PRESERVE;
-         seg->stencil_plan.load = D12_RP_LOAD_PRESERVE;
-      } else {
-         if (seg->depth_plan.load == D12_RP_LOAD_CLEAR)
-            seg->depth_cleared = true;
-         if (seg->stencil_plan.load == D12_RP_LOAD_CLEAR) {
-            seg->stencil_cleared = true;
-            seg->stencil_clear = list->render_pass_stencil_clear;
+      /* The pass's entry traffic is applied once per attachment, by the
+       * first render that binds it. A render binding an attachment already
+       * applied resumes a pass the driver had to split (a tile layout
+       * change, a full scissor array, a query, new sample positions);
+       * applying a CLEAR or DISCARD again would throw the earlier render
+       * away. Colour is decided per attachment below, where the render's
+       * write mask is known. */
+      if (dsv) {
+         if (list->render_pass_applied_depth) {
+            seg->depth_plan.load = D12_RP_LOAD_PRESERVE;
+         } else {
+            list->render_pass_applied_depth = true;
+            if (seg->depth_plan.load == D12_RP_LOAD_CLEAR)
+               seg->depth_cleared = true;
+         }
+         if (list->render_pass_applied_stencil) {
+            seg->stencil_plan.load = D12_RP_LOAD_PRESERVE;
+         } else {
+            list->render_pass_applied_stencil = true;
+            if (seg->stencil_plan.load == D12_RP_LOAD_CLEAR) {
+               seg->stencil_cleared = true;
+               seg->stencil_clear = list->render_pass_stencil_clear;
+            }
          }
          /* A declared clear reaches every tile, drawn into or not; a
           * render opened by a draw would otherwise clear only the tiles
           * its geometry touches. */
-         bool clears = seg->depth_cleared || seg->stencil_cleared;
-         for (unsigned i = 0; i < rtv_count; i++)
-            clears |= rtvs[i].resource &&
-                      seg->rt_plan[i].load == D12_RP_LOAD_CLEAR;
-         if (clears)
+         if (seg->depth_cleared || seg->stencil_cleared)
             seg->process_empty_tiles = true;
       }
       list->render_pass_segments++;
@@ -3552,6 +3561,14 @@ d12_list_begin_render(struct d12_cmd_list *list,
       struct d12_render_pass_plan plan;
       if (seg->render_pass) {
          plan = seg->rt_plan[i];
+         if (list->render_pass_applied_rts & BITFIELD_BIT(i)) {
+            plan.load = D12_RP_LOAD_PRESERVE;
+         } else {
+            list->render_pass_applied_rts |= BITFIELD_BIT(i);
+            if (plan.load == D12_RP_LOAD_CLEAR)
+               seg->process_empty_tiles = true;
+         }
+         seg->rt_plan[i] = plan;
       } else {
          plan = d12_render_pass_plan_legacy(legacy_clear_mask &
                                             BITFIELD_BIT(i));
@@ -9834,33 +9851,33 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
     * zeroed, padding included. */
    struct d12_agx3_triangle_bind_desc desc;
    memset(&desc, 0, sizeof(desc));
-   desc = (struct d12_agx3_triangle_bind_desc){
-      .compact_va = 0,
-      .fragment_program = list->device->dev.shader_base + fs_usc,
-      .linked_fragment_control = pso->fs.linked.fragment_control.opaque[0],
-      .raw_output_select = pso->uvs.osel.opaque[0],
-      .uvs_size = pso->uvs.size, .user_size = pso->uvs.user_size,
-      .coefficient_bindings = pso->fs.linked.cf.nr_bindings,
-      .reads_z = pso->fs.linked.cf.reads_z,
-      .writes_memory = pso->fs.g17p_writes_memory,
-      .writes_depth = pso->fs.info.depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED,
-      .needs_quad_derivatives = pso->fs.info.needs_quad_derivatives,
-      .has_preamble = pso->fs.info.has_preamble,
-      .cull_mode = pso->raster.cull_front | (pso->raster.cull_back << 1),
-      .front_face_ccw = pso->raster.front_face_ccw,
-      .depth_clip = pso->raster.depth_clip,
-      .has_depth = seg->ds != NULL,
-      .depth_test = pso->ds.depth_test,
-      .depth_write = pso->ds.depth_write,
-      .depth_compare = pso->ds.depth_func,
-      .raster = {
-         .scissor_enable = true,
-         .min_x = states[0].clip[0], .min_y = states[0].clip[1],
-         .max_x = states[0].clip[2], .max_y = states[0].clip[3],
-         .max_z_raw = fui(1.0f),
-      },
-      .viewport.viewport_count = 1,
-   };
+   /* Member assignments, not a compound literal: a literal's padding is
+    * indeterminate and would defeat the comparison. */
+   desc.fragment_program = list->device->dev.shader_base + fs_usc;
+   desc.linked_fragment_control = pso->fs.linked.fragment_control.opaque[0];
+   desc.raw_output_select = pso->uvs.osel.opaque[0];
+   desc.uvs_size = pso->uvs.size;
+   desc.user_size = pso->uvs.user_size;
+   desc.coefficient_bindings = pso->fs.linked.cf.nr_bindings;
+   desc.reads_z = pso->fs.linked.cf.reads_z;
+   desc.writes_memory = pso->fs.g17p_writes_memory;
+   desc.writes_depth = pso->fs.info.depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED;
+   desc.needs_quad_derivatives = pso->fs.info.needs_quad_derivatives;
+   desc.has_preamble = pso->fs.info.has_preamble;
+   desc.cull_mode = pso->raster.cull_front | (pso->raster.cull_back << 1);
+   desc.front_face_ccw = pso->raster.front_face_ccw;
+   desc.depth_clip = pso->raster.depth_clip;
+   desc.has_depth = seg->ds != NULL;
+   desc.depth_test = pso->ds.depth_test;
+   desc.depth_write = pso->ds.depth_write;
+   desc.depth_compare = pso->ds.depth_func;
+   desc.raster.scissor_enable = true;
+   desc.raster.min_x = states[0].clip[0];
+   desc.raster.min_y = states[0].clip[1];
+   desc.raster.max_x = states[0].clip[2];
+   desc.raster.max_y = states[0].clip[3];
+   desc.raster.max_z_raw = fui(1.0f);
+   desc.viewport.viewport_count = 1;
    uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
    agx_pack(region_clip, REGION_CLIP, cfg) {
       cfg.enable = true;
@@ -9870,11 +9887,12 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
       cfg.max_y = DIV_ROUND_UP(MAX2(states[0].clip[3], 1), 32);
    }
    memcpy(&desc.viewport.region_clip_raw[0], region_clip, sizeof(region_clip));
-   desc.viewport.viewports[0] = (struct agx_ppp_viewport_transform_raw){
-      .translate_x = fui(states[0].transform[0]), .scale_x = fui(states[0].transform[3]),
-      .translate_y = fui(states[0].transform[1]), .scale_y = fui(states[0].transform[4]),
-      .translate_z = fui(states[0].transform[2]), .scale_z = fui(states[0].transform[5]),
-   };
+   desc.viewport.viewports[0].translate_x = fui(states[0].transform[0]);
+   desc.viewport.viewports[0].scale_x = fui(states[0].transform[3]);
+   desc.viewport.viewports[0].translate_y = fui(states[0].transform[1]);
+   desc.viewport.viewports[0].scale_y = fui(states[0].transform[4]);
+   desc.viewport.viewports[0].translate_z = fui(states[0].transform[2]);
+   desc.viewport.viewports[0].scale_z = fui(states[0].transform[5]);
    uint8_t control[AGX_VIEWPORT_CONTROL_LENGTH];
    agx_pack(control, VIEWPORT_CONTROL, cfg) ;
    memcpy(&desc.viewport.viewport_control_raw, control, sizeof(control));
@@ -10147,11 +10165,32 @@ d12_list_prepare_pending_clears_for_draw(struct d12_cmd_list *list,
    unsigned width, height;
    d12_views_extent(list->bound_rtv, rtv_count, dsv, &width, &height);
 
+   /* Which bound targets the render will write: the pipeline's, or all of
+    * them when it writes no colour and the targets share one format
+    * (d12_list_begin_render seeds the tile layout from the bindings then;
+    * otherwise its write mask is empty and nothing is absorbed). */
+   uint8_t writes = pso->rt_write_mask;
+   if (!writes && rtv_count) {
+      enum pipe_format uniform = PIPE_FORMAT_NONE;
+      bool same = true;
+      for (unsigned i = 0; i < rtv_count; i++) {
+         if (!list->bound_rtv[i].resource)
+            continue;
+         const enum pipe_format pf =
+            d12_format_to_pipe(list->bound_rtv[i].format);
+         if (uniform == PIPE_FORMAT_NONE)
+            uniform = pf;
+         else if (pf != uniform)
+            same = false;
+      }
+      if (same && uniform != PIPE_FORMAT_NONE)
+         writes = (uint8_t)BITFIELD_MASK(rtv_count);
+   }
+
    uint8_t keep = 0;
    for (unsigned i = 0; i < rtv_count; i++) {
       const struct d12_descriptor *v = &list->bound_rtv[i];
-      if (!v->resource ||
-          (pso->rt_write_mask && !(pso->rt_write_mask & BITFIELD_BIT(i))))
+      if (!v->resource || !(writes & BITFIELD_BIT(i)))
          continue;
       int p = d12_list_find_pending_rt_clear(list, v);
       if (p < 0)
@@ -10181,6 +10220,10 @@ d12_list_prepare_pending_clears_for_draw(struct d12_cmd_list *list,
       struct d12_pending_ds_clear kept_ds = list->pending_ds_clear;
       if (keep_ds)
          list->pending_ds_clear.valid = false;
+      const struct d12_pending_ds_discard kept_dsd = list->pending_ds_discard;
+      const bool keep_dsd =
+         dsv && (d12_list_pending_ds_discard_covers(list, dsv, 0) ||
+                 d12_list_pending_ds_discard_covers(list, dsv, 1));
 
       if (!d12_list_flush_pending_clears(list))
          return false;
@@ -10189,6 +10232,8 @@ d12_list_prepare_pending_clears_for_draw(struct d12_cmd_list *list,
       list->pending_rt_clear_count = kept_count;
       if (keep_ds)
          list->pending_ds_clear = kept_ds;
+      if (keep_dsd)
+         list->pending_ds_discard = kept_dsd;
    }
 
    return list->pending_rt_clear_count != 0 || list->pending_ds_clear.valid;
@@ -14739,6 +14784,13 @@ d12_list_ClearRenderTargetView(ID3D12GraphicsCommandList6 *iface,
       return;
    }
 
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      mesa_loge("ClearRenderTargetView is not a bundle command");
+      list->state = D12_LIST_ERROR;
+      list->record_error = E_INVALIDARG;
+      return;
+   }
+
    struct d12_rtv *rtv = (struct d12_rtv *)rtv_handle.ptr;
    if (!rtv || !rtv->resource || rtv->kind != D12_DESC_RTV) {
       mesa_loge("ClearRenderTargetView: invalid RTV handle");
@@ -15168,7 +15220,9 @@ d12_list_discard_attachments(struct d12_cmd_list *list,
          }
          if (changed)
             d12_segment_rebuild_eot(list, seg);
-         if (seg->ds == resource) {
+         /* Depth and stencil stores stay for a render with draws, see
+          * d12_list_retire_attachment_store. */
+         if (seg->ds == resource && !seg->has_draws) {
             if (d12_discard_covers(resource, whole, first, count,
                                    seg->ds_level, seg->ds_address,
                                    seg->layers, 0))
@@ -15889,6 +15943,13 @@ d12_list_ClearDepthStencilView(ID3D12GraphicsCommandList6 *iface,
    if (list->state != D12_LIST_RECORDING)
       return;
 
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      mesa_loge("ClearDepthStencilView is not a bundle command");
+      list->state = D12_LIST_ERROR;
+      list->record_error = E_INVALIDARG;
+      return;
+   }
+
    struct d12_rtv *dsv = (struct d12_rtv *)dsv_handle.ptr;
    if (!dsv || !dsv->resource || dsv->kind != D12_DESC_DSV) {
       mesa_loge("ClearDepthStencilView: invalid DSV handle");
@@ -16277,6 +16338,9 @@ d12_cmd_list_begin_render_pass(
    list->render_pass_stencil_clear = stencil_clear;
    list->render_pass_active = true;
    list->render_pass_segments = 0;
+   list->render_pass_applied_rts = 0;
+   list->render_pass_applied_depth = false;
+   list->render_pass_applied_stencil = false;
    return true;
 }
 
@@ -16298,6 +16362,32 @@ d12_cmd_list_end_render_pass(struct d12_cmd_list *list)
     * work inside it. */
    if (!d12_list_flush_pending_clears(list))
       return false;
+
+   /* A declared CLEAR no draw's render applied -- an attachment no draw
+    * wrote, or a pass without draws -- is applied now by a render of the
+    * pass's attachments with no pipeline, which writes them all. The
+    * attachments already applied load and store PRESERVE in it. */
+   bool unapplied = false;
+   for (unsigned i = 0; i < list->bound_rtv_count; i++) {
+      unapplied |= list->bound_rtv[i].resource &&
+                   list->render_pass_rt_plan[i].load == D12_RP_LOAD_CLEAR &&
+                   !(list->render_pass_applied_rts & BITFIELD_BIT(i));
+   }
+   if (list->has_bound_dsv) {
+      unapplied |= list->render_pass_depth_plan.load == D12_RP_LOAD_CLEAR &&
+                   !list->render_pass_applied_depth;
+      unapplied |= list->render_pass_stencil_plan.load == D12_RP_LOAD_CLEAR &&
+                   !list->render_pass_applied_stencil;
+   }
+   if (unapplied) {
+      d12_list_close_cdm(list);
+      if (!d12_list_begin_render(
+             list, list->bound_rtv_count ? list->bound_rtv : NULL,
+             list->bound_rtv_count,
+             list->has_bound_dsv ? &list->bound_dsv : NULL, NULL, true))
+         return false;
+   }
+
    /* The pass ends with this render, so it is not a split: clear the flag
     * before closing, and the render keeps the end traffic it declared. */
    list->render_pass_active = false;

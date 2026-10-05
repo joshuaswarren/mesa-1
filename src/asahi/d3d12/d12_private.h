@@ -2257,11 +2257,16 @@ struct d12_cmd_list {
    uint32_t sample_positions;
 
    bool render_pass_active;
-   /* Hardware renders opened so far for the active declared pass. After the
-    * first, the pass has been split and a render resumes it: its loads are
-    * PRESERVE whatever the pass declared, and the render it continues
-    * stores (d12_list_close_cdm). */
+   /* Hardware renders opened so far for the active declared pass, and the
+    * attachments whose declared entry traffic one of them has applied. A
+    * render that binds an attachment already applied loads PRESERVE
+    * whatever the pass declared: the pass was split and this render
+    * resumes it; the render it continues stores (d12_list_close_cdm).
+    * Entry traffic a draw's render never applied (an attachment no draw
+    * wrote, or a pass without draws) is applied by EndRenderPass. */
    unsigned render_pass_segments;
+   uint8_t render_pass_applied_rts;
+   bool render_pass_applied_depth, render_pass_applied_stencil;
    struct d12_render_pass_plan render_pass_rt_plan[AGX_MAX_RENDER_TARGETS];
    float render_pass_rt_clear[AGX_MAX_RENDER_TARGETS][4];
    struct d12_render_pass_plan render_pass_depth_plan;
