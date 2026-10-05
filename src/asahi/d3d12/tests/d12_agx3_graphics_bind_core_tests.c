@@ -46,13 +46,13 @@ int main(void)
       assert(out.bytes[0xa8 + byte] == 0);
 
    const struct d12_agx3_triangle_bind_desc good = d;
-   for (unsigned fault = 0; fault < 16; ++fault) {
+   for (unsigned fault = 0; fault < 15; ++fault) {
       d = good;
       switch (fault) {
       case 0: d.compact_va = 0; break;
       case 1: d.compact_va = AGX_G17P_VDM_ALIAS_OFFSET_END - 4; break;
       case 2: d.fragment_program |= 1; break;
-      case 3: d.uvs_size = 6; break;
+      case 3: d.uvs_size = 128; break;
       case 4: d.user_size = 1; break;
       case 5: d.coefficient_bindings = 1; break;
       case 6: d.reads_z = true; break;
@@ -61,15 +61,51 @@ int main(void)
       case 9: d.has_preamble = true; break;
       case 10: d.viewport.viewport_count = 2; break;
       case 11: d.raster.depth_bias_enable = true; break;
-      case 12: d.needs_quad_derivatives = true; break;
-      case 13: d.linked_fragment_control = 1u << 29; break;
-      case 14: d.raw_output_select = 1u << 21; break;
-      case 15: d.cull_mode = 4; break;
+      case 12: d.linked_fragment_control = 4u << 29; break;
+      case 13: d.raw_output_select = 1u << 21; break;
+      case 14: d.cull_mode = 4; break;
       }
       memset(&out, 0xa5, sizeof(out));
       const struct d12_agx3_triangle_bind poison = out;
       assert(!d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
       assert(memcmp(&out, &poison, sizeof(out)) == 0);
+   }
+   d = good;
+   d.uvs_size = 9;
+   d.user_size = 4;
+   d.raw_output_select = 1u << 18;
+   d.coefficient_bindings = 2;
+   d.varying_table = 0x10000402000;
+   d.varying_counts_32 = 4;
+   assert(d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
+   assert(agx_ppp_hal200_graphics_core_unpack(AGX_CHIP_G17P,
+          AGX_PPP_HAL200_GRAPHICS_FS, out.bytes, AGX_PPP_HAL200_FS_LENGTH, &fs));
+   assert((((uint64_t)fs.words[0] & 0xffff) << 32 | fs.words[1]) == d.varying_table);
+   assert((fs.words[0] & 0xffff0000) == (2u << 16));
+   assert(agx_ppp_hal200_graphics_core_unpack(AGX_CHIP_G17P,
+          AGX_PPP_HAL200_GRAPHICS_OUTPUT, out.bytes + 0x1c,
+          AGX_PPP_HAL200_OUTPUT_LENGTH, &o));
+   assert(o.words[0] == ((1u << 18) | (1u << 16)) && o.words[3] == 9);
+   assert(out.bytes[0xac] == 4);
+   d.varying_table |= 4;
+   assert(!d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
+   for (unsigned pass = 0; pass < 4; ++pass) {
+      for (unsigned derivatives = 0; derivatives < 2; ++derivatives) {
+         d = good;
+         d.linked_fragment_control = pass << 29;
+         d.needs_quad_derivatives = derivatives;
+         assert(d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
+         struct agx_ppp_hal200_graphics_fields primary, secondary;
+         assert(agx_ppp_hal200_graphics_core_unpack(AGX_CHIP_G17P,
+            AGX_PPP_HAL200_GRAPHICS_PRIMARY_FACE, out.bytes + 0x30,
+            AGX_PPP_HAL200_PRIMARY_FACE_LENGTH, &primary));
+         assert(agx_ppp_hal200_graphics_core_unpack(AGX_CHIP_G17P,
+            AGX_PPP_HAL200_GRAPHICS_SECONDARY_FACE, out.bytes + 0x4c,
+            AGX_PPP_HAL200_SECONDARY_FACE_LENGTH, &secondary));
+         assert((secondary.words[0] >> 29) == pass);
+         assert(((secondary.words[0] >> 26) & 1) == (derivatives || pass >= 2));
+         assert(!(primary.words[0] & (1u << 26)));
+      }
    }
    /* Closed native-depth byte producer: compare/write state is checked on
     * both faces, with no-DSV and disabled-test API semantics preserved. */

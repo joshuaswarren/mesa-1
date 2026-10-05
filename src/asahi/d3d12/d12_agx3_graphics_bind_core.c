@@ -10,11 +10,14 @@ d12_agx3_triangle_bind_generate(
    struct d12_agx3_triangle_bind *output)
 {
    if (chip != AGX_CHIP_G17P || !d || !output ||
-       (d->uvs_size != 4 && d->uvs_size != 5) || d->user_size ||
-       d->raw_output_select != (d->uvs_size == 5 ? (1u << 18) : 0) ||
-       d->coefficient_bindings || d->reads_z || d->writes_memory ||
-       d->writes_depth || d->has_preamble || d->needs_quad_derivatives ||
-       (d->linked_fragment_control >> 29) != 0 ||
+       d->uvs_size < 4 || d->uvs_size > 127 ||
+       d->user_size > d->uvs_size - 4 ||
+       (d->raw_output_select & ~(1u << 18)) ||
+       d->coefficient_bindings > 127 ||
+       !!d->coefficient_bindings != !!d->varying_table ||
+       d->reads_z || d->writes_memory ||
+       d->writes_depth || d->has_preamble ||
+       (d->linked_fragment_control >> 29) > 3 ||
        d->viewport.viewport_count != 1 || d->raster.depth_bias_enable ||
        d->depth_compare > 7)
       return false;
@@ -22,11 +25,14 @@ d12_agx3_triangle_bind_generate(
    uint32_t output_size, output_select;
    if (!agx_ppp_hal200_output_size_pack(d->uvs_size, 0, &output_size) ||
        !agx_ppp_hal200_output_select_pack(chip, d->raw_output_select,
-                                         false, false, &output_select) ||
+                                         d->coefficient_bindings != 0,
+                                         false, &output_select) ||
        !agx_ppp_hal200_raster_state_build(chip, &d->raster, &staged.raster))
       return false;
    struct agx_ppp_hal200_fragment_fields fs = {
       .stage_program = d->fragment_program,
+      .resource_counts = (uint32_t)d->coefficient_bindings << 16,
+      .varying_table = d->varying_table,
    };
    struct agx_ppp_hal200_graphics_fields outputs = {
       .words = {output_select, 0, 0, output_size,
@@ -41,6 +47,12 @@ d12_agx3_triangle_bind_generate(
    struct agx_ppp_hal200_graphics_fields cull = {.words = {0x00000480}};
    const struct agx_ppp_hal200_fragment_control_fields control = {
       .linked_control = d->linked_fragment_control,
+      /* Match Honeykrisp's native control publication. Derivative quads
+       * cannot merge across primitives, and coverage passes need the same
+       * conservative merge policy. Keep these in SECONDARY_FACE through
+       * the shared encoder rather than copying legacy control bit 26. */
+      .shader_tri_merge_disable = d->needs_quad_derivatives,
+      .coverage_tri_merge_disable = (d->linked_fragment_control >> 29) >= 2,
    };
    if (!agx_ppp_hal200_fragment_controls_pack(
           chip, &control, staged.raster.fragment_control, secondary.words[0],
@@ -92,7 +104,8 @@ d12_agx3_triangle_bind_generate(
    if (!agx_ppp_viewport_payload_core_pack(chip, &d->viewport, &viewport) ||
        !agx_g17p_upload_bind_state(staged.bytes, sizeof(staged.bytes), d->compact_va,
                                    group, viewport.bytes, viewport.length,
-                                   0, 0, &staged.upload))
+                                   d->varying_counts_32, d->varying_counts_16,
+                                   &staged.upload))
       return false;
    *output = staged;
    return true;

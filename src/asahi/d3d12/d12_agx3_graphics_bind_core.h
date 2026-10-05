@@ -5,8 +5,9 @@
 #include "asahi/lib/agx_g17p_draw_state_upload.h"
 #include "asahi/lib/agx_ppp_hal200_raster_core.h"
 
-/* Baseline opaque solid triangle only: one viewport, no user coefficients,
- * depth/stencil, CProg or shader memory side effects. The caller still owns
+/* One viewport, no stencil, CProg or shader memory side effects. Smooth user
+ * coefficients and native pass/quad controls use the shared Asahi producers.
+ * The caller validates the coefficient layout and still owns
  * the compact VDM allocation, stage CODE/Ioto and render-context lifetime. */
 struct d12_agx3_triangle_bind_desc {
    uint64_t compact_va;
@@ -16,6 +17,9 @@ struct d12_agx3_triangle_bind_desc {
    uint8_t uvs_size;
    uint8_t user_size;
    uint8_t coefficient_bindings;
+   uint64_t varying_table;
+   uint32_t varying_counts_32;
+   uint32_t varying_counts_16;
    bool reads_z;
    bool writes_memory;
    bool needs_quad_derivatives;

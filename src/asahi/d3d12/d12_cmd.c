@@ -10038,13 +10038,49 @@ d12_list_viewport_hw_state(struct d12_cmd_list *list,
 }
 
 static bool
+d12_g17p_smooth_varyings_supported(const struct d12_pipeline_state *pso)
+{
+   /* Bounded adaptation of Honeykrisp's native coefficient validation.
+    * System 1/W precedes smooth user coefficients; each user binding must
+    * address words actually written by this hardware vertex program. */
+   const struct agx_varyings_fs *cf = &pso->fs.linked.cf;
+   if (!cf->nr_bindings)
+      return cf->nr_cf == 0;
+   if (cf->nr_bindings > 127 || cf->nr_cf > 127 || cf->reads_z)
+      return false;
+   unsigned next_cf = 0;
+   bool rhw = false;
+   for (unsigned i = 0; i < cf->nr_bindings; ++i) {
+      const struct agx_cf_binding *b = &cf->bindings[i];
+      if (!b->count || b->count > 4 || b->cf_base != next_cf || !b->smooth)
+         return false;
+      if (b->slot == VARYING_SLOT_POS) {
+         if (i != 0 || b->offset != 3 || b->count != 1 || b->perspective)
+            return false;
+         rhw = true;
+      } else {
+         if (b->slot < VARYING_SLOT_VAR0 || b->slot > VARYING_SLOT_VAR31 ||
+             (b->perspective && !rhw) ||
+             b->offset + b->count > pso->uvs.components[b->slot])
+            return false;
+         unsigned slot = pso->varyings.slots[b->slot];
+         if (slot < 4 || slot + b->offset + b->count > pso->uvs.size)
+            return false;
+      }
+      next_cf += b->count;
+   }
+   return next_cf == cf->nr_cf;
+}
+
+static bool
 d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
                         struct d12_pipeline_state *pso, uint32_t vs_usc,
-                        uint32_t fs_usc, unsigned vertex_count,
+                        uint32_t fs_usc, uint32_t varying_usc, unsigned vertex_count,
                         unsigned instance_count, unsigned first_vertex)
 {
    if (!d12_g17p_baseline_graphics_enabled(&list->device->dev) ||
        !seg->agx3_active_context_selector_valid ||
+       !d12_g17p_smooth_varyings_supported(pso) ||
        !pso->vs.g17p_root_only || !pso->fs.g17p_root_only ||
        pso->vs.g17p_writes_memory || pso->fs.g17p_writes_memory ||
        pso->has_gs || pso->has_tess || pso->has_mesh ||
@@ -10079,6 +10115,10 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    desc.uvs_size = pso->uvs.size;
    desc.user_size = pso->uvs.user_size;
    desc.coefficient_bindings = pso->fs.linked.cf.nr_bindings;
+   desc.varying_table =
+      varying_usc ? list->device->dev.shader_base + varying_usc : 0;
+   desc.varying_counts_32 = pso->varyings.counts_32.opaque[0];
+   desc.varying_counts_16 = pso->varyings.counts_16.opaque[0];
    desc.reads_z = pso->fs.linked.cf.reads_z;
    desc.writes_memory = pso->fs.g17p_writes_memory;
    desc.writes_depth = pso->fs.info.depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED;
@@ -10133,6 +10173,16 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
                                               64, &compact);
       if (!payload)
          goto fail;
+      if (desc.varying_table) {
+         const size_t size = AGX_CF_BINDING_HEADER_LENGTH +
+                             desc.coefficient_bindings * AGX_CF_BINDING_LENGTH;
+         const uint64_t base = list->usc_bo->va->addr;
+         if (desc.varying_table < base || size > list->usc_bo->size ||
+             desc.varying_table - base > list->usc_bo->size - size ||
+             agx_bo_sync_for_device(list->usc_bo, desc.varying_table - base,
+                                    size))
+            goto fail;
+      }
       bc->desc = desc;
       desc.compact_va = compact;
       if (!d12_agx3_triangle_bind_generate(list->device->dev.chip, &desc,
@@ -11035,7 +11085,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          return;
       }
       d12_emit_g17p_triangle(list, seg, pso, vs_usc, fs_usc,
-                             vertex_count, instance_count, first_vertex);
+                             varyings, vertex_count, instance_count, first_vertex);
       return;
    }
 
