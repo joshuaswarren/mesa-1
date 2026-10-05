@@ -630,6 +630,14 @@ d12_device_CheckFeatureSupport(ID3D12Device2 *iface, D3D12_FEATURE feature,
        * blobs (the version-2 range offset is handled there), so 1.1 is
        * honest.
        */
+      /* 1.2 is a recognized request even though the negotiated capability
+       * remains 1.1. Do not reject an application asking for a newer known
+       * version; return the driver's lower supported version. */
+      if (rs->HighestVersion == D3D_ROOT_SIGNATURE_VERSION_1_2) {
+         rs->HighestVersion = D3D_ROOT_SIGNATURE_VERSION_1_1;
+         return S_OK;
+      }
+
       if (rs->HighestVersion != D3D_ROOT_SIGNATURE_VERSION_1_0 &&
           rs->HighestVersion != D3D_ROOT_SIGNATURE_VERSION_1_1) {
          /* An unrecognised version is refused and the field is LEFT

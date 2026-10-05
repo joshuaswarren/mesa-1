@@ -35,6 +35,18 @@ run(D3D12_COMMAND_LIST_TYPE type)
    uint64_t *mapped = NULL;
    CALL(D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0, &IID_ID3D12Device,
                           (void **)&device));
+   const D3D_ROOT_SIGNATURE_VERSION versions[] = {
+      D3D_ROOT_SIGNATURE_VERSION_1_0, D3D_ROOT_SIGNATURE_VERSION_1_1,
+      D3D_ROOT_SIGNATURE_VERSION_1_2,
+   };
+   for (unsigned i = 0; i < 3; i++) {
+      D3D12_FEATURE_DATA_ROOT_SIGNATURE support = {.HighestVersion = versions[i]};
+      CALL(ID3D12Device_CheckFeatureSupport(device, D3D12_FEATURE_ROOT_SIGNATURE,
+                                             &support, sizeof(support)));
+      REQUIRE(support.HighestVersion ==
+              (i == 0 ? D3D_ROOT_SIGNATURE_VERSION_1_0
+                      : D3D_ROOT_SIGNATURE_VERSION_1_1));
+   }
    const D3D12_COMMAND_QUEUE_DESC queue_desc = {.Type = type};
    CALL(ID3D12Device_CreateCommandQueue(device, &queue_desc,
           &IID_ID3D12CommandQueue, (void **)&queue));
