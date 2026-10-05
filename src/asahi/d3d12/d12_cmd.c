@@ -12400,9 +12400,9 @@ d12_list_validate_query(struct d12_cmd_list *list,
                         struct d12_query_heap *heap,
                         D3D12_QUERY_TYPE type, UINT index)
 {
-   if (!heap || index >= heap->desc.Count ||
+   if (!heap || heap->device != list->device || index >= heap->desc.Count ||
        !d12_query_type_matches(heap, type) ||
-       !d12_query_core_timestamp_command_compatible(
+       !d12_query_core_command_compatible(
           (uint32_t)heap->desc.Type, (uint32_t)list->type)) {
       mesa_loge("query type/index does not match its heap");
       list->state = D12_LIST_ERROR;
@@ -12648,16 +12648,15 @@ d12_list_ResolveQueryData(ID3D12GraphicsCommandList6 *iface,
    if (list->state != D12_LIST_RECORDING || !query_count)
       return;
 
-   if (!heap || first_query >= heap->desc.Count ||
-       query_count > heap->desc.Count - first_query ||
+   if (!heap || heap->device != list->device ||
        !d12_query_type_matches(heap, type) ||
-       !d12_query_core_timestamp_command_compatible(
+       !d12_query_core_command_compatible(
           (uint32_t)heap->desc.Type, (uint32_t)list->type) ||
-       !dst ||
+       !dst || dst->device != list->device ||
        dst->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
-       destination_offset > dst->desc.Width ||
-       (uint64_t)query_count * heap->stride >
-          dst->desc.Width - destination_offset) {
+       !d12_query_core_resolve_range_valid(
+          heap->desc.Count, first_query, query_count, heap->stride,
+          dst->desc.Width, destination_offset)) {
       mesa_loge("ResolveQueryData: invalid heap, range, or destination");
       list->state = D12_LIST_ERROR;
       return;
