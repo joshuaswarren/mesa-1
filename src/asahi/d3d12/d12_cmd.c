@@ -95,14 +95,27 @@ d12_g17p_baseline_graphics_enabled(const struct agx_device *dev)
 }
 
 bool
-d12_g17p_depth_metadata_enabled(const struct agx_device *dev)
+d12_g17p_depth_enabled(const struct agx_device *dev)
 {
+   if (!dev) return false;
 #ifndef _WIN32
    const char *enable = getenv("AURORA_D3D12_SHIM_DEPTH_METADATA");
-   return enable && !strcmp(enable, "1") && dev->chip == AGX_CHIP_G17P &&
-          dev->g17p_render_context_bo &&
-          asahi_noop_d3d12_graphics_qualification_allowed &&
-          asahi_noop_d3d12_graphics_qualification_allowed(dev->fd);
+   if (enable && !strcmp(enable, "1") && dev->chip == AGX_CHIP_G17P &&
+       dev->g17p_render_context_bo &&
+       asahi_noop_d3d12_graphics_qualification_allowed &&
+       asahi_noop_d3d12_graphics_qualification_allowed(dev->fd))
+      return true;
+   /* Separate bounded physical admission. The controller must verify the
+    * exact matched kernel image/boot before setting both flags. A flag alone
+    * cannot admit an arbitrary fd: require an actual Asahi render node and
+    * the native context plus kernel capability on this initialized device. */
+   const char *physical = getenv("AURORA_D3D12_PHYSICAL_D32");
+   const char *baseline = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
+   return physical && !strcmp(physical, "1") &&
+          baseline && !strcmp(baseline, "1") &&
+          dev->chip == AGX_CHIP_G17P && dev->g17p_render_context_bo &&
+          (dev->params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) &&
+          d12_platform_is_real_asahi_render_fd(dev->fd);
 #else
    (void)dev;
    return false;
@@ -1962,7 +1975,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    struct agx_bg_eot_shader *shader = NULL;
 
    if (dev->chip != AGX_CHIP_G17P || !out_resources || !rt || !rt->bo ||
-       (seg->ds && (!d12_g17p_depth_metadata_enabled(dev) ||
+       (seg->ds && (!d12_g17p_depth_enabled(dev) ||
                     !d12_g17p_depth_segment_supported(seg))) ||
        rt->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
        rt->layout.sample_count_sa != 1 ||
@@ -2644,7 +2657,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
    /* Native depth has no qualified producer yet, including clear-only
     * passes which never reach the triangle draw admission guard. */
    if (dsv && list->device->dev.chip == AGX_CHIP_G17P &&
-       !d12_g17p_depth_metadata_enabled(&list->device->dev)) {
+       !d12_g17p_depth_enabled(&list->device->dev)) {
       mesa_loge("native depth render producer remains closed");
       list->state = D12_LIST_ERROR;
       return NULL;
@@ -8698,7 +8711,7 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
        pso->has_gs || pso->has_tess || pso->has_mesh || pso->nr_vb_attribs ||
        pso->raster.polygon_mode != AGX_POLYGON_MODE_FILL ||
        pso->raster.depth_bias || pso->raster.slope_scaled_depth_bias ||
-       (seg->ds && (!d12_g17p_depth_metadata_enabled(&list->device->dev) ||
+       (seg->ds && (!d12_g17p_depth_enabled(&list->device->dev) ||
                     !d12_g17p_depth_segment_supported(seg) ||
                     pso->ds.stencil_test ||
                     pso->ds.dsv_format != DXGI_FORMAT_D32_FLOAT)) ||
@@ -14147,7 +14160,7 @@ d12_list_attach_ds(struct d12_cmd_list *list,
                    const struct d12_descriptor *dsv)
 {
    if (list->device->dev.chip == AGX_CHIP_G17P &&
-       !d12_g17p_depth_metadata_enabled(&list->device->dev)) {
+       !d12_g17p_depth_enabled(&list->device->dev)) {
       mesa_loge("native depth attach/clear producer remains closed");
       list->state = D12_LIST_ERROR;
       return false;

@@ -101,6 +101,17 @@ shim_params(void)
    return &params_g13g;
 }
 
+/* Identity is unconditional: flags and chip selection never turn a registered
+ * shim fd into a physical node, even when fstat/version emulate that node. */
+bool asahi_noop_is_registered_fd(int fd)
+   __attribute__((visibility("default")));
+
+bool
+asahi_noop_is_registered_fd(int fd)
+{
+   return drm_shim_fd_lookup(fd) != NULL;
+}
+
 /* This symbol is available only from the actual loaded noop driver. D3D12
  * has a weak reference so normal clients retain the closed hardware gate. */
 bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
