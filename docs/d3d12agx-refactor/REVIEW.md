@@ -349,3 +349,82 @@ Neo 9/17 at 87c78, 1d2ee and 7bb38 (a63e8 pending). The Neo's remaining Reset co
    sub-programs.
 5. D1/D3 chip-ops split, D2 wrapper deletion, D6 `#ifdef _WIN32` of the KMT code, A6
    retained descriptor heaps across Close/Execute, D7 per-chip capability table.
+
+## 9. Third pass (2026-10-06): queue lane, GPU-side traffic, G17P
+
+Series on top of `a63e8981e40`, Neo packages built in the Fedora 45 container
+on the M1 Pro and run under the Phase 2 kit environment.
+
+### Commits
+
+| sha | lane | change |
+|---|---|---|
+| 715b2a8beab .. d83fc735eaf | B11 (agent, reviewed) | plain locks and untimed condition waits; submit and signal in the calling thread when the queue is idle; direct timeline waits for pending GPU signals; drain runnable ops before stopping the worker; `--idle` microbench mode; live queue/fence contract test |
+| 407e18662b1 | B10 | compiled stages persist in the Mesa shader disk cache (keyed on the library's build id and the AGX/D3D12 environment) |
+| 9b1afcfb219 | B11 review | shared-fence waits use WAIT_FOR_SUBMIT, notify-handle ABA, wait-any polls shared fences |
+| cc55230bb1e | C (GPU) | AGX2 compute cache flush deferred from every dispatch to the next barrier, helper launch or segment end |
+| 91113c90ba9 | G17P | identical scissor and depth-bias records reused: no more render cut every 64 draws |
+| 1261cc02d4b | G17P | native Texture.Load trace (three BLAKE3 hashes and two log lines per dispatch) behind `D3D12AGX_DUMP_TEX` |
+| 684f32ab025 | G17P | API dispatches end in the weak barrier word; the strong flush is applied in place at the next barrier (Honeykrisp's model); `D3D12AGX_FLUSH_EACH_DISPATCH` covers G17P too |
+| 1b20e71cef2 | G17P | the Ioto state-loader program is reused while the PSO and uniform ranges repeat |
+| ec8fed30c9f | C (GPU) | full clears deferred to the render that writes the view; dead attachment stores retired by a later clear or DiscardResource; DiscardResource turns off the next load |
+| 7f8f0eed552 | bench | `--only passes`: GPU wall of 16 frames of clear/bind/draw at 1080p in three shapes |
+| 89c05dd4c2e | A (correctness) | a split declared render pass resumes with PRESERVE and the split render stores; a declared CLEAR processes every tile |
+| 2d65607c6de | test | `render_pass_split` live test (fails against cc55230bb1e: the clear reaches a quarter of the target) |
+
+### How the G17P costs were found
+
+The Neo's 20k-draw Execute call cost 2.2 ms where the G13's cost microseconds.
+The native triangle producer appended a scissor and a depth-bias record per
+draw with no reuse, so the 64-entry depth-bias array cut the pass every 64
+draws: 313 hardware renders, five sliced submit ioctls, and at record time a
+full 32 MiB stream sync plus four background/end-of-tile program builds per
+render. The 10 us Texture.Load dispatch was the qualification trace left on.
+The 44 ms of GPU time for 20k dispatches is the strong barrier word after
+every launch; Honeykrisp already emits the weak form and upgrades it at a
+pipeline barrier, which the driver now copies.
+
+### Render-pass traffic
+
+Before this pass a ClearRenderTargetView opened a render of its own and a
+draw merged into it only with exactly that one target bound; every other
+shape stored and reloaded. Clears are now pending on the list until the render
+that writes the view absorbs them (per attachment, so MRT clears merge too),
+or until a command that could observe the view forces a clear-only render.
+Because clears are recorded rather than emitted, a later clear or discard of
+an attachment retires the previous render's write-back of it.
+
+`d3d12agx_microbench --only passes`, 16 frames at 1920x1080 RGBA8 + D32, GPU
+wall, best of three, before = cc55230bb1e library with the same binary:
+
+| shape | M1 Pro before | M1 Pro after | M2 before | M2 after |
+|---|---|---|---|---|
+| ClearRTV, bind, 4 draws | 2.69 ms | 2.30 ms | 3.3-3.9 ms | 2.6-2.7 ms |
+| ClearDSV, ClearRTV, bind, 4 draws | 6.82 ms | 2.37 ms | 7.4 ms | 2.4-2.8 ms |
+| the same + DiscardResource(depth) | 6.81 ms | 2.30 ms | 6.5-7.2 ms | 2.3-2.8 ms |
+
+The remaining 140 us per frame is the fixed cost of one 1080p render (tile
+walk with the clear background program); solid-colour stores compress well on
+AGX, which is why the colour-only shape gained less than the depth shapes.
+
+### Measured (debugoptimized; medians of 3 unless stated)
+
+| metric | M1 Pro a63e8 | M1 Pro 2d656 | M2 2d656 | Neo cc552 (before G17P fixes) | Neo 2d656 |
+|---|---|---|---|---|---|
+| record plain draw | 93 ns | 96 ns | 83 ns | 218 ns | see below |
+| record draw + root constant | 248 ns | 239 ns | 221 ns | 839 ns | |
+| record dispatch | 67 ns | 65 ns | 62 ns | 710 ns | |
+| record dispatch_texture | 137 ns | 132 ns | 110 ns | 9 864 ns | |
+| ExecuteCommandLists 20k draws, call | 9 us | 33 us (includes the inline submit ioctl since B11) | 23 us | 2 188 us | |
+| 20k draws GPU wall | 7.9 ms | 7.4 ms | 6.3 ms | 31.4 ms | |
+| ExecuteCommandLists 20k dispatches, call | 13 us | 54 us (inline ioctl) | 16 us | 33 us | |
+| 20k dispatches GPU wall | 105 ms | 2.0 ms | 2.0 ms | 44 ms | |
+| Reset after submit | 11 us | 4.7 us | 2.5 us | 8.2 us | |
+| one-draw round trip, median | 228 us | 210 us | 149 us | 256 us | |
+| graphics PSO, first (cold disk cache after a rebuild / warm) | 540 us | 370 us warm | 540 us | 2 290 / 670 us | |
+
+Frozen 17 suites: M1 Pro 11/17 and M2 11/17 after every commit of this pass;
+Neo 9/17 at 9b1afcfb219 and cc55230bb1e (h-6529). `device_interfaces`,
+`render_pass_split`, `pso_threads`, `pso_library_race`, `bundle_state`,
+`execute_indirect_count` and the queue/fence contract test pass on the M1 Pro
+at the head. Raw logs and JSON records: `reports/d3d12-stats/t-1082-*`.
