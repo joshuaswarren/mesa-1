@@ -15,6 +15,10 @@
  */
 
 #include "d12_private.h"
+#ifdef D12_PLATFORM_WINE
+bool d12_wine_queue_query_interface(ID3D12CommandQueue *queue, REFIID riid,
+                                    void **out);
+#endif
 #include "d12_agx3_cmdstream_core.h"
 #include "d12_native_render_resources_core.h"
 #include "d12_read_set_core.h"
@@ -280,6 +284,12 @@ d12_queue_QueryInterface(ID3D12CommandQueue *iface, REFIID riid, void **out)
 
    if (d12_private_data_query_notifier(&queue->private_data, riid, out))
       return S_OK;
+
+#ifdef D12_PLATFORM_WINE
+   /* DXVK's dxgi.dll presents through IDXGIVkSwapChainFactory on the queue. */
+   if (d12_wine_queue_query_interface(iface, riid, out))
+      return *out ? S_OK : E_OUTOFMEMORY;
+#endif
 
    d12_log_unknown_riid("ID3D12CommandQueue::QueryInterface", riid);
    *out = NULL;
@@ -611,7 +621,7 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                    (unsigned)!seg->depth_cleared,
                    (unsigned)(seg->depth_cleared ||
                               !(seg->dsv_flags & D3D12_DSV_FLAG_READ_ONLY_DEPTH)),
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
                    d12_platform_is_real_asahi_render_fd(device->dev.fd)
                       ? "physical-asahi-render-D32-optin" : "registered-shim-only"
 #else

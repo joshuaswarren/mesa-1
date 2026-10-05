@@ -71,6 +71,14 @@
 
 struct d12_queue;
 
+/* Which kernel backend this build talks to. The Wine build is a Windows PE
+ * (so it keeps the _WIN32 COM ABI below) but drives the Linux DRM backend;
+ * everything that is really "WDDM/D3DKMT only" keys off D12_PLATFORM_D3DKMT
+ * rather than _WIN32. */
+#if defined(_WIN32) && !defined(D12_PLATFORM_WINE)
+#define D12_PLATFORM_D3DKMT 1
+#endif
+
 /* widl/Windows spells aggregate COM returns as an explicit out pointer,
  * while the same DirectX-Headers interfaces return them by value elsewhere. */
 #ifdef _WIN32
@@ -2855,7 +2863,7 @@ HRESULT d12_device_backend_init(struct d12_device *device,
                                 D3D_FEATURE_LEVEL feature_level);
 void d12_device_backend_cleanup(struct d12_device *device);
 
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
 bool d12_platform_is_real_asahi_render_fd(int fd);
 #endif
 bool d12_platform_open_device(struct d12_device *device, IUnknown *adapter);

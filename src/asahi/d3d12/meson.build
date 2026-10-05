@@ -70,7 +70,8 @@ libd3d12agx_files = files(
   'dxil/d12_dxil_nir.c',
 )
 
-d12_is_windows = host_machine.system() == 'windows'
+d12_is_wine = host_machine.system() == 'windows' and asahi_d3d12_platform == 'wine'
+d12_is_windows = host_machine.system() == 'windows' and not d12_is_wine
 d12_core_strict_args = []
 if d12_is_windows
   d12_core_strict_args = cc.get_supported_arguments(
@@ -115,6 +116,20 @@ if d12_is_windows
   # this include privately, so propagate it to this direct consumer too.
   d12_platform_includes = [libasahi_lib_inc_win]
   d12_platform_deps = []
+elif d12_is_wine
+  # Wine/Proton: ARM64EC PE d3d12.dll. The Linux DRM driver body, kernel
+  # calls proxied to d3d12.so (wine/unix) through a tiny libdrm shim; the DRM
+  # syncobj sync provider is compiled in here because libmesa_util only
+  # carries it when a real libdrm exists. See wine/DESIGN.md.
+  libd3d12agx_files += files(
+    'wine/d12_platform_wine.c',
+    'wine/d12_wine_drm.c',
+    'wine/d12_wine_swapchain.c',
+    '../../util/u_sync_provider.c',
+  )
+  d12_platform_includes = [inc_asahi_d3d12_wine, include_directories('wine')]
+  d12_platform_deps = []
+  d12_core_strict_args += ['-DHAVE_LIBDRM', '-DAGX_WINE_UNIXLIB', '-DD12_PLATFORM_WINE']
 else
   libd3d12agx_files += files('d12_platform_linux.c')
   d12_platform_includes = [inc_virtio_gpu, inc_virtio_vdrm]
@@ -161,7 +176,7 @@ libd3d12agx_core = static_library(
 # implementation.  link_whole is intentional: the Windows .def files are the
 # roots that retain otherwise-unreferenced entrypoints from the archive.
 libd3d12agx = shared_library(
-  'd3d12agx',
+  d12_is_wine ? 'd3d12' : 'd3d12agx',
   link_whole : [libd3d12agx_core],
   dependencies : [
     dep_dxheaders_d12,
@@ -176,8 +191,8 @@ libd3d12agx = shared_library(
     libagx3b_disasm,
     libpoly_nir,
   ],
-  vs_module_defs : files('d3d12agx.def')[0],
-  name_prefix : d12_is_windows ? '' : [],
+  vs_module_defs : files(d12_is_wine ? 'wine/d3d12.def' : 'd3d12agx.def')[0],
+  name_prefix : (d12_is_windows or d12_is_wine) ? '' : [],
   install : false,
 )
 

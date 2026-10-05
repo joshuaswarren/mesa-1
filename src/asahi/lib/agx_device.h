@@ -39,7 +39,7 @@
  * virtio-only TUs that need the full definitions (agx_device_virtio.c,
  * agx_device.c under HAVE_LIBDRM).
  */
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) && !defined(AGX_NO_VIRTIO)
 #include "vdrm.h"
 #include "asahi_proto.h"
 #else

@@ -94,8 +94,15 @@ libasahi_lib_files = files(
   'pool.c',
 )
 
-asahi_lib_is_windows = host_machine.system() == 'windows'
-asahi_lib_has_virtio = not asahi_lib_is_windows and with_vdrm
+asahi_lib_is_wine = host_machine.system() == 'windows' and asahi_d3d12_platform == 'wine'
+asahi_lib_is_windows = host_machine.system() == 'windows' and not asahi_lib_is_wine
+asahi_lib_has_virtio = host_machine.system() != 'windows' and with_vdrm
+# Wine PE build: the Linux DRM device body over the unixlib shims in
+# src/asahi/d3d12/wine/include (xf86drm.h, sys/ioccom.h, os_mmap).
+asahi_lib_wine_args = []
+if asahi_lib_is_wine
+  asahi_lib_wine_args = ['-DHAVE_LIBDRM', '-DAGX_NO_VIRTIO', '-DAGX_WINE_UNIXLIB']
+endif
 asahi_d3d12_strict_args = []
 if asahi_lib_is_windows and with_asahi_d3d12
   asahi_d3d12_strict_args = cc.get_supported_arguments(
@@ -201,6 +208,13 @@ if asahi_lib_is_windows
   libasahi_lib_deps = [
     dep_valgrind, idep_nir, idep_mesautil, idep_libagx, idep_libpoly,
   ]
+elif asahi_lib_is_wine
+  libasahi_lib_files += files('decode_stub.c')
+  libasahi_lib_includes = [inc_asahi, inc_asahi_d3d12_wine]
+  libasahi_lib_links = [libpoly_nir]
+  libasahi_lib_deps = [
+    dep_valgrind, idep_nir, idep_mesautil, idep_libagx, idep_libpoly,
+  ]
 elif asahi_lib_has_virtio
   libasahi_lib_includes = [inc_asahi, inc_virtio_gpu, inc_virtio_vdrm]
   libasahi_lib_links = [libasahi_decode, libvdrm, libpoly_nir]
@@ -235,6 +249,7 @@ libasahi_lib = static_library(
     no_override_init_args,
     '-Wno-c2x-extensions',
     asahi_d3d12_strict_args,
+    asahi_lib_wine_args,
   ],
   gnu_symbol_visibility : 'hidden',
   link_with: libasahi_lib_links,

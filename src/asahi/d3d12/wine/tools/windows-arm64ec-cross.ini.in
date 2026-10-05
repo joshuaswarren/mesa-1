@@ -1,0 +1,22 @@
+[binaries]
+c = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-clang'
+cpp = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-clang++'
+ar = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-ar'
+strip = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-strip'
+windres = '@TOOLCHAIN@/bin/arm64ec-w64-mingw32-windres'
+pkg-config = 'false'
+
+[host_machine]
+system = 'windows'
+cpu_family = 'aarch64'
+cpu = 'arm64ec'
+endian = 'little'
+
+[built-in options]
+c_args = ['-mno-ms-bitfields']
+cpp_args = ['-mno-ms-bitfields']
+c_link_args = []
+cpp_link_args = []
+
+[properties]
+needs_exe_wrapper = true

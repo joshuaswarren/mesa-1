@@ -532,7 +532,7 @@ d12_resource_buffer_cache_range(const struct d12_resource *res,
 static bool
 d12_resource_needs_buffer_cache_ops(const struct d12_resource *res)
 {
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
    return res->device->dev.chip == AGX_CHIP_G17P &&
           res->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
 #else

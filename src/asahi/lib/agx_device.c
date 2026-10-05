@@ -22,7 +22,9 @@
 #include "agx_abi.h"
 #include "agx_bo.h"
 #include "agx_compile.h"
+#ifndef AGX_NO_VIRTIO
 #include "agx_device_virtio.h"
+#endif
 #include "agx_scratch.h"
 #include "decode.h"
 #include "glsl_types.h"
@@ -34,13 +36,19 @@
 #ifdef HAVE_LIBDRM
 #include <xf86drm.h>
 #include "drm-uapi/dma-buf.h"
+#ifndef AGX_NO_VIRTIO
 #include "vdrm.h"
+#endif
 #endif
 #include "util/blob.h"
 #include "util/log.h"
 #include "util/mesa-blake3.h"
 #include "util/os_file.h"
-#ifdef HAVE_LIBDRM
+#ifdef AGX_WINE_UNIXLIB
+/* Wine PE build: mmap/munmap travel through the unixlib (see
+ * src/asahi/d3d12/wine), as does every ioctl behind the xf86drm.h shim. */
+#include "agx_wine_unixlib.h"
+#elif defined(HAVE_LIBDRM)
 #include "util/os_mman.h"
 #endif
 #include "util/os_time.h"
@@ -66,11 +74,11 @@
 int
 asahi_simple_ioctl(struct agx_device *dev, unsigned cmd, void *req)
 {
-   if (dev->is_virtio) {
+#ifndef AGX_NO_VIRTIO
+   if (dev->is_virtio)
       return agx_virtio_simple_ioctl(dev, cmd, req);
-   } else {
-      return drmIoctl(dev->fd, cmd, req);
-   }
+#endif
+   return drmIoctl(dev->fd, cmd, req);
 }
 
 /*
@@ -587,9 +595,12 @@ agx_bo_import(struct agx_device *dev, int fd)
          goto error;
       }
 
+#ifndef AGX_NO_VIRTIO
       if (dev->is_virtio) {
          bo->uapi_handle = vdrm_handle_to_res_id(dev->vdrm, bo->handle);
-      } else {
+      } else
+#endif
+      {
          bo->uapi_handle = bo->handle;
       }
 
@@ -916,7 +927,7 @@ agx_cleanup_partial_device(struct agx_device *dev, unsigned initialized)
       simple_mtx_destroy(&dev->bo_map_lock);
       agxdecode_destroy_context(dev->agxdecode);
    }
-#ifdef HAVE_LIBDRM
+#if defined(HAVE_LIBDRM) && !defined(AGX_NO_VIRTIO)
    if (initialized & AGX_INIT_VIRTIO) {
       vdrm_device_close(dev->vdrm);
       dev->vdrm = NULL;
@@ -968,6 +979,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
          dev->render_rsrc_spec_hi = version->version_major > 0 ||
                                    version->version_minor >= 2;
          dev->ops = agx_device_drm_ops;
+#ifndef AGX_NO_VIRTIO
       } else if (!strcmp(version->name, "virtio_gpu")) {
          dev->is_virtio = true;
          if (!agx_virtio_open_device(dev)) {
@@ -978,6 +990,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
             goto fail;
          }
          initialized |= AGX_INIT_VIRTIO;
+#endif
       } else {
          drmFreeVersion(version);
          goto fail;

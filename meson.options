@@ -888,6 +888,14 @@ option(
 )
 
 option(
+  'asahi-d3d12-platform',
+  type : 'combo',
+  value : 'auto',
+  choices : ['auto', 'linux', 'd3dkmt', 'wine'],
+  description : 'Kernel/OS backend of the native AGX D3D12 driver: auto picks linux (DRM) or d3dkmt (WDDM) from the host; wine builds the DRM body as a Windows PE talking to the asahi render node through a Wine unixlib'
+)
+
+option(
   'asahi-d3d12-wddm-version',
   type : 'combo',
   value : '2.1',

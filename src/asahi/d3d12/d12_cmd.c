@@ -148,15 +148,20 @@ static void d12_list_replay_bundle(struct d12_cmd_list *list,
 /* Default rendering stays closed. The registered noop-fd callback enables
  * metadata tests; a separate exact opt-in plus new-KMD capability enables only
  * the bounded physical baseline. No unsupported producer guard is bypassed. */
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
+#ifdef D12_PLATFORM_WINE
+/* No weak undefined symbols in a PE: the noop-shim hooks are Linux-only. */
+#define asahi_noop_d3d12_graphics_qualification_allowed ((bool (*)(int))NULL)
+#else
 extern bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
    __attribute__((weak, visibility("default")));
+#endif
 #endif
 
 static bool
 d12_g17p_baseline_graphics_enabled(const struct agx_device *dev)
 {
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
    if (asahi_noop_d3d12_graphics_qualification_allowed &&
        asahi_noop_d3d12_graphics_qualification_allowed(dev->fd))
       return true;
@@ -189,7 +194,7 @@ bool
 d12_g17p_depth_enabled(const struct agx_device *dev)
 {
    if (!dev) return false;
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
    if (d12_debug()->shim_depth_metadata && dev->chip == AGX_CHIP_G17P &&
        dev->g17p_render_context_bo &&
        asahi_noop_d3d12_graphics_qualification_allowed &&
@@ -6988,7 +6993,7 @@ d12_segment_bind_sampler_heap(struct d12_cmd_list *list,
 bool
 d12_g17p_txf_metadata_enabled(const struct agx_device *dev)
 {
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
    return dev && dev->chip == AGX_CHIP_G17P && dev->g17p_render_context_bo &&
           d12_debug()->shim_texture_metadata &&
           asahi_noop_d3d12_graphics_qualification_allowed &&
@@ -7005,7 +7010,7 @@ d12_g17p_txf_metadata_enabled(const struct agx_device *dev)
 bool
 d12_g17p_txf_physical_enabled(const struct agx_device *dev)
 {
-#ifndef _WIN32
+#ifndef D12_PLATFORM_D3DKMT
    const char *baseline = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
    return dev && dev->chip == AGX_CHIP_G17P &&
           baseline && !strcmp(baseline, "1") &&
