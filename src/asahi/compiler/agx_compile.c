@@ -3653,20 +3653,49 @@ agx_lower_agx3_mixed_width_transcendental(agx_context *ctx)
       return;
 
    agx_foreach_instr_global_safe(ctx, I) {
-      if ((I->op != AGX_OPCODE_EXP2 && I->op != AGX_OPCODE_LOG2) ||
+      /* The rounding and gradient funops have the same single 32-bit form
+       * (agx3_emit_funop()); the optimizer folds an f16 widening into their
+       * source exactly as it does for exp2/log2. */
+      const bool gradient =
+         I->op == AGX_OPCODE_DFDX || I->op == AGX_OPCODE_DFDY;
+      if ((I->op != AGX_OPCODE_EXP2 && I->op != AGX_OPCODE_LOG2 &&
+           I->op != AGX_OPCODE_TRUNC && I->op != AGX_OPCODE_CEIL &&
+           I->op != AGX_OPCODE_FLOOR && I->op != AGX_OPCODE_ROUNDEVEN &&
+           !gradient) ||
           I->nr_dests != 1 || I->nr_srcs != 1 || I->saturate)
          continue;
 
-      if (I->dest[0].size != AGX_SIZE_32 || I->src[0].size != AGX_SIZE_16 ||
-          agx_channels(I->src[0]) != 1 ||
+      if (I->src[0].size != AGX_SIZE_16 || agx_channels(I->src[0]) != 1 ||
+          agx_channels(I->dest[0]) != 1 ||
           I->src[0].type == AGX_INDEX_IMMEDIATE ||
           I->src[0].type == AGX_INDEX_NULL)
          continue;
 
+      /* A half gradient has no AGX3 form at all. The difference of two
+       * halves is exact in f32, so differentiating the widened value and
+       * rounding once gives the correctly rounded half result. */
+      const bool half_gradient = gradient && I->dest[0].size == AGX_SIZE_16;
+      if (I->dest[0].size != AGX_SIZE_32 && !half_gradient)
+         continue;
+
+      /* Widen the plain value and keep any |x| or -x on the 32-bit funop
+       * source, which encodes them directly. */
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_index plain = I->src[0];
+      plain.abs = plain.neg = false;
       agx_index widened = agx_temp(ctx, AGX_SIZE_32);
-      agx_fmov_to(&b, widened, I->src[0]);
+      agx_fmov_to(&b, widened, plain);
+      widened.abs = I->src[0].abs;
+      widened.neg = I->src[0].neg;
       I->src[0] = widened;
+
+      if (half_gradient) {
+         agx_index narrow = I->dest[0];
+         agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+         I->dest[0] = wide;
+         b.cursor = agx_after_instr(I);
+         agx_fmov_to(&b, narrow, wide);
+      }
    }
 }
 void
@@ -8590,9 +8619,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       }
    }
 
+   agx_lower_agx3_mixed_width_transcendental(ctx);
    agx_lower_agx3_half_converts(ctx);
    agx_lower_agx3_fma_sources(ctx);
-   agx_lower_agx3_mixed_width_transcendental(ctx);
    agx_lower_agx3_shifted_iadd_dest(ctx);
 
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
