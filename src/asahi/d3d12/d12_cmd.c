@@ -13582,9 +13582,8 @@ d12_copy_texture_region(struct d12_cmd_list *list,
    }
 
    /* libagx_copy_image now uses the same CPU-reduced tile geometry and
-    * two-dimensional grid as Honeykrisp's raw image-copy caller. Its Morton
-    * encoder expands seven bits per axis, so refuse geometry outside that
-    * contract instead of silently truncating tiled addresses. */
+    * two-dimensional grid as Honeykrisp's raw image-copy caller. The generic
+    * Morton encoder covers fourteen bits, including legacy AIL mip tails. */
    const struct d12_copy_surface *surfaces[] = {&d, &s};
    for (unsigned i = 0; i < ARRAY_SIZE(surfaces); ++i) {
       const struct d12_copy_surface *surface = surfaces[i];
@@ -13592,7 +13591,8 @@ d12_copy_texture_region(struct d12_cmd_list *list,
           (!surface->stride_el ||
            !util_is_power_of_two_nonzero(surface->tile_width_el) ||
            !util_is_power_of_two_nonzero(surface->tile_height_el) ||
-           surface->tile_width_el > 128 || surface->tile_height_el > 128)) {
+           surface->tile_width_el > (1u << 14) ||
+           surface->tile_height_el > (1u << 14))) {
          mesa_loge("CopyTextureRegion: tiled geometry exceeds copy kernel contract");
          list->state = D12_LIST_ERROR;
          return;

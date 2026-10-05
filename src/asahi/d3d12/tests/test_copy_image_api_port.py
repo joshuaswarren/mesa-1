@@ -41,7 +41,7 @@ static void convert(struct d12_cmd_list *list,struct d12_copy_surface d,struct d
 /* ACTUAL_KERNEL_HELPERS */
 int main(void){
  unsigned long long checks=0;
- uint dims[]={1,8,32,64,128};
+ uint dims[]={1,8,32,64,128,256,512};
  for(unsigned wi=0;wi<ARRAY_SIZE(dims);wi++)for(unsigned hi=0;hi<ARRAY_SIZE(dims);hi++){
   uint w=dims[wi],h=dims[hi],stride=2*w+1;
   struct d12_copy_surface tiled={.stride_el=stride,.tile_width_el=w,.tile_height_el=h,.blocksize_B=4,.tiled=true};
@@ -64,7 +64,7 @@ int main(void){
  }
  for(unsigned bad=0;bad<4;bad++){
   struct d12_copy_surface s={.stride_el=128,.tile_width_el=32,.tile_height_el=32,.blocksize_B=4,.tiled=true};
-  if(bad==0)s.stride_el=0;else if(bad==1)s.tile_width_el=3;else if(bad==2)s.tile_height_el=0;else s.tile_height_el=256;
+  if(bad==0)s.stride_el=0;else if(bad==1)s.tile_width_el=3;else if(bad==2)s.tile_height_el=0;else s.tile_height_el=32768;
   for(unsigned endpoint=0;endpoint<2;endpoint++){
    struct d12_copy_surface good={.pitch_B=512,.blocksize_B=4};struct d12_cmd_list list={0};struct libagx_copy_image_args args={0};
    convert(&list,endpoint?s:good,endpoint?good:s,(struct plan){1,1,0,0,0,0},&args);assert(list.state==D12_LIST_ERROR);checks++;
