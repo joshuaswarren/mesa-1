@@ -105,6 +105,42 @@ static_assert(D12_VDM_DRAW_BYTES <= D12_DISPATCH_STREAM_MARGIN,
               "the upload reserve must cover a VDM draw");
 static_assert(D12_VDM_BARRIER_BYTES <= D12_DISPATCH_STREAM_MARGIN,
               "the upload reserve must cover a VDM barrier");
+
+/*
+ * Append one entry to a bundle's command log (see struct d12_bundle_cmd).
+ * Returns the zeroed header; the payload follows it. NULL, with the list
+ * in error, when out of memory.
+ */
+static struct d12_bundle_cmd *
+d12_bundle_record(struct d12_cmd_list *list, enum d12_bundle_op op,
+                  size_t payload_size)
+{
+   size_t size = ALIGN_POT(sizeof(struct d12_bundle_cmd) + payload_size, 8);
+   struct d12_bundle_cmd *cmd =
+      util_dynarray_grow_bytes(&list->bundle_cmds, 1, size);
+   if (!cmd) {
+      mesa_loge("bundle: out of memory recording a command");
+      list->state = D12_LIST_ERROR;
+      list->record_error = E_OUTOFMEMORY;
+      return NULL;
+   }
+
+   memset(cmd, 0, size);
+   cmd->op = op;
+   cmd->size_B = size;
+   cmd->pso_set = list->pso != NULL;
+   cmd->topology_set = list->bundle_topology_set;
+   return cmd;
+}
+
+static inline void *
+d12_bundle_payload(struct d12_bundle_cmd *cmd)
+{
+   return cmd + 1;
+}
+
+static void d12_list_replay_bundle(struct d12_cmd_list *list,
+                                   struct d12_cmd_list *bundle);
 /* Keep a single kernel command bounded even for command lists containing
  * hundreds of thousands of tiny meta dispatches. */
 #define D12_MAX_DISPATCHES_PER_SEGMENT 8192
@@ -894,16 +930,6 @@ d12_list_set_dynamic_state(struct d12_cmd_list *list,
    list->strip_cut = (D3D12_INDEX_BUFFER_STRIP_CUT_VALUE)state->strip_cut;
 }
 
-static void
-d12_list_apply_bundle_dynamic_state(
-   struct d12_cmd_list *list,
-   const struct d12_bundle_dynamic_state *bundle_state)
-{
-   struct d12_dynamic_state_values state = d12_list_dynamic_state(list);
-   d12_bundle_dynamic_state_apply(bundle_state, &state);
-   d12_list_set_dynamic_state(list, &state);
-}
-
 /* Reset the API-visible state, without rewinding command storage or removing
  * commands already recorded. This is shared by command-list Reset and
  * ClearState so neither path can leak bindings from a previous recording. */
@@ -990,7 +1016,7 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    util_dynarray_clear(&list->descriptor_fixups);
    util_dynarray_clear(&list->indirect_constant_fixups);
    util_dynarray_clear(&list->indirect_argument_fixups);
-   util_dynarray_clear(&list->bundle_draws);
+   util_dynarray_clear(&list->bundle_cmds);
    /* Invalidate rather than memset: the caches are several hundred KiB. */
    for (unsigned t = 0; t < 2; t++) {
       for (unsigned w = 0; w < D12_BINDING_CACHE_WAYS; w++)
@@ -1005,17 +1031,14 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    list->direct_draw_params_gpu = 0;
    list->blend_upload_valid = false;
    list->blend_upload_gpu = 0;
-   memset(&list->bundle_dynamic_state, 0,
-          sizeof(list->bundle_dynamic_state));
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE && list->pso &&
-       !list->pso->is_compute) {
-      const struct d12_dynamic_state_values dynamic =
-         d12_list_dynamic_state(list);
-      d12_bundle_dynamic_state_set_pipeline(&list->bundle_dynamic_state,
-                                            &dynamic);
-   }
-   list->bundle_graphics_rs_set = false;
    list->bundle_topology_set = false;
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE && list->pso) {
+      /* The initial pipeline state is the bundle's first command. */
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_SET_PIPELINE_STATE, 0);
+      if (cmd)
+         cmd->pso = &list->pso->iface;
+   }
 
    /* Points into the stream BO, whose data floor has just been rewound, so
     * the old address is about to be handed out to somebody else.
@@ -10285,6 +10308,17 @@ d12_list_DispatchMesh(ID3D12GraphicsCommandList6 *iface, UINT x, UINT y,
    if (!x || !y || !z)
       return;
 
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_DISPATCH_MESH, 0);
+      if (cmd) {
+         cmd->dispatch.x = x;
+         cmd->dispatch.y = y;
+         cmd->dispatch.z = z;
+      }
+      return;
+   }
+
    /* A mesh draw has no vertices; the thread group counts ride in the
     * same three arguments the vertex path uses, and d12_list_draw routes
     * on pso->has_mesh.
@@ -10310,21 +10344,13 @@ d12_list_DrawInstanced(ID3D12GraphicsCommandList6 *iface,
       return;
 
    if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
-      struct d12_bundle_draw draw = {
-         .vertex_count = vertex_count_per_instance,
-         .instance_count = instance_count,
-         .first_vertex = start_vertex,
-         .first_instance = start_instance,
-         .pso = list->pso,
-         .graphics_rs = list->graphics_rs,
-         .topology = list->topology,
-         .patch_control_points = list->patch_control_points,
-         .graphics_rs_set = list->bundle_graphics_rs_set,
-         .topology_set = list->bundle_topology_set,
-         .dynamic_state = list->bundle_dynamic_state,
-      };
-      util_dynarray_append_typed(&list->bundle_draws,
-                                 struct d12_bundle_draw, draw);
+      struct d12_bundle_cmd *cmd = d12_bundle_record(list, D12_BUNDLE_DRAW, 0);
+      if (cmd) {
+         cmd->draw.vertex_count = vertex_count_per_instance;
+         cmd->draw.instance_count = instance_count;
+         cmd->draw.first_vertex = start_vertex;
+         cmd->draw.first_instance = start_instance;
+      }
       return;
    }
 
@@ -10345,23 +10371,15 @@ d12_list_DrawIndexedInstanced(ID3D12GraphicsCommandList6 *iface,
       return;
 
    if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
-      struct d12_bundle_draw draw = {
-         .vertex_count = index_count_per_instance,
-         .instance_count = instance_count,
-         .first_vertex = (unsigned)base_vertex,
-         .first_instance = start_instance,
-         .first_index = start_index,
-         .indexed = true,
-         .pso = list->pso,
-         .graphics_rs = list->graphics_rs,
-         .topology = list->topology,
-         .patch_control_points = list->patch_control_points,
-         .graphics_rs_set = list->bundle_graphics_rs_set,
-         .topology_set = list->bundle_topology_set,
-         .dynamic_state = list->bundle_dynamic_state,
-      };
-      util_dynarray_append_typed(&list->bundle_draws,
-                                 struct d12_bundle_draw, draw);
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_DRAW_INDEXED, 0);
+      if (cmd) {
+         cmd->draw.vertex_count = index_count_per_instance;
+         cmd->draw.instance_count = instance_count;
+         cmd->draw.first_index = start_index;
+         cmd->draw.base_vertex = base_vertex;
+         cmd->draw.first_instance = start_instance;
+      }
       return;
    }
 
@@ -10558,11 +10576,22 @@ d12_list_ExecuteIndirect(ID3D12GraphicsCommandList6 *iface,
    /* The D3D12 indirect-drawing contract permits ExecuteIndirect in bundles
     * only for a single terminal operation and a CPU-specified count. Root or
     * IA mutations and a GPU count buffer require a direct/compute list. */
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE &&
-       (count_buffer || signature->desc.NumArgumentDescs != 1)) {
-      mesa_loge("ExecuteIndirect: bundle signature changes state or uses a "
-                "count buffer");
-      list->state = D12_LIST_ERROR;
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      if (count_buffer || signature->desc.NumArgumentDescs != 1) {
+         mesa_loge("ExecuteIndirect: bundle signature changes state or "
+                   "uses a count buffer");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_EXECUTE_INDIRECT, 0);
+      if (cmd) {
+         cmd->execute_indirect.signature = signature_iface;
+         cmd->execute_indirect.max_count = max_command_count;
+         cmd->execute_indirect.args = argument_buffer_iface;
+         cmd->execute_indirect.args_offset = argument_buffer_offset;
+      }
       return;
    }
 
@@ -10883,6 +10912,16 @@ d12_list_IASetVertexBuffers(ID3D12GraphicsCommandList6 *iface, UINT start_slot,
    if (!views)
       return;
 
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd = d12_bundle_record(
+         list, D12_BUNDLE_IA_VERTEX_BUFFERS, num_views * sizeof(*views));
+      if (!cmd)
+         return;
+      cmd->vertex_buffers.start = start_slot;
+      cmd->vertex_buffers.count = num_views;
+      memcpy(d12_bundle_payload(cmd), views, num_views * sizeof(*views));
+   }
+
    for (UINT i = 0; i < num_views; i++) {
       UINT slot = start_slot + i;
       if (slot >= D12_MAX_VB_SLOTS) {
@@ -10908,6 +10947,16 @@ d12_list_IASetIndexBuffer(ID3D12GraphicsCommandList6 *iface,
                           const D3D12_INDEX_BUFFER_VIEW *view)
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
+
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_IA_INDEX_BUFFER, 0);
+      if (!cmd)
+         return;
+      cmd->index_buffer.bound = view != NULL;
+      if (view)
+         cmd->index_buffer.view = *view;
+   }
 
    if (!view) {
       list->ib.addr = 0;
@@ -10947,8 +10996,14 @@ d12_list_IASetPrimitiveTopology(ID3D12GraphicsCommandList6 *iface,
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
 
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_IA_PRIMITIVE_TOPOLOGY, 0);
+      if (!cmd)
+         return;
+      cmd->topology = topology;
       list->bundle_topology_set = true;
+   }
 
    /* Geometry shaders take points and lines as input, so the topology
     * can no longer be assumed. Anything not listed here would be drawn
@@ -11046,8 +11101,12 @@ d12_list_SetGraphicsRootSignature(ID3D12GraphicsCommandList6 *iface,
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
    list->graphics_rs = (struct d12_root_signature *)root_sig;
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-      list->bundle_graphics_rs_set = true;
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_SET_GRAPHICS_ROOT_SIGNATURE, 0);
+      if (cmd)
+         cmd->root_sig = root_sig;
+   }
 }
 
 /*
@@ -11116,6 +11175,17 @@ d12_list_set_root_descriptor(struct d12_cmd_list *list, bool compute,
                              D3D12_GPU_VIRTUAL_ADDRESS address,
                              D3D12_ROOT_PARAMETER_TYPE expected)
 {
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_SET_ROOT_DESCRIPTOR, 0);
+      if (!cmd)
+         return ~0u;
+      cmd->descriptor.compute = compute;
+      cmd->descriptor.index = root_param_index;
+      cmd->descriptor.address = address;
+      cmd->descriptor.type = expected;
+   }
+
    unsigned slot = d12_list_root_descriptor_slot(
       list, compute, root_param_index, expected);
    if (slot == ~0u)
@@ -11161,6 +11231,16 @@ d12_list_set_root_table(struct d12_cmd_list *list, bool compute,
                         UINT root_param_index,
                         D3D12_GPU_DESCRIPTOR_HANDLE base)
 {
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_SET_ROOT_TABLE, 0);
+      if (!cmd)
+         return;
+      cmd->table.compute = compute;
+      cmd->table.index = root_param_index;
+      cmd->table.base = base;
+   }
+
    struct d12_root_signature *rs =
       compute ? list->compute_rs : list->graphics_rs;
 
@@ -11556,6 +11636,21 @@ d12_list_set_root_constants(struct d12_cmd_list *list, bool compute,
    struct d12_root_signature *rs =
       compute ? list->compute_rs : list->graphics_rs;
 
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd = d12_bundle_record(
+         list, D12_BUNDLE_SET_ROOT_CONSTANTS,
+         (size_t)num_values * sizeof(uint32_t));
+      if (!cmd)
+         return 0;
+      cmd->constants.compute = compute;
+      cmd->constants.index = root_param_index;
+      cmd->constants.count = num_values;
+      cmd->constants.offset = offset_in_values;
+      if (data)
+         memcpy(d12_bundle_payload(cmd), data,
+                (size_t)num_values * sizeof(uint32_t));
+   }
+
    if (!rs) {
       mesa_loge("root constants bound with no root signature set");
       list->state = D12_LIST_ERROR;
@@ -11703,6 +11798,16 @@ d12_list_SetDescriptorHeaps(ID3D12GraphicsCommandList6 *iface, UINT count,
       return;
    }
 
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_SET_DESCRIPTOR_HEAPS, 0);
+      if (!cmd)
+         return;
+      cmd->heaps.count = count;
+      for (UINT i = 0; i < count; i++)
+         cmd->heaps.heaps[i] = heaps[i];
+   }
+
    for (UINT i = 0; i < count; i++) {
       if (!heaps[i]) {
          mesa_loge("SetDescriptorHeaps: null heap");
@@ -11748,10 +11853,13 @@ d12_list_SetPipelineState(ID3D12GraphicsCommandList6 *iface,
          list->pso->raster.slope_scaled_depth_bias;
       dynamic.strip_cut = (uint32_t)list->pso->strip_cut;
       d12_list_set_dynamic_state(list, &dynamic);
+   }
 
-      if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-         d12_bundle_dynamic_state_set_pipeline(
-            &list->bundle_dynamic_state, &dynamic);
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_SET_PIPELINE_STATE, 0);
+      if (cmd)
+         cmd->pso = pso;
    }
 }
 
@@ -11773,43 +11881,11 @@ d12_list_ExecuteBundle(ID3D12GraphicsCommandList6 *iface,
       return;
    }
 
-   util_dynarray_foreach (&bundle->bundle_draws, struct d12_bundle_draw,
-                          draw) {
-      /* Pipeline state and primitive topology are not inherited from the
-       * caller.  A draw missing either has undefined output, so leave it as
-       * a no-op instead of silently borrowing the direct-list value.
-       */
-      if (!draw->pso || !draw->topology_set)
-         continue;
-
-      list->pso = draw->pso;
-      list->topology = draw->topology;
-      list->patch_control_points = draw->patch_control_points;
-      if (draw->graphics_rs_set)
-         list->graphics_rs = draw->graphics_rs;
-      d12_list_apply_bundle_dynamic_state(list, &draw->dynamic_state);
-
-      d12_list_draw(list, draw->vertex_count, draw->instance_count,
-                    draw->first_vertex, draw->first_instance, draw->indexed,
-                    draw->first_index, 0, NULL, 0, NULL, 0, NULL, 0, NULL, 0,
-                    0, NULL, NULL, NULL);
-      if (list->state != D12_LIST_RECORDING)
-         return;
-   }
-
-   /* All state explicitly set in a bundle is inherited back into the direct
-    * command list, including a bundle that records no draw.
-    */
-   /* Pipeline state is not inherited into a bundle, but the bundle's final
-    * PSO (including its creation/reset PSO) is returned to the caller. */
-   list->pso = bundle->pso;
-   if (bundle->bundle_graphics_rs_set)
-      list->graphics_rs = bundle->graphics_rs;
-   if (bundle->bundle_topology_set) {
-      list->topology = bundle->topology;
-      list->patch_control_points = bundle->patch_control_points;
-   }
-   d12_list_apply_bundle_dynamic_state(list, &bundle->bundle_dynamic_state);
+   /* Replaying the bundle's calls against this list applies every piece
+    * of state it set, in order, and leaves it set afterwards: D3D12's
+    * inheritance back into the caller, including from a bundle with no
+    * draw. */
+   d12_list_replay_bundle(list, bundle);
 }
 
 /* Clear API state without rewinding the command stream. Commands recorded
@@ -11855,6 +11931,12 @@ d12_list_SetComputeRootSignature(ID3D12GraphicsCommandList6 *iface,
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
    list->compute_rs = (struct d12_root_signature *)root_sig;
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_SET_COMPUTE_ROOT_SIGNATURE, 0);
+      if (cmd)
+         cmd->root_sig = root_sig;
+   }
 }
 
 static void STDMETHODCALLTYPE
@@ -11888,6 +11970,17 @@ d12_list_Dispatch(ID3D12GraphicsCommandList6 *iface, UINT x, UINT y, UINT z)
    if (y > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION ||
        z > D3D12_CS_DISPATCH_MAX_THREAD_GROUPS_PER_DIMENSION)
       return;
+
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_DISPATCH, 0);
+      if (cmd) {
+         cmd->dispatch.x = x;
+         cmd->dispatch.y = y;
+         cmd->dispatch.z = z;
+      }
+      return;
+   }
 
    d12_list_dispatch_pso(list, x, y, z, 0, NULL, 0, NULL, 0, NULL, 0, NULL,
                          NULL);
@@ -11971,7 +12064,7 @@ d12_list_Release(ID3D12GraphicsCommandList6 *iface)
       util_dynarray_fini(&list->descriptor_fixups);
       util_dynarray_fini(&list->indirect_constant_fixups);
       util_dynarray_fini(&list->indirect_argument_fixups);
-      util_dynarray_fini(&list->bundle_draws);
+      util_dynarray_fini(&list->bundle_cmds);
       if (list->allocator)
          d12_alloc_Release(&list->allocator->iface);
       d12_device_release(list->device);
@@ -14702,9 +14795,14 @@ d12_list_OMSetStencilRef(ID3D12GraphicsCommandList6 *iface, UINT ref)
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
    list->stencil_ref_front = (uint8_t)ref;
    list->stencil_ref_back = (uint8_t)ref;
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-      d12_bundle_dynamic_state_set_stencil(&list->bundle_dynamic_state,
-                                           (uint8_t)ref, (uint8_t)ref);
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_OM_STENCIL_REF, 0);
+      if (cmd) {
+         cmd->stencil_ref.front = ref;
+         cmd->stencil_ref.back = ref;
+      }
+   }
 }
 
 static void STDMETHODCALLTYPE
@@ -14726,9 +14824,14 @@ d12_list_OMSetFrontAndBackStencilRef(ID3D12GraphicsCommandList9 *iface,
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
    list->stencil_ref_front = (uint8_t)front;
    list->stencil_ref_back = (uint8_t)back;
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-      d12_bundle_dynamic_state_set_stencil(&list->bundle_dynamic_state,
-                                           (uint8_t)front, (uint8_t)back);
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_OM_STENCIL_REF, 0);
+      if (cmd) {
+         cmd->stencil_ref.front = front;
+         cmd->stencil_ref.back = back;
+      }
+   }
 }
 
 static void STDMETHODCALLTYPE
@@ -14739,9 +14842,15 @@ d12_list_RSSetDepthBias(ID3D12GraphicsCommandList9 *iface, FLOAT depth_bias,
    list->depth_bias = depth_bias;
    list->depth_bias_clamp = clamp;
    list->slope_scaled_depth_bias = slope;
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-      d12_bundle_dynamic_state_set_depth_bias(
-         &list->bundle_dynamic_state, depth_bias, clamp, slope);
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_RS_DEPTH_BIAS, 0);
+      if (cmd) {
+         cmd->depth_bias.bias = depth_bias;
+         cmd->depth_bias.clamp = clamp;
+         cmd->depth_bias.slope = slope;
+      }
+   }
 }
 
 static void STDMETHODCALLTYPE
@@ -14760,9 +14869,12 @@ d12_list_IASetIndexBufferStripCutValue(
       return;
    }
    list->strip_cut = strip_cut;
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-      d12_bundle_dynamic_state_set_strip_cut(
-         &list->bundle_dynamic_state, (uint32_t)strip_cut);
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_IA_STRIP_CUT, 0);
+      if (cmd)
+         cmd->strip_cut = strip_cut;
+   }
 }
 
 static void STDMETHODCALLTYPE
@@ -14773,9 +14885,13 @@ d12_list_OMSetBlendFactor(ID3D12GraphicsCommandList6 *iface,
    static const float one[4] = {1.0f, 1.0f, 1.0f, 1.0f};
    memcpy(list->blend_factor, factor ? factor : one,
           sizeof(list->blend_factor));
-   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE)
-      d12_bundle_dynamic_state_set_blend(&list->bundle_dynamic_state,
-                                         list->blend_factor);
+   if (list->type == D3D12_COMMAND_LIST_TYPE_BUNDLE) {
+      struct d12_bundle_cmd *cmd =
+         d12_bundle_record(list, D12_BUNDLE_OM_BLEND_FACTOR, 0);
+      if (cmd)
+         memcpy(cmd->blend_factor, list->blend_factor,
+                sizeof(cmd->blend_factor));
+   }
 }
 
 static void STDMETHODCALLTYPE
@@ -15230,6 +15346,121 @@ d12_list_EndRenderPass(ID3D12GraphicsCommandList6 *iface)
    (void)d12_cmd_list_end_render_pass(d12_cmd_list_from_iface(iface));
 }
 
+/*
+ * Replay a closed bundle's command log through this list's own entry
+ * points, so every call is validated and recorded exactly as if the
+ * application had made it here. Draws and dispatches recorded before the
+ * bundle set its own pipeline (or, for draws, topology) are undefined
+ * and replay as nothing rather than borrowing the caller's.
+ */
+static void
+d12_list_replay_bundle(struct d12_cmd_list *list, struct d12_cmd_list *bundle)
+{
+   ID3D12GraphicsCommandList6 *iface6 =
+      (ID3D12GraphicsCommandList6 *)&list->iface;
+   ID3D12GraphicsCommandList9 *iface9 =
+      (ID3D12GraphicsCommandList9 *)&list->iface;
+   const uint8_t *p = bundle->bundle_cmds.data;
+   const uint8_t *end = p + bundle->bundle_cmds.size;
+
+   while (p < end && list->state == D12_LIST_RECORDING) {
+      const struct d12_bundle_cmd *cmd = (const struct d12_bundle_cmd *)p;
+      const void *payload = cmd + 1;
+
+      switch (cmd->op) {
+      case D12_BUNDLE_SET_PIPELINE_STATE:
+         d12_list_SetPipelineState(iface6, cmd->pso);
+         break;
+      case D12_BUNDLE_SET_GRAPHICS_ROOT_SIGNATURE:
+         d12_list_SetGraphicsRootSignature(iface6, cmd->root_sig);
+         break;
+      case D12_BUNDLE_SET_COMPUTE_ROOT_SIGNATURE:
+         d12_list_SetComputeRootSignature(iface6, cmd->root_sig);
+         break;
+      case D12_BUNDLE_SET_DESCRIPTOR_HEAPS:
+         d12_list_SetDescriptorHeaps(iface6, cmd->heaps.count,
+                                     cmd->heaps.heaps);
+         break;
+      case D12_BUNDLE_SET_ROOT_TABLE:
+         d12_list_set_root_table(list, cmd->table.compute, cmd->table.index,
+                                 cmd->table.base);
+         break;
+      case D12_BUNDLE_SET_ROOT_DESCRIPTOR:
+         d12_list_set_root_descriptor(list, cmd->descriptor.compute,
+                                      cmd->descriptor.index,
+                                      cmd->descriptor.address,
+                                      cmd->descriptor.type);
+         break;
+      case D12_BUNDLE_SET_ROOT_CONSTANTS:
+         d12_list_set_root_constants(list, cmd->constants.compute,
+                                     cmd->constants.index,
+                                     cmd->constants.count, payload,
+                                     cmd->constants.offset);
+         break;
+      case D12_BUNDLE_IA_PRIMITIVE_TOPOLOGY:
+         d12_list_IASetPrimitiveTopology(iface6, cmd->topology);
+         break;
+      case D12_BUNDLE_IA_VERTEX_BUFFERS:
+         d12_list_IASetVertexBuffers(iface6, cmd->vertex_buffers.start,
+                                     cmd->vertex_buffers.count, payload);
+         break;
+      case D12_BUNDLE_IA_INDEX_BUFFER:
+         d12_list_IASetIndexBuffer(
+            iface6, cmd->index_buffer.bound ? &cmd->index_buffer.view : NULL);
+         break;
+      case D12_BUNDLE_OM_BLEND_FACTOR:
+         d12_list_OMSetBlendFactor(iface6, cmd->blend_factor);
+         break;
+      case D12_BUNDLE_OM_STENCIL_REF:
+         d12_list_OMSetFrontAndBackStencilRef(iface9, cmd->stencil_ref.front,
+                                              cmd->stencil_ref.back);
+         break;
+      case D12_BUNDLE_RS_DEPTH_BIAS:
+         d12_list_RSSetDepthBias(iface9, cmd->depth_bias.bias,
+                                 cmd->depth_bias.clamp, cmd->depth_bias.slope);
+         break;
+      case D12_BUNDLE_IA_STRIP_CUT:
+         d12_list_IASetIndexBufferStripCutValue(iface9, cmd->strip_cut);
+         break;
+      case D12_BUNDLE_DRAW:
+         if (cmd->pso_set && cmd->topology_set)
+            d12_list_DrawInstanced(iface6, cmd->draw.vertex_count,
+                                   cmd->draw.instance_count,
+                                   cmd->draw.first_vertex,
+                                   cmd->draw.first_instance);
+         break;
+      case D12_BUNDLE_DRAW_INDEXED:
+         if (cmd->pso_set && cmd->topology_set)
+            d12_list_DrawIndexedInstanced(
+               iface6, cmd->draw.vertex_count, cmd->draw.instance_count,
+               cmd->draw.first_index, cmd->draw.base_vertex,
+               cmd->draw.first_instance);
+         break;
+      case D12_BUNDLE_DISPATCH:
+         if (cmd->pso_set)
+            d12_list_Dispatch(iface6, cmd->dispatch.x, cmd->dispatch.y,
+                              cmd->dispatch.z);
+         break;
+      case D12_BUNDLE_DISPATCH_MESH:
+         if (cmd->pso_set)
+            d12_list_DispatchMesh(iface6, cmd->dispatch.x, cmd->dispatch.y,
+                                  cmd->dispatch.z);
+         break;
+      case D12_BUNDLE_EXECUTE_INDIRECT:
+         if (cmd->pso_set)
+            d12_list_ExecuteIndirect(
+               iface6, cmd->execute_indirect.signature,
+               cmd->execute_indirect.max_count, cmd->execute_indirect.args,
+               cmd->execute_indirect.args_offset,
+               cmd->execute_indirect.count,
+               cmd->execute_indirect.count_offset);
+         break;
+      }
+
+      p += cmd->size_B;
+   }
+}
+
 static const struct d12_list9_vtbl d12_list_vtbl = {
    .v6 = {
    /* every unimplemented slot fails safely */
@@ -15371,7 +15602,7 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
    util_dynarray_init(&list->descriptor_fixups, NULL);
    util_dynarray_init(&list->indirect_constant_fixups, NULL);
    util_dynarray_init(&list->indirect_argument_fixups, NULL);
-   util_dynarray_init(&list->bundle_draws, NULL);
+   util_dynarray_init(&list->bundle_cmds, NULL);
    if (allocator)
       allocator->recording_lists++;
    d12_device_add_ref(device);

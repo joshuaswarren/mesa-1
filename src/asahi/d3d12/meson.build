@@ -454,6 +454,14 @@ d3d12agx_g11_indexed_instanced = executable(
   link_with : [libd3d12agx],
 )
 
+# Live: state recorded inside a bundle reaches its draws and its caller.
+executable(
+  'd3d12agx_bundle_state',
+  files('tests/bundle_state.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 # Live: ExecuteIndirect whose count buffer is written by the GPU in-list.
 executable(
   'd3d12agx_execute_indirect_count',

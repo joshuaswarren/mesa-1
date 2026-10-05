@@ -996,27 +996,108 @@ struct d12_indirect_argument_fixup {
 };
 
 /*
- * Bundles are recorded before the direct command list state they inherit is
- * known.  Keep draw calls logical until ExecuteBundle so render targets,
- * viewport/scissor and root bindings come from the calling list.  Pipeline
- * state and primitive topology are deliberately snapshotted separately:
- * D3D12 does not inherit either of those into a bundle.
+ * Bundles are recorded before the direct command list state they inherit
+ * is known, so a bundle keeps a LOG OF THE API CALLS it received and
+ * ExecuteBundle replays them against the calling list: render targets,
+ * viewport/scissor and everything the bundle did not set come from the
+ * caller, everything it did set (root arguments, IA state, dynamic state,
+ * pipeline, root signatures, descriptor heaps) is applied in order and
+ * stays applied afterwards, which is D3D12's inheritance rule. Pipeline
+ * state and primitive topology are not inherited INTO a bundle, so a draw
+ * recorded without them is replayed as nothing.
+ *
+ * One log entry: the header, then `size_B - sizeof(header)` bytes of
+ * payload (root constant values, vertex buffer views).
  */
-struct d12_bundle_draw {
-   uint32_t vertex_count;
-   uint32_t instance_count;
-   uint32_t first_vertex;
-   uint32_t first_instance;
-   uint32_t first_index;
-   bool indexed;
+enum d12_bundle_op {
+   D12_BUNDLE_SET_PIPELINE_STATE,
+   D12_BUNDLE_SET_GRAPHICS_ROOT_SIGNATURE,
+   D12_BUNDLE_SET_COMPUTE_ROOT_SIGNATURE,
+   D12_BUNDLE_SET_DESCRIPTOR_HEAPS,
+   D12_BUNDLE_SET_ROOT_TABLE,
+   D12_BUNDLE_SET_ROOT_DESCRIPTOR,
+   D12_BUNDLE_SET_ROOT_CONSTANTS,
+   D12_BUNDLE_IA_PRIMITIVE_TOPOLOGY,
+   D12_BUNDLE_IA_VERTEX_BUFFERS,
+   D12_BUNDLE_IA_INDEX_BUFFER,
+   D12_BUNDLE_OM_BLEND_FACTOR,
+   D12_BUNDLE_OM_STENCIL_REF,
+   D12_BUNDLE_RS_DEPTH_BIAS,
+   D12_BUNDLE_IA_STRIP_CUT,
+   D12_BUNDLE_DRAW,
+   D12_BUNDLE_DRAW_INDEXED,
+   D12_BUNDLE_DISPATCH,
+   D12_BUNDLE_DISPATCH_MESH,
+   D12_BUNDLE_EXECUTE_INDIRECT,
+};
 
-   struct d12_pipeline_state *pso;
-   struct d12_root_signature *graphics_rs;
-   enum mesa_prim topology;
-   unsigned patch_control_points;
-   bool graphics_rs_set;
+struct d12_bundle_cmd {
+   enum d12_bundle_op op;
+   uint32_t size_B; /* header plus payload, 8-aligned */
+
+   /* Whether the bundle itself had set a pipeline / topology when a draw
+    * or dispatch was recorded; neither is inherited from the caller. */
+   bool pso_set;
    bool topology_set;
-   struct d12_bundle_dynamic_state dynamic_state;
+
+   union {
+      ID3D12PipelineState *pso;
+      ID3D12RootSignature *root_sig;
+      struct {
+         UINT count;
+         ID3D12DescriptorHeap *heaps[2];
+      } heaps;
+      struct {
+         bool compute;
+         UINT index;
+         D3D12_GPU_DESCRIPTOR_HANDLE base;
+      } table;
+      struct {
+         bool compute;
+         UINT index;
+         D3D12_GPU_VIRTUAL_ADDRESS address;
+         D3D12_ROOT_PARAMETER_TYPE type;
+      } descriptor;
+      struct {
+         bool compute;
+         UINT index;
+         UINT count;  /* payload: count 32-bit values */
+         UINT offset;
+      } constants;
+      D3D12_PRIMITIVE_TOPOLOGY topology;
+      struct {
+         UINT start;
+         UINT count;  /* payload: count D3D12_VERTEX_BUFFER_VIEW */
+      } vertex_buffers;
+      struct {
+         bool bound;
+         D3D12_INDEX_BUFFER_VIEW view;
+      } index_buffer;
+      float blend_factor[4];
+      struct {
+         UINT front, back;
+      } stencil_ref;
+      struct {
+         float bias, clamp, slope;
+      } depth_bias;
+      D3D12_INDEX_BUFFER_STRIP_CUT_VALUE strip_cut;
+      struct {
+         UINT vertex_count, instance_count, first_vertex, first_instance;
+         UINT first_index;
+         INT base_vertex;
+      } draw;
+      struct {
+         UINT x, y, z;
+      } dispatch;
+      struct {
+         ID3D12CommandSignature *signature;
+         UINT max_count;
+         ID3D12Resource *args;
+         UINT64 args_offset;
+         ID3D12Resource *count;
+         UINT64 count_offset;
+      } execute_indirect;
+   };
 };
 
 /*
@@ -1989,7 +2070,7 @@ struct d12_cmd_list {
    struct util_dynarray descriptor_fixups;
    struct util_dynarray indirect_constant_fixups;
    struct util_dynarray indirect_argument_fixups;
-   struct util_dynarray bundle_draws;
+   struct util_dynarray bundle_cmds; /* struct d12_bundle_cmd log */
 
    /* ExecuteIndirect reads GPU-produced root/VBV/IBV addresses. A fixed view
     * cell lives in this recording's stream BO; immediately before submission
@@ -2021,12 +2102,10 @@ struct d12_cmd_list {
    float blend_upload[4];
    uint64_t blend_upload_gpu;
 
-   /* Explicit state written while recording a bundle.  The final values are
-    * inherited back into its caller even when the bundle contains no draw.
-    */
-   bool bundle_graphics_rs_set;
+   /* Whether IASetPrimitiveTopology was called while recording a bundle:
+    * the topology is not inherited into it, so draws before that are
+    * replayed as nothing. */
    bool bundle_topology_set;
-   struct d12_bundle_dynamic_state bundle_dynamic_state;
 
    /* SetDescriptorHeaps state.  GPU descriptor handles remain CPU pointers
     * for application arithmetic, so the bound object is also how an
