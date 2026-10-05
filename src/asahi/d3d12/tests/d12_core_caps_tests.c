@@ -36,7 +36,7 @@ int main(void)
    assert(a.isolated_mmu && a.resource_heap_tier == 2 && a.gpu_upload_heap);
    assert(a.sample_counts == 7 && c.sample_counts == 1);
    assert(a.tiled_resources_tier == 0 && c.tiled_resources_tier == 0);
-   assert(!a.predication && !a.independent_front_and_back_stencil && !a.dynamic_depth_bias);
+   assert(!a.predication && !a.independent_front_and_back_stencil && a.dynamic_depth_bias);
    assert(a.full_texture_sampling && !c.full_texture_sampling);
    assert(a.mesh_shader_tier == 0 && b.mesh_shader_tier == 0 && c.mesh_shader_tier == 0);
    assert(a.max_shader_model == D12_CORE_SHADER_MODEL_6_0);

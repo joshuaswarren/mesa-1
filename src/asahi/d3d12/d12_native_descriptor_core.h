@@ -24,6 +24,14 @@
 #define D12_NATIVE_TEXTURE_GEN9_SAMPLES_SHIFT 56u
 #define D12_NATIVE_TEXTURE_GEN9_SAMPLES_MASK  UINT64_C(0x3)
 
+/* G13/G14 use the legacy texture instruction/descriptor ABI. */
+static inline bool
+d12_native_descriptor_legacy_shapes(uint32_t generation)
+{
+   return generation == D12_NATIVE_DESCRIPTOR_GEN7 ||
+          generation == D12_NATIVE_DESCRIPTOR_GEN8;
+}
+
 /* Largest texture or PBE stride any proven layout below uses. */
 #define D12_NATIVE_DESCRIPTOR_MAX_B 32u
 

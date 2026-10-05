@@ -4,6 +4,7 @@
  */
 
 #include "../d12_private.h"
+#include "../d12_native_descriptor_core.h"
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -53,6 +54,9 @@ check(D3D12_SRV_DIMENSION dimension, unsigned view_layers,
 int
 main(void)
 {
+   assert(d12_native_descriptor_legacy_shapes(D12_NATIVE_DESCRIPTOR_GEN7));
+   assert(d12_native_descriptor_legacy_shapes(D12_NATIVE_DESCRIPTOR_GEN8));
+   assert(!d12_native_descriptor_legacy_shapes(D12_NATIVE_DESCRIPTOR_GEN9));
    check(D3D12_SRV_DIMENSION_TEXTURE3D, 1, 16, D12_TEXTURE_SHAPE_NONE);
    check(D3D12_SRV_DIMENSION_TEXTURE2DARRAY, 3, 3, D12_TEXTURE_SHAPE_NONE);
    check(D3D12_SRV_DIMENSION_TEXTURE2DARRAY, 3, 1, D12_TEXTURE_SHAPE_2D);

@@ -412,8 +412,8 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
    }
    /* Gen7 mirrors retain both declaration shapes. A physical 2D descriptor
     * cannot accept an array coordinate/LOD ABI, even for a one-layer view. */
-   const unsigned windows = agx_chip_descriptor_generation(device->dev.chip) ==
-                               D12_NATIVE_DESCRIPTOR_GEN7 ? 3 : 1;
+   const unsigned windows = d12_native_descriptor_legacy_shapes(
+      agx_chip_descriptor_generation(device->dev.chip)) ? 3 : 1;
    uint8_t *textures = heap->texture_bo ? agx_bo_map(heap->texture_bo) : NULL;
    uint8_t *pbes = heap->pbe_bo ? agx_bo_map(heap->pbe_bo) : NULL;
    for (unsigned window = 0; window < windows; ++window) {
@@ -700,8 +700,8 @@ d12_descriptor_heap_create(struct d12_device *device,
 
       if (desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
          size_t texture_size, pbe_size;
-         const bool variants = agx_chip_descriptor_generation(device->dev.chip) ==
-                                  D12_NATIVE_DESCRIPTOR_GEN7;
+         const bool variants = d12_native_descriptor_legacy_shapes(
+            agx_chip_descriptor_generation(device->dev.chip));
          /* One extra permanently-null PBE slot is the robust sink for
           * dynamically indexed typed-buffer atomics. Unlike texture fetch,
           * AGX buffer image atomics do not suppress coordinates beyond the
@@ -796,8 +796,8 @@ d12_descriptor_heap_create(struct d12_device *device,
           heap->pbe_stride_B <= sizeof(heap->null_pbe) &&
           d12_set_null_texture_descriptor(device, heap->null_texture) &&
           d12_set_null_pbe_descriptor(device, heap->null_pbe)) {
-         const bool variants = agx_chip_descriptor_generation(device->dev.chip) ==
-                                  D12_NATIVE_DESCRIPTOR_GEN7;
+         const bool variants = d12_native_descriptor_legacy_shapes(
+            agx_chip_descriptor_generation(device->dev.chip));
          const uint64_t pbe_slots = variants
             ? 3 * ((uint64_t)desc->NumDescriptors + 1)
             : (uint64_t)desc->NumDescriptors + 1;

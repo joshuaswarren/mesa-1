@@ -2100,7 +2100,7 @@ resource_texture_offset(struct d12_dxbc_ctx *ctx,
       .align_mul = 8);
    nir_def *relative = nir_iadd_imm(b, slot, -(int64_t)first_slot);
    nir_def *index = nir_iadd(b, base, nir_u2u64(b, relative));
-   if (ctx->descriptor_generation == D12_NATIVE_DESCRIPTOR_GEN7) {
+   if (d12_native_descriptor_legacy_shapes(ctx->descriptor_generation)) {
       unsigned dim = file == D12_DXBC_FILE_UAV
          ? ctx->uav_dim[operand->index[0]] : ctx->srv_dim[operand->index[0]];
       const bool array = dim == D12_DXBC_RESOURCE_DIMENSION_TEXTURE_1D_ARRAY ||

@@ -1364,7 +1364,7 @@ native_texture_window_index(struct trans_ctx *ctx, nir_def *index,
                              const struct handle_ref *h)
 {
    unsigned shape = d12_texture_shape_from_kind(h->kind);
-   if (ctx->descriptor_generation != D12_NATIVE_DESCRIPTOR_GEN7 ||
+   if (!d12_native_descriptor_legacy_shapes(ctx->descriptor_generation) ||
        shape == D12_TEXTURE_SHAPE_NONE)
       return index;
    nir_builder *b = ctx->b;
