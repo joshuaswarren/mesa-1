@@ -6820,6 +6820,25 @@ hk_g17p_emit_native_bind_tail(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
           hk_g17p_publish_native_bind_tail(cmd, cs, out, prepared);
 }
 
+/* The hardware provoking-vertex selector for a topology. A point has one
+ * vertex, so its first and last vertex are the same; use the selector the
+ * native point pipelines carry (0) whatever the API convention is. GL's
+ * last-vertex convention through Zink otherwise selected 2 for points, which
+ * hk_g17p_smooth_varyings_supported() rightly does not admit for flat
+ * inputs, and dEQP's fragment-shader executor draws one point per value. */
+static unsigned
+hk_provoking_selector(const struct vk_dynamic_graphics_state *dyn,
+                      unsigned topology)
+{
+   if (topology == AGX_PRIMITIVE_POINTS)
+      return 0;
+   if (dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT)
+      return 2;
+   if (topology == AGX_PRIMITIVE_TRIANGLE_FAN)
+      return 1;
+   return 0;
+}
+
 /* Resolve the draw-independent inputs needed by the first HAL200 state update
  * while recording is still outside vkCmdDraw*. Nothing here advances a
  * control stream. The allocation and tail remain unreachable by firmware
@@ -6861,13 +6880,7 @@ hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd)
                            : HK_G17P_NO_HW_TOPOLOGY;
    gfx->object_type = translate_object_type(prim);
 
-   unsigned provoking;
-   if (dyn->rs.provoking_vertex == VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT)
-      provoking = 2;
-   else if (gfx->topology == AGX_PRIMITIVE_TRIANGLE_FAN)
-      provoking = 1;
-   else
-      provoking = 0;
+   unsigned provoking = hk_provoking_selector(dyn, gfx->topology);
 
    if (provoking != gfx->provoking) {
       gfx->provoking = provoking;
@@ -8771,14 +8784,7 @@ g17p_draw_parameters:
       }
 
       if (IS_DIRTY(IA_PRIMITIVE_TOPOLOGY) || IS_DIRTY(RS_PROVOKING_VERTEX)) {
-         unsigned provoking;
-         if (dyn->rs.provoking_vertex ==
-             VK_PROVOKING_VERTEX_MODE_LAST_VERTEX_EXT)
-            provoking = 2;
-         else if (gfx->topology == AGX_PRIMITIVE_TRIANGLE_FAN)
-            provoking = 1;
-         else
-            provoking = 0;
+         unsigned provoking = hk_provoking_selector(dyn, gfx->topology);
 
          if (provoking != gfx->provoking) {
             gfx->provoking = provoking;
