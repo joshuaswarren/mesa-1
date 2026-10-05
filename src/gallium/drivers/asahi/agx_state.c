@@ -4506,6 +4506,249 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
                        MESA_SHADER_COMPUTE, usc);
 }
 
+/*
+ * Background or end-of-tile program for a G17P multi-target layout that the
+ * dedicated RT0/dual/wide programs cannot express: mixed formats, or targets
+ * that do not share one operation. Only the targets the operation touches are
+ * numbered, each keeping its tile offset; reloads come before clears, because
+ * a reload reads its texture and sampler pointers from uniform halves 0..7,
+ * which a target-zero clear value would otherwise overlap. This is the
+ * Gallium form of hk_build_g17p_mixed_bg_eot().
+ */
+static struct asahi_bg_eot
+agx_g17p_build_mixed_bg_eot(struct agx_batch *batch,
+                            const struct agx_bg_eot_key *framebuffer_key,
+                            bool store)
+{
+   struct agx_context *ctx = batch->ctx;
+   struct agx_device *dev = agx_device(ctx->base.screen);
+   const enum agx_descriptor_generation descriptor_generation =
+      agx_gallium_descriptor_generation(dev->chip);
+   const unsigned descriptor_size =
+      agx_gallium_texture_descriptor_size(descriptor_generation);
+   const unsigned samples = MAX2(framebuffer_key->tib.nr_samples, 1);
+
+   /* Multisample targets are stored unresolved; a resolve or a
+    * single-sample WSI reload needs the single-target programs. */
+   if (samples > 1 && (batch->key.resolve || framebuffer_key->single_sample_reload))
+      agx_native_descriptor_rejected(dev, "multisample mixed MRT resolve");
+   if (descriptor_size != AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE ||
+       agx_gallium_pbe_descriptor_size(descriptor_generation) !=
+          AGX_IOTO_G17P_RT0_PBE_ARGUMENT_SIZE)
+      agx_native_descriptor_rejected(dev, "mixed MRT descriptor geometry");
+
+   struct agx_bg_eot_key key = *framebuffer_key;
+   memset(key.tib.logical_format, 0, sizeof(key.tib.logical_format));
+   memset(key.tib.spilled, 0, sizeof(key.tib.spilled));
+   memset(key.tib._offset_B, 0, sizeof(key.tib._offset_B));
+   memset(key.op, 0, sizeof(key.op));
+   key.mixed_mrt = true;
+   key.single_sample_reload = false;
+   key.multisample_store = store && samples > 1;
+   key.reserved_preamble = 0;
+
+   static const enum agx_bg_eot_op order[] = {AGX_BG_LOAD, AGX_BG_CLEAR,
+                                              AGX_EOT_STORE};
+   const struct pipe_surface *surfs[PIPE_MAX_COLOR_BUFS];
+   unsigned rts[PIPE_MAX_COLOR_BUFS];
+   unsigned count = 0, reloads = 0;
+   for (unsigned i = 0; i < ARRAY_SIZE(order); ++i) {
+      for (unsigned rt = 0; rt < PIPE_MAX_COLOR_BUFS; ++rt) {
+         if (framebuffer_key->op[rt] != order[i])
+            continue;
+
+         const struct pipe_surface *surf = &batch->key.cbufs[rt];
+         if (!surf->texture ||
+             util_res_sample_count(surf->texture) != samples)
+            agx_native_descriptor_rejected(dev, "mixed MRT attachment");
+
+         key.tib.logical_format[count] =
+            framebuffer_key->tib.logical_format[rt];
+         key.tib._offset_B[count] = framebuffer_key->tib._offset_B[rt];
+         key.op[count] = order[i];
+         rts[count] = rt;
+         surfs[count++] = surf;
+         reloads += order[i] == AGX_BG_LOAD;
+      }
+   }
+   assert(count > 0 && "uniform layouts take the dedicated programs");
+
+   const bool clears = !store && count > reloads;
+   if (clears)
+      key.reserved_preamble = 4 + 8 * count;
+
+   struct agx_bg_eot_shader *shader = agx_get_bg_eot_shader(&ctx->bg_eot, &key);
+   if (!shader || !shader->bo || !shader->bo->va || !shader->ptr ||
+       !shader->info.binary_size ||
+       shader->info.main_offset >= shader->info.binary_size ||
+       shader->info.main_size >
+          shader->info.binary_size - shader->info.main_offset ||
+       shader->info.has_preamble || shader->info.rodata.size_16 ||
+       !shader->info.nr_gprs ||
+       (!store && (shader->info.push_count != key.reserved_preamble ||
+                   shader->info.uses_txf != (reloads > 0)))) {
+      mesa_loge("asahi: G17P mixed MRT %s shader is unproven: push=%u "
+                "want=%u txf=%u count=%u reloads=%u samples=%u",
+                store ? "end-of-tile" : "background",
+                shader ? shader->info.push_count : 0, key.reserved_preamble,
+                shader ? shader->info.uses_txf : 0, count, reloads, samples);
+      agx_native_descriptor_rejected(dev, "mixed MRT shader");
+   }
+   agx_batch_add_bo(batch, shader->bo);
+
+   const enum agx3_g17p_rt0_bg_op bg_op =
+      reloads == count ? AGX3_G17P_RT0_BG_RELOAD
+      : reloads        ? AGX3_G17P_RT0_BG_CLEAR_RELOAD
+                       : AGX3_G17P_RT0_BG_CLEAR;
+   const size_t capacity =
+      store       ? (count > 4 ? AGX_IOTO_G17P_OCTA_EOT_PROGRAM_MAX_SIZE
+                               : AGX_IOTO_G17P_QUAD_EOT_PROGRAM_MAX_SIZE)
+      : count > 4 ? AGX_IOTO_G17P_OCTA_BACKGROUND_PROGRAM_MAX_SIZE
+      : bg_op == AGX3_G17P_RT0_BG_CLEAR_RELOAD
+         ? AGX_IOTO_G17P_CLEAR_RELOAD_PROGRAM_MAX_SIZE
+         : AGX_IOTO_G17P_RT0_RELOAD_PROGRAM_MAX_SIZE;
+   struct agx_bo *program_bo = NULL;
+   struct agx_ptr program_ptr = agx_pool_alloc_aligned_with_bo(
+      &batch->pipeline_pool, capacity, AGX_IOTO_PROGRAM_ALIGNMENT, &program_bo);
+   if (!program_ptr.cpu || !program_bo ||
+       !agx_va_in_usc_window(dev, program_ptr.gpu) ||
+       !agx_va_in_usc_window(dev, shader->ptr + shader->info.main_offset))
+      agx_native_descriptor_rejected(dev, "mixed MRT program allocation");
+
+   const struct agx_ioto_g17p_imageblock imageblock = {
+      .sample_size_B = key.tib.sample_size_B,
+      .nr_samples = key.tib.nr_samples,
+      .tile_size_px = key.tib.tile_size,
+   };
+   size_t program_length;
+   uint64_t resource_spec;
+   if (store) {
+      struct agx_ptr pbe =
+         agx_pool_alloc_aligned(&batch->pool, descriptor_size * count, 32);
+      for (unsigned i = 0; i < count; ++i) {
+         struct pipe_image_view view = image_view_for_surface(surfs[i]);
+         view.format = agx_g17p_rt0_pbe_format(view.format);
+         const bool no_compress =
+            batch->feedback & (PIPE_CLEAR_COLOR0 << rts[i]);
+         if (!agx_batch_upload_pbe(
+                batch, agx_pbe_descriptor_at(pbe.cpu, descriptor_size, i),
+                &view, true, true, false, no_compress))
+            agx_native_descriptor_rejected(dev, "mixed MRT end-of-tile PBE");
+      }
+
+      const struct agx3_g17p_rt0_eot_program_desc desc = {
+         .program_va = program_ptr.gpu,
+         .shader_va = shader->ptr + shader->info.main_offset,
+         .pbe_argument_va = pbe.gpu,
+         .imageblock_offset_B = key.tib._offset_B[0],
+         .attachment_count = count,
+         .imageblock_offset1_B = key.tib._offset_B[1],
+         .imageblock_offset2_B = key.tib._offset_B[2],
+         .imageblock_offset3_B = key.tib._offset_B[3],
+         .imageblock_offset4_B = key.tib._offset_B[4],
+         .imageblock_offset5_B = key.tib._offset_B[5],
+         .imageblock_offset6_B = key.tib._offset_B[6],
+         .imageblock_offset7_B = key.tib._offset_B[7],
+         .mixed_mrt = count > 1,
+         .shader_binary_size = shader->info.binary_size,
+         .scratch_size = shader->info.scratch_size,
+         .nr_gprs = shader->info.nr_gprs,
+         .staging_halfs = shader->info.agx3_staging_known
+                             ? shader->info.agx3_staging_halfs
+                             : 0,
+         .imageblock = imageblock,
+      };
+      struct agx3_g17p_rt0_eot_program native;
+      if (!agx3_g17p_rt0_eot_program_generate(dev->chip, &desc, &native) ||
+          native.length > capacity)
+         agx_native_descriptor_rejected(dev, "mixed MRT end-of-tile program");
+      memcpy(program_ptr.cpu, native.bytes, native.length);
+      program_length = native.length;
+      resource_spec = AGX_IOTO_G17P_EOT_RESOURCE_SPEC;
+   } else {
+      struct agx3_g17p_rt0_bg_program_desc desc = {
+         .program_va = program_ptr.gpu,
+         .shader_va = shader->ptr + shader->info.main_offset,
+         .shader_binary_size = shader->info.binary_size,
+         .scratch_size = shader->info.scratch_size,
+         .nr_gprs = shader->info.nr_gprs,
+         .staging_halfs = shader->info.agx3_staging_halfs,
+         .clear_push_halfs = shader->info.push_count,
+         .clear_start_halfs = 4 + 8 * reloads,
+         .staging_known = shader->info.agx3_staging_known,
+         .op = bg_op,
+         .imageblock = imageblock,
+      };
+
+      if (clears) {
+         union pipe_color_union clear_values[PIPE_MAX_COLOR_BUFS];
+         for (unsigned i = reloads; i < count; ++i) {
+            if (!batch->uploaded_clear_color[rts[i]])
+               agx_native_descriptor_rejected(dev, "mixed MRT clear value");
+            clear_values[i - reloads] = batch->clear_color[rts[i]];
+         }
+         desc.clear_value_va = agx_pool_upload_aligned(
+            &batch->pool, clear_values,
+            sizeof(clear_values[0]) * (count - reloads), 16);
+         if (!desc.clear_value_va)
+            agx_native_descriptor_rejected(dev, "mixed MRT clear upload");
+      }
+
+      if (reloads) {
+         /* Reload n reads native texture index 2n; the odd entries stay
+          * zero. */
+         const size_t texture_size = descriptor_size * (2 * reloads - 1);
+         struct agx_ptr textures =
+            agx_pool_alloc_aligned(&batch->pool, texture_size, 64);
+         memset(textures.cpu, 0, texture_size);
+         for (unsigned i = 0; i < reloads; ++i) {
+            struct pipe_sampler_view sampler_view =
+               sampler_view_for_surface(surfs[i]);
+            if (!agx_pack_texture(
+                   descriptor_generation,
+                   agx_texture_descriptor_at(textures.cpu, descriptor_size,
+                                             2 * i),
+                   agx_resource(surfs[i]->texture), surfs[i]->format,
+                   &sampler_view))
+               agx_native_descriptor_rejected(dev, "mixed MRT texture");
+         }
+
+         const unsigned sampler_size =
+            agx_chip_sampler_heap_element_size(dev->chip);
+         if (sampler_size != AGX_GALLIUM_SAMPLER_AGX3_SIZE)
+            agx_native_descriptor_rejected(dev, "mixed MRT sampler geometry");
+         struct agx_ptr sampler =
+            agx_pool_alloc_aligned(&batch->pool, sampler_size, 64);
+         if (!agx_gallium_pack_g17p_txf_sampler(dev->chip, sampler.cpu))
+            agx_native_descriptor_rejected(dev, "mixed MRT sampler");
+
+         const uint64_t pointers[2] = {textures.gpu, sampler.gpu};
+         const uint64_t table = agx_pool_upload_aligned(
+            &batch->pool, pointers, sizeof(pointers), 8);
+         desc.texture_pointer_va = table;
+         desc.sampler_pointer_va = table + sizeof(uint64_t);
+      }
+
+      struct agx3_g17p_rt0_bg_program native;
+      if (!agx3_g17p_rt0_bg_program_generate(dev->chip, &desc, &native) ||
+          native.length > capacity ||
+          !agx3_g17p_rt0_bg_resource_spec(dev->chip, bg_op, &resource_spec))
+         agx_native_descriptor_rejected(dev, "mixed MRT background program");
+      memcpy(program_ptr.cpu, native.bytes, native.length);
+      program_length = native.length;
+   }
+
+   if (agx_bo_sync_for_device(program_bo,
+                              program_ptr.gpu - program_bo->va->addr,
+                              program_length))
+      agx_native_descriptor_rejected(dev, "mixed MRT program upload");
+
+   return (struct asahi_bg_eot){
+      .usc = agx_usc_addr(dev, program_ptr.gpu),
+      .rsrc_spec = resource_spec,
+   };
+}
+
 struct asahi_bg_eot
 agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
 {
@@ -4608,10 +4851,12 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
             ((rt == 1 && dual_mrt) || (rgba8_mask & BITFIELD_BIT(rt))) &&
             (store ? rt_op == AGX_EOT_STORE
                    : (rt_op == AGX_BG_CLEAR || rt_op == AGX_BG_LOAD));
-         if (rt_op != AGX_BG_EOT_NONE && !rt1_supported)
-            agx_native_descriptor_rejected(dev, "background MRT program");
-         if ((rgba8_mask & BITFIELD_BIT(rt)) && rt_op != op)
-            agx_native_descriptor_rejected(dev, "mixed wide background operation");
+         /* Anything the dedicated programs cannot express -- mixed
+          * formats, or targets that do not share one operation -- takes
+          * the general mixed-format programs. */
+         if ((rt_op != AGX_BG_EOT_NONE && !rt1_supported) ||
+             ((rgba8_mask & BITFIELD_BIT(rt)) && rt_op != op))
+            return agx_g17p_build_mixed_bg_eot(batch, &key, store);
       }
 
       const bool dual_mrt_active = dual_mrt &&
@@ -4623,7 +4868,7 @@ agx_build_bg_eot(struct agx_batch *batch, bool store, bool partial_render)
       const unsigned slot_count =
          rgba8_mask ? util_last_bit(rgba8_mask) : attachment_count;
       if (dual_mrt_active && key.op[1] != op)
-         agx_native_descriptor_rejected(dev, "mixed background MRT operation");
+         return agx_g17p_build_mixed_bg_eot(batch, &key, store);
       if (store ? (op != AGX_EOT_STORE && op != AGX_BG_EOT_NONE)
                 : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD &&
                    op != AGX_BG_EOT_NONE))
