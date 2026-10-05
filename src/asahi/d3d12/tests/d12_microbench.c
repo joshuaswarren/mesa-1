@@ -14,10 +14,14 @@
  * (wall time from ExecuteCommandLists to fence completion) and never mixed
  * into a CPU figure.
  *
- * Usage: d3d12agx_microbench tri.dxil solid.dxil res_probe.dxil [--only NAME]
+ * Usage: d3d12agx_microbench tri.dxil solid.dxil res_probe.dxil [tex_probe.dxil]
+ *        [--only NAME]
  *
+ * With tex_probe.dxil a texture descriptor table over a 65536-slot heap is
+ * measured too (dispatch_texture).
  * --only restricts the recording benchmarks to one mode (plain, rootconst,
- * viewport, psotoggle, dispatch, dispatch_table) for profiling runs; the
+ * viewport, psotoggle, dispatch, dispatch_table, dispatch_miss,
+ * dispatch_texture) for profiling runs; the
  * rest of the metrics are then reported as zero.
  *
  * The last stdout line is "MICROBENCH_JSON {...}" with every metric, so a
@@ -186,7 +190,16 @@ struct bench {
    D3D12_CPU_DESCRIPTOR_HANDLE rtv;
    ID3D12DescriptorHeap *cbv_heap;
    D3D12_GPU_DESCRIPTOR_HANDLE table_a, table_b;
+   D3D12_GPU_DESCRIPTOR_HANDLE tables[8];
+   /* Texture descriptor table over a large shader-visible heap. */
+   ID3D12DescriptorHeap *tex_heap;
+   ID3D12RootSignature *rs_tex;
+   ID3D12PipelineState *pso_tex;
+   D3D12_GPU_DESCRIPTOR_HANDLE tex_a, tex_b;
 };
+
+#define TEX_HEAP_SLOTS 65536
+#define TEX_DISPATCHES 256
 
 static HRESULT
 wait_idle(struct bench *b)
@@ -294,9 +307,11 @@ record_draw_list(struct bench *b, enum draw_mode mode, double *setup_ns,
    return true;
 }
 
+/* ways == 0: one table for every dispatch; 2: alternate two tables (binding
+ * cache hits); 8: cycle eight tables, more than the cache holds, so every
+ * dispatch takes the binding upload miss path. */
 static bool
-record_dispatch_list(struct bench *b, bool alternate_tables,
-                     double *per_dispatch_ns)
+record_dispatch_list(struct bench *b, unsigned ways, double *per_dispatch_ns)
 {
    HRESULT hr = ID3D12CommandAllocator_Reset(b->calloc_);
    if (hr != S_OK)
@@ -313,9 +328,9 @@ record_dispatch_list(struct bench *b, bool alternate_tables,
 
    double t1 = now_ns();
    for (unsigned i = 0; i < DISPATCHES_PER_LIST; i++) {
-      if (alternate_tables)
+      if (ways)
          ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(
-            b->clist, 0, (i & 1) ? b->table_b : b->table_a);
+            b->clist, 0, b->tables[i % ways]);
       ID3D12GraphicsCommandList_Dispatch(b->clist, 1, 1, 1);
    }
    double t2 = now_ns();
@@ -328,15 +343,56 @@ record_dispatch_list(struct bench *b, bool alternate_tables,
    return true;
 }
 
+/* Dispatches reading a Texture2D through a descriptor table placed at the
+ * start of a 65536-slot shader-visible heap, alternating two tables so every
+ * dispatch misses the binding cache. A driver that copies descriptors "to
+ * the end of the bound heap" on a miss pays for all 65536 here. */
+static bool
+record_texture_dispatch_list(struct bench *b, double *per_dispatch_ns)
+{
+   HRESULT hr = ID3D12CommandAllocator_Reset(b->calloc_);
+   if (hr != S_OK)
+      return false;
+   hr = ID3D12GraphicsCommandList_Reset(b->clist, b->calloc_, NULL);
+   if (hr != S_OK)
+      return false;
+
+   ID3D12GraphicsCommandList_SetDescriptorHeaps(b->clist, 1, &b->tex_heap);
+   ID3D12GraphicsCommandList_SetComputeRootSignature(b->clist, b->rs_tex);
+   ID3D12GraphicsCommandList_SetPipelineState(b->clist, b->pso_tex);
+
+   double t1 = now_ns();
+   for (unsigned i = 0; i < TEX_DISPATCHES; i++) {
+      ID3D12GraphicsCommandList_SetComputeRootDescriptorTable(
+         b->clist, 0, (i & 1) ? b->tex_b : b->tex_a);
+      ID3D12GraphicsCommandList_Dispatch(b->clist, 4, 1, 1);
+   }
+   double t2 = now_ns();
+   hr = ID3D12GraphicsCommandList_Close(b->clist);
+   if (hr != S_OK) {
+      printf("       texture compute Close failed: 0x%08x\n", (unsigned)hr);
+      return false;
+   }
+   *per_dispatch_ns = (t2 - t1) / TEX_DISPATCHES;
+   return true;
+}
+
 int
 main(int argc, char **argv)
 {
    if (argc < 4) {
       fprintf(stderr, "usage: %s tri.dxil solid.dxil res_probe.dxil "
-                      "[--only MODE]\n", argv[0]);
+                      "[tex_probe.dxil] [--only MODE]\n", argv[0]);
       return 2;
    }
-   const char *only = argc >= 6 && !strcmp(argv[4], "--only") ? argv[5] : NULL;
+   const char *only = NULL;
+   const char *tex_path = NULL;
+   for (int i = 4; i < argc; i++) {
+      if (!strcmp(argv[i], "--only") && i + 1 < argc)
+         only = argv[++i];
+      else
+         tex_path = argv[i];
+   }
    /* "--only submit" skips the recording loops and runs the submit, reset
     * and round-trip measurements alone. */
    const bool only_submit = only && !strcmp(only, "submit");
@@ -348,6 +404,9 @@ main(int argc, char **argv)
    void *ps = slurp(argv[2], &ps_size);
    void *cs = slurp(argv[3], &cs_size);
    REQUIRE(vs && ps && cs, "read shader bytecode");
+   size_t tex_cs_size = 0;
+   void *tex_cs = tex_path ? slurp(tex_path, &tex_cs_size) : NULL;
+   REQUIRE(!tex_path || tex_cs, "read texture shader bytecode");
 
    struct bench b = {0};
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
@@ -505,7 +564,7 @@ main(int argc, char **argv)
    /* --- Descriptor writes and copies --------------------------------- */
    D3D12_DESCRIPTOR_HEAP_DESC chd = {
       .Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
-      .NumDescriptors = DESCRIPTOR_COUNT + 8,
+      .NumDescriptors = DESCRIPTOR_COUNT + 24,
       .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
    };
    hr = ID3D12Device_CreateDescriptorHeap(b.dev, &chd, &IID_ID3D12DescriptorHeap,
@@ -527,7 +586,7 @@ main(int argc, char **argv)
    D3D12_CPU_DESCRIPTOR_HANDLE stg_cpu =
       d12_test_descriptor_heap_get_cpu_start(staging);
 
-   /* Two complete tables at the end of the visible heap. */
+   /* Eight complete tables at the end of the visible heap. */
    const unsigned table_base = DESCRIPTOR_COUNT;
    D3D12_SHADER_RESOURCE_VIEW_DESC srv = {
       .Format = DXGI_FORMAT_UNKNOWN,
@@ -544,7 +603,7 @@ main(int argc, char **argv)
       .BufferLocation = ID3D12Resource_GetGPUVirtualAddress(cb),
       .SizeInBytes = 256,
    };
-   for (unsigned t = 0; t < 2; t++) {
+   for (unsigned t = 0; t < 8; t++) {
       D3D12_CPU_DESCRIPTOR_HANDLE h = {
          .ptr = vis_cpu.ptr + (table_base + 3 * t) * inc};
       ID3D12Device_CreateShaderResourceView(b.dev, src, &srv, h);
@@ -552,9 +611,10 @@ main(int argc, char **argv)
       ID3D12Device_CreateUnorderedAccessView(b.dev, dst, NULL, &uav, h);
       h.ptr += inc;
       ID3D12Device_CreateConstantBufferView(b.dev, &cbv, h);
+      b.tables[t].ptr = vis_gpu.ptr + (table_base + 3 * t) * inc;
    }
-   b.table_a.ptr = vis_gpu.ptr + table_base * inc;
-   b.table_b.ptr = vis_gpu.ptr + (table_base + 3) * inc;
+   b.table_a = b.tables[0];
+   b.table_b = b.tables[1];
 
    const UINT64 cb_big_va = ID3D12Resource_GetGPUVirtualAddress(cb_big);
    double t0 = now_ns();
@@ -657,37 +717,160 @@ main(int argc, char **argv)
              mode_names[m], best, setup / 1e3, close / 1e3, DRAWS_PER_LIST);
    }
 
-   double dispatch_ns = 0, dispatch_table_ns = 0;
+   double dispatch_ns = 0, dispatch_table_ns = 0, dispatch_miss_ns = 0;
    for (unsigned r = 0; r < RECORD_REPEATS; r++) {
       double d;
       if (!only || !strcmp(only, "dispatch")) {
-         REQUIRE(record_dispatch_list(&b, false, &d), "record dispatch list");
+         REQUIRE(record_dispatch_list(&b, 0, &d), "record dispatch list");
          if (!r || d < dispatch_ns)
             dispatch_ns = d;
       }
       if (!only || !strcmp(only, "dispatch_table")) {
-         REQUIRE(record_dispatch_list(&b, true, &d),
+         REQUIRE(record_dispatch_list(&b, 2, &d),
                  "record dispatch list (tables)");
          if (!r || d < dispatch_table_ns)
             dispatch_table_ns = d;
       }
+      if (!only || !strcmp(only, "dispatch_miss")) {
+         REQUIRE(record_dispatch_list(&b, 8, &d),
+                 "record dispatch list (8 tables)");
+         if (!r || d < dispatch_miss_ns)
+            dispatch_miss_ns = d;
+      }
    }
-   if (only && !only_submit) {
-      printf("record dispatch %7.0f ns/dispatch, with table switch %.0f ns\n",
-             dispatch_ns, dispatch_table_ns);
+   if (only && !only_submit && strcmp(only, "dispatch_texture")) {
+      printf("record dispatch %7.0f ns/dispatch, with table switch %.0f ns, "
+             "table miss %.0f ns\n",
+             dispatch_ns, dispatch_table_ns, dispatch_miss_ns);
       printf("MICROBENCH_JSON {\"only\": \"%s\", \"record_ns_per_draw\": %.0f, "
              "\"record_ns_per_draw_rootconst\": %.0f, "
              "\"record_ns_per_draw_viewport\": %.0f, "
              "\"record_ns_per_draw_psotoggle\": %.0f, "
              "\"record_ns_per_dispatch\": %.0f, "
-             "\"record_ns_per_dispatch_table\": %.0f}\n",
+             "\"record_ns_per_dispatch_table\": %.0f, "
+             "\"record_ns_per_dispatch_miss\": %.0f}\n",
              only, draw_ns[0], draw_ns[1], draw_ns[2], draw_ns[3], dispatch_ns,
-             dispatch_table_ns);
+             dispatch_table_ns, dispatch_miss_ns);
       return 0;
    }
    if (!only_submit)
-      printf("record dispatch %7.0f ns/dispatch, with table switch %.0f ns\n",
-             dispatch_ns, dispatch_table_ns);
+      printf("record dispatch %7.0f ns/dispatch, with table switch %.0f ns, "
+             "table miss %.0f ns\n",
+             dispatch_ns, dispatch_table_ns, dispatch_miss_ns);
+
+   /* --- Texture table over a large heap --------------------------------- */
+   double dispatch_tex_ns = 0, execute_call_tex_us = 0, gpu_wall_tex_ms = 0;
+   ID3D12Resource *tex = NULL, *tex_out = NULL;
+   if (tex_cs && (!only || !strcmp(only, "dispatch_texture"))) {
+      D3D12_DESCRIPTOR_RANGE tranges[2] = {
+         {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_SRV, .NumDescriptors = 1,
+          .BaseShaderRegister = 0,
+          .OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
+         {.RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV, .NumDescriptors = 1,
+          .BaseShaderRegister = 0,
+          .OffsetInDescriptorsFromTableStart = D3D12_DESCRIPTOR_RANGE_OFFSET_APPEND},
+      };
+      D3D12_ROOT_PARAMETER ttable = {
+         .ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE,
+         .DescriptorTable = {.NumDescriptorRanges = 2,
+                             .pDescriptorRanges = tranges},
+         .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL,
+      };
+      b.rs_tex = make_root_sig(b.dev, &ttable, 1);
+      REQUIRE(b.rs_tex, "texture-table root signature");
+      D3D12_COMPUTE_PIPELINE_STATE_DESC tcd = {
+         .pRootSignature = b.rs_tex,
+         .CS = {.pShaderBytecode = tex_cs, .BytecodeLength = tex_cs_size},
+      };
+      hr = ID3D12Device_CreateComputePipelineState(
+         b.dev, &tcd, &IID_ID3D12PipelineState, (void **)&b.pso_tex);
+      REQUIRE(hr == S_OK, "CreateComputePipelineState (texture)");
+
+      D3D12_HEAP_PROPERTIES def_heap = {.Type = D3D12_HEAP_TYPE_DEFAULT,
+                                        .CreationNodeMask = 1,
+                                        .VisibleNodeMask = 1};
+      D3D12_RESOURCE_DESC ttd = {
+         .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+         .Width = 16,
+         .Height = 16,
+         .DepthOrArraySize = 1,
+         .MipLevels = 1,
+         .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+         .SampleDesc = {.Count = 1},
+         .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+      };
+      hr = ID3D12Device_CreateCommittedResource(
+         b.dev, &def_heap, D3D12_HEAP_FLAG_NONE, &ttd,
+         D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
+         (void **)&tex);
+      REQUIRE(hr == S_OK, "create 16x16 texture");
+      tex_out = make_buffer(b.dev, 256 * 4,
+                            D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS);
+      REQUIRE(tex_out, "create texture-probe output");
+
+      D3D12_DESCRIPTOR_HEAP_DESC thd = {
+         .Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+         .NumDescriptors = TEX_HEAP_SLOTS,
+         .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+      };
+      hr = ID3D12Device_CreateDescriptorHeap(
+         b.dev, &thd, &IID_ID3D12DescriptorHeap, (void **)&b.tex_heap);
+      REQUIRE(hr == S_OK, "create 65536-slot shader-visible heap");
+      D3D12_CPU_DESCRIPTOR_HANDLE tcpu =
+         d12_test_descriptor_heap_get_cpu_start(b.tex_heap);
+      D3D12_GPU_DESCRIPTOR_HANDLE tgpu =
+         d12_test_descriptor_heap_get_gpu_start(b.tex_heap);
+      D3D12_SHADER_RESOURCE_VIEW_DESC tsrv = {
+         .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+         .ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D,
+         .Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING,
+         .Texture2D = {.MipLevels = 1},
+      };
+      D3D12_UNORDERED_ACCESS_VIEW_DESC tuav = {
+         .Format = DXGI_FORMAT_UNKNOWN,
+         .ViewDimension = D3D12_UAV_DIMENSION_BUFFER,
+         .Buffer = {.NumElements = 256, .StructureByteStride = 4},
+      };
+      for (unsigned t = 0; t < 2; t++) {
+         D3D12_CPU_DESCRIPTOR_HANDLE h = {.ptr = tcpu.ptr + 2 * t * inc};
+         ID3D12Device_CreateShaderResourceView(b.dev, tex, &tsrv, h);
+         h.ptr += inc;
+         ID3D12Device_CreateUnorderedAccessView(b.dev, tex_out, NULL, &tuav,
+                                                h);
+      }
+      b.tex_a.ptr = tgpu.ptr;
+      b.tex_b.ptr = tgpu.ptr + 2 * inc;
+
+      for (unsigned r = 0; r < RECORD_REPEATS; r++) {
+         double d;
+         REQUIRE(record_texture_dispatch_list(&b, &d),
+                 "record texture dispatch list");
+         if (!r || d < dispatch_tex_ns)
+            dispatch_tex_ns = d;
+      }
+      ID3D12CommandList *tlists[] = {(ID3D12CommandList *)b.clist};
+      double te0 = now_ns();
+      ID3D12CommandQueue_ExecuteCommandLists(b.queue, 1, tlists);
+      double te1 = now_ns();
+      hr = wait_idle(&b);
+      double te2 = now_ns();
+      REQUIRE(hr == S_OK, "texture dispatch list executes and signals");
+      execute_call_tex_us = (te1 - te0) / 1e3;
+      gpu_wall_tex_ms = (te2 - te0) / 1e6;
+      printf("record dispatch_tex %7.0f ns/dispatch (texture table in a "
+             "%u-slot heap, %u dispatches); execute call %.1f us, fence "
+             "after %.2f ms\n",
+             dispatch_tex_ns, TEX_HEAP_SLOTS, TEX_DISPATCHES,
+             execute_call_tex_us, gpu_wall_tex_ms);
+   }
+   if (only && !strcmp(only, "dispatch_texture")) {
+      printf("MICROBENCH_JSON {\"only\": \"%s\", "
+             "\"record_ns_per_dispatch_texture\": %.0f, "
+             "\"execute_call_us_texture\": %.2f, "
+             "\"gpu_wall_ms_texture\": %.3f}\n",
+             only, dispatch_tex_ns, execute_call_tex_us, gpu_wall_tex_ms);
+      return 0;
+   }
 
    /* --- Submit: CPU cost of ExecuteCommandLists and GPU wall time ---- */
    double s, d, c;
@@ -705,7 +888,7 @@ main(int argc, char **argv)
    printf("submit ExecuteCommandLists(20k draws) call %.1f us, fence after %.2f ms\n",
           execute_call_us, gpu_wall_ms);
 
-   REQUIRE(record_dispatch_list(&b, true, &d),
+   REQUIRE(record_dispatch_list(&b, 2, &d),
            "record 20k-dispatch list for submission");
    ID3D12CommandList *clists[] = {(ID3D12CommandList *)b.clist};
    e0 = now_ns();
@@ -787,21 +970,25 @@ main(int argc, char **argv)
           "\"record_ns_per_draw_viewport\": %.0f, \"record_ns_per_draw_psotoggle\": %.0f, "
           "\"record_list_setup_us\": %.2f, \"record_list_close_us\": %.2f, "
           "\"record_ns_per_dispatch\": %.0f, \"record_ns_per_dispatch_table\": %.0f, "
+          "\"record_ns_per_dispatch_miss\": %.0f, "
           "\"descriptor_cbv_write_ns\": %.0f, \"descriptor_cbv_write_visible_ns\": %.0f, "
           "\"descriptor_copy_bulk_ns\": %.0f, \"descriptor_copy_single_ns\": %.0f, "
           "\"empty_list_cycle_us\": %.2f, \"reset_after_submit_us\": %.2f, "
           "\"execute_call_us_20k_draws\": %.2f, \"gpu_wall_ms_20k_draws\": %.3f, "
           "\"execute_call_us_20k_dispatches\": %.2f, \"gpu_wall_ms_20k_dispatches\": %.3f, "
           "\"roundtrip_us_min\": %.1f, \"roundtrip_us_median\": %.1f, \"roundtrip_us_p95\": %.1f, "
+          "\"record_ns_per_dispatch_texture\": %.0f, \"execute_call_us_texture\": %.2f, "
+          "\"gpu_wall_ms_texture\": %.3f, "
           "\"failures\": %u}\n",
           pso_gfx_first_ms, pso_gfx_median_ms, pso_cs_first_ms, pso_cs_median_ms,
           draw_ns[0], draw_ns[1], draw_ns[2], draw_ns[3],
           setup_ns_best[0] / 1e3, close_ns_best[0] / 1e3,
-          dispatch_ns, dispatch_table_ns,
+          dispatch_ns, dispatch_table_ns, dispatch_miss_ns,
           cbv_write_staging_ns, cbv_write_visible_ns, copy_bulk_ns, copy_single_ns,
           empty_list_us, reset_after_submit_us,
           execute_call_us, gpu_wall_ms, execute_call_cs_us, gpu_wall_cs_ms,
-          rt_min_us, rt_median_us, rt_p95_us, failures);
+          rt_min_us, rt_median_us, rt_p95_us,
+          dispatch_tex_ns, execute_call_tex_us, gpu_wall_tex_ms, failures);
 
    ID3D12GraphicsCommandList_Release(b.list);
    ID3D12GraphicsCommandList_Release(b.clist);
@@ -818,6 +1005,17 @@ main(int argc, char **argv)
    ID3D12PipelineState_Release(b.pso_tri);
    ID3D12PipelineState_Release(b.pso_tri_consts);
    ID3D12PipelineState_Release(b.pso_cs);
+   if (b.pso_tex)
+      ID3D12PipelineState_Release(b.pso_tex);
+   if (b.rs_tex)
+      ID3D12RootSignature_Release(b.rs_tex);
+   if (b.tex_heap)
+      ID3D12DescriptorHeap_Release(b.tex_heap);
+   if (tex)
+      ID3D12Resource_Release(tex);
+   if (tex_out)
+      ID3D12Resource_Release(tex_out);
+   free(tex_cs);
    ID3D12RootSignature_Release(b.rs_empty);
    ID3D12RootSignature_Release(b.rs_consts);
    ID3D12RootSignature_Release(b.rs_table);
