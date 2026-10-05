@@ -104,6 +104,28 @@ then real titles; pass/fail and frame time recorded against the current tool.
 * `install-proton-tool.sh --refresh` swaps a rebuilt pair + wrapper into the
   installed tool; `SUITE_ONLY` splits the 17 suites into short batches so an
   exclusive hardware request stays under ten minutes.
+* **Steam's `run` verb vs vkd3d-proton.** `runinprefix` skips Proton's prefix
+  setup, so under the current tool it silently used Wine's own d3d12 rather
+  than vkd3d-proton; the runner now uses `run`, like Steam. Under `run`,
+  Proton copies the tool's `vkd3d-proton/<arch>/d3d12.dll` into the prefix
+  (a fatal `FileNotFoundError` when the file is missing) and appends
+  `d3d12=n` to `WINEDLLOVERRIDES`; the last setting wins in Wine's load-order
+  parser and Wine 11 refuses a builtin-signed d3d12 under a native override
+  (`dlls/ntdll/unix/loader.c load_builtin`: `wine_builtin && LO_NATIVE ->
+  STATUS_DLL_NOT_FOUND`). The experimental tool therefore carries a 5-line
+  patch to its own copy of `proton` (hard link to the source tool broken
+  first): with `PROTON_USE_D3D12AGX=1`, exported by the wrapper, no
+  vkd3d-proton files are installed and `d3d12`/`d3d12core` are forced
+  builtin. Prefixes previously created by the vkd3d-proton tool keep their
+  native `system32/d3d12.dll`; with `d3d12=b` Wine still resolves the builtin
+  from `aarch64-windows/`, so switching a game's tool works without
+  recreating the prefix.
+* **No headless runs.** Without a display Wine's explorer cannot start
+  (`nodrv_CreateWindow`) and the first user32 call hangs, even for the
+  console suites (the `steam.exe` shim and conhost touch the desktop). The
+  tests need the `user` graphical session; the harness waits for it.
+* The test exes must be linked `-static`: llvm-mingw otherwise imports
+  `libc++.dll`/`libunwind.dll`, which no prefix has (STATUS_DLL_NOT_FOUND).
 
 ## Risks / open
 * ARM64EC Mesa build has never been done: expect a few compiler/ABI fixes.
