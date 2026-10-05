@@ -12212,6 +12212,15 @@ d12_list_Close(ID3D12GraphicsCommandList6 *iface)
    if (!errored)
       d12_list_close_cdm(list);
 
+   /* Closing the last segment can itself fail (terminator encoding, VDM
+    * storage allocation, or BO synchronization). Do not overwrite that
+    * failure with CLOSED/S_OK and let the queue execute an incomplete stream.
+    */
+   if (list->state == D12_LIST_ERROR) {
+      errored = true;
+      list->had_error = true;
+   }
+
    list->state = D12_LIST_CLOSED;
 
    if (list->allocator && list->allocator->recording_lists)
