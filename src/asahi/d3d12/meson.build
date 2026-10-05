@@ -298,6 +298,14 @@ if d12_is_windows
   endif
 endif
 
+# CPU-side microbenchmark: record/submit cost, descriptor writes, PSO creation.
+d3d12agx_microbench = executable(
+  'd3d12agx_microbench',
+  files('tests/d12_microbench.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_g1_smoke = executable(
   'd3d12agx_g1_smoke',
   files('tests/g1_smoke.c'),
