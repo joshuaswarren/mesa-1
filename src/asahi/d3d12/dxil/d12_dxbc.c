@@ -3579,8 +3579,46 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          break;
       }
 
-      /* Everything else is operands. */
-      while (avail && nops < D12_DXBC_MAX_OPERANDS) {
+      /* Texture instructions have a fixed operand count. fxc can include
+       * zero padding inside the encoded instruction length (notably
+       * sample_l_s). Decoding that padding as a TEMP operand made the last
+       * source become r0 instead of the explicit LOD. Match the public
+       * formats audited against DXVK's dxbc_defs.cpp, and reject unknown
+       * nonzero payload rather than inventing another operand. */
+      unsigned operand_limit = D12_DXBC_MAX_OPERANDS;
+      switch (opcode) {
+      case D12_DXBC_OP_LD:
+      case D12_DXBC_OP_LD_RAW:
+      case D12_DXBC_OP_LD_UAV_TYPED: operand_limit = 3; break;
+      case D12_DXBC_OP_SAMPLE:
+      case D12_DXBC_OP_GATHER4:
+      case D12_DXBC_OP_LD_MS:
+      case D12_DXBC_OP_LD_STRUCTURED:
+      case D12_DXBC_OP_LD_S:
+      case D12_DXBC_OP_LD_RAW_S:
+      case D12_DXBC_OP_LD_UAV_TYPED_S: operand_limit = 4; break;
+      case D12_DXBC_OP_SAMPLE_C:
+      case D12_DXBC_OP_SAMPLE_C_LZ:
+      case D12_DXBC_OP_SAMPLE_L:
+      case D12_DXBC_OP_SAMPLE_B:
+      case D12_DXBC_OP_GATHER4_C:
+      case D12_DXBC_OP_GATHER4_PO:
+      case D12_DXBC_OP_GATHER4_S:
+      case D12_DXBC_OP_LD_MS_S:
+      case D12_DXBC_OP_LD_STRUCTURED_S: operand_limit = 5; break;
+      case D12_DXBC_OP_SAMPLE_D:
+      case D12_DXBC_OP_GATHER4_PO_C:
+      case D12_DXBC_OP_GATHER4_C_S:
+      case D12_DXBC_OP_GATHER4_PO_S:
+      case D12_DXBC_OP_SAMPLE_L_S:
+      case D12_DXBC_OP_SAMPLE_C_LZ_S:
+      case D12_DXBC_OP_SAMPLE_CLAMP_S: operand_limit = 6; break;
+      case D12_DXBC_OP_GATHER4_PO_C_S:
+      case D12_DXBC_OP_SAMPLE_B_CLAMP_S:
+      case D12_DXBC_OP_SAMPLE_C_CLAMP_S: operand_limit = 7; break;
+      default: break;
+      }
+      while (avail && nops < operand_limit) {
          unsigned n = decode_operand(ctx, args, avail, &o[nops]);
          if (!n) {
             fail(ctx, "malformed operand");
@@ -3589,6 +3627,15 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          args += n;
          avail -= n;
          nops++;
+      }
+      if (operand_limit != D12_DXBC_MAX_OPERANDS) {
+         while (avail) {
+            if (*args++) {
+               fail(ctx, "nonzero payload after texture operands");
+               return;
+            }
+            avail--;
+         }
       }
 
 #define SRC(i) read_src(ctx, &o[i])

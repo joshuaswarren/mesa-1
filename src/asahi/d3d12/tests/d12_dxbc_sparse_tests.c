@@ -80,7 +80,7 @@ check(unsigned opcode, bool null_clamp, bool null_feedback, bool buffer)
    if (!load)
       reg(&t, 0x0010600a, 0); /* s0.x (gather component) */
    if (compare || opcode == 228 || opcode == 224 || opcode == 231)
-      immediate(&t, 0);
+      immediate(&t, opcode == 228 ? 0x3fa00000 : 0);
    if (opcode == 232) {
       immediate(&t, 0x3c800000);
       immediate(&t, 0x3c800000);
@@ -91,6 +91,8 @@ check(unsigned opcode, bool null_clamp, bool null_feedback, bool buffer)
       else
          immediate(&t, 0x3fa00000); /* explicit minimum LOD 1.25 */
    }
+   if (opcode == 228 && null_clamp)
+      word(&t, 0); /* fxc's length includes this padding word. */
    t.words[start] |= (t.count - start) << 24;
    if (!null_feedback) {
       word(&t, 0x050000ea); /* check_access_fully_mapped o1, r1.x */
@@ -110,6 +112,7 @@ check(unsigned opcode, bool null_clamp, bool null_feedback, bool buffer)
    if (!shader)
       fprintf(stderr, "opcode %u: %s\n", opcode, error);
    assert(shader);
+   while (nir_opt_constant_folding(shader)) {}
    unsigned textures = 0, residency_checks = 0, min_lods = 0;
    nir_foreach_function_impl(impl, shader) {
       nir_foreach_block(block, impl) {
@@ -120,6 +123,11 @@ check(unsigned opcode, bool null_clamp, bool null_feedback, bool buffer)
                assert(tex->def.num_components == (null_feedback || buffer ? 4 : 5));
                textures++;
                min_lods += nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0;
+               if (opcode == 228) {
+                  int lod = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+                  assert(lod >= 0 && nir_src_is_const(tex->src[lod].src));
+                  assert(nir_src_as_float(tex->src[lod].src) == 1.25f);
+               }
             } else if (instr->type == nir_instr_type_intrinsic) {
                nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
                residency_checks += intr->intrinsic == nir_intrinsic_is_sparse_texels_resident;
