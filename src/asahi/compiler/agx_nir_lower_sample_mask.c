@@ -472,6 +472,61 @@ demoted_lanes_reach_quad_ops(nir_shader *shader)
    return false;
 }
 
+/* Non-quad subgroup operations, whose active set must not lose demoted
+ * lanes earlier than the deferred lowering would. */
+static bool
+subgroup_instr(const nir_instr *instr)
+{
+   if (instr->type != nir_instr_type_intrinsic)
+      return false;
+   /* Quad operations are also flagged SUBGROUP; they only read their own
+    * quad, which a dead-quad kill never leaves partially alive. */
+   const unsigned flags =
+      nir_intrinsic_infos[nir_instr_as_intrinsic(instr)->intrinsic].flags;
+   return (flags & NIR_INTRINSIC_SUBGROUP) &&
+          !(flags & NIR_INTRINSIC_QUADGROUP);
+}
+
+/* Whether every active lane of the quad has all samples in `killed`.
+ * Spelled with the AGX quad ballot directly (subgroup lowering has already
+ * run when hk lowers discards) and as a compare against zero, the quad
+ * ballot form G17P encodes. */
+static nir_def *
+quad_fully_killed(nir_builder *b, nir_def *killed)
+{
+   nir_def *all = nir_imm_intN_t(b, ALL_SAMPLES, 16);
+   nir_def *missing = nir_ixor(b, nir_iand(b, killed, all), all);
+   return nir_ieq_imm(b, nir_quad_ballot_agx(b, 16, nir_ine_imm(b, missing, 0)),
+                      0);
+}
+
+/*
+ * A fully demoted quad has no live lane left to read its helper values, so
+ * nothing observes whether it keeps running. Once the accumulated kill mask
+ * covers every sample of every active lane of a quad, kill those samples
+ * right away (kill only: demoted samples are never tested) instead of
+ * running the rest of the shader for them. Partially demoted quads keep
+ * their demoted lanes as helpers until the deferred coverage update; a
+ * rasterizer helper lane counts as dead only if it demoted too. Shaders with
+ * non-quad subgroup operations keep every demoted lane, since those lanes
+ * would leave the active set early. The vote runs in top-level control
+ * flow, after the node that demoted, where every non-killed lane of the quad
+ * is active.
+ */
+static void
+kill_dead_quads(nir_function_impl *impl, nir_variable *killed)
+{
+   foreach_list_typed_safe(nir_cf_node, node, node, &impl->body) {
+      if (!cf_node_has(node, is_demote) || node->type == nir_cf_node_block)
+         continue;
+      nir_builder b = nir_builder_at(nir_after_cf_node(node));
+      nir_def *k = nir_load_var(&b, killed);
+      nir_def *dead = quad_fully_killed(&b, k);
+      nir_sample_mask_agx(&b, nir_bcsel(&b, dead, k, nir_imm_intN_t(&b, 0, 16)),
+                          nir_imm_intN_t(&b, 0, 16));
+   }
+}
+
 /*
  * Native G16G variant. A MOVMSK coverage update takes the killed lanes out of
  * the quad: derivatives and quad operations after a demote then read stale
@@ -524,8 +579,36 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
    };
    nir_store_var(&b, ctx.killed, nir_imm_intN_t(&b, 0, 16),
                  nir_component_mask(1));
+
    nir_shader_intrinsics_pass(shader, accumulate_demote,
                               nir_metadata_none, &ctx);
+
+   /* Unconditional top-level demotes are handled where they occur: their
+    * block continues in uniform control flow. */
+   if (!cf_list_has(&impl->body, subgroup_instr)) {
+      nir_foreach_block(block, impl) {
+         if (block->cf_node.parent != &impl->cf_node)
+            continue;
+         nir_foreach_instr_safe(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic ||
+                nir_instr_as_intrinsic(instr)->intrinsic !=
+                   nir_intrinsic_store_deref)
+               continue;
+            nir_intrinsic_instr *st = nir_instr_as_intrinsic(instr);
+            if (nir_intrinsic_get_var(st, 0) != ctx.killed ||
+                nir_src_is_const(st->src[1]))
+               continue;
+            nir_builder qb = nir_builder_at(nir_after_instr(instr));
+            nir_def *k = st->src[1].ssa;
+            nir_def *dead = quad_fully_killed(&qb, k);
+            nir_sample_mask_agx(&qb,
+                                nir_bcsel(&qb, dead, k,
+                                          nir_imm_intN_t(&qb, 0, 16)),
+                                nir_imm_intN_t(&qb, 0, 16));
+         }
+      }
+      kill_dead_quads(impl, ctx.killed);
+   }
 
    b.cursor = nir_after_impl(impl);
    nir_def *killed = nir_load_var(&b, ctx.killed);

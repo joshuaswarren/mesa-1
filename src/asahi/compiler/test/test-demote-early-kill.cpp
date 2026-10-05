@@ -118,8 +118,9 @@ build(enum shape s)
    return b.shader;
 }
 
-/* The deferred lowering appends the kill/test after all other work; the
- * immediate one places it where the discard was, ahead of the output. */
+/* The deferred lowering appends the test-triggering update after all other
+ * work; the immediate one places it where the discard was, ahead of the
+ * output. */
 static bool
 kill_is_early(nir_shader *s)
 {
@@ -129,7 +130,11 @@ kill_is_early(nir_shader *s)
          if (instr->type != nir_instr_type_intrinsic)
             continue;
          nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         if (intr->intrinsic == nir_intrinsic_sample_mask_agx)
+         /* The test-triggering coverage update; kill-only updates (dead
+          * quads) have a constant zero live mask. */
+         if (intr->intrinsic == nir_intrinsic_sample_mask_agx &&
+             !(nir_src_is_const(intr->src[1]) &&
+               nir_src_as_uint(intr->src[1]) == 0))
             mask = true;
          else if (mask && intr->intrinsic == nir_intrinsic_store_output)
             after = true;
@@ -174,4 +179,32 @@ TEST_F(DemoteEarlyKill, ReachableQuadOperationsKeepDeferredKill)
    EXPECT_FALSE(lower(SAME_CONDITION));
    EXPECT_FALSE(lower(QUAD_IN_LOOP));
    EXPECT_FALSE(lower(SUBGROUP_AFTER));
+}
+
+/* A fully demoted quad is killed right after the demote; a shader with a
+ * non-quad subgroup operation keeps every demoted lane until the end. */
+static unsigned
+count_quad_ballots(nir_shader *s)
+{
+   unsigned n = 0;
+   nir_foreach_block(block, nir_shader_get_entrypoint(s)) {
+      nir_foreach_instr(instr, block) {
+         n += instr->type == nir_instr_type_intrinsic &&
+              nir_instr_as_intrinsic(instr)->intrinsic ==
+                 nir_intrinsic_quad_ballot_agx;
+      }
+   }
+   return n;
+}
+
+TEST_F(DemoteEarlyKill, FullyDemotedQuadsAreKilledEarly)
+{
+   for (enum shape s : {UNGUARDED, OTHER_CONDITION, SUBGROUP_AFTER}) {
+      nir_shader *nir = build(s);
+      agx_nir_lower_discard_zs_emit(nir);
+      agx_nir_lower_sample_mask_deferred(nir);
+      nir_validate_shader(nir, "dead quads");
+      EXPECT_EQ(count_quad_ballots(nir), s == SUBGROUP_AFTER ? 0u : 1u);
+      ralloc_free(nir);
+   }
 }
