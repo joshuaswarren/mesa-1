@@ -207,6 +207,8 @@ main(int argc, char **argv)
          "frozen GS static-per-instance shape");
    certify("sw-vs", pso->sw_vs_bo, pso->sw_vs_va, &pso->sw_vs_info,
            &pso->native_stages[D12_NATIVE_SW_VS]);
+   certify("gs-pre", pso->gs_pre_bo, pso->gs_pre_va, &pso->gs_pre_info,
+           &pso->native_stages[D12_NATIVE_GS_PRE]);
    certify("gs-main", pso->gs_main_bo, pso->gs_main_va, &pso->gs_main_info,
            &pso->native_stages[D12_NATIVE_GS_MAIN]);
    check(pso->gs_rast.linked.bo && pso->gs_rast.info.agx3_staging_known &&

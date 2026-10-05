@@ -3190,6 +3190,25 @@ compile_gs_nir(struct d12_device *device, nir_shader *nir,
       goto out;
    }
 
+   /* Poly keeps GS metadata while lowering its main/count variants. After
+    * that lowering, native CDM programs need the actual compute stage and
+    * local sizes used by d12_list_gs_prerast. The pre-GS patch-up is one
+    * invocation; main/count use the existing 64-thread preraster ABI. */
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      nir_shader *compute[] = {nir, gs_count, pre_gs};
+      for (unsigned i = 0; i < ARRAY_SIZE(compute); ++i) {
+         if (!compute[i])
+            continue;
+         compute[i]->info.stage = MESA_SHADER_COMPUTE;
+         memset(&compute[i]->info.cs, 0, sizeof(compute[i]->info.cs));
+         compute[i]->xfb_info = NULL;
+         compute[i]->info.has_transform_feedback_varyings = false;
+         compute[i]->info.workgroup_size[0] = i == 2 ? 1 : 64;
+         compute[i]->info.workgroup_size[1] = 1;
+         compute[i]->info.workgroup_size[2] = 1;
+      }
+   }
+
    if (gs_count) {
       const bool compiled =
          compile_poly_program(device, gs_count, NULL, count_out);
@@ -3605,12 +3624,17 @@ d12_pipeline_state_certify_native_gs(struct d12_device *device,
                          &count, &pre, &main, &rast))
       goto done;
    /* P09's initial certificate is the original static point GS, no XFB. */
-   if (count.binary || pre.binary ||
+   if (count.binary || !pre.binary ||
        pso->gs_info.shape != POLY_GS_SHAPE_STATIC_PER_INSTANCE)
       goto done;
    hr = d12_upload_internal_compute(device, &sw, &pso->sw_vs_bo,
       &pso->sw_vs_va, &pso->sw_vs_info, &pso->native_stages[D12_NATIVE_SW_VS],
       "d3d12 sw vs");
+   if (FAILED(hr))
+      goto done;
+   hr = d12_upload_internal_compute(device, &pre, &pso->gs_pre_bo,
+      &pso->gs_pre_va, &pso->gs_pre_info,
+      &pso->native_stages[D12_NATIVE_GS_PRE], "d3d12 gs pre");
    if (FAILED(hr))
       goto done;
    hr = d12_upload_internal_compute(device, &main, &pso->gs_main_bo,

@@ -88,7 +88,7 @@ admit a command list.
 
 The helper compiles the original `gs_input_vs.dxil`, `solid.dxil` and
 `gs_point.dxil`, retains software VS/GS CODE and the linked raster companion,
-and checks Ioto generation and refusal of missing cells, misalignment,
+and the pre-GS patch-up program, and checks Ioto generation and refusal of missing cells, misalignment,
 undeclared halves, ABI mismatch, unknown staging and preamble requirements.
 The Ioto certificate uses explicitly synthetic source-cell addresses and is
 never submitted. P10 must supply real command-owned source cells and prove

@@ -66,12 +66,12 @@ for p in sorted((out / 'gs').glob('stage-*.json')):
 abis = [json.loads(p.read_text()) for p in sorted((out / 'gs').glob('*.abi.json'))]
 stdout = (out / 'stdout').read_text()
 ok = (sys.argv[2] == '0' and 'NATIVE STAGE CERTIFICATION: PASS' in stdout
-      and len(stages) == 3 and all(s['compiled'] and s['refusal'] == 'none' for s in stages)
-      and len(abis) == 2 and all(a['certified'] and not a['physical_admission'] for a in abis))
+      and len(stages) == 4 and all(s['compiled'] and s['refusal'] == 'none' for s in stages)
+      and len(abis) == 3 and all(a['certified'] and not a['physical_admission'] for a in abis))
 files = {str(p.relative_to(out)): hashlib.sha256(p.read_bytes()).hexdigest()
          for p in sorted(out.rglob('*')) if p.is_file()}
 result = dict(status='PASS' if ok else 'FAIL', corpus='P09-registered-no-submit',
-              strict_suite_parity=False, stages=stages, abis=abis, sha256=files)
+              strict_suite_parity=False, api_pso_creation=re.findall(r'API_G6_PSO_CREATION:.*', stdout), stages=stages, abis=abis, sha256=files)
 (out / 'CERTIFICATION.json').write_text(json.dumps(result, indent=2) + '\n')
 print('P09 REGISTERED NO-SUBMIT:', result['status'], 'stages=', len(stages), 'native_compute=', len(abis))
 sys.exit(0 if ok else 1)
