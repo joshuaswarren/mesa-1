@@ -22,7 +22,9 @@
  * --only restricts the recording benchmarks to one mode (plain, rootconst,
  * viewport, psotoggle, dispatch, dispatch_table, dispatch_miss,
  * dispatch_texture) for profiling runs; the
- * rest of the metrics are then reported as zero.
+ * rest of the metrics are then reported as zero. "--only passes" runs the
+ * render-pass traffic measurement (GPU wall time of 16 frames of clear,
+ * bind and draw on a 1080p colour target and a D32 depth buffer) alone.
  *
  * --idle sleeps for SECONDS after the round-trip loop with the device,
  * queue and fence alive and nothing in flight, printing the process id
@@ -382,6 +384,188 @@ record_texture_dispatch_list(struct bench *b, double *per_dispatch_ns)
    return true;
 }
 
+/* --- Render-pass traffic ---------------------------------------------
+ *
+ * GPU wall time of a list of PASS_FRAMES frames on a 1080p colour target
+ * and a D32 depth buffer, in the three shapes an application issues:
+ *
+ *   rt      ClearRTV, bind, draws                  (colour only)
+ *   dsrt    ClearDSV, ClearRTV, bind, draws        (depth cleared first)
+ *   discard dsrt, then DiscardResource(depth)     (depth never read back)
+ *
+ * On a tiler every hardware render seeds its tiles from memory or from a
+ * clear and writes them back at the end, so what this measures is how many
+ * renders the driver cuts each frame into and how many of their loads and
+ * stores it leaves out. Nothing here is drawn twice; the draws are tiny.
+ */
+#define PASS_W 1920
+#define PASS_H 1080
+#define PASS_FRAMES 16
+#define PASS_DRAWS 4
+
+enum pass_shape { PASS_RT, PASS_DSRT, PASS_DISCARD, PASS_SHAPES };
+
+static bool
+record_pass_list(struct bench *b, enum pass_shape shape, ID3D12Resource *rt,
+                 ID3D12Resource *ds, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
+                 D3D12_CPU_DESCRIPTOR_HANDLE dsv, ID3D12PipelineState *pso,
+                 double *record_us)
+{
+   if (ID3D12CommandAllocator_Reset(b->alloc) != S_OK ||
+       ID3D12GraphicsCommandList_Reset(b->list, b->alloc, NULL) != S_OK)
+      return false;
+   ID3D12GraphicsCommandList *list = b->list;
+   const FLOAT clear[4] = {0.1f, 0.2f, 0.3f, 1.0f};
+   const bool depth = shape != PASS_RT;
+   double t0 = now_ns();
+   transition(list, rt, D3D12_RESOURCE_STATE_COMMON,
+              D3D12_RESOURCE_STATE_RENDER_TARGET);
+   if (depth)
+      transition(list, ds, D3D12_RESOURCE_STATE_COMMON,
+                 D3D12_RESOURCE_STATE_DEPTH_WRITE);
+   for (unsigned f = 0; f < PASS_FRAMES; f++) {
+      if (depth)
+         ID3D12GraphicsCommandList_ClearDepthStencilView(
+            list, dsv, D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 0, NULL);
+      ID3D12GraphicsCommandList_ClearRenderTargetView(list, rtv, clear, 0,
+                                                      NULL);
+      ID3D12GraphicsCommandList_OMSetRenderTargets(list, 1, &rtv, FALSE,
+                                                   depth ? &dsv : NULL);
+      D3D12_VIEWPORT vp = {.Width = PASS_W, .Height = PASS_H, .MaxDepth = 1.0f};
+      ID3D12GraphicsCommandList_RSSetViewports(list, 1, &vp);
+      D3D12_RECT sc = {.right = PASS_W, .bottom = PASS_H};
+      ID3D12GraphicsCommandList_RSSetScissorRects(list, 1, &sc);
+      ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, b->rs_empty);
+      ID3D12GraphicsCommandList_SetPipelineState(list, pso);
+      ID3D12GraphicsCommandList_IASetPrimitiveTopology(
+         list, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+      for (unsigned i = 0; i < PASS_DRAWS; i++)
+         ID3D12GraphicsCommandList_DrawInstanced(list, 3, 1, 0, 0);
+      if (shape == PASS_DISCARD)
+         ID3D12GraphicsCommandList_DiscardResource(list, ds, NULL);
+   }
+   transition(list, rt, D3D12_RESOURCE_STATE_RENDER_TARGET,
+              D3D12_RESOURCE_STATE_COMMON);
+   if (depth)
+      transition(list, ds, D3D12_RESOURCE_STATE_DEPTH_WRITE,
+                 D3D12_RESOURCE_STATE_COMMON);
+   if (ID3D12GraphicsCommandList_Close(list) != S_OK)
+      return false;
+   *record_us = (now_ns() - t0) / 1e3;
+   return true;
+}
+
+/* Returns false on any failure; fills gpu_ms[PASS_SHAPES] with the best of
+ * three executions of each shape and record_us with the dsrt recording cost. */
+static bool
+bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
+             size_t ps_size, double gpu_ms[PASS_SHAPES], double *record_us)
+{
+   D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_DEFAULT};
+   D3D12_RESOURCE_DESC td = {
+      .Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D,
+      .Width = PASS_W,
+      .Height = PASS_H,
+      .DepthOrArraySize = 1,
+      .MipLevels = 1,
+      .Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+      .SampleDesc = {.Count = 1},
+      .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+   };
+   ID3D12Resource *rt = NULL, *ds = NULL;
+   if (ID3D12Device_CreateCommittedResource(
+          b->dev, &heap, D3D12_HEAP_FLAG_NONE, &td,
+          D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
+          (void **)&rt) != S_OK)
+      return false;
+   td.Format = DXGI_FORMAT_D32_FLOAT;
+   td.Flags = D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL;
+   D3D12_CLEAR_VALUE dcv = {.Format = DXGI_FORMAT_D32_FLOAT,
+                            .DepthStencil = {.Depth = 1.0f}};
+   if (ID3D12Device_CreateCommittedResource(
+          b->dev, &heap, D3D12_HEAP_FLAG_NONE, &td,
+          D3D12_RESOURCE_STATE_COMMON, &dcv, &IID_ID3D12Resource,
+          (void **)&ds) != S_OK)
+      return false;
+
+   D3D12_DESCRIPTOR_HEAP_DESC rhd = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
+                                     .NumDescriptors = 1};
+   D3D12_DESCRIPTOR_HEAP_DESC dhd = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_DSV,
+                                     .NumDescriptors = 1};
+   ID3D12DescriptorHeap *rtv_heap = NULL, *dsv_heap = NULL;
+   if (ID3D12Device_CreateDescriptorHeap(b->dev, &rhd,
+                                         &IID_ID3D12DescriptorHeap,
+                                         (void **)&rtv_heap) != S_OK ||
+       ID3D12Device_CreateDescriptorHeap(b->dev, &dhd,
+                                         &IID_ID3D12DescriptorHeap,
+                                         (void **)&dsv_heap) != S_OK)
+      return false;
+   D3D12_CPU_DESCRIPTOR_HANDLE rtv =
+      d12_test_descriptor_heap_get_cpu_start(rtv_heap);
+   D3D12_CPU_DESCRIPTOR_HANDLE dsv =
+      d12_test_descriptor_heap_get_cpu_start(dsv_heap);
+   ID3D12Device_CreateRenderTargetView(b->dev, rt, NULL, rtv);
+   ID3D12Device_CreateDepthStencilView(b->dev, ds, NULL, dsv);
+
+   D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {
+      .pRootSignature = b->rs_empty,
+      .VS = {.pShaderBytecode = vs, .BytecodeLength = vs_size},
+      .PS = {.pShaderBytecode = ps, .BytecodeLength = ps_size},
+      .NumRenderTargets = 1,
+      .RTVFormats = {DXGI_FORMAT_R8G8B8A8_UNORM},
+      .SampleDesc = {.Count = 1},
+      .SampleMask = ~0u,
+      .RasterizerState = {.FillMode = D3D12_FILL_MODE_SOLID,
+                          .CullMode = D3D12_CULL_MODE_NONE,
+                          .DepthClipEnable = TRUE},
+      .PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+   };
+   pd.BlendState.RenderTarget[0].RenderTargetWriteMask =
+      D3D12_COLOR_WRITE_ENABLE_ALL;
+   ID3D12PipelineState *pso_rt = NULL, *pso_depth = NULL;
+   if (ID3D12Device_CreateGraphicsPipelineState(
+          b->dev, &pd, &IID_ID3D12PipelineState, (void **)&pso_rt) != S_OK)
+      return false;
+   pd.DSVFormat = DXGI_FORMAT_D32_FLOAT;
+   pd.DepthStencilState.DepthEnable = TRUE;
+   pd.DepthStencilState.DepthWriteMask = D3D12_DEPTH_WRITE_MASK_ALL;
+   pd.DepthStencilState.DepthFunc = D3D12_COMPARISON_FUNC_LESS;
+   if (ID3D12Device_CreateGraphicsPipelineState(
+          b->dev, &pd, &IID_ID3D12PipelineState, (void **)&pso_depth) != S_OK)
+      return false;
+
+   bool ok = true;
+   for (unsigned shape = 0; shape < PASS_SHAPES && ok; shape++) {
+      double best = 0;
+      for (unsigned rep = 0; rep < 3 && ok; rep++) {
+         double rec;
+         ok = record_pass_list(b, (enum pass_shape)shape, rt, ds, rtv, dsv,
+                               shape == PASS_RT ? pso_rt : pso_depth, &rec);
+         if (!ok)
+            break;
+         if (shape == PASS_DSRT)
+            *record_us = rec;
+         ID3D12CommandList *lists[] = {(ID3D12CommandList *)b->list};
+         double e0 = now_ns();
+         ID3D12CommandQueue_ExecuteCommandLists(b->queue, 1, lists);
+         ok = wait_idle(b) == S_OK;
+         double ms = (now_ns() - e0) / 1e6;
+         if (!rep || ms < best)
+            best = ms;
+      }
+      gpu_ms[shape] = best;
+   }
+
+   ID3D12PipelineState_Release(pso_rt);
+   ID3D12PipelineState_Release(pso_depth);
+   ID3D12DescriptorHeap_Release(rtv_heap);
+   ID3D12DescriptorHeap_Release(dsv_heap);
+   ID3D12Resource_Release(rt);
+   ID3D12Resource_Release(ds);
+   return ok;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -404,7 +588,10 @@ main(int argc, char **argv)
    }
    /* "--only submit" skips the recording loops and runs the submit, reset
     * and round-trip measurements alone. */
-   const bool only_submit = only && !strcmp(only, "submit");
+   const bool only_submit =
+      only && (!strcmp(only, "submit") || !strcmp(only, "passes"));
+   /* "--only passes" runs the render-pass traffic measurement alone. */
+   const bool only_passes = only && !strcmp(only, "passes");
    /* "--only pso" repeats PSO creation 64 times and stops. */
    const bool only_pso = only && !strcmp(only, "pso");
    const unsigned pso_repeats = only_pso ? 64 : PSO_REPEATS;
@@ -985,6 +1172,25 @@ main(int argc, char **argv)
       return 0;
    }
 
+   /* --- Render-pass traffic ------------------------------------------ */
+   double pass_ms[PASS_SHAPES] = {0};
+   double pass_record_us = 0;
+   REQUIRE(bench_passes(&b, vs, vs_size, ps, ps_size, pass_ms,
+                        &pass_record_us),
+           "render-pass traffic lists execute");
+   printf("passes %u frames at %ux%u: rt %.2f ms, ds+rt %.2f ms, "
+          "ds+rt+discard %.2f ms (GPU wall, best of 3); record %.1f us\n",
+          PASS_FRAMES, PASS_W, PASS_H, pass_ms[PASS_RT], pass_ms[PASS_DSRT],
+          pass_ms[PASS_DISCARD], pass_record_us);
+   if (only_passes) {
+      printf("MICROBENCH_JSON {\"only\": \"passes\", "
+             "\"gpu_wall_ms_passes_rt\": %.3f, \"gpu_wall_ms_passes_dsrt\": %.3f, "
+             "\"gpu_wall_ms_passes_discard\": %.3f, \"record_us_passes\": %.1f}\n",
+             pass_ms[PASS_RT], pass_ms[PASS_DSRT], pass_ms[PASS_DISCARD],
+             pass_record_us);
+      return 0;
+   }
+
    /* --- Submit: CPU cost of ExecuteCommandLists and GPU wall time ---- */
    double s, d, c;
    REQUIRE(record_draw_list(&b, DRAW_PLAIN, &s, &d, &c),
@@ -1103,6 +1309,8 @@ main(int argc, char **argv)
           "\"roundtrip_us_min\": %.1f, \"roundtrip_us_median\": %.1f, \"roundtrip_us_p95\": %.1f, "
           "\"record_ns_per_dispatch_texture\": %.0f, \"execute_call_us_texture\": %.2f, "
           "\"gpu_wall_ms_texture\": %.3f, "
+          "\"gpu_wall_ms_passes_rt\": %.3f, \"gpu_wall_ms_passes_dsrt\": %.3f, "
+          "\"gpu_wall_ms_passes_discard\": %.3f, \"record_us_passes\": %.1f, "
           "\"failures\": %u}\n",
           pso_gfx_first_ms, pso_gfx_median_ms, pso_cs_first_ms, pso_cs_median_ms,
           draw_ns[0], draw_ns[1], draw_ns[2], draw_ns[3],
@@ -1113,7 +1321,9 @@ main(int argc, char **argv)
           empty_list_us, reset_after_submit_us,
           execute_call_us, gpu_wall_ms, execute_call_cs_us, gpu_wall_cs_ms,
           rt_min_us, rt_median_us, rt_p95_us,
-          dispatch_tex_ns, execute_call_tex_us, gpu_wall_tex_ms, failures);
+          dispatch_tex_ns, execute_call_tex_us, gpu_wall_tex_ms,
+          pass_ms[PASS_RT], pass_ms[PASS_DSRT], pass_ms[PASS_DISCARD],
+          pass_record_us, failures);
 
    ID3D12GraphicsCommandList_Release(b.list);
    ID3D12GraphicsCommandList_Release(b.clist);
