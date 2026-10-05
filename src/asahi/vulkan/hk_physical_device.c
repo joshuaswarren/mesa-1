@@ -1315,6 +1315,25 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       }
    }
 
+   /* HK_HEAP_FRACTION: device-heap size as a fraction of physical RAM,
+    * overriding the DRIR heap_memory_percent default (0.5). Takes effect only
+    * when HK_SYSMEM is unset (absolute bytes win). Values outside (0, 1] are
+    * ignored. Like HK_SYSMEM this routes through pdev->sysmem so the heap
+    * size and the budget path stay consistent.
+    */
+   if (pdev->sysmem == 0) {
+      const char *hk_frac = os_get_option("HK_HEAP_FRACTION");
+      if (hk_frac) {
+         float fraction = strtof(hk_frac, NULL);
+         uint64_t total;
+         if (fraction > 0.0f && fraction <= 1.0f &&
+             os_get_total_physical_memory(&total)) {
+            pdev->sysmem =
+               ROUND_DOWN_TO((uint64_t)(total * fraction), 1 << 20);
+         }
+      }
+   }
+
    uint64_t sysmem_size_B = hk_get_sysmem_heap_size(pdev);
    if (sysmem_size_B == 0) {
       result = vk_errorf(instance, VK_ERROR_INITIALIZATION_FAILED,
