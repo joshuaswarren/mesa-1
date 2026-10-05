@@ -24,6 +24,7 @@ enum shape {
    QUAD_IN_LOOP,
    SUBGROUP_AFTER,
    NESTED_GUARDED,
+   QUAD_BEFORE_SECOND_DEMOTE,
 };
 
 static nir_shader *
@@ -40,6 +41,8 @@ build(enum shape s)
    nir_def *d = nir_flt(&b, y, nir_imm_float(&b, 3.0));
    nir_def *ix = nir_f2i32(&b, x), *iy = nir_f2i32(&b, y);
    nir_def *out = nir_imm_float(&b, 0.0);
+   nir_def *one = nir_imm_float(&b, 1.0);
+   nir_def *two = nir_imm_float(&b, 2.0);
 
    if (s == QUAD_ONLY_BEFORE)
       out = nir_ddx(&b, x);
@@ -62,12 +65,24 @@ build(enum shape s)
          nir_push_if(&b, d);
          v = nir_ddx(&b, y);
          nir_pop_if(&b, NULL);
-         v = nir_if_phi(&b, v, nir_imm_float(&b, 1.0));
+         v = nir_if_phi(&b, v, one);
       } else {
          v = nir_ddy(&b, y);
       }
       nir_pop_if(&b, nif);
-      out = nir_if_phi(&b, v, nir_imm_float(&b, 2.0));
+      out = nir_if_phi(&b, v, two);
+      break;
+   }
+   case QUAD_BEFORE_SECOND_DEMOTE: {
+      /* Split the top-level blocks with a guarded derivative. The next
+       * block's derivative is reachable by lanes demoted in the first block,
+       * even though it precedes this block's own demote. */
+      nir_push_if(&b, nir_inot(&b, c));
+      v = nir_ddx(&b, y);
+      nir_pop_if(&b, NULL);
+      out = nir_if_phi(&b, v, two);
+      out = nir_fadd(&b, out, nir_ddy(&b, x));
+      nir_demote_if(&b, c);
       break;
    }
    case GUARDED_ELSE: {
@@ -75,14 +90,14 @@ build(enum shape s)
       nir_push_else(&b, nif);
       v = nir_ddx(&b, y);
       nir_pop_if(&b, nif);
-      out = nir_if_phi(&b, nir_imm_float(&b, 2.0), v);
+      out = nir_if_phi(&b, two, v);
       break;
    }
    case GUARDED_COMPLEMENT: {
       nir_if *nif = nir_push_if(&b, nir_ine(&b, iy, ix));
       v = nir_ddx(&b, y);
       nir_pop_if(&b, nif);
-      out = nir_if_phi(&b, v, nir_imm_float(&b, 2.0));
+      out = nir_if_phi(&b, v, two);
       break;
    }
    case UNGUARDED:
@@ -93,7 +108,7 @@ build(enum shape s)
       nir_if *nif = nir_push_if(&b, s == OTHER_CONDITION ? d : c);
       v = nir_ddx(&b, y);
       nir_pop_if(&b, nif);
-      out = nir_if_phi(&b, v, nir_imm_float(&b, 2.0));
+      out = nir_if_phi(&b, v, two);
       break;
    }
    case QUAD_IN_LOOP: {
@@ -207,4 +222,9 @@ TEST_F(DemoteEarlyKill, FullyDemotedQuadsAreKilledEarly)
       EXPECT_EQ(count_quad_ballots(nir), s == SUBGROUP_AFTER ? 0u : 1u);
       ralloc_free(nir);
    }
+}
+
+TEST_F(DemoteEarlyKill, EarlierDemoteReachesQuadBeforeLaterDemote)
+{
+   EXPECT_FALSE(lower(QUAD_BEFORE_SECOND_DEMOTE));
 }

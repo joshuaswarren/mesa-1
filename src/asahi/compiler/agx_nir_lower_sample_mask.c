@@ -397,7 +397,10 @@ demoted_lanes_reach_quad_ops(nir_shader *shader)
              * demote_samples(bcsel(c, samples, 0)), which demotes only lanes
              * satisfying c. No quad operation may follow it in the same
              * block. */
-            bool after = false;
+            /* A previous top-level node may already have demoted lanes.
+             * They can reach quad operations before this block's first
+             * demote as well as those after it. */
+            bool after = seen;
             nir_foreach_instr(instr, nir_cf_node_as_block(node)) {
                if (is_demote(instr)) {
                   nir_def *mask = nir_instr_as_intrinsic(instr)->src[0].ssa;
