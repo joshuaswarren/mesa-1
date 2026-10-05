@@ -151,7 +151,7 @@ agx_chip_isa_encoding(enum agx_chip chip)
 }
 
 enum agx_command_stream_generation
-agx_chip_command_stream_generation(enum agx_chip chip)
+agx_chip_command_stream_generation_reference(enum agx_chip chip)
 {
    switch (chip) {
    case AGX_CHIP_G13G:
@@ -189,7 +189,7 @@ agx_chip_command_stream_generation(enum agx_chip chip)
 }
 
 enum agx_descriptor_generation
-agx_chip_descriptor_generation(enum agx_chip chip)
+agx_chip_descriptor_generation_reference(enum agx_chip chip)
 {
    switch (chip) {
    case AGX_CHIP_G13G:
@@ -224,7 +224,7 @@ agx_chip_descriptor_generation(enum agx_chip chip)
 }
 
 enum agx_sampler_generation
-agx_chip_sampler_generation(enum agx_chip chip)
+agx_chip_sampler_generation_reference(enum agx_chip chip)
 {
    switch (chip) {
    case AGX_CHIP_G13G:
@@ -258,9 +258,9 @@ agx_chip_sampler_generation(enum agx_chip chip)
 }
 
 unsigned
-agx_chip_sampler_heap_element_size(enum agx_chip chip)
+agx_chip_sampler_heap_element_size_reference(enum agx_chip chip)
 {
-   switch (agx_chip_command_stream_generation(chip)) {
+   switch (agx_chip_command_stream_generation_reference(chip)) {
    case AGX_CS_GENERATION_AGX2:
       return 8;
    case AGX_CS_GENERATION_G15:

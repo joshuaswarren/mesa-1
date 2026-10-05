@@ -185,19 +185,109 @@ enum agx_isa agx_chip_isa(enum agx_chip chip);
  * enum; UNKNOWN only for AGX_CHIP_UNKNOWN. */
 enum agx_isa_encoding agx_chip_isa_encoding(enum agx_chip chip);
 
+/* Exhaustive switch definitions, kept as the reference the inline lookups
+ * below are tested against (tests/test-chip.c). */
 enum agx_command_stream_generation
-agx_chip_command_stream_generation(enum agx_chip chip);
+agx_chip_command_stream_generation_reference(enum agx_chip chip);
 
 enum agx_descriptor_generation
-agx_chip_descriptor_generation(enum agx_chip chip);
+agx_chip_descriptor_generation_reference(enum agx_chip chip);
 
 enum agx_sampler_generation
-agx_chip_sampler_generation(enum agx_chip chip);
+agx_chip_sampler_generation_reference(enum agx_chip chip);
+
+unsigned agx_chip_sampler_heap_element_size_reference(enum agx_chip chip);
+
+/* These are queried several times per recorded draw and dispatch. Answer them
+ * with one bounded table load instead of an out-of-line call through a jump
+ * table: an indirect branch per query is especially costly when the x86
+ * driver build runs under FEX. */
+#define AGX_CHIP_TABLE(G13G, G13X, G14G, G14X, G15P, G15G, G15S, G15C, G15D,  \
+                       G16P, G16G, G16S, G16C, G17P, G17A, G17G, G17S, G17C)  \
+   {                                                                           \
+      [AGX_CHIP_G13G] = G13G, [AGX_CHIP_G13X] = G13X, [AGX_CHIP_G14G] = G14G,  \
+      [AGX_CHIP_G14X] = G14X, [AGX_CHIP_G15P] = G15P, [AGX_CHIP_G15G] = G15G,  \
+      [AGX_CHIP_G15S] = G15S, [AGX_CHIP_G15C] = G15C, [AGX_CHIP_G15D] = G15D,  \
+      [AGX_CHIP_G16P] = G16P, [AGX_CHIP_G16G] = G16G, [AGX_CHIP_G16S] = G16S,  \
+      [AGX_CHIP_G16C] = G16C, [AGX_CHIP_G17P] = G17P, [AGX_CHIP_G17A] = G17A,  \
+      [AGX_CHIP_G17G] = G17G, [AGX_CHIP_G17S] = G17S, [AGX_CHIP_G17C] = G17C,  \
+   }
+
+static inline enum agx_command_stream_generation
+agx_chip_command_stream_generation(enum agx_chip chip)
+{
+   static const uint8_t table[AGX_CHIP_UNKNOWN] = AGX_CHIP_TABLE(
+      AGX_CS_GENERATION_AGX2, AGX_CS_GENERATION_AGX2, AGX_CS_GENERATION_AGX2,
+      AGX_CS_GENERATION_AGX2,
+      /* A16's command-stream class was not in the Mac corpus. */
+      AGX_CS_GENERATION_UNKNOWN,
+      AGX_CS_GENERATION_G15, AGX_CS_GENERATION_G15, AGX_CS_GENERATION_G15,
+      AGX_CS_GENERATION_G15,
+      AGX_CS_GENERATION_HAL200, AGX_CS_GENERATION_HAL200,
+      AGX_CS_GENERATION_HAL200, AGX_CS_GENERATION_HAL200,
+      AGX_CS_GENERATION_HAL200, AGX_CS_GENERATION_HAL200,
+      AGX_CS_GENERATION_HAL300, AGX_CS_GENERATION_HAL300,
+      AGX_CS_GENERATION_HAL300);
+   return (unsigned)chip < AGX_CHIP_UNKNOWN
+             ? (enum agx_command_stream_generation)table[chip]
+             : AGX_CS_GENERATION_UNKNOWN;
+}
+
+static inline enum agx_descriptor_generation
+agx_chip_descriptor_generation(enum agx_chip chip)
+{
+   static const uint8_t table[AGX_CHIP_UNKNOWN] = AGX_CHIP_TABLE(
+      AGX_DESCRIPTOR_GENERATION_7, AGX_DESCRIPTOR_GENERATION_7,
+      AGX_DESCRIPTOR_GENERATION_8, AGX_DESCRIPTOR_GENERATION_8,
+      AGX_DESCRIPTOR_GENERATION_UNKNOWN,
+      AGX_DESCRIPTOR_GENERATION_9, AGX_DESCRIPTOR_GENERATION_9,
+      AGX_DESCRIPTOR_GENERATION_9, AGX_DESCRIPTOR_GENERATION_9,
+      AGX_DESCRIPTOR_GENERATION_9, AGX_DESCRIPTOR_GENERATION_9,
+      AGX_DESCRIPTOR_GENERATION_9, AGX_DESCRIPTOR_GENERATION_9,
+      AGX_DESCRIPTOR_GENERATION_9, AGX_DESCRIPTOR_GENERATION_9,
+      AGX_DESCRIPTOR_GENERATION_10, AGX_DESCRIPTOR_GENERATION_10,
+      AGX_DESCRIPTOR_GENERATION_10);
+   return (unsigned)chip < AGX_CHIP_UNKNOWN
+             ? (enum agx_descriptor_generation)table[chip]
+             : AGX_DESCRIPTOR_GENERATION_UNKNOWN;
+}
+
+static inline enum agx_sampler_generation
+agx_chip_sampler_generation(enum agx_chip chip)
+{
+   static const uint8_t table[AGX_CHIP_UNKNOWN] = AGX_CHIP_TABLE(
+      AGX_SAMPLER_GENERATION_GEN4, AGX_SAMPLER_GENERATION_GEN4,
+      AGX_SAMPLER_GENERATION_GEN4, AGX_SAMPLER_GENERATION_GEN4,
+      AGX_SAMPLER_GENERATION_UNKNOWN,
+      AGX_SAMPLER_GENERATION_GEN4, AGX_SAMPLER_GENERATION_GEN4,
+      AGX_SAMPLER_GENERATION_GEN4, AGX_SAMPLER_GENERATION_GEN4,
+      AGX_SAMPLER_GENERATION_GEN4_HAL200, AGX_SAMPLER_GENERATION_GEN4_HAL200,
+      AGX_SAMPLER_GENERATION_GEN4_HAL200, AGX_SAMPLER_GENERATION_GEN4_HAL200,
+      AGX_SAMPLER_GENERATION_GEN4_HAL200, AGX_SAMPLER_GENERATION_GEN4_HAL200,
+      AGX_SAMPLER_GENERATION_GEN5, AGX_SAMPLER_GENERATION_GEN5,
+      AGX_SAMPLER_GENERATION_GEN5);
+   return (unsigned)chip < AGX_CHIP_UNKNOWN
+             ? (enum agx_sampler_generation)table[chip]
+             : AGX_SAMPLER_GENERATION_UNKNOWN;
+}
 
 /* Native sampler heap element size. The packed state word remains eight
  * bytes, but G15 and later place it at offset zero of a 32-byte sparse heap
  * element. Zero means the heap ABI is not proven for this identity. */
-unsigned agx_chip_sampler_heap_element_size(enum agx_chip chip);
+static inline unsigned
+agx_chip_sampler_heap_element_size(enum agx_chip chip)
+{
+   switch (agx_chip_command_stream_generation(chip)) {
+   case AGX_CS_GENERATION_AGX2:
+      return 8;
+   case AGX_CS_GENERATION_G15:
+   case AGX_CS_GENERATION_HAL200:
+   case AGX_CS_GENERATION_HAL300:
+      return 32;
+   default:
+      return 0;
+   }
+}
 
 enum agx_submission_model
 agx_chip_submission_model(enum agx_chip chip);
