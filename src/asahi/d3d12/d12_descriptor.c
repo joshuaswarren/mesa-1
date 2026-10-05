@@ -225,6 +225,8 @@ d12_heap_Release(ID3D12DescriptorHeap *iface)
       else
          free(heap->slots);
       free(heap->live_resource_words);
+      free(heap->sampler_hash);
+      simple_mtx_destroy(&heap->sampler_lock);
       d12_private_data_store_destroy(&heap->private_data);
       d12_device_release(heap->device);
       free(heap);
@@ -233,14 +235,91 @@ d12_heap_Release(ID3D12DescriptorHeap *iface)
    return refs;
 }
 
+/*
+ * Native sampler table.
+ *
+ * A shader-visible D3D12 sampler heap holds up to 2,048 logical samplers
+ * while one AGX command names at most 1,024 native sampler states, so the
+ * native table is the deduplicated set of packed states and each logical
+ * slot records its native index. The dedup table lives on the heap: a
+ * descriptor write interns one state, and only exhausting the 1,024 native
+ * entries forces a rebuild over the whole heap, which recomputes the live
+ * set so states that no slot references any more are dropped. All of this
+ * runs under sampler_lock.
+ */
+#define D12_SAMPLER_HASH_BUCKETS 2048
+#define D12_SAMPLER_NATIVE_LIMIT 1024
+
+static_assert(sizeof(struct agx_sampler_packed) == sizeof(uint64_t),
+              "sampler deduplication key");
+static_assert(D12_SAMPLER_HASH_BUCKETS == 1u << 11,
+              "bucket index takes the top 11 bits of the mixed key");
+
 static void
-d12_descriptor_heap_rebuild_samplers(struct d12_descriptor_heap *heap)
+d12_sampler_slot_state(const struct d12_descriptor *slot,
+                       struct agx_sampler_packed *state)
 {
-   if (!heap->sampler_bo)
+   if (slot->sampler_kind == D12_DESC_SAMPLER)
+      *state = slot->sampler;
+   else
+      agx_pack_txf_sampler(state);
+}
+
+/* The native BO holds min(NumDescriptors, 1024) states: a heap with fewer
+ * logical slots than that can never reference more states than slots. */
+static uint32_t
+d12_sampler_heap_native_limit(const struct d12_descriptor_heap *heap)
+{
+   return MIN2(heap->desc.NumDescriptors, D12_SAMPLER_NATIVE_LIMIT);
+}
+
+/* Return the native index of a packed state, appending it to the native
+ * table when it is new, or UINT32_MAX when the table is full. */
+static uint32_t
+d12_sampler_heap_intern(struct d12_descriptor_heap *heap, uint8_t *native,
+                        unsigned stride,
+                        const struct agx_sampler_packed *state)
+{
+   uint64_t key;
+   memcpy(&key, state, sizeof(key));
+   /* Packed samplers differ in a few scattered bits (filters, wrap modes,
+    * LOD clamps); multiply by an odd 64-bit constant and keep the top bits
+    * so those differences spread over the buckets. */
+   uint32_t bucket =
+      (uint32_t)((key * UINT64_C(0x9E3779B97F4A7C15)) >> 53);
+
+   /* At most 1,024 of the 2,048 buckets are ever occupied, so the probe
+    * always reaches an empty bucket. */
+   while (heap->sampler_hash[bucket] != UINT16_MAX) {
+      const uint32_t index = heap->sampler_hash[bucket];
+      if (memcmp(native + ((size_t)index * stride), state,
+                 sizeof(*state)) == 0)
+         return index;
+      bucket = (bucket + 1) & (D12_SAMPLER_HASH_BUCKETS - 1);
+   }
+
+   if (heap->sampler_unique_count >= d12_sampler_heap_native_limit(heap))
+      return UINT32_MAX;
+
+   const uint32_t index = heap->sampler_unique_count++;
+   uint8_t *element = native + ((size_t)index * stride);
+   memset(element, 0, stride);
+   memcpy(element, state, sizeof(*state));
+   heap->sampler_hash[bucket] = index;
+   return index;
+}
+
+/* Rebuild the native table from every logical slot. Overflowing slots get
+ * native index 0 and the heap is marked with UINT32_MAX so recording
+ * refuses it, exactly as before. */
+static void
+d12_descriptor_heap_rebuild_samplers_locked(struct d12_descriptor_heap *heap)
+{
+   if (!heap->sampler_bo || !heap->sampler_hash)
       return;
 
-   /* Lock2 can refuse after device loss, and this runs on every descriptor
-    * update.  A driver must skip the native rebuild, not fault in the
+   /* Lock2 can refuse after device loss, and this runs on descriptor
+    * updates.  A driver must skip the native rebuild, not fault in the
     * application that wrote the descriptor. */
    uint8_t *native = agx_bo_map(heap->sampler_bo);
    if (!native)
@@ -251,51 +330,64 @@ d12_descriptor_heap_rebuild_samplers(struct d12_descriptor_heap *heap)
    if (!stride)
       return;
 
-   uint16_t hash_table[2048];
-   uint32_t unique = 0;
+   memset(heap->sampler_hash, 0xff,
+          D12_SAMPLER_HASH_BUCKETS * sizeof(*heap->sampler_hash));
+   heap->sampler_unique_count = 0;
    bool overflow = false;
-   memset(hash_table, 0xff, sizeof(hash_table));
-
-   static_assert(sizeof(struct agx_sampler_packed) == sizeof(uint64_t),
-                 "sampler deduplication key");
 
    for (UINT logical = 0; logical < heap->desc.NumDescriptors; logical++) {
-      struct agx_sampler_packed state;
       struct d12_descriptor *slot = &heap->slots[logical];
-      if (slot->sampler_kind == D12_DESC_SAMPLER)
-         state = slot->sampler;
-      else
-         agx_pack_txf_sampler(&state);
+      struct agx_sampler_packed state;
+      d12_sampler_slot_state(slot, &state);
 
-      uint64_t key;
-      memcpy(&key, &state, sizeof(key));
-      uint32_t bucket = ((uint32_t)key ^ (uint32_t)(key >> 32)) & 2047;
-      uint32_t index = 0;
-      while (hash_table[bucket] != UINT16_MAX) {
-         index = hash_table[bucket];
-         if (memcmp(native + ((size_t)index * stride), &state,
-                    sizeof(state)) == 0)
-            break;
-         bucket = (bucket + 1) & 2047;
+      uint32_t index = d12_sampler_heap_intern(heap, native, stride, &state);
+      if (index == UINT32_MAX) {
+         overflow = true;
+         index = 0;
       }
-
-      if (hash_table[bucket] == UINT16_MAX) {
-         if (unique >= 1024) {
-            overflow = true;
-            index = 0;
-         } else {
-            index = unique++;
-            uint8_t *element = native + ((size_t)index * stride);
-            memset(element, 0, stride);
-            memcpy(element, &state, sizeof(state));
-            hash_table[bucket] = index;
-         }
-      }
-
       slot->sampler_native_index = index;
    }
 
-   heap->sampler_unique_count = overflow ? UINT32_MAX : unique;
+   if (overflow)
+      heap->sampler_unique_count = UINT32_MAX;
+}
+
+/* One logical slot was written: intern its state. The native table is
+ * updated in place so the change is visible to already-recorded command
+ * lists, like the coherent logical heap itself. */
+static void
+d12_descriptor_heap_write_sampler_locked(struct d12_descriptor_heap *heap,
+                                         uint32_t index)
+{
+   /* An overflowed heap can only find out whether this write ended the
+    * overflow by recounting; that is the O(N) rebuild it always paid. */
+   if (heap->sampler_unique_count == UINT32_MAX) {
+      d12_descriptor_heap_rebuild_samplers_locked(heap);
+      return;
+   }
+
+   uint8_t *native = agx_bo_map(heap->sampler_bo);
+   if (!native)
+      return;
+
+   const unsigned stride =
+      agx_chip_sampler_heap_element_size(heap->device->dev.chip);
+   if (!stride)
+      return;
+
+   struct d12_descriptor *slot = &heap->slots[index];
+   struct agx_sampler_packed state;
+   d12_sampler_slot_state(slot, &state);
+
+   const uint32_t native_index =
+      d12_sampler_heap_intern(heap, native, stride, &state);
+   if (native_index == UINT32_MAX) {
+      /* The table only grows between rebuilds, so states that were
+       * overwritten since may still occupy it. Recount before giving up. */
+      d12_descriptor_heap_rebuild_samplers_locked(heap);
+      return;
+   }
+   slot->sampler_native_index = native_index;
 }
 
 /* Mirror one slot into the heap's native tables. The caller orders the
@@ -336,11 +428,9 @@ d12_descriptor_heap_refresh_slot(struct d12_descriptor_heap *heap,
          residency[index] = d12_descriptor_sparse_residency_address(slot);
    }
    if (heap->sampler_bo) {
-      /* The shader-visible D3D12 limit is 2,048, while one AGX command
-       * names at most 1,024 native sampler states.  Rebuild immediately
-       * so descriptor updates remain visible to already-recorded command
-       * lists, exactly like the coherent logical descriptor heap. */
-      d12_descriptor_heap_rebuild_samplers(heap);
+      simple_mtx_lock(&heap->sampler_lock);
+      d12_descriptor_heap_write_sampler_locked(heap, index);
+      simple_mtx_unlock(&heap->sampler_lock);
    }
 }
 
@@ -592,6 +682,14 @@ d12_descriptor_heap_create(struct d12_device *device,
             heap->sampler_bo =
                agx_bo_create(&device->dev, sampler_size, 0, AGX_BO_WRITEBACK,
                              "d3d12 bindless sampler descriptors");
+         if (heap->sampler_bo) {
+            heap->sampler_hash = malloc(D12_SAMPLER_HASH_BUCKETS *
+                                        sizeof(*heap->sampler_hash));
+            if (!heap->sampler_hash) {
+               agx_bo_unreference(&device->dev, heap->sampler_bo);
+               heap->sampler_bo = NULL;
+            }
+         }
       }
    } else {
       heap->slots = calloc(desc->NumDescriptors,
@@ -685,6 +783,7 @@ d12_descriptor_heap_create(struct d12_device *device,
       else
          free(heap->slots);
       free(heap->live_resource_words);
+      free(heap->sampler_hash);
       free(heap);
       return E_OUTOFMEMORY;
    }
@@ -693,7 +792,8 @@ d12_descriptor_heap_create(struct d12_device *device,
    heap->refcount = 1;
    heap->device = device;
    heap->desc = *desc;
-   d12_descriptor_heap_rebuild_samplers(heap);
+   simple_mtx_init(&heap->sampler_lock, mtx_plain);
+   d12_descriptor_heap_rebuild_samplers_locked(heap);
    d12_private_data_store_init(&heap->private_data, (IUnknown *)&heap->iface);
    d12_device_add_ref(device);
 
