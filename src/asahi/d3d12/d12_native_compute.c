@@ -164,7 +164,8 @@ d12_native_compute_generate(
    struct agx3_ioto_uniform_range ranges[D12_NATIVE_COMPUTE_RANGES];
    unsigned count;
    struct agx3_cdm_direct_template_sources sources;
-   if (!info || !info->main_size || !info->nr_gprs ||
+   if (!info || info->stage != MESA_SHADER_COMPUTE ||
+       !info->main_size || !info->nr_gprs ||
        !info->agx3_staging_known || info->has_preamble ||
        info->nr_preamble_gprs || info->scratch_size ||
        info->preamble_scratch_size || info->agx3_uniform_dma_valid ||

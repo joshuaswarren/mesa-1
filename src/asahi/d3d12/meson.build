@@ -756,7 +756,7 @@ if not d12_is_windows
                           include_directories('../isa')],
     dependencies : [dep_dxheaders_d12, d12_platform_deps, dep_valgrind,
                     idep_nir, idep_mesautil, idep_agx_pack, idep_libagx,
-                    idep_libpoly],
+                    idep_libagx_shaders_h, idep_libpoly],
     link_with : [libd3d12agx_core, libasahi_lib, libasahi_layout,
                  libasahi_compiler, libagx2_disasm, libagx3b_disasm,
                  libpoly_nir],

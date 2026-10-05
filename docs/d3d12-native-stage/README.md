@@ -46,6 +46,12 @@ cell would load the first eight parameter bytes as an address.
 | 76–79 | CUSTOM_BORDERS | Custom border table address |
 | ≥80 | Compiler rodata | Compiler constants, exact base and half count |
 
+The retained Poly parameter block sizes are 64 bytes (`poly_vertex_params`),
+316 bytes (`poly_geometry_params`) and 140 bytes (`poly_tess_params`), as
+asserted by their existing headers. Mesh parameters retain the existing
+64-byte D3D12 block. Pointee contents/ownership are execution work for the
+later tasks, separate from publishing each eight-byte source cell.
+
 Slots 0, 8 and the fragment-only root at 12 have no internal-compute producer.
 A program publishes only slots used by its compiler declarations. A scalar
 read within DRAW still uses the existing full eight-byte DRAW cell. The same

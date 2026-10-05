@@ -3,6 +3,7 @@
  * Supplementary registered-fd certification. Never creates a command queue. */
 #include "d12_private.h"
 #include "asahi/lib/agx3_code_container_core.h"
+#include "nir_builder.h"
 
 extern bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
    __attribute__((weak, visibility("default")));
@@ -16,6 +17,48 @@ check(bool ok, const char *what)
       ++failures;
       fprintf(stderr, "FAIL: %s\n", what);
    }
+}
+
+/* A declaration removed by DCE must not create a phantom source-cell
+ * requirement, while a scalar half of DRAW must survive with its exact units. */
+static void
+check_uniform_inventory(struct d12_device *device)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "native driver uniform inventory");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_load_preamble(&b, 1, 64, .base = D12_UNIFORM_ROOT); /* dead */
+   nir_def *dst = nir_load_preamble(&b, 1, 64, .base = D12_UNIFORM_VERTEX_PARAMS);
+   nir_def *value = nir_load_preamble(&b, 1, 32, .base = D12_UNIFORM_DRAW + 2);
+   nir_store_global(&b, value, dst, .align_mul = 4);
+   agx_preprocess_nir_g17p(b.shader);
+   struct agx_shader_key key = {
+      .dev = agx_gather_device_key(&device->dev),
+      .no_preamble = true, .reserved_preamble = D12_UNIFORM_RESERVED,
+   };
+   struct agx_shader_part part = {0};
+   bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   check(compiled && part.binary, "uniform inventory compiler check");
+   if (compiled && part.binary) {
+      uint64_t expected = BITFIELD64_RANGE(D12_UNIFORM_VERTEX_PARAMS, 4) |
+                          BITFIELD64_RANGE(D12_UNIFORM_DRAW + 2, 2);
+      check(part.info.agx3_uniform_halfs_valid &&
+            part.info.agx3_uniform_halfs[0] == expected,
+            "exact scalar/pointer halves after dead-load removal");
+      bool high_empty = true;
+      for (unsigned w = 1; w < AGX3_CPROG_INPUT_WORDS; ++w)
+         high_empty &= part.info.agx3_uniform_halfs[w] == 0;
+      check(high_empty, "no undeclared high uniforms");
+      uint32_t cells = 0;
+      check(d12_native_compute_uniforms(&part.info, &cells) &&
+            cells == (BITFIELD_BIT(D12_UNIFORM_DRAW / 4) |
+                      BITFIELD_BIT(D12_UNIFORM_VERTEX_PARAMS / 4)),
+            "scalar DRAW and pointer map to their existing complete cells");
+   }
+   free(part.binary);
+   ralloc_free(b.shader);
 }
 
 static void *
@@ -127,6 +170,10 @@ certify(const char *name, struct agx_bo *bo, uint64_t entry,
    uint32_t mask;
    check(!d12_native_compute_uniforms(&bad_info, &mask), "undeclared uniform refuses");
    bad_info = *info;
+   bad_info.stage = MESA_SHADER_VERTEX;
+   check(!d12_native_compute_generate(&bad_info, abi, entry, bo->va->addr,
+                                      cells, &generated), "raster stage refuses CDM certificate");
+   bad_info = *info;
    bad_info.agx3_staging_known = false;
    check(!d12_native_compute_generate(&bad_info, abi, entry, bo->va->addr,
                                       cells, &generated), "unknown staging refuses");
@@ -159,6 +206,7 @@ main(int argc, char **argv)
       ID3D12Device_Release(dev);
       return 2;
    }
+   check_uniform_inventory(device);
    size_t size[3] = {0};
    void *code[3] = {0};
    for (unsigned i = 0; i < 3; ++i)
