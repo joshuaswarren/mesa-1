@@ -90,6 +90,12 @@ struct agx_shader_info {
    /* Number of uniforms */
    uint16_t push_count;
 
+   /* G17P load_preamble declarations after NIR optimization, in native
+    * half-register units. This is a publication contract, not a CProg TPS
+    * import layout. Consumers must also publish compiler rodata separately. */
+   uint64_t agx3_uniform_halfs[AGX3_CPROG_INPUT_WORDS];
+   bool agx3_uniform_halfs_valid;
+
    /* G17P uniform DMA (v51a, AGX_G17P_UNIFORM_DMA): constant-index loads
     * through one 64-bit pointer uniform were replaced by uniform reads of
     * [agx3_uniform_dma_dest, +agx3_uniform_dma_halfs). The driver publishes

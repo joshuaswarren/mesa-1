@@ -6240,6 +6240,9 @@ d12_list_build_compute_usc(struct d12_cmd_list *list, uint64_t code_va,
                            uint8_t **out_cpu)
 {
    struct d12_device *device = list->device;
+   if (!d12_list_require_legacy_compute(list))
+      return 0;
+
 
    uint32_t usc;
    size_t usc_size = agx_usc_size(19);

@@ -34,6 +34,7 @@
 #include "d12_command_validation_core.h"
 #include "d12_device_removal_core.h"
 #include "d12_native_descriptor_core.h"
+#include "d12_native_compute.h"
 #include "d12_queue_timeline_core.h"
 #include "d12_sparse_residency_core.h"
 #include "d12_render_pass_core.h"
@@ -1444,6 +1445,8 @@ struct d12_pipeline_state {
     * The compute programs are plain code BOs like the compute PSO's;
     * gs_rast is fast-linked like any other vertex stage.
     */
+   struct d12_native_compute_abi native_stages[D12_NATIVE_STAGE_COUNT];
+
    bool has_gs;
    struct poly_gs_info gs_info;
 

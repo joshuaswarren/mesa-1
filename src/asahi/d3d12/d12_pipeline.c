@@ -1355,79 +1355,6 @@ d12_binding_map_uses_sampler_heap(const struct d12_binding_map *map)
    return false;
 }
 
-/* Reuse the shared G17P CODE producer. Driver uniforms come from the
- * command-lifetime Ioto program; this container has no generated preamble. */
-static HRESULT
-d12_create_g17p_compute_code(struct d12_device *device,
-                            const struct agx_shader_part *part,
-                            struct d12_pipeline_state *pso)
-{
-   const struct agx_shader_info *info = &part->info;
-   const size_t rodata_size = (size_t)info->rodata.size_16 * 2;
-   const size_t block_size = agx3_code_block_size(info->main_size);
-   const size_t entry_offset = AGX3_CONTAINER_LEAD_SIZE +
-                              AGX3_CODE_BLOCK_ENTRY_OFFSET;
-
-   if (!part->binary || info->stage != MESA_SHADER_COMPUTE ||
-       !info->main_size || info->main_offset > info->binary_size ||
-       info->main_size > info->binary_size - info->main_offset ||
-       !info->nr_gprs || !info->agx3_staging_known ||
-       !info->workgroup_size[0] || !info->workgroup_size[1] ||
-       !info->workgroup_size[2] || !block_size ||
-       info->rodata.offset > info->binary_size ||
-       rodata_size > info->binary_size - info->rodata.offset ||
-       block_size > SIZE_MAX - AGX3_CONTAINER_LEAD_SIZE - rodata_size)
-      return E_FAIL;
-
-   /* No legacy PRESHADER, helper scratch, or uniform-DMA producer is supplied
-    * by the native direct-compute path yet. Keep those requirements explicit. */
-   if (info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
-       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
-       info->imageblock_stride)
-      return E_NOTIMPL;
-
-   const size_t container_size = AGX3_CONTAINER_LEAD_SIZE + block_size;
-   const size_t upload_size = container_size + rodata_size;
-   struct agx_bo *bo = agx_bo_create(&device->dev, upload_size, 0,
-                                    AGX_BO_EXEC | AGX_BO_LOW_VA,
-                                    "d3d12 native compute container");
-   if (!bo)
-      return E_OUTOFMEMORY;
-
-   if (!bo->va || bo->va->addr > UINT64_MAX - entry_offset)
-      goto fail;
-   const uint64_t entry = bo->va->addr + entry_offset;
-   if (!agx_va_in_usc_window(&device->dev, bo->va->addr) ||
-       !agx_va_in_usc_window(&device->dev, entry) ||
-       info->main_size > AGX_USC_WINDOW_SIZE -
-                           (entry - device->dev.shader_base))
-      goto fail;
-
-   uint8_t *mapping = agx_bo_map(bo);
-   if (!mapping)
-      goto fail;
-   agx3_build_container_lead(mapping);
-   if (!agx3_build_code_block(mapping + AGX3_CONTAINER_LEAD_SIZE,
-                              block_size,
-                              (const uint8_t *)part->binary + info->main_offset,
-                              info->main_size, info->main_size, NULL, false))
-      goto fail;
-   if (rodata_size)
-      memcpy(mapping + container_size,
-             (const uint8_t *)part->binary + info->rodata.offset, rodata_size);
-   if (agx_bo_sync_for_device(bo, 0, upload_size))
-      goto fail;
-
-   pso->code_bo = bo;
-   pso->code_va = entry;
-   pso->g17p_rodata_va = rodata_size ? bo->va->addr + container_size : 0;
-   pso->g17p_compute_container = true;
-   return S_OK;
-
-fail:
-   agx_bo_unreference(&device->dev, bo);
-   return E_FAIL;
-}
 
 static void
 d12_disassemble_shader(bool native, uint8_t *code, size_t size, FILE *fp)
@@ -1708,8 +1635,9 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    }
 
    if (native_compute) {
-      /* The native container is built per PSO from the shared part. */
-      hr = d12_create_g17p_compute_code(device, part, pso);
+      hr = d12_native_compute_code_create(device, part, &pso->code_bo,
+                                           &pso->code_va, &pso->g17p_rodata_va);
+      pso->g17p_compute_container = SUCCEEDED(hr);
       if (FAILED(hr)) {
          mesa_loge("CreateComputePipelineState: native container/setup refused (%#x)",
                    (unsigned)hr);
@@ -2780,6 +2708,140 @@ compile_gfx_stage(struct d12_device *device,
    return compiled && out->binary && out->info.binary_size;
 }
 
+/* Optional compiler artifacts. A failed compile still owns its final NIR and
+ * records the backend's exact refusal; it must never look like certification. */
+static void
+d12_dump_native_stage(nir_shader *nir, const struct agx_shader_part *part,
+                      bool compiled)
+{
+   const char *dir = getenv("D3D12AGX_NATIVE_STAGE_ARTIFACTS");
+   if (!dir || !*dir)
+      return;
+   static int serial;
+   unsigned id = p_atomic_inc_return(&serial);
+   char path[4096];
+   snprintf(path, sizeof(path), "%s/stage-%03u.nir", dir, id);
+   FILE *f = fopen(path, "w");
+   if (!f)
+      return;
+   nir_print_shader(nir, f);
+   fclose(f);
+   snprintf(path, sizeof(path), "%s/stage-%03u.name", dir, id);
+   f = fopen(path, "w");
+   if (f) {
+      fprintf(f, "%s\n", nir->info.name ? nir->info.name : "unnamed");
+      fclose(f);
+   }
+   snprintf(path, sizeof(path), "%s/stage-%03u.refusal", dir, id);
+   f = fopen(path, "w");
+   if (f) {
+      const char *reason = compiled ? "none" : agx_last_compile_refusal();
+      fprintf(f, "%s\n", reason && *reason ? reason : "no compiler reason recorded");
+      fclose(f);
+   }
+   const struct agx_shader_info *i = &part->info;
+   snprintf(path, sizeof(path), "%s/stage-%03u.json", dir, id);
+   f = fopen(path, "w");
+   if (f) {
+      fprintf(f, "{\"compiled\":%s,\"stage\":%u,\"binary_size\":%u,"
+                 "\"main_offset\":%u,\"main_size\":%u,\"gprs\":%u,"
+                 "\"workgroup\":[%u,%u,%u],\"push_halfs\":%u,"
+                 "\"staging_known\":%s,\"staging_halfs\":%u,"
+                 "\"preamble\":%s,\"preamble_gprs\":%u,"
+                 "\"preamble_size\":%u,\"scratch\":%u,"
+                 "\"preamble_scratch\":%u,\"spectpr_scratch\":%u,"
+                 "\"shared_bytes\":%u,\"textures\":%u,\"samplers\":%u,"
+                 "\"uses_txf\":%s,\"uses_sampler_heap\":%s,"
+                 "\"uniform_dma\":%s,\"rodata\":[%u,%u,%u],"
+                 "\"uniform_halfs_valid\":%s,\"uniform_halfs\":[",
+              compiled ? "true" : "false", nir->info.stage, i->binary_size,
+              i->main_offset, i->main_size, i->nr_gprs,
+              i->workgroup_size[0], i->workgroup_size[1], i->workgroup_size[2],
+              i->push_count, i->agx3_staging_known ? "true" : "false",
+              i->agx3_staging_halfs, i->has_preamble ? "true" : "false",
+              i->nr_preamble_gprs, i->preamble_size, i->scratch_size,
+              i->preamble_scratch_size, i->agx3_spectpr_scratch_size,
+              i->local_size, i->texture_state_count, i->sampler_state_count,
+              i->uses_txf ? "true" : "false",
+              i->uses_sampler_heap ? "true" : "false",
+              i->agx3_uniform_dma_valid ? "true" : "false",
+              i->rodata.offset, i->rodata.base_uniform, i->rodata.size_16,
+              i->agx3_uniform_halfs_valid ? "true" : "false");
+      bool first = true;
+      for (unsigned h = 0; h < AGX3_CPROG_INPUT_HALVES; ++h) {
+         if (!(i->agx3_uniform_halfs[h / 64] & BITFIELD64_BIT(h % 64)))
+            continue;
+         fprintf(f, "%s%u", first ? "" : ",", h);
+         first = false;
+      }
+      fprintf(f, "]}\n");
+      fclose(f);
+   }
+   if (compiled && part->binary && i->binary_size) {
+      snprintf(path, sizeof(path), "%s/stage-%03u.bin", dir, id);
+      f = fopen(path, "wb");
+      if (f) {
+         fwrite(part->binary, 1, i->binary_size, f);
+         fclose(f);
+      }
+   }
+}
+
+/* Same CODE producer as API compute. Internal stage launches remain closed;
+ * the trial Ioto uses synthetic cell addresses and is never submitted. P10
+ * supplies recording-owned cells, ordering and retained parameter buffers. */
+static HRESULT
+d12_upload_internal_compute(struct d12_device *device,
+                             const struct agx_shader_part *part,
+                             struct agx_bo **bo, uint64_t *va,
+                             struct agx_shader_info *info,
+                             struct d12_native_compute_abi *abi,
+                             const char *name)
+{
+   if (device->dev.chip != AGX_CHIP_G17P) {
+      *bo = agx_bo_create(&device->dev, part->info.binary_size, 0,
+                          AGX_BO_EXEC | AGX_BO_LOW_VA, name);
+      if (!*bo)
+         return E_OUTOFMEMORY;
+      if (!d12_upload_executable(*bo, part->binary, part->info.binary_size))
+         return E_FAIL;
+      *va = (*bo)->va->addr;
+      *info = part->info;
+      return S_OK;
+   }
+
+   struct d12_native_compute_abi staged = {0};
+   if (!d12_native_compute_uniforms(&part->info, &staged.required_cells)) {
+      mesa_loge("%s: native driver uniform declaration refused", name);
+      return E_NOTIMPL;
+   }
+   HRESULT hr = d12_native_compute_code_create(device, part, bo, va,
+                                               &staged.rodata_va);
+   if (FAILED(hr)) {
+      mesa_loge("%s: native CODE metadata refused (%#x)", name, (unsigned)hr);
+      return hr;
+   }
+   uint64_t cells[D12_NATIVE_COMPUTE_CELLS];
+   for (unsigned slot = 0; slot < ARRAY_SIZE(cells); ++slot)
+      cells[slot] = UINT64_C(0x10000000) + slot * 8;
+   staged.certified = true;
+   struct agx3_g17p_compute_program trial;
+   if (!d12_native_compute_generate(&part->info, &staged, *va,
+                                     (*bo)->va->addr, cells, &trial)) {
+      mesa_loge("%s: native Ioto/resource metadata refused", name);
+      agx_bo_unreference(&device->dev, *bo);
+      *bo = NULL;
+      *va = 0;
+      return E_NOTIMPL;
+   }
+   *info = part->info;
+   *abi = staged;
+   mesa_logi("%s: native CODE/Ioto certified, main=%u gprs=%u cells=%#x; "
+             "higher-stage submission closed", name, info->main_size,
+             info->nr_gprs, abi->required_cells);
+   return S_OK;
+}
+
 /*
  * Finish one of the programs poly_nir_lower_gs produced. `uvs` non-NULL
  * marks the RASTERIZATION program, which is a hardware vertex shader and
@@ -2792,7 +2854,11 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
                      struct agx_shader_part *out)
 {
    NIR_PASS(_, nir, agx_nir_lower_texture);
-   agx_preprocess_nir(nir);
+   const bool native = device->dev.chip == AGX_CHIP_G17P;
+   if (native)
+      agx_preprocess_nir_g17p(nir);
+   else
+      agx_preprocess_nir(nir);
    NIR_PASS(_, nir, d12_dxil_lower_root);
 
    if (uvs) {
@@ -2820,13 +2886,20 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
    struct agx_shader_key key = {
       .dev = agx_gather_device_key(&device->dev),
       .has_scratch = true,
+      .no_preamble = native,
       .promote_constants = false,
       .reserved_preamble = D12_UNIFORM_RESERVED,
       .no_stop = false,
    };
 
    memset(out, 0, sizeof(*out));
-   agx_compile_shader_nir(nir, &key, out);
+   const bool compiled = agx_compile_shader_nir(nir, &key, out);
+   if (native)
+      d12_dump_native_stage(nir, out, compiled);
+   if (!compiled) {
+      mesa_loge("native/Poly program compile refused: %s",
+                agx_last_compile_refusal());
+   }
    d12_report_scratch("shader", &out->info);
 
    if (d12_debug()->dump_shaders && out->binary) {
@@ -2840,7 +2913,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
    }
 
    ralloc_free(nir);
-   return out->binary && out->info.binary_size;
+   return compiled && out->binary && out->info.binary_size;
 }
 
 /* Build NIR's byte-addressed transform-feedback description from D3D12's
@@ -3874,27 +3947,22 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
       struct agx_bo **bo;
       uint64_t *va;
       struct agx_shader_info *info;
+      struct d12_native_compute_abi *abi;
       const char *name;
    } cs[] = {
-      {&ms_part, &pso->ms_bo, &pso->ms_va, &pso->ms_info, "d3d12 mesh"},
-      {&setup_part, &pso->ms_setup_bo, &pso->ms_setup_va, &pso->ms_setup_info,
+      {&ms_part, &pso->ms_bo, &pso->ms_va, &pso->ms_info, &pso->native_stages[D12_NATIVE_MS], "d3d12 mesh"},
+      {&setup_part, &pso->ms_setup_bo, &pso->ms_setup_va, &pso->ms_setup_info, &pso->native_stages[D12_NATIVE_MS_SETUP],
        "d3d12 mesh setup"},
    };
 
    for (unsigned i = 0; i < ARRAY_SIZE(cs); i++) {
-      *cs[i].bo = agx_bo_create(&device->dev, cs[i].part->info.binary_size, 0,
-                                AGX_BO_EXEC | AGX_BO_LOW_VA, cs[i].name);
-      if (!*cs[i].bo) {
-         hr = E_OUTOFMEMORY;
+      HRESULT upload = d12_upload_internal_compute(
+         device, cs[i].part, cs[i].bo, cs[i].va, cs[i].info,
+         cs[i].abi, cs[i].name);
+      if (FAILED(upload)) {
+         hr = upload;
          goto fail;
       }
-      if (!d12_upload_executable(*cs[i].bo, cs[i].part->binary,
-                                 cs[i].part->info.binary_size)) {
-         hr = E_FAIL;
-         goto fail;
-      }
-      *cs[i].va = (*cs[i].bo)->va->addr;
-      *cs[i].info = cs[i].part->info;
    }
 
    /* The rasterization vertex shader, linked like any other. */
@@ -3986,29 +4054,24 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
          struct agx_bo **bo;
          uint64_t *va;
          struct agx_shader_info *info;
+         struct d12_native_compute_abi *abi;
          const char *name;
       } acs[] = {
-         {&as_part, &pso->as_bo, &pso->as_va, &pso->as_info,
+         {&as_part, &pso->as_bo, &pso->as_va, &pso->as_info, &pso->native_stages[D12_NATIVE_AS],
           "d3d12 amplification"},
          {&as_setup_part, &pso->as_setup_bo, &pso->as_setup_va,
-          &pso->as_setup_info, "d3d12 amplification setup"},
+          &pso->as_setup_info, &pso->native_stages[D12_NATIVE_AS_SETUP],
+          "d3d12 amplification setup"},
       };
 
       for (unsigned i = 0; i < ARRAY_SIZE(acs); i++) {
-         *acs[i].bo =
-            agx_bo_create(&device->dev, acs[i].part->info.binary_size, 0,
-                          AGX_BO_EXEC | AGX_BO_LOW_VA, acs[i].name);
-         if (!*acs[i].bo) {
-            hr = E_OUTOFMEMORY;
+         HRESULT upload = d12_upload_internal_compute(
+            device, acs[i].part, acs[i].bo, acs[i].va, acs[i].info,
+            acs[i].abi, acs[i].name);
+            if (FAILED(upload)) {
+            hr = upload;
             goto fail;
          }
-         if (!d12_upload_executable(*acs[i].bo, acs[i].part->binary,
-                                    acs[i].part->info.binary_size)) {
-            hr = E_FAIL;
-            goto fail;
-         }
-         *acs[i].va = (*acs[i].bo)->va->addr;
-         *acs[i].info = acs[i].part->info;
       }
 
       /* The payload size is declared in ASState, but the module is gone
@@ -4813,29 +4876,23 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          struct agx_bo **bo;
          uint64_t *va;
          struct agx_shader_info *info;
+         struct d12_native_compute_abi *abi;
          const char *name;
       } cs[] = {
-         {&sw_vs_part, &pso->sw_vs_bo, &pso->sw_vs_va, &pso->sw_vs_info,
+         {&sw_vs_part, &pso->sw_vs_bo, &pso->sw_vs_va, &pso->sw_vs_info, &pso->native_stages[D12_NATIVE_SW_VS],
           "d3d12 sw vs (tess)"},
-         {&tcs_part, &pso->tcs_bo, &pso->tcs_va, &pso->tcs_info,
+         {&tcs_part, &pso->tcs_bo, &pso->tcs_va, &pso->tcs_info, &pso->native_stages[D12_NATIVE_TCS],
           "d3d12 hull"},
       };
 
       for (unsigned i = 0; i < ARRAY_SIZE(cs); i++) {
-         *cs[i].bo = agx_bo_create(&device->dev, cs[i].part->info.binary_size,
-                                   0, AGX_BO_EXEC | AGX_BO_LOW_VA,
-                                   cs[i].name);
-         if (!*cs[i].bo) {
-            hr = E_OUTOFMEMORY;
+         HRESULT upload = d12_upload_internal_compute(
+            device, cs[i].part, cs[i].bo, cs[i].va, cs[i].info,
+            cs[i].abi, cs[i].name);
+            if (FAILED(upload)) {
+            hr = upload;
             goto fail;
          }
-         if (!d12_upload_executable(*cs[i].bo, cs[i].part->binary,
-                                    cs[i].part->info.binary_size)) {
-            hr = E_FAIL;
-            goto fail;
-         }
-         *cs[i].va = (*cs[i].bo)->va->addr;
-         *cs[i].info = cs[i].part->info;
       }
 
       /* The domain shader is a hardware vertex stage and takes the same
@@ -4982,16 +5039,20 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          struct agx_bo **bo;
          uint64_t *va;
          struct agx_shader_info *info;
+         struct d12_native_compute_abi *abi;
          const char *name;
       } cs[] = {
          {&gs_sw_part, sw_bo, sw_va, sw_info,
+          &pso->native_stages[pso->has_tess ? D12_NATIVE_SW_TES : D12_NATIVE_SW_VS],
           pso->has_tess ? "d3d12 sw domain" : "d3d12 sw vs"},
          {&gs_count_part, &pso->gs_count_bo, &pso->gs_count_va,
-          &pso->gs_count_info, "d3d12 gs count"},
+          &pso->gs_count_info, &pso->native_stages[D12_NATIVE_GS_COUNT],
+          "d3d12 gs count"},
          {&gs_pre_part, &pso->gs_pre_bo, &pso->gs_pre_va,
-          &pso->gs_pre_info, "d3d12 gs pre"},
+          &pso->gs_pre_info, &pso->native_stages[D12_NATIVE_GS_PRE], "d3d12 gs pre"},
          {&gs_main_part, &pso->gs_main_bo, &pso->gs_main_va,
-          &pso->gs_main_info, "d3d12 gs main"},
+          &pso->gs_main_info, &pso->native_stages[D12_NATIVE_GS_MAIN],
+          "d3d12 gs main"},
       };
 
       for (unsigned i = 0; i < ARRAY_SIZE(cs); i++) {
@@ -5000,20 +5061,13 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
          /* Same rule as the compute PSO: executable, low-VA, so the USC
           * can address it 32-bit-relative to the shader base. */
-         *cs[i].bo = agx_bo_create(&device->dev, cs[i].part->info.binary_size,
-                                   0, AGX_BO_EXEC | AGX_BO_LOW_VA,
-                                   cs[i].name);
-         if (!*cs[i].bo) {
-            hr = E_OUTOFMEMORY;
+         HRESULT upload = d12_upload_internal_compute(
+            device, cs[i].part, cs[i].bo, cs[i].va, cs[i].info,
+            cs[i].abi, cs[i].name);
+            if (FAILED(upload)) {
+            hr = upload;
             goto fail;
          }
-         if (!d12_upload_executable(*cs[i].bo, cs[i].part->binary,
-                                    cs[i].part->info.binary_size)) {
-            hr = E_FAIL;
-            goto fail;
-         }
-         *cs[i].va = (*cs[i].bo)->va->addr;
-         *cs[i].info = cs[i].part->info;
       }
 
       /* The rasterization program is an ordinary hardware vertex shader

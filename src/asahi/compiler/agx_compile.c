@@ -10068,6 +10068,31 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    if (agx_should_dump(nir, AGX_DBG_SHADERS))
       nir_print_shader(nir, stdout);
 
+   if (is_g17p) {
+      info->agx3_uniform_halfs_valid = true;
+      nir_foreach_function_with_impl(func, impl, nir) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_load_preamble)
+                  continue;
+               unsigned base = nir_intrinsic_base(intr);
+               unsigned halves = intr->def.num_components *
+                                 DIV_ROUND_UP(intr->def.bit_size, 16);
+               if (base >= AGX3_CPROG_INPUT_HALVES ||
+                   halves > AGX3_CPROG_INPUT_HALVES - base) {
+                  info->agx3_uniform_halfs_valid = false;
+                  continue;
+               }
+               for (unsigned h = base; h < base + halves; ++h)
+                  info->agx3_uniform_halfs[h / 64] |= BITFIELD64_BIT(h % 64);
+            }
+         }
+      }
+   }
+
    info->local_size = nir->info.shared_size;
    info->uses_resource_info_query = nir->info.uses_resource_info_query;
    info->uses_ray_traversal = nir->info.ray_queries != 0;

@@ -46,6 +46,7 @@ libd3d12agx_files = files(
   'd12_g17p_vdm_storage.c',
   'd12_g17p_txf_prefix_core.c',
   'd12_native_render_resources_core.c',
+  'd12_native_compute.c',
   'd12_pipeline.c',
   'd12_nir_g17p_txf.c',
   'd12_present_blt_math.c',
@@ -742,5 +743,22 @@ if host_machine.system() != 'windows'
     'd3d12agx_caps_probe',
     files('tests/caps_probe.c'),
     dependencies : [dep_dxheaders_d12, dep_dl],
+  )
+endif
+
+# Uses the same runtime archive as libd3d12agx, with access to retained private
+# program metadata. Registered noop fd only; no command queue or submission.
+if not d12_is_windows
+  d3d12agx_native_stage_certification = executable(
+    'd3d12agx_native_stage_certification',
+    files('tests/native_stage_certification.c'),
+    include_directories : [inc_include, inc_src, inc_asahi,
+                          include_directories('../isa')],
+    dependencies : [dep_dxheaders_d12, d12_platform_deps, dep_valgrind,
+                    idep_nir, idep_mesautil, idep_agx_pack, idep_libagx,
+                    idep_libpoly],
+    link_with : [libd3d12agx_core, libasahi_lib, libasahi_layout,
+                 libasahi_compiler, libagx2_disasm, libagx3b_disasm,
+                 libpoly_nir],
   )
 endif
