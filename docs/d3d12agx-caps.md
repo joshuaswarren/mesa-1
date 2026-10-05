@@ -30,9 +30,9 @@ JSON lines. Failed HRESULTs mean output fields are undefined.
 | Root signature | 1.2 requests succeed and clamp to proven 1.1. Integer static samplers are not qualified; the non-normalized static-sampler witness fails. |
 | Modern stencil / dynamic depth bias / predication | Off. Modern stencil PSO stream support is missing; ExecuteIndirect predication fails; dynamic bias is not fully qualified. |
 | Render pass | G13/G14 Tier 1; upstream suspend/resume variants execute successfully. G17P is not qualified. |
-| Sample positions | G13/G14 Tier 1 has a connected PPP_MULTISAMPLECTL writer and host encoder tests; G17P remains off. A dedicated per-device pixel witness is still required for full qualification. |
+| Sample positions | Off on every generation. The G13/G14 PPP_MULTISAMPLECTL writer and host encoder tests need a dedicated per-device pixel/depth-resolve witness before advertisement. |
 | Descriptor limits | 1024 distinct samplers, 1000000 rooted views. The view limit is an implementation bound, not a new million-entry stress result. |
-| Formats / MSAA | Existing format table, filtered by the connected device path. G17P withholds full texture sampling, additional typed UAV loads and multisample support; its bounded Texture.Load path is not a general sampler contract. |
+| Formats / MSAA | No-output sample mask 1 until its separate coverage contract is qualified ([public specification](https://microsoft.github.io/DirectX-Specs/d3d/VulkanOn12.html)). Existing attachment format table, filtered by the connected device path. G17P withholds full texture sampling, additional typed UAV loads and multisample support; its bounded Texture.Load path is not a general sampler contract. |
 | Queue / cache / protection | Normal DIRECT/COMPUTE/COPY priority only; single-PSO cache path only; no protection, cross-node, existing-address heaps, displayable textures, meta commands or tight placement. OPTIONS21 uses the official ExecuteIndirect 1.0 value 10. |
 
 The WDDM adapter currently lacks an opened-device discovery seam and retains a

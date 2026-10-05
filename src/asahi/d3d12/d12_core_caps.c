@@ -71,7 +71,9 @@ d12_core_caps_init(struct d12_core_caps *caps,
    caps->tiled_resources_tier = 0;
    caps->typed_uav_load_additional_formats = legacy;
    caps->full_texture_sampling = legacy;
-   caps->programmable_sample_positions_tier = legacy ? 1 : 0;
+   /* A register writer and encoder tests do not qualify per-device pixel
+    * coverage/depth resolve behavior. The native reference also reports 0. */
+   caps->programmable_sample_positions_tier = 0;
    caps->render_passes_tier = legacy ? 1 : 0;
    /* The required modern depth/stencil PSO stream is not accepted yet. */
    caps->independent_front_and_back_stencil = false;

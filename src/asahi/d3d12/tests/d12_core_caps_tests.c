@@ -42,7 +42,7 @@ int main(void)
    assert(a.max_shader_model == D12_CORE_SHADER_MODEL_6_0);
    assert(a.native_16bit_shader_ops && !c.native_16bit_shader_ops);
    assert(!a.copy_queue_timestamp_queries && !c.copy_queue_timestamp_queries);
-   assert(a.programmable_sample_positions_tier == 1 && !c.programmable_sample_positions_tier);
+   assert(a.programmable_sample_positions_tier == 0 && !c.programmable_sample_positions_tier);
    assert(a.render_passes_tier == 1 && !c.render_passes_tier);
    assert(!a.non_normalized_coordinate_samplers && !c.non_normalized_coordinate_samplers);
    assert(!a.tile_based_deferred_renderer);

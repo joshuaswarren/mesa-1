@@ -376,10 +376,10 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
        * promises stay off until their exact optional contracts pass. */
       memset(opts, 0, sizeof(*opts));
       opts->PointSamplingAddressesNeverRoundUp = FALSE;
-      /* Target-independent rasterization: with nothing attached the render
-       * command's sample count is purely the rasterization rate, so every
-       * count AGX can rasterize is available. */
-      opts->SupportedSampleCountsWithNoOutputs = caps->sample_counts;
+      /* No-output multisampling has a separate contract from multisampled
+       * attachments. Withhold it until a no-output coverage witness passes.
+       * The public mask uses log2(sample_count) as the bit index. */
+      opts->SupportedSampleCountsWithNoOutputs = 1;
       opts->MaxSamplerDescriptorHeapSize = caps->max_sampler_heap_size;
       opts->MaxSamplerDescriptorHeapSizeWithStaticSamplers = caps->max_sampler_heap_size;
       opts->MaxViewDescriptorHeapSize = caps->max_view_heap_size;

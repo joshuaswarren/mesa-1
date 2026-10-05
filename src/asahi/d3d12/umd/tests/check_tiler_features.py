@@ -71,7 +71,7 @@ assert "D3D12DDI_RENDER_PASS_FUNCS_0053" in umd_rc
 assert "ENDING_ACCESS_RESOLVE" in command
 
 # ----------------------------------------------------- programmable positions
-assert "caps->programmable_sample_positions_tier = legacy ? 1 : 0;" in caps
+assert "caps->programmable_sample_positions_tier = 0;" in caps
 assert "caps->programmable_sample_positions_tier" in device
 # The command-list table only gained pfnSetSamplePositions in DDI 0032, so a
 # WDDM 2.0/2.1 build must report the tier the ABI can actually carry rather
@@ -125,6 +125,6 @@ assert "sample_positions_set" in private
 
 print(
     "tiler-features: PASS "
-    "(render passes + programmable sample positions + GPU upload heaps "
+    "(render passes + unadvertised sample-position path + GPU upload heaps "
     "+ resource heap tier 2)"
 )
