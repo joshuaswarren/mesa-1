@@ -65,6 +65,9 @@ then real titles; pass/fail and frame time recorded against the current tool.
 
 ## Risks / open
 * ARM64EC Mesa build has never been done: expect a few compiler/ABI fixes.
+  Found so far: clang's arm64ec target predefines `__x86_64__` (not
+  `__aarch64__`), so `src/util/detect_arch.h` needed an `__arm64ec__` clause
+  or x86 inline asm (bitscan popcnt, cpuid) is emitted for an AArch64 target.
 * `drm_handle_t` is `unsigned long` (32-bit on Win64) in the BSD branch of
   `drm.h`; only legacy structs use it, none of ours.
 * Wine's 4K-page processes on the 16K kernel already mmap GEM BOs (Honeykrisp
