@@ -251,6 +251,11 @@ main(int argc, char **argv)
    if (hr != S_OK || !iface)
       goto done;
    struct d12_pipeline_state *pso = d12_pipeline_state_from_iface(iface);
+   const char *record_directory = getenv("D3D12AGX_NATIVE_STAGE_ARTIFACTS");
+   check(d12_cmd_certify_native_gs(pso, false, record_directory) == S_OK,
+         "P10 two direct GS recordings with owned cells/native grids");
+   check(d12_cmd_certify_native_gs(pso, true, record_directory) == S_OK,
+         "P10 setup and two indirect-local GS recordings");
    check(pso->has_gs && pso->gs_info.shape == POLY_GS_SHAPE_STATIC_PER_INSTANCE,
          "frozen GS static-per-instance shape");
    certify("sw-vs", pso->sw_vs_bo, pso->sw_vs_va, &pso->sw_vs_info,

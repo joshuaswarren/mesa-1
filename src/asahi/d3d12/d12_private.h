@@ -1713,6 +1713,9 @@ struct d12_read_tracker {
 struct d12_segment {
    /* Firmware timestamp destination, bound through agx_bind_timestamps. */
    struct drm_asahi_timestamp timestamp_end;
+   /* P10 recording certificate only. Recheck the registered fd at submit;
+    * this is not physical GS/raster admission. */
+   bool g17p_preraster_metadata_only;
    /* Revalidate the admission used when recording each native texture path. */
    bool g17p_txf_metadata_only;
    bool g17p_txf_physical;
@@ -2690,4 +2693,7 @@ bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
 
 /* Native Texture.Load metadata producer never admits a physical DRM fd. */
 bool d12_g17p_txf_metadata_enabled(const struct agx_device *dev);
+bool d12_g17p_preraster_metadata_enabled(const struct agx_device *dev);
+HRESULT d12_cmd_certify_native_gs(struct d12_pipeline_state *pso,
+                                 bool indirect, const char *directory);
 bool d12_g17p_txf_physical_enabled(const struct agx_device *dev);

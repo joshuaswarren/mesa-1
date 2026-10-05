@@ -173,6 +173,19 @@ d12_g17p_baseline_graphics_enabled(const struct agx_device *dev)
 }
 
 bool
+d12_g17p_preraster_metadata_enabled(const struct agx_device *dev)
+{
+#ifndef _WIN32
+   return dev && dev->chip == AGX_CHIP_G17P &&
+          asahi_noop_d3d12_graphics_qualification_allowed &&
+          asahi_noop_d3d12_graphics_qualification_allowed(dev->fd);
+#else
+   (void)dev;
+   return false;
+#endif
+}
+
+bool
 d12_g17p_depth_enabled(const struct agx_device *dev)
 {
    if (!dev) return false;
@@ -1886,7 +1899,11 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
    const bool native = device->dev.chip == AGX_CHIP_G17P;
    if (native) {
       /* Native graphics/indirect integration is a separate producer gate. */
-      if (pre_gfx || agx_is_indirect(grid)) {
+      if (agx_is_indirect(grid) ||
+          (pre_gfx && (!d12_g17p_preraster_metadata_enabled(&device->dev) ||
+                       (idx != LIBAGX_GS_SETUP_INDIRECT &&
+                        idx != LIBAGX_D3D12_GS_SETUP_INDIRECT_IBV &&
+                        idx != LIBAGX_PREFIX_SUM_GEOM)))) {
          mesa_loge("native precompiled graphics/indirect launch unavailable");
          list->state = D12_LIST_ERROR;
          return;
@@ -1940,6 +1957,8 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
       return;
 
    if (native) {
+      if (pre_gfx)
+         seg->g17p_preraster_metadata_only = true;
       if (!d12_list_append_g17p_precomp(list, prog, args, args_size, grid, cur))
          return;
    } else {
@@ -7592,6 +7611,168 @@ d12_agx_primitive(enum mesa_prim prim)
 }
 
 static bool
+d12_list_native_cell(struct d12_cmd_list *list, uint64_t address,
+                     size_t pointee_size)
+{
+   /* These cells and parameter blocks must be uploads in this recording,
+    * rather than merely arbitrary addresses inside the stream allocation. */
+   const uint64_t base = list->stream_bo->va->addr;
+   if ((address & 7) || !d12_list_stream_contains(list, address, 8) ||
+       address - base < list->data_floor)
+      return false;
+   if (pointee_size) {
+      uint64_t pointee;
+      memcpy(&pointee, d12_list_data_cpu(list, address), sizeof(pointee));
+      if ((pointee & 7) ||
+          !d12_list_stream_contains(list, pointee, pointee_size) ||
+          pointee - base < list->data_floor)
+         return false;
+   }
+   return true;
+}
+
+/* P09's compiler declarations select real source cells here. The existing
+ * Poly uploads supply the parameter blocks and six-word indirect-local grids;
+ * no CPU readback of a GPU-written count is involved. Like Honeykrisp, setup
+ * is a separate dispatch with a strong barrier before its consumers. */
+static bool
+d12_list_append_native_gs(struct d12_cmd_list *list, struct d12_segment *seg,
+                           uint64_t entry, const struct agx_shader_info *info,
+                           struct agx_grid grid, struct agx_workgroup wg,
+                           const struct d12_dispatch_uniforms *u)
+{
+   struct agx_device *dev = &list->device->dev;
+   struct d12_pipeline_state *pso = list->pso;
+   if (!d12_g17p_preraster_metadata_enabled(dev) || !pso || !pso->has_gs ||
+       pso->has_tess || pso->has_mesh || !info ||
+       info->workgroup_size[0] != wg.x ||
+       info->workgroup_size[1] != wg.y || info->workgroup_size[2] != wg.z)
+      goto fail;
+
+   const struct {
+      uint64_t entry;
+      struct agx_bo *bo;
+      enum d12_native_stage stage;
+      const struct agx_shader_info *info;
+   } stages[] = {
+      {pso->sw_vs_va, pso->sw_vs_bo, D12_NATIVE_SW_VS, &pso->sw_vs_info},
+      {pso->gs_count_va, pso->gs_count_bo, D12_NATIVE_GS_COUNT, &pso->gs_count_info},
+      {pso->gs_pre_va, pso->gs_pre_bo, D12_NATIVE_GS_PRE, &pso->gs_pre_info},
+      {pso->gs_main_va, pso->gs_main_bo, D12_NATIVE_GS_MAIN, &pso->gs_main_info},
+   };
+   const struct d12_native_compute_abi *abi = NULL;
+   struct agx_bo *code = NULL;
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); ++i) {
+      if (entry == stages[i].entry && info == stages[i].info) {
+         abi = &pso->native_stages[stages[i].stage];
+         code = stages[i].bo;
+         break;
+      }
+   }
+   if (!abi || !abi->certified || !code || !code->va ||
+       entry < code->va->addr || info->main_size > code->size ||
+       entry - code->va->addr > code->size - info->main_size ||
+       !agx_va_in_usc_window(dev, entry))
+      goto fail;
+   if (info->rodata.size_16 &&
+       (abi->rodata_va < code->va->addr ||
+        !((size_t)info->rodata.size_16 * 2 <= code->size) ||
+        abi->rodata_va - code->va->addr >
+           code->size - (size_t)info->rodata.size_16 * 2))
+      goto fail;
+
+   uint64_t cells[D12_NATIVE_COMPUTE_CELLS] = {0};
+   size_t pointee_sizes[D12_NATIVE_COMPUTE_CELLS] = {0};
+#define D12_GS_CELL(field, uniform, span) do { \
+      cells[uniform / 4] = u->field; \
+      pointee_sizes[uniform / 4] = span; \
+   } while (0)
+   D12_GS_CELL(root, D12_UNIFORM_ROOT, 8);
+   D12_GS_CELL(draw, D12_UNIFORM_DRAW, 0);
+   D12_GS_CELL(geom_params, D12_UNIFORM_GEOM_PARAMS, sizeof(struct poly_geometry_params));
+   D12_GS_CELL(vs_outputs, D12_UNIFORM_VS_OUTPUTS, 0);
+   D12_GS_CELL(vertex_params, D12_UNIFORM_VERTEX_PARAMS, sizeof(struct poly_vertex_params));
+   D12_GS_CELL(stat_query, D12_UNIFORM_STAT_QUERY, 128);
+   D12_GS_CELL(vb_params, D12_UNIFORM_VB_PARAMS, 256);
+#undef D12_GS_CELL
+   /* Descriptor, tessellation, mesh and node source cells await their own
+    * retained-pointee certificate. Never publish an unvalidated pointer. */
+   for (unsigned slot = 0; slot < ARRAY_SIZE(cells); ++slot) {
+      if (!(abi->required_cells & BITFIELD_BIT(slot)))
+         continue;
+      if (!d12_list_native_cell(list, cells[slot], pointee_sizes[slot]) ||
+          agx_bo_sync_for_device(list->stream_bo,
+                                 cells[slot] - list->stream_bo->va->addr, 8))
+         goto fail;
+      if (pointee_sizes[slot]) {
+         uint64_t pointee;
+         memcpy(&pointee, d12_list_data_cpu(list, cells[slot]), sizeof(pointee));
+         if (agx_bo_sync_for_device(list->stream_bo,
+                                    pointee - list->stream_bo->va->addr,
+                                    pointee_sizes[slot]))
+            goto fail;
+      }
+   }
+   if (agx_is_indirect(grid)) {
+      if (grid.mode != AGX_CDM_MODE_INDIRECT_LOCAL || (grid.ptr & 3) ||
+          !d12_list_stream_contains(list, grid.ptr, 6 * sizeof(uint32_t)) ||
+          grid.ptr - list->stream_bo->va->addr < list->data_floor)
+         goto fail;
+   } else if (!grid.count[0] || !grid.count[1] || !grid.count[2]) {
+      return true;
+   }
+   if (list->pregfx_cur > list->pregfx_end - 4)
+      goto fail;
+
+   uint32_t relative_program = 0;
+   uint8_t *cpu = d12_list_alloc_usc(list, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE,
+                                   &relative_program);
+   const uint64_t program_va = dev->shader_base + relative_program;
+   struct agx3_g17p_compute_program generated;
+   if (!cpu || !agx_va_in_usc_window(dev, program_va) ||
+       !d12_native_compute_generate(info, abi, entry, program_va, cells, &generated))
+      goto fail;
+   memcpy(cpu, generated.bytes, generated.length);
+   const size_t offset = program_va - list->usc_bo->va->addr;
+   list->usc_offset = offset + generated.length;
+   if (agx_bo_sync_for_device(list->usc_bo, offset, generated.length))
+      goto fail;
+
+   const struct agx3_compute_direct_grid direct = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {grid.count[0], grid.count[1], grid.count[2]},
+      .local_size = {wg.x, wg.y, wg.z},
+      .dimensions = grid.count[2] != 1 || wg.z != 1 ? 3 :
+                    grid.count[1] != 1 || wg.y != 1 ? 2 : 1,
+   };
+   struct agx3_compute_dispatch_sink sink = {
+      .data = list->pregfx_cur,
+      /* Reserve room for close_pregfx's native stream terminator. */
+      .capacity = list->pregfx_end - list->pregfx_cur - 4,
+   };
+   if (!(agx_is_indirect(grid)
+         ? agx3_g17p_native_indirect_compute_launch_append(
+              &generated.launch, grid.ptr, 0x5, &sink)
+         : agx3_g17p_native_compute_dispatch_append_with_barrier(
+              &generated.launch, &direct, 0x5, &sink)))
+      goto fail;
+   list->pregfx_cur += sink.length;
+   seg->g17p_preraster_metadata_only = true;
+   seg->dispatches++;
+   /* GPU-derived heap pointers cannot form a complete host read/write set.
+    * Reuse the queue's conservative residency/cache path and retained BOs. */
+   d12_list_track_pso_reads(list, pso);
+   d12_list_track_read_bo(list, list->device->heap_bo);
+   d12_list_mark_read_set_incomplete(list);
+   d12_segment_mark_write_set_incomplete(seg, D12_WRITE_COMPUTE);
+   return true;
+fail:
+   mesa_loge("native GS recording rejected program/cell/grid ownership");
+   list->state = D12_LIST_ERROR;
+   return false;
+}
+
+static bool
 d12_list_dispatch_gs_stage(struct d12_cmd_list *list,
                            struct d12_segment *seg, uint64_t va,
                            const struct agx_shader_info *info,
@@ -7599,6 +7780,8 @@ d12_list_dispatch_gs_stage(struct d12_cmd_list *list,
                            const struct d12_dispatch_uniforms *u,
                            D3D12_SHADER_VISIBILITY visibility)
 {
+   if (list->device->dev.chip == AGX_CHIP_G17P)
+      return d12_list_append_native_gs(list, seg, va, info, grid, wg, u);
    if (!d12_list_require_legacy_compute(list))
       return false;
 
@@ -7649,6 +7832,12 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
                     unsigned *out_instances, struct agx_draw *out_draw,
                     struct d12_dispatch_uniforms *out_poly)
 {
+   if (list->device->dev.chip == AGX_CHIP_G17P &&
+       !d12_g17p_preraster_metadata_enabled(&list->device->dev)) {
+      mesa_loge("physical native GS requires raster/execution certification");
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
    /* 64 threads, and this value has to agree in three places: both
     * parameter blocks bake it, and the launch below uses it. Nothing
     * cross-checks them.
@@ -8136,6 +8325,142 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
    *out_instances = indirect ? 0 : gp.draw.instance_count;
    *out_poly = u;
    return true;
+}
+
+/* Registered diagnostic entry, deliberately separate from API draw admission.
+ * Use the actual recording producer and storage, with a render placeholder
+ * solely to test segment insertion. Never create a queue or submit this list.
+ * The placeholder does not certify generated VDM/PPP/raster state. */
+HRESULT
+d12_cmd_certify_native_gs(struct d12_pipeline_state *pso,
+                           bool indirect, const char *directory)
+{
+   if (!pso || !directory ||
+       !d12_g17p_preraster_metadata_enabled(&pso->device->dev) ||
+       !pso->has_gs || pso->has_tess || pso->has_mesh || pso->gs_info.xfb ||
+       pso->gs_info.shape != POLY_GS_SHAPE_STATIC_PER_INSTANCE)
+      return E_NOTIMPL;
+
+   ID3D12CommandAllocator *allocator = NULL;
+   ID3D12GraphicsCommandList *iface = NULL;
+   HRESULT hr = d12_cmd_allocator_create(pso->device, D3D12_COMMAND_LIST_TYPE_DIRECT,
+      &IID_ID3D12CommandAllocator, (void **)&allocator);
+   if (FAILED(hr))
+      return hr;
+   hr = d12_cmd_list_create(pso->device, D3D12_COMMAND_LIST_TYPE_DIRECT,
+      d12_cmd_allocator_from_iface(allocator), pso,
+      &IID_ID3D12GraphicsCommandList, (void **)&iface);
+   if (FAILED(hr))
+      goto done;
+   struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
+   list->topology = MESA_PRIM_POINTS;
+   list->segments[0].type = D12_SEG_RENDER;
+   list->segment_count = 1;
+   list->render_open = true;
+
+   uint64_t root_data = d12_list_upload_zero(list, 256, 8);
+   uint64_t root_cell = d12_list_upload(list, &root_data, 8, 8);
+   const uint32_t draw_data[2] = {0, 0};
+   uint64_t draw_cell = d12_list_upload(list, draw_data, sizeof(draw_data), 8);
+   uint64_t vp_cells[2] = {0}, gp_cells[2] = {0};
+   for (unsigned i = 0; i < 2; ++i) {
+      struct d12_dispatch_uniforms u = {0};
+      struct agx_draw input = {0}, output = {0};
+      unsigned verts = 0, instances = 0;
+      if (indirect) {
+         const D3D12_DRAW_ARGUMENTS args = {
+            .VertexCountPerInstance = 4, .InstanceCount = i + 1,
+         };
+         uint64_t args_va = d12_list_upload(list, &args, sizeof(args), 4);
+         input = agx_draw_indirect(args_va);
+      }
+      if (!root_cell || !draw_cell ||
+          !d12_list_gs_prerast(list, pso, 4, i + 1, false, 0,
+             indirect ? &input : NULL, 0, false, root_cell, 0, 0, draw_cell,
+             &verts, &instances, &output, &u)) {
+         hr = E_FAIL;
+         goto done;
+      }
+      vp_cells[i] = u.vertex_params;
+      gp_cells[i] = u.geom_params;
+      if (!d12_list_native_cell(list, vp_cells[i], sizeof(struct poly_vertex_params)) ||
+          !d12_list_native_cell(list, gp_cells[i], sizeof(struct poly_geometry_params)) ||
+          agx_is_indirect(output.b) != indirect ||
+          (!indirect && (verts != 4 || instances != i + 1))) {
+         hr = E_FAIL;
+         goto done;
+      }
+   }
+   /* Distinct draws retain distinct snapshots. Negatives exercise the same
+    * ownership check as the live recorder before it dereferences a cell. */
+   if (vp_cells[0] == vp_cells[1] || gp_cells[0] == gp_cells[1] ||
+       d12_list_native_cell(list, vp_cells[0] + 1, sizeof(struct poly_vertex_params)) ||
+       d12_list_native_cell(list, list->stream_bo->va->addr, 0) ||
+       d12_list_native_cell(list, 0, sizeof(struct poly_vertex_params))) {
+      hr = E_FAIL;
+      goto done;
+   }
+   d12_list_close_pregfx(list);
+   /* Do not run ordinary Close against the render placeholder. */
+   list->render_open = false;
+   struct d12_segment *seg = &list->segments[0];
+   if (list->state != D12_LIST_RECORDING || list->segment_count != 2 ||
+       seg->type != D12_SEG_CDM || !seg->g17p_preraster_metadata_only ||
+       seg->dispatches != (indirect ? 6 : 4) ||
+       list->segments[1].type != D12_SEG_RENDER ||
+       seg->stream_end <= seg->stream_start || !list->usc_offset) {
+      hr = E_FAIL;
+      goto done;
+   }
+   if (agx_bo_sync_for_device(list->stream_bo, list->data_floor,
+                              list->stream_bo->size - list->data_floor)) {
+      hr = E_FAIL;
+      goto done;
+   }
+   const char *name = indirect ? "indirect" : "direct";
+   const struct { const char *suffix; const void *data; size_t size; } artifacts[] = {
+      {"uploads", d12_list_stream_map(list) + list->data_floor,
+                  list->stream_bo->size - list->data_floor},
+      {"Ioto", agx_bo_map(list->usc_bo), list->usc_offset},
+      {"CDM", d12_list_stream_map(list) + seg->stream_start,
+              seg->stream_end - seg->stream_start},
+   };
+   char path[4096];
+   for (unsigned i = 0; i < ARRAY_SIZE(artifacts); ++i) {
+      if (snprintf(path, sizeof(path), "%s/P10-%s.%s", directory, name,
+                    artifacts[i].suffix) >= (int)sizeof(path)) {
+         hr = E_FAIL;
+         goto done;
+      }
+      FILE *f = fopen(path, "wb");
+      if (!f) { hr = E_FAIL; goto done; }
+      bool saved = fwrite(artifacts[i].data, 1, artifacts[i].size, f) == artifacts[i].size;
+      if (fclose(f) || !saved) { hr = E_FAIL; goto done; }
+   }
+   if (snprintf(path, sizeof(path), "%s/P10-%s.json", directory, name) >= (int)sizeof(path)) {
+      hr = E_FAIL;
+      goto done;
+   }
+   FILE *f = fopen(path, "w");
+   if (!f) { hr = E_FAIL; goto done; }
+   bool saved = fprintf(f,
+      "{\"registered_recording\":true,\"physical_admission\":false,"
+      "\"render_placeholder\":true,\"gpu_submitted\":false,"
+      "\"draws\":2,\"dispatches\":%u,\"indirect_local\":%s,"
+      "\"stream_base\":%llu,\"upload_offset\":%zu,\"usc_base\":%llu,"
+      "\"vp_cells\":[%llu,%llu],\"gp_cells\":[%llu,%llu],"
+      "\"render_header\":{\"vdm_barrier\":0,\"cdm_barrier\":1}}\n",
+      seg->dispatches, indirect ? "true" : "false",
+      (unsigned long long)list->stream_bo->va->addr, list->data_floor,
+      (unsigned long long)list->usc_bo->va->addr,
+      (unsigned long long)vp_cells[0], (unsigned long long)vp_cells[1],
+      (unsigned long long)gp_cells[0], (unsigned long long)gp_cells[1]) > 0;
+   if (fclose(f) || !saved) { hr = E_FAIL; goto done; }
+   hr = S_OK;
+done:
+   if (iface) ID3D12GraphicsCommandList_Release(iface);
+   ID3D12CommandAllocator_Release(allocator);
+   return hr;
 }
 
 /*

@@ -2653,8 +2653,18 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          const struct d12_segment *seg = &list->segments[s];
          bool compute = seg->type == D12_SEG_CDM;
 
-         if (d12_debug()->dump_segs)
-            mesa_logi("seg %u: %s start=%zu end=%zu dispatches=%u", s,
+         if (seg->g17p_preraster_metadata_only &&
+             (!compute ||
+              !d12_g17p_preraster_metadata_enabled(&device->dev) ||
+              !(device->dev.params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) ||
+              s + 1 >= list->segment_count ||
+              list->segments[s + 1].type != D12_SEG_RENDER)) {
+            mesa_loge("native preraster registered admission/order revoked");
+            payload_valid = false;
+            break;
+         }
+
+         if (d12_debug()->dump_segs)            mesa_logi("seg %u: %s start=%zu end=%zu dispatches=%u", s,
                       compute ? "CDM" : "RENDER", seg->stream_start,
                       seg->stream_end, seg->dispatches);
 
