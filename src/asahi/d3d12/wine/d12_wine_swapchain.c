@@ -44,6 +44,7 @@ struct d12_wine_vk {
    VkFormat swap_format;
    VkExtent2D swap_extent;
    VkPresentModeKHR present_mode;
+   bool vsync;
    uint32_t swap_image_count;
    VkImage swap_images[D12_WINE_MAX_IMAGES];
    VkCommandPool pool;
@@ -207,6 +208,8 @@ d12_wine_vk_create_swapchain(struct d12_wine_vk *vk, VkFormat preferred,
    if (nfmt > 32)
       nfmt = 32;
    vk->GetPhysicalDeviceSurfaceFormatsKHR(vk->phys, vk->surface, &nfmt, fmts);
+   if (!nfmt)
+      return false;
    VkSurfaceFormatKHR chosen = fmts[0];
    for (uint32_t i = 0; i < nfmt; i++) {
       if (fmts[i].format == preferred) {
@@ -288,6 +291,7 @@ d12_wine_vk_create_swapchain(struct d12_wine_vk *vk, VkFormat preferred,
    vk->swap_format = chosen.format;
    vk->swap_extent = extent;
    vk->present_mode = mode;
+   vk->vsync = vsync;
    vk->swap_image_count = D12_WINE_MAX_IMAGES;
    vk->GetSwapchainImagesKHR(vk->device, sc, &vk->swap_image_count,
                              vk->swap_images);
@@ -548,9 +552,7 @@ d12_wine_vk_image_barrier(struct d12_wine_vk *vk, VkImage image,
 static HRESULT
 d12_wine_vk_present(struct d12_wine_vk *vk, bool vsync)
 {
-   bool want_vsync_mode = vsync;
-   bool have_vsync_mode = vk->present_mode == VK_PRESENT_MODE_FIFO_KHR;
-   if (!vk->swapchain || vk->out_of_date || want_vsync_mode != have_vsync_mode) {
+   if (!vk->swapchain || vk->out_of_date || vk->vsync != vsync) {
       if (!d12_wine_vk_create_swapchain(vk, vk->src_format, vsync))
          return DXGI_ERROR_DEVICE_RESET;
    }
@@ -742,8 +744,8 @@ presenter_create_images(struct d12_wine_presenter *p)
    }
 
    UINT bpp = d12_wine_format_bpp(p->desc.Format);
-   p->readback_pitch = align(p->desc.Width * bpp,
-                             D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
+   p->readback_pitch = ALIGN_POT(p->desc.Width * bpp,
+                                 D3D12_TEXTURE_DATA_PITCH_ALIGNMENT);
    D3D12_HEAP_PROPERTIES rb_heap = {.Type = D3D12_HEAP_TYPE_READBACK};
    D3D12_RESOURCE_DESC rb_desc = {
       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
