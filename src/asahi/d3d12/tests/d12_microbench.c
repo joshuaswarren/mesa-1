@@ -406,15 +406,12 @@ record_texture_dispatch_list(struct bench *b, double *per_dispatch_ns)
 enum pass_shape { PASS_RT, PASS_DSRT, PASS_DISCARD, PASS_SHAPES };
 
 static bool
-record_pass_list(struct bench *b, enum pass_shape shape, ID3D12Resource *rt,
+record_pass_list(struct bench *b, ID3D12GraphicsCommandList *list,
+                 enum pass_shape shape, ID3D12Resource *rt,
                  ID3D12Resource *ds, D3D12_CPU_DESCRIPTOR_HANDLE rtv,
                  D3D12_CPU_DESCRIPTOR_HANDLE dsv, ID3D12PipelineState *pso,
                  double *record_us)
 {
-   if (ID3D12CommandAllocator_Reset(b->alloc) != S_OK ||
-       ID3D12GraphicsCommandList_Reset(b->list, b->alloc, NULL) != S_OK)
-      return false;
-   ID3D12GraphicsCommandList *list = b->list;
    const FLOAT clear[4] = {0.1f, 0.2f, 0.3f, 1.0f};
    const bool depth = shape != PASS_RT;
    double t0 = now_ns();
@@ -538,13 +535,35 @@ bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
           b->dev, &pd, &IID_ID3D12PipelineState, (void **)&pso_depth) != S_OK)
       return false;
 
+   /* A list whose Close failed is poisoned for every later Reset, as
+    * D3D12 requires, so each shape records on a list of its own and a
+    * refused shape costs nothing but that list. */
+   ID3D12CommandAllocator *alloc = NULL;
+   if (ID3D12Device_CreateCommandAllocator(
+          b->dev, D3D12_COMMAND_LIST_TYPE_DIRECT, &IID_ID3D12CommandAllocator,
+          (void **)&alloc) != S_OK)
+      return false;
    bool ok = true;
    for (unsigned shape = 0; shape < PASS_SHAPES && ok; shape++) {
       double best = 0;
+      ID3D12GraphicsCommandList *list = NULL;
+      if (ID3D12CommandAllocator_Reset(alloc) != S_OK ||
+          ID3D12Device_CreateCommandList(
+             b->dev, 0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc, NULL,
+             &IID_ID3D12GraphicsCommandList, (void **)&list) != S_OK) {
+         ok = false;
+         break;
+      }
       for (unsigned rep = 0; rep < 3 && ok; rep++) {
          double rec;
-         if (!record_pass_list(b, (enum pass_shape)shape, rt, ds, rtv, dsv,
-                               shape == PASS_RT ? pso_rt : pso_depth,
+         if (rep && (ID3D12CommandAllocator_Reset(alloc) != S_OK ||
+                     ID3D12GraphicsCommandList_Reset(list, alloc, NULL) !=
+                        S_OK)) {
+            ok = false;
+            break;
+         }
+         if (!record_pass_list(b, list, (enum pass_shape)shape, rt, ds, rtv,
+                               dsv, shape == PASS_RT ? pso_rt : pso_depth,
                                &rec)) {
             printf("passes: shape %u is not recordable on this device\n",
                    shape);
@@ -553,7 +572,7 @@ bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
          }
          if (shape == PASS_DSRT)
             *record_us = rec;
-         ID3D12CommandList *lists[] = {(ID3D12CommandList *)b->list};
+         ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
          double e0 = now_ns();
          ID3D12CommandQueue_ExecuteCommandLists(b->queue, 1, lists);
          ok = wait_idle(b) == S_OK;
@@ -561,8 +580,10 @@ bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
          if (!rep || ms < best)
             best = ms;
       }
+      ID3D12GraphicsCommandList_Release(list);
       gpu_ms[shape] = best;
    }
+   ID3D12CommandAllocator_Release(alloc);
 
    ID3D12PipelineState_Release(pso_rt);
    ID3D12PipelineState_Release(pso_depth);
