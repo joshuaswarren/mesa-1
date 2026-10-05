@@ -18,8 +18,15 @@ then real titles; pass/fail and frame time recorded against the current tool.
 
 ## Design A in detail
 * **Build**: Mesa cross build, host `windows`/`aarch64`, compiler
-  `arm64ec-w64-mingw32-clang` (llvm-mingw 20260922 on the Neo), new option
-  `-Dasahi-d3d12-platform=wine`. The *Linux* DRM body of `agx_device.c`
+  `arm64ec-w64-mingw32-clang` (llvm-mingw 20260922, aarch64 Linux build), new
+  option `-Dasahi-d3d12-platform=wine`. The build host is **not the Neo**
+  (no compiles there since 2026-10-06): `build-wine-arm64ec.sh` runs inside
+  the Fedora 45 `aurora-f45-mesa` podman image on m1pro (`~/aurora-d3d12/t1084/
+  t1084-m1pro-build.sh`), so the unixlib is linked against the Neo's glibc and
+  the native host tools (mesa_clc, vtn_bindgen2, asahi_clc) are built from the
+  same tree first. The `wine/include` shim directory is on the cross file's
+  global `c_args` because `asahi_drm.h` is reached from `agx_chip.h` by the
+  compiler library, not only by `src/asahi/d3d12`. The *Linux* DRM body of `agx_device.c`
   (`HAVE_LIBDRM`) is compiled into the PE; virtio is compiled out
   (`AGX_NO_VIRTIO`). `xf86drm.h`, `sys/ioccom.h` (Linux ioctl encoding, not
   BSD), `linux/types.h` and `os_mmap` come from `wine/include/` shims that route
@@ -38,6 +45,15 @@ then real titles; pass/fail and frame time recorded against the current tool.
   PE is already machine AMD64, so ours is installed as
   `files/lib/wine/aarch64-windows/d3d12.dll` (the ARM64X Wine d3d12 kept as
   `.wine-orig`), with `files/lib/wine/aarch64-unix/d3d12.so` beside it. The
+  COFF header machine field must be `IMAGE_FILE_MACHINE_AMD64` (0x8664):
+  wineserver's `is_machine_64bit()`/`is_machine_supported()` know only AMD64
+  and ARM64 and refuse anything else with STATUS_INVALID_IMAGE_FORMAT; the
+  hybrid nature comes from `CHPEMetadataPointer` in the load config
+  (`server/mapping.c`: `is_hybrid`). lld writes 0x8664 for a pure ARM64EC
+  link; `llvm-readobj` *reports* such an image as `COFF-ARM64EC` /
+  `IMAGE_FILE_MACHINE_ARM64EC`, derived from the metadata, which is why the
+  packaging check accepts that string and `mark-wine-builtin.py` verifies the
+  raw field instead. The
   tool wrapper sets `WINEDLLOVERRIDES=d3d12=b;d3d12core=b` and the tool's
   vkd3d-proton `d3d12*.dll` are removed so Proton stops copying them into the
   prefix. Unix handle via `NtQueryVirtualMemory(..., 1000 /*MemoryWineLoadUnixLib*/)`;
@@ -59,9 +75,17 @@ then real titles; pass/fail and frame time recorded against the current tool.
   weak `asahi_noop_*` shim hooks are Linux-only (no weak undefined in PE).
 * **Tests**: the frozen suites are already `_WIN32`-clean (`d12_test_abi.h`);
   cross-built as x64 exes with `x86_64-w64-mingw32-clang`, run with
-  `proton runinprefix` in the user session. HelloTriangle is Microsoft's sample
-  built with llvm-mingw plus a `--selftest` back-buffer readback and frame-time
-  print so pass/fail and ms/frame are objective and identical under both tools.
+  `proton runinprefix` in the user session. The four D3D12HelloWorld samples
+  (Triangle, Texture, Bundles, ConstBuffers) are Microsoft's unmodified
+  sources built with llvm-mingw around `samples/aurora_sample_main.cpp`
+  (`-DSAMPLE_CLASS=...`): bounded `--frames N`, a `--selftest` back-buffer
+  readback (corner must be the clear colour, the triangle must cover a sane
+  share of the frame) and one JSON line of frame-time statistics, so
+  pass/fail and ms/frame are objective and identical under both tools.
+  HelloTexture expects Visual Studio's precompiled `.cso` pair; the entry
+  point produces it at start-up through `d3dcompiler_47` (Wine's) so the
+  sample source stays untouched. `samples/include/d3dx12/d3dx12.h` is a small
+  shim of the public helpers (mingw's d3d12.h predates the real d3dx12.h).
 
 ## Risks / open
 * ARM64EC Mesa build has never been done: expect a few compiler/ABI fixes.
