@@ -309,6 +309,15 @@ executable(
   link_with : [libd3d12agx],
 )
 
+# Live queue/fence contract: GPU and CPU Signal ordering, multi-fence waits,
+# cross-queue Wait, and queue release with parked waiters.
+executable(
+  'd3d12agx_queue_fence_live',
+  files('tests/queue_fence_live.c'),
+  dependencies : [dep_dxheaders_d12, dependency('threads')],
+  link_with : [libd3d12agx],
+)
+
 # Live: PSO lifetime under a pipeline library from several threads.
 executable(
   'd3d12agx_pso_library_race',
