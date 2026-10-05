@@ -799,9 +799,22 @@ hk_dispatch_precomp(struct hk_cmd_buffer *cmd, struct agx_grid grid,
 
    agx_usc_words_precomp(t.cpu, &prog->b, uploaded_data, data_size);
 
+   /* An internal full-barrier launch orders in both directions: drain the
+    * producers before it, and it drains before the next CDM launch. The
+    * producer side is not tracked by cdm_barrier_pending, since an internal
+    * launch may consume the output of a regular launch (e.g. the TCS of the
+    * same draw) that sets no flag. */
+   if (barrier & AGX_BARRIER_ALL) {
+      hk_cdm_cache_flush(dev, cs);
+      cmd->state.cs.cdm_barrier_pending = false;
+   }
+
    hk_dispatch_with_usc_launch(dev, cs, prog->b.launch,
                                agx_usc_addr(&dev->dev, t.gpu), grid,
                                prog->b.workgroup);
+
+   if (barrier & AGX_BARRIER_ALL)
+      cmd->state.cs.cdm_barrier_pending = true;
 }
 
 void
