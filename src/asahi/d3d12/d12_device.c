@@ -662,6 +662,13 @@ d12_device_CheckFeatureSupport(ID3D12Device2 *iface, D3D12_FEATURE feature,
          return E_INVALIDARG;
 
       native_support = d12_format_frontend_support(support->Format);
+      /* A recognized format with no implementation is an unsupported
+       * query, not a supported format with an empty set of uses. In
+       * particular, planar video formats have no resource layout here.
+       * Returning S_OK lets callers proceed to create and use those images.
+       */
+      if (!native_support && support->Format != DXGI_FORMAT_UNKNOWN)
+         return E_FAIL;
 #define D12_MAP_FORMAT1(frontend_bit, public_bit)                           \
    do {                                                                      \
       if (native_support & (frontend_bit))                                   \

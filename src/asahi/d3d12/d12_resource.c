@@ -13,6 +13,89 @@
 #include "d12_sparse_residency_core.h"
 #include "util/os_misc.h"
 #include "util/cache_ops.h"
+#include <limits.h>
+
+/* GEM storage on UMA is charged to the allocating process's memory cgroup.
+ * The kernel may kill that process while faulting/binding a BO, before GEM
+ * creation can return ENOMEM. Bound resource allocations by the real Linux
+ * budget so D3D12 can return E_OUTOFMEMORY instead. Observe all ancestors:
+ * memory.max can be unlimited in the leaf while a parent has a hard limit.
+ */
+static uint64_t
+d12_resource_available_memory(void)
+{
+   uint64_t available = UINT64_MAX;
+   os_get_available_system_memory(&available);
+#if DETECT_OS_LINUX
+   char path[PATH_MAX], line[PATH_MAX];
+   FILE *file = fopen("/proc/self/cgroup", "r");
+   if (!file)
+      return available;
+   bool found = false;
+   while (fgets(line, sizeof(line), file)) {
+      if (strncmp(line, "0::/", 4))
+         continue;
+      line[strcspn(line, "\n")] = '\0';
+      int length = snprintf(path, sizeof(path), "/sys/fs/cgroup%s", line + 3);
+      found = length > 0 && length < sizeof(path);
+      break;
+   }
+   fclose(file);
+   if (!found)
+      return available;
+
+   while (strlen(path) >= strlen("/sys/fs/cgroup")) {
+      char filename[PATH_MAX];
+      uint64_t maximum, current;
+      int length = snprintf(filename, sizeof(filename), "%s/memory.max", path);
+      if (length > 0 && length < sizeof(filename)) {
+         file = fopen(filename, "r");
+         bool limited = file && fscanf(file, "%" SCNu64, &maximum) == 1;
+         if (file)
+            fclose(file);
+         if (limited) {
+            length = snprintf(filename, sizeof(filename), "%s/memory.current", path);
+            file = length > 0 && length < sizeof(filename)
+                      ? fopen(filename, "r") : NULL;
+            if (file) {
+               if (fscanf(file, "%" SCNu64, &current) == 1)
+                  available = MIN2(available, current < maximum ? maximum - current : 0);
+               fclose(file);
+            }
+         }
+      }
+      *strrchr(path, '/') = '\0';
+   }
+#endif
+   return available;
+}
+
+static struct agx_bo *
+d12_resource_bo_create(struct d12_device *device, size_t size, unsigned align,
+                       enum agx_bo_flags flags, const char *label)
+{
+   /* Serialize the check and allocation across resource-creation threads.
+    * Reserve room for command streams and CPU allocations which do not go
+    * through this helper. This is an allocation refusal, not a capability
+    * limit; previously created resources and the device remain usable.
+    */
+   static simple_mtx_t allocation_lock = SIMPLE_MTX_INITIALIZER;
+   const uint64_t reserve = 128ull * 1024 * 1024;
+   struct agx_bo *bo = NULL;
+   if (!size || size > SIZE_MAX - (AIL_PAGESIZE - 1))
+      return NULL;
+   const uint64_t required = ALIGN_POT(size, AIL_PAGESIZE);
+   simple_mtx_lock(&allocation_lock);
+   uint64_t available = d12_resource_available_memory();
+   if (available <= reserve || required > available - reserve) {
+      agx_bo_cache_evict_all(&device->dev);
+      available = d12_resource_available_memory();
+   }
+   if (available > reserve && required <= available - reserve)
+      bo = agx_bo_create(&device->dev, size, align, flags, label);
+   simple_mtx_unlock(&allocation_lock);
+   return bo;
+}
 
 static_assert(AIL_PAGESIZE == D12_AGX_SPARSE_PAGE_SIZE_B,
               "portable sparse page size must match AIL");
@@ -2083,7 +2166,7 @@ d12_resource_create(struct d12_device *device,
        * handle methods remain E_NOTIMPL, while Windows must never silently
        * fall back to an unshareable BO after a real D3DKMT failure. */
       if (!shared || shared_hr == E_NOTIMPL)
-         res->bo = agx_bo_create(&device->dev, size_B, 0, bo_flags,
+         res->bo = d12_resource_bo_create(device, size_B, 0, bo_flags,
                                  "d3d12 resource");
       if (!res->bo) {
          free(res);
@@ -2097,7 +2180,7 @@ d12_resource_create(struct d12_device *device,
             res->stencil_bo = res->bo;
          } else {
             res->stencil_bo =
-               agx_bo_create(&device->dev, stencil_layout.size_B, 0,
+               d12_resource_bo_create(device, stencil_layout.size_B, 0,
                              bo_flags, "d3d12 stencil plane");
          }
          if (!res->stencil_bo) {
@@ -2959,7 +3042,7 @@ d12_heap_create_internal(struct d12_device *device,
       }
       if (!(resolved.Flags & D3D12_HEAP_FLAG_SHARED) ||
           shared_hr == E_NOTIMPL) {
-         heap->bo = agx_bo_create(&device->dev, resolved.SizeInBytes,
+         heap->bo = d12_resource_bo_create(device, resolved.SizeInBytes,
                                   resolved.Alignment, bo_flags,
                                   "d3d12 heap");
       }
