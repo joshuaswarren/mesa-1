@@ -11,12 +11,22 @@ d12_g17p_vdm_storage_ref(struct d12_g17p_vdm_storage *storage)
    p_atomic_inc(&storage->refcount);
 }
 
+/* Slabs kept bound for reuse per device. A command list that records a
+ * few passes needs one or two; the bound keeps a burst of retired lists
+ * from pinning the low VDM aperture. */
+#define D12_G17P_VDM_POOL_MAX 16
+
 void
-d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage)
+d12_device_g17p_vdm_pool_init(struct d12_device *device)
 {
-   if (!storage || p_atomic_dec_return(&storage->refcount))
-      return;
-   struct agx_device *dev = storage->dev;
+   simple_mtx_init(&device->g17p_vdm_pool_lock, mtx_plain);
+   util_dynarray_init(&device->g17p_vdm_pool, NULL);
+}
+
+static void
+d12_g17p_vdm_storage_destroy(struct d12_g17p_vdm_storage *storage)
+{
+   struct agx_device *dev = &storage->device->dev;
    /* Never recycle an alias whose mapping could still exist. Device teardown
     * is the recovery boundary after this exceptional unbind failure. */
    if (agx_bo_bind(dev, NULL, storage->alias, storage->bo->size, 0,
@@ -33,6 +43,42 @@ d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage)
 }
 
 void
+d12_device_g17p_vdm_pool_fini(struct d12_device *device)
+{
+   util_dynarray_foreach(&device->g17p_vdm_pool,
+                         struct d12_g17p_vdm_storage *, storage)
+      d12_g17p_vdm_storage_destroy(*storage);
+   util_dynarray_fini(&device->g17p_vdm_pool);
+   simple_mtx_destroy(&device->g17p_vdm_pool_lock);
+}
+
+void
+d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage)
+{
+   if (!storage || p_atomic_dec_return(&storage->refcount))
+      return;
+
+   /* The last submitted reader has retired: park the slab, still bound at
+    * its alias, for the next command list instead of unbinding it and
+    * binding a fresh one per Reset. */
+   struct d12_device *device = storage->device;
+   simple_mtx_lock(&device->g17p_vdm_pool_lock);
+   const bool pooled =
+      util_dynarray_num_elements(&device->g17p_vdm_pool,
+                                 struct d12_g17p_vdm_storage *) <
+      D12_G17P_VDM_POOL_MAX;
+   if (pooled) {
+      storage->refcount = 0;
+      storage->used = 0;
+      util_dynarray_append_typed(&device->g17p_vdm_pool,
+                                 struct d12_g17p_vdm_storage *, storage);
+   }
+   simple_mtx_unlock(&device->g17p_vdm_pool_lock);
+   if (!pooled)
+      d12_g17p_vdm_storage_destroy(storage);
+}
+
+void
 d12_list_g17p_vdm_storage_reset(struct d12_cmd_list *list)
 {
    util_dynarray_foreach(&list->g17p_vdm_storage,
@@ -42,12 +88,28 @@ d12_list_g17p_vdm_storage_reset(struct d12_cmd_list *list)
 }
 
 static struct d12_g17p_vdm_storage *
-d12_g17p_vdm_storage_create(struct agx_device *dev)
+d12_g17p_vdm_storage_create(struct d12_device *device)
 {
-   struct d12_g17p_vdm_storage *storage = calloc(1, sizeof(*storage));
+   struct agx_device *dev = &device->dev;
+
+   simple_mtx_lock(&device->g17p_vdm_pool_lock);
+   struct d12_g17p_vdm_storage *storage =
+      util_dynarray_num_elements(&device->g17p_vdm_pool,
+                                 struct d12_g17p_vdm_storage *)
+         ? util_dynarray_pop(&device->g17p_vdm_pool,
+                             struct d12_g17p_vdm_storage *)
+         : NULL;
+   simple_mtx_unlock(&device->g17p_vdm_pool_lock);
+   if (storage) {
+      storage->refcount = 1;
+      storage->used = 0;
+      return storage;
+   }
+
+   storage = calloc(1, sizeof(*storage));
    if (!storage)
       return NULL;
-   storage->dev = dev;
+   storage->device = device;
    storage->refcount = 1;
    /* Same ordinary coherent mapping as Honeykrisp's native VDM slabs. */
    storage->bo = agx_bo_create(dev, D12_G17P_VDM_SLAB_SIZE, 0, 0,
@@ -95,7 +157,7 @@ d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
                                       struct d12_g17p_vdm_storage *, count - 1)[0];
    size_t offset = storage ? ALIGN_POT(storage->used, alignment) : 0;
    if (!storage || size > storage->bo->size - offset) {
-      storage = d12_g17p_vdm_storage_create(&list->device->dev);
+      storage = d12_g17p_vdm_storage_create(list->device);
       if (!storage)
          goto fail;
       struct d12_g17p_vdm_storage **slot = util_dynarray_grow(

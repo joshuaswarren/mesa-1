@@ -259,6 +259,12 @@ struct d12_device {
    simple_mtx_t descriptor_heap_lock;
    struct d12_descriptor_heap *descriptor_heaps;
 
+   /* Retired G17P native VDM slabs, kept bound at their low-window alias
+    * for the next command list (the alias is immutable for the BO's life,
+    * as Honeykrisp's pooled command BOs keep theirs). */
+   simple_mtx_t g17p_vdm_pool_lock;
+   struct util_dynarray g17p_vdm_pool;
+
    /* Root SRV/CBV setters receive only a raw GPU VA. Retain the live sparse
     * intervals so read-only root descriptors can select the zero-backed
     * mirror used for unmapped tiles. */
@@ -1612,7 +1618,7 @@ struct d12_fragment_state_cache_entry {
  * operation retires, independently of command-list Reset/release. */
 struct d12_g17p_vdm_storage {
    uint32_t refcount;
-   struct agx_device *dev;
+   struct d12_device *device;
    struct agx_bo *bo;
    uint64_t alias;
    size_t used;
@@ -2304,6 +2310,8 @@ HRESULT d12_platform_open_shared_handle_by_name(struct d12_device *device,
 void d12_g17p_vdm_storage_ref(struct d12_g17p_vdm_storage *storage);
 void d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage);
 void d12_list_g17p_vdm_storage_reset(struct d12_cmd_list *list);
+void d12_device_g17p_vdm_pool_init(struct d12_device *device);
+void d12_device_g17p_vdm_pool_fini(struct d12_device *device);
 void *d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
                             size_t alignment, uint64_t *compact_va);
 
