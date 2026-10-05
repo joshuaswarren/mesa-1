@@ -15067,7 +15067,9 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
       return E_INVALIDARG;
    }
 
-   if (!allocator || allocator->type != type || allocator->recording_lists)
+   /* ID3D12Device4::CreateCommandList1 creates a list with no allocator; it
+    * starts closed and the first Reset supplies the allocator. */
+   if (allocator && (allocator->type != type || allocator->recording_lists))
       return E_INVALIDARG;
 
    struct d12_cmd_list *list = calloc(1, sizeof(*list));
@@ -15109,8 +15111,12 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
       allocator->recording_lists++;
    d12_device_add_ref(device);
 
-   /* D3D12 command lists are created in the recording state. */
-   d12_list_begin_recording(list);
+   /* CreateCommandList returns a list in the recording state;
+    * CreateCommandList1 returns a closed one. */
+   if (allocator)
+      d12_list_begin_recording(list);
+   else
+      list->state = D12_LIST_CLOSED;
 
    HRESULT hr = d12_list_QueryInterface((ID3D12GraphicsCommandList6 *)&list->iface, riid, out);
    d12_list_Release((ID3D12GraphicsCommandList6 *)&list->iface);

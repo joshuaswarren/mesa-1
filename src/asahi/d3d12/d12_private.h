@@ -210,10 +210,10 @@ HRESULT d12_private_data_set_name(struct d12_private_data_store *store,
 #define D12_VB_PARAMS_FAILED ((uint64_t)~0ull)
 
 struct d12_device {
+   /* One vtable answers every IID from ID3D12Device to ID3D12Device15: the
+    * newer interfaces are strict supersets, so the slots are appended to the
+    * ID3D12Device2 table (see struct d12_device_vtbl in d12_device.c). */
    ID3D12Device iface; /* must be first */
-   /* Narrow modern-device tear-off for the CPU query-heap methods added by
-    * ID3D12Device15. IUnknown still resolves to iface above. */
-   ID3D12Device15 iface15;
    /* D3D12Core configuration is a device-owned tear-off too.  It exposes
     * serialization helpers without changing the ID3D12Device2 ABI used by
     * the main interface. */

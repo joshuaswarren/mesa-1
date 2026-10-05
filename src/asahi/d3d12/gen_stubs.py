@@ -31,6 +31,9 @@ INTERFACES = [
     # are supersets of the base ones, so the objects keep one vtable each
     # and QueryInterface just accepts the newer IIDs.
     "ID3D12Device2",
+    # The device answers every IID up to ID3D12Device15 from one vtable that
+    # starts with the ID3D12Device2 table and appends the newer slots.
+    "ID3D12Device15",
     "ID3D12GraphicsCommandList",
     "ID3D12GraphicsCommandList6",
     "ID3D12CommandQueue",

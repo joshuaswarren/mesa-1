@@ -298,6 +298,15 @@ if d12_is_windows
   endif
 endif
 
+# Live API contract checks beyond the frozen suites: interface versions,
+# Device4+/Device15 entry points, NULL-argument robustness.
+executable(
+  'd3d12agx_device_interfaces',
+  files('tests/device_interfaces.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 # CPU-side microbenchmark: record/submit cost, descriptor writes, PSO creation.
 d3d12agx_microbench = executable(
   'd3d12agx_microbench',

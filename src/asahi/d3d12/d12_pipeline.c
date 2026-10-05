@@ -383,6 +383,8 @@ d12_private_data_set_name(struct d12_private_data_store *store, LPCWSTR name)
     * and read pairs of code units at a time on this host. */
    const uint16_t *utf16 = (const uint16_t *)name;
    size_t length = 0;
+   if (!utf16)
+      return E_INVALIDARG;
    while (utf16[length])
       length++;
 
