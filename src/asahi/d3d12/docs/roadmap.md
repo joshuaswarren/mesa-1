@@ -498,6 +498,13 @@ SM 6.9 cooperative matrix. Skip until something needs it.
 
 ## 5. The real conformance number — FIRST MEASUREMENT, 2026-08-04
 
+**2026-10-05 update:** the DXBC front end now exists. On the refactor base
+`c4518ba3ce5`, the same 63 shader registrations measure 57 pass / 6 fail on
+M1 Pro and M2; t-1108 takes both to 58 pass / 5 fail, equal to the current
+vkd3d-proton control. The August measurements below remain historical.
+See [shader-gaps.md](shader-gaps.md) for the per-registration limitations,
+DXVK opcode audit, and distinction between translation and execution.
+
 **185 of 557** vkd3d-proton D3D12 test functions complete with zero
 failures against `libd3d12agx.so`. Of those, **10 execute with nothing
 skipped at all**; the other 163 pass in part because a feature check

@@ -1,0 +1,232 @@
+opcode,dxvk_v2_7_1_name,dxvk_class,d12_enum,d12_case,scope
+0,Add,VectorAlu,ADD,1,present; operand/target restrictions apply
+1,And,VectorAlu,AND,1,present; operand/target restrictions apply
+2,Break,ControlFlow,BREAK,1,present; operand/target restrictions apply
+3,Breakc,ControlFlow,BREAKC,1,present; operand/target restrictions apply
+4,Call,ControlFlow,,0,absent
+5,Callc,ControlFlow,,0,absent
+6,Case,ControlFlow,CASE,1,present; operand/target restrictions apply
+7,Continue,ControlFlow,CONTINUE,1,present; operand/target restrictions apply
+8,Continuec,ControlFlow,CONTINUEC,1,present; operand/target restrictions apply
+9,Cut,GeometryEmit,CUT,1,present; operand/target restrictions apply
+10,Default,ControlFlow,DEFAULT,1,present; operand/target restrictions apply
+11,DerivRtx,VectorDeriv,DERIV_RTX,1,present; operand/target restrictions apply
+12,DerivRty,VectorDeriv,DERIV_RTY,1,present; operand/target restrictions apply
+13,Discard,ControlFlow,DISCARD,1,present; operand/target restrictions apply
+14,Div,VectorAlu,DIV,1,present; operand/target restrictions apply
+15,Dp2,VectorDot,DP2,1,present; operand/target restrictions apply
+16,Dp3,VectorDot,DP3,1,present; operand/target restrictions apply
+17,Dp4,VectorDot,DP4,1,present; operand/target restrictions apply
+18,Else,ControlFlow,ELSE,1,present; operand/target restrictions apply
+19,Emit,GeometryEmit,EMIT,1,present; operand/target restrictions apply
+20,EmitThenCut,GeometryEmit,EMITTHENCUT,1,present; operand/target restrictions apply
+21,EndIf,ControlFlow,ENDIF,1,present; operand/target restrictions apply
+22,EndLoop,ControlFlow,ENDLOOP,1,present; operand/target restrictions apply
+23,EndSwitch,ControlFlow,ENDSWITCH,1,present; operand/target restrictions apply
+24,Eq,VectorCmp,EQ,1,present; operand/target restrictions apply
+25,Exp,VectorAlu,EXP,1,present; operand/target restrictions apply
+26,Frc,VectorAlu,FRC,1,present; operand/target restrictions apply
+27,FtoI,VectorAlu,FTOI,1,present; operand/target restrictions apply
+28,FtoU,VectorAlu,FTOU,1,present; operand/target restrictions apply
+29,Ge,VectorCmp,GE,1,present; operand/target restrictions apply
+30,IAdd,VectorAlu,IADD,1,present; operand/target restrictions apply
+31,If,ControlFlow,IF,1,present; operand/target restrictions apply
+32,IEq,VectorCmp,IEQ,1,present; operand/target restrictions apply
+33,IGe,VectorCmp,IGE,1,present; operand/target restrictions apply
+34,ILt,VectorCmp,ILT,1,present; operand/target restrictions apply
+35,IMad,VectorAlu,IMAD,1,present; operand/target restrictions apply
+36,IMax,VectorAlu,IMAX,1,present; operand/target restrictions apply
+37,IMin,VectorAlu,IMIN,1,present; operand/target restrictions apply
+38,IMul,VectorImul,IMUL,1,present; operand/target restrictions apply
+39,INe,VectorCmp,INE,1,present; operand/target restrictions apply
+40,INeg,VectorAlu,INEG,1,present; operand/target restrictions apply
+41,IShl,VectorShift,ISHL,1,present; operand/target restrictions apply
+42,IShr,VectorShift,ISHR,1,present; operand/target restrictions apply
+43,ItoF,VectorAlu,ITOF,1,present; operand/target restrictions apply
+44,Label,ControlFlow,,0,absent
+45,Ld,TextureFetch,LD,1,present; operand/target restrictions apply
+46,LdMs,TextureFetch,LD_MS,1,present; operand/target restrictions apply
+47,Log,VectorAlu,LOG,1,present; operand/target restrictions apply
+48,Loop,ControlFlow,LOOP,1,present; operand/target restrictions apply
+49,Lt,VectorCmp,LT,1,present; operand/target restrictions apply
+50,Mad,VectorAlu,MAD,1,present; operand/target restrictions apply
+51,Min,VectorAlu,MIN,1,present; operand/target restrictions apply
+52,Max,VectorAlu,MAX,1,present; operand/target restrictions apply
+53,CustomData,CustomData,CUSTOMDATA,0,present; operand/target restrictions apply
+54,Mov,VectorAlu,MOV,1,present; operand/target restrictions apply
+55,Movc,VectorCmov,MOVC,1,present; operand/target restrictions apply
+56,Mul,VectorAlu,MUL,1,present; operand/target restrictions apply
+57,Ne,VectorCmp,NE,1,present; operand/target restrictions apply
+58,Nop,NoOperation,NOP,1,present; operand/target restrictions apply
+59,Not,VectorAlu,NOT,1,present; operand/target restrictions apply
+60,Or,VectorAlu,OR,1,present; operand/target restrictions apply
+61,ResInfo,TextureQuery,RESINFO,1,present; operand/target restrictions apply
+62,Ret,ControlFlow,RET,1,present; operand/target restrictions apply
+63,Retc,ControlFlow,RETC,1,present; operand/target restrictions apply
+64,RoundNe,VectorAlu,ROUND_NE,1,present; operand/target restrictions apply
+65,RoundNi,VectorAlu,ROUND_NI,1,present; operand/target restrictions apply
+66,RoundPi,VectorAlu,ROUND_PI,1,present; operand/target restrictions apply
+67,RoundZ,VectorAlu,ROUND_Z,1,present; operand/target restrictions apply
+68,Rsq,VectorAlu,RSQ,1,present; operand/target restrictions apply
+69,Sample,TextureSample,SAMPLE,1,present; operand/target restrictions apply
+70,SampleC,TextureSample,SAMPLE_C,1,present; operand/target restrictions apply
+71,SampleClz,TextureSample,SAMPLE_C_LZ,1,present; operand/target restrictions apply
+72,SampleL,TextureSample,SAMPLE_L,1,present; operand/target restrictions apply
+73,SampleD,TextureSample,SAMPLE_D,1,present; operand/target restrictions apply
+74,SampleB,TextureSample,SAMPLE_B,1,present; operand/target restrictions apply
+75,Sqrt,VectorAlu,SQRT,1,present; operand/target restrictions apply
+76,Switch,ControlFlow,SWITCH,1,present; operand/target restrictions apply
+77,SinCos,VectorSinCos,SINCOS,1,present; operand/target restrictions apply
+78,UDiv,VectorIdiv,UDIV,1,present; operand/target restrictions apply
+79,ULt,VectorCmp,ULT,1,present; operand/target restrictions apply
+80,UGe,VectorCmp,UGE,1,present; operand/target restrictions apply
+81,UMul,VectorImul,UMUL,1,present; operand/target restrictions apply
+82,UMad,VectorAlu,UMAD,1,present; operand/target restrictions apply
+83,UMax,VectorAlu,UMAX,1,present; operand/target restrictions apply
+84,UMin,VectorAlu,UMIN,1,present; operand/target restrictions apply
+85,UShr,VectorShift,USHR,1,present; operand/target restrictions apply
+86,UtoF,VectorAlu,UTOF,1,present; operand/target restrictions apply
+87,Xor,VectorAlu,XOR,1,present; operand/target restrictions apply
+88,DclResource,Declaration,DCL_RESOURCE,1,present; operand/target restrictions apply
+89,DclConstantBuffer,Declaration,DCL_CONSTANT_BUFFER,1,present; operand/target restrictions apply
+90,DclSampler,Declaration,DCL_SAMPLER,1,present; operand/target restrictions apply
+91,DclIndexRange,Declaration,DCL_INDEX_RANGE,1,present; operand/target restrictions apply
+92,DclGsOutputPrimitiveTopology,Declaration,DCL_GS_OUTPUT_TOPOLOGY,1,present; operand/target restrictions apply
+93,DclGsInputPrimitive,Declaration,DCL_GS_INPUT_PRIMITIVE,1,present; operand/target restrictions apply
+94,DclMaxOutputVertexCount,Declaration,DCL_MAX_OUTPUT_VERTEX_COUNT,1,present; operand/target restrictions apply
+95,DclInput,Declaration,DCL_INPUT,1,present; operand/target restrictions apply
+96,DclInputSgv,Declaration,DCL_INPUT_SGV,1,present; operand/target restrictions apply
+97,DclInputSiv,Declaration,DCL_INPUT_SIV,1,present; operand/target restrictions apply
+98,DclInputPs,Declaration,DCL_INPUT_PS,1,present; operand/target restrictions apply
+99,DclInputPsSgv,Declaration,DCL_INPUT_PS_SGV,1,present; operand/target restrictions apply
+100,DclInputPsSiv,Declaration,DCL_INPUT_PS_SIV,1,present; operand/target restrictions apply
+101,DclOutput,Declaration,DCL_OUTPUT,1,present; operand/target restrictions apply
+102,DclOutputSgv,Declaration,DCL_OUTPUT_SGV,1,present; operand/target restrictions apply
+103,DclOutputSiv,Declaration,DCL_OUTPUT_SIV,1,present; operand/target restrictions apply
+104,DclTemps,Declaration,DCL_TEMPS,1,present; operand/target restrictions apply
+105,DclIndexableTemp,Declaration,DCL_INDEXABLE_TEMP,1,present; operand/target restrictions apply
+106,DclGlobalFlags,Declaration,DCL_GLOBAL_FLAGS,1,present; operand/target restrictions apply
+108,Lod,TextureQueryLod,,0,absent
+109,Gather4,TextureGather,GATHER4,1,present; operand/target restrictions apply
+110,SamplePos,TextureQueryMsPos,SAMPLE_POS,1,present; operand/target restrictions apply
+111,SampleInfo,TextureQueryMs,SAMPLE_INFO,1,present; operand/target restrictions apply
+113,HsDecls,HullShaderPhase,HS_DECLS,1,present; operand/target restrictions apply
+114,HsControlPointPhase,HullShaderPhase,HS_CONTROL_POINT_PHASE,1,present; operand/target restrictions apply
+115,HsForkPhase,HullShaderPhase,HS_FORK_PHASE,1,present; operand/target restrictions apply
+116,HsJoinPhase,HullShaderPhase,HS_JOIN_PHASE,1,present; operand/target restrictions apply
+117,EmitStream,GeometryEmit,EMIT_STREAM,1,present; operand/target restrictions apply
+118,CutStream,GeometryEmit,CUT_STREAM,1,present; operand/target restrictions apply
+119,EmitThenCutStream,GeometryEmit,EMITTHENCUT_STREAM,1,present; operand/target restrictions apply
+120,InterfaceCall,undefined,,0,no DXVK implementation class
+121,BufInfo,BufferQuery,BUFINFO,1,present; operand/target restrictions apply
+122,DerivRtxCoarse,VectorDeriv,DERIV_RTX_COARSE,1,present; operand/target restrictions apply
+123,DerivRtxFine,VectorDeriv,DERIV_RTX_FINE,1,present; operand/target restrictions apply
+124,DerivRtyCoarse,VectorDeriv,DERIV_RTY_COARSE,1,present; operand/target restrictions apply
+125,DerivRtyFine,VectorDeriv,DERIV_RTY_FINE,1,present; operand/target restrictions apply
+126,Gather4C,TextureGather,GATHER4_C,1,present; operand/target restrictions apply
+127,Gather4Po,TextureGather,GATHER4_PO,1,present; operand/target restrictions apply
+128,Gather4PoC,TextureGather,GATHER4_PO_C,1,present; operand/target restrictions apply
+129,Rcp,VectorAlu,RCP,1,present; operand/target restrictions apply
+130,F32toF16,ConvertFloat16,F32TOF16,1,present; operand/target restrictions apply
+131,F16toF32,ConvertFloat16,F16TOF32,1,present; operand/target restrictions apply
+132,UAddc,undefined,,0,no DXVK implementation class
+133,USubb,undefined,,0,no DXVK implementation class
+134,CountBits,VectorAlu,COUNTBITS,1,present; operand/target restrictions apply
+135,FirstBitHi,BitScan,FIRSTBIT_HI,1,present; operand/target restrictions apply
+136,FirstBitLo,BitScan,FIRSTBIT_LO,1,present; operand/target restrictions apply
+137,FirstBitShi,BitScan,FIRSTBIT_SHI,1,present; operand/target restrictions apply
+138,UBfe,BitExtract,UBFE,1,present; operand/target restrictions apply
+139,IBfe,BitExtract,IBFE,1,present; operand/target restrictions apply
+140,Bfi,BitInsert,BFI,1,present; operand/target restrictions apply
+141,BfRev,VectorAlu,BFREV,1,present; operand/target restrictions apply
+142,Swapc,VectorCmov,SWAPC,1,present; operand/target restrictions apply
+143,DclStream,Declaration,DCL_STREAM,1,present; operand/target restrictions apply
+144,DclFunctionBody,undefined,,0,no DXVK implementation class
+145,DclFunctionTable,undefined,,0,no DXVK implementation class
+146,DclInterface,undefined,,0,no DXVK implementation class
+147,DclInputControlPointCount,Declaration,DCL_INPUT_CONTROL_POINT_COUNT,1,present; operand/target restrictions apply
+148,DclOutputControlPointCount,Declaration,DCL_OUTPUT_CONTROL_POINT_COUNT,1,present; operand/target restrictions apply
+149,DclTessDomain,Declaration,DCL_TESS_DOMAIN,1,present; operand/target restrictions apply
+150,DclTessPartitioning,Declaration,DCL_TESS_PARTITIONING,1,present; operand/target restrictions apply
+151,DclTessOutputPrimitive,Declaration,DCL_TESS_OUTPUT_PRIMITIVE,1,present; operand/target restrictions apply
+152,DclHsMaxTessFactor,Declaration,DCL_HS_MAX_TESSFACTOR,1,present; operand/target restrictions apply
+153,DclHsForkPhaseInstanceCount,HullShaderInstCnt,DCL_HS_FORK_PHASE_INSTANCE_COUNT,1,present; operand/target restrictions apply
+154,DclHsJoinPhaseInstanceCount,HullShaderInstCnt,DCL_HS_JOIN_PHASE_INSTANCE_COUNT,1,present; operand/target restrictions apply
+155,DclThreadGroup,Declaration,DCL_THREAD_GROUP,1,present; operand/target restrictions apply
+156,DclUavTyped,Declaration,DCL_UAV_TYPED,1,present; operand/target restrictions apply
+157,DclUavRaw,Declaration,DCL_UAV_RAW,1,present; operand/target restrictions apply
+158,DclUavStructured,Declaration,DCL_UAV_STRUCTURED,1,present; operand/target restrictions apply
+159,DclThreadGroupSharedMemoryRaw,Declaration,DCL_TGSM_RAW,1,present; operand/target restrictions apply
+160,DclThreadGroupSharedMemoryStructured,Declaration,DCL_TGSM_STRUCTURED,1,present; operand/target restrictions apply
+161,DclResourceRaw,Declaration,DCL_RESOURCE_RAW,1,present; operand/target restrictions apply
+162,DclResourceStructured,Declaration,DCL_RESOURCE_STRUCTURED,1,present; operand/target restrictions apply
+163,LdUavTyped,TypedUavLoad,LD_UAV_TYPED,1,present; operand/target restrictions apply
+164,StoreUavTyped,TypedUavStore,STORE_UAV_TYPED,1,present; operand/target restrictions apply
+165,LdRaw,BufferLoad,LD_RAW,1,present; operand/target restrictions apply
+166,StoreRaw,BufferStore,STORE_RAW,1,present; operand/target restrictions apply
+167,LdStructured,BufferLoad,LD_STRUCTURED,1,present; operand/target restrictions apply
+168,StoreStructured,BufferStore,STORE_STRUCTURED,1,present; operand/target restrictions apply
+169,AtomicAnd,Atomic,ATOMIC_AND,1,present; operand/target restrictions apply
+170,AtomicOr,Atomic,ATOMIC_OR,1,present; operand/target restrictions apply
+171,AtomicXor,Atomic,ATOMIC_XOR,1,present; operand/target restrictions apply
+172,AtomicCmpStore,Atomic,ATOMIC_CMP_STORE,1,present; operand/target restrictions apply
+173,AtomicIAdd,Atomic,ATOMIC_IADD,1,present; operand/target restrictions apply
+174,AtomicIMax,Atomic,ATOMIC_IMAX,1,present; operand/target restrictions apply
+175,AtomicIMin,Atomic,ATOMIC_IMIN,1,present; operand/target restrictions apply
+176,AtomicUMax,Atomic,ATOMIC_UMAX,1,present; operand/target restrictions apply
+177,AtomicUMin,Atomic,ATOMIC_UMIN,1,present; operand/target restrictions apply
+178,ImmAtomicAlloc,AtomicCounter,IMM_ATOMIC_ALLOC,1,present; operand/target restrictions apply
+179,ImmAtomicConsume,AtomicCounter,IMM_ATOMIC_CONSUME,1,present; operand/target restrictions apply
+180,ImmAtomicIAdd,Atomic,IMM_ATOMIC_IADD,1,present; operand/target restrictions apply
+181,ImmAtomicAnd,Atomic,IMM_ATOMIC_AND,1,present; operand/target restrictions apply
+182,ImmAtomicOr,Atomic,IMM_ATOMIC_OR,1,present; operand/target restrictions apply
+183,ImmAtomicXor,Atomic,IMM_ATOMIC_XOR,1,present; operand/target restrictions apply
+184,ImmAtomicExch,Atomic,IMM_ATOMIC_EXCH,1,present; operand/target restrictions apply
+185,ImmAtomicCmpExch,Atomic,IMM_ATOMIC_CMP_EXCH,1,present; operand/target restrictions apply
+186,ImmAtomicIMax,Atomic,IMM_ATOMIC_IMAX,1,present; operand/target restrictions apply
+187,ImmAtomicIMin,Atomic,IMM_ATOMIC_IMIN,1,present; operand/target restrictions apply
+188,ImmAtomicUMax,Atomic,IMM_ATOMIC_UMAX,1,present; operand/target restrictions apply
+189,ImmAtomicUMin,Atomic,IMM_ATOMIC_UMIN,1,present; operand/target restrictions apply
+190,Sync,Barrier,SYNC,1,present; operand/target restrictions apply
+191,DAdd,VectorAlu,,0,absent
+192,DMax,VectorAlu,,0,absent
+193,DMin,VectorAlu,,0,absent
+194,DMul,VectorAlu,,0,absent
+195,DEq,VectorCmp,,0,absent
+196,DGe,VectorCmp,,0,absent
+197,DLt,VectorCmp,,0,absent
+198,DNe,VectorCmp,,0,absent
+199,DMov,VectorAlu,,0,absent
+200,DMovc,VectorCmov,,0,absent
+201,DtoF,ConvertFloat64,,0,absent
+202,FtoD,ConvertFloat64,,0,absent
+203,EvalSnapped,Interpolate,,0,absent
+204,EvalSampleIndex,Interpolate,EVAL_SAMPLE_INDEX,1,present; operand/target restrictions apply
+205,EvalCentroid,Interpolate,EVAL_CENTROID,1,present; operand/target restrictions apply
+206,DclGsInstanceCount,Declaration,DCL_GS_INSTANCE_COUNT,1,present; operand/target restrictions apply
+207,Abort,undefined,,0,no DXVK implementation class
+208,DebugBreak,undefined,,0,no DXVK implementation class
+210,DDiv,VectorAlu,,0,absent
+211,DFma,VectorAlu,,0,absent
+212,DRcp,VectorAlu,,0,absent
+213,Msad,VectorMsad,MSAD,1,present; operand/target restrictions apply
+214,DtoI,ConvertFloat64,,0,absent
+215,DtoU,ConvertFloat64,,0,absent
+216,ItoD,ConvertFloat64,,0,absent
+217,UtoD,ConvertFloat64,,0,absent
+219,Gather4S,TextureGather,GATHER4_S,1,present; operand/target restrictions apply
+220,Gather4CS,TextureGather,GATHER4_C_S,1,present; operand/target restrictions apply
+221,Gather4PoS,TextureGather,GATHER4_PO_S,1,present; operand/target restrictions apply
+222,Gather4PoCS,TextureGather,GATHER4_PO_C_S,1,present; operand/target restrictions apply
+223,LdS,TextureFetch,LD_S,1,textures translated; buffer feedback refused
+224,LdMsS,TextureFetch,LD_MS_S,1,present; operand/target restrictions apply
+225,LdUavTypedS,TypedUavLoad,LD_UAV_TYPED_S,1,textures translated; buffer feedback refused
+226,LdRawS,BufferLoad,,0,absent
+227,LdStructuredS,BufferLoad,,0,absent
+228,SampleLS,TextureSample,SAMPLE_L_S,1,present; operand/target restrictions apply
+229,SampleClzS,TextureSample,SAMPLE_C_LZ_S,1,present; operand/target restrictions apply
+230,SampleClampS,TextureSample,SAMPLE_CLAMP_S,1,present; operand/target restrictions apply
+231,SampleBClampS,TextureSample,SAMPLE_B_CLAMP_S,1,present; operand/target restrictions apply
+232,SampleDClampS,TextureSample,SAMPLE_D_CLAMP_S,1,present; operand/target restrictions apply
+233,SampleCClampS,TextureSample,SAMPLE_C_CLAMP_S,1,present; operand/target restrictions apply
+234,CheckAccessFullyMapped,SparseCheckAccess,CHECK_ACCESS_FULLY_MAPPED,1,present; operand/target restrictions apply
