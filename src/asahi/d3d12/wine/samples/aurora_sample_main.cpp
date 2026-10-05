@@ -58,8 +58,8 @@ wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 struct Pixel { unsigned char b, g, r, a; };
 
 #ifdef SAMPLE_PRECOMPILED
-/* HelloTexture loads shaders_VSMain.cso / shaders_PSMain.cso that Visual
- * Studio compiles from shaders.hlsl at build time. Produce them next to the
+/* The HelloWorld samples load shaders_VSMain.cso / shaders_PSMain.cso that
+ * Visual Studio compiles from shaders.hlsl at build time. Produce them next to the
  * exe at start-up with the same compiler the other samples use at run time
  * (d3dcompiler_47), so the sample source stays untouched. */
 static bool

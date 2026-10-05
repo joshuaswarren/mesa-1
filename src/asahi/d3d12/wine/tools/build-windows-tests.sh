@@ -38,8 +38,10 @@ if [[ -n $samples ]]; then
    # is what d3d12agx (and vkd3d-proton) implement.
    for name in HelloTriangle HelloTexture HelloBundles HelloConstBuffers; do
       cls=D3D12$name
-      extra=-DSAMPLE_NONE
-      [[ $name == HelloTexture ]] && extra=-DSAMPLE_PRECOMPILED
+      # Every HelloWorld sample in this DirectX-Graphics-Samples revision
+      # reads shaders_VSMain.cso / shaders_PSMain.cso that Visual Studio
+      # compiles at build time; the harness produces them at start-up.
+      extra=-DSAMPLE_PRECOMPILED
       mkdir -p "$out/samples/$cls"
       "$cxx" -O2 -std=c++17 -static -municode -D_WIN32_WINNT=0x0A00 -DUNICODE -D_UNICODE -DNOMINMAX \
          -DWIDL_EXPLICIT_AGGREGATE_RETURNS "-D_uuidof=__uuidof" \
