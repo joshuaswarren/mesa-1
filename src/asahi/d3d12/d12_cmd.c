@@ -1306,6 +1306,37 @@ d12_list_emit_cdm_cache_flush(struct d12_cmd_list *list, uint8_t **cursor)
    return false;
 }
 
+/*
+ * Direct3D orders two dispatches' memory accesses only across a barrier
+ * (a UAV barrier between dependent dispatches, a transition before the
+ * data is read by anything else), so an API dispatch owes its cache flush
+ * to the next barrier rather than to the next launch: a run of
+ * independent dispatches is one flush instead of one per launch, which
+ * on G13 costs about 5 us of GPU time each. The flush is emitted at every
+ * point whose consumer the driver cannot see the barrier for: an API
+ * ResourceBarrier, a driver-generated launch (copies, clears, queries,
+ * indirect patching, which the application never barriers against), and
+ * the segment's terminator, so a hardware command always ends flushed and
+ * the next command's barrier field covers the rest. The native G17P
+ * dispatch record carries its own barrier and is unchanged.
+ */
+static bool
+d12_list_flush_cdm_pending(struct d12_cmd_list *list)
+{
+   if (!list->cdm_open)
+      return true;
+   struct d12_segment *seg = &list->segments[list->segment_count - 1];
+   if (!seg->cdm_flush_pending)
+      return true;
+   /* The dispatch reserved these bytes with its own space check. */
+   if (!d12_list_check_stream_space(list, AGX_CDM_BARRIER_LENGTH))
+      return false;
+   if (!d12_list_emit_cdm_cache_flush(list, &list->stream_cur))
+      return false;
+   seg->cdm_flush_pending = false;
+   return true;
+}
+
 static bool
 d12_list_require_legacy_compute(struct d12_cmd_list *list)
 {
@@ -1411,6 +1442,7 @@ d12_list_close_cdm(struct d12_cmd_list *list)
 {
    if (list->cdm_open) {
       struct d12_segment *seg = &list->segments[list->segment_count - 1];
+      d12_list_flush_cdm_pending(list);
       d12_list_emit_cdm_terminate(list);
       seg->stream_end = list->stream_cur - d12_list_stream_map(list);
       list->cdm_open = false;
@@ -1895,6 +1927,11 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
       d12_list_mark_read_set_incomplete(list);
 
    uint8_t **cur = pre_gfx ? &list->pregfx_cur : &list->stream_cur;
+
+   /* A helper consumes what the application's dispatches wrote without
+    * an API barrier in between. */
+   if (!pre_gfx && !d12_list_flush_cdm_pending(list))
+      return;
 
    /* The native sink bounds its own emission by its capacity. */
    size_t need = native ? D12_DISPATCH_STREAM_MARGIN : D12_CDM_DISPATCH_BYTES;
@@ -6871,8 +6908,12 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    if (!d12_list_emit_legacy_cdm_launch(list, &list->stream_cur, grid, wg,
                                         launch, usc))
       return;
-   if (!d12_list_emit_cdm_cache_flush(list, &list->stream_cur))
-      return;
+   if (d12_debug()->flush_each_dispatch) {
+      if (!d12_list_emit_cdm_cache_flush(list, &list->stream_cur))
+         return;
+   } else {
+      seg->cdm_flush_pending = true;
+   }
    seg->dispatches++;
 }
 
@@ -14067,11 +14108,19 @@ static void STDMETHODCALLTYPE
 d12_list_ResourceBarrier(ID3D12GraphicsCommandList6 *iface, UINT num_barriers,
                          const D3D12_RESOURCE_BARRIER *barriers)
 {
-   /* Every dispatch already ends in agx_cdm_barrier (cache flush), memory
-    * is coherent UMA, and segments execute in order via the submit-header
-    * barrier fields. State transitions are accepted as no-ops until image
-    * layout transitions matter.
+   struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
+
+   /* Memory is coherent UMA and segments execute in order via the
+    * submit-header barrier fields, so a barrier has one effect on the
+    * stream: the cache flush the open compute segment's last API dispatch
+    * deferred (d12_list_flush_cdm_pending) is emitted here, whatever the
+    * barrier's type. State transitions are otherwise accepted as no-ops
+    * until image layout transitions matter.
     */
+   if (list->state != D12_LIST_RECORDING)
+      return;
+   if (num_barriers && !d12_list_flush_cdm_pending(list))
+      return;
    for (UINT i = 0; i < num_barriers; i++) {
       if (barriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
           barriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_UAV) {

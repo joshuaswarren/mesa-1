@@ -1727,6 +1727,10 @@ struct d12_segment {
 
    /* CDM */
    uint32_t dispatches;
+   /* The last API dispatch launched without its trailing cache flush;
+    * the flush is owed before any barrier, helper launch or the
+    * segment's terminator (d12_list_flush_cdm_pending). */
+   bool cdm_flush_pending;
 
    /* Bindless AGX samplers are addressed from one heap named by the DRM
     * command, not by a USC sampler-state record. Capture the heap selected

@@ -38,6 +38,9 @@ struct d12_debug_flags {
    bool dump_mesh;
    bool dump_sparse;
    bool dump_shaders;
+   /* A/B control: flush the compute caches after every API dispatch as
+    * the driver did before deferring the flush to the next barrier. */
+   bool flush_each_dispatch;
 
    /* Qualification opt-ins consumed by the G17P admission gates in
     * d12_cmd.c. Each is true only when the variable is exactly "1". */
