@@ -9,6 +9,7 @@
  */
 
 #include "d12_private.h"
+#include "drm-uapi/drm.h"
 
 #include "util/os_time.h"
 #include "util/u_thread.h"
@@ -20,9 +21,13 @@ struct d12_fence_event_waiter {
    uint64_t value;
    HANDLE event;
    /* Internal waiters are told under fence->lock instead of through an
-    * event; the multi-fence "any" wait uses this. */
+    * event; the multi-fence "any" wait uses this.  They stay on the list
+    * until their registrant removes them: the registrant's handle is the
+    * node's address, and a node freed by the fence could be reallocated
+    * for another waiter before the registrant looks for it. */
    void (*notify)(void *cookie);
    void *cookie;
+   bool fired;
 };
 
 static uint64_t
@@ -203,11 +208,17 @@ d12_fence_signal_waiters_locked(struct d12_fence *fence, bool all)
          continue;
       }
 
+      if (waiter->notify) {
+         if (!waiter->fired) {
+            waiter->fired = true;
+            waiter->notify(waiter->cookie);
+         }
+         link = &waiter->next;
+         continue;
+      }
+
       *link = waiter->next;
-      if (waiter->notify)
-         waiter->notify(waiter->cookie);
-      else
-         d12_platform_signal_event(waiter->event);
+      d12_platform_signal_event(waiter->event);
       free(waiter);
    }
 }
@@ -243,8 +254,8 @@ d12_fence_notify_register(struct d12_fence *fence, uint64_t value,
    return 0;
 }
 
-/* The handle is only compared, never dereferenced, until it is found on the
- * list: a waiter that already fired was freed under the same lock. */
+/* Only the registrant frees an internal waiter, fired or not, so the
+ * handle is always on the list here. */
 static void
 d12_fence_notify_unregister(struct d12_fence *fence,
                             struct d12_fence_event_waiter *handle)
@@ -255,11 +266,11 @@ d12_fence_notify_unregister(struct d12_fence *fence,
    struct d12_fence_event_waiter **link = &fence->event_waiters;
    while (*link && *link != handle)
       link = &(*link)->next;
-   if (*link == handle) {
+   assert(*link == handle);
+   if (*link == handle)
       *link = handle->next;
-      free(handle);
-   }
    mtx_unlock(&fence->lock);
+   free(handle);
 }
 
 static void
@@ -586,13 +597,18 @@ d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
 
          /* A cancelable wait is bounded so the stop flag is re-read; it
           * still blocks in the kernel rather than sleeping and polling.
-          * Provider timeouts are absolute CLOCK_MONOTONIC deadlines. */
+          * Provider timeouts are absolute CLOCK_MONOTONIC deadlines.  The
+          * point may not have been submitted by the other process yet: a
+          * plain timeline wait on DRM refuses such a point outright
+          * (EINVAL, not a timeout), which would let a queue Wait fall
+          * through before its signal; wait for the submission as well. */
          uint32_t handle = fence->shared_syncobj;
          uint64_t point = value;
          const int64_t timeout_ns =
             cancel ? os_time_get_nano() + 10 * 1000 * 1000 : INT64_MAX;
          int ret = fence->device->sync->timeline_wait(
-            fence->device->sync, &handle, &point, 1, timeout_ns, 0, NULL);
+            fence->device->sync, &handle, &point, 1, timeout_ns,
+            DRM_SYNCOBJ_WAIT_FLAGS_WAIT_FOR_SUBMIT, NULL);
          if (ret && !(cancel && (ret == -ETIME || errno == ETIME)))
             return false;
       }
@@ -843,9 +859,22 @@ d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
       return -1;
    }
 
+   /* A shared fence's value moves in another process; its cached value
+    * only refreshes through GetCompletedValue, so such fences are polled
+    * (refreshed before registration and on a bounded wait) as the
+    * cancelable wait above does.  Local fences notify. */
+   bool any_shared = false;
    bool reached = false;
    int ret = 0;
    for (unsigned i = 0; i < w->count && !reached && !ret; i++) {
+      if (w->fences[i]->shared_syncobj) {
+         any_shared = true;
+         if (d12_fence_GetCompletedValue(&w->fences[i]->iface) >=
+             w->values[i]) {
+            reached = true;
+            break;
+         }
+      }
       ret = d12_fence_notify_register(w->fences[i], w->values[i],
                                       d12_fence_any_notify, &any,
                                       &handles[i]);
@@ -854,15 +883,35 @@ d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
          ret = 0;
    }
 
-   if (!reached && !ret) {
+   while (!reached && !ret) {
       mtx_lock(&any.lock);
-      while (!any.fired)
-         cnd_wait(&any.changed, &any.lock);
+      if (!any.fired) {
+         if (any_shared) {
+            struct timespec deadline;
+            timespec_get(&deadline, TIME_UTC);
+            deadline.tv_nsec += 1000 * 1000;
+            if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+               deadline.tv_sec++;
+               deadline.tv_nsec -= 1000 * 1000 * 1000;
+            }
+            cnd_timedwait(&any.changed, &any.lock, &deadline);
+         } else {
+            cnd_wait(&any.changed, &any.lock);
+         }
+      }
+      reached = any.fired;
       mtx_unlock(&any.lock);
+      if (reached || !any_shared)
+         continue;
+      for (unsigned i = 0; i < w->count && !reached; i++) {
+         if (w->fences[i]->shared_syncobj &&
+             d12_fence_GetCompletedValue(&w->fences[i]->iface) >=
+                w->values[i])
+            reached = true;
+      }
    }
 
-   /* Every registration is removed (or has already fired and been freed
-    * under its fence lock) before the cookie goes out of scope. */
+   /* Every registration is removed before the cookie goes out of scope. */
    for (unsigned i = 0; i < w->count; i++)
       d12_fence_notify_unregister(w->fences[i], handles[i]);
    free(handles);
