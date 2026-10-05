@@ -34,6 +34,22 @@ def main():
                        identity=identity, results=data['results'])
         (args.stats / f't1189-{path.parent.name}.json').write_text(json.dumps(summary, indent=2) + '\n')
         summaries.append({k: v for k, v in summary.items() if k not in ('identity', 'results')})
+    # A refused preflight is not a measured FAIL or an empty successful run.
+    for journal in sorted((args.report / 'raw').glob('i2-*/journal-before.log')):
+        if (journal.parent / 'results.json').exists():
+            continue
+        count = sum('submit failed' in line for line in journal.read_text(errors='replace').splitlines())
+        if not count:
+            continue
+        name = journal.parent.name
+        corpus = ('vkd3d-proton-tests' if 'proton' in name else
+                  'vkd3d-shader-tests' if 'shader' in name else 'vkd3d-tests')
+        driver = 'd3d12agx@3b1710ace113' if 'base' in name else 'd3d12agx@8f7347b64e6'
+        summary = dict(task='t-1189', machine='neo', driver=driver, corpus=corpus,
+                       evidence=str(journal), attempted=0, strict={},
+                       validity=f'NOT_RUN: preflight submit-failure count {count}')
+        (args.stats / f't1189-{name}.json').write_text(json.dumps(summary, indent=2) + '\n')
+        summaries.append(summary)
     (args.report / 'RUN-STATS.json').write_text(json.dumps(summaries, indent=2) + '\n')
     lines = ['# Individual measured runs', '',
              'Every row stands alone; historical passes never fill a newer unmeasured cell.', '',
