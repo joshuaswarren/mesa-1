@@ -3281,6 +3281,21 @@ hk_g17p_zls_attachment_elidable(const VkRenderingAttachmentInfo *att)
            att->resolveMode == VK_RESOLVE_MODE_NONE);
 }
 
+/* A NONE/NONE attachment that no draw touches must retain its memory
+ * contents. In particular, a full-area pass must not run the forced ZLS
+ * store with an uninitialized tile. Drop such an attachment after recording
+ * the pass, including all of its split streams and firmware partial renders.
+ * Secondary queues are replayed into the primary by hk_CmdExecuteCommands(),
+ * so the same draw/clear tracking observes their depth/stencil use. */
+static bool
+hk_g17p_zls_attachment_none(const VkRenderingAttachmentInfo *att)
+{
+   return !att || !att->imageView ||
+          (att->loadOp == VK_ATTACHMENT_LOAD_OP_NONE &&
+           att->storeOp == VK_ATTACHMENT_STORE_OP_NONE &&
+           att->resolveMode == VK_RESOLVE_MODE_NONE);
+}
+
 static inline void
 hk_g17p_note_depth_use(struct hk_cmd_buffer *cmd)
 {
@@ -3744,13 +3759,16 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    render->zls_precise = debug_get_option_hk_zls_precise_depth_store() &&
                          z_layout != NULL;
    render->g17p_depth_touched = false;
+   const bool preserve_none = hk_g17p_zls_attachment_none(attach_z) &&
+                              hk_g17p_zls_attachment_none(attach_s);
    render->g17p_zls_elide_ok =
       dev->dev.chip == AGX_CHIP_G17P &&
-      debug_get_option_hk_g17p_zls_elide_untouched() &&
+      (preserve_none ||
+       (debug_get_option_hk_g17p_zls_elide_untouched() &&
+        !(render->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT))) &&
       (z_layout != NULL || s_layout != NULL) &&
       !(render->flags & (VK_RENDERING_SUSPENDING_BIT |
-                         VK_RENDERING_RESUMING_BIT |
-                         VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT)) &&
+                         VK_RENDERING_RESUMING_BIT)) &&
       hk_g17p_zls_attachment_elidable(attach_z) &&
       hk_g17p_zls_attachment_elidable(attach_s);
    if (render->zls_precise) {

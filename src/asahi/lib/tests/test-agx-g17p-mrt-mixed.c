@@ -21,6 +21,7 @@
 #include "agx3_g17p_quad_eot.h"
 #include "agx3_sr_core.h"
 #include "agx_bg_eot_key.h"
+#include "agx_abi.h"
 #include "agx_compile.h"
 #include "agx_debug.h"
 #include "agx_linker.h"
@@ -730,9 +731,9 @@ test_background_programs(void)
 }
 
 static bool
-compile_epilog_samples(unsigned count, const enum pipe_format *formats,
+compile_epilog_samples_shared(unsigned count, const enum pipe_format *formats,
                        unsigned written, uint64_t partitions, bool additive,
-                       bool write_z, unsigned samples,
+                       bool write_z, unsigned samples, unsigned shared,
                        struct agx_shader_part *part)
 {
    const enum pipe_blendfactor dst =
@@ -759,6 +760,28 @@ compile_epilog_samples(unsigned count, const enum pipe_format *formats,
    nir_builder b = nir_builder_init_simple_shader(
       MESA_SHADER_FRAGMENT, &agx_nir_options, "G17P MRT epilog");
    agx_nir_fs_epilog(&b, &epilog);
+   /* Model a monolithic fragment exporting the same value to several RTs.
+    * Leave packing, CSE, liveness and register allocation to the compiler. */
+   if (shared) {
+      const unsigned base = AGX_ABI_FOUT_COLOUR(ffs(shared) - 1);
+      nir_foreach_function_impl(impl, b.shader) {
+         nir_foreach_block(block, impl) {
+            nir_foreach_instr(instr, block) {
+               if (instr->type != nir_instr_type_intrinsic)
+                  continue;
+               nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+               if (intr->intrinsic != nir_intrinsic_load_exported_agx)
+                  continue;
+               u_foreach_bit(rt, shared) {
+                  if (nir_intrinsic_base(intr) == AGX_ABI_FOUT_COLOUR(rt)) {
+                     nir_intrinsic_set_base(intr, base);
+                     break;
+                  }
+               }
+            }
+         }
+      }
+   }
    agx_nir_lower_g17p_tile_samples(b.shader, samples);
    agx_preprocess_nir(b.shader);
    struct agx_shader_key key = {.dev.encoding = AGX_ISA_ENCODING_AGX3B,
@@ -782,6 +805,16 @@ compile_epilog_samples(unsigned count, const enum pipe_format *formats,
    const bool ok = agx_compile_shader_nir(b.shader, &key, part);
    ralloc_free(b.shader);
    return ok;
+}
+
+static bool
+compile_epilog_samples(unsigned count, const enum pipe_format *formats,
+                       unsigned written, uint64_t partitions, bool additive,
+                       bool write_z, unsigned samples,
+                       struct agx_shader_part *part)
+{
+   return compile_epilog_samples_shared(count, formats, written, partitions,
+                                         additive, write_z, samples, 0, part);
 }
 
 static bool
@@ -916,6 +949,69 @@ store_f13_mask(const struct agx_shader_part *part, unsigned *stores)
    }
    *stores = n;
    return mask;
+}
+
+/* A repeated tile payload must remain valid through its later store. This
+ * follows the eight-attachment write-mask hardware regression; it does not
+ * assign an undocumented architectural meaning to f13. Partial sharing also
+ * checks that independent leading stores retain the witnessed hint. */
+static int
+test_reused_mrt_payloads(void)
+{
+   static const enum pipe_format formats[8] = {
+      RGBA8, RGBA8, RGBA8, RGBA8, RGBA8, RGBA8, RGBA8, RGBA8,
+   };
+   static const struct {
+      unsigned shared, expected_f13;
+   } cases[] = {
+      {0, 7},                     /* All unique: preserve native hints. */
+      {0xff, 0},                  /* The payload remains live until RT0. */
+      {BITFIELD_BIT(7) | 1, 6},
+      {BITFIELD_BIT(6) | 1, 5},
+      {BITFIELD_BIT(5) | 1, 3},
+      {BITFIELD_BIT(7) | BITFIELD_BIT(6), 6}, /* Last shared use is leading. */
+   };
+   for (unsigned c = 0; c < ARRAY_SIZE(cases); ++c) {
+      struct agx_shader_part part = {0};
+      CHECK(compile_epilog_samples_shared(8, formats, 0xff, 0, false, false,
+                                            1, cases[c].shared, &part));
+      unsigned stores;
+      unsigned f13 = store_f13_mask(&part, &stores);
+      if (f13 != cases[c].expected_f13)
+         fprintf(stderr, "MRT shared=%02x: f13=%02x expected=%02x\n",
+                 cases[c].shared, f13, cases[c].expected_f13);
+      CHECK(stores == 8);
+      CHECK(f13 == cases[c].expected_f13);
+
+      /* In these low-register stores byte 3 names the payload half-register
+       * and byte 5 names the two-byte offset (as in the native tile-op vectors).
+       * Assert actual reuse, so fresh copies cannot make the regression pass
+       * without exercising a live source. The homogeneous layout is emitted
+       * in descending physical order, RT7 through RT0. */
+      const uint8_t *text = part.binary;
+      unsigned n = 0, first_shared = ~0u;
+      for (size_t at = 0; at + 12 <= part.info.binary_size;) {
+         if (text[at] == 0xe7 && (text[at + 1] & 0x07) == 0x06 &&
+             (text[at + 2] & 0xfc) == 0x54) {
+            CHECK(n < 8);
+            const unsigned rt = 7 - n++;
+            CHECK(text[at + 5] == rt * 2);
+            CHECK(text[at + 3] < 64);
+            if (cases[c].shared & BITFIELD_BIT(rt)) {
+               if (first_shared == ~0u)
+                  first_shared = text[at + 3];
+               else
+                  CHECK(text[at + 3] == first_shared);
+            }
+            at += 12;
+         } else {
+            at++;
+         }
+      }
+      CHECK(n == 8);
+      free(part.binary);
+   }
+   return 0;
 }
 
 static int
@@ -1980,6 +2076,7 @@ main(void)
    if (test_selectors_match_single_target_programs() ||
        test_layout_classification() || test_eot_programs() ||
        test_background_programs() || test_epilogs() ||
+       test_reused_mrt_payloads() ||
        test_subset_epilogs() || test_octa_subset_epilogs() ||
        test_multisample_eot_witnesses() || test_multisample_epilogs() ||
        test_blended_epilogs() || test_preserved_blended_epilogs() ||

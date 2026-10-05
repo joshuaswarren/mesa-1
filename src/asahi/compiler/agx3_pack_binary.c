@@ -10536,8 +10536,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                                 : g17p_mrt.shared_first);
                const bool release_class =
                   !shared || partition == g17p_mrt.shared_last;
+               /* Do not use the leading-store f13 hint on a live payload:
+                * reusing that payload for a later attachment produces zero
+                * on G17P (eight mixed-format attachment write-mask CTS).
+                * Preserve it until its last use. Unique-payload native MRT
+                * witnesses retain their existing leading-store hint. */
                const bool store_f13 =
-                  !load && g17p_mrt_stores_seen++ < g17p_mrt.f13_stores;
+                  !load && g17p_mrt_stores_seen++ < g17p_mrt.f13_stores &&
+                  (I->src[0].kill || I->src[0].discard);
                /* A multisample store keeps its own coverage dependency. */
                const bool store_waits = !acquire_class || g17p_mrt.multisample;
                if ((acquire_class &&

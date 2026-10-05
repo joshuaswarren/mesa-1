@@ -1822,6 +1822,17 @@ if with_tests
       gnu_symbol_visibility : 'hidden',
     )
 
+    # Explicit hardware regression; do not register it with meson test.
+    executable(
+      'g17p-vulkan-none-preserve',
+      files('tests/g17p_vulkan_none_preserve.c'),
+      include_directories : [inc_include],
+      dependencies : [dep_dl],
+      c_args : [c_msvc_compat_args],
+      gnu_symbol_visibility : 'hidden',
+      build_by_default : false,
+    )
+
     # Multisample depth attachment: per-sample depth testing, and the ZLS
     # store/load round trip across two render passes.
     executable(
