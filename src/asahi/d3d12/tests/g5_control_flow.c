@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "d12_test_contract.h"
 
 static int failures = 0;
 
@@ -87,7 +88,7 @@ expected(uint32_t count)
 static ID3D12Resource *
 make_buffer(ID3D12Device *dev, UINT64 size)
 {
-   D3D12_HEAP_PROPERTIES heap = {.Type = D3D12_HEAP_TYPE_UPLOAD};
+   D3D12_HEAP_PROPERTIES heap = D12_TEST_UMA_HEAP;
    D3D12_RESOURCE_DESC desc = {
       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
       .Width = size,
@@ -96,14 +97,18 @@ make_buffer(ID3D12Device *dev, UINT64 size)
       .MipLevels = 1,
       .SampleDesc = {.Count = 1},
       .Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR,
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
    };
 
    ID3D12Resource *res = NULL;
-   if (FAILED(ID3D12Device_CreateCommittedResource(
+   HRESULT hr = ID3D12Device_CreateCommittedResource(
           dev, &heap, D3D12_HEAP_FLAG_NONE, &desc,
           D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
-          (void **)&res)))
+          (void **)&res);
+   if (hr != S_OK || !res) {
+      if (res) ID3D12Resource_Release(res);
       return NULL;
+   }
    return res;
 }
 
@@ -125,8 +130,9 @@ main(int argc, char **argv)
    ID3D12Device *dev = NULL;
    HRESULT hr = D3D12CreateDevice(NULL, D3D_FEATURE_LEVEL_11_0,
                                   &IID_ID3D12Device, (void **)&dev);
+   TEST_OBJECT(hr, dev, "checked D3D12CreateDevice dev");
    CHECK(hr == S_OK && dev, "D3D12CreateDevice");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    /* Two root descriptors: the SRV the shader reads and the UAV it writes. */
@@ -143,13 +149,13 @@ main(int argc, char **argv)
    D3D12_ROOT_SIGNATURE_DESC rsd = {.NumParameters = 2, .pParameters = params};
 
    ID3DBlob *blob = NULL;
-   D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob,
-                               NULL);
+   TEST_OBJECT(D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1_0, &blob,
+                               NULL), blob, "checked D3D12SerializeRootSignature blob");
    ID3D12RootSignature *root_sig = NULL;
-   ID3D12Device_CreateRootSignature(dev, 0, ID3D10Blob_GetBufferPointer(blob),
+   TEST_OBJECT(ID3D12Device_CreateRootSignature(dev, 0, ID3D10Blob_GetBufferPointer(blob),
                                     ID3D10Blob_GetBufferSize(blob),
                                     &IID_ID3D12RootSignature,
-                                    (void **)&root_sig);
+                                    (void **)&root_sig), root_sig, "checked ID3D12Device_CreateRootSignature root_sig");
    ID3D10Blob_Release(blob);
    CHECK(root_sig != NULL, "root signature with a UAV at u0 and an SRV at t0");
 
@@ -160,8 +166,8 @@ main(int argc, char **argv)
       return 1;
 
    uint32_t *in_map = NULL, *out_map = NULL;
-   ID3D12Resource_Map(in, 0, NULL, (void **)&in_map);
-   ID3D12Resource_Map(out, 0, NULL, (void **)&out_map);
+   TEST_CALL(d12_test_map(in, false, (void **)&in_map), "checked CPU initialization map in");
+   TEST_CALL(d12_test_map(out, false, (void **)&out_map), "checked CPU initialization map out");
 
    /* Trip counts that exercise different paths: none, one, a handful, a
     * long run, and the early-out sentinel.
@@ -186,20 +192,21 @@ main(int argc, char **argv)
    hr = ID3D12Device_CreateComputePipelineState(dev, &pd,
                                                 &IID_ID3D12PipelineState,
                                                 (void **)&pso);
+   TEST_OBJECT(hr, pso, "checked ID3D12Device_CreateComputePipelineState pso");
    CHECK(hr == S_OK && pso,
          "compile a shader with a loop, an early return and two phis");
-   if (FAILED(hr))
+   if (hr != S_OK)
       return 1;
 
    ID3D12CommandAllocator *alloc = NULL;
    ID3D12GraphicsCommandList *list = NULL;
-   ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+   TEST_OBJECT(ID3D12Device_CreateCommandAllocator(dev, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                        &IID_ID3D12CommandAllocator,
-                                       (void **)&alloc);
-   ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
+                                       (void **)&alloc), alloc, "checked ID3D12Device_CreateCommandAllocator alloc");
+   TEST_OBJECT(ID3D12Device_CreateCommandList(dev, 0, D3D12_COMMAND_LIST_TYPE_COMPUTE,
                                   alloc, NULL,
                                   &IID_ID3D12GraphicsCommandList,
-                                  (void **)&list);
+                                  (void **)&list), list, "checked ID3D12Device_CreateCommandList list");
 
    ID3D12GraphicsCommandList_SetComputeRootSignature(list, root_sig);
    ID3D12GraphicsCommandList_SetComputeRootUnorderedAccessView(
@@ -207,23 +214,29 @@ main(int argc, char **argv)
    ID3D12GraphicsCommandList_SetComputeRootShaderResourceView(
       list, 1, ID3D12Resource_GetGPUVirtualAddress(in));
    ID3D12GraphicsCommandList_SetPipelineState(list, pso);
+   ID3D12Resource_Unmap(in, 0, NULL);in_map = NULL;
+   d12_test_transition(list, in, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+   ID3D12Resource_Unmap(out, 0, NULL);out_map = NULL;
+   d12_test_transition(list, out, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
    ID3D12GraphicsCommandList_Dispatch(list, N / 64, 1, 1);
+   d12_test_transition(list, in, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+   d12_test_transition(list, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
    hr = ID3D12GraphicsCommandList_Close(list);
    CHECK(hr == S_OK, "record the dispatch");
+   if (hr != S_OK) return 1;
 
    ID3D12CommandQueue *queue = NULL;
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE};
-   ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
-                                   (void **)&queue);
+   TEST_OBJECT(ID3D12Device_CreateCommandQueue(dev, &qd, &IID_ID3D12CommandQueue,
+                                   (void **)&queue), queue, "checked ID3D12Device_CreateCommandQueue queue");
    ID3D12Fence *fence = NULL;
-   ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
-                            (void **)&fence);
+   TEST_OBJECT(ID3D12Device_CreateFence(dev, 0, D3D12_FENCE_FLAG_NONE, &IID_ID3D12Fence,
+                            (void **)&fence), fence, "checked ID3D12Device_CreateFence fence");
 
-   ID3D12CommandList *lists[] = {(ID3D12CommandList *)list};
-   ID3D12CommandQueue_ExecuteCommandLists(queue, 1, lists);
-   ID3D12CommandQueue_Signal(queue, fence, 1);
-   ID3D12Fence_SetEventOnCompletion(fence, 1, NULL);
-   CHECK(ID3D12Fence_GetCompletedValue(fence) >= 1, "GPU dispatch complete");
+   TEST_CALL(d12_test_submit_closed(dev, list, queue, fence, 1), "GPU dispatch complete");
+   TEST_CALL(d12_test_map(in, true, (void **)&in_map), "map actual fenced in bytes");
+   TEST_CALL(d12_test_map(out, true, (void **)&out_map), "map actual fenced out bytes");
+
 
    unsigned wrong = 0, early = 0, zero_trip = 0, looped = 0;
    for (unsigned i = 0; i < N; i++) {
@@ -263,8 +276,8 @@ main(int argc, char **argv)
          "a zero-trip loop runs its body zero times");
    CHECK(out_map[2] == expected(1), "a one-trip loop runs its body once");
 
-   ID3D12Resource_Unmap(in, 0, NULL);
-   ID3D12Resource_Unmap(out, 0, NULL);
+   { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(in, 0, &empty); }
+   { const D3D12_RANGE empty = {0,0}; ID3D12Resource_Unmap(out, 0, &empty); }
    ID3D12Fence_Release(fence);
    ID3D12CommandQueue_Release(queue);
    ID3D12GraphicsCommandList_Release(list);

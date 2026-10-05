@@ -43,6 +43,14 @@ d12_queue_timeline_inflight(const struct d12_queue_timeline_state *state);
 bool d12_queue_timeline_has_capacity(
    const struct d12_queue_timeline_state *state, uint64_t max_inflight);
 
+/* The stream/argument slots stay fixed while each generation owns a bounded,
+ * 64-byte-aligned program stride and a separate program arena. */
+bool d12_queue_signal_slot_layout_program(
+   uint32_t slot, uint32_t control_size, uint32_t program_size,
+   uint32_t program_stride, uint32_t program_arena_size,
+   uint32_t *control_offset, uint32_t *data_offset,
+   uint32_t *program_offset);
+
 bool d12_queue_signal_slot_layout(uint32_t slot, uint32_t control_size,
                                   uint32_t usc_size,
                                   uint32_t *control_offset,

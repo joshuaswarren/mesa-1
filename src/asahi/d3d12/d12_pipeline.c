@@ -14,8 +14,13 @@
 #include "d12_blend_core.h"
 
 #include "agx_linker.h"
+#include "asahi/lib/agx3_code_container_core.h"
+#include "asahi/lib/agx_vdm_state_update_core.h"
+#include "asahi/lib/agx_ioto_program_core.h"
 
 #include "agx_compile.h"
+#include "agx_debug.h"
+#include "d12_nir_g17p_txf.h"
 #include "agx_helpers.h"
 #include "agx_nir.h"
 #include "disasm.h"
@@ -1333,6 +1338,89 @@ d12_binding_map_uses_sampler_heap(const struct d12_binding_map *map)
    return false;
 }
 
+/* Reuse the shared G17P CODE producer. Driver uniforms come from the
+ * command-lifetime Ioto program; this container has no generated preamble. */
+static HRESULT
+d12_create_g17p_compute_code(struct d12_device *device,
+                            const struct agx_shader_part *part,
+                            struct d12_pipeline_state *pso)
+{
+   const struct agx_shader_info *info = &part->info;
+   const size_t rodata_size = (size_t)info->rodata.size_16 * 2;
+   const size_t block_size = agx3_code_block_size(info->main_size);
+   const size_t entry_offset = AGX3_CONTAINER_LEAD_SIZE +
+                              AGX3_CODE_BLOCK_ENTRY_OFFSET;
+
+   if (!part->binary || info->stage != MESA_SHADER_COMPUTE ||
+       !info->main_size || info->main_offset > info->binary_size ||
+       info->main_size > info->binary_size - info->main_offset ||
+       !info->nr_gprs || !info->agx3_staging_known ||
+       !info->workgroup_size[0] || !info->workgroup_size[1] ||
+       !info->workgroup_size[2] || !block_size ||
+       info->rodata.offset > info->binary_size ||
+       rodata_size > info->binary_size - info->rodata.offset ||
+       block_size > SIZE_MAX - AGX3_CONTAINER_LEAD_SIZE - rodata_size)
+      return E_FAIL;
+
+   /* No legacy PRESHADER, helper scratch, or uniform-DMA producer is supplied
+    * by the native direct-compute path yet. Keep those requirements explicit. */
+   if (info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
+       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
+       info->imageblock_stride)
+      return E_NOTIMPL;
+
+   const size_t container_size = AGX3_CONTAINER_LEAD_SIZE + block_size;
+   const size_t upload_size = container_size + rodata_size;
+   struct agx_bo *bo = agx_bo_create(&device->dev, upload_size, 0,
+                                    AGX_BO_EXEC | AGX_BO_LOW_VA,
+                                    "d3d12 native compute container");
+   if (!bo)
+      return E_OUTOFMEMORY;
+
+   if (!bo->va || bo->va->addr > UINT64_MAX - entry_offset)
+      goto fail;
+   const uint64_t entry = bo->va->addr + entry_offset;
+   if (!agx_va_in_usc_window(&device->dev, bo->va->addr) ||
+       !agx_va_in_usc_window(&device->dev, entry) ||
+       info->main_size > AGX_USC_WINDOW_SIZE -
+                           (entry - device->dev.shader_base))
+      goto fail;
+
+   uint8_t *mapping = agx_bo_map(bo);
+   if (!mapping)
+      goto fail;
+   agx3_build_container_lead(mapping);
+   if (!agx3_build_code_block(mapping + AGX3_CONTAINER_LEAD_SIZE,
+                              block_size,
+                              (const uint8_t *)part->binary + info->main_offset,
+                              info->main_size, info->main_size, NULL, false))
+      goto fail;
+   if (rodata_size)
+      memcpy(mapping + container_size,
+             (const uint8_t *)part->binary + info->rodata.offset, rodata_size);
+   if (agx_bo_sync_for_device(bo, 0, upload_size))
+      goto fail;
+
+   pso->code_bo = bo;
+   pso->code_va = entry;
+   pso->g17p_rodata_va = rodata_size ? bo->va->addr + container_size : 0;
+   pso->g17p_compute_container = true;
+   return S_OK;
+
+fail:
+   agx_bo_unreference(&device->dev, bo);
+   return E_FAIL;
+}
+
+static void
+d12_disassemble_shader(bool native, uint8_t *code, size_t size, FILE *fp)
+{
+   if (native)
+      agx3b_disassemble(code, size, fp);
+   else
+      agx2_disassemble(code, size, fp);
+}
+
 /*
  * The real work: application DXIL -> our translator -> NIR -> AGX, then
  * upload. This is the campaign's shader path running inside the driver.
@@ -1348,6 +1436,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    if (!dxil || !dxil_size)
       return E_INVALIDARG;
 
+   const bool native_compute = device->dev.chip == AGX_CHIP_G17P;
    const uint32_t descriptor_generation =
       (uint32_t)agx_chip_descriptor_generation(device->dev.chip);
    struct d12_native_descriptor_layout native_layout;
@@ -1446,22 +1535,41 @@ d12_pipeline_state_create_compute(struct d12_device *device,
       return E_INVALIDARG;
    }
 
-   NIR_PASS(_, nir, agx_nir_lower_texture);
-   /* Multisampled image stores lower the same way in every stage; the
-    * FS-only placement left compute MS stores to hit the backend raw.
-    */
+   bool native_txf_compiler_only = false;
+   if (native_compute &&
+       !d12_nir_g17p_txf_supported(nir, &native_txf_compiler_only)) {
+      mesa_loge("CreateComputePipelineState: native texture compilation subset refused");
+      ralloc_free(nir);
+      return E_NOTIMPL;
+   }
+   if (native_txf_compiler_only)
+      NIR_PASS(_, nir, agx_nir_lower_texture_for_generation,
+               descriptor_generation);
+   else
+      NIR_PASS(_, nir, agx_nir_lower_texture);
    NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
-   agx_preprocess_nir(nir);
+   if (native_txf_compiler_only &&
+       !d12_nir_lower_g17p_txf(nir, descriptor_generation)) {
+      mesa_loge("CreateComputePipelineState: native table fetch lowering refused");
+      ralloc_free(nir);
+      return E_NOTIMPL;
+   }
+   if (native_txf_compiler_only)
+      agx_preprocess_nir_g17p(nir);
+   else
+      agx_preprocess_nir(nir);
 
-   /* Must follow preprocessing: emitting the uniform read earlier lets the
-    * compiler reassign its register.
-    */
+   /* Uniform indices become stable after preprocessing. */
    NIR_PASS(_, nir, d12_dxil_lower_root);
+   if (native_txf_compiler_only)
+      NIR_PASS(_, nir, d12_nir_shift_g17p_txf_root);
 
    struct agx_shader_key key = {
       .dev = agx_gather_device_key(&device->dev),
       /* Allocas live in per-thread scratch, and large shaders spill. */
       .has_scratch = true,
+      /* Match the existing native API-compute contract: main is monolithic. */
+      .no_preamble = native_compute,
       /*
        * Constant promotion parks constants in uniform registers that only
        * the shader's preamble fills. Both USC builders push a PRESHADER
@@ -1489,7 +1597,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
 
    struct agx_shader_part part;
    memset(&part, 0, sizeof(part));
-   agx_compile_shader_nir(nir, &key, &part);
+   const bool compiled = agx_compile_shader_nir(nir, &key, &part);
    /* agx_nir_lower_texture consumes a dynamic sampler handle before the
     * backend can conservatively set this bit.  The root map remains the
     * authoritative declaration that the hardware sampler heap is needed. */
@@ -1507,20 +1615,24 @@ d12_pipeline_state_create_compute(struct d12_device *device,
               part.info.nr_preamble_gprs, part.info.rodata.size_16);
       if (part.info.has_preamble) {
          fprintf(stderr, "; driver preamble\n");
-         agx2_disassemble((uint8_t *)part.binary +
-                             part.info.preamble_offset,
+         d12_disassemble_shader(
+            native_compute,
+            (uint8_t *)part.binary + part.info.preamble_offset,
                           part.info.main_offset > part.info.preamble_offset
                              ? part.info.main_offset - part.info.preamble_offset
                              : part.info.binary_size - part.info.preamble_offset,
                           stderr);
       }
       fprintf(stderr, "; driver main\n");
-      agx2_disassemble((uint8_t *)part.binary + part.info.main_offset,
-                       part.info.binary_size - part.info.main_offset, stderr);
+      d12_disassemble_shader(
+         native_compute, (uint8_t *)part.binary + part.info.main_offset,
+         part.info.binary_size - part.info.main_offset, stderr);
    }
 
-   if (!part.binary || !part.info.binary_size) {
-      mesa_loge("CreateComputePipelineState: AGX compile produced no code");
+   if (!compiled || !part.binary || !part.info.binary_size) {
+      const char *refusal = agx_last_compile_refusal();
+      mesa_loge("CreateComputePipelineState: AGX compile produced no code: %s",
+                refusal && refusal[0] ? refusal : "no compiler reason recorded");
       free(part.binary);
       return E_FAIL;
    }
@@ -1531,24 +1643,35 @@ d12_pipeline_state_create_compute(struct d12_device *device,
       return E_OUTOFMEMORY;
    }
 
-   /* Shader code must live in executable, low-VA memory so the USC can
-    * address it 32-bit-relative to the shader base.
-    */
-   pso->code_bo = agx_bo_create(&device->dev, part.info.binary_size, 0,
-                                AGX_BO_EXEC | AGX_BO_LOW_VA,
-                                "d3d12 shader");
-   if (!pso->code_bo) {
-      free(part.binary);
-      free(pso);
-      return E_OUTOFMEMORY;
-   }
+   if (native_compute) {
+      HRESULT native_result = d12_create_g17p_compute_code(device, &part, pso);
+      if (FAILED(native_result)) {
+         mesa_loge("CreateComputePipelineState: native container/setup refused (%#x)",
+                   (unsigned)native_result);
+         free(part.binary);
+         free(pso);
+         return native_result;
+      }
+   } else {
+      /* Shader code must live in executable, low-VA memory so the USC can
+       * address it 32-bit-relative to the shader base.
+       */
+      pso->code_bo = agx_bo_create(&device->dev, part.info.binary_size, 0,
+                                   AGX_BO_EXEC | AGX_BO_LOW_VA,
+                                   "d3d12 shader");
+      if (!pso->code_bo) {
+         free(part.binary);
+         free(pso);
+         return E_OUTOFMEMORY;
+      }
 
-   if (!d12_upload_executable(pso->code_bo, part.binary,
-                              part.info.binary_size)) {
-      agx_bo_unreference(&device->dev, pso->code_bo);
-      free(part.binary);
-      free(pso);
-      return E_FAIL;
+      if (!d12_upload_executable(pso->code_bo, part.binary,
+                                 part.info.binary_size)) {
+         agx_bo_unreference(&device->dev, pso->code_bo);
+         free(part.binary);
+         free(pso);
+         return E_FAIL;
+      }
    }
 
    pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
@@ -1556,9 +1679,11 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    pso->device_ref_active = true;
    pso->device = device;
    pso->is_compute = true;
+   pso->g17p_txf_compiler_only = native_txf_compiler_only;
    memcpy(pso->texture_shapes, texture_shapes, sizeof(texture_shapes));
    pso->info = part.info;
-   pso->code_va = pso->code_bo->va->addr;
+   if (!native_compute)
+      pso->code_va = pso->code_bo->va->addr;
    d12_private_data_store_init(&pso->private_data, (IUnknown *)&pso->iface);
    d12_device_add_ref(device);
 
@@ -1572,14 +1697,16 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    if (getenv("D3D12AGX_DUMP_SHADERS")) {
       if (part.info.has_preamble) {
          fprintf(stderr, "; preamble +0x%x\n", part.info.preamble_offset);
-         agx2_disassemble((uint8_t *)part.binary +
-                             part.info.preamble_offset,
+         d12_disassemble_shader(
+            native_compute,
+            (uint8_t *)part.binary + part.info.preamble_offset,
                           part.info.main_offset - part.info.preamble_offset,
                           stderr);
       }
       fprintf(stderr, "; main +0x%x\n", part.info.main_offset);
-      agx2_disassemble((uint8_t *)part.binary + part.info.main_offset,
-                       part.info.binary_size - part.info.main_offset, stderr);
+      d12_disassemble_shader(
+         native_compute, (uint8_t *)part.binary + part.info.main_offset,
+         part.info.binary_size - part.info.main_offset, stderr);
    }
 
    free(part.binary);
@@ -2284,7 +2411,7 @@ compile_gfx_stage(struct d12_device *device,
                   struct agx_fs_epilog_link_info *fs_epilog_link,
                   struct d12_flat_transport *flat_transport,
                   uint8_t *cull_distance_size,
-                  struct agx_shader_part *out)
+                  struct agx_shader_part *out, bool *root_only, bool *writes_memory)
 {
    const uint32_t descriptor_generation =
       (uint32_t)agx_chip_descriptor_generation(device->dev.chip);
@@ -2339,6 +2466,20 @@ compile_gfx_stage(struct d12_device *device,
     * same boundary, before agx_preprocess_nir.
     */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
+   *writes_memory = nir->info.writes_memory;
+   *root_only = nir->info.num_textures == 0 && nir->info.num_images == 0;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_tex ||
+                (instr->type == nir_instr_type_intrinsic &&
+                 nir_instr_as_intrinsic(instr)->intrinsic ==
+                    nir_intrinsic_bindless_image_agx))
+               *root_only = false;
+         }
+      }
+   }
+
    nir->info.clip_distance_array_size =
       MAX2(nir->info.clip_distance_array_size, translated_clip_size);
    nir->info.cull_distance_array_size =
@@ -2393,7 +2534,10 @@ compile_gfx_stage(struct d12_device *device,
    }
 
    NIR_PASS(_, nir, agx_nir_lower_texture);
-   agx_preprocess_nir(nir);
+   if (device->dev.chip == AGX_CHIP_G17P)
+      agx_preprocess_nir_g17p(nir);
+   else
+      agx_preprocess_nir(nir);
    NIR_PASS(_, nir, d12_dxil_lower_root_mask, api_sample_mask);
 
    if (stage == MESA_SHADER_FRAGMENT && split_fs) {
@@ -2495,7 +2639,7 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
       if (cull_distance_size)
          *cull_distance_size = nir->info.cull_distance_array_size;
-      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs, false);
 
       /* Indexed output stores read their UVS index through
        * load_uvs_index_agx, which the driver must lower. Honeykrisp
@@ -2519,6 +2663,8 @@ compile_gfx_stage(struct d12_device *device,
       .dev = agx_gather_device_key(&device->dev),
       /* Allocas live in per-thread scratch, and large shaders spill. */
       .has_scratch = true,
+      /* Native stage publication below admits only the no-CProg ABI. */
+      .no_preamble = device->dev.chip == AGX_CHIP_G17P,
       /* Constant promotion is still outside this texture-binding change;
        * see the validation note on the compute key above. */
       .promote_constants = false,
@@ -2534,7 +2680,7 @@ compile_gfx_stage(struct d12_device *device,
    };
 
    memset(out, 0, sizeof(*out));
-   agx_compile_shader_nir(nir, &key, out);
+   const bool compiled = agx_compile_shader_nir(nir, &key, out);
    out->info.uses_sampler_heap |= d12_binding_map_uses_sampler_heap(map);
    out->info.sampler_state_count =
       MAX2(out->info.sampler_state_count, runtime_samplers);
@@ -2546,17 +2692,17 @@ compile_gfx_stage(struct d12_device *device,
               out->info.has_preamble);
       if (out->info.has_preamble) {
          fprintf(stderr, "; preamble +0x%x\n", out->info.preamble_offset);
-         agx2_disassemble((uint8_t *)out->binary +
+         d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)out->binary +
                              out->info.preamble_offset,
                           out->info.main_offset - out->info.preamble_offset,
                           stderr);
       }
       fprintf(stderr, "; main +0x%x\n", out->info.main_offset);
-      agx2_disassemble((uint8_t *)out->binary + out->info.main_offset,
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)out->binary + out->info.main_offset,
                        out->info.binary_size - out->info.main_offset, stderr);
    }
 
-   return out->binary && out->info.binary_size;
+   return compiled && out->binary && out->info.binary_size;
 }
 
 /*
@@ -2589,7 +2735,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
                NULL);
       NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
 
-      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs);
+      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs, false);
 
       struct agx_varyings_vs linked = {0};
       agx_assign_uvs(&linked, uvs, 0, 0);
@@ -2613,7 +2759,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
               nir->info.name ? nir->info.name : "program",
               uvs ? " (raster)" : "", out->info.push_count);
       fprintf(stderr, "; main +0x%x\n", out->info.main_offset);
-      agx2_disassemble((uint8_t *)out->binary + out->info.main_offset,
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)out->binary + out->info.main_offset,
                        out->info.binary_size - out->info.main_offset,
                        stderr);
    }
@@ -4127,7 +4273,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    if (!compile_gfx_stage(device, map, vs_dxil, vs_size, MESA_SHADER_VERTEX,
                           &tib, 0xffff, 0, &pso->uvs, &fetch, NULL, NULL, NULL,
-                          NULL, &cull_distance_size, &vs_part)) {
+                          NULL, &cull_distance_size, &vs_part, &pso->vs.g17p_root_only,
+                          &pso->vs.g17p_writes_memory)) {
       free(pso);
       return E_INVALIDARG;
    }
@@ -4153,7 +4300,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                           &fs_outputs,
                           &use_fs_epilog, &fs_epilog_link,
                           allow_flat_geometry ? &flat_transport : NULL,
-                          &cull_distance_size, &fs_part)) {
+                          &cull_distance_size, &fs_part, &pso->fs.g17p_root_only,
+                          &pso->fs.g17p_writes_memory)) {
       free(vs_part.binary);
       free(pso);
       return E_INVALIDARG;
@@ -4189,10 +4337,11 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          .no_stop = true,
          .fs.cf_base = prolog_key.cf_base,
       };
-      agx_compile_shader_nir(fb.shader, &prolog_backend_key, &fs_prolog);
+      const bool prolog_compiled =
+         agx_compile_shader_nir(fb.shader, &prolog_backend_key, &fs_prolog);
       ralloc_free(fb.shader);
 
-      if (!fs_prolog.binary || !fs_prolog.info.binary_size) {
+      if (!prolog_compiled || !fs_prolog.binary || !fs_prolog.info.binary_size) {
          free(fs_prolog.binary);
          free(fs_part.binary);
          free(vs_part.binary);
@@ -4288,7 +4437,10 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       nir_builder eb =
          nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
       agx_nir_fs_epilog(&eb, &epilog_key);
-      agx_preprocess_nir(eb.shader);
+      if (device->dev.chip == AGX_CHIP_G17P)
+         agx_preprocess_nir_g17p(eb.shader);
+      else
+         agx_preprocess_nir(eb.shader);
 
       struct agx_shader_key epilog_backend_key = {
          .dev = agx_gather_device_key(&device->dev),
@@ -4296,7 +4448,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          /* The one-sample fast-link footer appends the terminating stop. */
          .no_stop = true,
       };
-      agx_compile_shader_nir(eb.shader, &epilog_backend_key, &fs_epilog);
+      const bool epilog_compiled =
+         agx_compile_shader_nir(eb.shader, &epilog_backend_key, &fs_epilog);
       ralloc_free(eb.shader);
 
       bool any_colour_write = false;
@@ -4308,8 +4461,9 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          !epilog_key.blend.alpha_to_coverage && !fs_epilog_link.write_z &&
          !fs_epilog_link.write_s;
 
-      if ((!fs_epilog.binary || !fs_epilog.info.binary_size) &&
-          !intentionally_empty) {
+      if (!epilog_compiled ||
+          ((!fs_epilog.binary || !fs_epilog.info.binary_size) &&
+           !intentionally_empty)) {
          free(fs_epilog.binary);
          free(fs_part.binary);
          free(vs_part.binary);
@@ -4343,8 +4497,18 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    struct agx_shader_part prolog;
    memset(&prolog, 0, sizeof(prolog));
-   agx_compile_shader_nir(pb.shader, &prolog_backend_key, &prolog);
+   const bool prolog_compiled =
+      agx_compile_shader_nir(pb.shader, &prolog_backend_key, &prolog);
    ralloc_free(pb.shader);
+   if (!prolog_compiled || !prolog.binary || !prolog.info.binary_size) {
+      free(prolog.binary);
+      free(fs_prolog.binary);
+      free(fs_epilog.binary);
+      free(vs_part.binary);
+      free(fs_part.binary);
+      free(pso);
+      return E_INVALIDARG;
+   }
 
    /* Link: this uploads executable memory and bakes the USC/PPP words. */
    bool vs_linked = agx_fast_link(&pso->vs.linked, &device->dev, false,
@@ -4828,6 +4992,27 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    }
 
    agx_assign_uvs(&pso->varyings, &pso->uvs, 0, 0);
+   if (device->dev.chip == AGX_CHIP_G17P && !pso->has_gs && !pso->has_tess &&
+       !pso->has_mesh && pso->vs.g17p_root_only && !pso->vs.info.has_preamble) {
+      const struct agx_g17p_vertex_compile_info compiler_info = {
+         .hardware_vertex = pso->vs.info.stage == MESA_SHADER_VERTEX,
+         .has_preamble = pso->vs.info.has_preamble,
+         .nr_preamble_gprs = pso->vs.info.nr_preamble_gprs,
+         .preamble_scratch_size = pso->vs.info.preamble_scratch_size,
+         .uvs_written = pso->uvs.written,
+         .position_off = pso->uvs.group_offs[UVS_POSITION],
+         .varyings_off = pso->uvs.group_offs[UVS_VARYINGS],
+         .psiz_off = pso->uvs.group_offs[UVS_PSIZ],
+         .layer_viewport_off = pso->uvs.group_offs[UVS_LAYER_VIEWPORT],
+         .clip_off = pso->uvs.group_offs[UVS_CLIP_DIST],
+         .uvs_size = pso->uvs.size,
+         .user_size = pso->uvs.user_size,
+      };
+      if (!d12_agx3_g17p_vertex_program_info(device->dev.chip, &compiler_info,
+                                             &pso->vs.agx3_vdm_state_update))
+         mesa_loge("native graphics final UVS state producer refused layout");
+   }
+
 
    pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
    pso->refcount = 1;
@@ -4845,12 +5030,12 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    if (getenv("D3D12AGX_DUMP_SHADERS")) {
       fprintf(stderr, "; VS main +0x%x\n", vs_part.info.main_offset);
-      agx2_disassemble((uint8_t *)vs_part.binary +
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)vs_part.binary +
                           vs_part.info.main_offset,
                        vs_part.info.binary_size - vs_part.info.main_offset,
                        stderr);
       fprintf(stderr, "; FS main +0x%x\n", fs_part.info.main_offset);
-      agx2_disassemble((uint8_t *)fs_part.binary +
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)fs_part.binary +
                           fs_part.info.main_offset,
                        fs_part.info.binary_size - fs_part.info.main_offset,
                        stderr);

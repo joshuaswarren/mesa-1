@@ -24,6 +24,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <stddef.h>
 
 #include "d12_frontend.h"
 #include "d12_agx3_vdm_state_update_core.h"
@@ -962,6 +963,9 @@ ID3DBlob *d12_blob_create(const void *data, size_t size);
 
 /* One linked graphics stage */
 struct d12_gfx_stage {
+   /* Frontend scan before texture lowering: only root/buffer resources. */
+   bool g17p_root_only;
+   bool g17p_writes_memory;
    struct agx_shader_info info;
    struct agx_linked_shader linked;
 
@@ -1069,6 +1073,11 @@ struct d12_pipeline_state {
    struct agx_bo *code_bo;
    uint64_t code_va;
    struct agx_shader_info info;
+   /* Native compute code_va is the CODE entry, never the allocation base. */
+   bool g17p_compute_container;
+   /* Compiled native fetch ABI; no qualified dispatch pointer-prefix producer. */
+   bool g17p_txf_compiler_only;
+   uint64_t g17p_rodata_va;
 
    /* VERTEX ATTRIBUTES. Resolved at PSO creation by matching each
     * D3D12_INPUT_ELEMENT_DESC's (SemanticName, SemanticIndex) against the
@@ -1381,6 +1390,8 @@ struct d12_read_tracker {
 };
 
 struct d12_segment {
+   /* Recorded native texture launch remains registered-shim metadata only. */
+   bool g17p_txf_metadata_only;
    /* Base addresses of the render target SLICES this pass writes. Array and
     * 3D RTVs may select a bounded layer range; layers are contiguous at
     * layer_stride_B, so the view carries an offset the resource does not.
@@ -1401,6 +1412,7 @@ struct d12_segment {
     */
    size_t stream_start;
    size_t stream_end;
+   uint64_t g17p_vdm_control_base;
 
    /* CDM */
    uint32_t dispatches;
@@ -1438,6 +1450,8 @@ struct d12_segment {
    bool merge_unused_rts;
    uint32_t bg_usc, eot_usc; /* agx_usc_addr()-encoded */
    uint32_t partial_bg_usc, partial_eot_usc;
+   uint64_t g17p_bg_resources, g17p_eot_resources;
+   uint64_t g17p_partial_bg_resources, g17p_partial_eot_resources;
    struct agx_counts_packed bg_counts, eot_counts;
    struct agx_counts_packed partial_bg_counts, partial_eot_counts;
    bool has_draws;
@@ -1526,6 +1540,7 @@ struct d12_binding_upload_cache {
    const struct d12_descriptor *sources[D12_MAX_RESOURCE_BINDINGS];
    uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS];
    uint64_t root, textures, pbes;
+   uint64_t texture_table, texture_table_size_B;
    uint64_t heap, heap_textures, heap_pbes, heap_samplers;
    uint64_t tables;
    uint32_t table_count;
@@ -1558,8 +1573,19 @@ struct d12_fragment_state_cache_entry {
    uint16_t size;
 };
 
+/* Native PPP uploads keep their low VDM alias until the last submitted
+ * operation retires, independently of command-list Reset/release. */
+struct d12_g17p_vdm_storage {
+   uint32_t refcount;
+   struct agx_device *dev;
+   struct agx_bo *bo;
+   uint64_t alias;
+   size_t used;
+};
+
 struct d12_cmd_list {
    ID3D12GraphicsCommandList iface; /* must be first */
+   struct util_dynarray g17p_vdm_storage;
    uint32_t refcount;
    struct d12_private_data_store private_data;
 
@@ -1939,6 +1965,9 @@ struct d12_queue {
    struct agx_bo *signal_program_bo;
    struct agx_bo *dependency_scratch_bo;
    uint32_t signal_control_size;
+   /* USC records on AGX2; stable full Ioto program slots on G17P. */
+   uint32_t signal_program_stride;
+   uint32_t signal_program_size;
    uint64_t signal_slots;
    uint32_t stop;
    uint32_t retire_stop;
@@ -1958,6 +1987,27 @@ struct d12_command_signature {
    D3D12_COMMAND_SIGNATURE_DESC desc;
    D3D12_INDIRECT_ARGUMENT_DESC *arguments;
 };
+
+/* Direct interface-to-object casts rely on every COM interface being first.
+ * Protect all shared frontend objects in every C/C++ translation unit. */
+#ifdef __cplusplus
+#define D12_ASSERT_IFACE_FIRST(type) static_assert(offsetof(struct type, iface) == 0, #type " COM interface must be first")
+#else
+#define D12_ASSERT_IFACE_FIRST(type) _Static_assert(offsetof(struct type, iface) == 0, #type " COM interface must be first")
+#endif
+D12_ASSERT_IFACE_FIRST(d12_device);
+D12_ASSERT_IFACE_FIRST(d12_resource);
+D12_ASSERT_IFACE_FIRST(d12_heap);
+D12_ASSERT_IFACE_FIRST(d12_descriptor_heap);
+D12_ASSERT_IFACE_FIRST(d12_query_heap);
+D12_ASSERT_IFACE_FIRST(d12_root_signature);
+D12_ASSERT_IFACE_FIRST(d12_pipeline_state);
+D12_ASSERT_IFACE_FIRST(d12_cmd_allocator);
+D12_ASSERT_IFACE_FIRST(d12_cmd_list);
+D12_ASSERT_IFACE_FIRST(d12_fence);
+D12_ASSERT_IFACE_FIRST(d12_queue);
+D12_ASSERT_IFACE_FIRST(d12_command_signature);
+#undef D12_ASSERT_IFACE_FIRST
 
 static inline struct d12_device *
 d12_device_from_iface(void *iface)
@@ -2170,6 +2220,9 @@ HRESULT d12_device_backend_init(struct d12_device *device,
                                 D3D_FEATURE_LEVEL feature_level);
 void d12_device_backend_cleanup(struct d12_device *device);
 
+#ifndef _WIN32
+bool d12_platform_is_real_asahi_render_fd(int fd);
+#endif
 bool d12_platform_open_device(struct d12_device *device, IUnknown *adapter);
 void d12_platform_close_device(struct d12_device *device);
 void d12_platform_signal_event(HANDLE event);
@@ -2200,3 +2253,24 @@ HRESULT d12_platform_set_bo_resident(struct d12_device *device,
 HRESULT d12_platform_open_shared_handle_by_name(struct d12_device *device,
                                                 LPCWSTR name, DWORD access,
                                                 HANDLE *handle);
+
+void d12_g17p_vdm_storage_ref(struct d12_g17p_vdm_storage *storage);
+void d12_g17p_vdm_storage_unref(struct d12_g17p_vdm_storage *storage);
+void d12_list_g17p_vdm_storage_reset(struct d12_cmd_list *list);
+void *d12_list_alloc_g17p_vdm(struct d12_cmd_list *list, size_t size,
+                            size_t alignment, uint64_t *compact_va);
+
+uint32_t d12_build_g17p_bg_eot(
+   struct d12_cmd_list *list, const struct d12_segment *seg,
+   const float legacy_color[4],
+   const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
+   const struct agx_tilebuffer_layout *tib,
+   uint64_t *out_resources);
+
+/* Bounded D32 qualification: registered shim metadata or separately opted-in
+ * verified physical Asahi render fd. Every segment shape check is mandatory. */
+bool d12_g17p_depth_enabled(const struct agx_device *dev);
+bool d12_g17p_depth_segment_supported(const struct d12_segment *seg);
+
+/* Native Texture.Load metadata producer never admits a physical DRM fd. */
+bool d12_g17p_txf_metadata_enabled(const struct agx_device *dev);

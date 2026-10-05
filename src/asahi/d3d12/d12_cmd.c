@@ -12,9 +12,13 @@
  * recorded operation becomes real GPU work at ExecuteCommandLists.
  */
 
+#include "d12_g17p_txf_prefix_core.h"
+#include "util/mesa-blake3.h"
 #include "d12_private.h"
 #include "d12_buffer_view_core.h"
 #include "d12_agx3_cmdstream_core.h"
+#include "d12_agx3_graphics_bind_core.h"
+#include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 #include "d12_agx3_ppp_hal300_depth_bias_scissor_core.h"
 #include "d12_agx3_ppp_hal300_depth_stencil_core.h"
 #include "d12_agx3_ppp_viewport_payload_core.h"
@@ -30,6 +34,9 @@
 #include "d12_texture_copy_math.h"
 
 #include "agx_helpers.h"
+#include "asahi/compiler/agx3_compute_program.h"
+#include "asahi/compiler/agx3_graphics_program.h"
+#include "agx_abi.h"
 #include "agx_nir_texture.h"
 #include "agx_usc.h"
 #include "agx_vdm_state_update_core.h"
@@ -40,6 +47,9 @@
 #include "util/format/format_utils.h"
 #include "util/format/u_format.h"
 #include "util/u_math.h"
+
+static bool d12_segment_ensure_viewport_arrays(struct d12_cmd_list *list,
+                                                struct d12_segment *seg);
 
 /* A legal ExecuteIndirect count call may retain thousands of software-
  * geometry placeholders until the count is known on the GPU.  Keep one
@@ -55,6 +65,103 @@
 /* Keep a single kernel command bounded even for command lists containing
  * hundreds of thousands of tiny meta dispatches. */
 #define D12_MAX_DISPATCHES_PER_SEGMENT 8192
+
+/* Default rendering stays closed. The registered noop-fd callback enables
+ * metadata tests; a separate exact opt-in plus new-KMD capability enables only
+ * the bounded physical baseline. No unsupported producer guard is bypassed. */
+#ifndef _WIN32
+extern bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
+   __attribute__((weak, visibility("default")));
+#endif
+
+static bool
+d12_g17p_baseline_graphics_enabled(const struct agx_device *dev)
+{
+#ifndef _WIN32
+   if (asahi_noop_d3d12_graphics_qualification_allowed &&
+       asahi_noop_d3d12_graphics_qualification_allowed(dev->fd))
+      return true;
+   /* Explicit sacrificial baseline opt-in; the controller must additionally
+    * verify the matched kernel boot. The capability excludes the old KMD.
+    * Every existing narrow producer/resource/draw guard remains mandatory. */
+   const char *physical = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
+   return physical && !strcmp(physical, "1") && dev->chip == AGX_CHIP_G17P &&
+          (dev->params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) &&
+          dev->g17p_render_context_bo;
+#else
+   (void)dev;
+   return false;
+#endif
+}
+
+bool
+d12_g17p_depth_enabled(const struct agx_device *dev)
+{
+   if (!dev) return false;
+#ifndef _WIN32
+   const char *enable = getenv("AURORA_D3D12_SHIM_DEPTH_METADATA");
+   if (enable && !strcmp(enable, "1") && dev->chip == AGX_CHIP_G17P &&
+       dev->g17p_render_context_bo &&
+       asahi_noop_d3d12_graphics_qualification_allowed &&
+       asahi_noop_d3d12_graphics_qualification_allowed(dev->fd))
+      return true;
+   /* Separate bounded physical admission. The controller must verify the
+    * exact matched kernel image/boot before setting both flags. A flag alone
+    * cannot admit an arbitrary fd: require an actual Asahi render node and
+    * the native context plus kernel capability on this initialized device. */
+   const char *physical = getenv("AURORA_D3D12_PHYSICAL_D32");
+   const char *baseline = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
+   return physical && !strcmp(physical, "1") &&
+          baseline && !strcmp(baseline, "1") &&
+          dev->chip == AGX_CHIP_G17P && dev->g17p_render_context_bo &&
+          (dev->params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) &&
+          d12_platform_is_real_asahi_render_fd(dev->fd);
+#else
+   (void)dev;
+   return false;
+#endif
+}
+
+/* First native ZLS subset: D32 only, no compression, stencil, arrays/MSAA,
+ * mip or read-only view. Bounds/stride are checked before UAPI construction. */
+bool
+d12_g17p_depth_segment_supported(const struct d12_segment *seg)
+{
+   const struct d12_resource *ds = seg ? seg->ds : NULL;
+   const uint64_t limit = UINT64_C(1) << 48;
+   if (!ds || !ds->bo || !ds->bo->va || !seg->rt[0] ||
+       !ds->bo->va->addr || ds->bo->va->addr >= limit ||
+       ds->bo->size > limit - ds->bo->va->addr ||
+       ds->reserved || ds->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+       ds->desc.Format != DXGI_FORMAT_D32_FLOAT ||
+       !(ds->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL) ||
+       ds->layout.format != PIPE_FORMAT_Z32_FLOAT || ds->stencil_bo ||
+       ds->layout.compressed || ds->layout.levels != 1 ||
+       !ds->layout.width_px || !ds->layout.height_px ||
+       ds->layout.width_px > 16384 || ds->layout.height_px > 16384 ||
+       ds->layout.depth_px != 1 || ds->layout.sample_count_sa != 1 ||
+       (ds->layout.tiling != AIL_TILING_GPU &&
+        ds->layout.tiling != AIL_TILING_TWIDDLED) ||
+       seg->ds_level || seg->dsv_flags || seg->stencil_address ||
+       seg->layers != 1 || !seg->width_px || !seg->height_px ||
+       seg->width_px > 16384 || seg->height_px > 16384 ||
+       seg->width_px > ds->layout.width_px ||
+       seg->height_px > ds->layout.height_px ||
+       !ds->layout.size_B || ds->layout.layer_stride_B < AIL_PAGESIZE ||
+       ds->layout.layer_stride_B % AIL_PAGESIZE ||
+       ds->layout.layer_stride_B / AIL_PAGESIZE >
+          (UINT32_MAX >> 14) + UINT64_C(1) ||
+       (seg->ds_address & (AIL_PAGESIZE - 1)) ||
+       seg->ds_address < ds->bo->va->addr)
+      return false;
+   const uint64_t offset = seg->ds_address - ds->bo->va->addr;
+   return offset <= ds->bo->size &&
+          ds->layout.size_B <= ds->bo->size - offset &&
+          ds->layout.layer_stride_B <= ds->bo->size - offset;
+}
+
+_Static_assert(offsetof(struct d12_cmd_list, iface) == 0,
+               "Command-list COM interface must remain at object offset zero");
 
 static bool d12_pack_texture_generation(
    enum agx_descriptor_generation generation, void *out,
@@ -745,6 +852,7 @@ d12_list_begin_recording(struct d12_cmd_list *list)
 {
    d12_list_release_segment_scratch(list);
    d12_list_read_tracker_reset(list);
+   d12_list_g17p_vdm_storage_reset(list);
    list->stream_cur = d12_list_stream_map(list);
    list->data_floor = list->stream_bo->size;
    list->usc_offset = 0;
@@ -1159,6 +1267,18 @@ d12_list_close_cdm(struct d12_cmd_list *list)
       struct d12_segment *seg = &list->segments[list->segment_count - 1];
       d12_list_emit_vdm_terminate(list);
       seg->stream_end = list->stream_cur - d12_list_stream_map(list);
+      if (list->device->dev.chip == AGX_CHIP_G17P &&
+          d12_g17p_baseline_graphics_enabled(&list->device->dev) && list->state != D12_LIST_ERROR) {
+         const size_t size = seg->stream_end - seg->stream_start;
+         uint64_t compact;
+         void *copy = d12_list_alloc_g17p_vdm(list, size, 64, &compact);
+         if (copy) {
+            memcpy(copy, d12_list_stream_map(list) + seg->stream_start, size);
+            seg->g17p_vdm_control_base = AGX_G17P_VDM_USER_BASE + compact;
+            if (agx_bo_sync_for_device(list->stream_bo, 0, list->stream_bo->size))
+               list->state = D12_LIST_ERROR;
+         }
+      }
       list->render_open = false;
    }
 }
@@ -1440,6 +1560,124 @@ d12_list_track_precompiled_reads(struct d12_cmd_list *list,
 #undef D12_PRECOMP_ARGS
 }
 
+/* Native direct precompiled compute uses the same metadata/argument/Ioto
+ * join as Gallium. Each recording owns its uploaded arguments and program;
+ * the existing command-list storage and read-set references retain them
+ * until the actual submitted timeline point retires. */
+static bool
+d12_list_append_g17p_precomp(struct d12_cmd_list *list,
+                            const struct agx_precompiled_shader *prog,
+                            const void *args, size_t args_size,
+                            struct agx_grid grid, uint8_t **cursor)
+{
+   struct agx_device *dev = &list->device->dev;
+   if (dev->chip != AGX_CHIP_G17P || !prog || !prog->bo || !args ||
+       !args_size || args_size > UINT16_MAX * 2u || agx_is_indirect(grid) ||
+       !prog->info.main_size || !prog->info.nr_gprs ||
+       prog->info.nr_preamble_gprs || !prog->info.agx3_staging_known ||
+       (prog->info.rodata.size_16 && !prog->rodata_offset) ||
+       (prog->info.printf_uniform &&
+        (prog->info.printf_uniform < AGX_ABI_AGX3_PRECOMP_ARG_HALFS ||
+         !dev->printf_buffer_address)) ||
+       prog->entry_offset > UINT64_MAX - prog->ptr ||
+       prog->rodata_offset > UINT64_MAX - prog->ptr ||
+       !prog->b.workgroup.x || !prog->b.workgroup.y || !prog->b.workgroup.z)
+      goto fail;
+
+   const size_t printf_offset = prog->info.printf_uniform
+      ? (size_t)(prog->info.printf_uniform - AGX_ABI_AGX3_PRECOMP_ARG_HALFS) * 2
+      : 0;
+   const size_t uploaded_size = ALIGN_POT(
+      prog->info.printf_uniform ? MAX2(args_size, printf_offset + 8) : args_size,
+      4);
+   if (uploaded_size / 2 > UINT16_MAX)
+      goto fail;
+   const uint64_t data_gpu = d12_list_upload_zero(list, uploaded_size, 4);
+   if (!data_gpu)
+      return false;
+   uint8_t *data_cpu = d12_list_stream_map(list) +
+      (data_gpu - list->stream_bo->va->addr);
+   memcpy(data_cpu, args, args_size);
+   if (prog->info.printf_uniform)
+      memcpy(data_cpu + printf_offset, &dev->printf_buffer_address,
+             sizeof(uint64_t));
+
+   struct agx3_ioto_uniform_range ranges[2] = {{
+      .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
+      .size_halfs = uploaded_size / 2,
+      .address = data_gpu,
+   }};
+   unsigned range_count = 1;
+   if (prog->info.rodata.size_16) {
+      ranges[range_count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = prog->info.rodata.base_uniform,
+         .size_halfs = prog->info.rodata.size_16,
+         .address = prog->ptr + prog->rodata_offset,
+      };
+   }
+   struct agx3_cdm_direct_template_sources launch_sources;
+   if (!agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                  &launch_sources))
+      goto fail;
+   uint32_t relative_program = 0;
+   uint8_t *program_cpu = d12_list_alloc_usc(
+      list, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE, &relative_program);
+   const uint64_t program_va = dev->shader_base + relative_program;
+   const struct agx3_g17p_compute_program_desc desc = {
+      .program_va = program_va,
+      .shader_va = prog->ptr + prog->entry_offset,
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+      .shader_binary_size = prog->info.main_size,
+      .scratch_size = prog->info.agx3_tps_size,
+      .nr_gprs = prog->info.nr_gprs,
+      .compiler_d_valid = prog->info.agx3_staging_known,
+      .compiler_d = (uint32_t)prog->info.agx3_staging_halfs * 2,
+      .threadgroup_memory_size_B = prog->info.local_size
+         ? MAX2(256u, ALIGN_POT(prog->info.local_size, 64u)) : 0,
+      .launch_sources = launch_sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   struct agx3_g17p_compute_program generated;
+   if (!program_cpu || !agx_va_in_usc_window(dev, program_va) ||
+       !agx_va_in_usc_window(dev, desc.shader_va) ||
+       !agx3_g17p_compute_program_generate(dev->chip, &desc, &generated))
+      goto fail;
+   memcpy(program_cpu, generated.bytes, generated.length);
+   const size_t program_offset = program_va - list->usc_bo->va->addr;
+   /* This was the last allocation from the program BO; retain only the
+    * actual generated span so repeated small copies do not spend 6 KiB each. */
+   list->usc_offset = program_offset + generated.length;
+   if (agx_bo_sync_for_device(list->usc_bo, program_offset, generated.length) ||
+       agx_bo_sync_for_device(list->stream_bo,
+                              data_gpu - list->stream_bo->va->addr,
+                              uploaded_size))
+      goto fail;
+
+   const struct agx3_compute_direct_grid direct = {
+      .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+      .size = {grid.count[0], grid.count[1], grid.count[2]},
+      .local_size = {prog->b.workgroup.x, prog->b.workgroup.y,
+                     prog->b.workgroup.z},
+      .dimensions = grid.count[2] != 1 || prog->b.workgroup.z != 1 ? 3
+         : grid.count[1] != 1 || prog->b.workgroup.y != 1 ? 2 : 1,
+   };
+   struct agx3_compute_dispatch_sink sink = {
+      .data = *cursor,
+      .capacity = D12_DISPATCH_STREAM_MARGIN,
+   };
+   if (!agx3_g17p_native_compute_dispatch_append_with_barrier(
+          &generated.launch, &direct, 0x5, &sink))
+      goto fail;
+   *cursor += sink.length;
+   return true;
+
+fail:
+   mesa_loge("native G17P precompiled compute producer rejected metadata/resources");
+   list->state = D12_LIST_ERROR;
+   return false;
+}
+
 /*
  * Dispatch a precompiled libagx kernel, exactly as hk_dispatch_precomp does.
  */
@@ -1456,8 +1694,19 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
       return;
    }
 
-   if (!d12_list_require_legacy_compute(list))
+   const bool native = device->dev.chip == AGX_CHIP_G17P;
+   if (native) {
+      /* Native graphics/indirect integration is a separate producer gate. */
+      if (pre_gfx || agx_is_indirect(grid)) {
+         mesa_loge("native precompiled graphics/indirect launch unavailable");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+      if (!grid.count[0] || !grid.count[1] || !grid.count[2])
+         return;
+   } else if (!d12_list_require_legacy_compute(list)) {
       return;
+   }
 
    /* Tessellation runs its libagx kernels ahead of the draw that consumes
     * them, so they go in the pre-graphics stream rather than ending the
@@ -1488,25 +1737,6 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
    if (!d12_list_track_precompiled_reads(list, idx, args, args_size))
       d12_list_mark_read_set_incomplete(list);
 
-   uint64_t data_gpu = d12_list_upload(list, args, args_size, 4);
-   if (!data_gpu)
-      return;
-
-   uint32_t usc;
-   uint8_t *usc_cpu = d12_list_alloc_usc(list, agx_usc_size(15), &usc);
-   if (!usc_cpu)
-      return;
-
-   agx_usc_words_precomp((uint32_t *)usc_cpu, &prog->b, data_gpu, args_size);
-
-   if (getenv("D3D12AGX_DUMP_USC")) {
-      fprintf(stderr, "precomp USC @%u:", usc);
-      for (unsigned i = 0; i < 32; i++)
-         fprintf(stderr, " %02x", usc_cpu[i]);
-      fprintf(stderr, "\n  data_gpu=0x%llx size=%zu\n",
-              (unsigned long long)data_gpu, args_size);
-   }
-
    uint8_t **cur = pre_gfx ? &list->pregfx_cur : &list->stream_cur;
 
    if (pre_gfx) {
@@ -1519,11 +1749,35 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
       return;
    }
 
-   if (!d12_list_emit_legacy_cdm_launch(list, cur, grid, prog->b.workgroup,
-                                        prog->b.launch, usc))
-      return;
-   if (!d12_list_emit_cdm_cache_flush(list, cur))
-      return;
+   if (native) {
+      if (!d12_list_append_g17p_precomp(list, prog, args, args_size, grid, cur))
+         return;
+   } else {
+      uint64_t data_gpu = d12_list_upload(list, args, args_size, 4);
+      if (!data_gpu)
+         return;
+
+      uint32_t usc;
+      uint8_t *usc_cpu = d12_list_alloc_usc(list, agx_usc_size(15), &usc);
+      if (!usc_cpu)
+         return;
+
+      agx_usc_words_precomp((uint32_t *)usc_cpu, &prog->b, data_gpu, args_size);
+
+      if (getenv("D3D12AGX_DUMP_USC")) {
+         fprintf(stderr, "precomp USC @%u:", usc);
+         for (unsigned i = 0; i < 32; i++)
+            fprintf(stderr, " %02x", usc_cpu[i]);
+         fprintf(stderr, "\n  data_gpu=0x%llx size=%zu\n",
+                 (unsigned long long)data_gpu, args_size);
+      }
+
+      if (!d12_list_emit_legacy_cdm_launch(list, cur, grid, prog->b.workgroup,
+                                           prog->b.launch, usc))
+         return;
+      if (!d12_list_emit_cdm_cache_flush(list, cur))
+         return;
+   }
    seg->dispatches++;
    d12_segment_track_precompiled_write(seg, idx, args, args_size);
 }
@@ -1703,6 +1957,238 @@ d12_list_dispatch_indirect_patches(
    return true;
 }
 
+/* Native one-layer, one-sample tiled RGBA8/BGRA8 tile traffic. The legacy
+ * builder remains guarded until the renderer wires this producer together
+ * with native PPP/VDM lifetime and render-command qualification. */
+uint32_t
+d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
+                     const float legacy_color[4],
+                     const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
+                     const struct agx_tilebuffer_layout *tib,
+                     uint64_t *out_resources)
+{
+   struct d12_device *device = list->device;
+   struct agx_device *dev = &device->dev;
+   struct d12_resource *rt = seg->rt[0];
+   const enum agx_bg_eot_op op = ops[0];
+   const char *failure_stage = "attachment-shape";
+   struct agx_bg_eot_shader *shader = NULL;
+
+   if (dev->chip != AGX_CHIP_G17P || !out_resources || !rt || !rt->bo ||
+       (seg->ds && (!d12_g17p_depth_enabled(dev) ||
+                    !d12_g17p_depth_segment_supported(seg))) ||
+       rt->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+       rt->layout.sample_count_sa != 1 ||
+       seg->layers != 1 || tib->nr_samples != 1 || seg->rt_level[0] != 0 ||
+       (rt->layout.tiling != AIL_TILING_GPU &&
+        rt->layout.tiling != AIL_TILING_TWIDDLED) || rt->layout.levels != 1 ||
+       (seg->rt_view_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
+        seg->rt_view_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM) ||
+       (op != AGX_BG_CLEAR && op != AGX_BG_LOAD && op != AGX_EOT_STORE &&
+        op != AGX_BG_EOT_NONE))
+      goto fail;
+   failure_stage = "extra-attachment";
+   for (unsigned i = 1; i < AGX_MAX_RENDER_TARGETS; i++)
+      if (seg->rt[i] || ops[i] != AGX_BG_EOT_NONE)
+         goto fail;
+   failure_stage = "attachment-address";
+   if (!seg->rt_address[0])
+      goto fail;
+   struct agx_bg_eot_key key = {.tib = *tib};
+   key.op[0] = op;
+   if (op == AGX_BG_CLEAR)
+      key.reserved_preamble = AGX3_G17P_RT0_CLEAR_PUSH_HALFS;
+   failure_stage = "aux-shader-metadata";
+   shader = agx_get_bg_eot_shader(&device->bg_eot, &key);
+   if (!shader || !shader->bo || !shader->info.main_size ||
+       !shader->info.nr_gprs || shader->info.has_preamble ||
+       shader->info.rodata.size_16 || shader->info.scratch_size ||
+       !shader->info.agx3_staging_known ||
+       shader->ptr > UINT64_MAX - shader->info.main_offset)
+      goto fail;
+   failure_stage = "aux-shader-usc-window";
+   const uint64_t shader_va = shader->ptr + shader->info.main_offset;
+   if (!agx_va_in_usc_window(dev, shader_va))
+      goto fail;
+   failure_stage = "program-allocation";
+   uint32_t relative = 0;
+   uint8_t *cpu = d12_list_alloc_usc(list, AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE,
+                                   &relative);
+   if (!cpu)
+      goto fail;
+   const uint64_t program_va = dev->shader_base + relative;
+   uint64_t resource_spec = 0;
+   uint8_t program[AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE];
+   size_t length = 0;
+   const struct agx_ioto_g17p_imageblock imageblock = {
+      .sample_size_B = tib->sample_size_B, .nr_samples = tib->nr_samples,
+      .tile_size_px = tib->tile_size,
+   };
+   if (op == AGX_EOT_STORE) {
+      const enum pipe_format pf = seg->rt_view_format[0];
+      const struct util_format_description *fmt = util_format_description(pf);
+      struct AGX_PBE semantic = {AGX_PBE_header};
+      semantic.dimension = AGX_TEXTURE_DIMENSION_2D;
+      semantic.layout = agx_translate_layout(rt->layout.tiling);
+      semantic.channels = ail_pixel_format[pf].channels;
+      semantic.type = ail_pixel_format[pf].type;
+      semantic.buffer = seg->rt_address[0];
+      semantic.width = rt->layout.width_px;
+      semantic.height = rt->layout.height_px;
+      semantic.levels = semantic.layers = 1;
+      semantic.page_aligned_layers = rt->layout.page_aligned_layers;
+      semantic.swizzle_r = semantic.swizzle_g = semantic.swizzle_b = semantic.swizzle_a = 0;
+      for (unsigned c = 0; c < 4; c++) {
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_X) semantic.swizzle_r = c;
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_Y) semantic.swizzle_g = c;
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_Z) semantic.swizzle_b = c;
+         if (fmt->swizzle[c] == PIPE_SWIZZLE_W) semantic.swizzle_a = c;
+      }
+      failure_stage = "eot-pbe-pack";
+      uint8_t pbe[32];
+      if (!d12_pack_pbe_generation(agx_chip_descriptor_generation(dev->chip),
+                                  pbe, &semantic))
+         goto fail;
+      failure_stage = "eot-pbe-upload";
+      const uint64_t argument = d12_list_upload(list, pbe, sizeof(pbe), 32);
+      if (!argument)
+         goto fail;
+      const struct agx3_g17p_rt0_eot_program_desc desc = {
+         .program_va = program_va, .shader_va = shader_va,
+         .pbe_argument_va = argument, .attachment_count = 1,
+         .imageblock_offset_B = agx_tilebuffer_offset_B(tib, 0),
+         .shader_binary_size = shader->info.binary_size,
+         .nr_gprs = shader->info.nr_gprs,
+         .staging_halfs = shader->info.agx3_staging_halfs,
+         .imageblock = imageblock,
+      };
+      failure_stage = "eot-program-generate";
+      struct agx3_g17p_rt0_eot_program generated;
+      if (!agx3_g17p_rt0_eot_program_generate(dev->chip, &desc, &generated))
+         goto fail;
+      memcpy(program, generated.bytes, generated.length);
+      length = generated.length;
+      resource_spec = AGX_IOTO_G17P_EOT_RESOURCE_SPEC;
+   } else if (op == AGX_BG_EOT_NONE) {
+      failure_stage = "empty-shader-resources";
+      if (shader->info.push_count || shader->info.uses_txf)
+         goto fail;
+      const struct agx3_g17p_graphics_program_desc desc = {
+         .program_va = program_va, .shader_va = shader_va,
+         .shader_binary_size = shader->info.binary_size,
+         .nr_gprs = shader->info.nr_gprs, .compiler_d_valid = true,
+         .compiler_d = (uint32_t)shader->info.agx3_staging_halfs * 2,
+         .fragment = true, .imageblock = imageblock,
+      };
+      failure_stage = "empty-program-generate";
+      struct agx3_g17p_graphics_program generated;
+      if (!agx3_g17p_graphics_program_generate(dev->chip, &desc, &generated) ||
+          !agx3_g17p_rt0_bg_resource_spec(dev->chip, AGX3_G17P_RT0_BG_NONE,
+                                         &resource_spec))
+         goto fail;
+      memcpy(program, generated.bytes, generated.length);
+      length = generated.length;
+   } else {
+      struct agx3_g17p_rt0_bg_program_desc desc = {
+         .program_va = program_va, .shader_va = shader_va,
+         .shader_binary_size = shader->info.binary_size,
+         .nr_gprs = shader->info.nr_gprs,
+         .staging_halfs = shader->info.agx3_staging_halfs,
+         .clear_push_halfs = shader->info.push_count, .staging_known = true,
+         .op = op == AGX_BG_CLEAR ? AGX3_G17P_RT0_BG_CLEAR : AGX3_G17P_RT0_BG_RELOAD,
+         .imageblock = imageblock,
+      };
+      failure_stage = "background-shader-resources";
+      if (!agx3_g17p_rt0_bg_shader_resources_match(desc.op,
+             shader->info.push_count, shader->info.uses_txf))
+         goto fail;
+      if (op == AGX_BG_CLEAR) {
+         failure_stage = "clear-argument";
+         const float *color = seg->render_pass ? seg->rt_clear[0] : legacy_color;
+         if (!color)
+            goto fail;
+         desc.clear_value_va = d12_list_upload(list, color, 16, 16);
+         if (!desc.clear_value_va)
+            goto fail;
+      } else {
+         const enum pipe_format pf = seg->rt_view_format[0];
+         const struct util_format_description *fmt = util_format_description(pf);
+         struct AGX_TEXTURE texture = {AGX_TEXTURE_header};
+         texture.dimension = AGX_TEXTURE_DIMENSION_2D;
+         texture.layout = agx_translate_layout(rt->layout.tiling);
+         texture.channels = ail_pixel_format[pf].channels;
+         texture.type = ail_pixel_format[pf].type;
+         texture.swizzle_r = agx_channel_from_pipe(fmt->swizzle[0]);
+         texture.swizzle_g = agx_channel_from_pipe(fmt->swizzle[1]);
+         texture.swizzle_b = agx_channel_from_pipe(fmt->swizzle[2]);
+         texture.swizzle_a = agx_channel_from_pipe(fmt->swizzle[3]);
+         texture.address = d12_sparse_read_address(device, seg->rt_address[0]);
+         texture.width = rt->layout.width_px;
+         texture.height = rt->layout.height_px;
+         texture.depth = 1;
+         texture.page_aligned_layers = rt->layout.page_aligned_layers;
+         failure_stage = "reload-texture-pack";
+         uint8_t packed[32];
+         if (!device->rodata_bo || !device->rodata_bo->va ||
+             !d12_pack_texture_generation(agx_chip_descriptor_generation(dev->chip),
+                                          packed, &texture, 1))
+            goto fail;
+         failure_stage = "reload-texture-upload";
+         const uint64_t table_va = d12_list_upload(list, packed, sizeof(packed), 32);
+         if (!table_va)
+            goto fail;
+         const uint64_t pointers[2] = {table_va, device->rodata_bo->va->addr};
+         failure_stage = "reload-pointer-upload";
+         const uint64_t pointers_va = d12_list_upload(list, pointers, sizeof(pointers), 8);
+         if (!pointers_va)
+            goto fail;
+         desc.texture_pointer_va = pointers_va;
+         desc.sampler_pointer_va = pointers_va + 8;
+      }
+      failure_stage = "background-program-generate";
+      struct agx3_g17p_rt0_bg_program generated;
+      if (!agx3_g17p_rt0_bg_program_generate(dev->chip, &desc, &generated) ||
+          !agx3_g17p_rt0_bg_resource_spec(dev->chip, desc.op, &resource_spec))
+         goto fail;
+      memcpy(program, generated.bytes, generated.length);
+      length = generated.length;
+   }
+   failure_stage = "generated-program-length";
+   if (!length || length > AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE)
+      goto fail;
+   memcpy(cpu, program, length);
+   const size_t offset = program_va - list->usc_bo->va->addr;
+   list->usc_offset = offset + length;
+   failure_stage = "program-arguments-publish";
+   if (agx_bo_sync_for_device(list->usc_bo, offset, length) ||
+       agx_bo_sync_for_device(list->stream_bo, list->data_floor,
+                              list->stream_bo->size - list->data_floor))
+      goto fail;
+   *out_resources = resource_spec;
+   d12_list_track_read_bo(list, shader->bo);
+   return relative;
+fail:
+   mesa_loge("native BG/EOT rejected stage=%s op=%u rt=%u fmt=%u tiling=%u "
+             "levels=%u samples=%u/%u layers=%u address=%llx "
+             "shader=%u main=%u@%u binary=%u gprs=%u pre=%u rodata=%u "
+             "scratch=%u staging=%u/%u push=%u txf=%u tile=%u sample_bytes=%u",
+             failure_stage, (unsigned)op, rt != NULL,
+             (unsigned)seg->rt_view_format[0], rt ? (unsigned)rt->layout.tiling : 0,
+             rt ? rt->layout.levels : 0, rt ? rt->layout.sample_count_sa : 0,
+             tib->nr_samples, seg->layers,
+             (unsigned long long)seg->rt_address[0], shader != NULL,
+             shader ? shader->info.main_size : 0, shader ? shader->info.main_offset : 0,
+             shader ? shader->info.binary_size : 0, shader ? shader->info.nr_gprs : 0,
+             shader ? shader->info.has_preamble : 0, shader ? shader->info.rodata.size_16 : 0,
+             shader ? shader->info.scratch_size : 0,
+             shader ? shader->info.agx3_staging_known : 0,
+             shader ? shader->info.agx3_staging_halfs : 0,
+             shader ? shader->info.push_count : 0, shader ? shader->info.uses_txf : 0,
+             tib->tile_size, tib->sample_size_B);
+   list->state = D12_LIST_ERROR;
+   return 0;
+}
+
 /*
  * Build the USC words for a background (clear) or end-of-tile (store)
  * program targeting the render segment's selected subresources. Mirrors
@@ -1713,9 +2199,23 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
                      const float legacy_color[4],
                      const enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS],
                      const struct agx_tilebuffer_layout *tib,
-                     struct agx_counts_packed *out_counts)
+                     struct agx_counts_packed *out_counts, uint64_t *out_native_resources)
 {
    struct d12_device *device = list->device;
+
+   if (device->dev.chip == AGX_CHIP_G17P &&
+       d12_g17p_baseline_graphics_enabled(&list->device->dev))
+      return d12_build_g17p_bg_eot(list, seg, legacy_color, ops, tib, out_native_resources);
+
+   /* This builder emits AGX2 USC resource/state words. A clear-only list
+    * never reaches the vertex-state guard, so reject here until native
+    * BG/EOT Ioto programs and render resource specifications are supplied. */
+   if (agx_chip_command_stream_generation(device->dev.chip) !=
+       AGX_CS_GENERATION_AGX2) {
+      mesa_loge("native graphics background/EOT producer unavailable");
+      list->state = D12_LIST_ERROR;
+      return 0;
+   }
 
    uint32_t usc;
    size_t usc_size = agx_usc_size(3 + 8);
@@ -2154,6 +2654,15 @@ d12_list_begin_render(struct d12_cmd_list *list,
       return NULL;
    }
 
+   /* Native depth has no qualified producer yet, including clear-only
+    * passes which never reach the triangle draw admission guard. */
+   if (dsv && list->device->dev.chip == AGX_CHIP_G17P &&
+       !d12_g17p_depth_enabled(&list->device->dev)) {
+      mesa_loge("native depth render producer remains closed");
+      list->state = D12_LIST_ERROR;
+      return NULL;
+   }
+
    if (dsv && (!dsv->resource || dsv->kind != D12_DESC_DSV)) {
       mesa_loge("render pass received an invalid DSV descriptor");
       list->state = D12_LIST_ERROR;
@@ -2509,13 +3018,13 @@ d12_list_begin_render(struct d12_cmd_list *list,
    }
 
    seg->bg_usc = d12_build_bg_eot_usc(
-      list, seg, color, main_bg, &seg->tib, &seg->bg_counts);
+      list, seg, color, main_bg, &seg->tib, &seg->bg_counts, &seg->g17p_bg_resources);
    seg->eot_usc = d12_build_bg_eot_usc(
-      list, seg, NULL, main_eot, &seg->tib, &seg->eot_counts);
+      list, seg, NULL, main_eot, &seg->tib, &seg->eot_counts, &seg->g17p_eot_resources);
    seg->partial_bg_usc = d12_build_bg_eot_usc(
-      list, seg, NULL, partial_bg, &seg->tib, &seg->partial_bg_counts);
+      list, seg, NULL, partial_bg, &seg->tib, &seg->partial_bg_counts, &seg->g17p_partial_bg_resources);
    seg->partial_eot_usc = d12_build_bg_eot_usc(
-      list, seg, NULL, partial_eot, &seg->tib, &seg->partial_eot_counts);
+      list, seg, NULL, partial_eot, &seg->tib, &seg->partial_eot_counts, &seg->g17p_partial_eot_resources);
    if (!seg->bg_usc || !seg->eot_usc || !seg->partial_bg_usc ||
        !seg->partial_eot_usc)
       return NULL;
@@ -2527,7 +3036,38 @@ d12_list_begin_render(struct d12_cmd_list *list,
    if (!d12_list_emit_initial_vdm_barrier(list))
       return NULL;
 
-   if (agx_chip_command_stream_generation(list->device->dev.chip) ==
+   if (list->device->dev.chip == AGX_CHIP_G17P &&
+       d12_g17p_baseline_graphics_enabled(&list->device->dev)) {
+      if (!list->device->dev.g17p_render_context_bo) {
+         list->state = D12_LIST_ERROR;
+         return NULL;
+      }
+      /* The native render UAPI requires a resident, nonzero scissor base
+       * even for PROCESS_EMPTY_TILES clears with no draw. Draws previously
+       * allocated these arrays lazily, leaving clear-only segments at zero.
+       * Use the same owned, zeroed, aligned arrays without consuming indices. */
+      if (!d12_segment_ensure_viewport_arrays(list, seg))
+         return NULL;
+      struct d12_agx3_ppp_w_clamp_cull2 initial;
+      const struct d12_agx3_ppp_w_clamp_cull2_fields fields = {.cull2_raw = 0x80};
+      uint64_t compact;
+      void *payload = d12_list_alloc_g17p_vdm(list, sizeof(initial.bytes), 4, &compact);
+      if (!payload || !d12_agx3_encode_ppp_w_clamp_cull2(
+             list->device->dev.chip, &fields, &initial)) {
+         list->state = D12_LIST_ERROR;
+         return NULL;
+      }
+      memcpy(payload, initial.bytes, initial.length);
+      if (!agx_ppp_emit_state(list->device->dev.chip, &list->stream_cur,
+                              compact, initial.length)) {
+         list->state = D12_LIST_ERROR;
+         return NULL;
+      }
+      /* Same direct-render sentinel as HK CS initialization: no guessed
+       * context cycling and no mutable device-global PPP payload. */
+      seg->agx3_active_context_selector_valid = true;
+      seg->agx3_raw_active_context_selector = UINT32_MAX;
+   } else    if (agx_chip_command_stream_generation(list->device->dev.chip) ==
        AGX_CS_GENERATION_HAL300) {
       struct d12_agx3_ppp_w_clamp_cull2 initial;
       const struct d12_agx3_ppp_w_clamp_cull2_fields fields = {
@@ -4068,6 +4608,8 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
    memcpy(cache->texture_shapes, texture_shapes, sizeof(cache->texture_shapes));
    cache->root = *out_root;
    cache->textures = *out_textures;
+   cache->texture_table = heap_gpu;
+   cache->texture_table_size_B = heap_size;
    cache->pbes = *out_pbes;
    cache->heap = *out_heap;
    cache->heap_textures = *out_heap_textures;
@@ -5614,6 +6156,218 @@ d12_segment_bind_sampler_heap(struct d12_cmd_list *list,
    return true;
 }
 
+/* No physical texture path: this opt-in only reaches the actual registered
+ * noop fd whose native CDM stream validator is explicitly enabled. */
+bool
+d12_g17p_txf_metadata_enabled(const struct agx_device *dev)
+{
+#ifndef _WIN32
+   const char *enable = getenv("AURORA_D3D12_SHIM_TEXTURE_METADATA");
+   return dev && dev->chip == AGX_CHIP_G17P && dev->g17p_render_context_bo &&
+          enable && !strcmp(enable, "1") &&
+          asahi_noop_d3d12_graphics_qualification_allowed &&
+          asahi_noop_d3d12_graphics_qualification_allowed(dev->fd);
+#else
+   (void)dev;
+   return false;
+#endif
+}
+
+/* First native API-compute producer: monolithic, direct buffer compute.
+ * Texture/sampler, indirect, preamble and legacy scratch contracts retain
+ * their own guards until a matching native producer exists. */
+static bool
+d12_list_append_g17p_pso(struct d12_cmd_list *list,
+                        const struct d12_pipeline_state *pso,
+                        const struct d12_dispatch_uniforms *u,
+                        unsigned x, unsigned y, unsigned z)
+{
+   struct agx_device *dev = &list->device->dev;
+   const struct agx_shader_info *info = &pso->info;
+   const bool txf_metadata = pso->g17p_txf_compiler_only;
+   if (dev->chip != AGX_CHIP_G17P || !pso->g17p_compute_container ||
+       (txf_metadata && !d12_g17p_txf_metadata_enabled(dev)) ||
+       !pso->code_bo || !pso->code_va || !u->root ||
+       !info->main_size || !info->nr_gprs || !info->agx3_staging_known ||
+       info->has_preamble || info->nr_preamble_gprs || info->scratch_size ||
+       info->preamble_scratch_size || info->agx3_uniform_dma_valid ||
+       info->imageblock_stride || info->texture_state_count ||
+       info->uses_sampler_heap ||
+       (txf_metadata ? (!info->uses_txf || info->sampler_state_count != 1)
+                     : (info->sampler_state_count || info->uses_txf)) ||
+       info->uses_ray_traversal ||
+       (info->rodata.size_16 && !pso->g17p_rodata_va))
+      goto fail;
+
+   struct agx3_ioto_uniform_range ranges[10];
+   unsigned range_count = 0;
+   if (txf_metadata) {
+      const struct d12_binding_upload_cache *cache = &list->binding_upload_cache[1];
+      struct agx_bo *sampler_bo = list->device->rodata_bo;
+      if (!u->textures || !cache->valid || cache->root != u->root ||
+          cache->textures != u->textures ||
+          !sampler_bo || !sampler_bo->va || sampler_bo->size < 32 ||
+          !d12_list_stream_contains(list, u->root, sizeof(uint64_t)) ||
+          !d12_list_stream_contains(list, u->textures, sizeof(uint64_t)) ||
+          !d12_list_stream_contains(list, cache->texture_table,
+                                    cache->texture_table_size_B))
+         goto fail;
+      uint8_t *stream_cpu = d12_list_stream_map(list);
+      if (!stream_cpu)
+         goto fail;
+      const uint8_t *texture_cell_cpu =
+         stream_cpu + (u->textures - list->stream_bo->va->addr);
+      uint64_t texture_table;
+      memcpy(&texture_table, texture_cell_cpu, sizeof(texture_table));
+      if (texture_table != cache->texture_table)
+         goto fail;
+      const uint64_t sampler_table = sampler_bo->va->addr;
+      const uint64_t sampler_cell = d12_list_upload(
+         list, &sampler_table, sizeof(sampler_table), 8);
+      const struct d12_g17p_txf_prefix_sources sources = {
+         .root_cell = u->root, .texture_cell = u->textures,
+         .sampler_cell = sampler_cell, .texture_table = texture_table,
+         .texture_table_size_B = cache->texture_table_size_B,
+         .sampler_table = sampler_table,
+      };
+      struct d12_g17p_txf_range prefix[4];
+      if (!d12_g17p_txf_prefix_ranges(&sources, prefix))
+         goto fail;
+      for (unsigned i = 0; i < 4; ++i)
+         ranges[range_count++] = (struct agx3_ioto_uniform_range){
+            .start_halfs = prefix[i].start_halfs,
+            .size_halfs = prefix[i].size_halfs,
+            .address = prefix[i].address,
+         };
+      if (agx_bo_sync_for_device(sampler_bo, 0, 32) ||
+          agx_bo_sync_for_device(list->stream_bo,
+             texture_table - list->stream_bo->va->addr,
+             cache->texture_table_size_B))
+         goto fail;
+      d12_list_track_read_bo(list, sampler_bo);
+      d12_list_track_read_range(list, texture_table,
+                                cache->texture_table_size_B);
+      if (!pso->code_bo->va || pso->code_va < pso->code_bo->va->addr ||
+          info->main_size > pso->code_bo->size ||
+          pso->code_va - pso->code_bo->va->addr >
+             pso->code_bo->size - info->main_size)
+         goto fail;
+      const uint8_t *code_cpu = agx_bo_map(pso->code_bo);
+      const uint8_t *sampler_cpu = agx_bo_map(sampler_bo);
+      if (!code_cpu || !sampler_cpu)
+         goto fail;
+      blake3_hash code_hash, table_hash, sampler_hash;
+      char code_hex[BLAKE3_HEX_LEN], table_hex[BLAKE3_HEX_LEN];
+      char sampler_hex[BLAKE3_HEX_LEN];
+      _mesa_blake3_compute(code_cpu + (pso->code_va - pso->code_bo->va->addr),
+                           info->main_size, code_hash);
+      _mesa_blake3_compute(stream_cpu + (texture_table - list->stream_bo->va->addr),
+                           cache->texture_table_size_B, table_hash);
+      _mesa_blake3_compute(sampler_cpu, 32, sampler_hash);
+      _mesa_blake3_format(code_hex, code_hash);
+      _mesa_blake3_format(table_hex, table_hash);
+      _mesa_blake3_format(sampler_hex, sampler_hash);
+      mesa_logi("native Texture.Load CODE: va=0x%llx size=%u blake3=%s "
+                "table-blake3=%s sampler32-blake3=%s",
+                (unsigned long long)pso->code_va, info->main_size,
+                code_hex, table_hex, sampler_hex);
+      mesa_logi("native Texture.Load metadata: table=0x%llx span=%llu "
+                "texture-cell=0x%llx sampler-cell=0x%llx sampler=0x%llx "
+                "root-cell=0x%llx halves=0/4/8/query16 fd-policy=registered-shim-only",
+                (unsigned long long)texture_table,
+                (unsigned long long)cache->texture_table_size_B,
+                (unsigned long long)u->textures,
+                (unsigned long long)sampler_cell,
+                (unsigned long long)sampler_table,
+                (unsigned long long)u->root);
+   }
+#define D12_G17P_RANGE(field, base, size)                                       do {                                                                             if (u->field) {                                                                  ranges[range_count++] = (struct agx3_ioto_uniform_range){                        .start_halfs = base, .size_halfs = size, .address = u->field,             };                                                                        }                                                                         } while (0)
+   if (!txf_metadata) {
+      D12_G17P_RANGE(root, D12_UNIFORM_ROOT, D12_UNIFORM_ROOT_REGS);
+      D12_G17P_RANGE(textures, D12_UNIFORM_TEXTURES, D12_UNIFORM_TEXTURE_REGS);
+   }
+   D12_G17P_RANGE(heap, D12_UNIFORM_HEAP, D12_UNIFORM_HEAP_REGS);
+   D12_G17P_RANGE(pbes, D12_UNIFORM_PBES, D12_UNIFORM_PBE_REGS);
+   D12_G17P_RANGE(heap_textures, D12_UNIFORM_HEAP_TEXTURES,
+                  D12_UNIFORM_HEAP_TEXTURE_REGS);
+   D12_G17P_RANGE(heap_pbes, D12_UNIFORM_HEAP_PBES, D12_UNIFORM_HEAP_PBE_REGS);
+   D12_G17P_RANGE(heap_samplers, D12_UNIFORM_HEAP_SAMPLERS,
+                  D12_UNIFORM_HEAP_SAMPLER_REGS);
+#undef D12_G17P_RANGE
+   if (info->rodata.size_16) {
+      ranges[range_count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = info->rodata.base_uniform,
+         .size_halfs = info->rodata.size_16,
+         .address = pso->g17p_rodata_va,
+      };
+   }
+   struct agx3_cdm_direct_template_sources launch_sources;
+   if (!agx3_cdm_direct_template_sources_compute(
+          info->uses_resource_info_query, false, false, &launch_sources))
+      goto fail;
+   uint32_t relative_program = 0;
+   uint8_t *program_cpu = d12_list_alloc_usc(
+      list, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE, &relative_program);
+   const uint64_t program_va = dev->shader_base + relative_program;
+   const struct agx3_g17p_compute_program_desc desc = {
+      .program_va = program_va,
+      .shader_va = pso->code_va,
+      .uniform_ranges = ranges,
+      .uniform_range_count = range_count,
+      .shader_binary_size = info->main_size,
+      .scratch_size = info->agx3_spectpr_scratch_size,
+      .nr_gprs = info->nr_gprs,
+      .compiler_d_valid = info->agx3_staging_known,
+      .compiler_d = (uint32_t)info->agx3_staging_halfs * 2,
+      .threadgroup_memory_size_B = info->local_size
+         ? MAX2(256u, ALIGN_POT(info->local_size, 64u)) : 0,
+      .launch_sources = launch_sources,
+      .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+   };
+   struct agx3_g17p_compute_program generated;
+   if (!program_cpu || !agx_va_in_usc_window(dev, program_va) ||
+       !agx_va_in_usc_window(dev, pso->code_va) ||
+       !agx3_g17p_compute_program_generate(dev->chip, &desc, &generated))
+      goto fail;
+   memcpy(program_cpu, generated.bytes, generated.length);
+   const size_t offset = program_va - list->usc_bo->va->addr;
+   list->usc_offset = offset + generated.length;
+   if (agx_bo_sync_for_device(list->usc_bo, offset, generated.length))
+      goto fail;
+   for (unsigned i = 0; i < range_count; i++) {
+      if (d12_list_stream_contains(list, ranges[i].address,
+                                    (size_t)ranges[i].size_halfs * 2) &&
+          agx_bo_sync_for_device(list->stream_bo,
+                                 ranges[i].address - list->stream_bo->va->addr,
+                                 (size_t)ranges[i].size_halfs * 2))
+         goto fail;
+   }
+
+   const struct agx3_compute_direct_grid grid = {
+      .source = AGX3_CDM_DIRECT_GRID_THREADGROUP_COUNTS,
+      .size = {x, y, z},
+      .local_size = {info->workgroup_size[0], info->workgroup_size[1],
+                     info->workgroup_size[2]},
+      .dimensions = z != 1 || info->workgroup_size[2] != 1 ? 3
+         : y != 1 || info->workgroup_size[1] != 1 ? 2 : 1,
+   };
+   struct agx3_compute_dispatch_sink sink = {
+      .data = list->stream_cur,
+      .capacity = D12_DISPATCH_STREAM_MARGIN,
+   };
+   if (!d12_list_check_stream_space(list) ||
+       !agx3_g17p_native_compute_dispatch_append_with_barrier(
+          &generated.launch, &grid, 0x5, &sink))
+      goto fail;
+   list->stream_cur += sink.length;
+   return true;
+
+fail:
+   mesa_loge("native direct buffer-compute producer rejected metadata/resources");
+   list->state = D12_LIST_ERROR;
+   return false;
+}
+
 static void
 d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
                       unsigned z, uint64_t indirect_args,
@@ -5631,12 +6385,23 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    if (list->state != D12_LIST_RECORDING)
       return;
 
-   if (!d12_list_require_legacy_compute(list))
+   const bool native = list->device->dev.chip == AGX_CHIP_G17P;
+   if (!native && !d12_list_require_legacy_compute(list))
       return;
 
    if (!d12_command_has_compute_pipeline(pso != NULL,
                                          pso ? pso->is_compute : false))
       return;
+   if (native) {
+      if (indirect_args || list->predicate_gpu || patch_count ||
+          constant_patch_count || root_patch_count) {
+         mesa_loge("native indirect/predicated compute producer unavailable");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+      if (!x || !y || !z)
+         return;
+   }
 
    d12_list_track_pso_reads(list, pso);
    d12_list_track_bound_reads(list, true, D12_WRITE_VIS_COMPUTE);
@@ -5737,6 +6502,20 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    if (d12_indirect_root_has_uav(root_patches, root_patch_count))
       d12_segment_mark_write_set_incomplete(seg, D12_WRITE_COMPUTE);
 
+   if (native) {
+      if (!d12_list_append_g17p_pso(
+             list, pso,
+             &(struct d12_dispatch_uniforms){
+                .root = root_gpu, .textures = textures_gpu, .pbes = pbes_gpu,
+                .heap = heap_gpu, .heap_textures = heap_textures_gpu,
+                .heap_pbes = heap_pbes_gpu, .heap_samplers = heap_samplers_gpu,
+             }, x, y, z))
+         return;
+      seg->g17p_txf_metadata_only |= pso->g17p_txf_compiler_only;
+      seg->dispatches++;
+      return;
+   }
+
    uint8_t *usc_cpu = NULL;
    uint32_t usc = d12_list_build_compute_usc(
       list, pso->code_va, &pso->info,
@@ -5799,6 +6578,105 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    seg->dispatches++;
 }
 
+/* First bounded graphics-stage producer: monolithic native VS/FS with
+ * command-owned root/draw/blend ranges. This supplies Ioto bytes only; the
+ * independent VDM-context, PPP, background and EOT gates remain mandatory.
+ * Texture, preamble and promoted-constant ABIs are deliberately not admitted. */
+static uint32_t
+d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
+                  bool fragment, const struct agx_tilebuffer_layout *tib,
+                  uint64_t root_gpu, uint64_t draw_gpu, uint64_t blend_gpu)
+{
+   struct agx_device *dev = &list->device->dev;
+   const struct agx_shader_info *info = &st->info;
+   const struct agx_linked_shader *linked = &st->linked;
+   if (dev->chip != AGX_CHIP_G17P || !linked->bo || !linked->bo->va ||
+       !linked->entry_offset || !linked->size || linked->size > UINT32_MAX ||
+       linked->bo->va->addr > UINT64_MAX - linked->entry_offset ||
+       linked->entry_offset > linked->bo->size ||
+       linked->size > linked->bo->size - linked->entry_offset ||
+       !linked->nr_gprs || !linked->g17p_compiler_d_valid ||
+       info->stage != (fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX) ||
+       !st->g17p_root_only || info->scratch_size || linked->scratch_size ||
+       info->has_preamble || info->nr_preamble_gprs ||
+       info->preamble_scratch_size || info->rodata.size_16 ||
+       info->agx3_uniform_dma_valid || info->texture_state_count ||
+       info->sampler_state_count || info->uses_sampler_heap || linked->uses_txf ||
+       !root_gpu || !tib || tib->nr_samples != 1)
+      goto fail;
+
+   struct agx3_ioto_uniform_range ranges[3];
+   size_t count = 0;
+   if (fragment && blend_gpu)
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 4, .size_halfs = 8, .address = blend_gpu,
+      };
+   ranges[count++] = (struct agx3_ioto_uniform_range){
+      .start_halfs = fragment ? D12_UNIFORM_FRAGMENT_ROOT : D12_UNIFORM_ROOT,
+      .size_halfs = D12_UNIFORM_ROOT_REGS, .address = root_gpu,
+   };
+   if (draw_gpu)
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = D12_UNIFORM_DRAW,
+         .size_halfs = D12_UNIFORM_DRAW_REGS, .address = draw_gpu,
+      };
+   for (size_t i = 0; i < count; i++) {
+      const size_t size = (size_t)ranges[i].size_halfs * 2;
+      /* This subset consumes only immutable command-list uploads. */
+      if (!d12_list_stream_contains(list, ranges[i].address, size) ||
+          agx_bo_sync_for_device(list->stream_bo,
+             ranges[i].address - list->stream_bo->va->addr, size))
+         goto fail;
+   }
+
+   const uint64_t shader_va = linked->bo->va->addr + linked->entry_offset;
+   uint32_t relative_program = 0;
+   uint8_t *cpu = d12_list_alloc_usc(list, AGX3_G17P_GRAPHICS_PROGRAM_MAX_SIZE,
+                                   &relative_program);
+   const uint64_t program_va = dev->shader_base + relative_program;
+   const struct agx3_g17p_graphics_program_desc desc = {
+      .program_va = program_va,
+      .shader_va = shader_va,
+      .uniform_ranges = ranges,
+      .uniform_range_count = count,
+      .shader_binary_size = linked->size,
+      .scratch_size = MAX2(linked->scratch_size,
+                           linked->agx3_spectpr_scratch_size),
+      .nr_gprs = linked->nr_gprs,
+      .compiler_d_valid = linked->g17p_compiler_d_valid,
+      .compiler_d = linked->g17p_compiler_d,
+      .fragment = fragment,
+      .writes_sample_mask = fragment &&
+         ((linked->fragment_control.opaque[0] >> 29) == AGX_PASS_TYPE_PUNCH_THROUGH ||
+          (linked->fragment_control.opaque[0] >> 29) ==
+             AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH),
+      .colour_classes = fragment ? linked->g17p_colour_classes : 0,
+      .imageblock = {
+         .sample_size_B = tib->sample_size_B,
+         .nr_samples = tib->nr_samples,
+         .tile_size_px = tib->tile_size,
+      },
+   };
+   struct agx3_g17p_graphics_program generated;
+   if (!cpu || !agx_va_in_usc_window(dev, program_va) ||
+       !agx_va_in_usc_window(dev, shader_va) ||
+       linked->size > AGX_USC_WINDOW_SIZE - (shader_va - dev->shader_base) ||
+       !agx3_g17p_graphics_program_generate(dev->chip, &desc, &generated))
+      goto fail;
+   const size_t offset = program_va - list->usc_bo->va->addr;
+   memcpy(cpu, generated.bytes, generated.length);
+   list->usc_offset = offset + generated.length;
+   if (agx_bo_sync_for_device(list->usc_bo, offset, generated.length))
+      goto fail;
+   d12_list_track_read_bo(list, linked->bo);
+   return relative_program;
+
+fail:
+   mesa_loge("native graphics-stage Ioto producer rejected metadata/resources");
+   list->state = D12_LIST_ERROR;
+   return 0;
+}
+
 /*
  * Build the USC words that bind one linked graphics stage: our root
  * uniform, the stage's shared config, then the linker's packed program
@@ -5815,6 +6693,19 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
                   const struct d12_dispatch_uniforms *poly)
 {
    struct d12_device *device = list->device;
+
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      /* Unused null texture/PBE home cells are always uploaded by the
+       * binding collector; the frontend usage proof decides admission. */
+      if (!st->g17p_root_only || heap_gpu || heap_textures_gpu ||
+          heap_pbes_gpu || heap_samplers_gpu || poly) {
+         mesa_loge("native graphics texture/poly stage producer unavailable");
+         list->state = D12_LIST_ERROR;
+         return 0;
+      }
+      return d12_gfx_stage_g17p(list, st, fragment, tib,
+                                 root_gpu, draw_gpu, blend_gpu);
+   }
 
    uint32_t usc;
    uint8_t *cpu = d12_list_alloc_usc(list, agx_usc_size(18), &usc);
@@ -7807,6 +8698,139 @@ d12_emit_ppp_state(struct d12_cmd_list *list, uint8_t **out, uint64_t gpu,
    return false;
 }
 
+static bool
+d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
+                        struct d12_pipeline_state *pso, uint32_t vs_usc,
+                        uint32_t fs_usc, unsigned vertex_count,
+                        unsigned instance_count, unsigned first_vertex)
+{
+   if (!d12_g17p_baseline_graphics_enabled(&list->device->dev) ||
+       !seg->agx3_active_context_selector_valid ||
+       !pso->vs.g17p_root_only || !pso->fs.g17p_root_only ||
+       pso->vs.g17p_writes_memory || pso->fs.g17p_writes_memory ||
+       pso->has_gs || pso->has_tess || pso->has_mesh || pso->nr_vb_attribs ||
+       pso->raster.polygon_mode != AGX_POLYGON_MODE_FILL ||
+       pso->raster.depth_bias || pso->raster.slope_scaled_depth_bias ||
+       (seg->ds && (!d12_g17p_depth_enabled(&list->device->dev) ||
+                    !d12_g17p_depth_segment_supported(seg) ||
+                    pso->ds.stencil_test ||
+                    pso->ds.dsv_format != DXGI_FORMAT_D32_FLOAT)) ||
+       seg->tib.nr_samples != 1 || list->viewport_count != 1 ||
+       list->scissor_count != 1 || list->topology != MESA_PRIM_TRIANGLES ||
+       pso->fs.info.writes_sample_mask || pso->fs.info.reads_tib ||
+       seg->scissor_count >= D12_SCISSORS_PER_SEGMENT ||
+       seg->depth_bias_count >= D12_DEPTH_BIASES_PER_SEGMENT ||
+       list->active_occlusion_queries || list->active_pipeline_stats_heap)
+      goto fail;
+   if (!d12_segment_ensure_viewport_arrays(list, seg))
+      goto fail;
+   struct d12_viewport_hw_state states[D12_VIEWPORT_STATE_MAX];
+   if (d12_viewport_build_hw_state(list->viewport_count, list->viewports,
+          list->scissor_count, list->scissors, seg->width_px, seg->height_px,
+          states) != 1)
+      goto fail;
+   uint64_t compact;
+   void *payload = d12_list_alloc_g17p_vdm(list, AGX_G17P_BIND_STATE_BYTES, 64, &compact);
+   if (!payload)
+      goto fail;
+   struct d12_agx3_triangle_bind_desc desc = {
+      .compact_va = compact,
+      .fragment_program = list->device->dev.shader_base + fs_usc,
+      .linked_fragment_control = pso->fs.linked.fragment_control.opaque[0],
+      .raw_output_select = pso->uvs.osel.opaque[0],
+      .uvs_size = pso->uvs.size, .user_size = pso->uvs.user_size,
+      .coefficient_bindings = pso->fs.linked.cf.nr_bindings,
+      .reads_z = pso->fs.linked.cf.reads_z,
+      .writes_memory = pso->fs.g17p_writes_memory,
+      .writes_depth = pso->fs.info.depth_layout != FRAG_DEPTH_LAYOUT_UNCHANGED,
+      .needs_quad_derivatives = pso->fs.info.needs_quad_derivatives,
+      .has_preamble = pso->fs.info.has_preamble,
+      .cull_mode = pso->raster.cull_front | (pso->raster.cull_back << 1),
+      .front_face_ccw = pso->raster.front_face_ccw,
+      .depth_clip = pso->raster.depth_clip,
+      .has_depth = seg->ds != NULL,
+      .depth_test = pso->ds.depth_test,
+      .depth_write = pso->ds.depth_write,
+      .depth_compare = pso->ds.depth_func,
+      .raster = {
+         .scissor_enable = true,
+         .min_x = states[0].clip[0], .min_y = states[0].clip[1],
+         .max_x = states[0].clip[2], .max_y = states[0].clip[3],
+         .max_z_raw = fui(1.0f),
+      },
+      .viewport.viewport_count = 1,
+   };
+   uint8_t region_clip[AGX_REGION_CLIP_LENGTH];
+   agx_pack(region_clip, REGION_CLIP, cfg) {
+      cfg.enable = true;
+      cfg.min_x = states[0].clip[0] / 32;
+      cfg.min_y = states[0].clip[1] / 32;
+      cfg.max_x = DIV_ROUND_UP(MAX2(states[0].clip[2], 1), 32);
+      cfg.max_y = DIV_ROUND_UP(MAX2(states[0].clip[3], 1), 32);
+   }
+   memcpy(&desc.viewport.region_clip_raw[0], region_clip, sizeof(region_clip));
+   desc.viewport.viewports[0] = (struct agx_ppp_viewport_transform_raw){
+      .translate_x = fui(states[0].transform[0]), .scale_x = fui(states[0].transform[3]),
+      .translate_y = fui(states[0].transform[1]), .scale_y = fui(states[0].transform[4]),
+      .translate_z = fui(states[0].transform[2]), .scale_z = fui(states[0].transform[5]),
+   };
+   uint8_t control[AGX_VIEWPORT_CONTROL_LENGTH];
+   agx_pack(control, VIEWPORT_CONTROL, cfg) ;
+   memcpy(&desc.viewport.viewport_control_raw, control, sizeof(control));
+   struct d12_agx3_triangle_bind generated;
+   if (!d12_agx3_triangle_bind_generate(list->device->dev.chip, &desc, &generated))
+      goto fail;
+   memcpy(payload, generated.bytes, sizeof(generated.bytes));
+   uint8_t *scissor = d12_list_data_cpu(list, seg->scissor_base);
+   uint8_t *depth_bias = d12_list_data_cpu(list, seg->depth_bias_base);
+   if (!scissor || !depth_bias)
+      goto fail;
+   memcpy(scissor + seg->scissor_count * AGX_SCISSOR_LENGTH,
+          generated.raster.scissor, sizeof(generated.raster.scissor));
+   memcpy(depth_bias + seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH,
+          generated.raster.depth_bias, sizeof(generated.raster.depth_bias));
+   seg->scissor_count++;
+   seg->depth_bias_count++;
+   uint64_t draw_compact;
+   void *draw_payload = d12_list_alloc_g17p_vdm(list, 8, 4, &draw_compact);
+   uint32_t draw_offset;
+   if (!draw_payload || !agx_g17p_upload_draw_indices(draw_payload, 8, draw_compact,
+          seg->scissor_count * AGX_SCISSOR_LENGTH,
+          seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH, 1, &draw_offset))
+      goto fail;
+   struct d12_agx3_vdm_state_update_draw_info info = {
+      .source_layout = pso->vs.agx3_vdm_state_update.source_layout,
+      .draw_path = D12_AGX3_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED,
+      .rasterization_enabled = pso->rasterization_enabled,
+      .template_info = pso->vs.agx3_vdm_state_update.template_info,
+   };
+   info.template_info.pipeline = list->device->dev.shader_base + vs_usc;
+   info.template_info.raw_active_context_selector = seg->agx3_raw_active_context_selector;
+   struct d12_agx3_vdm_state_update vertex;
+   const struct agx_vdm_hal200_direct_draw_fields draw_fields = {
+      .draw_state_context_offset = draw_offset, .primitive = AGX_PRIMITIVE_TRIANGLES,
+      .vertex_count = vertex_count, .instance_count = instance_count,
+      .vertex_start = first_vertex,
+   };
+   struct agx_vdm_hal200_direct_draw draw;
+   if (!d12_agx3_encode_vdm_state_update_draw(list->device->dev.chip, &info, &vertex) ||
+       !agx_vdm_hal200_direct_draw_pack(list->device->dev.chip, &draw_fields, &draw) ||
+       !d12_list_check_stream_space(list))
+      goto fail;
+   uint8_t *out = list->stream_cur;
+   memcpy(out, vertex.bytes, vertex.length); out += vertex.length;
+   memcpy(out, generated.upload.tail.bytes, generated.upload.tail.length);
+   out += generated.upload.tail.length;
+   memcpy(out, draw.bytes, draw.length); out += draw.length;
+   list->stream_cur = out;
+   seg->has_draws = true;
+   return true;
+fail:
+   mesa_loge("native baseline triangle producer rejected draw/state/resources");
+   list->state = D12_LIST_ERROR;
+   return false;
+}
+
 static void
 d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
               unsigned instance_count, unsigned first_vertex,
@@ -8331,6 +9355,21 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             .varyings = varyings,
          };
       }
+   }
+
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      if (indexed || indirect_args || indirect_ibv || list->predicate_gpu ||
+          indirect_patch_count || indirect_constant_patch_count ||
+          indirect_root_patch_count || indirect_vb_patch_count ||
+          first_instance || first_vertex || first_index || vertex_count != 3 ||
+          instance_count != 1) {
+         mesa_loge("native baseline supports only a direct first triangle");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+      d12_emit_g17p_triangle(list, seg, pso, vs_usc, fs_usc,
+                             vertex_count, instance_count, first_vertex);
+      return;
    }
 
    if (!d12_list_check_stream_space(list))
@@ -10656,6 +11695,8 @@ d12_list_Release(ID3D12GraphicsCommandList6 *iface)
       /* Submitted queue operations own the exact BOs they reference. */
       d12_list_release_segment_scratch(list);
       d12_list_read_tracker_fini(list);
+      d12_list_g17p_vdm_storage_reset(list);
+      util_dynarray_fini(&list->g17p_vdm_storage);
 
       if (list->stream_bo)
          agx_bo_unreference(&list->device->dev, list->stream_bo);
@@ -11740,6 +12781,24 @@ d12_copy_texture_region(struct d12_cmd_list *list,
       return;
    }
 
+   /* libagx_copy_image now uses the same CPU-reduced tile geometry and
+    * two-dimensional grid as Honeykrisp's raw image-copy caller. Its Morton
+    * encoder expands seven bits per axis, so refuse geometry outside that
+    * contract instead of silently truncating tiled addresses. */
+   const struct d12_copy_surface *surfaces[] = {&d, &s};
+   for (unsigned i = 0; i < ARRAY_SIZE(surfaces); ++i) {
+      const struct d12_copy_surface *surface = surfaces[i];
+      if (surface->tiled &&
+          (!surface->stride_el ||
+           !util_is_power_of_two_nonzero(surface->tile_width_el) ||
+           !util_is_power_of_two_nonzero(surface->tile_height_el) ||
+           surface->tile_width_el > 128 || surface->tile_height_el > 128)) {
+         mesa_loge("CopyTextureRegion: tiled geometry exceeds copy kernel contract");
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+   }
+
    struct libagx_copy_image_args args = {
       .width_el = plan.width_el,
       .height_el = plan.height_el,
@@ -11749,12 +12808,16 @@ d12_copy_texture_region(struct d12_cmd_list *list,
       .src_y_el = plan.source_y_el,
       .dest_pitch_B = d.pitch_B,
       .src_pitch_B = s.pitch_B,
-      .dest_stride_el = d.stride_el,
-      .src_stride_el = s.stride_el,
-      .dest_tile_width_el = d.tile_width_el,
-      .dest_tile_height_el = d.tile_height_el,
-      .src_tile_width_el = s.tile_width_el,
-      .src_tile_height_el = s.tile_height_el,
+      .dest_tiles_per_row =
+         d.tiled ? ((uint64_t)d.stride_el + d.tile_width_el - 1) >>
+                      util_logbase2(d.tile_width_el) : 0,
+      .src_tiles_per_row =
+         s.tiled ? ((uint64_t)s.stride_el + s.tile_width_el - 1) >>
+                      util_logbase2(s.tile_width_el) : 0,
+      .dest_tile_width_log2 = d.tiled ? util_logbase2(d.tile_width_el) : 0,
+      .dest_tile_height_log2 = d.tiled ? util_logbase2(d.tile_height_el) : 0,
+      .src_tile_width_log2 = s.tiled ? util_logbase2(s.tile_width_el) : 0,
+      .src_tile_height_log2 = s.tiled ? util_logbase2(s.tile_height_el) : 0,
       .blocksize_B = s.blocksize_B,
       .dest_tiled = d.tiled,
       .src_tiled = s.tiled,
@@ -11770,8 +12833,7 @@ d12_copy_texture_region(struct d12_cmd_list *list,
       args.src = s.base +
                  (uint64_t)(plan.source_front_px + z) * s.slice_stride_B;
       d12_list_dispatch_precomp(list, LIBAGX_COPY_IMAGE, &args, sizeof(args),
-                                agx_1d((uint64_t)plan.width_el *
-                                       plan.height_el));
+                                agx_2d(plan.width_el, plan.height_el));
       if (list->state == D12_LIST_ERROR)
          return;
    }
@@ -13097,6 +14159,13 @@ static bool
 d12_list_attach_ds(struct d12_cmd_list *list,
                    const struct d12_descriptor *dsv)
 {
+   if (list->device->dev.chip == AGX_CHIP_G17P &&
+       !d12_g17p_depth_enabled(&list->device->dev)) {
+      mesa_loge("native depth attach/clear producer remains closed");
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+
    struct d12_resource *ds = dsv->resource;
    if (!list->render_open) {
       mesa_loge("depth/stencil needs an open render pass; clear the colour "
@@ -13132,6 +14201,12 @@ d12_list_attach_ds(struct d12_cmd_list *list,
    if (seg->layers != ds_layers) {
       mesa_loge("render pass and depth/stencil have mismatched layer counts "
                 "%u and %u", seg->layers, ds_layers);
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+   if (list->device->dev.chip == AGX_CHIP_G17P &&
+       !d12_g17p_depth_segment_supported(seg)) {
+      mesa_loge("native D32 attachment rejected storage/view/extent metadata");
       list->state = D12_LIST_ERROR;
       return false;
    }
@@ -14000,6 +15075,7 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
    list->allocator = allocator;
    list->pso = initial_state;
    d12_private_data_store_init(&list->private_data, (IUnknown *)&list->iface);
+   util_dynarray_init(&list->g17p_vdm_storage, NULL);
    util_dynarray_init(&list->descriptor_fixups, NULL);
    util_dynarray_init(&list->indirect_constant_fixups, NULL);
    util_dynarray_init(&list->indirect_argument_fixups, NULL);

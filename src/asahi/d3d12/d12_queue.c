@@ -16,6 +16,7 @@
 
 #include "d12_private.h"
 #include "d12_agx3_cmdstream_core.h"
+#include "d12_native_render_resources_core.h"
 #include "d12_read_set_core.h"
 #include "d12_write_set_core.h"
 
@@ -27,6 +28,8 @@
 #include "drm-uapi/drm.h"
 
 #include "agx_helpers.h"
+#include "asahi/compiler/agx3_compute_program.h"
+#include "agx_abi.h"
 #include "agx_usc.h"
 #include "clc/asahi_clc.h"
 #include "util/u_math.h"
@@ -194,6 +197,7 @@ struct d12_queue_op {
    struct d12_cmd_list *list;
    struct d12_device *submit_device;
    bool bos_initialized;
+   bool capture_failed;
    /*
     * A command list is mutable as soon as ExecuteCommandLists returns: the
     * application may Reset it while this operation is still waiting behind
@@ -204,6 +208,7 @@ struct d12_queue_op {
     * per submit and exhaust system memory before either queue could run.
     */
    struct util_dynarray bos;
+   struct util_dynarray g17p_vdm_storage;
    void *payload;
    size_t payload_size;
    unsigned nr_vdm;
@@ -319,14 +324,40 @@ d12_default_sample_positions(unsigned nr_samples)
    return packed;
 }
 
-static void
+/* Mirror the existing native kernel address checks before any ioctl. This
+ * identifies the exact UAPI field; it does not relax alignment or residency. */
+static const char *
+d12_g17p_render_address_error(const struct drm_asahi_cmd_render *c)
+{
+   if (!c->vdm_ctrl_stream_base || (c->vdm_ctrl_stream_base & 3))
+      return "vdm_ctrl_stream_base";
+   if (!c->isp_scissor_base || (c->isp_scissor_base & 7))
+      return "isp_scissor_base";
+   if (c->isp_dbias_base & 7)
+      return "isp_dbias_base";
+   if (c->isp_oclqry_base & 7)
+      return "isp_oclqry_base";
+   if ((c->sampler_heap == 0) != (c->sampler_count == 0) ||
+       (c->sampler_count && (c->sampler_heap & 7)))
+      return "sampler_heap/count";
+   return NULL;
+}
+
+static bool
 d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                     const struct d12_segment *seg,
                     struct drm_asahi_cmd_render *c)
 {
    memset(c, 0, sizeof(*c));
+   if (device->dev.chip == AGX_CHIP_G17P && seg->ds &&
+       (!d12_g17p_depth_enabled(&device->dev) ||
+        !d12_g17p_depth_segment_supported(seg))) {
+      mesa_loge("native depth submission refused before unqualified ZLS metadata");
+      return false;
+   }
 
-   c->vdm_ctrl_stream_base = list->stream_bo->va->addr + seg->stream_start;
+   c->vdm_ctrl_stream_base = seg->g17p_vdm_control_base
+      ? seg->g17p_vdm_control_base : list->stream_bo->va->addr + seg->stream_start;
 
    agx_pack(&c->ppp_ctrl, CR_PPP_CONTROL, cfg) {
       cfg.enable_w_clamp = true;
@@ -339,7 +370,8 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
    /* Background object values: hk's base constant, with the stencil clear
     * value in the low byte.
     */
-   c->isp_bgobjdepth = seg->isp_bgobjdepth;
+   c->isp_bgobjdepth = device->dev.chip == AGX_CHIP_G17P && !seg->ds
+      ? fui(1.0f) : seg->isp_bgobjdepth;
    c->isp_bgobjvals = 0x300 | seg->stencil_clear;
 
    /*
@@ -452,14 +484,23 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
    c->sampler_heap = seg->sampler_heap;
    c->sampler_count = seg->sampler_count;
 
-   static_assert(sizeof(c->bg.rsrc_spec) == sizeof(seg->bg_counts),
-                 "counts word must match rsrc_spec");
-   memcpy(&c->bg.rsrc_spec, &seg->bg_counts, sizeof(seg->bg_counts));
-   memcpy(&c->eot.rsrc_spec, &seg->eot_counts, sizeof(seg->eot_counts));
-   memcpy(&c->partial_bg.rsrc_spec, &seg->partial_bg_counts,
-          sizeof(seg->partial_bg_counts));
-   memcpy(&c->partial_eot.rsrc_spec, &seg->partial_eot_counts,
-          sizeof(seg->partial_eot_counts));
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      const struct d12_native_render_resource_specs specs = {
+         .bg = seg->g17p_bg_resources, .eot = seg->g17p_eot_resources,
+         .partial_bg = seg->g17p_partial_bg_resources,
+         .partial_eot = seg->g17p_partial_eot_resources,
+      };
+      d12_native_render_resource_specs_pack(&specs, c);
+   } else {
+      static_assert(sizeof(c->bg.rsrc_spec) == sizeof(seg->bg_counts),
+                    "counts word must match rsrc_spec");
+      memcpy(&c->bg.rsrc_spec, &seg->bg_counts, sizeof(seg->bg_counts));
+      memcpy(&c->eot.rsrc_spec, &seg->eot_counts, sizeof(seg->eot_counts));
+      memcpy(&c->partial_bg.rsrc_spec, &seg->partial_bg_counts,
+             sizeof(seg->partial_bg_counts));
+      memcpy(&c->partial_eot.rsrc_spec, &seg->partial_eot_counts,
+             sizeof(seg->partial_eot_counts));
+   }
 
    /* The scissor array carries both the XY bounds and the depth clip range
     * that draws index into. Occlusion scratch must be valid memory whether
@@ -494,6 +535,24 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
     * same run as the fault and match, exactly as the tessellation VA map
     * did for the last one.
     */
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      const char *field = d12_g17p_render_address_error(c);
+      if (field) {
+         mesa_loge("G17P render submission metadata refused: field=%s "
+                   "vdm=0x%llx scissor=0x%llx dbias=0x%llx "
+                   "oclqry=0x%llx sampler=0x%llx/%u extent=%ux%u "
+                   "draws=%u empty_tiles=%u", field,
+                   (unsigned long long)c->vdm_ctrl_stream_base,
+                   (unsigned long long)c->isp_scissor_base,
+                   (unsigned long long)c->isp_dbias_base,
+                   (unsigned long long)c->isp_oclqry_base,
+                   (unsigned long long)c->sampler_heap, c->sampler_count,
+                   c->width_px, c->height_px, seg->has_draws,
+                   seg->process_empty_tiles);
+         return false;
+      }
+   }
+
    if (getenv("D3D12AGX_DUMP_RENDER_CMD")) {
       mesa_logi("render cmd: vdm_base=0x%llx (stream_bo 0x%llx..0x%llx, "
                 "seg %zu..%zu, dispatches=%u)",
@@ -512,7 +571,24 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
       mesa_logi("  bg.usc=0x%llx eot.usc=0x%llx  %ux%ux%u samples=%u",
                 (unsigned long long)c->bg.usc, (unsigned long long)c->eot.usc,
                 c->width_px, c->height_px, c->layers, c->samples);
+      if (seg->ds)
+         mesa_logi("  native D32 metadata: zls=0x%llx pixels=0x%x "
+                   "depth-stride=0x%x clear=0x%x load=%u store=%u "
+                   "fd-policy=%s",
+                   (unsigned long long)c->zls_ctrl, c->isp_zls_pixels,
+                   c->depth.stride, c->isp_bgobjdepth,
+                   (unsigned)!seg->depth_cleared,
+                   (unsigned)(seg->depth_cleared ||
+                              !(seg->dsv_flags & D3D12_DSV_FLAG_READ_ONLY_DEPTH)),
+#ifndef _WIN32
+                   d12_platform_is_real_asahi_render_fd(device->dev.fd)
+                      ? "physical-asahi-render-D32-optin" : "registered-shim-only"
+#else
+                   "closed-windows"
+#endif
+                   );
    }
+   return true;
 }
 
 static void
@@ -532,6 +608,10 @@ d12_queue_op_destroy(struct d12_queue_op *op)
       util_dynarray_foreach(&op->bos, struct agx_bo *, bo)
          agx_bo_unreference(&op->submit_device->dev, *bo);
       util_dynarray_fini(&op->bos);
+      util_dynarray_foreach(&op->g17p_vdm_storage,
+                            struct d12_g17p_vdm_storage *, storage)
+         d12_g17p_vdm_storage_unref(*storage);
+      util_dynarray_fini(&op->g17p_vdm_storage);
    }
    if (op->list)
       ID3D12GraphicsCommandList_Release(&op->list->iface);
@@ -874,8 +954,13 @@ d12_queue_op_capture_bo(struct d12_queue_op *op, struct agx_bo *bo)
          return;
    }
 
+   struct agx_bo **slot = util_dynarray_grow(&op->bos, struct agx_bo *, 1);
+   if (!slot) {
+      op->capture_failed = true;
+      return;
+   }
    agx_bo_reference(bo);
-   util_dynarray_append_typed(&op->bos, struct agx_bo *, bo);
+   *slot = bo;
 }
 
 static void
@@ -883,12 +968,25 @@ d12_queue_op_capture_bos(struct d12_queue_op *op,
                          struct d12_cmd_list *list)
 {
    util_dynarray_init(&op->bos, NULL);
+   util_dynarray_init(&op->g17p_vdm_storage, NULL);
    op->bos_initialized = true;
    op->submit_device = list->device;
 
    d12_queue_op_capture_bo(op, list->stream_bo);
    d12_queue_op_capture_bo(op, list->usc_bo);
    d12_queue_op_capture_bo(op, list->sparse_registry_bo);
+   util_dynarray_foreach(&list->g17p_vdm_storage,
+                         struct d12_g17p_vdm_storage *, storage) {
+      struct d12_g17p_vdm_storage **slot = util_dynarray_grow(
+         &op->g17p_vdm_storage, struct d12_g17p_vdm_storage *, 1);
+      if (!slot) {
+         op->capture_failed = true;
+         return;
+      }
+      d12_g17p_vdm_storage_ref(*storage);
+      *slot = *storage;
+      d12_queue_op_capture_bo(op, (*storage)->bo);
+   }
 
    /* Scratch addresses are packed directly into the DRM command payload. */
    for (unsigned i = 0; i < list->segment_count; i++) {
@@ -1138,6 +1236,11 @@ d12_queue_op_build_read_set(struct d12_queue_op *op,
    for (unsigned i = 0; i < captured_count; ++i)
       complete &= d12_queue_read_set_add_bo(op, captured[i]);
 
+   util_dynarray_foreach(&op->g17p_vdm_storage,
+                         struct d12_g17p_vdm_storage *, storage)
+      complete &= d12_queue_read_set_add_range(op, (*storage)->alias,
+                                              (*storage)->bo->size);
+
    /* Every render command names the occlusion buffer even when counting is
     * disabled. Device rodata contains the null region and heap descriptor
     * consumed by ordinary shaders and libagx helpers. */
@@ -1242,13 +1345,17 @@ d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
    mtx_unlock(&queue->lock);
 }
 
+_Static_assert(sizeof(struct libagx_write_u64_args) == 16,
+               "queue signal arguments must fit their reserved stream slot");
+
 static HRESULT
 d12_queue_signal_arena_init(struct d12_queue *queue)
 {
    struct agx_device *dev = &queue->device->dev;
-   if (agx_chip_command_stream_generation(dev->chip) !=
-       AGX_CS_GENERATION_AGX2) {
-      mesa_loge("legacy USC queue-signal launch rejected for %s",
+   const bool native = dev->chip == AGX_CHIP_G17P;
+   if (!native && agx_chip_command_stream_generation(dev->chip) !=
+                     AGX_CS_GENERATION_AGX2) {
+      mesa_loge("queue-signal producer unavailable for %s",
                 agx_chip_name(dev->chip));
       return E_NOTIMPL;
    }
@@ -1261,15 +1368,33 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
    uint8_t *stream_map;
    uint8_t *usc_map;
    uint32_t common_control_size = 0;
-   const uint32_t usc_size = agx_usc_size(15);
+   const uint32_t usc_size = native ? AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE
+                                    : agx_usc_size(15);
+   const uint32_t usc_stride = native ? AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE
+                                      : D12_QUEUE_SIGNAL_USC_STRIDE;
+   const uint32_t usc_arena_size = native
+      ? usc_stride * D12_QUEUE_SIGNAL_SLOT_COUNT : D12_QUEUE_SIGNAL_ARENA_SIZE;
 
    if (!program || !program->bo || !dev->params.max_attachments)
+      return E_FAIL;
+
+   /* Only the precompiler's native code container and fully described Ioto
+    * ABI may pass the G17P producer gate. No legacy USC words are reused. */
+   if (native &&
+       (!program->info.main_size || !program->info.nr_gprs ||
+        program->info.nr_preamble_gprs || program->info.printf_uniform ||
+        !program->info.agx3_staging_known ||
+        (program->info.rodata.size_16 && !program->rodata_offset) ||
+        program->entry_offset > UINT64_MAX - program->ptr ||
+        program->rodata_offset > UINT64_MAX - program->ptr ||
+        program->b.workgroup.x != 1 || program->b.workgroup.y != 1 ||
+        program->b.workgroup.z != 1))
       return E_FAIL;
 
    stream = agx_bo_create(dev, D12_QUEUE_SIGNAL_ARENA_SIZE, 0,
                           AGX_BO_WRITEBACK,
                           "d3d12 ddi fence signal stream arena");
-   usc = agx_bo_create(dev, D12_QUEUE_SIGNAL_ARENA_SIZE, 0,
+   usc = agx_bo_create(dev, usc_arena_size, 0,
                        AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
                        "d3d12 ddi fence signal usc arena");
    scratch = agx_bo_create(dev, AIL_PAGESIZE, 0, AGX_BO_WRITEBACK,
@@ -1297,33 +1422,104 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
        * not fit before copying into the tightly packed arena slot. */
       uint32_t control_words[4096 / sizeof(uint32_t)] = {0};
 
-      if (!d12_queue_signal_slot_layout(slot, 0, usc_size,
-                                        &control_offset, &data_offset,
-                                        &usc_offset))
+      if (!d12_queue_signal_slot_layout_program(
+             slot, 0, usc_size, usc_stride, usc_arena_size,
+             &control_offset, &data_offset, &usc_offset))
          goto fail;
 
-      agx_usc_words_precomp((uint32_t *)(usc_map + usc_offset), &program->b,
-                            stream->va->addr + data_offset,
-                            sizeof(struct libagx_write_u64_args));
-      uint8_t *control = (uint8_t *)agx_cdm_launch(
-         control_words, dev->chip, agx_1d(1), program->b.workgroup,
-         program->b.launch,
-         agx_usc_addr(dev, usc->va->addr + usc_offset));
-      control = d12_queue_emit_cdm_cache_flush(dev, control);
+      uint8_t *control;
+      if (native) {
+         struct agx3_ioto_uniform_range ranges[2] = {{
+            .start_halfs = AGX_ABI_AGX3_PRECOMP_ARG_HALFS,
+            .size_halfs = sizeof(struct libagx_write_u64_args) / 2,
+            .address = stream->va->addr + data_offset,
+         }};
+         unsigned range_count = 1;
+         if (program->info.rodata.size_16) {
+            ranges[range_count++] = (struct agx3_ioto_uniform_range){
+               .start_halfs = program->info.rodata.base_uniform,
+               .size_halfs = program->info.rodata.size_16,
+               .address = program->ptr + program->rodata_offset,
+            };
+         }
+         struct agx3_cdm_direct_template_sources launch_sources;
+         if (!agx3_cdm_direct_template_sources_compute(false, false, false,
+                                                       &launch_sources))
+            goto fail;
+         const struct agx3_g17p_compute_program_desc desc = {
+            .program_va = usc->va->addr + usc_offset,
+            .shader_va = program->ptr + program->entry_offset,
+            .uniform_ranges = ranges,
+            .uniform_range_count = range_count,
+            .shader_binary_size = program->info.main_size,
+            .scratch_size = program->info.agx3_tps_size,
+            .nr_gprs = program->info.nr_gprs,
+            .compiler_d_valid = program->info.agx3_staging_known,
+            .compiler_d = (uint32_t)program->info.agx3_staging_halfs * 2,
+            .threadgroup_memory_size_B = program->info.local_size
+               ? MAX2(256u, ALIGN_POT(program->info.local_size, 64u)) : 0,
+            .launch_sources = launch_sources,
+            .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+         };
+         struct agx3_g17p_compute_program generated;
+         if (!agx_va_in_usc_window(dev, desc.program_va) ||
+             !agx_va_in_usc_window(dev, desc.shader_va) ||
+             !agx3_g17p_compute_program_generate(dev->chip, &desc, &generated) ||
+             generated.length > usc_size)
+            goto fail;
+         memcpy(usc_map + usc_offset, generated.bytes, generated.length);
+         if (!slot && getenv("D3D12AGX_DUMP_SYNC")) {
+            mesa_logi("native queue signal producer: code=%u gprs=%u "
+                      "staging_halfs=%u tps=%u rodata_halfs=%u ioto=%u "
+                      "stride=%u slots=%u local=1x1x1",
+                      program->info.main_size, program->info.nr_gprs,
+                      program->info.agx3_staging_halfs,
+                      program->info.agx3_tps_size,
+                      program->info.rodata.size_16, generated.length,
+                      usc_stride, D12_QUEUE_SIGNAL_SLOT_COUNT);
+         }
+         const struct agx3_compute_direct_grid grid = {
+            .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
+            .size = {1, 1, 1},
+            .local_size = {program->b.workgroup.x, program->b.workgroup.y,
+                           program->b.workgroup.z},
+            .dimensions = program->b.workgroup.z != 1 ? 3
+               : program->b.workgroup.y != 1 ? 2 : 1,
+         };
+         struct agx3_compute_dispatch_sink sink = {
+            .data = (uint8_t *)control_words,
+            .capacity = sizeof(control_words),
+         };
+         if (!agx3_g17p_native_compute_dispatch_append_with_barrier(
+                &generated.launch, &grid, 0x5, &sink))
+            goto fail;
+         control = (uint8_t *)control_words + sink.length;
+      } else {
+         agx_usc_words_precomp((uint32_t *)(usc_map + usc_offset), &program->b,
+                               stream->va->addr + data_offset,
+                               sizeof(struct libagx_write_u64_args));
+         control = (uint8_t *)agx_cdm_launch(
+            control_words, dev->chip, agx_1d(1), program->b.workgroup,
+            program->b.launch,
+            agx_usc_addr(dev, usc->va->addr + usc_offset));
+         control = d12_queue_emit_cdm_cache_flush(dev, control);
+      }
       if (!control)
          goto fail;
       const uint32_t control_size =
          (uint32_t)(control - (uint8_t *)control_words);
-      if (!d12_queue_signal_slot_layout(slot, control_size, usc_size,
-                                        &control_offset, &data_offset,
-                                        &usc_offset) ||
+      if (!d12_queue_signal_slot_layout_program(
+             slot, control_size, usc_size, usc_stride, usc_arena_size,
+             &control_offset, &data_offset, &usc_offset) ||
           (common_control_size && common_control_size != control_size))
          goto fail;
       common_control_size = control_size;
       memcpy(stream_map + control_offset, control_words, control_size);
    }
 
-   if (!common_control_size)
+   if (!common_control_size ||
+       agx_bo_sync_for_device(usc, 0, usc->size) ||
+       agx_bo_sync_for_device(stream, 0, stream->size))
       goto fail;
    queue->signal_stream_bo = stream;
    queue->signal_usc_bo = usc;
@@ -1331,6 +1527,8 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
    agx_bo_reference(program->bo);
    queue->signal_program_bo = program->bo;
    queue->signal_control_size = common_control_size;
+   queue->signal_program_stride = usc_stride;
+   queue->signal_program_size = usc_size;
    return S_OK;
 
 fail:
@@ -1354,6 +1552,8 @@ d12_queue_signal_arena_cleanup(struct d12_queue *queue)
    queue->signal_program_bo = NULL;
    queue->dependency_scratch_bo = NULL;
    queue->signal_control_size = 0;
+   queue->signal_program_stride = 0;
+   queue->signal_program_size = 0;
    queue->signal_slots = 0;
 }
 
@@ -1401,9 +1601,11 @@ d12_queue_prepare_internal_write(struct d12_queue *queue,
 
    op->signal_slot = (uint32_t)slot;
    op->signal_slot_valid = true;
-   if (!d12_queue_signal_slot_layout(
-          op->signal_slot, queue->signal_control_size, agx_usc_size(15),
-          &control_offset, &data_offset, &usc_offset)) {
+   if (!d12_queue_signal_slot_layout_program(
+          op->signal_slot, queue->signal_control_size,
+          queue->signal_program_size, queue->signal_program_stride,
+          queue->signal_usc_bo->size, &control_offset, &data_offset,
+          &usc_offset)) {
       d12_queue_release_signal_slot(queue, op);
       return false;
    }
@@ -1415,6 +1617,11 @@ d12_queue_prepare_internal_write(struct d12_queue *queue,
    };
    memcpy((uint8_t *)agx_bo_map(queue->signal_stream_bo) + data_offset,
           &shader_args, sizeof(shader_args));
+   if (agx_bo_sync_for_device(queue->signal_stream_bo, data_offset,
+                              sizeof(shader_args))) {
+      d12_queue_release_signal_slot(queue, op);
+      return false;
+   }
 
    op->submit_device = queue->device;
    op->payload_size = 2 * sizeof(struct drm_asahi_cmd_header) +
@@ -2258,6 +2465,12 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          payload_size += sizeof(header);
 
          if (compute) {
+            if (seg->g17p_txf_metadata_only &&
+                !d12_g17p_txf_metadata_enabled(&device->dev)) {
+               mesa_loge("native Texture.Load submission remains registered-shim-only");
+               payload_valid = false;
+               break;
+            }
             struct drm_asahi_cmd_compute cmd = {
                .cdm_ctrl_stream_base =
                   list->stream_bo->va->addr + seg->stream_start,
@@ -2277,7 +2490,10 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
             nr_cdm++;
          } else {
             struct drm_asahi_cmd_render cmd;
-            d12_fill_render_cmd(device, list, seg, &cmd);
+            if (!d12_fill_render_cmd(device, list, seg, &cmd)) {
+               payload_valid = false;
+               break;
+            }
             memcpy(payload + payload_size, &cmd, sizeof(cmd));
             payload_size += sizeof(cmd);
             nr_vdm++;
@@ -2285,7 +2501,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
       }
 
       if (!payload_valid) {
-         mesa_loge("ExecuteCommandLists: invalid GPU write tracker; device "
+         mesa_loge("ExecuteCommandLists: invalid GPU submission metadata or write tracker; device "
                    "removed before submission");
          free(payload);
          d12_device_mark_removed(device, DXGI_ERROR_DEVICE_REMOVED);
@@ -2320,6 +2536,14 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
 
       d12_queue_op_capture_bos(op, list);
       d12_queue_op_build_read_set(op, list);
+      if (op->capture_failed) {
+         /* AddRef below has not occurred; partial snapshots own only their
+          * captured BO/alias references, not a command-list reference. */
+         op->list = NULL;
+         d12_queue_op_destroy(op);
+         d12_device_mark_removed(device, E_OUTOFMEMORY);
+         break;
+      }
 
       /* Reset is legal as soon as ExecuteCommandLists returns.  Mark this
        * recording submitted before handing it back to the application, and

@@ -18,6 +18,7 @@ endif
 libd3d12agx_files = files(
   'd12_agx3_cmdstream_core.h',
   'd12_agx3_index_list_core.c',
+  'd12_agx3_graphics_bind_core.c',
   'd12_agx3_isa_core.c',
   'd12_agx3_ppp_hal300_depth_bias_scissor_core.c',
   'd12_agx3_ppp_hal300_depth_stencil_core.c',
@@ -40,7 +41,11 @@ libd3d12agx_files = files(
   'd12_device_removal_core.c',
   'd12_fence.c',
   'd12_format.c',
+  'd12_g17p_vdm_storage.c',
+  'd12_g17p_txf_prefix_core.c',
+  'd12_native_render_resources_core.c',
   'd12_pipeline.c',
+  'd12_nir_g17p_txf.c',
   'd12_present_blt_math.c',
   'd12_present_format_core.c',
   'd12_query.c',
@@ -138,6 +143,7 @@ libd3d12agx_core = static_library(
   ],
   link_with : [
     libasahi_lib, libasahi_layout, libasahi_compiler, libagx2_disasm,
+    libagx3b_disasm,
     libpoly_nir,
   ],
   c_args : [no_override_init_args, d12_core_strict_args],
@@ -163,6 +169,7 @@ libd3d12agx = shared_library(
   ],
   link_with : [
     libasahi_lib, libasahi_layout, libasahi_compiler, libagx2_disasm,
+    libagx3b_disasm,
     libpoly_nir,
   ],
   vs_module_defs : files('d3d12agx.def')[0],
@@ -275,6 +282,7 @@ if d12_is_windows
       link_whole : [libd3d12agx_core, libd3d12agx_umd_glue],
       link_with : [
         libasahi_lib, libasahi_layout, libasahi_compiler, libagx2_disasm,
+        libagx3b_disasm,
         libpoly_nir,
       ],
       gnu_symbol_visibility : 'hidden',
@@ -325,6 +333,20 @@ d3d12agx_render_ppm = executable(
   link_with : [libd3d12agx],
 )
 
+d3d12agx_g4_baseline_pixels = executable(
+  'd3d12agx_g4_baseline_pixels',
+  files('tests/g4_baseline_pixels.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
+d3d12agx_g4_pso_compile = executable(
+  'd3d12agx_g4_pso_compile',
+  files('tests/g4_pso_compile.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_g4_triangle = executable(
   'd3d12agx_g4_triangle',
   files('tests/g4_triangle.c'),
@@ -370,6 +392,13 @@ d3d12agx_g5_descriptors = executable(
 d3d12agx_g5_texture = executable(
   'd3d12agx_g5_texture',
   files('tests/g5_texture.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
+d3d12agx_g5_texture_compile_only = executable(
+  'd3d12agx_g5_texture_compile_only',
+  files('tests/g5_texture_compile_only.c'),
   dependencies : [dep_dxheaders_d12],
   link_with : [libd3d12agx],
 )
@@ -458,4 +487,36 @@ d3d12agx_dxil_compile = executable(
   link_with : [
     libasahi_compiler, libasahi_lib, libasahi_layout, libagx2_disasm,
   ],
+)
+
+# CPU-only production lowering/ISA checks. Never creates a DRM device or queue.
+d3d12agx_g17p_txf_lower_tests = executable(
+  'd3d12agx_g17p_txf_lower_tests',
+  files('d12_nir_g17p_txf.c', 'tests/d12_nir_g17p_txf_tests.c'),
+  include_directories : [inc_include, inc_src, inc_asahi],
+  dependencies : [idep_nir, idep_mesautil, idep_agx_pack, idep_libagx],
+  link_with : [libasahi_compiler, libasahi_lib, libasahi_layout],
+)
+
+# Original first depth pair with strict full-frame checks. Separate partial
+# physical qualification probe; mandatory full G5 target is unchanged.
+d3d12agx_g5_d32_first_pair = executable(
+  'd3d12agx_g5_d32_first_pair',
+  files('tests/g5_depth.c'),
+  c_args : ['-DD12_D32_FIRST_PAIR_PROBE=1'],
+  include_directories : [inc_include, inc_src, inc_asahi],
+  dependencies : [dep_dxheaders_d12],
+  link_with : libd3d12agx,
+)
+
+# Source-only bounded metadata diagnostics; neither target admits a GPU feature.
+d3d12agx_g17p_txf_prefix_core_tests = executable(
+  'd3d12agx_g17p_txf_prefix_core_tests',
+  files('d12_g17p_txf_prefix_core.c', 'tests/d12_g17p_txf_prefix_core_tests.c'),
+)
+d3d12agx_g5_texture_native_metadata = executable(
+  'd3d12agx_g5_texture_native_metadata',
+  files('tests/g5_texture_native_metadata.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : libd3d12agx,
 )

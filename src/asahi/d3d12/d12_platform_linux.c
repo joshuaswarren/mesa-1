@@ -10,8 +10,33 @@
 #include <stdint.h>
 #include <string.h>
 #include <sys/poll.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <xf86drm.h>
+
+extern bool asahi_noop_is_registered_fd(int fd)
+   __attribute__((weak, visibility("default")));
+extern bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
+   __attribute__((weak, visibility("default")));
+
+/* Physical qualification must not accept noop memfds or arbitrary handles.
+ * Shim fstat and DRM version deliberately emulate a real character node. */
+bool
+d12_platform_is_real_asahi_render_fd(int fd)
+{
+   if ((asahi_noop_is_registered_fd && asahi_noop_is_registered_fd(fd)) ||
+       (asahi_noop_d3d12_graphics_qualification_allowed &&
+        !asahi_noop_is_registered_fd))
+      return false; /* Older loaded shim without identity hook also fails closed. */
+   struct stat st;
+   if (fd < 0 || fstat(fd, &st) || !S_ISCHR(st.st_mode) ||
+       drmGetNodeTypeFromFd(fd) != DRM_NODE_RENDER)
+      return false;
+   drmVersionPtr version = drmGetVersion(fd);
+   bool valid = version && version->name && !strcmp(version->name, "asahi");
+   drmFreeVersion(version);
+   return valid;
+}
 
 static int
 d12_open_asahi_fd(void)

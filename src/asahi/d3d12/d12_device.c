@@ -1738,25 +1738,9 @@ d12_device_CreateRootSignature(ID3D12Device2 *iface, UINT node_mask,
  * which is what a caller placing them consecutively in one heap needs.
  */
 /*
- * ABI NOTE, and this cost a segfault to find. Aggregates larger than a
- * register are returned through an explicit RetVal POINTER here, not by
- * value: the callee writes the struct through arg 1 and returns that same
- * pointer. That is widl's WIDL_EXPLICIT_AGGREGATE_RETURNS convention, which
- * the vkd3d test binary is built with (_agxtest/gen/vkd3d_d3d12.h defines
- * it) and which matches what MSVC does on Windows for a struct this size.
- *
- * The Windows branch of DirectX-Headers declares this explicit return
- * pointer ABI.  Accidentally compiling against its non-Windows branch
- * instead makes the caller read the by-value result as a pointer and
- * dereference it. With SizeInBytes = 0 in x0 that is a null dereference,
- * which is exactly how
- * test_resource_allocation_info crashed -- inside the TEST, one instruction
- * after the call (`ldp x3, x21, [x0]`), which is why it looked like a test
- * bug rather than ours.
- *
- * Only GetResourceAllocationInfo and GetCustomHeapProperties take this
- * form among the methods we implement; GetDesc and the descriptor-handle
- * getters really are by-value, which is why they have always worked.
+ * DirectX-Headers C interfaces use an explicit aggregate return pointer on
+ * Windows and a by-value return on Linux. Keep this method and its internal
+ * caller on the same platform ABI as the vtable, using the existing helpers.
  */
 /*
  * Resolve an abstract heap type into the concrete properties this adapter
@@ -1804,11 +1788,10 @@ d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
    D12_RETURN_AGGREGATE(props);
 }
 
-static D3D12_RESOURCE_ALLOCATION_INFO *STDMETHODCALLTYPE
-d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
-                                     D3D12_RESOURCE_ALLOCATION_INFO *ret,
-                                     UINT visible_mask, UINT count,
-                                     const D3D12_RESOURCE_DESC *descs)
+static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
+d12_device_GetResourceAllocationInfo(
+   ID3D12Device2 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
+   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC *descs)
 {
    struct d12_device *device = d12_device_from_iface(iface);
    D3D12_RESOURCE_ALLOCATION_INFO info = {0, 0};
@@ -1823,17 +1806,13 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
    if (!count) {
       info.SizeInBytes = 0;
       info.Alignment = 1;
-      if (ret)
-         *ret = info;
-      return ret;
+      D12_RETURN_AGGREGATE(info);
    }
 
    if (!descs) {
       info.SizeInBytes = UINT64_MAX;
       info.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-      if (ret)
-         *ret = info;
-      return ret;
+      D12_RETURN_AGGREGATE(info);
    }
 
    uint64_t total = 0;
@@ -1887,9 +1866,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
       if (d->Alignment != 0 && d->Alignment != align && !want_small) {
          info.SizeInBytes = UINT64_MAX;
          info.Alignment = align;
-         if (ret)
-            *ret = info;
-         return ret;
+         D12_RETURN_AGGREGATE(info);
       }
 
       if (d->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
@@ -1911,9 +1888,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
              * ALIGNMENT` even on the UINT64_MAX path. */
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            if (ret)
-               *ret = info;
-            return ret;
+            D12_RETURN_AGGREGATE(info);
          }
 
          /* Block-aware size of ONE SLICE OF LEVEL 0; the small-placement
@@ -1946,9 +1921,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
          } else {
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            if (ret)
-               *ret = info;
-            return ret;
+            D12_RETURN_AGGREGATE(info);
          }
       }
 
@@ -1958,9 +1931,7 @@ d12_device_GetResourceAllocationInfo(ID3D12Device2 *iface,
 
    info.SizeInBytes = align64(total, max_align);
    info.Alignment = max_align;
-   if (ret)
-         *ret = info;
-      return ret;
+   D12_RETURN_AGGREGATE(info);
 }
 
 void
@@ -1977,8 +1948,13 @@ d12_device_get_resource_allocation_info_runtime(
    };
    if (!device || !desc)
       return;
+#ifdef _WIN32
    (void)d12_device_GetResourceAllocationInfo(
       (ID3D12Device2 *)&device->iface, info, visible_mask, 1, desc);
+#else
+   *info = d12_device_GetResourceAllocationInfo(
+      (ID3D12Device2 *)&device->iface, visible_mask, 1, desc);
+#endif
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -4950,9 +4926,13 @@ d12_device_backend_init(struct d12_device *device,
       goto fail_bg;
 
    /* Sampler 0, tessellation descriptor, then the zero-backed NULL region. */
+   const unsigned sampler_size =
+      agx_chip_sampler_heap_element_size(device->dev.chip);
+   if (!sampler_size)
+      goto fail_oclqry;
    device->rodata_bo =
       agx_bo_create(&device->dev,
-                    ALIGN_POT(AGX_SAMPLER_LENGTH, 16) +
+                    ALIGN_POT(sampler_size, 16) +
                        sizeof(struct poly_heap) + D12_NULL_REGION_SIZE,
                     0, 0, "d3d12 rodata");
    if (!device->rodata_bo)
@@ -4965,11 +4945,27 @@ d12_device_backend_init(struct d12_device *device,
    if (!rodata)
       goto fail_rodata;
 
-   agx_pack_txf_sampler((struct agx_sampler_packed *)rodata);
-   agx_pack(&device->dev.txf_sampler, USC_SAMPLER, cfg) {
-      cfg.start = 0;
-      cfg.count = 1;
-      cfg.buffer = device->rodata_bo->va->addr;
+   memset(rodata, 0, sampler_size);
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      if (sampler_size != 32 || agx_chip_sampler_generation(device->dev.chip) !=
+                               AGX_SAMPLER_GENERATION_GEN4_HAL200)
+         goto fail_rodata;
+      agx_pack(rodata, SAMPLER_HAL200, cfg) {
+         cfg.minimum_lod = 0.0f;
+         cfg.maximum_lod = INFINITY;
+         cfg.maximum_anisotropy = 1;
+         cfg.mip_filter = AGX_MIP_FILTER_NEAREST;
+         cfg.wrap_s = cfg.wrap_t = cfg.wrap_r = AGX_WRAP_CLAMP_TO_BORDER;
+         cfg.border_colour = AGX_BORDER_COLOUR_TRANSPARENT_BLACK;
+      }
+      memset(&device->dev.txf_sampler, 0, sizeof(device->dev.txf_sampler));
+   } else {
+      agx_pack_txf_sampler((struct agx_sampler_packed *)rodata);
+      agx_pack(&device->dev.txf_sampler, USC_SAMPLER, cfg) {
+         cfg.start = 0;
+         cfg.count = 1;
+         cfg.buffer = device->rodata_bo->va->addr;
+      }
    }
 
    /* Match Honeykrisp's 128 MiB geometry/tessellation heap. */
@@ -4978,7 +4974,7 @@ d12_device_backend_init(struct d12_device *device,
    if (!device->heap_bo)
       goto fail_rodata;
 
-   const size_t heap_off = ALIGN_POT(AGX_SAMPLER_LENGTH, 16);
+   const size_t heap_off = ALIGN_POT(sampler_size, 16);
    const size_t null_off = heap_off + sizeof(struct poly_heap);
    device->heap_desc_va = device->rodata_bo->va->addr + heap_off;
    device->null_va = device->rodata_bo->va->addr + null_off;

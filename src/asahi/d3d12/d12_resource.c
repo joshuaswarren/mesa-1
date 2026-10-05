@@ -2,14 +2,15 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * ID3D12Resource for committed buffers: one agx_bo with a writeback (cached,
- * coherent on Apple UMA) CPU mapping. Textures are a later milestone (G3).
+ * ID3D12Resource storage and CPU access. G17P UMA is cached and requires
+ * explicit buffer and opaque texture cache maintenance.
  */
 
 #include "d12_private.h"
 #include "d12_core_caps.h"
 #include "d12_sparse_residency_core.h"
 #include "util/os_misc.h"
+#include "util/cache_ops.h"
 
 static_assert(AIL_PAGESIZE == D12_AGX_SPARSE_PAGE_SIZE_B,
               "portable sparse page size must match AIL");
@@ -409,6 +410,51 @@ d12_resource_GetDevice(ID3D12Resource *iface, REFIID riid, void **out)
    return ID3D12Device_QueryInterface(&res->device->iface, riid, out);
 }
 
+/* G17P CPU-visible buffers are cached but CacheCoherentUMA is false. Keep
+ * cache operations within the resource's BO window, including placed offsets.
+ * Callers still synchronize GPU access with a fence before a reading Map. */
+static bool
+d12_resource_buffer_cache_range(const struct d12_resource *res,
+                                const D3D12_RANGE *range,
+                                size_t *begin, size_t *size)
+{
+   uint64_t width = res->desc.Width;
+   if (!res->bo || width > SIZE_MAX || res->offset_B > res->bo->size ||
+       width > res->bo->size - res->offset_B)
+      return false;
+
+   uint64_t first = range ? range->Begin : 0;
+   uint64_t last = range ? range->End : width;
+   if (first > width || last > width)
+      return false;
+   *begin = first;
+   *size = first < last ? last - first : 0;
+   if (*size) {
+      /* The platform helper rounds to cache lines. Its maximum granule
+       * must remain inside the owned BO, even for an unaligned range. */
+      size_t granule = util_cache_granularity();
+      if (!granule || (granule & (granule - 1)))
+         return false;
+      uint64_t final_line = (res->offset_B + last - 1) &
+                            ~((uint64_t)granule - 1);
+      if (final_line > res->bo->size ||
+          granule > res->bo->size - final_line)
+         return false;
+   }
+   return true;
+}
+
+static bool
+d12_resource_needs_buffer_cache_ops(const struct d12_resource *res)
+{
+#ifndef _WIN32
+   return res->device->dev.chip == AGX_CHIP_G17P &&
+          res->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER;
+#else
+   return false;
+#endif
+}
+
 static HRESULT STDMETHODCALLTYPE
 d12_resource_Map(ID3D12Resource *iface, UINT subresource,
                  const D3D12_RANGE *read_range, void **data)
@@ -435,7 +481,8 @@ d12_resource_Map(ID3D12Resource *iface, UINT subresource,
         res->desc.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN))
       return E_INVALIDARG;
 
-   /* Persistent coherent mapping; ranges are an optimization hint only.
+   /* Persistent mapping; a noncoherent G17P buffer reads through explicit
+    * cache maintenance of the caller's read range.
     * offset_B is nonzero for a PLACED resource, which is a window into a
     * heap -- mapping the BO base would hand back the start of the heap.
     *
@@ -448,6 +495,17 @@ d12_resource_Map(ID3D12Resource *iface, UINT subresource,
    if (!mapping)
       return E_OUTOFMEMORY;
 
+   if (d12_resource_needs_buffer_cache_ops(res)) {
+      size_t begin, size;
+      if (!util_has_cache_ops())
+         return E_FAIL;
+      if (!d12_resource_buffer_cache_range(res, read_range, &begin, &size))
+         return E_INVALIDARG;
+      if (size)
+         util_flush_inval_range((uint8_t *)mapping + res->offset_B + begin,
+                               size);
+   }
+
    if (data)
       *data = (uint8_t *)mapping + res->offset_B;
    return S_OK;
@@ -457,7 +515,20 @@ static void STDMETHODCALLTYPE
 d12_resource_Unmap(ID3D12Resource *iface, UINT subresource,
                    const D3D12_RANGE *written_range)
 {
-   /* Coherent UMA: nothing to flush. */
+   struct d12_resource *res = d12_resource_from_iface(iface);
+   if (subresource || res->reserved ||
+       res->heap_props.Type == D3D12_HEAP_TYPE_DEFAULT ||
+       res->heap_props.CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ||
+       !d12_resource_needs_buffer_cache_ops(res) || !util_has_cache_ops())
+      return;
+
+   size_t begin, size;
+   if (!d12_resource_buffer_cache_range(res, written_range, &begin, &size) ||
+       !size)
+      return;
+   void *mapping = agx_bo_map(res->bo);
+   if (mapping)
+      util_flush_range((uint8_t *)mapping + res->offset_B + begin, size);
 }
 
 static D12_AGGREGATE_RETURN(D3D12_RESOURCE_DESC) STDMETHODCALLTYPE
@@ -489,6 +560,7 @@ struct d12_cpu_subresource {
    uint32_t blocksize_B;
    uint32_t texture_pitch_B;
    bool empty;
+   bool tiled;
 };
 
 static HRESULT
@@ -540,7 +612,19 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
        (b->bottom % block_height && b->bottom != height))
       return E_INVALIDARG;
 
-   if (res->layout.tiling != AIL_TILING_LINEAR)
+   const bool tiled = res->layout.tiling != AIL_TILING_LINEAR;
+   if (tiled &&
+       (res->device->dev.chip != AGX_CHIP_G17P ||
+        (res->layout.tiling != AIL_TILING_GPU && res->layout.tiling != AIL_TILING_TWIDDLED) ||
+        res->heap_props.CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_WRITE_BACK ||
+        res->heap_props.MemoryPoolPreference != D3D12_MEMORY_POOL_L0 ||
+        res->desc.Layout != D3D12_TEXTURE_LAYOUT_UNKNOWN || res->reserved ||
+        res->layout.levels != 1 || res->desc.DepthOrArraySize != 1 ||
+        res->layout.sample_count_sa != 1 || res->layout.compressed ||
+        !util_has_cache_ops() ||
+        (format != PIPE_FORMAT_R8G8B8A8_UNORM && format != PIPE_FORMAT_B8G8R8A8_UNORM) ||
+        res->offset_B > res->bo->size ||
+        res->layout.size_B > res->bo->size - res->offset_B))
       return E_INVALIDARG;
 
    void *mapping = agx_bo_map(res->bo);
@@ -556,8 +640,12 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
       .width_el = right_el - b->left / block_width,
       .height_el = bottom_el - b->top / block_height,
       .blocksize_B = blocksize,
-      .texture_pitch_B = ail_get_linear_stride_B(&res->layout, 0),
+      .texture_pitch_B = tiled ? 0 : ail_get_linear_stride_B(&res->layout, 0),
+      .tiled = tiled,
    };
+
+   if (tiled)
+      return S_OK;
 
    const uint64_t last =
       (uint64_t)(out->y_el + out->height_el - 1) * out->texture_pitch_B +
@@ -588,8 +676,22 @@ d12_resource_WriteToSubresource(ID3D12Resource *iface, UINT dst_subresource,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (src_row_pitch < row_bytes)
+   if (src_row_pitch < row_bytes ||
+       (surface.tiled && src_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
+
+   if (surface.tiled) {
+      /* UNKNOWN-layout UMA textures expose no CPU pointer. AIL owns the
+       * resource's actual tiled layout; only caller-provided bytes are stored. */
+      ail_tile(surface.map, (void *)src, &res->layout, 0, src_row_pitch,
+               surface.x_el, surface.y_el, surface.width_el, surface.height_el);
+      /* Non-coherent UMA is intentionally advertised. Publish dirty CPU
+       * cache lines before the resource can return to GPU ownership. */
+      util_flush_range(surface.map, res->layout.size_B);
+      if (agx_bo_sync_for_device(res->bo, res->offset_B, res->layout.size_B))
+         return E_FAIL;
+      return S_OK;
+   }
 
    uint8_t *dst = surface.map +
                   (uint64_t)surface.y_el * surface.texture_pitch_B +
@@ -620,8 +722,20 @@ d12_resource_ReadFromSubresource(ID3D12Resource *iface, void *dst,
 
    const uint64_t row_bytes =
       (uint64_t)surface.width_el * surface.blocksize_B;
-   if (dst_row_pitch < row_bytes)
+   if (dst_row_pitch < row_bytes ||
+       (surface.tiled && dst_row_pitch % surface.blocksize_B))
       return E_INVALIDARG;
+
+   if (surface.tiled) {
+      /* Copy the real EOT-written resource bytes after the caller's fence and
+       * COMMON transition; this does not invoke a shader or synthesize pixels. */
+      /* The caller synchronized GPU completion before this CPU access.
+       * Drop clean/stale CPU lines before reading actual EOT writes. */
+      util_flush_inval_range(surface.map, res->layout.size_B);
+      ail_detile(surface.map, dst, &res->layout, 0, dst_row_pitch,
+                 surface.x_el, surface.y_el, surface.width_el, surface.height_el);
+      return S_OK;
+   }
 
    const uint8_t *src = surface.map +
                         (uint64_t)surface.y_el * surface.texture_pitch_B +

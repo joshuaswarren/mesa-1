@@ -230,6 +230,34 @@ bool agx_vdm_state_update_draw_pack(
    enum agx_chip chip, const struct agx_vdm_state_update_draw_info *info,
    struct agx_vdm_state_update *out);
 
+/* Final compiler UVS and CProg resources shared by native API frontends.
+ * This describes shader state only; callers still own context and draw gates. */
+struct agx_g17p_vertex_compile_info {
+   bool hardware_vertex;
+   bool has_preamble;
+   /* The caller compiled the preamble as a native constant program (inputs
+    * imported through its TPS frame). Without it a preamble is refused. */
+   bool constant_program_allowed;
+   /* The constant program's texture staging footprint, published as its
+    * thread-invariant largest-IPR bytes (as for the fragment CProg). */
+   bool preamble_staging_known;
+   uint16_t preamble_staging_halfs;
+   uint16_t nr_preamble_gprs;
+   uint32_t preamble_scratch_size;
+   uint64_t uvs_written;
+   uint8_t position_off;
+   uint8_t varyings_off;
+   uint8_t psiz_off;
+   uint8_t layer_viewport_off;
+   uint8_t clip_off;
+   uint8_t uvs_size;
+   uint8_t user_size;
+};
+
+bool agx_g17p_vertex_program_info(
+   enum agx_chip chip, const struct agx_g17p_vertex_compile_info *compiler_info,
+   struct agx_vdm_state_update_program_info *program);
+
 #ifdef __cplusplus
 }
 #endif
