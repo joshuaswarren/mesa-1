@@ -88,6 +88,10 @@ run(D3D12_COMMAND_LIST_TYPE type)
           &IID_ID3D12CommandAllocator, (void **)&allocator));
    CALL(ID3D12Device_CreateCommandList(device, 0, type, allocator, NULL,
           &IID_ID3D12GraphicsCommandList, (void **)&list));
+   /* A list retains allocator storage internally, without adding a public
+    * COM reference. Keep the API count separate from pool ownership. */
+   REQUIRE(ID3D12CommandAllocator_AddRef(allocator) == 2);
+   REQUIRE(ID3D12CommandAllocator_Release(allocator) == 1);
    CALL(ID3D12Device_CreateFence(device, 0, D3D12_FENCE_FLAG_NONE,
           &IID_ID3D12Fence, (void **)&fence));
 

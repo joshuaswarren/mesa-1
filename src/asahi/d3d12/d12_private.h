@@ -1559,6 +1559,7 @@ d12_pipeline_state_from_iface(ID3D12PipelineState *iface)
 struct d12_cmd_allocator {
    ID3D12CommandAllocator iface; /* must be first */
    uint32_t refcount;
+   uint32_t lifetime_refcount; /* command lists do not change COM refs */
    struct d12_private_data_store private_data;
 
    struct d12_device *device; /* holds a device ref */

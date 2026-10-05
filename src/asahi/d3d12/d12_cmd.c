@@ -335,13 +335,10 @@ d12_alloc_pool_take(struct util_dynarray *pool, size_t size)
    return NULL;
 }
 
-static ULONG STDMETHODCALLTYPE
-d12_alloc_Release(ID3D12CommandAllocator *iface)
+static void
+d12_alloc_internal_unref(struct d12_cmd_allocator *alloc)
 {
-   struct d12_cmd_allocator *alloc = d12_cmd_allocator_from_iface(iface);
-   uint32_t refs = p_atomic_dec_return(&alloc->refcount);
-
-   if (refs == 0) {
+   if (p_atomic_dec_return(&alloc->lifetime_refcount) == 0) {
       d12_alloc_pool_drain(alloc, &alloc->parked_stream_bos, 0);
       d12_alloc_pool_drain(alloc, &alloc->parked_usc_bos, 0);
       d12_alloc_pool_drain(alloc, &alloc->free_stream_bos, 0);
@@ -355,6 +352,15 @@ d12_alloc_Release(ID3D12CommandAllocator *iface)
       free(alloc);
    }
 
+}
+
+static ULONG STDMETHODCALLTYPE
+d12_alloc_Release(ID3D12CommandAllocator *iface)
+{
+   struct d12_cmd_allocator *alloc = d12_cmd_allocator_from_iface(iface);
+   uint32_t refs = p_atomic_dec_return(&alloc->refcount);
+   if (!refs)
+      d12_alloc_internal_unref(alloc);
    return refs;
 }
 
@@ -433,6 +439,7 @@ d12_cmd_allocator_create(struct d12_device *device,
 
    alloc->iface.lpVtbl = (ID3D12CommandAllocatorVtbl *)&d12_alloc_vtbl;
    alloc->refcount = 1;
+   alloc->lifetime_refcount = 1;
    alloc->device = device;
    alloc->type = type;
    d12_private_data_store_init(&alloc->private_data, (IUnknown *)&alloc->iface);
@@ -12467,7 +12474,7 @@ d12_list_Release(ID3D12GraphicsCommandList6 *iface)
       util_dynarray_fini(&list->indirect_argument_fixups);
       util_dynarray_fini(&list->bundle_cmds);
       if (list->allocator)
-         d12_alloc_Release(&list->allocator->iface);
+         d12_alloc_internal_unref(list->allocator);
       d12_device_release(list->device);
       free(list);
    }
@@ -12727,9 +12734,9 @@ d12_list_Reset(ID3D12GraphicsCommandList6 *iface,
     * later Reset, which may come after the application dropped its own. */
    if (list->state != D12_LIST_RECORDING) {
       if (new_allocator != list->allocator) {
-         d12_alloc_AddRef(&new_allocator->iface);
+         p_atomic_inc(&new_allocator->lifetime_refcount);
          if (list->allocator)
-            d12_alloc_Release(&list->allocator->iface);
+            d12_alloc_internal_unref(list->allocator);
       }
       list->allocator = new_allocator;
       list->allocator->recording_lists++;
@@ -16057,7 +16064,7 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
    list->type = type;
    list->allocator = allocator;
    if (allocator)
-      d12_alloc_AddRef(&allocator->iface);
+      p_atomic_inc(&allocator->lifetime_refcount);
    list->pso = initial_state;
    d12_private_data_store_init(&list->private_data, (IUnknown *)&list->iface);
    util_dynarray_init(&list->g17p_vdm_storage, NULL);
