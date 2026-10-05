@@ -1793,6 +1793,9 @@ struct d12_segment {
    struct agx_counts_packed bg_counts, eot_counts;
    struct agx_counts_packed partial_bg_counts, partial_eot_counts;
    bool has_draws;
+   /* A draw in this render ran a shader that writes memory (UAVs), so a
+    * later barrier with a memory scope may depend on it. */
+   bool draws_write_memory;
    /* The end-of-tile op chosen per colour attachment (enum agx_bg_eot_op),
     * kept so a later full clear or discard of the attachment can retire a
     * store nothing will read (d12_list_retire_attachment_store). */

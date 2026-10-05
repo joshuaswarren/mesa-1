@@ -10335,6 +10335,9 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
    }
 
    struct d12_segment *seg = &list->segments[list->segment_count - 1];
+   seg->draws_write_memory |= pso->vs.g17p_writes_memory ||
+                              pso->fs.g17p_writes_memory || pso->has_gs ||
+                              pso->has_tess || pso->has_mesh;
 
    /* Scissor and depth-bias bases are per render command. End the current
     * pass before either 16-bit hardware array can run out of reserved
@@ -15277,12 +15280,25 @@ d12_list_ResourceBarrier(ID3D12GraphicsCommandList6 *iface, UINT num_barriers,
    if (num_barriers && !d12_list_flush_cdm_pending(list))
       return;
 
+   /* Inside a render, a UAV or aliasing barrier, or a transition out of
+    * UNORDERED_ACCESS, is a dependency with a memory scope: a later draw
+    * reads what an earlier one wrote. AGX only makes such writes visible
+    * across renders, so when a draw of this render writes memory the
+    * render ends here and the next draw continues in a new one, which is
+    * what Honeykrisp does for a pipeline barrier inside a render pass. A
+    * render whose draws write nothing has nothing to publish. Pending
+    * compute caches were flushed above; compute dispatches execute in
+    * stream order and stay in the same segment, since legal
+    * placed-resource loops can contain thousands of aliasing barriers. */
+   bool memory_scope = false;
    for (UINT i = 0; i < num_barriers; i++) {
       switch (barriers[i].Type) {
       case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION:
          /* BEGIN_ONLY may defer the synchronization until END_ONLY. A full
           * barrier at both ends is conservative and preserves that promise.
           */
+         memory_scope |= (barriers[i].Transition.StateBefore &
+                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS) != 0;
          break;
       case D3D12_RESOURCE_BARRIER_TYPE_UAV:
       case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
@@ -15291,6 +15307,7 @@ d12_list_ResourceBarrier(ID3D12GraphicsCommandList6 *iface, UINT num_barriers,
             list->state = D12_LIST_ERROR;
             return;
          }
+         memory_scope = true;
          break;
       default:
          list->record_error = E_INVALIDARG;
@@ -15299,21 +15316,8 @@ d12_list_ResourceBarrier(ID3D12GraphicsCommandList6 *iface, UINT num_barriers,
       }
    }
 
-   /* Like Honeykrisp's memory barriers, materialize tilebuffer writes before
-    * later texture reads or accesses through a different placed-resource
-    * alias. Pending compute caches were flushed above, but an open render pass
-    * can still hold the preceding writes. Ending the segment stores them;
-    * queue submission orders the next segment after it. Render continuation
-    * reloads the attachments through the existing load-preserving path.
-    * No metadata activation is necessary: these layouts are uncompressed
-    * AIL surfaces and aliases name the same coherent BO storage. NULL/NULL
-    * aliasing and UAV barriers apply globally, so use the same render
-    * boundary. Compute dispatches are flushed above and execute
-    * in stream order; keep them in the same segment. Legal placed-resource
-    * loops can contain thousands of aliasing barriers, so splitting those
-    * dispatches would incorrectly exhaust the command-list segment limit.
-    */
-   if (num_barriers && list->render_open)
+   if (memory_scope && list->render_open &&
+       list->segments[list->segment_count - 1].draws_write_memory)
       d12_list_close_cdm(list);
 }
 
