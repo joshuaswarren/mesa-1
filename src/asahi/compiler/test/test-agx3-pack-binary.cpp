@@ -9468,6 +9468,82 @@ TEST_F(AGX3PackBinary, G17PColourPackingKeepsNativeUniformSources)
       AGX_OPCODE_IADD, 0, 16, AGX_SIZE_32));
 }
 
+/* An 8-bit sRGB attachment is U8NORM storage whose colour lanes the pack and
+ * unpack convert: agx_compile.c marks the encoded lanes in the instruction's
+ * mask, and the packer selects Apple's modes from it (s_rgba / s_r8 /
+ * s_pblend witnesses in test-agx3-g17p-producers.c): both lanes encoded, lane
+ * 0 encoded over a linear alpha lane, or a single encoded lane. */
+TEST_F(AGX3PackBinary, G17PSrgbLanesSelectNativeConversionModes)
+{
+   static const struct {
+      unsigned mask;
+      bool two;
+      uint8_t srgb;
+   } cases[] = {
+      {0, true, AGX3_FLTNORM_SRGB_NONE},
+      {3, true, AGX3_FLTNORM_SRGB_BOTH},
+      {1, true, AGX3_FLTNORM_SRGB_LANE0},
+      {1, false, AGX3_FLTNORM_SRGB_BOTH},
+   };
+   const uint8_t stop[] = {14, 0, 0, 0};
+   for (const auto &c : cases) {
+      SCOPED_TRACE(c.mask * 2 + c.two);
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_instr *I = agx_fltnorm_agx3_to(b, agx_register(0, AGX_SIZE_16),
+         agx_uniform(16, AGX_SIZE_32),
+         c.two ? agx_uniform(18, AGX_SIZE_32) : agx_null(),
+         AGX_FORMAT_U8NORM);
+      I->mask = c.mask;
+      agx_stop(b);
+      struct agx3_fltnorm_desc d = {};
+      d.two_lanes = c.two;
+      d.srgb = c.srgb;
+      d.src[0].kind = AGX3_FLTNORM_SRC_UNIFORM;
+      d.src[0].value = 16;
+      if (c.two) {
+         d.src[1].kind = AGX3_FLTNORM_SRC_UNIFORM;
+         d.src[1].value = 18;
+      }
+      uint8_t encoded[AGX3_FLTNORM_MAX_LENGTH], len = 0;
+      ASSERT_TRUE(agx3_fltnorm_encode(AGX_ISA_ENCODING_AGX3B, &d, encoded,
+                                      &len));
+      std::vector<uint8_t> expected(encoded, encoded + len);
+      append(expected, stop, sizeof(stop));
+      EXPECT_EQ(pack(b), expected);
+
+      agx_builder *u = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_index pair = agx_register(4, AGX_SIZE_32);
+      pair.channels_m1 = c.two ? 1 : 0;
+      agx_normflt_agx3_to(u, pair, agx_register(0, AGX_SIZE_16),
+                          AGX_FORMAT_U8NORM)->mask = c.mask;
+      agx_stop(u);
+      struct agx3_normflt_desc nd = {};
+      nd.dest = 4;
+      nd.dest_hint = true;
+      nd.src = 0;
+      nd.two_lanes = c.two;
+      nd.srgb = c.srgb;
+      ASSERT_TRUE(agx3_normflt_encode(AGX_ISA_ENCODING_AGX3B, &nd, encoded,
+                                      &len));
+      std::vector<uint8_t> nexpected(encoded, encoded + len);
+      append(nexpected, stop, sizeof(stop));
+      EXPECT_EQ(pack(u), nexpected);
+   }
+
+   /* No mode encodes a linear lane 0 under an encoded lane 1, and the sRGB
+    * modes exist only for unsigned 8-bit lanes. */
+   for (unsigned refused = 0; refused < 2; ++refused) {
+      SCOPED_TRACE(refused);
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      agx_fltnorm_agx3_to(b, agx_register(0, AGX_SIZE_16),
+         agx_uniform(16, AGX_SIZE_32), agx_uniform(18, AGX_SIZE_32),
+         refused ? AGX_FORMAT_S8NORM : AGX_FORMAT_U8NORM)->mask =
+         refused ? 3 : 2;
+      agx_stop(b);
+      pack(b, false);
+   }
+}
+
 TEST_F(AGX3PackBinary, G17PTexelFetchLODMaterializesUniform)
 {
    EXPECT_FALSE(agx_instr_accepts_uniform(AGX_ISA_ENCODING_AGX3B,

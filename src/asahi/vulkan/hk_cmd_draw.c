@@ -6896,11 +6896,11 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
       uint32_t link = 0;
       memcpy(&link, &key->epilog.link, sizeof(link));
       mesa_loge("fragment epilog compilation failed: link=%#010x samples=%u "
-                "shaded=%u stop=%u small=%u preserve-zero=%u srgb=%u "
+                "shaded=%u stop=%u small=%u preserve-zero=%u g17p-tile=%u "
                 "formats=%x/%x/%x/%x remap=%d/%d/%d/%d",
                 link, key->epilog.nr_samples, key->nr_samples_shaded,
                 epilog_stop, key->epilog.force_small_tile,
-                key->epilog.preserve_zero_mask, key->epilog.lower_srgb,
+                key->epilog.preserve_zero_mask, key->epilog.g17p_tile_formats,
                 key->epilog.rt_formats[0], key->epilog.rt_formats[1],
                 key->epilog.rt_formats[2], key->epilog.rt_formats[3],
                 key->epilog.remap[0], key->epilog.remap[1],

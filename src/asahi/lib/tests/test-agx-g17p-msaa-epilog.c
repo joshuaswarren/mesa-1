@@ -462,7 +462,7 @@ check_alpha_one_after_preprocess(unsigned samples)
       .rt_formats = {PIPE_FORMAT_R8G8B8A8_UNORM},
       .blend.alpha_to_one = true,
       .preserve_zero_mask = true,
-      .lower_srgb = true,
+      .g17p_tile_formats = true,
    };
    memset(key.remap, -1, sizeof(key.remap));
    key.remap[0] = 0;

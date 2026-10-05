@@ -30,34 +30,6 @@ struct ctx {
    bool lower_g17p_formats;
 };
 
-static nir_def *
-convert_srgb(nir_builder *b, nir_def *value, unsigned comps, bool encode)
-{
-   nir_def *channels[4];
-   const unsigned bit_size = value->bit_size;
-   const unsigned color_comps = MIN2(comps, 3);
-   nir_def *rgb = nir_trim_vector(b, value, color_comps);
-   if (bit_size != 32)
-      rgb = nir_f2f32(b, rgb);
-
-   rgb = encode ? nir_format_linear_to_srgb(b, rgb)
-                : nir_format_srgb_to_linear(b, rgb);
-
-   if (!encode && bit_size != 32)
-      rgb = nir_f2f16(b, rgb);
-
-   for (unsigned i = 0; i < comps; ++i) {
-      if (i < color_comps) {
-         channels[i] = nir_channel(b, rgb, i);
-      } else {
-         nir_def *alpha = nir_channel(b, value, i);
-         channels[i] = encode && bit_size != 32 ? nir_f2f32(b, alpha) : alpha;
-      }
-   }
-
-   return nir_vec(b, channels, comps);
-}
-
 static void
 store_tilebuffer(nir_builder *b, struct agx_tilebuffer_layout *tib,
                  enum pipe_format format, enum pipe_format logical_format,
@@ -308,12 +280,17 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    const bool lower_r11g11b10 =
       ctx->lower_g17p_formats &&
       logical_format == PIPE_FORMAT_R11G11B10_FLOAT;
-   const bool lower_srgb =
+   /* G17P stores an 8-bit sRGB target as U8NORM bytes. The colour stores and
+    * reads below keep the sRGB format: the backend encodes and decodes with
+    * the native fltnorm/normflt sRGB modes, as Apple's G17P code does. Only
+    * the destination-preserving copy, which must not convert at all, moves
+    * the raw bytes as U8NORM. */
+   const bool raw_srgb =
       ctx->lower_g17p_formats && util_format_is_srgb(logical_format);
    const enum pipe_format lowered_format =
       lower_r11g11b10
          ? PIPE_FORMAT_R32_UINT
-         : lower_srgb ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM : format;
+         : raw_srgb ? (enum pipe_format)AIL_ISA_FORMAT_U8NORM : format;
 
    if (intr->intrinsic == nir_intrinsic_store_output) {
       ctx->outputs_written |= BITFIELD_BIT(rt);
@@ -360,7 +337,7 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          if (ctx->preserve_zero_mask && !tib->spilled[rt]) {
             nir_def *value = load_tilebuffer(
                b, tib, lower_r11g11b10 ? 1 : comps,
-               (lower_r11g11b10 || lower_srgb)
+               (lower_r11g11b10 || raw_srgb)
                   ? 32
                   : intr->src[0].ssa->bit_size,
                rt, lowered_format,
@@ -386,9 +363,6 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
             value = nir_format_pack_rgba(b, logical_format, value);
             format = lowered_format;
             write_mask = 1;
-         } else if (lower_srgb) {
-            value = convert_srgb(b, value, comps, true);
-            format = lowered_format;
          }
 
          store_tilebuffer(b, tib, format, logical_format, rt, value,
@@ -411,17 +385,13 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       } else {
          def = load_tilebuffer(
             b, tib, lower_r11g11b10 ? 1 : intr->num_components,
-            (lower_r11g11b10 || lower_srgb) ? 32 : bit_size, rt,
-            lowered_format, logical_format);
+            lower_r11g11b10 ? 32 : bit_size, rt,
+            lower_r11g11b10 ? lowered_format : format, logical_format);
 
          if (lower_r11g11b10) {
             def = nir_trim_vector(
                b, nir_format_unpack_rgba(b, def, logical_format),
                intr->num_components);
-            if (bit_size != 32)
-               def = nir_f2f16(b, def);
-         } else if (lower_srgb) {
-            def = convert_srgb(b, def, intr->num_components, false);
             if (bit_size != 32)
                def = nir_f2f16(b, def);
          }

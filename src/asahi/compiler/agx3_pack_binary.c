@@ -2892,6 +2892,28 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
  */
 
 /*
+ * The sRGB transfer mode of one `fltnorm`/`normflt` pack. agx_compile.c marks
+ * the encoded lanes of an 8-bit sRGB attachment in the instruction's mask (bit
+ * n = lane n); the alpha lane of RGBA8Unorm_sRGB stays linear. Apple's modes
+ * (agx3_fltnorm_core.h): every lane encoded, or lane 0 encoded with a linear
+ * lane 1. A linear lane 0 under an encoded lane 1 has no mode; refuse it.
+ */
+static bool
+agx3_norm_srgb_mode(const agx_instr *I, bool two_lanes, uint8_t *srgb)
+{
+   const unsigned lanes = I->mask & (two_lanes ? 3 : 1);
+   if (I->mask & ~lanes)
+      return false;
+   if (lanes && I->format != AGX_FORMAT_U8NORM)
+      return false;
+   *srgb = !lanes                       ? AGX3_FLTNORM_SRGB_NONE
+           : lanes == 1 && two_lanes    ? AGX3_FLTNORM_SRGB_LANE0
+           : (lanes & 1)                ? AGX3_FLTNORM_SRGB_BOTH
+                                        : 0xff;
+   return *srgb != 0xff;
+}
+
+/*
  * `fltnorm`: pack two 32-bit floats, clamped and scaled, into the two halves
  * of one 16-bit register. agx_pack_normalized_agx3() in agx_compile.c creates
  * these immediately before an 8-bit normalized tile store, one per channel
@@ -2936,6 +2958,8 @@ agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
       .wait_mask = wait_mask,
       .first_instruction = first_instruction,
    };
+   if (!agx3_norm_srgb_mode(I, two_lanes, &d.srgb))
+      return false;
 
    for (unsigned i = 0; i < 2; ++i) {
       if (i == 1 && !d.two_lanes)
@@ -3070,7 +3094,7 @@ agx3_emit_normflt(struct util_dynarray *emission, enum agx_isa_encoding enc,
        agx_channels(src) != (norm16 && two_lanes ? 2 : 1))
       return false;
 
-   const struct agx3_normflt_desc d = {
+   struct agx3_normflt_desc d = {
       .dest = dest.value,
       .dest_hint = true,
       .src = src.value,
@@ -3080,6 +3104,8 @@ agx3_emit_normflt(struct util_dynarray *emission, enum agx_isa_encoding enc,
       .is_16bit = norm16,
       .wait_mask = wait_mask,
    };
+   if (!agx3_norm_srgb_mode(I, two_lanes, &d.srgb))
+      return false;
 
    uint8_t bytes[AGX3_FLTNORM_MAX_LENGTH];
    uint8_t len = 0;

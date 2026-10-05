@@ -330,7 +330,9 @@ struct agx_fs_epilog_key {
    uint16_t max_samples_per_tile;
    bool force_small_tile;
    bool preserve_zero_mask;
-   bool lower_srgb;
+   /* G17P tile storage: sRGB as U8NORM bytes converted by the native packs,
+    * R11G11B10/RGB9E5 as one raw 32-bit word. */
+   bool g17p_tile_formats;
    bool native_spills;
    /* Absolute uniform-half address of the private native spill table. */
    uint16_t emrt_heap_base;

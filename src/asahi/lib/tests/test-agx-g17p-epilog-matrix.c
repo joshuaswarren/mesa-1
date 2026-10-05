@@ -176,7 +176,7 @@ main(void)
                      .preserve_zero_mask = (w1 >> 7) & 1,
                      .blend.alpha_to_coverage = (w1 >> 8) & 1,
                      .blend.alpha_to_one = (w1 >> 9) & 1,
-                     .lower_srgb = srgb != 0,
+                     .g17p_tile_formats = srgb != 0,
                   };
                   memset(key.remap, -1, sizeof(key.remap));
                   key.remap[0] = 0;

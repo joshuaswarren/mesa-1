@@ -137,7 +137,7 @@ compile_vkquake_mboit_epilog(const struct agx_fs_epilog_link_info *link,
    struct agx_fs_epilog_key key = {
       .link = *link,
       .nr_samples = 1,
-      .lower_srgb = true,
+      .g17p_tile_formats = true,
       .preserve_zero_mask = true,
    };
    memset(key.remap, -1, sizeof(key.remap));

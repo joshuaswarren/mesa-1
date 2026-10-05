@@ -1565,7 +1565,7 @@ compile_epilog_blended_preserve(unsigned count, enum pipe_format format,
       .nr_samples = 1,
       .max_sample_size_B = AGX_G17P_MAX_BYTES_PER_SAMPLE,
       .preserve_zero_mask = true,
-      .lower_srgb = true,
+      .g17p_tile_formats = true,
       .preserve_rt = preserve_rt,
    };
    memset(epilog.remap, -1, sizeof(epilog.remap));

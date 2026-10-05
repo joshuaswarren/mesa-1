@@ -15,7 +15,7 @@
  *     link=0x09070700 samples=2 ... formats=34/54/38/0 remap=0/1/2/3
  *
  * 0x54 is PIPE_FORMAT_R8G8B8A8_UNORM.  Device policy (preserve_zero_mask,
- * lower_srgb) comes from agx_fs_epilog_apply_device_policy() rather than being
+ * g17p_tile_formats) comes from agx_fs_epilog_apply_device_policy() rather than being
  * assigned here, so the swept keys are ones the driver actually emits.
  */
 

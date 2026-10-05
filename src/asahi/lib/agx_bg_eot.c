@@ -498,8 +498,9 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
          physical = PIPE_FORMAT_R32_UINT;
       } else if (cache->dev->chip == AGX_CHIP_G17P &&
           util_format_is_srgb(key->tib.logical_format[rt])) {
-         /* G17P lowers the sRGB transfer explicitly before ST_TILE and stores
-          * the resulting bytes in a U8NORM imageblock.  EOT is a raw transfer
+         /* G17P applies the sRGB transfer in the fragment's own packs
+          * (fltnorm/normflt sRGB modes) and stores the resulting bytes in a
+          * U8NORM imageblock.  EOT is a raw transfer
           * from that imageblock to the format-aware PBE descriptor; asking
           * IMGWBLK to consume SRGBA8 would perform a second conversion and has
           * no native builtin.  Match the physical format selected by the

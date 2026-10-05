@@ -1161,11 +1161,17 @@ agx_wait_pixel_mask(agx_builder *b, uint32_t mask)
  * this path can pack, in which case the caller keeps the unpacked value and
  * the AGX3 packer refuses the shader rather than storing raw floats through a
  * width that would truncate them.
+ *
+ * `srgb_lanes` names the channels (in `channels` order) that an sRGB target
+ * encodes. The tile itself is the same U8NORM byte storage; Apple selects the
+ * transfer function on `fltnorm` alone (agx3_fltnorm_core.h, "The sRGB
+ * conversion modes"), and the packer reads the per-pack lane set from the
+ * instruction's mask.
  */
 static unsigned
 agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
                          unsigned nr_channels, enum agx_format format,
-                         agx_index *packed)
+                         unsigned srgb_lanes, agx_index *packed)
 {
    if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX2)
       return 0;
@@ -1211,6 +1217,16 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
       return 1;
    }
 
+   /* An 8-bit sRGB target is U8NORM storage with the transfer function on
+    * the pack. Witnessed on applegpu_g17p only, so keep AGX3c closed. */
+   if (format == AGX_FORMAT_SRGBA8) {
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+         return 0;
+      format = AGX_FORMAT_U8NORM;
+   } else {
+      srgb_lanes = 0;
+   }
+
    const bool norm8 =
       format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_S8NORM;
    const bool norm16 =
@@ -1253,7 +1269,9 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
       agx_index dest = agx_temp(b->shader, AGX_SIZE_16);
       if (norm16)
          dest.channels_m1 = lanes - 1;
-      agx_fltnorm_agx3_to(b, dest, pack_sources[i], hi, format);
+      agx_instr *pack =
+         agx_fltnorm_agx3_to(b, dest, pack_sources[i], hi, format);
+      pack->mask = (srgb_lanes >> i) & BITFIELD_MASK(lanes);
       if (norm16) {
          agx_index halves[2] = {agx_null()};
          agx_emit_split(b, halves, dest, lanes);
@@ -1362,12 +1380,28 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
       compacted[compact_count++] = agx_extract_nir_src(b, instr->src[0], i);
    }
 
-   const enum agx_format format =
-      agx_format_for_pipe(nir_intrinsic_format(instr));
+   enum agx_format format = agx_format_for_pipe(nir_intrinsic_format(instr));
+
+   /* The colour channels of an sRGB target are encoded, its alpha (the
+    * fourth channel) is linear. Name them in compacted order. */
+   unsigned srgb_lanes = 0;
+   {
+      unsigned k = 0;
+      u_foreach_bit(i, nir_intrinsic_write_mask(instr)) {
+         if (i < 3)
+            srgb_lanes |= BITFIELD_BIT(k);
+         ++k;
+      }
+   }
 
    agx_index packed[4] = {agx_null()};
-   unsigned nr_packed =
-      agx_pack_normalized_agx3(b, compacted, compact_count, format, packed);
+   unsigned nr_packed = agx_pack_normalized_agx3(
+      b, compacted, compact_count, format, srgb_lanes, packed);
+
+   /* The packed sRGB bytes are stored through the U8NORM width. */
+   if (nr_packed && format == AGX_FORMAT_SRGBA8)
+      format = AGX_FORMAT_U8NORM;
+
    if (nr_packed == 0)
       nr_packed = agx_pack_integer_8_agx3(
          b, compacted, compact_count, format, packed);
@@ -1625,6 +1659,17 @@ agx_unpack_normalized_halves_agx3(agx_builder *b, agx_index dest,
                                   unsigned nr_comps, unsigned read_mask,
                                   bool split_dest)
 {
+   /* An 8-bit sRGB target is U8NORM storage whose colour channels `normflt`
+    * decodes (agx3_fltnorm_core.h, "The sRGB conversion modes"); the fourth
+    * channel, alpha, is linear. The packer reads the lane set from the mask.
+    * Witnessed on applegpu_g17p only. */
+   unsigned srgb_lanes = 0;
+   if (format == AGX_FORMAT_SRGBA8) {
+      assert(b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B);
+      format = AGX_FORMAT_U8NORM;
+      srgb_lanes = BITFIELD_MASK(MIN2(nr_comps, 3));
+   }
+
    const bool norm16 =
       format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
    agx_index channels[4] = {agx_null()};
@@ -1647,7 +1692,8 @@ agx_unpack_normalized_halves_agx3(agx_builder *b, agx_index dest,
          source.channels_m1 = lanes - 1;
          agx_emit_collect_to(b, source, lanes, &halves[i * 2]);
       }
-      agx_normflt_agx3_to(b, pair, source, format);
+      agx_normflt_agx3_to(b, pair, source, format)->mask =
+         (srgb_lanes >> (i * 2)) & BITFIELD_MASK(lanes);
 
       agx_index unpacked[2] = {agx_null()};
       agx_emit_split(b, unpacked, pair, lanes);
@@ -1726,8 +1772,13 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
       agx_emit_cached_split(b, dest, nr_comps);
       return true;
    }
+   /* sRGB: a U8NORM tile read, decoded by normflt (see
+    * agx_unpack_normalized_halves_agx3). */
+   const bool srgb = format == AGX_FORMAT_SRGBA8 &&
+                     b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B;
+   const enum agx_format tile_format = srgb ? AGX_FORMAT_U8NORM : format;
    const bool norm8 =
-      format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_S8NORM;
+      tile_format == AGX_FORMAT_U8NORM || tile_format == AGX_FORMAT_S8NORM;
    const bool norm16 =
       format == AGX_FORMAT_U16NORM || format == AGX_FORMAT_S16NORM;
    if (!norm8 &&
@@ -1742,8 +1793,9 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
 
    agx_index packed = agx_temp(b->shader, AGX_SIZE_16);
    packed.channels_m1 = loaded_channels - 1;
-   agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(), format,
-                  BITFIELD_MASK(nr_comps), nir_intrinsic_base(instr), false,
+   agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
+                  tile_format, BITFIELD_MASK(nr_comps),
+                  nir_intrinsic_base(instr), false,
                   nir_intrinsic_target(instr));
 
    agx_index halves[4] = {agx_null()};

@@ -965,7 +965,7 @@ agx_nir_fs_epilog(nir_builder *b, const void *key_)
    unsigned rt_spill = key->link.rt_spill_base;
    NIR_PASS(_, b->shader, agx_nir_lower_tilebuffer, &tib, colormasks, &rt_spill,
             write_samples, &force_translucent, key->preserve_zero_mask,
-            key->lower_srgb);
+            key->g17p_tile_formats);
    const bool native_spills = key->native_spills && agx_tilebuffer_spills(&tib);
    if (native_spills) {
       NIR_PASS(_, b->shader, nir_shader_intrinsics_pass, lower_native_emrt_handle,
