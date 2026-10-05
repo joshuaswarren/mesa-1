@@ -8458,6 +8458,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    unsigned image_writes_left = 0;
    unsigned texture_samples_left = 0;
    unsigned sample_group_members_left = 0;
+   /* Whether a quad-derivative or quad-shuffle consumer follows the last
+    * f156 sample-group member in linear order (see the group flags below). */
+   bool quad_consumer_after_last_member = false;
    unsigned device_loads_left = 0;
    bool has_coverage_write = false;
    bool has_memory_write = false;
@@ -8558,8 +8561,27 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * outside f156 sample groups. Native AUTO/GRAD/AUTO groups the
              * two AUTO samples across the gradient without marking it. */
             if (scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
-                scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN)
+                scan_I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN) {
                sample_group_members_left++;
+               quad_consumer_after_last_member = false;
+            }
+         }
+         switch (scan_I->op) {
+         case AGX_OPCODE_DFDX:
+         case AGX_OPCODE_DFDY:
+         case AGX_OPCODE_QUAD_REDUCE:
+         case AGX_OPCODE_QUAD_PREFIX:
+         case AGX_OPCODE_QUAD_SHUFFLE:
+         case AGX_OPCODE_QUAD_SHUFFLE_XOR:
+         case AGX_OPCODE_QUAD_SHUFFLE_UP:
+         case AGX_OPCODE_QUAD_SHUFFLE_DOWN:
+         case AGX_OPCODE_QUAD_BALLOT:
+         case AGX_OPCODE_FCMP_QUAD_BALLOT:
+         case AGX_OPCODE_ICMP_QUAD_BALLOT:
+            quad_consumer_after_last_member = true;
+            break;
+         default:
+            break;
          }
          if (scan_I->op == AGX_OPCODE_TEXTURE_SAMPLE &&
              (scan_I->dim == AGX_DIM_CUBE ||
@@ -10072,7 +10094,23 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             const bool sample_group_member =
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD &&
                I->lod_mode != AGX_LOD_MODE_LOD_GRAD_MIN;
-            const bool sample_group_nonterminal =
+            /* A fragment SMP whose f156 group is still open (nonterminal)
+             * keeps the quad's helper lanes for what follows; the terminating
+             * member, or a lone member carrying neither flag, does not
+             * (measured on G17P, 2026-10-05: in
+             * dEQP-VK.glsl.helper_invocations.load_from_texture,
+             * fwidth(texture(...)) after a lone SMP read the helper lanes'
+             * results wrong -- Fail 4/4 -- and passes 2/2 with the lone SMP
+             * nonterminal; marking it terminal still fails). So the last
+             * member stays open when a quad derivative or quad shuffle
+             * follows it. Native's encoding for this shape is not yet
+             * decoded; this is the measured requirement. */
+            const bool keep_quad_open =
+               enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT && sample_group_member &&
+               sample_group_members_remaining == 1 &&
+               quad_consumer_after_last_member;
+            const bool sample_group_nonterminal = keep_quad_open ||
                (g17p_sample_group && sample_group_member &&
                 sample_group_members_remaining > 1) ||
                /* Compute gathers use level zero without a fragment group. */
@@ -10083,7 +10121,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (sample_group_member) {
                assert(sample_group_members_remaining > 0);
                sample_group_end = --sample_group_members_remaining == 0 &&
-                                  g17p_sample_group;
+                                  g17p_sample_group && !keep_quad_open;
             }
             /* Apple's implicit-derivative fragment programs enter the pixel
              * transaction immediately before their first SMP, after their
