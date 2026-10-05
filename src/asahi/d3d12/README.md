@@ -4,11 +4,16 @@ A native D3D12 user-mode driver on the Mesa/Asahi substrate: DXIL is
 translated straight to NIR and compiled to AGX machine code. **No Vulkan
 layer, no SPIR-V, no `dxc` at run time.**
 
-Status on `dev`: **321 of 334** corpus shaders compile, and **all seventeen
-GPU suites pass on real hardware, with nothing skipped, from a clean
-checkout** — the four G1-G4 milestone smokes plus thirteen acceptance
-suites. **Every graphics stage that replaces fixed function now
-executes**: vertex, geometry, tessellation, mesh, amplification, pixel.
+Status (2026-10-06, frozen ba4c reference suites, stock Fedora Asahi
+kernels): **11 of 17 on G13 (M1 Pro) and G14 (M2), 9 of 17 on G17P (J700)
+under the Phase 2 kit environment.** The six that do not pass on the Macs
+are fixture contradictions, not driver failures: `g1_smoke` (three
+capability expectations the driver cannot honour), `g5_depth` (three cull
+expectations that vkd3d-proton contradicts too) and `g6`-`g9`, whose
+2026-10-05 pipeline descriptions are refused at creation with
+"incompatible shader signatures". The paragraphs below describe what each
+suite proves when it passes; see `docs/d3d12agx-refactor/REVIEW.md` for
+the measured state and the optimisation series.
 
 - `g11_indexed_instanced` — **indexed draws and per-instance
   attributes**. An indexed draw with a non-zero `StartIndexLocation` and
