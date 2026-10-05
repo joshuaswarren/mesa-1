@@ -113,8 +113,8 @@ build(enum shape s)
    }
 
    nir_store_output(&b, out, nir_imm_int(&b, 0),
-                    .io_semantics.location = FRAG_RESULT_DATA0,
-                    .src_type = nir_type_float32);
+                    .src_type = nir_type_float32,
+                    .io_semantics = {.location = FRAG_RESULT_DATA0});
    return b.shader;
 }
 
