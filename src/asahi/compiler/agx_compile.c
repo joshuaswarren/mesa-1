@@ -4155,6 +4155,47 @@ agx_lower_agx3_fma_sources(agx_context *ctx)
       if (!mixed || !has_modifier || unsupported_modifier)
          continue;
 
+      /* Two mixed shapes have native modifier-bearing encodings that the
+       * packer emits directly, so keep their modifiers fused instead of
+       * spending a MOV-immediate and a BITOP per modified source:
+       *
+       *  - two F32 register multiplicands with abs/neg and a plain minifloat
+       *    addend (agx3_falu_fma_addend_imm_mod; Apple G17P emits
+       *    fma(-a, b, 1.0f) as one f32fma, 3903060121b002c8);
+       *  - one plain minifloat multiplier with a modified register
+       *    multiplicand and addend of either width
+       *    (agx3_falu_fma_mul_imm_mod).
+       *
+       * Both still round once, exactly like the materialized sign bits. */
+      if (I->nr_dests == 1 && I->dest[0].size == AGX_SIZE_32 &&
+          agx_channels(I->dest[0]) == 1) {
+         const bool imm0 = I->src[0].type == AGX_INDEX_IMMEDIATE;
+         const bool imm1 = I->src[1].type == AGX_INDEX_IMMEDIATE;
+         const bool imm2 = I->src[2].type == AGX_INDEX_IMMEDIATE;
+         bool native_shape = false;
+         if (imm2 && !imm0 && !imm1) {
+            native_shape = I->src[2].value <= 0xff &&
+                           I->src[0].size == AGX_SIZE_32 &&
+                           I->src[1].size == AGX_SIZE_32 &&
+                           agx_channels(I->src[0]) == 1 &&
+                           agx_channels(I->src[1]) == 1 &&
+                           !I->src[0].memory && !I->src[1].memory;
+         } else if (imm0 != imm1 && !imm2) {
+            const agx_index imm = I->src[imm0 ? 0 : 1];
+            const agx_index reg = I->src[imm0 ? 1 : 0];
+            native_shape = imm.value <= 0xff && !imm.memory &&
+                           agx_channels(reg) == 1 &&
+                           agx_channels(I->src[2]) == 1 &&
+                           !reg.memory && !I->src[2].memory &&
+                           (reg.size == AGX_SIZE_32 ||
+                            reg.size == AGX_SIZE_16) &&
+                           (I->src[2].size == AGX_SIZE_32 ||
+                            I->src[2].size == AGX_SIZE_16);
+         }
+         if (native_shape)
+            continue;
+      }
+
       agx_foreach_src(I, s) {
          const bool absolute = I->src[s].abs, negate = I->src[s].neg;
          if (!absolute && !negate)

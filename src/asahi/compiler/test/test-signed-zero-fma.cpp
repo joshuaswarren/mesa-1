@@ -75,3 +75,57 @@ TEST(SignedZeroFMA, RetainsUnsupportedForms)
       ralloc_free(mem);
    }
 }
+
+/* Mixed FMA shapes the G17P packer encodes with their modifiers fused
+ * (agx3_falu_fma_addend_imm_mod / agx3_falu_fma_mul_imm_mod) keep them; other
+ * mixed shapes still have their modifiers materialized as sign bits. */
+TEST(SignedZeroFMA, KeepsNativeModifierShapes)
+{
+   for (unsigned mode = 0; mode < 6; mode++) {
+      void *mem = ralloc_context(NULL);
+      agx_builder *b = agx_test_builder(mem);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      b->shader->key = &key;
+      agx_index x = agx_temp(b->shader, AGX_SIZE_32);
+      agx_index y = agx_temp(b->shader, AGX_SIZE_32);
+      agx_index h = agx_temp(b->shader, AGX_SIZE_16);
+      (void)h;
+      agx_instr *I = NULL;
+      bool keep = true;
+      switch (mode) {
+      case 0: /* fma(-x, y, 1.0) */
+         I = agx_ffma_to(b, agx_temp(b->shader, AGX_SIZE_32), agx_neg(x), y,
+                         agx_immediate(48));
+         break;
+      case 1: /* fma(x, |y|, 0.5) */
+         I = agx_ffma_to(b, agx_temp(b->shader, AGX_SIZE_32), x, agx_abs(y),
+                         agx_immediate(32));
+         break;
+      case 2: /* fma(2.0, -x, |y|) */
+         I = agx_ffma_to(b, agx_temp(b->shader, AGX_SIZE_32), agx_immediate(64),
+                         agx_neg(x), agx_abs(y));
+         break;
+      case 3: /* fma(-x, 2.0, half) */
+         I = agx_ffma_to(b, agx_temp(b->shader, AGX_SIZE_32), agx_neg(x),
+                         agx_immediate(64), h);
+         break;
+      case 4: /* fma(2.0, -x, 1.0): two minifloats, still materialized */
+         I = agx_ffma_to(b, agx_temp(b->shader, AGX_SIZE_32), agx_immediate(64),
+                         agx_neg(x), agx_immediate(48));
+         keep = false;
+         break;
+      case 5: /* fma(|x|, 2.0, 1.0): likewise */
+         I = agx_ffma_to(b, agx_temp(b->shader, AGX_SIZE_32), agx_abs(x),
+                         agx_immediate(64), agx_immediate(48));
+         keep = false;
+         break;
+      }
+      agx_lower_agx3_fma_sources(b->shader);
+      bool modified = false;
+      for (unsigned s = 0; s < 3; ++s)
+         modified |= I->src[s].abs || I->src[s].neg;
+      EXPECT_EQ(modified, keep) << mode;
+      ralloc_free(mem);
+   }
+}
