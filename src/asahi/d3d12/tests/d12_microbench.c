@@ -14,7 +14,11 @@
  * (wall time from ExecuteCommandLists to fence completion) and never mixed
  * into a CPU figure.
  *
- * Usage: d3d12agx_microbench tri.dxil solid.dxil res_probe.dxil [--json FILE]
+ * Usage: d3d12agx_microbench tri.dxil solid.dxil res_probe.dxil [--only NAME]
+ *
+ * --only restricts the recording benchmarks to one mode (plain, rootconst,
+ * viewport, psotoggle, dispatch, dispatch_table) for profiling runs; the
+ * rest of the metrics are then reported as zero.
  *
  * The last stdout line is "MICROBENCH_JSON {...}" with every metric, so a
  * host-side collector can file it without parsing prose.
@@ -328,10 +332,14 @@ int
 main(int argc, char **argv)
 {
    if (argc < 4) {
-      fprintf(stderr, "usage: %s tri.dxil solid.dxil res_probe.dxil\n",
-              argv[0]);
+      fprintf(stderr, "usage: %s tri.dxil solid.dxil res_probe.dxil "
+                      "[--only MODE]\n", argv[0]);
       return 2;
    }
+   const char *only = argc >= 6 && !strcmp(argv[4], "--only") ? argv[5] : NULL;
+   /* "--only submit" skips the recording loops and runs the submit, reset
+    * and round-trip measurements alone. */
+   const bool only_submit = only && !strcmp(only, "submit");
    size_t vs_size, ps_size, cs_size;
    void *vs = slurp(argv[1], &vs_size);
    void *ps = slurp(argv[2], &ps_size);
@@ -619,6 +627,10 @@ main(int argc, char **argv)
    double draw_ns[4] = {0}, setup_ns_best[4] = {0}, close_ns_best[4] = {0};
    for (unsigned m = 0; m < 4; m++) {
       double best = 1e18, setup = 0, close = 0;
+      if (only && strcmp(only, mode_names[m])) {
+         draw_ns[m] = 0;
+         continue;
+      }
       for (unsigned r = 0; r < RECORD_REPEATS; r++) {
          double s, d, c;
          REQUIRE(record_draw_list(&b, (enum draw_mode)m, &s, &d, &c),
@@ -636,19 +648,37 @@ main(int argc, char **argv)
              mode_names[m], best, setup / 1e3, close / 1e3, DRAWS_PER_LIST);
    }
 
-   double dispatch_ns = 1e18, dispatch_table_ns = 1e18;
+   double dispatch_ns = 0, dispatch_table_ns = 0;
    for (unsigned r = 0; r < RECORD_REPEATS; r++) {
       double d;
-      REQUIRE(record_dispatch_list(&b, false, &d), "record dispatch list");
-      if (d < dispatch_ns)
-         dispatch_ns = d;
-      REQUIRE(record_dispatch_list(&b, true, &d),
-              "record dispatch list (tables)");
-      if (d < dispatch_table_ns)
-         dispatch_table_ns = d;
+      if (!only || !strcmp(only, "dispatch")) {
+         REQUIRE(record_dispatch_list(&b, false, &d), "record dispatch list");
+         if (!r || d < dispatch_ns)
+            dispatch_ns = d;
+      }
+      if (!only || !strcmp(only, "dispatch_table")) {
+         REQUIRE(record_dispatch_list(&b, true, &d),
+                 "record dispatch list (tables)");
+         if (!r || d < dispatch_table_ns)
+            dispatch_table_ns = d;
+      }
    }
-   printf("record dispatch %7.0f ns/dispatch, with table switch %.0f ns\n",
-          dispatch_ns, dispatch_table_ns);
+   if (only && !only_submit) {
+      printf("record dispatch %7.0f ns/dispatch, with table switch %.0f ns\n",
+             dispatch_ns, dispatch_table_ns);
+      printf("MICROBENCH_JSON {\"only\": \"%s\", \"record_ns_per_draw\": %.0f, "
+             "\"record_ns_per_draw_rootconst\": %.0f, "
+             "\"record_ns_per_draw_viewport\": %.0f, "
+             "\"record_ns_per_draw_psotoggle\": %.0f, "
+             "\"record_ns_per_dispatch\": %.0f, "
+             "\"record_ns_per_dispatch_table\": %.0f}\n",
+             only, draw_ns[0], draw_ns[1], draw_ns[2], draw_ns[3], dispatch_ns,
+             dispatch_table_ns);
+      return 0;
+   }
+   if (!only_submit)
+      printf("record dispatch %7.0f ns/dispatch, with table switch %.0f ns\n",
+             dispatch_ns, dispatch_table_ns);
 
    /* --- Submit: CPU cost of ExecuteCommandLists and GPU wall time ---- */
    double s, d, c;

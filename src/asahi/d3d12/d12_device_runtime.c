@@ -134,6 +134,9 @@ d12_device_create_d3dkmt_runtime(
    device = calloc(1, sizeof(*device));
    if (!device)
       return E_OUTOFMEMORY;
+   /* The DDI runtime submits through D3DKMT, which consumes an exact
+    * allocation list for every submission. */
+   device->submit_read_set = true;
 
    device->dev.fd = -1;
    if (!agx_d3dkmt_open_runtime_device(&device->dev, runtime_device)) {

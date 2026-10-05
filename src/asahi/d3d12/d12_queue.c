@@ -1220,6 +1220,20 @@ d12_queue_op_build_read_set(struct d12_queue_op *op,
    struct agx_device *dev = &device->dev;
    bool complete = !list->reads.incomplete;
 
+   /* Native DRM consumes no read set: only the retention of the exact BOs
+    * the recording references matters, and ranges never need resolving. */
+   if (!device->submit_read_set) {
+      if (list->reads.initialized) {
+         util_dynarray_foreach(&list->reads.refs, struct d12_read_ref, ref) {
+            if (ref->kind == D12_READ_REF_BO)
+               d12_queue_op_capture_bo(op, ref->bo);
+         }
+      }
+      op->read_set_complete = false;
+      op->exact_read_range_count = 0;
+      return;
+   }
+
    static_assert(sizeof(struct d12_read_range) ==
                     sizeof(struct agx_submit_read_range),
                  "frontend read-range ABI width");

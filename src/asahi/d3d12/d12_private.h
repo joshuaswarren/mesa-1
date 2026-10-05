@@ -227,6 +227,12 @@ struct d12_device {
    /* Platform sync objects use one provider surface on DRM and D3DKMT. */
    struct util_sync_provider *sync;
 
+   /* Whether submissions carry an exact read set (allocation list). The
+    * D3DKMT and virtio backends consume one; native Linux DRM ignores it,
+    * so the recorder skips every read reference except the BO retention
+    * the queue needs, and the queue skips resolving ranges to BOs. */
+   bool submit_read_set;
+
    /* The adapter identity DXGI and D3DKMT use for zero-copy interop. */
    LUID adapter_luid;
 
@@ -1556,7 +1562,13 @@ struct d12_binding_upload_cache {
    uint32_t table_count;
 };
 
+#define D12_BINDING_CACHE_WAYS 4
+
 #define D12_GFX_UPLOAD_CACHE_SIZE 1024
+/* Probe window for the hashed USC caches. Past it an entry is evicted
+ * rather than scanning the whole table, which is what turned a full cache
+ * into a 1024-probe miss on every draw. */
+#define D12_USC_CACHE_PROBES 8
 
 struct d12_gfx_upload_cache_entry {
    bool valid;
@@ -1721,6 +1733,9 @@ struct d12_cmd_list {
    unsigned patch_control_points;
    struct d12_cmd_allocator *allocator; /* the one it is recording into */
    struct d12_pipeline_state *pso; /* not referenced; app keeps alive */
+   /* The PSO whose code BOs were last added to the read tracker; a draw
+    * with the same PSO bound adds nothing. */
+   const struct d12_pipeline_state *tracked_pso;
 
    /* SetPredication snapshots the API buffer's 64-bit value into command-list
     * storage at the exact point where the call is recorded. Later draw and
@@ -1769,7 +1784,13 @@ struct d12_cmd_list {
     * changes.  Exhaustive PSO-mix tests revisit the same 512 pipelines
     * hundreds of times; rebuilding 6 KiB root planes and USC programs per
     * draw is both needless and larger than the command-list arena. */
-   struct d12_binding_upload_cache binding_upload_cache[2];
+   /* A few ways per pipeline type so alternating root state (two descriptor
+    * tables, two root signatures) keeps hitting. */
+   struct d12_binding_upload_cache
+      binding_upload_cache[2][D12_BINDING_CACHE_WAYS];
+   uint8_t binding_cache_next[2];
+   /* Round-robin victim selection for the bounded USC cache probes. */
+   uint32_t usc_cache_tick;
    struct d12_gfx_upload_cache_entry gfx_upload_cache[D12_GFX_UPLOAD_CACHE_SIZE];
    struct d12_fragment_state_cache_entry
       fragment_state_cache[D12_FRAGMENT_STATE_CACHE_SIZE];

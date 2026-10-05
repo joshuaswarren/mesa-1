@@ -5779,6 +5779,12 @@ D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
       return E_FAIL;
    }
 
+#ifdef _WIN32
+   device->submit_read_set = true;
+#else
+   device->submit_read_set = device->dev.is_virtio;
+#endif
+
    HRESULT hr = d12_device_backend_init(device, max_fl);
    if (FAILED(hr)) {
       mesa_loge("D3D12CreateDevice: native backend initialization failed");

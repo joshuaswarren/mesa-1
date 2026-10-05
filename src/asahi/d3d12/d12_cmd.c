@@ -578,6 +578,8 @@ static void
 d12_list_track_read_range(struct d12_cmd_list *list, uint64_t address,
                           uint64_t size)
 {
+   if (!list->device->submit_read_set)
+      return;
    struct d12_read_tracker *tracker = d12_list_read_tracker(list);
    if (!address || (size && address > UINT64_MAX - size)) {
       tracker->incomplete = true;
@@ -602,7 +604,7 @@ static void
 d12_list_track_read_descriptor(struct d12_cmd_list *list,
                                const struct d12_descriptor *descriptor)
 {
-   if (!descriptor)
+   if (!descriptor || !list->device->submit_read_set)
       return;
 
    struct d12_read_tracker *tracker = d12_list_read_tracker(list);
@@ -625,6 +627,8 @@ d12_list_track_read_heap(struct d12_cmd_list *list,
                          const struct d12_descriptor_heap *heap,
                          uint32_t first, uint32_t count, bool resources)
 {
+   if (!list->device->submit_read_set)
+      return;
    struct d12_read_tracker *tracker = d12_list_read_tracker(list);
    if (!heap || first >= heap->desc.NumDescriptors) {
       tracker->incomplete = true;
@@ -657,7 +661,9 @@ static void
 d12_list_track_read_resource(struct d12_cmd_list *list,
                              struct d12_resource *resource)
 {
-   if (!resource)
+   /* Application resources outlive their submissions by API contract; only
+    * a submit that publishes a read set needs them listed. */
+   if (!resource || !list->device->submit_read_set)
       return;
 
    if (resource->reserved) {
@@ -707,6 +713,7 @@ d12_list_read_tracker_reset(struct d12_cmd_list *list)
    memset(tracker, 0, sizeof(*tracker));
    util_dynarray_init(&tracker->refs, NULL);
    tracker->initialized = true;
+   list->tracked_pso = NULL;
 }
 
 static void
@@ -728,8 +735,9 @@ static void
 d12_list_track_pso_reads(struct d12_cmd_list *list,
                          const struct d12_pipeline_state *pso)
 {
-   if (!pso)
+   if (!pso || pso == list->tracked_pso)
       return;
+   list->tracked_pso = pso;
 
    struct agx_bo *const bos[] = {
       pso->code_bo,
@@ -887,9 +895,16 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    util_dynarray_clear(&list->indirect_constant_fixups);
    util_dynarray_clear(&list->indirect_argument_fixups);
    util_dynarray_clear(&list->bundle_draws);
-   memset(list->binding_upload_cache, 0, sizeof(list->binding_upload_cache));
-   memset(list->gfx_upload_cache, 0, sizeof(list->gfx_upload_cache));
-   memset(list->fragment_state_cache, 0, sizeof(list->fragment_state_cache));
+   /* Invalidate rather than memset: the caches are several hundred KiB. */
+   for (unsigned t = 0; t < 2; t++) {
+      for (unsigned w = 0; w < D12_BINDING_CACHE_WAYS; w++)
+         list->binding_upload_cache[t][w].valid = false;
+      list->binding_cache_next[t] = 0;
+   }
+   for (unsigned i = 0; i < D12_GFX_UPLOAD_CACHE_SIZE; i++)
+      list->gfx_upload_cache[i].valid = false;
+   for (unsigned i = 0; i < D12_FRAGMENT_STATE_CACHE_SIZE; i++)
+      list->fragment_state_cache[i].valid = false;
    list->direct_draw_params_valid = false;
    list->direct_draw_params_gpu = 0;
    list->blend_upload_valid = false;
@@ -3910,20 +3925,25 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
    const struct d12_root_signature *rs =
       compute ? list->compute_rs : list->graphics_rs;
    struct d12_descriptor_heap *bound_heap = list->resource_descriptor_heap;
-   struct d12_binding_upload_cache *cache =
-      &list->binding_upload_cache[compute ? 1 : 0];
+   struct d12_binding_upload_cache *ways =
+      list->binding_upload_cache[compute ? 1 : 0];
+   struct d12_binding_upload_cache *cache = NULL;
    const uint32_t generation = list->root_generation[compute];
 
-   /* The common case: nothing bound changed since the last upload. */
-   if (!force_unique && cache->valid && cache->generation == generation &&
-       cache->rs == rs && cache->pso == list->pso &&
-       cache->resource_heap == bound_heap &&
-       cache->sampler_heap == list->sampler_descriptor_heap) {
-      d12_binding_upload_cache_outputs(cache, out_root, out_textures,
-                                       out_pbes, out_heap, out_heap_textures,
-                                       out_heap_pbes, out_heap_samplers,
-                                       out_tables, out_table_count);
-      return true;
+   /* The common case: nothing bound changed since one of the cached
+    * uploads was built or last validated. */
+   for (unsigned w = 0; !force_unique && w < D12_BINDING_CACHE_WAYS; w++) {
+      struct d12_binding_upload_cache *e = &ways[w];
+      if (e->valid && e->generation == generation && e->rs == rs &&
+          e->pso == list->pso && e->resource_heap == bound_heap &&
+          e->sampler_heap == list->sampler_descriptor_heap) {
+         d12_binding_upload_cache_outputs(e, out_root, out_textures,
+                                          out_pbes, out_heap,
+                                          out_heap_textures, out_heap_pbes,
+                                          out_heap_samplers, out_tables,
+                                          out_table_count);
+         return true;
+      }
    }
 
    bool validate = getenv("D3D12AGX_VALIDATE_BINDINGS") != NULL;
@@ -3952,55 +3972,63 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
 
    /* The generation moved but the contents may still match (a root
     * parameter rewritten with the same value), or only root constants and
-    * bare root descriptors may differ. Both are decided per slot. */
-   if (!force_unique && cache->valid && cache->rs == rs &&
-       cache->resource_heap == bound_heap &&
-       cache->sampler_heap == list->sampler_descriptor_heap &&
-       memcmp(cache->samplers, sampler_table, sizeof(cache->samplers)) == 0 &&
-       memcmp(cache->sources, sources, sizeof(cache->sources)) == 0 &&
-       memcmp(cache->texture_shapes, texture_shapes,
-              sizeof(cache->texture_shapes)) == 0) {
+    * bare root descriptors may differ. Both are decided per slot, over the
+    * slots the bound root signature can actually address: a slot past its
+    * binding map is unreachable by the bound shaders. */
+   const unsigned compare_slots = rs ? MAX2(rs->map.resource_count, 1) : 1;
+   const unsigned compare_samplers = rs ? rs->map.sampler_count : 0;
+   for (unsigned w = 0; !force_unique && w < D12_BINDING_CACHE_WAYS; w++) {
+      struct d12_binding_upload_cache *e = &ways[w];
+      if (!e->valid || e->rs != rs || e->resource_heap != bound_heap ||
+          e->sampler_heap != list->sampler_descriptor_heap ||
+          memcmp(e->samplers, sampler_table,
+                 compare_samplers * sizeof(*sampler_table)) != 0 ||
+          memcmp(e->sources, sources, compare_slots * sizeof(*sources)) != 0 ||
+          memcmp(e->texture_shapes, texture_shapes, compare_slots) != 0)
+         continue;
+
       unsigned changed = 0;
       bool plane_only = true;
-      for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS && plane_only; i++) {
-         if (memcmp(&cache->table[i], &raw_table[i], sizeof(raw_table[i])) == 0)
+      for (unsigned i = 0; i < compare_slots && plane_only; i++) {
+         if (memcmp(&e->table[i], &raw_table[i], sizeof(raw_table[i])) == 0)
             continue;
          changed++;
-         plane_only = d12_descriptor_is_plane_only(&cache->table[i]) &&
+         plane_only = d12_descriptor_is_plane_only(&e->table[i]) &&
                       d12_descriptor_is_plane_only(&raw_table[i]) &&
                       !sources[i];
       }
-      if (!changed) {
-         cache->generation = generation;
-         cache->pso = list->pso;
-         d12_binding_upload_cache_outputs(cache, out_root, out_textures,
-                                          out_pbes, out_heap,
-                                          out_heap_textures, out_heap_pbes,
-                                          out_heap_samplers, out_tables,
-                                          out_table_count);
-         return true;
-      }
-      if (plane_only) {
-         if (!d12_list_reroot_bindings(list, cache, raw_table, sources,
-                                       bound_heap))
-            return false;
-         cache->generation = generation;
-         cache->pso = list->pso;
-         d12_binding_upload_cache_outputs(cache, out_root, out_textures,
-                                          out_pbes, out_heap,
-                                          out_heap_textures, out_heap_pbes,
-                                          out_heap_samplers, out_tables,
-                                          out_table_count);
-         return true;
-      }
+      if (!plane_only)
+         continue;
+      if (changed &&
+          !d12_list_reroot_bindings(list, e, raw_table, sources, bound_heap))
+         return false;
+      e->generation = generation;
+      e->pso = list->pso;
+      d12_binding_upload_cache_outputs(e, out_root, out_textures, out_pbes,
+                                       out_heap, out_heap_textures,
+                                       out_heap_pbes, out_heap_samplers,
+                                       out_tables, out_table_count);
+      return true;
    }
 
    /* An ExecuteIndirect root descriptor is patched by the GPU after command
     * recording.  Its binding snapshot must never enter the immutable upload
     * cache: a later draw with the same CPU-visible null root state would then
     * alias storage which the earlier command mutates at execution time. */
-   if (force_unique)
-      cache->valid = false;
+   if (force_unique) {
+      for (unsigned w = 0; w < D12_BINDING_CACHE_WAYS; w++)
+         ways[w].valid = false;
+   } else {
+      for (unsigned w = 0; w < D12_BINDING_CACHE_WAYS && !cache; w++) {
+         if (!ways[w].valid)
+            cache = &ways[w];
+      }
+      if (!cache) {
+         uint8_t *next = &list->binding_cache_next[compute ? 1 : 0];
+         cache = &ways[*next];
+         *next = (*next + 1) % D12_BINDING_CACHE_WAYS;
+      }
+   }
 
    struct d12_descriptor effective_table[D12_MAX_RESOURCE_BINDINGS];
    memcpy(effective_table, raw_table, sizeof(effective_table));
@@ -4932,6 +4960,8 @@ static void
 d12_list_track_bound_reads(struct d12_cmd_list *list, bool compute_bindings,
                            enum d12_write_visibility_group visibility)
 {
+   if (!list->device->submit_read_set)
+      return;
    const struct d12_root_signature *rs =
       compute_bindings ? list->compute_rs : list->graphics_rs;
    const struct d12_descriptor *table =
@@ -6417,10 +6447,17 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
    struct agx3_ioto_uniform_range ranges[10];
    unsigned range_count = 0;
    if (native_txf) {
-      const struct d12_binding_upload_cache *cache = &list->binding_upload_cache[1];
+      /* The compute binding upload this dispatch consumes must still be
+       * cached: its texture table extent is what the prefix publishes. */
+      const struct d12_binding_upload_cache *cache = NULL;
+      for (unsigned w = 0; w < D12_BINDING_CACHE_WAYS; w++) {
+         const struct d12_binding_upload_cache *e =
+            &list->binding_upload_cache[1][w];
+         if (e->valid && e->root == u->root && e->textures == u->textures)
+            cache = e;
+      }
       struct agx_bo *sampler_bo = list->device->rodata_bo;
-      if (!u->textures || !cache->valid || cache->root != u->root ||
-          cache->textures != u->textures ||
+      if (!u->textures || !cache ||
           !sampler_bo || !sampler_bo->va || sampler_bo->size < 32 ||
           !d12_list_stream_contains(list, u->root, sizeof(uint64_t)) ||
           !d12_list_stream_contains(list, u->textures, sizeof(uint64_t)) ||
@@ -8841,7 +8878,7 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
       (D12_GFX_UPLOAD_CACHE_SIZE & (D12_GFX_UPLOAD_CACHE_SIZE - 1)) == 0,
       "graphics upload cache must be power-of-two sized");
 
-   for (unsigned probe = 0; probe < D12_GFX_UPLOAD_CACHE_SIZE; probe++) {
+   for (unsigned probe = 0; probe < D12_USC_CACHE_PROBES; probe++) {
       struct d12_gfx_upload_cache_entry *entry =
          &list->gfx_upload_cache[(start + probe) &
                                  (D12_GFX_UPLOAD_CACHE_SIZE - 1)];
@@ -8858,7 +8895,13 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
          return entry;
    }
 
-   return NULL;
+   /* Evict within the window; the caller rebuilds into the returned slot. */
+   struct d12_gfx_upload_cache_entry *victim =
+      &list->gfx_upload_cache[(start + (list->usc_cache_tick++ %
+                                        D12_USC_CACHE_PROBES)) &
+                              (D12_GFX_UPLOAD_CACHE_SIZE - 1)];
+   victim->valid = false;
+   return victim;
 }
 
 static struct d12_fragment_state_cache_entry *
@@ -8884,7 +8927,7 @@ d12_fragment_state_cache_lookup(struct d12_cmd_list *list,
                   (D12_FRAGMENT_STATE_CACHE_SIZE - 1)) == 0,
                  "fragment-state cache must be power-of-two sized");
 
-   for (unsigned probe = 0; probe < D12_FRAGMENT_STATE_CACHE_SIZE; probe++) {
+   for (unsigned probe = 0; probe < D12_USC_CACHE_PROBES; probe++) {
       struct d12_fragment_state_cache_entry *entry =
          &list->fragment_state_cache[(start + probe) &
                                      (D12_FRAGMENT_STATE_CACHE_SIZE - 1)];
@@ -8903,7 +8946,12 @@ d12_fragment_state_cache_lookup(struct d12_cmd_list *list,
          return entry;
    }
 
-   return NULL;
+   struct d12_fragment_state_cache_entry *victim =
+      &list->fragment_state_cache[(start + (list->usc_cache_tick++ %
+                                            D12_USC_CACHE_PROBES)) &
+                                  (D12_FRAGMENT_STATE_CACHE_SIZE - 1)];
+   victim->valid = false;
+   return victim;
 }
 
 static bool
@@ -9094,7 +9142,9 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
    d12_list_track_bound_reads(list, false,
                               D12_WRITE_VIS_GRAPHICS_FRAGMENT);
 
-   for (unsigned slot = 0; slot < ARRAY_SIZE(list->vb); ++slot) {
+   for (unsigned slot = 0;
+        list->device->submit_read_set && slot < ARRAY_SIZE(list->vb);
+        ++slot) {
       if (list->vb[slot].addr && list->vb[slot].size_B) {
          struct d12_resource *resource =
             d12_sparse_buffer_for_address(list->device,
@@ -9106,7 +9156,8 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
                                       list->vb[slot].size_B);
       }
    }
-   if (indexed && list->ib.addr && list->ib.size_B) {
+   if (list->device->submit_read_set && indexed && list->ib.addr &&
+       list->ib.size_B) {
       struct d12_resource *resource =
          d12_sparse_buffer_for_address(list->device, list->ib.addr);
       if (resource)
@@ -9115,7 +9166,9 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          d12_list_track_read_range(list, list->ib.addr, list->ib.size_B);
    }
 
-   for (unsigned stream = 0; stream < ARRAY_SIZE(list->so); ++stream) {
+   for (unsigned stream = 0;
+        list->device->submit_read_set && stream < ARRAY_SIZE(list->so);
+        ++stream) {
       const D3D12_STREAM_OUTPUT_BUFFER_VIEW *view = &list->so[stream];
       if (view->BufferLocation && view->SizeInBytes) {
          struct d12_resource *resource = d12_sparse_buffer_for_address(
