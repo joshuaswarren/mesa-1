@@ -39,7 +39,6 @@ wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
    return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-HWND Win32Application::m_hwnd = nullptr;
 
 struct Pixel { unsigned char b, g, r, a; };
 

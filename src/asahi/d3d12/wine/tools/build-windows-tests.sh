@@ -7,7 +7,7 @@
 #
 # Usage: build-windows-tests.sh <mesa-source> <out-dir> [dx-samples-src]
 set -euo pipefail
-src=$(realpath "$1"); out=$(realpath -m "$2"); samples=${3:-}
+src=$(cd "$1" && pwd); mkdir -p "$2"; out=$(cd "$2" && pwd); samples=${3:-}
 toolchain=${LLVM_MINGW_ROOT:-/opt/aurora-llvm-mingw-20260922/llvm-mingw-20260922-ucrt-ubuntu-22.04-aarch64}
 cc=$toolchain/bin/x86_64-w64-mingw32-clang
 cxx=$toolchain/bin/x86_64-w64-mingw32-clang++
@@ -31,9 +31,13 @@ cp "$tests/run-suites.sh" "$out/suites/"
 if [[ -n $samples ]]; then
    ht=$samples/Samples/Desktop/D3D12HelloWorld/src/HelloTriangle
    wrap=$src/src/asahi/d3d12/wine/samples
+   # mingw's own d3d12/dxgi headers: with WIDL_EXPLICIT_AGGREGATE_RETURNS the
+   # C++ wrappers use the explicit out-pointer ABI for aggregate returns, which
+   # is what d3d12agx (and vkd3d-proton) implement.
    "$cxx" -O2 -std=c++17 -municode -D_WIN32_WINNT=0x0A00 -DUNICODE -D_UNICODE -DNOMINMAX \
-      -Wno-ignored-attributes -Wno-nonportable-include-path \
-      -I"$dxh" -I"$dxh/directx" -I"$ht" -I"$wrap" \
+      -DWIDL_EXPLICIT_AGGREGATE_RETURNS "-D_uuidof=__uuidof" \
+      -Wno-ignored-attributes -Wno-nonportable-include-path -Wno-address-of-temporary \
+      -I"$wrap" -I"$ht" \
       -o "$out/samples/D3D12HelloTriangle.exe" \
       "$wrap/aurora_sample_main.cpp" "$ht/D3D12HelloTriangle.cpp" "$ht/DXSample.cpp" "$ht/Win32Application.cpp" \
       -ld3d12 -ldxgi -ld3dcompiler -ldxguid -lole32 -luser32 -lgdi32

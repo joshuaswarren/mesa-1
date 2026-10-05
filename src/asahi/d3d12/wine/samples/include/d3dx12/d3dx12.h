@@ -99,6 +99,7 @@ struct CD3DX12_BLEND_DESC : public D3D12_BLEND_DESC {
 
 struct CD3DX12_CPU_DESCRIPTOR_HANDLE : public D3D12_CPU_DESCRIPTOR_HANDLE {
    CD3DX12_CPU_DESCRIPTOR_HANDLE() = default;
+   CD3DX12_CPU_DESCRIPTOR_HANDLE(const D3D12_CPU_DESCRIPTOR_HANDLE &other) { ptr = other.ptr; }
    CD3DX12_CPU_DESCRIPTOR_HANDLE(D3D12_CPU_DESCRIPTOR_HANDLE other, INT offsetInDescriptors,
                                  UINT descriptorIncrementSize) {
       ptr = other.ptr + SIZE_T(INT64(offsetInDescriptors) * INT64(descriptorIncrementSize));
@@ -113,13 +114,23 @@ struct CD3DX12_RESOURCE_BARRIER : public D3D12_RESOURCE_BARRIER {
       ID3D12Resource *res, D3D12_RESOURCE_STATES before, D3D12_RESOURCE_STATES after,
       UINT subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,
       D3D12_RESOURCE_BARRIER_FLAGS flags = D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+      D3D12_RESOURCE_BARRIER raw;
+      std::memset(&raw, 0, sizeof(raw));
+      raw.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; raw.Flags = flags;
+      raw.Transition.pResource = res; raw.Transition.StateBefore = before;
+      raw.Transition.StateAfter = after; raw.Transition.Subresource = subresource;
       CD3DX12_RESOURCE_BARRIER b;
-      std::memset(&b, 0, sizeof(b));
-      b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION; b.Flags = flags;
-      b.Transition.pResource = res; b.Transition.StateBefore = before;
-      b.Transition.StateAfter = after; b.Transition.Subresource = subresource;
+      static_cast<D3D12_RESOURCE_BARRIER &>(b) = raw;
       return b;
    }
+};
+
+struct CD3DX12_SHADER_BYTECODE : public D3D12_SHADER_BYTECODE {
+   CD3DX12_SHADER_BYTECODE() = default;
+   explicit CD3DX12_SHADER_BYTECODE(ID3DBlob *blob) {
+      pShaderBytecode = blob->GetBufferPointer(); BytecodeLength = blob->GetBufferSize();
+   }
+   CD3DX12_SHADER_BYTECODE(const void *p, SIZE_T n) { pShaderBytecode = p; BytecodeLength = n; }
 };
 
 #define D3D12_DEFAULT 0
