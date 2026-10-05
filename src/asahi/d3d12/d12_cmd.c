@@ -13604,8 +13604,9 @@ d12_list_CopyResource(ID3D12GraphicsCommandList6 *iface, ID3D12Resource *dst,
       return;
    }
 
-   if (dstr->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-       srcr->desc.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+   if (dstr->desc.Dimension != srcr->desc.Dimension ||
+       dstr->desc.Dimension < D3D12_RESOURCE_DIMENSION_TEXTURE1D ||
+       dstr->desc.Dimension > D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
       mesa_loge("CopyResource: resource dimensions differ or are unsupported");
       list->state = D12_LIST_ERROR;
       return;
@@ -13622,10 +13623,14 @@ d12_list_CopyResource(ID3D12GraphicsCommandList6 *iface, ID3D12Resource *dst,
    }
 
    const unsigned dst_subresources =
-      MAX2(dstr->desc.MipLevels, 1) * MAX2(dstr->desc.DepthOrArraySize, 1) *
+      MAX2(dstr->desc.MipLevels, 1) *
+      (dstr->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+          ? 1 : MAX2(dstr->desc.DepthOrArraySize, 1)) *
       (dstr->stencil_bo ? 2 : 1);
    const unsigned src_subresources =
-      MAX2(srcr->desc.MipLevels, 1) * MAX2(srcr->desc.DepthOrArraySize, 1) *
+      MAX2(srcr->desc.MipLevels, 1) *
+      (srcr->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D
+          ? 1 : MAX2(srcr->desc.DepthOrArraySize, 1)) *
       (srcr->stencil_bo ? 2 : 1);
    if (dst_subresources != src_subresources) {
       mesa_loge("CopyResource: texture subresource counts differ");
@@ -14117,25 +14122,51 @@ d12_list_ResourceBarrier(ID3D12GraphicsCommandList6 *iface, UINT num_barriers,
                          const D3D12_RESOURCE_BARRIER *barriers)
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
-
-   /* Memory is coherent UMA and segments execute in order via the
-    * submit-header barrier fields, so a barrier has one effect on the
-    * stream: the cache flush the open compute segment's last API dispatch
-    * deferred (d12_list_flush_cdm_pending) is emitted here, whatever the
-    * barrier's type. State transitions are otherwise accepted as no-ops
-    * until image layout transitions matter.
-    */
    if (list->state != D12_LIST_RECORDING)
       return;
+   if (num_barriers && !barriers) {
+      list->record_error = E_INVALIDARG;
+      list->state = D12_LIST_ERROR;
+      return;
+   }
+   /* Fable defers API-dispatch flushes until an actual consumer barrier. */
    if (num_barriers && !d12_list_flush_cdm_pending(list))
       return;
+
    for (UINT i = 0; i < num_barriers; i++) {
-      if (barriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_TRANSITION &&
-          barriers[i].Type != D3D12_RESOURCE_BARRIER_TYPE_UAV) {
-         mesa_logw("ResourceBarrier: type %d ignored",
-                   (int)barriers[i].Type);
+      switch (barriers[i].Type) {
+      case D3D12_RESOURCE_BARRIER_TYPE_TRANSITION:
+         /* BEGIN_ONLY may defer the synchronization until END_ONLY. A full
+          * barrier at both ends is conservative and preserves that promise.
+          */
+         break;
+      case D3D12_RESOURCE_BARRIER_TYPE_UAV:
+      case D3D12_RESOURCE_BARRIER_TYPE_ALIASING:
+         if (barriers[i].Flags != D3D12_RESOURCE_BARRIER_FLAG_NONE) {
+            list->record_error = E_INVALIDARG;
+            list->state = D12_LIST_ERROR;
+            return;
+         }
+         break;
+      default:
+         list->record_error = E_INVALIDARG;
+         list->state = D12_LIST_ERROR;
+         return;
       }
    }
+
+   /* Like Honeykrisp's memory barriers, materialize tilebuffer writes before
+    * later texture reads or accesses through a different placed-resource
+    * alias. Dispatches already flush their caches, but an open render pass
+    * can still hold the preceding writes. Ending the segment stores them;
+    * queue submission orders the next segment after it. Render continuation
+    * reloads the attachments through the existing load-preserving path.
+    * No metadata activation is necessary: these layouts are uncompressed
+    * AIL surfaces and aliases name the same coherent BO storage. NULL/NULL
+    * aliasing and UAV barriers apply globally, so use the same boundary.
+    */
+   if (num_barriers)
+      d12_list_close_cdm(list);
 }
 
 /*

@@ -333,6 +333,13 @@ executable(
   link_with : [libd3d12agx],
 )
 
+executable(
+  'd3d12agx_resource_copies',
+  files('tests/resource_copies.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 # Checked placement math can also run without a GPU or DirectX headers.
 d3d12agx_allocation_math_tests = executable(
   'd3d12agx_allocation_math_tests',
