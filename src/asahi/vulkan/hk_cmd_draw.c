@@ -3229,28 +3229,30 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
 }
 
-/* HK_ZLS_PRECISE_DEPTH_STORE (v50, default off).
+/* HK_ZLS_PRECISE_DEPTH_STORE (default on; =0 restores the forced store).
  *
  * hk_pack_zls_control() forces the depth store on ("|| true") because a pass
  * split across several of Honeykrisp's own control streams needs every stream
- * but the last to store depth for the next one to reload. That costs one
- * full depth write per tile even for storeOp DONT_CARE, and on G17P depth is
- * never compressed (hk_can_compress refuses AGX3), so it is 4 B/px of DRAM
- * writes per pass for D32. Only the stream that ends the pass may drop it:
- * the first stream keeps the forced word, middle streams keep the partial
- * word, and EndRendering installs one of these two:
+ * but the last to store depth for the next one to reload. Applied to the
+ * stream that ends the pass, that costs one full depth write per tile even
+ * for storeOp DONT_CARE or NONE: DXVK opens read-only depth passes as
+ * LOAD/NONE, and Subnautica's frame 1787 paid three full 1080p D32 stores for
+ * them (0.10-0.15 ms each on Neo). Only the stream that ends the pass may
+ * drop it: the first stream keeps the forced word, middle streams keep the
+ * partial word, and EndRendering installs one of these two:
  *
  *  - only: the pass has a single stream: loads per loadOp, depth stores per
  *    storeOp/resolve;
  *  - last: a later stream: loads forced (the earlier stream stored), depth
  *    stores per storeOp/resolve.
  *
+ * Suspending passes keep the forced store (a later command buffer reloads).
  * Firmware partial renders (TVB overflow) are unaffected: the G17 kernel
  * derives their ZLS word with both load and store forced
  * (g17_uapi.rs partial_depth_flags). Stencil keeps its forced store: the
  * existing TODO documents a CTS failure without it. */
 DEBUG_GET_ONCE_BOOL_OPTION(hk_zls_precise_depth_store,
-                           "HK_ZLS_PRECISE_DEPTH_STORE", false)
+                           "HK_ZLS_PRECISE_DEPTH_STORE", true)
 
 /* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED=1 (opt-in).
  *
