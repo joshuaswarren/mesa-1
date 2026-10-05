@@ -29,6 +29,7 @@
 #include "agx_compile.h"
 #include "nir.h"
 #include "nir_builder.h"
+#include "d12_nir_integer.h"
 
 #include "util/simple_mtx.h"
 #define XXH_INLINE_ALL
@@ -5231,10 +5232,12 @@ translate_binop(struct trans_ctx *ctx, const struct d12_inst *inst)
    case D12_BINOP_ADD:  res = is_float ? nir_fadd(b, x, y) : nir_iadd(b, x, y); break;
    case D12_BINOP_SUB:  res = is_float ? nir_fsub(b, x, y) : nir_isub(b, x, y); break;
    case D12_BINOP_MUL:  res = is_float ? nir_fmul(b, x, y) : nir_imul(b, x, y); break;
-   case D12_BINOP_UDIV: res = nir_udiv(b, x, y); break;
-   case D12_BINOP_SDIV: res = is_float ? nir_fdiv(b, x, y) : nir_idiv(b, x, y); break;
-   case D12_BINOP_UREM: res = nir_umod(b, x, y); break;
-   case D12_BINOP_SREM: res = is_float ? nir_frem(b, x, y) : nir_irem(b, x, y); break;
+   case D12_BINOP_UDIV: res = d12_nir_integer_divmod(b, x, y, false, false); break;
+   case D12_BINOP_SDIV: res = is_float ? nir_fdiv(b, x, y)
+                                      : d12_nir_integer_divmod(b, x, y, true, false); break;
+   case D12_BINOP_UREM: res = d12_nir_integer_divmod(b, x, y, false, true); break;
+   case D12_BINOP_SREM: res = is_float ? nir_frem(b, x, y)
+                                      : d12_nir_integer_divmod(b, x, y, true, true); break;
    case D12_BINOP_SHL:  res = nir_ishl(b, x, y); break;
    case D12_BINOP_LSHR: res = nir_ushr(b, x, y); break;
    case D12_BINOP_ASHR: res = nir_ishr(b, x, y); break;
