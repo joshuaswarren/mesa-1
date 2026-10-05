@@ -43,6 +43,7 @@
 #include "d12_viewport_math.h"
 
 #include "agx3_compute_program_core.h"
+#include "d12_agx3_graphics_bind_core.h"
 #include "agx3_ioto_uniform_program.h"
 #include "agx_bg_eot.h"
 #include "agx_compile.h"
@@ -1962,6 +1963,19 @@ struct d12_g17p_program_cache {
    struct agx3_compute_program launch;
 };
 
+/* The bind state and draw-index records of the previous native G17P draw
+ * of the open render, reused while a draw repeats them: each is otherwise
+ * a fresh VDM slab allocation (188 + 8 bytes, 64-byte aligned) per draw. */
+struct d12_g17p_bind_cache {
+   unsigned segment; /* index of the render this cache belongs to */
+   bool bind_valid;
+   struct d12_agx3_triangle_bind_desc desc; /* compact_va zeroed */
+   struct d12_agx3_triangle_bind generated;
+   bool indices_valid;
+   unsigned scissor_index, depth_bias_index;
+   uint32_t draw_offset;
+};
+
 struct d12_cmd_list {
    ID3D12GraphicsCommandList iface; /* must be first */
    struct util_dynarray g17p_vdm_storage;
@@ -1988,6 +2002,7 @@ struct d12_cmd_list {
    unsigned segment_count;
    bool cdm_open;    /* last segment is an unterminated CDM */
    struct d12_g17p_program_cache g17p_program_cache;
+   struct d12_g17p_bind_cache g17p_bind_cache;
    bool render_open; /* last segment is an unterminated RENDER */
 
    /* THE PRE-GRAPHICS COMPUTE STREAM.

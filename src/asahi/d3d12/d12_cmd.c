@@ -1016,6 +1016,11 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    list->pending_rt_clear_count = 0;
    list->pending_ds_clear.valid = false;
    list->pending_ds_discard.resource = NULL;
+   /* Both caches name storage of the previous recording. */
+   list->g17p_program_cache.valid = false;
+   list->g17p_bind_cache.bind_valid = false;
+   list->g17p_bind_cache.indices_valid = false;
+   list->g17p_bind_cache.segment = ~0u;
    d12_list_reset_api_state(list);
 
    list->uses_heap = false;
@@ -9824,12 +9829,13 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
           list->scissor_count, list->scissors, seg->width_px, seg->height_px,
           states) != 1)
       goto fail;
-   uint64_t compact;
-   void *payload = d12_list_alloc_g17p_vdm(list, AGX_G17P_BIND_STATE_BYTES, 64, &compact);
-   if (!payload)
-      goto fail;
-   struct d12_agx3_triangle_bind_desc desc = {
-      .compact_va = compact,
+   /* The bind state is a function of the PSO, the viewport and the
+    * scissor; the cache compares the whole descriptor, so it starts
+    * zeroed, padding included. */
+   struct d12_agx3_triangle_bind_desc desc;
+   memset(&desc, 0, sizeof(desc));
+   desc = (struct d12_agx3_triangle_bind_desc){
+      .compact_va = 0,
       .fragment_program = list->device->dev.shader_base + fs_usc,
       .linked_fragment_control = pso->fs.linked.fragment_control.opaque[0],
       .raw_output_select = pso->uvs.osel.opaque[0],
@@ -9872,10 +9878,32 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    uint8_t control[AGX_VIEWPORT_CONTROL_LENGTH];
    agx_pack(control, VIEWPORT_CONTROL, cfg) ;
    memcpy(&desc.viewport.viewport_control_raw, control, sizeof(control));
-   struct d12_agx3_triangle_bind generated;
-   if (!d12_agx3_triangle_bind_generate(list->device->dev.chip, &desc, &generated))
-      goto fail;
-   memcpy(payload, generated.bytes, sizeof(generated.bytes));
+
+   /* Reuse the previous draw's bind state when this one's descriptor is
+    * the same: the record in the VDM slab is immutable once written and
+    * the stream only references it. */
+   struct d12_g17p_bind_cache *bc = &list->g17p_bind_cache;
+   const unsigned seg_index = seg - list->segments;
+   if (bc->segment != seg_index) {
+      bc->segment = seg_index;
+      bc->bind_valid = false;
+      bc->indices_valid = false;
+   }
+   if (!bc->bind_valid || memcmp(&bc->desc, &desc, sizeof(desc)) != 0) {
+      uint64_t compact;
+      void *payload = d12_list_alloc_g17p_vdm(list, AGX_G17P_BIND_STATE_BYTES,
+                                              64, &compact);
+      if (!payload)
+         goto fail;
+      bc->desc = desc;
+      desc.compact_va = compact;
+      if (!d12_agx3_triangle_bind_generate(list->device->dev.chip, &desc,
+                                           &bc->generated))
+         goto fail;
+      memcpy(payload, bc->generated.bytes, sizeof(bc->generated.bytes));
+      bc->bind_valid = true;
+   }
+   const struct d12_agx3_triangle_bind *generated = &bc->generated;
    uint8_t *scissor = d12_list_data_cpu(list, seg->scissor_base);
    uint8_t *depth_bias = d12_list_data_cpu(list, seg->depth_bias_base);
    if (!scissor || !depth_bias)
@@ -9887,34 +9915,44 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    unsigned scissor_index = seg->scissor_count;
    if (seg->scissor_count &&
        !memcmp(scissor + (seg->scissor_count - 1) * AGX_SCISSOR_LENGTH,
-               generated.raster.scissor, sizeof(generated.raster.scissor))) {
+               generated->raster.scissor, sizeof(generated->raster.scissor))) {
       scissor_index = seg->scissor_count - 1;
    } else {
       memcpy(scissor + seg->scissor_count * AGX_SCISSOR_LENGTH,
-             generated.raster.scissor, sizeof(generated.raster.scissor));
+             generated->raster.scissor, sizeof(generated->raster.scissor));
       seg->scissor_count++;
    }
    unsigned depth_bias_index = seg->depth_bias_count;
    if (seg->depth_bias_count &&
        !memcmp(depth_bias + (seg->depth_bias_count - 1) * AGX_DEPTH_BIAS_LENGTH,
-               generated.raster.depth_bias,
-               sizeof(generated.raster.depth_bias))) {
+               generated->raster.depth_bias,
+               sizeof(generated->raster.depth_bias))) {
       depth_bias_index = seg->depth_bias_count - 1;
    } else {
       memcpy(depth_bias + seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH,
-             generated.raster.depth_bias,
-             sizeof(generated.raster.depth_bias));
+             generated->raster.depth_bias,
+             sizeof(generated->raster.depth_bias));
       seg->depth_bias_count++;
    }
-   uint64_t draw_compact;
-   void *draw_payload = d12_list_alloc_g17p_vdm(list, 8, 4, &draw_compact);
    uint32_t draw_offset;
-   /* The index record is packed from the byte extent one past the record
-    * it selects (agx_g17p_ppp_indices_base_pack). */
-   if (!draw_payload || !agx_g17p_upload_draw_indices(draw_payload, 8, draw_compact,
-          (scissor_index + 1) * AGX_SCISSOR_LENGTH,
-          (depth_bias_index + 1) * AGX_DEPTH_BIAS_LENGTH, 1, &draw_offset))
-      goto fail;
+   if (bc->indices_valid && bc->scissor_index == scissor_index &&
+       bc->depth_bias_index == depth_bias_index) {
+      draw_offset = bc->draw_offset;
+   } else {
+      uint64_t draw_compact;
+      void *draw_payload = d12_list_alloc_g17p_vdm(list, 8, 4, &draw_compact);
+      /* The index record is packed from the byte extent one past the
+       * record it selects (agx_g17p_ppp_indices_base_pack). */
+      if (!draw_payload ||
+          !agx_g17p_upload_draw_indices(draw_payload, 8, draw_compact,
+             (scissor_index + 1) * AGX_SCISSOR_LENGTH,
+             (depth_bias_index + 1) * AGX_DEPTH_BIAS_LENGTH, 1, &draw_offset))
+         goto fail;
+      bc->indices_valid = true;
+      bc->scissor_index = scissor_index;
+      bc->depth_bias_index = depth_bias_index;
+      bc->draw_offset = draw_offset;
+   }
    struct d12_agx3_vdm_state_update_draw_info info = {
       .source_layout = pso->vs.agx3_vdm_state_update.source_layout,
       .draw_path = D12_AGX3_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED,
@@ -9933,13 +9971,13 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    if (!d12_agx3_encode_vdm_state_update_draw(list->device->dev.chip, &info, &vertex) ||
        !agx_vdm_hal200_direct_draw_pack(list->device->dev.chip, &draw_fields, &draw) ||
        !d12_list_check_stream_space(list, (size_t)vertex.length +
-                                             generated.upload.tail.length +
+                                             generated->upload.tail.length +
                                              draw.length))
       goto fail;
    uint8_t *out = list->stream_cur;
    memcpy(out, vertex.bytes, vertex.length); out += vertex.length;
-   memcpy(out, generated.upload.tail.bytes, generated.upload.tail.length);
-   out += generated.upload.tail.length;
+   memcpy(out, generated->upload.tail.bytes, generated->upload.tail.length);
+   out += generated->upload.tail.length;
    memcpy(out, draw.bytes, draw.length); out += draw.length;
    list->stream_cur = out;
    seg->has_draws = true;
