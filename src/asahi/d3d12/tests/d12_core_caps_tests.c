@@ -48,6 +48,7 @@ int main(void)
    assert(!a.copy_queue_timestamp_queries && !c.copy_queue_timestamp_queries);
    assert(a.programmable_sample_positions_tier == 0 && !c.programmable_sample_positions_tier);
    assert(a.render_passes_tier == 1 && !c.render_passes_tier);
+   assert(a.dynamic_depth_bias && b.dynamic_depth_bias && !c.dynamic_depth_bias);
    assert(!a.non_normalized_coordinate_samplers && !c.non_normalized_coordinate_samplers);
    assert(!a.tile_based_deferred_renderer);
    assert(a.max_root_signature_version == 2);

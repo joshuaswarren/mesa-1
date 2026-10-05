@@ -12252,13 +12252,19 @@ d12_list_SetPipelineState(ID3D12GraphicsCommandList6 *iface,
                           ID3D12PipelineState *pso)
 {
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
+   struct d12_pipeline_state *previous = list->pso;
    list->pso = pso ? d12_pipeline_state_from_iface(pso) : NULL;
    if (list->pso && !list->pso->is_compute) {
       struct d12_dynamic_state_values dynamic = d12_list_dynamic_state(list);
-      dynamic.depth_bias = list->pso->raster.depth_bias;
-      dynamic.depth_bias_clamp = list->pso->raster.depth_bias_clamp;
-      dynamic.slope_scaled_depth_bias =
-         list->pso->raster.slope_scaled_depth_bias;
+      /* A fresh dynamic PSO bind seeds its defaults. Rebinding the same
+       * PSO must preserve values already written by RSSetDepthBias. Static
+       * PSOs use their own bias without overwriting this dynamic state. */
+      if (list->pso != previous && list->pso->raster.dynamic_depth_bias) {
+         dynamic.depth_bias = list->pso->raster.depth_bias;
+         dynamic.depth_bias_clamp = list->pso->raster.depth_bias_clamp;
+         dynamic.slope_scaled_depth_bias =
+            list->pso->raster.slope_scaled_depth_bias;
+      }
       dynamic.strip_cut = (uint32_t)list->pso->strip_cut;
       d12_list_set_dynamic_state(list, &dynamic);
    }

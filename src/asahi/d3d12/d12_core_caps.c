@@ -92,7 +92,8 @@ d12_core_caps_init(struct d12_core_caps *caps,
    /* The upstream non-normalized-coordinate test fails its integer static
     * sampler variant on G13. Keep this contract off until both routes pass. */
    caps->non_normalized_coordinate_samplers = false;
-   caps->dynamic_depth_bias = false;
+   /* G13/G14 use the existing draw-time raster depth-bias state. */
+   caps->dynamic_depth_bias = legacy;
    /* ExecuteIndirect + predication fails the upstream state witness. */
    caps->predication = false;
    caps->texture_copy_between_dimensions = legacy;
