@@ -606,8 +606,10 @@ d12_pso_add_ref(struct d12_pipeline_state *pso)
     * object and private-data store remain cached. Reacquiring it starts a
     * new public epoch, which holds one lifetime reference. The library's
     * own reference is what keeps the object alive across this call. */
-   if (refs == 1)
+   if (refs == 1) {
       p_atomic_inc(&pso->lifetime);
+      d12_device_add_ref(pso->device);
+   }
 
    return refs;
 }
@@ -692,7 +694,7 @@ d12_pso_release_bos(struct d12_device *device,
       agx_bo_unreference(&device->dev, pso->as_setup_bo);
 }
 
-/* Release BOs while the device reference is still live, then the device. */
+/* The public epoch or the owning library still holds the device here. */
 static void
 d12_pso_destroy(struct d12_pipeline_state *pso)
 {
@@ -703,7 +705,6 @@ d12_pso_destroy(struct d12_pipeline_state *pso)
    d12_pso_release_bos(pso->device, pso);
    free(pso->cached_blob);
    d12_private_data_store_destroy(&pso->private_data);
-   d12_device_release(pso->device);
    free(pso);
 }
 
@@ -722,8 +723,14 @@ d12_pso_Release(ID3D12PipelineState *iface)
 
    /* The public epoch ends: drop its lifetime reference. A library entry
     * may still hold one, in which case nothing else happens here. */
-   if (!refs)
+   if (!refs) {
+      struct d12_device *device = pso->device;
       d12_pso_lifetime_unref(pso);
+      /* A cached PSO remains alive through its library, but its public
+       * device reference follows the public epoch. Release after freeing
+       * BOs when this was also the last lifetime reference. */
+      d12_device_release(device);
+   }
 
    return refs;
 }

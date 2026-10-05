@@ -214,9 +214,15 @@ main(int argc, char **argv)
    CHECK(ID3D12PipelineLibrary_StorePipeline(lib, PSO_NAME, pso) == S_OK,
          "StorePipeline");
 
+   ULONG device_refs = ID3D12Device_AddRef(dev) - 1;
+   ID3D12Device_Release(dev);
+
    /* The application lets go; the library alone keeps the PSO. */
    CHECK(ID3D12PipelineState_Release(pso) == 0,
          "public count reaches zero while the library holds the PSO");
+   CHECK(ID3D12Device_AddRef(dev) == device_refs,
+         "cached PSO releases its public device reference");
+   ID3D12Device_Release(dev);
 
    struct storm storm = {.lib = lib, .desc = &cd, .expect = pso};
    pthread_t threads[STORM_THREADS];
