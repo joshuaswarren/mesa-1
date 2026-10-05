@@ -717,45 +717,6 @@ hk_g17p_verbose_enabled(void)
    return enabled != 0;
 }
 
-/*
- * Diagnostics for the mid-render-pass control-stream split.
- *
- * A graphics control stream that is not the first of its render pass runs the
- * *partial* background/EOT programs and the partial ZLS control
- * (hk_cs_init_graphics). ZINK_DEBUG=sync ends the Vulkan render pass around
- * every draw, so under sync every stream is a first stream and the partial
- * path is never taken. Without sync a render pass reaches it through the 32 KiB
- * G17P VDM root filling, a depth-bias representation switch, a pipeline
- * barrier, or the one-draw-per-stream rule. Counting them, and naming which
- * rule fired, decides from a log whether a given path is on a failing route
- * instead of inferring it: HK_G17P_SPLIT_TRACE=1 counted *zero* splits across
- * a whole run that lost the GPU, which is how the partial BG/EOT programs were
- * ruled out as the cause.
- */
-bool
-hk_g17p_split_trace_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_SPLIT_TRACE", false);
-   return enabled != 0;
-}
-
-void
-hk_g17p_note_gfx_split(struct hk_cmd_buffer *cmd, const char *reason,
-                       unsigned commands, size_t remaining)
-{
-   static unsigned count;
-
-   if (!hk_g17p_split_trace_enabled())
-      return;
-
-   fprintf(stderr,
-           "G17P gfx split #%u: %s (commands=%u remaining=%zu)\n", ++count,
-           reason, commands, remaining);
-   fflush(stderr);
-}
-
 /* Single line, distinct tag. The multi-line dump below has twice been reported
  * as "only the header printed", so anything that must not be lost in a log
  * filter goes through this instead. */
@@ -1072,8 +1033,6 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
    if (cmd->sync.in_pass) {
       if (hk_dependency_has_memory_scope(pDependencyInfo) &&
           cmd->current_cs.gfx) {
-         hk_g17p_note_gfx_split(cmd, "pipeline-barrier",
-                                cmd->current_cs.gfx->stats.cmds, 0);
          hk_cmd_buffer_end_graphics(cmd);
       }
       return;

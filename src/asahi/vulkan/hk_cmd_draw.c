@@ -87,8 +87,6 @@
 /* Diagnostic controls are immutable for a process. Keep environment parsing
  * out of the per-draw path; all controls remain opt-in and retain their exact
  * existing behavior. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_interdraw_barrier,
-                           "HK_G17P_INTERDRAW_BARRIER", false)
 DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_dirty_bisect,
                            "HK_G17P_DIRTY_BISECT", 0)
 /* v46 execution-efficiency A/B (neo-gpu-exec-mesa-v46), default off.
@@ -1115,123 +1113,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
 
    }
 
-}
-
-/* G17P batches draws in one graphics stream. Explicit split policies and
- * depth caps are diagnostic controls only. The historical depth experiments
- * and their intermittent faults are retained in commit fb8fd6b881d; they do
- * not establish a hardware limit of one draw or publication per stream.
- */
-enum hk_g17p_draw_split {
-   /* Every draw after the first starts a new stream. */
-   HK_G17P_DRAW_SPLIT_EVERY,
-   /* Only a draw that republishes render state starts a new stream. */
-   HK_G17P_DRAW_SPLIT_REPUBLISH,
-   /* Batch draws until a real render dependency or capacity boundary. */
-   HK_G17P_DRAW_SPLIT_NEVER,
-};
-
-static enum hk_g17p_draw_split
-hk_g17p_draw_split_policy(const struct hk_device *dev)
-{
-   static int policy = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return HK_G17P_DRAW_SPLIT_NEVER;
-
-   if (policy < 0) {
-      const char *spelled = getenv("HK_G17P_DRAW_SPLIT");
-
-      if (spelled && !strcmp(spelled, "every"))
-         policy = HK_G17P_DRAW_SPLIT_EVERY;
-      else if (spelled && !strcmp(spelled, "republish"))
-         policy = HK_G17P_DRAW_SPLIT_REPUBLISH;
-      else if (spelled && !strcmp(spelled, "never"))
-         policy = HK_G17P_DRAW_SPLIT_NEVER;
-      else if (HK_ENV_BOOL_ONCE("HK_G17P_CONCAT_DRAWS", false))
-         policy = HK_G17P_DRAW_SPLIT_NEVER;
-      else
-         policy = HK_G17P_DRAW_SPLIT_NEVER;
-
-      /* The old opt-in spelling, kept working so existing A/B scripts that
-       * asked for the unconditional split still get it. */
-      if (HK_ENV_BOOL_ONCE("HK_G17P_SPLIT_DIRECT_DRAWS", false))
-         policy = HK_G17P_DRAW_SPLIT_EVERY;
-   }
-
-   return (enum hk_g17p_draw_split)policy;
-}
-
-/*
- * How many render-state publications one stream may carry.
- *
- * Diagnostic limit on state publications, independently of draw bodies.
- * Zero is the default and means no artificial cap.
- */
-static unsigned
-hk_g17p_state_publications_per_stream(const struct hk_device *dev)
-{
-   static int cap = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return 0;
-
-   if (cap < 0)
-      cap = HK_ENV_NUM_ONCE("HK_G17P_STATE_PUBLICATIONS_PER_STREAM", 0);
-
-   return cap > 0 ? (unsigned)cap : 0;
-}
-
-/*
- * Hard cap on draw *bodies* per graphics control stream, independent of the
- * publication cap above. Zero means no artificial cap. Historical depth
- * experiments are documented in fb8fd6b881d, including intermittent faults.
- */
-static unsigned
-hk_g17p_draws_per_stream(const struct hk_device *dev)
-{
-   static int cap = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return 0;
-
-   if (cap < 0)
-      cap = HK_ENV_NUM_ONCE("HK_G17P_DRAWS_PER_STREAM", 0);
-
-   return cap > 0 ? (unsigned)cap : 0;
-}
-
-/*
- * Number of VDM state contexts to rotate a stream's state publications
- * through.  1 (the default) pins every publication to context 0, which is what
- * m1n1's single-draw witness recorded and all this driver has ever emitted.
- * The hardware field is three bits, so 8 is the ceiling.
- */
-static unsigned
-hk_g17p_vdm_contexts(const struct hk_device *dev)
-{
-   static int contexts = -1;
-
-   if (dev->dev.chip != AGX_CHIP_G17P)
-      return 1;
-
-   if (contexts < 0) {
-      contexts = HK_ENV_NUM_ONCE("HK_G17P_VDM_CONTEXTS", 0);
-
-      /* The original boolean spelling asked for the full rotation. */
-      if (contexts <= 0)
-         contexts = HK_ENV_BOOL_ONCE("HK_G17P_CYCLE_VDM_CONTEXT", false)
-                        ? 8
-                        : 1;
-   }
-
-   return CLAMP(contexts, 1, 8);
-}
-
-static bool
-hk_g17p_cycle_vdm_context_enabled(const struct hk_device *dev)
-{
-   return hk_g17p_vdm_contexts(dev) > 1;
 }
 
 /* CTS coverage of indirect draws is pretty bad, so it's helpful to be able to
@@ -8148,7 +8029,6 @@ hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd)
        !gfx->prepared_fast_link_vs.valid ||
        gfx->prepared_fast_link_vs.indexed ||
        gfx->prepared_fast_link_vs.restart ||
-       hk_g17p_cycle_vdm_context_enabled(dev) ||
        !cs->agx3_active_context_selector_valid)
       return false;
 
@@ -9035,12 +8915,6 @@ hk_g17p_flush_prepared_dynamic_state(
    cs->g17p_state_publications++;
    uint8_t *out = cs->current;
 
-   struct agx_vdm_barrier_core interdraw_barrier;
-   if (cs->stats.cmds > 0 && debug_get_option_hk_g17p_interdraw_barrier() &&
-       agx_vdm_barrier_core_pack(dev->dev.chip, &interdraw_barrier)) {
-      memcpy(out, interdraw_barrier.bytes, interdraw_barrier.length);
-      out += interdraw_barrier.length;
-   }
 
    if (linked_vs->b.uses_base_param) {
       if (agx_is_indirect(draw.b)) {
@@ -9380,9 +9254,6 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    info.template_info.raw_vs_output_flag_6 = gfx->generate_primitive_id;
    info.template_info.raw_vs_output_count_1_extra =
       gfx->generate_primitive_id;
-   if (hk_g17p_cycle_vdm_context_enabled(dev) &&
-       cs->agx3_raw_active_context_selector == UINT32_MAX)
-      cs->agx3_raw_active_context_selector = 1;
    info.template_info.raw_active_context_selector =
       cs->agx3_raw_active_context_selector;
 
@@ -9447,16 +9318,6 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       *phase_start = os_time_get_nano();
    }
 
-   if (hk_g17p_cycle_vdm_context_enabled(dev)) {
-      const unsigned contexts = hk_g17p_vdm_contexts(dev);
-
-      assert(cs->agx3_raw_active_context_selector >= 1 &&
-             cs->agx3_raw_active_context_selector <= contexts);
-      cs->agx3_raw_active_context_selector =
-         cs->agx3_raw_active_context_selector >= contexts
-            ? 1
-            : cs->agx3_raw_active_context_selector + 1;
-   }
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       if (!hk_g17p_emit_native_bind_tail(cmd, cs, &out,
@@ -9526,8 +9387,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    /* Past this point the draw installs a fresh vertex-program template, a
     * fresh HAL200 bind tail and a fresh draw-state selector, all into the
-    * stream's one render-state context. Count it: that depth, not the draw
-    * count, is what hk_g17p_state_publications_per_stream() bounds. */
+    * stream's one render-state context. Count it for fault traces. */
    if (!prepare_only)
       cs->g17p_state_publications++;
 
@@ -9535,16 +9395,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    assert(cs->current + 0x1000 < cs->end && "already ensured space");
    uint8_t *out = cs->current;
-   /* Native captures concatenate state publications without this cache
-    * invalidation. Retain the old barrier only as a diagnostic control;
-    * immutable per-draw state does not require a per-draw cache flush. */
-   struct agx_vdm_barrier_core interdraw_barrier;
-   if (!prepare_only && cs->stats.cmds > 0 &&
-       debug_get_option_hk_g17p_interdraw_barrier() &&
-       agx_vdm_barrier_core_pack(dev->dev.chip, &interdraw_barrier)) {
-      memcpy(out, interdraw_barrier.bytes, interdraw_barrier.length);
-      out += interdraw_barrier.length;
-   }
 
    struct hk_shader *fs = hk_bound_fs(cmd);
    bool gt_dirty = IS_SHADER_DIRTY(TESS_CTRL) || IS_SHADER_DIRTY(TESS_EVAL) ||
@@ -10643,26 +10493,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       return NULL;
    }
 
-   /* Policies that do not depend on what this draw will publish are decided
-    * here, before the stream is chosen, so the whole of the per-stream setup
-    * below runs on the stream the draw is actually recorded into.  Ending the
-    * stream reuses the established retained-render transition, so the
-    * continuation loads the tilebuffer through the partial BG program exactly
-    * as a mid-render-pass split already did. */
-   const enum hk_g17p_draw_split split_policy = hk_g17p_draw_split_policy(dev);
-   const unsigned draws_per_stream = hk_g17p_draws_per_stream(dev);
-
-   if (cmd->current_cs.gfx && cmd->current_cs.gfx->stats.cmds > 0) {
-      const unsigned recorded = cmd->current_cs.gfx->stats.cmds;
-
-      if (split_policy == HK_G17P_DRAW_SPLIT_EVERY) {
-         hk_g17p_note_gfx_split(cmd, "one-draw-per-stream", recorded, 0);
-         hk_cmd_buffer_end_graphics(cmd);
-      } else if (draws_per_stream && recorded >= draws_per_stream) {
-         hk_g17p_note_gfx_split(cmd, "draws-per-stream", recorded, 0);
-         hk_cmd_buffer_end_graphics(cmd);
-      }
-   }
 
    struct hk_cs *cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
    const struct vk_dynamic_graphics_state *dyn =
@@ -10699,8 +10529,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       if (!succ) {
          perf_debug(cmd, "Splitting control stream due to depth bias");
 
-         hk_g17p_note_gfx_split(cmd, "depth-bias-representation",
-                                cs->stats.cmds, cs->end - cs->current);
          hk_cmd_buffer_end_graphics(cmd);
          cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
          if (!cs)
@@ -10815,25 +10643,17 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
     * and a split has to happen before the record it protects. */
    const bool republishes = hk_gfx_republishes_render_state(cmd);
 
-   const unsigned publication_cap = hk_g17p_state_publications_per_stream(dev);
    /* v56g/v57e: the HAL200 draw-state selector holds 16-bit scissor and
     * depth-bias indices. A stream whose arrays are about to exceed that
     * (only reachable with >65k distinct scissor/depth-bias states) is ended
-    * like the publication-depth split instead of failing the draw. */
+    * before the republication instead of failing the draw. */
    const unsigned ppp_margin = AGX_PPP_VIEWPORT_PAYLOAD_MAX_VIEWPORTS + 1;
    const bool ppp_index_limit =
       dev->dev.chip == AGX_CHIP_G17P &&
       (cs->scissor.size / AGX_SCISSOR_LENGTH + ppp_margin > UINT16_MAX ||
        cs->depth_bias.size / AGX_DEPTH_BIAS_LENGTH + ppp_margin > UINT16_MAX);
-   const bool publication_depth_reached =
-      (publication_cap && cs->g17p_state_publications >= publication_cap) ||
-      ppp_index_limit;
 
-   if (republishes && cs->stats.cmds > 0 &&
-       (split_policy == HK_G17P_DRAW_SPLIT_REPUBLISH ||
-        publication_depth_reached)) {
-      hk_g17p_note_gfx_split(cmd, "state-publication-depth", cs->stats.cmds,
-                             cs->end - cs->current);
+   if (republishes && cs->stats.cmds > 0 && ppp_index_limit) {
       hk_cmd_buffer_end_graphics(cmd);
       cs = hk_cmd_buffer_get_cs(cmd, false /* compute */);
       if (!cs)
@@ -12043,11 +11863,6 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
        (dyn->ms.rasterization_samples && !gfx->render.tilebuffer.nr_samples))
       return false;
 
-   if (hk_g17p_draw_split_policy(dev) != HK_G17P_DRAW_SPLIT_NEVER ||
-       hk_g17p_draws_per_stream(dev) ||
-       hk_g17p_state_publications_per_stream(dev) ||
-       debug_get_option_hk_g17p_interdraw_barrier())
-      return false;
 
    /* hk_draw_impl()'s index validation, and the general path's refusals. */
    if (draw->indexed) {

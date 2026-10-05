@@ -1711,9 +1711,6 @@ bool hk_cs_init_graphics(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 /* A depth/stencil clear touched the pass's attachment (ZLS elision). */
 void hk_g17p_note_depth_clear(struct hk_cmd_buffer *cmd);
 
-bool hk_g17p_split_trace_enabled(void);
-void hk_g17p_note_gfx_split(struct hk_cmd_buffer *cmd, const char *reason,
-                            unsigned commands, size_t remaining);
 uint32_t hk_default_sample_positions(unsigned nr_samples);
 
 static inline struct hk_cs *
