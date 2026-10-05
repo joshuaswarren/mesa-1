@@ -357,6 +357,12 @@ executable(
 
 if not d12_is_windows
   executable(
+    'd3d12agx_fence_multiple_live',
+    files('tests/fence_multiple_live.c'),
+    dependencies : [dep_dxheaders_d12],
+    link_with : [libd3d12agx],
+  )
+  executable(
     'd3d12agx_command_sync_live',
     files('tests/command_sync_live.c'),
     dependencies : [dep_dxheaders_d12],

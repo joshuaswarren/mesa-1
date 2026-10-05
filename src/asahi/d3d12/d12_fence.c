@@ -804,7 +804,7 @@ d12_fence_SetEventOnCompletion(ID3D12Fence *iface, UINT64 value,
 struct d12_fence_multi_waiter {
    struct d12_device *device;
    struct d12_fence **fences;
-   uint64_t *values;
+   struct d12_fence_ticket *tickets;
    unsigned count;
    bool wait_all;
    HANDLE event;
@@ -831,11 +831,10 @@ static int
 d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
 {
    if (w->wait_all) {
-      /* Each wait takes the direct timeline path when its value is pending
-       * on a queue Signal.  A destroyed fence counts as reached, as the
-       * native runtime treats a closed fence handle. */
+      /* Tickets are registered for every fence before the asynchronous
+       * worker starts, so legal CPU rewinds cannot lose completion. */
       for (unsigned i = 0; i < w->count; i++)
-         (void)d12_fence_wait_value(w->fences[i], w->values[i], NULL);
+         (void)d12_fence_ticket_wait(&w->tickets[i], NULL);
       return 0;
    }
 
@@ -867,18 +866,22 @@ d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
    bool reached = false;
    int ret = 0;
    for (unsigned i = 0; i < w->count && !reached && !ret; i++) {
+      if (p_atomic_read(&w->tickets[i].satisfied)) {
+         reached = true;
+         break;
+      }
       if (w->fences[i]->shared_syncobj) {
          any_shared = true;
          if (d12_fence_GetCompletedValue(&w->fences[i]->iface) >=
-             w->values[i]) {
+             w->tickets[i].value) {
             reached = true;
             break;
          }
       }
-      ret = d12_fence_notify_register(w->fences[i], w->values[i],
+      ret = d12_fence_notify_register(w->fences[i], w->tickets[i].value,
                                       d12_fence_any_notify, &any,
                                       &handles[i]);
-      reached = ret > 0;
+      reached = ret > 0 || p_atomic_read(&w->tickets[i].satisfied);
       if (ret > 0)
          ret = 0;
    }
@@ -906,7 +909,7 @@ d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
       for (unsigned i = 0; i < w->count && !reached; i++) {
          if (w->fences[i]->shared_syncobj &&
              d12_fence_GetCompletedValue(&w->fences[i]->iface) >=
-                w->values[i])
+                w->tickets[i].value)
             reached = true;
       }
    }
@@ -923,10 +926,12 @@ d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
 static void
 d12_fence_multi_waiter_destroy(struct d12_fence_multi_waiter *w)
 {
-   for (unsigned i = 0; i < w->count; i++)
+   for (unsigned i = 0; i < w->count; i++) {
+      d12_fence_ticket_fini(&w->tickets[i]);
       d12_fence_internal_unref(w->fences[i]);
+   }
 
-   free(w->values);
+   free(w->tickets);
    free(w->fences);
    free(w);
 }
@@ -963,9 +968,9 @@ d12_fence_set_event_multiple(struct d12_device *device,
       return E_OUTOFMEMORY;
 
    w->fences = calloc(count, sizeof(*w->fences));
-   w->values = calloc(count, sizeof(*w->values));
-   if (!w->fences || !w->values) {
-      free(w->values);
+   w->tickets = calloc(count, sizeof(*w->tickets));
+   if (!w->fences || !w->tickets) {
+      free(w->tickets);
       free(w->fences);
       free(w);
       return E_OUTOFMEMORY;
@@ -992,7 +997,7 @@ d12_fence_set_event_multiple(struct d12_device *device,
 
       d12_fence_internal_ref(fence);
       w->fences[i] = fence;
-      w->values[i] = values[i];
+      d12_fence_ticket_init(fence, &w->tickets[i], values[i]);
    }
 
    if (!event) {
