@@ -1,7 +1,7 @@
 /* Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
- * Same immutable G5 input/resources/dispatch, registered-noop metadata only.
- * No output readback, texel grading or physical feature admission. */
+ * Supplemental native Texture.Load recording/admission controls.
+ * No output readback or texel grading; frozen g5_texture owns that verdict. */
 #define COBJMACROS
 #include <wsl/winadapter.h>
 #include <directx/d3d12.h>
@@ -95,12 +95,23 @@ static bool metadata_shim_loaded(void)
 int
 main(int argc, char **argv)
 {
-   if(argc!=3 || !metadata_shim_loaded() ||
-      (strcmp(argv[1],"--record-only") && strcmp(argv[1],"--shim-submit-only"))) {
-      fprintf(stderr,"usage under registered G17P noop only: %s --record-only|--shim-submit-only tex_probe.dxil\n",argv[0]);
+   if (argc != 3)
+      return 2;
+   const bool physical_revoke = !strcmp(argv[1], "--physical-record-revoke");
+   const bool shim_revoke = !strcmp(argv[1], "--shim-record-revoke");
+   const bool revoke = physical_revoke || shim_revoke;
+   const bool submit = !strcmp(argv[1], "--shim-submit-only");
+   if (physical_revoke) {
+      const char *baseline = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
+      if (!baseline || strcmp(baseline, "1") || getenv("LD_PRELOAD"))
+         return 2;
+   } else if (!metadata_shim_loaded() ||
+              (!submit && !shim_revoke && strcmp(argv[1], "--record-only"))) {
+      fprintf(stderr, "usage: %s --record-only|--shim-submit-only|"
+              "--shim-record-revoke|--physical-record-revoke tex_probe.dxil\n",
+              argv[0]);
       return 2;
    }
-   bool submit=!strcmp(argv[1],"--shim-submit-only");
    if(submit) {
       const char *expected=getenv("ASAHI_SHIM_G17P_EXPECT_VALID_STREAM");
       if(!expected||strcmp(expected,"1"))return 2;
@@ -348,6 +359,24 @@ main(int argc, char **argv)
       TEST_CALL(d12_test_submit_closed(dev,list,queue,fence,1),"strict noop metadata completion only");
       ID3D12Fence_Release(fence);ID3D12CommandQueue_Release(queue);
    }
+   if (revoke) {
+      ID3D12CommandQueue *queue = NULL;
+      const D3D12_COMMAND_QUEUE_DESC qd = {
+         .Type = D3D12_COMMAND_LIST_TYPE_COMPUTE,
+      };
+      TEST_OBJECT(ID3D12Device_CreateCommandQueue(
+         dev, &qd, &IID_ID3D12CommandQueue, (void **)&queue), queue,
+         "admission-revocation queue object");
+      /* Queue revalidation must discard the recorded launch before ioctl.
+       * Do not signal/wait a fence or turn an empty fence into execution proof. */
+      unsetenv(physical_revoke ? "AURORA_D3D12_PHYSICAL_BASELINE"
+                              : "AURORA_D3D12_SHIM_TEXTURE_METADATA");
+      ID3D12CommandList *commands[] = {(ID3D12CommandList *)list};
+      ID3D12CommandQueue_ExecuteCommandLists(queue, 1, commands);
+      CHECK(ID3D12Device_GetDeviceRemovedReason(dev) == DXGI_ERROR_DEVICE_REMOVED,
+            "revoked texture admission removes device before submission");
+      ID3D12CommandQueue_Release(queue);
+   }
    ID3D12GraphicsCommandList_Release(list);
    ID3D12CommandAllocator_Release(alloc);
    ID3D12PipelineState_Release(pso);
@@ -358,6 +387,11 @@ main(int argc, char **argv)
    CHECK(ID3D12Device_Release(dev)==0,"metadata device references released");
    free(cs);
    if(failures)return 1;
-   printf("NATIVE TEXTURE %s: PASS SHIM_METADATA_ONLY_NO_PIXEL_OR_PHYSICAL_VERDICT\n",submit?"SHIM SUBMIT":"RECORD");
+   if (revoke)
+      printf("NATIVE TEXTURE %s REVOKE: PASS NO_GPU_SUBMISSION_NO_PIXEL_VERDICT\n",
+             physical_revoke ? "PHYSICAL" : "SHIM");
+   else
+      printf("NATIVE TEXTURE %s: PASS SHIM_METADATA_ONLY_NO_PIXEL_OR_PHYSICAL_VERDICT\n",
+             submit ? "SHIM SUBMIT" : "RECORD");
    return 0;
 }
