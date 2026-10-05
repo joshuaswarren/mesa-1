@@ -1392,6 +1392,21 @@ d12_queue_idle_locked(const struct d12_queue *queue)
 }
 
 static void
+d12_queue_dump_path_locked(const struct d12_queue *queue, const char *what,
+                           bool inline_path)
+{
+   if (!d12_debug()->dump_sync)
+      return;
+   mesa_logi("SYNC %s: queue %p -> %s (queued=%d worker_busy=%d "
+             "inline_busy=%d inflight=%llu stop=%u)",
+             what, (void *)queue, inline_path ? "inline" : "worker",
+             queue->op_head != NULL, queue->worker_busy, queue->inline_busy,
+             (unsigned long long)d12_queue_timeline_inflight(
+                &queue->timeline),
+             p_atomic_read(&queue->stop));
+}
+
+static void
 d12_queue_inline_begin_locked(struct d12_queue *queue)
 {
    assert(d12_queue_idle_locked(queue));
@@ -2769,6 +2784,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          /* Nothing is ahead of this list: submit it from here instead of
           * paying a worker wakeup.  A full in-flight window still goes
           * through the worker so this call never blocks on the GPU. */
+         d12_queue_dump_path_locked(queue, "Execute", true);
          d12_queue_inline_begin_locked(queue);
          mtx_unlock(&queue->lock);
          const bool submitted = d12_queue_submit_inline(queue, op);
@@ -2776,9 +2792,12 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          d12_queue_inline_end_locked(queue);
          if (!submitted)
             break;
-      } else if (!d12_queue_enqueue_locked(queue, op)) {
-         d12_queue_op_destroy(op);
-         break;
+      } else {
+         d12_queue_dump_path_locked(queue, "Execute", false);
+         if (!d12_queue_enqueue_locked(queue, op)) {
+            d12_queue_op_destroy(op);
+            break;
+         }
       }
    }
 
@@ -3116,9 +3135,11 @@ d12_queue_Signal(ID3D12CommandQueue *iface, ID3D12Fence *fence_iface,
    bool queued;
    if (d12_queue_idle_locked(queue)) {
       /* Scheduling a Signal is only a timeline read; do it here. */
+      d12_queue_dump_path_locked(queue, "Signal", true);
       d12_queue_schedule_signal_locked(queue, op);
       queued = true;
    } else {
+      d12_queue_dump_path_locked(queue, "Signal", false);
       queued = d12_queue_enqueue_locked(queue, op);
    }
    mtx_unlock(&queue->lock);
