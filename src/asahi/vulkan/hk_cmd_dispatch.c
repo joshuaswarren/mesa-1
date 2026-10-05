@@ -69,13 +69,31 @@ hk_cdm_cache_flush(struct hk_device *dev, struct hk_cs *cs)
       cs->stats.flushes++;
 }
 
+static inline GLOBAL uint32_t *
+hk_cdm_barrier_deferred_word(struct hk_device *dev, struct hk_cs *cs)
+{
+   assert(cs->type == HK_CS_CDM);
+
+   if (unlikely(dev->cdm_deferred_mask)) {
+      /* Perftest only: exact deferred CDM_BARRIER flag word. */
+      assert(cs->current + AGX_CDM_BARRIER_LENGTH < cs->end &&
+             "caller must ensure space");
+      uint32_t *word = cs->current;
+      *word = dev->cdm_deferred_mask | (AGX_CDM_BLOCK_TYPE_BARRIER << 29);
+      cs->current = word + 1;
+      return cs->current;
+   }
+
+   return agx_cdm_barrier_deferred(cs->current, dev->dev.chip);
+}
+
 void
 hk_cs_finish_pending_flush(struct hk_cmd_buffer *cmd, struct hk_cs *cs)
 {
    if (cs->type == HK_CS_CDM && cs->cdm_flush_pending) {
       hk_ensure_cs_has_space(cmd, cs, 0x2000);
-      cs->current = agx_cdm_barrier_deferred(cs->current,
-                                             hk_cmd_buffer_device(cmd)->dev.chip);
+      cs->current = hk_cdm_barrier_deferred_word(
+         hk_cmd_buffer_device(cmd), cs);
       cs->stats.flushes++;
       cs->cdm_flush_pending = false;
    }
@@ -95,6 +113,21 @@ hk_dispatch_with_usc_launch(struct hk_device *dev, struct hk_cs *cs,
          agx_cdm_launch(cs->current, dev->dev.chip, grid, wg, launch, usc);
       hk_cdm_cache_flush(dev, cs);
       return;
+   }
+
+   /* Inline deferred CDM flush (HK_CDM_INLINE_DEFER): like the deferred flush,
+    * but the batch-ending barrier word is emitted inline before the dependent
+    * launch instead of splitting the control stream. Experiment: on G13X the
+    * analogous no-split shape needed bits {0,1,2} for cross-launch coherency,
+    * so digest parity is unproven by construction; gate on digests.
+    */
+   if (dev->cdm_inline_defer && cs->cmd->state.cs.cdm_barrier_pending) {
+      assert(cs->type == HK_CS_CDM);
+      hk_ensure_cs_has_space(cs->cmd, cs, 0x2000);
+      cs->current =
+         hk_cdm_barrier_deferred_word(dev, cs);
+      cs->stats.flushes++;
+      cs->cmd->state.cs.cdm_barrier_pending = false;
    }
 
    /* Deferred CDM flush: no barrier between the launches of one batch. The

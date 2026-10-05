@@ -357,6 +357,14 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       debug_get_bool_option("HK_CDM_DEFER_FLUSH",
                             pdev->dev.chip == AGX_CHIP_G13G);
 
+   /* Deferred-word perftest mask + inline-defer emission (see hk_device.h).
+    * Both are no-ops unless the deferred flush is active. */
+   dev->cdm_deferred_mask =
+      debug_get_num_option("HK_CDM_DEFERRED_MASK", 0) & 0x07ffffff;
+   dev->cdm_inline_defer =
+      dev->cdm_defer_flush &&
+      debug_get_bool_option("HK_CDM_INLINE_DEFER", false);
+
    /* Bounded poll before blocking syncobj waits (see vk_device.sync_wait_poll_us).
     * Off by default; pays CPU to skip wake-up latency on short submit->signal
     * round trips. */

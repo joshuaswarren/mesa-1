@@ -101,6 +101,16 @@ struct hk_device {
    /* HK_CDM_BARRIER_MASK=<hex>: perftest-only override of the per-launch
     * CDM_BARRIER flag word (bits 0..26). 0 = unset. */
    uint32_t cdm_barrier_mask;
+   /* HK_CDM_DEFERRED_MASK=<hex>: perftest-only override of the deferred-batch
+    * CDM_BARRIER flag word (hk_cs_finish_pending_flush and the inline-defer
+    * edge below). Applied wherever agx_cdm_barrier_deferred would emit.
+    * 0 = unset. */
+   uint32_t cdm_deferred_mask;
+   /* HK_CDM_INLINE_DEFER=1: emit the deferred CDM_BARRIER word inline before
+    * the dependent launch instead of ending the compute batch (drops the
+    * per-edge CS split + stream link). Only meaningful with
+    * HK_CDM_DEFER_FLUSH=1; digest parity unproven (experiment). */
+   bool cdm_inline_defer;
    /* HK_CDM_DEFER_FLUSH (hk_device.c): emit the CDM barrier at the end of
     * each compute batch, not after vkCmdPipelineBarrier2. */
    bool cdm_defer_flush;

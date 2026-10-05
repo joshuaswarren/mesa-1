@@ -349,10 +349,13 @@ hk_CmdPipelineBarrier2(VkCommandBuffer commandBuffer,
 
    perf_debug(cmd, "Pipeline barrier");
 
-   if (!HK_PERF(dev, ALWAYSCDMBARRIER) && !dev->cdm_defer_flush) {
+   if (!HK_PERF(dev, ALWAYSCDMBARRIER) &&
+       (dev->cdm_inline_defer || !dev->cdm_defer_flush)) {
       /* The app declared a memory dependency: the next CDM launch carries the
-       * full barrier set (hk_cmd_dispatch.c). Compute launches before the
-       * barrier were already flushed by the previous launch's gating.
+       * barrier word — the full designed set inline in tracked mode, the
+       * deferred set inline in inline-defer mode (hk_cmd_dispatch.c) — and
+       * the compute batch stays open. Compute launches before the barrier
+       * were already flushed by the previous launch's gating.
        */
       cmd->state.cs.cdm_barrier_pending = true;
 
