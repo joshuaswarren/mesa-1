@@ -1735,7 +1735,8 @@ d12_pipeline_state_create_compute(struct d12_device *device,
 static nir_shader *
 dxil_to_nir_stage(const struct d12_binding_map *map,
                   uint32_t descriptor_generation, const void *dxil,
-                  size_t dxil_size, mesa_shader_stage stage)
+                  size_t dxil_size, mesa_shader_stage stage,
+                  uint8_t *texture_shapes)
 {
    struct d12_binding_map filtered_map;
    if (map) {
@@ -1784,6 +1785,17 @@ dxil_to_nir_stage(const struct d12_binding_map *map,
    if (!d12_dxil_module_parse(mod, bc, bc_size)) {
       mesa_loge("graphics PSO: DXIL parse failed: %s",
                 mod->error ? mod->error : "unknown");
+      d12_dxil_module_free(mod);
+      return NULL;
+   }
+
+   /* The draw path packs texture descriptors with the dimension the shader
+    * declared for that slot (2D vs array vs cube). Collect it for every
+    * stage into the PSO's table; the stages must agree on a shared slot. */
+   if (texture_shapes &&
+       !d12_dxil_collect_texture_shapes(mod, map, texture_shapes)) {
+      mesa_loge("graphics PSO: %s declares a conflicting texture shape for "
+                "a root slot", _mesa_shader_stage_to_string(stage));
       d12_dxil_module_free(mod);
       return NULL;
    }
@@ -2417,7 +2429,8 @@ compile_gfx_stage(struct d12_device *device,
                   struct agx_fs_epilog_link_info *fs_epilog_link,
                   struct d12_flat_transport *flat_transport,
                   uint8_t *cull_distance_size,
-                  struct agx_shader_part *out, bool *root_only, bool *writes_memory)
+                  struct agx_shader_part *out, bool *root_only, bool *writes_memory,
+                  uint8_t *texture_shapes)
 {
    const uint32_t descriptor_generation =
       (uint32_t)agx_chip_descriptor_generation(device->dev.chip);
@@ -2439,7 +2452,7 @@ compile_gfx_stage(struct d12_device *device,
       nir = b.shader;
    } else {
       nir = dxil_to_nir_stage(map, descriptor_generation, dxil, dxil_size,
-                              stage);
+                              stage, texture_shapes);
    }
    if (!nir)
       return false;
@@ -3114,7 +3127,7 @@ compile_gs_stage(struct d12_device *device, const struct d12_binding_map *map,
    nir_shader *nir =
       dxil_to_nir_stage(
          map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-         dxil, dxil_size, MESA_SHADER_GEOMETRY);
+         dxil, dxil_size, MESA_SHADER_GEOMETRY, NULL);
    if (!nir)
       return false;
 
@@ -3190,7 +3203,7 @@ compile_tcs_stage(struct d12_device *device, const struct d12_binding_map *map,
    nir_shader *nir =
       dxil_to_nir_stage(
          map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-         dxil, dxil_size, MESA_SHADER_TESS_CTRL);
+         dxil, dxil_size, MESA_SHADER_TESS_CTRL, NULL);
    if (!nir)
       return false;
 
@@ -3237,7 +3250,7 @@ compile_tes_stage(struct d12_device *device, const struct d12_binding_map *map,
    nir_shader *nir =
       dxil_to_nir_stage(
          map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-         dxil, dxil_size, MESA_SHADER_TESS_EVAL);
+         dxil, dxil_size, MESA_SHADER_TESS_EVAL, NULL);
    if (!nir)
       return false;
 
@@ -3272,7 +3285,7 @@ compile_sw_tes_stage(struct d12_device *device,
    nir_shader *nir =
       dxil_to_nir_stage(
          map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-         dxil, dxil_size, MESA_SHADER_TESS_EVAL);
+         dxil, dxil_size, MESA_SHADER_TESS_EVAL, NULL);
    if (!nir)
       return false;
 
@@ -3315,7 +3328,7 @@ compile_sw_vs_stage(struct d12_device *device,
    nir_shader *nir =
       dxil_to_nir_stage(
          map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-         dxil, dxil_size, MESA_SHADER_VERTEX);
+         dxil, dxil_size, MESA_SHADER_VERTEX, NULL);
    if (!nir)
       return false;
 
@@ -3747,7 +3760,7 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    struct agx_shader_part ms_part;
    nir_shader *ms = dxil_to_nir_stage(
       map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-      ms_dxil, ms_size, MESA_SHADER_COMPUTE);
+      ms_dxil, ms_size, MESA_SHADER_COMPUTE, NULL);
    if (!ms) {
       ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
       *out = NULL;
@@ -3873,7 +3886,7 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
       nir_shader *as =
          dxil_to_nir_stage(
             map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-            as_dxil, as_size, MESA_SHADER_COMPUTE);
+            as_dxil, as_size, MESA_SHADER_COMPUTE, NULL);
       if (!as) {
          ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
          *out = NULL;
@@ -4280,7 +4293,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    if (!compile_gfx_stage(device, map, vs_dxil, vs_size, MESA_SHADER_VERTEX,
                           &tib, 0xffff, 0, &pso->uvs, &fetch, NULL, NULL, NULL,
                           NULL, &cull_distance_size, &vs_part, &pso->vs.g17p_root_only,
-                          &pso->vs.g17p_writes_memory)) {
+                          &pso->vs.g17p_writes_memory,
+                          pso->texture_shapes)) {
       free(pso);
       return E_INVALIDARG;
    }
@@ -4307,7 +4321,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                           &use_fs_epilog, &fs_epilog_link,
                           allow_flat_geometry ? &flat_transport : NULL,
                           &cull_distance_size, &fs_part, &pso->fs.g17p_root_only,
-                          &pso->fs.g17p_writes_memory)) {
+                          &pso->fs.g17p_writes_memory,
+                          pso->texture_shapes)) {
       free(vs_part.binary);
       free(pso);
       return E_INVALIDARG;
