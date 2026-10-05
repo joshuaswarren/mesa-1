@@ -11318,9 +11318,17 @@ TEST_F(AGX3PackBinary, G17PCoalescesAdjacentPreambleUniformHalvesBeforeRA)
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->is_preamble = true;
    b->shader->allocated_vec = _mesa_hash_table_u64_create(b->shader);
-   agx_uniform_store(b, agx_register(4, AGX_SIZE_16), agx_immediate(32), 1);
-   agx_uniform_store(b, agx_register(6, AGX_SIZE_16), agx_immediate(33), 1);
-   agx_uniform_store(b, agx_register(8, AGX_SIZE_16), agx_immediate(34), 1);
+   /* Before RA, exports use SSA values that remain safe to delay. Reserve
+    * these IDs so the existing collect-source assertions stay exact. */
+   agx_index halves[3] = {agx_get_index(4, AGX_SIZE_16),
+                          agx_get_index(6, AGX_SIZE_16),
+                          agx_get_index(8, AGX_SIZE_16)};
+   b->shader->alloc = 9;
+   for (unsigned h = 0; h < 3; ++h)
+      agx_preload_to(b, halves[h], agx_register(4 + 2 * h, AGX_SIZE_16));
+   agx_uniform_store(b, halves[0], agx_immediate(32), 1);
+   agx_uniform_store(b, halves[1], agx_immediate(33), 1);
+   agx_uniform_store(b, halves[2], agx_immediate(34), 1);
    agx_stop(b);
 
    ASSERT_TRUE(agx3_coalesce_uniform_half_stores(b->shader));
@@ -11351,10 +11359,36 @@ TEST_F(AGX3PackBinary, G17PDoesNotCoalesceOddUniformPair)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
    b->shader->is_preamble = true;
-   agx_uniform_store(b, agx_register(4, AGX_SIZE_16), agx_immediate(33), 1);
-   agx_uniform_store(b, agx_register(6, AGX_SIZE_16), agx_immediate(34), 1);
+   agx_index low = agx_temp(b->shader, AGX_SIZE_16);
+   agx_index high = agx_temp(b->shader, AGX_SIZE_16);
+   agx_preload_to(b, low, agx_register(4, AGX_SIZE_16));
+   agx_preload_to(b, high, agx_register(6, AGX_SIZE_16));
+   agx_uniform_store(b, low, agx_immediate(33), 1);
+   agx_uniform_store(b, high, agx_immediate(34), 1);
    agx_stop(b);
    EXPECT_FALSE(agx3_coalesce_uniform_half_stores(b->shader));
+}
+
+TEST_F(AGX3PackBinary, G17PDoesNotCoalescePhysicalRegisterHalfStores)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->is_preamble = true;
+   agx_uniform_store(b, agx_register(4, AGX_SIZE_16), agx_immediate(32), 1);
+   agx_uniform_store(b, agx_register(6, AGX_SIZE_16), agx_immediate(33), 1);
+   agx_stop(b);
+
+   EXPECT_FALSE(agx3_coalesce_uniform_half_stores(b->shader));
+   unsigned stores = 0;
+   agx_foreach_instr_global(b->shader, I) {
+      EXPECT_NE(I->op, AGX_OPCODE_COLLECT);
+      if (I->op == AGX_OPCODE_UNIFORM_STORE) {
+         EXPECT_EQ(I->src[0].type, AGX_INDEX_REGISTER);
+         EXPECT_EQ(I->src[0].value, 4u + 2u * stores);
+         EXPECT_EQ(I->src[1].value, 32u + stores);
+         ++stores;
+      }
+   }
+   EXPECT_EQ(stores, 2u);
 }
 
 TEST_F(AGX3PackBinary, ByteAddressLoweringKeepsFullU32Offset)
