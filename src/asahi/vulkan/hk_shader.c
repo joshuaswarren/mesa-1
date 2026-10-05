@@ -2733,7 +2733,13 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
     * transform-feedback layout before any such replacement or stage lowering,
     * and use the shader-owned copy for the remaining compile decisions. */
    if (xfb_info) {
-      assert(xfb_info->output_count < ARRAY_SIZE(shader->info.xfb_outputs));
+      if (xfb_info->output_count > ARRAY_SIZE(shader->info.xfb_outputs)) {
+         ralloc_free(nir);
+         return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                          "%u transform feedback outputs exceed %zu",
+                          xfb_info->output_count,
+                          ARRAY_SIZE(shader->info.xfb_outputs));
+      }
       memcpy(&shader->info.xfb_info, xfb_info,
              nir_xfb_info_size(xfb_info->output_count));
       typed_memcpy(shader->info.xfb_stride, nir->info.xfb_stride, 4);

@@ -147,9 +147,14 @@ struct hk_shader_info {
 
    /* XXX: is there a less goofy way to do this? I really don't want dynamic
     * allocation here.
+    *
+    * nir_gather_xfb_info() emits at most one output per component of a
+    * captured slot, and vertex-pipeline outputs occupy the slots below
+    * VARYING_SLOT_VAR31 + 1. Sixty-four entries overflowed into the next
+    * variant (a CTS vertex shader captures 94 outputs).
     */
    nir_xfb_info xfb_info;
-   nir_xfb_output_info xfb_outputs[64];
+   nir_xfb_output_info xfb_outputs[4 * (VARYING_SLOT_VAR31 + 1)];
 };
 
 /*
