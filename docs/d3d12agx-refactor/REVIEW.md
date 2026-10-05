@@ -284,3 +284,68 @@ Not executed from the plan (next in order): S8 queue wakeups/timeline deps (B11)
 descriptor registry (B9), the chip-ops split (S9/D1), the per-PSO NIR/binary frees and
 prolog/epilog/fast-link caches (A9/B10 rest), the "to end of heap" texture repack (B1
 core, not exercised by the microbenchmark), and the correctness items A3-A6, A10-A14.
+
+## 8. Second pass (2026-10-06): rebase, bindless ranges, agents' lanes
+
+The series was rebased onto the t-1099 integration head `87c78f894a1` (a212 + four hk
+commits + t-1081 + t-1087's G17P Texture.Load admission). The Neo was never compiled on
+again: Neo packages come from a Fedora 45 podman image on the M1 Pro (`aurora-f45-mesa`,
+`scratch/t-1082/f45-build.sh`) and run under the Phase 2 kit environment
+(`AURORA_D3D12_PHYSICAL_BASELINE=1 AURORA_D3D12_PHYSICAL_D32=1`, shim variables unset).
+The previous attempt's "6/17 on the Neo" was that environment missing, not a regression:
+the same build is 8/17 (= a212) under the kit environment (h-6158), and the rebased series
+is 9/17 (= t-1099) before and after every commit below.
+
+### Commits (on top of `1d2ee857bd4`, the rebased S0-S10)
+
+| sha | lane | change |
+|---|---|---|
+| 10a737f9062 | bench | `dispatch_texture` (texture table at the start of a 65536-slot heap) and `dispatch_miss` (eight tables, every dispatch misses the 4-way cache) modes |
+| d85918323fe | B1 core | dynamically indexed texture ranges address the heap's native mirrors through a heap index in the range's first resource slot; no per-command copy to the end of the heap, no per-slot submit fixups |
+| bd19552e5be | B1 | every binding-upload pass and cache snapshot bounded by the root signature's resource_count instead of all 256 slots |
+| 7bb38b08b45 | B14/G17P | retired native VDM slabs pooled on the device, alias kept bound (hk's pooled command BOs) |
+| f896dc14cf4 | D8 | README records the measured suite status |
+| 0fa2c1a68a2 .. 4cd90d34538 | B9 (agent) | sorted range table + seqlock for heap lookup; one refresh per view; incremental sampler dedup; per-range copies; null natives packed once per heap; one-walk CBV sparse resolve |
+| e2c37723815 .. d242ca01ec5 | B10/A9 (agent) | every NIR and sub-part binary freed; device prolog/epilog cache (hk_get_prolog_epilog model); compiled-stage + fast-link cache keyed on bytecode hash + binding map + stage keys; pipeline library locked, indexed, graphics GetCachedBlob |
+| 0902159130b .. a63e8981e40 | A3/A4/A5/A10/A11/A12 (agent) | DXIL parser tables grow (uber-shaders parse); one atomic PSO lifetime (library race); pre-graphics slot reserved at render begin (no stale segment pointer); ExecuteIndirect count proven GPU-side (test only, it already was); stream-space checks sized from the emission; bundles replay every recorded command |
+
+New live/unit tests: `dxil_limits` (meson), `pso_library_race`, `pso_threads`,
+`execute_indirect_count`, `bundle_state`; the microbench gained sampler-heap, texture-table
+and binding-miss sections.
+
+### Measured (debugoptimized; medians of 3 unless stated)
+
+| metric | M1 Pro before (1d2ee) | M1 Pro after (a63e8) | M2 after | Neo before (87c78) | Neo after (7bb38) |
+|---|---|---|---|---|---|
+| record plain draw | 89 ns | 93 ns | 84 | 960 ns | 223 ns |
+| record draw + root constant | 665 ns | 248 ns | 229 | 12 308 ns | 883 ns |
+| record draw + viewport | 105 ns | 108 ns | 100 | 1 032 ns | 252 ns |
+| record draw + PSO toggle | 140 ns | 142 ns | 114 | 3 971 ns | 274 ns |
+| record dispatch / table hit / table miss | 65 / 112 / 2 522 ns | 67 / 114 / 403 ns | 62 / 107 / 397 | 1 385 / 2 868 / - | 715 / 727 / 1 292 ns |
+| dispatch_texture, 65536-slot heap (record / Execute call) | 26 909 ns / 3 380 us | 137 ns / 14 us | 111 ns / 8 us | - | - |
+| CBV write staging / visible | 50 / 73 ns | 8 / 16 ns | 40 / 64 (pre-B9) | 11 / 139 ns | 11 / 126 ns |
+| CopyDescriptorsSimple bulk / single | 29 / 31 ns | 7 / 15 ns | | 66 / 75 ns | 61 / 65 ns |
+| CreateSampler into a 2048-slot visible heap | 176 us | 28 ns | | | |
+| graphics PSO create, median (repeat) | 0.54 ms | 0.01 ms | | 1.54 ms | 0.53-0.71 ms |
+| compute PSO create, median (repeat) | 1.9 ms | 0.00 ms | | 1.95 ms | 1.70 ms |
+| ExecuteCommandLists 20k draws / 20k dispatches | 5 / 12 us | 9 / 13 us | 3 / 3 | 86 / 5 850 us | 49 / 5 us |
+| Reset after submit | 9 us | 11 us | 7 | 740 us | 180 us |
+| one-draw round trip median | 200 us | 228 us (loaded host) | 170 | 258 us | 251 us |
+
+PSO leak check (valgrind, 64+64 creations): 1.27 MB definitely + 46 MB indirectly lost
+before, nothing after. Frozen 17 suites: M1 Pro 11/17 and M2 11/17 after every commit;
+Neo 9/17 at 87c78, 1d2ee and 7bb38 (a63e8 pending). The Neo's remaining Reset cost
+(180 us) is not the slab churn; it needs a profile on the Neo.
+
+### What remains (ranked)
+
+1. B11 queue/fence latency (agent lane, in review at the time of writing: plain locks and
+   condvar waits, inline submit when idle, direct timeline waits; a hang in its live test
+   must be fixed first).
+2. Static texture handles through the heap mirrors too, removing the per-command texture
+   and PBE tables entirely (needs the G17P txf prefix publisher to follow).
+3. Neo per-draw cost (223 ns vs 93 on G13) and Reset (180 us): profile on the Neo.
+4. Disk cache for compiled stages and pipeline libraries; caching of the GS/tess/mesh
+   sub-programs.
+5. D1/D3 chip-ops split, D2 wrapper deletion, D6 `#ifdef _WIN32` of the KMT code, A6
+   retained descriptor heaps across Close/Execute, D7 per-chip capability table.
