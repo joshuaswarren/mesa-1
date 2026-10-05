@@ -4226,10 +4226,15 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       /* The modified add form needs a 32-bit destination, so a half add of
        * -x or |x| -- mediump subtraction, e.g. range reduction in trig --
        * has no encoding either. */
+      /* Leave an immediate beside the modifier alone: #1.0 - x has its own
+       * witnessed half form (agx3_alu_hadd_one_neg) and a plain x + #imm
+       * does not. */
       const bool half_add =
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          I->op == AGX_OPCODE_FADD && I->nr_srcs == 2 && !I->saturate &&
-         I->dest[0].size == AGX_SIZE_16;
+         I->dest[0].size == AGX_SIZE_16 &&
+         I->src[0].type != AGX_INDEX_IMMEDIATE &&
+         I->src[1].type != AGX_INDEX_IMMEDIATE;
 
       if (half_fsel || half_round || half_add) {
          const unsigned source_count = half_fsel ? 4 : half_add ? 2 : 1;
