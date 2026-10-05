@@ -43,6 +43,7 @@
  * nir_variables that later passes promote.
  */
 
+#include "d12_debug.h"
 #include "d12_dxil.h"
 #include "../d12_native_descriptor_core.h"
 
@@ -3898,7 +3899,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             nir_def *offset = uav ? uav_texture_offset(ctx, res)
                                   : srv_texture_offset(ctx, res);
             if (!offset) {
-               if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+               if (d12_debug()->validate_bindings) {
                   const struct d12_dxbc_binding_range *range =
                      uav ? &ctx->uav_range[reg] : &ctx->srv_range[reg];
                   mesa_logi("DXBC RESINFO operand: uav=%u reg=%u "
@@ -5162,7 +5163,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          if (!rooted_texture) {
             texture_slot = srv_binding_slot(ctx, tex_operand);
             if (!texture_slot) {
-               if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+               if (d12_debug()->validate_bindings) {
                   mesa_logi("DXBC texture operand: reg=%u indices=%u "
                             "idx0=%u idx1=%u rel0=%u rel1=%u "
                             "range-valid=%u lower=%u upper=%u space=%u",
@@ -5531,7 +5532,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
           * from translating is the only thing that predicts what a fix
           * is worth -- the score moves when a shader completes, not when
           * an opcode is added. */
-         if (getenv("D3D12AGX_DXBC_SURVEY")) {
+         if (d12_debug()->dxbc_survey) {
             fprintf(stderr, "dxbc-missing: %u operands:", opcode);
             for (unsigned k = 0; k < nops; k++)
                fprintf(stderr, " file%u/idx%u", o[k].file, o[k].index[0]);

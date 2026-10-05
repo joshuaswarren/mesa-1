@@ -18,6 +18,7 @@
 
 #define MESA_LOG_TAG "d3d12agx"
 
+#include "d12_debug.h"
 #include "d12_dxil.h"
 #include "../d12_native_descriptor_core.h"
 #include "poly/nir/poly_nir.h"
@@ -691,7 +692,7 @@ resolve_binding_slot(struct trans_ctx *ctx, unsigned klass,
          return false;
       }
 
-      if (getenv("D3D12AGX_DEBUG_BINDINGS")) {
+      if (d12_debug()->debug_bindings) {
          fprintf(stderr,
                  "binding: class %u rangeId %u index %u -> register %u "
                  "space %u, slot %u (declared %u..%u, stride %uB)\n",
@@ -2104,7 +2105,7 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
 {
    nir_builder *b = ctx->b;
 
-   if (getenv("D3D12AGX_DUMP_INSTS")) {
+   if (d12_debug()->dump_insts) {
       fprintf(stderr, "  dxop %llu (%s)\n", (unsigned long long)opcode,
               callee ? callee : "?");
    }
@@ -4071,7 +4072,7 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
        * turn that SSA undef into a real (and potentially huge) hardware LOD;
        * UAVs have no mip selection at the use site. */
       nir_def *lod = operand_is_undef(ctx, p[1]) ? NULL : get_def(ctx, p[1]);
-      if (getenv("D3D12AGX_DUMP_TEX")) {
+      if (d12_debug()->dump_tex) {
          fprintf(stderr, "textureLoad: num_ops=%u lod=%s\n",
                  inst->num_ops, lod ? "yes" : "no");
       }
@@ -4848,7 +4849,7 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
             ctx->handle_heap[inst->result_value] = 3;
       }
 
-      if (getenv("D3D12AGX_DEBUG_BINDINGS")) {
+      if (d12_debug()->debug_bindings) {
          fprintf(stderr,
                  "binding: fromBinding class %u range %u..%u space %u, "
                  "base slot %u%s\n",
@@ -5150,7 +5151,7 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
          return true;
       }
 
-      if (getenv("D3D12AGX_DUMP_INSTS")) {
+      if (d12_debug()->dump_insts) {
          fprintf(stderr, "  op %llu operands:", (unsigned long long)opcode);
          for (unsigned i = 0; i < np; i++) {
             uint64_t c;
@@ -5797,7 +5798,7 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
    for (unsigned i = 0; i < entry->num_insts && !ctx.error; i++) {
       const struct d12_inst *inst = &entry->insts[i];
 
-      if (getenv("D3D12AGX_DUMP_INSTS")) {
+      if (d12_debug()->dump_insts) {
          fprintf(stderr, "inst %u: code %u result %d block %u ops", i,
                  inst->code, (int)inst->result_value, inst->block);
          for (unsigned o = 0; o < inst->num_ops; o++)

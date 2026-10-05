@@ -7,6 +7,7 @@
  * SPIR-V, no dxc, no external compiler is involved at run time.
  */
 
+#include "d12_debug.h"
 #include "d12_dxil.h"
 #include "../d12_native_descriptor_core.h"
 
@@ -154,7 +155,7 @@ main(int argc, char **argv)
             return 1;
          }
          printf("DXBC->NIR OK\n");
-         if (getenv("D3D12AGX_PRINT_NIR"))
+         if (d12_debug()->print_nir)
             nir_print_shader(dn, stdout);
          return 0;
       }

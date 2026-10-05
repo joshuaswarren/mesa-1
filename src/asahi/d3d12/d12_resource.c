@@ -1264,7 +1264,7 @@ d12_sparse_apply_updates(struct d12_resource *res,
          ops[count++] = op;
       }
 
-      if (getenv("D3D12AGX_DUMP_SPARSE")) {
+      if (d12_debug()->dump_sparse) {
          mesa_logi("sparse tile %u pages=%u bo=%u heap=0x%llx "
                    "va=0x%llx..0x%llx",
                    update->tile, pages,

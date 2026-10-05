@@ -35,7 +35,7 @@
 static void
 d12_report_scratch(const char *what, const struct agx_shader_info *info)
 {
-   if (getenv("D3D12AGX_DUMP_SCRATCH") &&
+   if (d12_debug()->dump_scratch &&
        (info->scratch_size || info->preamble_scratch_size))
       mesa_logi("%s uses scratch (%u dwords main, %u dwords preamble)", what,
                 info->scratch_size, info->preamble_scratch_size);
@@ -1608,7 +1608,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
       MAX2(part.info.sampler_state_count, runtime_samplers);
    d12_report_scratch("shader", &part.info);
 
-   if (getenv("D3D12AGX_DUMP_TEX") && part.binary) {
+   if (d12_debug()->dump_tex && part.binary) {
       fprintf(stderr,
               "driver cs: has_preamble=%d preamble_off=0x%x main_off=0x%x "
               "push_count=%u nr_preamble_gprs=%u rodata.size_16=%u\n",
@@ -1696,7 +1696,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
              part.info.workgroup_size[1], part.info.workgroup_size[2],
              part.info.push_count, part.info.has_preamble);
 
-   if (getenv("D3D12AGX_DUMP_SHADERS")) {
+   if (d12_debug()->dump_shaders) {
       if (part.info.has_preamble) {
          fprintf(stderr, "; preamble +0x%x\n", part.info.preamble_offset);
          d12_disassemble_shader(
@@ -2688,7 +2688,7 @@ compile_gfx_stage(struct d12_device *device,
       MAX2(out->info.sampler_state_count, runtime_samplers);
    d12_report_scratch("shader", &out->info);
 
-   if (getenv("D3D12AGX_DUMP_SHADERS") && out->binary) {
+   if (d12_debug()->dump_shaders && out->binary) {
       fprintf(stderr, "; --- %s stage, push_count %u, preamble %d ---\n",
               _mesa_shader_stage_to_string(stage), out->info.push_count,
               out->info.has_preamble);
@@ -2756,7 +2756,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
    agx_compile_shader_nir(nir, &key, out);
    d12_report_scratch("shader", &out->info);
 
-   if (getenv("D3D12AGX_DUMP_SHADERS") && out->binary) {
+   if (d12_debug()->dump_shaders && out->binary) {
       fprintf(stderr, "; --- poly %s%s, push_count %u ---\n",
               nir->info.name ? nir->info.name : "program",
               uvs ? " (raster)" : "", out->info.push_count);
@@ -5036,7 +5036,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
              fs_part.info.binary_size, fs_part.info.nr_gprs, pso->uvs.size,
              pso->fs.linked.cf.nr_bindings);
 
-   if (getenv("D3D12AGX_DUMP_SHADERS")) {
+   if (d12_debug()->dump_shaders) {
       fprintf(stderr, "; VS main +0x%x\n", vs_part.info.main_offset);
       d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)vs_part.binary +
                           vs_part.info.main_offset,

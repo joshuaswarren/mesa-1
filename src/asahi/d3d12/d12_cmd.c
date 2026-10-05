@@ -84,8 +84,7 @@ d12_g17p_baseline_graphics_enabled(const struct agx_device *dev)
    /* Explicit sacrificial baseline opt-in; the controller must additionally
     * verify the matched kernel boot. The capability excludes the old KMD.
     * Every existing narrow producer/resource/draw guard remains mandatory. */
-   const char *physical = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
-   return physical && !strcmp(physical, "1") && dev->chip == AGX_CHIP_G17P &&
+   return d12_debug()->physical_baseline && dev->chip == AGX_CHIP_G17P &&
           (dev->params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) &&
           dev->g17p_render_context_bo;
 #else
@@ -99,8 +98,7 @@ d12_g17p_depth_enabled(const struct agx_device *dev)
 {
    if (!dev) return false;
 #ifndef _WIN32
-   const char *enable = getenv("AURORA_D3D12_SHIM_DEPTH_METADATA");
-   if (enable && !strcmp(enable, "1") && dev->chip == AGX_CHIP_G17P &&
+   if (d12_debug()->shim_depth_metadata && dev->chip == AGX_CHIP_G17P &&
        dev->g17p_render_context_bo &&
        asahi_noop_d3d12_graphics_qualification_allowed &&
        asahi_noop_d3d12_graphics_qualification_allowed(dev->fd))
@@ -109,10 +107,7 @@ d12_g17p_depth_enabled(const struct agx_device *dev)
     * exact matched kernel image/boot before setting both flags. A flag alone
     * cannot admit an arbitrary fd: require an actual Asahi render node and
     * the native context plus kernel capability on this initialized device. */
-   const char *physical = getenv("AURORA_D3D12_PHYSICAL_D32");
-   const char *baseline = getenv("AURORA_D3D12_PHYSICAL_BASELINE");
-   return physical && !strcmp(physical, "1") &&
-          baseline && !strcmp(baseline, "1") &&
+   return d12_debug()->physical_d32 && d12_debug()->physical_baseline &&
           dev->chip == AGX_CHIP_G17P && dev->g17p_render_context_bo &&
           (dev->params.features & DRM_ASAHI_FEATURE_EXACT_PRIOR_BARRIERS) &&
           d12_platform_is_real_asahi_render_fd(dev->fd);
@@ -378,7 +373,7 @@ d12_segment_reserve_scratch(struct d12_cmd_list *list,
    *segment_preamble |= info->preamble_scratch_size > 0;
    simple_mtx_unlock(&device->scratch_lock);
 
-   if (getenv("D3D12AGX_DUMP_SCRATCH"))
+   if (d12_debug()->dump_scratch)
       mesa_logi("scratch stage=%u size=%u preamble=%u bo=0x%llx (%zu B)",
                 stage, info->scratch_size, info->preamble_scratch_size,
                 (unsigned long long)(*segment_bo)->va->addr,
@@ -1781,7 +1776,7 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
 
       agx_usc_words_precomp((uint32_t *)usc_cpu, &prog->b, data_gpu, args_size);
 
-      if (getenv("D3D12AGX_DUMP_USC")) {
+      if (d12_debug()->dump_usc) {
          fprintf(stderr, "precomp USC @%u:", usc);
          for (unsigned i = 0; i < 32; i++)
             fprintf(stderr, " %02x", usc_cpu[i]);
@@ -1839,7 +1834,7 @@ d12_list_apply_predication(struct d12_cmd_list *list, uint64_t input,
 
    d12_list_dispatch_precomp_to(list, LIBAGX_D3D12_PREDICATE, &args,
                                 sizeof(args), agx_1d(1), pre_gfx);
-   if (getenv("D3D12AGX_DUMP_PREDICATION"))
+   if (d12_debug()->dump_predication)
       mesa_logi("predication patch: snapshot=0x%llx input=0x%llx "
                 "output=0x%llx words=%u skip_if_nonzero=%u pregfx=%u",
                 (unsigned long long)args.predicate,
@@ -2398,7 +2393,7 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
          if (!desc_ptr)
             return 0;
 
-         if (getenv("D3D12AGX_VALIDATE_MRT"))
+         if (d12_debug()->validate_mrt)
             mesa_logi("MRT validate: BG_LOAD RT%u texture_slot=%u "
                       "desc=0x%llx",
                       rt_index, rt_index * 2,
@@ -2508,7 +2503,7 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
          if (!desc_ptr)
             return 0;
 
-         if (getenv("D3D12AGX_VALIDATE_MRT"))
+         if (d12_debug()->validate_mrt)
             mesa_logi("MRT validate: EOT_STORE RT%u pbe_slot=%u desc=0x%llx",
                       rt_index, rt_index,
                       (unsigned long long)desc_ptr);
@@ -2564,7 +2559,7 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
          agx_translate_sampler_state_count(uses_txf ? 1 : 0, false);
    }
 
-   if (getenv("D3D12AGX_VALIDATE_MRT"))
+   if (d12_debug()->validate_mrt)
       mesa_logi("MRT validate: bg/eot ops ready nr_tex=%u uniforms=%u "
                 "uses_txf=%u",
                 nr_tex, uniforms, uses_txf);
@@ -2765,7 +2760,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
       seg->rt_view_format[i] = view_pf;
       seg->rt_level[i] = (uint8_t)rtv->texture_level;
 
-      if (getenv("D3D12AGX_VALIDATE_MRT")) {
+      if (d12_debug()->validate_mrt) {
          const uint64_t bo_start = rtv->resource->reserved
                                       ? rtv->resource->addr
                                       : rtv->resource->bo->va->addr;
@@ -2973,7 +2968,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
          seg->tib = pso->tib;
       }
 
-      if (getenv("D3D12AGX_VALIDATE_MRT")) {
+      if (d12_debug()->validate_mrt) {
          for (unsigned i = 0; i < rtv_count; i++) {
             if (seg->rt[i] &&
                 seg->tib.logical_format[i] != seg->rt_view_format[i]) {
@@ -3946,7 +3941,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       }
    }
 
-   bool validate = getenv("D3D12AGX_VALIDATE_BINDINGS") != NULL;
+   bool validate = d12_debug()->validate_bindings;
    const enum agx_descriptor_generation descriptor_generation =
       agx_chip_descriptor_generation(list->device->dev.chip);
    struct d12_native_descriptor_layout native_layout;
@@ -4534,7 +4529,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
          }
       }
 
-      if (validate || getenv("D3D12AGX_DUMP_TEX")) {
+      if (validate || d12_debug()->dump_tex) {
          mesa_logi("dynamic texture range=%u root-slot=%u shape=%u "
                    "heap=%u+%u native=%u+%u bytes=0x%x valid=1",
                    dynamic_ranges[r].root_range, dynamic_ranges[r].base_slot,
@@ -4605,7 +4600,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
          return false;
       }
 
-      if (getenv("D3D12AGX_DUMP_TEX")) {
+      if (d12_debug()->dump_tex) {
          const uint8_t *raw =
             pbes + (size_t)i * native_layout.pbe_stride_B;
          fprintf(stderr, "pbe[%u]:", i);
@@ -4631,7 +4626,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       }
    }
 
-   if (getenv("D3D12AGX_DUMP_TEX")) {
+   if (d12_debug()->dump_tex) {
       for (unsigned i = 0; i < last_texture; i++) {
          struct d12_resource *res =
             (table[i].kind == D12_DESC_SRV ||
@@ -4758,7 +4753,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
                 (unsigned long long)*out_pbes, last_texture);
    }
 
-   if (getenv("D3D12AGX_DUMP_TEX") && *out_textures) {
+   if (d12_debug()->dump_tex && *out_textures) {
       uint64_t home = *(uint64_t *)d12_list_data_cpu(list, *out_textures);
       fprintf(stderr,
               "chain: textures_gpu=0x%llx -> home holds 0x%llx "
@@ -5487,7 +5482,7 @@ d12_set_null_texture_descriptor(struct d12_device *device, void *out)
 bool
 d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
 {
-   bool validate = getenv("D3D12AGX_VALIDATE_BINDINGS") != NULL;
+   bool validate = d12_debug()->validate_bindings;
    struct d12_native_descriptor_layout native_layout;
    if (!list ||
        !d12_native_descriptor_layout(
@@ -5571,7 +5566,7 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
             return false;
       }
 
-      if (getenv("D3D12AGX_DUMP_DESCRIPTOR_FIXUPS"))
+      if (d12_debug()->dump_descriptor_fixups)
          mesa_logi("descriptor refresh: slot=%u source=%p kind=%u "
                    "address=0x%llx tables=0x%llx textures=0x%llx "
                    "pbes=0x%llx valid=1",
@@ -5610,7 +5605,7 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
       uint8_t *dst = d12_list_data_cpu(list, fixup->destination_gpu);
       memcpy(dst, src, fixup->size_B);
 
-      if (getenv("D3D12AGX_DUMP_INDIRECT"))
+      if (d12_debug()->dump_indirect)
          mesa_logi("indirect constants: source=%p+0x%llx destination=0x%llx "
                    "size=%u valid=1", (void *)source,
                    (unsigned long long)fixup->source_offset_B,
@@ -5664,7 +5659,7 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
          memset(dst, 0, fixup->size_B);
       }
 
-      if (getenv("D3D12AGX_DUMP_INDIRECT"))
+      if (d12_debug()->dump_indirect)
          mesa_logi("indirect args: source=%p+0x%llx count=%u index=%u "
                    "destination=0x%llx size=%u valid=1", (void *)source,
                    (unsigned long long)fixup->source_offset_B, command_count,
@@ -5923,7 +5918,7 @@ d12_list_upload_custom_borders(struct d12_cmd_list *list,
                                D3D12_SHADER_VISIBILITY visibility,
                                uint64_t *out_gpu)
 {
-   bool validate = getenv("D3D12AGX_VALIDATE_BINDINGS") != NULL;
+   bool validate = d12_debug()->validate_bindings;
    unsigned count = info->uses_txf ? MAX2(info->sampler_state_count, 1)
                                    : info->sampler_state_count;
    *out_gpu = 0;
@@ -6015,7 +6010,7 @@ d12_list_upload_custom_borders(struct d12_cmd_list *list,
       return false;
    }
 
-   if (getenv("D3D12AGX_DUMP_SAMPLERS")) {
+   if (d12_debug()->dump_samplers) {
       mesa_logi("custom borders: stage=%u compute=%u entries=%u "
                 "table=0x%llx home=0x%llx stream=0x%llx..0x%llx "
                 "valid=%u/%u",
@@ -6051,11 +6046,11 @@ d12_list_push_samplers(struct d12_cmd_list *list,
                        bool compute_bindings,
                        D3D12_SHADER_VISIBILITY visibility)
 {
-   bool validate = getenv("D3D12AGX_VALIDATE_BINDINGS") != NULL;
+   bool validate = d12_debug()->validate_bindings;
    unsigned count = info->uses_txf ? MAX2(info->sampler_state_count, 1)
                                    : info->sampler_state_count;
 
-   if (getenv("D3D12AGX_DUMP_SAMPLERS"))
+   if (d12_debug()->dump_samplers)
       mesa_logi("sampler requirement: stage=%u compute=%u count=%u txf=%u",
                 (unsigned)visibility, compute_bindings, count,
                 info->uses_txf);
@@ -6114,7 +6109,7 @@ d12_list_push_samplers(struct d12_cmd_list *list,
       return false;
    }
 
-   if (getenv("D3D12AGX_DUMP_SAMPLERS")) {
+   if (d12_debug()->dump_samplers) {
       mesa_logi("samplers: stage=%u compute=%u states=%u logical=%u "
                 "gpu=0x%llx stream=0x%llx..0x%llx valid=%u",
                 (unsigned)visibility, compute_bindings, count,
@@ -6296,7 +6291,7 @@ d12_list_build_compute_usc(struct d12_cmd_list *list, uint64_t code_va,
          ;
    }
 
-   if (getenv("D3D12AGX_DUMP_GS_USC")) {
+   if (d12_debug()->dump_gs_usc) {
       mesa_logi("compute USC: code=0x%llx main=%u gprs=%u push=%u "
                 "preamble=%d tex=%u txf=%d pregprs=%u "
                 "root=0x%llx vp=0x%llx gp=0x%llx vso=0x%llx stat=0x%llx",
@@ -6374,7 +6369,7 @@ d12_segment_bind_sampler_heap(struct d12_cmd_list *list,
 
    seg->sampler_heap = address;
    seg->sampler_count = heap->sampler_unique_count;
-   if (getenv("D3D12AGX_DUMP_SAMPLERS")) {
+   if (d12_debug()->dump_samplers) {
       mesa_logi("bindless sampler compaction: logical=%u native=%u "
                 "heap=0x%llx",
                 heap->desc.NumDescriptors, heap->sampler_unique_count,
@@ -6388,9 +6383,8 @@ bool
 d12_g17p_txf_metadata_enabled(const struct agx_device *dev)
 {
 #ifndef _WIN32
-   const char *enable = getenv("AURORA_D3D12_SHIM_TEXTURE_METADATA");
    return dev && dev->chip == AGX_CHIP_G17P && dev->g17p_render_context_bo &&
-          enable && !strcmp(enable, "1") &&
+          d12_debug()->shim_texture_metadata &&
           asahi_noop_d3d12_graphics_qualification_allowed &&
           asahi_noop_d3d12_graphics_qualification_allowed(dev->fd);
 #else
@@ -6789,7 +6783,7 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
    if (!usc)
       return;
 
-   if (getenv("D3D12AGX_DUMP_USC")) {
+   if (d12_debug()->dump_usc) {
       fprintf(stderr, "pso USC @%u:", usc);
       for (unsigned i = 0; i < 32; i++)
          fprintf(stderr, " %02x", usc_cpu[i]);
@@ -6800,7 +6794,7 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
               (unsigned long long)pbes_gpu);
    }
 
-   if (getenv("D3D12AGX_DUMP_TEX")) {
+   if (d12_debug()->dump_tex) {
       fprintf(stderr,
               "cs info: uses_txf=%d sampler_state_count=%u "
               "texture_state_count=%u push_count=%u nr_preamble_gprs=%u\n",
@@ -7098,7 +7092,7 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
          return 0;
       }
 
-      if (getenv("D3D12AGX_DUMP_TEX"))
+      if (d12_debug()->dump_tex)
          mesa_logi("%s preamble: va=0x%llx bo=0x%llx..0x%llx valid=1 "
                    "tex_states=%u sampler_states=%u pregprs=%u",
                    fragment ? "fragment" : "vertex",
@@ -7119,7 +7113,7 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    }
 
    size_t usc_used = b.head - cpu;
-   if (getenv("D3D12AGX_VALIDATE_BINDINGS") &&
+   if (d12_debug()->validate_bindings &&
        usc_used > agx_usc_size(18)) {
       mesa_loge("binding validation: graphics USC used %zu bytes of %zu",
                 usc_used, (size_t)agx_usc_size(18));
@@ -7636,7 +7630,7 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
     * rasterization program then reads is the one question a command
     * stream dump cannot answer.
     */
-   if (!indirect && getenv("D3D12AGX_DUMP_GS_VB")) {
+   if (!indirect && d12_debug()->dump_gs_vb) {
       list->device->dbg_gs_vb = d12_list_data_cpu(list, vp.output_buffer);
       list->device->dbg_gs_vb_size = MAX2(out_size, 16);
       mesa_logi("gs vb: gpu=0x%llx cpu=%p size=%zu outputs=0x%llx "
@@ -7661,7 +7655,7 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
    struct poly_geometry_params gp;
    poly_geometry_params_init(&gp, input_prim, wg_size);
    gp.flat_outputs = pso->flat_outputs;
-   if (getenv("D3D12AGX_VALIDATE_BINDINGS") && pso->flat_outputs) {
+   if (d12_debug()->validate_bindings && pso->flat_outputs) {
       mesa_logi("GS flat transport: outputs=0x%llx topology=%u shape=%u",
                 (unsigned long long)gp.flat_outputs, input_prim,
                 pso->gs_info.shape);
@@ -7694,7 +7688,7 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
    if (!stat_query)
       return false;
 
-   if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+   if (d12_debug()->validate_bindings) {
       bool valid = d12_list_stream_contains(list, sink, 128) &&
                    d12_list_stream_contains(list, stat_query, sizeof(sink)) &&
                    *(uint64_t *)d12_list_data_cpu(list, stat_query) == sink;
@@ -7805,7 +7799,7 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
       };
    }
 
-   if (getenv("D3D12AGX_DUMP_SO")) {
+   if (d12_debug()->dump_so) {
       mesa_logi("SO draw: xfb=%u prefix=%u count_words=%u count=0x%llx "
                 "stride=%u input_prims=%u grid=%ux%u shape=%u",
                 pso->gs_info.xfb, pso->gs_info.prefix_sum,
@@ -7829,7 +7823,7 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
    if (!vp_gpu || !gp_gpu)
       return false;
 
-   if (!indirect && getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+   if (!indirect && d12_debug()->validate_bindings) {
       size_t output_size = MAX2(out_size, 16);
       bool valid =
          d12_list_stream_contains(list, vp_gpu, sizeof(vp)) &&
@@ -7848,7 +7842,7 @@ d12_list_gs_prerast(struct d12_cmd_list *list, struct d12_pipeline_state *pso,
       }
    }
 
-   if (indirect && getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+   if (indirect && d12_debug()->validate_bindings) {
       const uint64_t heap_base = list->device->heap_bo->va->addr;
       const uint64_t heap_size = list->device->heap_bo->size;
       bool valid =
@@ -8114,7 +8108,7 @@ d12_list_upload_vb_params(struct d12_cmd_list *list,
             : 0;
    }
 
-   if (getenv("D3D12AGX_DUMP_VB")) {
+   if (d12_debug()->dump_vb) {
       for (unsigned i = 0; i < pso->nr_vb_attribs; i++) {
          const struct d12_vb_attrib *a = &pso->vb_attribs[i];
          mesa_logi("vb attrib %u: live=%d slot=%u off=%u ialign=%u "
@@ -8467,7 +8461,7 @@ d12_list_tess_prerast(struct d12_cmd_list *list,
    if (list->state != D12_LIST_RECORDING)
       return false;
 
-   if (getenv("D3D12AGX_DUMP_TESS")) {
+   if (d12_debug()->dump_tess) {
       /* The GPU faults here read a real but unmapped address that changes
        * every run, so the address alone says nothing. Print the extent of
        * every allocation this draw hands the tessellator, in the same run,
@@ -8717,7 +8711,7 @@ d12_list_mesh_prerast(struct d12_cmd_list *list,
    if (list->state != D12_LIST_RECORDING)
       return false;
 
-   if (getenv("D3D12AGX_DUMP_MESH")) {
+   if (d12_debug()->dump_mesh) {
       device->dbg_tess_draw = d12_list_data_cpu(list, drawdesc);
       device->dbg_tess_counts = d12_list_data_cpu(list, counts);
       device->dbg_tess_counts_n = 2;
@@ -8831,7 +8825,7 @@ d12_list_unroll_gs_restart(struct d12_cmd_list *list,
       .flatshade_first = true,
    };
 
-   if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+   if (d12_debug()->validate_bindings) {
       bool valid = input->b.ptr && input->index_buffer &&
                    input->index_buffer_range_B &&
                    d12_list_stream_contains(list, out_draw,
@@ -9524,7 +9518,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
       draw_set = true;
    }
 
-   if (getenv("D3D12AGX_DUMP_MESH")) {
+   if (d12_debug()->dump_mesh) {
       mesa_logi("draw: has_mesh=%d mesh_params=0x%llx vstage=%s",
                 pso->has_mesh, (unsigned long long)poly_u.mesh_params,
                 vstage == &pso->ms_rast ? "ms_rast" : "other");
@@ -11334,7 +11328,7 @@ d12_list_set_root_table(struct d12_cmd_list *list, bool compute,
                .address = first,
             };
 
-            if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+            if (d12_debug()->validate_bindings) {
                size_t remaining = heap->desc.NumDescriptors - first;
                /* Only a genuinely unbounded range owns the tail of the heap.
                 * A sized range ends, and demanding that every later sampler
@@ -11405,7 +11399,7 @@ d12_list_set_root_table(struct d12_cmd_list *list, bool compute,
          };
          resource_sources[slot] = NULL;
 
-         if (getenv("D3D12AGX_VALIDATE_BINDINGS")) {
+         if (d12_debug()->validate_bindings) {
             size_t first = heap_index + offset;
             size_t remaining =
                (size_t)heap->desc.NumDescriptors - first;
@@ -12310,7 +12304,7 @@ d12_list_SetPredication(ID3D12GraphicsCommandList6 *iface,
    list->predicate_gpu = snapshot;
    list->predicate_op = operation;
 
-   if (getenv("D3D12AGX_DUMP_PREDICATION"))
+   if (d12_debug()->dump_predication)
       mesa_logi("SetPredication snapshot: source=0x%llx latch=0x%llx "
                 "skip_if_nonzero=%u",
                 (unsigned long long)source,
@@ -13767,7 +13761,7 @@ d12_list_CopyTiles(ID3D12GraphicsCommandList6 *iface,
       }
 
       uint64_t linear = buffer->addr + buffer_offset_B + (uint64_t)i * tile_B;
-      if (getenv("D3D12AGX_DUMP_SPARSE")) {
+      if (d12_debug()->dump_sparse) {
          simple_mtx_lock(&tiled->sparse_lock);
          struct d12_sparse_mapping mapping = tiled->sparse_mappings[tiles[i]];
          simple_mtx_unlock(&tiled->sparse_lock);
@@ -13823,7 +13817,7 @@ d12_list_CopyTiles(ID3D12GraphicsCommandList6 *iface,
       const uint32_t row_pitch =
          util_format_get_nblocksx(format, tile_width) *
          util_format_get_blocksize(format);
-      if (getenv("D3D12AGX_DUMP_SPARSE")) {
+      if (d12_debug()->dump_sparse) {
          mesa_logi("CopyTiles texture subresource=%u tile-xy=%u,%u "
                    "rect=%u,%u+%ux%u row-pitch=%u",
                    info.subresource, info.x, info.y, x, y, width, height,

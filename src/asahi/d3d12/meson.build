@@ -36,6 +36,7 @@ libd3d12agx_files = files(
   'd12_core_caps.c',
   'd12_dxbc_wrap.c',
   'd12_cmd.c',
+  'd12_debug.c',
   'd12_descriptor.c',
   'd12_device.c',
   'd12_device_removal_core.c',
@@ -480,6 +481,7 @@ d3d12agx_g5_depth = executable(
 
 # DXIL frontend (G4): standalone of the COM driver for now
 libd12_dxil_files = files(
+  'd12_debug.c',
   'dxil/d12_dxil_bitstream.c',
   'dxil/d12_dxil_module.c',
 )

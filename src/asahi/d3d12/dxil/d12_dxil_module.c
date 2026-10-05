@@ -10,6 +10,7 @@
  * against Mesa's own MIT-licensed DXIL writer in src/microsoft/compiler.
  */
 
+#include "d12_debug.h"
 #include "d12_dxil.h"
 
 #include <stdlib.h>
@@ -1307,7 +1308,7 @@ parse_entry_properties(struct d12_module *mod)
 
       const struct d12_metadata *val = &mod->metadata[val_id];
 
-      if (getenv("D3D12AGX_DUMP_ENTRY_PROPS")) {
+      if (d12_debug()->dump_entry_props) {
          fprintf(stderr, "entry prop tag %u:", (unsigned)tag);
          if (val->kind == D12_MD_NODE) {
             for (unsigned k = 0; k < val->node.num_ops; k++) {

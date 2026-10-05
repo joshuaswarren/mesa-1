@@ -17,6 +17,7 @@
 #pragma once
 
 #define COBJMACROS
+#include "d12_debug.h"
 #include <wsl/winadapter.h>
 #include <directx/d3d12.h>
 

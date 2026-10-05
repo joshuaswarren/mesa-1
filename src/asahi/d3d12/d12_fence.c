@@ -274,7 +274,7 @@ d12_fence_GetCompletedValue(ID3D12Fence *iface)
       }
    }
 
-   if (getenv("D3D12AGX_DUMP_SYNC"))
+   if (d12_debug()->dump_sync)
       mesa_logi("SYNC GetCompletedValue: fence %p -> %llu", (void *)fence,
                 (unsigned long long)point);
 

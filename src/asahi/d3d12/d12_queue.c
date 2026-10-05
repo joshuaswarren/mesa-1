@@ -554,7 +554,7 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
       }
    }
 
-   if (getenv("D3D12AGX_DUMP_RENDER_CMD")) {
+   if (d12_debug()->dump_render_cmd) {
       mesa_logi("render cmd: vdm_base=0x%llx (stream_bo 0x%llx..0x%llx, "
                 "seg %zu..%zu, dispatches=%u)",
                 (unsigned long long)c->vdm_ctrl_stream_base,
@@ -1322,10 +1322,10 @@ d12_queue_op_build_read_set(struct d12_queue_op *op,
    op->read_set_complete = complete;
    if (!complete) {
       op->exact_read_range_count = 0;
-      if (getenv("D3D12AGX_DUMP_READ_SET"))
+      if (d12_debug()->dump_read_set)
          mesa_logw("ExecuteCommandLists: exact read set incomplete; using "
                    "the conservative WDDM allocation scan");
-   } else if (getenv("D3D12AGX_DUMP_READ_SET")) {
+   } else if (d12_debug()->dump_read_set) {
       mesa_logi("ExecuteCommandLists: exact read set contains %u canonical "
                 "ranges", op->exact_read_range_count);
    }
@@ -1483,7 +1483,7 @@ d12_queue_signal_arena_init(struct d12_queue *queue)
              generated.length > usc_size)
             goto fail;
          memcpy(usc_map + usc_offset, generated.bytes, generated.length);
-         if (!slot && getenv("D3D12AGX_DUMP_SYNC")) {
+         if (!slot && d12_debug()->dump_sync) {
             mesa_logi("native queue signal producer: code=%u gprs=%u "
                       "staging_halfs=%u tps=%u rodata_halfs=%u ioto=%u "
                       "stride=%u slots=%u local=1x1x1",
@@ -1961,7 +1961,7 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
       return false;
    }
    op->retire_value = out;
-   if (getenv("D3D12AGX_DUMP_SYNC")) {
+   if (d12_debug()->dump_sync) {
       uint64_t stream_address = 0;
       if (op->bos_initialized && util_dynarray_num_elements(
                                     &op->bos, struct agx_bo *) > 0) {
@@ -2117,7 +2117,7 @@ d12_queue_retire_worker(void *data)
             d12_device_mark_removed(queue->device,
                                     DXGI_ERROR_DEVICE_REMOVED);
          } else if (op->type == D12_QUEUE_OP_SIGNAL) {
-            if (getenv("D3D12AGX_DUMP_SYNC")) {
+            if (d12_debug()->dump_sync) {
                mesa_logi("SYNC Signal retire: queue %p fence %p value %llu "
                          "point %llu", (void *)queue, (void *)op->fence,
                          (unsigned long long)op->value,
@@ -2167,7 +2167,7 @@ d12_queue_worker(void *data)
 
       switch (op->type) {
       case D12_QUEUE_OP_WAIT:
-         if (getenv("D3D12AGX_DUMP_SYNC"))
+         if (d12_debug()->dump_sync)
             mesa_logi("SYNC Wait worker: queue %p fence %p value %llu",
                       (void *)queue, (void *)op->fence,
                       (unsigned long long)op->value);
@@ -2192,7 +2192,7 @@ d12_queue_worker(void *data)
             d12_queue_release_signal_slot(queue, op);
          break;
       case D12_QUEUE_OP_SIGNAL:
-         if (getenv("D3D12AGX_DUMP_SYNC"))
+         if (d12_debug()->dump_sync)
             mesa_logi("SYNC Signal schedule: queue %p fence %p value %llu",
                       (void *)queue, (void *)op->fence,
                       (unsigned long long)op->value);
@@ -2200,7 +2200,7 @@ d12_queue_worker(void *data)
          retire = true;
          break;
       case D12_QUEUE_OP_PLACEMENT_WAIT:
-         if (getenv("D3D12AGX_DUMP_SYNC"))
+         if (d12_debug()->dump_sync)
             mesa_logi("SYNC DDI Wait worker: queue %p fence %p value %llu",
                       (void *)queue, (void *)op->placement_fence,
                       (unsigned long long)op->value);
@@ -2411,7 +2411,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          continue;
       }
 
-      if (getenv("D3D12AGX_DUMP_SEGS")) {
+      if (d12_debug()->dump_segs) {
          size_t control_used =
             list->stream_cur - (uint8_t *)agx_bo_map(list->stream_bo);
          mesa_logi("list storage: control=%zu data=%zu/%zu usc=%zu/%zu "
@@ -2447,7 +2447,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          const struct d12_segment *seg = &list->segments[s];
          bool compute = seg->type == D12_SEG_CDM;
 
-         if (getenv("D3D12AGX_DUMP_SEGS"))
+         if (d12_debug()->dump_segs)
             mesa_logi("seg %u: %s start=%zu end=%zu dispatches=%u", s,
                       compute ? "CDM" : "RENDER", seg->stream_start,
                       seg->stream_end, seg->dispatches);
@@ -2554,7 +2554,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
       op->nr_vdm = nr_vdm;
       op->nr_cdm = nr_cdm;
       op->write_set_complete = write_set_complete;
-      if (!write_set_complete && getenv("D3D12AGX_DUMP_WRITE_SET")) {
+      if (!write_set_complete && d12_debug()->dump_write_set) {
          mesa_logw("ExecuteCommandLists: submitting conservative attachment "
                    "hints without the Aurora complete-write declaration");
       }
@@ -2924,7 +2924,7 @@ d12_queue_Signal(ID3D12CommandQueue *iface, ID3D12Fence *fence_iface,
    op->value = value;
    d12_fence_internal_ref(fence);
 
-   if (getenv("D3D12AGX_DUMP_SYNC")) {
+   if (d12_debug()->dump_sync) {
       mesa_logi("SYNC Signal enqueue: queue %p agxq %u fence %p value %llu",
                 (void *)queue, queue->agx_queue_id, (void *)fence,
                 (unsigned long long)value);
@@ -2960,7 +2960,7 @@ d12_queue_Wait(ID3D12CommandQueue *iface, ID3D12Fence *fence_iface,
    d12_fence_internal_ref(fence);
    d12_fence_ticket_init(fence, &op->ticket, value);
 
-   if (getenv("D3D12AGX_DUMP_SYNC")) {
+   if (d12_debug()->dump_sync) {
       mesa_logi("SYNC Wait enqueue: queue %p agxq %u fence %p value %llu",
                 (void *)queue, queue->agx_queue_id, (void *)fence,
                 (unsigned long long)value);
