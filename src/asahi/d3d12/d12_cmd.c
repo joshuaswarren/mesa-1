@@ -2236,7 +2236,7 @@ d12_list_dispatch_indirect_patches(
    return true;
 }
 
-/* Native one-layer, one-sample tiled RGBA8/BGRA8 tile traffic. The legacy
+/* Native one-layer, one-sample colour tile traffic. The legacy
  * builder remains guarded until the renderer wires this producer together
  * with native PPP/VDM lifetime and render-command qualification. */
 uint32_t
@@ -2250,6 +2250,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
    struct agx_device *dev = &device->dev;
    struct d12_resource *rt = seg->rt[0];
    const enum agx_bg_eot_op op = ops[0];
+   const enum pipe_format pf = seg->rt_view_format[0];
    const char *failure_stage = "attachment-shape";
    struct agx_bg_eot_shader *shader = NULL;
 
@@ -2260,12 +2261,26 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
        rt->layout.sample_count_sa != 1 ||
        seg->layers != 1 || tib->nr_samples != 1 || seg->rt_level[0] != 0 ||
        (rt->layout.tiling != AIL_TILING_GPU &&
-        rt->layout.tiling != AIL_TILING_TWIDDLED) || rt->layout.levels != 1 ||
-       (seg->rt_view_format[0] != PIPE_FORMAT_R8G8B8A8_UNORM &&
-        seg->rt_view_format[0] != PIPE_FORMAT_B8G8R8A8_UNORM) ||
+        rt->layout.tiling != AIL_TILING_TWIDDLED &&
+        rt->layout.tiling != AIL_TILING_LINEAR) || rt->layout.levels != 1 ||
+       (pf != PIPE_FORMAT_R8G8B8A8_UNORM &&
+        pf != PIPE_FORMAT_B8G8R8A8_UNORM &&
+        pf != PIPE_FORMAT_R32G32B32A32_FLOAT &&
+        pf != PIPE_FORMAT_R32G32B32A32_UINT &&
+        pf != PIPE_FORMAT_R32G32B32A32_SINT) ||
        (op != AGX_BG_CLEAR && op != AGX_BG_LOAD && op != AGX_EOT_STORE &&
         op != AGX_BG_EOT_NONE))
       goto fail;
+   /* Like Honeykrisp's pack_pbe/pack_texture, the two descriptor types
+    * express the same row pitch with different biases. Never reinterpret a
+    * linear surface as twiddled merely to pass the native admission gate. */
+   uint32_t stride_B = 0;
+   if (rt->layout.tiling == AIL_TILING_LINEAR) {
+      stride_B = ail_get_linear_stride_B(&rt->layout, 0);
+      failure_stage = "linear-row-pitch";
+      if (stride_B < 16 || (stride_B & 15))
+         goto fail;
+   }
    failure_stage = "extra-attachment";
    for (unsigned i = 1; i < AGX_MAX_RENDER_TARGETS; i++)
       if (seg->rt[i] || ops[i] != AGX_BG_EOT_NONE)
@@ -2316,6 +2331,8 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
       semantic.height = rt->layout.height_px;
       semantic.levels = semantic.layers = 1;
       semantic.page_aligned_layers = rt->layout.page_aligned_layers;
+      if (stride_B)
+         semantic.stride = stride_B - 4;
       semantic.swizzle_r = semantic.swizzle_g = semantic.swizzle_b = semantic.swizzle_a = 0;
       for (unsigned c = 0; c < 4; c++) {
          if (fmt->swizzle[c] == PIPE_SWIZZLE_X) semantic.swizzle_r = c;
@@ -2383,8 +2400,29 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          goto fail;
       if (op == AGX_BG_CLEAR) {
          failure_stage = "clear-argument";
-         const float *color = seg->rt_clear[0];
-         desc.clear_value_va = d12_list_upload(list, color, 16, 16);
+         const float *clear_color = seg->rt_clear[0];
+         union {
+            float f[4];
+            uint32_t u[4];
+            int32_t i[4];
+         } color;
+         /* ClearRenderTargetView supplies numeric FLOAT values even for
+          * integer targets. Match the existing AGX2 background producer. */
+         if (util_format_is_pure_uint(pf)) {
+            for (unsigned c = 0; c < 4; ++c)
+               color.u[c] = !(clear_color[c] > 0) ? 0 :
+                  clear_color[c] >= (float)UINT32_MAX ? UINT32_MAX :
+                  (uint32_t)clear_color[c];
+         } else if (util_format_is_pure_sint(pf)) {
+            for (unsigned c = 0; c < 4; ++c)
+               color.i[c] = isnan(clear_color[c]) ? 0 :
+                  clear_color[c] <= (float)INT32_MIN ? INT32_MIN :
+                  clear_color[c] >= (float)INT32_MAX ? INT32_MAX :
+                  (int32_t)clear_color[c];
+         } else {
+            memcpy(color.f, clear_color, sizeof(color.f));
+         }
+         desc.clear_value_va = d12_list_upload(list, &color, sizeof(color), 16);
          if (!desc.clear_value_va)
             goto fail;
       } else {
@@ -2404,6 +2442,8 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          texture.height = rt->layout.height_px;
          texture.depth = 1;
          texture.page_aligned_layers = rt->layout.page_aligned_layers;
+         if (stride_B)
+            texture.stride = stride_B - 16;
          failure_stage = "reload-texture-pack";
          uint8_t packed[32];
          if (!device->rodata_bo || !device->rodata_bo->va ||
@@ -3887,12 +3927,16 @@ d12_pack_pbe_generation(enum agx_descriptor_generation generation, void *out,
 
    if (legacy->dimension != AGX_TEXTURE_DIMENSION_2D ||
        (legacy->layout != AGX_LAYOUT_TWIDDLED &&
-        legacy->layout != AGX_LAYOUT_GPU) ||
+        legacy->layout != AGX_LAYOUT_GPU &&
+        !(legacy->layout == AGX_LAYOUT_LINEAR && generation == 9)) ||
        legacy->unk_52 || legacy->rotate_90 || legacy->flip_vertical ||
        legacy->samples != AGX_SAMPLE_COUNT_2 || legacy->unk_mipmapped ||
        legacy->compressed || legacy->mode != AGX_IMAGE_MODE_NORMAL ||
        legacy->level != 0 || legacy->levels != 1 || legacy->layers != 1 ||
-       legacy->srgb || legacy->extended || legacy->stride ||
+       legacy->srgb || legacy->extended ||
+       (legacy->layout == AGX_LAYOUT_LINEAR
+           ? legacy->stride < 12 || legacy->stride > UINT32_MAX - 4
+           : legacy->stride != 0) ||
        legacy->acceleration_buffer || legacy->depth_linear != 1 ||
        legacy->layer_stride_linear || legacy->level_offset_sw ||
        legacy->aligned_width_msaa_sw || legacy->sample_count_log2_sw ||
@@ -3911,6 +3955,7 @@ d12_pack_pbe_generation(enum agx_descriptor_generation generation, void *out,
       .width = legacy->width,
       .height = legacy->height,
       .buffer = legacy->buffer,
+      .stride_B = legacy->layout == AGX_LAYOUT_LINEAR ? legacy->stride + 4 : 0,
       .page_aligned_layers = legacy->page_aligned_layers,
    };
    struct agx_pbe_agx3_descriptor packed;
@@ -7504,7 +7549,8 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
 static uint32_t
 d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
                   bool fragment, const struct agx_tilebuffer_layout *tib,
-                  uint64_t root_gpu, uint64_t draw_gpu, uint64_t blend_gpu)
+                  uint64_t root_gpu, uint64_t draw_gpu, uint64_t blend_gpu,
+                  uint64_t vb_params_gpu)
 {
    struct agx_device *dev = &list->device->dev;
    const struct agx_shader_info *info = &st->info;
@@ -7524,7 +7570,7 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        !root_gpu || !tib || tib->nr_samples != 1)
       goto fail;
 
-   struct agx3_ioto_uniform_range ranges[3];
+   struct agx3_ioto_uniform_range ranges[4];
    size_t count = 0;
    if (fragment && blend_gpu)
       ranges[count++] = (struct agx3_ioto_uniform_range){
@@ -7538,6 +7584,15 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = D12_UNIFORM_DRAW,
          .size_halfs = D12_UNIFORM_DRAW_REGS, .address = draw_gpu,
+      };
+   /* Monolithic vertex fetch already lowers the Asahi VBO intrinsics to
+    * this command-owned pointer cell. Publish it through the same native
+    * Ioto uniform-range producer used by Honeykrisp, rather than introducing
+    * a second vertex-input ABI. The VBO ranges are retained by draw recording. */
+   if (!fragment && vb_params_gpu)
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = D12_UNIFORM_VB_PARAMS,
+         .size_halfs = D12_UNIFORM_VB_REGS, .address = vb_params_gpu,
       };
    for (size_t i = 0; i < count; i++) {
       const size_t size = (size_t)ranges[i].size_halfs * 2;
@@ -7616,14 +7671,18 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    if (device->dev.chip == AGX_CHIP_G17P) {
       /* Unused null texture/PBE home cells are always uploaded by the
        * binding collector; the frontend usage proof decides admission. */
+      const bool software_stages = poly &&
+         (poly->geom_params || poly->tess_params || poly->vs_outputs ||
+          poly->vertex_params || poly->mesh_params || poly->stat_query);
       if (!st->g17p_root_only || heap_gpu || heap_textures_gpu ||
-          heap_pbes_gpu || heap_samplers_gpu || poly) {
+          heap_pbes_gpu || heap_samplers_gpu || software_stages) {
          mesa_loge("native graphics texture/poly stage producer unavailable");
          list->state = D12_LIST_ERROR;
          return 0;
       }
       return d12_gfx_stage_g17p(list, st, fragment, tib,
-                                 root_gpu, draw_gpu, blend_gpu);
+                                 root_gpu, draw_gpu, blend_gpu,
+                                 poly ? poly->vb_params : 0);
    }
 
    uint32_t usc;
@@ -9988,7 +10047,7 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
        !seg->agx3_active_context_selector_valid ||
        !pso->vs.g17p_root_only || !pso->fs.g17p_root_only ||
        pso->vs.g17p_writes_memory || pso->fs.g17p_writes_memory ||
-       pso->has_gs || pso->has_tess || pso->has_mesh || pso->nr_vb_attribs ||
+       pso->has_gs || pso->has_tess || pso->has_mesh ||
        pso->raster.polygon_mode != AGX_POLYGON_MODE_FILL ||
        pso->raster.depth_bias || pso->raster.slope_scaled_depth_bias ||
        (seg->ds && (!d12_g17p_depth_enabled(&list->device->dev) ||
