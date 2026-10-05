@@ -3534,21 +3534,17 @@ d12_fill_buffer_descriptor(struct d12_descriptor *slot,
    return true;
 }
 
-static void STDMETHODCALLTYPE
-d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
-                                    ID3D12Resource *resource,
-                                    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
-                                    D3D12_CPU_DESCRIPTOR_HANDLE dest)
+/*
+ * View creation builds the descriptor in a zeroed local and commits it to
+ * the heap slot once, so the native mirror is refreshed exactly once per
+ * call. Every early return below leaves the local zeroed, which commits a
+ * D12_DESC_NONE descriptor for the rejected view.
+ */
+static void
+d12_device_fill_srv(struct d12_device *device, ID3D12Resource *resource,
+                    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
+                    struct d12_descriptor *slot)
 {
-   struct d12_device *device = d12_device_from_iface(iface);
-   struct d12_descriptor *slot = (struct d12_descriptor *)dest.ptr;
-
-   if (!slot)
-      return;
-
-   memset(slot, 0, sizeof(*slot));
-   d12_descriptor_heap_update_slot(device, slot);
-
    if (!resource) {
       /*
        * A null descriptor must READ AS ZERO, not fault. Leaving address 0
@@ -3802,7 +3798,6 @@ d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
       slot->texture_srv_layers = view_layers;
       slot->texture_srv_dimension = view_dim;
       slot->texture_plane = plane;
-      d12_descriptor_heap_update_slot(device, slot);
       return;
    }
 
@@ -3851,15 +3846,14 @@ d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
          : desc && desc->Buffer.StructureByteStride
             ? D12_BUFFER_VIEW_STRUCTURED
             : D12_BUFFER_VIEW_TYPED;
-      d12_descriptor_heap_update_slot(device, slot);
    }
 }
 
 static void STDMETHODCALLTYPE
-d12_device_CreateUnorderedAccessView(
-   ID3D12Device2 *iface, ID3D12Resource *resource, ID3D12Resource *counter,
-   const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
-   D3D12_CPU_DESCRIPTOR_HANDLE dest)
+d12_device_CreateShaderResourceView(ID3D12Device2 *iface,
+                                    ID3D12Resource *resource,
+                                    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,
+                                    D3D12_CPU_DESCRIPTOR_HANDLE dest)
 {
    struct d12_device *device = d12_device_from_iface(iface);
    struct d12_descriptor *slot = (struct d12_descriptor *)dest.ptr;
@@ -3867,9 +3861,18 @@ d12_device_CreateUnorderedAccessView(
    if (!slot)
       return;
 
-   memset(slot, 0, sizeof(*slot));
+   struct d12_descriptor view = {0};
+   d12_device_fill_srv(device, resource, desc, &view);
+   *slot = view;
    d12_descriptor_heap_update_slot(device, slot);
+}
 
+static void
+d12_device_fill_uav(struct d12_device *device, ID3D12Resource *resource,
+                    ID3D12Resource *counter,
+                    const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
+                    struct d12_descriptor *slot)
+{
    if (!resource) {
       /* Same reasoning as the null SRV above.  Leave counter_address zero:
        * command recording replaces absent counters with a distinct mapped
@@ -3997,7 +4000,6 @@ d12_device_CreateUnorderedAccessView(
                       (unsigned long long)end,
                       res->bo ? res->bo->size : 0);
             memset(slot, 0, sizeof(*slot));
-            d12_descriptor_heap_update_slot(device, slot);
             return;
          }
       }
@@ -4006,7 +4008,6 @@ d12_device_CreateUnorderedAccessView(
       slot->format = view_format;
       slot->kind = D12_DESC_UAV;
       slot->texture_uav_dimension = dimension;
-      d12_descriptor_heap_update_slot(device, slot);
       return;
    }
 
@@ -4069,8 +4070,25 @@ d12_device_CreateUnorderedAccessView(
          : desc && desc->Buffer.StructureByteStride
             ? D12_BUFFER_VIEW_STRUCTURED
             : D12_BUFFER_VIEW_TYPED;
-      d12_descriptor_heap_update_slot(device, slot);
    }
+}
+
+static void STDMETHODCALLTYPE
+d12_device_CreateUnorderedAccessView(
+   ID3D12Device2 *iface, ID3D12Resource *resource, ID3D12Resource *counter,
+   const D3D12_UNORDERED_ACCESS_VIEW_DESC *desc,
+   D3D12_CPU_DESCRIPTOR_HANDLE dest)
+{
+   struct d12_device *device = d12_device_from_iface(iface);
+   struct d12_descriptor *slot = (struct d12_descriptor *)dest.ptr;
+
+   if (!slot)
+      return;
+
+   struct d12_descriptor view = {0};
+   d12_device_fill_uav(device, resource, counter, desc, &view);
+   *slot = view;
+   d12_descriptor_heap_update_slot(device, slot);
 }
 
 static void STDMETHODCALLTYPE
@@ -4084,8 +4102,7 @@ d12_device_CreateConstantBufferView(
    if (!slot)
       return;
 
-   memset(slot, 0, sizeof(*slot));
-   d12_descriptor_heap_update_slot(device, slot);
+   struct d12_descriptor view = {0};
 
    if (!desc || !desc->BufferLocation) {
       /* Null CBVs need the same mapped read-as-zero backing as null SRVs
@@ -4094,21 +4111,22 @@ d12_device_CreateConstantBufferView(
        * load (or a type-mismatched null descriptor load) into an unmapped
        * GPU read instead of returning zero.
        */
-      slot->address = device->null_va;
-      slot->size_B = D12_NULL_REGION_SIZE;
-      d12_descriptor_heap_update_slot(device, slot);
-      return;
+      view.address = device->null_va;
+      view.size_B = D12_NULL_REGION_SIZE;
+   } else {
+      /* A CBV names a GPU address directly, but retain a reserved-buffer
+       * owner when one exists. The read-only sparse alias supplies D3D12's
+       * zero-fill behavior for unmapped tiles, while the resource pointer
+       * publishes its residency map and current backing allocations to the
+       * exact read set. */
+      view.kind = D12_DESC_CBV;
+      view.resource =
+         d12_sparse_buffer_for_address(device, desc->BufferLocation);
+      view.address = d12_sparse_read_address(device, desc->BufferLocation);
+      view.size_B = desc->SizeInBytes;
    }
 
-   /* A CBV names a GPU address directly, but retain a reserved-buffer owner
-    * when one exists. The read-only sparse alias supplies D3D12's zero-fill
-    * behavior for unmapped tiles, while the resource pointer publishes its
-    * residency map and current backing allocations to the exact read set. */
-   slot->kind = D12_DESC_CBV;
-   slot->resource =
-      d12_sparse_buffer_for_address(device, desc->BufferLocation);
-   slot->address = d12_sparse_read_address(device, desc->BufferLocation);
-   slot->size_B = desc->SizeInBytes;
+   *slot = view;
    d12_descriptor_heap_update_slot(device, slot);
 }
 
