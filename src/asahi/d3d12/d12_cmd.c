@@ -9473,18 +9473,40 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    uint8_t *depth_bias = d12_list_data_cpu(list, seg->depth_bias_base);
    if (!scissor || !depth_bias)
       goto fail;
-   memcpy(scissor + seg->scissor_count * AGX_SCISSOR_LENGTH,
-          generated.raster.scissor, sizeof(generated.raster.scissor));
-   memcpy(depth_bias + seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH,
-          generated.raster.depth_bias, sizeof(generated.raster.depth_bias));
-   seg->scissor_count++;
-   seg->depth_bias_count++;
+   /* Reuse the previous record when this draw's is identical, as the AGX2
+    * push helpers do. Appending one per draw filled the 64-entry depth-bias
+    * array every 64 draws, and each refill cut the pass into a new hardware
+    * render with a store and a reload of every attachment. */
+   unsigned scissor_index = seg->scissor_count;
+   if (seg->scissor_count &&
+       !memcmp(scissor + (seg->scissor_count - 1) * AGX_SCISSOR_LENGTH,
+               generated.raster.scissor, sizeof(generated.raster.scissor))) {
+      scissor_index = seg->scissor_count - 1;
+   } else {
+      memcpy(scissor + seg->scissor_count * AGX_SCISSOR_LENGTH,
+             generated.raster.scissor, sizeof(generated.raster.scissor));
+      seg->scissor_count++;
+   }
+   unsigned depth_bias_index = seg->depth_bias_count;
+   if (seg->depth_bias_count &&
+       !memcmp(depth_bias + (seg->depth_bias_count - 1) * AGX_DEPTH_BIAS_LENGTH,
+               generated.raster.depth_bias,
+               sizeof(generated.raster.depth_bias))) {
+      depth_bias_index = seg->depth_bias_count - 1;
+   } else {
+      memcpy(depth_bias + seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH,
+             generated.raster.depth_bias,
+             sizeof(generated.raster.depth_bias));
+      seg->depth_bias_count++;
+   }
    uint64_t draw_compact;
    void *draw_payload = d12_list_alloc_g17p_vdm(list, 8, 4, &draw_compact);
    uint32_t draw_offset;
+   /* The index record is packed from the byte extent one past the record
+    * it selects (agx_g17p_ppp_indices_base_pack). */
    if (!draw_payload || !agx_g17p_upload_draw_indices(draw_payload, 8, draw_compact,
-          seg->scissor_count * AGX_SCISSOR_LENGTH,
-          seg->depth_bias_count * AGX_DEPTH_BIAS_LENGTH, 1, &draw_offset))
+          (scissor_index + 1) * AGX_SCISSOR_LENGTH,
+          (depth_bias_index + 1) * AGX_DEPTH_BIAS_LENGTH, 1, &draw_offset))
       goto fail;
    struct d12_agx3_vdm_state_update_draw_info info = {
       .source_layout = pso->vs.agx3_vdm_state_update.source_layout,
