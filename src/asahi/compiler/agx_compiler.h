@@ -1118,6 +1118,9 @@ agx_builder_insert(agx_cursor *cursor, agx_instr *I)
 }
 
 bool agx_vertex_tex_uniforms(const agx_context *ctx);
+bool agx3_tex_uniform_pair_unwitnessed(const agx_context *ctx,
+                                       const agx_instr *I, agx_index texture,
+                                       agx_index sampler);
 bool agx_instr_accepts_uniform(enum agx_isa_encoding encoding,
                                enum agx_opcode op, unsigned src_index,
                                unsigned value, enum agx_size size);

@@ -170,6 +170,53 @@ agx_instr_accepts_uniform(enum agx_isa_encoding encoding, enum agx_opcode op,
    }
 }
 
+/*
+ * SMP texture/sampler descriptor operands kept in the uniform file
+ * (AGX_G17P_TEX_UNIFORM_OPERANDS, or the vertex-only qualification) are
+ * restricted to the operand-kind pairs Apple's G17P compiler emits:
+ * uniform/uniform and, outside cube sampling, a uniform texture with an
+ * immediate sampler (native corpus: f103/f132 = 3/3 and 3/1 only, never a
+ * register beside a uniform). Cube pairs are grounded only as same-kind pairs
+ * (agx3_tex_core.c). Returns true when `texture`/`sampler`, as they would be
+ * encoded, contain a retained uniform in any other pairing.
+ */
+static bool
+agx_tex_uniform_stays(const agx_context *ctx, agx_index src, unsigned s)
+{
+   return src.type == AGX_INDEX_UNIFORM &&
+          ((agx_vertex_tex_uniforms(ctx) && src.value <= 252 &&
+            !(src.value & 3) &&
+            (src.size == AGX_SIZE_32 || src.size == AGX_SIZE_64)) ||
+           agx_instr_accepts_uniform(ctx->key->dev.encoding,
+                                     AGX_OPCODE_TEXTURE_SAMPLE, s, src.value,
+                                     src.size));
+}
+
+bool
+agx3_tex_uniform_pair_unwitnessed(const agx_context *ctx, const agx_instr *I,
+                                  agx_index texture, agx_index sampler)
+{
+   if (!ctx->key || ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+       I->op != AGX_OPCODE_TEXTURE_SAMPLE)
+      return false;
+   const agx_index src[2] = {texture, sampler};
+   enum agx_index_type kind[2];
+   bool any_uniform = false;
+   for (unsigned j = 0; j < 2; ++j) {
+      const bool stays = agx_tex_uniform_stays(ctx, src[j], 3 + j);
+      kind[j] = stays ? AGX_INDEX_UNIFORM :
+                src[j].type == AGX_INDEX_IMMEDIATE ? AGX_INDEX_IMMEDIATE :
+                                                     AGX_INDEX_NORMAL;
+      any_uniform |= stays;
+   }
+   const bool cube = I->dim == AGX_DIM_CUBE || I->dim == AGX_DIM_CUBE_ARRAY;
+   const bool witnessed =
+      kind[0] == kind[1] ||
+      (!cube && kind[0] == AGX_INDEX_UNIFORM &&
+       kind[1] == AGX_INDEX_IMMEDIATE);
+   return any_uniform && !witnessed;
+}
+
 void
 agx_lower_uniform_sources(agx_context *ctx)
 {
@@ -218,6 +265,11 @@ agx_lower_uniform_sources(agx_context *ctx)
          if (has_gpr)
             first_uniform = UINT_MAX;
       }
+
+      /* An unwitnessed descriptor pair (agx3_tex_uniform_pair_unwitnessed)
+       * materializes its uniform operand, keeping the register form. */
+      const bool copy_tex_uniform =
+         agx3_tex_uniform_pair_unwitnessed(ctx, I, I->src[3], I->src[4]);
 
       /* Exports end the block and admit no instruction between them; place
        * their materialized sources before the first export of the run. */
@@ -288,9 +340,10 @@ agx_lower_uniform_sources(agx_context *ctx)
             I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
             I->src[s].value <= 252 && !(I->src[s].value & 3) &&
             (I->src[s].size == AGX_SIZE_32 || I->src[s].size == AGX_SIZE_64);
+         const bool copy_tex = copy_tex_uniform && (s == 3 || s == 4);
          if (I->src[s].type == AGX_INDEX_UNIFORM &&
              (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
-              copy_compare_uniform ||
+              copy_compare_uniform || copy_tex ||
               !(native_integer || vertex_tex_uniform || uniform_imm_compare ||
                 agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {

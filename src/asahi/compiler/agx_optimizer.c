@@ -589,6 +589,25 @@ agx_optimizer_copyprop(agx_context *ctx, agx_instr **defs, agx_instr *I)
              agx_vertex_tex_uniforms(ctx))))
          continue;
 
+      /* Forward a descriptor uniform into SMP only when the pair it forms is
+       * a native one. Otherwise agx_lower_uniform_sources would copy it back
+       * per instruction, where the shared SSA move serves every sample. */
+      if (I->op == AGX_OPCODE_TEXTURE_SAMPLE && (s == 3 || s == 4) &&
+          def->src[0].type == AGX_INDEX_UNIFORM) {
+         agx_index pair[2] = {I->src[3], I->src[4]};
+         pair[s - 3] = def->src[0];
+         agx_index *other = &pair[4 - s];
+         if (other->type == AGX_INDEX_NORMAL) {
+            agx_instr *odef = defs[other->value];
+            if (odef && odef->op == AGX_OPCODE_MOV &&
+                odef->src[0].type == AGX_INDEX_UNIFORM &&
+                odef->src[0].size == other->size)
+               *other = odef->src[0];
+         }
+         if (agx3_tex_uniform_pair_unwitnessed(ctx, I, pair[0], pair[1]))
+            continue;
+      }
+
       agx_replace_src(I, s, def->src[0]);
 
       /* If we are zero-extending into an instruction that distinguishes sign

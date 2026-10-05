@@ -384,8 +384,12 @@ DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_shared_rhw,
 AGX_C2_OPTION(agx_g17p_uniform_dma, "AGX_G17P_UNIFORM_DMA")
 DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_internal_scaled_guard,
                            "HK_G17P_INTERNAL_SCALED_GUARD", true)
+/* Default on: SMP reads its texture/sampler descriptor operands straight from
+ * the uniform file when the pair is a native G17P form (see
+ * agx_lower_uniform_sources). AGX_G17P_TEX_UNIFORM_OPERANDS=0 restores the
+ * register copies; the variable is part of the codegen environment hash. */
 DEBUG_GET_ONCE_BOOL_OPTION(agx_g17p_tex_uniform_operands,
-                           "AGX_G17P_TEX_UNIFORM_OPERANDS", false)
+                           "AGX_G17P_TEX_UNIFORM_OPERANDS", true)
 
 uint32_t
 agx_get_v57_flags(void)

@@ -11,11 +11,14 @@
 
 TEST(AGX3UniformALU, VertexTextureUniformQualification)
 {
-   /* Run in separate processes with AGX_G17P_VERTEX_TEX_UNIFORMS=0 and 1.
-    * Keep the older all-stage AGX_G17P_TEX_UNIFORM_OPERANDS option disabled.
-    */
+   /* Run in separate processes with AGX_G17P_VERTEX_TEX_UNIFORMS=0 and 1,
+    * and with the all-stage AGX_G17P_TEX_UNIFORM_OPERANDS (default on) set to
+    * 0 and 1. Both operands name the same aligned uniform, a witnessed
+    * uniform/uniform pair, so either option keeps them in the uniform file. */
    const bool enabled =
       debug_get_bool_option("AGX_G17P_VERTEX_TEX_UNIFORMS", false);
+   const bool all_stages =
+      debug_get_bool_option("AGX_G17P_TEX_UNIFORM_OPERANDS", true);
    for (auto encoding : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
       for (auto stage : {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT}) {
          for (bool preamble : {false, true}) {
@@ -39,10 +42,11 @@ TEST(AGX3UniformALU, VertexTextureUniformQualification)
                      false, false, false, AGX_GATHER_NONE, false);
                   agx_optimizer_forward(b->shader);
                   agx_lower_uniform_sources(b->shader);
-                  const bool keep = enabled &&
+                  const bool keep =
                      encoding == AGX_ISA_ENCODING_AGX3B &&
-                     stage == MESA_SHADER_VERTEX && !preamble &&
-                     value <= 252 && !(value & 3) && size != AGX_SIZE_16;
+                     value <= 252 && !(value & 3) && size != AGX_SIZE_16 &&
+                     (all_stages ||
+                      (enabled && stage == MESA_SHADER_VERTEX && !preamble));
                   EXPECT_EQ(I->src[3].type == AGX_INDEX_UNIFORM, keep);
                   EXPECT_EQ(I->src[4].type == AGX_INDEX_UNIFORM, keep);
                   EXPECT_NE(I->src[1].type, AGX_INDEX_UNIFORM);
@@ -50,6 +54,49 @@ TEST(AGX3UniformALU, VertexTextureUniformQualification)
                }
             }
          }
+      }
+   }
+}
+
+TEST(AGX3UniformALU, TextureUniformOperandPairs)
+{
+   /* Only the descriptor-kind pairs native G17P code uses stay in the
+    * uniform file: uniform/uniform, and (outside cube sampling) a uniform
+    * texture with an immediate sampler. A uniform beside a register, or a
+    * cube uniform beside an immediate, is materialized so the sample keeps
+    * its register form. */
+   if (!debug_get_bool_option("AGX_G17P_TEX_UNIFORM_OPERANDS", true))
+      GTEST_SKIP() << "texture uniform operands disabled";
+   enum other { OTHER_UNIFORM, OTHER_IMMEDIATE, OTHER_REGISTER };
+   for (auto dim : {AGX_DIM_2D, AGX_DIM_CUBE, AGX_DIM_CUBE_ARRAY}) {
+      for (auto other : {OTHER_UNIFORM, OTHER_IMMEDIATE, OTHER_REGISTER}) {
+         void *mem = ralloc_context(NULL);
+         agx_shader_key key = {};
+         key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+         agx_builder *b = agx_test_builder(mem);
+         b->shader->key = &key;
+         b->shader->stage = MESA_SHADER_FRAGMENT;
+         agx_index texture = agx_mov(b, agx_uniform(12, AGX_SIZE_64));
+         agx_index sampler =
+            other == OTHER_UNIFORM ? agx_mov(b, agx_uniform(16, AGX_SIZE_64))
+            : other == OTHER_IMMEDIATE ? agx_immediate(3)
+                                       : agx_register(4, AGX_SIZE_64);
+         agx_instr *I = agx_texture_sample_to(
+            b, agx_temp(b->shader, AGX_SIZE_32), agx_register(0, AGX_SIZE_32),
+            agx_uniform(8, AGX_SIZE_32), agx_uniform(0, AGX_SIZE_64),
+            texture, sampler, agx_null(), dim, AGX_LOD_MODE_LOD_MIN, 0,
+            false, false, false, AGX_GATHER_NONE, false);
+         agx_optimizer_forward(b->shader);
+         agx_lower_uniform_sources(b->shader);
+         const bool cube = dim != AGX_DIM_2D;
+         const bool keep = other == OTHER_UNIFORM ||
+                           (other == OTHER_IMMEDIATE && !cube);
+         EXPECT_EQ(I->src[3].type == AGX_INDEX_UNIFORM, keep)
+            << "dim " << dim << " other " << other;
+         EXPECT_EQ(I->src[4].type == AGX_INDEX_UNIFORM,
+                   other == OTHER_UNIFORM)
+            << "dim " << dim << " other " << other;
+         ralloc_free(mem);
       }
    }
 }
