@@ -92,6 +92,13 @@ bool agx3_g17g_compute_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    struct agx3_g17p_graphics_program *program);
 
+/* G18 compute's static TPS frame. Produces the canonical GPU1 program for
+ * subsequent agx3d re-encoding; the kernel must own the matching pool before
+ * execution. Other stages and G17G retain their separate scratch-free APIs. */
+bool agx3_g18g_compute_program_generate(
+   const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program);
+
 /* No-preamble internal tile shaders: EOT has no PIXREL, background has the
  * distinct M5 release mask. Uniform ranges describe the compiled shader ABI. */
 bool agx3_g17g_tile_program_generate(

@@ -294,12 +294,22 @@ encode_gpu1(const struct agx3_isel_desc *d,
     *
     * f28 and f43 widen the two halves by sign extension; Apple sets both for
     * equality, where the extension cannot change the outcome, and neither
-    * for the unsigned relation. A 32-bit result of the same comparison is
-    * this select into the low half and a clear of the high one, so only the
-    * half result takes this form. */
+    * for the unsigned relation.
+    *
+    * Native mixed-select probes also witness two half comparands selecting
+    * full-width registers on G17G and G18G: eq/ne, unsigned lt/gt and signed
+    * lt/gt, with live and discarded operands. This is iseli32, retaining
+    * f24=f39=1 for the comparands while f10=f54=f68=2 select the full word.
+    * Signed relations set both extension fields, as equality does. Equality
+    * additionally witnesses one selected u8 immediate, on either side. */
    const bool half_regs = d->cmp_16 && !d->cmp1_immediate;
-   if (half_regs && (!d->dest_16 || (d->cond != AGX3_ISEL_ICOND_EQ &&
-                                     d->cond != AGX3_ISEL_ICOND_ULT)))
+   const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
+   const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
+   if (half_regs && d->dest_16 && d->cond != AGX3_ISEL_ICOND_EQ &&
+       d->cond != AGX3_ISEL_ICOND_ULT)
+      return false;
+   if (half_regs && !d->dest_16 && (ti || fi) &&
+       (d->cond != AGX3_ISEL_ICOND_EQ || (ti && fi)))
       return false;
    if (d->cmp_16 && !half_regs &&
        (d->cmp1 > 255 || d->cond != AGX3_ISEL_ICOND_EQ))
@@ -312,8 +322,6 @@ encode_gpu1(const struct agx3_isel_desc *d,
       return false;
    if (d->cmp1_sign_extend && !d->cmp1_16)
       return false;
-   const bool ti = d->true_kind == AGX3_ISEL_IMMEDIATE;
-   const bool fi = d->false_kind == AGX3_ISEL_IMMEDIATE;
    /* A signed relation with a 16-bit result is the same instruction with
     * f82 = 5/6, on a full-width comparand: applegpu_g17g kernels in
     * test/native/g17g/m5-compare-select-reference.metal, which is also the
@@ -351,10 +359,10 @@ encode_gpu1(const struct agx3_isel_desc *d,
       KV(11, d->dest_cache),
       KV(23, 2), KV(24, d->cmp_16 ? 1 : 2),
       /* Native ushort equality sets f28 with its half comparator. */
-      KV(28, half_regs ? d->cond == AGX3_ISEL_ICOND_EQ : d->cmp_16),
+      KV(28, half_regs ? d->cond >= AGX3_ISEL_ICOND_EQ : d->cmp_16),
       KV(38, d->cmp1_immediate ? 1 : 2),
       KV(39, (d->cmp1_immediate || d->cmp1_16 || half_regs) ? 1 : 2),
-      KV(43, half_regs ? d->cond == AGX3_ISEL_ICOND_EQ
+      KV(43, half_regs ? d->cond >= AGX3_ISEL_ICOND_EQ
                        : d->cmp1_sign_extend),
       KV(53, ti ? 1 : 2), KV(54, d->dest_16 ? 1 : 2),
       KV(67, fi ? 1 : 2), KV(68, d->dest_16 ? 1 : 2),

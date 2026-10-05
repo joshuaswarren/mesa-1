@@ -66,7 +66,7 @@ static const uint8_t
 
 enum {
    G17P_FRAGMENT_PIXREL_SIZE = 6,
-   G17P_MAX_COLOUR_PARTITIONS = 3,
+   FRAGMENT_COLOUR_PARTITIONS = 3,
 };
 
 /* Fragment __GPU_METADATA_2 root field 1 is a release mask for pixel classes
@@ -80,21 +80,34 @@ enum {
  * 0x233 for partitions 0 and 2, and 0x20f for partitions 1 and 2.  Coverage
  * shaders additionally keep class 0 acquired, clearing bit 0 of each form. */
 static bool
-g17p_fragment_pixrel_compose(unsigned colour_classes,
-                             bool writes_sample_mask,
-                             uint8_t out[G17P_FRAGMENT_PIXREL_SIZE])
+fragment_pixrel_descriptor(unsigned colour_classes, bool writes_sample_mask,
+                           uint16_t *out)
 {
    if (!out || colour_classes == 0 ||
-       colour_classes >= (1u << G17P_MAX_COLOUR_PARTITIONS))
+       colour_classes >= (1u << FRAGMENT_COLOUR_PARTITIONS))
       return false;
 
    uint16_t descriptor = UINT16_C(0x2ff);
-   for (unsigned c = 0; c < G17P_MAX_COLOUR_PARTITIONS; ++c) {
+   for (unsigned c = 0; c < FRAGMENT_COLOUR_PARTITIONS; ++c) {
       if (colour_classes & (1u << c))
          descriptor &= ~(UINT16_C(12) << (2 * c));
    }
    if (writes_sample_mask)
       descriptor &= ~UINT16_C(1);
+
+   *out = descriptor;
+   return true;
+}
+
+static bool
+g17p_fragment_pixrel_compose(unsigned colour_classes,
+                             bool writes_sample_mask,
+                             uint8_t out[G17P_FRAGMENT_PIXREL_SIZE])
+{
+   uint16_t descriptor;
+   if (!out || !fragment_pixrel_descriptor(colour_classes, writes_sample_mask,
+                                          &descriptor))
+      return false;
 
    const uint8_t staged[G17P_FRAGMENT_PIXREL_SIZE] = {
       0x07, 0x02, 0x54, descriptor, descriptor >> 8, 0x00,
@@ -655,7 +668,8 @@ agx_ioto_g17g_resource_program_compose_classes(
    enum agx_ioto_g17g_program_stage stage, unsigned colour_classes,
    void *output, size_t capacity, size_t *written)
 {
-   if (!output || !written || (colour_classes != 1 && colour_classes != 3) ||
+   if (!output || !written || !colour_classes ||
+       colour_classes >= (1u << FRAGMENT_COLOUR_PARTITIONS) ||
        (stage != AGX_IOTO_G17G_PROGRAM_VERTEX &&
         stage != AGX_IOTO_G17G_PROGRAM_FRAGMENT &&
         stage != AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT &&
@@ -681,27 +695,22 @@ agx_ioto_g17g_resource_program_compose_classes(
    const bool pixel_release = stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
                               stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT ||
                               stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND;
-   if (colour_classes == 3 && stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT) {
-      /* G18 native two-RGBA8 fragment Ioto: f14=0x2c3. PIXREL has
-       * identical bytes in AGX3c/d, and RT0 alone has f14=0x2f3. */
-      static const uint8_t mrt_pixrel[] = {0x1f, 0x16, 0, 4, 0, 0};
-      memcpy(base + prefix_size, mrt_pixrel, sizeof(mrt_pixrel));
-   }
-   if (colour_classes == 3 &&
-       stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT)
-      return false;
-   if (stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT) {
-      /* Native M5 punch-through fragment Ioto releases with 971700040000
-       * where an opaque one releases with 9f1700040000: one bit, cleared
-       * because the shader owns the sample mask rather than the fixed
-       * function. Captured 2026-09-14 from gpu/m5-state-matrix-reference.m
-       * mode `discard` (a fragment that discards where red > 0.5) against
-       * mode `color-load`; every other byte of the two programs beyond the
-       * shader's own uniform copies is identical. This mirrors G17P, where
-       * the same distinction clears bit 0 of the 0x2f3 release descriptor.
-       */
-      static const uint8_t coverage_pixrel[] = {0x97, 0x17, 0, 4, 0, 0};
-      memcpy(base + prefix_size, coverage_pixrel, sizeof(coverage_pixrel));
+   if (stage == AGX_IOTO_G17G_PROGRAM_FRAGMENT ||
+       stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT) {
+      /* PIXREL has identical bytes in AGX3c/d. Native G18 submitted
+       * fragments use f14=0x203 for all three colour classes and 0x233
+       * for classes 0 and 2 (capture308). These extend the one/two-target
+       * 0x2f3/0x2c3 witnesses using the same class ownership as G17P.
+       * M5 coverage fragments additionally retain bit 0, giving 0x2f2
+       * instead of 0x2f3, independently of the colour-class fields. */
+      uint16_t descriptor;
+      if (!fragment_pixrel_descriptor(
+             colour_classes,
+             stage == AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT, &descriptor))
+         return false;
+      const uint16_t low = UINT16_C(7) | (descriptor << 3);
+      const uint8_t pixrel[] = {low, low >> 8, 0, 4, 0, 0};
+      memcpy(base + prefix_size, pixrel, sizeof(pixrel));
    }
    if (stage == AGX_IOTO_G17G_PROGRAM_BACKGROUND) {
       /* Native M5 main/partial background Ioto at +0x19e releases with

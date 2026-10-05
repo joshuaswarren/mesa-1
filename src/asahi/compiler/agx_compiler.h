@@ -26,6 +26,9 @@ extern "C" {
 /* G17P's register file: halves 0..191. */
 #define AGX3B_NUM_REGS (192)
 
+/* G18G's ordinary register file ends at r125 (half 251). */
+#define AGX3D_NUM_REGS (252)
+
 /* u0-u255 inclusive, as pairs of 16-bits */
 #define AGX_NUM_UNIFORMS (512)
 

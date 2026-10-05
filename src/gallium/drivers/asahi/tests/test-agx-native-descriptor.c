@@ -319,8 +319,8 @@ test_agx3_pbe(void)
       CHECK(agx_pbe_agx3_2d_multisample_pack(
          AGX_PBE_AGX3_GENERATION_9, &fields, samples, &expected));
       CHECK(memcmp(native.opaque, expected.bytes, sizeof(expected.bytes)) == 0);
-      CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10,
-                                          &native, &msaa));
+      CHECK(agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_10,
+                                         &native, &msaa));
       msaa.levels = 2;
       CHECK(!agx_gallium_pack_native_pbe(AGX_DESCRIPTOR_GENERATION_9,
                                           &native, &msaa));

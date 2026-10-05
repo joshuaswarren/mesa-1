@@ -258,8 +258,9 @@ agx_tilebuffer_pack_usc(struct agx_tilebuffer_layout *tib)
    }
 }
 
-unsigned
-agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
+static unsigned
+agx_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib,
+                  unsigned max_bytes_per_tile)
 {
    if (!tib || tib->layered || tib->nr_samples != 1 ||
        (tib->tile_size != 32 * 32 && tib->tile_size != 32 * 16))
@@ -280,7 +281,22 @@ agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
       ++count;
    }
    return count && tib->sample_size_B == ALIGN_POT(4 * count, 8) &&
-          tib->sample_size_B * tib->tile_size < 32768 ? mask : 0;
+          tib->sample_size_B * tib->tile_size <= max_bytes_per_tile ? mask : 0;
+}
+
+unsigned
+agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
+{
+   return agx_rgba8_mrt_mask(tib, 32767);
+}
+
+unsigned
+agx_g18g_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib)
+{
+   /* Native G18 clear/load/mixed/sparse capture308 binds 32-byte samples
+    * in a 32x32 single-sample tile. Keep this separate from G17P's budget. */
+   return tib && tib->tile_size == 32 * 32
+             ? agx_rgba8_mrt_mask(tib, 32768) : 0;
 }
 
 unsigned

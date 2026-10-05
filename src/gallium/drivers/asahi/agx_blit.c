@@ -794,13 +794,17 @@ agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info)
        agx_g17p_staged_resolve_blit(ctx, info))
       return;
 
-   /* msaa163 P13: a multisample source that neither folds nor stages would
-    * reach u_blitter's txf_ms resolve, which has no grounded G18G encoding
-    * and would read a multisample image no render ever stored. Refuse it
-    * explicitly (MSAA notes F15). */
-   if (g18_msaa4 && util_res_sample_count(info->src.resource) > 1) {
-      mesa_loge("asahi: G18G multisample blit source %s %ux%u could not be "
-                "resolved at end of tile; refused (txf_ms is not grounded)",
+   /* The render blitter fetches every stored sample and performs the format's
+    * resolve in the shader. Admit only sources sharing the writer/reload
+    * storage contract; other sample counts and layouts remain unsupported. */
+   if (g18_msaa4 && util_res_sample_count(info->src.resource) > 1 &&
+       (!agx_g18_msaa4_storage(agx_device(ctx->base.screen),
+                                agx_resource(info->src.resource),
+                                info->src.format) ||
+        info->src.level != 0 || info->src.box.z != 0 ||
+        info->src.box.depth != 1)) {
+      mesa_loge("asahi: G18G multisample blit source %s %ux%u has "
+                "unsupported sample count, format or storage layout",
                 util_format_name(info->src.format), info->src.box.width,
                 info->src.box.height);
       return;

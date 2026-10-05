@@ -305,7 +305,7 @@ agx_compact_kernel_info(struct agx_shader_info *info)
       .agx3_preamble_staging_halfs = info->agx3_preamble_staging_halfs,
       .agx3_preamble_encoded_inputs = info->agx3_preamble_encoded_inputs,
       .agx3_tps_size =
-         (uint16_t)MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
+         MAX2(info->scratch_size, info->agx3_spectpr_scratch_size),
    };
 }
 
@@ -592,7 +592,8 @@ bool agx_nir_fix_g17g_constant_interpolation(nir_shader *s);
 
 bool agx_nir_lower_cull_distance_vs(struct nir_shader *s);
 bool agx_nir_lower_cull_distance_fs(struct nir_shader *s,
-                                    unsigned nr_distances);
+                                    unsigned nr_distances,
+                                    bool native_constant_planes);
 bool agx_mem_vectorize_cb(unsigned align_mul, unsigned align_offset,
                           unsigned bit_size, unsigned num_components,
                           int64_t hole_size, nir_intrinsic_instr *low,

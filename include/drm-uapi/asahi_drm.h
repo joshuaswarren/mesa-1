@@ -1286,6 +1286,37 @@ struct drm_asahi_cmd_compute {
 	struct drm_asahi_timestamps ts;
 };
 
+/* G18 per-dispatch metadata. Counts are compiler halfwords or bytes as named;
+ * the kernel converts them to native units. Version 1 is exactly 64 bytes.
+ * Flags: bit0 main staging known, bit1 constant program present, bit2 constant
+ * staging known, bit3 local geometry unknown (local_size must then be zero).
+ * All other flag bits and reserved must be zero. */
+struct drm_asahi_g18_compute_resources {
+	__u32 version;
+	__u32 flags;
+	__u32 registers_16;
+	__u32 scratch_bytes;
+	__u32 spectpr_scratch_bytes;
+	__u32 staging_16;
+	__u32 constant_registers_16;
+	__u32 constant_scratch_bytes;
+	__u32 constant_staging_16;
+	__u32 local_bytes;
+	__u32 imageblock_stride;
+	__u32 variable_shared_bytes;
+	__u32 local_size[3];
+	__u32 reserved;
+};
+
+/* Flagged G18-only extension. Keep the ordinary compute payload unchanged.
+ * The existing kernel ScsLayout word occupies offset0x40; metadata starts at
+ * offset0x48. This path does not use SCS, so scs_layout must be zero. */
+struct drm_asahi_cmd_compute_g18 {
+	struct drm_asahi_cmd_compute base;
+	__u64 scs_layout;
+	struct drm_asahi_g18_compute_resources resources;
+};
+
 /**
  * enum drm_asahi_compute_flags - Compute command flags
  */
@@ -1304,6 +1335,9 @@ enum drm_asahi_compute_flags {
 	 * 0x14c08a60 instead of 0x10c08860). Other kernels refuse the bit.
 	 */
 	DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE = (1L << 1),
+
+	/** @DRM_ASAHI_COMPUTE_G18_RESOURCES: Versioned G18 metadata suffix. */
+	DRM_ASAHI_COMPUTE_G18_RESOURCES = (1L << 2),
 };
 
 /**

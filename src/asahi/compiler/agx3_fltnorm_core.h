@@ -199,6 +199,12 @@ struct agx3_rgb10a2_desc {
 };
 bool agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *desc,
                         uint8_t out[14], uint8_t *length);
+/* G17G/G18G RGB10A2 fragment epilogs share the operand fields, with the
+ * additional f82/f83 sub-opcode pair. Packed floats and part-start markers
+ * remain G17P-only until their shader-linking paths are qualified. */
+bool agx3_rgb10a2_encode_for_encoding(enum agx_isa_encoding enc,
+                                     const struct agx3_rgb10a2_desc *desc,
+                                     uint8_t out[14], uint8_t *length);
 
 struct agx3_rgb10a2_unpack_desc {
    uint16_t dest, source; /* half indices: four f32 outputs, one u32 input */

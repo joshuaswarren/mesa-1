@@ -8,6 +8,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "util/macros.h"
+#include "util/mesa-blake3.h"
 #include "util/ralloc.h"
 #include "agx_abi.h"
 #include "agx3_code_container_core.h"
@@ -45,12 +46,21 @@ agx_fs_epilog_apply_device_policy(enum agx_chip chip,
       return;
 
    const bool g17p = chip == AGX_CHIP_G17P;
-   key->preserve_zero_mask = g17p;
+   /* G18 coverage also dirties color during depth-only or fully masked draws.
+    * Preserve the previous tile value while executing the other side effects.
+    */
+   key->preserve_zero_mask = g17p || chip == AGX_CHIP_G18G;
    /* Both AGX3 tile interfaces move packed bytes. The RGB transfer function
-    * belongs around blending; alpha remains linear. Packed float lowering
-    * is a separate capability and remains confined to G17P. */
+    * belongs around blending; alpha remains linear. R11G11B10 is explicitly
+    * packed into one raw tile word, with a matching R32_UINT store PBE. */
    key->lower_srgb = g17p || agx_chip_m5_paths(chip);
-   key->lower_r11g11b10 = g17p;
+   key->lower_r11g11b10 = g17p || chip == AGX_CHIP_G18G;
+   if (chip == AGX_CHIP_G18G && key->nr_samples == 1) {
+      /* Match the single-sample render-pass layout. Native G18 eight-target
+       * renders use the complete 32-KiB imageblock with 1024 raster samples. */
+      key->max_bytes_per_tile = 32768;
+      key->max_samples_per_tile = 1024;
+   }
 }
 
 bool
@@ -534,6 +544,29 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    linked->agx3_spectpr_scratch_size = agx3_spectpr_scratch_size;
    linked->nr_gprs = nr_gprs;
    linked->g17p_colour_classes = colour_classes;
+
+   if (dev->chip == AGX_CHIP_G18G && getenv("ASAHI_G18_RESOURCE_TRACE") &&
+       (scratch_size || agx3_spectpr_scratch_size) && size <= (SIZE_MAX - 1) / 2) {
+      /* Once per linked executable, rather than once per dispatch. Preserve
+       * the final bytes, including prolog/epilog and link-time patches. */
+      char *hex = malloc(size * 2 + 1);
+      if (hex) {
+         static const char digits[] = "0123456789abcdef";
+         blake3_hash digest;
+         char hash[BLAKE3_HEX_LEN];
+         _mesa_blake3_compute(linked_map, size, digest);
+         _mesa_blake3_format(hash, digest);
+         for (size_t i = 0; i < size; ++i) {
+            hex[2 * i] = digits[linked_map[i] >> 4];
+            hex[2 * i + 1] = digits[linked_map[i] & 15];
+         }
+         hex[size * 2] = 0;
+         fprintf(stderr,
+                 "G18_LINKED_SHADER size=%zu scratch=%u spectpr=%u blake3=%s hex=%s\n",
+                 size, scratch_size, agx3_spectpr_scratch_size, hash, hex);
+         free(hex);
+      }
+   }
 
    if (agx_bo_sync_for_device(linked->bo, 0, alloc_size)) {
       agx_bo_unreference(dev, linked->bo);

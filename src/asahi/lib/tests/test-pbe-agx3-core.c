@@ -619,7 +619,7 @@ check_gen9_multisample_vector(void)
    linear.layout = 0;
    linear.stride_B = 1024;
    CHECK(!agx_pbe_agx3_2d_multisample_pack(9, &linear, 4, &packed));
-   CHECK(!agx_pbe_agx3_2d_multisample_pack(10, &fields, 4, &packed));
+   CHECK(!agx_pbe_agx3_2d_multisample_pack(11, &fields, 4, &packed));
    CHECK(!agx_pbe_agx3_2d_multisample_pack(9, NULL, 4, &packed));
    return 0;
 }
@@ -727,7 +727,7 @@ check_gen9_array_multisample_vector(void)
    linear.stride_B = 1024;
    CHECK(!agx_pbe_agx3_2d_array_multisample_pack(9, &linear, 12, 4,
                                                  &packed));
-   CHECK(!agx_pbe_agx3_2d_array_multisample_pack(10, &fields, 12, 4,
+   CHECK(!agx_pbe_agx3_2d_array_multisample_pack(11, &fields, 12, 4,
                                                  &packed));
    CHECK(!agx_pbe_agx3_2d_array_multisample_pack(9, &fields, 0, 4,
                                                  &packed));

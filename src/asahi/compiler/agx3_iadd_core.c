@@ -245,9 +245,25 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
     * (2b 80 85 8c 12 04 01 90 13 00 00 00, the vertex_id * 12 + base address)
     * differ from G17G only in the wait slot (f61..f68). */
    const bool m5 = agx_encoding_is_g17_class(encoding);
-   /* M5's imadd32 has the same integer operand classes, with a separate
-    * fourteen-byte encoding and eight producer slots. Narrow and widening
-    * forms require independent M5 witnesses. */
+   /* G17G and G18G's 16x16->32 products use the same width/sign fields.
+    * test/native/g18g/narrow-imad.metal witnesses unsigned, signed, mixed
+    * signedness, live inputs, and a 32-bit register addend. For example:
+    *
+    *   G18G unsigned  eb 01 00 00 12 80 41 40 00 00
+    *   G18G signed    eb 01 00 00 12 80 41 a0 00 00 20 00
+    *   G17G unsigned  2f 00 04 1a 21 00 a1 02 60 00 20 00 01 02
+    *   G17G signed    2f 00 04 1a 21 00 a1 02 60 00 20 c0 01 02
+    *
+    * Pure 32x16->32 products are independently witnessed by mul_u32_u16
+    * and mul_i32_i16; these set f24=2 while f39 remains 1. A register
+    * addend is witnessed only with two half inputs. Keep immediate-addend,
+    * narrow-result and 64-bit forms closed. G18G's packer uses the G17G form
+    * before transcoding, preserving the same operand field vector. */
+   const bool g17_half_product = m5 &&
+      !d->dest_16 && !d->dest_64 && (d->src_a_16 || d->no_addend) &&
+      d->multiplier_is_register && d->multiplier_16 &&
+      !d->src_c_16 && !d->src_c_64 && !d->src_c_sign_extend &&
+      !d->addend_is_immediate;
    /* M5's 32x32->64 form is `imadd64` (f10=3, f60=85): a register
     * multiplier with an immediate or a 64-bit register addend, both operands
     * zero-extended. Witnessed byte-exactly against applegpu_g17g
@@ -260,7 +276,7 @@ agx3_imad_encode(enum agx_isa_encoding encoding,
     *
     * The addend-free product is the immediate form adding #0 (identical
     * bytes); a product signed on one side only has no witness. */
-   if (m5 && (d->dest_16 || d->src_a_16 ||
+   if (m5 && !g17_half_product && (d->dest_16 || d->src_a_16 ||
               d->multiplier_16 || d->src_c_16 ||
               (d->src_c_64 && !d->dest_64) ||
               (d->dest_64 && (!d->multiplier_is_register || d->no_addend)) ||

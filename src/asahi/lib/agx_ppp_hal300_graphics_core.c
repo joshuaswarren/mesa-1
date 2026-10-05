@@ -21,7 +21,8 @@ agx_ppp_hal300_graphics_core_pack(
     * that shared layout, without a G18G capture of their own. */
    if (!agx_chip_hal300_records(chip) || !fields || !out ||
        !fields->fragment_program || fields->cull_mode > 3 ||
-       fields->fragment_pass > 2 || fields->flat_shading_vertex > 2 ||
+       fields->fragment_pass > (chip == AGX_CHIP_G18G ? 3 : 2) ||
+       fields->flat_shading_vertex > 2 ||
        (fields->flat_shading_vertex && chip != AGX_CHIP_G18G))
       return false;
 
@@ -82,6 +83,17 @@ agx_ppp_hal300_graphics_core_pack(
    /* Rasterizer discard is read from AGXMetalG18G; G17G has no witness. */
    if (fields->rasterizer_discard && chip != AGX_CHIP_G18G)
       return false;
+   if (fields->depth_bias_enable &&
+       (chip != AGX_CHIP_G18G || fields->object_type != AGX_PPP_HAL300_TRIANGLES))
+      return false;
+
+   if ((fields->occlusion_query_mode != 0 &&
+        fields->occlusion_query_mode != 2 &&
+        fields->occlusion_query_mode != 3) ||
+       fields->occlusion_query_index >= 32768 ||
+       (chip != AGX_CHIP_G18G &&
+        (fields->occlusion_query_mode || fields->occlusion_query_index)))
+      return false;
 
    /* never .. always; see the header's decode table. An inactive depth unit
     * carries no comparison of its own. */
@@ -89,23 +101,28 @@ agx_ppp_hal300_graphics_core_pack(
        (!fields->depth_active && (fields->depth_compare || fields->depth_write)))
       return false;
 
-   /* 0x40000 tracks whether the depth test is enabled at all, not what the
-    * test does. The capture matrix settles it: every render with the test
-    * enabled carries 0x200, including the one with comparison always and
-    * depth writes off, while the renders with no test at all -- no
-    * attachment, an attachment with no depth-stencil state, and the stencil
-    * render whose depth test was off -- all carry 0x40000. An earlier model
-    * that derived the bit from "always and no write" produced 0x40200 for
-    * that first case and was wrong. */
+   /* Retain the captured bit 18 for depth-disabled draws. On G18, stencil
+    * testing independently requires BOTH bits 18 and 19, including when
+    * depth testing is enabled. The native state constructor at 0x2194210bc
+    * selects 0xc0000 for either enabled stencil face, and setDepthStencilState
+    * copies both bits into primary ISP control at 0x219660404..0x21966042c.
+    * Setting only bit 19 silently loses stencil tests/updates on combined
+    * depth/stencil draws; stencil-only draws already had bit 18 by accident.
+    */
    const uint8_t compare = fields->depth_active ? fields->depth_compare : 7;
    const bool write = fields->depth_active && fields->depth_write;
    const bool depth_inactive = !fields->depth_active;
    const bool points = fields->object_type == AGX_PPP_HAL300_POINTS;
    const bool lines = fields->object_type == AGX_PPP_HAL300_LINES;
    const uint32_t control = 0x00000200 | (points || lines ? 0x04000000 : 0) |
+                            (fields->occlusion_query_mode << 14) |
                             (fields->scissor_enable ? 0x00010000 : 0) |
+                            (fields->depth_bias_enable ? 0x00020000 : 0) |
                             (depth_inactive ? 0x00040000 : 0) |
-                            (fields->stencil_active ? 0x00080000 : 0);
+                            (fields->stencil_active
+                                ? (chip == AGX_CHIP_G18G ? 0x000c0000
+                                                        : 0x00080000)
+                                : 0);
    const uint32_t face = ((uint32_t)compare << 24) |
                          (write ? 0 : 0x00200000) | 0xf00;
 
@@ -167,7 +184,8 @@ agx_ppp_hal300_graphics_core_pack(
        face | fields->front_stencil_reference,
        face | fields->back_stencil_reference,
        fields->stencil_active ? fields->front_stencil : 0x0e000000,
-       fields->stencil_active ? fields->back_stencil : 0x0e000000, 0},
+       fields->stencil_active ? fields->back_stencil : 0x0e000000,
+       fields->occlusion_query_index << 17},
       /* HAL300 updateFragmentShaderISPState (M5/25G76, 4d2b10..4d2b38)
        * stores pass bits29..31 at context+780c. encodeAndEmitRenderState
        * loads them at 4e831c (7500+30c), preserves them at 4e83ac..4e83b8,

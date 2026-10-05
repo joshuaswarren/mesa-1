@@ -1184,7 +1184,7 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
       for (unsigned i = 0; i < 4; ++i) {
          if (channels[i].size == AGX_SIZE_32) {
             pack_sources[i] = channels[i];
-         } else if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         } else if (agx_encoding_is_agx3(b->shader->key->dev.encoding) &&
                     channels[i].size == AGX_SIZE_16) {
             /* As with the normalized 8-bit epilog below, a texture result
              * can arrive through the half export ABI. The native RGB10A2
@@ -1383,11 +1383,14 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
       nr_packed = agx_pack_integer_8_agx3(
          b, compacted, compact_count, format, packed);
 
-   /* G17P's tile store encodes only the lane width.  Unlike AGX2 it cannot
-    * narrow an f32 colour to the f16 lanes named by that width, so make the
-    * conversion explicit before collecting the store payload.  Keep AGX3c
-    * unchanged until its matching narrowing ALU form is grounded. */
-   if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+    /* G17P/G18G tile stores encode only the lane width. Unlike AGX2 they cannot
+     * narrow an f32 colour to the f16 lanes named by that width, so make the
+     * conversion explicit before collecting the store payload. G18 native
+     * F16 stores consume contiguous half registers, including packed UNORM
+     * targets whose physical tile representation is F16. */
+    if ((b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+         (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+          b->shader->key->dev.emit_agx3d)) &&
        format == AGX_FORMAT_F16 && nr_packed == 0) {
       nr_packed = compact_count;
       for (unsigned i = 0; i < compact_count; ++i) {
@@ -1511,6 +1514,55 @@ agx_emit_store_zs(agx_builder *b, nir_intrinsic_instr *instr)
 
    assert(!write_z || z.size == AGX_SIZE_32);
    assert(!write_s || s.size == AGX_SIZE_16);
+
+   if (b->shader->key->dev.emit_agx3d &&
+       b->shader->key->fs.nr_samples == 4 && write_z && !write_s) {
+      /* Native315's twelve G18 draws bind a four-sample depth fragment:
+       * each DEPTHF preserves SR39's upper byte, selects one covered sample
+       * in its low byte, and follows that word with saturated float depth.
+       * The four exports share one class-1 transaction. Unlike G17P, the
+       * G18 word is not formed by shifting the upper coverage nibble. */
+      unsigned reach = agx_possible_zs_samples(instr->src[0].ssa) & 0xf;
+      if (!reach)
+         reach = 0xf; /* Empty coverage still balances the transaction. */
+
+      agx_index keep = agx_temp(b->shader, AGX_SIZE_16);
+      agx_mov_to(b, keep, agx_src_index(&instr->src[0]));
+      agx_index depth;
+      if (nir_src_is_const(instr->src[1])) {
+         const float value = nir_src_as_float(instr->src[1]);
+         depth = agx_mov_imm(b, 32, fui(CLAMP(value, 0.0f, 1.0f)));
+      } else {
+         depth = agx_temp(b->shader, AGX_SIZE_32);
+         agx_fmov_to(b, depth, z)->saturate = true;
+      }
+      agx_index depth_lo = agx_temp(b->shader, AGX_SIZE_16);
+      agx_index depth_hi = agx_temp(b->shader, AGX_SIZE_16);
+      agx_subdivide_to(b, depth_lo, depth, 0);
+      agx_subdivide_to(b, depth_hi, depth, 1);
+      agx_index high = agx_mov_imm(b, 16, 0xff00);
+
+      agx_instr *last = NULL;
+      b->shader->zs_writes_left += util_bitcount(reach) - 1;
+      u_foreach_bit(i, reach) {
+         agx_index sr39 = agx_temp(b->shader, AGX_SIZE_16);
+         agx_get_sr_coverage_to(b, sr39, AGX_SR_INPUT_SAMPLE_MASK);
+         agx_index covered = agx_and(
+            b, agx_and(b, sr39, keep), agx_immediate(BITFIELD_BIT(i)));
+         agx_index upper = agx_and(b, sr39, agx_mov_imm(b, 16, 0xff00));
+         agx_index low = agx_iadd(b, covered, upper, 0);
+         agx_index word = agx_vec_temp(b->shader, AGX_SIZE_16, 4);
+         agx_emit_collect_to(b, word, 4,
+                            (agx_index[]){low, high, depth_lo, depth_hi});
+         b->shader->out->writes_sample_mask = true;
+         agx_wait_pixel_mask(b, 0x1);
+         last = agx_zs_emit_agx3(b, word, base);
+         assert(b->shader->zs_writes_left > 0);
+         if (--b->shader->zs_writes_left == 0)
+            agx_signal_pix(b, 0x1);
+      }
+      return last;
+   }
 
    /* G17P depthf reads staged dwords: coverage at half 0 and float32 depth
     * at half 2. Native FSEL.ep35 publishes the clamped depth directly to
@@ -3160,6 +3212,28 @@ translate_simd_op(nir_op op)
 #undef CASE
 }
 
+static agx_index
+agx_g18_sample_mask_word(agx_builder *b, agx_index affected, agx_index keep,
+                         bool no_tests)
+{
+   /* Native G18 one-sample discard supplies MOVMSK with coverage in bits
+    * 0 and 8, and the live sample in bit 24. Its FSELI16 selects 0 or the
+    * static uniform halfword 0x0100 into the high half of the staging word.
+    * These are byte fields, not three nibbles in the low halfword.
+    */
+   agx_index zero = agx_immediate(0);
+   /* Native early kills pass only the affected byte (zero is a no-op).
+    * A full update must also be zero when no sample is affected; main
+    * shader and epilog must not run tests twice on surviving samples. */
+   agx_index low = no_tests ? affected :
+      agx_iadd(b, affected, agx_iadd(b, zero, affected, 4), 4);
+   agx_index high = no_tests ? agx_mov_imm(b, 16, 0) :
+      agx_iadd(b, zero, agx_iadd(b, zero, keep, 4), 4);
+   agx_index word = agx_temp(b->shader, AGX_SIZE_32);
+   agx_emit_collect_to(b, word, 2, (agx_index[]){low, high});
+   return word;
+}
+
 static agx_instr *
 agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
 {
@@ -3271,9 +3345,14 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
    case nir_intrinsic_load_frag_coord_z: {
       agx_index cf = agx_get_cf(b->shader, VARYING_SLOT_POS, 2);
 
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      /* AGX3 has no legacy ITER. G17G/G18G position.z/w use ordinary
+       * scalar interpolation too, with the native f11 mode set. This is
+       * a direct coefficient value, without a software perspective divide. */
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2)
          return agx_interp_agx3_to(b, dst, cf, agx_zero(),
-                                     AGX_INTERPOLATION_CENTER, false);
+                                     AGX_INTERPOLATION_CENTER,
+                                     agx_encoding_is_g17_class(
+                                        b->shader->key->dev.encoding));
 
       return agx_iter_to(b, dst, cf, agx_zero(), 1, AGX_INTERPOLATION_CENTER);
    }
@@ -3284,9 +3363,11 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       /* Native position.w uses ordinary interpolation (f54=0). The
        * projective RHW form is private to reciprocal interpolation and
        * cannot be reused as a public arithmetic value. */
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      if (b->shader->key->dev.encoding != AGX_ISA_ENCODING_AGX2)
          return agx_interp_agx3_to(b, dst, cf, agx_zero(),
-                                     AGX_INTERPOLATION_CENTER, false);
+                                     AGX_INTERPOLATION_CENTER,
+                                     agx_encoding_is_g17_class(
+                                        b->shader->key->dev.encoding));
 
       return agx_iter_to(b, dst, cf, agx_zero(), 1, AGX_INTERPOLATION_CENTER);
    }
@@ -3375,17 +3456,23 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
          }
 
          if (known_target >= 0) {
-            target = agx_mov_imm(b, 16, known_target);
+            const bool g18 = b->shader->key->dev.emit_agx3d;
+            target = agx_mov_imm(b, 16, g18 ? 1 : known_target);
             agx_index selected = agx_temp(b->shader, AGX_SIZE_32);
             if (known_target) {
                agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
                agx_get_coverage_1x_agx3_to(b, t16);
-               mid = agx_iadd(b, t16, t16, 4);
-               agx_index word =
-                  agx_iadd(b, agx_immediate(known_keep), mid, 4);
-               agx_emit_collect_to(b, selected, 2,
-                                   (agx_index[]){word,
-                                                 agx_mov_imm(b, 16, 0)});
+               agx_index live = agx_immediate(known_target ? known_keep : 1);
+               if (g18) {
+                  live = agx_and(b, t16, live);
+                  selected = agx_g18_sample_mask_word(b, t16, live, no_tests);
+               } else {
+                  mid = agx_iadd(b, t16, t16, 4);
+                  agx_index word = agx_iadd(b, live, mid, 4);
+                  agx_emit_collect_to(b, selected, 2,
+                                      (agx_index[]){word,
+                                                    agx_mov_imm(b, 16, 0)});
+               }
             } else {
                agx_mov_imm_to(b, selected, 0);
             }
@@ -3403,14 +3490,24 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
             (discard_word && samples == 1) ? nir_intrinsic_flags(instr) : 0;
 
          if (samples == 1) {
-            /* Apple's one-sample fragments read SR2 and repeat it in both
-             * coverage nibbles. */
+            /* One-sample fragments read current coverage from SR2. */
             target = (reduced & 1) ? agx_g17p_reg16(b, target_in)
                                    : agx_and(b, target_in, agx_immediate(1));
             keep = (reduced & 2) ? agx_g17p_reg16(b, live_in)
                                  : agx_and(b, live_in, agx_immediate(1));
             agx_index t16 = agx_temp(b->shader, AGX_SIZE_16);
             agx_get_coverage_1x_agx3_to(b, t16);
+            if (b->shader->key->dev.emit_agx3d) {
+               /* A zero affected set is a native no-op. Preserve that
+                * distinction so a non-testing shader part does not
+                * perform the epilog's depth/stencil tests prematurely. */
+               agx_index affected = agx_and(b, t16, target);
+               keep = agx_and(b, affected, keep);
+               return agx_sample_mask_agx3(
+                  b, target,
+                  agx_g18_sample_mask_word(b, affected, keep, no_tests),
+                  (!no_tests ? 2 : 0) | (force_early ? 1 : 0));
+            }
             mid = agx_iadd(b, t16, t16, 4);
          } else {
             /* At two and four samples Apple reads SR39, whose low byte holds
@@ -8784,9 +8881,14 @@ agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
        (depth_ops && depth_ops != 3))
       AGX3_ORDER_REFUSE();
 
-   if (g18 && (store_count != 2 || load_count || sample_masks || depth_ops ||
-               ctx->key->fs.ignore_tib_dependencies))
-      AGX3_ORDER_REFUSE();
+   /* Native G18 RGBA8 fragments with two through eight attachments, including
+    * sparse writes and blending, load and store in descending target order.
+    * Each class's read acquisition remains held through its final store.
+    * Sample masks, depth exports and backgrounds are separate protocols. */
+   if (g18 && (!store_count || store_count > AGX_MAX_RTS ||
+                sample_masks || depth_ops ||
+                ctx->key->fs.ignore_tib_dependencies))
+       AGX3_ORDER_REFUSE();
 
    /* Native raw32 BG clear/reload keeps ascending stores and has no
     * ordinary colour transactions, including two/three RGBA32 targets. Other
@@ -9590,6 +9692,13 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
          stack_size = align(ctx->scratch_size_B, 4);
 
+      /* G18 native pressure launches publish the static TPS extent in bytes,
+       * rounded to 16. COPY/RLD offsets address halves; SPECTPR divides this
+       * byte count by four. The legacy word count and dynamic-stack header
+       * do not describe this frame. */
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C)
+         stack_size = align(ctx->scratch_size_B, 16);
+
       if (ctx->is_preamble)
          out->preamble_scratch_size = stack_size;
       else
@@ -9619,7 +9728,8 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
     * instruction, so a vector spill or scratch access has to become a run of
     * scalar ones. Do it before the last-use pass, so each component's hints
     * are computed against the instructions that actually survive. */
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+       ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C)
       agx3_split_vector_stack_access(ctx);
 
    /* Set last-use bits after lowering pseudo for best results. */
@@ -9997,7 +10107,14 @@ agx_preprocess_nir_internal(nir_shader *nir, bool g17p, bool g18g)
    NIR_PASS(_, nir, nir_lower_var_copies);
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
-      NIR_PASS(_, nir, agx_nir_lower_frag_sidefx, g17p);
+      /* G18's native image/SSBO/atomic fragments feed pass-through depth
+       * back after their side effects, just like G17P. The 1x and 4x
+       * native318 reference matrix emits DEPTHF even without an explicit
+       * shader depth output. The AGX2 all-live sample-mask lowering is not
+       * that late-test contract. Keep helper-write suppression paired with
+       * the native lowering; draw admission and multisample export remain
+       * independently qualified by the driver. */
+      NIR_PASS(_, nir, agx_nir_lower_frag_sidefx, g17p || g18g);
       NIR_PASS(_, nir, nir_lower_is_helper_invocation);
    }
 
@@ -10649,7 +10766,9 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
    NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_printf_buffer,
             nir_metadata_control_flow, &key->dev);
 
-   if (key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+   /* G18 also lacks a register-indexed interpolation encoding. Reuse the
+    * static-input selection lowering before instruction selection. */
+   if ((key->dev.encoding == AGX_ISA_ENCODING_AGX3B || key->dev.emit_agx3d) &&
        nir->info.stage == MESA_SHADER_FRAGMENT) {
       NIR_PASS(_, nir, nir_shader_intrinsics_pass, lower_indirect_fs_input,
                nir_metadata_none, NULL);

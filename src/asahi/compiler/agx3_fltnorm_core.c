@@ -491,10 +491,28 @@ bool
 agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *d,
                     uint8_t out[14], uint8_t *length)
 {
-   if (!d || !out || !length || d->dest >= 256 || (d->dest & 1) ||
-       (d->wait_mask & ~0x3f) || d->layout > AGX3_PACKED_RG11B10)
+   return agx3_rgb10a2_encode_for_encoding(AGX_ISA_ENCODING_AGX3B, d,
+                                          out, length);
+}
+
+bool
+agx3_rgb10a2_encode_for_encoding(enum agx_isa_encoding enc,
+                                const struct agx3_rgb10a2_desc *d,
+                                uint8_t out[14], uint8_t *length)
+{
+   if (!d || !out || !length || !enc_ok(enc) ||
+       d->dest >= 256 || (d->dest & 1) ||
+       (d->wait_mask & ~wait_limit(enc)) || d->layout > AGX3_PACKED_RG11B10)
       return false;
-   const struct agx3_field_kv base[] = {KV(9, 2), KV(10, 2)};
+   const bool g17 = agx_encoding_is_g17_class(enc);
+   if (g17 && (d->layout != AGX3_PACKED_RGB10A2 || d->first_instruction))
+      return false;
+   /* Fresh G17G/G18G render pipelines establish the same register/immediate,
+    * modifier and lifetime fields as G17P. Their pack sub-opcode is 3/116;
+    * texture input also demonstrates the first scoreboard wait at f84. */
+   const struct agx3_field_kv base[] = {
+      KV(9, 2), KV(10, 2), KV(82, 3), KV(83, 116),
+   };
    struct agx3_field_kv fields[48];
    unsigned n = 0;
    fields[n++] = (struct agx3_field_kv)KV(2, d->dest);
@@ -525,15 +543,15 @@ agx3_rgb10a2_encode(const struct agx3_rgb10a2_desc *d,
       }
    }
    /* Fresh texture-to-RGB10 native main waits for smp slot1 at field84. */
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < nslots(enc); ++i)
       if (d->wait_mask & (1u << i))
          fields[n++] = (struct agx3_field_kv)KV(84 + i, 1);
    fields[n++] = (struct agx3_field_kv)KV(102, d->first_instruction);
    fields[n++] = (struct agx3_field_kv)KV(94, 0);
    fields[n++] = (struct agx3_field_kv)KV(95, 0);
    fields[n++] = (struct agx3_field_kv)KV(96, 0);
-   return agx3_bind_compose(AGX_ISA_ENCODING_AGX3B, "pack", 0,
-                           base, 2, fields, n, out, length);
+   return agx3_bind_compose(enc, "pack", agx3_bind_ep(enc, 0),
+                           base, g17 ? 4 : 2, fields, n, out, length);
 }
 
 /* Fresh single- and two-attachment fetch programs identify the source register

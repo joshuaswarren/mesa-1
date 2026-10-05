@@ -428,9 +428,17 @@ uint16_t agx_sampler_heap_add(struct agx_device *dev,
                               struct agx_sampler_heap *heap,
                               struct agx_sampler_packed *sampler);
 
-/* agx_launch_gs_prerast() issues at most five: vertex-as-compute, geometry
- * count, prefix sum, pre-GS and the geometry shader itself. */
-#define AGX_MAX_CDM_DISPATCHES 8
+struct agx_cdm_dispatch {
+   uint32_t start, end;
+   /* G18G: the command carries DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE. */
+   bool texture_state;
+   struct drm_asahi_g18_compute_resources resources;
+   /* CPU metadata for tracing and resolving empty indirect work after its
+    * dependencies retire; never serialized into a GPU command. */
+   uint32_t trace_mode, trace_global[3], trace_local[3], trace_program;
+   uint64_t trace_indirect, trace_shader;
+   uint64_t trace_tess_params, trace_vertex_params, trace_geometry_params;
+};
 
 struct agx_encoder {
    struct agx_bo *bo;
@@ -538,14 +546,9 @@ struct agx_batch {
     * transform-feedback prepass issues several launches, so on AGX3c each one
     * is terminated where it ends and submitted as its own command, in order.
     * Byte offsets into cdm.bo; empty on every other part, where the whole
-    * stream is submitted once. */
-   struct {
-      uint32_t start, end;
-      /* G18G: the dispatch bound texture or image state; its command
-       * carries DRM_ASAHI_COMPUTE_USES_TEXTURE_STATE. */
-      bool texture_state;
-   } cdm_dispatch[AGX_MAX_CDM_DISPATCHES];
-   unsigned cdm_dispatch_count;
+    * stream is submitted once. A batch can contain more launches than one
+    * geometry prepass, so retain a record for every emitted dispatch. */
+   struct util_dynarray cdm_dispatch; /* struct agx_cdm_dispatch */
 
    /* Scissor and depth-bias descriptors, uploaded at GPU time */
    struct util_dynarray scissor, depth_bias;
@@ -1314,6 +1317,10 @@ void agx_blitter_save(struct agx_context *ctx, struct blitter_context *blitter,
                       enum asahi_blitter_op op);
 
 void agx_blit(struct pipe_context *pipe, const struct pipe_blit_info *info);
+
+bool agx_g18_msaa4_storage(const struct agx_device *dev,
+                           const struct agx_resource *rsrc,
+                           enum pipe_format format);
 
 bool agx_g17p_direct_resolve_blit_shape(const struct pipe_blit_info *info,
                                         bool source_multisampled);

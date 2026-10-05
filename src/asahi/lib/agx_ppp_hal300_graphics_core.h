@@ -20,6 +20,19 @@ struct agx_ppp_hal300_graphics_fields {
    /* Native G18 handleScissorUpdates sets primary ISP control bit 16 when
     * using the separately bound scissor buffer (26A428, 0x21963acb0). */
    bool scissor_enable;
+   /* G18 encodeISPPrimitiveType (26A428, 0x2196367b8..0x21963681c)
+    * selects primary ISP control bit 17 for a biased triangle. The bias
+    * record itself is separately bound by the depth-bias/scissor block. */
+   bool depth_bias_enable;
+   /* G18 setVisibilityResultMode:offset: (26A428, 0x219660660..0x2196606a8)
+    * writes mode 0/2/3 into primary ISP bits 14..15 and the 15-bit query
+    * slot into the primary record's last word, bits 17..31. Slot units are
+    * uint64_t results; maxVisibilityQueryOffset returns 0x3fff8. The native
+    * emitter copies both fields at 0x21963501c..0x2196350a4. Zero defaults
+    * preserve the existing non-query path; G17 has no witness here.
+    */
+   unsigned occlusion_query_mode;
+   unsigned occlusion_query_index;
    /*
     * Set when the render has no colour attachment. Two things move with it,
     * both from controlled colour-free renders on 25G76: the interpolated
@@ -35,7 +48,13 @@ struct agx_ppp_hal300_graphics_fields {
     */
    bool no_color_attachment;
    /*
-    * ISP pass type: 0 opaque, 1 translucent, 2 punch through. A controlled
+    * ISP pass type: 0 opaque, 1 translucent, 2 punch through, and on G18G
+    * 3 translucent punch through. The G18 native constructor selects 3
+    * at 0x219564774..0x2195647f0; setFragmentVariant copies all three pass
+    * bits at 0x21969a494..0x21969a49c and the secondary ISP emitter preserves
+    * them at 0x2196350c0..0x2196350f4 (26A428). Original-instruction replay
+    * covers combined tile reads/coverage, primitive and depth-output state.
+    * A controlled
     * capture of a discarding fragment shader on 25G76
     * (gpu/m5-state-matrix-reference.m, mode "discard") emitted word1
     * 0x44000200 against the opaque baseline's 0x00000200: the pass type in
@@ -137,10 +156,12 @@ struct agx_ppp_hal300_graphics_fields {
     * constant 0x01000f00 is "less, writes on", so both existing witnessed
     * values fall out of the decode rather than being special cases.
     *
-    * The control word carries 0x40000 while the depth unit is inactive
-    * (comparison always with writes off) and 0x80000 while stencil is
-    * active; a render with a depth attachment but no depth-stencil state
-    * is byte-identical to one with no attachment at all.
+    * The captured depth-disabled state carries 0x40000. G18's native
+    * depth/stencil state constructor additionally requires 0xc0000 whenever
+    * stencil is active, even with depth testing enabled. The G17 control
+    * retains its separately captured 0x80000 stencil bit. A render with a
+    * depth attachment but no depth-stencil state is byte-identical to one
+    * with no attachment at all.
     */
    /*
     * Set while a depth-stencil state governs the draw. Cleared -- the

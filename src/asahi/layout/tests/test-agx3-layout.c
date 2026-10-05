@@ -66,12 +66,12 @@ main(void)
    CHECK_EQ(ail_m5_layer_stride_B(0x4001, 2, false), 0x8000);
 
    const struct ail_tile metadata_rgba8 =
-      ail_m5_compression_tile_size(4);
+      ail_m5_compression_tile_size(4, 1);
    CHECK_EQ(metadata_rgba8.width_el, 16);
    CHECK_EQ(metadata_rgba8.height_el, 16);
 
    const struct ail_tile metadata_rgba32f =
-      ail_m5_compression_tile_size(16);
+      ail_m5_compression_tile_size(16, 1);
    CHECK_EQ(metadata_rgba32f.width_el, 16);
    CHECK_EQ(metadata_rgba32f.height_el, 8);
 

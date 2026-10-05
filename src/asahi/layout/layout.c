@@ -307,7 +307,8 @@ ail_initialize_compression(struct ail_layout *layout)
 
    const struct ail_tile metadata_tile =
       layout->policy == AIL_LAYOUT_POLICY_M5 && !layout->mipmapped_z
-         ? ail_m5_compression_tile_size(util_format_get_blocksize(layout->format))
+         ? ail_m5_compression_tile_size(util_format_get_blocksize(layout->format),
+                                        layout->sample_count_sa)
          : (struct ail_tile){16, 16};
 
    width_sa = ALIGN_POT(width_sa, metadata_tile.width_el);
@@ -322,7 +323,7 @@ ail_initialize_compression(struct ail_layout *layout)
       layout->level_offsets_compressed_B[l] = compbuf_B;
 
       /* The metadata buffer contains 8 bytes per compression tile. M5 uses
-       * 16x8 for 16 B/px and 16x16 otherwise; legacy layouts use 16x16.
+       * a format- and sample-dependent tile; legacy layouts use 16x16.
        * Addressing is fully twiddled, so both axes are padded to powers-of-two.
        */
       unsigned w_tl = DIV_ROUND_UP(util_next_power_of_two(width_sa),

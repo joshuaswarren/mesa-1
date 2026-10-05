@@ -289,6 +289,63 @@ agx_pbe_agx3_3d_mip_pack(
                        levels, out);
 }
 
+/* G18 StateFields (0x219546988..0x219547150) keeps Gen10's base geometry
+ * but places sample selection at word0[59:58] and compression at bit61.
+ * Scalar multisample targets do not inherit the page-aligned-layer flag;
+ * arrays retain both that flag and their dimension even with one layer.
+ */
+static bool
+pack_gen10_multisample(const struct agx_pbe_agx3_2d_fields *fields,
+                      bool array, uint32_t layers, uint32_t samples,
+                      struct agx_pbe_agx3_descriptor *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+
+   if (!out || !fields || (samples != 2 && samples != 4) ||
+       !layers || layers > UINT16_MAX + 1u ||
+       /* G18 StateFields masks the shifted image address with
+        * 0xffffffffffc. Reject unrepresentable low bits instead of dropping
+        * them; metadata retains its independent 16-byte alignment. */
+       (fields->buffer & 0x3f) ||
+       (fields->layout != AGX_PBE_LAYOUT_TWIDDLED &&
+        fields->layout != AGX_PBE_LAYOUT_GPU) ||
+       (fields->compressed
+           ? fields->layout != AGX_PBE_LAYOUT_GPU ||
+                !fields->acceleration_buffer ||
+                (fields->acceleration_buffer & 0xf) ||
+                (fields->acceleration_buffer >> 48)
+           : fields->acceleration_buffer != 0))
+      return false;
+
+   /* Keep the single-sample codec's admission and bit layout unchanged. */
+   struct agx_pbe_agx3_2d_fields base = *fields;
+   base.compressed = false;
+   base.acceleration_buffer = 0;
+   base.page_aligned_layers = false;
+   if (!agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_10, &base, out))
+      return false;
+
+   uint64_t word0 = load_le64(&out->bytes[0]);
+   word0 = (word0 & ~UINT64_C(0xf)) |
+           (array ? AGX_PBE_DIMENSION_2D_ARRAY_MULTISAMPLE
+                  : AGX_PBE_DIMENSION_2D_MULTISAMPLE);
+   word0 |= (uint64_t)(samples >> 2) << 58;
+   word0 |= (uint64_t)fields->compressed << 61;
+
+   uint64_t word1 = load_le64(&out->bytes[8]);
+   if (array) {
+      word1 |= (uint64_t)(layers - 1) << 44;
+      word1 |= (uint64_t)fields->page_aligned_layers << 60;
+   }
+   word1 |= (uint64_t)fields->compressed << 63;
+   store_le64(&out->bytes[0], word0);
+   store_le64(&out->bytes[8], word1);
+   if (fields->compressed)
+      store_le64(&out->bytes[16], fields->acceleration_buffer >> 4);
+   return true;
+}
+
 bool
 agx_pbe_agx3_2d_multisample_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
@@ -297,11 +354,14 @@ agx_pbe_agx3_2d_multisample_pack(
    if (out)
       memset(out, 0, sizeof(*out));
 
+   if (generation == AGX_PBE_AGX3_GENERATION_10)
+      return pack_gen10_multisample(fields, false, 1, samples, out);
+
    /* A multisample colour target is never linear and never mipmapped: the
     * end-of-tile store addresses it through the sample-expanded twiddled
     * layout. Refuse 8x and every other count: the encoder's selector covers
-    * them, but no tilebuffer geometry does. Gen10 has its own encoder and
-    * its own witness to recover, so it is refused here too.
+    * them, but no tilebuffer geometry does. Gen10 uses its separately
+    * recovered encoder above.
     */
    if (generation != AGX_PBE_AGX3_GENERATION_9 || !fields ||
        fields->compressed ||
@@ -330,6 +390,9 @@ agx_pbe_agx3_2d_array_multisample_pack(
 {
    if (out)
       memset(out, 0, sizeof(*out));
+
+   if (generation == AGX_PBE_AGX3_GENERATION_10)
+      return pack_gen10_multisample(fields, true, layers, samples, out);
 
    /* HAL200's array+multisample path selects dimension 8 while retaining the
     * layered word1 fields and the ordinary multisample selector. */

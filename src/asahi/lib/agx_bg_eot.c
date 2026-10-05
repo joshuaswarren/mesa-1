@@ -244,7 +244,8 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
                NULL, NULL, false,
                cache->dev->chip == AGX_CHIP_G17P ||
                   agx_chip_m5_paths(cache->dev->chip),
-               cache->dev->chip == AGX_CHIP_G17P);
+               cache->dev->chip == AGX_CHIP_G17P ||
+                  cache->dev->chip == AGX_CHIP_G18G);
       NIR_PASS(_, shader, agx_nir_lower_monolithic_msaa, tib->nr_samples);
       NIR_PASS(_, shader, agx_nir_lower_multisampled_image_store);
       NIR_PASS(_, shader, agx_nir_lower_texture);
@@ -330,7 +331,7 @@ agx_compile_bg_eot_shader(struct agx_bg_eot_cache *cache, nir_shader *shader,
 static nir_def *
 build_background_op(nir_builder *b, enum agx_bg_eot_op op, unsigned rt,
                     unsigned nr, bool source_msaa, bool layered,
-                    bool wide_coords)
+                    bool wide_coords, unsigned clear_base)
 {
    if (op == AGX_BG_LOAD) {
       nir_def *coord = nir_load_pixel_coord(b);
@@ -366,7 +367,7 @@ build_background_op(nir_builder *b, enum agx_bg_eot_op op, unsigned rt,
    } else {
       assert(op == AGX_BG_CLEAR);
 
-      return nir_load_preamble(b, nr, 32, 4 + (rt * 8));
+      return nir_load_preamble(b, nr, 32, clear_base + (rt * 8));
    }
 }
 
@@ -404,9 +405,16 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
     * same shapes through an ordinary draw-buffer mask, and
     * KHR-GL30.draw_buffers clears eight RGBA8 targets at once. */
    unsigned background_targets = 0;
+   bool has_load = false;
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
       background_targets += key->op[rt] != AGX_BG_EOT_NONE;
+   for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt)
+      has_load |= key->op[rt] == AGX_BG_LOAD;
    compiler_key.g17p_mrt_bg = key->mixed_mrt || background_targets > 1;
+   /* A reload binds texture/sampler pointers in u0..7. A mixed G18
+    * background must place clear values after both pointers. */
+   const unsigned clear_base =
+      cache->dev->chip == AGX_CHIP_G18G && has_load ? 8 : 4;
 
    for (unsigned rt = 0; rt < ARRAY_SIZE(key->op); ++rt) {
       if (key->op[rt] == AGX_BG_EOT_NONE)
@@ -436,7 +444,7 @@ agx_build_background_shader(struct agx_bg_eot_cache *cache,
       nir_store_output(
          &b, build_background_op(&b, key->op[rt], rt, nr, source_msaa, layered,
                                  cache->dev->chip == AGX_CHIP_G17P ||
-                                 agx_chip_m5_paths(cache->dev->chip)),
+                                 agx_chip_m5_paths(cache->dev->chip), clear_base),
          nir_imm_int(&b, 0), .write_mask = BITFIELD_MASK(nr),
          .src_type = nir_type_uint32,
          .io_semantics.location = FRAG_RESULT_DATA0 + rt,
@@ -468,15 +476,17 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
                              struct agx_bg_eot_key *key)
 {
    const bool g17g = agx_chip_m5_paths(cache->dev->chip);
-   const bool g18_dual = cache->dev->chip == AGX_CHIP_G18G &&
-                         agx_g17p_rgba8_mrt_mask(&key->tib) == 3;
+   const unsigned g18_mrt = cache->dev->chip == AGX_CHIP_G18G
+                              ? agx_g18g_rgba8_mrt_mask(&key->tib) : 0;
    /* msaa163: G18G's four-sample tile is resolved at end of tile into the
     * single-sample PBE target, the shape Apple's G18 4x render uses: its
     * end-of-tile code is the same program at 1x and 4x (byte-identical over
     * 0x1400 bytes) and its resolve descriptor is the plain 1x one (MSAA
-    * notes s2.5). An unresolved multisample store stays refused (P11). */
+    * notes s2.5). Persistent attachments and partial stores instead use the
+    * native multisample IMGWBLK dimension, preserving individual samples. */
+   const bool g18_msaa = agx_g18_msaa4_tib(cache->dev, &key->tib);
    const bool g18_resolve =
-      agx_g18_msaa4_tib(cache->dev, &key->tib) && !key->multisample_store;
+      g18_msaa && !key->multisample_store;
    /* Bring-up diagnostic for the G18 4x render hang: an end-of-tile program
     * that stores nothing. It is compiled without g17g_rt0_eot, which would
     * otherwise substitute Apple's native store text. Off by default. */
@@ -509,16 +519,18 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
        * keeps the fallback explicit.
        */
       if (key->op[0] != AGX_EOT_STORE ||
-          (key->tib.nr_samples != 1 && !g18_resolve) ||
+          (key->tib.nr_samples != 1 && !g18_msaa) ||
           key->tib.layered || key->tib.spilled[0] ||
           agx_tilebuffer_offset_B(&key->tib, 0) != 0 ||
+          !(cache->dev->chip == AGX_CHIP_G18G &&
+            key->tib.logical_format[0] == PIPE_FORMAT_R11G11B10_FLOAT) &&
           !agx_g17g_rt0_eot_physical_format_supported(
              agx_tilebuffer_physical_format(&key->tib, 0)))
          return NULL;
 
       for (unsigned rt = 1; rt < ARRAY_SIZE(key->op); ++rt) {
-         if (key->op[rt] != (g18_dual && rt == 1 ? AGX_EOT_STORE
-                                                : AGX_BG_EOT_NONE))
+         if (key->op[rt] != ((g18_mrt & BITFIELD_BIT(rt)) ? AGX_EOT_STORE
+                                                       : AGX_BG_EOT_NONE))
             return NULL;
       }
    }
@@ -576,13 +588,13 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 
    /* AGX2 carries the sample in the store's coordinate vector, so its
     * multisample block store is a three-component GLSL_SAMPLER_DIM_MS one.
-    * Apple's G17P builtins do not: both the resolving and the unresolved
+    * Apple's G17P/G17G/G18G builtins do not: both resolving and unresolved
     * end-of-tile programs read exactly the same two grid coordinates and
     * differ only in the IMGWBLK dimension class the packer deposits. Keep
-    * the two-coordinate 2D shape on G17P and let the compiler key select
+    * the two-coordinate 2D shape on AGX3 and let the compiler key select
     * which of the two Apple programs is meant, the same way every other
     * G17P end-of-tile selector is chosen. */
-   enum glsl_sampler_dim dim = (store_multisample && !g17p)
+   enum glsl_sampler_dim dim = (store_multisample && !g17p && !g17g)
                                   ? GLSL_SAMPLER_DIM_MS
                                   : GLSL_SAMPLER_DIM_2D;
 
@@ -624,11 +636,13 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 
       enum pipe_format physical =
          agx_tilebuffer_physical_format(&key->tib, rt);
-      if (cache->dev->chip == AGX_CHIP_G17P &&
-          (key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT ||
+      if (((cache->dev->chip == AGX_CHIP_G17P ||
+            cache->dev->chip == AGX_CHIP_G18G) &&
+           key->tib.logical_format[rt] == PIPE_FORMAT_R11G11B10_FLOAT) ||
+          (cache->dev->chip == AGX_CHIP_G17P &&
            key->tib.logical_format[rt] == PIPE_FORMAT_R9G9B9E5_FLOAT)) {
-         /* G17P keeps packed-float tiles as one raw 32-bit word. The matching
-          * PBE descriptor also uses R32_UINT to preserve those exact bits. */
+         /* Explicitly packed color is one raw word. The matching store PBE
+          * is R32_UINT; texture views retain the original decoding format. */
          physical = PIPE_FORMAT_R32_UINT;
       } else if ((cache->dev->chip == AGX_CHIP_G17P || g17g) &&
           util_format_is_srgb(key->tib.logical_format[rt])) {

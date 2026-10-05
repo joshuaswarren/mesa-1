@@ -348,7 +348,7 @@ ail_metadata_width_tl(struct ail_layout *layout, unsigned level)
    const struct ail_tile tile =
       layout->policy == AIL_LAYOUT_POLICY_M5 && !layout->mipmapped_z
          ? ail_m5_compression_tile_size(
-              util_format_get_blocksize(layout->format))
+              util_format_get_blocksize(layout->format), layout->sample_count_sa)
          : (struct ail_tile){16, 16};
    return DIV_ROUND_UP(sa, tile.width_el);
 }
@@ -361,7 +361,7 @@ ail_metadata_height_tl(struct ail_layout *layout, unsigned level)
    const struct ail_tile tile =
       layout->policy == AIL_LAYOUT_POLICY_M5 && !layout->mipmapped_z
          ? ail_m5_compression_tile_size(
-              util_format_get_blocksize(layout->format))
+              util_format_get_blocksize(layout->format), layout->sample_count_sa)
          : (struct ail_tile){16, 16};
    return DIV_ROUND_UP(sa, tile.height_el);
 }

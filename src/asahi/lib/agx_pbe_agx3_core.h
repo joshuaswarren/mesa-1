@@ -22,7 +22,8 @@ extern "C" {
 /* This is intentionally the subset whose complete byte geometry is recovered:
  * ordinary non-sparse 2D images in Gen9/10 linear or Gen9/10 twiddled/GPU
  * memory, Gen9 GPU-tiled compressed 2D images, and Gen9's exact uncompressed
- * tiled 2D-array extension.
+ * tiled 2D-array extension. The dedicated multisample entry points also
+ * encode Gen10 tiled 2D/array targets, including GPU-tiled compression.
  * Gen9's ordinary single-layer packet has no layer-mode bit regardless of
  * allocation padding; the inherited page-aligned-layer input is ignored on
  * scalar pack and canonicalized to false on unpack. Gen10 keeps its existing
@@ -40,8 +41,9 @@ struct agx_pbe_agx3_2d_fields {
    uint16_t width;
    uint16_t height;
    uint64_t buffer;
-   /* Gen9 GPU-tiled 2D lossless compression metadata base. Exactly zero when
-    * compressed is false; 16-byte aligned and below bit 48 otherwise. */
+   /* Lossless compression metadata base: Gen9 GPU-tiled 2D or dedicated
+    * Gen10 GPU-tiled multisample entry points. Exactly zero when compressed
+    * is false; 16-byte aligned and below bit 48 otherwise. */
    uint64_t acceleration_buffer;
    bool compressed;
    /* Linear row pitch in bytes. Zero for tiled layouts. */
@@ -99,6 +101,13 @@ bool agx_pbe_agx3_3d_mip_pack(
  * Bounded to the tiled 2x/4x colour shapes G17P's tilebuffer admits. 8x has
  * the same encoder path but no tilebuffer or layout qualification, so it is
  * refused here rather than guessed.
+ *
+ * Gen10 uses the native G18 StateFields geometry: sample selector at
+ * word0[59:58], compression at word0 bit61 and extension at word1 bit63.
+ * The scalar packet has no page-aligned-layer flag. A supplied compression
+ * metadata address is encoded, not derived; storage/layout qualification
+ * remains the caller's responsibility. Gen10 tiled image addresses require
+ * 64-byte alignment; compression metadata requires 16-byte alignment.
  */
 bool agx_pbe_agx3_2d_multisample_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
@@ -106,7 +115,8 @@ bool agx_pbe_agx3_2d_multisample_pack(
 
 /* Layered multisample colour target. The Gen9 encoder combines the layered
  * dimension-8 selector and layer-count fields with the same 2x/4x sample
- * selector as the dimension-4 packet. */
+ * selector as the dimension-4 packet. Gen10 keeps that array/layer geometry
+ * with its own sample/compression placement, including a one-layer array. */
 bool agx_pbe_agx3_2d_array_multisample_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
    uint32_t layers, uint32_t samples,

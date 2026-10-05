@@ -986,19 +986,23 @@ static bool
 g17g_graphics_program_generate(
    enum agx_chip chip, const struct agx3_g17p_graphics_program_desc *desc,
    enum agx_ioto_g17g_program_stage stage,
-   struct agx3_g17p_graphics_program *program)
+   bool g18_compute_tps, struct agx3_g17p_graphics_program *program)
 {
    size_t bound;
    if (chip != AGX_CHIP_G17G || !desc || !program ||
        !desc->shader_binary_size ||
-       !desc->nr_gprs || desc->nr_gprs > 256 || desc->scratch_size ||
+       !desc->nr_gprs || desc->nr_gprs > 256 ||
+       (desc->scratch_size && !g18_compute_tps) ||
+       (g18_compute_tps && (stage != AGX_IOTO_G17G_PROGRAM_COMPUTE ||
+                           (desc->scratch_size & 15) ||
+                           desc->scratch_size > UINT16_MAX * 4u)) ||
        !desc->compiler_d_valid || desc->compiler_d > 256 ||
        (desc->writes_sample_mask && !desc->fragment) ||
        (desc->threadgroup_memory_size_B &&
         (desc->fragment || desc->threadgroup_memory_size_B < 256 ||
          desc->threadgroup_memory_size_B > 32768 ||
          (desc->threadgroup_memory_size_B & 63))) ||
-       (desc->colour_classes > 1 && desc->colour_classes != 3) ||
+       desc->colour_classes > 7 ||
        (!desc->fragment && desc->colour_classes) ||
        /* A render with no colour attachment has an empty imageblock. Apple's
         * own colour-free render emits the same fragment SPECLM spelling as a
@@ -1014,9 +1018,10 @@ g17g_graphics_program_generate(
         !(desc->imageblock.sample_size_B == 8 &&
           desc->imageblock.nr_samples == 4 &&
           desc->imageblock.tile_size_px == 32 * 16) &&
-        ((desc->imageblock.sample_size_B != 8 &&
-          desc->imageblock.sample_size_B != 16 &&
-          desc->imageblock.sample_size_B != 32 &&
+         ((desc->imageblock.sample_size_B != 8 &&
+           desc->imageblock.sample_size_B != 16 &&
+           desc->imageblock.sample_size_B != 24 &&
+           desc->imageblock.sample_size_B != 32 &&
           desc->imageblock.sample_size_B != 0) ||
          desc->imageblock.nr_samples != 1 ||
          desc->imageblock.tile_size_px != 32 * 32)) ||
@@ -1053,6 +1058,12 @@ g17g_graphics_program_generate(
    spectpr.f[0] = 3;
    spectpr.f[1] = 166;
    spectpr.f[22] = (((desc->compiler_d + 3) >> 2) + 1) & ~1u;
+   if (g18_compute_tps) {
+      /* Native G18 TPS pressure captures: the compiler frame is bytes,
+       * aligned to sixteen; both SPECTPR fields count four-byte words. */
+      spectpr.f[20] = desc->scratch_size / 4;
+      spectpr.f[21] = desc->scratch_size / 4;
+   }
 
    struct agx_ioto_state_tail_output tail = {
       .length = AGX_IOTO_STATE_TAIL_TYPE0_SIZE,
@@ -1139,7 +1150,7 @@ agx3_g17g_graphics_program_generate(
       : !desc->fragment          ? AGX_IOTO_G17G_PROGRAM_VERTEX
       : desc->writes_sample_mask ? AGX_IOTO_G17G_PROGRAM_COVERAGE_FRAGMENT
                                  : AGX_IOTO_G17G_PROGRAM_FRAGMENT;
-   return desc && g17g_graphics_program_generate(chip, desc, stage, program);
+   return desc && g17g_graphics_program_generate(chip, desc, stage, false, program);
 }
 
 bool
@@ -1148,7 +1159,17 @@ agx3_g17g_compute_program_generate(
    struct agx3_g17p_graphics_program *program)
 {
    return desc && !desc->fragment && g17g_graphics_program_generate(
-      chip, desc, AGX_IOTO_G17G_PROGRAM_COMPUTE, program);
+      chip, desc, AGX_IOTO_G17G_PROGRAM_COMPUTE, false, program);
+}
+
+bool
+agx3_g18g_compute_program_generate(
+   const struct agx3_g17p_graphics_program_desc *desc,
+   struct agx3_g17p_graphics_program *program)
+{
+   /* Canonical GPU1 record; the G18 caller must re-encode it as agx3d. */
+   return desc && !desc->fragment && g17g_graphics_program_generate(
+      AGX_CHIP_G17G, desc, AGX_IOTO_G17G_PROGRAM_COMPUTE, true, program);
 }
 
 bool
@@ -1158,7 +1179,7 @@ agx3_g17g_tile_program_generate(
 {
    return desc && desc->fragment && g17g_graphics_program_generate(
       chip, desc, store ? AGX_IOTO_G17G_PROGRAM_EOT
-                       : AGX_IOTO_G17G_PROGRAM_BACKGROUND, program);
+                       : AGX_IOTO_G17G_PROGRAM_BACKGROUND, false, program);
 }
 
 bool

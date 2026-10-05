@@ -44,10 +44,14 @@ agx3_copy_encode_reg16(enum agx_isa_encoding encoding, uint16_t dest_half,
                        bool src_discard, uint16_t wait_mask,
                        uint8_t out[AGX3_COPY_MAX_LENGTH], uint8_t *len)
 {
+   const bool agx3c = encoding == AGX_ISA_ENCODING_AGX3C;
+   const unsigned wait_bits = agx3c ? 8 : 6;
    if (out == NULL || len == NULL ||
        (encoding != AGX_ISA_ENCODING_AGX3B &&
         encoding != AGX_ISA_ENCODING_AGX3C) ||
-       dest_half >= AGX3_COPY_REG16_DEST_HALVES || src_half >= 256 || wait_mask >= (1u << 6) ||
+       dest_half >= (encoding == AGX_ISA_ENCODING_AGX3C ? 256 :
+                     AGX3_COPY_REG16_DEST_HALVES) ||
+       src_half >= 256 || wait_mask >= (1u << wait_bits) ||
        (src_cache && src_discard))
       return false;
 
@@ -60,17 +64,22 @@ agx3_copy_encode_reg16(enum agx_isa_encoding encoding, uint16_t dest_half,
    const struct agx3_field_kv baseline_c[] = {
       KV(9, 2), KV(10, 1), KV(23, 2), KV(24, 1), KV(28, 3), KV(29, 35),
    };
-   const bool agx3c = encoding == AGX_ISA_ENCODING_AGX3C;
-   struct agx3_field_kv overrides[11] = {
+   /* Native G17G vector 1287 carries slot 8 in f37. AGX3B retains
+    * six slots; AGX3C deposits all eight independent wait fields. */
+   struct agx3_field_kv overrides[13] = {
       KV(2, dest_half), KV(16, src_half), KV(11, dest_cache),
       KV(25, src_cache), KV(27, src_discard),
    };
    unsigned n = 5;
-   for (unsigned i = 0; i < 6; ++i) {
+   for (unsigned i = 0; i < wait_bits; ++i) {
       if (wait_mask & (1u << i))
          overrides[n++] = (struct agx3_field_kv)KV(30 + i, 1);
    }
-   return agx3_bind_compose(encoding, "copy", 0,
+   /* Native G17G register-pressure loops copy halves above 127 with ep1;
+    * G18G uses the same operand fields in its compact form. Let AGX3C
+    * choose the witnessed extended form instead of truncating the index. */
+   return agx3_bind_compose(encoding, "copy",
+                            agx3c ? AGX3_BIND_APPLE_ORDER : 0,
                             agx3c ? baseline_c : baseline_b,
                             agx3c ? AGX3_COPY_ARRAY_SIZE(baseline_c)
                                   : AGX3_COPY_ARRAY_SIZE(baseline_b), overrides, n,

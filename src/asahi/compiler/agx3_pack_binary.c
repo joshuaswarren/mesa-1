@@ -656,16 +656,18 @@ agx3_try_float_modifier(struct util_dynarray *emission,
       return 0;
 
    bool has_mod = I->saturate;
-   bool has_runtime = wait || (I->nr_dests == 1 && I->dest[0].cache);
    bool scalar_regs = I->nr_dests == 1 && agx3_mod_src_ok(I->dest[0]) &&
                       agx_channels(I->dest[0]) == 1;
    for (unsigned s = 0; s < I->nr_srcs; ++s)
       has_mod |= I->src[s].abs || I->src[s].neg;
    for (unsigned s = 0; s < I->nr_srcs; ++s) {
-      has_runtime |= I->src[s].cache || I->src[s].discard;
       scalar_regs &= agx3_mod_src_ok(I->src[s]) && agx_channels(I->src[s]) == 1;
    }
-   if (!has_mod && !(enc == AGX_ISA_ENCODING_AGX3C && has_runtime && scalar_regs))
+   /* All-zero runtime hints are meaningful too: the legacy specimen encoder
+    * contains discard flags that would kill live loop invariants. Preserve
+    * the actual source lifetimes and waits for every plain scalar register
+    * operation on G17G/G18G, including operations with no modifiers. */
+   if (!has_mod && !(enc == AGX_ISA_ENCODING_AGX3C && scalar_regs))
       return 0; /* the compact no-modifier packer handles it */
 
    const unsigned want = is_fma ? 3 : 2;
@@ -1475,7 +1477,8 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
                         uint8_t slot, uint16_t wait_mask, bool final,
                         bool stage_coordinates, bool separate_write_coords,
                         bool image_read_bank0, bool g18g,
-                        uint16_t ms_array_scratch, const char **why)
+                        uint16_t ms_array_scratch, bool pixel_entry,
+                        uint32_t *pixel_entry_offset, const char **why)
 {
    const bool immediate = I->nr_srcs == 6 &&
       I->src[3].type == AGX_INDEX_IMMEDIATE;
@@ -1803,6 +1806,15 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
          *why = "no grounded fetch form for this descriptor";
       return false;
    }
+   if (pixel_entry) {
+      uint8_t entry[AGX3_PIXEL_MAX_LENGTH], entry_len = 0;
+      if (!pixel_entry_offset ||
+          !agx3_pixel_colour_entry(enc, entry, &entry_len))
+         return false;
+      *pixel_entry_offset = emission->size;
+      if (!agx3_append(emission, entry, entry_len))
+         return false;
+   }
    return agx3_append(emission, bytes, len);
 }
 
@@ -1821,7 +1833,7 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
    if (enc == AGX_ISA_ENCODING_AGX3C)
       return agx3_emit_texture_fetch_g17g(emission, enc, I, slot, wait_mask,
           final, stage_coordinates, separate_write_coords, image_read_bank0,
-          g18g, ms_array_scratch, NULL);
+          g18g, ms_array_scratch, pixel_entry, pixel_entry_offset, NULL);
    /* What follows is the agx3b emitter; no other encoding may fall into it. */
    if (enc != AGX_ISA_ENCODING_AGX3B)
       return false;
@@ -4474,7 +4486,8 @@ agx3_emit_fltnorm(struct util_dynarray *emission, enum agx_isa_encoding enc,
 }
 
 static bool
-agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
+agx3_emit_rgb10a2(struct util_dynarray *emission, enum agx_isa_encoding enc,
+                 const agx_instr *I,
                  uint16_t wait, bool first)
 {
    const bool unpack = I->op == AGX_OPCODE_UNPACK_RGB10A2_AGX3;
@@ -4490,6 +4503,8 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
       return false;
    uint8_t bytes[14], length = 0;
    if (unpack) {
+      if (enc != AGX_ISA_ENCODING_AGX3B)
+         return false;
       const agx_index src = I->src[0];
       if (!agx3_src_is_register(src) || src.memory || src.abs || src.neg ||
           src.size != AGX_SIZE_32 || agx_channels(src) != 1)
@@ -4521,7 +4536,7 @@ agx3_emit_rgb10a2(struct util_dynarray *emission, const agx_instr *I,
          d.abs[i] = src.abs;
          d.neg[i] = src.neg;
       }
-      if (!agx3_rgb10a2_encode(&d, bytes, &length))
+      if (!agx3_rgb10a2_encode_for_encoding(enc, &d, bytes, &length))
          return false;
    }
    return agx3_append(emission, bytes, length);
@@ -7820,8 +7835,12 @@ agx3_rt0_eot_kind(const agx_context *ctx, enum agx_isa_encoding enc)
     * float MRT store is G17P-only. Refuse those rather than store the wrong
     * class's bytes.
     */
+   /* G18 signed RGBA32 uses the same 2D store as unsigned/float RGBA32.
+    * The old distinct signed witness was the array program. Keep the G17G
+    * admission scope unchanged; G18 still passes the complete 2D matcher. */
    if (g17g && (ctx->key->g17p_rt0_eot_i16_signed_two_words ||
-                ctx->key->g17p_rt0_eot_i32_signed_four_words ||
+                (ctx->key->g17p_rt0_eot_i32_signed_four_words &&
+                 !ctx->key->dev.emit_agx3d) ||
                 ctx->key->g17p_r11g11b10_mrt_eot))
       return AGX3_G17P_RT0_EOT_NONE;
 
@@ -8502,7 +8521,9 @@ agx3_g17p_colour_writeout(uint32_t writeout, unsigned pair)
 static unsigned
 agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
 {
-   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
+   const bool g18 = agx3_g18_msaa4_tile_shader(ctx) && colour &&
+                    !ctx->key->secondary;
+   if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        ctx->key->fs.ignore_tib_dependencies == colour ||
        list_length(&ctx->blocks) != 1)
@@ -8528,7 +8549,7 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
     * transaction of every sample's write, as Apple's per-sample depth
     * fragments do before their colour stores: 1 waited, 2 written,
     * 3 released. */
-   unsigned depth = 0;
+   unsigned depth = 0, colour_signals = 0;
 
    agx_foreach_instr_global(ctx, I) {
       if (stopped)
@@ -8558,6 +8579,17 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
       if (I->op == AGX_OPCODE_WAIT_PIX && colour && !waited &&
           !target_count && I->writeout == 12 && (depth == 0 || depth == 3)) {
          waited = true;
+         continue;
+      }
+
+      /* G18's generic tile lowering releases after each unrolled sample.
+       * Native sample-ID and texture-reload fragments instead hold class12
+       * across all four stores, then release524 once. Recognize the complete
+       * group before coalescing those releases in the emitter below. */
+      if (g18 && I->op == AGX_OPCODE_SIGNAL_PIX && I->writeout == 12 &&
+          waited && target_count == 1 &&
+          colour_signals < targets[0].stores) {
+         colour_signals++;
          continue;
       }
 
@@ -8634,6 +8666,23 @@ agx3_g17p_sample_store_protocol(agx_context *ctx, bool colour)
 
    const unsigned samples =
       target_count ? targets[0].stores : 0;
+   if (g18) {
+      if (depth || target_count != 1 || samples != 4 ||
+          colour_signals != samples)
+         return 0;
+      /* Native G18 clear/sample-ID/reload pipelines share this transaction
+       * across normalized bytes, half floats and a single packed word.
+       * The R8Uint references in packed-blit325 also retain one class-12
+       * wait, four scalar integer-byte stores and one 524 release. */
+      const enum agx_format format = targets[0].format;
+      const unsigned mask = targets[0].component_mask;
+      if (!(((format == AGX_FORMAT_U8NORM || format == AGX_FORMAT_F16) &&
+             (mask == 1 || mask == 3 || mask == 15)) ||
+            ((format == AGX_FORMAT_RGB10A2 || format == AGX_FORMAT_I32 ||
+              format == AGX_FORMAT_I8) &&
+             mask == 1)))
+         return 0;
+   }
    for (unsigned t = 0; t < target_count; ++t) {
       if (targets[t].stores != samples)
          return 0;
@@ -8821,10 +8870,25 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
          }
       }
    }
-   if (p.offsets[0] != 0 ||
-       (g18 && (p.count != 2 || p.offsets[1] != 4 ||
-                p.targets[0] != 0 || p.targets[1] != 1 || tile_loads)))
-      return agx3_g17p_mrt_refused(__LINE__);
+   if (p.offsets[0] != 0)
+       return agx3_g17p_mrt_refused(__LINE__);
+
+   /* G18's native two-to-eight-target RGBA8 fragments use class 12 for
+    * targets 0 and 3..7, class 48 for target 1, and class 192 for target 2.
+    * Sparse writes keep the framebuffer target identity. Limit this path to
+    * the witnessed packed RGBA8 layout. Native blended fragments acquire
+    * each loaded class's read half before the same ordered stores. */
+   if (g18) {
+      if (!p.count || p.count > AGX_MAX_RTS)
+         return agx3_g17p_mrt_refused(__LINE__);
+      for (unsigned i = 0; i < p.count; ++i) {
+         /* Absent framebuffer slots compact the tile offsets, while native
+          * sparse-layout fragments retain their logical target's class. */
+         if (p.offsets[i] != 4 * i || p.targets[i] >= AGX_MAX_RTS ||
+             (i && p.targets[i] <= p.targets[i - 1]))
+            return agx3_g17p_mrt_refused(__LINE__);
+      }
+   }
 
    p.multisample = ctx->key->fs.nr_samples > 1 &&
                    !ctx->key->fs.ignore_tib_dependencies;
@@ -9021,7 +9085,7 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
          stopped = true;
       } else if (I->op == AGX_OPCODE_ST_TILE && ctx->key->g17p_mrt_bg) {
          if (g18 && (I->format != AGX_FORMAT_U8NORM || I->mask != 15 ||
-                     I->pixel_offset != stores * 4 || stores >= 2))
+                     I->pixel_offset != stores * 4 || stores >= AGX_MAX_RTS))
             return false;
          /* Apple's BG builtins for other layouts store each target once, in
           * no required order, so only require disjoint whole-pixel stores.
@@ -9070,7 +9134,7 @@ agx3_g17p_multi_background_protocol(const agx_context *ctx)
       }
    }
    if (ctx->key->g17p_mrt_bg)
-      return stopped && (g18 ? stores == 2 : stores >= 2);
+      return stopped && stores >= 2;
    return stopped && ((stride == 16 && stores >= 2 && stores <= 4) ||
                       (stride == 4 && (stores == 4 ||
                        (stores == 3 && format == AGX_FORMAT_U8NORM))));
@@ -9218,10 +9282,14 @@ agx3_g17p_multi_eot_count(const agx_context *ctx)
    const unsigned mixed_count = ctx->key->g17p_mrt_eot_count;
    if (mixed_count == 1 || mixed_count > AGX_MAX_RTS)
       return false;
-   if (g18 && (mixed_count != 2 || ctx->key->g17p_rt0_eot_multisample ||
-               ctx->key->g17p_mrt_eot_selectors[0] != 0x75 ||
-               ctx->key->g17p_mrt_eot_selectors[1] != 0x75))
-      return false;
+   if (g18) {
+      if (mixed_count < 2 || ctx->key->g17p_rt0_eot_multisample)
+         return false;
+      for (unsigned rt = 0; rt < mixed_count; ++rt) {
+         if (ctx->key->g17p_mrt_eot_selectors[rt] != 0x75)
+            return false;
+      }
+   }
 
    unsigned values[256];
    for (unsigned i = 0; i < ARRAY_SIZE(values); ++i)
@@ -9819,33 +9887,198 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    const unsigned multi_eot_count = agx3_g17p_multi_eot_count(ctx);
    if (multi_eot_count && enc == AGX_ISA_ENCODING_AGX3C) {
-      /* Native applegpu_g17g BTNF rgba8-2, re-encoded to AGX3d by the
-       * normal final pass. u0..3 points to two consecutive PBE descriptors;
-       * u4..5 and u8..9 are their tile offsets. Native D=32 bytes.
-       * Captured by build-native-eot-reference.py, text SHA256
-       * 344492993770725a63010f9af89423ebe6be03aa1efeb7f3919320bf9bf1b1e6. */
-      static const uint8_t dual_rgba8_eot[] = {
-         0x1c,0x9c,0x10,0x06,0x24,0xa8,0x14,0x06,
-         0x0c,0x9d,0x10,0x26,0x24,0x81,0x01,0x40,
-         0x28,0x01,0xa0,0x0a,0x37,0x06,0x04,0x1a,
-         0x29,0x00,0xa1,0x02,0x68,0x01,0x20,0x00,
-         0x01,0x02,0x27,0x08,0x04,0x1a,0x29,0x00,
-         0xa1,0x02,0x28,0x01,0x20,0x00,0x01,0x02,
-         0x27,0x00,0x20,0x2a,0x21,0x00,0xab,0x0a,
-         0x00,0x00,0x4a,0x30,0x18,0x00,0x0b,0x82,
-         0x21,0x04,0x1b,0x80,0x21,0x04,0x27,0x00,
-         0x20,0x4a,0x21,0x01,0xab,0x1a,0x00,0x00,
-         0x4a,0x30,0x18,0x00,0x23,0x02,0x07,0x02,
-         0x26,0x81,0xa4,0x12,0x33,0x00,0x07,0x02,
-         0x26,0x81,0xa4,0x12,0x25,0x04,0x15,0x00,
-         0x24,0x00,0xa0,0x22,0x00,0xe0,0x00,0x55,
-         0x25,0x08,0x15,0x00,0x34,0x40,0xa0,0x22,
-         0x00,0xe0,0x04,0x55,0x0e,0x00,0x00,0x00,
+      /* Native G17G BTNF RGBA8 EOT programs for two through eight targets,
+       * re-encoded to G18 by the normal final pass. Each complete program
+       * matches its G18 reference; capture308 also executes the eight-target
+       * program. u0..3 points to dense PBEs, u(4+4*i) holds tile offset i.
+       * The caller compacts sparse shader keys and PBE bindings together.
+       * Reproducible references: J873 mrt-290-20261004/native, counts 2..8. */
+      static const uint8_t rgba8_eot_2[] = {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+         0x24, 0x81, 0x01, 0x40, 0x28, 0x01, 0xa0, 0x0a, 0x37, 0x06, 0x04, 0x1a,
+         0x29, 0x00, 0xa1, 0x02, 0x68, 0x01, 0x20, 0x00, 0x01, 0x02, 0x27, 0x08,
+         0x04, 0x1a, 0x29, 0x00, 0xa1, 0x02, 0x28, 0x01, 0x20, 0x00, 0x01, 0x02,
+         0x27, 0x00, 0x20, 0x2a, 0x21, 0x00, 0xab, 0x0a, 0x00, 0x00, 0x4a, 0x30,
+         0x18, 0x00, 0x0b, 0x82, 0x21, 0x04, 0x1b, 0x80, 0x21, 0x04, 0x27, 0x00,
+         0x20, 0x4a, 0x21, 0x01, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x02, 0x07, 0x02, 0x26, 0x81, 0xa4, 0x12, 0x33, 0x00, 0x07, 0x02,
+         0x26, 0x81, 0xa4, 0x12, 0x25, 0x04, 0x15, 0x00, 0x24, 0x00, 0xa0, 0x22,
+         0x00, 0xe0, 0x00, 0x55, 0x25, 0x08, 0x15, 0x00, 0x34, 0x40, 0xa0, 0x22,
+         0x00, 0xe0, 0x04, 0x55, 0x0e, 0x00, 0x00, 0x00,
       };
-      static_assert(sizeof(dual_rgba8_eot) == 128, "native dual RGBA8 EOT");
+      static const uint8_t rgba8_eot_3[] = {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+         0x24, 0x81, 0x01, 0x40, 0x28, 0x01, 0xa0, 0x0a, 0x37, 0x06, 0x04, 0x1a,
+         0x29, 0x00, 0xa1, 0x02, 0x68, 0x01, 0x20, 0x00, 0x01, 0x02, 0x27, 0x08,
+         0x04, 0x1a, 0x29, 0x00, 0xa1, 0x02, 0x28, 0x01, 0x20, 0x00, 0x01, 0x02,
+         0x27, 0x00, 0x20, 0x2a, 0x21, 0x00, 0xab, 0x0a, 0x00, 0x00, 0x4a, 0x30,
+         0x18, 0x00, 0x0b, 0x82, 0x21, 0x04, 0x1b, 0x80, 0x21, 0x04, 0x27, 0x00,
+         0x20, 0x4a, 0x21, 0x01, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x81, 0xa4, 0x12, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x81, 0xa4, 0x12, 0xa7, 0x00, 0x20, 0x6a, 0x21, 0x02, 0xab, 0x0a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x02, 0x07, 0x02, 0x26, 0x82,
+         0xa4, 0x02, 0xb3, 0x00, 0x07, 0x02, 0x26, 0x82, 0xa4, 0x02, 0x25, 0x04,
+         0x15, 0x00, 0x24, 0x00, 0xa0, 0x22, 0x00, 0xe0, 0x00, 0x55, 0x25, 0x08,
+         0x15, 0x00, 0x34, 0x40, 0xa0, 0x22, 0x00, 0xe0, 0x04, 0x55, 0x25, 0x10,
+         0x15, 0x00, 0xa4, 0x80, 0xa0, 0x22, 0x01, 0xe0, 0x00, 0x55, 0x0e, 0x00,
+         0x00, 0x00,
+      };
+      static const uint8_t rgba8_eot_4[] = {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+         0x24, 0x81, 0x01, 0x40, 0x28, 0x01, 0xa0, 0x0a, 0x37, 0x06, 0x04, 0x1a,
+         0x29, 0x00, 0xa1, 0x02, 0x68, 0x01, 0x20, 0x00, 0x01, 0x02, 0x27, 0x08,
+         0x04, 0x1a, 0x29, 0x00, 0xa1, 0x02, 0x28, 0x01, 0x20, 0x00, 0x01, 0x02,
+         0x27, 0x00, 0x20, 0x2a, 0x21, 0x00, 0xab, 0x0a, 0x00, 0x00, 0x4a, 0x30,
+         0x18, 0x00, 0x0b, 0x82, 0x21, 0x04, 0x1b, 0x80, 0x21, 0x04, 0x27, 0x00,
+         0x20, 0x4a, 0x21, 0x01, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x81, 0xa4, 0x12, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x81, 0xa4, 0x12, 0xa7, 0x00, 0x20, 0x6a, 0x21, 0x02, 0xab, 0x0a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x82, 0x07, 0x02, 0x22, 0x82,
+         0xa4, 0x02, 0xb3, 0x80, 0x07, 0x02, 0x22, 0x82, 0xa4, 0x02, 0xa7, 0x00,
+         0x20, 0x8a, 0x21, 0x03, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0xa3, 0x02, 0x07, 0x02, 0x26, 0x83, 0xa4, 0x12, 0xb3, 0x00, 0x07, 0x02,
+         0x26, 0x83, 0xa4, 0x12, 0x25, 0x04, 0x15, 0x00, 0x24, 0x00, 0xa0, 0x22,
+         0x00, 0xe0, 0x00, 0x55, 0x25, 0x08, 0x15, 0x00, 0x34, 0x40, 0xa0, 0x22,
+         0x00, 0xe0, 0x04, 0x55, 0x25, 0x10, 0x15, 0x00, 0xa4, 0x80, 0xa0, 0x22,
+         0x01, 0xe0, 0x00, 0x55, 0x25, 0x20, 0x15, 0x00, 0xb4, 0xc0, 0xa0, 0x22,
+         0x01, 0xe0, 0x04, 0x55, 0x0e, 0x00, 0x00, 0x00,
+      };
+      static const uint8_t rgba8_eot_5[] = {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+         0x24, 0x81, 0x01, 0x40, 0x28, 0x01, 0xa0, 0x0a, 0x37, 0x06, 0x04, 0x1a,
+         0x29, 0x00, 0xa1, 0x02, 0x68, 0x01, 0x20, 0x00, 0x01, 0x02, 0x27, 0x08,
+         0x04, 0x1a, 0x29, 0x00, 0xa1, 0x02, 0x28, 0x01, 0x20, 0x00, 0x01, 0x02,
+         0x27, 0x00, 0x20, 0x2a, 0x21, 0x00, 0xab, 0x0a, 0x00, 0x00, 0x4a, 0x30,
+         0x18, 0x00, 0x0b, 0x82, 0x21, 0x04, 0x1b, 0x80, 0x21, 0x04, 0x27, 0x00,
+         0x20, 0x4a, 0x21, 0x01, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x81, 0xa4, 0x12, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x81, 0xa4, 0x12, 0xa7, 0x00, 0x20, 0x6a, 0x21, 0x02, 0xab, 0x0a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x82, 0x07, 0x02, 0x22, 0x82,
+         0xa4, 0x02, 0xb3, 0x80, 0x07, 0x02, 0x22, 0x82, 0xa4, 0x02, 0xa7, 0x00,
+         0x20, 0x8a, 0x21, 0x03, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0xa3, 0x82, 0x07, 0x02, 0x22, 0x83, 0xa4, 0x12, 0xb3, 0x80, 0x07, 0x02,
+         0x22, 0x83, 0xa4, 0x12, 0x27, 0x00, 0x20, 0xaa, 0x21, 0x04, 0xab, 0x2a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0x23, 0x02, 0x07, 0x02, 0x26, 0x84,
+         0xa4, 0x22, 0x33, 0x00, 0x07, 0x02, 0x26, 0x84, 0xa4, 0x22, 0x25, 0x04,
+         0x15, 0x00, 0x24, 0x00, 0xa0, 0x22, 0x00, 0xe0, 0x00, 0x55, 0x25, 0x08,
+         0x15, 0x00, 0x34, 0x40, 0xa0, 0x22, 0x00, 0xe0, 0x04, 0x55, 0x25, 0x10,
+         0x15, 0x00, 0xa4, 0x80, 0xa0, 0x22, 0x01, 0xe0, 0x00, 0x55, 0x25, 0x20,
+         0x15, 0x00, 0xb4, 0xc0, 0xa0, 0x22, 0x01, 0xe0, 0x04, 0x55, 0x25, 0x40,
+         0x1d, 0x01, 0x24, 0x02, 0xa0, 0x22, 0x00, 0xe0, 0x00, 0x55, 0x0e, 0x00,
+         0x00, 0x00,
+      };
+      static const uint8_t rgba8_eot_6[] = {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+         0x24, 0x81, 0x01, 0x40, 0x28, 0x01, 0xa0, 0x0a, 0x37, 0x06, 0x04, 0x1a,
+         0x29, 0x00, 0xa1, 0x02, 0x68, 0x01, 0x20, 0x00, 0x01, 0x02, 0x27, 0x08,
+         0x04, 0x1a, 0x29, 0x00, 0xa1, 0x02, 0x28, 0x01, 0x20, 0x00, 0x01, 0x02,
+         0x27, 0x00, 0x20, 0x2a, 0x21, 0x00, 0xab, 0x0a, 0x00, 0x00, 0x4a, 0x30,
+         0x18, 0x00, 0x0b, 0x82, 0x21, 0x04, 0x1b, 0x80, 0x21, 0x04, 0x27, 0x00,
+         0x20, 0x4a, 0x21, 0x01, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x81, 0xa4, 0x12, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x81, 0xa4, 0x12, 0xa7, 0x00, 0x20, 0x6a, 0x21, 0x02, 0xab, 0x0a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x82, 0x07, 0x02, 0x22, 0x82,
+         0xa4, 0x02, 0xb3, 0x80, 0x07, 0x02, 0x22, 0x82, 0xa4, 0x02, 0xa7, 0x00,
+         0x20, 0x8a, 0x21, 0x03, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0xa3, 0x82, 0x07, 0x02, 0x22, 0x83, 0xa4, 0x12, 0xb3, 0x80, 0x07, 0x02,
+         0x22, 0x83, 0xa4, 0x12, 0x27, 0x00, 0x20, 0xaa, 0x21, 0x04, 0xab, 0x2a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0x23, 0x82, 0x07, 0x02, 0x22, 0x84,
+         0xa4, 0x22, 0x33, 0x80, 0x07, 0x02, 0x22, 0x84, 0xa4, 0x22, 0x27, 0x00,
+         0x20, 0xca, 0x21, 0x05, 0xab, 0x3a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x02, 0x07, 0x02, 0x26, 0x85, 0xa4, 0x32, 0x33, 0x00, 0x07, 0x02,
+         0x26, 0x85, 0xa4, 0x32, 0x25, 0x04, 0x15, 0x00, 0x24, 0x00, 0xa0, 0x22,
+         0x00, 0xe0, 0x00, 0x55, 0x25, 0x08, 0x15, 0x00, 0x34, 0x40, 0xa0, 0x22,
+         0x00, 0xe0, 0x04, 0x55, 0x25, 0x10, 0x15, 0x00, 0xa4, 0x80, 0xa0, 0x22,
+         0x01, 0xe0, 0x00, 0x55, 0x25, 0x20, 0x15, 0x00, 0xb4, 0xc0, 0xa0, 0x22,
+         0x01, 0xe0, 0x04, 0x55, 0x25, 0x40, 0x1d, 0x01, 0x24, 0x02, 0xa0, 0x22,
+         0x00, 0xe0, 0x00, 0x55, 0x25, 0x00, 0x1d, 0x01, 0x34, 0x42, 0xa0, 0xa2,
+         0x00, 0xe0, 0x04, 0x55, 0x0e, 0x00, 0x00, 0x00,
+      };
+      static const uint8_t rgba8_eot_7[] = {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+         0x24, 0x81, 0x01, 0x40, 0x28, 0x01, 0xa0, 0x0a, 0x37, 0x06, 0x04, 0x1a,
+         0x29, 0x00, 0xa1, 0x02, 0x68, 0x01, 0x20, 0x00, 0x01, 0x02, 0x27, 0x08,
+         0x04, 0x1a, 0x29, 0x00, 0xa1, 0x02, 0x28, 0x01, 0x20, 0x00, 0x01, 0x02,
+         0x27, 0x00, 0x20, 0x2a, 0x21, 0x00, 0xab, 0x0a, 0x00, 0x00, 0x4a, 0x30,
+         0x18, 0x00, 0x0b, 0x82, 0x21, 0x04, 0x1b, 0x80, 0x21, 0x04, 0x25, 0x04,
+         0x15, 0x00, 0x24, 0x00, 0xa0, 0x22, 0x00, 0xe0, 0x00, 0x55, 0x27, 0x00,
+         0x20, 0x4a, 0x21, 0x01, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x81, 0xa4, 0x12, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x81, 0xa4, 0x12, 0xa7, 0x00, 0x20, 0x6a, 0x21, 0x02, 0xab, 0x0a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x82, 0x07, 0x02, 0x22, 0x82,
+         0xa4, 0x02, 0xb3, 0x80, 0x07, 0x02, 0x22, 0x82, 0xa4, 0x02, 0xa7, 0x00,
+         0x20, 0x8a, 0x21, 0x03, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0xa3, 0x82, 0x07, 0x02, 0x22, 0x83, 0xa4, 0x12, 0xb3, 0x80, 0x07, 0x02,
+         0x22, 0x83, 0xa4, 0x12, 0x27, 0x00, 0x20, 0xaa, 0x21, 0x04, 0xab, 0x2a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0x23, 0x82, 0x07, 0x02, 0x22, 0x84,
+         0xa4, 0x22, 0x33, 0x80, 0x07, 0x02, 0x22, 0x84, 0xa4, 0x22, 0x27, 0x00,
+         0x20, 0xca, 0x21, 0x05, 0xab, 0x3a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x85, 0xa4, 0x32, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x85, 0xa4, 0x32, 0xa7, 0x00, 0x20, 0xea, 0x21, 0x06, 0xab, 0x2a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x02, 0x07, 0x02, 0x26, 0x86,
+         0xa4, 0x22, 0xb3, 0x00, 0x07, 0x02, 0x26, 0x86, 0xa4, 0x22, 0x25, 0x08,
+         0x15, 0x00, 0x34, 0x40, 0xa0, 0x22, 0x00, 0xe0, 0x04, 0x55, 0x25, 0x10,
+         0x15, 0x00, 0xa4, 0x80, 0xa0, 0x22, 0x01, 0xe0, 0x00, 0x55, 0x25, 0x20,
+         0x15, 0x00, 0xb4, 0xc0, 0xa0, 0x22, 0x01, 0xe0, 0x04, 0x55, 0x25, 0x40,
+         0x1d, 0x01, 0x24, 0x02, 0xa0, 0x22, 0x00, 0xe0, 0x00, 0x55, 0x25, 0x00,
+         0x1d, 0x01, 0x34, 0x42, 0xa0, 0xa2, 0x00, 0xe0, 0x04, 0x55, 0x25, 0x00,
+         0x5d, 0x01, 0xa4, 0x82, 0xa0, 0x22, 0x01, 0xe0, 0x00, 0x55, 0x0e, 0x00,
+         0x00, 0x00,
+      };
+      static const uint8_t rgba8_eot_8[] = {
+         0x1c, 0x9c, 0x10, 0x06, 0x24, 0xa8, 0x14, 0x06, 0x0c, 0x9d, 0x10, 0x26,
+         0x24, 0x81, 0x01, 0x40, 0x28, 0x01, 0xa0, 0x0a, 0x37, 0x06, 0x04, 0x1a,
+         0x29, 0x00, 0xa1, 0x02, 0x68, 0x01, 0x20, 0x00, 0x01, 0x02, 0x27, 0x08,
+         0x04, 0x1a, 0x29, 0x00, 0xa1, 0x02, 0x28, 0x01, 0x20, 0x00, 0x01, 0x02,
+         0x27, 0x00, 0x20, 0x2a, 0x21, 0x00, 0xab, 0x0a, 0x00, 0x00, 0x4a, 0x30,
+         0x18, 0x00, 0x0b, 0x82, 0x21, 0x04, 0x1b, 0x80, 0x21, 0x04, 0x27, 0x00,
+         0x20, 0x4a, 0x21, 0x01, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x81, 0xa4, 0x12, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x81, 0xa4, 0x12, 0x25, 0x04, 0x15, 0x00, 0x24, 0x00, 0xa0, 0x22,
+         0x00, 0xe0, 0x00, 0x55, 0x25, 0x08, 0x15, 0x00, 0x34, 0x40, 0xa0, 0x22,
+         0x00, 0xe0, 0x04, 0x55, 0xa7, 0x00, 0x20, 0x6a, 0x21, 0x02, 0xab, 0x0a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x82, 0x07, 0x02, 0x22, 0x82,
+         0xa4, 0x02, 0xb3, 0x80, 0x07, 0x02, 0x22, 0x82, 0xa4, 0x02, 0xa7, 0x00,
+         0x20, 0x8a, 0x21, 0x03, 0xab, 0x1a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0xa3, 0x82, 0x07, 0x02, 0x22, 0x83, 0xa4, 0x12, 0xb3, 0x80, 0x07, 0x02,
+         0x22, 0x83, 0xa4, 0x12, 0x27, 0x00, 0x20, 0xaa, 0x21, 0x04, 0xab, 0x2a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0x23, 0x82, 0x07, 0x02, 0x22, 0x84,
+         0xa4, 0x22, 0x33, 0x80, 0x07, 0x02, 0x22, 0x84, 0xa4, 0x22, 0x27, 0x00,
+         0x20, 0xca, 0x21, 0x05, 0xab, 0x3a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0x23, 0x82, 0x07, 0x02, 0x22, 0x85, 0xa4, 0x32, 0x33, 0x80, 0x07, 0x02,
+         0x22, 0x85, 0xa4, 0x32, 0xa7, 0x00, 0x20, 0xea, 0x21, 0x06, 0xab, 0x2a,
+         0x00, 0x00, 0x4a, 0x30, 0x18, 0x00, 0xa3, 0x82, 0x07, 0x02, 0x22, 0x86,
+         0xa4, 0x22, 0xb3, 0x80, 0x07, 0x02, 0x22, 0x86, 0xa4, 0x22, 0xa7, 0x00,
+         0x20, 0x0a, 0x21, 0x87, 0xab, 0x3a, 0x00, 0x00, 0x4a, 0x30, 0x18, 0x00,
+         0xa3, 0x02, 0x07, 0x02, 0x26, 0x87, 0xa4, 0x32, 0xb3, 0x00, 0x07, 0x02,
+         0x26, 0x87, 0xa4, 0x32, 0x25, 0x10, 0x15, 0x00, 0xa4, 0x80, 0xa0, 0x22,
+         0x01, 0xe0, 0x00, 0x55, 0x25, 0x20, 0x15, 0x00, 0xb4, 0xc0, 0xa0, 0x22,
+         0x01, 0xe0, 0x04, 0x55, 0x25, 0x40, 0x1d, 0x01, 0x24, 0x02, 0xa0, 0x22,
+         0x00, 0xe0, 0x00, 0x55, 0x25, 0x00, 0x1d, 0x01, 0x34, 0x42, 0xa0, 0xa2,
+         0x00, 0xe0, 0x04, 0x55, 0x25, 0x00, 0x5d, 0x01, 0xa4, 0x82, 0xa0, 0x22,
+         0x01, 0xe0, 0x00, 0x55, 0x2d, 0x00, 0x1d, 0x01, 0xb4, 0xc2, 0xa0, 0x22,
+         0x01, 0xe0, 0x04, 0x55, 0x0e, 0x00, 0x00, 0x00,
+      };
+      static const struct {
+         const uint8_t *code;
+         size_t size;
+      } programs[] = {
+         [2] = {rgba8_eot_2, sizeof(rgba8_eot_2)},
+         [3] = {rgba8_eot_3, sizeof(rgba8_eot_3)},
+         [4] = {rgba8_eot_4, sizeof(rgba8_eot_4)},
+         [5] = {rgba8_eot_5, sizeof(rgba8_eot_5)},
+         [6] = {rgba8_eot_6, sizeof(rgba8_eot_6)},
+         [7] = {rgba8_eot_7, sizeof(rgba8_eot_7)},
+         [8] = {rgba8_eot_8, sizeof(rgba8_eot_8)},
+      };
+      assert(multi_eot_count >= 2 && multi_eot_count < ARRAY_SIZE(programs));
       ctx->max_reg = MAX2(ctx->max_reg, 7);
-      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 16);
-      return agx3_append(emission, dual_rgba8_eot, sizeof(dual_rgba8_eot));
+      ctx->agx3_staging_halfs = MAX2(ctx->agx3_staging_halfs, 8 * multi_eot_count);
+      /* Six or more targets exceed agx3_append's 8-bit length. */
+      const size_t size = programs[multi_eot_count].size;
+      memcpy(util_dynarray_grow_bytes(emission, 1, size),
+             programs[multi_eot_count].code, size);
+      return true;
    }
    if (multi_eot_count) {
       static_assert(sizeof(agx3_g17p_quad_eot) == 208, "native quad EOT");
@@ -10136,8 +10369,16 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
       const unsigned index = rt0_eot - AGX3_G17P_RT0_EOT_SELECTOR_75;
       assert(index < ARRAY_SIZE(g17g_rt0_eot) &&
              "the classifier refuses the G17P-only builtins on G17G");
-      return agx3_append(emission, g17g_rt0_eot[index],
-                         sizeof(g17g_rt0_eot[index]));
+      uint8_t program[sizeof(g17g_rt0_eot[0])];
+      memcpy(program, g17g_rt0_eot[index], sizeof(program));
+      if (ctx->key->g17p_rt0_eot_multisample) {
+         /* Native G17G/G18G 2DMS EOT programs preserve the complete 2D
+          * coordinate wire for all five format classes and 1..4 components.
+          * Only IMGWBLK field30 changes from 1 to 2 (byte73 bits6:7).
+          * G17P's PACK_IMGWIR change does not apply here. */
+         program[73] = (program[73] & 0x3f) | (2u << 6);
+      }
+      return agx3_append(emission, program, sizeof(program));
    }
    if (rt0_eot != AGX3_G17P_RT0_EOT_NONE) {
       static const uint8_t g17p_rt0_eot[][68] = {{
@@ -10612,8 +10853,12 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    const unsigned g17p_msaa_background_targets =
       agx3_g17p_sample_store_protocol(ctx, false);
    const bool g17p_msaa_background_stores = g17p_msaa_background_targets > 0;
-   const bool g17p_sample_colour_stores =
+   const bool sample_colour_stores =
       tile_stores_left > 1 && agx3_g17p_sample_store_protocol(ctx, true);
+   const bool g17p_sample_colour_stores =
+      enc == AGX_ISA_ENCODING_AGX3B && sample_colour_stores;
+   const bool g18_sample_colour_stores =
+      agx3_g18_msaa4_tile_shader(ctx) && sample_colour_stores;
    const bool g17p_colour_protocol =
       (enc == AGX_ISA_ENCODING_AGX3B &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
@@ -10627,7 +10872,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
    if ((enc == AGX_ISA_ENCODING_AGX3B || ctx->key->dev.emit_agx3d) &&
        ctx->stage == MESA_SHADER_FRAGMENT &&
        tile_stores_left > 1 && !g17p_mrt.valid && !g17p_multi_background &&
-       !g17p_msaa_background_stores && !g17p_sample_colour_stores)
+       !g17p_msaa_background_stores && !g17p_sample_colour_stores &&
+       !g18_sample_colour_stores)
       goto fail;
    /* Exact native RGBA8 alpha pipeline: one class-8 read wait/load followed
     * by one class-4 write wait/store, under the same class-12 entry/release.
@@ -11983,21 +12229,48 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             }
             assert(texture_ops_left > 0);
             const bool final = --texture_ops_left == 0;
+            /* G18 MS reads currently publish X/Y/sample into one fixed
+             * staging record. Scoreboard slots do not select separate
+             * records: native concurrent reads instead use distinct
+             * PACK_SMPIR destinations and SMP argument offsets. Retire the
+             * previous consumers before republishing our fixed record.
+             * Use the established per-slot waits, including dependencies
+             * this instruction would otherwise wait on while staging. */
+            const bool g18_fixed_ms_record =
+               enc == AGX_ISA_ENCODING_AGX3C && ctx->key->dev.emit_agx3d &&
+               (I->dim == AGX_DIM_2D_MS || I->dim == AGX_DIM_2D_MS_ARRAY);
+            if (g18_fixed_ms_record) {
+               if (!agx3_retire_slots_noop(emission, enc,
+                                           wait | outstanding_here))
+                  AGX3_REFUSE(I);
+               outstanding &= (uint16_t)~outstanding_here;
+               sample_slots_live &= (uint16_t)~outstanding_here;
+            }
             const uint16_t fetch_wait =
-               wait | ((I->dim == AGX_DIM_2D_MS ||
+               g18_fixed_ms_record ? 0 : wait | ((I->dim == AGX_DIM_2D_MS ||
                          I->dim == AGX_DIM_2D_MS_ARRAY)
                           ? (outstanding_here & 1u)
                           : 0);
             /* A fragment texel fetch with a per-lane level stages that level
              * into the sampler-private bank; Apple enters the pixel
              * transaction before such an SMP. Keep the same straight-line
-             * gate placement rule as the implicit-derivative samples. */
-            const bool open_pixel_fetch =
-               enc == AGX_ISA_ENCODING_AGX3B &&
+             * gate placement rule as the implicit-derivative samples.
+             * Native G18 fragments also enter before reading a multisample
+             * texture when the destination itself is single-sampled. */
+            const bool g18_ms_fragment_fetch =
+               enc == AGX_ISA_ENCODING_AGX3C && ctx->key->dev.emit_agx3d &&
                ctx->stage == MESA_SHADER_FRAGMENT &&
                !ctx->key->fs.ignore_tib_dependencies &&
                ctx->agx3_colour_link.straight_line &&
-               register_fetch_lod && I->dim == AGX_DIM_2D && !g17p_colour_open;
+               (I->dim == AGX_DIM_2D_MS || I->dim == AGX_DIM_2D_MS_ARRAY);
+            const bool open_pixel_fetch =
+               ((enc == AGX_ISA_ENCODING_AGX3B &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
+               !ctx->key->fs.ignore_tib_dependencies &&
+               ctx->agx3_colour_link.straight_line &&
+               register_fetch_lod && I->dim == AGX_DIM_2D) ||
+                g18_sample_colour_stores || g18_ms_fragment_fetch) &&
+               !g17p_colour_open;
             uint16_t staged_end = 0;
             if (!agx3_emit_texture_fetch(emission, enc, I, slot, fetch_wait,
                                          final, staged, separate_write_coords,
@@ -12444,6 +12717,26 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_WAIT_PIX ||
              I->op == AGX_OPCODE_SIGNAL_PIX) {
+            if (g18_sample_colour_stores) {
+               if (I->op == AGX_OPCODE_WAIT_PIX) {
+                  uint8_t bytes[AGX3_PIXEL_MAX_LENGTH], len = 0;
+                  if (!g17p_colour_open) {
+                     if (!agx3_pixel_colour_entry(enc, bytes, &len) ||
+                         !agx3_append(emission, bytes, len))
+                        AGX3_REFUSE(I);
+                     ctx->agx3_colour_link.entry_emitted = true;
+                     ctx->agx3_colour_link.entry_offset =
+                        emission->size - len - initial_size;
+                     g17p_colour_open = true;
+                  }
+                  if (!agx3_pixel_wait(enc, 12, wait, bytes, &len) ||
+                      !agx3_append(emission, bytes, len))
+                     AGX3_REFUSE(I);
+               } else if (!agx3_retire_slots_noop(emission, enc, wait)) {
+                  AGX3_REFUSE(I);
+               }
+               continue;
+            }
             /* A late depth test for fragment memory side effects stages the
              * pass-through Z value before acquiring class 1 in Apple's fresh
              * G17P atomic fragment. Hold this wait until ZS_EMIT can reproduce
@@ -12558,11 +12851,17 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
          if (I->op == AGX_OPCODE_PACK_RGB10A2_AGX3 ||
              I->op == AGX_OPCODE_UNPACK_RGB10A2_AGX3) {
-            const bool first = ctx->stage == MESA_SHADER_FRAGMENT &&
+            /* A secondary epilog follows the main shader: its local offset
+             * zero is not the start of the linked program. G17P records the
+             * marker and relocates it during linking; C/D epilogs use the
+             * native non-leading form directly. Keep C/D whole-program
+             * leading packs guarded by the encoder. */
+            const bool first = (enc == AGX_ISA_ENCODING_AGX3B ||
+                                !ctx->key->secondary) &&
+               ctx->stage == MESA_SHADER_FRAGMENT &&
                !ctx->key->fs.ignore_tib_dependencies &&
                emission->size == initial_size;
-            if (enc != AGX_ISA_ENCODING_AGX3B ||
-                !agx3_emit_rgb10a2(emission, I, wait, first))
+            if (!agx3_emit_rgb10a2(emission, enc, I, wait, first))
                AGX3_REFUSE(I);
             ctx->agx3_fltnorm_start |= first &&
                I->op == AGX_OPCODE_PACK_RGB10A2_AGX3;
@@ -12702,7 +13001,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                       bytes, &len) ||
                      !agx3_append(emission, bytes, len))) ||
                    !agx3_emit_tile(emission, enc, I, slot,
-                                   store_waits ? wait : 0, false, false,
+                                   store_waits ? wait : 0,
+                                   enc == AGX_ISA_ENCODING_AGX3C && load && first,
+                                   enc == AGX_ISA_ENCODING_AGX3C && load && last,
                                    g17p_mrt.raw32_store,
                                    g17p_mrt.count >= 3,
                                    store_f13,
@@ -12765,6 +13066,13 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (g17g_deferred_write && I->op == AGX_OPCODE_ST_TILE && last) {
                uint8_t release[AGX3_PIXEL_MAX_LENGTH], release_len = 0;
                if (!agx3_pixel_release(enc, 12, true, 0, release, &release_len) ||
+                   !agx3_append(emission, release, release_len))
+                  AGX3_REFUSE(I);
+            }
+            if (g18_sample_colour_stores && I->op == AGX_OPCODE_ST_TILE && last) {
+               uint8_t release[AGX3_PIXEL_MAX_LENGTH], release_len = 0;
+               if (!g17p_colour_open ||
+                   !agx3_pixel_release(enc, 12, true, 0, release, &release_len) ||
                    !agx3_append(emission, release, release_len))
                   AGX3_REFUSE(I);
             }
@@ -12845,7 +13153,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
              * fragment, gpu/m5-fragment-zs-constant-reference.metal). */
             if ((enc != AGX_ISA_ENCODING_AGX3B && enc != AGX_ISA_ENCODING_AGX3C) ||
                 ctx->stage != MESA_SHADER_FRAGMENT ||
-                (enc == AGX_ISA_ENCODING_AGX3B && ctx->key->fs.nr_samples > 1) ||
+                ctx->key->fs.nr_samples > 1 ||
                 I->nr_dests != 1 || I->nr_srcs ||
                 !agx3_src_is_register(I->dest[0]) || I->dest[0].memory ||
                 I->dest[0].size != AGX_SIZE_16 || agx_channels(I->dest[0]) != 1)
@@ -12865,18 +13173,25 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
          if (I->op == AGX_OPCODE_ZS_EMIT_AGX3) {
             const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
             const bool depth = I->zs & 1, stencil = I->zs & 2;
+            const bool g18_msaa4 = agx3_g18_msaa4_tile_shader(ctx);
             /* Apple's 2x/4x per-sample depth/stencil writes stage each word,
              * and its depth, after the previous sample's, all under the one
              * class-1 wait taken before the first DEPTHF (msaa/native/zexp2
              * fs_id_{2,4}x, msaa/native/zmrt/zsten fs_id_s_4x). */
-            const unsigned staging = gpu1 ? 0 : g17p_zs_staging;
+            const unsigned staging = gpu1 && !g18_msaa4 ? 0 : g17p_zs_staging;
             if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) ||
                 ctx->stage != MESA_SHADER_FRAGMENT || I->nr_dests ||
                 I->nr_srcs != 1 || I->zs < 1 || I->zs > 3 ||
                 (gpu1 ? (!agx3_src_is_register(I->src[0]) || I->src[0].memory ||
-                         !g17p_deferred_zs_wait || I->src[0].size != AGX_SIZE_16 ||
+                         I->src[0].size != AGX_SIZE_16 ||
                          agx_channels(I->src[0]) != (depth ? 4 : 2) ||
-                         (I->src[0].value & 1))
+                         (I->src[0].value & 1) ||
+                         (g18_msaa4
+                            ? (!depth || stencil || g17p_zs_writes >= 4 ||
+                               (g17p_zs_writes == 0) !=
+                                  (g17p_deferred_zs_wait != NULL))
+                            : (!g17p_deferred_zs_wait ||
+                               ctx->key->fs.nr_samples > 1)))
                       : (!agx3_vary_reg32(I->src[0]) ||
                          agx_channels(I->src[0]) != (depth ? 2 : 1) ||
                          (g17p_zs_writes == 0) != (g17p_deferred_zs_wait != NULL) ||
@@ -12898,12 +13213,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                /* Apple's G17G copies carry no liveness flag: 0b 00 29 04 is
                 * dest 0, source r0, no wait; the depth copy to staging 2 is
                 * the coordinate copy already witnessed for fetches. */
-               if (!agx3_stage_copy_kill(enc, 0, I->src[0].value, false, slot,
+               /* Native315 uses distinct staging pairs for its four G18
+                * depth exports, still without a copy liveness flag. */
+               if (!agx3_stage_copy_kill(enc, staging, I->src[0].value, false, slot,
                                          wait | outstanding_here, bytes, &len) ||
                    !agx3_append(emission, bytes, len))
                   AGX3_REFUSE(I);
                if (depth &&
-                   (!agx3_stage_copy_kill(enc, 2, I->src[0].value + 2, false,
+                   (!agx3_stage_copy_kill(enc, staging + 2, I->src[0].value + 2, false,
                                           slot, 0, bytes, &len) ||
                     !agx3_append(emission, bytes, len)))
                   AGX3_REFUSE(I);

@@ -2072,6 +2072,28 @@ agx_ra(agx_context *ctx)
    if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
       max_possible_regs = MIN2(max_possible_regs, AGX3B_NUM_REGS);
 
+   /* G18G's eight-bit operand fields also encode r126/r127, but those names
+    * do not behave as ordinary data registers. Physical scalar readbacks
+    * from r124/r125 succeed while stores from r126/r127 leave their output
+    * untouched; a vec4 spanning them loses the entire store. Native G18G
+    * pressure kernels reach r125 and spill the remaining live values.
+    * Keep the unavailable halves out of allocation, including spill temps.
+    * G18G uses the G17G allocator before the final AGX3D transcode.
+    */
+   if (ctx->key->dev.emit_agx3d) {
+      /* Round before deciding whether to spill. Rounding only at assignment
+       * could leave demand above the aligned file after the spill pass. */
+      unsigned alignment = 8;
+      agx_foreach_instr_global(ctx, I) {
+         agx_foreach_ssa_dest(I, d) {
+            alignment = MAX2(alignment,
+                            util_next_power_of_two(agx_index_size_16(I->dest[d])));
+         }
+      }
+      max_possible_regs =
+         MIN2(max_possible_regs, ROUND_DOWN_TO(AGX3D_NUM_REGS, alignment));
+   }
+
    /* A cube-array sample whose texture or sampler descriptor is a register
     * publishes CEM's face through agx3_tex_stage_cube_array_layer(), which
     * names it in the seven-bit f30 operand. The plain cube's cube_z and
