@@ -87,33 +87,7 @@
 /* Diagnostic controls are immutable for a process. Keep environment parsing
  * out of the per-draw path; all controls remain opt-in and retain their exact
  * existing behavior. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_dirty_bisect,
-                           "HK_G17P_DIRTY_BISECT", 0)
-/* v46 execution-efficiency A/B (neo-gpu-exec-mesa-v46), default off.
- * HK_G17P_FS_COMPLEXITY=<1..15> writes that value into the low nibble of the
- * HAL200 FragmentProgram record's final word for every fragment draw. Metal
- * copies the low nibble of the compile reply's ShaderInfo field 32
- * (`shader_complexity`) into this word (see the About diagnostic below);
- * Honeykrisp always writes 0. Apple's compile reply for the throughput
- * benchmark's exact fragment shader carries shader_complexity = 3
- * (neo-throughput-apple-compiler/apple-runtime/metadata-saved-schema.json,
- * record 2), the Minecraft terrain fragment carries 1. The hardware meaning of
- * the nibble is not decoded: this is a matched-workload parity probe, not a
- * general policy. Values outside 1..15 are ignored. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_fs_complexity,
-                          "HK_G17P_FS_COMPLEXITY", 0)
 
-static uint32_t
-hk_g17p_fs_complexity_override(void)
-{
-   const int64_t value = debug_get_option_hk_g17p_fs_complexity();
-   return value >= 1 && value <= 15 ? (uint32_t)value : 0;
-}
-/* Failure-isolation only.  The production default keeps prepared-state
- * consumption enabled; this forces the authoritative builder so the two
- * paths can be compared on identical hardware and workloads. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_prepared_dynamic_disable,
-                           "HK_G17P_PREPARED_DYNAMIC_DISABLE", false)
 #define IS_DIRTY(bit) BITSET_TEST(dyn->dirty, MESA_VK_DYNAMIC_##bit)
 
 #define IS_SHADER_DIRTY(bit)                                                   \
@@ -512,17 +486,6 @@ hk_sw_tess_program(enum tess_primitive_mode prim, enum poly_tess_mode mode)
    }
 }
 
-static const char *
-hk_g17p_tg_probe_option(void)
-{
-   static const char *probe;
-   static bool initialized;
-   if (unlikely(!initialized)) {
-      probe = getenv("HK_G17P_TG_PROBE");
-      initialized = true;
-   }
-   return probe;
-}
 
 static void hk_g17p_prepare_native_bind_tail(struct hk_cmd_buffer *cmd);
 static bool hk_g17p_prepare_vdm_state_update(struct hk_cmd_buffer *cmd);
@@ -1027,7 +990,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
 
    hk_g17p_prewarm_indirect_helpers(cmd);
    (void)hk_g17p_strong_dispatch_flush_enabled();
-   (void)hk_g17p_tg_probe_option();
 
    if (dev->g17p_shader_perf.trace)
       fprintf(stderr,
@@ -5288,27 +5250,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       phase_start = os_time_get_nano();
    }
 
-   /* HK_G17P_TG_PROBE=local|sg runs one threadgroup-memory probe in this
-    * dispatch stream, with the same internal precompiled record, immediately
-    * before the scan. Inert unless the variable is set; it is how the quarter-
-    * sized threadgroup window on this path was measured. */
-   {
-      const char *probe = hk_g17p_tg_probe_option();
-      if (unlikely(probe != NULL)) {
-         struct agx_ptr report = hk_pool_alloc(cmd, 8192, 4);
-         if (report.gpu) {
-            if (probe[0] == 's') {
-               libagx_g17p_local_sg_probe(cmd, agx_1d(1024),
-                                          AGX_BARRIER_ALL | AGX_PREGFX,
-                                          report.gpu);
-            } else {
-               libagx_g17p_local_probe(cmd, agx_1d(1024),
-                                       AGX_BARRIER_ALL | AGX_PREGFX,
-                                       report.gpu);
-            }
-         }
-      }
-   }
 
    const struct libagx_prefix_sum_tess_args prefix = {
       .p = state,
@@ -7165,9 +7106,6 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
           &output_select))
       return hk_g17p_bind_tail_refused(__LINE__);
 
-   if (hk_g17p_fs_complexity_override())
-      mesa_logi_once("G17P FragmentProgram complexity nibble %u A/B active",
-                     hk_g17p_fs_complexity_override());
 
    struct agx_ppp_hal200_graphics_core fs_record;
    struct agx_ppp_hal200_fragment_fields fs_fields = {
@@ -7178,7 +7116,7 @@ hk_g17p_build_native_bind_tail(struct hk_cmd_buffer *cmd,
       .unknown_0c = 0,
       .stage_program = fragment_program,
       .stage_program_template = 0,
-      .flags = hk_g17p_fs_complexity_override(),
+      .flags = 0,
    };
    if (fs->b.info.has_preamble &&
        (!fs->b.info.agx3_preamble_staging_known ||
@@ -8180,64 +8118,6 @@ hk_flush_ppp_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out)
    if (dev->dev.chip != AGX_CHIP_G17P)
       dirty.fragment_shader &= !linked_fs->b.no_op;
 
-   /* The first G17P hardware fault is introduced by this aggregate dirty PPP
-    * update. Keep a diagnostic-only selector that emits one independently
-    * consumable legacy group at a time so the bad HAL200 block can be
-    * identified without changing any of its dynamic values.
-    *
-    * 1: fragment control and non-stencil faces
-    * 2: cull words
-    * 3: fragment shader words
-    * 4: output selection, varying counts, and output size
-    * 5: occlusion query and output size
-    */
-   if (dev->dev.chip == AGX_CHIP_G17P) {
-      static int g17p_dirty_bisect = -1;
-      if (g17p_dirty_bisect < 0)
-         g17p_dirty_bisect =
-            debug_get_option_hk_g17p_dirty_bisect();
-
-      if (g17p_dirty_bisect > 0) {
-         const struct AGX_PPP_HEADER all = dirty;
-         dirty = (struct AGX_PPP_HEADER){.viewport_count = 1};
-
-         switch (g17p_dirty_bisect) {
-         case 1:
-            dirty.fragment_control = all.fragment_control;
-            dirty.fragment_control_2 = all.fragment_control_2;
-            dirty.fragment_front_face = all.fragment_front_face;
-            dirty.fragment_front_face_2 = all.fragment_front_face_2;
-            dirty.fragment_back_face = all.fragment_back_face;
-            dirty.fragment_back_face_2 = all.fragment_back_face_2;
-            break;
-         case 2:
-            dirty.cull = all.cull;
-            dirty.cull_2 = all.cull_2;
-            break;
-         case 3:
-            dirty.fragment_shader = all.fragment_shader;
-            break;
-         case 4:
-            dirty.output_select = all.output_select;
-            dirty.varying_counts_32 = all.varying_counts_32;
-            dirty.varying_counts_16 = all.varying_counts_16;
-            dirty.output_size = all.output_size;
-            break;
-         case 5:
-            dirty.occlusion_query = all.occlusion_query;
-            dirty.output_size = all.output_size;
-            break;
-         default:
-            mesa_loge("HK_G17P_DIRTY_BISECT=%d is outside 1..5",
-                      g17p_dirty_bisect);
-            dirty = all;
-            break;
-         }
-
-         fprintf(stderr, "G17P dirty PPP bisect: group=%d\n",
-                 g17p_dirty_bisect);
-      }
-   }
 
    /* Calculate the update size. If it equals the header, there is nothing to
     * update so early-exit.
@@ -9416,7 +9296,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * Any intervening state, descriptor, shader, root, or indexed-form change
     * misses this predicate and takes the complete path below. */
    const bool g17p_prepared_exact =
-      !debug_get_option_hk_g17p_prepared_dynamic_disable() &&
       dev->dev.chip == AGX_CHIP_G17P && !prepare_only &&
       !desc->root_dirty && gfx->prepared_vertex_usc && prepared_linked_vs &&
       prepared_linked_fs &&
@@ -10328,16 +10207,7 @@ hk_flush_dynamic_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                        bool *g17p_native_bind_tail_emitted_out,
                        bool prepare_only)
 {
-   if (unlikely(debug_get_option_hk_g17p_prepared_dynamic_disable())) {
-      static bool reported;
-      if (!reported) {
-         fprintf(stderr, "G17P diagnostic: prepared dynamic consumption disabled\n");
-         reported = true;
-      }
-   }
-
    if (!prepare_only &&
-       !debug_get_option_hk_g17p_prepared_dynamic_disable() &&
        hk_g17p_flush_prepared_dynamic_state(
           cmd, cs, draw_id, draw, ordinary_draw_path,
           g17p_native_bind_tail_emitted_out))
