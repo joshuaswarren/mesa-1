@@ -25,7 +25,6 @@
 #include "hk_device.h"
 #include "hk_device_memory.h"
 #include "hk_entrypoints.h"
-#include "hk_g17p_apple_override.h"
 #include "hk_image.h"
 #include "hk_image_view.h"
 #include "hk_physical_device.h"
@@ -1051,8 +1050,7 @@ hk_g17p_can_retain_descriptor_root(struct hk_cmd_buffer *cmd,
    const struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
    const struct hk_shader *hw_fs = hk_fs_variant(fs, 1);
    return hw_vs && hw_fs && hw_vs->compiled && hw_fs->compiled &&
-          !hw_fs->info.agx3_combined_sampler_valid &&
-          !hw_fs->info.g17p_apple_fs;
+          !hw_fs->info.agx3_combined_sampler_valid;
 }
 
 static void
@@ -1920,15 +1918,6 @@ hk_g17p_graphics_uniform_ranges(
    size_t count = 0;
    const unsigned root_uniform = s->info.agx3_root_uniform;
 
-   /* Diagnostic HK_G17P_APPLE_FS: Apple's own uniform DMA layout. */
-   if (s->info.stage == MESA_SHADER_FRAGMENT && s->info.g17p_apple_fs) {
-      if (agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer) ||
-          hk_cmd_uses_blend_constant(cmd))
-         return hk_g17p_graphics_ranges_refused(range_count, 0);
-      return hk_g17p_apple_fs_ranges(cmd, s, root_ptr, ranges,
-                                     HK_AGX3_G17P_GRAPHICS_MAX_RANGES,
-                                     range_count);
-   }
    const bool native_spills = s->info.stage == MESA_SHADER_FRAGMENT &&
       agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer);
 
@@ -3010,7 +2999,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                                hk_g17p_launch_trace_enabled();
       const bool fast_cacheable =
          !diagnostics && !s->info.agx3_combined_sampler_valid &&
-         !s->info.g17p_apple_fs &&
          !(s->info.stage == MESA_SHADER_FRAGMENT &&
            agx_tilebuffer_spills(&cmd->state.gfx.render.tilebuffer));
       const bool fragment = s->info.stage == MESA_SHADER_FRAGMENT;

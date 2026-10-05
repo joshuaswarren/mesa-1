@@ -70,8 +70,6 @@ hk_files = files(
   'hk_image_layout_core.c',
   'hk_image_layout_core.h',
   'hk_image_view.c',
-  'hk_g17p_apple_override.c',
-  'hk_g17p_apple_override.h',
   'hk_image_view.h',
   'hk_instance.c',
   'hk_instance.h',

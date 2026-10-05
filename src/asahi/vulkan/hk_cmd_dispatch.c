@@ -17,7 +17,6 @@
 #include "hk_descriptor_set.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
-#include "hk_g17p_apple_override.h"
 #include "hk_agx3_ioto_program_core.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "hk_physical_device.h"
@@ -1051,13 +1050,10 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                               uint64_t *program_va_out,
                               struct hk_g17p_compute_program_ref *out)
 {
-   /* Diagnostic HK_G17P_APPLE_CS: Apple's uniform layout, never cached. */
-   const bool apple_cs = s->info.g17p_apple_cs && !internal_graphics;
    struct hk_g17p_exact_compute_program *cached =
-      apple_cs ? NULL
-               : hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
-                                                    texture_pointers,
-                                                    internal_graphics, kind);
+      hk_g17p_find_exact_compute_program(cmd, s, linked, root_ptr,
+                                         texture_pointers, internal_graphics,
+                                         kind);
    if (cached) {
       memcpy(ranges, cached->ranges,
              cached->range_count * sizeof(cached->ranges[0]));
@@ -1070,10 +1066,7 @@ hk_g17p_build_compute_program(struct hk_cmd_buffer *cmd, struct hk_shader *s,
    }
 
    size_t range_count;
-   const bool ranges_ok = apple_cs
-      ? hk_g17p_apple_cs_ranges(cmd, s, root_ptr, ranges,
-                                HK_G17P_COMPUTE_MAX_RANGES, &range_count)
-      : internal_graphics
+   const bool ranges_ok = internal_graphics
       ? hk_g17p_internal_graphics_uniform_ranges(
            cmd, s, linked, root_ptr, texture_pointers, ranges, &range_count)
       : hk_g17p_compute_uniform_ranges(s, root_ptr, texture_pointers, ranges,

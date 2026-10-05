@@ -286,14 +286,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
        bind_fs->info.agx3_combined_sampler_valid)
       return;
 
-   /* Diagnostic HK_G17P_APPLE_FS: leave all preparation to the
-    * authoritative draw path (CPU-side only). */
-   hk_foreach_variant(gfx->shaders[MESA_SHADER_FRAGMENT], variant) {
-      /* A deferred variant is never an Apple-FS diagnostic (those stay eager). */
-      if (hk_shader_is_compiled(variant) && variant->info.g17p_apple_fs)
-         return;
-   }
-
    /* Shaders, dynamic state and attachment formats are now all known. Build
     * the exact non-indexed immutable variants outside vkCmdDraw*. An indexed
     * draw gets its width-specific VS variant when its index buffer is bound;
@@ -5752,8 +5744,7 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
     * any refusal falls through to the split link below, unchanged. */
    if (dev->dev.chip == AGX_CHIP_G17P &&
        (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND) &&
-       !prolog && key->nr_samples_shaded == 0 && shader->g17p_mono_nir &&
-       !shader->info.g17p_apple_fs) {
+       !prolog && key->nr_samples_shaded == 0 && shader->g17p_mono_nir) {
       struct agx_shader_part *mono = hk_g17p_inline_epilog_part(
          dev, shader, &key->epilog, g17p_tile_partitions);
       if (mono) {

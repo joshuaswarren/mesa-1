@@ -133,10 +133,6 @@ struct hk_shader_info {
     */
    bool agx3_combined_sampler_valid;
    bool agx3_uses_root;
-   /* Diagnostic HK_G17P_APPLE_CS / HK_G17P_APPLE_FS (hk_g17p_apple_override.c):
-    * this variant executes Apple's machine code. Never set otherwise. */
-   bool g17p_apple_cs;
-   bool g17p_apple_fs;
    /* Actual uniform address selected after stage and resource lowering. */
    unsigned agx3_root_uniform;
    bool agx3_txf_texture_valid;

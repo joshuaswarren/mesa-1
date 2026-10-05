@@ -14,7 +14,6 @@
 #include "hk_nir_widen_16bit_varyings.h"
 #include "hk_nir_lower_robust_image.h"
 #include "hk_entrypoints.h"
-#include "hk_g17p_apple_override.h"
 
 #include "poly/nir/poly_nir.h"
 #include "agx_compiler.h"
@@ -3412,7 +3411,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
        (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_INLINE_BLEND) &&
        sw_stage == MESA_SHADER_FRAGMENT &&
        nir->info.stage == MESA_SHADER_FRAGMENT && !nir->info.internal &&
-       !nir->info.fs.uses_sample_shading && !shader->info.g17p_apple_fs) {
+       !nir->info.fs.uses_sample_shading) {
       struct blob blob;
       blob_init(&blob);
       nir_serialize(&blob, nir, false);
@@ -3485,16 +3484,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
       return vk_errorf(dev, VK_ERROR_UNKNOWN,
                        "AGX backend cannot encode shader for %s",
                        agx_chip_name(dev->dev.chip));
-   }
-
-   /* Diagnostic, inert unless HK_G17P_APPLE_CS/FS names a file: swap in
-    * Apple's machine code for the throughput benchmark kernels. */
-   if (sw_stage == MESA_SHADER_COMPUTE || sw_stage == MESA_SHADER_FRAGMENT) {
-      VkResult apple = hk_g17p_apple_override_apply(dev, nir, shader);
-      if (apple != VK_SUCCESS) {
-         ralloc_free(nir);
-         return apple;
-      }
    }
 
    shader->code_ptr = shader->b.binary;
@@ -3646,11 +3635,8 @@ DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_lazy_generic, "HK_G17P_LAZY_GENERIC", 0)
 static bool
 hk_g17p_lazy_generic_enabled(struct hk_device *dev)
 {
-   /* The HK_G17P_FS_OVERRIDE / APPLE_FS diagnostics inspect every variant's
-    * compiled info at bind time; keep them eager. */
    return dev->dev.chip == AGX_CHIP_G17P &&
-          debug_get_option_hk_g17p_lazy_generic() != 0 &&
-          !getenv("HK_G17P_FS_OVERRIDE") && !getenv("HK_G17P_APPLE_FS");
+          debug_get_option_hk_g17p_lazy_generic() != 0;
 }
 
 /* hk_g17p_ordinary_force_generic() lives in hk_ordinary_descriptor.c, so the
@@ -5441,18 +5427,6 @@ hk_fast_link_part(struct hk_device *dev, bool fragment, struct hk_shader *main,
    struct hk_linked_shader *s = rzalloc(NULL, struct hk_linked_shader);
    if (!s)
       return NULL;
-   if (fragment && main->info.g17p_apple_fs) {
-      /* Apple's main blends and stores RT0 itself and ends in END; an epilog
-       * after it would be unreachable. Prologs and sample loops have no
-       * Apple ABI here. */
-      if (prolog || nr_samples_shaded) {
-         mesa_loge("HK_G17P_APPLE_FS: prolog=%u shaded=%u unsupported",
-                   prolog != NULL, nr_samples_shaded);
-         ralloc_free(s);
-         return NULL;
-      }
-      epilog = NULL;
-   }
    if (!agx_fast_link(&s->b, &dev->dev, fragment,
                       main_part ? main_part : &main->b, prolog, epilog,
                       nr_samples_shaded)) {
