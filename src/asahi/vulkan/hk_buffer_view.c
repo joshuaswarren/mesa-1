@@ -72,6 +72,9 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
 
    enum pipe_format format = hk_format_to_pipe_format(view->vk.format);
    const struct util_format_description *desc = util_format_description(format);
+   const bool g17p = device->dev.chip == AGX_CHIP_G17P;
+   const bool rgb32 =
+      ail_pixel_format[format].channels == AGX_CHANNELS_R32G32B32_EMULATED;
 
    uint8_t format_swizzle[4] = {
       desc->swizzle[0],
@@ -116,10 +119,17 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
     * either way (the shadow only exists for buffer->va != NULL), so this
     * cannot move an ordinary texel buffer.
     */
-   const bool g17p = device->dev.chip == AGX_CHIP_G17P;
    const uint64_t sampled_base = g17p ? rw_base : ro_base;
 
    uint32_t tail_offset_B = view->vk.offset & 0xf;
+   /* RGB32 permits component-aligned offsets, which cannot in general be
+    * expressed as a whole-texel tail. Its G17P raw-load metadata can carry
+    * the exact address instead; the unused hardware texture stays aligned.
+    */
+   const uint64_t metadata_base =
+      sampled_base + ((g17p && rgb32) ? tail_offset_B : 0);
+   if (g17p && rgb32)
+      tail_offset_B = 0;
    uint32_t tail_offset_el = tail_offset_B / util_format_get_blocksize(format);
    assert(tail_offset_el * util_format_get_blocksize(format) == tail_offset_B &&
           "must be texel aligned");
@@ -183,8 +193,8 @@ hk_CreateBufferView(VkDevice _device, const VkBufferViewCreateInfo *pCreateInfo,
       view->buffer_metadata = (struct hk_g17p_buffer_texture_metadata){
          .elements = view->vk.elements,
          .offset_el = tail_offset_el,
-         .address = sampled_base,
-         .rgb32 = texture.channels == AGX_CHANNELS_R32G32B32_EMULATED,
+         .address = metadata_base,
+         .rgb32 = rgb32,
          .sparse = sparse,
       };
       /* Gen9 has no AGX2 software tail fields. The shader consumes the

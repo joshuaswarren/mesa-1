@@ -934,7 +934,7 @@ txs_for_image(nir_builder *b, nir_intrinsic_instr *intr,
 
 static nir_def *
 image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
-                    bool return_index, bool gen9)
+                    bool return_index, bool gen9, bool buffer_metadata)
 {
    /* First, calculate the address of the PBE descriptor */
    nir_def *desc_address =
@@ -958,6 +958,21 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
 
    if (dim == GLSL_SAMPLER_DIM_BUF && return_index) {
       return nir_channel(b, coord, 0);
+   } else if (dim == GLSL_SAMPLER_DIM_BUF && buffer_metadata) {
+      /* Buffer atomics receive the PBE handle, but Gen9 has no AGX2
+       * software address/offset fields. Use the same sideband as buffer
+       * loads and stores, relative to the start of the descriptor.
+       */
+      nir_def *desc = nir_iadd_imm(
+         b, desc_address, -AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET);
+      nir_def *base = load_buffer_metadata(
+         b, desc, AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET, 64);
+      nir_def *tail = load_buffer_metadata(
+         b, desc, AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET, 32);
+      nir_def *element = nir_iadd(b, nir_channel(b, coord, 0), tail);
+      return nir_iadd(b, base,
+                      nir_imul(b, nir_u2u64(b, element),
+                               nir_u2u64(b, blocksize_B)));
    } else if (dim == GLSL_SAMPLER_DIM_BUF) {
       return libagx_buffer_texel_address(b, desc_address, coord, blocksize_B);
    } else if (gen9) {
@@ -1219,7 +1234,8 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
    case nir_intrinsic_bindless_image_texel_address:
       nir_def_rewrite_uses(&intr->def,
-                           image_texel_address(b, intr, false, gen9));
+                           image_texel_address(b, intr, false, gen9,
+                                               options && options->buffer_metadata));
       return true;
 
    case nir_intrinsic_is_sparse_texels_resident:
@@ -1646,7 +1662,7 @@ lower_multisampled_store(nir_builder *b, nir_intrinsic_instr *intr,
          intr->src[1].ssa, nir_u2u32(b, intr->src[2].ssa),
          nir_imm_int(b, util_format_get_blocksize(nir_intrinsic_format(intr))));
    } else {
-      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false));
+      index_px = nir_u2u32(b, image_texel_address(b, intr, true, false, false));
    }
    nir_def *coord2d = coords_for_buffer_texture(b, index_px);
 
