@@ -374,8 +374,8 @@ d12_device_runtime_rotate_resource_identities(
       }
    }
 
-   for (struct d12_descriptor_heap *heap = device->descriptor_heaps; heap;
-        heap = heap->registry_next) {
+   struct d12_descriptor_heap *heap;
+   d12_descriptor_registry_foreach(device, heap, heap_index) {
       uint8_t *textures =
          heap->texture_bo ? agx_bo_map(heap->texture_bo) : NULL;
       uint8_t *pbes = heap->pbe_bo ? agx_bo_map(heap->pbe_bo) : NULL;

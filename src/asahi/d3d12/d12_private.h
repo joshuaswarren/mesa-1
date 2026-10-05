@@ -210,6 +210,31 @@ HRESULT d12_private_data_set_name(struct d12_private_data_store *store,
  */
 #define D12_VB_PARAMS_FAILED ((uint64_t)~0ull)
 
+/* One registered descriptor heap: the half-open byte range of its slot
+ * array. The registry keeps these sorted by start so a slot pointer resolves
+ * to its heap by binary search.
+ */
+struct d12_descriptor_heap_range {
+   uintptr_t start;
+   uintptr_t end;
+   struct d12_descriptor_heap *heap;
+};
+
+/* Seqlock-published sorted range table. Writers (heap creation and release)
+ * hold descriptor_heap_lock and bump seq to odd while they edit the table;
+ * readers retry a search that observed an odd or changed seq. A table that
+ * growth replaced may still be under a reader's binary search, so retired
+ * tables stay mapped until the device is destroyed.
+ */
+struct d12_descriptor_registry {
+   uint32_t seq;
+   uint32_t count;
+   uint32_t capacity;
+   struct d12_descriptor_heap_range *ranges;
+   struct d12_descriptor_heap_range **retired;
+   uint32_t retired_count;
+};
+
 struct d12_device {
    /* One vtable answers every IID from ID3D12Device to ID3D12Device15: the
     * newer interfaces are strict supersets, so the slots are appended to the
@@ -252,12 +277,14 @@ struct d12_device {
    struct agx_scratch scratch_vs, scratch_fs, scratch_cs;
 
    /* CPU descriptor handles are opaque pointers into a heap's slot array.
-    * View creation only receives that pointer, so retain a small registry to
-    * locate the owning heap and mirror the slot into its GPU-native texture,
-    * PBE or sampler table. Descriptor heaps hold a device ref, hence every
-    * registry entry is removed before final device destruction. */
+    * View creation only receives that pointer, so retain a registry of
+    * slot-array ranges to locate the owning heap and mirror the slot into
+    * its GPU-native texture, PBE or sampler table. Descriptor heaps hold a
+    * device ref, hence every registry entry is removed before final device
+    * destruction. The lock serialises registry writers and whole-registry
+    * walks; descriptor writes resolve their heap without it. */
    simple_mtx_t descriptor_heap_lock;
-   struct d12_descriptor_heap *descriptor_heaps;
+   struct d12_descriptor_registry descriptor_registry;
 
    /* Retired G17P native VDM slabs, kept bound at their low-window alias
     * for the next command list (the alias is immutable for the BO's life,
@@ -746,18 +773,24 @@ struct d12_descriptor_heap {
    struct agx_bo *residency_bo;
    struct agx_bo *sampler_bo;
    uint32_t sampler_unique_count;
+   /* Shader-visible sampler heaps keep the packed-state deduplication table
+    * (2,048 open-addressed buckets of native indices) across writes, so a
+    * descriptor write inserts one state instead of rebuilding the heap.
+    * sampler_lock serialises native sampler table maintenance. */
+   simple_mtx_t sampler_lock;
+   uint16_t *sampler_hash;
 
    /* Exact WDDM read-set construction must inspect descriptors which can be
     * reached through an unbounded table or SM 6.6 heap handle. A maximum
     * resource heap contains one million slots, so walking every slot on
     * every ExecuteCommandLists call is not viable. Maintain a compact CPU
     * occupancy bitmap as descriptors are written and visit only live slots.
-    * descriptor_heap_lock protects this bitmap and the matching slot reads.
+    * The words are maintained with atomic read-modify-writes; the slots
+    * themselves are only ever written by the application thread that owns
+    * the descriptor, as D3D12 requires.
     */
    uint64_t *live_resource_words;
    uint32_t live_resource_word_count;
-
-   struct d12_descriptor_heap *registry_next;
 };
 
 /* A finite descriptor table is flattened into the command-list root and
@@ -2154,6 +2187,16 @@ HRESULT d12_descriptor_heap_create(struct d12_device *device,
                             REFIID riid, void **out);
 void d12_descriptor_heap_update_slot(struct d12_device *device,
                                      struct d12_descriptor *slot);
+void d12_descriptor_heap_update_range(struct d12_device *device,
+                                      struct d12_descriptor *first,
+                                      uint32_t count);
+void d12_descriptor_registry_destroy(struct d12_device *device);
+/* Walk every registered heap; the caller holds descriptor_heap_lock. */
+#define d12_descriptor_registry_foreach(device, heap, i)                    \
+   for (uint32_t i = 0;                                                     \
+        i < (device)->descriptor_registry.count &&                          \
+        ((heap) = (device)->descriptor_registry.ranges[i].heap, true);      \
+        i++)
 void d12_device_create_srv_runtime(
    struct d12_device *device, ID3D12Resource *resource,
    const D3D12_SHADER_RESOURCE_VIEW_DESC *desc,

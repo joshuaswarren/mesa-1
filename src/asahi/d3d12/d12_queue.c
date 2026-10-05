@@ -780,13 +780,13 @@ d12_queue_collect_write_tracker(
              ref->heap.count <= heap->desc.NumDescriptors - ref->heap.first)
             heap_limit = ref->heap.first + ref->heap.count;
 
-         simple_mtx_lock(&heap->device->descriptor_heap_lock);
          uint32_t first_word = ref->heap.first >> 6;
          uint32_t last_word = (heap_limit - 1) >> 6;
          if (last_word >= heap->live_resource_word_count)
             last_word = heap->live_resource_word_count - 1;
          for (uint32_t w = first_word; w <= last_word; ++w) {
-            uint64_t active = heap->live_resource_words[w];
+            uint64_t active =
+               p_atomic_read(&heap->live_resource_words[w]);
             if (w == first_word)
                active &= UINT64_MAX << (ref->heap.first & 63);
 
@@ -798,13 +798,10 @@ d12_queue_collect_write_tracker(
                       dev, attachments, count, limit,
                       &heap->slots[index])) {
                   *complete = false;
-                  simple_mtx_unlock(
-                     &heap->device->descriptor_heap_lock);
                   return true;
                }
             }
          }
-         simple_mtx_unlock(&heap->device->descriptor_heap_lock);
          break;
       }
       case D12_WRITE_REF_RESOURCE: {
@@ -1173,9 +1170,9 @@ d12_queue_read_set_add_heap(struct d12_queue_op *op,
       if (!heap->live_resource_words || !heap->live_resource_word_count)
          return false;
 
-      /* Descriptor writes and bitmap maintenance use the same device lock.
-       * This gives Execute a coherent descriptor snapshot while reducing a
-       * one-million-slot heap scan to the number of populated descriptors.
+      /* Descriptor writes maintain the bitmap atomically, so Execute reads
+       * the populated set without a lock and reduces a one-million-slot heap
+       * scan to the number of populated descriptors.
        */
       /* A root range the signature sized explicitly ends. Walking to the
        * end of the heap would pull every later populated descriptor's
@@ -1187,13 +1184,12 @@ d12_queue_read_set_add_heap(struct d12_queue_op *op,
           ref->heap.count <= heap->desc.NumDescriptors - ref->heap.first)
          limit = ref->heap.first + ref->heap.count;
 
-      simple_mtx_lock(&heap->device->descriptor_heap_lock);
       uint32_t first_word = ref->heap.first >> 6;
       uint32_t last_word = (limit - 1) >> 6;
       if (last_word >= heap->live_resource_word_count)
          last_word = heap->live_resource_word_count - 1;
       for (uint32_t w = first_word; w <= last_word; ++w) {
-         uint64_t active = heap->live_resource_words[w];
+         uint64_t active = p_atomic_read(&heap->live_resource_words[w]);
          if (w == first_word)
             active &= UINT64_MAX << (ref->heap.first & 63);
 
@@ -1205,7 +1201,6 @@ d12_queue_read_set_add_heap(struct d12_queue_op *op,
                op, dev, &heap->slots[index]);
          }
       }
-      simple_mtx_unlock(&heap->device->descriptor_heap_lock);
    } else {
       complete &= d12_queue_read_set_add_bo(op, heap->sampler_bo);
    }

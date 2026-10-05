@@ -5743,6 +5743,7 @@ d12_device_backend_cleanup(struct d12_device *device)
    agx_scratch_fini(&device->scratch_cs);
    d12_device_g17p_vdm_pool_fini(device);
    simple_mtx_destroy(&device->scratch_lock);
+   d12_descriptor_registry_destroy(device);
    simple_mtx_destroy(&device->descriptor_heap_lock);
    simple_mtx_destroy(&device->sparse_resource_lock);
    agx_bg_eot_cleanup(&device->bg_eot);
