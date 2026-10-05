@@ -699,6 +699,8 @@ d12_fence_ticket_wait(struct d12_fence_ticket *ticket,
                       const uint32_t *cancel)
 {
    struct d12_fence *fence = ticket->fence;
+   if (p_atomic_read(&ticket->satisfied))
+      return true;
    if (fence->shared_syncobj) {
       bool completed = d12_fence_wait_value(fence, ticket->value, cancel);
       if (completed)
@@ -707,6 +709,7 @@ d12_fence_ticket_wait(struct d12_fence_ticket *ticket,
    }
 
    bool completed = true;
+   struct d12_fence_pending_signal *failed = NULL;
 
    mtx_lock(&fence->lock);
    while (!p_atomic_read(&ticket->satisfied) && !fence->destroyed) {
@@ -716,6 +719,13 @@ d12_fence_ticket_wait(struct d12_fence_ticket *ticket,
       }
 
       if (!cancel) {
+         struct d12_fence_pending_signal *pending =
+            d12_fence_find_pending_locked(fence, ticket->value);
+         if (pending && pending != failed) {
+            if (!d12_fence_wait_pending_locked(fence, pending))
+               failed = pending;
+            continue;
+         }
          cnd_wait(&fence->changed, &fence->lock);
          continue;
       }
