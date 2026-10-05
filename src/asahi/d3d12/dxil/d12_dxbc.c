@@ -2081,7 +2081,7 @@ resource_texture_offset(struct d12_dxbc_ctx *ctx,
    if (!slot)
       return NULL;
 
-   if (operand->num_indices != 2)
+   if (operand->num_indices != 2 || !operand->index_is_relative[1])
       return nir_imul_imm(b, slot, native_stride);
 
    const struct d12_dxbc_binding_range *range = &ranges[operand->index[0]];
@@ -2184,7 +2184,7 @@ uav_image_handle(struct d12_dxbc_ctx *ctx,
    if (!offset)
       return NULL;
    return nir_bindless_image_agx(b, offset,
-      .desc_set = uav->num_indices == 2 ? D12_UNIFORM_HEAP_PBES : D12_UNIFORM_PBES);
+      .desc_set = uav->num_indices == 2 && uav->index_is_relative[1] ? D12_UNIFORM_HEAP_PBES : D12_UNIFORM_PBES);
 }
 
 static nir_def *
@@ -4138,7 +4138,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                return;
             }
             handle = nir_bindless_image_agx(b, offset,
-               .desc_set = res->num_indices == 2
+               .desc_set = res->num_indices == 2 && res->index_is_relative[1]
                   ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
          }
          nir_tex_instr *txs = nir_tex_instr_create(b->shader, is_ms ? 1 : 2);
@@ -4642,7 +4642,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                   return;
 
                handle = nir_bindless_image_agx(
-                  b, offset, .desc_set = resource->num_indices == 2
+                  b, offset, .desc_set = resource->num_indices == 2 && resource->index_is_relative[1]
                      ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
             }
             nir_def *coord = SRC(1);
@@ -5495,7 +5495,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             if (!native_offset)
                return;
             tex_handle = nir_bindless_image_agx(
-               b, native_offset, .desc_set = !is_buffer && tex_operand->num_indices == 2
+               b, native_offset, .desc_set = !is_buffer && tex_operand->num_indices == 2 &&
+                           tex_operand->index_is_relative[1]
                   ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
          }
 

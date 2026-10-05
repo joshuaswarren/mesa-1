@@ -144,6 +144,48 @@ check(unsigned opcode, bool null_clamp, bool null_feedback, bool buffer)
    free(container);
 }
 
+/* A static SM5.1 resource has two indices but no runtime displacement.
+ * Its native descriptor remains in the compact command-local table. */
+static void
+check_static_sm51_texture(void)
+{
+   struct tokens t = {0};
+   word(&t, 0x51); word(&t, 0);
+   word(&t, 0x02000068); word(&t, 1);
+   word(&t, (7u << 24) | (3u << 11) | 88u);
+   word(&t, 0x00307000); word(&t, 0); word(&t, 0); word(&t, 0);
+   word(&t, 0x5555); word(&t, 0);
+   unsigned start = t.count;
+   word(&t, 45); /* ld r0, l(0,0,0,0), t[range0][register0] */
+   reg(&t, 0x001000f2, 0); immediate(&t, 0);
+   word(&t, 0x00207e46); word(&t, 0); word(&t, 0);
+   t.words[start] |= (t.count - start) << 24;
+   word(&t, 0x05000036);
+   reg(&t, 0x001020f2, 0); reg(&t, 0x00100e46, 0);
+   word(&t, 0x0100003e); t.words[1] = t.count;
+   void *container; size_t size;
+   assert(d12_dxbc_wrap_tokens(t.words, NULL, &container, &size));
+   const char *error = NULL;
+   nir_shader *shader = d12_dxbc_to_nir(container, size, MESA_SHADER_FRAGMENT,
+                                      NULL, 7, NULL, &error);
+   if (!shader) fprintf(stderr, "static SM5.1: %s\n", error);
+   assert(shader);
+   unsigned handles = 0;
+   nir_foreach_function_impl(impl, shader) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic) continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic != nir_intrinsic_bindless_image_agx) continue;
+            assert(nir_intrinsic_desc_set(intr) == D12_UNIFORM_TEXTURES);
+            handles++;
+         }
+      }
+   }
+   assert(handles == 1);
+   ralloc_free(shader); free(container);
+}
+
 int
 main(void)
 {
@@ -161,6 +203,7 @@ main(void)
       check(buffer_ops[i], false, false, true);
       check(buffer_ops[i], false, true, true);
    }
+   check_static_sm51_texture();
    glsl_type_singleton_decref();
    puts("d12_dxbc_sparse_tests: PASS");
    return 0;
