@@ -80,10 +80,13 @@ hk_ioto_arena_grow(struct hk_cmd_buffer *cmd, size_t size, const char *label)
    return true;
 }
 
+static_assert(HK_IOTO_PROGRAM_ALIGNMENT == AGX_IOTO_PROGRAM_ALIGNMENT,
+              "inline Ioto reservation alignment");
+
 bool
-hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
-                            const char *label,
-                            struct hk_ioto_reservation *reservation)
+hk_cmd_reserve_ioto_program_slow(struct hk_cmd_buffer *cmd, size_t size,
+                                 const char *label,
+                                 struct hk_ioto_reservation *reservation)
 {
    struct hk_ioto_arena *arena = &cmd->ioto;
    struct hk_ioto_arena_span span;

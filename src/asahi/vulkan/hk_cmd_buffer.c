@@ -394,10 +394,10 @@ hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, enum hk_cmd_bo_type type,
    return VK_SUCCESS;
 }
 
-static __attribute__((hot)) struct agx_ptr
-hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
-                   uint32_t size, uint32_t alignment,
-                   enum hk_cmd_bo_type type)
+struct agx_ptr
+hk_pool_alloc_from_slow(struct hk_cmd_buffer *cmd,
+                        struct hk_uploader *uploader, uint32_t size,
+                        uint32_t alignment, enum hk_cmd_bo_type type)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
 
@@ -1654,24 +1654,13 @@ hk_usc_upload_spilled_rt_descs(struct agx_usc_builder *b,
    agx_usc_uniform(b, 0, 4, hk_pool_upload(cmd, &descs.gpu, 8, 8));
 }
 
-__attribute__((hot)) void
-hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                   struct hk_shader *s)
+void
+hk_reserve_scratch_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                        struct hk_shader *s)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    uint32_t max_scratch_size =
       MAX2(s->b.info.scratch_size, s->b.info.preamble_scratch_size);
-
-   /* Not scratch but this is the most convenient place for this... */
-   cs->uses_sampler_heap |= s->b.info.uses_sampler_heap;
-
-   /* G17P publishes a shader's spill frame as thread-private storage in its
-    * SPECTPR. There is no helper-program stack, and the kernel rejects a
-    * command that names one. */
-   if (max_scratch_size == 0 ||
-       agx_chip_command_stream_generation(dev->dev.chip) ==
-          AGX_CS_GENERATION_HAL200)
-      return;
 
    unsigned preamble_size = (s->b.info.preamble_scratch_size > 0) ? 1 : 0;
 
@@ -2585,14 +2574,24 @@ enum hk_g17p_graphics_ioto_cache_result {
    HK_G17P_GRAPHICS_IOTO_RESULT_COUNT,
 };
 
+static ATTRIBUTE_NOINLINE void
+hk_g17p_graphics_ioto_cache_stat_record(
+   enum hk_g17p_graphics_ioto_cache_result result);
+
+/* Diagnostic counter; the disabled check is all a draw pays. */
 static inline void
 hk_g17p_graphics_ioto_cache_stat(
    const struct hk_device *dev,
    enum hk_g17p_graphics_ioto_cache_result result)
 {
-   if (likely(!dev->g17p_diagnostics.graphics_ioto_cache_stats))
-      return;
+   if (unlikely(dev->g17p_diagnostics.graphics_ioto_cache_stats))
+      hk_g17p_graphics_ioto_cache_stat_record(result);
+}
 
+static void
+hk_g17p_graphics_ioto_cache_stat_record(
+   enum hk_g17p_graphics_ioto_cache_result result)
+{
    static uint32_t counts[HK_G17P_GRAPHICS_IOTO_RESULT_COUNT];
    static uint32_t total;
    p_atomic_inc(&counts[result]);

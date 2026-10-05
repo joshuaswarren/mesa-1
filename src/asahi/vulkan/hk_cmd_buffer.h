@@ -1432,9 +1432,38 @@ struct hk_ioto_reservation {
  * Reserve `size` bytes of executable USC-window space for one Ioto program.
  * On failure the command buffer error is already set.
  */
-bool hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
-                                 const char *label,
-                                 struct hk_ioto_reservation *reservation);
+bool hk_cmd_reserve_ioto_program_slow(struct hk_cmd_buffer *cmd, size_t size,
+                                      const char *label,
+                                      struct hk_ioto_reservation *reservation);
+
+/* AGX_IOTO_PROGRAM_ALIGNMENT, checked in hk_ioto_arena.c. */
+#define HK_IOTO_PROGRAM_ALIGNMENT 64u
+
+static inline bool
+hk_cmd_reserve_ioto_program(struct hk_cmd_buffer *cmd, size_t size,
+                            const char *label,
+                            struct hk_ioto_reservation *reservation)
+{
+   /* The placement hk_ioto_arena_place() computes, in the current chunk. */
+   struct hk_ioto_arena *arena = &cmd->ioto;
+   const uint32_t mask = HK_IOTO_PROGRAM_ALIGNMENT - 1;
+   if (likely(reservation && size != 0 && size <= UINT32_MAX && arena->map &&
+              arena->cursor <= arena->capacity &&
+              arena->cursor <= UINT32_MAX - mask)) {
+      const uint32_t offset = (arena->cursor + mask) & ~mask;
+      if (likely(offset <= arena->capacity &&
+                 (uint32_t)size <= arena->capacity - offset)) {
+         *reservation = (struct hk_ioto_reservation){
+            .map = arena->map + offset,
+            .va = arena->base + offset,
+         };
+         arena->cursor = offset + (uint32_t)size;
+         return true;
+      }
+   }
+
+   return hk_cmd_reserve_ioto_program_slow(cmd, size, label, reservation);
+}
 
 /*
  * Publish the `length` bytes composed at reservation->map and return the
@@ -1541,6 +1570,32 @@ hk_bound_sw_vs_before_gs(struct hk_graphics_state *gfx)
    return &api->variants[HK_VS_VARIANT_SW];
 }
 
+struct agx_ptr hk_pool_alloc_from_slow(struct hk_cmd_buffer *cmd,
+                                       struct hk_uploader *uploader,
+                                       uint32_t size, uint32_t alignment,
+                                       enum hk_cmd_bo_type type);
+
+/* Bump allocation from the uploader's current BO; a new BO or a large
+ * allocation takes hk_pool_alloc_from_slow(). */
+static inline struct agx_ptr
+hk_pool_alloc_from(struct hk_cmd_buffer *cmd, struct hk_uploader *uploader,
+                   uint32_t size, uint32_t alignment,
+                   enum hk_cmd_bo_type type)
+{
+   assert(alignment > 0);
+   const uint32_t offset = align(uploader->offset, alignment);
+   if (likely(uploader->map != NULL && size <= HK_CMD_BO_SIZE &&
+              offset <= HK_CMD_BO_SIZE && size <= HK_CMD_BO_SIZE - offset)) {
+      uploader->offset = offset + size;
+      return (struct agx_ptr){
+         .gpu = uploader->base + offset,
+         .cpu = uploader->map + offset,
+      };
+   }
+
+   return hk_pool_alloc_from_slow(cmd, uploader, size, alignment, type);
+}
+
 struct agx_ptr hk_pool_alloc_internal(struct hk_cmd_buffer *cmd, uint32_t size,
                                       uint32_t alignment, bool usc);
 struct agx_ptr hk_pool_cs_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
@@ -1596,13 +1651,15 @@ void hk_cmd_buffer_release_bos(struct hk_cmd_buffer *cmd,
 static inline struct agx_ptr
 hk_pool_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
-   return hk_pool_alloc_internal(cmd, size, alignment, false);
+   return hk_pool_alloc_from(cmd, &cmd->uploader.main, size, alignment,
+                             HK_CMD_BO_MAIN);
 }
 
 static inline struct agx_ptr
 hk_pool_usc_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
-   return hk_pool_alloc_internal(cmd, size, alignment, true);
+   return hk_pool_alloc_from(cmd, &cmd->uploader.usc, size, alignment,
+                             HK_CMD_BO_USC);
 }
 
 /*
@@ -1991,8 +2048,26 @@ uint64_t hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
                                    VkPipelineBindPoint bind_point);
 bool hk_cmd_buffer_prepare_graphics_root(struct hk_cmd_buffer *cmd);
 
-void hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
-                        struct hk_shader *s);
+void hk_reserve_scratch_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                             struct hk_shader *s);
+
+static inline void
+hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                   struct hk_shader *s)
+{
+   /* Not scratch but this is the most convenient place for this... */
+   cs->uses_sampler_heap |= s->b.info.uses_sampler_heap;
+
+   /* G17P publishes a shader's spill frame as thread-private storage in its
+    * SPECTPR. There is no helper-program stack, and the kernel rejects a
+    * command that names one. */
+   if ((s->b.info.scratch_size == 0 && s->b.info.preamble_scratch_size == 0) ||
+       agx_chip_command_stream_generation(
+          hk_cmd_buffer_device(cmd)->dev.chip) == AGX_CS_GENERATION_HAL200)
+      return;
+
+   hk_reserve_scratch_slow(cmd, cs, s);
+}
 
 /* AGX2 returns its shader-base-relative USC offset.  G17P returns the absolute
  * 48-bit Ioto program VA consumed by HAL200 VDM state. */
