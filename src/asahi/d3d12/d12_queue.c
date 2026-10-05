@@ -1790,12 +1790,15 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
       .cmdbuf = (uint64_t)(uintptr_t)op->payload,
    };
 
-   /* The kernel/firmware accept at most 64 commands in one submit ioctl.
-    * Follow Honeykrisp's queue_submit_looped model: slice the packed payload,
-    * make barriers ioctl-relative, wait only on the first slice and signal
-    * only from the last.  The queue itself preserves slice order. */
+   /* The kernel reports how many commands one submit ioctl accepts
+    * (64 on the kernels this driver was brought up on). Follow Honeykrisp's
+    * queue_submit_looped model: slice the packed payload, make barriers
+    * ioctl-relative, wait only on the first slice and signal only from the
+    * last.  The queue itself preserves slice order. */
    const unsigned command_count = op->nr_vdm + op->nr_cdm;
-   const unsigned max_commands = 64;
+   const unsigned reported_max =
+      queue->device->dev.params.max_commands_per_submission;
+   const unsigned max_commands = reported_max ? reported_max : 64;
    uint8_t *cmdbuf = op->payload;
    uint32_t offs = 0;
    unsigned submitted_vdm = 0, submitted_cdm = 0;
