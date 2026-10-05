@@ -3039,7 +3039,7 @@ static bool
 d12_fill_buffer_descriptor(struct d12_descriptor *slot,
                            struct d12_resource *res, uint64_t first_element,
                            uint32_t num_elements, uint32_t stride_B,
-                           const char *what)
+                           const char *what, bool typed)
 {
    if (res->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER) {
       mesa_loge("%s: only buffer views are supported so far", what);
@@ -3048,12 +3048,16 @@ d12_fill_buffer_descriptor(struct d12_descriptor *slot,
       return false;
    }
 
-   if (!d12_buffer_view_element_count_valid(num_elements)) {
-      mesa_loge("%s: NumElements exceeds the D3D12 buffer-view limit", what);
+   if (typed && num_elements > D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS) {
+      mesa_loge("%s: typed view exceeds the qualified native element extent", what);
       slot->kind = D12_DESC_NONE;
       slot->resource = NULL;
       return false;
    }
+
+   /* Raw/structured counts use the complete UINT field. The SDK's REQ
+    * texel count is not a universal ceiling on these byte-addressed views;
+    * validate their complete byte interval below. */
 
    stride_B = MAX2(stride_B, 1);
    if (stride_B > UINT16_MAX) {
@@ -3380,7 +3384,9 @@ d12_device_fill_srv(struct d12_device *device, ID3D12Resource *resource,
       stride = 4;
 
    if (d12_fill_buffer_descriptor(slot, res, first, count, stride,
-                                  "CreateShaderResourceView")) {
+                                  "CreateShaderResourceView",
+                                  !desc || (!(desc->Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) &&
+                                             !desc->Buffer.StructureByteStride))) {
       if (res->reserved)
          slot->address += device->dev.sparse_ro_offset;
       slot->kind = D12_DESC_SRV;
@@ -3606,7 +3612,9 @@ d12_device_fill_uav(struct d12_device *device, ID3D12Resource *resource,
    }
 
    if (d12_fill_buffer_descriptor(slot, res, first, count, stride,
-                                  "CreateUnorderedAccessView")) {
+                                  "CreateUnorderedAccessView",
+                                  !desc || (!(desc->Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) &&
+                                             !desc->Buffer.StructureByteStride))) {
       slot->kind = D12_DESC_UAV;
       slot->format = desc ? desc->Format : DXGI_FORMAT_UNKNOWN;
       slot->buffer_kind =

@@ -11,16 +11,13 @@ device = (d12 / "d12_device.c").read_text()
 dxbc = (d12 / "dxil/d12_dxbc.c").read_text()
 
 
-assert "#define D12_BUFFER_VIEW_MAX_ELEMENTS (UINT32_C(1) << 27)" in core
-assert "d12_buffer_view_element_count_valid(uint32_t num_elements)" in core
-
+assert "#define D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS (UINT32_C(1) << 27)" in core
 fill_start = device.index("d12_fill_buffer_descriptor(")
 fill_end = device.index("d12_device_CreateShaderResourceView(", fill_start)
 fill = device[fill_start:fill_end]
-assert "d12_buffer_view_element_count_valid(num_elements)" in fill
-assert fill.index("d12_buffer_view_element_count_valid(num_elements)") < fill.index(
-    "d12_buffer_view_range("
-)
+assert "typed && num_elements > D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS" in fill
+assert "d12_buffer_view_range(" in fill
+assert "d12_buffer_view_element_count_valid" not in fill
 
 store_start = dxbc.index("case D12_DXBC_OP_STORE_RAW:")
 store_end = dxbc.index("case D12_DXBC_OP_ATOMIC_AND:", store_start)
@@ -51,5 +48,5 @@ assert "AGX_TEXTURE_BUFFER_MAX_SIZE" not in dxbc
 
 print(
     "dxbc-buffer-view-bounds: PASS "
-    "(2^27 API limit + one-slot native heaps + guarded typed PBE stores)"
+    "(typed extent + full-width byte bounds + native heaps + guarded typed PBE stores)"
 )

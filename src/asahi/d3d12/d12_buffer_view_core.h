@@ -9,17 +9,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* d3d12.h and d3d12umddi.h define
- * D3D12_REQ_BUFFER_RESOURCE_TEXEL_COUNT_2_TO_EXP as 27. Keep the portable
- * validation helper independent of Windows headers so host tests exercise
- * the same limit as descriptor creation. */
-#define D12_BUFFER_VIEW_MAX_ELEMENTS (UINT32_C(1) << 27)
-
-static inline bool
-d12_buffer_view_element_count_valid(uint32_t num_elements)
-{
-   return num_elements <= D12_BUFFER_VIEW_MAX_ELEMENTS;
-}
+/* Qualified formatted-buffer extent; raw/structured views use byte bounds. */
+#define D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS (UINT32_C(1) << 27)
 
 /*
  * D3D12 describes a buffer view as a 64-bit first element and a 32-bit
