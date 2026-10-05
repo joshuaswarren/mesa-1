@@ -19,6 +19,10 @@ struct d12_fence_event_waiter {
    struct d12_fence_event_waiter *next;
    uint64_t value;
    HANDLE event;
+   /* Internal waiters are told under fence->lock instead of through an
+    * event; the multi-fence "any" wait uses this. */
+   void (*notify)(void *cookie);
+   void *cookie;
 };
 
 static uint64_t
@@ -200,9 +204,62 @@ d12_fence_signal_waiters_locked(struct d12_fence *fence, bool all)
       }
 
       *link = waiter->next;
-      d12_platform_signal_event(waiter->event);
+      if (waiter->notify)
+         waiter->notify(waiter->cookie);
+      else
+         d12_platform_signal_event(waiter->event);
       free(waiter);
    }
+}
+
+/* Registers an internal waiter.  Returns 1 when the value is already
+ * reached (or the fence destroyed) and nothing was registered, 0 when
+ * *handle identifies the waiter for d12_fence_notify_unregister, and -1
+ * when out of memory. */
+static int
+d12_fence_notify_register(struct d12_fence *fence, uint64_t value,
+                          void (*notify)(void *cookie), void *cookie,
+                          struct d12_fence_event_waiter **handle)
+{
+   struct d12_fence_event_waiter *waiter = calloc(1, sizeof(*waiter));
+   *handle = NULL;
+   if (!waiter)
+      return -1;
+   waiter->value = value;
+   waiter->notify = notify;
+   waiter->cookie = cookie;
+
+   mtx_lock(&fence->lock);
+   if (fence->destroyed ||
+       p_atomic_read(&fence->completed_value) >= value) {
+      mtx_unlock(&fence->lock);
+      free(waiter);
+      return 1;
+   }
+   waiter->next = fence->event_waiters;
+   fence->event_waiters = waiter;
+   mtx_unlock(&fence->lock);
+   *handle = waiter;
+   return 0;
+}
+
+/* The handle is only compared, never dereferenced, until it is found on the
+ * list: a waiter that already fired was freed under the same lock. */
+static void
+d12_fence_notify_unregister(struct d12_fence *fence,
+                            struct d12_fence_event_waiter *handle)
+{
+   if (!handle)
+      return;
+   mtx_lock(&fence->lock);
+   struct d12_fence_event_waiter **link = &fence->event_waiters;
+   while (*link && *link != handle)
+      link = &(*link)->next;
+   if (*link == handle) {
+      *link = handle->next;
+      free(handle);
+   }
+   mtx_unlock(&fence->lock);
 }
 
 static void
@@ -339,6 +396,28 @@ d12_fence_internal_unref(struct d12_fence *fence)
    free(fence);
 }
 
+static void
+d12_fence_signal_value_locked(struct d12_fence *fence, uint64_t value)
+{
+   if (fence->destroyed)
+      return;
+
+   uint64_t old = p_atomic_read(&fence->completed_value);
+
+   /*
+    * Registration checks the current value while holding this same lock,
+    * so an idempotent signal cannot make any existing waiter or ticket
+    * newly ready.  Avoid rescanning thousands of queued wait tickets on
+    * every iteration of an application's fence-rewind polling loop.
+    */
+   if (old != value) {
+      p_atomic_set(&fence->completed_value, value);
+      d12_fence_signal_waiters_locked(fence, false);
+      d12_fence_satisfy_tickets_locked(fence, false);
+      cnd_broadcast(&fence->changed);
+   }
+}
+
 HRESULT
 d12_fence_signal_value(struct d12_fence *fence, uint64_t value)
 {
@@ -354,24 +433,139 @@ d12_fence_signal_value(struct d12_fence *fence, uint64_t value)
    }
 
    mtx_lock(&fence->lock);
-   if (!fence->destroyed) {
-      uint64_t old = p_atomic_read(&fence->completed_value);
-
-      /*
-       * Registration checks the current value while holding this same lock,
-       * so an idempotent signal cannot make any existing waiter or ticket
-       * newly ready.  Avoid rescanning thousands of queued wait tickets on
-       * every iteration of an application's fence-rewind polling loop.
-       */
-      if (old != value) {
-         p_atomic_set(&fence->completed_value, value);
-         d12_fence_signal_waiters_locked(fence, false);
-         d12_fence_satisfy_tickets_locked(fence, false);
-         cnd_broadcast(&fence->changed);
-      }
-   }
+   d12_fence_signal_value_locked(fence, value);
    mtx_unlock(&fence->lock);
    return S_OK;
+}
+
+void
+d12_fence_pending_signal_add(struct d12_fence *fence,
+                             struct d12_fence_pending_signal *pending,
+                             struct d12_queue *queue, uint64_t point,
+                             uint64_t value)
+{
+   /* A shared fence is published through its syncobj by the retirement
+    * worker; CPU waiters already wait on that syncobj directly. */
+   if (fence->shared_syncobj)
+      return;
+
+   pending->next = NULL;
+   pending->queue = queue;
+   pending->point = point;
+   pending->value = value;
+   pending->published = false;
+
+   /* Append so the list is in scheduling order: for one queue that is
+    * ascending point order, which d12_fence_publish_completed_locked
+    * relies on. */
+   mtx_lock(&fence->lock);
+   struct d12_fence_pending_signal **link = &fence->pending_signals;
+   while (*link)
+      link = &(*link)->next;
+   *link = pending;
+   pending->registered = true;
+   cnd_broadcast(&fence->changed);
+   mtx_unlock(&fence->lock);
+}
+
+/* Publishes every unpublished pending signal from queue whose point is at or
+ * before the one just observed complete, in queue order.  Both the
+ * retirement worker and a direct CPU waiter call this; each record is
+ * published once, by whichever gets there first. */
+static void
+d12_fence_publish_completed_locked(struct d12_fence *fence,
+                                   struct d12_queue *queue, uint64_t point)
+{
+   for (struct d12_fence_pending_signal *p = fence->pending_signals; p;
+        p = p->next) {
+      if (p->queue == queue && p->point <= point && !p->published) {
+         p->published = true;
+         d12_fence_signal_value_locked(fence, p->value);
+      }
+   }
+}
+
+void
+d12_fence_pending_signal_retire(struct d12_fence *fence,
+                                struct d12_fence_pending_signal *pending,
+                                bool completed)
+{
+   if (!pending->registered) {
+      /* Shared fences (never registered) publish through their syncobj. */
+      if (completed && fence->shared_syncobj)
+         d12_fence_signal_value(fence, pending->value);
+      return;
+   }
+
+   mtx_lock(&fence->lock);
+   if (completed)
+      d12_fence_publish_completed_locked(fence, pending->queue,
+                                         pending->point);
+   struct d12_fence_pending_signal **link = &fence->pending_signals;
+   while (*link && *link != pending)
+      link = &(*link)->next;
+   if (*link == pending)
+      *link = pending->next;
+   pending->registered = false;
+   pending->next = NULL;
+   /* A direct waiter parked on this record must re-evaluate. */
+   cnd_broadcast(&fence->changed);
+   mtx_unlock(&fence->lock);
+}
+
+/* The first unpublished GPU signal a wait for value can ride on. */
+static struct d12_fence_pending_signal *
+d12_fence_find_pending_locked(struct d12_fence *fence, uint64_t value)
+{
+   for (struct d12_fence_pending_signal *p = fence->pending_signals; p;
+        p = p->next) {
+      if (!p->published && p->value >= value)
+         return p;
+   }
+   return NULL;
+}
+
+/*
+ * Wait for a pending GPU signal's timeline point from the calling thread.
+ * Called and returns with fence->lock held; the lock is dropped around the
+ * kernel wait.  The waiter is counted on the queue across the wait so its
+ * syncobj cannot be destroyed (and the handle reused) underneath it.
+ * Returns false when the kernel wait failed, in which case the caller must
+ * not retry the same record without sleeping: the retirement worker will
+ * either publish or unlink it, and both broadcast fence->changed.
+ */
+static bool
+d12_fence_wait_pending_locked(struct d12_fence *fence,
+                              struct d12_fence_pending_signal *pending)
+{
+   struct d12_queue *queue = pending->queue;
+   const uint64_t point = pending->point;
+   const uint64_t value = pending->value;
+
+   d12_queue_direct_wait_begin(queue);
+   mtx_unlock(&fence->lock);
+
+   const int64_t start = d12_debug()->dump_sync ? os_time_get_nano() : 0;
+   const bool reached = d12_queue_wait_timeline(queue, point);
+   if (d12_debug()->dump_sync) {
+      mesa_logi("SYNC wait direct: fence %p value %llu queue %p point %llu "
+                "waited %lld us%s",
+                (void *)fence, (unsigned long long)value, (void *)queue,
+                (unsigned long long)point,
+                (long long)(os_time_get_nano() - start) / 1000,
+                reached ? "" : " (failed)");
+   }
+
+   mtx_lock(&fence->lock);
+   if (reached)
+      d12_fence_publish_completed_locked(fence, queue, point);
+   mtx_unlock(&fence->lock);
+
+   /* Teardown may free the queue as soon as this returns; it takes
+    * queue->lock, so it is not called under fence->lock. */
+   d12_queue_direct_wait_end(queue);
+   mtx_lock(&fence->lock);
+   return reached;
 }
 
 bool
@@ -405,11 +599,23 @@ d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
    }
 
    bool completed = true;
+   struct d12_fence_pending_signal *failed = NULL;
 
    mtx_lock(&fence->lock);
    while (!fence->destroyed &&
           p_atomic_read(&fence->completed_value) < value) {
       if (!cancel) {
+         /* A value pending on a queue Signal is waited for on the queue's
+          * timeline directly rather than through the retirement worker's
+          * hop; anything else (a CPU Signal, a Signal not yet scheduled
+          * behind a queue Wait) arrives through the condition variable. */
+         struct d12_fence_pending_signal *pending =
+            d12_fence_find_pending_locked(fence, value);
+         if (pending && pending != failed) {
+            if (!d12_fence_wait_pending_locked(fence, pending))
+               failed = pending;
+            continue;
+         }
          cnd_wait(&fence->changed, &fence->lock);
          continue;
       }
@@ -589,32 +795,80 @@ struct d12_fence_multi_waiter {
    thrd_t thread;
 };
 
+struct d12_fence_any_waiter {
+   mtx_t lock;
+   cnd_t changed;
+   bool fired;
+};
+
+static void
+d12_fence_any_notify(void *cookie)
+{
+   struct d12_fence_any_waiter *any = cookie;
+   mtx_lock(&any->lock);
+   any->fired = true;
+   cnd_broadcast(&any->changed);
+   mtx_unlock(&any->lock);
+}
+
 static int
 d12_fence_multi_wait(struct d12_fence_multi_waiter *w)
 {
-   const struct timespec pause = {.tv_nsec = 1000 * 1000};
-
-   for (;;) {
-      bool any = false;
-      bool all = true;
-
-      for (unsigned i = 0; i < w->count; i++) {
-         struct d12_fence *fence = w->fences[i];
-         mtx_lock(&fence->lock);
-         bool destroyed = fence->destroyed;
-         mtx_unlock(&fence->lock);
-         bool reached = destroyed ||
-                        d12_fence_GetCompletedValue(&fence->iface) >=
-                           w->values[i];
-         any |= reached;
-         all &= reached;
-      }
-
-      if ((w->wait_all && all) || (!w->wait_all && any))
-         return 0;
-
-      thrd_sleep(&pause, NULL);
+   if (w->wait_all) {
+      /* Each wait takes the direct timeline path when its value is pending
+       * on a queue Signal.  A destroyed fence counts as reached, as the
+       * native runtime treats a closed fence handle. */
+      for (unsigned i = 0; i < w->count; i++)
+         (void)d12_fence_wait_value(w->fences[i], w->values[i], NULL);
+      return 0;
    }
+
+   /* Wait for any: park on one condition variable that every fence's
+    * internal waiter notifies.  Registration is checked against the current
+    * value under each fence's lock, so a value reached before or after the
+    * registration both fire. */
+   struct d12_fence_any_waiter any = {.fired = false};
+   if (mtx_init(&any.lock, mtx_plain) != thrd_success)
+      return -1;
+   if (cnd_init(&any.changed) != thrd_success) {
+      mtx_destroy(&any.lock);
+      return -1;
+   }
+
+   struct d12_fence_event_waiter **handles =
+      calloc(w->count, sizeof(*handles));
+   if (!handles) {
+      cnd_destroy(&any.changed);
+      mtx_destroy(&any.lock);
+      return -1;
+   }
+
+   bool reached = false;
+   int ret = 0;
+   for (unsigned i = 0; i < w->count && !reached && !ret; i++) {
+      ret = d12_fence_notify_register(w->fences[i], w->values[i],
+                                      d12_fence_any_notify, &any,
+                                      &handles[i]);
+      reached = ret > 0;
+      if (ret > 0)
+         ret = 0;
+   }
+
+   if (!reached && !ret) {
+      mtx_lock(&any.lock);
+      while (!any.fired)
+         cnd_wait(&any.changed, &any.lock);
+      mtx_unlock(&any.lock);
+   }
+
+   /* Every registration is removed (or has already fired and been freed
+    * under its fence lock) before the cookie goes out of scope. */
+   for (unsigned i = 0; i < w->count; i++)
+      d12_fence_notify_unregister(w->fences[i], handles[i]);
+   free(handles);
+   cnd_destroy(&any.changed);
+   mtx_destroy(&any.lock);
+   return ret;
 }
 
 static void

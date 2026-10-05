@@ -2199,6 +2199,22 @@ d12_cmd_list_from_iface(void *iface)
 }
 
 struct d12_fence_event_waiter;
+
+/* A queue Signal that has taken its timeline point but has not retired.
+ * Linked on the fence under fence->lock so a CPU waiter can wait for the
+ * point itself instead of for the retirement worker's hop.  Whoever observes
+ * the point complete first publishes the value; the record is published at
+ * most once so a value never re-arrives after a later CPU Signal rewinds
+ * the fence. */
+struct d12_fence_pending_signal {
+   struct d12_fence_pending_signal *next;
+   struct d12_queue *queue;
+   uint64_t point;
+   uint64_t value;
+   bool registered;
+   bool published;
+};
+
 struct d12_fence_ticket {
    struct d12_fence_ticket *next;
    struct d12_fence *fence;
@@ -2227,6 +2243,7 @@ struct d12_fence {
    bool destroyed;
    struct d12_fence_event_waiter *event_waiters;
    struct d12_fence_ticket *tickets;
+   struct d12_fence_pending_signal *pending_signals;
 
    /* Queue operations and asynchronous event waiters must keep the storage
     * alive without changing the public COM reference count. */
@@ -2314,6 +2331,10 @@ struct d12_queue {
     * See d12_queue_idle_locked for the ordering invariant. */
    bool worker_busy;
    bool inline_busy;
+   /* CPU fence waiters blocked on this queue's timeline directly (see
+    * d12_queue_direct_wait_begin).  Teardown waits for zero before the
+    * syncobj is destroyed. */
+   uint32_t direct_waiters;
    uint32_t pending_placement_wait_count;
    struct d12_queue_placement_wait
       pending_placement_waits[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
@@ -2379,6 +2400,16 @@ HRESULT d12_fence_signal_value(struct d12_fence *fence, uint64_t value);
 bool d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
                           const uint32_t *cancel);
 void d12_fence_wake_waiters(struct d12_fence *fence);
+void d12_fence_pending_signal_add(struct d12_fence *fence,
+                                  struct d12_fence_pending_signal *pending,
+                                  struct d12_queue *queue, uint64_t point,
+                                  uint64_t value);
+void d12_fence_pending_signal_retire(
+   struct d12_fence *fence, struct d12_fence_pending_signal *pending,
+   bool completed);
+bool d12_queue_wait_timeline(struct d12_queue *queue, uint64_t point);
+void d12_queue_direct_wait_begin(struct d12_queue *queue);
+void d12_queue_direct_wait_end(struct d12_queue *queue);
 void d12_fence_ticket_init(struct d12_fence *fence,
                            struct d12_fence_ticket *ticket, uint64_t value);
 void d12_fence_ticket_fini(struct d12_fence_ticket *ticket);

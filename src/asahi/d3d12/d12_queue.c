@@ -211,6 +211,7 @@ struct d12_queue_op {
       placement_waits[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
    uint64_t value;
    struct d12_fence_ticket ticket;
+   struct d12_fence_pending_signal pending_signal;
    uint64_t retire_value;
 
    struct d12_cmd_list *list;
@@ -618,6 +619,9 @@ d12_queue_op_destroy(struct d12_queue_op *op)
 {
    if (op->type == D12_QUEUE_OP_WAIT)
       d12_fence_ticket_fini(&op->ticket);
+   if (op->type == D12_QUEUE_OP_SIGNAL && op->fence)
+      d12_fence_pending_signal_retire(op->fence, &op->pending_signal,
+                                      false);
    if (op->fence)
       d12_fence_internal_unref(op->fence);
    if (op->placement_fence)
@@ -1438,6 +1442,8 @@ d12_queue_schedule_signal_locked(struct d12_queue *queue,
                 (void *)queue, (void *)op->fence,
                 (unsigned long long)op->value);
    op->retire_value = d12_queue_timeline_marker(&queue->timeline);
+   d12_fence_pending_signal_add(op->fence, &op->pending_signal, queue,
+                                op->retire_value, op->value);
    d12_queue_retire_enqueue_locked(queue, op);
 }
 
@@ -1903,6 +1909,8 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
       placement_dependencies[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
    uint32_t placement_wait_count = 0;
    bool placement_signal_described = false;
+   const int64_t ioctl_start =
+      d12_debug()->dump_sync ? os_time_get_nano() : 0;
 
    for (uint32_t i = 0; i < op->placement_wait_count; ++i) {
       const struct d12_placement_fence *fence =
@@ -2071,16 +2079,43 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
                              D12_QUEUE_SIGNAL_STREAM_STRIDE;
       }
       mesa_logi("SYNC submit: queue %p agxq %u  in=%llu out=%llu  "
-                "list %p stream_bo 0x%llx",
+                "list %p stream_bo 0x%llx  ioctl %lld us",
                 (void *)queue, queue->agx_queue_id,
                 (unsigned long long)in, (unsigned long long)out,
-                (void *)op->list, (unsigned long long)stream_address);
+                (void *)op->list, (unsigned long long)stream_address,
+                (long long)(os_time_get_nano() - ioctl_start) / 1000);
    }
 
    return true;
 }
 
-static bool
+/*
+ * A CPU fence waiter is about to wait on this queue's timeline directly.
+ * Called under the fence lock while the pending-signal record naming the
+ * queue is still linked, which guarantees the retirement worker (which
+ * unlinks every record before it exits) has not been joined yet; teardown
+ * then waits for the count to return to zero before the syncobj and the
+ * queue go away.  The waiter must not touch the queue after _end returns.
+ * This deliberately does not take a COM reference: an application's final
+ * Release may already be tearing the queue down, and a reference taken
+ * then would run d12_queue_Release a second time.
+ */
+void
+d12_queue_direct_wait_begin(struct d12_queue *queue)
+{
+   p_atomic_inc(&queue->direct_waiters);
+}
+
+void
+d12_queue_direct_wait_end(struct d12_queue *queue)
+{
+   d12_sync_lock(&queue->lock);
+   p_atomic_dec(&queue->direct_waiters);
+   cnd_broadcast(&queue->retire_available);
+   mtx_unlock(&queue->lock);
+}
+
+bool
 d12_queue_wait_timeline(struct d12_queue *queue, uint64_t point)
 {
    if (point == 0)
@@ -2202,8 +2237,15 @@ d12_queue_retire_worker(void *data)
       op->next = NULL;
       mtx_unlock(&queue->lock);
 
+      const int64_t wait_start =
+         d12_debug()->dump_sync ? os_time_get_nano() : 0;
       const bool completed = d12_queue_wait_timeline(queue,
                                                       op->retire_value);
+      if (d12_debug()->dump_sync) {
+         mesa_logi("SYNC retire: queue %p point %llu waited %lld us",
+                   (void *)queue, (unsigned long long)op->retire_value,
+                   (long long)(os_time_get_nano() - wait_start) / 1000);
+      }
       if (completed) {
          d12_sync_lock(&queue->lock);
          const bool retired =
@@ -2221,7 +2263,8 @@ d12_queue_retire_worker(void *data)
                          (unsigned long long)op->value,
                          (unsigned long long)op->retire_value);
             }
-            d12_fence_signal_value(op->fence, op->value);
+            d12_fence_pending_signal_retire(op->fence, &op->pending_signal,
+                                            true);
          } else if (op->type == D12_QUEUE_OP_SUBMIT) {
             d12_queue_dump_completion(queue->device);
          }
@@ -2390,6 +2433,13 @@ d12_queue_stop_worker(struct d12_queue *queue)
       thrd_join(queue->retire_worker, NULL);
       queue->retire_worker_started = false;
    }
+
+   /* Every pending-signal record is unlinked now, so no new direct waiter
+    * can start; let the ones already in the kernel wait finish. */
+   d12_sync_lock(&queue->lock);
+   while (p_atomic_read(&queue->direct_waiters))
+      d12_sync_wait(&queue->retire_available, &queue->lock);
+   mtx_unlock(&queue->lock);
 
    struct d12_queue_op *op = queue->op_head;
    while (op) {
