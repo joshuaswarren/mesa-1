@@ -92,6 +92,7 @@ struct ra_ctx {
     * when shuffling.
     */
    bool early_killed;
+   unsigned early_killed_reg;
 
    /* Maintained while assigning registers. Count of registers required, i.e.
     * the maximum register assigned + 1.
@@ -835,6 +836,11 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
 
    unsigned align = count;
 
+   /* Early kills free a region reserved for this destination. Use it directly
+    * rather than falling through to live-range splitting, which needs the
+    * killed sources to remain allocated until the instruction. */
+   if (rctx->early_killed)
+      return rctx->early_killed_reg;
    /* Try to allocate entire phi webs compatibly */
    unsigned phi_idx = phi_web_find(rctx->phi_web, idx.value);
    if (rctx->phi_web[phi_idx].assigned) {
@@ -1039,6 +1045,9 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
                        unsigned first_source, unsigned last_source,
                        unsigned region_end, unsigned region_base)
 {
+   /* A memory destination cannot use the freed GPR source region. */
+   if (ra_class_for_index(I->dest[0]) != RA_GPR)
+      return;
    unsigned dest_size = util_next_power_of_two(rctx->ncomps[I->dest[0].value]);
    unsigned dest_end = region_base + dest_size;
 
@@ -1054,12 +1063,26 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
       return;
 
    for (unsigned s = first_source; s <= last_source; ++s) {
-      if (early_killable(I, s)) {
+      if (early_killable(I, s))
          kill_source(rctx, I, s);
-         rctx->early_killed = true;
-         I->src[s].kill = false;
-      }
    }
+
+   if (BITSET_TEST_COUNT(rctx->used_regs[RA_GPR], region_base, dest_size)) {
+      for (unsigned s = first_source; s <= last_source; ++s) {
+         if (early_killable(I, s))
+            BITSET_SET_COUNT(rctx->used_regs[RA_GPR],
+                             rctx->ssa_to_reg[I->src[s].value],
+                             rctx->ncomps[I->src[s].value]);
+      }
+      return;
+   }
+
+   for (unsigned s = first_source; s <= last_source; ++s) {
+      if (early_killable(I, s))
+         I->src[s].kill = false;
+   }
+   rctx->early_killed_reg = region_base;
+   rctx->early_killed = true;
 }
 
 /** Assign registers to SSA values in a block. */
