@@ -2575,6 +2575,7 @@ void d12_pack_sampler_descriptor(struct d12_device *device,
                                  const D3D12_SAMPLER_DESC2 *desc);
 bool d12_set_null_texture_descriptor(struct d12_device *device, void *out);
 bool d12_set_null_pbe_descriptor(struct d12_device *device, void *out);
+void d12_apply_texture_shape(struct d12_descriptor *d, unsigned shape);
 bool d12_refresh_texture_descriptor(struct d12_device *device, void *out,
                                     const struct d12_descriptor *d);
 bool d12_refresh_pbe_descriptor(struct d12_device *device, void *out,

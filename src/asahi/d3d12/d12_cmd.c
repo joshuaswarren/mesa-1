@@ -3862,7 +3862,7 @@ d12_descriptor_resource_span(const struct d12_descriptor *d, uint64_t *base,
    return true;
 }
 
-static void
+void
 d12_apply_texture_shape(struct d12_descriptor *d, unsigned shape)
 {
    if (!d || !d->resource || shape == D12_TEXTURE_SHAPE_NONE ||

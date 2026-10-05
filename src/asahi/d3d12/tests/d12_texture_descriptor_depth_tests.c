@@ -6,10 +6,11 @@
 #include "../d12_private.h"
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 
 static void
 check(D3D12_SRV_DIMENSION dimension, unsigned view_layers,
-      unsigned expected_depth)
+      unsigned expected_depth, unsigned shape)
 {
    struct d12_device device = {0};
    device.dev.chip = AGX_CHIP_G13X;
@@ -35,8 +36,13 @@ check(D3D12_SRV_DIMENSION dimension, unsigned view_layers,
    descriptor.texture_level_count = 3;
    descriptor.texture_component_mapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 
+   struct d12_descriptor original = descriptor;
+   struct d12_descriptor effective = descriptor;
+   d12_apply_texture_shape(&effective, shape);
+   assert(memcmp(&descriptor, &original, sizeof(descriptor)) == 0);
+
    struct agx_texture_packed packed;
-   assert(d12_refresh_texture_descriptor(&device, &packed, &descriptor));
+   assert(d12_refresh_texture_descriptor(&device, &packed, &effective));
    struct AGX_TEXTURE unpacked;
    assert(AGX_TEXTURE_unpack(NULL, (uint8_t *)&packed, &unpacked));
    assert(unpacked.depth == expected_depth);
@@ -47,9 +53,12 @@ check(D3D12_SRV_DIMENSION dimension, unsigned view_layers,
 int
 main(void)
 {
-   check(D3D12_SRV_DIMENSION_TEXTURE3D, 1, 16);
-   check(D3D12_SRV_DIMENSION_TEXTURE2DARRAY, 3, 3);
-   check(D3D12_SRV_DIMENSION_TEXTURECUBEARRAY, 12, 2);
+   check(D3D12_SRV_DIMENSION_TEXTURE3D, 1, 16, D12_TEXTURE_SHAPE_NONE);
+   check(D3D12_SRV_DIMENSION_TEXTURE2DARRAY, 3, 3, D12_TEXTURE_SHAPE_NONE);
+   check(D3D12_SRV_DIMENSION_TEXTURE2DARRAY, 3, 1, D12_TEXTURE_SHAPE_2D);
+   check(D3D12_SRV_DIMENSION_TEXTURE2D, 1, 1, D12_TEXTURE_SHAPE_2D_ARRAY);
+   check(D3D12_SRV_DIMENSION_TEXTURE2DARRAY, 3, 3, D12_TEXTURE_SHAPE_2D_ARRAY);
+   check(D3D12_SRV_DIMENSION_TEXTURECUBEARRAY, 12, 2, D12_TEXTURE_SHAPE_NONE);
    puts("d12_texture_descriptor_depth_tests: PASS");
    return 0;
 }

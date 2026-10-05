@@ -2073,7 +2073,8 @@ static nir_def *
 resource_texture_offset(struct d12_dxbc_ctx *ctx,
                         const struct d12_dxbc_operand *operand,
                         enum d12_dxbc_file file, unsigned klass,
-                        const struct d12_dxbc_binding_range *ranges)
+                        const struct d12_dxbc_binding_range *ranges,
+                        unsigned native_stride)
 {
    nir_builder *b = &ctx->b;
    nir_def *slot = resource_binding_slot(ctx, operand, file, klass, ranges);
@@ -2081,7 +2082,7 @@ resource_texture_offset(struct d12_dxbc_ctx *ctx,
       return NULL;
 
    if (operand->num_indices != 2)
-      return nir_imul_imm(b, slot, ctx->native_layout.texture_stride_B);
+      return nir_imul_imm(b, slot, native_stride);
 
    const struct d12_dxbc_binding_range *range = &ranges[operand->index[0]];
    unsigned first_slot =
@@ -2098,23 +2099,37 @@ resource_texture_offset(struct d12_dxbc_ctx *ctx,
       b, 1, 64, nir_iadd_imm(b, resource_table, first_slot * sizeof(uint64_t)),
       .align_mul = 8);
    nir_def *relative = nir_iadd_imm(b, slot, -(int64_t)first_slot);
-   return nir_iadd(b, nir_u2u32(b, base),
-                   nir_imul_imm(b, relative,
-                                ctx->native_layout.texture_stride_B));
+   nir_def *index = nir_iadd(b, base, nir_u2u64(b, relative));
+   if (ctx->descriptor_generation == D12_NATIVE_DESCRIPTOR_GEN7) {
+      unsigned dim = file == D12_DXBC_FILE_UAV
+         ? ctx->uav_dim[operand->index[0]] : ctx->srv_dim[operand->index[0]];
+      const bool array = dim == D12_DXBC_RESOURCE_DIMENSION_TEXTURE_1D_ARRAY ||
+                         dim == D12_DXBC_RESOURCE_DIMENSION_TEXTURE_2D_ARRAY;
+      nir_def *count = nir_udiv_imm(b, root_heap_pbe_null_offset(ctx),
+                                   ctx->native_layout.pbe_stride_B);
+      nir_def *count64 = nir_u2u64(b, count);
+      index = nir_u2u32(b, nir_bcsel(b, nir_ult(b, index, count64),
+                                   index, count64));
+      index = nir_iadd(b, index,
+         nir_imul_imm(b, nir_iadd_imm(b, count, 1), array ? 2 : 1));
+   }
+   return nir_imul_imm(b, nir_u2u32(b, index), native_stride);
 }
 
 static nir_def *
 srv_texture_offset(struct d12_dxbc_ctx *ctx, const struct d12_dxbc_operand *srv)
 {
    return resource_texture_offset(ctx, srv, D12_DXBC_FILE_RESOURCE, D12_RES_SRV,
-                                  ctx->srv_range);
+                                  ctx->srv_range,
+                                  ctx->native_layout.texture_stride_B);
 }
 
 static nir_def *
 uav_texture_offset(struct d12_dxbc_ctx *ctx, const struct d12_dxbc_operand *uav)
 {
    return resource_texture_offset(ctx, uav, D12_DXBC_FILE_UAV, D12_RES_UAV,
-                                  ctx->uav_range);
+                                  ctx->uav_range,
+                                  ctx->native_layout.texture_stride_B);
 }
 
 /*
@@ -2163,11 +2178,13 @@ uav_image_handle(struct d12_dxbc_ctx *ctx,
          .desc_set = D12_UNIFORM_HEAP_PBES);
    }
 
-   nir_def *offset = uav_texture_offset(ctx, uav);
+   nir_def *offset = resource_texture_offset(
+      ctx, uav, D12_DXBC_FILE_UAV, D12_RES_UAV, ctx->uav_range,
+      ctx->native_layout.pbe_stride_B);
    if (!offset)
       return NULL;
-
-   return nir_bindless_image_agx(b, offset, .desc_set = D12_UNIFORM_PBES);
+   return nir_bindless_image_agx(b, offset,
+      .desc_set = uav->num_indices == 2 ? D12_UNIFORM_HEAP_PBES : D12_UNIFORM_PBES);
 }
 
 static nir_def *
@@ -4121,7 +4138,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                return;
             }
             handle = nir_bindless_image_agx(b, offset,
-                                            .desc_set = D12_UNIFORM_TEXTURES);
+               .desc_set = res->num_indices == 2
+                  ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
          }
          nir_tex_instr *txs = nir_tex_instr_create(b->shader, is_ms ? 1 : 2);
          txs->op = nir_texop_txs;
@@ -4624,7 +4642,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                   return;
 
                handle = nir_bindless_image_agx(
-                  b, offset, .desc_set = D12_UNIFORM_TEXTURES);
+                  b, offset, .desc_set = resource->num_indices == 2
+                     ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
             }
             nir_def *coord = SRC(1);
             nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
@@ -5476,7 +5495,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             if (!native_offset)
                return;
             tex_handle = nir_bindless_image_agx(
-               b, native_offset, .desc_set = D12_UNIFORM_TEXTURES);
+               b, native_offset, .desc_set = !is_buffer && tex_operand->num_indices == 2
+                  ? D12_UNIFORM_HEAP_TEXTURES : D12_UNIFORM_TEXTURES);
          }
 
          /* Public Extended Opcode SAMPLE_CONTROLS packs signed 4-bit U/V/W

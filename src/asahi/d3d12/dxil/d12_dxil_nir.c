@@ -1360,6 +1360,30 @@ native_heap_index(struct trans_ctx *ctx, const struct handle_ref *h)
 }
 
 static nir_def *
+native_texture_window_index(struct trans_ctx *ctx, nir_def *index,
+                             const struct handle_ref *h)
+{
+   unsigned shape = d12_texture_shape_from_kind(h->kind);
+   if (ctx->descriptor_generation != D12_NATIVE_DESCRIPTOR_GEN7 ||
+       shape == D12_TEXTURE_SHAPE_NONE)
+      return index;
+   nir_builder *b = ctx->b;
+   unsigned window = shape == D12_TEXTURE_SHAPE_1D_ARRAY ||
+                     shape == D12_TEXTURE_SHAPE_2D_ARRAY ? 2 : 1;
+   nir_def *count64 = nir_udiv_imm(
+      b, root_plane(ctx, D12_ROOT_PLANE_HEAP_PBE_NULL),
+      ctx->native_layout.pbe_stride_B);
+   nir_def *index64 = nir_u2u64(b, index);
+   nir_def *valid = nir_ult(b, index64, count64);
+   if (h->valid)
+      valid = nir_iand(b, valid, h->valid);
+   index = nir_u2u32(b, nir_bcsel(b, valid, index64, count64));
+   nir_def *count = nir_u2u32(b, count64);
+   return nir_iadd(b, index,
+                   nir_imul_imm(b, nir_iadd_imm(b, count, 1), window));
+}
+
+static nir_def *
 native_image_handle(struct trans_ctx *ctx, const struct handle_ref *h,
                     bool writable)
 {
@@ -1379,14 +1403,17 @@ native_image_handle(struct trans_ctx *ctx, const struct handle_ref *h,
          nir_iadd_imm(b, resource_table, h->base_slot * sizeof(uint64_t)),
          .align_mul = 8);
       nir_def *relative = nir_iadd_imm(b, h->slot, -(int)h->base_slot);
-      nir_def *index = nir_iadd(b, nir_u2u32(b, first), relative);
+      nir_def *index = nir_iadd(b, first, nir_u2u64(b, relative));
+      index = native_texture_window_index(ctx, index, h);
       return nir_bindless_image_agx(
-         b, nir_imul_imm(b, index, stride),
+         b, nir_imul_imm(b, nir_u2u32(b, index), stride),
          .desc_set = writable ? D12_UNIFORM_HEAP_PBES
                               : D12_UNIFORM_HEAP_TEXTURES);
    }
 
    nir_def *index = h->heap ? native_heap_index(ctx, h) : h->slot;
+   if (h->heap)
+      index = native_texture_window_index(ctx, index, h);
    unsigned desc_set = h->heap
                           ? writable ? D12_UNIFORM_HEAP_PBES
                                      : D12_UNIFORM_HEAP_TEXTURES
@@ -3223,6 +3250,8 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
                return false;
             }
          }
+         const bool native_segment = !rooted_heap &&
+            d12_texture_shape_from_kind(rb->kind) != D12_TEXTURE_SHAPE_NONE;
          unsigned finite_count = 0;
          if (!count && !rooted_heap) {
             finite_count = finite_root_range_count(
@@ -3268,7 +3297,7 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
                                         nir_imm_int(b, root_count)));
          } else {
             slot_def = nir_iadd_imm(b, relative, base_slot);
-            if (!count)
+            if (!count && !native_segment)
                valid = nir_iand(b, valid,
                                 nir_ult(b, relative,
                                         nir_imm_int(b, finite_count)));

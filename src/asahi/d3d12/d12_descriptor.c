@@ -410,28 +410,43 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
       else
          __atomic_fetch_and(word, ~mask, __ATOMIC_RELAXED);
    }
-   /* A descriptor without a resource packs to the generation's null
-    * texture and PBE on every generation (the AGX2 builder emits null for
-    * it and the Gen9/10 repack of that null has nothing resource-specific
-    * to add), so copy the heap's null descriptors instead of packing. */
-   const bool null_native = !slot->resource;
-   if (heap->texture_bo) {
-      uint8_t *textures = agx_bo_map(heap->texture_bo);
-      if (textures && null_native)
-         memcpy(textures + index * heap->texture_stride_B,
-                heap->null_texture, heap->texture_stride_B);
-      else if (textures)
-         d12_refresh_texture_descriptor(
-            device, textures + index * heap->texture_stride_B, slot);
-   }
-   if (heap->pbe_bo) {
-      uint8_t *pbes = agx_bo_map(heap->pbe_bo);
-      if (pbes && null_native)
-         memcpy(pbes + index * heap->pbe_stride_B, heap->null_pbe,
-                heap->pbe_stride_B);
-      else if (pbes)
-         d12_refresh_pbe_descriptor(
-            device, pbes + index * heap->pbe_stride_B, slot);
+   /* Gen7 mirrors retain both declaration shapes. A physical 2D descriptor
+    * cannot accept an array coordinate/LOD ABI, even for a one-layer view. */
+   const unsigned windows = agx_chip_descriptor_generation(device->dev.chip) ==
+                               D12_NATIVE_DESCRIPTOR_GEN7 ? 3 : 1;
+   uint8_t *textures = heap->texture_bo ? agx_bo_map(heap->texture_bo) : NULL;
+   uint8_t *pbes = heap->pbe_bo ? agx_bo_map(heap->pbe_bo) : NULL;
+   for (unsigned window = 0; window < windows; ++window) {
+      const size_t native_index =
+         (size_t)window * ((size_t)heap->desc.NumDescriptors + 1) + index;
+      struct d12_descriptor effective = *slot;
+      if (window && slot->resource &&
+          slot->resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+         if (textures)
+            memcpy(textures + native_index * heap->texture_stride_B,
+                   textures + index * heap->texture_stride_B, heap->texture_stride_B);
+         if (pbes)
+            memcpy(pbes + native_index * heap->pbe_stride_B,
+                   pbes + index * heap->pbe_stride_B, heap->pbe_stride_B);
+         continue;
+      }
+      if (window)
+         d12_apply_texture_shape(&effective, window == 1
+            ? D12_TEXTURE_SHAPE_2D : D12_TEXTURE_SHAPE_2D_ARRAY);
+      if (textures) {
+         uint8_t *out = textures + native_index * heap->texture_stride_B;
+         if (!slot->resource)
+            memcpy(out, heap->null_texture, heap->texture_stride_B);
+         else
+            d12_refresh_texture_descriptor(device, out, &effective);
+      }
+      if (pbes) {
+         uint8_t *out = pbes + native_index * heap->pbe_stride_B;
+         if (!slot->resource)
+            memcpy(out, heap->null_pbe, heap->pbe_stride_B);
+         else
+            d12_refresh_pbe_descriptor(device, out, &effective);
+      }
    }
    if (heap->residency_bo) {
       uint64_t *residency = agx_bo_map(heap->residency_bo);
@@ -685,12 +700,14 @@ d12_descriptor_heap_create(struct d12_device *device,
 
       if (desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
          size_t texture_size, pbe_size;
+         const bool variants = agx_chip_descriptor_generation(device->dev.chip) ==
+                                  D12_NATIVE_DESCRIPTOR_GEN7;
          /* One extra permanently-null PBE slot is the robust sink for
           * dynamically indexed typed-buffer atomics. Unlike texture fetch,
           * AGX buffer image atomics do not suppress coordinates beyond the
           * descriptor's element count. */
          if (!d12_native_descriptor_span(
-                heap->texture_stride_B, desc->NumDescriptors, 0,
+                heap->texture_stride_B, desc->NumDescriptors, variants ? 1 : 0,
                 &texture_size) ||
              !d12_native_descriptor_span(
                 heap->pbe_stride_B, desc->NumDescriptors, 1, &pbe_size)) {
@@ -699,6 +716,17 @@ d12_descriptor_heap_create(struct d12_device *device,
             free(heap->live_resource_words);
             free(heap);
             return E_OUTOFMEMORY;
+         }
+         if (variants) {
+            if (texture_size > SIZE_MAX / 3 || pbe_size > SIZE_MAX / 3) {
+               if (heap->bo)
+                  agx_bo_unreference(&device->dev, heap->bo);
+               free(heap->live_resource_words);
+               free(heap);
+               return E_OUTOFMEMORY;
+            }
+            texture_size *= 3;
+            pbe_size *= 3;
          }
          heap->texture_bo =
             agx_bo_create(&device->dev, texture_size, 0, AGX_BO_WRITEBACK,
@@ -768,12 +796,18 @@ d12_descriptor_heap_create(struct d12_device *device,
           heap->pbe_stride_B <= sizeof(heap->null_pbe) &&
           d12_set_null_texture_descriptor(device, heap->null_texture) &&
           d12_set_null_pbe_descriptor(device, heap->null_pbe)) {
-         for (uint64_t i = 0; i < desc->NumDescriptors; i++) {
+         const bool variants = agx_chip_descriptor_generation(device->dev.chip) ==
+                                  D12_NATIVE_DESCRIPTOR_GEN7;
+         const uint64_t pbe_slots = variants
+            ? 3 * ((uint64_t)desc->NumDescriptors + 1)
+            : (uint64_t)desc->NumDescriptors + 1;
+         const uint64_t texture_slots = variants ? pbe_slots : desc->NumDescriptors;
+         for (uint64_t i = 0; i < texture_slots; i++) {
             memcpy(textures + i * heap->texture_stride_B,
                    heap->null_texture, heap->texture_stride_B);
          }
          /* ... plus the permanently-null PBE sink past the last slot. */
-         for (uint64_t i = 0; i <= desc->NumDescriptors; i++) {
+         for (uint64_t i = 0; i < pbe_slots; i++) {
             memcpy(pbes + i * heap->pbe_stride_B, heap->null_pbe,
                    heap->pbe_stride_B);
          }
