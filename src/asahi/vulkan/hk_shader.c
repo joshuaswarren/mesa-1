@@ -1583,9 +1583,17 @@ hk_scaled_sample_guard(const nir_shader *nir)
 /* Image-view formats are dynamic descriptor state. Recover scaled samples
  * from the integer descriptor result without changing ordinary float samples. */
 static bool
-lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *unused)
+lower_scaled_sample(nir_builder *b, nir_tex_instr *tex, void *data)
 {
+   const struct hk_physical_device *pdev = data;
    if (hk_is_ordinary_descriptor_region(b))
+      return false;
+   /* No scaled format is sampleable on this device, so no valid application
+    * descriptor carries a nonzero kind and the conversion below is dead code
+    * that every float sample would otherwise pay for (about 50 ALU
+    * instructions each, unguarded). Driver-internal shaders keep their
+    * guarded conversion. */
+   if (!b->shader->info.internal && pdev && !pdev->scaled_sampling)
       return false;
    if (tex->dest_type != nir_type_float32 || tex->is_shadow ||
        tex->sampler_dim == GLSL_SAMPLER_DIM_BUF || tex->is_sparse)
@@ -2288,7 +2296,7 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_scaled_sample,
                hk_scaled_sample_guard(nir) ? nir_metadata_none
                                            : nir_metadata_control_flow,
-               NULL);
+               hk_device_physical(dev));
    }
 
    if (ordinary_regions) {

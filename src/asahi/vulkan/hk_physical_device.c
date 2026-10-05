@@ -1755,6 +1755,26 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
    if (result != VK_SUCCESS)
       goto fail_agx_device;
 
+   /* Descriptor writes encode a scaled_conversion kind only for views whose
+    * format is [SU]SCALED (hk_scaled_texture_format()). Such a view needs
+    * sampled-image or input-attachment features for its format, so if no
+    * scaled format has them, no valid descriptor carries a nonzero kind. */
+   pdev->scaled_sampling = false;
+   for (VkFormat f = VK_FORMAT_UNDEFINED + 1;
+        f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && !pdev->scaled_sampling; ++f) {
+      if (hk_scaled_texture_format(hk_format_to_pipe_format(f)) ==
+          PIPE_FORMAT_NONE)
+         continue;
+      const VkFormatFeatureFlags2 sampled =
+         VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT |
+         VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT |
+         VK_FORMAT_FEATURE_2_DEPTH_STENCIL_ATTACHMENT_BIT;
+      pdev->scaled_sampling =
+         (hk_get_image_format_features(pdev, f, VK_IMAGE_TILING_OPTIMAL) |
+          hk_get_image_format_features(pdev, f, VK_IMAGE_TILING_LINEAR)) &
+         sampled;
+   }
+
    hk_physical_device_init_pipeline_cache(pdev);
 
    const char *hk_sysmem = os_get_option("HK_SYSMEM");
