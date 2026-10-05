@@ -16,7 +16,10 @@
  *   right half  the second draw, after it
  *
  * Both halves must be lit and the rest of the target must hold the clear
- * colour. Needs a device (GPU). Takes tri.dxil and solid.dxil.
+ * colour. A second target is declared CLEAR by the pass but written by no
+ * draw (the pipeline has one colour output); it must come out cleared all
+ * the same, which the pass's end applies. Needs a device (GPU). Takes
+ * tri.dxil and solid.dxil.
  */
 
 #define COBJMACROS
@@ -142,21 +145,30 @@ main(int argc, char **argv)
       .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
                D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
    };
-   ID3D12Resource *rt = NULL;
+   ID3D12Resource *rt = NULL, *rt2 = NULL;
    TEST_OBJECT(ID3D12Device_CreateCommittedResource(
                   dev, &heap, D3D12_HEAP_FLAG_NONE, &td,
                   D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
                   (void **)&rt),
                rt, "create the render target");
+   TEST_OBJECT(ID3D12Device_CreateCommittedResource(
+                  dev, &heap, D3D12_HEAP_FLAG_NONE, &td,
+                  D3D12_RESOURCE_STATE_COMMON, NULL, &IID_ID3D12Resource,
+                  (void **)&rt2),
+               rt2, "create the second render target");
    D3D12_DESCRIPTOR_HEAP_DESC hd = {.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV,
-                                    .NumDescriptors = 1};
+                                    .NumDescriptors = 2};
    ID3D12DescriptorHeap *rtv_heap = NULL;
    TEST_OBJECT(ID3D12Device_CreateDescriptorHeap(
                   dev, &hd, &IID_ID3D12DescriptorHeap, (void **)&rtv_heap),
                rtv_heap, "create the RTV heap");
    D3D12_CPU_DESCRIPTOR_HANDLE rtv =
       d12_test_descriptor_heap_get_cpu_start(rtv_heap);
+   D3D12_CPU_DESCRIPTOR_HANDLE rtv2 = {
+      rtv.ptr + ID3D12Device_GetDescriptorHandleIncrementSize(
+                   dev, D3D12_DESCRIPTOR_HEAP_TYPE_RTV)};
    ID3D12Device_CreateRenderTargetView(dev, rt, NULL, rtv);
+   ID3D12Device_CreateRenderTargetView(dev, rt2, NULL, rtv2);
 
    D3D12_COMMAND_QUEUE_DESC qd = {.Type = D3D12_COMMAND_LIST_TYPE_DIRECT};
    ID3D12CommandQueue *queue = NULL;
@@ -190,20 +202,36 @@ main(int argc, char **argv)
    TEST_CALL(d12_test_opaque_texture_transfer(rt, map, STRIDE, STRIDE * H,
                                               true),
              "publish texture poison in COMMON");
+   TEST_CALL(d12_test_opaque_texture_transfer(rt2, map, STRIDE, STRIDE * H,
+                                              true),
+             "publish second texture poison in COMMON");
 
    d12_test_transition(list, rt, D3D12_RESOURCE_STATE_COMMON,
                        D3D12_RESOURCE_STATE_RENDER_TARGET);
+   d12_test_transition(list, rt2, D3D12_RESOURCE_STATE_COMMON,
+                       D3D12_RESOURCE_STATE_RENDER_TARGET);
 
-   D3D12_RENDER_PASS_RENDER_TARGET_DESC pass_rt = {
-      .cpuDescriptor = rtv,
-      .BeginningAccess = {
-         .Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR,
-         .Clear = {.ClearValue = {.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
-                                  .Color = {0.0f, 0.0f, 0.0f, 1.0f}}},
+   D3D12_RENDER_PASS_RENDER_TARGET_DESC pass_rt[2] = {
+      {
+         .cpuDescriptor = rtv,
+         .BeginningAccess = {
+            .Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR,
+            .Clear = {.ClearValue = {.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                                     .Color = {0.0f, 0.0f, 0.0f, 1.0f}}},
+         },
+         .EndingAccess = {.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE},
       },
-      .EndingAccess = {.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE},
+      {
+         .cpuDescriptor = rtv2,
+         .BeginningAccess = {
+            .Type = D3D12_RENDER_PASS_BEGINNING_ACCESS_TYPE_CLEAR,
+            .Clear = {.ClearValue = {.Format = DXGI_FORMAT_R8G8B8A8_UNORM,
+                                     .Color = {0.0f, 1.0f, 0.0f, 1.0f}}},
+         },
+         .EndingAccess = {.Type = D3D12_RENDER_PASS_ENDING_ACCESS_TYPE_PRESERVE},
+      },
    };
-   ID3D12GraphicsCommandList4_BeginRenderPass(list4, 1, &pass_rt, NULL,
+   ID3D12GraphicsCommandList4_BeginRenderPass(list4, 2, pass_rt, NULL,
                                               D3D12_RENDER_PASS_FLAG_NONE);
 
    ID3D12GraphicsCommandList_SetGraphicsRootSignature(list, root_sig);
@@ -232,6 +260,8 @@ main(int argc, char **argv)
 
    ID3D12GraphicsCommandList4_EndRenderPass(list4);
    d12_test_transition(list, rt, D3D12_RESOURCE_STATE_RENDER_TARGET,
+                       D3D12_RESOURCE_STATE_COMMON);
+   d12_test_transition(list, rt2, D3D12_RESOURCE_STATE_RENDER_TARGET,
                        D3D12_RESOURCE_STATE_COMMON);
 
    hr = ID3D12GraphicsCommandList_Close(list);
@@ -273,6 +303,22 @@ main(int argc, char **argv)
                lit_left > lit_right - lit_right / 8 &&
                lit_left < lit_right + lit_right / 8,
             "both halves hold one triangle of the same size");
+
+      memset(map, 0x33, STRIDE * H);
+      TEST_CALL(d12_test_opaque_texture_transfer(rt2, map, STRIDE,
+                                                 STRIDE * H, false),
+                "read back the second target after the fence");
+      unsigned green = 0;
+      for (unsigned y = 0; y < H; y++) {
+         for (unsigned x = 0; x < W; x++) {
+            const uint8_t *c = map + y * STRIDE + x * 4;
+            green += c[0] == 0 && c[1] == 255 && c[2] == 0 && c[3] == 255;
+         }
+      }
+      printf("       second target: %u of %u pixels hold its clear\n",
+             green, W * H);
+      CHECK(green == W * H,
+            "a target the pass clears but no draw writes is cleared");
    }
 
 teardown:
@@ -285,6 +331,7 @@ teardown:
    ID3D12CommandQueue_Release(queue);
    ID3D12DescriptorHeap_Release(rtv_heap);
    ID3D12Resource_Release(rt);
+   ID3D12Resource_Release(rt2);
    ID3D12PipelineState_Release(pso);
    ID3D12RootSignature_Release(root_sig);
    ID3D12Device_Release(dev);
