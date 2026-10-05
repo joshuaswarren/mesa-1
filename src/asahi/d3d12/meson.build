@@ -753,7 +753,7 @@ if not d12_is_windows
     'd3d12agx_native_stage_certification',
     files('tests/native_stage_certification.c'),
     include_directories : [inc_include, inc_src, inc_asahi,
-                          include_directories('../isa')],
+                          d12_platform_includes, include_directories('../isa')],
     dependencies : [dep_dxheaders_d12, d12_platform_deps, dep_valgrind,
                     idep_nir, idep_mesautil, idep_agx_pack, idep_libagx,
                     idep_libagx_shaders_h, idep_libpoly],

@@ -44,12 +44,16 @@ def main():
         tf.extractall(source, filter='data')
     source_files = {str(p.relative_to(source)): digest(p) for p in sorted(source.rglob('*'))
                     if p.is_file() and not p.is_symlink()}
+    archive_source_files = source_files
     # Overlay exact frozen blobs, including the original full G5 branch.
     for path in (p00 / 'reference').rglob('*'):
         if path.is_file():
             shutil.copy2(path, source / path.relative_to(p00 / 'reference'))
     subprocess.run(['sha256sum', '--strict', '-c', str(p00 / 'reference-inputs.sha256')],
                    cwd=source, stdout=subprocess.DEVNULL, check=True)
+    source_files = {str(p.relative_to(source)): digest(p) for p in sorted(source.rglob('*'))
+                    if p.is_file() and not p.is_symlink()}
+    overlay = [name for name, sha in source_files.items() if archive_source_files.get(name) != sha]
     env = os.environ.copy()
     for key in ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'CFLAGS', 'CXXFLAGS', 'CPPFLAGS', 'LDFLAGS']:
         env.pop(key, None)
@@ -146,6 +150,7 @@ def main():
     binaries = {str(p.relative_to(stage)): digest(p) for p in sorted((stage / 'bin').iterdir())}
     receipt = dict(candidate=candidate, reference=(stage / 'REFERENCE-COMMIT').read_text().strip(),
         source_archive_sha256=expected_hash, source_files='receipts/SOURCE-FILES.json',
+        frozen_overlay=overlay,
         candidate_library_sha256=binaries['bin/libd3d12agx.so'], binaries=binaries,
         runtime_dependencies=dependencies, setup_command=setup, build_command=command,
         build_options=actual, compiler_versions=actual_compilers, dependency_versions=deps,
