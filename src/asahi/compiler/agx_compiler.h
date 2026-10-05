@@ -624,8 +624,6 @@ typedef struct {
    /* AGX_G17P_SHARED_RHW: the centre-interpolated projective 1/W computed in
     * the entry block by the first perspective input load, reused by later
     * loads instead of a fresh RHW f32interp + f32rcp pair. Null until then. */
-   agx_index agx3_shared_rcp_w;
-   unsigned agx3_shared_rhw_cf;
 
    /* Beginning of our stack allocation used for spilling, below that is
     * NIR-level scratch.
@@ -1117,7 +1115,6 @@ agx_builder_insert(agx_cursor *cursor, agx_instr *I)
    UNREACHABLE("Invalid cursor option");
 }
 
-bool agx_vertex_tex_uniforms(const agx_context *ctx);
 bool agx3_tex_uniform_pair_unwitnessed(const agx_context *ctx,
                                        const agx_instr *I, agx_index texture,
                                        agx_index sampler);

@@ -90,9 +90,7 @@ constant_use_accepts_uniform(agx_context *ctx, const agx_instr *I, unsigned s,
       return true;
 
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B || I->nr_srcs > 3 ||
-       uniform >= AGX_NUM_UNIFORMS ||
-       !(agx_get_codegen_flags() &
-         AGX_CODEGEN_G17P_PROMOTE_INTEGER_CONSTANTS))
+       uniform >= AGX_NUM_UNIFORMS)
       return false;
 
    agx_instr candidate = *I;

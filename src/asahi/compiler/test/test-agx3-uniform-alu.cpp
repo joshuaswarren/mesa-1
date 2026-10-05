@@ -11,14 +11,8 @@
 
 TEST(AGX3UniformALU, VertexTextureUniformQualification)
 {
-   /* Run in separate processes with AGX_G17P_VERTEX_TEX_UNIFORMS=0 and 1,
-    * and with the all-stage AGX_G17P_TEX_UNIFORM_OPERANDS (default on) set to
-    * 0 and 1. Both operands name the same aligned uniform, a witnessed
-    * uniform/uniform pair, so either option keeps them in the uniform file. */
-   const bool enabled =
-      debug_get_bool_option("AGX_G17P_VERTEX_TEX_UNIFORMS", false);
-   const bool all_stages =
-      debug_get_bool_option("AGX_G17P_TEX_UNIFORM_OPERANDS", true);
+   /* Both operands name the same aligned uniform, a witnessed
+    * uniform/uniform pair, so every stage keeps them in the uniform file. */
    for (auto encoding : {AGX_ISA_ENCODING_AGX3B, AGX_ISA_ENCODING_AGX3C}) {
       for (auto stage : {MESA_SHADER_VERTEX, MESA_SHADER_FRAGMENT}) {
          for (bool preamble : {false, true}) {
@@ -44,9 +38,7 @@ TEST(AGX3UniformALU, VertexTextureUniformQualification)
                   agx_lower_uniform_sources(b->shader);
                   const bool keep =
                      encoding == AGX_ISA_ENCODING_AGX3B &&
-                     value <= 252 && !(value & 3) && size != AGX_SIZE_16 &&
-                     (all_stages ||
-                      (enabled && stage == MESA_SHADER_VERTEX && !preamble));
+                     value <= 252 && !(value & 3) && size != AGX_SIZE_16;
                   EXPECT_EQ(I->src[3].type == AGX_INDEX_UNIFORM, keep);
                   EXPECT_EQ(I->src[4].type == AGX_INDEX_UNIFORM, keep);
                   EXPECT_NE(I->src[1].type, AGX_INDEX_UNIFORM);
@@ -65,8 +57,6 @@ TEST(AGX3UniformALU, TextureUniformOperandPairs)
     * texture with an immediate sampler. A uniform beside a register, or a
     * cube uniform beside an immediate, is materialized so the sample keeps
     * its register form. */
-   if (!debug_get_bool_option("AGX_G17P_TEX_UNIFORM_OPERANDS", true))
-      GTEST_SKIP() << "texture uniform operands disabled";
    enum other { OTHER_UNIFORM, OTHER_IMMEDIATE, OTHER_REGISTER };
    for (auto dim : {AGX_DIM_2D, AGX_DIM_CUBE, AGX_DIM_CUBE_ARRAY}) {
       for (auto other : {OTHER_UNIFORM, OTHER_IMMEDIATE, OTHER_REGISTER}) {

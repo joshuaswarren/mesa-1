@@ -660,19 +660,8 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
        * 4- and 8-layer images, requested layers 0/1/3/4/7/100/100000, all
        * return the correctly clamped layer with this disabled. An unclamped
        * read would wrap or read out of bounds; layer 9 of 4 returns layer 3,
-       * not layer 1.
-       *
-       * AGX_G17P_LAYER_CLAMP=1 forces the software clamp back for A/B. */
-      bool skip_layer_clamp = options && options->gen9;
-      {
-         static int force = -1;
-         if (force < 0) {
-            const char *v = getenv("AGX_G17P_LAYER_CLAMP");
-            force = (v && v[0] && v[0] != '0') ? 1 : 0;
-         }
-         if (force)
-            skip_layer_clamp = false;
-      }
+       * not layer 1. */
+      const bool skip_layer_clamp = options && options->gen9;
 
       if (!(tex->backend_flags & AGX_TEXTURE_FLAG_NO_CLAMP) && !is_txf &&
           !skip_layer_clamp) {

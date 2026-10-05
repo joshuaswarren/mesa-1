@@ -687,18 +687,8 @@ compile_arithmetic_uniform_program(enum agx_isa_encoding encoding,
       EXPECT_EQ(part.info.agx3_preamble_inputs.count, 0u);
       EXPECT_EQ(part.info.agx3_preamble_inputs.storage_bytes, 0u);
    }
-   const bool native_imports = !no_preamble &&
-      encoding == AGX_ISA_ENCODING_AGX3B &&
-      (agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS);
-   EXPECT_EQ(part.info.preamble_scratch_size, native_imports ? 32u : 0u);
-   EXPECT_EQ(part.info.agx3_preamble_tps_inputs, native_imports);
-   if (native_imports) {
-      /* The retained native stream uses GPR halves 0..31. Its input TPS
-       * region must not trigger the old 256-register scratch reservation. */
-      EXPECT_EQ(part.info.nr_preamble_gprs, 32u);
-      EXPECT_TRUE(part.info.agx3_preamble_staging_known);
-      EXPECT_EQ(part.info.agx3_preamble_staging_halfs, 0u);
-   }
+   EXPECT_EQ(part.info.preamble_scratch_size, 0u);
+   EXPECT_FALSE(part.info.agx3_preamble_tps_inputs);
    EXPECT_LT(part.info.main_offset, part.info.binary_size);
    EXPECT_GT(part.info.main_size, 0u);
    const struct agx_precompiled_kernel_info compact =
@@ -729,11 +719,8 @@ compile_arithmetic_uniform_program(enum agx_isa_encoding encoding,
     * uses once hid these exports from selection, leaving four FMA results
     * and four separate uniform copies (12 preamble instructions). */
    if (encoding == AGX_ISA_ENCODING_AGX3B) {
-      const bool native = agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS;
-      if (native)
-         EXPECT_EQ(part.info.stats.preamble_inst, 10u);
       /* These exact extents exclude the next function's alignment padding. */
-      EXPECT_EQ(part.info.preamble_size, native ? 94u : 96u);
+      EXPECT_EQ(part.info.preamble_size, 96u);
 
       struct agx_ioto_constant_program program = {};
       program.code = (uint8_t *)part.binary + part.info.preamble_offset;
@@ -823,26 +810,6 @@ compile_arithmetic_uniform_program(enum agx_isa_encoding encoding,
          absolute |= (uint64_t)cached.program.bytes[branch + 3 + i] << (8 * i);
       EXPECT_EQ(absolute & ~UINT64_C(1), program.code_va);
 
-      if (native_imports) {
-         /* Connect this actual compiled RLD consumer to loader publication.
-          * Both aligned pointer words add one native 10-byte TPS COPY. */
-         desc.cprog_inputs = &part.info.agx3_preamble_inputs;
-         struct agx3_g17p_graphics_program with_inputs;
-         ASSERT_TRUE(agx3_g17p_graphics_program_generate(
-            AGX_CHIP_G17P, &desc, &with_inputs));
-         EXPECT_EQ(with_inputs.length, cached.program.length + 20u);
-         ASSERT_TRUE(agx3_g17p_graphics_program_template_generate(
-            AGX_CHIP_G17P, &desc, &cached));
-         moved = desc;
-         moved.program_va = 0x70000;
-         ASSERT_TRUE(agx3_g17p_graphics_program_template_relocate(
-            AGX_CHIP_G17P, &desc, &moved, &cached, relocated.bytes,
-            sizeof(relocated.bytes), &relocated.length));
-         ASSERT_TRUE(agx3_g17p_graphics_program_generate(
-            AGX_CHIP_G17P, &moved, &fresh));
-         EXPECT_EQ(relocated.length, fresh.length);
-         EXPECT_EQ(memcmp(relocated.bytes, fresh.bytes, fresh.length), 0);
-      }
    }
    free(part.binary);
    ralloc_free(n.shader);

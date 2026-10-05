@@ -98,27 +98,15 @@ test_configuration(enum pipe_advanced_blend_mode op,
    static const uint8_t tile_load[] = {
       0x67,0x0e,0x54,0x00,0x00,0x00,0x01,0xce,0x02,0x00,0x00,0x00,
    };
-   /* With AGX_G17P_BANK_COALESCE (default on) the FLTNORM pair is packed
-    * straight into the store registers (r1), as Apple's fragments do, so the
-    * payload copy into r0 disappears; the protocol bytes are otherwise the
-    * same. AGX_G17P_BANK_COALESCE=0 keeps the original r0 anchor. */
-   static const uint8_t tail_r0[] = {
-      0x87,0x02,0x54,0x04,0x08,0x00,
-      0xe7,0x06,0x54,0x00,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
-      0x07,0x02,0x54,0x0c,0x02,0x00,
-      0x0e,0x00,0x00,0x00,
-   };
-   static const uint8_t tail_r1[] = {
+   /* The FLTNORM pair is packed straight into the store registers (r1), as
+    * Apple's fragments do, so no payload copy into r0 is needed. */
+   static const uint8_t tail[] = {
       0x87,0x02,0x54,0x04,0x08,0x00,
       0xe7,0x06,0x54,0x02,0x00,0x00,0x01,0x4e,0x00,0x00,0x00,0x00,
       0x07,0x02,0x54,0x0c,0x02,0x00,
       0x0e,0x00,0x00,0x00,
    };
-   STATIC_ASSERT(sizeof(tail_r0) == sizeof(tail_r1));
-   const uint8_t *tail =
-      (agx_get_codegen_flags() & AGX_CODEGEN_G17P_BANK_COALESCE) ? tail_r1
-                                                                 : tail_r0;
-   const size_t tail_size = sizeof(tail_r0);
+   const size_t tail_size = sizeof(tail);
    const uint8_t *program = part.binary ?
       (const uint8_t *)part.binary + part.info.main_offset : NULL;
    const bool protocol = compiled && program && part.info.main_size >=

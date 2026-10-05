@@ -242,20 +242,6 @@ struct agx3_colour_link_info {
    bool straight_line;
    bool branch_free;
    uint32_t entry_offset;
-   /* v52 AGX_G17P_EARLY_COLOUR_GATE: this part's gate was moved forward from
-    * a later part, so the linker removes it when no later part opens the
-    * colour protocol. */
-   bool entry_optional;
-   /* v52: the gate sits in the entry block ahead of every control-flow
-    * instruction. The entry block has no predecessors (agx_start_block), so
-    * no branch crosses it and the linker may remove it. */
-   bool entry_in_entry_block;
-   /* v52 AGX_G17P_INPUT_MARK provenance: the part carries a fragment-input
-    * entry marker (interp/LDCF/SR first), and where its first-marked LLDCOL
-    * begins, relative to the part. */
-   bool input_marked;
-   bool lldcol_first_valid;
-   uint32_t lldcol_first_offset;
 
    /* Colour pixel classes consumed by this part: bit n is the class of the
     * tile partitions n, n + 3, ...  The linked fragment state loader must keep

@@ -324,43 +324,8 @@ TEST_F(Optimizer, G17PFoldsBothHalvesOfATiedConstantFmax)
    ASSERT_SHADER_EQUAL(actual->shader, expected->shader);
 }
 
-TEST_F(Optimizer, G17PVertexAbsMaxQualification)
+TEST_F(Optimizer, G17PVertexConstantWidth)
 {
-   const bool enabled = debug_get_bool_option("AGX_G17P_VERTEX_ABS_MAX", false);
-   /* Valid, fragment, preamble, fmin, saturate, negate, half, broken tie. */
-   for (unsigned mode = 0; mode < 8; ++mode) {
-      agx_builder *b = agx_test_builder(mem_ctx);
-      struct agx_shader_key key = {};
-      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
-      b->shader->key = &key;
-      b->shader->stage = mode == 1 ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
-      b->shader->is_preamble = mode == 2;
-      const agx_index input = mode == 6 ? hx : wx;
-      agx_index modified = agx_abs(input);
-      modified.neg = mode == 5;
-      agx_index value = agx_temp(b->shader, modified.size);
-      agx_fmov_to(b, value, modified)->saturate = mode == 4;
-      agx_index out = agx_temp(b->shader, AGX_SIZE_32);
-      agx_fcmpsel_to(b, out, wy, value, wy, mode == 7 ? wx : value,
-                    mode == 3 ? AGX_FCOND_LTN : AGX_FCOND_GTN);
-      agx_unit_test(b, out);
-      agx_optimizer_forward(b->shader);
-      unsigned folded = 0;
-      agx_foreach_instr_global(b->shader, I) {
-         if (I->op == AGX_OPCODE_FCMPSEL) {
-            folded += I->src[1].abs && I->src[3].abs &&
-                      agx_is_equiv(I->src[1], input) &&
-                      agx_is_equiv(I->src[3], input);
-         }
-      }
-      EXPECT_EQ(folded, enabled && mode == 0 ? 1u : 0u) << mode;
-   }
-}
-
-TEST_F(Optimizer, G17PVertexConstantWidthQualification)
-{
-   const bool enabled =
-      debug_get_bool_option("AGX_G17P_VERTEX_FULL_CONSTANTS", false);
    for (unsigned mode = 0; mode < 4; ++mode) {
       agx_builder *b = agx_test_builder(mem_ctx);
       struct agx_shader_key key = {};
@@ -375,11 +340,9 @@ TEST_F(Optimizer, G17PVertexConstantWidthQualification)
       agx_opt_compact_constants(b->shader);
       agx_foreach_instr_global(b->shader, I) {
          if (I->op == AGX_OPCODE_FFMA)
-            EXPECT_EQ(I->src[1].size,
-                      enabled && mode == 0 ? AGX_SIZE_32 : AGX_SIZE_16);
+            EXPECT_EQ(I->src[1].size, AGX_SIZE_16);
          if (I->op == AGX_OPCODE_MOV_IMM)
-            EXPECT_EQ(I->imm, enabled && mode == 0 ? fui(1.0f / 1024.0f)
-                                                  : 0x1400u);
+            EXPECT_EQ(I->imm, 0x1400u);
       }
    }
 }

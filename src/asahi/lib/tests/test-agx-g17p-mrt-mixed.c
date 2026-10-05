@@ -1500,11 +1500,11 @@ static const struct {
      {120, 0x1aa59cf1e9af7435ull}}},
 };
 
-/* AGX_G17P_BANK_COALESCE (default on) lets a tile-store payload collect or
+/* Bank coalescing lets a tile-store payload collect or
  * move reuse the registers its sources already occupy inside the store bank.
  * These pinned programs then lose only their payload copies (IADD moves);
  * every other instruction is unchanged (offline decode of each pair, frg-codegen
- * 2026-09-30). The origin/agx3 pins still apply with AGX_G17P_BANK_COALESCE=0. */
+ * 2026-09-30). */
 static const struct {
    const char *name;
    struct golden_program pinned, coalesced;
@@ -1522,8 +1522,6 @@ static const struct {
 static const struct golden_program *
 current_golden(const char *name, const struct golden_program *golden)
 {
-   if (!(agx_get_codegen_flags() & AGX_CODEGEN_G17P_BANK_COALESCE))
-      return golden;
    for (unsigned i = 0; i < ARRAY_SIZE(coalesced_pins); ++i) {
       if (!strcmp(coalesced_pins[i].name, name) &&
           coalesced_pins[i].pinned.size == golden->size &&

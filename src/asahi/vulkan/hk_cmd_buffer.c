@@ -1711,8 +1711,7 @@ hk_g17p_basic_graphics_program_supported(struct hk_cmd_buffer *cmd,
     * below still require that variant. */
    const bool native_preamble =
       (s->b.info.stage == MESA_SHADER_VERTEX ||
-       (s->info.stage == MESA_SHADER_FRAGMENT &&
-        agx_g17p_fs_native_uniforms())) &&
+       s->info.stage == MESA_SHADER_FRAGMENT) &&
       hk_g17p_native_cprog_qualified(&s->b.info);
    if (!linked || !linked->b.bo || !linked->b.bo->va || linked->b.size == 0 ||
        linked->b.size > UINT32_MAX || (s->b.info.has_preamble && !native_preamble) ||

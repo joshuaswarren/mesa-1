@@ -192,8 +192,8 @@ main(void)
    static const uint8_t copy_image_end[] = {0x0e, 0x00, 0x00, 0x00};
    CHECK(copy_image_info->preamble_offset == 0);
    CHECK(copy_image_info->main_offset == 0);
-   CHECK(copy_image_info->main_size == 1414);
-   CHECK(copy_image_info->binary_size == 1414);
+   CHECK(copy_image_info->main_size == 1430);
+   CHECK(copy_image_info->binary_size == 1430);
    CHECK(copy_image_info->nr_gprs == 22);
    CHECK(copy_image_info->nr_preamble_gprs == 0);
    CHECK(copy_image_info->push_count == 54);
@@ -206,7 +206,7 @@ main(void)
    CHECK(copy_image_info->agx3_staging_known);
    CHECK(copy_image_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(copy_image_binary, copy_image_info->binary_size) ==
-         UINT64_C(0x75d08f991b654176));
+         UINT64_C(0xd4321ffb3d0eabb2));
    CHECK(memcmp(copy_image_binary + copy_image_info->binary_size -
                    sizeof(copy_image_end),
                 copy_image_end, sizeof(copy_image_end)) == 0);
@@ -609,8 +609,8 @@ main(void)
       (const uint8_t *)conditional_blob + sizeof(*conditional_info);
    CHECK(conditional_info->preamble_offset == 0);
    CHECK(conditional_info->main_offset == 0);
-   CHECK(conditional_info->main_size == 180);
-   CHECK(conditional_info->binary_size == 180);
+   CHECK(conditional_info->main_size == 186);
+   CHECK(conditional_info->binary_size == 186);
    CHECK(conditional_info->nr_gprs == 6);
    CHECK(conditional_info->nr_preamble_gprs == 0);
    CHECK(conditional_info->push_count == 28);
@@ -623,7 +623,7 @@ main(void)
    CHECK(conditional_info->agx3_staging_known);
    CHECK(conditional_info->agx3_staging_halfs == 0);
    CHECK(fnv1a64(conditional_binary, conditional_info->binary_size) ==
-         UINT64_C(0xc0f57f69909964bb));
+         UINT64_C(0x352642109b15222a));
    CHECK(memcmp(conditional_binary + conditional_info->binary_size -
                    sizeof(end),
                 end, sizeof(end)) == 0);

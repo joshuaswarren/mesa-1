@@ -16,9 +16,6 @@
 #include "agx3_fixed_dependencies.h"
 #include "agx_opcodes.h"
 
-/* Diagnostic escape hatch for A/B testing the UVS store ordering below. */
-DEBUG_GET_ONCE_BOOL_OPTION(agx_stvary_noorder, "HK_STVARY_NOORDER", false)
-
 struct sched_ctx {
    /* Dependency graph */
    struct dag *dag;
@@ -166,8 +163,7 @@ create_dag(agx_context *ctx, agx_block *block, void *memctx, bool native_uniform
    struct sched_node *vary_store = NULL;
    const enum agx_isa_encoding enc = ctx->key->dev.encoding;
    const bool order_vary_stores =
-      (enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C) &&
-      !debug_get_option_agx_stvary_noorder();
+      enc == AGX_ISA_ENCODING_AGX3B || enc == AGX_ISA_ENCODING_AGX3C;
 
    agx_foreach_instr_in_block(block, I) {
       /* Don't touch control flow */
@@ -419,14 +415,14 @@ agx_pressure_schedule(agx_context *ctx)
  * issues the ready instruction whose operands are available soonest, breaking
  * ties by the longest remaining critical path. It never adds or removes
  * instructions and keeps every ordering edge of create_dag(). A block whose
- * register pressure would rise by more than AGX_G17P_ILP_SLACK halves keeps
- * its original order.
+ * register pressure would rise by more than AGX_ILP_SLACK halves keeps its
+ * original order.
  *
- * Latencies are a model, not measured G17P numbers: AGX_G17P_ILP_LATENCY
- * (default 4) for ALU results, 4x that for memory, texture and tile loads.
+ * Latencies are a model, not measured G17P numbers: AGX_ILP_ALU_LATENCY for
+ * ALU results, 4x that for memory, texture and tile loads.
  */
-DEBUG_GET_ONCE_NUM_OPTION(agx_g17p_ilp_latency, "AGX_G17P_ILP_LATENCY", 4)
-DEBUG_GET_ONCE_NUM_OPTION(agx_g17p_ilp_slack, "AGX_G17P_ILP_SLACK", 2)
+#define AGX_ILP_ALU_LATENCY 4
+#define AGX_ILP_SLACK 2
 
 static unsigned
 ilp_latency(const agx_instr *I, unsigned alu)
@@ -486,8 +482,7 @@ ilp_max_pressure(struct sched_node **order, unsigned n,
  *    emits T's compare right after the cone.
  * This is placement by dependency and distance, not a pattern: nothing
  * depends on the shift/xor opcodes. Pressure is checked by the caller. */
-DEBUG_GET_ONCE_NUM_OPTION(agx_g17p_exit_compare_distance,
-                          "AGX_G17P_EXIT_COMPARE_DISTANCE", 5)
+#define AGX_EXIT_COMPARE_DISTANCE 5
 
 static bool
 ilp_defines(const agx_instr *I, unsigned ssa)
@@ -517,10 +512,7 @@ ilp_place_exit_compare(agx_block *block, struct sched_node **nodes,
                        struct sched_node **order, unsigned n,
                        const struct util_dynarray *dependents, void *memctx)
 {
-   const int64_t distance_opt = debug_get_option_agx_g17p_exit_compare_distance();
-   if (distance_opt < 1 || distance_opt > 64)
-      return false;
-   const unsigned distance = (unsigned)distance_opt;
+   const unsigned distance = AGX_EXIT_COMPARE_DISTANCE;
 
    agx_instr *T = agx_last_instr(block);
    if (!T || (T->op != AGX_OPCODE_IF_ICMP && T->op != AGX_OPCODE_WHILE_ICMP &&
@@ -634,17 +626,6 @@ ilp_place_exit_compare(agx_block *block, struct sched_node **nodes,
    /* Phis stay first; a group user among them means no valid placement. */
    if (p < phis)
       return false;
-
-   if (debug_get_bool_option("AGX_G17P_EXIT_COMPARE_TRACE", false)) {
-      fprintf(stderr, "exit-compare: n=%u cone=%u readers=%u p=%u rest:", n,
-              cone_n, readers, p);
-      for (unsigned i = 0; i < nr; ++i)
-         fprintf(stderr, " %s", agx_opcodes_info[rest[i]->instr->op].name);
-      fprintf(stderr, " | group:");
-      for (unsigned i = 0; i < ng; ++i)
-         fprintf(stderr, " %s", agx_opcodes_info[grp[i]->instr->op].name);
-      fprintf(stderr, "\n");
-   }
 
    unsigned k = 0;
    for (unsigned i = 0; i < p; ++i)
@@ -789,14 +770,12 @@ ilp_schedule_block(agx_context *ctx, agx_block *block, void *memctx,
    /* The ILP order itself counts as a change from the source order. */
    for (unsigned i = 0; i < n; ++i)
       changed |= order[i]->index != i;
-   if ((agx_get_codegen_flags() & AGX_CODEGEN_G17P_EXIT_COMPARE) &&
-       ilp_place_exit_compare(block, nodes, order, n, dependents, memctx)) {
+   if (ilp_place_exit_compare(block, nodes, order, n, dependents, memctx)) {
       changed = false;
       for (unsigned i = 0; i < n; ++i)
          changed |= order[i]->index != i;
    }
-   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
-       (agx_get_codegen_flags() & AGX_CODEGEN_G17P_TILE_WAIT_SINK)) {
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
       ilp_sink_pixel_waits(order, n, dependents);
       changed = false;
       for (unsigned i = 0; i < n; ++i)
@@ -881,8 +860,7 @@ static bool
 ilp_single_tile_blend(const agx_context *ctx, const agx_block *block)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B ||
-       ctx->stage != MESA_SHADER_FRAGMENT ||
-       !(agx_get_codegen_flags() & AGX_CODEGEN_G17P_COLOR_ILP))
+       ctx->stage != MESA_SHADER_FRAGMENT)
       return false;
 
    unsigned loads = 0, stores = 0, load_target = 0, store_target = 0;
@@ -934,10 +912,7 @@ ilp_single_tile_blend(const agx_context *ctx, const agx_block *block)
 void
 agx_ilp_schedule(agx_context *ctx)
 {
-   const int64_t latency = debug_get_option_agx_g17p_ilp_latency();
-   const int64_t slack = debug_get_option_agx_g17p_ilp_slack();
-   const unsigned alu_latency =
-      latency >= 1 && latency <= 64 ? (unsigned)latency : 4;
+   const unsigned alu_latency = AGX_ILP_ALU_LATENCY;
 
    agx_compute_liveness(ctx);
    void *memctx = ralloc_context(ctx);
@@ -974,7 +949,7 @@ agx_ilp_schedule(agx_context *ctx)
          continue;
       if (in_loop[block->index] && !ilp_block_has_memory(block)) {
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency,
-                            slack >= 0 && slack <= 256 ? (signed)slack : 2);
+                            AGX_ILP_SLACK);
       } else if (!in_loop[block->index] && ilp_single_tile_blend(ctx, block)) {
          /* Hardware-qualified color-only budget; leave loop pressure alone. */
          ilp_schedule_block(ctx, block, memctx, native_uniforms, alu_latency, 8);

@@ -1535,12 +1535,6 @@ hk_codegen_env_hash(void)
    }
    qsort(list, n, sizeof(list[0]), hk_env_cmp);
    uint64_t h = 0xcbf29ce484222325ull;
-   /* The legacy packed key is full. Hash all codegen bits independently,
-    * including default-enabled options with no environment entry. This feeds
-    * both Vulkan UUIDs and the disk cache; Gallium already keys all 32 bits. */
-   const uint32_t codegen = agx_get_codegen_flags();
-   for (unsigned i = 0; i < 4; ++i)
-      h = (h ^ ((codegen >> (8 * i)) & 0xff)) * UINT64_C(0x100000001b3);
    for (unsigned i = 0; i < n; ++i)
       for (const char *c = list[i]; ; ++c) {
          h = (h ^ (uint8_t)*c) * 0x100000001b3ull;

@@ -186,54 +186,19 @@ hk_ordinary_v57_flags(const struct agx_device *dev)
           (debug_get_option_hk_g17p_ordinary_txf() ? HK_ORDINARY_V57_TXF : 0);
 }
 
-/* v53-pre: v52b's ALU flags keep key bits 33, 59, 62 and 63, so the v52
- * fragment-structure flags move to bits 28..31 of the device-debug word,
- * which no AGX_DBG flag uses (the highest is AGX_DBG_ASYNCTRACE, bit 24).
- * Key placement changes only cache identity, never generated code. */
+/* Inline blending changes the fragment programs fast-link builds. */
 static uint64_t
 hk_fs_structure_key_bits(void)
 {
-   /* v54: six flags, bits 26..31 (the four v52 flags keep their relative
-    * order, so only their absolute position moves). */
-   static_assert(AGX_FS_STRUCTURE_FLAG_BITS == 6,
-                 "v52/v54 flags must fit in key bits 26..31");
-   static_assert(AGX_DBG_ASYNCTRACE < BITFIELD_BIT(26),
-                 "device debug flags must stay below key bit 26");
-   return (uint64_t)(agx_get_fs_structure_flags() &
-                     BITFIELD_MASK(AGX_FS_STRUCTURE_FLAG_BITS)) << 26;
+   return (uint64_t)!!(agx_get_fs_structure_flags() &
+                       AGX_FS_STRUCTURE_INLINE_BLEND) << 30;
 }
 
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
    /* This could be optimized but it doesn't matter. */
-   const uint64_t debug = agx_get_compiler_debug();
-   /* The native backend experiments change emitted code. Keep their cached
-    * binaries distinct; bits 0..31 are device flags, bit 32 is unused
-    * and bits 41..57 are the legacy G17P code generation flags. Extended
-    * codegen bits are hashed separately into the cache identities. */
-   static_assert(AGX_CODEGEN_G17P_EXIT_COMPARE < (1u << 17),
-                 "codegen flags must fit in key bits 41..57");
-   /* v50 footgun-audit flags occupy the otherwise unused bits 35..39. */
-   static_assert(AGX_FOOTGUN_FLAG_BITS == 5,
-                 "footgun flags must fit in key bits 35..39");
-   static_assert(AGX_DBG_ASYNCTRACE < BITFIELD_BIT(25),
-                 "v56c FS_CPROG key bit 25 must be free of device debug flags");
-   /* v52b ALU-issue flags occupy the otherwise unused bits 33, 59, 62, 63. */
-   static_assert(AGX_ALU_FLAG_BITS == 4, "ALU flags must fit in key bits 33/59/62/63");
-   const uint32_t alu = agx_get_alu_flags();
-   const uint64_t alu_key = ((uint64_t)!!(alu & BITFIELD_BIT(0)) << 33) |
-                            ((uint64_t)!!(alu & BITFIELD_BIT(1)) << 59) |
-                            ((uint64_t)!!(alu & BITFIELD_BIT(2)) << 62) |
-                            ((uint64_t)!!(alu & BITFIELD_BIT(3)) << 63);
-   return alu_key | pdev->dev.debug |
-          ((uint64_t)!!(debug & AGX_DBG_NATIVE_UNIFORMS) << 34) |
-          /* v56c AGX_G17P_FS_CPROG: bit 25 (device debug flags end at 24). */
-          ((uint64_t)(pdev->dev.chip == AGX_CHIP_G17P &&
-                      agx_g17p_fs_cprog_default()) << 25) |
-          ((uint64_t)(agx_get_footgun_flags() &
-                      BITFIELD_MASK(AGX_FOOTGUN_FLAG_BITS)) << 35) |
-          ((uint64_t)(agx_get_codegen_flags() & BITFIELD_MASK(17)) << 41) |
+   return pdev->dev.debug |
           ((uint64_t)hk_ordinary_regions_enabled(&pdev->dev) << 40) |
           ((uint64_t)hk_ordinary_single_sample_enabled(&pdev->dev) << 58) |
           ((uint64_t)hk_ordinary_variants_enabled(&pdev->dev) << 60) |
@@ -1513,17 +1478,11 @@ lower_scaled_storage(nir_builder *b, nir_intrinsic_instr *intr, void *unused)
    return true;
 }
 
-/* Internal shaders: AGX_FOOTGUN_G17P_INTERNAL_SCALED_GUARD (default on,
- * HK_G17P_INTERNAL_SCALED_GUARD=0 for A/B). Everything:
- * AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD (opt-in). Both are shader-cache keyed
- * through hk_physical_device_compiler_flags(). */
+/* Driver-internal shaders branch around the scaled-view texel conversion. */
 static bool
 hk_scaled_sample_guard(const nir_shader *nir)
 {
-   const uint32_t flags = agx_get_footgun_flags();
-   return (nir->info.internal &&
-           (flags & AGX_FOOTGUN_G17P_INTERNAL_SCALED_GUARD)) ||
-          (flags & AGX_FOOTGUN_G17P_SCALED_SAMPLE_GUARD);
+   return nir->info.internal;
 }
 
 /* Image-view formats are dynamic descriptor state. Recover scaled samples
@@ -3087,12 +3046,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          NIR_PASS(_, nir, nir_lower_alpha_to_coverage, false, enable);
       }
 
-      if (dev->dev.chip == AGX_CHIP_G17P &&
-          (agx_get_codegen_flags() & AGX_CODEGEN_G17P_UNIT_RANGE_BLEND))
+      if (dev->dev.chip == AGX_CHIP_G17P)
          shader->info.fs.g17p_colour_unit_range =
-            agx_nir_fs_colour_outputs_unit_range(
-               nir, agx_get_fs_structure_flags() &
-                       AGX_FS_STRUCTURE_UNIT_RANGE_CONST);
+            agx_nir_fs_colour_outputs_unit_range(nir);
 
       NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog_for_device,
                dev->dev.chip, &shader->info.fs.epilog_key);
@@ -3333,22 +3289,17 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          dev->dev.chip == AGX_CHIP_G17P && hw &&
          hk_g17p_sparse_vertex_outputs(&nir->info, sw_stage,
                                        xfb_info && xfb_info->output_count),
-      /* Native fragment CProg qualification is explicitly opt-in. Descriptor
-       * lowering above still uses immediate native state slots, never the
-       * AGX2 texture/sampler-state-store protocol. Vertex/compute launch and
-       * the default G17P path remain outside this qualification gate. */
-      /* v56c: the default fragment constant program is formed only when the
-       * fragment reads descriptor-backed memory (UBO/SSBO/texture/image) it
-       * can hoist. A push-constant-only fragment keeps the v56b path: its CProg
-       * measured longer offline (light FS main 48 -> 52 + 12-instruction
-       * CProg, and the loop's uniform compare/early compare were lost). The
-       * AGX_MESA_DEBUG=native_uniforms debug flag still forces every FS. */
+      /* The fragment constant program is formed only when the fragment reads
+       * descriptor-backed memory (UBO/SSBO/texture/image) it can hoist. A
+       * push-constant-only fragment keeps uniform DMA: its CProg measured
+       * longer offline (light FS main 48 -> 52 + 12-instruction CProg, and
+       * the loop's uniform compare/early compare were lost). Descriptor
+       * lowering above uses immediate native state slots, never the AGX2
+       * texture/sampler-state-store protocol. */
       .no_preamble = dev->dev.chip == AGX_CHIP_G17P &&
          !(nir->info.stage == MESA_SHADER_FRAGMENT &&
-           ((agx_get_compiler_debug() & AGX_DBG_NATIVE_UNIFORMS) ||
-            (agx_g17p_fs_cprog_default() &&
-             (nir->info.num_ubos || nir->info.num_ssbos ||
-              nir->info.num_textures || nir->info.num_images)))),
+           (nir->info.num_ubos || nir->info.num_ssbos ||
+            nir->info.num_textures || nir->info.num_images)),
    };
 
    /* v56d: the native constant-program lowering applies exactly when G17P
@@ -3357,10 +3308,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    backend_key.g17p_native_uniforms =
       dev->dev.chip == AGX_CHIP_G17P && !backend_key.no_preamble;
 
-   /* AGX_G17P_UNIFORM_DMA (v51a, default off): fragment shaders only. The
-    * root table and every descriptor set pointer are driver-resolvable
-    * (hk_g17p_graphics_uniform_ranges publishes the span). */
-   /* v51b: the hardware vertex shader too, when its worst-case launch range
+   /* Uniform DMA: the root table and every descriptor set pointer are
+    * driver-resolvable (hk_g17p_graphics_uniform_ranges publishes the span).
+    * The hardware vertex shader uses it too when its worst-case launch range
     * count leaves room for the extra span. hk_g17p_graphics_uniform_ranges()
     * can emit for a VS: attribute bases + clamps (2), draw parameters (1,
     * decided by the linked prolog, so assume present), draw ID (1), indexed
@@ -3373,8 +3323,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
         shader->info.agx3_indexed_sampler_valid);
    if (dev->dev.chip == AGX_CHIP_G17P && backend_key.no_preamble &&
        ((sw_stage == MESA_SHADER_FRAGMENT &&
-         nir->info.stage == MESA_SHADER_FRAGMENT) || vs_dma_fits) &&
-       (agx_get_footgun_flags() & AGX_FOOTGUN_G17P_UNIFORM_DMA)) {
+         nir->info.stage == MESA_SHADER_FRAGMENT) || vs_dma_fits)) {
       backend_key.g17p_uniform_dma = true;
       backend_key.g17p_dma_root = root;
       backend_key.g17p_dma_set_mask = BITFIELD_MASK(MIN2(set_count, 8));
@@ -3396,7 +3345,7 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
    simple_mtx_t *lock = NULL;
    if (agx_get_compiler_debug() &
        (AGX_DBG_SHADERS | AGX_DBG_SHADERDB | AGX_DBG_VERBOSE |
-        AGX_DBG_INTERNAL | AGX_DBG_REFUSE))
+        AGX_DBG_INTERNAL))
       lock = &hk_device_physical(dev)->debug_compile_lock;
 
    if (lock)
@@ -3428,14 +3377,9 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
 
    /* G17P hardware vertex programs (API VS, GS raster and native TES
     * variants) run per-draw uniform work once in a native vertex constant
-    * program, as Apple's compiler does: e.g. ProjMat * ModelViewMat.
-    * HK_G17P_VS_CPROG=0 is the A/B off-switch: every vertex program is then
-    * built the way a declined constant program is (no preamble; uniform DMA
-    * when AGX_G17P_UNIFORM_DMA applies). The codegen environment hash keeps
-    * the two arms' cached binaries apart. */
+    * program, as Apple's compiler does: e.g. ProjMat * ModelViewMat. */
    const bool vs_cprog = dev->dev.chip == AGX_CHIP_G17P && hw &&
-                         nir->info.stage == MESA_SHADER_VERTEX &&
-                         HK_ENV_BOOL_ONCE("HK_G17P_VS_CPROG", true);
+                         nir->info.stage == MESA_SHADER_VERTEX;
    bool compiled = vs_cprog &&
       hk_g17p_compile_vs_cprog(dev, &nir, &backend_key, shader);
    if (!compiled && dev->dev.chip == AGX_CHIP_G17P &&

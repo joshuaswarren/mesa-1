@@ -1333,20 +1333,8 @@ agx3_alu_band_identity_wait(enum agx_isa_encoding enc, uint16_t reg,
    const uint16_t src[] = {reg, reg};
    const enum agx3_alu_hint hints[] = {AGX3_ALU_HINT_NONE, AGX3_ALU_HINT_NONE};
 
-   /* Diagnostic (AGX_G17P_CARRIER_NO_S6=1): drop the specimen's slot-6 bit
-    * from the carrier's wait mask.
-    *
-    * Every retire carrier waits slot 6 in addition to whatever it was asked to
-    * retire. That matters when reading AGX_G17P_SINGLE_WAIT=2, which is worth
-    * 26x on bug #1: the win could be "the wait moved off the BITOP" or simply
-    * "the carrier also synchronises slot 6". This knob separates them. */
-   static int no_s6 = -1;
-   if (no_s6 < 0) {
-      const char *v = getenv("AGX_G17P_CARRIER_NO_S6");
-      no_s6 = (v && v[0] && v[0] != '0') ? 1 : 0;
-   }
-
-   const uint16_t extra = no_s6 ? 0 : (UINT16_C(1) << 5);
+   /* Every retire carrier also waits slot 6, as the witnessed specimen does. */
+   const uint16_t extra = UINT16_C(1) << 5;
    return agx3_alu_bit_reg(enc, AGX3_ALU_BAND, reg, src, hints,
                            wait_mask | extra, out, len);
 }

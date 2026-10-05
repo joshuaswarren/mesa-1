@@ -131,19 +131,17 @@ class AGX3PackBinary : public testing::Test {
    }
 };
 
-/* AGX_G17P_INT_DEST_CACHE (default on since 253b68945fd, "G17P v56h")
- * deposits the f11 destination register-cache hint on every AGX3b integer
- * register add/subtract the packer emits; the hint is byte 4 bit 0 of these
- * ten-byte forms. Expectations below that were written before that default
- * are the hint-free encodings with the hint applied exactly when the flag is
- * active, so they keep checking everything else either way. Several of them
- * carry Apple captures (the "Apple:" comments) with f11 clear: the flag
- * deliberately differs from those captures, and its CTS result on hardware
- * was unchanged (253b68945fd). */
+/* The packer deposits the f11 destination register-cache hint on every AGX3b
+ * integer register add/subtract (253b68945fd, "G17P v56h"); the hint is byte 4
+ * bit 0 of these ten-byte forms. Expectations below that predate it are the
+ * hint-free encodings with the hint applied. Several of them carry Apple
+ * captures (the "Apple:" comments) with f11 clear: the packer deliberately
+ * differs from those captures, and its CTS result on hardware was unchanged
+ * (253b68945fd). */
 static bool
 int_dest_cache(void)
 {
-   return agx_get_codegen_flags() & AGX_CODEGEN_G17P_INT_DEST_CACHE;
+   return true;
 }
 
 static bool

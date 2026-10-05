@@ -420,18 +420,14 @@ struct agx_shader_key {
 
    /* AGX3B: build the preamble as a native constant program (CProg inputs
     * imported through its TPS frame, arithmetic results selected straight
-    * into uniform destinations, half exports legalized) for this shader,
-    * independent of AGX_MESA_DEBUG=native_uniforms. G17P vertex programs
-    * always use it.
+    * into uniform destinations, half exports legalized) for this shader.
+    * G17P vertex programs always use it.
     */
    bool agx3_native_cprog;
-   /* v56d: the native constant-program lowering (the AGX_DBG_NATIVE_UNIFORMS
-    * behaviour) for THIS compile. Decided per compile by the driver (G17P
-    * fragment constant program, v57 vertex CProg) and carried in the key:
-    * never by writing the process-global agx_compiler_debug, which every
-    * concurrently compiling thread reads (v56c raced here: a vertex compile
-    * starting on another thread cleared the bit under a fragment compile,
-    * whose preamble then could not be encoded). */
+   /* The native constant-program lowering for THIS compile. Decided per
+    * compile by the driver (G17P fragment and vertex constant programs) and
+    * carried in the key, never in process-global state that concurrently
+    * compiling threads read. */
    bool g17p_native_uniforms;
 
    /* G17P uniform DMA (v51a): hoist constant-index loads through the 64-bit

@@ -5486,63 +5486,6 @@ hk_g17p_mono_resolve_exports(nir_shader *nir)
    return true;
 }
 
-/* v54 AGX_G17P_DISCARD_NO_RESTORE: a top-level sample_mask_agx whose target
- * is every sample (a constant, or `x | c` with the low sample bits of c set)
- * and whose live set is constant zero kills the fragment. Every later tile
- * store then has no covered sample; drop them (the unwritten-target
- * preserve among them), and let DCE remove their loads. */
-static bool
-hk_g17p_mono_drop_dead_tile_stores(nir_shader *nir, unsigned nr_samples)
-{
-   nir_function_impl *impl = nir_shader_get_entrypoint(nir);
-   const unsigned all = BITFIELD_MASK(MAX2(nr_samples, 1));
-   bool killed = false, progress = false;
-   foreach_list_typed(nir_cf_node, node, node, &impl->body) {
-      if (node->type != nir_cf_node_block) {
-         if (killed)
-            return false; /* keep it simple: straight-line tail only */
-         continue;
-      }
-      nir_block *block = nir_cf_node_as_block(node);
-      nir_foreach_instr_safe(instr, block) {
-         if (instr->type != nir_instr_type_intrinsic)
-            continue;
-         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
-         if (!killed && intr->intrinsic == nir_intrinsic_sample_mask_agx) {
-            bool target_all = false;
-            if (nir_src_is_const(intr->src[0])) {
-               target_all = (nir_src_as_uint(intr->src[0]) & all) == all;
-            } else {
-               nir_scalar t = nir_scalar_chase_movs(
-                  nir_get_scalar(intr->src[0].ssa, 0));
-               if (nir_scalar_is_alu(t) && nir_scalar_alu_op(t) == nir_op_ior) {
-                  for (unsigned i = 0; i < 2; ++i) {
-                     nir_scalar c = nir_scalar_chase_movs(
-                        nir_scalar_chase_alu_src(t, i));
-                     if (nir_scalar_is_const(c) &&
-                         (nir_scalar_as_uint(c) & all) == all)
-                        target_all = true;
-                  }
-               }
-            }
-            killed = target_all && nir_src_is_const(intr->src[1]) &&
-                     nir_src_as_uint(intr->src[1]) == 0;
-         } else if (killed &&
-                    intr->intrinsic == nir_intrinsic_store_local_pixel_agx) {
-            nir_instr_remove(instr);
-            progress = true;
-         } else if (killed &&
-                    (intr->intrinsic == nir_intrinsic_sample_mask_agx ||
-                     intr->intrinsic == nir_intrinsic_store_zs_agx)) {
-            return false;
-         }
-      }
-   }
-   if (progress)
-      nir_progress(true, impl, nir_metadata_control_flow);
-   return progress;
-}
-
 static struct agx_shader_part *
 hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
                            const struct agx_fs_epilog_key *ekey,
@@ -5626,11 +5569,6 @@ hk_g17p_inline_epilog_part(struct hk_device *dev, struct hk_shader *shader,
    NIR_PASS(_, nir, nir_opt_copy_prop);
    NIR_PASS(_, nir, nir_opt_constant_folding);
    NIR_PASS(_, nir, nir_opt_dce);
-
-   if (agx_get_fs_structure_flags() & AGX_FS_STRUCTURE_DISCARD_NO_RESTORE) {
-      NIR_PASS(_, nir, hk_g17p_mono_drop_dead_tile_stores, ekey->nr_samples);
-      NIR_PASS(_, nir, nir_opt_dce);
-   }
 
    struct agx_shader_key key = shader->g17p_mono_key;
    key.no_stop = false;

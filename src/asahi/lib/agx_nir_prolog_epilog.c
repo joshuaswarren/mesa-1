@@ -1160,7 +1160,7 @@ unit_bound(nir_shader *s, struct hash_table *ht, nir_scalar v, double *lo,
 }
 
 bool
-agx_nir_fs_colour_outputs_unit_range(nir_shader *s, bool exact_constants)
+agx_nir_fs_colour_outputs_unit_range(nir_shader *s)
 {
    if (s->info.stage != MESA_SHADER_FRAGMENT)
       return false;
@@ -1189,14 +1189,6 @@ agx_nir_fs_colour_outputs_unit_range(nir_shader *s, bool exact_constants)
                double lo, hi;
                nir_scalar chan = nir_scalar_chase_movs(nir_get_scalar(vec, c));
                any = true;
-               /* An exact constant needs no rounding margin: fsat(k) == k
-                * for every k in [0, 1], including 1.0 (v52). */
-               if (exact_constants && nir_scalar_is_const(chan)) {
-                  const double k = nir_scalar_as_float(chan);
-                  if (!(k >= 0.0 && k <= 1.0))
-                     all = false;
-                  continue;
-               }
                /* Margin covers f16/f32 rounding of each bounded step. */
                if (!unit_bound(s, ht, nir_get_scalar(vec, c), &lo, &hi, 0) ||
                    lo < 0.0 || hi > 0.99)

@@ -609,7 +609,6 @@ check_instance_divisor_compiles(uint32_t divisor)
 static void
 check_uniform_sub_preamble(void)
 {
-   const bool enabled = debug_get_bool_option("AGX_G17P_VERTEX_UNIFORM_SUB", false);
    for (unsigned mode = 0; mode < 6; ++mode) {
       const bool g17p = mode != 1;
       mesa_shader_stage stage = mode == 2 ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX;
@@ -643,12 +642,7 @@ check_uniform_sub_preamble(void)
             }
          }
       }
-      fprintf(stderr, "uniform-sub mode=%u enabled=%u main=%u pre=%u\n", mode, enabled, main_neg, pre_neg);
-      if (enabled && (mode == 0 || mode == 5)) {
-         CHECK(main_neg == 1 && pre_neg == 0);
-      } else {
-         CHECK(main_neg == 0 && pre_neg == 1);
-      }
+      CHECK(main_neg == 0 && pre_neg == 1);
       ralloc_free(b.shader);
    }
 }
