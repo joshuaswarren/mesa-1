@@ -1348,6 +1348,20 @@ d12_list_flush_cdm_pending(struct d12_cmd_list *list)
    struct d12_segment *seg = &list->segments[list->segment_count - 1];
    if (!seg->cdm_flush_pending)
       return true;
+   /* A native G17P launch ends in its own barrier word. When nothing has
+    * been appended since, the strong flush replaces that word rather than
+    * following it: Apple never emits two barrier words back to back. */
+   if (seg->g17p_weak_barrier_end &&
+       seg->g17p_weak_barrier_end ==
+          (size_t)(list->stream_cur - d12_list_stream_map(list))) {
+      const uint32_t strong = agx3_cdm_barrier_word(0x5);
+      memcpy(list->stream_cur - AGX3_CDM_BARRIER_SIZE, &strong,
+             sizeof(strong));
+      seg->g17p_weak_barrier_end = 0;
+      seg->cdm_flush_pending = false;
+      return true;
+   }
+   seg->g17p_weak_barrier_end = 0;
    /* The dispatch reserved these bytes with its own space check. */
    if (!d12_list_check_stream_space(list, AGX_CDM_BARRIER_LENGTH))
       return false;
@@ -6739,11 +6753,23 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
       .data = list->stream_cur,
       .capacity = D12_DISPATCH_STREAM_MARGIN,
    };
+   /* The record's trailing barrier word is the weak ordering form unless
+    * the A/B control asks for the strong flush on every launch; the strong
+    * form is owed to the next barrier, which rewrites this word in place
+    * when it is still the last thing in the stream (hk_cdm_cache_flush). */
+   const uint8_t barrier_flags =
+      d12_debug()->flush_each_dispatch ? 0x5 : 0;
    if (!d12_list_check_stream_space(list, sink.capacity) ||
        !agx3_g17p_native_compute_dispatch_append_with_barrier(
-          &generated.launch, &grid, 0x5, &sink))
+          &generated.launch, &grid, barrier_flags, &sink))
       goto fail;
    list->stream_cur += sink.length;
+   if (barrier_flags == 0) {
+      struct d12_segment *seg = &list->segments[list->segment_count - 1];
+      seg->cdm_flush_pending = true;
+      seg->g17p_weak_barrier_end =
+         list->stream_cur - d12_list_stream_map(list);
+   }
    return true;
 
 fail:

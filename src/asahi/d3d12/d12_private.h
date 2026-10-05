@@ -1748,6 +1748,10 @@ struct d12_segment {
     * the flush is owed before any barrier, helper launch or the
     * segment's terminator (d12_list_flush_cdm_pending). */
    bool cdm_flush_pending;
+   /* Stream offset one past the weak barrier word of the last native G17P
+    * API launch while it is still the end of the stream, else 0; the owed
+    * strong flush rewrites that word in place (d12_list_flush_cdm_pending). */
+   size_t g17p_weak_barrier_end;
 
    /* Bindless AGX samplers are addressed from one heap named by the DRM
     * command, not by a USC sampler-state record. Capture the heap selected
