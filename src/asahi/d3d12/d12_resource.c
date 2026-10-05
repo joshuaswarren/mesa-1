@@ -2176,6 +2176,45 @@ d12_sparse_read_address(struct d12_device *device, uint64_t address)
    return address;
 }
 
+/* CreateConstantBufferView needs both answers for one address: the
+ * reserved buffer that owns it, if any, and the address to read it through.
+ * Give both from one walk under one lock, and skip the lock entirely while
+ * no reserved resource exists, which is the common case. The list head is
+ * read without the lock: a resource's address can only reach this thread
+ * after its creation, which registered it, returned. */
+uint64_t
+d12_sparse_resolve_cbv_address(struct d12_device *device, uint64_t address,
+                               struct d12_resource **owner)
+{
+   *owner = NULL;
+   if (p_atomic_read_relaxed(&device->sparse_resources.next) ==
+       &device->sparse_resources)
+      return address;
+
+   uint64_t probe = address;
+   if (agx_addr_is_ro(&device->dev, probe))
+      probe -= device->dev.sparse_ro_offset;
+
+   uint64_t read_address = address;
+   bool read_found = false;
+   simple_mtx_lock(&device->sparse_resource_lock);
+   list_for_each_entry(struct d12_resource, res, &device->sparse_resources,
+                       sparse_link) {
+      if (!*owner && res->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER &&
+          probe >= res->addr && probe - res->addr < res->sparse_size_B)
+         *owner = res;
+      if (!read_found && address >= res->addr &&
+          address - res->addr < res->sparse_size_B) {
+         read_address = address + device->dev.sparse_ro_offset;
+         read_found = true;
+      }
+      if (*owner && read_found)
+         break;
+   }
+   simple_mtx_unlock(&device->sparse_resource_lock);
+   return read_address;
+}
+
 struct d12_resource *
 d12_sparse_buffer_for_address(struct d12_device *device, uint64_t address)
 {

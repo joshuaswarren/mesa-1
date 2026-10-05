@@ -4120,9 +4120,8 @@ d12_device_CreateConstantBufferView(
        * publishes its residency map and current backing allocations to the
        * exact read set. */
       view.kind = D12_DESC_CBV;
-      view.resource =
-         d12_sparse_buffer_for_address(device, desc->BufferLocation);
-      view.address = d12_sparse_read_address(device, desc->BufferLocation);
+      view.address = d12_sparse_resolve_cbv_address(
+         device, desc->BufferLocation, &view.resource);
       view.size_B = desc->SizeInBytes;
    }
 

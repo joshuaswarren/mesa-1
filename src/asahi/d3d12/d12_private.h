@@ -558,6 +558,9 @@ HRESULT d12_sparse_collect_tiles(
    const D3D12_TILE_REGION_SIZE *sizes, uint32_t **out_tiles,
    uint32_t *out_count);
 uint64_t d12_sparse_read_address(struct d12_device *device, uint64_t address);
+uint64_t d12_sparse_resolve_cbv_address(struct d12_device *device,
+                                        uint64_t address,
+                                        struct d12_resource **owner);
 struct d12_resource *d12_sparse_buffer_for_address(
    struct d12_device *device, uint64_t address);
 uint64_t d12_sparse_buffer_residency_address(
