@@ -59,8 +59,9 @@ def check(directory, name):
     for size in sizes:
         words = struct.unpack_from('<' + 'I' * (size // 4), stream, offset)
         assert bool(words[0] & 0x10000000) == (size == 24)
-        address = (words[2] << 6) | ((words[3] & 0xff) << 40)
+        address = (words[2] << 6) | (((words[1] >> 22) & 0x3ff) << 38)
         assert (words[3] & 0xffffff00) == 0x40000000
+        assert (words[3] & 0xff) == ((address >> 40) & 0xff)
         assert address % 64 == 0 and 0 <= address - meta['usc_base'] < len(ioto)
         programs.append(address)
         if size == 24:
