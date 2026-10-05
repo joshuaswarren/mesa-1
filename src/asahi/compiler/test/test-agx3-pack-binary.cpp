@@ -9473,6 +9473,66 @@ TEST_F(AGX3PackBinary, G17PColourPackingKeepsNativeUniformSources)
  * mask, and the packer selects Apple's modes from it (s_rgba / s_r8 /
  * s_pblend witnesses in test-agx3-g17p-producers.c): both lanes encoded, lane
  * 0 encoded over a linear alpha lane, or a single encoded lane. */
+/* The G17P kill (sample_mask_agx3) is scheduled as early as its sources
+ * allow, like the AGX2 sample_mask: a texture fetch the kill does not depend
+ * on must not run before it, or every fragment the kill retires pays for it
+ * (Apple's code for the same shapes issues only the kill's own fetch first). */
+TEST_F(AGX3PackBinary, G17PKillPrecedesIndependentFetches)
+{
+   agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   b->shader->nir = rzalloc(mem_ctx, nir_shader);
+   b->shader->nir->info.stage = MESA_SHADER_FRAGMENT;
+
+   auto fetch = [&](uint32_t x) {
+      agx_index xy[2] = {agx_mov_imm(b, 32, x), agx_mov_imm(b, 32, x + 1)};
+      agx_index coord = agx_vec_temp(b->shader, AGX_SIZE_32, 2);
+      agx_instr *collect = agx_collect_to(b, coord, 2);
+      collect->src[0] = xy[0];
+      collect->src[1] = xy[1];
+      agx_index dest = agx_vec_temp(b->shader, AGX_SIZE_32, 4);
+      agx_instr *tex = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0),
+         agx_uniform(0, AGX_SIZE_64), agx_immediate(0), agx_null(),
+         AGX_DIM_2D, AGX_LOD_MODE_LOD_MIN, 0, false, false, false,
+         AGX_GATHER_NONE, false);
+      tex->op = AGX_OPCODE_TEXTURE_LOAD;
+      tex->mask = 15;
+      agx_instr *split = agx_split(b, 4, dest);
+      for (unsigned i = 0; i < 4; ++i)
+         split->dest[i] = agx_temp(b->shader, AGX_SIZE_32);
+      return std::make_pair(tex, split);
+   };
+
+   /* Program order: the kill's flag fetch, an unrelated fetch, the kill,
+    * then the unrelated value's use. */
+   auto flag = fetch(0x40000000);
+   auto other = fetch(0x41000000);
+   agx_instr *kill = agx_sample_mask_agx3(
+      b, agx_mov_imm(b, 16, 1), flag.second->dest[0], 2);
+   agx_index sum = agx_fadd(b, other.second->dest[0], other.second->dest[1]);
+   sum = agx_fadd(b, sum, other.second->dest[2]);
+   sum = agx_fadd(b, sum, other.second->dest[3]);
+   agx_export(b, sum, 8);
+   agx_stop(b);
+
+   agx_pressure_schedule(b->shader);
+
+   int pos = 0, kill_pos = -1, other_pos = -1, flag_pos = -1;
+   agx_foreach_instr_global(b->shader, I) {
+      if (I == kill)
+         kill_pos = pos;
+      else if (I == other.first)
+         other_pos = pos;
+      else if (I == flag.first)
+         flag_pos = pos;
+      ++pos;
+   }
+   ASSERT_GE(kill_pos, 0);
+   EXPECT_LT(flag_pos, kill_pos);
+   EXPECT_LT(kill_pos, other_pos);
+}
+
 TEST_F(AGX3PackBinary, G17PSrgbLanesSelectNativeConversionModes)
 {
    static const struct {
