@@ -175,9 +175,6 @@ struct hk_device {
 
    struct {
       bool launch_trace;
-      bool draw_trace;
-      bool compact_ioto_trace;
-      bool graphics_ioto_cache_stats;
    } g17p_diagnostics;
 
    struct {

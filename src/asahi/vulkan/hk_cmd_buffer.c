@@ -629,19 +629,6 @@ hk_g17p_launch_trace_init(void)
    return enabled;
 }
 
-/* One short line per submitted graphics stream.  This trace exists for real
- * applications where HK_G17P_LAUNCH_TRACE changes timing and produces too
- * much output to find the program whose fragment timestamp never ended. */
-int hk_g17p_draw_trace_state = -1;
-
-int
-hk_g17p_draw_trace_init(void)
-{
-   const int enabled = HK_ENV_BOOL_ONCE("HK_G17P_DRAW_TRACE", false) ? 1 : 0;
-   hk_g17p_draw_trace_state = enabled;
-   return enabled;
-}
-
 /* Single line, distinct tag. The multi-line dump below has twice been reported
  * as "only the header printed", so anything that must not be lost in a log
  * filter goes through this instead. */
@@ -1345,13 +1332,6 @@ hk_cmd_buffer_upload_root(struct hk_cmd_buffer *cmd,
    /* Diagnostic: which descriptor sets each published graphics root names,
     * so a launch's root range can be matched to the sets its constant
     * program reads (the uniform DMA stale-set gate). */
-   if (unlikely(dev->g17p_diagnostics.compact_ioto_trace) &&
-       bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
-      fprintf(stderr, "G17P root-table: va=%" PRIx64, root_ptr.gpu);
-      for (unsigned i = 0; i < HK_MAX_SETS; ++i)
-         fprintf(stderr, " set%u=%" PRIx64, i, root->sets[i]);
-      fprintf(stderr, "\n");
-   }
 
    return root_ptr.gpu;
 }
@@ -2387,50 +2367,6 @@ hk_g17p_graphics_ioto_key_init(
    return size;
 }
 
-enum hk_g17p_graphics_ioto_cache_result {
-   HK_G17P_GRAPHICS_IOTO_FAST_HIT,
-   HK_G17P_GRAPHICS_IOTO_LAST_HIT,
-   HK_G17P_GRAPHICS_IOTO_COMPACT_ROOT,
-   HK_G17P_GRAPHICS_IOTO_TEMPLATE_HIT,
-   HK_G17P_GRAPHICS_IOTO_GENERATED,
-   HK_G17P_GRAPHICS_IOTO_RESULT_COUNT,
-};
-
-static ATTRIBUTE_NOINLINE void
-hk_g17p_graphics_ioto_cache_stat_record(
-   enum hk_g17p_graphics_ioto_cache_result result);
-
-/* Diagnostic counter; the disabled check is all a draw pays. */
-static inline void
-hk_g17p_graphics_ioto_cache_stat(
-   const struct hk_device *dev,
-   enum hk_g17p_graphics_ioto_cache_result result)
-{
-   if (unlikely(dev->g17p_diagnostics.graphics_ioto_cache_stats))
-      hk_g17p_graphics_ioto_cache_stat_record(result);
-}
-
-static void
-hk_g17p_graphics_ioto_cache_stat_record(
-   enum hk_g17p_graphics_ioto_cache_result result)
-{
-   static uint32_t counts[HK_G17P_GRAPHICS_IOTO_RESULT_COUNT];
-   static uint32_t total;
-   p_atomic_inc(&counts[result]);
-   const uint32_t calls = p_atomic_inc_return(&total);
-
-   if ((calls & 0x7fff) == 0) {
-      fprintf(stderr,
-              "HK_G17P_GRAPHICS_IOTO_CACHE calls=%u fast=%u last=%u "
-              "compact=%u template=%u generated=%u\n",
-              calls, p_atomic_read(&counts[HK_G17P_GRAPHICS_IOTO_FAST_HIT]),
-              p_atomic_read(&counts[HK_G17P_GRAPHICS_IOTO_LAST_HIT]),
-              p_atomic_read(&counts[HK_G17P_GRAPHICS_IOTO_COMPACT_ROOT]),
-              p_atomic_read(&counts[HK_G17P_GRAPHICS_IOTO_TEMPLATE_HIT]),
-              p_atomic_read(&counts[HK_G17P_GRAPHICS_IOTO_GENERATED]));
-   }
-}
-
 struct hk_g17p_graphics_template_entry {
    struct hk_g17p_graphics_template_entry *next;
    struct agx3_cprog_inputs cprog_inputs;
@@ -2760,31 +2696,6 @@ hk_g17p_publish_compact_graphics(
    if (compact_root_ptr.cpu)
       memcpy(compact_root_ptr.cpu, compact_root, sizeof(*compact_root));
    const uint64_t compact_root_va = compact_root_ptr.gpu;
-   if (dev->g17p_diagnostics.compact_ioto_trace) {
-      fprintf(stderr,
-              "G17P compact Ioto: stage=%s shader=%" PRIx64
-              " root=%" PRIx64 " setup_len=%u external=%" PRIx64
-              "/%u ranges=%zu "
-              "valid=%" PRIx64 "\n",
-              fragment ? "fragment" : "vertex", linked_shader_va,
-              compact_root_va, setup->length, setup->external_va,
-              setup->external_length, range_count, compact_root->valid);
-      for (size_t r = 0; r < range_count; ++r) {
-         fprintf(stderr,
-                 "G17P compact range[%zu]: start_halfs=%u "
-                 "size_halfs=%u address=%" PRIx64 "\n",
-                 r, (unsigned)compact_ranges[r].start_halfs,
-                 (unsigned)compact_ranges[r].size_halfs,
-                 compact_ranges[r].address);
-      }
-      hk_g17p_trace_line("compact-root", compact_root_va, compact_root,
-                         sizeof(*compact_root));
-      hk_g17p_trace_line("compact-template", 0, setup->bytes, setup->length);
-      if (setup->external_bo)
-         hk_g17p_trace_line("compact-external-setup", setup->external_va,
-                            agx_bo_map(setup->external_bo),
-                            setup->external_length);
-   }
    struct hk_ioto_reservation reservation;
    const size_t launcher_capacity = MAX2(
       (size_t)HK_AGX3_G17P_GRAPHICS_EXTERNAL_LAUNCHER_MAX_SIZE,
@@ -2810,10 +2721,6 @@ hk_g17p_publish_compact_graphics(
       memcpy(reservation.map + prefix.length, setup->bytes, setup->length);
       program_length = prefix.length + setup->length;
    }
-   if (dev->g17p_diagnostics.compact_ioto_trace)
-      hk_g17p_trace_line(external ? "compact-external-launcher"
-                                  : "compact-inline-program",
-                         reservation.va, reservation.map, program_length);
    const uint64_t published =
       hk_cmd_publish_ioto_program(cmd, &reservation, program_length);
    if (!published)
@@ -2991,16 +2898,6 @@ hk_g17p_publish_one_level_record(
          }
          const uint64_t published =
             hk_cmd_publish_ioto_program(cmd, &reservation, one->length);
-         if (published && dev->g17p_diagnostics.compact_ioto_trace) {
-            fprintf(stderr,
-                    "G17P one-level record: shader=%" PRIx64
-                    " program=%" PRIx64 " len=%u draw_params=%" PRIx64
-                    " draw_id=%" PRIx64 " patched=%u\n",
-                    linked_shader_va, published, (unsigned)one->length,
-                    gfx->draw_params, gfx->draw_id_ptr, one->site_count);
-            hk_g17p_trace_line("one-level-program", published,
-                               reservation.map, one->length);
-         }
          return published;
       }
    }
@@ -3025,15 +2922,6 @@ hk_g17p_publish_one_level_record(
 
    const uint64_t published =
       hk_cmd_publish_ioto_program(cmd, &reservation, length);
-   if (published && dev->g17p_diagnostics.compact_ioto_trace) {
-      fprintf(stderr,
-              "G17P one-level record: shader=%" PRIx64 " program=%" PRIx64
-              " len=%u draw_params=%" PRIx64 " draw_id=%" PRIx64 "\n",
-              linked_shader_va, published, (unsigned)length,
-              gfx->draw_params, gfx->draw_id_ptr);
-      hk_g17p_trace_line("one-level-program", published, reservation.map,
-                         length);
-   }
    return published;
 }
 
@@ -3094,8 +2982,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
       }
 
       const bool diagnostics = (dev->dev.debug & AGX_DBG_FAULTTRACE) ||
-                               hk_g17p_launch_trace_enabled() ||
-                               hk_g17p_draw_trace_enabled();
+                               hk_g17p_launch_trace_enabled();
       const bool fast_cacheable =
          !diagnostics && !s->info.agx3_combined_sampler_valid &&
          !s->info.g17p_apple_fs &&
@@ -3143,8 +3030,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
           cached->tile_size_px == tib->tile_size &&
           cached->sample_size_B == tib->sample_size_B &&
           cached->nr_samples == tib->nr_samples) {
-         hk_g17p_graphics_ioto_cache_stat(
-            dev, HK_G17P_GRAPHICS_IOTO_LAST_HIT);
          return cached->program;
       }
 
@@ -3173,8 +3058,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             cached->key_size = 0;
             cached->fast_valid = fast_cacheable;
             cached->valid = true;
-            hk_g17p_graphics_ioto_cache_stat(
-               dev, HK_G17P_GRAPHICS_IOTO_TEMPLATE_HIT);
             return published;
          }
          if (vk_command_buffer_has_error(&cmd->vk))
@@ -3263,8 +3146,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                cached->key_size = 0;
                cached->fast_valid = fast_cacheable;
                cached->valid = true;
-               hk_g17p_graphics_ioto_cache_stat(
-                  dev, HK_G17P_GRAPHICS_IOTO_COMPACT_ROOT);
                return published;
             }
 
@@ -3381,8 +3262,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                cached->key_size = 0;
                cached->fast_valid = fast_cacheable;
                cached->valid = true;
-               hk_g17p_graphics_ioto_cache_stat(
-                  dev, HK_G17P_GRAPHICS_IOTO_COMPACT_ROOT);
                return published;
             }
          }
@@ -3547,8 +3426,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                            ? hk_bound_hw_vs(&cmd->state.gfx)
                            : NULL;
                   }
-                  hk_g17p_graphics_ioto_cache_stat(
-                     dev, HK_G17P_GRAPHICS_IOTO_COMPACT_ROOT);
                   return published;
                }
             }
@@ -3573,8 +3450,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             cached->sample_size_B = tib->sample_size_B;
             cached->nr_samples = tib->nr_samples;
          }
-         hk_g17p_graphics_ioto_cache_stat(
-            dev, HK_G17P_GRAPHICS_IOTO_LAST_HIT);
          return cached->program;
       }
 
@@ -3691,16 +3566,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             one->source_offset[r] = ranges[r].address - base[sources[r]];
          }
          one->valid = patchable;
-         if (dev->g17p_diagnostics.compact_ioto_trace) {
-            fprintf(stderr,
-                    "G17P one-level template: shader=%" PRIx64
-                    " program=%" PRIx64 " len=%u ranges=%zu patchable=%u"
-                    " template=%u\n",
-                    linked_shader_va, published, (unsigned)program_length,
-                    range_count, patchable, template_hit);
-            hk_g17p_trace_line("one-level-program", published, program_map,
-                               program_length);
-         }
          one->patch = false;
          if (patchable &&
              program_length <= sizeof(one->bytes) &&
@@ -3835,9 +3700,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          cached->valid = true;
       }
 
-      hk_g17p_graphics_ioto_cache_stat(
-         dev, template_hit ? HK_G17P_GRAPHICS_IOTO_TEMPLATE_HIT
-                           : HK_G17P_GRAPHICS_IOTO_GENERATED);
 
       if ((dev->dev.debug & AGX_DBG_FAULTTRACE) &&
           s->info.stage == MESA_SHADER_FRAGMENT && cmd->current_cs.gfx) {
@@ -3922,38 +3784,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                snapshot += size;
             }
          }
-      }
-
-      if (hk_g17p_draw_trace_enabled() &&
-          s->info.stage == MESA_SHADER_FRAGMENT && cmd->current_cs.gfx) {
-         struct hk_cs *cs = cmd->current_cs.gfx;
-         void *shader_map = agx_bo_map(linked->b.bo);
-
-         cs->g17p_draw_trace.fragment_program = published;
-         cs->g17p_draw_trace.fragment_ioto_hash =
-            _mesa_hash_data(program_map, program_length);
-         cs->g17p_draw_trace.fragment_ioto_size = program_length;
-         cs->g17p_draw_trace.fragment_shader_size = linked->b.size;
-         cs->g17p_draw_trace.fragment_shader_hash =
-            shader_map
-               ? _mesa_hash_data((uint8_t *)shader_map + linked->b.entry_offset,
-                                 linked->b.size)
-               : 0;
-         /* Keep the main shader identity separate from the linked executable:
-          * render-target epilogs can change the latter for one application
-          * shader, which makes a timeout fingerprint needlessly ambiguous.
-          */
-         cs->g17p_draw_trace.fragment_main_size = s->code_size;
-         cs->g17p_draw_trace.fragment_main_hash =
-            s->code_ptr ? _mesa_hash_data(s->code_ptr, s->code_size) : 0;
-         cs->g17p_draw_trace.color_count =
-            cmd->state.gfx.render.color_att_count;
-         for (unsigned i = 0; i < cmd->state.gfx.render.color_att_count; ++i) {
-            cs->g17p_draw_trace.color_formats[i] =
-               cmd->state.gfx.render.color_att[i].vk_format;
-         }
-         cs->g17p_draw_trace.depth_format =
-            cmd->state.gfx.render.depth_att.vk_format;
       }
 
       if (hk_g17p_launch_trace_enabled()) {

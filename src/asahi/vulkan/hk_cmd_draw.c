@@ -11325,27 +11325,6 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          return;
       }
 
-      if (hk_g17p_draw_trace_enabled() && dev->dev.chip == AGX_CHIP_G17P) {
-         cs->g17p_draw_trace.draw_id = draw_id;
-         cs->g17p_draw_trace.topology = topology;
-         cs->g17p_draw_trace.api_indexed = api_draw.indexed;
-         cs->g17p_draw_trace.api_indirect = agx_is_indirect(api_draw.b);
-         cs->g17p_draw_trace.api_count =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.b.count[0];
-         cs->g17p_draw_trace.api_instances =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.b.count[1];
-         cs->g17p_draw_trace.api_first =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.start;
-         cs->g17p_draw_trace.api_base_vertex =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.index_bias;
-         cs->g17p_draw_trace.api_first_instance =
-            agx_is_indirect(api_draw.b) ? 0 : api_draw.start_instance;
-         cs->g17p_draw_trace.emitted_indexed = draw.indexed;
-         cs->g17p_draw_trace.emitted_indirect = agx_is_indirect(draw.b);
-         cs->g17p_draw_trace.emitted_indirect_buffer =
-            agx_is_indirect(draw.b) ? draw.b.ptr : 0;
-      }
-
       if (needs_idx_robust) {
          assert(!geom && !tess && !adj);
          perf_debug(cmd, "lowering robust index buffer");
@@ -11356,12 +11335,6 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          if (!agx_vdm_draw_supported(dev->dev.chip, draw, topology)) {
             vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
             return;
-         }
-         if (hk_g17p_draw_trace_enabled() &&
-             dev->dev.chip == AGX_CHIP_G17P) {
-            cs->g17p_draw_trace.emitted_indexed = draw.indexed;
-            cs->g17p_draw_trace.emitted_indirect = true;
-            cs->g17p_draw_trace.emitted_indirect_buffer = draw.b.ptr;
          }
 
          uint32_t draw_state_offset = 0;
@@ -11657,7 +11630,7 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
    if (dev->dev.chip != AGX_CHIP_G17P || !cmd->current_cs.gfx ||
        vk_command_buffer_has_error(&cmd->vk) ||
        hk_shader_perf_draw_enabled(dev) || dev->g17p_shader_perf.trace ||
-       hk_g17p_draw_trace_enabled() || (dev->dev.debug & AGX_DBG_DIRTY))
+       (dev->dev.debug & AGX_DBG_DIRTY))
       return false;
 
    /* Nothing dirty: every state-derivation block of the general path is

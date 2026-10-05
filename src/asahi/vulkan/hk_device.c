@@ -883,12 +883,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STREAMS", false);
    dev->g17p_diagnostics.launch_trace =
       debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
-   dev->g17p_diagnostics.draw_trace =
-      debug_get_bool_option("HK_G17P_DRAW_TRACE", false);
-   dev->g17p_diagnostics.compact_ioto_trace =
-      debug_get_bool_option("HK_G17P_COMPACT_IOTO_TRACE", false);
-   dev->g17p_diagnostics.graphics_ioto_cache_stats =
-      debug_get_bool_option("HK_G17P_GRAPHICS_IOTO_CACHE_STATS", false);
 
    /* Geometry and tessellation are advertised core functionality on G17P.
     * Upload their immutable internal kernels with the device instead of

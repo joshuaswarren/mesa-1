@@ -580,54 +580,6 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       c->ts_frag.end.offset = cs->timestamp.end.offset_B;
    }
 
-   if (hk_g17p_draw_trace_enabled() && dev->dev.chip == AGX_CHIP_G17P &&
-       cs->stats.cmds) {
-      static int sequence;
-      const unsigned submit_sequence = p_atomic_inc_return(&sequence);
-
-      fprintf(stderr,
-              "G17P draw submit: seq=%u vdm=%" PRIx64
-              " draws=%u calls=%u publications=%u draw-id=%u topology=%u"
-              " api-indexed=%u api-indirect=%u api-count=%u"
-              " api-instances=%u api-first=%u api-base-vertex=%d"
-              " api-first-instance=%u emitted-indexed=%u"
-              " emitted-indirect=%u emitted-buffer=%" PRIx64
-              " fragment-program=%" PRIx64
-              " main=%08x/%u linked=%08x/%u ioto=%08x/%u"
-              " size=%ux%u samples=%u"
-              " sample-size=%u sampler-count=%u colors=%u[",
-              submit_sequence, (uint64_t)c->vdm_ctrl_stream_base,
-              cs->stats.cmds, cs->stats.calls,
-              cs->g17p_state_publications,
-              cs->g17p_draw_trace.draw_id, cs->g17p_draw_trace.topology,
-              cs->g17p_draw_trace.api_indexed,
-              cs->g17p_draw_trace.api_indirect,
-              cs->g17p_draw_trace.api_count,
-              cs->g17p_draw_trace.api_instances,
-              cs->g17p_draw_trace.api_first,
-              cs->g17p_draw_trace.api_base_vertex,
-              cs->g17p_draw_trace.api_first_instance,
-              cs->g17p_draw_trace.emitted_indexed,
-              cs->g17p_draw_trace.emitted_indirect,
-              cs->g17p_draw_trace.emitted_indirect_buffer,
-              cs->g17p_draw_trace.fragment_program,
-              cs->g17p_draw_trace.fragment_main_hash,
-              cs->g17p_draw_trace.fragment_main_size,
-              cs->g17p_draw_trace.fragment_shader_hash,
-              cs->g17p_draw_trace.fragment_shader_size,
-              cs->g17p_draw_trace.fragment_ioto_hash,
-              cs->g17p_draw_trace.fragment_ioto_size, c->width_px,
-              c->height_px, c->samples, c->sample_size_B, c->sampler_count,
-              cs->g17p_draw_trace.color_count);
-      for (unsigned i = 0; i < cs->g17p_draw_trace.color_count; ++i) {
-         fprintf(stderr, "%s%u", i ? "," : "",
-                 cs->g17p_draw_trace.color_formats[i]);
-      }
-      fprintf(stderr, "] depth=%u zls=%#" PRIx64 "\n",
-              cs->g17p_draw_trace.depth_format, (uint64_t)c->zls_ctrl);
-      fflush(stderr);
-   }
-
    if ((dev->dev.debug & AGX_DBG_FAULTTRACE) && faulttrace_extra) {
       const struct hk_g17p_faulttrace_stream_header header = {
          .magic = HK_G17P_FAULTTRACE_STREAM_MAGIC,

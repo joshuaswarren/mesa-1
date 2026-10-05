@@ -998,34 +998,6 @@ struct hk_cs {
     * whether the stream faults. See hk_cmd_draw.c. */
    unsigned g17p_state_publications;
 
-   /* Compact identity for a submitted G17P draw.  The full launch trace is
-    * intentionally enormous; this is enough to name the exact fragment
-    * program and draw that preceded a DM1 fragment timeout. */
-   struct {
-      uint64_t fragment_program;
-      uint64_t emitted_indirect_buffer;
-      uint32_t fragment_shader_hash;
-      uint32_t fragment_main_hash;
-      uint32_t fragment_ioto_hash;
-      uint32_t fragment_shader_size;
-      uint32_t fragment_main_size;
-      uint32_t fragment_ioto_size;
-      uint32_t api_count;
-      uint32_t api_instances;
-      uint32_t api_first;
-      int32_t api_base_vertex;
-      uint32_t api_first_instance;
-      uint32_t color_formats[HK_MAX_RTS];
-      uint32_t depth_format;
-      uint8_t color_count;
-      uint16_t draw_id;
-      uint8_t topology;
-      bool api_indexed;
-      bool api_indirect;
-      bool emitted_indexed;
-      bool emitted_indirect;
-   } g17p_draw_trace;
-
    /* Exact fragment launch inputs retained only for failure-only faulttrace.
     * The allocation remains empty on the production path. */
    struct util_dynarray g17p_faulttrace_snapshots;
@@ -1840,12 +1812,10 @@ void hk_dispatch_imm_writes(struct hk_cmd_buffer *cmd, struct hk_cs *cs);
 
 bool hk_g17p_smooth_varyings_supported(
    struct hk_cmd_buffer *cmd, const struct hk_linked_shader *linked);
-/* HK_G17P_LAUNCH_TRACE / HK_G17P_DRAW_TRACE, read once.  Inline because the
- * draw path checks them several times per draw; -1 until initialized. */
+/* HK_G17P_LAUNCH_TRACE, read once.  Inline because the draw path checks it
+ * several times per draw; -1 until initialized. */
 extern int hk_g17p_launch_trace_state;
-extern int hk_g17p_draw_trace_state;
 int hk_g17p_launch_trace_init(void);
-int hk_g17p_draw_trace_init(void);
 
 static inline bool
 hk_g17p_launch_trace_enabled(void)
@@ -1853,15 +1823,6 @@ hk_g17p_launch_trace_enabled(void)
    int enabled = hk_g17p_launch_trace_state;
    if (unlikely(enabled < 0))
       enabled = hk_g17p_launch_trace_init();
-   return enabled != 0;
-}
-
-static inline bool
-hk_g17p_draw_trace_enabled(void)
-{
-   int enabled = hk_g17p_draw_trace_state;
-   if (unlikely(enabled < 0))
-      enabled = hk_g17p_draw_trace_init();
    return enabled != 0;
 }
 void hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,
