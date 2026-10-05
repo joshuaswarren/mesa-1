@@ -4223,9 +4223,16 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          (I->op == AGX_OPCODE_FLOOR || I->op == AGX_OPCODE_CEIL) &&
          I->nr_srcs == 1 && I->dest[0].size == AGX_SIZE_16;
+      /* The modified add form needs a 32-bit destination, so a half add of
+       * -x or |x| -- mediump subtraction, e.g. range reduction in trig --
+       * has no encoding either. */
+      const bool half_add =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_FADD && I->nr_srcs == 2 && !I->saturate &&
+         I->dest[0].size == AGX_SIZE_16;
 
-      if (half_fsel || half_round) {
-         const unsigned source_count = half_fsel ? 4 : 1;
+      if (half_fsel || half_round || half_add) {
+         const unsigned source_count = half_fsel ? 4 : half_add ? 2 : 1;
          for (unsigned s = 0; s < source_count; ++s) {
             if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
                 I->src[s].size != AGX_SIZE_16 ||
