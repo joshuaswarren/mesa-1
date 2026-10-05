@@ -3572,6 +3572,95 @@ compile_sw_vs_stage(struct d12_device *device,
    return compile_poly_program(device, nir, NULL, out);
 }
 
+/* Compiler diagnostic only: an API signature refusal must not hide a stage
+ * compiler refusal. This entry is restricted to an actual registered noop fd;
+ * it uses the same stage lowerings/uploads as the ordinary graphics PSO and
+ * never grants command recording or physical admission. */
+HRESULT
+d12_pipeline_state_certify_native_gs(struct d12_device *device,
+                                     const struct d12_binding_map *map,
+                                     const void *vs, size_t vs_size,
+                                     const void *gs, size_t gs_size,
+                                     ID3D12PipelineState **out)
+{
+#ifndef _WIN32
+   extern bool asahi_noop_d3d12_graphics_qualification_allowed(int fd)
+      __attribute__((weak, visibility("default")));
+   if (!device || !out || device->dev.chip != AGX_CHIP_G17P ||
+       !asahi_noop_d3d12_graphics_qualification_allowed ||
+       !asahi_noop_d3d12_graphics_qualification_allowed(device->dev.fd))
+      return E_NOTIMPL;
+   *out = NULL;
+   struct d12_pipeline_state *pso = calloc(1, sizeof(*pso));
+   if (!pso)
+      return E_OUTOFMEMORY;
+   struct agx_shader_part sw = {0}, count = {0}, pre = {0}, main = {0}, rast = {0};
+   struct agx_shader_part prolog = {0};
+   HRESULT hr = E_FAIL;
+   if (!compile_sw_vs_stage(device, map, vs, vs_size, NULL, &sw,
+                             &pso->sw_vs_outputs, NULL, NULL) ||
+       !compile_gs_stage(device, map, gs, gs_size, NULL,
+                         D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT, pso,
+                         &pso->gs_info, &pso->gs_uvs,
+                         &count, &pre, &main, &rast))
+      goto done;
+   /* P09's initial certificate is the original static point GS, no XFB. */
+   if (count.binary || pre.binary ||
+       pso->gs_info.shape != POLY_GS_SHAPE_STATIC_PER_INSTANCE)
+      goto done;
+   hr = d12_upload_internal_compute(device, &sw, &pso->sw_vs_bo,
+      &pso->sw_vs_va, &pso->sw_vs_info, &pso->native_stages[D12_NATIVE_SW_VS],
+      "d3d12 sw vs");
+   if (FAILED(hr))
+      goto done;
+   hr = d12_upload_internal_compute(device, &main, &pso->gs_main_bo,
+      &pso->gs_main_va, &pso->gs_main_info,
+      &pso->native_stages[D12_NATIVE_GS_MAIN], "d3d12 gs main");
+   if (FAILED(hr))
+      goto done;
+
+   struct agx_vs_prolog_key pk = {.hw = true, .static_vi = true};
+   nir_builder b = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
+   agx_nir_vs_prolog(&b, &pk);
+   struct agx_shader_key key = {
+      .dev = agx_gather_device_key(&device->dev), .has_scratch = true,
+      .secondary = true, .no_stop = true,
+   };
+   bool compiled = agx_compile_shader_nir(b.shader, &key, &prolog);
+   ralloc_free(b.shader);
+   if (!compiled || !prolog.binary ||
+       !agx_fast_link(&pso->gs_rast.linked, &device->dev, false,
+                      &rast, &prolog, NULL, 0)) {
+      hr = E_FAIL;
+      goto done;
+   }
+   pso->gs_rast.info = rast.info;
+   pso->has_gs = true;
+   pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
+   pso->refcount = 1;
+   pso->device = device;
+   pso->device_ref_active = true;
+   d12_device_add_ref(device);
+   d12_private_data_store_init(&pso->private_data, (IUnknown *)&pso->iface);
+   *out = &pso->iface;
+   hr = S_OK;
+done:
+   free(sw.binary);
+   free(count.binary);
+   free(pre.binary);
+   free(main.binary);
+   free(rast.binary);
+   free(prolog.binary);
+   if (FAILED(hr)) {
+      d12_pso_release_bos(device, pso);
+      free(pso);
+   }
+   return hr;
+#else
+   return E_NOTIMPL;
+#endif
+}
+
 /*
  * D3D12 comparison functions map one-for-one onto the AGX ZS functions, but
  * write the mapping out rather than relying on the constant offset: a silent
@@ -3950,8 +4039,10 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
       struct d12_native_compute_abi *abi;
       const char *name;
    } cs[] = {
-      {&ms_part, &pso->ms_bo, &pso->ms_va, &pso->ms_info, &pso->native_stages[D12_NATIVE_MS], "d3d12 mesh"},
-      {&setup_part, &pso->ms_setup_bo, &pso->ms_setup_va, &pso->ms_setup_info, &pso->native_stages[D12_NATIVE_MS_SETUP],
+      {&ms_part, &pso->ms_bo, &pso->ms_va, &pso->ms_info,
+       &pso->native_stages[D12_NATIVE_MS], "d3d12 mesh"},
+      {&setup_part, &pso->ms_setup_bo, &pso->ms_setup_va, &pso->ms_setup_info,
+       &pso->native_stages[D12_NATIVE_MS_SETUP],
        "d3d12 mesh setup"},
    };
 
@@ -4057,7 +4148,8 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
          struct d12_native_compute_abi *abi;
          const char *name;
       } acs[] = {
-         {&as_part, &pso->as_bo, &pso->as_va, &pso->as_info, &pso->native_stages[D12_NATIVE_AS],
+         {&as_part, &pso->as_bo, &pso->as_va, &pso->as_info,
+          &pso->native_stages[D12_NATIVE_AS],
           "d3d12 amplification"},
          {&as_setup_part, &pso->as_setup_bo, &pso->as_setup_va,
           &pso->as_setup_info, &pso->native_stages[D12_NATIVE_AS_SETUP],

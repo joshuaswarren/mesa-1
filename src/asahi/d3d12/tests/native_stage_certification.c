@@ -166,7 +166,9 @@ main(int argc, char **argv)
    ID3DBlob *blob = NULL;
    ID3D12RootSignature *root = NULL;
    ID3D12PipelineState *iface = NULL;
-   const D3D12_ROOT_SIGNATURE_DESC rs = {0};
+   const D3D12_ROOT_SIGNATURE_DESC rs = {
+      .Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT,
+   };
    bool complete = false;
    if (!code[0] || !code[1] || !code[2])
       goto done;
@@ -191,9 +193,16 @@ main(int argc, char **argv)
    desc.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
    hr = ID3D12Device_CreateGraphicsPipelineState(dev, &desc,
       &IID_ID3D12PipelineState, (void **)&iface);
+   printf("API_G6_PSO_CREATION: HRESULT=%#x object=%u NOT_SUITE_PARITY\n",
+          (unsigned)hr, iface != NULL);
+   if (hr != S_OK || !iface) {
+      printf("COMPILER_DIAGNOSTIC: API refusal retained; registered no-submit stage entry\n");
+      hr = d12_pipeline_state_certify_native_gs(device,
+         &((struct d12_root_signature *)root)->map, code[0], size[0], code[2], size[2], &iface);
+   }
    if (hr != S_OK || !iface)
       goto done;
-   struct d12_pipeline_state *pso = d12_pso_from_iface(iface);
+   struct d12_pipeline_state *pso = d12_pipeline_state_from_iface(iface);
    check(pso->has_gs && pso->gs_info.shape == POLY_GS_SHAPE_STATIC_PER_INSTANCE,
          "frozen GS static-per-instance shape");
    certify("sw-vs", pso->sw_vs_bo, pso->sw_vs_va, &pso->sw_vs_info,

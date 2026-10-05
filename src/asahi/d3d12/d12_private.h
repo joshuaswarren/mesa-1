@@ -2593,6 +2593,12 @@ HRESULT d12_pipeline_state_create_compute(struct d12_device *device,
                                           REFIID riid, void **out);
 void d12_pipeline_state_library_ref(struct d12_pipeline_state *pso);
 void d12_pipeline_state_library_unref(struct d12_pipeline_state *pso);
+/* Registered-no-submit compiler diagnostic, never an API/physical admission. */
+HRESULT d12_pipeline_state_certify_native_gs(
+   struct d12_device *device, const struct d12_binding_map *map,
+   const void *vs, size_t vs_size, const void *gs, size_t gs_size,
+   ID3D12PipelineState **out);
+
 HRESULT d12_pipeline_state_create_mesh(
    struct d12_device *device, const void *ms_dxil, size_t ms_size,
    const void *as_dxil, size_t as_size, const void *ps_dxil, size_t ps_size,
