@@ -386,6 +386,16 @@ d3d12agx_microbench = executable(
   link_with : [libd3d12agx],
 )
 
+# Frame-level benchmark: dlopens the D3D12 implementation (D3D12_LIBRARY), so
+# the same binary measures d3d12agx and a native vkd3d-proton build.
+if host_machine.system() != 'windows'
+  executable(
+    'd3d12agx_framebench',
+    files('tests/d12_framebench.c'),
+    dependencies : [dep_dxheaders_d12, dep_dl],
+  )
+endif
+
 # Concurrent PSO creation over the device shader cache.
 executable(
   'd3d12agx_pso_threads',
