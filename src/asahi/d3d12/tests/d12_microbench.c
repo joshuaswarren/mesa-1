@@ -15,7 +15,7 @@
  * into a CPU figure.
  *
  * Usage: d3d12agx_microbench tri.dxil solid.dxil res_probe.dxil [tex_probe.dxil]
- *        [--only NAME]
+ *        [--only NAME] [--idle SECONDS]
  *
  * With tex_probe.dxil a texture descriptor table over a 65536-slot heap is
  * measured too (dispatch_texture).
@@ -23,6 +23,10 @@
  * viewport, psotoggle, dispatch, dispatch_table, dispatch_miss,
  * dispatch_texture) for profiling runs; the
  * rest of the metrics are then reported as zero.
+ *
+ * --idle sleeps for SECONDS after the round-trip loop with the device,
+ * queue and fence alive and nothing in flight, printing the process id
+ * first, so an idle driver's thread CPU use can be sampled (top -H -p).
  *
  * The last stdout line is "MICROBENCH_JSON {...}" with every metric, so a
  * host-side collector can file it without parsing prose.
@@ -41,6 +45,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #define W 256
 #define H 256
@@ -382,14 +387,18 @@ main(int argc, char **argv)
 {
    if (argc < 4) {
       fprintf(stderr, "usage: %s tri.dxil solid.dxil res_probe.dxil "
-                      "[tex_probe.dxil] [--only MODE]\n", argv[0]);
+                      "[tex_probe.dxil] [--only MODE] [--idle SECONDS]\n",
+              argv[0]);
       return 2;
    }
    const char *only = NULL;
    const char *tex_path = NULL;
+   unsigned idle_seconds = 0;
    for (int i = 4; i < argc; i++) {
       if (!strcmp(argv[i], "--only") && i + 1 < argc)
          only = argv[++i];
+      else if (!strcmp(argv[i], "--idle") && i + 1 < argc)
+         idle_seconds = (unsigned)atoi(argv[++i]);
       else
          tex_path = argv[i];
    }
@@ -1047,6 +1056,14 @@ main(int argc, char **argv)
    double rt_min_us = rt_us[0];
    printf("submit one-draw round trip min %.0f us, median %.0f us, p95 %.0f us\n",
           rt_min_us, rt_median_us, rt_p95_us);
+
+   if (idle_seconds) {
+      printf("idle: pid %ld sleeping %u s with nothing in flight\n",
+             (long)getpid(), idle_seconds);
+      fflush(stdout);
+      const struct timespec nap = {.tv_sec = idle_seconds};
+      nanosleep(&nap, NULL);
+   }
 
    /* Sanity: the render target should hold the triangle colour somewhere. */
    {
