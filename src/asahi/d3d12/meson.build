@@ -631,6 +631,16 @@ d3d12agx_nir_sparse_buffer_tests = executable(
 test('d3d12agx_nir_sparse_buffer', d3d12agx_nir_sparse_buffer_tests,
      suite : ['asahi', 'd3d12'])
 
+d3d12agx_nir_min_lod_tests = executable(
+  'd3d12agx_nir_min_lod_tests',
+  files('tests/d12_nir_min_lod_tests.c'),
+  include_directories : [inc_include, inc_src],
+  dependencies : [idep_nir, idep_mesautil],
+  c_args : ['-UNDEBUG'],
+)
+test('d3d12agx_nir_min_lod', d3d12agx_nir_min_lod_tests,
+     suite : ['asahi', 'd3d12'])
+
 # Supplemental live API validation; the frozen G1 suite remains unchanged.
 executable(
   'd3d12agx_createheap_validation',

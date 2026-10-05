@@ -31,6 +31,7 @@
 #include "nir_builder.h"
 #include "d12_nir_integer.h"
 #include "d12_nir_sparse_buffer.h"
+#include "d12_nir_min_lod.h"
 
 #include "util/simple_mtx.h"
 #define XXH_INLINE_ALL
@@ -3698,6 +3699,21 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
       }
 
 #undef TAILD
+      /* Optional clamp positions match Mesa's MIT DXIL writer's sample
+       * prototypes. DXC may truncate trailing undef operands. */
+      unsigned clamp_index = UINT_MAX;
+      switch (opcode) {
+      case D12_DXOP_SAMPLE: clamp_index = 9; break;
+      case D12_DXOP_SAMPLE_BIAS:
+      case D12_DXOP_SAMPLE_CMP: clamp_index = 10; break;
+      case D12_DXOP_SAMPLE_GRAD: clamp_index = 15; break;
+      case D12_DXOP_SAMPLE_CMP_BIAS: clamp_index = 11; break;
+      case D12_DXOP_SAMPLE_CMP_GRAD: clamp_index = 16; break;
+      default: break;
+      }
+      nir_def *minimum = clamp_index < np &&
+                         !operand_is_undef(ctx, p[clamp_index])
+                            ? get_def(ctx, p[clamp_index]) : NULL;
       /* The resource descriptor decides whether memory is actually sparse,
        * but DXIL handles are late-bound. Always request the hardware feedback
        * lane: dense descriptors report resident, while AGX sparse descriptors
@@ -3706,6 +3722,8 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
       nir_def_init(&tex->instr, &tex->def,
                    nir_tex_instr_dest_size(tex), 32);
       nir_builder_instr_insert(b, &tex->instr);
+      if (minimum)
+         d12_nir_sample_min_lod(b, tex, minimum);
 
       /* DXIL sample/gather results are {vec4, status}. AGX places its sparse
        * residency code after the four data components. */
