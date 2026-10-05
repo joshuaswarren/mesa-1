@@ -2703,6 +2703,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
                break;
             }
             struct drm_asahi_cmd_compute cmd = {
+               .ts.end = seg->timestamp_end,
                .cdm_ctrl_stream_base =
                   list->stream_bo->va->addr + seg->stream_start,
                .cdm_ctrl_stream_end =
@@ -2725,6 +2726,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
                payload_valid = false;
                break;
             }
+            cmd.ts_frag.end = seg->timestamp_end;
             memcpy(payload + payload_size, &cmd, header.size);
             payload_size += header.size;
             nr_vdm++;

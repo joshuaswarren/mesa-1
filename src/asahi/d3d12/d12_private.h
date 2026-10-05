@@ -1115,6 +1115,7 @@ struct d12_query_heap {
    struct d12_device *device; /* holds a device ref */
    D3D12_QUERY_HEAP_DESC desc;
    D3D12_QUERY_HEAP_FLAGS flags;
+   uint32_t timestamp_handle;
    unsigned stride;   /* bytes per result */
    size_t start_offset; /* occlusion BeginQuery snapshots, 0 otherwise */
    struct agx_bo *bo;
@@ -1700,6 +1701,8 @@ struct d12_read_tracker {
 };
 
 struct d12_segment {
+   /* Firmware timestamp destination, bound through agx_bind_timestamps. */
+   struct drm_asahi_timestamp timestamp_end;
    /* Revalidate the admission used when recording each native texture path. */
    bool g17p_txf_metadata_only;
    bool g17p_txf_physical;

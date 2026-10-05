@@ -12602,15 +12602,25 @@ d12_list_EndQuery(ID3D12GraphicsCommandList6 *iface,
    }
 
    if (d12_query_core_is_timestamp_heap((uint32_t)heap->desc.Type)) {
-      /* The kernel-calibrated GPU clock is sampled while recording, then
-       * copied by the GPU at this exact point in the command stream.  This
-       * preserves Resolve-before-rewrite ordering across submissions.
+      /* Timestamp the preceding command at retirement, using Honeykrisp's
+       * firmware destination binding. Sampling on the CPU while recording
+       * predates delayed submissions and returns the same value on replay.
+       * A timestamp-only interval needs a real CDM command: the queue drops
+       * empty compute segments. A self-copy supplies that command without
+       * changing query memory before the firmware writes its end timestamp.
        */
-      uint64_t timestamp = agx_get_gpu_timestamp(&list->device->dev);
-      uint64_t source =
-         d12_list_upload(list, &timestamp, sizeof(timestamp), 8);
-      if (source)
-         d12_list_copy_gpu_bytes(list, result, source, sizeof(timestamp));
+      if (!list->cdm_open && !list->render_open)
+         d12_list_copy_gpu_bytes(list, result, result, sizeof(uint64_t));
+      if (list->state != D12_LIST_RECORDING)
+         return;
+      struct d12_segment *seg = &list->segments[list->segment_count - 1];
+      seg->timestamp_end = (struct drm_asahi_timestamp){
+         .handle = heap->timestamp_handle,
+         .offset = index * heap->stride,
+      };
+      /* A following resolve or timestamp must be a separate command, so its
+       * reads/writes cannot race this retirement write. */
+      d12_list_close_cdm(list);
       return;
    }
 
