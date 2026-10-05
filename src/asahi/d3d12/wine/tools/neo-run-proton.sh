@@ -23,10 +23,25 @@ sess_pid=$(pgrep -u "$run_user" -x gnome-shell | head -1)
 [[ -n $sess_pid ]] || sess_pid=$(pgrep -u "$run_user" -x sway | head -1)
 [[ -n $sess_pid ]] || { echo "no graphical session for $run_user" >&2; exit 3; }
 sess_env=()
+declare -A have=()
 for v in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XAUTHORITY XDG_SESSION_TYPE; do
    val=$(tr '\0' '\n' < "/proc/$sess_pid/environ" | sed -n "s/^$v=//p" | head -1)
-   [[ -n $val ]] && sess_env+=("$v=$val")
+   [[ -n $val ]] && { sess_env+=("$v=$val"); have[$v]=$val; }
 done
+# gnome-shell's own environment names neither its Wayland socket nor its
+# Xwayland display (it creates both); derive them from the runtime dir and
+# the Xwayland command line so Wine's x11 driver can open a window.
+rt=${have[XDG_RUNTIME_DIR]:-/run/user/$(id -u "$run_user")}
+if [[ -z ${have[WAYLAND_DISPLAY]:-} && -S $rt/wayland-0 ]]; then
+   sess_env+=("WAYLAND_DISPLAY=wayland-0")
+fi
+if [[ -z ${have[DISPLAY]:-} ]]; then
+   xw=$(pgrep -u "$run_user" -a -x Xwayland | head -1)
+   disp=$(sed -n 's/.*Xwayland \(:[0-9]*\).*/\1/p' <<< "$xw")
+   auth=$(sed -n 's/.*-auth \([^ ]*\).*/\1/p' <<< "$xw")
+   [[ -n $disp ]] && sess_env+=("DISPLAY=$disp")
+   [[ -n $auth && -z ${have[XAUTHORITY]:-} ]] && sess_env+=("XAUTHORITY=$auth")
+fi
 
 exe_dir=$(dirname "$1")
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
