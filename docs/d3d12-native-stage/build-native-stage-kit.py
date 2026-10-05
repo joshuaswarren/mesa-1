@@ -140,6 +140,17 @@ def main():
     shutil.copytree(p00 / 'reference', stage / 'reference')
     for name in ['reference-inputs.sha256', 'REFERENCE-COMMIT', 'KERNEL-IDENTITY.json']:
         shutil.copy2(p00 / name, stage / name)
+    kernel = json.loads((stage / 'KERNEL-IDENTITY.json').read_text())
+    if os.uname().release != kernel['release'] or digest(kernel['image_path']) != kernel['image_sha256']:
+        raise ValueError('running kernel differs from the matched P00 Image; new reviewed kernel receipt required')
+    kernel['boot_id'] = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    probe = p00 / 'diagnostics/P00/kmd-params'
+    kernel['kmd_feature_evidence'] = json.loads(subprocess.check_output(
+        [str(probe), kernel['kmd_feature_evidence']['render_node']], env=env, text=True))
+    if not kernel['kmd_feature_evidence']['exact_prior_barriers'] or kernel['kmd_feature_evidence']['gpu_generation'] != 17:
+        raise ValueError('matched G17P KMD features required')
+    kernel['boot_repin'] = 'P09 approved native build request; same release and trusted Image hash; read-only GET_PARAMS'
+    (stage / 'KERNEL-IDENTITY.json').write_text(json.dumps(kernel, indent=2) + '\n')
     (stage / 'SOURCE-COMMIT').write_text(candidate + '\n')
     (receipts / 'SELECTED-COMMANDS.txt').write_text(commands)
     (receipts / 'SOURCE-FILES.json').write_text(json.dumps(source_files, indent=2) + '\n')
