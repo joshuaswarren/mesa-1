@@ -6,12 +6,18 @@
 #include "d12_debug.h"
 
 #include "c11/threads.h"
+#include "util/macros.h"
+#include "util/u_atomic.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 static struct d12_debug_flags d12_debug_flags;
 static once_flag d12_debug_once = ONCE_FLAG_INIT;
+/* Published after the once-initialiser filled the flags, so the hot path
+ * (one call per draw, several per dispatch) is a load and a branch rather
+ * than pthread_once, which was 9% of a 1000-draw frame on the M1 Pro. */
+static bool d12_debug_ready;
 
 static bool
 d12_env_set(const char *name)
@@ -63,11 +69,14 @@ d12_debug_init(void)
    f->shim_depth_metadata = d12_env_is_one("AURORA_D3D12_SHIM_DEPTH_METADATA");
    f->shim_texture_metadata =
       d12_env_is_one("AURORA_D3D12_SHIM_TEXTURE_METADATA");
+   p_atomic_set(&d12_debug_ready, true);
 }
 
 const struct d12_debug_flags *
 d12_debug(void)
 {
+   if (likely(p_atomic_read(&d12_debug_ready)))
+      return &d12_debug_flags;
    call_once(&d12_debug_once, d12_debug_init);
    return &d12_debug_flags;
 }
