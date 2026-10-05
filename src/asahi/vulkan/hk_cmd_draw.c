@@ -7795,9 +7795,7 @@ hk_g17p_publish_native_bind_tail(
     * the 16-bit selector index overflowed (>65k such draws in one stream made
     * agx_g17p_upload_draw_indices() refuse the draw and the command buffer
     * fail with VK_ERROR_FEATURE_NOT_PRESENT). */
-   /* Opt-in (HK_G17P_PPP_DEDUPE=1) while it is hardware-qualified; the
-    * index-overflow split in hk_flush_gfx_state() is the default guard. */
-   const bool same_tail = HK_ENV_BOOL_ONCE("HK_G17P_PPP_DEDUPE", false) &&
+   const bool same_tail =
       cs->scissor.size >= scissor_bytes &&
       cs->depth_bias.size >= depth_bias_bytes &&
       !memcmp((const uint8_t *)cs->scissor.data + cs->scissor.size -
