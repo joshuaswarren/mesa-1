@@ -2232,10 +2232,13 @@ struct d12_fence_event_waiter;
  * the fence. */
 struct d12_fence_pending_signal {
    struct d12_fence_pending_signal *next;
+   struct d12_fence_pending_signal *queue_next;
+   struct d12_fence *fence;
    struct d12_queue *queue;
    uint64_t point;
    uint64_t value;
    bool registered;
+   bool queue_registered;
    bool published;
 };
 
@@ -2362,6 +2365,9 @@ struct d12_queue {
     * d12_queue_direct_wait_begin).  Teardown waits for zero before the
     * syncobj is destroyed. */
    uint32_t direct_waiters;
+   /* Scheduled Signals stay here until retirement, including the op
+    * currently being retired. Protected by queue->lock. */
+   struct d12_fence_pending_signal *signal_head, *signal_tail;
    uint32_t pending_placement_wait_count;
    struct d12_queue_placement_wait
       pending_placement_waits[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
@@ -2435,6 +2441,8 @@ void d12_fence_pending_signal_retire(
    struct d12_fence *fence, struct d12_fence_pending_signal *pending,
    bool completed);
 bool d12_queue_wait_timeline(struct d12_queue *queue, uint64_t point);
+void d12_fence_pending_signal_publish(struct d12_fence_pending_signal *pending);
+void d12_queue_publish_pending_signals(struct d12_queue *queue, uint64_t point);
 void d12_queue_direct_wait_begin(struct d12_queue *queue);
 void d12_queue_direct_wait_end(struct d12_queue *queue);
 void d12_fence_ticket_init(struct d12_fence *fence,

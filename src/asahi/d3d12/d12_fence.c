@@ -455,20 +455,25 @@ d12_fence_pending_signal_add(struct d12_fence *fence,
                              struct d12_queue *queue, uint64_t point,
                              uint64_t value)
 {
-   /* A shared fence is published through its syncobj by the retirement
-    * worker; CPU waiters already wait on that syncobj directly. */
-   if (fence->shared_syncobj)
-      return;
-
    pending->next = NULL;
+   pending->queue_next = NULL;
+   pending->fence = fence;
    pending->queue = queue;
    pending->point = point;
    pending->value = value;
    pending->published = false;
 
-   /* Append so the list is in scheduling order: for one queue that is
-    * ascending point order, which d12_fence_publish_completed_locked
-    * relies on. */
+   /* Scheduling holds queue->lock. Keep Signals in queue order across
+    * fences: a direct wait on fence B must also publish earlier fence A. */
+   if (queue->signal_tail)
+      queue->signal_tail->queue_next = pending;
+   else
+      queue->signal_head = pending;
+   queue->signal_tail = pending;
+   pending->queue_registered = true;
+   if (fence->shared_syncobj)
+      return;
+
    mtx_lock(&fence->lock);
    struct d12_fence_pending_signal **link = &fence->pending_signals;
    while (*link)
@@ -479,21 +484,25 @@ d12_fence_pending_signal_add(struct d12_fence *fence,
    mtx_unlock(&fence->lock);
 }
 
-/* Publishes every unpublished pending signal from queue whose point is at or
- * before the one just observed complete, in queue order.  Both the
- * retirement worker and a direct CPU waiter call this; each record is
- * published once, by whichever gets there first. */
-static void
-d12_fence_publish_completed_locked(struct d12_fence *fence,
-                                   struct d12_queue *queue, uint64_t point)
+/* Called with queue->lock held, so retirement cannot free the record. */
+void
+d12_fence_pending_signal_publish(struct d12_fence_pending_signal *pending)
 {
-   for (struct d12_fence_pending_signal *p = fence->pending_signals; p;
-        p = p->next) {
-      if (p->queue == queue && p->point <= point && !p->published) {
-         p->published = true;
-         d12_fence_signal_value_locked(fence, p->value);
+   struct d12_fence *fence = pending->fence;
+   if (fence->shared_syncobj) {
+      if (!pending->published) {
+         pending->published = true;
+         d12_fence_signal_value(fence, pending->value);
       }
+      return;
    }
+
+   mtx_lock(&fence->lock);
+   if (!pending->published) {
+      pending->published = true;
+      d12_fence_signal_value_locked(fence, pending->value);
+   }
+   mtx_unlock(&fence->lock);
 }
 
 void
@@ -501,27 +510,40 @@ d12_fence_pending_signal_retire(struct d12_fence *fence,
                                 struct d12_fence_pending_signal *pending,
                                 bool completed)
 {
-   if (!pending->registered) {
-      /* Shared fences (never registered) publish through their syncobj. */
-      if (completed && fence->shared_syncobj)
-         d12_fence_signal_value(fence, pending->value);
+   if (!pending->queue_registered)
       return;
+   struct d12_queue *queue = pending->queue;
+   if (completed)
+      d12_queue_publish_pending_signals(queue, pending->point);
+
+   /* Lock order is queue then fence, as in scheduling and publication. */
+   mtx_lock(&queue->lock);
+   struct d12_fence_pending_signal **queue_link = &queue->signal_head;
+   struct d12_fence_pending_signal *previous = NULL;
+   while (*queue_link && *queue_link != pending) {
+      previous = *queue_link;
+      queue_link = &(*queue_link)->queue_next;
    }
+   if (*queue_link == pending)
+      *queue_link = pending->queue_next;
+   if (queue->signal_tail == pending)
+      queue->signal_tail = previous;
+   pending->queue_registered = false;
+   pending->queue_next = NULL;
 
    mtx_lock(&fence->lock);
-   if (completed)
-      d12_fence_publish_completed_locked(fence, pending->queue,
-                                         pending->point);
-   struct d12_fence_pending_signal **link = &fence->pending_signals;
-   while (*link && *link != pending)
-      link = &(*link)->next;
-   if (*link == pending)
-      *link = pending->next;
-   pending->registered = false;
-   pending->next = NULL;
-   /* A direct waiter parked on this record must re-evaluate. */
+   if (pending->registered) {
+      struct d12_fence_pending_signal **link = &fence->pending_signals;
+      while (*link && *link != pending)
+         link = &(*link)->next;
+      if (*link == pending)
+         *link = pending->next;
+      pending->registered = false;
+      pending->next = NULL;
+   }
    cnd_broadcast(&fence->changed);
    mtx_unlock(&fence->lock);
+   mtx_unlock(&queue->lock);
 }
 
 /* The first unpublished GPU signal a wait for value can ride on. */
@@ -567,10 +589,8 @@ d12_fence_wait_pending_locked(struct d12_fence *fence,
                 reached ? "" : " (failed)");
    }
 
-   mtx_lock(&fence->lock);
    if (reached)
-      d12_fence_publish_completed_locked(fence, queue, point);
-   mtx_unlock(&fence->lock);
+      d12_queue_publish_pending_signals(queue, point);
 
    /* Teardown may free the queue as soon as this returns; it takes
     * queue->lock, so it is not called under fence->lock. */

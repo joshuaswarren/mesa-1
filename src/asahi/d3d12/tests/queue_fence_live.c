@@ -461,6 +461,22 @@ main(void)
                     "its timeline");
    }
 
+   /* Waiting for B also completes every earlier Signal to A on that queue.
+    * There need not be a GPU submission between the two timeline markers. */
+   ID3D12Fence *barrier = NULL;
+   hr = ID3D12Device_CreateFence(c.dev, 0, D3D12_FENCE_FLAG_NONE,
+                                &IID_ID3D12Fence, (void **)&barrier);
+   REQUIRE(hr == S_OK && barrier, "cross-fence barrier creation");
+   bool cross_fence_ok = true;
+   for (uint64_t i = 1; i <= 1000; ++i) {
+      cross_fence_ok &= ID3D12CommandQueue_Signal(queue, fence, i) == S_OK;
+      cross_fence_ok &= ID3D12CommandQueue_Signal(queue, barrier, i) == S_OK;
+      cross_fence_ok &= ID3D12Fence_SetEventOnCompletion(barrier, i, NULL) == S_OK;
+      cross_fence_ok &= ID3D12Fence_GetCompletedValue(fence) == i;
+   }
+   CHECK(cross_fence_ok, "waiting on B publishes all earlier Signals on A");
+   ID3D12Fence_Release(barrier);
+
    hr = ID3D12Device_GetDeviceRemovedReason(c.dev);
    CHECK(hr == S_OK, "device healthy at end");
 

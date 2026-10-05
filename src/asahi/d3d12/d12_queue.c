@@ -1448,6 +1448,19 @@ d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
 
 /* A queue Signal takes the point of the last submission ahead of it; the
  * retirement worker publishes the value once that point completes. */
+void
+d12_queue_publish_pending_signals(struct d12_queue *queue, uint64_t point)
+{
+   d12_sync_lock(&queue->lock);
+   for (struct d12_fence_pending_signal *p = queue->signal_head; p;
+        p = p->queue_next) {
+      if (p->point > point)
+         break;
+      d12_fence_pending_signal_publish(p);
+   }
+   mtx_unlock(&queue->lock);
+}
+
 static void
 d12_queue_schedule_signal_locked(struct d12_queue *queue,
                                  struct d12_queue_op *op)
