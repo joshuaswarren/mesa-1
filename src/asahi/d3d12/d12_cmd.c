@@ -6703,6 +6703,44 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
    if (!agx3_cdm_direct_template_sources_compute(
           info->uses_resource_info_query, false, false, &launch_sources))
       goto fail;
+
+   /* The state-loader program depends only on the PSO and the uniform
+    * ranges it publishes, which a run of dispatches with the same bindings
+    * repeats exactly. Reuse the previous program then, instead of a 6 KiB
+    * USC reservation, a regeneration and a sync per dispatch. */
+   struct d12_g17p_program_cache *pc = &list->g17p_program_cache;
+   if (pc->valid && pc->pso == pso && pc->range_count == range_count &&
+       !memcmp(pc->ranges, ranges, range_count * sizeof(ranges[0])) &&
+       !memcmp(&pc->launch_sources, &launch_sources,
+               sizeof(launch_sources))) {
+      struct agx3_compute_dispatch_sink sink = {
+         .data = list->stream_cur,
+         .capacity = D12_DISPATCH_STREAM_MARGIN,
+      };
+      const struct agx3_compute_direct_grid grid = {
+         .source = AGX3_CDM_DIRECT_GRID_THREADGROUP_COUNTS,
+         .size = {x, y, z},
+         .local_size = {info->workgroup_size[0], info->workgroup_size[1],
+                        info->workgroup_size[2]},
+         .dimensions = z != 1 || info->workgroup_size[2] != 1 ? 3
+            : y != 1 || info->workgroup_size[1] != 1 ? 2 : 1,
+      };
+      const uint8_t barrier_flags =
+         d12_debug()->flush_each_dispatch ? 0x5 : 0;
+      if (!d12_list_check_stream_space(list, sink.capacity) ||
+          !agx3_g17p_native_compute_dispatch_append_with_barrier(
+             &pc->launch, &grid, barrier_flags, &sink))
+         goto fail;
+      list->stream_cur += sink.length;
+      if (barrier_flags == 0) {
+         struct d12_segment *seg = &list->segments[list->segment_count - 1];
+         seg->cdm_flush_pending = true;
+         seg->g17p_weak_barrier_end =
+            list->stream_cur - d12_list_stream_map(list);
+      }
+      return true;
+   }
+
    uint32_t relative_program = 0;
    uint8_t *program_cpu = d12_list_alloc_usc(
       list, AGX3_G17P_COMPUTE_PROGRAM_MAX_SIZE, &relative_program);
@@ -6732,6 +6770,12 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
    list->usc_offset = offset + generated.length;
    if (agx_bo_sync_for_device(list->usc_bo, offset, generated.length))
       goto fail;
+   pc->valid = true;
+   pc->pso = pso;
+   pc->range_count = range_count;
+   memcpy(pc->ranges, ranges, range_count * sizeof(ranges[0]));
+   pc->launch_sources = launch_sources;
+   pc->launch = generated.launch;
    for (unsigned i = 0; i < range_count; i++) {
       if (d12_list_stream_contains(list, ranges[i].address,
                                     (size_t)ranges[i].size_halfs * 2) &&

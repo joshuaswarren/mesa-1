@@ -42,6 +42,8 @@
 #include "d12_raytracing_core.h"
 #include "d12_viewport_math.h"
 
+#include "agx3_compute_program_core.h"
+#include "agx3_ioto_uniform_program.h"
 #include "agx_bg_eot.h"
 #include "agx_compile.h"
 #include "agx_device.h"
@@ -1934,6 +1936,17 @@ struct d12_g17p_vdm_storage {
    size_t used;
 };
 
+/* The native G17P compute state-loader program of the previous API
+ * dispatch, reused while the PSO and its uniform ranges repeat. */
+struct d12_g17p_program_cache {
+   bool valid;
+   const struct d12_pipeline_state *pso;
+   unsigned range_count;
+   struct agx3_ioto_uniform_range ranges[10];
+   struct agx3_cdm_direct_template_sources launch_sources;
+   struct agx3_compute_program launch;
+};
+
 struct d12_cmd_list {
    ID3D12GraphicsCommandList iface; /* must be first */
    struct util_dynarray g17p_vdm_storage;
@@ -1959,6 +1972,7 @@ struct d12_cmd_list {
    struct d12_segment segments[D12_MAX_SEGMENTS];
    unsigned segment_count;
    bool cdm_open;    /* last segment is an unterminated CDM */
+   struct d12_g17p_program_cache g17p_program_cache;
    bool render_open; /* last segment is an unterminated RENDER */
 
    /* THE PRE-GRAPHICS COMPUTE STREAM.
