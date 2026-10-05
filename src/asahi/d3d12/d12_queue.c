@@ -253,6 +253,9 @@ struct d12_queue_op {
 
 static void d12_queue_stop_worker(struct d12_queue *queue);
 static void d12_queue_signal_arena_cleanup(struct d12_queue *queue);
+static bool d12_queue_wait_submit_capacity(struct d12_queue *queue);
+static bool d12_queue_process_submit(struct d12_queue *queue,
+                                     struct d12_queue_op *op);
 
 static HRESULT STDMETHODCALLTYPE
 d12_queue_QueryInterface(ID3D12CommandQueue *iface, REFIID riid, void **out)
@@ -1361,11 +1364,49 @@ d12_queue_enqueue_locked(struct d12_queue *queue, struct d12_queue_op *op)
    return true;
 }
 
+/*
+ * Inline processing invariant.
+ *
+ * Operations enter the queue in API order and must reach the hardware (or,
+ * for Signal, take their timeline point) in that order.  Normally the submit
+ * worker is the single consumer, so order is the order of the op list.  An
+ * API thread may process an op itself only when nothing is ahead of it: the
+ * op list is empty, the worker holds no op (worker_busy), no other API
+ * thread is inside the inline path (inline_busy) and, for submissions, the
+ * in-flight capacity check would not block.  While inline_busy is set the
+ * worker does not dequeue, so any op enqueued meanwhile is processed after
+ * the inline one completes; while worker_busy is set or the list is
+ * non-empty no thread goes inline, so an inline op can never overtake an op
+ * the worker owns.  Both flags are only changed under queue->lock and every
+ * change broadcasts work_available.
+ */
+static bool
+d12_queue_idle_locked(const struct d12_queue *queue)
+{
+   return !queue->op_head && !queue->worker_busy && !queue->inline_busy &&
+          !p_atomic_read(&queue->stop);
+}
+
 static void
-d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
+d12_queue_inline_begin_locked(struct d12_queue *queue)
+{
+   assert(d12_queue_idle_locked(queue));
+   queue->inline_busy = true;
+}
+
+static void
+d12_queue_inline_end_locked(struct d12_queue *queue)
+{
+   assert(queue->inline_busy);
+   queue->inline_busy = false;
+   cnd_broadcast(&queue->work_available);
+}
+
+static void
+d12_queue_retire_enqueue_locked(struct d12_queue *queue,
+                                struct d12_queue_op *op)
 {
    op->next = NULL;
-   d12_sync_lock(&queue->lock);
    if (queue->retire_tail)
       queue->retire_tail->next = op;
    else
@@ -1376,7 +1417,42 @@ d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
     * waiter whose predicate is still false and leave the retire worker
     * parked until its fallback timeout; broadcast reaches the right one. */
    cnd_broadcast(&queue->retire_available);
+}
+
+static void
+d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
+{
+   d12_sync_lock(&queue->lock);
+   d12_queue_retire_enqueue_locked(queue, op);
    mtx_unlock(&queue->lock);
+}
+
+/* A queue Signal takes the point of the last submission ahead of it; the
+ * retirement worker publishes the value once that point completes. */
+static void
+d12_queue_schedule_signal_locked(struct d12_queue *queue,
+                                 struct d12_queue_op *op)
+{
+   if (d12_debug()->dump_sync)
+      mesa_logi("SYNC Signal schedule: queue %p fence %p value %llu",
+                (void *)queue, (void *)op->fence,
+                (unsigned long long)op->value);
+   op->retire_value = d12_queue_timeline_marker(&queue->timeline);
+   d12_queue_retire_enqueue_locked(queue, op);
+}
+
+/* Submit an op from the calling thread.  Returns false when the op was
+ * consumed by a failure (the device is then removed, or stopping). */
+static bool
+d12_queue_submit_inline(struct d12_queue *queue, struct d12_queue_op *op)
+{
+   const bool retire = d12_queue_wait_submit_capacity(queue) &&
+                       d12_queue_process_submit(queue, op);
+   if (retire)
+      d12_queue_retire_enqueue(queue, op);
+   else
+      d12_queue_op_destroy(op);
+   return retire;
 }
 
 _Static_assert(sizeof(struct libagx_write_u64_args) == 16,
@@ -2168,7 +2244,8 @@ d12_queue_worker(void *data)
 
    for (;;) {
       d12_sync_lock(&queue->lock);
-      while (!queue->op_head && !p_atomic_read(&queue->stop))
+      while ((!queue->op_head || queue->inline_busy) &&
+             !p_atomic_read(&queue->stop))
          d12_sync_wait_idle(&queue->work_available, &queue->lock,
                             &idle_backoff_ns);
       idle_backoff_ns = 0;
@@ -2183,6 +2260,7 @@ d12_queue_worker(void *data)
       if (!queue->op_head)
          queue->op_tail = NULL;
       op->next = NULL;
+      queue->worker_busy = true;
       mtx_unlock(&queue->lock);
 
       bool retire = false;
@@ -2223,12 +2301,10 @@ d12_queue_worker(void *data)
             d12_queue_release_signal_slot(queue, op);
          break;
       case D12_QUEUE_OP_SIGNAL:
-         if (d12_debug()->dump_sync)
-            mesa_logi("SYNC Signal schedule: queue %p fence %p value %llu",
-                      (void *)queue, (void *)op->fence,
-                      (unsigned long long)op->value);
-         op->retire_value = d12_queue_timeline_marker(&queue->timeline);
-         retire = true;
+         d12_sync_lock(&queue->lock);
+         d12_queue_schedule_signal_locked(queue, op);
+         mtx_unlock(&queue->lock);
+         op = NULL;
          break;
       case D12_QUEUE_OP_PLACEMENT_WAIT:
          if (d12_debug()->dump_sync)
@@ -2269,8 +2345,13 @@ d12_queue_worker(void *data)
 
       if (retire)
          d12_queue_retire_enqueue(queue, op);
-      else
+      else if (op)
          d12_queue_op_destroy(op);
+
+      d12_sync_lock(&queue->lock);
+      queue->worker_busy = false;
+      cnd_broadcast(&queue->work_available);
+      mtx_unlock(&queue->lock);
    }
 
    return 0;
@@ -2632,6 +2713,19 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
          d12_sync_lock(&queue->lock);
          if (!retire)
             break;
+      } else if (d12_queue_idle_locked(queue) &&
+                 d12_queue_timeline_has_capacity(
+                    &queue->timeline, D12_QUEUE_MAX_INFLIGHT_SUBMITS)) {
+         /* Nothing is ahead of this list: submit it from here instead of
+          * paying a worker wakeup.  A full in-flight window still goes
+          * through the worker so this call never blocks on the GPU. */
+         d12_queue_inline_begin_locked(queue);
+         mtx_unlock(&queue->lock);
+         const bool submitted = d12_queue_submit_inline(queue, op);
+         d12_sync_lock(&queue->lock);
+         d12_queue_inline_end_locked(queue);
+         if (!submitted)
+            break;
       } else if (!d12_queue_enqueue_locked(queue, op)) {
          d12_queue_op_destroy(op);
          break;
@@ -2969,7 +3063,14 @@ d12_queue_Signal(ID3D12CommandQueue *iface, ID3D12Fence *fence_iface,
    }
 
    d12_sync_lock(&queue->lock);
-   bool queued = d12_queue_enqueue_locked(queue, op);
+   bool queued;
+   if (d12_queue_idle_locked(queue)) {
+      /* Scheduling a Signal is only a timeline read; do it here. */
+      d12_queue_schedule_signal_locked(queue, op);
+      queued = true;
+   } else {
+      queued = d12_queue_enqueue_locked(queue, op);
+   }
    mtx_unlock(&queue->lock);
    if (!queued) {
       d12_queue_op_destroy(op);

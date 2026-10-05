@@ -2308,6 +2308,12 @@ struct d12_queue {
     * Teardown broadcasts it after raising stop, so the worker never needs a
     * timed poll to notice cancellation. */
    struct d12_fence *worker_parked_fence;
+   /* Ownership of the queue's API order, both under queue->lock.
+    * worker_busy: the submit worker holds an op it dequeued and has not
+    * finished.  inline_busy: an API thread is processing an op in place.
+    * See d12_queue_idle_locked for the ordering invariant. */
+   bool worker_busy;
+   bool inline_busy;
    uint32_t pending_placement_wait_count;
    struct d12_queue_placement_wait
       pending_placement_waits[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
