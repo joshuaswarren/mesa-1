@@ -6559,6 +6559,8 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
 
    struct agx3_ioto_uniform_range ranges[10];
    unsigned range_count = 0;
+   const struct d12_binding_upload_cache *txf_cache = NULL;
+   uint64_t txf_texture_table = 0, txf_sampler_cell = 0;
    if (native_txf) {
       /* The compute binding upload this dispatch consumes must still be
        * cached: its texture table extent is what the prefix publishes. */
@@ -6589,6 +6591,9 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
       const uint64_t sampler_table = sampler_bo->va->addr;
       const uint64_t sampler_cell = d12_list_upload(
          list, &sampler_table, sizeof(sampler_table), 8);
+      txf_cache = cache;
+      txf_texture_table = texture_table;
+      txf_sampler_cell = sampler_cell;
       const struct d12_g17p_txf_prefix_sources sources = {
          .root_cell = u->root, .texture_cell = u->textures,
          .sampler_cell = sampler_cell, .texture_table = texture_table,
@@ -6621,6 +6626,18 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
       const uint8_t *sampler_cpu = agx_bo_map(sampler_bo);
       if (!code_cpu || !sampler_cpu)
          goto fail;
+   }
+   /* Qualification trace of the native Texture.Load inputs: three BLAKE3
+    * hashes and two log lines per dispatch, so only under D3D12AGX_DUMP_TEX.
+    * Unconditionally this cost 10 us of every such dispatch. */
+   if (native_txf && d12_debug()->dump_tex) {
+      const struct d12_binding_upload_cache *cache = txf_cache;
+      const uint8_t *stream_cpu = d12_list_stream_map(list);
+      const uint8_t *code_cpu = agx_bo_map(pso->code_bo);
+      const uint8_t *sampler_cpu = agx_bo_map(list->device->rodata_bo);
+      const uint64_t texture_table = txf_texture_table;
+      const uint64_t sampler_table = list->device->rodata_bo->va->addr;
+      const uint64_t sampler_cell = txf_sampler_cell;
       blake3_hash code_hash, table_hash, sampler_hash;
       char code_hex[BLAKE3_HEX_LEN], table_hex[BLAKE3_HEX_LEN];
       char sampler_hex[BLAKE3_HEX_LEN];
