@@ -22,6 +22,8 @@ enum shape {
    IF_DEMOTE_THEN_GUARDED,
    QUAD_ONLY_BEFORE,
    QUAD_IN_LOOP,
+   GUARDED_PLAIN_LOOP,
+   GUARDED_LOOP_AFTER,
    SUBGROUP_AFTER,
    NESTED_GUARDED,
    QUAD_BEFORE_SECOND_DEMOTE,
@@ -119,6 +121,38 @@ build(enum shape s)
       out = x;
       break;
    }
+   case GUARDED_LOOP_AFTER: {
+      nir_if *nif = nir_push_if(&b, nir_inot(&b, c));
+      nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+      tex->op = nir_texop_txl;
+      tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
+      tex->dest_type = nir_type_float32;
+      tex->coord_components = 2;
+      tex->texture_index = 0;
+      tex->sampler_index = 0;
+      tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, nir_vec2(&b, x, y));
+      tex->src[1] =
+         nir_tex_src_for_ssa(nir_tex_src_lod, nir_imm_float(&b, 0.0f));
+      nir_def_init(&tex->instr, &tex->def, 4, 32);
+      nir_builder_instr_insert(&b, &tex->instr);
+      nir_loop *loop = nir_push_loop(&b);
+      v = nir_fadd(&b, nir_channel(&b, &tex->def, 0), y);
+      nir_break_if(&b, nir_flt(&b, v, x));
+      nir_pop_loop(&b, loop);
+      nir_pop_if(&b, nif);
+      out = nir_if_phi(&b, v, two);
+      break;
+   }
+   case GUARDED_PLAIN_LOOP: {
+      nir_if *nif = nir_push_if(&b, nir_inot(&b, c));
+      nir_loop *loop = nir_push_loop(&b);
+      v = nir_fadd(&b, x, y);
+      nir_break_if(&b, nir_flt(&b, v, x));
+      nir_pop_loop(&b, loop);
+      nir_pop_if(&b, nif);
+      out = nir_if_phi(&b, v, two);
+      break;
+   }
    case SUBGROUP_AFTER:
       out = nir_u2f32(&b, nir_channel(&b, nir_ballot(&b, 1, 32, d), 0));
       break;
@@ -185,14 +219,16 @@ TEST_F(DemoteEarlyKill, GuardedQuadOperationsAllowEarlyKill)
    EXPECT_TRUE(lower(IF_DEMOTE_THEN_GUARDED));
    EXPECT_TRUE(lower(NESTED_GUARDED));
    EXPECT_TRUE(lower(QUAD_ONLY_BEFORE));
+   EXPECT_TRUE(lower(GUARDED_PLAIN_LOOP));
 }
 
-TEST_F(DemoteEarlyKill, ReachableQuadOperationsKeepDeferredKill)
+TEST_F(DemoteEarlyKill, ReachableLaneDependentOperationsKeepDeferredKill)
 {
    EXPECT_FALSE(lower(UNGUARDED));
    EXPECT_FALSE(lower(OTHER_CONDITION));
    EXPECT_FALSE(lower(SAME_CONDITION));
    EXPECT_FALSE(lower(QUAD_IN_LOOP));
+   EXPECT_FALSE(lower(GUARDED_LOOP_AFTER));
    EXPECT_FALSE(lower(SUBGROUP_AFTER));
 }
 

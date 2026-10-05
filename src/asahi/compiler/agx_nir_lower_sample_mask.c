@@ -258,7 +258,10 @@ accumulate_demote(nir_builder *b, nir_intrinsic_instr *intr, void *data)
  * The proof is structural and conservative: demotes and the guarded code
  * must sit in top-level control flow, and every later quad-dependent
  * instruction must be inside a top-level if whose branch excludes the
- * demoted lanes by an exact boolean negation of the demote's guard.
+ * demoted lanes by an exact boolean negation of the demote's guard. A G17P
+ * texture result carried across a later loop is also lane-dependent: hardware
+ * drops intermittent fragment groups if a coverage kill precedes that shape,
+ * even when the loop executes zero iterations.
  */
 static bool
 quad_dependent_instr(const nir_instr *instr)
@@ -297,6 +300,12 @@ is_demote(const nir_instr *instr)
 }
 
 static bool
+is_texture(const nir_instr *instr)
+{
+   return instr->type == nir_instr_type_tex;
+}
+
+static bool
 cf_list_has(struct exec_list *list, bool (*pred)(const nir_instr *))
 {
    foreach_list_typed(nir_cf_node, node, node, list) {
@@ -319,6 +328,39 @@ cf_node_has(nir_cf_node *node, bool (*pred)(const nir_instr *))
             return true;
       }
    }
+   return false;
+}
+
+static bool
+cf_list_has_loop(struct exec_list *list)
+{
+   foreach_list_typed(nir_cf_node, node, node, list) {
+      if (node->type == nir_cf_node_loop)
+         return true;
+
+      if (node->type == nir_cf_node_if) {
+         nir_if *nif = nir_cf_node_as_if(node);
+         if (cf_list_has_loop(&nif->then_list) ||
+             cf_list_has_loop(&nif->else_list))
+            return true;
+      }
+   }
+
+   return false;
+}
+
+static bool
+cf_node_has_loop(nir_cf_node *node)
+{
+   if (node->type == nir_cf_node_loop)
+      return true;
+
+   if (node->type == nir_cf_node_if) {
+      nir_if *nif = nir_cf_node_as_if(node);
+      return cf_list_has_loop(&nif->then_list) ||
+             cf_list_has_loop(&nif->else_list);
+   }
+
    return false;
 }
 
@@ -383,15 +425,19 @@ bool_equal(nir_def *a, nir_def *b)
 }
 
 static bool
-demoted_lanes_reach_quad_ops(nir_shader *shader)
+demoted_lanes_reach_sensitive_work(nir_shader *shader)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   const bool has_texture = cf_list_has(&impl->body, is_texture);
    bool seen = false, all = false;
    nir_def *guard = NULL;
    bool guard_negated = false;
 
    foreach_list_typed(nir_cf_node, node, node, &impl->body) {
       if (cf_node_has(node, is_demote)) {
+         if (has_texture && cf_node_has_loop(node))
+            return true;
+
          if (node->type == nir_cf_node_block) {
             /* Unconditionally executed demote. demote_if(c) arrives here as
              * demote_samples(bcsel(c, samples, 0)), which demotes only lanes
@@ -453,7 +499,13 @@ demoted_lanes_reach_quad_ops(nir_shader *shader)
          continue;
       }
 
-      if (!seen || !cf_node_has(node, quad_dependent_instr))
+      if (!seen)
+         continue;
+
+      if (has_texture && cf_node_has_loop(node))
+         return true;
+
+      if (!cf_node_has(node, quad_dependent_instr))
          continue;
       if (all || node->type != nir_cf_node_if)
          return true;
@@ -546,15 +598,18 @@ bool
 agx_nir_lower_sample_mask_deferred(nir_shader *shader)
 {
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
+   const bool lanes_reach_sensitive_work =
+      demoted_lanes_reach_sensitive_work(shader);
 
-   /* Only shaders whose derivatives or quad operations need every lane
-    * defer their kills. Depth-writing (z_export) and forced-early shaders
-    * rely on the kill preceding the test-triggering operation or the
+   /* Only shaders whose derivatives, quad operations or sampled loops need
+    * every lane defer their kills. Depth-writing (z_export) and forced-early
+    * shaders rely on the kill preceding the test-triggering operation or the
     * colour export: pipeline.*.multisample.z_export.*_static_atc and
     * samplemask_early_fragment_tests_depth lost their depth writes with a
     * kill at the end of the shader. */
    if (!shader->info.fs.needs_coarse_quad_helper_invocations &&
-       !shader->info.fs.needs_full_quad_helper_invocations)
+       !shader->info.fs.needs_full_quad_helper_invocations &&
+       !lanes_reach_sensitive_work)
       return agx_nir_lower_sample_mask(shader);
 
    bool writes_zs =
@@ -563,7 +618,7 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
 
    const bool early = shader->info.fs.early_fragment_tests;
    if (!early && !writes_zs && shader->info.fs.uses_discard &&
-       !demoted_lanes_reach_quad_ops(shader))
+       !lanes_reach_sensitive_work)
       return agx_nir_lower_sample_mask(shader);
 
    if (early) {
