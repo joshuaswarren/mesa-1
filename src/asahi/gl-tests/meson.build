@@ -1,6 +1,15 @@
 # Copyright 2026 Aurora Silicon
 # SPDX-License-Identifier: MIT
 
+# Hardware stress reproducer; the GL software path cannot exercise the
+# intermittent G17P failure. Invoke explicitly with Zink -> Honeykrisp.
+executable(
+  'asahi-zink-discard-corruption',
+  files('test-zink-discard-corruption.c'),
+  dependencies : [cc.find_library('EGL'), cc.find_library('GLESv2')],
+  build_by_default : false,
+)
+
 gl_resources = executable(
   'asahi-g17p-gl-resources',
   files('test-g17p-gl-resources.c'),
