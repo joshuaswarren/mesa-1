@@ -127,6 +127,12 @@ hk_ordinary_descriptor_select_push(
  * branch) and the API shader gets a separate ordinary hardware variant,
  * selected per draw (hk_cmd_draw.c hk_select_ordinary_vs()). */
 #define HK_ORDINARY_V96_VERTEX_VARIANTS (1u << 2)
+/* Only omit custom-border emulation; retain scaled-format conversion. The
+ * descriptor proof is deliberately unchanged (including kind == 0). */
+#define HK_ORDINARY_BUILTIN_BORDER_ONLY (1u << 3)
+/* Prove every sampled/fetched image, including gather and array/cube shapes,
+ * before omitting either scaled conversion or custom-border emulation. */
+#define HK_ORDINARY_ALL_TEXTURE_SHAPES (1u << 4)
 
 bool hk_nir_ordinary_descriptor_regions(
    struct nir_shader *nir, uint32_t set_layout_count,
