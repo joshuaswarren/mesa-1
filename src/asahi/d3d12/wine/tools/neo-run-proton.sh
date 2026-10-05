@@ -23,23 +23,33 @@ mkdir -p "$logdir" "$prefix"
 chown "$run_user" "$logdir" "$prefix"
 
 # Session environment of the user's compositor (gnome-shell or sway).
+# ALLOW_HEADLESS=1: run with no display (Wine's null driver) when the user is
+# logged out; fine for the frozen suites (no swapchain), and for our presenter
+# (readback + GDI blit onto a null DC). A Vulkan-WSI swapchain (DXVK dxgi +
+# vkd3d-proton) cannot be created without a display, so sample runs under the
+# vkd3d-proton tool need a real session.
 sess_pid=$(pgrep -u "$run_user" -x gnome-shell | head -1)
 [[ -n $sess_pid ]] || sess_pid=$(pgrep -u "$run_user" -x sway | head -1)
-[[ -n $sess_pid ]] || { echo "no graphical session for $run_user" >&2; exit 3; }
 sess_env=()
 declare -A have=()
-for v in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XAUTHORITY XDG_SESSION_TYPE; do
-   val=$(tr '\0' '\n' < "/proc/$sess_pid/environ" | sed -n "s/^$v=//p" | head -1)
-   [[ -n $val ]] && { sess_env+=("$v=$val"); have[$v]=$val; }
-done
+headless=0
+if [[ -z $sess_pid ]]; then
+   [[ ${ALLOW_HEADLESS:-0} == 1 ]] || { echo "no graphical session for $run_user" >&2; exit 3; }
+   headless=1
+else
+   for v in DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR DBUS_SESSION_BUS_ADDRESS XAUTHORITY XDG_SESSION_TYPE; do
+      val=$(tr '\0' '\n' < "/proc/$sess_pid/environ" | sed -n "s/^$v=//p" | head -1)
+      [[ -n $val ]] && { sess_env+=("$v=$val"); have[$v]=$val; }
+   done
+fi
 # gnome-shell's own environment names neither its Wayland socket nor its
 # Xwayland display (it creates both); derive them from the runtime dir and
 # the Xwayland command line so Wine's x11 driver can open a window.
 rt=${have[XDG_RUNTIME_DIR]:-/run/user/$(id -u "$run_user")}
-if [[ -z ${have[WAYLAND_DISPLAY]:-} && -S $rt/wayland-0 ]]; then
+if (( !headless )) && [[ -z ${have[WAYLAND_DISPLAY]:-} && -S $rt/wayland-0 ]]; then
    sess_env+=("WAYLAND_DISPLAY=wayland-0")
 fi
-if [[ -z ${have[DISPLAY]:-} ]]; then
+if (( !headless )) && [[ -z ${have[DISPLAY]:-} ]]; then
    xw=$(pgrep -u "$run_user" -a -x Xwayland | head -1)
    disp=$(sed -n 's/.*Xwayland \(:[0-9]*\).*/\1/p' <<< "$xw")
    auth=$(sed -n 's/.*-auth \([^ ]*\).*/\1/p' <<< "$xw")
@@ -52,7 +62,7 @@ stamp=$(date -u +%Y%m%dT%H%M%SZ)
 log=$logdir/run-$stamp.log
 {
    echo "tool=$tool prefix=$prefix exe=$1 args=${*:2} timeout=$timeout_s verb=${PROTON_VERB:-run}"
-   echo "session env: ${sess_env[*]}"
+   echo "session env: ${sess_env[*]} headless=$headless"
 } > "$log"
 
 # Everything after the verb is the command line; the exe directory is only
