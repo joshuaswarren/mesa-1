@@ -14163,9 +14163,13 @@ d12_list_ResourceBarrier(ID3D12GraphicsCommandList6 *iface, UINT num_barriers,
     * reloads the attachments through the existing load-preserving path.
     * No metadata activation is necessary: these layouts are uncompressed
     * AIL surfaces and aliases name the same coherent BO storage. NULL/NULL
-    * aliasing and UAV barriers apply globally, so use the same boundary.
+    * aliasing and UAV barriers apply globally, so use the same render
+    * boundary. Compute dispatches already end in a cache flush and execute
+    * in stream order; keep them in the same segment. Legal placed-resource
+    * loops can contain thousands of aliasing barriers, so splitting those
+    * dispatches would incorrectly exhaust the command-list segment limit.
     */
-   if (num_barriers)
+   if (num_barriers && list->render_open)
       d12_list_close_cdm(list);
 }
 
