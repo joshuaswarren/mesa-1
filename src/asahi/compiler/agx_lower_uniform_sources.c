@@ -266,6 +266,40 @@ agx_lower_uniform_sources(agx_context *ctx)
             first_uniform = UINT_MAX;
       }
 
+      /* G17P ISEL reads an aligned 32-bit uniform directly as one comparand
+       * beside a 32-bit register (f36/f42 = 3, f51/f57 = 3) or as either
+       * select (f66/f72 = 3, f83/f89 = 3), 32-bit result (agx3_isel_core.c
+       * witnesses). Keep those uniforms instead of copying each one into a
+       * GPR per use; prefer the selects when both kinds are present, since
+       * a uniform comparand is only witnessed beside register selects. */
+      bool keep_isel_uniform[4] = {false};
+      if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+          !ctx->is_preamble &&
+          I->op == AGX_OPCODE_ICMPSEL && I->nr_dests == 1 &&
+          I->nr_srcs == 4 && I->dest[0].size == AGX_SIZE_32 &&
+          agx_channels(I->dest[0]) == 1 &&
+          I->src[0].size == AGX_SIZE_32 && I->src[1].size == AGX_SIZE_32) {
+         bool uniform_ok[4], reg32[4];
+         for (unsigned j = 0; j < 4; ++j) {
+            const agx_index x = I->src[j];
+            uniform_ok[j] = x.type == AGX_INDEX_UNIFORM &&
+                            x.size == AGX_SIZE_32 && !(x.value & 1) &&
+                            x.value + 2 <= 256 && !x.abs && !x.neg &&
+                            !x.memory;
+            reg32[j] = x.type == AGX_INDEX_NORMAL &&
+                       x.size == AGX_SIZE_32 && !x.abs && !x.neg &&
+                       agx_channels(x) == 1;
+         }
+         if (uniform_ok[2] || uniform_ok[3]) {
+            keep_isel_uniform[2] = uniform_ok[2];
+            keep_isel_uniform[3] = uniform_ok[3];
+         } else if (uniform_ok[0] && reg32[1]) {
+            keep_isel_uniform[0] = true;
+         } else if (uniform_ok[1] && reg32[0]) {
+            keep_isel_uniform[1] = true;
+         }
+      }
+
       /* An unwitnessed descriptor pair (agx3_tex_uniform_pair_unwitnessed)
        * materializes its uniform operand, keeping the register form. */
       const bool copy_tex_uniform =
@@ -345,6 +379,7 @@ agx_lower_uniform_sources(agx_context *ctx)
              (s == first_uniform || copy_minmax || copy_float_uniforms || copy_float_modifier ||
               copy_compare_uniform || copy_tex ||
               !(native_integer || vertex_tex_uniform || uniform_imm_compare ||
+                (s < 4 && keep_isel_uniform[s]) ||
                 agx_instr_accepts_uniform(ctx->key->dev.encoding, I->op, s,
                                          I->src[s].value, I->src[s].size)))) {
             agx_index idx = I->src[s];

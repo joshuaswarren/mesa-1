@@ -101,6 +101,46 @@ TEST(AGX3UniformALU, TextureUniformOperandPairs)
    }
 }
 
+/* ICMPSEL keeps an aligned 32-bit uniform only in the native ISEL shapes
+ * (agx3_isel_core.c witnesses): as a select, or as one comparand beside a
+ * 32-bit register; never beside an immediate, never in a constant program. */
+TEST(AGX3UniformALU, IselUniformOperands)
+{
+   enum shape { SEL, CMP0_REG, CMP1_REG, CMP0_IMM, CMP_SEL, PREAMBLE, ODD };
+   for (unsigned shape = SEL; shape <= ODD; ++shape) {
+      void *mem = ralloc_context(NULL);
+      agx_shader_key key = {};
+      key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+      agx_builder *b = agx_test_builder(mem);
+      b->shader->key = &key;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      b->shader->is_preamble = shape == PREAMBLE;
+      agx_index r0 = agx_temp(b->shader, AGX_SIZE_32);
+      agx_index r1 = agx_temp(b->shader, AGX_SIZE_32);
+      agx_index u = agx_uniform(shape == ODD ? 9 : 8, AGX_SIZE_32);
+      agx_index src[4] = {r0, r1, r0, r1};
+      unsigned kept = ~0u;
+      switch (shape) {
+      case SEL: case PREAMBLE: case ODD: src[2] = u; kept = 2; break;
+      case CMP0_REG: src[0] = u; kept = 0; break;
+      case CMP1_REG: src[1] = u; kept = 1; break;
+      case CMP0_IMM: src[0] = u; src[1] = agx_immediate(0); break;
+      case CMP_SEL: src[0] = u; src[3] = u; kept = 3; break;
+      }
+      if (shape == PREAMBLE || shape == ODD)
+         kept = ~0u;
+      agx_instr *I = agx_icmpsel_to(b, agx_temp(b->shader, AGX_SIZE_32),
+                                    src[0], src[1], src[2], src[3],
+                                    AGX_ICOND_ULT);
+      agx_lower_uniform_sources(b->shader);
+      for (unsigned s = 0; s < 4; ++s) {
+         EXPECT_EQ(I->src[s].type == AGX_INDEX_UNIFORM, s == kept)
+            << "shape " << shape << " src " << s;
+      }
+      ralloc_free(mem);
+   }
+}
+
 TEST(AGX3UniformALU, AppleArithmeticWitnesses)
 {
    /* Fresh applegpu_g17p output, also byte-identical on applegpu_g16g. */

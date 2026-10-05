@@ -13531,13 +13531,27 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                agx3_src_is_register(dest) && !dest.memory &&
                agx_channels(dest) == 1 &&
                (dest.size == AGX_SIZE_32 || dest.size == AGX_SIZE_16);
-            const bool cmp_ok =
-               agx3_src_is_register(a) && !a.memory && !a.abs && !a.neg &&
-               (a.size == AGX_SIZE_32 || a.size == AGX_SIZE_16) &&
-               agx_channels(a) == 1 && !b.memory && !b.abs && !b.neg &&
-               ((b.type == AGX_INDEX_IMMEDIATE && b.value <= 255) ||
-                (agx3_src_is_register(b) && b.size == a.size &&
-                 agx_channels(b) == 1));
+            /* One aligned 32-bit uniform comparand is native beside a
+             * 32-bit register (agx3_isel_core.c); agx_lower_uniform_sources
+             * keeps no other uniform compare shape. */
+            const bool a_uniform = a.type == AGX_INDEX_UNIFORM;
+            const bool b_uniform = b.type == AGX_INDEX_UNIFORM;
+            const bool a_reg32 = agx3_src_is_register(a) &&
+                                 a.size == AGX_SIZE_32 &&
+                                 agx_channels(a) == 1;
+            const bool b_reg32 = agx3_src_is_register(b) &&
+                                 b.size == AGX_SIZE_32 &&
+                                 agx_channels(b) == 1;
+            const bool cmp_ok = !a.memory && !a.abs && !a.neg &&
+               !b.memory && !b.abs && !b.neg &&
+               ((a_uniform && a.size == AGX_SIZE_32 && b_reg32) ||
+                (b_uniform && b.size == AGX_SIZE_32 && a_reg32) ||
+                (agx3_src_is_register(a) &&
+                 (a.size == AGX_SIZE_32 || a.size == AGX_SIZE_16) &&
+                 agx_channels(a) == 1 &&
+                 ((b.type == AGX_INDEX_IMMEDIATE && b.value <= 255) ||
+                  (agx3_src_is_register(b) && b.size == a.size &&
+                   agx_channels(b) == 1))));
 
             if (!dest_ok || !cmp_ok)
                AGX3_REFUSE(I);
@@ -13547,6 +13561,8 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             d.cmp0 = a.value;
             d.cmp1 = b.value;
             d.cmp1_immediate = b.type == AGX_INDEX_IMMEDIATE;
+            d.cmp0_uniform = a_uniform;
+            d.cmp1_uniform = b_uniform;
             d.cmp_16 = a.size == AGX_SIZE_16;
             d.explicit_hints = true;
             d.dest_cache = dest.cache;
@@ -13613,6 +13629,11 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                           !s.neg && s.size == dest.size &&
                           agx_channels(s) == 1) {
                   kind[n] = AGX3_ISEL_REGISTER;
+                  value[n] = s.value;
+               } else if (s.type == AGX_INDEX_UNIFORM && !s.memory &&
+                          !s.abs && !s.neg && s.size == AGX_SIZE_32 &&
+                          dest.size == AGX_SIZE_32) {
+                  kind[n] = AGX3_ISEL_UNIFORM;
                   value[n] = s.value;
                } else {
                   selects_ok = false;

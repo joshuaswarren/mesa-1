@@ -195,13 +195,53 @@ operand_ok(enum agx3_isel_operand kind, uint16_t value, bool narrow)
 /* Fresh G17P eq0/eq0_live/lt2/gt255 native witnesses. This form uses kind-2
  * selected registers even with two register selections; it cannot reuse the
  * older register-comparand form's kind-3 fields. */
+/* Uniform operands: aligned 32-bit words in the low uniform file. */
+static bool
+uniform32_ok(uint16_t half)
+{
+   return (half & 1) == 0 && half + 2 <= 256;
+}
+
 static bool
 encode_explicit(const struct agx3_isel_desc *d,
                  uint8_t out[AGX3_ISEL_MAX_LENGTH], uint8_t *len)
 {
-   if (!(d->cmp_16 ? reg16_ok(d->cmp0) : reg32_ok(d->cmp0)) ||
-       (d->cmp1_immediate ? d->cmp1 > 255 :
-        !(d->cmp_16 ? reg16_ok(d->cmp1) : reg32_ok(d->cmp1))))
+   const bool tu = d->true_kind == AGX3_ISEL_UNIFORM;
+   const bool fu = d->false_kind == AGX3_ISEL_UNIFORM;
+   const bool any_uniform = d->cmp0_uniform || d->cmp1_uniform || tu || fu;
+
+   /* Native G17P (metal-nt -arch applegpu_g17p) uniform isel witnesses:
+    *   (u < r) ? r : r      02091701020285c00004   cmp0 f36, f42 = 3
+    *   (r < u) ? r : r      02010f09020205c20004   cmp1 f51, f57 = 3
+    *   (r == 7) ? u : r     02010f86260a17c20002   true f66, f72 = 3
+    *   (r == 7) ? r : u     02010f86060217c2200c   false f83, f89 = 3
+    *   (r == 7) ? u : u     02010f86260a17c2200c
+    *   (r < r) ? u : 3      02010f03220a05c02083
+    * Keep to those shapes: one uniform comparand beside a 32-bit register,
+    * or uniform selects beside register/immediate comparands, 32-bit result. */
+   if (any_uniform) {
+      if (d->dest_16 || d->cmp_16 ||
+          (d->cmp0_uniform && d->cmp1_uniform) ||
+          ((d->cmp0_uniform || d->cmp1_uniform) &&
+           (d->cmp1_immediate || tu || fu)) ||
+          (d->cmp0_uniform && !uniform32_ok(d->cmp0)) ||
+          (d->cmp1_uniform && !uniform32_ok(d->cmp1)) ||
+          (tu && !uniform32_ok(d->sel_true)) ||
+          (fu && !uniform32_ok(d->sel_false)) ||
+          (d->cmp0_uniform && (d->cache[0] || d->discard[0])) ||
+          (d->cmp1_uniform && (d->cache[1] || d->discard[1])) ||
+          (tu && (d->cache[2] || d->discard[2])) ||
+          (fu && (d->cache[3] || d->discard[3])) ||
+          (!tu && !operand_ok(d->true_kind, d->sel_true, false)) ||
+          (!fu && !operand_ok(d->false_kind, d->sel_false, false)))
+         return false;
+   }
+
+   if ((!d->cmp0_uniform &&
+        !(d->cmp_16 ? reg16_ok(d->cmp0) : reg32_ok(d->cmp0))) ||
+       (!d->cmp1_uniform &&
+        (d->cmp1_immediate ? d->cmp1 > 255 :
+         !(d->cmp_16 ? reg16_ok(d->cmp1) : reg32_ok(d->cmp1)))))
       return false;
 
    for (unsigned i = 0; i < 4; ++i) {
@@ -219,34 +259,38 @@ encode_explicit(const struct agx3_isel_desc *d,
    const unsigned width = d->dest_16 ? 1 : 2;
    const struct agx3_field_kv base[] = {
       KV(10, 2), KV(11, width), KV(12, d->dest_cache),
-      KV(42, 2), KV(43, d->cmp_16 ? 1 : 2),
-      KV(57, d->cmp1_immediate ? 1 : 2),
-      KV(58, (d->cmp1_immediate || d->cmp_16) ? 1 : 2), KV(72, ti ? 1 : 2), KV(73, width),
-      KV(89, fi ? 1 : 2), KV(90, width),
+      KV(42, d->cmp0_uniform ? 3 : 2), KV(43, d->cmp_16 ? 1 : 2),
+      KV(57, d->cmp1_immediate ? 1 : d->cmp1_uniform ? 3 : 2),
+      KV(58, (d->cmp1_immediate || d->cmp_16) ? 1 : 2),
+      KV(72, ti ? 1 : tu ? 3 : 2), KV(73, width),
+      KV(89, fi ? 1 : fu ? 3 : 2), KV(90, width),
    };
    struct agx3_field_kv ov[24];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(3, d->dest);
-   ov[n++] = (struct agx3_field_kv)KV(35, d->cmp0);
-   ov[n++] = (struct agx3_field_kv)KV(d->cmp1_immediate ? 49 : 50, d->cmp1);
+   ov[n++] = (struct agx3_field_kv)KV(d->cmp0_uniform ? 36 : 35, d->cmp0);
+   ov[n++] = (struct agx3_field_kv)KV(d->cmp1_immediate ? 49 :
+                                      d->cmp1_uniform ? 51 : 50, d->cmp1);
    ov[n++] = (struct agx3_field_kv)KV(106, d->cond);
-   ov[n++] = (struct agx3_field_kv)KV(ti ? 64 : 65, d->sel_true);
-   ov[n++] = (struct agx3_field_kv)KV(fi ? 81 : 82, d->sel_false);
-   ov[n++] = (struct agx3_field_kv)KV(44, d->cache[0]);
-   ov[n++] = (struct agx3_field_kv)KV(46, d->discard[0]);
+   ov[n++] = (struct agx3_field_kv)KV(ti ? 64 : tu ? 66 : 65, d->sel_true);
+   ov[n++] = (struct agx3_field_kv)KV(fi ? 81 : fu ? 83 : 82, d->sel_false);
+   if (!d->cmp0_uniform) {
+      ov[n++] = (struct agx3_field_kv)KV(44, d->cache[0]);
+      ov[n++] = (struct agx3_field_kv)KV(46, d->discard[0]);
+   }
    if (d->cmp_16 && d->cond >= AGX3_ISEL_ICOND_EQ)
       ov[n++] = (struct agx3_field_kv)KV(47, 1);
-   if (!d->cmp1_immediate) {
+   if (!d->cmp1_immediate && !d->cmp1_uniform) {
       ov[n++] = (struct agx3_field_kv)KV(59, d->cache[1]);
       ov[n++] = (struct agx3_field_kv)KV(61, d->discard[1]);
       if (d->cmp_16 && d->cond >= AGX3_ISEL_ICOND_EQ)
          ov[n++] = (struct agx3_field_kv)KV(62, 1);
    }
-   if (!ti) {
+   if (!ti && !tu) {
       ov[n++] = (struct agx3_field_kv)KV(74, d->cache[2]);
       ov[n++] = (struct agx3_field_kv)KV(76, d->discard[2]);
    }
-   if (!fi) {
+   if (!fi && !fu) {
       ov[n++] = (struct agx3_field_kv)KV(91, d->cache[3]);
       ov[n++] = (struct agx3_field_kv)KV(93, d->discard[3]);
    }
@@ -273,8 +317,9 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
 
    /* The register comparands share a width; immediates carry no register. */
    if (!cond_ok(d->cond) ||
-       !(d->cmp_16 ? reg16_ok(d->cmp0) : reg32_ok(d->cmp0)) ||
-       (!d->cmp1_immediate &&
+       (!d->cmp0_uniform &&
+        !(d->cmp_16 ? reg16_ok(d->cmp0) : reg32_ok(d->cmp0))) ||
+       (!d->cmp1_immediate && !d->cmp1_uniform &&
         !(d->cmp_16 ? reg16_ok(d->cmp1) : reg32_ok(d->cmp1))))
       return false;
    if (d->wait_mask >= (1u << 6))
@@ -282,6 +327,12 @@ agx3_isel_encode(enum agx_isa_encoding encoding,
 
    if (d->dest_16 ? !reg16_ok(d->dest) : !reg32_ok(d->dest))
       return false;
+   const bool uniform = d->cmp0_uniform || d->cmp1_uniform ||
+                        d->true_kind == AGX3_ISEL_UNIFORM ||
+                        d->false_kind == AGX3_ISEL_UNIFORM;
+   if (uniform)
+      return encode_explicit(d, out, len);
+
    if (!operand_ok(d->true_kind, d->sel_true, d->dest_16) ||
        !operand_ok(d->false_kind, d->sel_false, d->dest_16))
       return false;
