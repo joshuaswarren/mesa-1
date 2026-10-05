@@ -456,7 +456,10 @@ record_pass_list(struct bench *b, enum pass_shape shape, ID3D12Resource *rt,
 }
 
 /* Returns false on any failure; fills gpu_ms[PASS_SHAPES] with the best of
- * three executions of each shape and record_us with the dsrt recording cost. */
+ * three executions of each shape and record_us with the dsrt recording cost.
+ * A shape the device refuses to record (a native path that admits only some
+ * attachment shapes) is reported as 0 and skipped, not failed: the rest of
+ * the benchmark says nothing about it. */
 static bool
 bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
              size_t ps_size, double gpu_ms[PASS_SHAPES], double *record_us)
@@ -540,10 +543,14 @@ bench_passes(struct bench *b, const void *vs, size_t vs_size, const void *ps,
       double best = 0;
       for (unsigned rep = 0; rep < 3 && ok; rep++) {
          double rec;
-         ok = record_pass_list(b, (enum pass_shape)shape, rt, ds, rtv, dsv,
-                               shape == PASS_RT ? pso_rt : pso_depth, &rec);
-         if (!ok)
+         if (!record_pass_list(b, (enum pass_shape)shape, rt, ds, rtv, dsv,
+                               shape == PASS_RT ? pso_rt : pso_depth,
+                               &rec)) {
+            printf("passes: shape %u is not recordable on this device\n",
+                   shape);
+            best = 0;
             break;
+         }
          if (shape == PASS_DSRT)
             *record_us = rec;
          ID3D12CommandList *lists[] = {(ID3D12CommandList *)b->list};
