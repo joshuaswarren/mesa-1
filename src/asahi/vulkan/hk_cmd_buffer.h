@@ -26,6 +26,7 @@
 #include "asahi/lib/agx_ppp_hal200_graphics_core.h"
 #include "asahi/lib/agx_ppp_viewport_payload_core.h"
 #include "asahi/lib/agx_vdm_hal200_bind_tail_core.h"
+#include "asahi/lib/agx_va_runtime_hole.h"
 
 #include "hk_private.h"
 #include "hk_conditional_render_core.h"
@@ -1249,6 +1250,9 @@ struct hk_uploader {
    uint64_t base;
    uint32_t offset;
    uint32_t capacity;
+
+   /* VDM uploader only: low alias of base (its hk_vdm_allocation's alias). */
+   uint64_t vdm_alias;
 };
 
 /*
@@ -1610,8 +1614,29 @@ hk_pool_usc_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 static inline struct agx_ptr
 hk_pool_vdm_alloc(struct hk_cmd_buffer *cmd, uint32_t size, uint32_t alignment)
 {
-   struct agx_ptr T = hk_pool_vdm_primary_alloc(cmd, size, alignment);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
+
+   /* Bump-allocate from the current VDM chunk and derive its compact pointer
+    * from the chunk's alias.  Allocations never overlap, so this is the
+    * address hk_g17p_vdm_compact() resolves through the chunk's
+    * hk_vdm_allocation; anything else takes the general path below. */
+   struct hk_uploader *vdm = &cmd->uploader.vdm;
+   const uint32_t vdm_offset = align(vdm->offset, alignment);
+   uint32_t vdm_compact;
+   if (likely(vdm->map && vdm_offset <= vdm->capacity &&
+              size <= vdm->capacity - vdm_offset &&
+              hk_g17p_vdm_low_window_enabled(&dev->dev) &&
+              agx_g17p_vdm_alias_compact_inline(vdm->vdm_alias + vdm_offset,
+                                                &vdm_compact) &&
+              vdm_compact != 0)) {
+      vdm->offset = vdm_offset + size;
+      return (struct agx_ptr){
+         .gpu = vdm_compact,
+         .cpu = vdm->map + vdm_offset,
+      };
+   }
+
+   struct agx_ptr T = hk_pool_vdm_primary_alloc(cmd, size, alignment);
 
    if (T.gpu && hk_g17p_vdm_low_window_enabled(&dev->dev)) {
       T.gpu = hk_g17p_vdm_compact(cmd, T.gpu);

@@ -297,6 +297,7 @@ hk_reset_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer,
    cmd->uploader.vdm.base = 0;
    cmd->uploader.vdm.offset = 0;
    cmd->uploader.vdm.capacity = 0;
+   cmd->uploader.vdm.vdm_alias = 0;
    cmd->uploader.streams.map = NULL;
    cmd->uploader.streams.base = 0;
    cmd->uploader.streams.offset = 0;
@@ -539,6 +540,7 @@ hk_pool_vdm_primary_alloc(struct hk_cmd_buffer *cmd, uint32_t size,
    uploader->base = chunk.gpu;
    uploader->offset = size;
    uploader->capacity = chunk_size;
+   uploader->vdm_alias = allocation->alias + (chunk.gpu - allocation->addr);
    return chunk;
 }
 
