@@ -367,6 +367,12 @@ static const nir_opt_preamble_options preamble_options = {
    .rewrite_cost_cb = rewrite_cost,
    .avoid_instr_cb = avoid_instr,
 
+   /* Custom-border emulation and DXVK's per-sample descriptor reads repeat
+    * one uniform expression at every guarded sample site; give them one slot
+    * so the storage is left for the remaining descriptor work.
+    */
+   .share_equal_values = true,
+
    /* hardware size is 512, but it's polite to leave some wiggle room to push
     * hot constants so we don't end up rematerializing all over the place.
     * 480 seems to be a sweetspot, based on a few minutes of shader-db.
