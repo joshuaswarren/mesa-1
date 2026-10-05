@@ -244,13 +244,137 @@ struct hash_table;
 struct nir_builder;
 typedef void (*d12_part_builder_t)(struct nir_builder *b, const void *key);
 
+/*
+ * AGX's coefficient unit transports floating-point varyings.  Integer flat
+ * values therefore need an explicit integer -> float -> integer round trip,
+ * but only when we also bypass native flat interpolation through Poly.  Keep
+ * the component masks exact so ordinary integer links retain their established
+ * path byte-for-byte.
+ */
+struct d12_flat_transport {
+   uint64_t uint_components[4];
+   uint64_t sint_components[4];
+   uint64_t flat_outputs;
+   bool enabled;
+};
+
+/* What a compiled API stage is a function of, beyond the device: the
+ * bytecode, the root-signature binding map and the per-PSO compile keys.
+ * Zeroed before it is filled so the whole struct hashes and compares. */
+struct d12_stage_cache_key {
+   uint64_t blob_hash;
+   uint64_t map_hash[2];
+   uint32_t blob_size;
+   uint8_t stage; /* mesa_shader_stage */
+   uint8_t has_map;
+   uint16_t api_sample_mask;
+   uint8_t a8_mask;
+   uint8_t nr_samples;
+   uint8_t nr_layout_formats;
+   uint8_t flags; /* D12_STAGE_KEY_* */
+   uint16_t layout_formats[AGX_MAX_RENDER_TARGETS]; /* enum pipe_format */
+   uint8_t nr_velems;
+   uint8_t pad[7];
+   struct agx_velem_key velems[D12_MAX_VB_ATTRIBS];
+};
+
+#define D12_STAGE_KEY_FS_EPILOG_REQUESTED (1u << 0)
+#define D12_STAGE_KEY_FLAT_TRANSPORT      (1u << 1)
+
+/* Everything compile_gfx_stage / the compute path derive from the NIR
+ * besides the binary, so a cache hit replays a compile exactly. */
+struct d12_stage_outputs {
+   struct agx_unlinked_uvs_layout uvs; /* vertex */
+   uint64_t outputs_written;
+   struct agx_fs_epilog_link_info fs_epilog_link; /* fragment */
+   struct d12_flat_transport flat_transport;       /* fragment */
+   uint8_t cull_distance_size;                     /* vertex */
+   bool use_fs_epilog;                             /* fragment, resolved */
+   bool root_only;
+   bool writes_memory;
+   bool native_txf; /* compute, G17P */
+   uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS];
+};
+
+/* The fast-link variant of a cached stage: which prolog/epilog it was
+ * linked with. Zeroed before it is filled. */
+struct d12_link_key {
+   uint8_t fragment, has_prolog, has_epilog, nr_samples_shaded;
+   struct agx_vs_prolog_key vs_prolog;
+   struct agx_fs_prolog_key fs_prolog;
+   struct agx_fs_epilog_key fs_epilog;
+};
+
+struct d12_cached_stage {
+   struct d12_stage_cache_key key;
+   void *blob; /* the bytecode, compared on every hit */
+   /* The table's reference plus one per live lookup; under the cache
+    * lock. An evicted entry lives until its last user drops it. */
+   uint32_t refcount;
+   bool in_table;
+   struct list_head lru_link;
+
+   struct agx_shader_part part;
+   struct d12_stage_outputs out;
+
+   /* The whole part uploaded once and shared: the compute program, or the
+    * preamble the fast linker does not copy. Created on first use. */
+   struct agx_bo *code_bo;
+   /* struct d12_link_key -> struct agx_linked_shader, each holding one
+    * reference on its BO. */
+   struct hash_table *links;
+};
+
 struct d12_shader_cache {
    simple_mtx_t lock;
-   struct hash_table *parts; /* struct d12_part_key -> agx_shader_part */
+   struct hash_table *parts;  /* struct d12_part_key -> agx_shader_part */
+   struct hash_table *stages; /* d12_stage_cache_key -> d12_cached_stage */
+   struct list_head stage_lru; /* d12_cached_stage::lru_link, oldest first */
+   unsigned nr_stages;
 };
 
 void d12_shader_cache_init(struct d12_shader_cache *cache);
 void d12_shader_cache_finish(struct d12_device *device);
+
+void d12_stage_cache_key_init(struct d12_stage_cache_key *key,
+                              mesa_shader_stage stage, const void *blob,
+                              size_t blob_size,
+                              const struct d12_binding_map *map);
+
+/* A referenced entry for an identical compile, or NULL. */
+struct d12_cached_stage *
+d12_shader_cache_find_stage(struct d12_device *device,
+                            const struct d12_stage_cache_key *key,
+                            const void *blob);
+
+/* Publish a compile. Takes the part's binary on success (part->binary is
+ * cleared); returns a referenced entry, which may be one another thread
+ * inserted meanwhile. With insert false the entry is private to the
+ * caller and dies with its reference. */
+struct d12_cached_stage *
+d12_shader_cache_add_stage(struct d12_device *device,
+                           const struct d12_stage_cache_key *key,
+                           const void *blob, struct agx_shader_part *part,
+                           const struct d12_stage_outputs *out, bool insert);
+
+void d12_cached_stage_unref(struct d12_device *device,
+                            struct d12_cached_stage *stage);
+
+/* A new reference on the stage's shared executable upload, or NULL. */
+struct agx_bo *d12_cached_stage_code_bo(struct d12_device *device,
+                                        struct d12_cached_stage *stage,
+                                        const char *name);
+
+/* The stage fast-linked with these parts; *out owns a new BO reference. */
+bool d12_cached_stage_link(struct d12_device *device,
+                           struct d12_cached_stage *stage,
+                           const struct d12_link_key *key,
+                           const struct agx_shader_part *prolog,
+                           const struct agx_shader_part *epilog,
+                           struct agx_linked_shader *out);
+
+bool d12_upload_executable(struct agx_bo *bo, const void *binary,
+                           size_t size);
 
 /* The cached part for (builder, key). Owned by the cache: never freed by
  * the caller, valid for the device's lifetime. NULL when the compile was

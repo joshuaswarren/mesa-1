@@ -317,6 +317,14 @@ d3d12agx_microbench = executable(
   link_with : [libd3d12agx],
 )
 
+# Concurrent PSO creation over the device shader cache.
+executable(
+  'd3d12agx_pso_threads',
+  files('tests/pso_threads.c'),
+  dependencies : [dep_dxheaders_d12, dep_thread],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_g1_smoke = executable(
   'd3d12agx_g1_smoke',
   files('tests/g1_smoke.c'),

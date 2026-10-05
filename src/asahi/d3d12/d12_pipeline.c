@@ -41,7 +41,7 @@ d12_report_scratch(const char *what, const struct agx_shader_info *info)
                 info->scratch_size, info->preamble_scratch_size);
 }
 
-static bool
+bool
 d12_upload_executable(struct agx_bo *bo, const void *binary, size_t size)
 {
    void *mapping;
@@ -1436,53 +1436,19 @@ d12_disassemble_shader(bool native, uint8_t *code, size_t size, FILE *fp)
 }
 
 /*
- * The real work: application DXIL -> our translator -> NIR -> AGX, then
- * upload. This is the campaign's shader path running inside the driver.
+ * DXIL/DXBC -> NIR -> AGX for one compute shader. `o` is zeroed by the
+ * caller; everything in it and in `part` is a function of the inputs, so
+ * the device stage cache replays it for an identical compile.
  */
-HRESULT
-d12_pipeline_state_create_compute(struct d12_device *device,
-                                  const void *dxil, size_t dxil_size,
-                                  const struct d12_binding_map *map,
-                                  REFIID riid, void **out)
+static HRESULT
+compile_compute_stage(struct d12_device *device, const void *dxil,
+                      size_t dxil_size, const struct d12_binding_map *map,
+                      uint32_t descriptor_generation,
+                      const struct d12_native_descriptor_layout *native_layout,
+                      struct d12_stage_outputs *o,
+                      struct agx_shader_part *part)
 {
-   if (!out)
-      return E_POINTER;
-   if (!dxil || !dxil_size)
-      return E_INVALIDARG;
-
    const bool native_compute = device->dev.chip == AGX_CHIP_G17P;
-   const uint32_t descriptor_generation =
-      (uint32_t)agx_chip_descriptor_generation(device->dev.chip);
-   struct d12_native_descriptor_layout native_layout;
-   if (!d12_native_descriptor_layout(descriptor_generation, &native_layout)) {
-      mesa_loge("CreateComputePipelineState: unsupported native descriptor "
-                "generation %u", descriptor_generation);
-      return E_NOTIMPL;
-   }
-
-   uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS] = {0};
-
-   struct d12_binding_map filtered_map;
-   if (map) {
-      filtered_map = *map;
-      filtered_map.visibility_filter = D3D12_SHADER_VISIBILITY_ALL;
-      map = &filtered_map;
-   }
-
-   /* The container declares its stage; honour it or refuse. Forcing a
-    * non-compute shader through this path compiles its store_output
-    * against the compute backend, which asserts "Unhandled intrinsic"
-    * and takes the process with it -- a crash where an E_INVALIDARG
-    * belongs. Same rule the standalone tool already follows
-    * (docs/findings.md).
-    */
-   mesa_shader_stage declared;
-   if (d12_container_stage(dxil, dxil_size, &declared) &&
-       declared != MESA_SHADER_COMPUTE) {
-      mesa_loge("CreateComputePipelineState: bytecode declares a %s shader",
-                _mesa_shader_stage_to_string(declared));
-      return E_INVALIDARG;
-   }
 
    const uint8_t *bc;
    size_t bc_size;
@@ -1495,7 +1461,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
          const char *dxbc_error = "unknown";
          dxbc_nir = d12_dxbc_to_nir(
             dxil, dxil_size, MESA_SHADER_COMPUTE, map,
-            descriptor_generation, texture_shapes, &dxbc_error);
+            descriptor_generation, o->texture_shapes, &dxbc_error);
          if (!dxbc_nir) {
             mesa_loge("CreateComputePipelineState: DXBC->NIR failed: %s",
                       dxbc_error);
@@ -1521,7 +1487,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
          return E_INVALIDARG;
       }
 
-      if (!d12_dxil_collect_texture_shapes(mod, map, texture_shapes)) {
+      if (!d12_dxil_collect_texture_shapes(mod, map, o->texture_shapes)) {
          mesa_loge("CreateComputePipelineState: one root slot has "
                    "conflicting texture declarations");
          d12_dxil_module_free(mod);
@@ -1539,7 +1505,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    }
 
    NIR_PASS(_, nir, d12_nir_lower_sampler_lod_bias);
-   NIR_PASS(_, nir, d12_nir_lower_custom_point_borders, &native_layout);
+   NIR_PASS(_, nir, d12_nir_lower_custom_point_borders, native_layout);
    NIR_PASS(_, nir, d12_nir_lower_sampler_reduction);
    NIR_PASS(_, nir, d12_nir_lower_bindless_sampler_map);
 
@@ -1611,83 +1577,148 @@ d12_pipeline_state_create_compute(struct d12_device *device,
       .reserved_preamble = D12_UNIFORM_RESERVED,
    };
 
-   struct agx_shader_part part;
-   memset(&part, 0, sizeof(part));
-   const bool compiled = agx_compile_shader_nir(nir, &key, &part);
+      memset(part, 0, sizeof(*part));
+   const bool compiled = agx_compile_shader_nir(nir, &key, part);
    ralloc_free(nir);
    /* agx_nir_lower_texture consumes a dynamic sampler handle before the
     * backend can conservatively set this bit.  The root map remains the
     * authoritative declaration that the hardware sampler heap is needed. */
-   part.info.uses_sampler_heap |= d12_binding_map_uses_sampler_heap(map);
-   part.info.sampler_state_count =
-      MAX2(part.info.sampler_state_count, runtime_samplers);
-   d12_report_scratch("shader", &part.info);
+   part->info.uses_sampler_heap |= d12_binding_map_uses_sampler_heap(map);
+   part->info.sampler_state_count =
+      MAX2(part->info.sampler_state_count, runtime_samplers);
+   d12_report_scratch("shader", &part->info);
 
-   if (d12_debug()->dump_tex && part.binary) {
+   if (d12_debug()->dump_tex && part->binary) {
       fprintf(stderr,
               "driver cs: has_preamble=%d preamble_off=0x%x main_off=0x%x "
               "push_count=%u nr_preamble_gprs=%u rodata.size_16=%u\n",
-              part.info.has_preamble, part.info.preamble_offset,
-              part.info.main_offset, part.info.push_count,
-              part.info.nr_preamble_gprs, part.info.rodata.size_16);
-      if (part.info.has_preamble) {
+              part->info.has_preamble, part->info.preamble_offset,
+              part->info.main_offset, part->info.push_count,
+              part->info.nr_preamble_gprs, part->info.rodata.size_16);
+      if (part->info.has_preamble) {
          fprintf(stderr, "; driver preamble\n");
          d12_disassemble_shader(
             native_compute,
-            (uint8_t *)part.binary + part.info.preamble_offset,
-                          part.info.main_offset > part.info.preamble_offset
-                             ? part.info.main_offset - part.info.preamble_offset
-                             : part.info.binary_size - part.info.preamble_offset,
+            (uint8_t *)part->binary + part->info.preamble_offset,
+                          part->info.main_offset > part->info.preamble_offset
+                             ? part->info.main_offset - part->info.preamble_offset
+                             : part->info.binary_size - part->info.preamble_offset,
                           stderr);
       }
       fprintf(stderr, "; driver main\n");
       d12_disassemble_shader(
-         native_compute, (uint8_t *)part.binary + part.info.main_offset,
-         part.info.binary_size - part.info.main_offset, stderr);
+         native_compute, (uint8_t *)part->binary + part->info.main_offset,
+         part->info.binary_size - part->info.main_offset, stderr);
    }
 
-   if (!compiled || !part.binary || !part.info.binary_size) {
+   if (!compiled || !part->binary || !part->info.binary_size) {
       const char *refusal = agx_last_compile_refusal();
       mesa_loge("CreateComputePipelineState: AGX compile produced no code: %s",
                 refusal && refusal[0] ? refusal : "no compiler reason recorded");
-      free(part.binary);
+      free(part->binary);
+      part->binary = NULL;
       return E_FAIL;
    }
 
+   o->native_txf = native_txf;
+   return S_OK;
+}
+
+/*
+ * The real work: application DXIL -> our translator -> NIR -> AGX, then
+ * upload. This is the campaign's shader path running inside the driver.
+ */
+HRESULT
+d12_pipeline_state_create_compute(struct d12_device *device,
+                                  const void *dxil, size_t dxil_size,
+                                  const struct d12_binding_map *map,
+                                  REFIID riid, void **out)
+{
+   if (!out)
+      return E_POINTER;
+   if (!dxil || !dxil_size)
+      return E_INVALIDARG;
+
+   const bool native_compute = device->dev.chip == AGX_CHIP_G17P;
+   const uint32_t descriptor_generation =
+      (uint32_t)agx_chip_descriptor_generation(device->dev.chip);
+   struct d12_native_descriptor_layout native_layout;
+   if (!d12_native_descriptor_layout(descriptor_generation, &native_layout)) {
+      mesa_loge("CreateComputePipelineState: unsupported native descriptor "
+                "generation %u", descriptor_generation);
+      return E_NOTIMPL;
+   }
+
+   struct d12_binding_map filtered_map;
+   if (map) {
+      filtered_map = *map;
+      filtered_map.visibility_filter = D3D12_SHADER_VISIBILITY_ALL;
+      map = &filtered_map;
+   }
+
+   /* The container declares its stage; honour it or refuse. Forcing a
+    * non-compute shader through this path compiles its store_output
+    * against the compute backend, which asserts "Unhandled intrinsic"
+    * and takes the process with it -- a crash where an E_INVALIDARG
+    * belongs. Same rule the standalone tool already follows
+    * (docs/findings.md).
+    */
+   mesa_shader_stage declared;
+   if (d12_container_stage(dxil, dxil_size, &declared) &&
+       declared != MESA_SHADER_COMPUTE) {
+      mesa_loge("CreateComputePipelineState: bytecode declares a %s shader",
+                _mesa_shader_stage_to_string(declared));
+      return E_INVALIDARG;
+   }
+
+   /* Shader dumps are a per-compile side effect; keep them per PSO. */
+   const bool bypass_cache =
+      d12_debug()->dump_shaders || d12_debug()->dump_tex;
+
+   struct d12_stage_cache_key key;
+   d12_stage_cache_key_init(&key, MESA_SHADER_COMPUTE, dxil, dxil_size, map);
+   struct d12_cached_stage *entry = NULL;
+   if (!bypass_cache)
+      entry = d12_shader_cache_find_stage(device, &key, dxil);
+   if (!entry) {
+      struct d12_stage_outputs o = {0};
+      struct agx_shader_part compiled;
+      HRESULT chr = compile_compute_stage(device, dxil, dxil_size, map,
+                                          descriptor_generation,
+                                          &native_layout, &o, &compiled);
+      if (FAILED(chr))
+         return chr;
+      entry = d12_shader_cache_add_stage(device, &key, dxil, &compiled, &o,
+                                         !bypass_cache);
+      if (!entry) {
+         free(compiled.binary);
+         return E_OUTOFMEMORY;
+      }
+   }
+   const struct agx_shader_part *part = &entry->part;
+   HRESULT hr = S_OK;
+
    struct d12_pipeline_state *pso = calloc(1, sizeof(*pso));
    if (!pso) {
-      free(part.binary);
-      return E_OUTOFMEMORY;
+      hr = E_OUTOFMEMORY;
+      goto fail;
    }
 
    if (native_compute) {
-      HRESULT native_result = d12_create_g17p_compute_code(device, &part, pso);
-      if (FAILED(native_result)) {
+      /* The native container is built per PSO from the shared part. */
+      hr = d12_create_g17p_compute_code(device, part, pso);
+      if (FAILED(hr)) {
          mesa_loge("CreateComputePipelineState: native container/setup refused (%#x)",
-                   (unsigned)native_result);
-         free(part.binary);
-         free(pso);
-         return native_result;
+                   (unsigned)hr);
+         goto fail;
       }
    } else {
-      /* Shader code must live in executable, low-VA memory so the USC can
-       * address it 32-bit-relative to the shader base.
-       */
-      pso->code_bo = agx_bo_create(&device->dev, part.info.binary_size, 0,
-                                   AGX_BO_EXEC | AGX_BO_LOW_VA,
-                                   "d3d12 shader");
+      /* One executable upload per compiled shader, shared by every PSO
+       * created from it. */
+      pso->code_bo = d12_cached_stage_code_bo(device, entry, "d3d12 shader");
       if (!pso->code_bo) {
-         free(part.binary);
-         free(pso);
-         return E_OUTOFMEMORY;
-      }
-
-      if (!d12_upload_executable(pso->code_bo, part.binary,
-                                 part.info.binary_size)) {
-         agx_bo_unreference(&device->dev, pso->code_bo);
-         free(part.binary);
-         free(pso);
-         return E_FAIL;
+         hr = E_OUTOFMEMORY;
+         goto fail;
       }
    }
 
@@ -1696,9 +1727,10 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    pso->device_ref_active = true;
    pso->device = device;
    pso->is_compute = true;
-   pso->g17p_native_txf = native_txf;
-   memcpy(pso->texture_shapes, texture_shapes, sizeof(texture_shapes));
-   pso->info = part.info;
+   pso->g17p_native_txf = entry->out.native_txf;
+   memcpy(pso->texture_shapes, entry->out.texture_shapes,
+          sizeof(pso->texture_shapes));
+   pso->info = part->info;
    if (!native_compute)
       pso->code_va = pso->code_bo->va->addr;
    d12_private_data_store_init(&pso->private_data, (IUnknown *)&pso->iface);
@@ -1706,30 +1738,34 @@ d12_pipeline_state_create_compute(struct d12_device *device,
 
    mesa_logi("compiled compute shader: %u bytes AGX, %u GPRs, main +0x%x, "
              "numthreads %ux%ux%u, push %u, preamble %d",
-             part.info.binary_size, part.info.nr_gprs,
-             part.info.main_offset, part.info.workgroup_size[0],
-             part.info.workgroup_size[1], part.info.workgroup_size[2],
-             part.info.push_count, part.info.has_preamble);
+             part->info.binary_size, part->info.nr_gprs,
+             part->info.main_offset, part->info.workgroup_size[0],
+             part->info.workgroup_size[1], part->info.workgroup_size[2],
+             part->info.push_count, part->info.has_preamble);
 
    if (d12_debug()->dump_shaders) {
-      if (part.info.has_preamble) {
-         fprintf(stderr, "; preamble +0x%x\n", part.info.preamble_offset);
+      if (part->info.has_preamble) {
+         fprintf(stderr, "; preamble +0x%x\n", part->info.preamble_offset);
          d12_disassemble_shader(
             native_compute,
-            (uint8_t *)part.binary + part.info.preamble_offset,
-                          part.info.main_offset - part.info.preamble_offset,
+            (uint8_t *)part->binary + part->info.preamble_offset,
+                          part->info.main_offset - part->info.preamble_offset,
                           stderr);
       }
-      fprintf(stderr, "; main +0x%x\n", part.info.main_offset);
+      fprintf(stderr, "; main +0x%x\n", part->info.main_offset);
       d12_disassemble_shader(
-         native_compute, (uint8_t *)part.binary + part.info.main_offset,
-         part.info.binary_size - part.info.main_offset, stderr);
+         native_compute, (uint8_t *)part->binary + part->info.main_offset,
+         part->info.binary_size - part->info.main_offset, stderr);
    }
 
-   free(part.binary);
-
-   HRESULT hr = d12_pso_QueryInterface(&pso->iface, riid, out);
+   d12_cached_stage_unref(device, entry);
+   hr = d12_pso_QueryInterface(&pso->iface, riid, out);
    d12_pso_Release(&pso->iface);
+   return hr;
+
+fail:
+   d12_cached_stage_unref(device, entry);
+   free(pso);
    return hr;
 }
 
@@ -1832,20 +1868,6 @@ dxil_to_nir_stage(const struct d12_binding_map *map,
 struct d12_vs_fetch {
    struct agx_velem_key keys[D12_MAX_VB_ATTRIBS];
    unsigned nr;
-};
-
-/*
- * AGX's coefficient unit transports floating-point varyings.  Integer flat
- * values therefore need an explicit integer -> float -> integer round trip,
- * but only when we also bypass native flat interpolation through Poly.  Keep
- * the component masks exact so ordinary integer links retain their established
- * path byte-for-byte.
- */
-struct d12_flat_transport {
-   uint64_t uint_components[4];
-   uint64_t sint_components[4];
-   uint64_t flat_outputs;
-   bool enabled;
 };
 
 enum d12_sig_section {
@@ -2429,21 +2451,39 @@ d12_gather_flat_transport(const void *bytecode, size_t size,
    transport->enabled = has_integer && has_float;
 }
 
+/*
+ * Merge one stage's declared texture shapes into the PSO's table. The
+ * stages must agree on a shared slot: the draw path packs each descriptor
+ * with one dimension (same rule d12_dxil_collect_texture_shapes applies
+ * within a stage).
+ */
+static bool
+d12_merge_texture_shapes(uint8_t *pso_shapes, const uint8_t *stage_shapes)
+{
+   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+      if (stage_shapes[i] == D12_TEXTURE_SHAPE_NONE)
+         continue;
+      if (pso_shapes[i] != D12_TEXTURE_SHAPE_NONE &&
+          pso_shapes[i] != stage_shapes[i])
+         return false;
+      pso_shapes[i] = stage_shapes[i];
+   }
+   return true;
+}
+
+/*
+ * `o` is zeroed by the caller except o->use_fs_epilog, which carries the
+ * fixed-function request in and the resolved split decision out. Everything
+ * in it is a function of the inputs here, so a cached stage replays it.
+ */
 static bool
 compile_gfx_stage(struct d12_device *device,
                   const struct d12_binding_map *map, const void *dxil,
                   size_t dxil_size, mesa_shader_stage stage,
                   struct agx_tilebuffer_layout *tib,
-                  uint16_t api_sample_mask,
-                  uint8_t a8_mask,
-                  struct agx_unlinked_uvs_layout *uvs,
-                  const struct d12_vs_fetch *fetch,
-                  uint64_t *outputs_written, bool *use_fs_epilog,
-                  struct agx_fs_epilog_link_info *fs_epilog_link,
-                  struct d12_flat_transport *flat_transport,
-                  uint8_t *cull_distance_size,
-                  struct agx_shader_part *out, bool *root_only, bool *writes_memory,
-                  uint8_t *texture_shapes)
+                  uint16_t api_sample_mask, uint8_t a8_mask,
+                  const struct d12_vs_fetch *fetch, bool allow_flat_transport,
+                  struct d12_stage_outputs *o, struct agx_shader_part *out)
 {
    const uint32_t descriptor_generation =
       (uint32_t)agx_chip_descriptor_generation(device->dev.chip);
@@ -2465,7 +2505,7 @@ compile_gfx_stage(struct d12_device *device,
       nir = b.shader;
    } else {
       nir = dxil_to_nir_stage(map, descriptor_generation, dxil, dxil_size,
-                              stage, texture_shapes);
+                              stage, o->texture_shapes);
    }
    if (!nir)
       return false;
@@ -2476,9 +2516,8 @@ compile_gfx_stage(struct d12_device *device,
     * retain them across the generic metadata refresh below. */
    const uint8_t translated_clip_size = nir->info.clip_distance_array_size;
    const uint8_t translated_cull_size = nir->info.cull_distance_array_size;
-   if (stage != MESA_SHADER_FRAGMENT && cull_distance_size) {
-      *cull_distance_size = nir->info.cull_distance_array_size;
-   }
+   if (stage != MESA_SHADER_FRAGMENT)
+      o->cull_distance_size = nir->info.cull_distance_array_size;
 
    /* AGX exposes integer pixel coordinates. D3D12, like Vulkan, defines
     * SV_Position.xy at the sample position (pixel centre without sample
@@ -2498,8 +2537,8 @@ compile_gfx_stage(struct d12_device *device,
     * same boundary, before agx_preprocess_nir.
     */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
-   *writes_memory = nir->info.writes_memory;
-   *root_only = nir->info.num_textures == 0 && nir->info.num_images == 0;
+   o->writes_memory = nir->info.writes_memory;
+   o->root_only = nir->info.num_textures == 0 && nir->info.num_images == 0;
    nir_foreach_function_impl(impl, nir) {
       nir_foreach_block(block, impl) {
          nir_foreach_instr(instr, block) {
@@ -2507,7 +2546,7 @@ compile_gfx_stage(struct d12_device *device,
                 (instr->type == nir_instr_type_intrinsic &&
                  nir_instr_as_intrinsic(instr)->intrinsic ==
                     nir_intrinsic_bindless_image_agx))
-               *root_only = false;
+               o->root_only = false;
          }
       }
    }
@@ -2517,9 +2556,10 @@ compile_gfx_stage(struct d12_device *device,
    nir->info.cull_distance_array_size =
       MAX2(nir->info.cull_distance_array_size, translated_cull_size);
 
-   if (stage == MESA_SHADER_FRAGMENT && flat_transport) {
-      d12_gather_flat_transport(dxil, dxil_size, nir, flat_transport);
-      NIR_PASS(_, nir, d12_nir_lower_flat_input_transport, flat_transport);
+   if (stage == MESA_SHADER_FRAGMENT && allow_flat_transport) {
+      d12_gather_flat_transport(dxil, dxil_size, nir, &o->flat_transport);
+      NIR_PASS(_, nir, d12_nir_lower_flat_input_transport,
+               &o->flat_transport);
    }
 
    NIR_PASS(_, nir, d12_nir_lower_sampler_lod_bias);
@@ -2535,8 +2575,7 @@ compile_gfx_stage(struct d12_device *device,
       return false;
    }
 
-   if (outputs_written)
-      *outputs_written = nir->info.outputs_written;
+   o->outputs_written = nir->info.outputs_written;
 
    if (stage == MESA_SHADER_FRAGMENT && api_sample_mask != 0xff) {
       /* Match Honeykrisp's FS prolog: the D3D12 PSO sample mask kills the
@@ -2549,7 +2588,7 @@ compile_gfx_stage(struct d12_device *device,
    }
 
    bool split_fs = false;
-   if (stage == MESA_SHADER_FRAGMENT && use_fs_epilog) {
+   if (stage == MESA_SHADER_FRAGMENT) {
       /* A shader-written coverage mask has to execute before tilebuffer
        * stores.  A monolithic NIR shader may legally write SV_Target before
        * SV_Coverage; lowering that literally would place sample_mask after
@@ -2559,10 +2598,10 @@ compile_gfx_stage(struct d12_device *device,
       const bool writes_coverage =
          nir->info.outputs_written &
          BITFIELD64_BIT(FRAG_RESULT_SAMPLE_MASK);
-      split_fs = (*use_fs_epilog || writes_coverage) &&
+      split_fs = (o->use_fs_epilog || writes_coverage) &&
                  (nir->info.outputs_written &
                   BITFIELD64_RANGE(FRAG_RESULT_DATA0, 8));
-      *use_fs_epilog = split_fs;
+      o->use_fs_epilog = split_fs;
    }
 
    NIR_PASS(_, nir, agx_nir_lower_texture);
@@ -2586,9 +2625,10 @@ compile_gfx_stage(struct d12_device *device,
       bool coverage_to_epilog = false;
       NIR_PASS(_, nir, d12_nir_lower_coverage_to_epilog,
                &coverage_to_epilog);
-      fs_epilog_link->sample_mask_after_force_early |= coverage_to_epilog;
+      o->fs_epilog_link.sample_mask_after_force_early |= coverage_to_epilog;
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
-      NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog, fs_epilog_link);
+      NIR_PASS(_, nir, agx_nir_lower_fs_output_to_epilog,
+               &o->fs_epilog_link);
       NIR_PASS(_, nir, agx_nir_lower_sample_intrinsics, false);
       NIR_PASS(_, nir, agx_nir_lower_sample_mask);
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
@@ -2669,9 +2709,8 @@ compile_gfx_stage(struct d12_device *device,
       NIR_PASS(_, nir, nir_lower_io_to_scalar, nir_var_shader_out, NULL,
                NULL);
       NIR_PASS(_, nir, agx_nir_lower_cull_distance_vs);
-      if (cull_distance_size)
-         *cull_distance_size = nir->info.cull_distance_array_size;
-      NIR_PASS(_, nir, agx_nir_lower_uvs, uvs, false);
+      o->cull_distance_size = nir->info.cull_distance_array_size;
+      NIR_PASS(_, nir, agx_nir_lower_uvs, &o->uvs, false);
 
       /* Indexed output stores read their UVS index through
        * load_uvs_index_agx, which the driver must lower. Honeykrisp
@@ -2682,7 +2721,7 @@ compile_gfx_stage(struct d12_device *device,
        * agx_assign_uvs later recomputes the identical layout.
        */
       struct agx_varyings_vs linked = {0};
-      agx_assign_uvs(&linked, uvs, 0, 0);
+      agx_assign_uvs(&linked, &o->uvs, 0, 0);
       NIR_PASS(_, nir, d12_dxil_lower_uvs_index, linked.slots);
    }
 
@@ -4336,20 +4375,54 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    /* Prologs and epilogs are device-cached and shared, never freed here. */
    const struct agx_shader_part *fs_prolog = NULL, *fs_epilog = NULL;
    const struct agx_shader_part *prolog = NULL;
+   /* The compiled vertex and fragment stages, shared through the device
+    * cache; `vs`/`fs` alias their parts. Referenced until `fail`. */
+   struct d12_cached_stage *vs_entry = NULL, *fs_entry = NULL;
+   const struct agx_shader_part *vs = NULL, *fs = NULL;
+   struct agx_fs_prolog_key fs_prolog_key = {0};
+   struct agx_fs_epilog_key epilog_key = {0};
    HRESULT hr = S_OK;
-   uint8_t cull_distance_size = 0;
-   struct agx_fs_epilog_link_info fs_epilog_link = {0};
    struct d12_vs_fetch fetch;
    resolve_input_layout(pso, input_layout, vs_dxil, vs_size, &fetch);
 
-   if (!compile_gfx_stage(device, map, vs_dxil, vs_size, MESA_SHADER_VERTEX,
-                          &tib, 0xffff, 0, &pso->uvs, &fetch, NULL, NULL, NULL,
-                          NULL, &cull_distance_size, &vs_part, &pso->vs.g17p_root_only,
-                          &pso->vs.g17p_writes_memory,
-                          pso->texture_shapes)) {
+   /* Shader dumps are a per-compile side effect; keep them per PSO. */
+   const bool bypass_cache =
+      d12_debug()->dump_shaders || d12_debug()->dump_tex;
+
+   struct d12_stage_cache_key vs_key;
+   d12_stage_cache_key_init(&vs_key, MESA_SHADER_VERTEX, vs_dxil, vs_size,
+                            map);
+   vs_key.nr_velems = fetch.nr;
+   memcpy(vs_key.velems, fetch.keys, sizeof(vs_key.velems));
+   if (!bypass_cache)
+      vs_entry = d12_shader_cache_find_stage(device, &vs_key, vs_dxil);
+   if (!vs_entry) {
+      struct d12_stage_outputs o = {0};
+      if (!compile_gfx_stage(device, map, vs_dxil, vs_size,
+                             MESA_SHADER_VERTEX, &tib, 0xffff, 0, &fetch,
+                             false, &o, &vs_part)) {
+         hr = E_INVALIDARG;
+         goto fail;
+      }
+      vs_entry = d12_shader_cache_add_stage(device, &vs_key, vs_dxil,
+                                            &vs_part, &o, !bypass_cache);
+      if (!vs_entry) {
+         hr = E_OUTOFMEMORY;
+         goto fail;
+      }
+   }
+   vs = &vs_entry->part;
+   if (!d12_merge_texture_shapes(pso->texture_shapes,
+                                 vs_entry->out.texture_shapes)) {
+      mesa_loge("graphics PSO: vertex shader declares a conflicting texture "
+                "shape for a root slot");
       hr = E_INVALIDARG;
       goto fail;
    }
+   pso->uvs = vs_entry->out.uvs;
+   pso->vs.g17p_root_only = vs_entry->out.root_only;
+   pso->vs.g17p_writes_memory = vs_entry->out.writes_memory;
+   const uint8_t cull_distance_size = vs_entry->out.cull_distance_size;
 
    uint64_t fs_outputs = 0;
    const uint16_t framebuffer_mask =
@@ -4362,22 +4435,62 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          a8_mask |= BITFIELD_BIT(i);
    }
 
-   struct d12_flat_transport flat_transport = {0};
    const bool allow_flat_geometry =
       ps_dxil && ps_size && !(gs_dxil && gs_size) &&
       !(hs_dxil && hs_size) && !(ds_dxil && ds_size) &&
       !(so_desc && so_desc->NumEntries);
-   if (!compile_gfx_stage(device, map, ps_dxil, ps_size, MESA_SHADER_FRAGMENT,
-                          &tib, active_sample_mask, a8_mask, NULL, NULL,
-                          &fs_outputs,
-                          &use_fs_epilog, &fs_epilog_link,
-                          allow_flat_geometry ? &flat_transport : NULL,
-                          &cull_distance_size, &fs_part, &pso->fs.g17p_root_only,
-                          &pso->fs.g17p_writes_memory,
-                          pso->texture_shapes)) {
+
+   /* The fragment compile also depends on the tilebuffer layout (a
+    * function of the layout formats, their count and the sample count),
+    * the API sample mask, the A8 targets, whether an epilog was requested
+    * and whether flat transport may be routed through poly. */
+   struct d12_stage_cache_key fs_key;
+   d12_stage_cache_key_init(&fs_key, MESA_SHADER_FRAGMENT, ps_dxil, ps_size,
+                            map);
+   fs_key.api_sample_mask = active_sample_mask;
+   fs_key.a8_mask = a8_mask;
+   fs_key.nr_samples = nr_samples;
+   fs_key.nr_layout_formats =
+      pso->stable_unused_rt_layout ? ARRAY_SIZE(layout_formats) : nr_rt;
+   for (unsigned i = 0; i < ARRAY_SIZE(layout_formats); i++)
+      fs_key.layout_formats[i] = layout_formats[i];
+   fs_key.flags = (use_fs_epilog ? D12_STAGE_KEY_FS_EPILOG_REQUESTED : 0) |
+                  (allow_flat_geometry ? D12_STAGE_KEY_FLAT_TRANSPORT : 0);
+   if (!bypass_cache)
+      fs_entry = d12_shader_cache_find_stage(device, &fs_key, ps_dxil);
+   if (!fs_entry) {
+      struct d12_stage_outputs o = {0};
+      o.use_fs_epilog = use_fs_epilog;
+      if (!compile_gfx_stage(device, map, ps_dxil, ps_size,
+                             MESA_SHADER_FRAGMENT, &tib, active_sample_mask,
+                             a8_mask, NULL, allow_flat_geometry, &o,
+                             &fs_part)) {
+         hr = E_INVALIDARG;
+         goto fail;
+      }
+      fs_entry = d12_shader_cache_add_stage(device, &fs_key, ps_dxil,
+                                            &fs_part, &o, !bypass_cache);
+      if (!fs_entry) {
+         hr = E_OUTOFMEMORY;
+         goto fail;
+      }
+   }
+   fs = &fs_entry->part;
+   if (!d12_merge_texture_shapes(pso->texture_shapes,
+                                 fs_entry->out.texture_shapes)) {
+      mesa_loge("graphics PSO: pixel shader declares a conflicting texture "
+                "shape for a root slot");
       hr = E_INVALIDARG;
       goto fail;
    }
+   fs_outputs = fs_entry->out.outputs_written;
+   use_fs_epilog = fs_entry->out.use_fs_epilog;
+   const struct agx_fs_epilog_link_info fs_epilog_link =
+      fs_entry->out.fs_epilog_link;
+   const struct d12_flat_transport flat_transport =
+      fs_entry->out.flat_transport;
+   pso->fs.g17p_root_only = fs_entry->out.root_only;
+   pso->fs.g17p_writes_memory = fs_entry->out.writes_memory;
 
    for (unsigned i = 0; i < nr_rt; i++) {
       if (formats[i] != PIPE_FORMAT_NONE && blend_keys[i].colormask &&
@@ -4391,21 +4504,21 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
     * to depth/stencil tests, the fast linker knows how to merge the prolog's
     * private coefficient-register bindings after those used by the main. */
    if (cull_distance_size) {
-      struct agx_fs_prolog_key prolog_key = {
+      fs_prolog_key = (struct agx_fs_prolog_key){
          .api_sample_mask = 0xff,
          .cull_distance_size = cull_distance_size,
          .run_zs_tests = true,
-         .cf_base = fs_part.info.varyings.fs.nr_cf,
+         .cf_base = fs->info.varyings.fs.nr_cf,
       };
 
       struct agx_shader_key prolog_backend_key = {
          .dev = agx_gather_device_key(&device->dev),
          .secondary = true,
          .no_stop = true,
-         .fs.cf_base = prolog_key.cf_base,
+         .fs.cf_base = fs_prolog_key.cf_base,
       };
       fs_prolog = d12_shader_cache_part(device, agx_nir_fs_prolog,
-                                        &prolog_key, sizeof(prolog_key),
+                                        &fs_prolog_key, sizeof(fs_prolog_key),
                                         &prolog_backend_key, false);
 
       if (!fs_prolog || !fs_prolog->binary || !fs_prolog->info.binary_size) {
@@ -4472,7 +4585,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
        * does not additionally alpha-to-coverage that mask; doing both made
        * an explicit nonzero mask disappear whenever the shader's alpha was
        * zero. */
-      struct agx_fs_epilog_key epilog_key = {
+      epilog_key = (struct agx_fs_epilog_key){
          .link = fs_epilog_link,
          .smooth_line_alpha = pso->raster.smooth_line,
          .blend.alpha_to_coverage =
@@ -4550,10 +4663,15 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       goto fail;
    }
 
-   /* Link: this uploads executable memory and bakes the USC/PPP words. */
-   bool vs_linked = d12_link(&pso->vs.linked, &device->dev, false, &vs_part,
-                             empty_prolog ? NULL : prolog, NULL, 0);
-   if (!vs_linked) {
+   /* Link: this uploads executable memory and bakes the USC/PPP words.
+    * Linked variants are cached with the stage, keyed on the prolog. */
+   struct d12_link_key vs_link = {0};
+   vs_link.has_prolog = !empty_prolog;
+   if (!empty_prolog)
+      vs_link.vs_prolog = prolog_key;
+   if (!d12_cached_stage_link(device, vs_entry, &vs_link,
+                              empty_prolog ? NULL : prolog, NULL,
+                              &pso->vs.linked)) {
       hr = E_OUTOFMEMORY;
       goto fail;
    }
@@ -4572,28 +4690,30 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
     * without it the fetch runs against whatever those registers held --
     * measured as a triangle covering the ENTIRE render target.
     */
-   if (vs_part.info.has_preamble) {
+   if (vs->info.has_preamble) {
       pso->vs.code_bo =
-         agx_bo_create(&device->dev, vs_part.info.binary_size, 0,
-                       AGX_BO_EXEC | AGX_BO_LOW_VA, "d3d12 vs preamble");
+         d12_cached_stage_code_bo(device, vs_entry, "d3d12 vs preamble");
       if (!pso->vs.code_bo) {
          hr = E_OUTOFMEMORY;
          goto fail;
       }
-      if (!d12_upload_executable(pso->vs.code_bo, vs_part.binary,
-                                 vs_part.info.binary_size)) {
-         hr = E_FAIL;
-         goto fail;
-      }
       pso->vs.preamble_va =
-         pso->vs.code_bo->va->addr + vs_part.info.preamble_offset;
+         pso->vs.code_bo->va->addr + vs->info.preamble_offset;
    }
-   bool fs_linked = d12_link(
-      &pso->fs.linked, &device->dev, true, &fs_part,
-      fs_prolog && fs_prolog->binary ? fs_prolog : NULL,
-      use_fs_epilog && fs_epilog && fs_epilog->binary ? fs_epilog : NULL,
-      use_fs_epilog ? 1 : 0);
-   if (!fs_linked) {
+
+   struct d12_link_key fs_link = {0};
+   fs_link.fragment = true;
+   fs_link.has_prolog = fs_prolog && fs_prolog->binary;
+   fs_link.has_epilog = use_fs_epilog && fs_epilog && fs_epilog->binary;
+   fs_link.nr_samples_shaded = use_fs_epilog ? 1 : 0;
+   if (fs_link.has_prolog)
+      fs_link.fs_prolog = fs_prolog_key;
+   if (fs_link.has_epilog)
+      fs_link.fs_epilog = epilog_key;
+   if (!d12_cached_stage_link(device, fs_entry, &fs_link,
+                              fs_link.has_prolog ? fs_prolog : NULL,
+                              fs_link.has_epilog ? fs_epilog : NULL,
+                              &pso->fs.linked)) {
       hr = E_OUTOFMEMORY;
       goto fail;
    }
@@ -4604,25 +4724,19 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
     * the original compiled part exactly as the VS/TES/GS/MS paths do.
     * Pointing preamble_va into linked.bo executes unrelated linked main
     * code and is a GPU-fault-class error, not merely a bad sample. */
-   if (fs_part.info.has_preamble) {
+   if (fs->info.has_preamble) {
       pso->fs.code_bo =
-         agx_bo_create(&device->dev, fs_part.info.binary_size, 0,
-                       AGX_BO_EXEC | AGX_BO_LOW_VA, "d3d12 fs preamble");
+         d12_cached_stage_code_bo(device, fs_entry, "d3d12 fs preamble");
       if (!pso->fs.code_bo) {
          hr = E_OUTOFMEMORY;
          goto fail;
       }
-      if (!d12_upload_executable(pso->fs.code_bo, fs_part.binary,
-                                 fs_part.info.binary_size)) {
-         hr = E_FAIL;
-         goto fail;
-      }
       pso->fs.preamble_va =
-         pso->fs.code_bo->va->addr + fs_part.info.preamble_offset;
+         pso->fs.code_bo->va->addr + fs->info.preamble_offset;
    }
 
-   pso->vs.info = vs_part.info;
-   pso->fs.info = fs_part.info;
+   pso->vs.info = vs->info;
+   pso->fs.info = fs->info;
 
    /*
     * GEOMETRY. Three more programs, compiled and linked here so a draw
@@ -4942,29 +5056,29 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
     * undefined state and returns mostly out-of-bounds. Honeykrisp does the
     * same MAX2 (hk_shader.c).
     */
-   unsigned vs_samplers = vs_part.info.sampler_state_count;
-   if (vs_part.info.uses_txf)
+   unsigned vs_samplers = vs->info.sampler_state_count;
+   if (vs->info.uses_txf)
       vs_samplers = MAX2(vs_samplers, 1);
 
-   unsigned fs_samplers = fs_part.info.sampler_state_count;
-   if (fs_part.info.uses_txf)
+   unsigned fs_samplers = fs->info.sampler_state_count;
+   if (fs->info.uses_txf)
       fs_samplers = MAX2(fs_samplers, 1);
 
    agx_pack(&pso->vs.counts, COUNTS, cfg) {
-      cfg.uniform_register_count = vs_part.info.push_count;
-      cfg.preshader_register_count = vs_part.info.nr_preamble_gprs;
+      cfg.uniform_register_count = vs->info.push_count;
+      cfg.preshader_register_count = vs->info.nr_preamble_gprs;
       cfg.sampler_state_register_count =
          agx_translate_sampler_state_count(vs_samplers, false);
-      cfg.texture_state_register_count = vs_part.info.texture_state_count;
+      cfg.texture_state_register_count = vs->info.texture_state_count;
    }
 
-   agx_pack_fragment_face_2(&pso->fs.frag_face, 0, &fs_part.info);
+   agx_pack_fragment_face_2(&pso->fs.frag_face, 0, &pso->fs.info);
 
    agx_pack(&pso->fs.fs_counts, FRAGMENT_SHADER_WORD_0, cfg) {
       cfg.cf_binding_count = pso->fs.linked.cf.nr_bindings;
-      cfg.uniform_register_count = fs_part.info.push_count;
-      cfg.preshader_register_count = fs_part.info.nr_preamble_gprs;
-      cfg.texture_state_register_count = fs_part.info.texture_state_count;
+      cfg.uniform_register_count = fs->info.push_count;
+      cfg.preshader_register_count = fs->info.nr_preamble_gprs;
+      cfg.texture_state_register_count = fs->info.texture_state_count;
       cfg.sampler_state_register_count =
          agx_translate_sampler_state_count(fs_samplers, false);
    }
@@ -5002,20 +5116,20 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    mesa_logi("compiled graphics pipeline: VS %u B / %u GPRs, FS %u B / %u "
              "GPRs, uvs size %u, cf bindings %u",
-             vs_part.info.binary_size, vs_part.info.nr_gprs,
-             fs_part.info.binary_size, fs_part.info.nr_gprs, pso->uvs.size,
+             vs->info.binary_size, vs->info.nr_gprs,
+             fs->info.binary_size, fs->info.nr_gprs, pso->uvs.size,
              pso->fs.linked.cf.nr_bindings);
 
    if (d12_debug()->dump_shaders) {
-      fprintf(stderr, "; VS main +0x%x\n", vs_part.info.main_offset);
-      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)vs_part.binary +
-                          vs_part.info.main_offset,
-                       vs_part.info.binary_size - vs_part.info.main_offset,
+      fprintf(stderr, "; VS main +0x%x\n", vs->info.main_offset);
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)vs->binary +
+                          vs->info.main_offset,
+                       vs->info.binary_size - vs->info.main_offset,
                        stderr);
-      fprintf(stderr, "; FS main +0x%x\n", fs_part.info.main_offset);
-      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)fs_part.binary +
-                          fs_part.info.main_offset,
-                       fs_part.info.binary_size - fs_part.info.main_offset,
+      fprintf(stderr, "; FS main +0x%x\n", fs->info.main_offset);
+      d12_disassemble_shader(device->dev.chip == AGX_CHIP_G17P, (uint8_t *)fs->binary +
+                          fs->info.main_offset,
+                       fs->info.binary_size - fs->info.main_offset,
                        stderr);
    }
 
@@ -5033,6 +5147,10 @@ fail:
    free(gs_pre_part.binary);
    free(gs_main_part.binary);
    free(gs_rast_part.binary);
+   if (vs_entry)
+      d12_cached_stage_unref(device, vs_entry);
+   if (fs_entry)
+      d12_cached_stage_unref(device, fs_entry);
 
    if (FAILED(hr)) {
       d12_pso_release_bos(device, pso);
