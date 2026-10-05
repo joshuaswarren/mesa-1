@@ -22,18 +22,21 @@
 #include <string.h>
 
 #include <windows.h>
-#include <winternl.h>
 
 #include "util/os_time.h"
 
 #define D12_WINE_MEMORY_LOAD_UNIX_LIB 1000 /* MemoryWineLoadUnixLib */
 
 typedef UINT64 d12_unixlib_handle_t;
-typedef NTSTATUS (WINAPI *d12_unix_dispatcher_t)(d12_unixlib_handle_t,
-                                                 unsigned int, void *);
+typedef LONG d12_ntstatus_t;
+typedef d12_ntstatus_t (WINAPI *d12_unix_dispatcher_t)(d12_unixlib_handle_t,
+                                                       unsigned int, void *);
+/* mingw's winternl.h does not declare this; resolve it from ntdll at runtime. */
+typedef d12_ntstatus_t (WINAPI *d12_nt_query_virtual_memory_t)(
+   HANDLE, PVOID, int, PVOID, SIZE_T, SIZE_T *);
 
 static d12_unixlib_handle_t d12_wine_handle;
-static d12_unix_dispatcher_t d12_wine_dispatcher;
+static d12_unix_dispatcher_t d12_wine_dispatcher __attribute__((used));
 static int d12_wine_state; /* 0 untried, 1 ok, -1 failed */
 
 extern IMAGE_DOS_HEADER __ImageBase;
@@ -41,7 +44,7 @@ extern IMAGE_DOS_HEADER __ImageBase;
 #ifdef __arm64ec__
 /* Must not be reached through an EC indirect-call check: branch straight to the
  * native dispatcher stored in d12_wine_dispatcher. */
-__attribute__((naked)) static NTSTATUS
+__attribute__((naked)) static d12_ntstatus_t
 d12_wine_unix_call_raw(d12_unixlib_handle_t handle, unsigned int code,
                        void *args)
 {
@@ -54,7 +57,7 @@ d12_wine_unix_call_raw(d12_unixlib_handle_t handle, unsigned int code,
 }
 #define D12_WINE_DISPATCHER_EXPORT "__wine_unix_call_dispatcher_arm64ec"
 #else
-static NTSTATUS
+static d12_ntstatus_t
 d12_wine_unix_call_raw(d12_unixlib_handle_t handle, unsigned int code,
                        void *args)
 {
@@ -80,10 +83,16 @@ d12_wine_unixlib_init(void)
    }
    d12_wine_dispatcher = (d12_unix_dispatcher_t)*dispatcher_var;
 
-   NTSTATUS status = NtQueryVirtualMemory(
-      GetCurrentProcess(), &__ImageBase,
-      (MEMORY_INFORMATION_CLASS)D12_WINE_MEMORY_LOAD_UNIX_LIB, &d12_wine_handle,
-      sizeof(d12_wine_handle), NULL);
+   d12_nt_query_virtual_memory_t query =
+      (d12_nt_query_virtual_memory_t)(void *)GetProcAddress(ntdll,
+                                                            "NtQueryVirtualMemory");
+   if (!query) {
+      d12_wine_state = -1;
+      return false;
+   }
+   d12_ntstatus_t status =
+      query(GetCurrentProcess(), &__ImageBase, D12_WINE_MEMORY_LOAD_UNIX_LIB,
+            &d12_wine_handle, sizeof(d12_wine_handle), NULL);
    if (status) {
       fprintf(stderr,
               "d3d12agx: cannot load unixlib d3d12.so (NTSTATUS 0x%08lx); "
@@ -104,7 +113,7 @@ d12_wine_call(enum d12_wine_call code, void *args)
       errno = ENOSYS;
       return -1;
    }
-   NTSTATUS status = d12_wine_unix_call_raw(d12_wine_handle, code, args);
+   d12_ntstatus_t status = d12_wine_unix_call_raw(d12_wine_handle, code, args);
    if (status) {
       errno = ENOSYS;
       return -1;
