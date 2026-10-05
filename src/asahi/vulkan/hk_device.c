@@ -61,9 +61,6 @@ hk_g17p_prewarm_poly_kernels(struct hk_device *dev)
    PREWARM(LIBAGX_PREFIX_SUM_TESS_0, libagx_prefix_sum_tess_args);
    PREWARM(LIBAGX_PREFIX_SUM_TESS_1, libagx_prefix_sum_tess_args);
    PREWARM(LIBAGX_TESS_SETUP_INDIRECT, libagx_tess_setup_indirect_args);
-   PREWARM(LIBAGX_TESS_SETUP_INDIRECT_HW,
-           libagx_tess_setup_indirect_hw_args);
-   PREWARM(LIBAGX_TESS_FACTORS_HALF, libagx_tess_factors_half_args);
    PREWARM(LIBAGX_TESS_ISOLINE_0, libagx_tess_isoline_args);
    PREWARM(LIBAGX_TESS_ISOLINE_1, libagx_tess_isoline_args);
    PREWARM(LIBAGX_TESS_TRI_0, libagx_tess_tri_args);
