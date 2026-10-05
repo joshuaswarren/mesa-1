@@ -475,6 +475,10 @@ hk_can_compress(const struct agx_device *dev, VkFormat format, unsigned plane,
    return true;
 }
 
+static bool
+hk_can_compress_create_info(const struct agx_device *dev, unsigned plane,
+                            const VkImageCreateInfo *info);
+
 bool
 hk_can_compress_format(const struct agx_device *dev, VkFormat format)
 {
@@ -908,9 +912,45 @@ hk_GetPhysicalDeviceImageFormatProperties2(
       case VK_STRUCTURE_TYPE_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY_EXT: {
          VkHostImageCopyDevicePerformanceQueryEXT *hic_props = (void *)s;
 
+         /* Compare against the device-copy image, including private G17P
+          * compression. hk_can_compress_format() is for DRM modifiers and
+          * deliberately excludes private AGX3 compression.
+          *
+          * The query omits dimensions, levels, layers and samples. Choose a
+          * shape that permits compression: if any such image can compress,
+          * host-transfer images cannot promise the same layout.
+          */
+         const VkExternalMemoryImageCreateInfo external_create_info = {
+            .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+            .pNext = pImageFormatInfo->pNext,
+            .handleTypes = external_info ? external_info->handleType : 0,
+         };
+         const VkImageCreateInfo device_copy_info = {
+            .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+            .pNext = &external_create_info,
+            .flags = pImageFormatInfo->flags,
+            .imageType = pImageFormatInfo->type,
+            .format = pImageFormatInfo->format,
+            .extent = {64, 64, 1},
+            .mipLevels = 1,
+            .arrayLayers = 1,
+            .samples = VK_SAMPLE_COUNT_1_BIT,
+            .tiling = pImageFormatInfo->tiling,
+            .usage = (pImageFormatInfo->usage &
+                      ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT) |
+                     VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                     VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+         };
+         bool can_compress = false;
+         if (pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL) {
+            for (unsigned plane = 0; plane < plane_count; ++plane) {
+               can_compress |= hk_can_compress_create_info(
+                  &pdev->dev, plane, &device_copy_info);
+            }
+         }
+
          hic_props->optimalDeviceAccess = hic_props->identicalMemoryLayout =
-            !(pImageFormatInfo->tiling == VK_IMAGE_TILING_OPTIMAL &&
-              hk_can_compress_format(&pdev->dev, pImageFormatInfo->format));
+            !can_compress;
          break;
       }
       default:
@@ -1002,12 +1042,12 @@ hk_GetPhysicalDeviceSparseImageFormatProperties2(
 }
 
 static bool
-hk_can_compress_create_info(struct hk_device *dev, unsigned plane,
+hk_can_compress_create_info(const struct agx_device *dev, unsigned plane,
                             const VkImageCreateInfo *info)
 {
    /* AGX3: G17P compresses every image hk_g17p_compression.h admits. Other
     * AGX3 chips stay plain until their packets are recovered. */
-   bool allow_agx3 = hk_g17p_compression_eligible(dev->dev.chip, plane, info);
+   bool allow_agx3 = hk_g17p_compression_eligible(dev->chip, plane, info);
 
    /* Compressed data is only decodable through its own channel class. Every
     * G17P writer of a colour image is a PBE; the end-of-tile PBE may store a
@@ -1019,7 +1059,7 @@ hk_can_compress_create_info(struct hk_device *dev, unsigned plane,
       const enum pipe_format store = agx_g17p_rt0_pbe_format(
          util_format_linear(hk_padded_image_format(p_format)));
       if (!ail_formats_compatible(p_format, store)) {
-         perf_debug_dev(&dev->dev,
+         perf_debug_dev(dev,
                         "No compression: G17P stores %s through class of %s",
                         util_format_short_name(p_format),
                         util_format_short_name(store));
@@ -1027,7 +1067,7 @@ hk_can_compress_create_info(struct hk_device *dev, unsigned plane,
       }
    }
 
-   return hk_can_compress(&dev->dev, info->format, plane, info->extent.width,
+   return hk_can_compress(dev, info->format, plane, info->extent.width,
                           info->extent.height, info->samples, info->flags,
                           info->usage, info->pNext, allow_agx3);
 }
@@ -1097,7 +1137,7 @@ hk_compression_refusal(struct hk_device *dev, unsigned plane,
    if (!ail_can_compress(hk_format_to_pipe_format(format), width, height,
                          info->samples))
       return "too-small-or-not-renderable";
-   if (!hk_can_compress_create_info(dev, plane, info))
+   if (!hk_can_compress_create_info(&dev->dev, plane, info))
       return "other";
    return NULL;
 }
@@ -1160,7 +1200,7 @@ hk_map_compression(struct hk_device *dev, const VkImageCreateInfo *info,
       return false;
 
    case VK_IMAGE_TILING_OPTIMAL:
-      return hk_can_compress_create_info(dev, plane, info);
+      return hk_can_compress_create_info(&dev->dev, plane, info);
 
    case VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT:
       return ail_is_drm_modifier_compressed(modifier);
@@ -1207,7 +1247,7 @@ choose_drm_format_mod(struct hk_device *dev, uint8_t plane_count,
    bool can_compress = true;
 
    for (uint8_t plane = 0; plane < plane_count; plane++) {
-      if (!hk_can_compress_create_info(dev, plane, info))
+      if (!hk_can_compress_create_info(&dev->dev, plane, info))
          can_compress = false;
    }
 
