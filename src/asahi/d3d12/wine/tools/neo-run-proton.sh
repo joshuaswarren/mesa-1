@@ -81,9 +81,14 @@ if [[ ${PROTON_VERB:-run} == run && ${CAPTURE_STDOUT:-1} == 1 ]]; then
    outfile=$logdir/out-$stamp.txt
    : > "$outfile"; chown "$run_user" "$outfile"
    winpath() { local p=$1; printf 'Z:%s' "${p//\//\\}"; }
+   # cmd.exe mangles a single quoted argument containing '>' (quote
+   # stripping), so the command line goes into a batch file instead.
+   bat=$logdir/run-$stamp.bat
    cmdline="\"$(winpath "$1")\""; shift
    for a in "$@"; do cmdline+=" \"$a\""; done
-   set -- cmd.exe /c "$cmdline > \"$(winpath "$outfile")\" 2>&1"
+   printf '@echo off\r\n%s > "%s" 2>&1\r\nexit /b %%ERRORLEVEL%%\r\n' "$cmdline" "$(winpath "$outfile")" > "$bat"
+   chown "$run_user" "$bat"
+   set -- cmd.exe /c "$(winpath "$bat")"
 fi
 {
    echo "tool=$tool prefix=$prefix exe=$1 args=${*:2} timeout=$timeout_s verb=${PROTON_VERB:-run}"
