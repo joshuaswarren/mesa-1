@@ -393,7 +393,9 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
       D3D12_FEATURE_DATA_PREDICATION *predication = data;
       if (data_size != sizeof(D3D12_FEATURE_DATA_PREDICATION))
          return E_INVALIDARG;
-      predication->Supported = caps->predication ? TRUE : FALSE;
+      if (!caps->predication)
+         return E_NOTIMPL;
+      predication->Supported = TRUE;
       return S_OK;
    }
 
@@ -401,7 +403,9 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
       D3D12_FEATURE_DATA_HARDWARE_COPY *hardware_copy = data;
       if (data_size != sizeof(D3D12_FEATURE_DATA_HARDWARE_COPY))
          return E_INVALIDARG;
-      hardware_copy->Supported = caps->hardware_copy ? TRUE : FALSE;
+      if (!caps->hardware_copy)
+         return E_NOTIMPL;
+      hardware_copy->Supported = TRUE;
       return S_OK;
    }
 
@@ -446,7 +450,83 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
       if (data_size != sizeof(*layout))
          return E_INVALIDARG;
 
-      layout->Supported = FALSE;
+      bool direct = layout->CommandListType == D3D12_COMMAND_LIST_TYPE_DIRECT;
+      bool compute =
+         layout->CommandListType == D3D12_COMMAND_LIST_TYPE_COMPUTE;
+
+      /* D3D12_BARRIER_LAYOUT_VIDEO_QUEUE_COMMON (value 30) was added after
+       * the DirectX-Headers version this build uses. Keep the public value
+       * here so callers built against the current header get the right
+       * queue/layout validation answer.
+       */
+      if ((unsigned)layout->Layout == 30) {
+         layout->Supported =
+            layout->CommandListType == D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE ||
+            layout->CommandListType == D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS ||
+            layout->CommandListType == D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE;
+         return S_OK;
+      }
+
+      switch (layout->Layout) {
+      case D3D12_BARRIER_LAYOUT_COMMON:
+      case D3D12_BARRIER_LAYOUT_UNDEFINED:
+         layout->Supported = TRUE;
+         break;
+
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COMMON:
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_GENERIC_READ:
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_UNORDERED_ACCESS:
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_SHADER_RESOURCE:
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_SOURCE:
+      case D3D12_BARRIER_LAYOUT_DIRECT_QUEUE_COPY_DEST:
+      case D3D12_BARRIER_LAYOUT_RENDER_TARGET:
+      case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_READ:
+      case D3D12_BARRIER_LAYOUT_DEPTH_STENCIL_WRITE:
+      case D3D12_BARRIER_LAYOUT_RESOLVE_SOURCE:
+      case D3D12_BARRIER_LAYOUT_RESOLVE_DEST:
+      case D3D12_BARRIER_LAYOUT_SHADING_RATE_SOURCE:
+         layout->Supported = direct;
+         break;
+
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COMMON:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_GENERIC_READ:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_UNORDERED_ACCESS:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_SOURCE:
+      case D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_COPY_DEST:
+         layout->Supported = compute;
+         break;
+
+      case D3D12_BARRIER_LAYOUT_GENERIC_READ:
+      case D3D12_BARRIER_LAYOUT_UNORDERED_ACCESS:
+      case D3D12_BARRIER_LAYOUT_SHADER_RESOURCE:
+      case D3D12_BARRIER_LAYOUT_COPY_SOURCE:
+      case D3D12_BARRIER_LAYOUT_COPY_DEST:
+         layout->Supported = direct || compute;
+         break;
+
+      case D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_READ:
+      case D3D12_BARRIER_LAYOUT_VIDEO_PROCESS_WRITE:
+         layout->Supported = layout->CommandListType ==
+                             D3D12_COMMAND_LIST_TYPE_VIDEO_PROCESS;
+         break;
+
+      case D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_READ:
+      case D3D12_BARRIER_LAYOUT_VIDEO_ENCODE_WRITE:
+         layout->Supported = layout->CommandListType ==
+                             D3D12_COMMAND_LIST_TYPE_VIDEO_ENCODE;
+         break;
+
+      case D3D12_BARRIER_LAYOUT_VIDEO_DECODE_READ:
+      case D3D12_BARRIER_LAYOUT_VIDEO_DECODE_WRITE:
+         layout->Supported = layout->CommandListType ==
+                             D3D12_COMMAND_LIST_TYPE_VIDEO_DECODE;
+         break;
+
+      default:
+         layout->Supported = FALSE;
+         break;
+      }
 
       return S_OK;
    }

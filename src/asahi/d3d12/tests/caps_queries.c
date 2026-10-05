@@ -55,6 +55,26 @@ int main(void)
    SIZE_QUERY(D3D12_FEATURE_SHADER_CACHE_ABI_SUPPORT, D3D12_FEATURE_DATA_SHADERCACHE_ABI_SUPPORT);
    SIZE_QUERY(D3D12_FEATURE_BARRIER_LAYOUT, D3D12_FEATURE_DATA_BARRIER_LAYOUT);
 
+   D3D12_FEATURE_DATA_BARRIER_LAYOUT layout = {
+      .CommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT,
+      .Layout = D3D12_BARRIER_LAYOUT_RENDER_TARGET,
+   };
+   assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_BARRIER_LAYOUT,
+                                           &layout, sizeof(layout)) == S_OK);
+   assert(layout.Supported);
+   layout.CommandListType = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+   assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_BARRIER_LAYOUT,
+                                           &layout, sizeof(layout)) == S_OK);
+   assert(!layout.Supported);
+   layout.Layout = D3D12_BARRIER_LAYOUT_COMPUTE_QUEUE_SHADER_RESOURCE;
+   assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_BARRIER_LAYOUT,
+                                           &layout, sizeof(layout)) == S_OK);
+   assert(layout.Supported);
+   D3D12_FEATURE_DATA_PREDICATION predication = {.Supported = TRUE};
+   assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_PREDICATION,
+                                           &predication, sizeof(predication)) == E_NOTIMPL);
+   assert(predication.Supported == TRUE); /* unavailable query leaves output */
+
    D3D12_FEATURE_DATA_D3D12_OPTIONS opts = {0};
    D3D12_FEATURE_DATA_GPU_VIRTUAL_ADDRESS_SUPPORT va = {0};
    assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_D3D12_OPTIONS, &opts, sizeof(opts)) == S_OK);
