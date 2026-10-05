@@ -27,6 +27,7 @@
 #include "hk_drm_render_core.h"
 #include "hk_drm_prior_core.h"
 #include "hk_image.h"
+#include "hk_pass_profile.h"
 #include "hk_physical_device.h"
 
 #include <errno.h>
@@ -2006,6 +2007,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_append_compute_attachments(dev, &payload, cs);
             struct drm_asahi_cmd_compute_with_prior cmd = {0};
             asahi_fill_cdm_command(dev, cs, &cmd.legacy);
+            if (unlikely(dev->pass_profile))
+               hk_pass_profile_compute(dev, cs, &cmd.legacy);
             if (queue->sync.exact_prior) {
                header.size = sizeof(cmd);
                cmd.prior_vdm = cs->sync.prior[HK_SYNC_VDM];
@@ -2029,6 +2032,8 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_fill_vdm_command(dev, cs, &cmd.legacy, &faulttrace_extra);
             header.size = hk_drm_render_command_size(
                dev->dev.chip == AGX_CHIP_G17P, queue->sync.exact_prior);
+            if (unlikely(dev->pass_profile))
+               hk_pass_profile_render(dev, cs, &cmd.legacy);
             if (queue->sync.exact_prior) {
                cmd.prior_vdm = cs->sync.prior[HK_SYNC_VDM];
                cmd.prior_cdm = cs->sync.prior[HK_SYNC_CDM];
@@ -2112,6 +2117,10 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
 
    util_dynarray_fini(&payload);
    util_dynarray_fini(&faulttrace_extra);
+
+   if (unlikely(dev->pass_profile))
+      hk_pass_profile_harvest(dev);
+
    return result;
 }
 

@@ -413,6 +413,9 @@ struct hk_render_registers {
       struct hk_bg_eot main;
       struct hk_bg_eot partial;
    } eot;
+
+   /* HK_PASS_PROFILE: API-level pass description, empty unless enabled. */
+   char prof_desc[160];
 };
 
 struct hk_rendering_state {

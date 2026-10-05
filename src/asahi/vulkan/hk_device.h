@@ -137,6 +137,9 @@ struct hk_device {
    /* frg-codegen v4 BG/EOT device cache (hk_cmd_draw.c). */
    struct hk_g17p_bg_eot_dev_cache *g17p_bg_eot_dev_cache;
 
+   /* HK_PASS_PROFILE diagnostic state, NULL unless enabled. */
+   struct hk_pass_profile *pass_profile;
+
    /* VK_KHR_ray_tracing_pipeline shader group handles.  A handle is one
     * device-unique index, so a handle captured from a pipeline library keeps
     * naming the same group in every pipeline that imports the library.  It

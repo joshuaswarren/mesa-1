@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_device.h"
+#include "hk_pass_profile.h"
 
 #include "hk_acceleration_structure.h"
 
@@ -824,6 +825,8 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
              dev->dev.user_timestamp_to_ns.den &&
           "user timestamps are in ns");
 
+   hk_pass_profile_init(dev);
+
    result = hk_init_sampler_heap(dev, &dev->samplers);
    if (result != VK_SUCCESS)
       goto fail_dev;
@@ -1018,6 +1021,7 @@ hk_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
       hk_queue_finish(dev, queue);
    }
 
+   hk_pass_profile_fini(dev);
    vk_device_finish(&dev->vk);
 
    hk_device_finish_vdm_slabs(dev);
