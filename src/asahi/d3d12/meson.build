@@ -326,6 +326,20 @@ executable(
   link_with : [libd3d12agx],
 )
 
+executable(
+  'd3d12agx_resource_validation',
+  files('tests/resource_validation.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
+# Checked placement math can also run without a GPU or DirectX headers.
+d3d12agx_allocation_math_tests = executable(
+  'd3d12agx_allocation_math_tests',
+  files('tests/d12_allocation_math_tests.c'),
+)
+test('d3d12agx_allocation_math', d3d12agx_allocation_math_tests)
+
 # CPU-side microbenchmark: record/submit cost, descriptor writes, PSO creation.
 d3d12agx_microbench = executable(
   'd3d12agx_microbench',

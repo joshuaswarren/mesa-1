@@ -9,6 +9,7 @@
 #include "d12_private.h"
 #include "d12_core_caps.h"
 #include "d12_heap_desc.h"
+#include "d12_allocation_math.h"
 #include "d12_sparse_residency_core.h"
 #include "util/os_misc.h"
 #include "util/cache_ops.h"
@@ -1818,6 +1819,7 @@ d12_resource_create(struct d12_device *device,
 {
    if (!out)
       return E_POINTER;
+   *out = NULL;
    if (!heap_props || !desc)
       return E_INVALIDARG;
 
@@ -1968,7 +1970,10 @@ d12_resource_create(struct d12_device *device,
        */
       uint64_t need = size_B;
       if (is_depth_stencil && stencil_layout.size_B) {
-         stencil_offset_B = heap_offset_B + size_B;
+         if (stencil_layout.size_B > UINT64_MAX - need) {
+            free(res);
+            return E_INVALIDARG;
+         }
          need += stencil_layout.size_B;
       }
 
@@ -2026,13 +2031,16 @@ d12_resource_create(struct d12_device *device,
        * rounding either kind here rejects an otherwise in-bounds resource.
        */
 
-      if (heap_offset_B + need > heap->bo->size) {
+      if (!d12_allocation_fits(heap_offset_B, need, heap->desc.SizeInBytes) ||
+          !d12_allocation_fits(heap_offset_B, need, heap->bo->size)) {
          mesa_loge("CreatePlacedResource: %" PRIu64 " bytes at offset %"
-                   PRIu64 " does not fit a %zu-byte heap",
-                   need, heap_offset_B, (size_t)heap->bo->size);
+                   PRIu64 " does not fit a %" PRIu64 "-byte heap",
+                   need, heap_offset_B, heap->desc.SizeInBytes);
          free(res);
          return E_INVALIDARG;
       }
+      if (is_depth_stencil && stencil_layout.size_B)
+         stencil_offset_B = heap_offset_B + size_B;
 
       res->bo = heap->bo;
       res->stencil_bo = (is_depth_stencil && stencil_layout.size_B)
@@ -2485,6 +2493,8 @@ d12_resource_create_committed(struct d12_device *device,
                               const D3D12_CLEAR_VALUE *clear_value,
                               REFIID riid, void **out)
 {
+   if (out)
+      *out = NULL;
    HRESULT valid = d12_validate_resource_desc(heap_props, desc, initial_state,
                                               clear_value);
    if (FAILED(valid))
@@ -2503,7 +2513,9 @@ d12_resource_create_placed(struct d12_device *device, struct d12_heap *heap,
                            const D3D12_CLEAR_VALUE *clear_value, REFIID riid,
                            void **out)
 {
-   if (!heap || !desc)
+   if (out)
+      *out = NULL;
+   if (!heap || !desc || heap->device != device)
       return E_INVALIDARG;
 
    /* The ALLOW_ONLY_* heap flags are aliases for combinations of these
@@ -2552,6 +2564,8 @@ d12_resource_create_reused(struct d12_device *device,
    uint64_t explicit_row_major_size_B = 0;
    uint64_t absolute_offset;
 
+   if (out)
+      *out = NULL;
    if (!device || !source || source->device != device || !desc ||
        source->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
        source->reserved || !source->bo || !source->bo->va ||
@@ -2589,8 +2603,9 @@ d12_resource_create_reused(struct d12_device *device,
                              };
    captured_heap.desc.SizeInBytes = source->bo->size;
    captured_heap.bo = source->bo;
+   captured_heap.device = device;
 
-   /* d12_resource_create_placed consumes the heap description and BO only
+   /* d12_resource_create_placed consumes the heap description, device and BO
     * during this call, then retains the BO and copies the description. This
     * exactly models the DDI's capture-GPUVA lifetime without retaining the
     * public heap COM object. */

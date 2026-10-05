@@ -8,6 +8,7 @@
 
 #include "d12_private.h"
 #include "d12_attachment_view_core.h"
+#include "d12_allocation_math.h"
 #include "d12_buffer_view_core.h"
 #include "d12_core_caps.h"
 #include "d12_query_core.h"
@@ -1897,13 +1898,18 @@ d12_device_GetCustomHeapProperties(ID3D12Device2 *iface
    D12_RETURN_AGGREGATE(props);
 }
 
-static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
-d12_device_GetResourceAllocationInfo(
-   ID3D12Device2 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
-   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC *descs)
+static D3D12_RESOURCE_ALLOCATION_INFO
+d12_device_compute_allocation_info(
+   ID3D12Device2 *iface, UINT visible_mask, UINT count,
+   const D3D12_RESOURCE_DESC *descs, D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
 {
    struct d12_device *device = d12_device_from_iface(iface);
-   D3D12_RESOURCE_ALLOCATION_INFO info = {0, 0};
+   D3D12_RESOURCE_ALLOCATION_INFO info = {
+      UINT64_MAX, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+   };
+
+   if (visible_mask > 1)
+      return info;
 
    /*
     * An EMPTY query is not an invalid one. D3D12 answers count == 0 with
@@ -1915,13 +1921,13 @@ d12_device_GetResourceAllocationInfo(
    if (!count) {
       info.SizeInBytes = 0;
       info.Alignment = 1;
-      D12_RETURN_AGGREGATE(info);
+      return info;
    }
 
    if (!descs) {
       info.SizeInBytes = UINT64_MAX;
       info.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-      D12_RETURN_AGGREGATE(info);
+      return info;
    }
 
    uint64_t total = 0;
@@ -1975,10 +1981,15 @@ d12_device_GetResourceAllocationInfo(
       if (d->Alignment != 0 && d->Alignment != align && !want_small) {
          info.SizeInBytes = UINT64_MAX;
          info.Alignment = align;
-         D12_RETURN_AGGREGATE(info);
+         return info;
       }
 
       if (d->Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+         if (!d->Width || d->Height != 1 || d->DepthOrArraySize != 1 ||
+             d->MipLevels != 1 || d->Format != DXGI_FORMAT_UNKNOWN ||
+             d->SampleDesc.Count != 1 || d->SampleDesc.Quality != 0 ||
+             d->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
+            return info;
          size = d->Width;
       } else {
          /* The resource constructor and this reflection query share one
@@ -1997,7 +2008,7 @@ d12_device_GetResourceAllocationInfo(
              * ALIGNMENT` even on the UINT64_MAX path. */
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            D12_RETURN_AGGREGATE(info);
+            return info;
          }
 
          /* Block-aware size of ONE SLICE OF LEVEL 0; the small-placement
@@ -2030,16 +2041,41 @@ d12_device_GetResourceAllocationInfo(
          } else {
             info.SizeInBytes = UINT64_MAX;
             info.Alignment = align;
-            D12_RETURN_AGGREGATE(info);
+            return info;
          }
       }
 
-      total = align64(total, align) + size;
-      max_align = MAX2(max_align, align);
+      uint64_t offset, padded_size;
+      if (!d12_allocation_append(size, align, &total, &max_align,
+                                 &offset, &padded_size)) {
+         info.Alignment = MAX2(max_align, align);
+         return info;
+      }
+      if (info1) {
+         info1[i] = (D3D12_RESOURCE_ALLOCATION_INFO1){
+            .Offset = offset,
+            .Alignment = align,
+            .SizeInBytes = padded_size,
+         };
+      }
    }
 
-   info.SizeInBytes = align64(total, max_align);
+   if (!d12_allocation_align(total, max_align, &info.SizeInBytes)) {
+      info.SizeInBytes = UINT64_MAX;
+      info.Alignment = max_align;
+      return info;
+   }
    info.Alignment = max_align;
+   return info;
+}
+
+static D12_AGGREGATE_RETURN(D3D12_RESOURCE_ALLOCATION_INFO) STDMETHODCALLTYPE
+d12_device_GetResourceAllocationInfo(
+   ID3D12Device2 *iface D12_AGGREGATE_OUT(D3D12_RESOURCE_ALLOCATION_INFO),
+   UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC *descs)
+{
+   D3D12_RESOURCE_ALLOCATION_INFO info = d12_device_compute_allocation_info(
+      iface, visible_mask, count, descs, NULL);
    D12_RETURN_AGGREGATE(info);
 }
 
@@ -2091,12 +2127,9 @@ d12_device_CreatePlacedResource(ID3D12Device2 *iface, ID3D12Heap *heap_iface,
    if (out)
       *out = NULL;
 
-   if (!heap_iface || !desc)
+   if (!d12_heap_iface_is_ours(heap_iface) || !desc)
       return E_INVALIDARG;
 
-   /* Resource STATES are not tracked: this driver has no transition
-    * barriers to honour, and UMA gives no separate layouts to move
-    * between. The optimized clear value is a hint we do not need. */
    return d12_resource_create_placed(device, d12_memheap_from_iface(heap_iface),
                                      heap_offset, desc, 0, 0, initial_state,
                                      optimized_clear, riid, out);
@@ -4903,21 +4936,6 @@ d12_resource_desc1_supported(const D3D12_RESOURCE_DESC1 *desc1)
           desc1->SamplerFeedbackMipRegion.Depth == 0;
 }
 
-static D3D12_RESOURCE_ALLOCATION_INFO
-d12_device_allocation_info(ID3D12Device2 *iface, UINT visible_mask,
-                           UINT count, const D3D12_RESOURCE_DESC *descs)
-{
-#ifdef _WIN32
-   D3D12_RESOURCE_ALLOCATION_INFO info;
-   d12_device_GetResourceAllocationInfo(iface, &info, visible_mask, count,
-                                        descs);
-   return info;
-#else
-   return d12_device_GetResourceAllocationInfo(iface, visible_mask, count,
-                                               descs);
-#endif
-}
-
 /* GetResourceAllocationInfo1/2/3 add a per-resource breakdown of the
  * aggregate answer: each resource's offset inside one heap sized by the
  * aggregate, laid out in order with each resource's own alignment. */
@@ -4926,28 +4944,8 @@ d12_device_allocation_info1(ID3D12Device2 *iface, UINT visible_mask,
                             UINT count, const D3D12_RESOURCE_DESC *descs,
                             D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
 {
-   D3D12_RESOURCE_ALLOCATION_INFO total = {0, 0};
-   if (!descs && count)
-      return (D3D12_RESOURCE_ALLOCATION_INFO){UINT64_MAX, 0};
-
-   UINT64 offset = 0;
-   for (UINT i = 0; i < count; i++) {
-      D3D12_RESOURCE_ALLOCATION_INFO one =
-         d12_device_allocation_info(iface, visible_mask, 1, &descs[i]);
-      if (one.SizeInBytes == UINT64_MAX)
-         return one;
-      if (one.Alignment)
-         offset = ALIGN_POT(offset, one.Alignment);
-      if (info1) {
-         info1[i].Offset = offset;
-         info1[i].Alignment = one.Alignment;
-         info1[i].SizeInBytes = one.SizeInBytes;
-      }
-      offset += one.SizeInBytes;
-      total.Alignment = MAX2(total.Alignment, one.Alignment);
-   }
-   total.SizeInBytes = offset;
-   return total;
+   return d12_device_compute_allocation_info(iface, visible_mask, count,
+                                             descs, info1);
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -5081,7 +5079,9 @@ d12_device8_GetResourceAllocationInfo2(
    UINT visible_mask, UINT count, const D3D12_RESOURCE_DESC1 *descs1,
    D3D12_RESOURCE_ALLOCATION_INFO1 *info1)
 {
-   D3D12_RESOURCE_ALLOCATION_INFO info = {UINT64_MAX, 0};
+   D3D12_RESOURCE_ALLOCATION_INFO info = {
+      UINT64_MAX, D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+   };
    D3D12_RESOURCE_DESC *descs =
       count ? calloc(count, sizeof(*descs)) : NULL;
    if (!count || (descs && descs1)) {

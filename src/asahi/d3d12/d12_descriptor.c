@@ -587,9 +587,10 @@ d12_descriptor_heap_create(struct d12_device *device,
                            const D3D12_DESCRIPTOR_HEAP_DESC *desc,
                            REFIID riid, void **out)
 {
-   if (!out)
-      return E_POINTER;
-   if (!desc || !desc->NumDescriptors)
+   if (out)
+      *out = NULL;
+   if (!desc || !desc->NumDescriptors || desc->NodeMask > 1 ||
+       ((unsigned)desc->Flags & ~D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE))
       return E_INVALIDARG;
 
    switch (desc->Type) {
@@ -605,18 +606,30 @@ d12_descriptor_heap_create(struct d12_device *device,
    case D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV:
       /* Shader-visible storage is allocated below from a coherent BO so
        * unbounded ranges can index it directly. */
+      if ((desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
+          desc->NumDescriptors >
+             D3D12_MAX_SHADER_VISIBLE_DESCRIPTOR_HEAP_SIZE_TIER_2)
+         return E_INVALIDARG;
       break;
 
    case D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER:
       /* Sampler creation is CPU-immediate too.  The packed hardware state
        * lives in the same fixed-size slot; binding/upload is a later
        * texturing concern and does not make heap object creation invalid. */
+      if ((desc->Flags & D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE) &&
+          desc->NumDescriptors > D3D12_MAX_SHADER_VISIBLE_SAMPLER_HEAP_SIZE)
+         return E_INVALIDARG;
       break;
 
    default:
       mesa_loge("CreateDescriptorHeap: invalid type %d", (int)desc->Type);
       return E_INVALIDARG;
    }
+
+   /* D3D12 permits a validation-only call. Do not allocate storage or take
+    * a device reference when the caller only asks whether the desc is legal. */
+   if (!out)
+      return S_FALSE;
 
    struct d12_descriptor_heap *heap = calloc(1, sizeof(*heap));
    if (!heap)
