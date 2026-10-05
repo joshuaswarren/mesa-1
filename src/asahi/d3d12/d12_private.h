@@ -1533,9 +1533,18 @@ struct d12_segment {
 
 struct d12_binding_upload_cache {
    bool valid;
+   /* Root-table generation this upload was built from; equal generations
+    * mean no root parameter was written since, so the hit needs no compare. */
+   uint32_t generation;
    const struct d12_root_signature *rs;
+   const struct d12_pipeline_state *pso;
    const struct d12_descriptor_heap *resource_heap;
    const struct d12_descriptor_heap *sampler_heap;
+   /* The uploaded dense root planes, kept so a root constant or root
+    * descriptor change re-roots only the affected slots instead of
+    * rebuilding texture and PBE heaps. */
+   uint64_t compact[D12_ROOT_TABLE_ENTRIES];
+   uint64_t pbe_table;
    struct d12_descriptor table[D12_MAX_RESOURCE_BINDINGS];
    struct d12_descriptor samplers[D12_MAX_RESOURCE_BINDINGS];
    const struct d12_descriptor *sources[D12_MAX_RESOURCE_BINDINGS];
@@ -1739,6 +1748,9 @@ struct d12_cmd_list {
     * is reserved for texture Load; API sampler S is uploaded at S + 1. */
    struct d12_descriptor compute_sampler_table[D12_MAX_RESOURCE_BINDINGS];
    struct d12_descriptor graphics_sampler_table[D12_MAX_RESOURCE_BINDINGS];
+   /* Bumped by every root parameter write (compute, graphics); the binding
+    * upload cache compares this instead of 33 KiB of table contents. */
+   uint32_t root_generation[2];
    struct util_dynarray descriptor_fixups;
    struct util_dynarray indirect_constant_fixups;
    struct util_dynarray indirect_argument_fixups;

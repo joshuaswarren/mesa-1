@@ -833,6 +833,8 @@ d12_list_reset_api_state(struct d12_cmd_list *list)
           sizeof(list->compute_sampler_table));
    memset(list->graphics_sampler_table, 0,
           sizeof(list->graphics_sampler_table));
+   list->root_generation[0]++;
+   list->root_generation[1]++;
 
    memset(list->vb, 0, sizeof(list->vb));
    memset(&list->ib, 0, sizeof(list->ib));
@@ -3667,6 +3669,229 @@ d12_apply_texture_shape(struct d12_descriptor *d, unsigned shape)
    }
 }
 
+/* One slot of the four dense root planes: resource address, UAV counter,
+ * BUFINFO and sparse residency. Shared by the full upload and the re-root
+ * fast path so both publish identical bits. */
+static bool
+d12_root_plane_slot(struct d12_cmd_list *list, const struct d12_descriptor *d,
+                    const struct d12_descriptor *source, unsigned i,
+                    uint64_t *null_buf, uint64_t *null_counters,
+                    uint64_t *addrs)
+{
+   addrs[D12_ROOT_RESOURCE_BASE + i] = d->address;
+   addrs[D12_ROOT_COUNTER_BASE + i] = d->counter_address;
+   addrs[D12_ROOT_BUFINFO_BASE + i] = 0;
+   addrs[D12_ROOT_RESIDENCY_BASE + i] =
+      d12_descriptor_sparse_residency_address(d);
+
+   if (d->resource &&
+       d->resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER &&
+       (d->kind == D12_DESC_SRV || d->kind == D12_DESC_UAV)) {
+      if (!source) {
+         /* A bare root SRV/UAV has no declared view extent. The resource
+          * pointer exists only to publish sparse residency metadata. */
+         addrs[D12_ROOT_BUFINFO_BASE + i] = UINT32_MAX;
+      } else {
+         switch (d->buffer_kind) {
+         case D12_BUFFER_VIEW_RAW:
+         case D12_BUFFER_VIEW_TYPED:
+         case D12_BUFFER_VIEW_STRUCTURED:
+            addrs[D12_ROOT_BUFINFO_BASE + i] = d->buffer_count;
+            break;
+         default:
+            break;
+         }
+         if (d->buffer_kind != D12_BUFFER_VIEW_NONE)
+            addrs[D12_ROOT_BUFINFO_BASE + i] |=
+               (uint64_t)d->buffer_stride_B << 32;
+      }
+   } else if (d->resource && d->kind == D12_DESC_SRV &&
+              (d->resource->desc.Dimension ==
+                  D3D12_RESOURCE_DIMENSION_TEXTURE1D ||
+               d->resource->desc.Dimension ==
+                  D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
+               d->resource->desc.Dimension ==
+                  D3D12_RESOURCE_DIMENSION_TEXTURE3D)) {
+      /* Texture SRVs use the low BUFINFO word for the runtime per-view
+       * minimum LOD clamp. Buffer users interpret the same plane as a
+       * count, and the resource dimension keeps the meanings disjoint. */
+      uint32_t info = d->texture_txf_min_level |
+                      (d->texture_min_lod_oob ? 0x80000000u : 0);
+      addrs[D12_ROOT_BUFINFO_BASE + i] =
+         fui(d->texture_min_lod) | (uint64_t)info << 32;
+   } else if (d->address && !d->resource &&
+              (d->kind == D12_DESC_SRV || d->kind == D12_DESC_UAV)) {
+      /* Root SRV/UAV descriptors carry only a GPU address, so D3D12
+       * provides no view extent to publish.  Treat their element count
+       * as unbounded instead of zero: structured-store robustness uses
+       * this plane for descriptor-table views, and must not accidentally
+       * discard every valid access through a bare root descriptor.  Null
+       * root descriptors retain count zero because their address is zero
+       * until the safe null-buffer substitution below.
+       */
+      addrs[D12_ROOT_BUFINFO_BASE + i] = UINT32_MAX;
+   }
+
+   if (!addrs[D12_ROOT_RESOURCE_BASE + i]) {
+      if (!*null_buf && !(*null_buf = d12_list_null_buffer(list)))
+         return false;
+      addrs[D12_ROOT_RESOURCE_BASE + i] = *null_buf;
+   }
+
+   if (!addrs[D12_ROOT_COUNTER_BASE + i]) {
+      if (!*null_counters && !(*null_counters = d12_list_null_counters(list)))
+         return false;
+      addrs[D12_ROOT_COUNTER_BASE + i] = *null_counters + i * sizeof(uint32_t);
+   }
+   return true;
+}
+
+/* A slot that only feeds the root planes: unbound, root constants, a CBV,
+ * or a bare root SRV/UAV with no resource behind it. Such slots never pack
+ * a texture or PBE descriptor, so replacing one leaves every uploaded heap
+ * valid and only the planes need re-rooting. */
+static bool
+d12_descriptor_is_plane_only(const struct d12_descriptor *d)
+{
+   if (d->resource)
+      return false;
+   switch (d->kind) {
+   case D12_DESC_CBV:
+   case D12_DESC_SRV:
+   case D12_DESC_UAV:
+      return true;
+   default:
+      return !d->address && !d->counter_address;
+   }
+}
+
+static void
+d12_binding_upload_cache_outputs(const struct d12_binding_upload_cache *cache,
+                                 uint64_t *out_root, uint64_t *out_textures,
+                                 uint64_t *out_pbes, uint64_t *out_heap,
+                                 uint64_t *out_heap_textures,
+                                 uint64_t *out_heap_pbes,
+                                 uint64_t *out_heap_samplers,
+                                 uint64_t *out_tables,
+                                 uint32_t *out_table_count)
+{
+   *out_root = cache->root;
+   *out_textures = cache->textures;
+   *out_pbes = cache->pbes;
+   *out_heap = cache->heap;
+   *out_heap_textures = cache->heap_textures;
+   *out_heap_pbes = cache->heap_pbes;
+   *out_heap_samplers = cache->heap_samplers;
+   if (out_tables)
+      *out_tables = cache->tables;
+   if (out_table_count)
+      *out_table_count = cache->table_count;
+}
+
+/* Re-root a cached binding upload after plane-only slots changed: patch
+ * those slots in the cached dense planes, upload fresh planes and headers,
+ * and point the root at them. The texture and PBE heaps, their home cells
+ * and the bindless heap cells are reused unchanged. */
+static bool
+d12_list_reroot_bindings(struct d12_cmd_list *list,
+                         struct d12_binding_upload_cache *cache,
+                         const struct d12_descriptor *raw_table,
+                         const struct d12_descriptor *const *sources,
+                         const struct d12_descriptor_heap *bound_heap)
+{
+   const unsigned root_count = cache->table_count;
+   uint64_t null_buf = 0, null_counters = 0;
+
+   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+      if (memcmp(&cache->table[i], &raw_table[i], sizeof(raw_table[i])) == 0)
+         continue;
+      cache->table[i] = raw_table[i];
+      if (i >= root_count)
+         continue;
+
+      uint64_t addrs[D12_ROOT_TABLE_ENTRIES];
+      if (!d12_root_plane_slot(list, &raw_table[i], sources[i], i, &null_buf,
+                               &null_counters, addrs))
+         return false;
+      cache->compact[i] = addrs[D12_ROOT_RESOURCE_BASE + i];
+      cache->compact[root_count + i] = addrs[D12_ROOT_COUNTER_BASE + i];
+      cache->compact[2 * root_count + i] = addrs[D12_ROOT_BUFINFO_BASE + i];
+      cache->compact[3 * root_count + i] = addrs[D12_ROOT_RESIDENCY_BASE + i];
+   }
+
+   uint64_t tables_gpu = d12_list_upload(
+      list, cache->compact, 4 * root_count * sizeof(uint64_t), 8);
+   if (!tables_gpu)
+      return false;
+
+   if (!null_buf && !(null_buf = d12_list_null_buffer(list)))
+      return false;
+   uint64_t discard_buf = d12_list_discard_buffer(list);
+   if (!discard_buf)
+      return false;
+
+   uint64_t metadata_header[] = {
+      tables_gpu + root_count * sizeof(uint64_t),
+      tables_gpu + 2 * root_count * sizeof(uint64_t),
+      null_buf,
+      discard_buf,
+      tables_gpu + 3 * root_count * sizeof(uint64_t),
+      bound_heap && bound_heap->residency_bo
+         ? bound_heap->residency_bo->va->addr : 0,
+      list->device->dev.sparse_ro_offset,
+   };
+   uint64_t metadata_gpu =
+      d12_list_upload(list, metadata_header, sizeof(metadata_header), 8);
+   if (!metadata_gpu)
+      return false;
+
+   /* The sampler-table plane and the PBE null offset are unchanged; read
+    * them back from the cached header rather than recomputing. */
+   const uint64_t *old_header_cell =
+      (const uint64_t *)d12_list_data_cpu(list, cache->root);
+   const uint64_t *old_header =
+      old_header_cell
+         ? (const uint64_t *)d12_list_data_cpu(list, *old_header_cell)
+         : NULL;
+   if (!old_header)
+      return false;
+   uint64_t header[] = {
+      tables_gpu,
+      metadata_gpu,
+      old_header[2],
+      old_header[3],
+   };
+   static_assert(sizeof(header) == D12_ROOT_HEADER_SIZE,
+                 "root header ABI mismatch");
+   uint64_t header_gpu = d12_list_upload(list, header, sizeof(header), 8);
+   if (!header_gpu)
+      return false;
+   uint64_t root = d12_list_upload(list, &header_gpu, sizeof(header_gpu), 8);
+   if (!root)
+      return false;
+
+   /* Mutable shader-visible table slots are refreshed at submission into
+    * the planes of every upload that flattened them. */
+   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
+      if (!sources[i])
+         continue;
+      struct d12_descriptor_fixup fixup = {
+         .source = sources[i],
+         .tables_gpu = tables_gpu,
+         .slot = i,
+         .table_count = root_count,
+         .texture_shape =
+            list->pso ? list->pso->texture_shapes[i] : D12_TEXTURE_SHAPE_NONE,
+      };
+      util_dynarray_append_typed(&list->descriptor_fixups,
+                                 struct d12_descriptor_fixup, fixup);
+   }
+
+   cache->root = root;
+   cache->tables = tables_gpu;
+   return true;
+}
+
 static bool
 d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
                          uint64_t *out_root, uint64_t *out_textures,
@@ -3676,6 +3901,31 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
                          uint64_t *out_heap_samplers, bool force_unique,
                          uint64_t *out_tables, uint32_t *out_table_count)
 {
+   const struct d12_descriptor *raw_table =
+      compute ? list->compute_root_table : list->graphics_root_table;
+   const struct d12_descriptor *const *sources =
+      compute ? list->compute_root_source : list->graphics_root_source;
+   const struct d12_descriptor *sampler_table =
+      compute ? list->compute_sampler_table : list->graphics_sampler_table;
+   const struct d12_root_signature *rs =
+      compute ? list->compute_rs : list->graphics_rs;
+   struct d12_descriptor_heap *bound_heap = list->resource_descriptor_heap;
+   struct d12_binding_upload_cache *cache =
+      &list->binding_upload_cache[compute ? 1 : 0];
+   const uint32_t generation = list->root_generation[compute];
+
+   /* The common case: nothing bound changed since the last upload. */
+   if (!force_unique && cache->valid && cache->generation == generation &&
+       cache->rs == rs && cache->pso == list->pso &&
+       cache->resource_heap == bound_heap &&
+       cache->sampler_heap == list->sampler_descriptor_heap) {
+      d12_binding_upload_cache_outputs(cache, out_root, out_textures,
+                                       out_pbes, out_heap, out_heap_textures,
+                                       out_heap_pbes, out_heap_samplers,
+                                       out_tables, out_table_count);
+      return true;
+   }
+
    bool validate = getenv("D3D12AGX_VALIDATE_BINDINGS") != NULL;
    const enum agx_descriptor_generation descriptor_generation =
       agx_chip_descriptor_generation(list->device->dev.chip);
@@ -3687,23 +3937,6 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       list->state = D12_LIST_ERROR;
       return false;
    }
-   const struct d12_descriptor *raw_table =
-      compute ? list->compute_root_table : list->graphics_root_table;
-   struct d12_descriptor effective_table[D12_MAX_RESOURCE_BINDINGS];
-   memcpy(effective_table, raw_table, sizeof(effective_table));
-   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
-      unsigned shape =
-         list->pso ? list->pso->texture_shapes[i] : D12_TEXTURE_SHAPE_NONE;
-      d12_apply_texture_shape(&effective_table[i], shape);
-   }
-   const struct d12_descriptor *table = effective_table;
-   const struct d12_descriptor *const *sources =
-      compute ? list->compute_root_source : list->graphics_root_source;
-   const struct d12_descriptor *sampler_table =
-      compute ? list->compute_sampler_table : list->graphics_sampler_table;
-   const struct d12_root_signature *rs =
-      compute ? list->compute_rs : list->graphics_rs;
-   struct d12_descriptor_heap *bound_heap = list->resource_descriptor_heap;
    if (bound_heap &&
        (bound_heap->texture_stride_B != native_layout.texture_stride_B ||
         bound_heap->pbe_stride_B != native_layout.pbe_stride_B)) {
@@ -3713,32 +3946,53 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       return false;
    }
 
-   struct d12_binding_upload_cache *cache =
-      &list->binding_upload_cache[compute ? 1 : 0];
    uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS] = {0};
    if (list->pso)
       memcpy(texture_shapes, list->pso->texture_shapes, sizeof(texture_shapes));
 
+   /* The generation moved but the contents may still match (a root
+    * parameter rewritten with the same value), or only root constants and
+    * bare root descriptors may differ. Both are decided per slot. */
    if (!force_unique && cache->valid && cache->rs == rs &&
        cache->resource_heap == bound_heap &&
        cache->sampler_heap == list->sampler_descriptor_heap &&
-       memcmp(cache->table, raw_table, sizeof(cache->table)) == 0 &&
        memcmp(cache->samplers, sampler_table, sizeof(cache->samplers)) == 0 &&
        memcmp(cache->sources, sources, sizeof(cache->sources)) == 0 &&
        memcmp(cache->texture_shapes, texture_shapes,
               sizeof(cache->texture_shapes)) == 0) {
-      *out_root = cache->root;
-      *out_textures = cache->textures;
-      *out_pbes = cache->pbes;
-      *out_heap = cache->heap;
-      *out_heap_textures = cache->heap_textures;
-      *out_heap_pbes = cache->heap_pbes;
-      *out_heap_samplers = cache->heap_samplers;
-      if (out_tables)
-         *out_tables = cache->tables;
-      if (out_table_count)
-         *out_table_count = cache->table_count;
-      return true;
+      unsigned changed = 0;
+      bool plane_only = true;
+      for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS && plane_only; i++) {
+         if (memcmp(&cache->table[i], &raw_table[i], sizeof(raw_table[i])) == 0)
+            continue;
+         changed++;
+         plane_only = d12_descriptor_is_plane_only(&cache->table[i]) &&
+                      d12_descriptor_is_plane_only(&raw_table[i]) &&
+                      !sources[i];
+      }
+      if (!changed) {
+         cache->generation = generation;
+         cache->pso = list->pso;
+         d12_binding_upload_cache_outputs(cache, out_root, out_textures,
+                                          out_pbes, out_heap,
+                                          out_heap_textures, out_heap_pbes,
+                                          out_heap_samplers, out_tables,
+                                          out_table_count);
+         return true;
+      }
+      if (plane_only) {
+         if (!d12_list_reroot_bindings(list, cache, raw_table, sources,
+                                       bound_heap))
+            return false;
+         cache->generation = generation;
+         cache->pso = list->pso;
+         d12_binding_upload_cache_outputs(cache, out_root, out_textures,
+                                          out_pbes, out_heap,
+                                          out_heap_textures, out_heap_pbes,
+                                          out_heap_samplers, out_tables,
+                                          out_table_count);
+         return true;
+      }
    }
 
    /* An ExecuteIndirect root descriptor is patched by the GPU after command
@@ -3747,6 +4001,12 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
     * alias storage which the earlier command mutates at execution time. */
    if (force_unique)
       cache->valid = false;
+
+   struct d12_descriptor effective_table[D12_MAX_RESOURCE_BINDINGS];
+   memcpy(effective_table, raw_table, sizeof(effective_table));
+   for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++)
+      d12_apply_texture_shape(&effective_table[i], texture_shapes[i]);
+   const struct d12_descriptor *table = effective_table;
 
    unsigned last_texture = rs ? MAX2(rs->map.resource_count, 1) : 1;
    for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
@@ -3886,76 +4146,9 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
    uint64_t null_buf = 0, null_counters = 0;
    uint64_t addrs[D12_ROOT_TABLE_ENTRIES];
    for (unsigned i = 0; i < D12_MAX_RESOURCE_BINDINGS; i++) {
-      addrs[i] = table[i].address;
-      addrs[D12_ROOT_COUNTER_BASE + i] = table[i].counter_address;
-      addrs[D12_ROOT_BUFINFO_BASE + i] = 0;
-      addrs[D12_ROOT_RESIDENCY_BASE + i] =
-         d12_descriptor_sparse_residency_address(&table[i]);
-
-      if (table[i].resource &&
-          table[i].resource->desc.Dimension ==
-             D3D12_RESOURCE_DIMENSION_BUFFER &&
-          (table[i].kind == D12_DESC_SRV ||
-           table[i].kind == D12_DESC_UAV)) {
-         if (!sources[i]) {
-            /* A bare root SRV/UAV has no declared view extent. The resource
-             * pointer exists only to publish sparse residency metadata. */
-            addrs[D12_ROOT_BUFINFO_BASE + i] = UINT32_MAX;
-         } else {
-            switch (table[i].buffer_kind) {
-            case D12_BUFFER_VIEW_RAW:
-            case D12_BUFFER_VIEW_TYPED:
-            case D12_BUFFER_VIEW_STRUCTURED:
-               addrs[D12_ROOT_BUFINFO_BASE + i] = table[i].buffer_count;
-               break;
-            default:
-               break;
-            }
-            if (table[i].buffer_kind != D12_BUFFER_VIEW_NONE)
-               addrs[D12_ROOT_BUFINFO_BASE + i] |=
-                  (uint64_t)table[i].buffer_stride_B << 32;
-         }
-      } else if (table[i].resource && table[i].kind == D12_DESC_SRV &&
-                 (table[i].resource->desc.Dimension ==
-                     D3D12_RESOURCE_DIMENSION_TEXTURE1D ||
-                  table[i].resource->desc.Dimension ==
-                     D3D12_RESOURCE_DIMENSION_TEXTURE2D ||
-                  table[i].resource->desc.Dimension ==
-                     D3D12_RESOURCE_DIMENSION_TEXTURE3D)) {
-         /* Texture SRVs use the low BUFINFO word for the runtime per-view
-          * minimum LOD clamp. Buffer users interpret the same plane as a
-          * count, and the resource dimension keeps the meanings disjoint. */
-         uint32_t info = table[i].texture_txf_min_level |
-                         (table[i].texture_min_lod_oob ? 0x80000000u : 0);
-         addrs[D12_ROOT_BUFINFO_BASE + i] =
-            fui(table[i].texture_min_lod) | (uint64_t)info << 32;
-      } else if (table[i].address && !table[i].resource &&
-                 (table[i].kind == D12_DESC_SRV ||
-                  table[i].kind == D12_DESC_UAV)) {
-         /* Root SRV/UAV descriptors carry only a GPU address, so D3D12
-          * provides no view extent to publish.  Treat their element count
-          * as unbounded instead of zero: structured-store robustness uses
-          * this plane for descriptor-table views, and must not accidentally
-          * discard every valid access through a bare root descriptor.  Null
-          * root descriptors retain count zero because their address is zero
-          * until the safe null-buffer substitution below.
-          */
-         addrs[D12_ROOT_BUFINFO_BASE + i] = UINT32_MAX;
-      }
-
-      if (!addrs[i]) {
-         if (!null_buf && !(null_buf = d12_list_null_buffer(list)))
-            return false;
-         addrs[i] = null_buf;
-      }
-
-      if (!addrs[D12_ROOT_COUNTER_BASE + i]) {
-         if (!null_counters &&
-             !(null_counters = d12_list_null_counters(list)))
-            return false;
-         addrs[D12_ROOT_COUNTER_BASE + i] =
-            null_counters + i * sizeof(uint32_t);
-      }
+      if (!d12_root_plane_slot(list, &table[i], sources[i], i, &null_buf,
+                               &null_counters, addrs))
+         return false;
    }
 
    for (unsigned r = 0; r < dynamic_range_count; r++) {
@@ -4599,9 +4792,13 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       return true;
 
    cache->valid = true;
+   cache->generation = generation;
    cache->rs = rs;
+   cache->pso = list->pso;
    cache->resource_heap = bound_heap;
    cache->sampler_heap = list->sampler_descriptor_heap;
+   memcpy(cache->compact, compact, 4 * root_count * sizeof(uint64_t));
+   cache->pbe_table = pbe_heap_gpu;
    memcpy(cache->table, raw_table, sizeof(cache->table));
    memcpy(cache->samplers, sampler_table, sizeof(cache->samplers));
    memcpy(cache->sources, sources, sizeof(cache->sources));
@@ -10897,6 +11094,7 @@ d12_list_set_root_descriptor(struct d12_cmd_list *list, bool compute,
    /* A root descriptor is a bare address: no resource behind it, so no
     * hardware texture descriptor can be built from one.
     */
+   list->root_generation[compute]++;
    memset(&table[slot], 0, sizeof(table[slot]));
    sources[slot] = NULL;
    table[slot].address = address;
@@ -11022,6 +11220,7 @@ d12_list_set_root_table(struct d12_cmd_list *list, bool compute,
       compute ? list->compute_root_source : list->graphics_root_source;
    struct d12_descriptor *sampler_table =
       compute ? list->compute_sampler_table : list->graphics_sampler_table;
+   list->root_generation[compute]++;
 
    unsigned cursor = 0;
    unsigned root_range_base =
@@ -11385,6 +11584,7 @@ d12_list_set_root_constants(struct d12_cmd_list *list, bool compute,
    sources[slot] = NULL;
    table[slot].address = gpu;
    table[slot].kind = D12_DESC_CBV;
+   list->root_generation[compute]++;
    return gpu;
 }
 
