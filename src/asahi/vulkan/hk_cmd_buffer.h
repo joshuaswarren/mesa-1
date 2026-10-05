@@ -653,17 +653,6 @@ struct hk_prepared_fast_link_vs {
 };
 
 struct hk_graphics_state {
-   struct hk_ordinary_fs_selection ordinary_fs;
-   /* v96: per-draw selection of a vertex object's ordinary hardware variant
-    * (hk_select_ordinary_vs()). Valid for `api` at descriptor `generation`;
-    * UINT64_MAX marks a bind-time prediction the draw must re-prove. */
-   struct {
-      struct hk_api_shader *api;
-      uint64_t generation;
-      bool valid, ordinary;
-   } ordinary_vs;
-   /* v57d: set while hk_cmd_prepare_bound_graphics() runs (bind time). */
-   bool g17p_bind_prepare;
    struct hk_rendering_state render;
    struct hk_descriptor_state descriptors;
 
@@ -1499,9 +1488,6 @@ hk_bound_hw_vs(struct hk_graphics_state *gfx)
       return &gs->variants[HK_GS_VARIANT_RAST];
    else if (tes)
       return &tes->variants[HK_VS_VARIANT_HW];
-   else if (vs->g17p_ordinary_variants && gfx->ordinary_vs.valid &&
-            gfx->ordinary_vs.api == vs && gfx->ordinary_vs.ordinary)
-      return &vs->variants[HK_VS_VARIANT_HW_ORDINARY];
    else
       return &vs->variants[HK_VS_VARIANT_HW];
 }
@@ -1512,9 +1498,7 @@ hk_bound_sw_vs(struct hk_graphics_state *gfx)
    struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
 
-   if (hw_vs == &vs->variants[HK_VS_VARIANT_HW] ||
-       (vs->g17p_ordinary_variants &&
-        hw_vs == &vs->variants[HK_VS_VARIANT_HW_ORDINARY]))
+   if (hw_vs == &vs->variants[HK_VS_VARIANT_HW])
       return hw_vs;
    else
       return &vs->variants[HK_VS_VARIANT_SW];

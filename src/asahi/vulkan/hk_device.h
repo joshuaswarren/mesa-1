@@ -200,13 +200,6 @@ struct hk_device {
          *entries[HK_SHADER_BINARY_CACHE_MAX];
    } shader_binary_cache;
 
-   /* v56e HK_G17P_LAZY_GENERIC=2: background compiles of generic variants. */
-   struct {
-      simple_mtx_t lock;
-      bool initialized;
-      struct util_queue queue;
-   } g17p_lazy;
-
    /* Device-wide compact VDM backing. Command buffers from different pools
     * suballocate immutable spans from the same finite G17P aperture. */
    struct {

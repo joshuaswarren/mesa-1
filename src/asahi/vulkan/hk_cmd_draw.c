@@ -101,8 +101,6 @@ hk_prelink_graphics(struct hk_cmd_buffer *cmd, bool indexed,
                     bool vertex_only);
 static void hk_flush_shaders(struct hk_cmd_buffer *cmd);
 static struct hk_shader *hk_bound_fs(struct hk_cmd_buffer *cmd);
-static struct hk_shader *hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure);
-static void hk_select_ordinary_vs(struct hk_cmd_buffer *cmd);
 static uint64_t hk_heap(struct hk_cmd_buffer *cmd);
 static enum mesa_prim hk_gs_in_prim(struct hk_cmd_buffer *cmd);
 
@@ -133,14 +131,8 @@ static void hk_flush_dynamic_state(
    struct agx_draw draw, bool ordinary_draw_path,
    bool *g17p_native_bind_tail_emitted_out, bool prepare_only);
 
-static_assert(HK_ORDINARY_REASON_COUNT <=
-                 ARRAY_SIZE(((struct hk_api_shader *)0)->g17p_trace_reason_draws),
-              "per-reason draw counters");
-
 static void hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd);
 
-/* v57d: bind-time preparation runs with gfx->g17p_bind_prepare set, so the
- * ordinary selection predicts instead of proving stale descriptors. */
 void
 hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
 {
@@ -170,9 +162,7 @@ hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
       hk_cmd_buffer_flush_push_descriptors(cmd, gfx_desc);
 
    const VkResult prior_result = cmd->vk.record_result;
-   cmd->state.gfx.g17p_bind_prepare = true;
    hk_cmd_prepare_bound_graphics_impl(cmd);
-   cmd->state.gfx.g17p_bind_prepare = false;
    if (prior_result == VK_SUCCESS)
       cmd->vk.record_result = VK_SUCCESS;
 }
@@ -265,26 +255,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
    const unsigned render_samples = gfx->render.tilebuffer.nr_samples;
    const bool samples_incomplete = dev->dev.chip == AGX_CHIP_G17P && samples &&
                                    render_samples && samples != render_samples;
-
-   /* v96: predict the ordinary vertex variant before preparing its link. */
-   hk_select_ordinary_vs(cmd);
-
-   /* v56e: if the fragment program this state would select is a deferred
-    * generic variant (typically because the draw's descriptors are not bound
-    * yet), leave preparation to the authoritative draw path rather than
-    * compiling it here. */
-   struct hk_shader *bind_fs = hk_bound_fs_select(cmd, false);
-   if (!hk_shader_is_compiled(bind_fs))
-      return;
-
-   /* v57d: a combined-sampler fragment program publishes texture and
-    * sampler state read from the draw's descriptors at record time. Before
-    * those are pushed the bound descriptor state belongs to an earlier draw
-    * (or is absent), and building its launch here would refuse the command
-    * buffer. Leave it to the draw. */
-   if (gfx->ordinary_fs.valid && gfx->ordinary_fs.reason == HK_ORDINARY_PREDICTED &&
-       bind_fs->info.agx3_combined_sampler_valid)
-      return;
 
    /* Shaders, dynamic state and attachment formats are now all known. Build
     * the exact non-indexed immutable variants outside vkCmdDraw*. An indexed
@@ -3593,328 +3563,11 @@ hk_rast_prim(struct hk_cmd_buffer *cmd)
    }
 }
 
-/* v57d: HK_G17P_ORDINARY_VARIANT_TRACE
- *   1: one line per selection change, naming the site (bind-time prediction
- *      or the draw's authoritative proof), the proof outcome and the shader;
- *   2: also count every draw per fragment shader and print a summary per
- *      shader at most every 5 s while it draws, and when it is destroyed.
- * The v56e line printed bind-time peeks (taken before the draw's descriptors
- * are pushed) and draw-time selections alike, so it cannot say which variant
- * draws actually ran. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_ordinary_variant_trace,
-                          "HK_G17P_ORDINARY_VARIANT_TRACE", 0)
-/* v57d: HK_G17P_ORDINARY_BIND_PREDICT=0 restores the v57c bind-time peek
- * (A/B control). Default on; the draw's proof stays authoritative. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_ordinary_bind_predict,
-                           "HK_G17P_ORDINARY_BIND_PREDICT", true)
-uint32_t
-hk_ordinary_trace_id(struct hk_api_shader *obj)
-{
-   uint32_t id = p_atomic_read(&obj->g17p_trace_id);
-   if (id)
-      return id;
-   /* FNV-1a over the ordinary (always eager) program: stable for one build
-    * and flag set, so a replay can map it to the SPIR-V module. */
-   const unsigned n = hk_api_num_variants(obj);
-   const struct hk_shader *s = &obj->variants[n - 1];
-   id = 2166136261u;
-   const uint8_t *b = s->b.binary;
-   for (size_t i = 0; b && i < s->b.info.binary_size; ++i)
-      id = (id ^ b[i]) * 16777619u;
-   id |= 1;
-   p_atomic_set(&obj->g17p_trace_id, id);
-   return id;
-}
-
-static void
-hk_ordinary_trace_summary(struct hk_api_shader *obj, const char *when)
-{
-   char reasons[512];
-   unsigned o = 0;
-   reasons[0] = 0;
-   for (unsigned r = 0; r < HK_ORDINARY_REASON_COUNT && o < sizeof(reasons) - 40; ++r) {
-      uint64_t c = p_atomic_read(&obj->g17p_trace_reason_draws[r]);
-      if (c)
-         o += snprintf(reasons + o, sizeof(reasons) - o, "%s%s:%" PRIu64,
-                       o ? "," : "", hk_ordinary_reason_name(r), c);
-   }
-   const unsigned n = hk_api_num_variants(obj);
-   fprintf(stderr,
-           "G17P ordinary summary: when=%s fs=%08x draws_ordinary=%" PRIu64
-           " draws_generic=%" PRIu64 " reasons=%s generic_main=%u"
-           " ordinary_main=%u lazy_wait_us=%.1f\n",
-           when, hk_ordinary_trace_id(obj),
-           p_atomic_read(&obj->g17p_trace_draws[1]),
-           p_atomic_read(&obj->g17p_trace_draws[0]), o ? reasons : "-",
-           hk_shader_is_compiled(&obj->variants[0])
-              ? obj->variants[0].b.info.main_size : 0,
-           obj->variants[n - 1].b.info.main_size,
-           p_atomic_read(&obj->g17p_trace_wait_ns) / 1000.0);
-}
-
-void
-hk_ordinary_trace_final(struct hk_api_shader *obj)
-{
-   if (debug_get_option_hk_g17p_ordinary_variant_trace() >= 2 &&
-       obj->g17p_ordinary_variants &&
-       (obj->g17p_trace_draws[0] || obj->g17p_trace_draws[1]))
-      hk_ordinary_trace_summary(obj, "destroy");
-}
-
-static uint32_t
-hk_trace_code_id(const struct hk_api_shader *obj)
-{
-   if (!obj)
-      return 0;
-   const unsigned n = hk_api_num_variants(obj);
-   for (unsigned i = 0; i < n; ++i) {
-      const struct hk_shader *v = &obj->variants[i];
-      if (v->lazy || !v->b.binary || !v->b.info.binary_size)
-         continue;
-      uint32_t id = 2166136261u;
-      const uint8_t *b = v->b.binary;
-      for (size_t k = 0; k < v->b.info.binary_size; ++k)
-         id = (id ^ b[k]) * 16777619u;
-      return id | 1;
-   }
-   return 0;
-}
-
-/* v57d HK_G17P_ORDINARY_VARIANT_TRACE=3: one line per draw naming the vertex
- * and fragment programs, the fragment variant and its proof, and the arm a
- * runtime region guard (ordinary vertex region) should take, evaluated on the
- * CPU over the same descriptor state the GPU guard reads. */
-static void
-hk_ordinary_trace_draw_line(struct hk_cmd_buffer *cmd)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
-   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
-   const char *vs_guard = "none";
-   if (vs && vs->g17p_guard_requirements) {
-      enum hk_ordinary_reason r = hk_ordinary_descriptor_reason(
-         vs->g17p_guard_requirements, gfx->descriptors.sets,
-         gfx->descriptors.root.sets, gfx->descriptors.push,
-         gfx->descriptors.push_active, HK_MAX_SETS, NULL);
-      vs_guard = r == HK_ORDINARY_OK ? "fast" : hk_ordinary_reason_name(r);
-   }
-   const struct hk_ordinary_fs_selection *c = &gfx->ordinary_fs;
-   const bool fs_sel = fs && fs->g17p_ordinary_variants && c->valid && c->api == fs;
-   fprintf(stderr,
-           "G17P draw: cb=%p n=%u vs=%08x vs_guard=%s fs=%08x fs_variant=%d"
-           " fs_reason=%s generation=%" PRIu64 " prev_set0=%" PRIx64
-           " push_active=%#x rt0=%p depth=%p area=%ux%u\n",
-           (void *)cmd, cmd->g17p_trace_draws++, hk_trace_code_id(vs),
-           vs_guard, hk_trace_code_id(fs),
-           fs_sel ? (int)(c->selected - fs->variants) : -1,
-           fs_sel ? hk_ordinary_reason_name(c->reason) : "-",
-           gfx->descriptors.generation, gfx->descriptors.root.sets[0],
-           gfx->descriptors.push_active,
-           (void *)gfx->render.color_att[0].iview,
-           (void *)gfx->render.depth_att.iview, gfx->render.area.extent.width,
-           gfx->render.area.extent.height);
-}
-
-/* Called once per draw after hk_flush_shaders(): the selection is then the
- * draw's authoritative one. */
-static void
-hk_ordinary_trace_draw(struct hk_cmd_buffer *cmd)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   if (debug_get_option_hk_g17p_ordinary_variant_trace() >= 3)
-      hk_ordinary_trace_draw_line(cmd);
-   struct hk_api_shader *obj = gfx->shaders[MESA_SHADER_FRAGMENT];
-   if (!obj || !obj->g17p_ordinary_variants || !gfx->ordinary_fs.valid ||
-       gfx->ordinary_fs.api != obj)
-      return;
-   const unsigned first_ordinary = obj->g17p_sample_variants ? 3 : 1;
-   const bool ordinary =
-      (unsigned)(gfx->ordinary_fs.selected - obj->variants) >= first_ordinary;
-   p_atomic_inc(&obj->g17p_trace_draws[ordinary]);
-   unsigned reason = MIN2(gfx->ordinary_fs.reason, HK_ORDINARY_REASON_COUNT - 1);
-   p_atomic_inc(&obj->g17p_trace_reason_draws[reason]);
-   const uint64_t now = os_time_get_nano();
-   const uint64_t last = p_atomic_read(&obj->g17p_trace_last_print_ns);
-   if (now - last > 5000000000ull &&
-       p_atomic_cmpxchg(&obj->g17p_trace_last_print_ns, last, now) == last)
-      hk_ordinary_trace_summary(obj, "periodic");
-}
-
-static struct hk_shader *
-hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure);
-
 static struct hk_shader *
 hk_bound_fs(struct hk_cmd_buffer *cmd)
 {
-   return hk_bound_fs_select(cmd, true);
-}
-
-/* v96 HK_G17P_ORDINARY_VS_VARIANTS: choose the hardware vertex program of a
- * vertex object with an ordinary variant for the current descriptors, before
- * anything reads hk_bound_hw_vs() for the draw. The proof is the fragment
- * one (hk_ordinary_descriptor_reason()) over the vertex requirements; it is
- * re-evaluated whenever the descriptor generation or the object changes. At
- * bind time the descriptors still belong to an earlier draw, so the choice
- * is predicted (the object's last choice, else ordinary) and recorded with
- * an impossible generation so the draw always re-proves it. A changed choice
- * dirties the vertex stage, which relinks and republishes it. */
-static void
-hk_select_ordinary_vs(struct hk_cmd_buffer *cmd)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *vs = gfx->shaders[MESA_SHADER_VERTEX];
-   if (!vs || !vs->g17p_ordinary_variants)
-      return;
-
-   __typeof__(gfx->ordinary_vs) *c = &gfx->ordinary_vs;
-   uint64_t generation = gfx->descriptors.generation;
-   if (c->valid && c->api == vs && c->generation == generation)
-      return;
-
-   bool ordinary;
-   enum hk_ordinary_reason reason = HK_ORDINARY_PREDICTED;
-   if (gfx->g17p_bind_prepare) {
-      if (c->valid && c->api == vs)
-         return; /* keep the current choice until the draw re-proves it */
-      ordinary = !hk_g17p_ordinary_force_generic();
-      generation = UINT64_MAX;
-   } else {
-      reason = hk_g17p_ordinary_force_generic()
-         ? HK_ORDINARY_FORCED_GENERIC
-         : hk_ordinary_descriptor_reason(
-              hk_api_ordinary_requirements(vs), gfx->descriptors.sets,
-              gfx->descriptors.root.sets, gfx->descriptors.push,
-              gfx->descriptors.push_active, HK_MAX_SETS, NULL);
-      ordinary = reason == HK_ORDINARY_OK;
-   }
-
-   const bool changed = !c->valid || c->api != vs || c->ordinary != ordinary;
-   c->api = vs;
-   c->generation = generation;
-   c->valid = true;
-   c->ordinary = ordinary;
-   if (changed) {
-      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_VERTEX);
-      if (debug_get_option_hk_g17p_ordinary_variant_trace())
-         fprintf(stderr,
-                 "G17P ordinary vertex variant: site=%s variant=%s reason=%s"
-                 " vs=%08x generation=%" PRIu64 "\n",
-                 gfx->g17p_bind_prepare ? "bind" : "draw",
-                 ordinary ? "ordinary" : "generic",
-                 hk_ordinary_reason_name(reason), hk_ordinary_trace_id(vs),
-                 gfx->descriptors.generation);
-   }
-}
-
-/* v57d: the variant bind-time preparation should build. The draw's
- * descriptors are normally pushed or bound after the pipeline, so the proof
- * over the current state describes the previous draw; v57c's peek therefore
- * selected (and prepared) the generic variant at nearly every pipeline
- * switch and the draw threw that preparation away. Predict the variant this
- * shader's last draw used, ordinary before its first draw. The prediction is
- * recorded with an impossible descriptor generation, so the draw always
- * re-proves; a wrong prediction costs what the v57c peek always cost. */
-static struct hk_shader *
-hk_ordinary_bind_prediction(struct hk_cmd_buffer *cmd, struct hk_api_shader *obj,
-                            unsigned samples)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_ordinary_fs_selection *c = &gfx->ordinary_fs;
-   if (c->valid && c->api == obj && c->samples == samples &&
-       c->descriptor_generation == gfx->descriptors.generation)
-      return c->selected; /* already proven for the current descriptors */
-
-   unsigned sample_index = obj->g17p_sample_variants && samples > 1
-      ? util_logbase2(samples) : 0;
-   unsigned ordinary_offset = obj->g17p_sample_variants ? 3 : 1;
-   const unsigned last = p_atomic_read(&obj->g17p_last_draw_ordinary);
-   const bool ordinary = !hk_g17p_ordinary_force_generic() && last != 1;
-   struct hk_shader *pred =
-      &obj->variants[sample_index + (ordinary ? ordinary_offset : 0)];
-   const bool changed = !c->valid || c->selected != pred;
-   *c = (struct hk_ordinary_fs_selection){
-      .api = obj, .selected = pred, .descriptor_generation = UINT64_MAX,
-      .samples = samples, .valid = true, .reason = HK_ORDINARY_PREDICTED,
-   };
-   if (changed) {
-      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
-      if (debug_get_option_hk_g17p_ordinary_variant_trace())
-         fprintf(stderr,
-                 "G17P ordinary variant: site=bind selected=%u variant=%s"
-                 " reason=predicted fs=%08x generation=%" PRIu64 " main=%u\n",
-                 (unsigned)(pred - obj->variants),
-                 ordinary ? "ordinary" : "generic", hk_ordinary_trace_id(obj),
-                 gfx->descriptors.generation,
-                 hk_shader_is_compiled(pred) ? pred->b.info.main_size : 0);
-   }
-   return pred;
-}
-
-/* v56e: `ensure` compiles a deferred generic variant when it is selected.
- * Bind-time preparation peeks without it (v57d: it uses the prediction
- * above), so a draw is the only place a generic variant is compiled. */
-static struct hk_shader *
-hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure)
-{
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *obj = gfx->shaders[MESA_SHADER_FRAGMENT];
-   unsigned samples = cmd->vk.dynamic_graphics_state.ms.rasterization_samples;
-   if (!obj || !obj->g17p_ordinary_variants)
-      return hk_fs_variant(obj, samples);
-
-   if (gfx->g17p_bind_prepare && debug_get_option_hk_g17p_ordinary_bind_predict())
-      return hk_ordinary_bind_prediction(cmd, obj, samples);
-
-   bool changed;
-   struct hk_shader *selected = hk_ordinary_descriptor_select_push(
-      &gfx->ordinary_fs, obj, gfx->descriptors.sets, gfx->descriptors.root.sets,
-      gfx->descriptors.push, gfx->descriptors.push_active,
-      HK_MAX_SETS, gfx->descriptors.generation, samples, &changed);
-   const unsigned first_ordinary = obj->g17p_sample_variants ? 3 : 1;
-   const bool ordinary = (unsigned)(selected - obj->variants) >= first_ordinary;
-   if (!gfx->g17p_bind_prepare) {
-      /* 2 = ordinary, 1 = generic; read by the next bind's prediction. */
-      const unsigned v = ordinary ? 2 : 1;
-      if (p_atomic_read(&obj->g17p_last_draw_ordinary) != v)
-         p_atomic_set(&obj->g17p_last_draw_ordinary, v);
-   }
-   /* v56e: a deferred generic variant is compiled (or its background compile
-    * awaited) the first time a draw selects it. */
-   double wait_us = 0;
-   if (ensure) {
-      const bool was_compiled = hk_shader_is_compiled(selected);
-      const uint64_t t0 = was_compiled ? 0 : os_time_get_nano();
-      VkResult lazy_result =
-         hk_shader_ensure_compiled(hk_cmd_buffer_device(cmd), selected);
-      if (lazy_result != VK_SUCCESS)
-         vk_command_buffer_set_error(&cmd->vk, lazy_result);
-      if (!was_compiled) {
-         const uint64_t ns = os_time_get_nano() - t0;
-         wait_us = ns / 1000.0;
-         p_atomic_add(&obj->g17p_trace_wait_ns, ns);
-      }
-   }
-   if (changed)
-      gfx->shaders_dirty |= BITFIELD_BIT(MESA_SHADER_FRAGMENT);
-   if ((changed || wait_us) && debug_get_option_hk_g17p_ordinary_variant_trace()) {
-      const struct hk_ordinary_fs_selection *c = &gfx->ordinary_fs;
-      fprintf(stderr,
-              "G17P ordinary variant: site=%s selected=%u variant=%s reason=%s"
-              " fs=%08x generation=%" PRIu64 " main=%u wait_us=%.1f",
-              gfx->g17p_bind_prepare ? "bind-peek" : "draw",
-              (unsigned)(selected - obj->variants),
-              ordinary ? "ordinary" : "generic",
-              hk_ordinary_reason_name(c->reason), hk_ordinary_trace_id(obj),
-              gfx->descriptors.generation,
-              hk_shader_is_compiled(selected) ? selected->b.info.main_size : 0,
-              wait_us);
-      if (c->reason == HK_ORDINARY_SCALED_FORMAT ||
-          c->reason == HK_ORDINARY_CUSTOM_BORDER)
-         fprintf(stderr, " binding=%u scaled=%#x border=%d",
-                 c->detail_binding, c->detail_scaled, c->detail_border);
-      fprintf(stderr, "\n");
-   }
-   return selected;
+   return hk_fs_variant(cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT],
+                        cmd->vk.dynamic_graphics_state.ms.rasterization_samples);
 }
 
 static uint64_t
@@ -4829,10 +4482,8 @@ hk_cmd_bind_graphics_shader(struct hk_cmd_buffer *cmd,
    cmd->state.gfx.shaders[stage] = shader;
    cmd->state.gfx.shaders_dirty |= BITFIELD_BIT(stage);
 
-   if (stage == MESA_SHADER_FRAGMENT) {
-      cmd->state.gfx.ordinary_fs.valid = false;
+   if (stage == MESA_SHADER_FRAGMENT)
       BITSET_SET(dyn->dirty, MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
-   }
 }
 
 static uint64_t
@@ -4854,11 +4505,6 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
 {
    struct hk_api_shader *fs_obj =
        cmd->state.gfx.shaders[MESA_SHADER_FRAGMENT];
-   /* Selection may dirty FS before the ordinary early-out below. */
-   if (fs_obj->g17p_ordinary_variants)
-      hk_bound_fs(cmd);
-   /* v96: and the vertex ordinary-variant choice may dirty the VS. */
-   hk_select_ordinary_vs(cmd);
    const bool sample_variant_dirty = fs_obj->g17p_sample_variants &&
       BITSET_TEST(cmd->vk.dynamic_graphics_state.dirty,
                   MESA_VK_DYNAMIC_MS_RASTERIZATION_SAMPLES);
@@ -4915,13 +4561,8 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
     * immutable data address actually changes.  In particular, equivalent
     * shader objects must not clone the root and invalidate both native IOTO
     * programs merely because their API handles differ. */
-   /* v96: an ordinary vertex variant has its own constant data. */
-   struct hk_api_shader *vs_api = gfx->shaders[MESA_SHADER_VERTEX];
    const uint64_t vs_constant_data_addr = hk_upload_constant_data(
-      cmd, vs_api && vs_api->g17p_ordinary_variants &&
-              !gfx->shaders[MESA_SHADER_GEOMETRY] &&
-              !gfx->shaders[MESA_SHADER_TESS_EVAL]
-         ? hk_bound_hw_vs(gfx) : hk_any_variant(vs_api));
+      cmd, hk_any_variant(gfx->shaders[MESA_SHADER_VERTEX]));
    const uint64_t fs_constant_data_addr =
       hk_upload_constant_data(cmd, fs);
    if (desc->root.draw.vs_constant_data_addr != vs_constant_data_addr) {
@@ -9687,8 +9328,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
 
 
    hk_flush_shaders(cmd);
-   if (unlikely(debug_get_option_hk_g17p_ordinary_variant_trace() >= 2))
-      hk_ordinary_trace_draw(cmd);
 
 
    const bool geom = gfx->shaders[MESA_SHADER_GEOMETRY];
@@ -9840,13 +9479,12 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
           * must not pair the old linked code with the new shader's metadata.
           * Only refresh the tail when the complete fragment key is current;
           * the draw resolves any incomplete binding before publishing it.
-          * Do not compile a deferred fragment variant merely to test this.
           */
          if (!same_index_key) {
-            struct hk_shader *fs = hk_bound_fs_select(cmd, false);
+            struct hk_shader *fs = hk_bound_fs(cmd);
             struct hk_fast_link_key_fs fs_key;
             const bool fragment_exact =
-               hk_shader_is_compiled(fs) && gfx->fast_link_fs.valid &&
+               gfx->fast_link_fs.valid &&
                gfx->fast_link_fs.shader == fs &&
                gfx->linked[MESA_SHADER_FRAGMENT] &&
                hk_fill_fast_link_key_fs(cmd, fs, hk_bound_hw_vs(gfx),
@@ -10193,7 +9831,6 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       return;
 
    hk_g17p_note_depth_use(cmd);
-   hk_select_ordinary_vs(cmd);
 
    draw_.restart = dyn->ia.primitive_restart_enable && draw_.indexed;
    draw_.index_size = cmd->state.gfx.index.size;
@@ -10772,21 +10409,6 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
        gfx->shaders[MESA_SHADER_TESS_EVAL] || gfx->render.view_mask ||
        mesa_prim_has_adjacency(
           vk_topology_to_mesa(dyn->ia.primitive_topology)))
-      return false;
-
-   /* v96: likewise the vertex ordinary-variant choice must already be
-    * proven for these descriptors (hk_select_ordinary_vs()). */
-   struct hk_api_shader *vs_obj = gfx->shaders[MESA_SHADER_VERTEX];
-   if (vs_obj->g17p_ordinary_variants &&
-       !(gfx->ordinary_vs.valid && gfx->ordinary_vs.api == vs_obj &&
-         gfx->ordinary_vs.generation == desc->generation))
-      return false;
-
-   /* hk_bound_fs() must answer from its cache without dirtying the FS. */
-   if (fs_obj->g17p_ordinary_variants &&
-       !(gfx->ordinary_fs.valid && gfx->ordinary_fs.api == fs_obj &&
-         gfx->ordinary_fs.descriptor_generation == desc->generation &&
-         gfx->ordinary_fs.samples == dyn->ms.rasterization_samples))
       return false;
 
    if (hk_conditional_render_is_active(&cmd->state.conditional, cmd->in_meta,
