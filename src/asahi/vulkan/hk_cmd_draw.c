@@ -1605,13 +1605,6 @@ hk_g17p_bg_eot_ops_uniform(const struct agx_bg_eot_key *key)
    return true;
 }
 
-/* v51x FRG-floor diagnostics (default off).
- *
- * HK_G17P_IOTO_IMMEDIATE=1: per-launch setup (Ioto) programs publish
- * uniforms whose source memory is CPU-known and immutable for the command
- * buffer -- clear values, the root table, shader rodata -- with LDIMM instead
- * of LDDEV, so the background and fragment launches issue no memory loads.
- */
 /* Packed clear: a single-sample R8G8B8A8_UNORM RT0 clear is packed on the
  * CPU and the background program stores the word directly (COPY + LSTCOL
  * instead of two FLTNORMs + LSTCOL per pixel). Apple's background clear
@@ -1624,15 +1617,6 @@ static uint32_t
 hk_g17p_unorm8(float x)
 {
    return x == x ? (uint32_t)_mesa_float_to_unorm(x, 8) : 0;
-}
-
-static bool
-hk_g17p_ioto_immediate_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_IOTO_IMMEDIATE", false);
-   return enabled;
 }
 
 /* frg-codegen v4 BG/EOT device cache.
@@ -2428,12 +2412,6 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
             hk_g17p_bg_eot_upload(cmd, dc, clear_values, clear_size, 16);
          if (!desc.clear_value_va)
             return (struct hk_bg_eot){0};
-         /* v51x HK_G17P_IOTO_IMMEDIATE: LDIMM the (immutable, record-time)
-          * clear values into the uniforms instead of loading the same 16..128
-          * bytes from memory at every background launch. The upload above is
-          * kept so the program shape outside the body is unchanged. */
-         if (hk_g17p_ioto_immediate_enabled())
-            desc.clear_value_cpu = clear_values;
       } else {
          /* Native texture-table entries occupy aligned 32-byte slots. RT1 is
           * native texture index2, so the exact MRT table retains index1 as a
@@ -11807,9 +11785,9 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       hk_reserve_scratch(cmd, cs, hw_vs);
       struct hk_linked_shader *linked_hw_vs =
          (hw_vs == sw_vs) ? linked_vs : hw_vs->only_linked;
-      /* HK_G17P_MDI_ONE_LEVEL: publish this record's vertex setup as the
-       * one-level template (hk_g17p_publish_one_level_record()). */
-      gfx->g17p_vs_one_level = hk_g17p_mdi_one_level_enabled();
+      /* Publish this record's vertex setup as the one-level template
+       * (hk_g17p_publish_one_level_record()). */
+      gfx->g17p_vs_one_level = true;
       const uint64_t pipeline_program =
          hk_upload_usc_words(cmd, hw_vs, linked_hw_vs);
       gfx->g17p_vs_one_level = false;

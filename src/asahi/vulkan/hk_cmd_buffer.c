@@ -2849,9 +2849,9 @@ hk_g17p_compact_range_address_ok(uint64_t address, unsigned size_halfs)
 }
 
 /*
- * HK_G17P_MDI_ONE_LEVEL (default on; HK_G17P_MDI_ONE_LEVEL=0 restores the
- * compact two-level launcher).  Qualified by a Minecraft ABBA on hardware
- * (mc-ta, +2.3% FPS over 4 sessions, 0 faults).
+ * One-level vertex setup for indexed-indirect records.  Qualified by a
+ * Minecraft ABBA on hardware against the compact two-level launcher (mc-ta,
+ * +2.3% FPS over 4 sessions, 0 faults).
  *
  * Every record of an indexed-indirect multi-draw whose vertex shader reads
  * per-draw parameters (gl_BaseInstance/gl_BaseVertex, per-instance vertex
@@ -2872,8 +2872,8 @@ hk_g17p_compact_range_address_ok(uint64_t address, unsigned size_halfs)
  * (mc-ta/decode/ol_mc.dis): one round trip.  Native Metal's vertex ESL has
  * that one-level shape too (agx3-footguns K.1).
  *
- * With the knob on, indexed-indirect records (hk_g17p_emit_indirect_record)
- * publish that one-level template instead.  The uniform values are loaded at
+ * Indexed-indirect records (hk_g17p_emit_indirect_record) therefore publish
+ * that one-level template instead.  The uniform values are loaded at
  * execution time from exactly the same source addresses (root fields,
  * device constants, the record's own indirect parameters), so GPU-written
  * indirect buffers and drawIndirectCount predication keep their semantics.
@@ -2882,11 +2882,6 @@ hk_g17p_compact_range_address_ok(uint64_t address, unsigned size_halfs)
  * draw-parameter/draw-ID addresses re-derived, exactly as the compact patch
  * path re-derives its root record.
  */
-bool
-hk_g17p_mdi_one_level_enabled(void)
-{
-   return HK_ENV_BOOL_ONCE("HK_G17P_MDI_ONE_LEVEL", true);
-}
 
 /* The setup composer shares one LDIMM address base between ranges within
  * INT16_MAX bytes of each other (agx3_graphics_program.c,
@@ -2910,49 +2905,6 @@ hk_g17p_one_level_range_isolated(const struct agx3_ioto_uniform_range *ranges,
          return false;
    }
    return true;
-}
-
-/* HK_G17P_MDI_ONE_LEVEL_VERIFY=1 (diagnostic, CPU-heavy): compose each
- * one-level record program again with the uncached reference composer (the
- * HK_G17P_LAUNCH_TRACE / fail-closed fallback path) for the same descriptor
- * and VA, and compare bytes. */
-static unsigned hk_g17p_one_level_verify_calls;
-static unsigned hk_g17p_one_level_verify_mismatches;
-
-static void
-hk_g17p_one_level_verify_report(void)
-{
-   fprintf(stderr, "G17P MDI one-level verify: checked=%u mismatched=%u\n",
-           p_atomic_read(&hk_g17p_one_level_verify_calls),
-           p_atomic_read(&hk_g17p_one_level_verify_mismatches));
-}
-
-static void
-hk_g17p_one_level_verify(struct hk_device *dev,
-                         const struct hk_agx3_g17p_graphics_program_desc *desc,
-                         const void *published, uint16_t length,
-                         const char *form)
-{
-   if (!HK_ENV_BOOL_ONCE("HK_G17P_MDI_ONE_LEVEL_VERIFY", false))
-      return;
-
-   if (p_atomic_inc_return(&hk_g17p_one_level_verify_calls) == 1)
-      atexit(hk_g17p_one_level_verify_report);
-   struct hk_agx3_g17p_graphics_program *reference =
-      malloc(sizeof(*reference));
-   const bool ok = reference &&
-      hk_agx3_g17p_basic_graphics_program_generate(dev->dev.chip, desc,
-                                                   reference) &&
-      reference->length == length &&
-      !memcmp(reference->bytes, published, length);
-   if (!ok) {
-      p_atomic_inc(&hk_g17p_one_level_verify_mismatches);
-      mesa_loge("G17P MDI one-level verify MISMATCH (%s): program=%" PRIx64
-                " length=%u reference=%u",
-                form, desc->program_va, (unsigned)length,
-                reference ? (unsigned)reference->length : 0);
-   }
-   free(reference);
 }
 
 static uint64_t
@@ -3037,13 +2989,6 @@ hk_g17p_publish_one_level_record(
             memcpy(map + site->offset + site->low_length, patch[i][1],
                    site->high_length);
          }
-         {
-            struct hk_agx3_g17p_graphics_program_desc check = entry->desc;
-            check.uniform_ranges = ranges;
-            check.uniform_range_count = one->range_count;
-            check.program_va = reservation.va;
-            hk_g17p_one_level_verify(dev, &check, map, one->length, "patch");
-         }
          const uint64_t published =
             hk_cmd_publish_ioto_program(cmd, &reservation, one->length);
          if (published && dev->g17p_diagnostics.compact_ioto_trace) {
@@ -3077,8 +3022,6 @@ hk_g17p_publish_one_level_record(
           reservation.map, one->capacity, &length) ||
        length == 0 || length > one->capacity)
       return 0;
-   hk_g17p_one_level_verify(dev, &target, reservation.map, length,
-                            "relocate");
 
    const uint64_t published =
       hk_cmd_publish_ioto_program(cmd, &reservation, length);
@@ -3150,14 +3093,9 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          return 0;
       }
 
-      /* v51x HK_G17P_IOTO_IMMEDIATE takes the uncached inline composer too:
-       * its programs embed record-time values, so address-keyed templates,
-       * relocation and the compact root launcher do not apply. */
-      const bool ioto_immediate =
-         HK_ENV_BOOL_ONCE("HK_G17P_IOTO_IMMEDIATE", false);
       const bool diagnostics = (dev->dev.debug & AGX_DBG_FAULTTRACE) ||
                                hk_g17p_launch_trace_enabled() ||
-                               hk_g17p_draw_trace_enabled() || ioto_immediate;
+                               hk_g17p_draw_trace_enabled();
       const bool fast_cacheable =
          !diagnostics && !s->info.agx3_combined_sampler_valid &&
          !s->info.g17p_apple_fs &&
@@ -3210,7 +3148,7 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          return cached->program;
       }
 
-      /* HK_G17P_MDI_ONE_LEVEL: an indexed-indirect record publishes the
+      /* An indexed-indirect record publishes the
        * one-level template (see hk_g17p_publish_one_level_record()), never
        * the two-level compact launcher. */
       const bool one_level = vertex && fast_cacheable &&
@@ -3474,65 +3412,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             .tile_size_px = cmd->state.gfx.render.tilebuffer.tile_size,
          },
       };
-
-      /* v51x HK_G17P_IOTO_IMMEDIATE: resolve each range whose source is
-       * immutable CPU-known memory. Any unresolved range keeps the ordinary
-       * load body for the whole program (the generator requires all). */
-      const void *range_cpu[HK_AGX3_G17P_GRAPHICS_MAX_RANGES] = {0};
-      uint8_t range_staging[HK_AGX3_G17P_GRAPHICS_MAX_RANGES][256];
-      if (ioto_immediate) {
-         /* The root is uploaded later in this flush, so only root fields that
-          * are final before the draw is flushed qualify: root_desc_addr (by
-          * construction the root VA itself), the descriptor-set pointers
-          * (bind-time) and the push constants (CmdPushConstants). Draw-time
-          * fields written by the flush keep their loads. */
-         const struct hk_root_descriptor_table *root_cpu =
-            &cmd->state.gfx.descriptors.root;
-         const uint64_t root_va = cmd->state.gfx.root;
-         const uint64_t sets_end = offsetof(struct hk_root_descriptor_table,
-                                            sets) + sizeof(root_cpu->sets);
-         const uint64_t push_start = hk_root_descriptor_offset(push);
-         const uint64_t push_end = push_start + sizeof(root_cpu->push);
-         const uint64_t rodata_va =
-            s->bo && s->bo->va && s->b.info.rodata.size_16
-               ? s->bo->va->addr + s->b.info.rodata.offset
-               : 0;
-         bool all = range_count > 0;
-         for (size_t i = 0; i < range_count; ++i) {
-            const uint64_t a = ranges[i].address;
-            const uint64_t bytes = (uint64_t)ranges[i].size_halfs * 2;
-            const uint64_t off = a - root_va;
-            if (root_va && a >= root_va && bytes <= 256 &&
-                ((off + bytes <= sets_end) ||
-                 (off >= push_start && off + bytes <= push_end))) {
-               memcpy(range_staging[i], (const uint8_t *)root_cpu + off, bytes);
-               /* root_desc_addr is published as the root's own VA. */
-               for (uint64_t b = off; b < MIN2(off + bytes, 8); ++b)
-                  range_staging[i][b - off] = (uint8_t)(root_va >> (8 * b));
-               range_cpu[i] = range_staging[i];
-            } else if (rodata_va && a == rodata_va && s->code_ptr &&
-                       s->b.info.rodata.offset + bytes <= s->code_size) {
-               range_cpu[i] = (const uint8_t *)s->code_ptr +
-                              s->b.info.rodata.offset;
-            } else {
-               all = false;
-            }
-         }
-         if (all)
-            desc.uniform_range_cpu = range_cpu;
-         if (hk_g17p_launch_trace_enabled()) {
-            fprintf(stderr, "G17P IOTO immediate: stage=%u ranges=%zu all=%u "
-                    "root=%" PRIx64 " rodata=%" PRIx64,
-                    (unsigned)s->info.stage, range_count, all, root_va,
-                    rodata_va);
-            for (size_t i = 0; i < range_count; ++i)
-               fprintf(stderr, " [%" PRIx64 "+%u:%s]", ranges[i].address,
-                       ranges[i].size_halfs, range_cpu[i] ? "cpu" : "load");
-            fprintf(stderr, "\n");
-         }
-         mesa_logi_once("HK_G17P_IOTO_IMMEDIATE: graphics setup programs "
-                        "publish CPU-known uniform ranges with LDIMM");
-      }
 
       if (s->b.info.has_preamble &&
           (!s->bo || !s->bo->va ||
@@ -3812,8 +3691,6 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
             one->source_offset[r] = ranges[r].address - base[sources[r]];
          }
          one->valid = patchable;
-         hk_g17p_one_level_verify(dev, &desc, program_map, program_length,
-                                  "template");
          if (dev->g17p_diagnostics.compact_ioto_trace) {
             fprintf(stderr,
                     "G17P one-level template: shader=%" PRIx64

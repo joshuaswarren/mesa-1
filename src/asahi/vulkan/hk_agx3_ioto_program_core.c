@@ -297,7 +297,6 @@ hk_agx3_g17p_shared_graphics_desc(
       .preloaded_root = desc->preloaded_root,
       .constant_program = desc->constant_program,
       .cprog_inputs = desc->cprog_inputs,
-      .uniform_range_cpu = desc->uniform_range_cpu,
    };
 }
 

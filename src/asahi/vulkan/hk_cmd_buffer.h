@@ -598,7 +598,7 @@ struct hk_g17p_graphics_ioto_cache_entry {
     * (see hk_g17p_dma_set_base); 0 otherwise. */
    uint64_t dma_set_base;
 
-   /* HK_G17P_MDI_ONE_LEVEL: the last one-level (absolute-address) vertex
+   /* The last one-level (absolute-address) vertex
     * setup published for an indexed-indirect multi-draw record.  The next
     * record of the same linked shader, root, descriptor-set DMA base and
     * render layout differs only in its draw-parameter / draw-ID addresses,
@@ -697,7 +697,7 @@ struct hk_graphics_state {
    struct agx_ptr prepared_geometry_params;
    bool prepared_geometry_params_filled;
    uint64_t prepared_vertex_usc;
-   /* HK_G17P_MDI_ONE_LEVEL: set only around the vertex-program upload of an
+   /* Set only around the vertex-program upload of an
     * indexed-indirect record in hk_g17p_emit_indirect_record(). */
    bool g17p_vs_one_level;
    struct agx_ptr prepared_vertex_compact_root;
@@ -2067,8 +2067,6 @@ hk_reserve_scratch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
  * 48-bit Ioto program VA consumed by HAL200 VDM state. */
 uint64_t hk_g17p_dma_set_base(const struct hk_cmd_buffer *cmd,
                               const struct hk_shader *s);
-/* HK_G17P_MDI_ONE_LEVEL (hk_cmd_buffer.c). */
-bool hk_g17p_mdi_one_level_enabled(void);
 
 uint64_t hk_upload_usc_words(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked);
