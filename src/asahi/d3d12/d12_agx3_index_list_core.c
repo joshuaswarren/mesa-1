@@ -6,8 +6,56 @@
 #include "d12_agx3_index_list_core.h"
 
 #include "asahi/lib/agx_vdm_index_list_core.h"
+#include "asahi/lib/agx_abi.h"
 
 #include <string.h>
+
+bool
+d12_agx3_encode_native_direct_draw(
+   enum agx_chip chip, const struct d12_agx3_native_direct_draw_info *info,
+   struct d12_agx3_native_direct_draw *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+   if (!out || !info)
+      return false;
+
+   if (info->indexed) {
+      /* A null D3D index binding fetches zero for every index. Neither the
+       * API index start nor signed vertex bias applies to that zero page. */
+      const bool bound = info->index_buffer != 0;
+      const struct agx_vdm_hal200_indexed_draw_fields fields = {
+         .draw_state_context_offset = info->draw_state_context_offset,
+         .primitive = info->primitive,
+         .index_size_B = bound ? info->index_size_B : 2,
+         .index_buffer = bound ? info->index_buffer : AGX_ZERO_PAGE_ADDRESS,
+         .index_buffer_range_B = bound ? info->index_buffer_range_B : 4,
+         .first_index = bound ? info->first_index : 0,
+         .base_vertex = bound ? (int32_t)info->first_vertex : 0,
+         .index_count = info->count,
+         .instance_count = info->instances,
+      };
+      struct agx_vdm_hal200_indexed_draw encoded;
+      if (!agx_vdm_hal200_indexed_draw_pack(chip, &fields, &encoded))
+         return false;
+      memcpy(out->bytes, encoded.bytes, encoded.length);
+      out->length = encoded.length;
+   } else {
+      const struct agx_vdm_hal200_direct_draw_fields fields = {
+         .draw_state_context_offset = info->draw_state_context_offset,
+         .primitive = info->primitive,
+         .vertex_count = info->count,
+         .instance_count = info->instances,
+         .vertex_start = info->first_vertex,
+      };
+      struct agx_vdm_hal200_direct_draw encoded;
+      if (!agx_vdm_hal200_direct_draw_pack(chip, &fields, &encoded))
+         return false;
+      memcpy(out->bytes, encoded.bytes, encoded.length);
+      out->length = encoded.length;
+   }
+   return true;
+}
 
 bool
 d12_agx3_encode_direct_nonindexed_index_list(

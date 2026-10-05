@@ -671,6 +671,16 @@ d3d12agx_submit_tests = executable(
 test('d3d12agx_heap_desc', d3d12agx_heap_desc_tests, suite : ['asahi', 'd3d12'])
 test('d3d12agx_submit', d3d12agx_submit_tests, suite : ['asahi', 'd3d12'])
 
+d3d12agx_native_direct_draw_tests = executable(
+  'd3d12agx_native_direct_draw_tests',
+  files('tests/d12_agx3_index_list_core_tests.c', 'd12_agx3_index_list_core.c',
+        '../lib/agx_vdm_index_list_core.c',
+        '../lib/agx_vdm_hal200_direct_draw_core.c'),
+  include_directories : [inc_include, inc_src, inc_asahi],
+)
+test('d3d12agx_native_direct_draw', d3d12agx_native_direct_draw_tests,
+     suite : ['asahi', 'd3d12'])
+
 d3d12agx_nir_integer_tests = executable(
   'd3d12agx_nir_integer_tests',
   files('tests/d12_nir_integer_tests.c'),

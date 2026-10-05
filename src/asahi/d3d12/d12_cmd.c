@@ -18,6 +18,7 @@
 #include "d12_buffer_view_core.h"
 #include "d12_agx3_cmdstream_core.h"
 #include "d12_agx3_graphics_bind_core.h"
+#include "d12_agx3_index_list_core.h"
 #include "asahi/lib/agx_vdm_hal200_direct_draw_core.h"
 #include "d12_agx3_ppp_hal300_depth_bias_scissor_core.h"
 #include "d12_agx3_ppp_hal300_depth_stencil_core.h"
@@ -10078,10 +10079,11 @@ d12_g17p_smooth_varyings_supported(const struct d12_pipeline_state *pso)
 }
 
 static bool
-d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
+d12_emit_g17p_direct_draw(struct d12_cmd_list *list, struct d12_segment *seg,
                         struct d12_pipeline_state *pso, uint32_t vs_usc,
                         uint32_t fs_usc, uint32_t varying_usc, unsigned vertex_count,
-                        unsigned instance_count, unsigned first_vertex)
+                        unsigned instance_count, unsigned first_vertex,
+                        bool indexed, unsigned first_index)
 {
    if (!d12_g17p_baseline_graphics_enabled(&list->device->dev) ||
        !seg->agx3_active_context_selector_valid ||
@@ -10248,21 +10250,25 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    }
    struct d12_agx3_vdm_state_update_draw_info info = {
       .source_layout = pso->vs.agx3_vdm_state_update.source_layout,
-      .draw_path = D12_AGX3_VDM_STATE_UPDATE_DRAW_DIRECT_NONINDEXED,
+      .draw_path = d12_agx3_vdm_state_update_classify_draw(false, indexed),
       .rasterization_enabled = pso->rasterization_enabled,
       .template_info = pso->vs.agx3_vdm_state_update.template_info,
    };
    info.template_info.pipeline = list->device->dev.shader_base + vs_usc;
    info.template_info.raw_active_context_selector = seg->agx3_raw_active_context_selector;
    struct d12_agx3_vdm_state_update vertex;
-   const struct agx_vdm_hal200_direct_draw_fields draw_fields = {
+   const struct d12_agx3_native_direct_draw_info draw_fields = {
       .draw_state_context_offset = draw_offset, .primitive = AGX_PRIMITIVE_TRIANGLES,
-      .vertex_count = vertex_count, .instance_count = instance_count,
-      .vertex_start = first_vertex,
+      .count = vertex_count, .instances = instance_count,
+      .first_vertex = first_vertex, .indexed = indexed,
+      .first_index = first_index,
+      .index_buffer = list->ib.addr,
+      .index_buffer_range_B = list->ib.size_B,
+      .index_size_B = agx_index_size_to_B(list->ib.index_size),
    };
-   struct agx_vdm_hal200_direct_draw draw;
+   struct d12_agx3_native_direct_draw draw;
    if (!d12_agx3_encode_vdm_state_update_draw(list->device->dev.chip, &info, &vertex) ||
-       !agx_vdm_hal200_direct_draw_pack(list->device->dev.chip, &draw_fields, &draw) ||
+       !d12_agx3_encode_native_direct_draw(list->device->dev.chip, &draw_fields, &draw) ||
        !d12_list_check_stream_space(list, (size_t)vertex.length +
                                              generated->upload.tail.length +
                                              draw.length))
@@ -10276,7 +10282,7 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    seg->has_draws = true;
    return true;
 fail:
-   mesa_loge("native baseline triangle producer rejected draw/state/resources");
+   mesa_loge("native direct draw producer rejected draw/state/resources");
    list->state = D12_LIST_ERROR;
    return false;
 }
@@ -11080,17 +11086,16 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
    }
 
    if (device->dev.chip == AGX_CHIP_G17P) {
-      if (indexed || indirect_args || indirect_ibv || list->predicate_gpu ||
+      if (indirect_args || indirect_ibv || list->predicate_gpu ||
           indirect_patch_count || indirect_constant_patch_count ||
-          indirect_root_patch_count || indirect_vb_patch_count ||
-          first_instance || first_vertex || first_index || vertex_count != 3 ||
-          instance_count != 1) {
-         mesa_loge("native baseline supports only a direct first triangle");
+          indirect_root_patch_count || indirect_vb_patch_count) {
+         mesa_loge("native direct draw producer requires direct API arguments");
          list->state = D12_LIST_ERROR;
          return;
       }
-      d12_emit_g17p_triangle(list, seg, pso, vs_usc, fs_usc,
-                             varyings, vertex_count, instance_count, first_vertex);
+      d12_emit_g17p_direct_draw(list, seg, pso, vs_usc, fs_usc,
+                               varyings, vertex_count, instance_count,
+                               first_vertex, indexed, first_index);
       return;
    }
 
