@@ -4230,6 +4230,14 @@ agx_g17p_append_compute(struct agx_batch *batch,
       return false;
    }
 
+   /* An empty direct grid -- a geometry or transform feedback setup kernel
+    * for a draw with nothing to process -- launches no invocations. The
+    * native launch record cannot encode a zero size, so emit nothing, as
+    * the hardware would have done with the legacy record. */
+   if (!indirect_local &&
+       (!grid.count[0] || !grid.count[1] || !grid.count[2]))
+      return true;
+
    uint64_t shader_va;
    uint32_t shader_binary_size, nr_gprs, compiler_d;
    struct agx_bo *shader_bo = NULL;
