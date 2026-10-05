@@ -3663,7 +3663,7 @@ d12_pipeline_state_certify_native_gs(struct d12_device *device,
    pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
    pso->refcount = 1;
    pso->device = device;
-   pso->device_ref_active = true;
+   pso->lifetime = 1;
    d12_device_add_ref(device);
    d12_private_data_store_init(&pso->private_data, (IUnknown *)&pso->iface);
    *out = &pso->iface;

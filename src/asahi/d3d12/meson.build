@@ -646,7 +646,7 @@ d3d12agx_texture_descriptor_depth_tests = executable(
   include_directories : [inc_include, inc_src, inc_asahi,
                         d12_platform_includes, include_directories('../isa')],
   dependencies : [dep_dxheaders_d12, d12_platform_deps, idep_nir,
-                  idep_mesautil, idep_agx_pack, idep_libagx],
+                  idep_mesautil, idep_agx_pack, idep_libagx, idep_libagx_shaders_h],
   link_with : [libd3d12agx_core, libasahi_lib, libasahi_layout,
                libasahi_compiler, libagx2_disasm, libagx3b_disasm, libpoly_nir],
   c_args : ['-UNDEBUG'],
