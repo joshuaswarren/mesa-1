@@ -218,11 +218,11 @@ opcode,dxvk_v2_7_1_name,dxvk_class,d12_enum,d12_case,scope
 220,Gather4CS,TextureGather,GATHER4_C_S,1,present; operand/target restrictions apply
 221,Gather4PoS,TextureGather,GATHER4_PO_S,1,present; operand/target restrictions apply
 222,Gather4PoCS,TextureGather,GATHER4_PO_C_S,1,present; operand/target restrictions apply
-223,LdS,TextureFetch,LD_S,1,textures translated; buffer feedback refused
+223,LdS,TextureFetch,LD_S,1,buffer and texture residency translated; null buffer data masks refused
 224,LdMsS,TextureFetch,LD_MS_S,1,present; operand/target restrictions apply
-225,LdUavTypedS,TypedUavLoad,LD_UAV_TYPED_S,1,textures translated; buffer feedback refused
-226,LdRawS,BufferLoad,,0,absent
-227,LdStructuredS,BufferLoad,,0,absent
+225,LdUavTypedS,TypedUavLoad,LD_UAV_TYPED_S,1,buffer and texture residency translated; null buffer data masks refused
+226,LdRawS,BufferLoad,LD_RAW_S,1,buffer and texture residency translated; null buffer data masks refused
+227,LdStructuredS,BufferLoad,LD_STRUCTURED_S,1,buffer and texture residency translated; null buffer data masks refused
 228,SampleLS,TextureSample,SAMPLE_L_S,1,present; operand/target restrictions apply
 229,SampleClzS,TextureSample,SAMPLE_C_LZ_S,1,present; operand/target restrictions apply
 230,SampleClampS,TextureSample,SAMPLE_CLAMP_S,1,present; operand/target restrictions apply

@@ -26,10 +26,26 @@ Changes:
 * SM5 texture feedback: thirteen texture instruction forms plus
   `check_access_fully_mapped` now use the existing NIR/AGX residency path.
   Null feedback destinations avoid the extra residency result. UNORM/SNORM
-  UAV declarations return floats. The separate
-  `test_texture_feedback_instructions_sm51` registration progresses from a
-  first-opcode refusal/crash to a completed wrong-result failure. Its mip/LOD
-  failures remain, as do failures in the corresponding DXIL registration.
+  UAV declarations return floats. Bounding texture operand counts prevents
+  fxc's zero padding from replacing the actual LOD/clamp source with r0.
+  `test_texture_feedback_instructions_sm51` changes from a first-opcode
+  refusal/crash to PASS, with all 390 checks passing on both Macs.
+* SM5 buffer feedback: typed, raw and structured loads now share DXIL's
+  real coherent residency-map query. Bounds and component spans determine
+  the touched 64 KiB tiles; raw/structured data uses the existing read-only
+  sparse VA mirror. On both Macs, `test_buffer_feedback_instructions_sm51`
+  and `test_sparse_buffer_memory_lifetime` change from FAIL to PASS. The
+  DXIL buffer control remains PASS. These are outside `d3d12_shaders.c`.
+* DXIL sample clamps: optional minimum LOD arguments were dropped. Positions
+  now follow Mesa's own writer; implicit samples use the established AGX
+  gradient representation, with zero clamps elided. This clears twelve
+  mismatches and makes the DXIL texture-feedback registration PASS too.
+
+The five feedback/lifetime registrations measure **A: 1/5 before, 5/5 after;
+B: 3/5** on both Macs. The combined selection of the 63 shader
+registrations and these five controls therefore measures **A: 58/68 before,
+63/68 after; B: 61/68**. This is a selected compiler-focused comparison, not
+a claim that the entire driver or full suite exceeds the reference.
 
 The remaining five shader registrations are:
 
@@ -49,19 +65,18 @@ compares the translator's enumerants/cases with
 [DXVK v2.7.1](https://github.com/doitsujin/dxvk/tree/v2.7.1/src/dxbc), pinned
 to `c3dd74be6baec53786d4e064a572185b70347a17`. The
 [DXVK licence](https://github.com/doitsujin/dxvk/blob/v2.7.1/LICENSE) is zlib.
-197 of its 231 non-reserved named opcodes now have d12 enumerants, up from
+199 of its 231 non-reserved named opcodes now have d12 enumerants, up from
 183. **This is an audit of dispatch coverage, not a conformance percentage.**
 Dimensions, operand forms, binding maps and hardware generation impose
 additional restrictions even when an enumerant is present. Some DXVK
 enumerants have no implementation class either.
 
 Remaining DXVK-supported families include call/label flow, LOD queries,
-snapped interpolation, raw/structured buffer feedback and fp64 instructions.
-Buffer forms of `ld_s` and `ld_uav_typed_s` still fail by name: the DXBC path
-must consume the real buffer residency metadata before it can report them
-mapped. Texture residency is taken from hardware, never replaced by a
-constant. Sparse status codes are opaque and interpreted through NIR's
-target residency intrinsic.
+snapped interpolation and fp64 instructions. Buffer feedback with no data
+destination component mask remains a named refusal. Texture residency is
+taken from hardware, and buffer residency from the real coherent map;
+neither is replaced by a guessed constant. Sparse status codes are opaque
+and interpreted through NIR's target residency intrinsic.
 
 Instruction formats were checked against DXVK; this NIR implementation and
 the token-stream tests are independently written. Integer division behavior
@@ -76,9 +91,10 @@ macOS reverse-engineering material was used.
 
 The new CPU tests exercise 75 integer cases (16/32/64-bit, signed/unsigned,
 division/remainder), production descriptor packing for three volume/array
-views, and 39 independently assembled sparse texture token streams. They
-open no GPU device. `meson test --suite d3d12` passes all five registered
-tests.
+views, 51 independently assembled sparse texture/buffer token streams,
+seven shared residency bounds/overflow cases, and twelve minimum-LOD NIR
+cases. They open no GPU device. `meson test --suite d3d12` passes all seven
+registered targets.
 
 Every measured code revision ran `tests/run-suites.sh` and
 `tests/corpus-passset.sh`. M1 Pro remained at the established 11/17 frozen
