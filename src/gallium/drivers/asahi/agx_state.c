@@ -4153,6 +4153,13 @@ agx_build_pipeline(struct agx_batch *batch, struct agx_compiled_shader *cs,
    return agx_usc_addr(dev, t.gpu);
 }
 
+static bool
+agx_g17p_compute_failed(const char *step)
+{
+   mesa_loge("asahi: G17P compute dispatch failed at: %s", step);
+   return false;
+}
+
 /*
  * A fast-linked program (a software vertex shader behind the prolog that
  * fetches its attributes and publishes the vertex and instance IDs from the
@@ -4173,6 +4180,16 @@ agx_g17p_append_compute(struct agx_batch *batch,
     * local sizes -- from six u32 in GPU memory, so the workgroup this call
     * was handed is not the one that launches and must not be validated. */
    const bool indirect_local = grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL;
+   /* The compiler places promoted constants ahead of main and pads main to
+    * 0x80, so a shader with rodata has main_offset >= 0x80 and only rodata
+    * before it.  Those constants are published as a uniform range by the
+    * caller; the code block gets the generated compute constant program, as
+    * the D3D12 native compute path already does. */
+   const bool rodata_prefix =
+      info && info->rodata.size_16 && info->main_offset &&
+      !(info->main_offset % 0x80) &&
+      info->rodata.offset + (uint64_t)info->rodata.size_16 * 2 <=
+         info->main_offset;
    if (dev->chip != AGX_CHIP_G17P || !info || !binary ||
        (grid.mode != AGX_CDM_MODE_DIRECT && !indirect_local) ||
        (indirect_local &&
@@ -4180,7 +4197,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
        !info->main_size || !info->nr_gprs ||
        info->has_preamble || info->preamble_scratch_size || info->scratch_size ||
        !info->agx3_staging_known ||
-       (info->main_offset != 0 &&
+       (info->main_offset != 0 && !rodata_prefix &&
         info->main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
        info->main_offset > info->binary_size ||
        info->main_size > info->binary_size - info->main_offset ||
@@ -4215,21 +4232,21 @@ agx_g17p_append_compute(struct agx_batch *batch,
    } else {
       const size_t block_size = agx3_code_block_size(info->main_size);
       if (!block_size || block_size > SIZE_MAX - AGX3_CONTAINER_LEAD_SIZE)
-         return false;
+         return agx_g17p_compute_failed("code block size");
 
       struct agx_ptr shader = agx_pool_alloc_aligned_with_bo(
          &batch->pipeline_pool, AGX3_CONTAINER_LEAD_SIZE + block_size, 128,
          &shader_bo);
       if (!shader.cpu || !shader_bo)
-         return false;
+         return agx_g17p_compute_failed("shader allocation");
 
       agx3_build_container_lead(shader.cpu);
       const uint8_t *bytes = binary;
       if (!agx3_build_code_block(
              (uint8_t *)shader.cpu + AGX3_CONTAINER_LEAD_SIZE, block_size,
              bytes + info->main_offset, info->main_size, info->main_size,
-             info->main_offset ? bytes : NULL, false))
-         return false;
+             info->main_offset && !rodata_prefix ? bytes : NULL, false))
+         return agx_g17p_compute_failed("code block build");
       shader_va =
          shader.gpu + AGX3_CONTAINER_LEAD_SIZE + AGX3_CODE_BLOCK_ENTRY_OFFSET;
       shader_binary_size = info->main_size;
@@ -4245,17 +4262,17 @@ agx_g17p_append_compute(struct agx_batch *batch,
       AGX_IOTO_PROGRAM_ALIGNMENT, &program_bo);
    if (!program.cpu || !program_bo || !agx_va_in_usc_window(dev, shader_va) ||
        !agx_va_in_usc_window(dev, program.gpu))
-      return false;
+      return agx_g17p_compute_failed("program allocation or USC window");
 
    struct agx3_cdm_direct_template_sources launch_sources;
    if (!agx3_cdm_direct_template_sources_compute(
           info->uses_resource_info_query, info->uses_ray_traversal,
           info->ray_traversal_depth_nonzero, &launch_sources))
-      return false;
+      return agx_g17p_compute_failed("launch template");
 
    const uint64_t shared = (uint64_t)info->local_size + variable_shared_mem;
    if (shared > UINT32_MAX)
-      return false;
+      return agx_g17p_compute_failed("shared memory size");
    const struct agx3_g17p_compute_program_desc desc = {
       .program_va = program.gpu,
       .shader_va = shader_va,
@@ -4279,14 +4296,14 @@ agx_g17p_append_compute(struct agx_batch *batch,
    };
    struct agx3_g17p_compute_program native;
    if (!agx3_g17p_compute_program_generate(dev->chip, &desc, &native))
-      return false;
+      return agx_g17p_compute_failed("Ioto program generation");
    memcpy(program.cpu, native.bytes, native.length);
 
    if ((shader_bo && agx_bo_sync_for_device(shader_bo, shader_sync_offset,
                                             shader_sync_size)) ||
        agx_bo_sync_for_device(program_bo, program.gpu - program_bo->va->addr,
                               native.length))
-      return false;
+      return agx_g17p_compute_failed("shader/program sync");
 
    struct agx3_compute_dispatch_sink sink = {
       .data = batch->cdm.current,
@@ -4297,7 +4314,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
        * in the stream, behind a full barrier, so the launch stands alone. */
       if (!agx3_g17p_native_indirect_compute_launch_append(&native.launch,
                                                            grid.ptr, 0, &sink))
-         return false;
+         return agx_g17p_compute_failed("indirect launch append");
    } else {
       const struct agx3_compute_direct_grid direct = {
          .source = AGX3_CDM_DIRECT_GRID_GLOBAL_THREADS,
@@ -4309,7 +4326,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
       };
       if (!agx3_g17p_native_compute_dispatch_append(&native.launch, &direct,
                                                      &sink))
-         return false;
+         return agx_g17p_compute_failed("direct launch append");
    }
    batch->cdm.current += sink.length;
    if (constant_bo)
