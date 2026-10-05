@@ -1364,18 +1364,23 @@ native_image_handle(struct trans_ctx *ctx, const struct handle_ref *h,
    const unsigned stride = writable ? ctx->native_layout.pbe_stride_B
                                     : ctx->native_layout.texture_stride_B;
 
+   /* A dynamically indexed texture range addresses the bound heap's own
+    * native mirrors: the range's first resource slot carries the heap index
+    * of its first descriptor, and the index may legally run past the API
+    * range to the end of the heap. The mirrors are refreshed by descriptor
+    * writes, so no per-command copy exists. */
    if (h->native_segment) {
       nir_def *resource_table = root_plane(ctx, D12_ROOT_PLANE_RESOURCE);
-      nir_def *base = nir_load_global(
+      nir_def *first = nir_load_global(
          b, 1, 64,
          nir_iadd_imm(b, resource_table, h->base_slot * sizeof(uint64_t)),
          .align_mul = 8);
       nir_def *relative = nir_iadd_imm(b, h->slot, -(int)h->base_slot);
-      nir_def *offset =
-         nir_iadd(b, nir_u2u32(b, base), nir_imul_imm(b, relative, stride));
+      nir_def *index = nir_iadd(b, nir_u2u32(b, first), relative);
       return nir_bindless_image_agx(
-         b, offset,
-         .desc_set = writable ? D12_UNIFORM_PBES : D12_UNIFORM_TEXTURES);
+         b, nir_imul_imm(b, index, stride),
+         .desc_set = writable ? D12_UNIFORM_HEAP_PBES
+                              : D12_UNIFORM_HEAP_TEXTURES);
    }
 
    nir_def *index = h->heap ? native_heap_index(ctx, h) : h->slot;

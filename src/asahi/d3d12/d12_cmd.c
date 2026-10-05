@@ -4110,18 +4110,16 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
     * beyond NumDescriptors into the rest of the bound shader-visible heap.
     * Dense root slots cannot represent that: two independently based tables
     * would overlap, which is exactly what the array-reinterpretation tests
-    * exercise. Give each shader-declared texture range its own native segment
-    * and publish the segment's byte offset through its first resource slot. */
+    * exercise. A dynamically indexed texture handle therefore addresses the
+    * heap's own native texture/PBE mirrors, which descriptor writes keep
+    * coherent, through the heap index of the range's first descriptor,
+    * published in the range's first resource slot. Nothing is copied. */
    struct d12_dynamic_texture_range {
       uint32_t root_range;
       uint32_t base_slot;
       uint32_t first;
-      uint32_t count;
-      uint32_t native_base;
-      uint8_t shape;
    } dynamic_ranges[D12_MAX_RESOURCE_BINDINGS];
    unsigned dynamic_range_count = 0;
-   size_t dynamic_native_count = 0;
 
    if (rs && list->pso && bound_heap) {
       uintptr_t heap_start = (uintptr_t)bound_heap->slots;
@@ -4163,13 +4161,16 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
             list->state = D12_LIST_ERROR;
             return false;
          }
+         if (!bound_heap->texture_bo || !bound_heap->pbe_bo) {
+            mesa_loge("dynamic texture range %u is bound to a heap without "
+                      "native mirrors", root_range);
+            list->state = D12_LIST_ERROR;
+            return false;
+         }
 
          size_t first =
             (source_ptr - heap_start) / sizeof(bound_heap->slots[0]);
-         size_t count = bound_heap->desc.NumDescriptors - first;
-         if (!count || dynamic_native_count > UINT32_MAX - count ||
-             dynamic_range_count >= ARRAY_SIZE(dynamic_ranges)) {
-            mesa_loge("dynamic texture range %u is too large", root_range);
+         if (dynamic_range_count >= ARRAY_SIZE(dynamic_ranges)) {
             list->state = D12_LIST_ERROR;
             return false;
          }
@@ -4179,26 +4180,11 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
                .root_range = root_range,
                .base_slot = base_slot,
                .first = first,
-               .count = count,
-               .shape = shape,
             };
-         dynamic_native_count += count;
       }
    }
 
-   size_t native_desc_count = last_texture;
-   if (dynamic_native_count > SIZE_MAX - native_desc_count) {
-      list->state = D12_LIST_ERROR;
-      return false;
-   }
-   for (unsigned r = 0; r < dynamic_range_count; r++) {
-      if (native_desc_count > UINT32_MAX - dynamic_ranges[r].count) {
-         list->state = D12_LIST_ERROR;
-         return false;
-      }
-      dynamic_ranges[r].native_base = native_desc_count;
-      native_desc_count += dynamic_ranges[r].count;
-   }
+   const size_t native_desc_count = last_texture;
 
    *out_heap = 0;
    *out_heap_textures = 0;
@@ -4234,8 +4220,7 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
 
    for (unsigned r = 0; r < dynamic_range_count; r++) {
       addrs[D12_ROOT_RESOURCE_BASE + dynamic_ranges[r].base_slot] =
-         (uint64_t)dynamic_ranges[r].native_base *
-         native_layout.texture_stride_B;
+         dynamic_ranges[r].first;
    }
 
    /* The shader ABI names the three planes through pointers in the root
@@ -4556,56 +4541,11 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       }
    }
 
-   for (unsigned r = 0; r < dynamic_range_count; r++) {
-      const unsigned base = dynamic_ranges[r].native_base;
-      const unsigned first = dynamic_ranges[r].first;
-      for (unsigned i = 0; i < dynamic_ranges[r].count; i++) {
-         struct d12_descriptor effective = bound_heap->slots[first + i];
-         d12_apply_texture_shape(&effective, dynamic_ranges[r].shape);
-
-         if (validate && effective.resource) {
-            uint64_t bo_base, bo_size;
-            if (!d12_descriptor_resource_span(&effective, &bo_base,
-                                              &bo_size) ||
-                !effective.address || effective.address < bo_base ||
-                effective.address - bo_base >= bo_size) {
-               mesa_loge("dynamic texture range %u heap slot %u address "
-                         "0x%llx is outside its resource BO",
-                         dynamic_ranges[r].root_range, first + i,
-                         (unsigned long long)effective.address);
-               list->state = D12_LIST_ERROR;
-               return false;
-            }
-         }
-         if (!d12_refresh_texture_descriptor(
-                list->device,
-                descs + (size_t)(base + i) *
-                   native_layout.texture_stride_B,
-                &effective)) {
-            list->state = D12_LIST_ERROR;
-            return false;
-         }
-      }
-
-      if (validate || d12_debug()->dump_tex) {
-         mesa_logi("dynamic texture range=%u root-slot=%u shape=%u "
-                   "heap=%u+%u native=%u+%u bytes=0x%x valid=1",
-                   dynamic_ranges[r].root_range, dynamic_ranges[r].base_slot,
-                   dynamic_ranges[r].shape, dynamic_ranges[r].first,
-                   dynamic_ranges[r].count, dynamic_ranges[r].native_base,
-                   dynamic_ranges[r].count,
-                   dynamic_ranges[r].native_base *
-                      native_layout.texture_stride_B);
-         const struct d12_descriptor *first_desc =
-            &bound_heap->slots[dynamic_ranges[r].first];
-         const struct d12_descriptor *last_desc =
-            &bound_heap
-                ->slots[dynamic_ranges[r].first + dynamic_ranges[r].count - 1];
-         mesa_logi("dynamic texture endpoints: range=%u first-kind=%u "
-                   "first-address=0x%llx last-kind=%u last-address=0x%llx",
-                   dynamic_ranges[r].root_range, first_desc->kind,
-                   (unsigned long long)first_desc->address, last_desc->kind,
-                   (unsigned long long)last_desc->address);
+   if (validate || d12_debug()->dump_tex) {
+      for (unsigned r = 0; r < dynamic_range_count; r++) {
+         mesa_logi("dynamic texture range=%u root-slot=%u heap-first=%u "
+                   "valid=1", dynamic_ranges[r].root_range,
+                   dynamic_ranges[r].base_slot, dynamic_ranges[r].first);
       }
    }
 
@@ -4665,22 +4605,6 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
          for (unsigned b = 0; b < native_layout.pbe_stride_B; b++)
             fprintf(stderr, " %02x", raw[b]);
          fprintf(stderr, "\n");
-      }
-   }
-
-   for (unsigned r = 0; r < dynamic_range_count; r++) {
-      const unsigned base = dynamic_ranges[r].native_base;
-      const unsigned first = dynamic_ranges[r].first;
-      for (unsigned i = 0; i < dynamic_ranges[r].count; i++) {
-         struct d12_descriptor effective = bound_heap->slots[first + i];
-         d12_apply_texture_shape(&effective, dynamic_ranges[r].shape);
-         if (!d12_refresh_pbe_descriptor(
-                list->device,
-                pbes + (size_t)(base + i) * native_layout.pbe_stride_B,
-                &effective)) {
-            list->state = D12_LIST_ERROR;
-            return false;
-         }
       }
    }
 
@@ -4847,23 +4771,6 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       };
       util_dynarray_append_typed(&list->descriptor_fixups,
                                  struct d12_descriptor_fixup, fixup);
-   }
-
-   for (unsigned r = 0; r < dynamic_range_count; r++) {
-      const unsigned first = dynamic_ranges[r].first;
-      const unsigned base = dynamic_ranges[r].native_base;
-      for (unsigned i = 0; i < dynamic_ranges[r].count; i++) {
-         struct d12_descriptor_fixup fixup = {
-            .source = &bound_heap->slots[first + i],
-            .textures_gpu = heap_gpu,
-            .pbes_gpu = pbe_heap_gpu,
-            .slot = base + i,
-            .texture_shape = dynamic_ranges[r].shape,
-            .native_only = true,
-         };
-         util_dynarray_append_typed(&list->descriptor_fixups,
-                                    struct d12_descriptor_fixup, fixup);
-      }
    }
 
    if (!*out_textures || !*out_pbes)
@@ -5550,10 +5457,8 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
 
    util_dynarray_foreach (&list->descriptor_fixups,
                           struct d12_descriptor_fixup, fixup) {
-      if (!fixup->source ||
-          (!fixup->native_only &&
-           (fixup->slot >= D12_MAX_RESOURCE_BINDINGS ||
-            fixup->slot >= fixup->table_count)))
+      if (!fixup->source || fixup->slot >= D12_MAX_RESOURCE_BINDINGS ||
+          fixup->slot >= fixup->table_count)
          return false;
 
       const struct d12_descriptor *d = fixup->source;
@@ -5574,20 +5479,6 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
          }
       }
 
-      if (fixup->native_only) {
-         void *texture = d12_list_data_cpu(
-            list, fixup->textures_gpu +
-                     (uint64_t)slot * native_layout.texture_stride_B);
-         void *pbe = d12_list_data_cpu(
-            list, fixup->pbes_gpu +
-                     (uint64_t)slot * native_layout.pbe_stride_B);
-         if (!texture || !pbe)
-            return false;
-         if (!d12_refresh_texture_descriptor(list->device, texture, d) ||
-             !d12_refresh_pbe_descriptor(list->device, pbe, d))
-            return false;
-         continue;
-      }
 
       uint64_t *tables = (uint64_t *)d12_list_data_cpu(list, fixup->tables_gpu);
       if (!tables)

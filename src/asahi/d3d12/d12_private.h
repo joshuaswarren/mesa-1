@@ -768,7 +768,6 @@ struct d12_descriptor_fixup {
    uint32_t slot;
    uint16_t table_count;
    uint8_t texture_shape;
-   bool native_only;
 };
 
 /* ExecuteIndirect root constants are sourced from the argument buffer at
