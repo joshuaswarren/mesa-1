@@ -128,7 +128,8 @@ elif d12_is_wine
     '../../util/u_sync_provider.c',
   )
   d12_platform_includes = [inc_asahi_d3d12_wine, include_directories('wine')]
-  d12_platform_deps = []
+  # DXGI interface IIDs used by the presenter come from mingw's dxguid.
+  d12_platform_deps = [cc.find_library('dxguid')]
   d12_core_strict_args += ['-DHAVE_LIBDRM', '-DAGX_WINE_UNIXLIB', '-DD12_PLATFORM_WINE']
 else
   libd3d12agx_files += files('d12_platform_linux.c')
