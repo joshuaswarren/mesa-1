@@ -1796,14 +1796,6 @@ hk_build_g17p_bg_eot(struct hk_cmd_buffer *cmd,
           (dual_mrt_active &&
            (!iview1 || !target1_pbe_valid ||
             info->pColorAttachments[1].imageView == VK_NULL_HANDLE))) {
-         if (HK_ENV_BOOL_ONCE("HK_DEBUG_RECORD", false))
-            mesa_loge("EOT target mismatch: partial=%u active=%u samples=%u "
-                      "target_samples=%u direct=%u ms_store=%u pbe=%u "
-                      "store_op=%u resolve_mode=%u",
-                      partial_render, active_count, key->tib.nr_samples,
-                      target ? target->vk.image->samples : 0,
-                      direct_resolve, multisample_store, target_pbe_valid,
-                      att->storeOp, att->resolveMode);
          vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FORMAT_NOT_SUPPORTED);
          return (struct hk_bg_eot){0};
       }
@@ -4959,10 +4951,7 @@ static void build_fs_prolog(nir_builder *b, const void *key);
  * MC corpus: ~87 compiles even with a warm pipeline cache). The disk key
  * names the builder by a stable id and covers every input of the compile
  * below; the cache identity already carries the build, the GPU and the
- * codegen flags/environment. HK_G17P_PROLOG_DISK_CACHE=0 is the A/B
- * off-switch. */
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_prolog_disk_cache,
-                           "HK_G17P_PROLOG_DISK_CACHE", true)
+ * codegen flags/environment. */
 
 static uint8_t
 hk_prolog_epilog_builder_id(hk_internal_builder_t builder)
@@ -4988,7 +4977,7 @@ hk_prolog_epilog_disk_key(struct hk_device *dev, const struct hk_internal_key *k
 {
    struct disk_cache *cache = dev->vk.physical->disk_cache;
    const uint8_t builder = hk_prolog_epilog_builder_id(key->builder);
-   if (!cache || !builder || !debug_get_option_hk_g17p_prolog_disk_cache())
+   if (!cache || !builder)
       return false;
 
    const struct agx_device_key dk = agx_gather_device_key(&dev->dev);
@@ -5113,19 +5102,15 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
    const bool disk =
       hk_prolog_epilog_disk_key(dev, key, preprocess_nir, stop, cf_base,
                                 g17p_tile_partitions, nr_samples, disk_key);
-   /* HK_G17P_PROLOG_DISK_CACHE_VERIFY=1 (gate): compile every part even on a
-    * disk hit and compare the stored bytes with the fresh compile. */
-   const bool verify = disk && HK_ENV_BOOL_ONCE("HK_G17P_PROLOG_DISK_CACHE_VERIFY", false);
    struct agx_shader_part *cached =
       disk ? hk_prolog_epilog_disk_get(dev, disk_key) : NULL;
-   if (cached && !verify) {
+   if (cached) {
       if (hk_prolog_epilog_insert(dev, key, cached))
          return cached;
       free(cached->binary);
       ralloc_free(cached);
       return NULL;
    }
-
 
    nir_builder b = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
    builder(&b, key->key);
@@ -5212,19 +5197,6 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       return NULL;
    }
 
-   if (cached) {
-      /* Verify mode: the stored part must be the fresh compile, byte for
-       * byte (info and binary). */
-      const bool same =
-         !memcmp(&cached->info, &part->info, sizeof(part->info)) &&
-         !memcmp(cached->binary, part->binary, part->info.binary_size);
-      fprintf(stderr, "G17P prolog/epilog disk cache verify: builder=%u size=%u %s\n",
-              hk_prolog_epilog_builder_id(builder), part->info.binary_size,
-              same ? "MATCH" : "MISMATCH");
-      free(cached->binary);
-      ralloc_free(cached);
-   }
-
    /* ..and cache it before we return. */
    if (!hk_prolog_epilog_insert(dev, key, part)) {
       free(part->binary);
@@ -5232,7 +5204,7 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       return NULL;
    }
 
-   if (disk && !cached)
+   if (disk)
       hk_prolog_epilog_disk_put(dev, disk_key, part);
    return part;
 }

@@ -1584,13 +1584,6 @@ hk_physical_device_init_pipeline_cache(struct hk_physical_device *pdev)
 
    char timestamp[BLAKE3_HEX_LEN];
    _mesa_blake3_format(timestamp, instance->driver_build_sha);
-   /* v56f diagnostic: HK_DEBUG_DISK_CACHE_ID=<hex> reads a disk cache written
-    * by another build with the same serialized format (warm-cache forensics
-    * with an instrumented library). Never set in production. */
-   const char *cache_id = getenv("HK_DEBUG_DISK_CACHE_ID");
-   if (cache_id && strlen(cache_id) < sizeof(timestamp))
-      snprintf(timestamp, sizeof(timestamp), "%s", cache_id);
-
    const uint64_t driver_flags = hk_physical_device_compiler_flags(pdev);
    pdev->vk.disk_cache = disk_cache_create(renderer, timestamp, driver_flags ^
       (env_hash * UINT64_C(0xff51afd7ed558ccd)));

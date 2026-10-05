@@ -539,55 +539,9 @@ hk_build_ray_traversal(nir_builder *b, const struct hk_ray_traversal_args *args)
       .no_skip_aabbs = nir_ieq_imm(b, nir_iand_imm(b, args->flags, SpvRayFlagsSkipAABBsKHRMask), 0),
    };
 
-   /*
-    * HK_RT_TRAVERSAL_CAP=N -- OFF by default, and off means the emitted shader
-    * is byte-identical to the one without this code: the variable is read once
-    * at compile time and nothing below is built when it is unset or zero.
-    *
-    * The traversal loop below exits only on
-    * `current_node == HK_BVH_INVALID_NODE && stack_ptr == 0`, and
-    * hk_build_push_stack() refuses to push past capacity, so a CYCLE in an
-    * encoded acceleration structure neither faults nor overflows: it spins with
-    * every access inside the mapped structure.  That is exactly the signature
-    * of the second DeviceLost -- a hang with a `halted GMMU` count of zero
-    * (HANDOFF_G17P_RT_MESH_TESS.md sec 3.3, G17P_RAYTRACING_PIPELINE_ABI.md
-    * sec 10).  That mechanism is INFERRED, not measured, and the falsifier
-    * written down for it is this: cap the iterations and the hang becomes a
-    * wrong answer.  Nobody could run that experiment because the cap did not
-    * exist.
-    *
-    * It is a diagnostic, never a fix.  A capped traversal returns wrong results
-    * for any structure deeper than the cap, and the counter costs an add, a
-    * compare and a branch on the hottest loop in the ray path, so it must not
-    * be turned on for anything but this experiment.  Pick N comfortably above a
-    * legitimate traversal: a 2-triangle BLAS needs a handful of iterations, and
-    * 4096 is already far past anything the builders produce.
-    */
-   const int64_t traversal_cap = debug_get_num_option("HK_RT_TRAVERSAL_CAP", 0);
-   nir_variable *iterations = NULL;
-
-   if (traversal_cap > 0) {
-      iterations = nir_local_variable_create(b->impl, glsl_uint_type(),
-                                             "hk_traversal_iterations");
-      nir_store_var(b, iterations, nir_imm_int(b, 0), 0x1);
-   }
-
    nir_loop *loop = nir_push_loop(b);
    {
       nir_loop_add_continue_construct(loop);
-
-      if (iterations) {
-         nir_def *count = nir_load_var(b, iterations);
-         nir_push_if(b, nir_uge_imm(b, count, (uint32_t)traversal_cap));
-         {
-            /* Leave `incomplete` true so the caller sees an unfinished
-             * traversal rather than a clean miss: a capped run must not be
-             * mistaken for a correct one. */
-            nir_jump(b, nir_jump_break);
-         }
-         nir_pop_if(b, NULL);
-         nir_store_var(b, iterations, nir_iadd_imm(b, count, 1), 0x1);
-      }
 
       nir_push_if(b, nir_ieq_imm(b, nir_load_deref(b, args->vars.current_node), HK_BVH_INVALID_NODE));
       {

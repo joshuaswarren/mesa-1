@@ -3885,107 +3885,6 @@ hk_shader_prepare_device_for_stage(struct hk_device *dev,
       hk_device_ensure_geometry_heap(dev);
 }
 
-/* v56f: HK_DEBUG_OBJECT_DUMP=<file> appends one record per API shader object
- * when it is created by a compile ("fresh"), a deserialization ("deser") or a
- * device binary-cache clone ("clone"). Every non-pointer field execution
- * reads is written (structs as raw hex); pointer fields are written as
- * presence bits and BO-relative offsets. tools/objdiff.py pairs records by
- * code identity and reports every field that differs between origins.
- * Diagnostic only; off by default. */
-static uint64_t
-hk_debug_fnv64(const void *data, size_t size, uint64_t h)
-{
-   const uint8_t *b = data;
-   for (size_t i = 0; b && i < size; ++i)
-      h = (h ^ b[i]) * 0x100000001b3ull;
-   return h;
-}
-
-static void
-hk_debug_hex(FILE *f, const char *name, const void *data, size_t size)
-{
-   const uint8_t *b = data;
-   fprintf(f, " %s=", name);
-   for (size_t i = 0; i < size; ++i)
-      fprintf(f, "%02x", b[i]);
-}
-
-static void
-hk_debug_dump_object(const struct hk_api_shader *obj, const char *origin)
-{
-   static simple_mtx_t lock = SIMPLE_MTX_INITIALIZER;
-   const char *path = getenv("HK_DEBUG_OBJECT_DUMP");
-   if (!path || !path[0])
-      return;
-   const unsigned n = hk_api_num_variants(obj);
-   uint64_t id = hk_debug_fnv64(&obj->vk.stage, sizeof(obj->vk.stage),
-                                0xcbf29ce484222325ull);
-   for (unsigned i = 0; i < n; ++i) {
-      const struct hk_shader *s = &obj->variants[i];
-      id = hk_debug_fnv64(&i, sizeof(i), id);
-      if (!s->lazy)
-         id = hk_debug_fnv64(s->b.binary, s->b.info.binary_size, id);
-   }
-   simple_mtx_lock(&lock);
-   FILE *f = fopen(path, "a");
-   if (f) {
-      fprintf(f, "OBJ %016" PRIx64 " origin=%s stage=%u variants=%u sample_variants=%u"
-                 " ordinary_variants=%u passthrough=%u binary_cache_entry=%u",
-              id, origin, (unsigned)obj->vk.stage, n, obj->g17p_sample_variants,
-              obj->g17p_ordinary_variants, obj->is_passthrough,
-              obj->binary_cache_entry != NULL);
-      if (obj->g17p_ordinary_variants)
-         hk_debug_hex(f, "requirements", &obj->variants[n],
-                      sizeof(struct hk_ordinary_descriptor_requirements));
-      fprintf(f, "\n");
-      for (unsigned i = 0; i < n; ++i) {
-         const struct hk_shader *s = &obj->variants[i];
-         fprintf(f, "VAR %016" PRIx64 " %u origin=%s lazy=%u", id, i, origin,
-                 s->lazy != NULL);
-         if (!s->lazy) {
-            fprintf(f, " code=%016" PRIx64 " code_size=%u data=%016" PRIx64
-                       " data_size=%u",
-                    hk_debug_fnv64(s->b.binary, s->b.info.binary_size,
-                                   0xcbf29ce484222325ull),
-                    s->code_size,
-                    hk_debug_fnv64(s->data_ptr, s->data_size,
-                                   0xcbf29ce484222325ull),
-                    s->data_size);
-            hk_debug_hex(f, "info", &s->info, sizeof(s->info));
-            hk_debug_hex(f, "binfo", &s->b.info, sizeof(s->b.info));
-            hk_debug_hex(f, "vdm", &s->agx3_vdm_state_update,
-                         sizeof(s->agx3_vdm_state_update));
-            hk_debug_hex(f, "frag_face", &s->frag_face, sizeof(s->frag_face));
-            hk_debug_hex(f, "counts", &s->counts, sizeof(s->counts));
-            fprintf(f, " bo=%u bo_size=%" PRIu64 " preamble_rel=%" PRId64
-                       " data_addr=%" PRIx64 " only_linked=%u linked_ht=%u"
-                       " lazy_ht=%u mono_nir=%zu",
-                    s->bo != NULL, s->bo ? (uint64_t)s->bo->size : 0,
-                    s->bo ? (int64_t)(s->preamble_addr - s->bo->va->addr)
-                          : (int64_t)s->preamble_addr,
-                    s->data_addr, s->only_linked != NULL,
-                    s->linked.ht != NULL, s->linked.lazy_ht,
-                    s->g17p_mono_nir_size);
-            if (s->bo) {
-               const void *map = agx_bo_map(s->bo);
-               fprintf(f, " bo_bytes=%016" PRIx64,
-                       hk_debug_fnv64(map, s->b.info.binary_size,
-                                      0xcbf29ce484222325ull));
-            }
-            if (s->only_linked && s->only_linked->b.bo)
-               fprintf(f, " only_linked_code=%016" PRIx64 " only_linked_size=%zu",
-                       hk_debug_fnv64(agx_bo_map(s->only_linked->b.bo),
-                                      s->only_linked->b.size,
-                                      0xcbf29ce484222325ull),
-                       s->only_linked->b.size);
-         }
-         fprintf(f, "\n");
-      }
-      fclose(f);
-   }
-   simple_mtx_unlock(&lock);
-}
-
 static VkResult
 hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *info,
                   const struct vk_graphics_pipeline_state *state,
@@ -4481,7 +4380,6 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
 
    hk_shader_prepare_device_for_stage(dev, sw_stage);
 
-   hk_debug_dump_object(obj, "fresh");
    *shader_out = obj;
    return VK_SUCCESS;
 }
@@ -4937,7 +4835,6 @@ hk_deserialize_api_shader_impl(struct vk_device *vk_dev,
 
    hk_shader_prepare_device_for_stage(dev, stage);
 
-   hk_debug_dump_object(obj, "deser");
    *shader_out = &obj->vk;
    return VK_SUCCESS;
 }
@@ -5028,7 +4925,6 @@ hk_shader_binary_cache_clone(struct hk_device *dev,
       dst->linked.lazy_ht = src->compiled;
    }
 
-   hk_debug_dump_object(obj, "clone");
    *shader_out = &obj->vk;
    return VK_SUCCESS;
 }
