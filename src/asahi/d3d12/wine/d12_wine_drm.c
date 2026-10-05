@@ -27,6 +27,12 @@
 
 #define D12_WINE_MEMORY_LOAD_UNIX_LIB 1000 /* MemoryWineLoadUnixLib */
 
+/* The request numbers travel verbatim to the Linux kernel: make sure the
+ * asm-generic encoding from the sys/ioccom.h shim is in effect here. */
+_Static_assert(DRM_IOCTL_VERSION == 0xc0406400u, "Linux ioctl encoding lost");
+_Static_assert(DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT == 0xc03064cau,
+               "Linux ioctl encoding lost");
+
 typedef UINT64 d12_unixlib_handle_t;
 typedef LONG d12_ntstatus_t;
 typedef d12_ntstatus_t (WINAPI *d12_unix_dispatcher_t)(d12_unixlib_handle_t,

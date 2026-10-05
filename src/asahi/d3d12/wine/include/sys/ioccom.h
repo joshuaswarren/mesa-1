@@ -28,6 +28,14 @@
    (((unsigned)(dir) << _IOC_DIRSHIFT) | ((unsigned)(type) << _IOC_TYPESHIFT) | \
     ((unsigned)(nr) << _IOC_NRSHIFT) | ((unsigned)(size) << _IOC_SIZESHIFT))
 
+/* winsock.h (pulled in by windows.h without WIN32_LEAN_AND_MEAN) defines
+ * BSD-style _IO/_IOR/_IOW; the build sets WIN32_LEAN_AND_MEAN and
+ * d12_wine_drm.c static-asserts the Linux encoding, but never let a stale
+ * definition win here. */
+#undef _IO
+#undef _IOR
+#undef _IOW
+#undef _IOWR
 #define _IO(type, nr)        _IOC(_IOC_NONE, (type), (nr), 0)
 #define _IOR(type, nr, st)   _IOC(_IOC_READ, (type), (nr), sizeof(st))
 #define _IOW(type, nr, st)   _IOC(_IOC_WRITE, (type), (nr), sizeof(st))
