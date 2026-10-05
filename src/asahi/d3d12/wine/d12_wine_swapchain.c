@@ -725,7 +725,13 @@ presenter_create_images(struct d12_wine_presenter *p)
       .Format = p->desc.Format,
       .SampleDesc = {1, 0},
       .Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN,
-      .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET,
+      /* SIMULTANEOUS_ACCESS selects the GPU-tiled, renderable layout
+       * (d12_resource_compute_texture_layout: interop_layout); a plain
+       * one-level 2D render target would be laid out linear, which the
+       * native G17P background/end-of-tile path rejects ("attachment-shape
+       * ... tiling=0"). Swapchain images are shared-access images anyway. */
+      .Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+               D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
    };
    if (p->desc.BufferUsage & DXGI_USAGE_UNORDERED_ACCESS)
       desc.Flags |= D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;

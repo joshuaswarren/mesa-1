@@ -217,8 +217,14 @@ wmain(int argc, wchar_t **argv)
          TranslateMessage(&msg);
          DispatchMessageW(&msg);
       }
-      sample.OnUpdate();
-      sample.OnRender();
+      try {
+         sample.OnUpdate();
+         sample.OnRender();
+      } catch (const std::exception &e) {
+         printf("{\"status\":\"RENDER_FAIL\",\"frame\":%d,\"error\":\"%s\"}\n", rendered, e.what());
+         fflush(stdout);
+         return 2;
+      }
       LARGE_INTEGER now;
       QueryPerformanceCounter(&now);
       ms.push_back((now.QuadPart - prev.QuadPart) * 1000.0 / freq.QuadPart);

@@ -11,6 +11,7 @@
 #include <d3d12.h>
 #include <cstring>
 #include <vector>
+#include <cstdio>
 
 struct CD3DX12_RECT : public D3D12_RECT {
    CD3DX12_RECT() = default;
@@ -192,8 +193,13 @@ D3DX12SerializeVersionedRootSignature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC 
 {
    if (error)
       *error = nullptr;
-   if (maxVersion >= D3D_ROOT_SIGNATURE_VERSION_1_1 || desc->Version == D3D_ROOT_SIGNATURE_VERSION_1_0)
-      return D3D12SerializeVersionedRootSignature(desc, blob, error);
+   if (maxVersion >= D3D_ROOT_SIGNATURE_VERSION_1_1 || desc->Version == D3D_ROOT_SIGNATURE_VERSION_1_0) {
+      HRESULT hr = D3D12SerializeVersionedRootSignature(desc, blob, error);
+      if (FAILED(hr))
+         fprintf(stderr, "d3dx12 shim: D3D12SerializeVersionedRootSignature hr=0x%08lx %s\n",
+                 (unsigned long)hr, (error && *error) ? (const char *)(*error)->GetBufferPointer() : "");
+      return hr;
+   }
 
    const D3D12_ROOT_SIGNATURE_DESC1 &d1 = desc->Desc_1_1;
    std::vector<D3D12_ROOT_PARAMETER> params(d1.NumParameters);
@@ -229,7 +235,11 @@ D3DX12SerializeVersionedRootSignature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC 
    d0.NumParameters = d1.NumParameters; d0.pParameters = params.data();
    d0.NumStaticSamplers = d1.NumStaticSamplers; d0.pStaticSamplers = d1.pStaticSamplers;
    d0.Flags = d1.Flags;
-   return D3D12SerializeRootSignature(&d0, D3D_ROOT_SIGNATURE_VERSION_1_0, blob, error);
+   HRESULT hr = D3D12SerializeRootSignature(&d0, D3D_ROOT_SIGNATURE_VERSION_1_0, blob, error);
+   if (FAILED(hr))
+      fprintf(stderr, "d3dx12 shim: D3D12SerializeRootSignature(1.0) hr=0x%08lx %s\n",
+              (unsigned long)hr, (error && *error) ? (const char *)(*error)->GetBufferPointer() : "");
+   return hr;
 }
 
 /* ---- subresource upload (HelloTexture) ----------------------------------- */
@@ -275,14 +285,14 @@ UpdateSubresources(ID3D12GraphicsCommandList *cmdList, ID3D12Resource *dst,
    device->Release();
    if (intDesc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
        intDesc.Width < required + layouts[0].Offset)
-      return 0;
+      { fprintf(stderr, "d3dx12 shim: UpdateSubresources failed at line %d\n", __LINE__); return 0; }
 
    BYTE *data = nullptr;
    if (FAILED(intermediate->Map(0, nullptr, (void **)&data)))
-      return 0;
+      { fprintf(stderr, "d3dx12 shim: UpdateSubresources failed at line %d\n", __LINE__); return 0; }
    for (UINT i = 0; i < numSubresources; i++) {
       if (rowSizes[i] > (SIZE_T)-1)
-         return 0;
+         { fprintf(stderr, "d3dx12 shim: UpdateSubresources failed at line %d\n", __LINE__); return 0; }
       for (UINT z = 0; z < layouts[i].Footprint.Depth; z++) {
          BYTE *dstSlice = data + layouts[i].Offset + (SIZE_T)layouts[i].Footprint.RowPitch * rows[i] * z;
          const BYTE *srcSlice = (const BYTE *)srcData[i].pData + srcData[i].SlicePitch * z;
