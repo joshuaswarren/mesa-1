@@ -73,6 +73,18 @@ fi
 exe_dir=$(dirname "$1")
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 log=$logdir/run-$stamp.log
+# Under the "run" verb the steam.exe shim gives the program a fresh console,
+# so its stdout never reaches this log. Wrap it in cmd.exe /c with a
+# redirection to a file (Windows paths on drive Z:) and append that file.
+outfile=
+if [[ ${PROTON_VERB:-run} == run && ${CAPTURE_STDOUT:-1} == 1 ]]; then
+   outfile=$logdir/out-$stamp.txt
+   : > "$outfile"; chown "$run_user" "$outfile"
+   winpath() { local p=$1; printf 'Z:%s' "${p//\//\\}"; }
+   cmdline="\"$(winpath "$1")\""; shift
+   for a in "$@"; do cmdline+=" \"$a\""; done
+   set -- cmd.exe /c "$cmdline > \"$(winpath "$outfile")\" 2>&1"
+fi
 {
    echo "tool=$tool prefix=$prefix exe=$1 args=${*:2} timeout=$timeout_s verb=${PROTON_VERB:-run}"
    echo "session env: ${sess_env[*]} headless=$headless"
@@ -114,6 +126,9 @@ else
    rc=124
 fi
 kill_prefix_server
+if [[ -n $outfile ]]; then
+   { echo "--- program output ($outfile) ---"; cat "$outfile"; echo "--- end of program output ---"; } >> "$log"
+fi
 echo "exit=$rc" >> "$log"
 echo "$log"
 exit $rc
