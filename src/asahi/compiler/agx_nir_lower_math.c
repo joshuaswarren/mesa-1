@@ -136,7 +136,7 @@ agx_nir_lower_fdiv_late(nir_shader *s)
 }
 
 /*
- * Natural log and log2 as double-float (fp32 pair) arithmetic.
+ * Log2 as double-float (fp32 pair) arithmetic.
  *
  * x = 2^e m with m in [sqrt(1/2), sqrt(2)). With s = (m - 1) / (m + 1),
  *
@@ -145,8 +145,7 @@ agx_nir_lower_fdiv_late(nir_shader *s)
  * s is kept as a pair (s, s_lo) from one correctly rounded division plus the
  * fma residual, the cubic term is kept as a pair, and the terms are summed
  * with Fast2Sum so the value handed to the final rounding carries about 40
- * bits. That makes the exact cases (powers of two, log(3)) come out correctly
- * rounded and everything else faithful, without any table.
+ * bits without a lookup table.
  */
 struct log_parts {
    nir_def *e;    /* exponent as float */
@@ -248,26 +247,6 @@ log_special(nir_builder *b, nir_def *x)
 }
 
 static nir_def *
-soft_log(nir_builder *b, nir_def *x)
-{
-   struct log_parts l = log_core(b, x);
-
-   /* ln2 split so e * LN2_HI is exact for |e| < 2^8 */
-   nir_def *a = nir_fmul_imm(b, l.e, 0.693145751953125);
-   nir_def *bb = nir_fmul_imm(b, l.s, 2.0);
-   nir_def *h = nir_fadd(b, a, bb);
-   nir_def *lo = fast2sum_lo(b, a, bb, h);
-   nir_def *h2 = nir_fadd(b, h, l.t_hi);
-   nir_def *lo2 = fast2sum_lo(b, h, l.t_hi, h2);
-
-   nir_def *small = nir_fadd(b, lo, lo2);
-   small = nir_fadd(b, small, l.t_lo);
-   small = nir_fadd(b, small, nir_fmul_imm(b, l.s_lo, 2.0));
-   small = nir_ffma(b, l.e, nir_imm_float(b, 1.428606765330187e-06), small);
-   return nir_fadd(b, h2, small);
-}
-
-static nir_def *
 soft_log2(nir_builder *b, nir_def *x)
 {
    struct log_parts l = log_core(b, x);
@@ -291,54 +270,6 @@ soft_log2(nir_builder *b, nir_def *x)
    return nir_fadd(b, h2, nir_fadd(b, nir_fadd(b, lo, lo2), pl));
 }
 
-static const uint32_t LN2_F32_BITS = 0x3f317218;
-
-static bool
-src_is_ln2(nir_alu_instr *alu, unsigned i)
-{
-   nir_scalar s = nir_scalar_chase_alu_src(nir_get_scalar(&alu->def, 0), i);
-   return nir_scalar_is_const(s) && nir_scalar_as_uint(s) == LN2_F32_BITS;
-}
-
-static bool
-src_is_flog2(nir_alu_instr *alu, unsigned i)
-{
-   nir_scalar s = nir_scalar_chase_alu_src(nir_get_scalar(&alu->def, 0), i);
-   return nir_scalar_is_alu(s) && nir_scalar_alu_op(s) == nir_op_flog2;
-}
-
-/* nir_flog builds fmul(flog2(x), ln2); catch that before the flog2 goes. */
-static bool
-lower_log(nir_builder *b, nir_alu_instr *alu, void *_)
-{
-   if (alu->op != nir_op_fmul || alu->def.bit_size != 32 ||
-       alu->def.num_components != 1)
-      return false;
-
-   unsigned li;
-   if (src_is_flog2(alu, 0) && src_is_ln2(alu, 1))
-      li = 0;
-   else if (src_is_flog2(alu, 1) && src_is_ln2(alu, 0))
-      li = 1;
-   else
-      return false;
-
-   nir_scalar log = nir_scalar_chase_alu_src(nir_get_scalar(&alu->def, 0), li);
-   nir_scalar xs = nir_scalar_chase_alu_src(log, 0);
-
-   b->cursor = nir_before_instr(&alu->instr);
-   b->fp_math_ctrl = nir_fp_no_fast_math;
-   nir_def *x = nir_channel(b, xs.def, xs.comp);
-   nir_def *res = nir_bcsel(b, is_positive_normal(b, x), soft_log(b, x),
-                            log_special(b, x));
-   nir_def_replace(&alu->def, res);
-
-   if (nir_def_is_unused(log.def))
-      nir_instr_remove(nir_def_instr(log.def));
-
-   return true;
-}
-
 static bool
 lower_log2(nir_builder *b, nir_alu_instr *alu, void *_)
 {
@@ -357,11 +288,7 @@ lower_log2(nir_builder *b, nir_alu_instr *alu, void *_)
 bool
 agx_nir_lower_log(nir_shader *s)
 {
-   bool progress =
-      nir_shader_alu_pass(s, lower_log, nir_metadata_control_flow, NULL);
-   progress |=
-      nir_shader_alu_pass(s, lower_log2, nir_metadata_control_flow, NULL);
-   return progress;
+   return nir_shader_alu_pass(s, lower_log2, nir_metadata_control_flow, NULL);
 }
 
 /*
