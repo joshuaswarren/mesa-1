@@ -1283,7 +1283,9 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
       }
       allow_single_sample = true;
    }
-   const bool allow_txf = v57_flags & HK_ORDINARY_V57_TXF;
+   const bool border_only = v57_flags & HK_ORDINARY_BUILTIN_BORDER_ONLY;
+   const bool all_shapes = v57_flags & HK_ORDINARY_ALL_TEXTURE_SHAPES;
+   const bool allow_txf = all_shapes || (v57_flags & HK_ORDINARY_V57_TXF);
    nir_function_impl *old = nir_shader_get_entrypoint(nir);
    nir_variable *resources[16];
    unsigned count = 0, samples = 0;
@@ -1294,13 +1296,26 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
          nir_tex_instr *tex = nir_instr_as_tex(instr);
          if (nir_tex_instr_is_query(tex))
             continue;
-         const bool txf = allow_txf && tex->op == nir_texop_txf;
-         if ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-              tex->op != nir_texop_txl && tex->op != nir_texop_txd && !txf) ||
+         /* Match custom-border lowering exactly. Fetches and shadow samples
+          * do not use that emulation and retain all their normal lowering.
+          * Dimensions and arrayed images do not affect a sampler's border
+          * classification. Descriptor arrays remain excluded below. */
+         if (border_only && (!nir_tex_instr_need_sampler(tex) || tex->is_shadow))
+            continue;
+         /* The proof reads base-plane metadata only. */
+         if (border_only && nir_tex_instr_src_index(tex, nir_tex_src_plane) >= 0)
+            return false;
+         const bool txf = allow_txf && (tex->op == nir_texop_txf ||
+                                       (all_shapes && tex->op == nir_texop_txf_ms));
+         const bool gather = all_shapes && tex->op == nir_texop_tg4;
+         if (!border_only && ((tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+              tex->op != nir_texop_txl && tex->op != nir_texop_txd && !txf &&
+              !gather) ||
              tex->dest_type != nir_type_float32 || tex->is_shadow ||
-             tex->is_sparse || tex->is_array ||
-             tex->sampler_dim != GLSL_SAMPLER_DIM_2D ||
-             nir_tex_instr_src_index(tex, nir_tex_src_plane) >= 0)
+             tex->is_sparse || tex->sampler_dim == GLSL_SAMPLER_DIM_BUF ||
+             (!all_shapes && (tex->is_array ||
+                             tex->sampler_dim != GLSL_SAMPLER_DIM_2D)) ||
+             nir_tex_instr_src_index(tex, nir_tex_src_plane) >= 0))
             return false;
          int t = nir_tex_instr_src_index(tex, nir_tex_src_texture_deref);
          int s = nir_tex_instr_src_index(tex, nir_tex_src_sampler_deref);
@@ -1373,7 +1388,8 @@ hk_nir_ordinary_descriptor_regions(nir_shader *nir,
          ctx.set_layouts[i] = vk_to_hk_descriptor_set_layout(layouts[i]);
 
    nir_function *entry = old->function;
-   nir_function *fast = nir_function_create(nir, "hk_ordinary_descriptor_fast");
+   nir_function *fast = nir_function_create(nir, border_only ?
+      "hk_builtin_border_fast" : "hk_ordinary_descriptor_fast");
    fast->impl = nir_function_impl_clone(nir, old);
    fast->impl->function = fast;
    nir_function *slow = nir_function_create(nir, "hk_ordinary_descriptor_slow");

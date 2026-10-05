@@ -1416,7 +1416,11 @@ hk_is_ordinary_descriptor_region(nir_builder *b)
 static bool
 lower(nir_builder *b, nir_tex_instr *tex, UNUSED void *_data)
 {
-   if (hk_is_ordinary_descriptor_region(b))
+   /* The border-only region retains scaled-format conversion. Its descriptor
+    * guard proves every sampler used by this lowering has a builtin border. */
+   const char *name = b->impl->function->name;
+   if (hk_is_ordinary_descriptor_region(b) ||
+       (name && !strcmp(name, "hk_builtin_border_fast")))
       return false;
    if (!nir_tex_instr_need_sampler(tex) || nir_tex_instr_is_query(tex))
       return false;
@@ -2125,6 +2129,30 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
           nir, set_layout_count, set_layouts,
           hk_ordinary_single_sample_enabled(&dev->dev),
           hk_ordinary_v57_flags(&dev->dev),
+          hk_ordinary_variants_enabled(&dev->dev) ? ordinary_requirements : NULL);
+
+   /* Prove every sampled and fetched image before omitting scaled-format
+    * conversion. Unlike the narrower border-only proof below, this includes
+    * fetch-only bindings and requires supported float32 image operations. */
+   if (!ordinary_regions && nir->info.stage == MESA_SHADER_FRAGMENT &&
+       hk_ordinary_regions_enabled(&dev->dev))
+      ordinary_regions = hk_nir_ordinary_descriptor_regions(
+          nir, set_layout_count, set_layouts,
+          hk_ordinary_single_sample_enabled(&dev->dev),
+          HK_ORDINARY_ALL_TEXTURE_SHAPES,
+          hk_ordinary_variants_enabled(&dev->dev) ? ordinary_requirements : NULL);
+
+   /* Complex texture shapes can still avoid custom-border emulation when
+    * the existing descriptor proof holds. Keep format conversion and all
+    * robustness lowering in this narrower fast region. The same kind==0 &&
+    * builtin-border proof and descriptor-generation invalidation apply, so
+    * scaled views and custom samplers always select the complete fallback. */
+   if (!ordinary_regions && nir->info.stage == MESA_SHADER_FRAGMENT &&
+       hk_ordinary_regions_enabled(&dev->dev))
+      ordinary_regions = hk_nir_ordinary_descriptor_regions(
+          nir, set_layout_count, set_layouts,
+          hk_ordinary_single_sample_enabled(&dev->dev),
+          HK_ORDINARY_BUILTIN_BORDER_ONLY,
           hk_ordinary_variants_enabled(&dev->dev) ? ordinary_requirements : NULL);
 
    if (((features & HK_FEAT_CUSTOM_BORDER) || agx_native_graphics(&dev->dev)) &&
