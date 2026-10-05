@@ -1351,6 +1351,11 @@ struct d12_pipeline_state {
    void *cached_blob;
    size_t cached_blob_size;
    bool is_compute;
+   /* SO without an application GS can inherit the primitive class from IA
+    * when a PSO stream omits PRIMITIVE_TOPOLOGY. Point is this object;
+    * line and triangle retain ordinary pipelines compiled by the same path. */
+   bool so_dynamic_topology;
+   struct d12_pipeline_state *so_line, *so_triangle;
    struct d12_pipeline_library_key library_key;
    bool library_key_valid;
    /* A null pixel shader still uses an empty hardware fragment program for

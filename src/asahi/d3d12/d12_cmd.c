@@ -9217,6 +9217,26 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
    if (list->topology == MESA_PRIM_UNKNOWN)
       return;
 
+   if (pso->so_dynamic_topology) {
+      switch (list->topology) {
+      case MESA_PRIM_POINTS:
+         break;
+      case MESA_PRIM_LINES:
+      case MESA_PRIM_LINE_STRIP:
+         pso = pso->so_line;
+         break;
+      case MESA_PRIM_TRIANGLES:
+      case MESA_PRIM_TRIANGLE_STRIP:
+         pso = pso->so_triangle;
+         break;
+      default:
+         mesa_loge("stream-output PSO has no specialization for topology %u",
+                   (unsigned)list->topology);
+         list->state = D12_LIST_ERROR;
+         return;
+      }
+   }
+
    d12_list_track_pso_reads(list, pso);
    d12_list_track_bound_reads(list, false,
                               D12_WRITE_VIS_GRAPHICS_VERTEX);

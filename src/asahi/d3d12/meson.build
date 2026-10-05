@@ -348,6 +348,13 @@ d3d12agx_allocation_math_tests = executable(
 test('d3d12agx_allocation_math', d3d12agx_allocation_math_tests)
 
 # CPU-side microbenchmark: record/submit cost, descriptor writes, PSO creation.
+executable(
+  'd3d12agx_streamout_topology_live',
+  files('tests/streamout_topology_live.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 if not d12_is_windows
   executable(
     'd3d12agx_command_sync_live',

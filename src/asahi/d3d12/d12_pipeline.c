@@ -695,6 +695,10 @@ d12_pso_release_bos(struct d12_device *device,
 static void
 d12_pso_destroy(struct d12_pipeline_state *pso)
 {
+   if (pso->so_line)
+      ID3D12PipelineState_Release(&pso->so_line->iface);
+   if (pso->so_triangle)
+      ID3D12PipelineState_Release(&pso->so_triangle->iface);
    d12_pso_release_bos(pso->device, pso);
    free(pso->cached_blob);
    d12_private_data_store_destroy(&pso->private_data);
@@ -4076,6 +4080,45 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 {
    if (!out)
       return E_POINTER;
+   *out = NULL;
+
+   if (so_desc && so_desc->NumEntries && !gs_size && !hs_size && !ds_size &&
+       primitive_topology_type == D3D12_PRIMITIVE_TOPOLOGY_TYPE_UNDEFINED) {
+      /* Streams may omit primitive topology. A passthrough GS's input
+       * primitive is part of its compiled poly_nir program, so retain the
+       * three real specializations and select from IA at draw time. */
+      ID3D12PipelineState *variants[3] = {0};
+      const D3D12_PRIMITIVE_TOPOLOGY_TYPE types[3] = {
+         D3D12_PRIMITIVE_TOPOLOGY_TYPE_POINT,
+         D3D12_PRIMITIVE_TOPOLOGY_TYPE_LINE,
+         D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE,
+      };
+      HRESULT hr = S_OK;
+      for (unsigned i = 0; i < ARRAY_SIZE(variants); i++) {
+         hr = d12_pipeline_state_create_graphics(
+            device, vs_dxil, vs_size, ps_dxil, ps_size, gs_dxil, gs_size,
+            hs_dxil, hs_size, ds_dxil, ds_size, rt_format, nr_rt, rt_formats,
+            nr_samples, sample_mask, ds_desc, dsv_format, rs_desc,
+            rasterizer_depth_bias, front_stencil_enable, back_stencil_enable,
+            front_stencil_read_mask, front_stencil_write_mask,
+            back_stencil_read_mask, back_stencil_write_mask, blend_desc,
+            input_layout, so_desc, types[i], strip_cut, flags, map,
+            &IID_ID3D12PipelineState, (void **)&variants[i]);
+         if (FAILED(hr)) {
+            for (unsigned j = 0; j < i; j++)
+               ID3D12PipelineState_Release(variants[j]);
+            return hr;
+         }
+      }
+      struct d12_pipeline_state *point = d12_pso_from_iface(variants[0]);
+      point->so_dynamic_topology = true;
+      point->so_line = d12_pso_from_iface(variants[1]);
+      point->so_triangle = d12_pso_from_iface(variants[2]);
+      hr = d12_pso_QueryInterface(variants[0], riid, out);
+      ID3D12PipelineState_Release(variants[0]);
+      return hr;
+   }
+
    if (!vs_dxil || !vs_size || (!ps_dxil != !ps_size))
       return E_INVALIDARG;
    if (strip_cut != D3D12_INDEX_BUFFER_STRIP_CUT_VALUE_DISABLED &&

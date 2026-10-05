@@ -1597,8 +1597,7 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
    const bool has_vs = st.vs && st.vs->pShaderBytecode && st.vs->BytecodeLength;
    const bool has_ms = st.ms && st.ms->pShaderBytecode && st.ms->BytecodeLength;
    const bool has_cs = st.cs && st.cs->pShaderBytecode && st.cs->BytecodeLength;
-   if (!d12_pso_stream_pipeline_class_valid(
-          has_vs, has_ms, has_cs))
+   if (!d12_pso_stream_pipeline_class_valid(has_vs, has_ms, has_cs))
       return E_INVALIDARG;
 
    enum pipe_format rt_format = PIPE_FORMAT_NONE;
