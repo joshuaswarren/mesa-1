@@ -11,6 +11,11 @@
  * feature answers. Adapter queries use d12_core_caps_init below. */
 static const struct d12_core_caps d12_allocation_caps = {
    .max_feature_level = D12_CORE_FEATURE_LEVEL_11_0,
+   .max_shader_model = D12_CORE_SHADER_MODEL_5_1,
+   .node_count = 1,
+   .resource_binding_tier = 1,
+   .resource_heap_tier = 2,
+   .uma = true,
    .gpu_virtual_address_bits = 39,
    .gpu_upload_heap = true,
 };
@@ -28,7 +33,7 @@ d12_core_caps_init(struct d12_core_caps *caps,
    if (!legacy && !native)
       return;
 
-   /* bit length of the highest userspace VA, rather than a fixed 39. */
+   /* Bit length of the highest public resource VA, not internal USC/kernel VAs. */
    for (uint64_t addr = info->vm_end - 1; addr; addr >>= 1)
       caps->gpu_virtual_address_bits++;
    caps->node_count = 1;
@@ -41,7 +46,12 @@ d12_core_caps_init(struct d12_core_caps *caps,
    caps->resource_heap_tier = 2; /* one BO allocation kind, mixed placements */
    caps->gpu_upload_heap = true; /* committed/placed GPU_UPLOAD use that BO */
    caps->max_root_signature_version = 2; /* integer static samplers unproven */
-   caps->max_shader_model = D12_CORE_SHADER_MODEL_6_0;
+   /* G17P's bounded DXIL producer does not implement a complete SM6.0
+    * contract: the maximal-convergence shader reaches a refused container.
+    * Keep SM6.0 behind the qualified wave/compiler path, not chip age. */
+   caps->max_shader_model = info->compiler_wave_ops
+                               ? D12_CORE_SHADER_MODEL_6_0
+                               : D12_CORE_SHADER_MODEL_5_1;
    /* Tier 2 requires 2048 distinct samplers. Deduplication cannot meet
     * that contract with the current 1024-entry hardware table. */
    caps->resource_binding_tier = 1;

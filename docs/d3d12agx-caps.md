@@ -2,7 +2,7 @@
 
 `d12_core_caps_init` derives a separate immutable policy for each opened
 adapter. `d12_core_caps_init_agx` copies Linux UAPI generation, active core masks,
-VM bounds and VM identity through existing AGX helpers, and describes the
+resource allocator bounds and VM identity through existing AGX helpers, and describes the
 connected compiler paths. `d12_core_caps_query` translates that policy into the
 public structures. Device creation and feature negotiation use the same policy;
 a null output pointer still probes the actual adapter.
@@ -24,10 +24,10 @@ Microsoft's MIT DirectX-Headers property-format table on Linux.
 
 | Policy | Implementation / qualification |
 | --- | --- |
-| VM bits | Bit length of the highest userspace VA in GET_PARAMS; OPTIONS and dedicated VA query agree. This is the available driver window, not a guessed silicon address width. |
+| VM bits | Bit length of the highest resource VA in the UAPI-derived main VMA heap; OPTIONS and dedicated VA query agree. Internal USC/kernel ranges are excluded. This is the public allocation window, not a guessed silicon address width. |
 | UMA / coherence | One BO allocation kind. Native Linux DRM coherent mappings have a no-op cache maintenance hook; virtio/Windows do not inherit that proof. The D3D12 TileBasedRenderer efficiency promise remains false, independently of the physical tile buffer. |
 | Wave width | Connected AGX2 wave lowering, 32 lanes. G17P full WaveOps is not qualified. TotalLaneCount is one executable wave per active core, a conservative lower bound; Proton's 1024 fallback is an explicitly guessed occupancy, not a UAPI fact. |
-| Shader model | SM6.0. Individual native f16/i64 operations do not justify a complete SM6.2 contract. AGX2 compiler paths provide those operations; G17P full contracts remain off. |
+| Shader model | G13/G14 SM6.0; G17P SM5.1. A G17P SM6.0 convergence shader reaches a refused native container, so complete SM6.0 is withheld. Individual native f16/i64 operations do not justify a complete SM6.2 contract. AGX2 compiler paths provide those operations; G17P full contracts remain off. |
 | Binding / FL | Tier 1, FL11_0. The 1024 distinct native sampler limit cannot guarantee Tier 2's 2048 samplers. FL12_0/12_1/12_2 are withheld. The inherited missing 8x MSAA baseline requirement remains an unresolved conformance gap even at FL11_0. |
 | Sparse | Tier 0. SM5 texture feedback cannot compile; feedback/default-mapping/lifetime witnesses fail. Existing bind/mapping code does not establish a tier. |
 | Mesh / RT / VRS / feedback / work graphs / enhanced barriers | Off. Compiler acceptance or exposed COM methods are not complete execution contracts. BARRIER_LAYOUT reports unsupported consistently with OPTIONS12. |

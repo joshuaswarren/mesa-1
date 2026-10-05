@@ -17,8 +17,11 @@ d12_core_caps_init_agx(struct d12_core_caps *caps, const struct agx_device *dev)
       .generation = legacy ? dev->params.gpu_generation :
                     dev->chip == AGX_CHIP_G17P ? 17 : 0,
       .active_cores = agx_get_num_cores(dev),
-      .vm_start = dev->params.vm_start,
-      .vm_end = dev->params.vm_end,
+      /* Resource/heap allocations use this UAPI-derived VMA carveout. The
+       * complete kernel window also contains internal shader/kernel ranges,
+       * which cannot justify a larger public D3D12 resource address width. */
+      .vm_start = dev->main_heap_base,
+      .vm_end = dev->main_heap_base + dev->main_heap_size,
       .isolated_mmu = dev->vm_id != 0,
 #ifndef _WIN32
       /* The native DRM winsys maps coherent shmem; its cache maintenance

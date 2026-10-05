@@ -40,6 +40,10 @@ int main(void)
    assert(a.full_texture_sampling && !c.full_texture_sampling);
    assert(a.mesh_shader_tier == 0 && b.mesh_shader_tier == 0 && c.mesh_shader_tier == 0);
    assert(a.max_shader_model == D12_CORE_SHADER_MODEL_6_0);
+   assert(c.max_shader_model == D12_CORE_SHADER_MODEL_5_1);
+   assert(d12_core_get_caps()->node_count == 1);
+   assert(d12_core_get_caps()->resource_binding_tier == 1);
+   assert(d12_core_get_caps()->resource_heap_tier == 2);
    assert(a.native_16bit_shader_ops && !c.native_16bit_shader_ops);
    assert(!a.copy_queue_timestamp_queries && !c.copy_queue_timestamp_queries);
    assert(a.programmable_sample_positions_tier == 0 && !c.programmable_sample_positions_tier);
@@ -69,6 +73,7 @@ int main(void)
    d12_core_caps_init(&unknown, &g13);
    assert(!unknown.wave_ops && !unknown.wave_lane_count_min && !unknown.total_lane_count);
    assert(!unknown.int64_shader_ops && !unknown.native_16bit_shader_ops);
+   assert(unknown.max_shader_model == D12_CORE_SHADER_MODEL_5_1);
    assert(!unknown.tiled_resources_tier && !unknown.isolated_mmu);
    assert(unknown.gpu_virtual_address_bits == 36);
    /* Deriving another device cannot mutate existing caps. */
