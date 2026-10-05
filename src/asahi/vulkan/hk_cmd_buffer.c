@@ -2140,11 +2140,11 @@ hk_g17p_graphics_uniform_ranges(
    if (s->info.agx3_indexed_sampler_valid || native_spills) {
       if ((s->b.info.stage != MESA_SHADER_FRAGMENT &&
            s->b.info.stage != MESA_SHADER_VERTEX) ||
-          !dev->sampled_images.bo || !dev->samplers.table.bo ||
+          !dev->sampled_images.base_va || !dev->samplers.table.bo ||
           !dev->rodata.indexed_heap_pointers)
          return hk_g17p_graphics_ranges_refused(range_count, count);
       const uint64_t pointers[2] = {
-         dev->sampled_images.bo->va->addr,
+         dev->sampled_images.base_va,
          dev->samplers.table.bo->va->addr,
       };
       const uint64_t pointers_va = dev->rodata.indexed_heap_pointers;
@@ -2159,9 +2159,10 @@ hk_g17p_graphics_uniform_ranges(
                  pointers_va);
          hk_g17p_trace_line("indexed-pointers", pointers_va, pointers,
                             sizeof(pointers));
-         if (dev->sampled_images.map && dev->sampled_images.next_desc)
+         if (dev->sampled_images.next_desc)
             hk_g17p_trace_line(
-               "indexed-texture-heap", pointers[0], dev->sampled_images.map,
+               "indexed-texture-heap", pointers[0],
+               hk_descriptor_table_entry(&dev->sampled_images, 0),
                MIN2((size_t)dev->sampled_images.next_desc *
                         dev->sampled_images.desc_size,
                     (size_t)4096));

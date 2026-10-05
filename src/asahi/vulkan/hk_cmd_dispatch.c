@@ -2210,14 +2210,14 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          : &cmd->state.cs.descriptors;
 
       if (s->info.agx3_indexed_sampler_valid) {
-         if (!dev->sampled_images.bo || !dev->sampled_images.bo->va ||
+         if (!dev->sampled_images.base_va ||
              !dev->samplers.table.bo || !dev->samplers.table.bo->va) {
             vk_command_buffer_set_error(&cmd->vk,
                                         VK_ERROR_FEATURE_NOT_PRESENT);
             return;
          }
          uint64_t pointers[4] = {
-            dev->sampled_images.bo->va->addr,
+            dev->sampled_images.base_va,
             dev->samplers.table.bo->va->addr,
          };
          unsigned pointer_count = 2;

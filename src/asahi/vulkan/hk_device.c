@@ -135,7 +135,7 @@ hk_upload_rodata(struct hk_device *dev)
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
       const uint64_t pointers[2] = {
-         dev->sampled_images.bo->va->addr,
+         dev->sampled_images.base_va,
          dev->samplers.table.bo->va->addr,
       };
 
@@ -829,8 +829,11 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       goto fail_dev;
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
+      /* Capacity stays HK_MAX_DESCRIPTORS, but memory is added a chunk at a
+       * time as image and buffer views are created. */
       result = hk_descriptor_table_init(dev, &dev->sampled_images, 32,
-                                        HK_MAX_DESCRIPTORS, HK_MAX_DESCRIPTORS);
+                                        HK_DESCRIPTOR_TABLE_CHUNK_B / 32,
+                                        HK_MAX_DESCRIPTORS);
       if (result != VK_SUCCESS)
          goto fail_samplers;
 
