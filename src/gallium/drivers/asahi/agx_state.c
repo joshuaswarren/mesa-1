@@ -7895,6 +7895,14 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
       agx_update_descriptors(batch, ctx->gs->gs_copy);
    }
 
+   /* Nothing left to rasterize -- a geometry or transform feedback pass with
+    * an empty rasterized output, or too few vertices for one primitive. The
+    * pre-rasterization work is already launched above; a native HAL200
+    * direct draw cannot encode a zero count, and would draw nothing. */
+   if (agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P && !indirect &&
+       (!draws->count || !info->instance_count))
+      return;
+
    assert((!indirect || !indirect->indirect_draw_count) && "multidraw handled");
 
    /* Update batch masks based on current state */
