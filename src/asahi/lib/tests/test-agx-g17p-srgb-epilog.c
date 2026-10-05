@@ -177,6 +177,23 @@ main(void)
                                  PIPE_FORMAT_R8G8B8A8_UNORM, name);
    }
 
+   /* R11G11B10 is one raw tile word converted by the native pack/unpack
+    * layout 2: the epilog reads and writes the packed-float format itself,
+    * with no NIR bit packing. */
+   key.blend.rt[0].colormask = 0x7;
+   {
+      nir_shader *r11 = build_epilog(&key, PIPE_FORMAT_R11G11B10_FLOAT,
+                                     "G17P R11G11B10 blend epilog");
+      if (!check_lowering(r11, PIPE_FORMAT_R11G11B10_FLOAT)) {
+         fprintf(stderr, "G17P R11G11B10 epilog packs in NIR\n");
+         ok = false;
+      }
+      struct agx_shader_part r11_part;
+      ok &= compile_epilog(r11, "G17P R11G11B10 blend epilog", &r11_part);
+      free(r11_part.binary);
+      ralloc_free(r11);
+   }
+
    /* A disabled colour mask must preserve the raw encoded tile. It needs one
     * real U8 load/store pair but no sRGB round trip. */
    key.blend.rt[0].colormask = 0;

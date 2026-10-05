@@ -1488,12 +1488,15 @@ static const struct {
      {108, 0x6e9526fc4e86abbfull},
      {178, 0xb2a8e1c3d4476d62ull},
      {238, 0x1815f518eb05705full}}},
+   /* Epilogs and background programs convert R11G11B10 with the native
+    * pack/unpack layout 2 instead of NIR bit packing (store 278 -> 86 bytes,
+    * blend 500 -> 162, clear 306 -> 110, reload 368 -> 172); EOT unchanged. */
    {"r11g11b10x2", 2, PIPE_FORMAT_R11G11B10_FLOAT,
     PIPE_FORMAT_R11G11B10_FLOAT, 18,
-    {{278, 0x20ee40e8315e024aull},
-     {500, 0xe417d5be690047beull},
-     {306, 0xbbffcb79cb499e46ull},
-     {368, 0x6264a9844be5dd17ull},
+    {{86, 0x67b8bdfa2732d494ull},
+     {162, 0x06c5bb62f81b6908ull},
+     {110, 0xb4b2de773418f180ull},
+     {172, 0xd3ce6d013faf0453ull},
      {120, 0x1aa59cf1e9af7435ull}}},
 };
 

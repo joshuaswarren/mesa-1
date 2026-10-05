@@ -1200,10 +1200,11 @@ agx_pack_normalized_agx3(agx_builder *b, const agx_index *channels,
       return 1;
    }
 
-   /* Apple packs an RGB9E5 target's three float lanes with the same native
-    * conversion (rgb9e5/native/rgb9e5.py). A store of four channels, as a
-    * background clear writes, has no alpha lane to keep. */
-   if (format == AGX_FORMAT_RGB9E5 &&
+   /* Apple packs an RGB9E5 or RG11B10 target's three float lanes with the
+    * same native conversion (rgb9e5/native/rgb9e5.py, layouts 1 and 2). A
+    * store of four channels, as a background clear writes, has no alpha lane
+    * to keep. */
+   if ((format == AGX_FORMAT_RGB9E5 || format == AGX_FORMAT_RG11B10F) &&
        b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
       if (nr_channels != 3 && nr_channels != 4)
          return 0;
@@ -1432,7 +1433,8 @@ agx_emit_local_store_pixel(agx_builder *b, nir_intrinsic_instr *instr)
    return agx_st_tile(b, collected, agx_src_index(&instr->src[1]), coords,
                       format,
                       (nr_packed && (format == AGX_FORMAT_RGB10A2 ||
-                                     format == AGX_FORMAT_RGB9E5))
+                                     format == AGX_FORMAT_RGB9E5 ||
+                                     format == AGX_FORMAT_RG11B10F))
                          ? 1
                          : nir_intrinsic_write_mask(instr),
                       nir_intrinsic_base(instr), explicit,
@@ -1749,12 +1751,14 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
       agx_emit_cached_split(b, dest, 4);
       return true;
    }
-   /* Apple reads an RGB9E5 target's three float lanes back with the same
-    * native conversion (rgb9e5/native/rgb9e5.py fs_read). The format has no
-    * alpha, so a four-component read sees 1.0 there. */
-   if (format == AGX_FORMAT_RGB9E5 &&
+   /* Apple reads an RGB9E5 or RG11B10 target's three float lanes back with
+    * the same native conversion (rgb9e5/native/rgb9e5.py fs_read). Neither
+    * format has alpha, so a four-component read sees 1.0 there; a narrower
+    * read takes the leading lanes. */
+   if ((format == AGX_FORMAT_RGB9E5 || format == AGX_FORMAT_RG11B10F) &&
        b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-      if ((nr_comps != 3 && nr_comps != 4) || dest.size != AGX_SIZE_32)
+      if (nr_comps < 1 || nr_comps > 4 || dest.size != AGX_SIZE_32 ||
+          (format == AGX_FORMAT_RGB9E5 && nr_comps < 3))
          return false;
       agx_index packed = agx_temp(b->shader, AGX_SIZE_32);
       agx_ld_tile_to(b, packed, agx_src_index(&instr->src[0]), agx_null(),
@@ -1763,11 +1767,11 @@ agx_unpack_normalized_agx3(agx_builder *b, agx_index dest,
       agx_index rgb = nr_comps == 3 ? dest : agx_vec_temp(b->shader,
                                                           AGX_SIZE_32, 3);
       agx_unpack_rgb10a2_agx3_to(b, rgb, packed)->format = format;
-      if (nr_comps == 4) {
+      if (nr_comps != 3) {
          agx_index channels[4] = {agx_null()};
          agx_emit_split(b, channels, rgb, 3);
          channels[3] = agx_mov_imm(b, 32, fui(1.0f));
-         agx_emit_collect_to(b, dest, 4, channels);
+         agx_emit_collect_to(b, dest, nr_comps, channels);
       }
       agx_emit_cached_split(b, dest, nr_comps);
       return true;

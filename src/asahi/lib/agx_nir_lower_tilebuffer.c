@@ -277,6 +277,11 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    enum pipe_format logical_format = tib->logical_format[rt];
    enum pipe_format format = agx_tilebuffer_physical_format(tib, rt);
    unsigned comps = util_format_get_nr_components(logical_format);
+   /* G17P keeps an R11G11B10 target as one raw 32-bit tile word. Colour
+    * stores and reads keep the packed-float format: the backend converts with
+    * the native pack/unpack layout 2, as Apple's G17P code does
+    * (rgb9e5/native/rgb9e5.py). Only the destination-preserving copy moves
+    * the raw word. */
    const bool lower_r11g11b10 =
       ctx->lower_g17p_formats &&
       logical_format == PIPE_FORMAT_R11G11B10_FLOAT;
@@ -359,11 +364,9 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
                       rt, value, ctx->write_samples);
          ctx->any_memory_stores = true;
       } else {
-         if (lower_r11g11b10) {
-            value = nir_format_pack_rgba(b, logical_format, value);
-            format = lowered_format;
-            write_mask = 1;
-         }
+         /* Every native packed-float witness takes f32 lanes. */
+         if (lower_r11g11b10 && value->bit_size != 32)
+            value = nir_f2f32(b, value);
 
          store_tilebuffer(b, tib, format, logical_format, rt, value,
                           ctx->write_samples, write_mask);
@@ -383,18 +386,13 @@ pass(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          def = load_memory(b, ctx->bindless_base, tib->nr_samples,
                            intr->num_components, bit_size, rt, logical_format);
       } else {
-         def = load_tilebuffer(
-            b, tib, lower_r11g11b10 ? 1 : intr->num_components,
-            lower_r11g11b10 ? 32 : bit_size, rt,
-            lower_r11g11b10 ? lowered_format : format, logical_format);
+         def = load_tilebuffer(b, tib, intr->num_components,
+                               lower_r11g11b10 ? 32 : bit_size, rt, format,
+                               logical_format);
 
-         if (lower_r11g11b10) {
-            def = nir_trim_vector(
-               b, nir_format_unpack_rgba(b, def, logical_format),
-               intr->num_components);
-            if (bit_size != 32)
-               def = nir_f2f16(b, def);
-         }
+         /* The native unpack produces f32 lanes. */
+         if (lower_r11g11b10 && bit_size != 32)
+            def = nir_f2f16(b, def);
       }
 
       nir_def_rewrite_uses(&intr->def, def);
