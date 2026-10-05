@@ -302,7 +302,7 @@ struct trans_ctx {
     * structurized afterwards. Empty for a single-block function, which is
     * built structured as before.
     */
-   nir_block *blocks[D12_MAX_BLOCKS];
+   nir_block **blocks;
    unsigned num_blocks;
 
    /* value index -> the register a phi reads, for values that cross a
@@ -5741,7 +5741,7 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
    for (unsigned i = 0; i < entry->num_insts; i++)
       num_blocks = MAX2(num_blocks, entry->insts[i].block + 1);
 
-   if (num_blocks > D12_MAX_BLOCKS) {
+   if (num_blocks > D12_LIMIT_BLOCKS) {
       *error = "function has too many basic blocks";
       free(ctx.defs);
       free(ctx.phi_reg);
@@ -5759,6 +5759,24 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
    }
 
    ctx.num_blocks = num_blocks;
+   ctx.blocks = calloc(num_blocks, sizeof(*ctx.blocks));
+   if (!ctx.blocks) {
+      *error = "out of memory for the basic block table";
+      free(merged_insts);
+      free(ctx.defs);
+      free(ctx.phi_reg);
+      free(ctx.ptr_space);
+      free(ctx.ptr_base);
+      free(ctx.ptr_pointee);
+      free(ctx.ptr_global);
+      free(ctx.handle_base);
+      free(ctx.handle_heap);
+      free(ctx.handle_kind_v);
+      free(ctx.handle_stride_v);
+      free(ctx.handle_valid);
+      ralloc_free(b.shader);
+      return NULL;
+   }
 
    /* Multi-block functions get a synthetic EPILOGUE block: every return
     * branches to it, and the buffered-output flush is emitted into it.
@@ -6399,6 +6417,7 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
    b.shader->scratch_size = ctx.scratch_size;
 
    free(merged_insts);
+   free(ctx.blocks);
    free(ctx.defs);
    free(ctx.phi_reg);
    free(ctx.ptr_space);

@@ -517,6 +517,25 @@ d3d12agx_dxil_compile = executable(
   ],
 )
 
+# DXIL parser capacity: a synthetic module past every old fixed table size,
+# built with Mesa's DXIL writer, parsed and translated. CPU only.
+d3d12agx_dxil_limits_tests = executable(
+  'd3d12agx_dxil_limits_tests',
+  [libd12_dxil_files, files('dxil/d12_dxil_nir.c', 'dxil/d12_dxbc.c',
+                            'tests/d12_dxil_limits_tests.c')],
+  include_directories : [
+    inc_include, inc_src, inc_asahi, inc_gallium, inc_gallium_aux,
+    include_directories('../isa'),
+  ],
+  dependencies : [idep_nir, idep_mesautil, idep_agx_pack, idep_libagx,
+                  idep_libdxil_compiler],
+  link_with : [
+    libasahi_compiler, libasahi_lib, libasahi_layout, libagx2_disasm,
+  ],
+)
+test('d3d12agx_dxil_limits', d3d12agx_dxil_limits_tests,
+     suite : ['asahi', 'd3d12'])
+
 # CPU-only production lowering/ISA checks. Never creates a DRM device or queue.
 d3d12agx_heap_desc_tests = executable(
   'd3d12agx_heap_desc_tests',

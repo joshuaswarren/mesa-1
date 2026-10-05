@@ -29,12 +29,15 @@ struct parse_ctx {
 
    /* Type table state */
    uint32_t pending_struct_name; /* index into strings, ~0 if none */
+   bool struct_name_pending;     /* STRUCT_NAME stashed in the next slot */
 
    /* Constant block state: CST_SETTYPE latches the type for what follows */
    uint32_t const_type;
 
-   /* Function parsing state */
-   struct d12_function *cur_func;
+   /* Function parsing state: the function whose body is being decoded,
+    * as an index because the function table may move when it grows. */
+   bool in_func;
+   unsigned cur_func;
    uint32_t cur_block; /* basic block the next instruction lands in */
 
    /* Number of MODULE-level values, latched before the first function
@@ -61,43 +64,99 @@ fail(struct d12_module *mod, const char *msg)
       mod->error = msg;
 }
 
-/* Copy a record's char-array operands into the module string arena. */
-static const char *
-intern_chars(struct d12_module *mod, const uint64_t *ops, unsigned n)
+/*
+ * Module arena: 8-byte aligned storage that is never moved or freed
+ * before the module is. Start a new chunk when a request does not fit;
+ * the pointers handed out here are held for the life of the module.
+ */
+void *
+d12_dxil_module_arena_alloc(struct d12_module *mod, size_t size)
 {
-   /* Start a new chunk when this string does not fit. Chunks are never
-    * grown or moved: the pointers handed out here outlive this call and
-    * are held for the life of the module.
-    */
-   if (!mod->strings || mod->chunk_used + n + 1 > mod->chunk_size) {
-      size_t want = MAX2(4096, n + 1);
-      struct d12_str_chunk *chunk = malloc(sizeof(*chunk) + want);
+   size = ALIGN_POT(size, 8);
+
+   if (!mod->arena || mod->chunk_used + size > mod->chunk_size) {
+      size_t want = MAX2((size_t)16384, size);
+      struct d12_arena_chunk *chunk = malloc(sizeof(*chunk) + want);
       if (!chunk) {
-         fail(mod, "out of memory interning a string");
+         fail(mod, "out of memory in the module arena");
          return NULL;
       }
 
-      chunk->next = mod->strings;
-      mod->strings = chunk;
+      chunk->next = mod->arena;
+      mod->arena = chunk;
       mod->chunk_size = want;
       mod->chunk_used = 0;
    }
 
-   char *out = mod->strings->data + mod->chunk_used;
+   void *out = mod->arena->data + mod->chunk_used;
+   mod->chunk_used += size;
+   return out;
+}
+
+/* Copy a record's char-array operands into the module arena. */
+static const char *
+intern_chars(struct d12_module *mod, const uint64_t *ops, unsigned n)
+{
+   char *out = d12_dxil_module_arena_alloc(mod, (size_t)n + 1);
+   if (!out)
+      return NULL;
+
    for (unsigned i = 0; i < n; i++)
       out[i] = (char)ops[i];
    out[n] = '\0';
-   mod->chunk_used += n + 1;
    return out;
+}
+
+/* Copy a run of record operands into the arena as 32-bit indices. */
+static uint32_t *
+intern_u32(struct d12_module *mod, const uint64_t *ops, unsigned n)
+{
+   uint32_t *out = d12_dxil_module_arena_alloc(mod, (size_t)n * sizeof(*out));
+   if (!out)
+      return NULL;
+
+   for (unsigned i = 0; i < n; i++)
+      out[i] = (uint32_t)ops[i];
+   return out;
+}
+
+/*
+ * Grow a table so that one more element fits. The tables double up to a
+ * hard ceiling; the element pointer returned by the caller's indexing is
+ * only valid until the next growth of the same table.
+ */
+static bool
+grow_table(struct d12_module *mod, void **table, unsigned count,
+           unsigned *capacity, size_t elem_size, unsigned limit,
+           const char *what)
+{
+   if (count < *capacity)
+      return true;
+
+   if (count >= limit) {
+      fail(mod, what);
+      return false;
+   }
+
+   unsigned want = MIN2(MAX2(*capacity * 2, 256u), limit);
+   void *grown = realloc(*table, (size_t)want * elem_size);
+   if (!grown) {
+      fail(mod, "out of memory growing a module table");
+      return false;
+   }
+
+   *table = grown;
+   *capacity = want;
+   return true;
 }
 
 static struct d12_value *
 push_value(struct d12_module *mod, enum d12_value_kind kind, uint32_t type)
 {
-   if (mod->num_values >= D12_MAX_VALUES) {
-      fail(mod, "too many values in module");
+   if (!grow_table(mod, (void **)&mod->values, mod->num_values,
+                   &mod->value_capacity, sizeof(*mod->values),
+                   D12_LIMIT_VALUES, "too many values in module"))
       return NULL;
-   }
 
    struct d12_value *v = &mod->values[mod->num_values++];
    memset(v, 0, sizeof(*v));
@@ -117,22 +176,25 @@ parse_type_record(struct parse_ctx *ctx, const struct d12_record *rec)
    if (rec->code == D12_TYPE_NUMENTRY)
       return true; /* capacity hint only */
 
+   /* Both paths touch the slot the next type will occupy. */
+   if (!grow_table(mod, (void **)&mod->types, mod->num_types,
+                   &mod->type_capacity, sizeof(*mod->types),
+                   D12_LIMIT_TYPES, "too many types"))
+      return false;
+
    if (rec->code == D12_TYPE_STRUCT_NAME) {
       const char *name = intern_chars(mod, rec->ops, rec->num_ops);
       ctx->pending_struct_name = 0;
       /* Stash for the STRUCT_NAMED that follows */
-      if (mod->num_types < D12_MAX_TYPES)
-         mod->types[mod->num_types].name = name;
+      mod->types[mod->num_types].name = name;
+      ctx->struct_name_pending = true;
       return true;
    }
 
-   if (mod->num_types >= D12_MAX_TYPES) {
-      fail(mod, "too many types");
-      return false;
-   }
-
    struct d12_type *t = &mod->types[mod->num_types];
-   const char *carried_name = t->name; /* set by a preceding STRUCT_NAME */
+   /* Set by a preceding STRUCT_NAME; the slot is otherwise uninitialised. */
+   const char *carried_name = ctx->struct_name_pending ? t->name : NULL;
+   ctx->struct_name_pending = false;
    memset(t, 0, sizeof(*t));
    t->kind = rec->code;
 
@@ -172,15 +234,22 @@ parse_type_record(struct parse_ctx *ctx, const struct d12_record *rec)
       if (rec->num_ops < 2)
          return true;
       t->func.ret = (uint32_t)rec->ops[1];
-      for (unsigned i = 2; i < rec->num_ops && t->func.num_params < 16; i++)
-         t->func.params[t->func.num_params++] = (uint32_t)rec->ops[i];
+      t->func.num_params = rec->num_ops - 2;
+      t->func.params = intern_u32(mod, rec->ops + 2, t->func.num_params);
+      if (!t->func.params && t->func.num_params)
+         return false;
       break;
 
    case D12_TYPE_STRUCT_ANON:
    case D12_TYPE_STRUCT_NAMED:
       /* [ispacked, eltty...] */
-      for (unsigned i = 1; i < rec->num_ops && t->strct.num_members < 16; i++)
-         t->strct.members[t->strct.num_members++] = (uint32_t)rec->ops[i];
+      if (rec->num_ops >= 1) {
+         t->strct.num_members = rec->num_ops - 1;
+         t->strct.members =
+            intern_u32(mod, rec->ops + 1, t->strct.num_members);
+         if (!t->strct.members && t->strct.num_members)
+            return false;
+      }
       if (rec->code == D12_TYPE_STRUCT_NAMED)
          t->name = carried_name;
       break;
@@ -307,16 +376,21 @@ parse_metadata_record(struct parse_ctx *ctx, const struct d12_record *rec)
       struct d12_named_md *nmd = &mod->named_md[mod->num_named_md++];
       memset(nmd, 0, sizeof(*nmd));
       nmd->name = ctx->pending_md_name;
-      for (unsigned i = 0; i < rec->num_ops && nmd->num_nodes < 16; i++)
-         nmd->nodes[nmd->num_nodes++] = rec->ops[i];
+      nmd->nodes = d12_dxil_module_arena_alloc(
+         mod, (size_t)rec->num_ops * sizeof(*nmd->nodes));
+      if (!nmd->nodes && rec->num_ops)
+         return false;
+      for (unsigned i = 0; i < rec->num_ops; i++)
+         nmd->nodes[i] = rec->ops[i];
+      nmd->num_nodes = rec->num_ops;
       ctx->pending_md_name = NULL;
       return true;
    }
 
-   if (mod->num_metadata >= D12_MAX_METADATA) {
-      fail(mod, "too many metadata nodes");
+   if (!grow_table(mod, (void **)&mod->metadata, mod->num_metadata,
+                   &mod->metadata_capacity, sizeof(*mod->metadata),
+                   D12_LIMIT_METADATA, "too many metadata nodes"))
       return false;
-   }
 
    struct d12_metadata *md = &mod->metadata[mod->num_metadata++];
    memset(md, 0, sizeof(*md));
@@ -337,15 +411,17 @@ parse_metadata_record(struct parse_ctx *ctx, const struct d12_record *rec)
 
    case D12_MD_NODE:
       /* Operands are metadata ids biased by 1; 0 means null. */
-      for (unsigned i = 0; i < rec->num_ops && md->node.num_ops < 64; i++) {
-         unsigned slot = md->node.num_ops++;
-         if (rec->ops[i] == 0) {
-            md->node.op_is_null[slot] = true;
-            md->node.ops[slot] = 0;
-         } else {
-            md->node.ops[slot] = rec->ops[i] - 1;
-         }
+      md->node.ops = d12_dxil_module_arena_alloc(
+         mod, (size_t)rec->num_ops * sizeof(*md->node.ops));
+      md->node.op_is_null = d12_dxil_module_arena_alloc(
+         mod, (size_t)rec->num_ops * sizeof(*md->node.op_is_null));
+      if ((!md->node.ops || !md->node.op_is_null) && rec->num_ops)
+         return false;
+      for (unsigned i = 0; i < rec->num_ops; i++) {
+         md->node.op_is_null[i] = rec->ops[i] == 0;
+         md->node.ops[i] = rec->ops[i] == 0 ? 0 : rec->ops[i] - 1;
       }
+      md->node.num_ops = rec->num_ops;
       break;
 
    default:
@@ -404,10 +480,10 @@ parse_module_record(struct parse_ctx *ctx, const struct d12_record *rec)
 
    case D12_MODULE_FUNCTION: {
       /* [type, callingconv, isproto, ...] */
-      if (mod->num_functions >= D12_MAX_FUNCTIONS) {
-         fail(mod, "too many functions");
+      if (!grow_table(mod, (void **)&mod->functions, mod->num_functions,
+                      &mod->function_capacity, sizeof(*mod->functions),
+                      D12_LIMIT_FUNCTIONS, "too many functions"))
          return false;
-      }
 
       struct d12_function *f = &mod->functions[mod->num_functions];
       memset(f, 0, sizeof(*f));
@@ -442,7 +518,8 @@ rel_to_abs(struct parse_ctx *ctx, uint64_t rel)
 {
    uint32_t mod_vals =
       ctx->module_values_latched ? ctx->module_values : ctx->mod->num_values;
-   uint32_t base = ctx->cur_func ? ctx->cur_func->first_value : mod_vals;
+   uint32_t base = ctx->in_func
+      ? ctx->mod->functions[ctx->cur_func].first_value : mod_vals;
 
    /* Where LLVM thinks we are: module values plus this function's own
     * locals so far, NOT the global array's length.
@@ -464,10 +541,11 @@ static bool
 parse_function_record(struct parse_ctx *ctx, const struct d12_record *rec)
 {
    struct d12_module *mod = ctx->mod;
-   struct d12_function *f = ctx->cur_func;
 
-   if (!f)
+   if (!ctx->in_func)
       return true;
+
+   struct d12_function *f = &mod->functions[ctx->cur_func];
 
    if (rec->code == D12_FUNC_DECLAREBLOCKS) {
       f->num_blocks = rec->num_ops >= 1 ? (unsigned)rec->ops[0] : 0;
@@ -478,16 +556,32 @@ parse_function_record(struct parse_ctx *ctx, const struct d12_record *rec)
    if (rec->code == D12_FUNC_DEBUG_LOC || rec->code == D12_FUNC_DEBUG_LOC_AGAIN)
       return true;
 
-   if (f->num_insts >= D12_MAX_INSTS) {
-      fail(mod, "too many instructions in function");
+   if (!grow_table(mod, (void **)&f->insts, f->num_insts, &f->inst_capacity,
+                   sizeof(*f->insts), D12_LIMIT_INSTS,
+                   "too many instructions in function"))
       return false;
-   }
 
    struct d12_inst *inst = &f->insts[f->num_insts];
    memset(inst, 0, sizeof(*inst));
    inst->code = rec->code;
    inst->result_type = ~0u;
    inst->result_value = ~0u;
+
+   /* Every operand decoded below is one record operand at most, so the
+    * record's own count bounds the array. Phi sources are (value, block)
+    * pairs after the type. */
+   if (rec->num_ops) {
+      inst->ops = d12_dxil_module_arena_alloc(
+         mod, (size_t)rec->num_ops * sizeof(*inst->ops));
+      if (!inst->ops)
+         return false;
+   }
+   if (rec->code == D12_FUNC_INST_PHI && rec->num_ops >= 3) {
+      inst->phi_srcs = d12_dxil_module_arena_alloc(
+         mod, (size_t)(rec->num_ops / 2) * sizeof(*inst->phi_srcs));
+      if (!inst->phi_srcs)
+         return false;
+   }
 
    bool defines_value = false;
 
@@ -510,7 +604,7 @@ parse_function_record(struct parse_ctx *ctx, const struct d12_record *rec)
       }
 
       /* ops[0] is the callee; ops[1..] are the arguments. */
-      for (; opnum < rec->num_ops && inst->num_ops < D12_MAX_INST_OPS; opnum++)
+      for (; opnum < rec->num_ops; opnum++)
          inst->ops[inst->num_ops++] = rel_to_abs(ctx, rec->ops[opnum]);
 
       /* A call defines a value only if the callee does not return void.
@@ -658,7 +752,7 @@ parse_function_record(struct parse_ctx *ctx, const struct d12_record *rec)
    case D12_FUNC_INST_GEP:
    case D12_FUNC_INST_GEP_OLD:
       for (unsigned i = (rec->code == D12_FUNC_INST_GEP ? 2 : 0);
-           i < rec->num_ops && inst->num_ops < D12_MAX_INST_OPS; i++)
+           i < rec->num_ops; i++)
          inst->ops[inst->num_ops++] = rel_to_abs(ctx, rec->ops[i]);
       defines_value = true;
       break;
@@ -671,14 +765,14 @@ parse_function_record(struct parse_ctx *ctx, const struct d12_record *rec)
       if (rec->num_ops >= 1)
          inst->result_type = (uint32_t)rec->ops[0];
 
-      for (unsigned i = 1; i + 1 < rec->num_ops &&
-                           inst->num_phi_srcs < D12_MAX_PHI_SOURCES;
-           i += 2) {
+      for (unsigned i = 1; i + 1 < rec->num_ops; i += 2) {
          struct d12_phi_src *src = &inst->phi_srcs[inst->num_phi_srcs++];
          int64_t rel = (int64_t)decode_signed_vbr(rec->ops[i]);
          int64_t abs = (int64_t)ctx->mod->num_values - rel;
 
-         src->value = (abs >= 0 && abs < (int64_t)D12_MAX_VALUES)
+         /* May name a value defined later (a loop back edge); the
+          * translator checks it against the finished value count. */
+         src->value = (abs >= 0 && abs < (int64_t)D12_LIMIT_VALUES)
                          ? (uint32_t)abs
                          : ~0u;
          src->block = (uint32_t)rec->ops[i + 1];
@@ -783,12 +877,8 @@ on_enter_block(void *user, unsigned block_id, unsigned depth)
          return false;
       }
 
-      struct d12_function *f = &mod->functions[ctx->next_func_to_define++];
-      f->insts = calloc(D12_MAX_INSTS, sizeof(*f->insts));
-      if (!f->insts) {
-         fail(mod, "out of memory for function body");
-         return false;
-      }
+      unsigned index = ctx->next_func_to_define++;
+      struct d12_function *f = &mod->functions[index];
 
       if (!ctx->module_values_latched) {
          ctx->module_values = mod->num_values;
@@ -807,7 +897,8 @@ on_enter_block(void *user, unsigned block_id, unsigned depth)
          }
       }
 
-      ctx->cur_func = f;
+      ctx->in_func = true;
+      ctx->cur_func = index;
       ctx->cur_block = 0;
    }
 
@@ -820,7 +911,7 @@ on_exit_block(void *user, unsigned block_id, unsigned depth)
    struct parse_ctx *ctx = user;
 
    if (block_id == D12_BLOCK_FUNCTION)
-      ctx->cur_func = NULL;
+      ctx->in_func = false;
 
    return true;
 }
@@ -861,9 +952,8 @@ bool
 d12_dxil_module_parse(struct d12_module *mod, const uint8_t *bitcode,
                       size_t size_B)
 {
-   /* The module is several MiB of fixed arrays; callers allocate it with
-    * d12_dxil_module_alloc() so only the pages a shader touches are ever
-    * zeroed, rather than memset()ing the whole struct per parse. */
+   /* Callers allocate the module with d12_dxil_module_alloc(); the tables
+    * grow from empty as records arrive. */
 
    struct d12_bitstream bs;
    d12_bitstream_init(&bs, bitcode, size_B);
@@ -907,9 +997,6 @@ d12_dxil_module_parse(struct d12_module *mod, const uint8_t *bitcode,
 struct d12_module *
 d12_dxil_module_alloc(void)
 {
-   /* Several MiB of fixed arrays: never on the stack. calloc() hands back
-    * demand-zero pages for the first module and zeroed heap memory after
-    * glibc raises its mmap threshold; both are what the parser needs. */
    return calloc(1, sizeof(struct d12_module));
 }
 
@@ -930,11 +1017,15 @@ d12_dxil_module_finish(struct d12_module *mod)
       free(mod->functions[i].insts);
    for (unsigned i = 0; i < mod->num_values; i++)
       free(mod->values[i].data_elems);
-   for (struct d12_str_chunk *c = mod->strings; c;) {
-      struct d12_str_chunk *next = c->next;
+   for (struct d12_arena_chunk *c = mod->arena; c;) {
+      struct d12_arena_chunk *next = c->next;
       free(c);
       c = next;
    }
+   free(mod->types);
+   free(mod->values);
+   free(mod->functions);
+   free(mod->metadata);
    free(mod->resources);
    memset(mod, 0, sizeof(*mod));
 }
@@ -1150,7 +1241,7 @@ parse_resource_list(struct d12_module *mod, uint64_t list_id, unsigned klass)
          continue;
 
       if (mod->num_resources == mod->resource_capacity) {
-         if (mod->resource_capacity >= D12_MAX_METADATA) {
+         if (mod->resource_capacity >= D12_LIMIT_METADATA) {
             fail(mod, "too many DXIL resource declarations");
             return;
          }
@@ -1158,7 +1249,7 @@ parse_resource_list(struct d12_module *mod, uint64_t list_id, unsigned klass)
          unsigned capacity = mod->resource_capacity
                                 ? mod->resource_capacity * 2
                                 : 32;
-         capacity = MIN2(capacity, D12_MAX_METADATA);
+         capacity = MIN2(capacity, D12_LIMIT_METADATA);
          if (capacity < mod->resource_capacity ||
              (size_t)capacity >
                 SIZE_MAX / sizeof(struct d12_resource_binding)) {
