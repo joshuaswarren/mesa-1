@@ -454,6 +454,14 @@ d3d12agx_g11_indexed_instanced = executable(
   link_with : [libd3d12agx],
 )
 
+# Live: ExecuteIndirect whose count buffer is written by the GPU in-list.
+executable(
+  'd3d12agx_execute_indirect_count',
+  files('tests/execute_indirect_count.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_g10_vertex_buffers = executable(
   'd3d12agx_g10_vertex_buffers',
   files('tests/g10_vertex_buffers.c'),
