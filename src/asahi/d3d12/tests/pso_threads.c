@@ -11,6 +11,12 @@
  * stage cache and the fast-link cache all see hits and misses racing),
  * then every variant is created once more on the main thread and checked.
  *
+ * The pipeline library is exercised the same way: a stored pipeline loads
+ * back as the same object, a GetCachedBlob blob recreates its PSO through
+ * CachedPSO, a serialized library deserializes and loads (recompiling
+ * through the device cache), and eight threads load one deserialized entry
+ * at once and must all receive the single pipeline the library keeps.
+ *
  * Usage: d3d12agx_pso_threads tri.dxil solid.dxil res_probe.dxil
  */
 
@@ -136,6 +142,171 @@ graphics_desc(const struct shared *s, unsigned variant,
    }
 }
 
+struct load_race {
+   const struct shared *s;
+   ID3D12PipelineLibrary *library;
+   ID3D12PipelineState *result;
+   HRESULT hr;
+};
+
+static const WCHAR load_race_name[] = {'r', 'a', 'c', 'e', 0};
+
+static void *
+load_worker(void *arg)
+{
+   struct load_race *r = arg;
+   D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
+   graphics_desc(r->s, 1, &pd);
+   r->hr = ID3D12PipelineLibrary_LoadGraphicsPipeline(
+      r->library, load_race_name, &pd, &IID_ID3D12PipelineState,
+      (void **)&r->result);
+   return NULL;
+}
+
+static int
+library_checks(struct shared *s)
+{
+   ID3D12Device1 *dev1 = NULL;
+   HRESULT hr = ID3D12Device_QueryInterface(s->dev, &IID_ID3D12Device1,
+                                            (void **)&dev1);
+   REQUIRE(hr == S_OK && dev1, "ID3D12Device1");
+
+   ID3D12PipelineLibrary *library = NULL;
+   hr = ID3D12Device1_CreatePipelineLibrary(
+      dev1, NULL, 0, &IID_ID3D12PipelineLibrary, (void **)&library);
+   REQUIRE(hr == S_OK && library, "CreatePipelineLibrary");
+
+   /* Store a graphics and a compute pipeline, load them back. */
+   D3D12_GRAPHICS_PIPELINE_STATE_DESC pd;
+   graphics_desc(s, 1, &pd);
+   ID3D12PipelineState *gfx = NULL, *cs = NULL, *loaded = NULL;
+   hr = ID3D12Device_CreateGraphicsPipelineState(
+      s->dev, &pd, &IID_ID3D12PipelineState, (void **)&gfx);
+   REQUIRE(hr == S_OK && gfx, "graphics PSO for the library");
+   D3D12_COMPUTE_PIPELINE_STATE_DESC cd = {
+      .pRootSignature = s->rs_table,
+      .CS = {s->cs, s->cs_size},
+   };
+   hr = ID3D12Device_CreateComputePipelineState(
+      s->dev, &cd, &IID_ID3D12PipelineState, (void **)&cs);
+   REQUIRE(hr == S_OK && cs, "compute PSO for the library");
+
+   static const WCHAR gfx_name[] = {'g', 'f', 'x', 0};
+   static const WCHAR cs_name[] = {'c', 's', 0};
+   hr = ID3D12PipelineLibrary_StorePipeline(library, gfx_name, gfx);
+   REQUIRE(hr == S_OK, "StorePipeline graphics");
+   hr = ID3D12PipelineLibrary_StorePipeline(library, cs_name, cs);
+   REQUIRE(hr == S_OK, "StorePipeline compute");
+   hr = ID3D12PipelineLibrary_StorePipeline(library, cs_name, cs);
+   REQUIRE(hr == E_INVALIDARG, "StorePipeline rejects a duplicate name");
+   hr = ID3D12PipelineLibrary_StorePipeline(library, load_race_name, gfx);
+   REQUIRE(hr == S_OK, "StorePipeline graphics (race name)");
+
+   hr = ID3D12PipelineLibrary_LoadGraphicsPipeline(
+      library, gfx_name, &pd, &IID_ID3D12PipelineState, (void **)&loaded);
+   REQUIRE(hr == S_OK && loaded == gfx, "LoadGraphicsPipeline returns the "
+                                        "stored object");
+   ID3D12PipelineState_Release(loaded);
+   loaded = NULL;
+   hr = ID3D12PipelineLibrary_LoadComputePipeline(
+      library, cs_name, &cd, &IID_ID3D12PipelineState, (void **)&loaded);
+   REQUIRE(hr == S_OK && loaded == cs, "LoadComputePipeline returns the "
+                                       "stored object");
+   ID3D12PipelineState_Release(loaded);
+   loaded = NULL;
+   hr = ID3D12PipelineLibrary_LoadComputePipeline(
+      library, gfx_name, &cd, &IID_ID3D12PipelineState, (void **)&loaded);
+   REQUIRE(hr == E_INVALIDARG && !loaded, "Load refuses the wrong kind");
+   D3D12_GRAPHICS_PIPELINE_STATE_DESC other;
+   graphics_desc(s, 2, &other);
+   hr = ID3D12PipelineLibrary_LoadGraphicsPipeline(
+      library, gfx_name, &other, &IID_ID3D12PipelineState, (void **)&loaded);
+   REQUIRE(hr == E_INVALIDARG && !loaded,
+           "Load refuses a different description");
+
+   /* GetCachedBlob -> CachedPSO round trip for a graphics PSO. */
+   ID3DBlob *blob = NULL;
+   hr = ID3D12PipelineState_GetCachedBlob(gfx, &blob);
+   REQUIRE(hr == S_OK && blob && ID3D10Blob_GetBufferSize(blob),
+           "GetCachedBlob graphics");
+   pd.CachedPSO.pCachedBlob = ID3D10Blob_GetBufferPointer(blob);
+   pd.CachedPSO.CachedBlobSizeInBytes = ID3D10Blob_GetBufferSize(blob);
+   ID3D12PipelineState *recreated = NULL;
+   hr = ID3D12Device_CreateGraphicsPipelineState(
+      s->dev, &pd, &IID_ID3D12PipelineState, (void **)&recreated);
+   REQUIRE(hr == S_OK && recreated, "CreateGraphicsPipelineState with its "
+                                    "own cached blob");
+   ID3D12PipelineState_Release(recreated);
+   recreated = NULL;
+   graphics_desc(s, 2, &other);
+   other.CachedPSO = pd.CachedPSO;
+   hr = ID3D12Device_CreateGraphicsPipelineState(
+      s->dev, &other, &IID_ID3D12PipelineState, (void **)&recreated);
+   REQUIRE(hr == E_INVALIDARG && !recreated,
+           "a cached blob for another description is refused");
+   pd.CachedPSO.pCachedBlob = NULL;
+   pd.CachedPSO.CachedBlobSizeInBytes = 0;
+   ID3D10Blob_Release(blob);
+
+   /* Serialize, deserialize into a fresh library, load. */
+   SIZE_T size = ID3D12PipelineLibrary_GetSerializedSize(library);
+   REQUIRE(size, "GetSerializedSize");
+   void *serialized = malloc(size);
+   REQUIRE(serialized, "serialized storage");
+   hr = ID3D12PipelineLibrary_Serialize(library, serialized, size);
+   REQUIRE(hr == S_OK, "Serialize");
+
+   ID3D12PipelineLibrary *library2 = NULL;
+   hr = ID3D12Device1_CreatePipelineLibrary(
+      dev1, serialized, size, &IID_ID3D12PipelineLibrary,
+      (void **)&library2);
+   REQUIRE(hr == S_OK && library2, "CreatePipelineLibrary from a blob");
+   free(serialized);
+
+   hr = ID3D12PipelineLibrary_LoadGraphicsPipeline(
+      library2, gfx_name, &pd, &IID_ID3D12PipelineState, (void **)&loaded);
+   REQUIRE(hr == S_OK && loaded, "Load from a deserialized library");
+   ID3D12PipelineState *again = NULL;
+   hr = ID3D12PipelineLibrary_LoadGraphicsPipeline(
+      library2, gfx_name, &pd, &IID_ID3D12PipelineState, (void **)&again);
+   REQUIRE(hr == S_OK && again == loaded, "second Load returns the kept "
+                                          "pipeline");
+   ID3D12PipelineState_Release(again);
+   ID3D12PipelineState_Release(loaded);
+   loaded = NULL;
+   hr = ID3D12PipelineLibrary_LoadComputePipeline(
+      library2, cs_name, &cd, &IID_ID3D12PipelineState, (void **)&loaded);
+   REQUIRE(hr == S_OK && loaded, "Load compute from a deserialized library");
+   ID3D12PipelineState_Release(loaded);
+   loaded = NULL;
+
+   /* Eight threads load one deserialized entry at once. */
+   struct load_race races[THREADS];
+   pthread_t threads[THREADS];
+   for (unsigned t = 0; t < THREADS; t++) {
+      races[t] = (struct load_race){.s = s, .library = library2};
+      REQUIRE(!pthread_create(&threads[t], NULL, load_worker, &races[t]),
+              "pthread_create (load race)");
+   }
+   for (unsigned t = 0; t < THREADS; t++)
+      pthread_join(threads[t], NULL);
+   for (unsigned t = 0; t < THREADS; t++) {
+      REQUIRE(races[t].hr == S_OK && races[t].result,
+              "concurrent Load succeeded");
+      REQUIRE(races[t].result == races[0].result,
+              "concurrent Loads agree on one pipeline");
+   }
+   for (unsigned t = 0; t < THREADS; t++)
+      ID3D12PipelineState_Release(races[t].result);
+
+   ID3D12PipelineLibrary_Release(library2);
+   ID3D12PipelineLibrary_Release(library);
+   ID3D12PipelineState_Release(gfx);
+   ID3D12PipelineState_Release(cs);
+   ID3D12Device1_Release(dev1);
+   return 0;
+}
+
 static void *
 worker(void *arg)
 {
@@ -243,6 +414,9 @@ main(int argc, char **argv)
    REQUIRE(hr == S_OK && held[VARIANTS], "compute after the races");
    for (unsigned v = 0; v <= VARIANTS; v++)
       ID3D12PipelineState_Release(held[v]);
+
+   if (library_checks(&s))
+      return 1;
 
    ID3D12RootSignature_Release(s.rs_empty);
    ID3D12RootSignature_Release(s.rs_table);

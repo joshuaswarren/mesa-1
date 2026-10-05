@@ -1252,9 +1252,10 @@ struct d12_pipeline_state {
    struct d12_private_data_store private_data;
 
    struct d12_device *device; /* holds a device ref */
-   /* Driver-private validation blob returned by GetCachedBlob.  The current
-    * implementation still recompiles cached PSOs, but validates that the
-    * supplied shader and canonical root layout are an exact match. */
+   /* Driver-private validation blob returned by GetCachedBlob: the shader
+    * bytes and the canonical root layout (plus the library key for graphics
+    * PSOs). A supplied CachedPSO must match it exactly; the recreation
+    * itself is served by the device shader cache. */
    void *cached_blob;
    size_t cached_blob_size;
    bool is_compute;

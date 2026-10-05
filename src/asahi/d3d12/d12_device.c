@@ -15,6 +15,10 @@
 #include <math.h>
 #include <string.h>
 
+#include "util/hash_table.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
+
 /*
  * Report an unimplemented COM method. Logged once per method so a test
  * suite run produces a readable list of what is missing rather than a
@@ -1038,17 +1042,19 @@ d12_embedded_pso_binding_map(const D3D12_SHADER_BYTECODE *const *stages,
  * descriptor key from the value fields, shader bytes, canonical root layout,
  * and the pointed-to input/SO declarations. This is validation metadata, not
  * executable code: a deserialized library recompiles a matching description
- * on first use and then caches that PSO object. */
+ * on first use (through the device shader cache when the stages were
+ * compiled in this process) and then caches that PSO object.
+ *
+ * Each piece is folded in as XXH64(piece, previous lane) so the key is a
+ * chain over the pieces in order; the former byte-at-a-time FNV loop over
+ * the whole bytecode was the largest remaining cost of a cached PSO. The
+ * serialized-library format version covers the key definition. */
 static void
 d12_library_key_add(struct d12_pipeline_library_key *key, const void *data,
                     size_t size)
 {
-   const uint8_t *bytes = data;
-   for (size_t i = 0; i < size; i++) {
-      key->lo = (key->lo ^ bytes[i]) * UINT64_C(1099511628211);
-      key->hi = (key->hi ^ (uint8_t)(bytes[i] + 0x9d)) *
-                UINT64_C(14029467366897019727);
-   }
+   key->lo = XXH64(data, size, key->lo);
+   key->hi = XXH64(data, size, key->hi ^ UINT64_C(0x9e3779b97f4a7c15));
 }
 
 static void
@@ -1169,6 +1175,87 @@ d12_library_key_equal(struct d12_pipeline_library_key a,
                       struct d12_pipeline_library_key b)
 {
    return a.lo == b.lo && a.hi == b.hi;
+}
+
+/*
+ * The graphics counterpart of the compute cached-PSO blob: an identifying
+ * header, the five stage bytecodes and the canonical root layout, with the
+ * fixed-function state, input layout and stream-output declaration covered
+ * by the library key. Like the compute blob it is a correctness contract
+ * (exact byte comparison on CreateGraphicsPipelineState) rather than
+ * executable code; the device shader cache is what makes the recreation
+ * cheap in-process.
+ */
+struct d12_graphics_cache_header {
+   char magic[8];
+   uint32_t version;
+   uint32_t num_params;
+   uint32_t num_ranges;
+   uint32_t num_static_samplers;
+   uint32_t flags;
+   uint32_t stage_sizes[5]; /* VS, PS, DS, HS, GS */
+   uint64_t key_lo, key_hi;
+};
+
+static uint8_t *
+d12_graphics_cache_blob(const D3D12_GRAPHICS_PIPELINE_STATE_DESC *desc,
+                        const struct d12_root_layout *layout,
+                        struct d12_pipeline_library_key key, size_t *size_out)
+{
+   const D3D12_SHADER_BYTECODE *stages[] = {
+      &desc->VS, &desc->PS, &desc->DS, &desc->HS, &desc->GS,
+   };
+   struct d12_graphics_cache_header header = {
+      .magic = {'D', '1', '2', 'A', 'G', 'X', 'G', 'P'},
+      .version = 1,
+      .num_params = layout->num_params,
+      .num_ranges = layout->num_ranges,
+      .num_static_samplers = layout->num_static_samplers,
+      .flags = layout->flags,
+      .key_lo = key.lo,
+      .key_hi = key.hi,
+   };
+
+   size_t size = sizeof(header);
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); i++) {
+      const size_t stage_size =
+         stages[i]->pShaderBytecode ? stages[i]->BytecodeLength : 0;
+      if (stage_size > UINT32_MAX || stage_size > SIZE_MAX / 2 - size)
+         return NULL;
+      header.stage_sizes[i] = stage_size;
+      size += stage_size;
+   }
+   if (layout->num_params > D12_MAX_ROOT_PARAMS)
+      return NULL;
+   const size_t params_size = layout->num_params * sizeof(layout->params[0]);
+   const size_t ranges_size = layout->num_ranges * sizeof(layout->ranges[0]);
+   const size_t samplers_size =
+      layout->num_static_samplers * sizeof(layout->static_samplers[0]);
+   size += params_size + ranges_size + samplers_size;
+
+   uint8_t *blob = malloc(size);
+   if (!blob)
+      return NULL;
+   uint8_t *cursor = blob;
+   memcpy(cursor, &header, sizeof(header));
+   cursor += sizeof(header);
+   for (unsigned i = 0; i < ARRAY_SIZE(stages); i++) {
+      if (header.stage_sizes[i]) {
+         memcpy(cursor, stages[i]->pShaderBytecode, header.stage_sizes[i]);
+         cursor += header.stage_sizes[i];
+      }
+   }
+   memcpy(cursor, layout->params, params_size);
+   cursor += params_size;
+   if (ranges_size) {
+      memcpy(cursor, layout->ranges, ranges_size);
+      cursor += ranges_size;
+   }
+   if (samplers_size)
+      memcpy(cursor, layout->static_samplers, samplers_size);
+
+   *size_out = size;
+   return blob;
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -1668,6 +1755,25 @@ d12_device_CreateGraphicsPipelineState(
       layout = &embedded_layout;
    }
 
+   /* The cached blob GetCachedBlob returns, and the contract a supplied
+    * CachedPSO has to meet byte for byte (same rule as compute). */
+   const struct d12_pipeline_library_key key =
+      d12_graphics_library_key(desc, layout);
+   size_t cache_size = 0;
+   uint8_t *cache = d12_graphics_cache_blob(desc, layout, key, &cache_size);
+   if (!cache) {
+      d12_root_layout_cleanup(&embedded_layout);
+      return E_OUTOFMEMORY;
+   }
+   if (desc->CachedPSO.CachedBlobSizeInBytes &&
+       (!desc->CachedPSO.pCachedBlob ||
+        desc->CachedPSO.CachedBlobSizeInBytes != cache_size ||
+        memcmp(desc->CachedPSO.pCachedBlob, cache, cache_size))) {
+      free(cache);
+      d12_root_layout_cleanup(&embedded_layout);
+      return E_INVALIDARG;
+   }
+
    HRESULT hr = d12_pipeline_state_create_graphics(
       device, desc->VS.pShaderBytecode, desc->VS.BytecodeLength,
       desc->PS.pShaderBytecode, desc->PS.BytecodeLength,
@@ -1687,9 +1793,13 @@ d12_device_CreateGraphicsPipelineState(
       desc->IBStripCutValue, desc->Flags, map, riid, out);
    if (SUCCEEDED(hr) && out && *out) {
       struct d12_pipeline_state *pso = *(void **)out;
-      pso->library_key = d12_graphics_library_key(desc, layout);
+      pso->cached_blob = cache;
+      pso->cached_blob_size = cache_size;
+      pso->library_key = key;
       pso->library_key_valid = true;
+      cache = NULL;
    }
+   free(cache);
    d12_root_layout_cleanup(&embedded_layout);
    return hr;
 }
@@ -2051,8 +2161,12 @@ struct d12_pipeline_library {
    uint32_t refcount;
    struct d12_private_data_store private_data;
    struct d12_device *device; /* holds a device ref */
+   /* Games store and load from several threads at once. The lock covers
+    * the entry array and the name index; pipeline creation on a load runs
+    * outside it and the first creation to finish is the one kept. */
+   simple_mtx_t lock;
    struct d12_pipeline_library_entry {
-      uint16_t *name;
+      uint16_t *name; /* owned, NUL-terminated */
       uint32_t name_length;
       bool is_compute;
       struct d12_pipeline_library_key key;
@@ -2060,7 +2174,29 @@ struct d12_pipeline_library {
    } *entries;
    uint32_t entry_count;
    uint32_t entry_capacity;
+   /* entry->name -> entry index, so lookups do not scan the array. */
+   struct hash_table *by_name;
 };
+
+static uint32_t
+d12_library_name_hash(const void *key)
+{
+   const uint16_t *name = key;
+   size_t length = 0;
+   while (name[length])
+      length++;
+   return _mesa_hash_data(name, length * sizeof(*name));
+}
+
+static bool
+d12_library_name_equal(const void *a_, const void *b_)
+{
+   const uint16_t *a = a_, *b = b_;
+   size_t i = 0;
+   while (a[i] && a[i] == b[i])
+      i++;
+   return a[i] == b[i];
+}
 
 struct d12_pipeline_library_blob_header {
    char magic[8];
@@ -2078,6 +2214,10 @@ struct d12_pipeline_library_blob_entry {
 static const char d12_pipeline_library_magic[8] = {
    'D', '1', '2', 'A', 'G', 'X', 'P', 'L'
 };
+
+/* Version 2: the entry key became the XXH64 chain in d12_library_key_add.
+ * Older blobs are refused, so the application creates a fresh library. */
+#define D12_PIPELINE_LIBRARY_BLOB_VERSION 2
 
 static inline struct d12_pipeline_library *
 d12_pipeline_library_from_iface(ID3D12PipelineLibrary *iface)
@@ -2133,6 +2273,9 @@ d12_pipeline_library_Release(ID3D12PipelineLibrary *iface)
          free(library->entries[i].name);
       }
       free(library->entries);
+      if (library->by_name)
+         _mesa_hash_table_destroy(library->by_name, NULL);
+      simple_mtx_destroy(&library->lock);
       d12_private_data_store_destroy(&library->private_data);
       d12_device_release(library->device);
       free(library);
@@ -2169,30 +2312,9 @@ d12_pipeline_library_StorePipeline(ID3D12PipelineLibrary *iface, LPCWSTR name,
    if (!name_length || name_length > UINT32_MAX)
       return E_INVALIDARG;
 
-   for (uint32_t i = 0; i < library->entry_count; i++) {
-      const struct d12_pipeline_library_entry *entry = &library->entries[i];
-      if (entry->name_length == name_length &&
-          !memcmp(entry->name, wire_name, name_length * sizeof(uint16_t)))
-         return E_INVALIDARG;
-   }
-
    struct d12_pipeline_state *pso = (struct d12_pipeline_state *)pipeline;
    if (pso->device != library->device || !pso->library_key_valid)
       return E_INVALIDARG;
-
-   if (library->entry_count == library->entry_capacity) {
-      uint32_t capacity = library->entry_capacity
-                             ? library->entry_capacity * 2
-                             : 4;
-      if (capacity < library->entry_capacity)
-         return E_OUTOFMEMORY;
-      void *entries = realloc(library->entries,
-                              capacity * sizeof(library->entries[0]));
-      if (!entries)
-         return E_OUTOFMEMORY;
-      library->entries = entries;
-      library->entry_capacity = capacity;
-   }
 
    uint16_t *owned_name = malloc((name_length + 1) * sizeof(uint16_t));
    if (!owned_name)
@@ -2200,38 +2322,147 @@ d12_pipeline_library_StorePipeline(ID3D12PipelineLibrary *iface, LPCWSTR name,
    memcpy(owned_name, wire_name, name_length * sizeof(uint16_t));
    owned_name[name_length] = 0;
 
-   struct d12_pipeline_library_entry *entry =
-      &library->entries[library->entry_count++];
-   *entry = (struct d12_pipeline_library_entry){
-      .name = owned_name,
-      .name_length = name_length,
-      .is_compute = pso->is_compute,
-      .key = pso->library_key,
-      .pipeline = pso,
-   };
+   simple_mtx_lock(&library->lock);
+   HRESULT hr = S_OK;
+   if (_mesa_hash_table_search(library->by_name, owned_name)) {
+      hr = E_INVALIDARG;
+      goto out;
+   }
+
+   if (library->entry_count == library->entry_capacity) {
+      uint32_t capacity = library->entry_capacity
+                             ? library->entry_capacity * 2
+                             : 4;
+      if (capacity < library->entry_capacity) {
+         hr = E_OUTOFMEMORY;
+         goto out;
+      }
+      void *entries = realloc(library->entries,
+                              capacity * sizeof(library->entries[0]));
+      if (!entries) {
+         hr = E_OUTOFMEMORY;
+         goto out;
+      }
+      library->entries = entries;
+      library->entry_capacity = capacity;
+   }
+
+   const uint32_t index = library->entry_count;
+   if (!_mesa_hash_table_insert(library->by_name, owned_name,
+                                (void *)(uintptr_t)index)) {
+      hr = E_OUTOFMEMORY;
+      goto out;
+   }
+
+   library->entries[library->entry_count++] =
+      (struct d12_pipeline_library_entry){
+         .name = owned_name,
+         .name_length = name_length,
+         .is_compute = pso->is_compute,
+         .key = pso->library_key,
+         .pipeline = pso,
+      };
+   owned_name = NULL;
    d12_pipeline_state_library_ref(pso);
+
+out:
+   simple_mtx_unlock(&library->lock);
+   free(owned_name);
+   return hr;
+}
+
+/* The index of the named entry, or UINT32_MAX; the lock is held. */
+static uint32_t
+d12_pipeline_library_find_locked(struct d12_pipeline_library *library,
+                                 LPCWSTR name)
+{
+   if (!name || !name[0])
+      return UINT32_MAX;
+
+   struct hash_entry *ent =
+      _mesa_hash_table_search(library->by_name, (const uint16_t *)name);
+   return ent ? (uint32_t)(uintptr_t)ent->data : UINT32_MAX;
+}
+
+/*
+ * Load: an entry that already holds its pipeline (stored in this library
+ * object, or loaded earlier) hands it back. A deserialized entry has only
+ * its validation key, so the description is created through the device,
+ * whose shader cache reuses the compiled stages when the same bytecode was
+ * compiled in this process. Creation runs outside the library lock; when
+ * two threads load the same name at once the first result is kept.
+ */
+static HRESULT
+d12_pipeline_library_load(struct d12_pipeline_library *library, LPCWSTR name,
+                          bool compute,
+                          const struct d12_pipeline_library_key *key,
+                          HRESULT (*create)(struct d12_pipeline_library *,
+                                            const void *, REFIID, void **),
+                          const void *desc, REFIID riid, void **out)
+{
+   simple_mtx_lock(&library->lock);
+   const uint32_t index = d12_pipeline_library_find_locked(library, name);
+   if (index == UINT32_MAX || library->entries[index].is_compute != compute ||
+       !d12_library_key_equal(*key, library->entries[index].key)) {
+      simple_mtx_unlock(&library->lock);
+      return E_INVALIDARG;
+   }
+   struct d12_pipeline_state *stored = library->entries[index].pipeline;
+   if (stored)
+      d12_pipeline_state_library_ref(stored);
+   simple_mtx_unlock(&library->lock);
+
+   if (stored) {
+      HRESULT hr = ID3D12PipelineState_QueryInterface(&stored->iface, riid,
+                                                      out);
+      d12_pipeline_state_library_unref(stored);
+      return hr;
+   }
+
+   HRESULT hr = create(library, desc, riid, out);
+   if (FAILED(hr))
+      return hr;
+
+   struct d12_pipeline_state *pso = *out;
+   if (!pso->library_key_valid || !d12_library_key_equal(pso->library_key, *key)) {
+      ID3D12PipelineState_Release(&pso->iface);
+      *out = NULL;
+      return E_INVALIDARG;
+   }
+
+   simple_mtx_lock(&library->lock);
+   struct d12_pipeline_library_entry *entry = &library->entries[index];
+   if (entry->pipeline) {
+      /* Another thread loaded this name meanwhile: return its pipeline. */
+      stored = entry->pipeline;
+      d12_pipeline_state_library_ref(stored);
+      simple_mtx_unlock(&library->lock);
+      ID3D12PipelineState_Release(&pso->iface);
+      hr = ID3D12PipelineState_QueryInterface(&stored->iface, riid, out);
+      d12_pipeline_state_library_unref(stored);
+      return hr;
+   }
+   entry->pipeline = pso;
+   d12_pipeline_state_library_ref(pso);
+   simple_mtx_unlock(&library->lock);
    return S_OK;
 }
 
-static struct d12_pipeline_library_entry *
-d12_pipeline_library_find(struct d12_pipeline_library *library, LPCWSTR name)
+static HRESULT
+d12_pipeline_library_create_graphics(struct d12_pipeline_library *library,
+                                     const void *desc, REFIID riid,
+                                     void **out)
 {
-   if (!name)
-      return NULL;
+   return ID3D12Device_CreateGraphicsPipelineState(&library->device->iface,
+                                                   desc, riid, out);
+}
 
-   const uint16_t *wire_name = (const uint16_t *)name;
-   size_t name_length = 0;
-   while (wire_name[name_length])
-      name_length++;
-
-   for (uint32_t i = 0; i < library->entry_count; i++) {
-      struct d12_pipeline_library_entry *entry = &library->entries[i];
-      if (entry->name_length == name_length &&
-          !memcmp(entry->name, wire_name, name_length * sizeof(uint16_t)))
-         return entry;
-   }
-
-   return NULL;
+static HRESULT
+d12_pipeline_library_create_compute(struct d12_pipeline_library *library,
+                                    const void *desc, REFIID riid, void **out)
+{
+   return ID3D12Device_CreateComputePipelineState(&library->device->iface,
+                                                  desc, riid, out);
 }
 
 static HRESULT
@@ -2306,36 +2537,15 @@ d12_pipeline_library_LoadGraphicsPipeline(
 
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
-   struct d12_pipeline_library_entry *entry =
-      d12_pipeline_library_find(library, name);
-   if (!entry || entry->is_compute)
-      return E_INVALIDARG;
 
    struct d12_pipeline_library_key key;
    HRESULT hr = d12_graphics_desc_library_key(desc, &key);
-   if (FAILED(hr) || !d12_library_key_equal(key, entry->key))
-      return E_INVALIDARG;
-
-   if (entry->pipeline)
-      return ID3D12PipelineState_QueryInterface(&entry->pipeline->iface,
-                                                riid, out);
-
-   hr = ID3D12Device_CreateGraphicsPipelineState(
-      &library->device->iface, desc, riid, out);
    if (FAILED(hr))
-      return hr;
-
-   struct d12_pipeline_state *pso = *out;
-   if (!pso->library_key_valid ||
-       !d12_library_key_equal(pso->library_key, entry->key)) {
-      ID3D12PipelineState_Release(&pso->iface);
-      *out = NULL;
       return E_INVALIDARG;
-   }
 
-   entry->pipeline = pso;
-   d12_pipeline_state_library_ref(pso);
-   return S_OK;
+   return d12_pipeline_library_load(library, name, false, &key,
+                                    d12_pipeline_library_create_graphics,
+                                    desc, riid, out);
 }
 
 static HRESULT STDMETHODCALLTYPE
@@ -2350,36 +2560,15 @@ d12_pipeline_library_LoadComputePipeline(
 
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
-   struct d12_pipeline_library_entry *entry =
-      d12_pipeline_library_find(library, name);
-   if (!entry || !entry->is_compute)
-      return E_INVALIDARG;
 
    struct d12_pipeline_library_key key;
    HRESULT hr = d12_compute_desc_library_key(desc, &key);
-   if (FAILED(hr) || !d12_library_key_equal(key, entry->key))
-      return E_INVALIDARG;
-
-   if (entry->pipeline)
-      return ID3D12PipelineState_QueryInterface(&entry->pipeline->iface,
-                                                riid, out);
-
-   hr = ID3D12Device_CreateComputePipelineState(
-      &library->device->iface, desc, riid, out);
    if (FAILED(hr))
-      return hr;
-
-   struct d12_pipeline_state *pso = *out;
-   if (!pso->library_key_valid ||
-       !d12_library_key_equal(pso->library_key, entry->key)) {
-      ID3D12PipelineState_Release(&pso->iface);
-      *out = NULL;
       return E_INVALIDARG;
-   }
 
-   entry->pipeline = pso;
-   d12_pipeline_state_library_ref(pso);
-   return S_OK;
+   return d12_pipeline_library_load(library, name, true, &key,
+                                    d12_pipeline_library_create_compute,
+                                    desc, riid, out);
 }
 
 static SIZE_T STDMETHODCALLTYPE
@@ -2388,14 +2577,18 @@ d12_pipeline_library_GetSerializedSize(ID3D12PipelineLibrary *iface)
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
    size_t size = sizeof(struct d12_pipeline_library_blob_header);
+   simple_mtx_lock(&library->lock);
    for (uint32_t i = 0; i < library->entry_count; i++) {
       const struct d12_pipeline_library_entry *entry = &library->entries[i];
       size_t name_size = (size_t)entry->name_length * sizeof(uint16_t);
       if (name_size > SIZE_MAX - size -
-                         sizeof(struct d12_pipeline_library_blob_entry))
-         return 0;
+                         sizeof(struct d12_pipeline_library_blob_entry)) {
+         size = 0;
+         break;
+      }
       size += sizeof(struct d12_pipeline_library_blob_entry) + name_size;
    }
+   simple_mtx_unlock(&library->lock);
    return size;
 }
 
@@ -2405,14 +2598,22 @@ d12_pipeline_library_Serialize(ID3D12PipelineLibrary *iface, void *data,
 {
    struct d12_pipeline_library *library =
       d12_pipeline_library_from_iface(iface);
-   size_t required = d12_pipeline_library_GetSerializedSize(iface);
    if (!data)
       return E_POINTER;
-   if (!required || size < required)
+
+   simple_mtx_lock(&library->lock);
+   size_t required = sizeof(struct d12_pipeline_library_blob_header);
+   for (uint32_t i = 0; i < library->entry_count; i++) {
+      required += sizeof(struct d12_pipeline_library_blob_entry) +
+                  (size_t)library->entries[i].name_length * sizeof(uint16_t);
+   }
+   if (size < required) {
+      simple_mtx_unlock(&library->lock);
       return E_INVALIDARG;
+   }
 
    struct d12_pipeline_library_blob_header header = {
-      .version = 1,
+      .version = D12_PIPELINE_LIBRARY_BLOB_VERSION,
       .entry_count = library->entry_count,
       .total_size = required,
    };
@@ -2434,6 +2635,7 @@ d12_pipeline_library_Serialize(ID3D12PipelineLibrary *iface, void *data,
       memcpy(cursor, entry->name, name_size);
       cursor += name_size;
    }
+   simple_mtx_unlock(&library->lock);
 
    return S_OK;
 }
@@ -2465,7 +2667,8 @@ d12_pipeline_library_deserialize(struct d12_pipeline_library *library,
    memcpy(&header, blob, sizeof(header));
    if (memcmp(header.magic, d12_pipeline_library_magic,
               sizeof(header.magic)) ||
-       header.version != 1 || header.total_size != blob_size ||
+       header.version != D12_PIPELINE_LIBRARY_BLOB_VERSION ||
+       header.total_size != blob_size ||
        header.entry_count > (blob_size - sizeof(header)) /
                                sizeof(struct d12_pipeline_library_blob_entry))
       return E_INVALIDARG;
@@ -2507,14 +2710,15 @@ d12_pipeline_library_deserialize(struct d12_pipeline_library *library,
       bool invalid = false;
       for (uint32_t j = 0; j < serialized.name_length; j++)
          invalid |= name[j] == 0;
-      for (uint32_t j = 0; j < library->entry_count; j++) {
-         const struct d12_pipeline_library_entry *old = &library->entries[j];
-         invalid |= old->name_length == serialized.name_length &&
-                    !memcmp(old->name, name, name_size);
-      }
+      invalid |= _mesa_hash_table_search(library->by_name, name) != NULL;
       if (invalid) {
          free(name);
          return E_INVALIDARG;
+      }
+      if (!_mesa_hash_table_insert(library->by_name, name,
+                                   (void *)(uintptr_t)library->entry_count)) {
+         free(name);
+         return E_OUTOFMEMORY;
       }
 
       library->entries[library->entry_count++] =
@@ -2556,9 +2760,12 @@ d12_device_CreatePipelineLibrary(ID3D12Device2 *iface,
    d12_device_add_ref(library->device);
    d12_private_data_store_init(&library->private_data,
                                (IUnknown *)&library->iface);
+   simple_mtx_init(&library->lock, mtx_plain);
+   library->by_name = _mesa_hash_table_create(NULL, d12_library_name_hash,
+                                              d12_library_name_equal);
 
-   HRESULT hr = S_OK;
-   if (library_blob)
+   HRESULT hr = library->by_name ? S_OK : E_OUTOFMEMORY;
+   if (SUCCEEDED(hr) && library_blob)
       hr = d12_pipeline_library_deserialize(library, library_blob,
                                             library_blob_length);
    if (FAILED(hr)) {
