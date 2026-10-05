@@ -8354,8 +8354,10 @@ d12_cmd_certify_native_gs(struct d12_pipeline_state *pso,
       goto done;
    struct d12_cmd_list *list = d12_cmd_list_from_iface(iface);
    list->topology = MESA_PRIM_POINTS;
-   list->segments[0].type = D12_SEG_RENDER;
-   list->segment_count = 1;
+   /* Match the runtime render begin's reserved pre-graphics prelude. */
+   list->segments[0].type = D12_SEG_CDM;
+   list->segments[1].type = D12_SEG_RENDER;
+   list->segment_count = 2;
    list->render_open = true;
 
    uint64_t root_data = d12_list_upload_zero(list, 256, 8);
