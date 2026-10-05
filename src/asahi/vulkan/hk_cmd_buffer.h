@@ -1286,8 +1286,7 @@ struct hk_cmd_buffer {
       g17p_bg_eot_cache[HK_G17P_BG_EOT_CACHE_ENTRIES];
    uint8_t g17p_bg_eot_cache_next;
 
-   /* v94 HK_G17P_HOST_ENCODE bit1: set by hk_reset_cmd_buffer, cleared by
-    * vkBeginCommandBuffer. */
+   /* Set by hk_reset_cmd_buffer, cleared by vkBeginCommandBuffer. */
    bool g17p_pristine;
 
    struct {
@@ -1865,8 +1864,6 @@ hk_g17p_draw_trace_enabled(void)
       enabled = hk_g17p_draw_trace_init();
    return enabled != 0;
 }
-bool hk_g17p_strong_dispatch_flush_enabled(void);
-bool hk_g17p_verbose_enabled(void);
 void hk_g17p_trace_hexdump(const char *label, uint64_t base, const void *data,
                            size_t len);
 void hk_g17p_trace_line(const char *label, uint64_t base, const void *data,

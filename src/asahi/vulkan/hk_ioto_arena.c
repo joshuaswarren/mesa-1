@@ -22,13 +22,6 @@ hk_ioto_arena_finish(struct hk_cmd_buffer *cmd)
 {
    struct hk_ioto_arena *arena = &cmd->ioto;
 
-   if (arena->programs && hk_g17p_verbose_enabled()) {
-      fprintf(stderr,
-              "asahi: G17P Ioto programs: %u published, "
-              "%" PRIu64 " program bytes in %" PRIu64 " bytes of USC window\n",
-              arena->programs, arena->program_bytes, arena->chunk_bytes);
-   }
-
    memset(arena, 0, sizeof(*arena));
 }
 
@@ -69,13 +62,6 @@ hk_ioto_arena_grow(struct hk_cmd_buffer *cmd, size_t size, const char *label)
    arena->cursor = 0;
    arena->capacity = bo->size > UINT32_MAX ? UINT32_MAX : (uint32_t)bo->size;
    arena->chunk_bytes += bo->size;
-
-   if (hk_g17p_verbose_enabled()) {
-      fprintf(stderr,
-              "asahi: G17P Ioto arena chunk %#llx size %#llx for %s\n",
-              (unsigned long long)arena->base,
-              (unsigned long long)bo->size, label ? label : "(program)");
-   }
 
    return true;
 }

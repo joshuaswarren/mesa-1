@@ -957,9 +957,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
 
    simple_mtx_init(&dev->vdm.lock, mtx_plain);
    list_inithead(&dev->vdm.slabs);
-   list_inithead(&dev->vdm.quarantined_bos);
-   list_inithead(&dev->vdm.quarantined_vdm_allocations);
-   util_dynarray_init(&dev->vdm.quarantined_ioto_bos, NULL);
    simple_mtx_init(&dev->scratch.lock, mtx_plain);
    simple_mtx_init(&dev->shader_binary_cache.lock, mtx_plain);
    simple_mtx_init(&dev->g17p_lazy.lock, mtx_plain);

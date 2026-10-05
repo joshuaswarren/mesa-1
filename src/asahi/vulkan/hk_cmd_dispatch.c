@@ -2106,8 +2106,7 @@ hk_g17p_append_graphics_direct(
       .local_size = {local_size.x, local_size.y, local_size.z},
       .dimensions = dimensions,
    };
-   const uint8_t barrier_flags =
-      hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t barrier_flags = 0;
    if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
           program, &direct, barrier_flags, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
@@ -2212,8 +2211,7 @@ hk_dispatch_prepared_g17p_native(
       agx3_cmdstream_store_le32(out + 16 + axis * 4, grid.count[axis]);
       agx3_cmdstream_store_le32(out + 28 + axis * 4, local[axis]);
    }
-   const uint8_t barrier_flags =
-      hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t barrier_flags = 0;
    agx3_cmdstream_store_le32(
       out + AGX3_CDM_DIRECT_LAUNCH_SIZE,
       agx3_cdm_barrier_word(barrier_flags));
@@ -2748,13 +2746,10 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
     * adjacent CDM streams at hk_EndCommandBuffer, so independent copies share
     * a stream too.
     *
-    * This is a candidate for the Hyprland GMMU read fault that ZINK_DEBUG=sync
-    * cures, and it is unproven: it cannot be settled host-side, because the
-    * shim executes nothing and both flag values encode. Ship it as a one-boot
-    * probe rather than a default, so it can be A/B'd on hardware without
-    * moving the thirteen stream oracles that currently pin the weak shape.
+    * Whether this weak shape explains the Hyprland GMMU read fault that
+    * ZINK_DEBUG=sync cures is unproven.
     */
-   const uint8_t barrier_flags = hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t barrier_flags = 0;
    if (!hk_agx3_g17p_native_compute_dispatch_append_with_barrier(
           &program.launch, &direct, barrier_flags, &sink)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);

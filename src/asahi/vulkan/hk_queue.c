@@ -407,15 +407,6 @@ asahi_fill_vdm_command(struct hk_device *dev, struct hk_cs *cs,
       }
    }
 
-   if (hk_g17p_vdm_low_window_enabled(&dev->dev) && hk_g17p_verbose_enabled()) {
-      fprintf(stderr,
-              "asahi: G17P VDM submit full=%#llx alias=%#llx low=%#llx\n",
-              (unsigned long long)submitted_full,
-              (unsigned long long)c->vdm_ctrl_stream_base,
-              (unsigned long long)(c->vdm_ctrl_stream_base -
-                                   UINT64_C(0x1000000000)));
-   }
-
    /* Capture the exact live VDM stream after its terminator was appended.
     * The nested PPP state records in this dump can then be resolved against
     * the payload dumps emitted while the command buffer was built.

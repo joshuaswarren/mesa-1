@@ -228,16 +228,6 @@ struct hk_device {
    struct {
       simple_mtx_t lock;
       struct list_head slabs;
-
-      /* Opt-in command-upload lifetime falsifier. These lists retain complete
-       * upload BOs and VDM slab leases after command-buffer reset, preventing
-       * either address from being recycled before device destruction. */
-      struct list_head quarantined_bos;
-      struct list_head quarantined_vdm_allocations;
-      /* Opt-in Ioto-only lifetime falsifier. Unlike the broad command-upload
-       * quarantine, this retains only executable arena BOs whose addresses
-       * were embedded in submitted VDM streams. */
-      struct util_dynarray quarantined_ioto_bos;
    } vdm;
 
    /* Native G17P indirect compute grid helper.  A compact indirect helper

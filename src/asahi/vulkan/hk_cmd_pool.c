@@ -27,27 +27,6 @@ struct hk_vdm_slab {
 
 #include <string.h>
 
-int hk_g17p_vdm_low_window_state = -1;
-
-int
-hk_g17p_vdm_low_window_init(void)
-{
-   /* On by default: a VDM record's pointer is 40 bits and hardware reads bit
-    * 39 as the UAT root select, adding 0x1000000000 when it is clear. G17P's
-    * main heap sits at 0x8000000000, so every main-heap pointer a VDM record
-    * carries has bit 39 set and is fetched from the upper root instead. That
-    * is exactly the dVDM_SSD unmapped read at (1<<42)|0x7ffee0400 hardware
-    * reported for the first PPP state record after the root chunk
-    * (0x87ffee0400). Native keeps these payloads inside the architectural
-    * 0x1000000000 window, which is what this path reproduces. The environment
-    * variable now only exists to turn the correct behaviour back off for A/B
-    * testing. */
-   const int enabled =
-      debug_get_bool_option("ASAHI_G17P_VDM_LOW_WINDOW", true) ? 1 : 0;
-   hk_g17p_vdm_low_window_state = enabled;
-   return enabled;
-}
-
 static void
 hk_g17p_vdm_alias_free(struct agx_device *dev, uint64_t alias, uint64_t size);
 
@@ -95,28 +74,7 @@ hk_cmd_bo_ensure_vdm_alias(struct hk_cmd_pool *pool, struct hk_cmd_bo *bo)
    }
 
    bo->g17p_vdm_alias = alias;
-   if (hk_g17p_verbose_enabled())
-      fprintf(stderr,
-           "asahi: G17P VDM command BO full=%#llx alias=%#llx low=%#llx size=%#llx\n",
-           (unsigned long long)bo->bo->va->addr,
-           (unsigned long long)alias,
-           (unsigned long long)(alias - AGX_G17P_VDM_USER_BASE),
-           (unsigned long long)bo->bo->size);
    return VK_SUCCESS;
-}
-
-/* Ordinary command BO wrappers are owned by their command pool.  The
- * default-off upload quarantine deliberately transfers them to the device
- * until destruction, so choose device-lifetime allocation from the start in
- * that mode.  A quarantined wrapper must not retain a pool allocator whose
- * pUserData may cease to exist when the pool is destroyed.
- */
-static const VkAllocationCallbacks *
-hk_cmd_bo_allocator(struct hk_cmd_pool *pool)
-{
-   struct hk_device *dev = hk_cmd_pool_device(pool);
-   return hk_g17p_upload_quarantine_enabled(dev) ? &dev->vk.alloc
-                                                : &pool->vk.alloc;
 }
 
 static VkResult
@@ -125,11 +83,9 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_bo_type type,
 {
    struct hk_device *dev = hk_cmd_pool_device(pool);
    struct hk_cmd_bo *bo;
-   const VkAllocationCallbacks *alloc = hk_cmd_bo_allocator(pool);
+   const VkAllocationCallbacks *alloc = &pool->vk.alloc;
 
-   bo = vk_zalloc(alloc, sizeof(*bo), 8,
-                  alloc == &dev->vk.alloc ? VK_SYSTEM_ALLOCATION_SCOPE_DEVICE
-                                         : VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
+   bo = vk_zalloc(alloc, sizeof(*bo), 8, VK_SYSTEM_ALLOCATION_SCOPE_OBJECT);
    if (bo == NULL)
       return vk_error(pool, VK_ERROR_OUT_OF_HOST_MEMORY);
 
@@ -212,14 +168,6 @@ hk_device_create_vdm_slab(struct hk_device *dev)
    slab->heap.alloc_high = false;
    list_addtail(&slab->link, &dev->vdm.slabs);
 
-   if (hk_g17p_verbose_enabled())
-      fprintf(stderr,
-              "asahi: G17P VDM command BO slab full=%#llx alias=%#llx low=%#llx "
-              "size=%#llx\n",
-              (unsigned long long)slab->bo->va->addr,
-              (unsigned long long)slab->alias,
-              (unsigned long long)(slab->alias - AGX_G17P_VDM_USER_BASE),
-              (unsigned long long)slab->bo->size);
    return slab;
 }
 
@@ -294,66 +242,9 @@ hk_cmd_pool_free_vdm(struct hk_cmd_pool *pool,
    free(allocation);
 }
 
-bool
-hk_g17p_upload_quarantine_enabled(const struct hk_device *dev)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_UPLOAD_QUARANTINE", false);
-
-   return dev->dev.chip == AGX_CHIP_G17P && enabled;
-}
-
-void
-hk_g17p_quarantine_command_uploads(
-   struct hk_device *dev, struct list_head *main_bos,
-   struct list_head *usc_bos, struct list_head *root_bos,
-   struct list_head *vdm_allocations)
-{
-   assert(hk_g17p_upload_quarantine_enabled(dev));
-
-   const unsigned bo_count = list_length(main_bos) + list_length(usc_bos) +
-                             list_length(root_bos);
-   const unsigned vdm_count = list_length(vdm_allocations);
-
-   simple_mtx_lock(&dev->vdm.lock);
-   list_splicetail(main_bos, &dev->vdm.quarantined_bos);
-   list_inithead(main_bos);
-   list_splicetail(usc_bos, &dev->vdm.quarantined_bos);
-   list_inithead(usc_bos);
-   list_splicetail(root_bos, &dev->vdm.quarantined_bos);
-   list_inithead(root_bos);
-   list_splicetail(vdm_allocations,
-                   &dev->vdm.quarantined_vdm_allocations);
-   list_inithead(vdm_allocations);
-   simple_mtx_unlock(&dev->vdm.lock);
-
-   if (bo_count || vdm_count)
-      mesa_logi_once("G17P command-upload quarantine active; retained until "
-                     "device destruction");
-}
-
 void
 hk_device_finish_vdm_slabs(struct hk_device *dev)
 {
-   util_dynarray_foreach(&dev->vdm.quarantined_ioto_bos, struct agx_bo *, bo)
-      agx_bo_unreference(&dev->dev, *bo);
-   util_dynarray_fini(&dev->vdm.quarantined_ioto_bos);
-
-   list_for_each_entry_safe(struct hk_cmd_bo, bo,
-                            &dev->vdm.quarantined_bos, link) {
-      list_del(&bo->link);
-      hk_cmd_bo_destroy(dev, &dev->vk.alloc, bo);
-   }
-   list_inithead(&dev->vdm.quarantined_bos);
-
-   list_for_each_entry_safe(struct hk_vdm_allocation, allocation,
-                            &dev->vdm.quarantined_vdm_allocations, link) {
-      list_del(&allocation->link);
-      free(allocation);
-   }
-   list_inithead(&dev->vdm.quarantined_vdm_allocations);
-
    list_for_each_entry_safe(struct hk_vdm_slab, slab, &dev->vdm.slabs, link) {
       list_del(&slab->link);
       util_vma_heap_finish(&slab->heap);
@@ -404,7 +295,7 @@ hk_cmd_pool_destroy_bos(struct hk_cmd_pool *pool)
    for (enum hk_cmd_bo_type type = 0; type < HK_CMD_BO_TYPE_COUNT; ++type) {
       list_for_each_entry_safe(struct hk_cmd_bo, bo, &pool->free_bos[type],
                                link)
-         hk_cmd_bo_destroy(dev, hk_cmd_bo_allocator(pool), bo);
+         hk_cmd_bo_destroy(dev, &pool->vk.alloc, bo);
 
       list_inithead(&pool->free_bos[type]);
       pool->num_free_bos[type] = 0;
@@ -444,7 +335,7 @@ hk_cmd_pool_free_bo_list(struct hk_cmd_pool *pool, enum hk_cmd_bo_type type,
       list_del(&bo->link);
       if (pool->num_free_bos[type] >= max_free) {
          hk_cmd_bo_destroy(hk_cmd_pool_device(pool),
-                           hk_cmd_bo_allocator(pool), bo);
+                           &pool->vk.alloc, bo);
       } else {
          list_addtail(&bo->link, &pool->free_bos[type]);
          pool->num_free_bos[type]++;

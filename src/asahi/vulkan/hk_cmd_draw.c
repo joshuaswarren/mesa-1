@@ -989,7 +989,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
    }
 
    hk_g17p_prewarm_indirect_helpers(cmd);
-   (void)hk_g17p_strong_dispatch_flush_enabled();
 
    if (dev->g17p_shader_perf.trace)
       fprintf(stderr,
@@ -5004,8 +5003,7 @@ hk_g17p_emit_prepared_sw_tess_batch(
       agx_workgroup(64, 1, 1),
       agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1),
    };
-   const uint8_t graphics_barrier =
-      hk_g17p_strong_dispatch_flush_enabled() ? 0x5 : 0;
+   const uint8_t graphics_barrier = 0;
    for (unsigned launch = 0;
         launch < HK_G17P_SW_TESS_BATCH_LAUNCHES; ++launch) {
       uint8_t *record =

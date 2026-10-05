@@ -175,25 +175,13 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
    hk_descriptor_state_fini(cmd, &cmd->state.cs.descriptors);
    hk_descriptor_state_fini(cmd, &cmd->state.rt.descriptors);
 
-   if (hk_g17p_upload_quarantine_enabled(dev)) {
-      /* Diagnostic lifetime falsifier: neither ordinary/USC upload BOs nor
-       * compact VDM slab spans may be reused after reset. Their mappings and
-       * backing storage remain live until device destruction. */
-      hk_g17p_quarantine_command_uploads(
-         dev, &cmd->uploader.main.bos, &cmd->uploader.usc.bos,
-         &cmd->uploader.root.bos, &cmd->vdm_allocations);
-   } else {
-      hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_MAIN,
-                               &cmd->uploader.main.bos);
-      hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_USC,
-                               &cmd->uploader.usc.bos);
-      hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_ROOT,
-                               &cmd->uploader.root.bos);
-      list_for_each_entry_safe(struct hk_vdm_allocation, allocation,
-                               &cmd->vdm_allocations, link) {
-         list_del(&allocation->link);
-         hk_cmd_pool_free_vdm(pool, allocation);
-      }
+   hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_MAIN, &cmd->uploader.main.bos);
+   hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_USC, &cmd->uploader.usc.bos);
+   hk_cmd_pool_free_bo_list(pool, HK_CMD_BO_ROOT, &cmd->uploader.root.bos);
+   list_for_each_entry_safe(struct hk_vdm_allocation, allocation,
+                            &cmd->vdm_allocations, link) {
+      list_del(&allocation->link);
+      hk_cmd_pool_free_vdm(pool, allocation);
    }
 
    list_for_each_entry_safe(struct hk_cs, it, &cmd->control_streams, node) {
@@ -631,33 +619,6 @@ hk_cmd_buffer_emit_cs_jump(struct hk_cmd_buffer *cmd, void *current,
    return current;
 }
 
-/* Diagnostics for the G17P native compute/graphics route.
- *
- * The raw add3 probe and a Honeykrisp dispatch drive the *same* kernel path
- * with the same 44-byte launch + 4-byte terminate shape, yet only the
- * Honeykrisp one makes the firmware request a stamp-blamed recovery. The two
- * objects that differ are the CDM stream as a whole and the composed Ioto
- * program; both are small, so dump them verbatim and diff against the
- * known-good 48-byte add3 stream instead of reasoning about them.
- */
-static bool
-hk_g17p_push_descriptor_dedicated_bo(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("HK_G17P_PUSH_DESCRIPTOR_DEDICATED_BO", false);
-   return enabled != 0;
-}
-
-static bool
-hk_g17p_sync_push_descriptors(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = debug_get_bool_option("HK_G17P_SYNC_PUSH_DESCRIPTORS", false);
-   return enabled != 0;
-}
-
 int hk_g17p_launch_trace_state = -1;
 
 int
@@ -679,42 +640,6 @@ hk_g17p_draw_trace_init(void)
    const int enabled = HK_ENV_BOOL_ONCE("HK_G17P_DRAW_TRACE", false) ? 1 : 0;
    hk_g17p_draw_trace_state = enabled;
    return enabled;
-}
-
-/*
- * Terminate every native G17P compute launch with Apple's strong cache flush
- * (barrier flags 5) instead of the weak ordering barrier (flags 0).
- *
- * AGX2 flushes after every launch via hk_cdm_cache_flush(); the G17P native
- * dispatch path does not, so back-to-back dispatches in one CDM stream have no
- * write->read dependency. That is the shape of the G17P meta copy paths. This
- * is a one-boot probe for whether that gap is the Hyprland GMMU read fault
- * ZINK_DEBUG=sync cures; it is off by default because it cannot be decided
- * host-side.
- */
-__attribute__((hot)) bool
-hk_g17p_strong_dispatch_flush_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled =
-         HK_ENV_BOOL_ONCE("HK_G17P_STRONG_DISPATCH_FLUSH", false);
-   return enabled != 0;
-}
-
-/*
- * Per-submission and per-allocation address tracing. These fire on every queue
- * submit and every command BO, so at desktop frame rates they cost an unbuffered
- * stderr write per frame and bury everything else in the journal. They stay
- * available, they just are not the default any more.
- */
-bool
-hk_g17p_verbose_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = HK_ENV_BOOL_ONCE("HK_G17P_VERBOSE", false);
-   return enabled != 0;
 }
 
 /* Single line, distinct tag. The multi-line dump below has twice been reported
@@ -830,23 +755,17 @@ hk_trace_cmd_error(const char *file, unsigned line, VkResult error)
       mesa_loge("command buffer error %d set at %s:%u", (int)error, file, line);
 }
 
-/* frg-codegen v4: bit1 (redundant reset elision) is the default; an explicit
- * vkResetCommandBuffer followed by vkBeginCommandBuffer no longer resets the
- * buffer twice. HK_G17P_HOST_ENCODE=0 restores the double reset. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_host_encode, "HK_G17P_HOST_ENCODE", 2)
-
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_BeginCommandBuffer(VkCommandBuffer commandBuffer,
                       const VkCommandBufferBeginInfo *pBeginInfo)
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
 
-   /* v94 bit1: an explicit vkResetCommandBuffer/pool reset already left this
-    * buffer in exactly the state the implicit reset below produces (nothing
-    * can be recorded between that reset and this begin), so doing it again
-    * only repeats the teardown and the full state memset. */
-   if (!(debug_get_option_hk_g17p_host_encode() & (1u << 1)) ||
-       !cmd->g17p_pristine)
+   /* An explicit vkResetCommandBuffer/pool reset already left this buffer in
+    * exactly the state the implicit reset below produces (nothing can be
+    * recorded between that reset and this begin), so doing it again would
+    * only repeat the teardown and the full state memset. */
+   if (!cmd->g17p_pristine)
       hk_reset_cmd_buffer(&cmd->vk, 0);
    cmd->g17p_pristine = false;
    vk_command_buffer_begin(&cmd->vk, pBeginInfo);
@@ -1340,68 +1259,12 @@ hk_cmd_buffer_flush_push_descriptors(struct hk_cmd_buffer *cmd,
 {
    u_foreach_bit(set_idx, desc->push_dirty) {
       struct hk_push_descriptor_set *push_set = desc->push[set_idx];
-      uint64_t push_set_addr;
-      struct hk_device *dev = hk_cmd_buffer_device(cmd);
-      const bool dedicated_g17p_descriptor_bo =
-         dev->dev.chip == AGX_CHIP_G17P &&
-         hk_g17p_push_descriptor_dedicated_bo();
-      if (dedicated_g17p_descriptor_bo) {
-         /* G17P diagnostic: keep the pushed descriptor snapshot out of the
-          * mixed command uploader whose BO may also acquire a low VDM alias.
-          * Allocated descriptor-pool BOs work for both combined and separate
-          * samples; this makes backing/alias class the only changed variable. */
-         struct agx_bo *bo = agx_bo_create(
-            &dev->dev, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT, 0,
-            "G17P pushed descriptor diagnostic");
-         if (!bo) {
-            vk_command_buffer_set_error(&cmd->vk,
-                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
-            return;
-         }
-
-         void *map = agx_bo_map(bo);
-         if (!map) {
-            agx_bo_unreference(&dev->dev, bo);
-            vk_command_buffer_set_error(&cmd->vk,
-                                        VK_ERROR_MEMORY_MAP_FAILED);
-            return;
-         }
-         memcpy(map, push_set->data, sizeof(push_set->data));
-         if (agx_bo_sync_for_device(bo, 0, sizeof(push_set->data))) {
-            agx_bo_unreference(&dev->dev, bo);
-            vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
-            return;
-         }
-         util_dynarray_append(&cmd->large_bos, bo);
-         push_set_addr = bo->va->addr;
-      } else {
-         push_set_addr = hk_pool_upload(
-            cmd, push_set->data, sizeof(push_set->data),
-            HK_MIN_UBO_ALIGNMENT);
-      }
+      const uint64_t push_set_addr = hk_pool_upload(
+         cmd, push_set->data, sizeof(push_set->data), HK_MIN_UBO_ALIGNMENT);
 
       if (hk_g17p_launch_trace_enabled())
          hk_g17p_trace_line("push-descriptor-set", push_set_addr,
                             push_set->data, sizeof(push_set->data));
-
-      if (!dedicated_g17p_descriptor_bo && hk_g17p_sync_push_descriptors()) {
-         bool found = false;
-         list_for_each_entry(struct hk_cmd_bo, bo,
-                             &cmd->uploader.main.bos, link) {
-            const uint64_t base = bo->bo->va->addr;
-            if (push_set_addr < base ||
-                push_set_addr - base > bo->bo->size - sizeof(push_set->data))
-               continue;
-            found = true;
-            if (agx_bo_sync_for_device(bo->bo, push_set_addr - base,
-                                       sizeof(push_set->data)))
-               vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
-            break;
-         }
-         if (!found)
-            vk_command_buffer_set_error(&cmd->vk,
-                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
-      }
 
       desc->root.sets[set_idx] = push_set_addr;
       desc->set_sizes[set_idx] = sizeof(push_set->data);
