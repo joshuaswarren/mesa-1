@@ -319,6 +319,20 @@ enum d12_dxbc_op {
    D12_DXBC_OP_DCL_INDEXABLE_TEMP = 105,
    D12_DXBC_OP_DCL_GLOBAL_FLAGS = 106,
    D12_DXBC_OP_DCL_THREAD_GROUP = 155,
+   D12_DXBC_OP_GATHER4_S = 219,
+   D12_DXBC_OP_GATHER4_C_S = 220,
+   D12_DXBC_OP_GATHER4_PO_S = 221,
+   D12_DXBC_OP_GATHER4_PO_C_S = 222,
+   D12_DXBC_OP_LD_S = 223,
+   D12_DXBC_OP_LD_MS_S = 224,
+   D12_DXBC_OP_LD_UAV_TYPED_S = 225,
+   D12_DXBC_OP_SAMPLE_L_S = 228,
+   D12_DXBC_OP_SAMPLE_C_LZ_S = 229,
+   D12_DXBC_OP_SAMPLE_CLAMP_S = 230,
+   D12_DXBC_OP_SAMPLE_B_CLAMP_S = 231,
+   D12_DXBC_OP_SAMPLE_D_CLAMP_S = 232,
+   D12_DXBC_OP_SAMPLE_C_CLAMP_S = 233,
+   D12_DXBC_OP_CHECK_ACCESS_FULLY_MAPPED = 234,
 };
 
 /* Public token encoding from Microsoft's D3D12TokenizedProgramFormat.hpp.
@@ -342,6 +356,8 @@ enum d12_dxbc_op {
 #define D12_DXBC_RESINFO_RETURN_TYPE_SHIFT 11
 #define D12_DXBC_RESINFO_RETURN_FLOAT      0
 #define D12_DXBC_RESINFO_RETURN_UINT       2
+#define D12_DXBC_RESOURCE_RETURN_UNORM     1
+#define D12_DXBC_RESOURCE_RETURN_SNORM     2
 #define D12_DXBC_RESOURCE_RETURN_SINT      3
 #define D12_DXBC_RESOURCE_RETURN_UINT      4
 #define D12_DXBC_RESOURCE_RETURN_FLOAT     5
@@ -3505,7 +3521,63 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
       }                                                                      \
    } while (0)
 
+      /* SM5 sparse instructions insert a residency destination after the
+       * data destination, and the clamp forms append an optional minimum
+       * LOD. Normalize their operand shape before sharing ordinary texture
+       * translation. This follows DXVK's zlib-licensed instruction formats
+       * (v2.7.1 dxbc_defs.cpp); the NIR residency path is shared with DXIL.
+       */
+      unsigned ordinary_opcode = opcode;
+      bool instruction_clamp = false;
       switch (opcode) {
+      case D12_DXBC_OP_GATHER4_S: ordinary_opcode = D12_DXBC_OP_GATHER4; break;
+      case D12_DXBC_OP_GATHER4_C_S: ordinary_opcode = D12_DXBC_OP_GATHER4_C; break;
+      case D12_DXBC_OP_GATHER4_PO_S: ordinary_opcode = D12_DXBC_OP_GATHER4_PO; break;
+      case D12_DXBC_OP_GATHER4_PO_C_S: ordinary_opcode = D12_DXBC_OP_GATHER4_PO_C; break;
+      case D12_DXBC_OP_LD_S: ordinary_opcode = D12_DXBC_OP_LD; break;
+      case D12_DXBC_OP_LD_MS_S: ordinary_opcode = D12_DXBC_OP_LD_MS; break;
+      case D12_DXBC_OP_LD_UAV_TYPED_S: ordinary_opcode = D12_DXBC_OP_LD_UAV_TYPED; break;
+      case D12_DXBC_OP_SAMPLE_L_S: ordinary_opcode = D12_DXBC_OP_SAMPLE_L; break;
+      case D12_DXBC_OP_SAMPLE_C_LZ_S: ordinary_opcode = D12_DXBC_OP_SAMPLE_C_LZ; break;
+      case D12_DXBC_OP_SAMPLE_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE; instruction_clamp = true; break;
+      case D12_DXBC_OP_SAMPLE_B_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE_B; instruction_clamp = true; break;
+      case D12_DXBC_OP_SAMPLE_D_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE_D; instruction_clamp = true; break;
+      case D12_DXBC_OP_SAMPLE_C_CLAMP_S:
+         ordinary_opcode = D12_DXBC_OP_SAMPLE_C; instruction_clamp = true; break;
+      default: break;
+      }
+      bool sparse = ordinary_opcode != opcode;
+      struct d12_dxbc_operand feedback_dst = {0};
+      nir_def *instruction_min_lod = NULL;
+      if (sparse) {
+         NEED(2);
+         feedback_dst = o[1];
+         memmove(&o[1], &o[2], (nops - 2) * sizeof(o[0]));
+         nops--;
+         opcode = ordinary_opcode;
+         if (instruction_clamp) {
+            NEED(5);
+            if (o[nops - 1].file != D12_DXBC_FILE_NULL)
+               instruction_min_lod = nir_channel(b, SRC(nops - 1), 0);
+            nops--;
+         }
+         /* A null feedback destination needs the same sampling/clamp
+          * semantics, but no hardware residency result or extra lane. */
+         sparse = feedback_dst.file != D12_DXBC_FILE_NULL;
+      }
+
+      switch (opcode) {
+      case D12_DXBC_OP_CHECK_ACCESS_FULLY_MAPPED: {
+         NEED(2);
+         nir_def *resident = nir_is_sparse_texels_resident(
+            b, 1, nir_channel(b, SRC(1), 0));
+         DST(nir_replicate(b, nir_bcsel(b, resident, nir_imm_int(b, -1),
+                                       nir_imm_int(b, 0)), 4));
+         break;
+      }
       case D12_DXBC_OP_MOV:      NEED(2); DST(SRC(1)); break;
       case D12_DXBC_OP_ADD:      NEED(3); DST(nir_fadd(b, SRC(1), SRC(2))); break;
       case D12_DXBC_OP_MUL:      NEED(3); DST(nir_fmul(b, SRC(1), SRC(2))); break;
@@ -4356,7 +4428,9 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             unsigned return_type = ctx->uav_return_type[reg];
             if ((dim != D12_DXBC_RESOURCE_DIMENSION_TEXTURE_1D &&
                  dim != D12_DXBC_RESOURCE_DIMENSION_TEXTURE_2D && !is_array) ||
-                (return_type != D12_DXBC_RESOURCE_RETURN_FLOAT &&
+                (return_type != D12_DXBC_RESOURCE_RETURN_UNORM &&
+                 return_type != D12_DXBC_RESOURCE_RETURN_SNORM &&
+                 return_type != D12_DXBC_RESOURCE_RETURN_FLOAT &&
                  return_type != D12_DXBC_RESOURCE_RETURN_UINT &&
                  return_type != D12_DXBC_RESOURCE_RETURN_SINT) ||
                 (resource->num_indices != 1 && resource->num_indices != 2)) {
@@ -4401,6 +4475,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
              * array layer rather than interpreting it as a 1D coordinate. */
             tex->sampler_dim = GLSL_SAMPLER_DIM_2D;
             tex->is_array = is_array;
+            tex->is_sparse = sparse;
             tex->dest_type = return_type == D12_DXBC_RESOURCE_RETURN_UINT
                                 ? nir_type_uint32
                              : return_type == D12_DXBC_RESOURCE_RETURN_SINT
@@ -4418,13 +4493,21 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                      : nir_trim_vector(b, coord, tex->coord_components);
             tex->src[1] =
                nir_tex_src_for_ssa(nir_tex_src_coord, physical_coord);
-            nir_def_init(&tex->instr, &tex->def, 4, 32);
+            nir_def_init(&tex->instr, &tex->def, sparse ? 5 : 4, 32);
             nir_builder_instr_insert(b, &tex->instr);
 
             unsigned rs[4] = {resource->swizzle[0], resource->swizzle[1],
                               resource->swizzle[2], resource->swizzle[3]};
             DST(nir_swizzle(b, &tex->def, rs, 4));
+            if (sparse)
+               write_dst(ctx, &feedback_dst,
+                         nir_replicate(b, nir_channel(b, &tex->def, 4), 4));
             break;
+         }
+
+         if (sparse) {
+            fail(ctx, "DXBC buffer feedback requires buffer residency translation");
+            return;
          }
 
          if (uav) {
@@ -5122,6 +5205,10 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
          bool is_buffer =
             is_ld && !is_ld_ms && tex_reg < D12_DXBC_MAX_SIG &&
             ctx->srv_dim[tex_reg] == D12_DXBC_RESOURCE_DIMENSION_BUFFER;
+         if (sparse && is_buffer) {
+            fail(ctx, "DXBC buffer feedback requires buffer residency translation");
+            return;
+         }
          unsigned resource_dim = tex_reg < D12_DXBC_MAX_SIG
                                     ? ctx->srv_dim[tex_reg]
                                     : D12_DXBC_RESOURCE_DIMENSION_TEXTURE_2D;
@@ -5294,6 +5381,11 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             }
          }
 
+         if (instruction_min_lod)
+            view_min_lod = view_min_lod
+                              ? nir_fmax(b, view_min_lod, instruction_min_lod)
+                              : instruction_min_lod;
+
          bool implicit_min_lod = view_min_lod && !is_ld && !has_lod &&
                                  !has_grad && !has_bias && !gather;
 
@@ -5325,6 +5417,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
                                                : sampler_dim;
          tex->is_array = !is_buffer && is_array;
          tex->is_shadow = compare;
+         tex->is_sparse = sparse;
          tex->dest_type = nir_type_float32;
          tex->coord_components = is_buffer          ? 1
                                  : physical_1d_load ? (is_array ? 3 : 2)
@@ -5464,7 +5557,7 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             }
          }
 
-         nir_def_init(&tex->instr, &tex->def, 4, 32);
+         nir_def_init(&tex->instr, &tex->def, sparse ? 5 : 4, 32);
          nir_builder_instr_insert(b, &tex->instr);
 
          /* The RESOURCE operand's swizzle reorders the result. */
@@ -5483,6 +5576,9 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
             result = nir_bcsel(b, view_min_lod_oob,
                                nir_imm_vec4(b, 0, 0, 0, 0), result);
          DST(result);
+         if (sparse)
+            write_dst(ctx, &feedback_dst,
+                      nir_replicate(b, nir_channel(b, &tex->def, 4), 4));
          break;
       }
 
@@ -5600,12 +5696,8 @@ translate_tokens(struct d12_dxbc_ctx *ctx)
 /*
  * Translate a DXBC container to NIR.
  *
- * STATUS: the token decoder and the scalar/vector ALU set are in place
- * and verified against real fxc output. Control flow (if/else/loop/
- * break), resource access (sample/ld/store) and the structured
- * declarations are NOT yet translated -- those opcodes fail the shader
- * rather than being skipped, because a silently skipped instruction
- * yields a shader that runs and is wrong.
+ * Unsupported opcode/operand combinations fail translation by name.
+ * See docs/shader-gaps.md for the measured coverage and remaining gaps.
  */
 nir_shader *
 d12_dxbc_to_nir(const void *data, size_t size_B, mesa_shader_stage stage,

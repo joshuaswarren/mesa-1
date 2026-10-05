@@ -609,6 +609,18 @@ d3d12agx_texture_descriptor_depth_tests = executable(
 test('d3d12agx_texture_descriptor_depth', d3d12agx_texture_descriptor_depth_tests,
      suite : ['asahi', 'd3d12'])
 
+d3d12agx_dxbc_sparse_tests = executable(
+  'd3d12agx_dxbc_sparse_tests',
+  files('tests/d12_dxbc_sparse_tests.c'),
+  include_directories : [inc_include, inc_src, inc_asahi],
+  dependencies : [idep_nir, idep_mesautil, idep_agx_pack, idep_libagx],
+  link_with : [libd3d12agx_core, libasahi_lib, libasahi_layout,
+               libasahi_compiler, libagx2_disasm, libagx3b_disasm, libpoly_nir],
+  c_args : ['-UNDEBUG'],
+)
+test('d3d12agx_dxbc_sparse', d3d12agx_dxbc_sparse_tests,
+     suite : ['asahi', 'd3d12'])
+
 # Supplemental live API validation; the frozen G1 suite remains unchanged.
 executable(
   'd3d12agx_createheap_validation',
