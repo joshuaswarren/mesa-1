@@ -1342,7 +1342,9 @@ d12_queue_enqueue_locked(struct d12_queue *queue, struct d12_queue_op *op)
    else
       queue->op_head = op;
    queue->op_tail = op;
-   cnd_signal(&queue->work_available);
+   /* work_available is also waited on by threads other than the worker
+    * (queue teardown); wake them all rather than one arbitrary waiter. */
+   cnd_broadcast(&queue->work_available);
    return true;
 }
 
@@ -1356,7 +1358,11 @@ d12_queue_retire_enqueue(struct d12_queue *queue, struct d12_queue_op *op)
    else
       queue->retire_head = op;
    queue->retire_tail = op;
-   cnd_signal(&queue->retire_available);
+   /* retire_available is shared by the retire worker, submit-capacity
+    * waiters and signal-slot waiters. cnd_signal could wake a capacity
+    * waiter whose predicate is still false and leave the retire worker
+    * parked until its fallback timeout; broadcast reaches the right one. */
+   cnd_broadcast(&queue->retire_available);
    mtx_unlock(&queue->lock);
 }
 
