@@ -241,3 +241,46 @@ mesh/AS on G17P) need, from this structure:
   segment splits) once vkd3d-proton tests exercise them.
 * Native G17P tessellation (hk `hk_g17p_tess_is_native`) after the software route is green.
 * Per-chip capability audit (D7) with the orchestrator's contract for G1.
+
+## 7. Results of the executed series (2026-10-05)
+
+Series on branch `ctl/t-1082-...`, on top of t-1081's ae23ffebb9d:
+
+| step | commit | change |
+|---|---|---|
+| S0 | 6615044a005 | `d3d12agx_microbench` |
+| S1 | e7bcec55e79 | ID3D12Device3..15 on one complete vtable, CreateCommandList1, SetName(NULL), EnableExperimentalFeatures(0); `tests/device_interfaces.c` |
+| S3 | 0a7ed778d1f | root-generation keyed binding cache + plane-only re-root |
+| S4+S5 | 4414b585468 | 4-way binding cache, bounded USC probes, read set gated off on DRM (`device->submit_read_set`) |
+| S2 | 1d5c3a64d7a | `d12_debug()`: all knobs parsed once |
+| S6 | 554d3e7a777 | allocator-owned command storage pool, lists reference their allocator |
+| S7 | b67b8dc4dd1 | DXIL signature cache, module off the stack |
+
+Microbenchmark, median of 3 runs, debugoptimized build (M2 in brackets):
+
+| metric | before (ae23) | after (b67b) | gain |
+|---|---|---|---|
+| record plain draw | 984 ns [942] | 94 ns [86] | 10.5x |
+| record draw + root constant | 15 779 ns [15 299] | 661 ns [628] | 24x |
+| record draw + viewport | 1 001 ns [962] | 105 ns [100] | 9.5x |
+| record draw + PSO/root-sig toggle | 6 000 ns [5 819] | 142 ns [116] | 42x |
+| record dispatch | 1 055 ns [1 019] | 65 ns [62] | 16x |
+| record dispatch + table switch | 2 635 ns [2 538] | 127 ns [109] | 21x |
+| graphics PSO create (median) | 1.06 ms [1.10] | 0.53 ms [0.48] | 2.0x |
+| compute PSO create (median) | 2.08 ms [2.04] | 2.24 ms [1.98] | compile-bound, unchanged |
+| allocator + list Reset after submit | 335 us [307] | 11.7 us [6.8] | 29x |
+| ExecuteCommandLists, 20k dispatches | 3 623 us [3 395] | 5.3 us [3.7] | 690x |
+| ExecuteCommandLists, 20k draws | 15.3 us [8.7] | 7.6 us [6.6] | 2x |
+| one-draw submit round trip (median) | 362 us [264] | 278 us [168] | 1.3x |
+| CBV descriptor write (visible heap) | 77 ns | 84 ns [73] | unchanged (B9 not done) |
+
+Frozen 17 suites: 11/17 on M1 Pro and M2 at every step (g1 x3 and g5_depth x3 are the
+documented contradictions; g6-g9 are refused at PSO creation with "incompatible shader
+signatures" for the 2026-10-05 fixture descriptions, unchanged from the base).
+`device_interfaces`: ALL PASS at every step. Raw logs and JSON records:
+`<aurora-ctl>/reports/d3d12-stats/t-1082-*`.
+
+Not executed from the plan (next in order): S8 queue wakeups/timeline deps (B11), S9
+descriptor registry (B9), the chip-ops split (S9/D1), the per-PSO NIR/binary frees and
+prolog/epilog/fast-link caches (A9/B10 rest), the "to end of heap" texture repack (B1
+core, not exercised by the microbenchmark), and the correctness items A3-A6, A10-A14.
