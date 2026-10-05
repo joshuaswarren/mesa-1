@@ -87,6 +87,24 @@ then real titles; pass/fail and frame time recorded against the current tool.
   sample source stays untouched. `samples/include/d3dx12/d3dx12.h` is a small
   shim of the public helpers (mingw's d3d12.h predates the real d3dx12.h).
 
+## Running the tests on the Neo (what the first runs taught)
+* Every attempt-3 run under *both* tools timed out at 240 s without the test
+  exe ever loading. The Proton log showed why: a fresh prefix (wineboot,
+  wine-mono, explorer, tabtip) plus Proton's accessibility helper `xalia.exe`
+  (.NET under FEX) consumed the whole budget. The harness now warms each
+  tool's prefix once with a 9-minute budget and sets `PROTON_USE_XALIA=0`
+  for both tools (the `proton` script honours it) so later runs measure the
+  driver, not the prefix bring-up.
+* The tool wrapper logs `page=16384` for `runinprefix` because it records
+  `getconf PAGE_SIZE` *before* re-executing itself through the 4K page
+  helper, which then asserts 4096; Steam launches show `page=4096` only
+  because Steam already runs in 4K mode. The tests are 4K processes either way.
+* The wrapper must not override a caller's `PROTON_LOG_DIR`, otherwise the
+  per-run Proton logs vanish into the tool's `aurora-game-logs`.
+* `install-proton-tool.sh --refresh` swaps a rebuilt pair + wrapper into the
+  installed tool; `SUITE_ONLY` splits the 17 suites into short batches so an
+  exclusive hardware request stays under ten minutes.
+
 ## Risks / open
 * ARM64EC Mesa build has never been done: expect a few compiler/ABI fixes.
   Found so far: clang's arm64ec target predefines `__x86_64__` (not
