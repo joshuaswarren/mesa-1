@@ -2269,11 +2269,15 @@ agx_ra(agx_context *ctx)
    const unsigned tile_gpr_limit = agx3_tile_store_bank(ctx);
 
    agx_foreach_instr_global(ctx, I) {
-      /* Native G17P sinc and its fused quadrant selects use the bounded
-       * seven-bit operand forms. Constrain only these SSA webs. */
+      /* The G17P funop encoder and fused quadrant selects use the bounded
+       * seven-bit operand forms. Constrain only their SSA webs; unrelated
+       * values retain the complete register file. */
       if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
           (I->op == AGX_OPCODE_SINC_AGX3 ||
-           I->op == AGX_OPCODE_BITTEST_SELECT_AGX3)) {
+           I->op == AGX_OPCODE_BITTEST_SELECT_AGX3 ||
+           (I->op == AGX_OPCODE_TRUNC && I->nr_dests == 1 &&
+            I->dest[0].size == AGX_SIZE_32) ||
+           I->op == AGX_OPCODE_DFDX || I->op == AGX_OPCODE_DFDY)) {
          agx_foreach_ssa_src(I, s)
             BITSET_SET(texture_gpr, I->src[s].value);
          agx_foreach_ssa_dest(I, d)

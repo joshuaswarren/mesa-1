@@ -11232,7 +11232,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 !agx3_vary_reg32(dest) ||
                 !agx3_src_is_register(src) || src.memory ||
                 agx_channels(dest) != 1 || agx_channels(src) != 1 ||
-                src.neg || src.kill || (src.abs && half) ||
+                (src.neg && half) || src.kill || (src.abs && half) ||
                 (src.cache && src.discard))
                AGX3_REFUSE(I);
             uint8_t bytes[AGX3_ALU_MAX_LENGTH],len;
@@ -11242,9 +11242,9 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                                               true, wait, bytes, &len)
                     : (src.size == AGX_SIZE_32 && !(src.value & 1) &&
                        src.value < 256 &&
-                       agx3_alu_sqrt_step_mod(enc, dest.value, src.value,
+                       agx3_alu_sqrt_step_source_modifiers(enc, dest.value, src.value,
                                               agx3_post_ra_hint(src),
-                                              dest.cache, wait, src.abs,
+                                              dest.cache, wait, src.abs, src.neg,
                                               bytes, &len));
             if (!ok || !agx3_append(emission,bytes,len))
                AGX3_REFUSE(I);
