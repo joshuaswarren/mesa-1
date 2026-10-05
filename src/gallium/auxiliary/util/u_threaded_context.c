@@ -134,6 +134,8 @@ struct tc_batch_rp_info {
    struct util_queue_fence ready;
    /* the call that set 'ended' (increment info after) */
    void *end_call;
+   /* this info was copied from an info in the previous batch which had already ended */
+   bool ended_before_batch;
    /* when a batch is full, the rp info rollsover onto 'next' */
    struct tc_batch_rp_info *next;
    /* when rp info has rolled over onto this struct, 'prev' is used to update pointers for realloc */
@@ -282,6 +284,7 @@ tc_batch_increment_renderpass_info(struct threaded_context *tc, unsigned batch_i
       /* copy the previous data in its entirety: this is still the same renderpass */
       if (tc->renderpass_info_recording) {
          tc_info[batch->renderpass_info_idx].info.data = tc->renderpass_info_recording->data;
+         tc_info[batch->renderpass_info_idx].ended_before_batch = tc->renderpass_info_recording->ended;
          memcpy(tc_info[batch->renderpass_info_idx].info.resolve, tc->renderpass_info_recording->resolve, sizeof(tc->renderpass_info_recording->resolve));
          memset(tc->renderpass_info_recording->resolve, 0, sizeof(tc->renderpass_info_recording->resolve));
          tc_batch_rp_info(tc->renderpass_info_recording)->next = &tc_info[batch->renderpass_info_idx];
@@ -290,6 +293,7 @@ tc_batch_increment_renderpass_info(struct threaded_context *tc, unsigned batch_i
          assert(&tc_batch_rp_info(tc->renderpass_info_recording)->next->info != tc->renderpass_info_recording);
       } else {
          tc_info[batch->renderpass_info_idx].info.data = 0;
+         tc_info[batch->renderpass_info_idx].ended_before_batch = false;
          for (unsigned i = 0; i < ARRAY_SIZE(tc_info[batch->renderpass_info_idx].info.resolve); i++)
             pipe_resource_reference(&tc_info[batch->renderpass_info_idx].info.resolve[i], NULL);
          tc_info[batch->renderpass_info_idx].prev = NULL;
@@ -297,6 +301,7 @@ tc_batch_increment_renderpass_info(struct threaded_context *tc, unsigned batch_i
    } else {
       /* selectively copy: only the CSO metadata is copied, and a new framebuffer state will be added later */
       tc_info[batch->renderpass_info_idx].info.data = 0;
+      tc_info[batch->renderpass_info_idx].ended_before_batch = false;
       for (unsigned i = 0; i < ARRAY_SIZE(tc_info[batch->renderpass_info_idx].info.resolve); i++)
          pipe_resource_reference(&tc_info[batch->renderpass_info_idx].info.resolve[i], NULL);
       if (tc->renderpass_info_recording) {
@@ -785,6 +790,9 @@ _tc_sync(struct threaded_context *tc, UNUSED const char *info, UNUSED const char
          tc->renderpass_info_recording->data32[0] = 0;
       }
       tc->renderpass_info_recording->ended = false;
+      /* the batch has executed, so a reused info must not match calls recorded after this */
+      tc_batch_rp_info(tc->renderpass_info_recording)->end_call = NULL;
+      tc_batch_rp_info(tc->renderpass_info_recording)->ended_before_batch = false;
       tc->seen_fb_state = false;
       tc->query_ended = false;
    }
@@ -3667,6 +3675,7 @@ tc_flush(struct pipe_context *_pipe, struct pipe_fence_handle **fence,
    struct pipe_screen *screen = pipe->screen;
    bool async = flags & (PIPE_FLUSH_DEFERRED | PIPE_FLUSH_ASYNC);
    bool deferred = (flags & PIPE_FLUSH_DEFERRED) > 0;
+   bool ended = tc->renderpass_info_recording && tc->renderpass_info_recording->ended;
 
    if (!deferred || !fence) {
       tc->in_renderpass = false;
@@ -3703,6 +3712,9 @@ tc_flush(struct pipe_context *_pipe, struct pipe_fence_handle **fence,
       }
       p->fence = fence ? *fence : NULL;
       p->flags = flags | TC_FLUSH_ASYNC;
+      /* a deferred flush without a fence ends the renderpass but stays in this batch */
+      if (deferred && tc->renderpass_info_recording && !ended && tc->renderpass_info_recording->ended)
+         tc_batch_rp_info(tc->renderpass_info_recording)->end_call = p;
 
       if (!deferred) {
          /* non-deferred async flushes indicate completion of existing renderpass info */
@@ -5318,7 +5330,11 @@ batch_execute(struct tc_batch *batch, struct pipe_context *pipe, bool parsing)
     * begin incrementing renderpass info on the first set_framebuffer_state call
     */
    bool increment_rp_info_on_fb = batch->increment_rp_info_on_fb;
-   bool increment_rp_info_on_draw_clear = false;
+   /* if the renderpass info carried over from the previous batch had already ended,
+    * the first draw/clear in this batch was recorded with a new one
+    */
+   bool increment_rp_info_on_draw_clear = parsing &&
+      tc_batch_rp_info(batch->tc->renderpass_info)->ended_before_batch;
    uint64_t *iter = batch->slots;
 
    while (1) {
@@ -5330,6 +5346,19 @@ batch_execute(struct tc_batch *batch, struct pipe_context *pipe, bool parsing)
          tc_printf("CALL: %s", tc_call_names[call->call_id]);
 #endif
       TC_TRACE_SCOPE(call->call_id);
+
+      /* the recorder incremented the renderpass info before recording this draw/clear
+       * (see tc_parse_draw and tc_clear), so the driver must see the new info while executing it
+       */
+      if (parsing && increment_rp_info_on_draw_clear &&
+          (call->call_id == TC_CALL_draw_single ||
+           call->call_id == TC_CALL_draw_multi ||
+           call->call_id == TC_CALL_clear ||
+           (call->call_id >= TC_CALL_draw_single_drawid &&
+            call->call_id <= TC_CALL_draw_vstate_multi))) {
+         batch->tc->renderpass_info = incr_rp_info(batch->tc->renderpass_info);
+         increment_rp_info_on_draw_clear = false;
+      }
 
       /* This executes the call using a switch. */
       switch (call->call_id) {
@@ -5359,19 +5388,6 @@ batch_execute(struct tc_batch *batch, struct pipe_context *pipe, bool parsing)
             increment_rp_info_on_draw_clear = false;
          } else if (call == tc_batch_rp_info(batch->tc->renderpass_info)->end_call) {
             increment_rp_info_on_draw_clear = true;
-         } else if (increment_rp_info_on_draw_clear) {
-            switch (call->call_id) {
-            case TC_CALL_clear:
-            case TC_CALL_draw_single:
-            case TC_CALL_draw_multi:
-            case TC_CALL_draw_single_drawid:
-            case TC_CALL_draw_vstate_multi:
-               batch->tc->renderpass_info = incr_rp_info(batch->tc->renderpass_info);
-               increment_rp_info_on_draw_clear = false;
-               break;
-            default:
-               break;
-            }
          }
       }
    }
