@@ -1602,6 +1602,7 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    struct agx_shader_part part;
    memset(&part, 0, sizeof(part));
    const bool compiled = agx_compile_shader_nir(nir, &key, &part);
+   ralloc_free(nir);
    /* agx_nir_lower_texture consumes a dynamic sampler handle before the
     * backend can conservatively set this bit.  The root map remains the
     * authoritative declaration that the hardware sampler heap is needed. */
@@ -2721,6 +2722,7 @@ compile_gfx_stage(struct d12_device *device,
                        out->info.binary_size - out->info.main_offset, stderr);
    }
 
+   ralloc_free(nir);
    return compiled && out->binary && out->info.binary_size;
 }
 
@@ -2728,7 +2730,7 @@ compile_gfx_stage(struct d12_device *device,
  * Finish one of the programs poly_nir_lower_gs produced. `uvs` non-NULL
  * marks the RASTERIZATION program, which is a hardware vertex shader and
  * therefore needs the unified-vertex-store lowering; the others are
- * compute.
+ * compute. Takes ownership of `nir` and frees it.
  */
 static bool
 compile_poly_program(struct d12_device *device, nir_shader *nir,
@@ -2783,6 +2785,7 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
                        stderr);
    }
 
+   ralloc_free(nir);
    return out->binary && out->info.binary_size;
 }
 
@@ -3038,34 +3041,62 @@ compile_gs_nir(struct d12_device *device, nir_shader *nir,
    NIR_PASS(_, nir, d12_nir_lower_flat_output_transport, flat_transport);
    NIR_PASS(_, nir, poly_nir_lower_gs, &gs_count, &gs_copy, &pre_gs, gs_info);
 
+   /* poly clones the three derived programs with no ralloc parent, so each
+    * one is released separately: compile_poly_program frees what it is
+    * handed, the rest are freed here. */
+   bool ok = false;
+   memset(count_out, 0, sizeof(*count_out));
+   memset(pre_out, 0, sizeof(*pre_out));
+   memset(main_out, 0, sizeof(*main_out));
+   memset(rast_out, 0, sizeof(*rast_out));
+
    if (gs_info->shape < POLY_GS_SHAPE_DYNAMIC_INDEXED ||
        gs_info->shape > POLY_GS_SHAPE_STATIC_PER_INSTANCE) {
       mesa_loge("graphics PSO: geometry lowering produced invalid "
                 "rasterization shape %d", gs_info->shape);
-      return false;
+      goto out;
    }
 
    if (!gs_copy) {
       mesa_loge("graphics PSO: geometry lowering produced no rasterization "
                 "program");
-      return false;
+      goto out;
    }
 
-   memset(count_out, 0, sizeof(*count_out));
-   memset(pre_out, 0, sizeof(*pre_out));
-   if (gs_count && !compile_poly_program(device, gs_count, NULL, count_out))
-      return false;
-   if (pre_gs && !compile_poly_program(device, pre_gs, NULL, pre_out))
-      return false;
-   if (gs_info->xfb && (!pre_gs || !pre_out->binary)) {
+   if (gs_count) {
+      const bool compiled =
+         compile_poly_program(device, gs_count, NULL, count_out);
+      gs_count = NULL;
+      if (!compiled)
+         goto out;
+   }
+   if (pre_gs) {
+      const bool compiled = compile_poly_program(device, pre_gs, NULL, pre_out);
+      pre_gs = NULL;
+      if (!compiled)
+         goto out;
+   }
+   if (gs_info->xfb && !pre_out->binary) {
       mesa_loge("graphics PSO: transform feedback produced no pre-GS program");
-      return false;
+      goto out;
    }
 
-   if (!compile_poly_program(device, nir, NULL, main_out))
-      return false;
+   {
+      const bool compiled = compile_poly_program(device, nir, NULL, main_out);
+      nir = NULL;
+      if (!compiled)
+         goto out;
+   }
 
-   return compile_poly_program(device, gs_copy, rast_uvs, rast_out);
+   ok = compile_poly_program(device, gs_copy, rast_uvs, rast_out);
+   gs_copy = NULL;
+
+out:
+   ralloc_free(gs_count);
+   ralloc_free(pre_gs);
+   ralloc_free(gs_copy);
+   ralloc_free(nir);
+   return ok;
 }
 
 /*
@@ -3756,15 +3787,17 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    struct d12_pipeline_state *pso =
       d12_pso_from_iface((ID3D12PipelineState *)*out);
 
+   /* Every compiled part is released at `fail` on both paths. */
+   struct agx_shader_part ms_part = {0}, setup_part = {0}, rast_part = {0};
+   struct agx_shader_part prolog = {0}, as_part = {0}, as_setup_part = {0};
+
    /* The mesh shader itself, as compute. */
-   struct agx_shader_part ms_part;
    nir_shader *ms = dxil_to_nir_stage(
       map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
       ms_dxil, ms_size, MESA_SHADER_COMPUTE, NULL);
    if (!ms) {
-      ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-      *out = NULL;
-      return E_INVALIDARG;
+      hr = E_INVALIDARG;
+      goto fail;
    }
 
    pso->ms_workgroup[0] = MAX2(ms->info.workgroup_size[0], 1);
@@ -3773,16 +3806,13 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    pso->ms_outputs = ms->info.outputs_written;
 
    if (!compile_poly_program(device, ms, NULL, &ms_part)) {
-      ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-      *out = NULL;
-      return E_INVALIDARG;
+      hr = E_INVALIDARG;
+      goto fail;
    }
 
-   struct agx_shader_part setup_part;
    if (!compile_poly_program(device, build_ms_setup(), NULL, &setup_part)) {
-      ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-      *out = NULL;
-      return E_INVALIDARG;
+      hr = E_INVALIDARG;
+      goto fail;
    }
 
    const struct {
@@ -3801,27 +3831,23 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
       *cs[i].bo = agx_bo_create(&device->dev, cs[i].part->info.binary_size, 0,
                                 AGX_BO_EXEC | AGX_BO_LOW_VA, cs[i].name);
       if (!*cs[i].bo) {
-         ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-         *out = NULL;
-         return E_OUTOFMEMORY;
+         hr = E_OUTOFMEMORY;
+         goto fail;
       }
       if (!d12_upload_executable(*cs[i].bo, cs[i].part->binary,
                                  cs[i].part->info.binary_size)) {
-         ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-         *out = NULL;
-         return E_FAIL;
+         hr = E_FAIL;
+         goto fail;
       }
       *cs[i].va = (*cs[i].bo)->va->addr;
       *cs[i].info = cs[i].part->info;
    }
 
    /* The rasterization vertex shader, linked like any other. */
-   struct agx_shader_part rast_part;
    if (!compile_poly_program(device, build_ms_rast(pso->ms_outputs),
                              &pso->ms_uvs, &rast_part)) {
-      ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-      *out = NULL;
-      return E_INVALIDARG;
+      hr = E_INVALIDARG;
+      goto fail;
    }
 
    struct agx_vs_prolog_key pk = {.hw = true, .static_vi = true};
@@ -3833,18 +3859,14 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    };
    nir_builder pb = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
    agx_nir_vs_prolog(&pb, &pk);
-   struct agx_shader_part prolog;
-   memset(&prolog, 0, sizeof(prolog));
    agx_compile_shader_nir(pb.shader, &pbk, &prolog);
    ralloc_free(pb.shader);
 
    bool linked = agx_fast_link(&pso->ms_rast.linked, &device->dev, false,
                                &rast_part, &prolog, NULL, 0);
-   free(prolog.binary);
    if (!linked) {
-      ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-      *out = NULL;
-      return E_OUTOFMEMORY;
+      hr = E_OUTOFMEMORY;
+      goto fail;
    }
    pso->ms_rast.info = rast_part.info;
    agx_assign_uvs(&pso->ms_varyings, &pso->ms_uvs, 0, 0);
@@ -3855,15 +3877,13 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
          agx_bo_create(&device->dev, rast_part.info.binary_size, 0,
                        AGX_BO_EXEC | AGX_BO_LOW_VA, "d3d12 mesh rast");
       if (!pso->ms_rast.code_bo) {
-         ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-         *out = NULL;
-         return E_OUTOFMEMORY;
+         hr = E_OUTOFMEMORY;
+         goto fail;
       }
       if (!d12_upload_executable(pso->ms_rast.code_bo, rast_part.binary,
                                  rast_part.info.binary_size)) {
-         ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-         *out = NULL;
-         return E_FAIL;
+         hr = E_FAIL;
+         goto fail;
       }
       pso->ms_rast.preamble_va =
          pso->ms_rast.code_bo->va->addr + rast_part.info.preamble_offset;
@@ -3888,22 +3908,19 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
             map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
             as_dxil, as_size, MESA_SHADER_COMPUTE, NULL);
       if (!as) {
-         ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-         *out = NULL;
-         return E_INVALIDARG;
+         hr = E_INVALIDARG;
+         goto fail;
       }
 
       pso->as_workgroup[0] = MAX2(as->info.workgroup_size[0], 1);
       pso->as_workgroup[1] = MAX2(as->info.workgroup_size[1], 1);
       pso->as_workgroup[2] = MAX2(as->info.workgroup_size[2], 1);
 
-      struct agx_shader_part as_part, as_setup_part;
       if (!compile_poly_program(device, as, NULL, &as_part) ||
           !compile_poly_program(device, build_as_setup(pso->ms_workgroup),
                                 NULL, &as_setup_part)) {
-         ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-         *out = NULL;
-         return E_INVALIDARG;
+         hr = E_INVALIDARG;
+         goto fail;
       }
 
       const struct {
@@ -3924,15 +3941,13 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
             agx_bo_create(&device->dev, acs[i].part->info.binary_size, 0,
                           AGX_BO_EXEC | AGX_BO_LOW_VA, acs[i].name);
          if (!*acs[i].bo) {
-            ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-            *out = NULL;
-            return E_OUTOFMEMORY;
+            hr = E_OUTOFMEMORY;
+            goto fail;
          }
          if (!d12_upload_executable(*acs[i].bo, acs[i].part->binary,
                                     acs[i].part->info.binary_size)) {
-            ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
-            *out = NULL;
-            return E_FAIL;
+            hr = E_FAIL;
+            goto fail;
          }
          *acs[i].va = (*acs[i].bo)->va->addr;
          *acs[i].info = acs[i].part->info;
@@ -3960,7 +3975,20 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
              (unsigned long long)pso->ms_outputs);
 
    pso->has_mesh = true;
-   return S_OK;
+   hr = S_OK;
+
+fail:
+   free(ms_part.binary);
+   free(setup_part.binary);
+   free(rast_part.binary);
+   free(prolog.binary);
+   free(as_part.binary);
+   free(as_setup_part.binary);
+   if (FAILED(hr)) {
+      ID3D12PipelineState_Release((ID3D12PipelineState *)*out);
+      *out = NULL;
+   }
+   return hr;
 }
 
 HRESULT
@@ -4284,7 +4312,15 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    const D3D12_RENDER_TARGET_BLEND_DESC *rt_blend =
       nr_rt ? rt_blends[0] : &default_rt_blend;
 
-   struct agx_shader_part vs_part, fs_part;
+   /* Every compiled part is released at `cleanup` on both paths. */
+   struct agx_shader_part vs_part = {0}, fs_part = {0};
+   struct agx_shader_part fs_prolog = {0}, fs_epilog = {0}, prolog = {0};
+   struct agx_shader_part sw_vs_part = {0}, tcs_part = {0}, tes_part = {0};
+   struct agx_shader_part tes_prolog = {0};
+   struct agx_shader_part gs_sw_part = {0}, gs_count_part = {0};
+   struct agx_shader_part gs_pre_part = {0}, gs_main_part = {0};
+   struct agx_shader_part gs_rast_part = {0}, rast_prolog = {0};
+   HRESULT hr = S_OK;
    uint8_t cull_distance_size = 0;
    struct agx_fs_epilog_link_info fs_epilog_link = {0};
    struct d12_vs_fetch fetch;
@@ -4295,8 +4331,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                           NULL, &cull_distance_size, &vs_part, &pso->vs.g17p_root_only,
                           &pso->vs.g17p_writes_memory,
                           pso->texture_shapes)) {
-      free(pso);
-      return E_INVALIDARG;
+      hr = E_INVALIDARG;
+      goto fail;
    }
 
    uint64_t fs_outputs = 0;
@@ -4323,9 +4359,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                           &cull_distance_size, &fs_part, &pso->fs.g17p_root_only,
                           &pso->fs.g17p_writes_memory,
                           pso->texture_shapes)) {
-      free(vs_part.binary);
-      free(pso);
-      return E_INVALIDARG;
+      hr = E_INVALIDARG;
+      goto fail;
    }
 
    for (unsigned i = 0; i < nr_rt; i++) {
@@ -4339,7 +4374,6 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
     * the API shader main. Besides preserving the required ordering relative
     * to depth/stencil tests, the fast linker knows how to merge the prolog's
     * private coefficient-register bindings after those used by the main. */
-   struct agx_shader_part fs_prolog = {0};
    if (cull_distance_size) {
       struct agx_fs_prolog_key prolog_key = {
          .api_sample_mask = 0xff,
@@ -4363,11 +4397,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       ralloc_free(fb.shader);
 
       if (!prolog_compiled || !fs_prolog.binary || !fs_prolog.info.binary_size) {
-         free(fs_prolog.binary);
-         free(fs_part.binary);
-         free(vs_part.binary);
-         free(pso);
-         return E_INVALIDARG;
+         hr = E_INVALIDARG;
+         goto fail;
       }
    }
 
@@ -4381,10 +4412,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       if (rt_blends[i]->BlendEnable &&
           util_format_is_pure_integer(formats[i]) &&
           (fs_outputs & BITFIELD64_BIT(FRAG_RESULT_DATA0 + i))) {
-         free(fs_part.binary);
-         free(vs_part.binary);
-         free(pso);
-         return E_INVALIDARG;
+         hr = E_INVALIDARG;
+         goto fail;
       }
    }
 
@@ -4407,10 +4436,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       for (unsigned i = 1; i < ARRAY_SIZE(blend_desc->RenderTarget); ++i) {
          if (blend_desc->RenderTarget[i].BlendEnable ||
              blend_desc->RenderTarget[i].LogicOpEnable) {
-            free(fs_part.binary);
-            free(vs_part.binary);
-            free(pso);
-            return E_INVALIDARG;
+            hr = E_INVALIDARG;
+            goto fail;
          }
       }
    }
@@ -4422,15 +4449,12 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
          if (i == 1 ||
              (fs_outputs & BITFIELD64_BIT(FRAG_RESULT_DATA0 + i))) {
-            free(fs_part.binary);
-            free(vs_part.binary);
-            free(pso);
-            return E_INVALIDARG;
+            hr = E_INVALIDARG;
+            goto fail;
          }
       }
    }
 
-   struct agx_shader_part fs_epilog = {0};
    if (use_fs_epilog) {
       /* An explicit SV_Coverage output is the final coverage mask. D3D12
        * does not additionally alpha-to-coverage that mask; doing both made
@@ -4485,11 +4509,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       if (!epilog_compiled ||
           ((!fs_epilog.binary || !fs_epilog.info.binary_size) &&
            !intentionally_empty)) {
-         free(fs_epilog.binary);
-         free(fs_part.binary);
-         free(vs_part.binary);
-         free(pso);
-         return E_INVALIDARG;
+         hr = E_INVALIDARG;
+         goto fail;
       }
    }
 
@@ -4516,8 +4537,6 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       .no_stop = true,
    };
 
-   struct agx_shader_part prolog;
-   memset(&prolog, 0, sizeof(prolog));
    const bool prolog_compiled =
       agx_compile_shader_nir(pb.shader, &prolog_backend_key, &prolog);
    ralloc_free(pb.shader);
@@ -4527,26 +4546,17 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    const bool empty_prolog = !prolog.info.binary_size;
    if (!prolog_compiled || (!empty_prolog && !prolog.binary) ||
        (empty_prolog && device->dev.chip == AGX_CHIP_G17P)) {
-      free(prolog.binary);
-      free(fs_prolog.binary);
-      free(fs_epilog.binary);
-      free(vs_part.binary);
-      free(fs_part.binary);
-      free(pso);
-      return E_INVALIDARG;
+      hr = E_INVALIDARG;
+      goto fail;
    }
 
    /* Link: this uploads executable memory and bakes the USC/PPP words. */
    bool vs_linked = agx_fast_link(&pso->vs.linked, &device->dev, false,
                                   &vs_part, empty_prolog ? NULL : &prolog,
                                   NULL, 0);
-   free(prolog.binary);
    if (!vs_linked) {
-      free(fs_epilog.binary);
-      free(vs_part.binary);
-      free(fs_part.binary);
-      free(pso);
-      return E_OUTOFMEMORY;
+      hr = E_OUTOFMEMORY;
+      goto fail;
    }
 
    /*
@@ -4568,23 +4578,13 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          agx_bo_create(&device->dev, vs_part.info.binary_size, 0,
                        AGX_BO_EXEC | AGX_BO_LOW_VA, "d3d12 vs preamble");
       if (!pso->vs.code_bo) {
-         d12_pso_release_bos(device, pso);
-         free(fs_epilog.binary);
-         free(vs_part.binary);
-         free(fs_part.binary);
-         free(pso);
-         return E_OUTOFMEMORY;
+         hr = E_OUTOFMEMORY;
+         goto fail;
       }
       if (!d12_upload_executable(pso->vs.code_bo, vs_part.binary,
                                  vs_part.info.binary_size)) {
-         agx_bo_unreference(&device->dev, pso->vs.code_bo);
-         pso->vs.code_bo = NULL;
-         d12_pso_release_bos(device, pso);
-         free(fs_epilog.binary);
-         free(vs_part.binary);
-         free(fs_part.binary);
-         free(pso);
-         return E_FAIL;
+         hr = E_FAIL;
+         goto fail;
       }
       pso->vs.preamble_va =
          pso->vs.code_bo->va->addr + vs_part.info.preamble_offset;
@@ -4594,14 +4594,9 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       fs_prolog.binary ? &fs_prolog : NULL,
       use_fs_epilog && fs_epilog.binary ? &fs_epilog : NULL,
       use_fs_epilog ? 1 : 0);
-   free(fs_prolog.binary);
-   free(fs_epilog.binary);
    if (!fs_linked) {
-      d12_pso_release_bos(device, pso);
-      free(vs_part.binary);
-      free(fs_part.binary);
-      free(pso);
-      return E_OUTOFMEMORY;
+      hr = E_OUTOFMEMORY;
+      goto fail;
    }
 
    /* Texture promotion gives the fragment shader a preamble that copies
@@ -4615,21 +4610,13 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          agx_bo_create(&device->dev, fs_part.info.binary_size, 0,
                        AGX_BO_EXEC | AGX_BO_LOW_VA, "d3d12 fs preamble");
       if (!pso->fs.code_bo) {
-         d12_pso_release_bos(device, pso);
-         free(vs_part.binary);
-         free(fs_part.binary);
-         free(pso);
-         return E_OUTOFMEMORY;
+         hr = E_OUTOFMEMORY;
+         goto fail;
       }
       if (!d12_upload_executable(pso->fs.code_bo, fs_part.binary,
                                  fs_part.info.binary_size)) {
-         agx_bo_unreference(&device->dev, pso->fs.code_bo);
-         pso->fs.code_bo = NULL;
-         d12_pso_release_bos(device, pso);
-         free(vs_part.binary);
-         free(fs_part.binary);
-         free(pso);
-         return E_FAIL;
+         hr = E_FAIL;
+         goto fail;
       }
       pso->fs.preamble_va =
          pso->fs.code_bo->va->addr + fs_part.info.preamble_offset;
@@ -4656,16 +4643,14 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
     * shader replaces pso->vs as the hardware vertex stage.
     */
    if (hs_dxil && hs_size && ds_dxil && ds_size) {
-      struct agx_shader_part sw_vs_part, tcs_part, tes_part;
 
       if (!compile_sw_vs_stage(device, map, vs_dxil, vs_size, &fetch,
                                &sw_vs_part, &pso->sw_vs_outputs, NULL, NULL) ||
           !compile_tcs_stage(device, map, hs_dxil, hs_size, pso, &tcs_part) ||
           !compile_tes_stage(device, map, ds_dxil, ds_size, pso, &pso->tes_uvs,
                              &tes_part)) {
-         d12_pso_release_bos(device, pso);
-         free(pso);
-         return E_INVALIDARG;
+         hr = E_INVALIDARG;
+         goto fail;
       }
 
       const struct {
@@ -4686,35 +4671,29 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                                    0, AGX_BO_EXEC | AGX_BO_LOW_VA,
                                    cs[i].name);
          if (!*cs[i].bo) {
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_OUTOFMEMORY;
+            hr = E_OUTOFMEMORY;
+            goto fail;
          }
          if (!d12_upload_executable(*cs[i].bo, cs[i].part->binary,
                                     cs[i].part->info.binary_size)) {
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_FAIL;
+            hr = E_FAIL;
+            goto fail;
          }
          *cs[i].va = (*cs[i].bo)->va->addr;
          *cs[i].info = cs[i].part->info;
       }
 
-      struct agx_shader_part tes_prolog;
       nir_builder tb =
          nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
       agx_nir_vs_prolog(&tb, &prolog_key);
-      memset(&tes_prolog, 0, sizeof(tes_prolog));
       agx_compile_shader_nir(tb.shader, &prolog_backend_key, &tes_prolog);
       ralloc_free(tb.shader);
 
       bool tes_linked = agx_fast_link(&pso->tes.linked, &device->dev, false,
                                       &tes_part, &tes_prolog, NULL, 0);
-      free(tes_prolog.binary);
       if (!tes_linked) {
-         d12_pso_release_bos(device, pso);
-         free(pso);
-         return E_OUTOFMEMORY;
+         hr = E_OUTOFMEMORY;
+         goto fail;
       }
       pso->tes.info = tes_part.info;
       agx_assign_uvs(&pso->tes_varyings, &pso->tes_uvs, 0, 0);
@@ -4727,17 +4706,13 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
             agx_bo_create(&device->dev, tes_part.info.binary_size, 0,
                           AGX_BO_EXEC | AGX_BO_LOW_VA, "d3d12 domain");
          if (!pso->tes.code_bo) {
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_OUTOFMEMORY;
+            hr = E_OUTOFMEMORY;
+            goto fail;
          }
          if (!d12_upload_executable(pso->tes.code_bo, tes_part.binary,
                                     tes_part.info.binary_size)) {
-            agx_bo_unreference(&device->dev, pso->tes.code_bo);
-            pso->tes.code_bo = NULL;
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_FAIL;
+            hr = E_FAIL;
+            goto fail;
          }
          pso->tes.preamble_va =
             pso->tes.code_bo->va->addr + tes_part.info.preamble_offset;
@@ -4770,8 +4745,6 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    bool has_so = so_desc && so_desc->NumEntries;
    bool has_flat_geometry = flat_transport.enabled;
    if (has_app_gs || has_so || has_flat_geometry) {
-      struct agx_shader_part sw_vs_part, gs_count_part, gs_pre_part,
-         gs_main_part, gs_rast_part;
       uint8_t clip_size = 0, cull_size = 0;
 
       nir_xfb_info *xfb = NULL;
@@ -4788,9 +4761,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          if (!valid || !xfb) {
             mesa_loge("graphics PSO: invalid stream-output declaration or "
                       "unmatched output semantic");
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_INVALIDARG;
+            hr = E_INVALIDARG;
+            goto fail;
          }
       }
 
@@ -4798,12 +4770,12 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       uint64_t gs_input_outputs;
       if (pso->has_tess) {
          compiled = compile_sw_tes_stage(
-            device, map, ds_dxil, ds_size, &sw_vs_part,
+            device, map, ds_dxil, ds_size, &gs_sw_part,
             &pso->sw_tes_outputs, &clip_size, &cull_size, has_app_gs);
          gs_input_outputs = pso->sw_tes_outputs;
       } else {
          compiled = compile_sw_vs_stage(
-            device, map, vs_dxil, vs_size, &fetch, &sw_vs_part,
+            device, map, vs_dxil, vs_size, &fetch, &gs_sw_part,
             &pso->sw_vs_outputs, &clip_size, &cull_size);
          gs_input_outputs = pso->sw_vs_outputs;
       }
@@ -4840,9 +4812,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
       ralloc_free(xfb);
 
       if (!compiled) {
-         d12_pso_release_bos(device, pso);
-         free(pso);
-         return E_INVALIDARG;
+         hr = E_INVALIDARG;
+         goto fail;
       }
 
       /* The software VS, optional count/pre-GS, and geometry body are
@@ -4861,7 +4832,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
          struct agx_shader_info *info;
          const char *name;
       } cs[] = {
-         {&sw_vs_part, sw_bo, sw_va, sw_info,
+         {&gs_sw_part, sw_bo, sw_va, sw_info,
           pso->has_tess ? "d3d12 sw domain" : "d3d12 sw vs"},
          {&gs_count_part, &pso->gs_count_bo, &pso->gs_count_va,
           &pso->gs_count_info, "d3d12 gs count"},
@@ -4881,15 +4852,13 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                                    0, AGX_BO_EXEC | AGX_BO_LOW_VA,
                                    cs[i].name);
          if (!*cs[i].bo) {
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_OUTOFMEMORY;
+            hr = E_OUTOFMEMORY;
+            goto fail;
          }
          if (!d12_upload_executable(*cs[i].bo, cs[i].part->binary,
                                     cs[i].part->info.binary_size)) {
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_FAIL;
+            hr = E_FAIL;
+            goto fail;
          }
          *cs[i].va = (*cs[i].bo)->va->addr;
          *cs[i].info = cs[i].part->info;
@@ -4903,22 +4872,18 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
        * prolog leaves both IDs undefined, so every invocation reads the
        * wrong slot of the vertex buffer.
        */
-      struct agx_shader_part rast_prolog;
       nir_builder rb =
          nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
       agx_nir_vs_prolog(&rb, &prolog_key);
-      memset(&rast_prolog, 0, sizeof(rast_prolog));
       agx_compile_shader_nir(rb.shader, &prolog_backend_key, &rast_prolog);
       ralloc_free(rb.shader);
 
       bool gs_rast_linked = agx_fast_link(
          &pso->gs_rast.linked, &device->dev, false, &gs_rast_part,
          &rast_prolog, NULL, 0);
-      free(rast_prolog.binary);
       if (!gs_rast_linked) {
-         d12_pso_release_bos(device, pso);
-         free(pso);
-         return E_OUTOFMEMORY;
+         hr = E_OUTOFMEMORY;
+         goto fail;
       }
 
       /* Keep the compiled part so its PREAMBLE has an address. The linker
@@ -4933,18 +4898,14 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
             agx_bo_create(&device->dev, gs_rast_part.info.binary_size, 0,
                           AGX_BO_EXEC | AGX_BO_LOW_VA, "d3d12 gs rast");
          if (!pso->gs_rast.code_bo) {
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_OUTOFMEMORY;
+            hr = E_OUTOFMEMORY;
+            goto fail;
          }
          if (!d12_upload_executable(pso->gs_rast.code_bo,
                                     gs_rast_part.binary,
                                     gs_rast_part.info.binary_size)) {
-            agx_bo_unreference(&device->dev, pso->gs_rast.code_bo);
-            pso->gs_rast.code_bo = NULL;
-            d12_pso_release_bos(device, pso);
-            free(pso);
-            return E_FAIL;
+            hr = E_FAIL;
+            goto fail;
          }
          pso->gs_rast.preamble_va = pso->gs_rast.code_bo->va->addr +
                                     gs_rast_part.info.preamble_offset;
@@ -4974,7 +4935,7 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
       mesa_logi("compiled geometry pipeline: sw_vs %u B / %u GPRs, "
                 "gs_main %u B, gs_rast %u B / %u GPRs, outputs 0x%llx",
-                sw_vs_part.info.binary_size, sw_vs_part.info.nr_gprs,
+                gs_sw_part.info.binary_size, gs_sw_part.info.nr_gprs,
                 gs_main_part.info.binary_size, gs_rast_part.info.binary_size,
                 gs_rast_part.info.nr_gprs,
                 (unsigned long long)(pso->has_tess ? pso->sw_tes_outputs
@@ -5068,10 +5029,33 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
                        stderr);
    }
 
+
+   hr = S_OK;
+
+fail:
    free(vs_part.binary);
    free(fs_part.binary);
+   free(fs_prolog.binary);
+   free(fs_epilog.binary);
+   free(prolog.binary);
+   free(sw_vs_part.binary);
+   free(tcs_part.binary);
+   free(tes_part.binary);
+   free(tes_prolog.binary);
+   free(gs_sw_part.binary);
+   free(gs_count_part.binary);
+   free(gs_pre_part.binary);
+   free(gs_main_part.binary);
+   free(gs_rast_part.binary);
+   free(rast_prolog.binary);
 
-   HRESULT hr = d12_pso_QueryInterface(&pso->iface, riid, out);
+   if (FAILED(hr)) {
+      d12_pso_release_bos(device, pso);
+      free(pso);
+      return hr;
+   }
+
+   hr = d12_pso_QueryInterface(&pso->iface, riid, out);
    d12_pso_Release(&pso->iface);
    return hr;
 }
