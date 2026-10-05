@@ -29,19 +29,27 @@ cp -r "$tests/shaders" "$out/suites/"
 cp "$tests/run-suites.sh" "$out/suites/"
 
 if [[ -n $samples ]]; then
-   ht=$samples/Samples/Desktop/D3D12HelloWorld/src/HelloTriangle
+   hw=$samples/Samples/Desktop/D3D12HelloWorld/src
    wrap=$src/src/asahi/d3d12/wine/samples
    # mingw's own d3d12/dxgi headers: with WIDL_EXPLICIT_AGGREGATE_RETURNS the
    # C++ wrappers use the explicit out-pointer ABI for aggregate returns, which
    # is what d3d12agx (and vkd3d-proton) implement.
-   "$cxx" -O2 -std=c++17 -municode -D_WIN32_WINNT=0x0A00 -DUNICODE -D_UNICODE -DNOMINMAX \
-      -DWIDL_EXPLICIT_AGGREGATE_RETURNS "-D_uuidof=__uuidof" \
-      -Wno-ignored-attributes -Wno-nonportable-include-path -Wno-address-of-temporary \
-      -I"$wrap" -I"$ht" \
-      -o "$out/samples/D3D12HelloTriangle.exe" \
-      "$wrap/aurora_sample_main.cpp" "$ht/D3D12HelloTriangle.cpp" "$ht/DXSample.cpp" "$ht/Win32Application.cpp" \
-      -ld3d12 -ldxgi -ld3dcompiler -ldxguid -lole32 -luser32 -lgdi32
-   cp "$ht/shaders.hlsl" "$out/samples/"
-   echo "built D3D12HelloTriangle.exe"
+   for name in HelloTriangle HelloTexture HelloBundles HelloConstBuffers; do
+      cls=D3D12$name
+      extra=-DSAMPLE_NONE
+      [[ $name == HelloTexture ]] && extra=-DSAMPLE_PRECOMPILED
+      mkdir -p "$out/samples/$cls"
+      "$cxx" -O2 -std=c++17 -municode -D_WIN32_WINNT=0x0A00 -DUNICODE -D_UNICODE -DNOMINMAX \
+         -DWIDL_EXPLICIT_AGGREGATE_RETURNS "-D_uuidof=__uuidof" \
+         -DSAMPLE_CLASS=$cls "-DSAMPLE_HEADER=\"$cls.h\"" "${extra[@]}" \
+         -Wno-ignored-attributes -Wno-nonportable-include-path -Wno-address-of-temporary \
+         -I"$wrap" -I"$hw/$name" \
+         -o "$out/samples/$cls/$cls.exe" \
+         "$wrap/aurora_sample_main.cpp" "$hw/$name/$cls.cpp" "$hw/$name/DXSample.cpp" "$hw/$name/Win32Application.cpp" \
+         -ld3d12 -ldxgi -ld3dcompiler -ldxguid -lole32 -luser32 -lgdi32
+      # each sample reads its own shaders.hlsl next to the exe (d3dcompiler_47)
+      cp "$hw/$name/shaders.hlsl" "$out/samples/$cls/"
+      echo "built $cls.exe"
+   done
 fi
 (cd "$out" && find . -type f -name '*.exe' -exec sha256sum {} + > ARTIFACTS.sha256)

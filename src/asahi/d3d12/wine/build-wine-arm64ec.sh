@@ -45,7 +45,8 @@ export PATH=$native/src/compiler/clc:$native/src/compiler/spirv:$native/src/asah
 
 # 2. ARM64EC PE -------------------------------------------------------------
 cross_file=$out/windows-arm64ec-cross.ini
-sed "s#@TOOLCHAIN@#$toolchain#g" "$wine_dir/tools/windows-arm64ec-cross.ini.in" > "$cross_file"
+sed -e "s#@TOOLCHAIN@#$toolchain#g" -e "s#@WINE_INCLUDE@#$wine_dir/include#g" \
+   "$wine_dir/tools/windows-arm64ec-cross.ini.in" > "$cross_file"
 echo "== cross build -> $cross"
 cross_args=(
    --cross-file "$cross_file"
@@ -77,7 +78,10 @@ python3 "$wine_dir/tools/mark-wine-builtin.py" "$out/d3d12.dll"
 "$toolchain/bin/llvm-readobj" --file-headers --coff-load-config "$out/d3d12.dll" \
    | grep -E 'Format|Machine|CHPEMetadataPointer' > "$out/d3d12.dll.readobj.txt"
 cat "$out/d3d12.dll.readobj.txt"
-grep -q 'IMAGE_FILE_MACHINE_AMD64' "$out/d3d12.dll.readobj.txt"
+# llvm-readobj reports ARM64EC for an AMD64-machine image with CHPE metadata;
+# mark-wine-builtin.py verified the raw header field is 0x8664 (what
+# wineserver requires).
+grep -q 'IMAGE_FILE_MACHINE_ARM64EC\|IMAGE_FILE_MACHINE_AMD64' "$out/d3d12.dll.readobj.txt"
 grep -q 'CHPEMetadataPointer: 0x[1-9A-F]' "$out/d3d12.dll.readobj.txt" || { echo "not an ARM64EC image" >&2; exit 1; }
 git -C "$src" rev-parse HEAD > "$out/SOURCE-COMMIT" 2>/dev/null || cp "$src/SOURCE-COMMIT" "$out/SOURCE-COMMIT"
 (cd "$out" && sha256sum d3d12.dll d3d12.so > ARTIFACTS.sha256 && cat ARTIFACTS.sha256)

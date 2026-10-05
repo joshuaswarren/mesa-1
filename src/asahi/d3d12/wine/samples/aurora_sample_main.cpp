@@ -2,21 +2,36 @@
  * Copyright 2026 Aurora Silicon
  * SPDX-License-Identifier: MIT
  *
- * Entry point for Microsoft's D3D12HelloTriangle built with llvm-mingw, used
+ * Entry point for Microsoft's D3D12HelloWorld samples (HelloTriangle,
+ * HelloTexture, HelloBundles, HelloConstBuffers) built with llvm-mingw, used
  * to compare the d3d12agx Proton tool against the vkd3d-proton one. The sample
  * sources are unmodified; this file replaces Main.cpp/the message loop so the
  * run is bounded and measurable:
  *   --frames N      render N frames then exit (default 600)
  *   --selftest      read the back buffer after the last frame and check the
- *                   triangle and clear colours; prints PASS/FAIL
+ *                   clear colour in the corner and that the triangle covered
+ *                   a sane share of the frame; prints PASS/FAIL
  * Output: one JSON line with frame-time statistics on stdout.
+ * Build with -DSAMPLE_CLASS=D3D12HelloTexture -DSAMPLE_HEADER="D3D12HelloTexture.h"
+ * (defaults: D3D12HelloTriangle). All four samples share the member names
+ * used below and the clear colour 0.0,0.2,0.4.
  */
 #include "stdafx.h"
+#ifndef SAMPLE_CLASS
+#define SAMPLE_CLASS D3D12HelloTriangle
+#endif
+#ifndef SAMPLE_HEADER
+#define SAMPLE_HEADER "D3D12HelloTriangle.h"
+#endif
+#define SAMPLE_STR_(x) #x
+#define SAMPLE_STR(x) SAMPLE_STR_(x)
 #define private public
 #define protected public
-#include "D3D12HelloTriangle.h"
+#include SAMPLE_HEADER
 #undef private
 #undef protected
+
+#include <d3dcompiler.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -42,8 +57,42 @@ wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 
 struct Pixel { unsigned char b, g, r, a; };
 
+#ifdef SAMPLE_PRECOMPILED
+/* HelloTexture loads shaders_VSMain.cso / shaders_PSMain.cso that Visual
+ * Studio compiles from shaders.hlsl at build time. Produce them next to the
+ * exe at start-up with the same compiler the other samples use at run time
+ * (d3dcompiler_47), so the sample source stays untouched. */
 static bool
-read_back(D3D12HelloTriangle &s, std::vector<Pixel> &out, UINT &w, UINT &h)
+precompile_shaders(const std::wstring &assets)
+{
+   using Microsoft::WRL::ComPtr;
+   const std::wstring hlsl = assets + L"shaders.hlsl";
+   struct { const char *entry, *target; const wchar_t *out; } stages[] = {
+      {"VSMain", "vs_5_0", L"shaders_VSMain.cso"},
+      {"PSMain", "ps_5_0", L"shaders_PSMain.cso"},
+   };
+   for (const auto &st : stages) {
+      ComPtr<ID3DBlob> code, err;
+      HRESULT hr = D3DCompileFromFile(hlsl.c_str(), nullptr, nullptr, st.entry, st.target,
+                                      D3DCOMPILE_ENABLE_STRICTNESS, 0, &code, &err);
+      if (FAILED(hr)) {
+         printf("{\"status\":\"INIT_FAIL\",\"error\":\"D3DCompileFromFile(%s) hr=0x%08lx %s\"}\n",
+                st.entry, (unsigned long)hr,
+                err ? (const char *)err->GetBufferPointer() : "");
+         return false;
+      }
+      FILE *f = _wfopen((assets + st.out).c_str(), L"wb");
+      if (!f)
+         return false;
+      fwrite(code->GetBufferPointer(), 1, code->GetBufferSize(), f);
+      fclose(f);
+   }
+   return true;
+}
+#endif
+
+static bool
+read_back(SAMPLE_CLASS &s, std::vector<Pixel> &out, UINT &w, UINT &h)
 {
    using Microsoft::WRL::ComPtr;
    UINT idx = s.m_swapChain->GetCurrentBackBufferIndex();
@@ -120,7 +169,7 @@ wmain(int argc, wchar_t **argv)
          selftest = true;
    }
 
-   D3D12HelloTriangle sample(1280, 720, L"D3D12 Hello Triangle (aurora)");
+   SAMPLE_CLASS sample(1280, 720, L"" SAMPLE_STR(SAMPLE_CLASS) L" (aurora)");
    sample.ParseCommandLineArgs(argv, argc);
 
    HINSTANCE hinst = GetModuleHandleW(nullptr);
@@ -143,6 +192,10 @@ wmain(int argc, wchar_t **argv)
    QueryPerformanceFrequency(&freq);
    QueryPerformanceCounter(&t0);
    try {
+#ifdef SAMPLE_PRECOMPILED
+      if (!precompile_shaders(sample.m_assetsPath))
+         return 2;
+#endif
       sample.OnInit();
    } catch (const std::exception &e) {
       printf("{\"status\":\"INIT_FAIL\",\"error\":\"%s\"}\n", e.what());
@@ -175,6 +228,7 @@ wmain(int argc, wchar_t **argv)
 
    std::string verdict = "SKIPPED";
    int center[3] = {-1, -1, -1}, corner[3] = {-1, -1, -1};
+   double covered = -1;
    if (selftest) {
       std::vector<Pixel> px;
       UINT w = 0, h = 0;
@@ -183,13 +237,21 @@ wmain(int argc, wchar_t **argv)
          Pixel k = px[(size_t)10 * w + 10];
          center[0] = c.r; center[1] = c.g; center[2] = c.b;
          corner[0] = k.r; corner[1] = k.g; corner[2] = k.b;
-         /* clear colour 0.0,0.2,0.4 -> (0,51,102); triangle centre is a blend
-          * of red/green/blue vertices, every channel clearly above the clear
-          * colour's red and well below full. */
-         bool corner_ok = k.r < 8 && k.g > 40 && k.g < 62 && k.b > 90 && k.b < 114;
-         bool center_ok = c.r > 40 && c.g > 40 && c.b > 40 &&
-                          !(c.r < 8 && c.g > 40 && c.g < 62 && c.b > 90 && c.b < 114);
-         verdict = (corner_ok && center_ok) ? "PASS" : "FAIL";
+         /* clear colour 0.0,0.2,0.4 -> (0,51,102) in every HelloWorld sample. */
+         auto is_clear = [](const Pixel &p) {
+            return p.r < 8 && p.g > 40 && p.g < 62 && p.b > 90 && p.b < 114;
+         };
+         size_t drawn = 0;
+         for (const Pixel &p : px)
+            drawn += !is_clear(p);
+         covered = (double)drawn / px.size();
+         /* The triangle spans 0.25*aspect..0.25 of the clip space in each
+          * sample: ~5.6% of the frame at 16:9 (HelloConstBuffers slides it
+          * sideways, HelloTexture fills it with a checkerboard), so accept a
+          * window around that and reject an all-clear or garbage frame. */
+         bool corner_ok = is_clear(k);
+         bool cover_ok = covered > 0.01 && covered < 0.30;
+         verdict = (corner_ok && cover_ok) ? "PASS" : "FAIL";
       } else {
          verdict = "READBACK_FAIL";
       }
@@ -205,9 +267,10 @@ wmain(int argc, wchar_t **argv)
    double p99 = sorted.empty() ? 0 : sorted[(size_t)(sorted.size() * 0.99)];
    printf("{\"status\":\"OK\",\"frames\":%d,\"init_ms\":%.2f,\"avg_ms\":%.3f,\"p50_ms\":%.3f,"
           "\"p95_ms\":%.3f,\"p99_ms\":%.3f,\"fps\":%.1f,\"selftest\":\"%s\","
-          "\"center\":[%d,%d,%d],\"corner\":[%d,%d,%d]}\n",
+          "\"sample\":\"%s\",\"covered\":%.4f,\"center\":[%d,%d,%d],\"corner\":[%d,%d,%d]}\n",
           rendered, init_ms, avg, p50, p95, p99, avg > 0 ? 1000.0 / avg : 0.0,
-          verdict.c_str(), center[0], center[1], center[2], corner[0], corner[1], corner[2]);
+          verdict.c_str(), SAMPLE_STR(SAMPLE_CLASS), covered, center[0], center[1], center[2],
+          corner[0], corner[1], corner[2]);
    fflush(stdout);
    sample.OnDestroy();
    DestroyWindow(g_hwnd);

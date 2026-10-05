@@ -84,7 +84,7 @@ agx_tilebuffer_set_drm_cmd(struct drm_asahi_cmd_render *c,
  * asserts that render targets are not spilled rather than returning garbage.
  */
 static inline uint8_t
-agx_tilebuffer_offset_B(struct agx_tilebuffer_layout *layout, unsigned rt)
+agx_tilebuffer_offset_B(const struct agx_tilebuffer_layout *layout, unsigned rt)
 {
    assert(rt < AGX_MAX_RENDER_TARGETS);
    assert(!layout->spilled[rt] && "precondition");

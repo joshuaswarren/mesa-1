@@ -130,7 +130,7 @@ elif d12_is_wine
   d12_platform_includes = [inc_asahi_d3d12_wine, include_directories('wine')]
   # DXGI interface IIDs used by the presenter come from mingw's dxguid.
   d12_platform_deps = [cc.find_library('dxguid'), cc.find_library('ntdll')]
-  d12_core_strict_args += ['-DHAVE_LIBDRM', '-DAGX_WINE_UNIXLIB', '-DD12_PLATFORM_WINE']
+  d12_core_strict_args += ['-DHAVE_LIBDRM', '-DAGX_NO_VIRTIO', '-DAGX_WINE_UNIXLIB', '-DD12_PLATFORM_WINE']
 else
   libd3d12agx_files += files('d12_platform_linux.c')
   d12_platform_includes = [inc_virtio_gpu, inc_virtio_vdrm]

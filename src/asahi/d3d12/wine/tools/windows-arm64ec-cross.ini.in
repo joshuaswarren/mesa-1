@@ -13,8 +13,12 @@ cpu = 'arm64ec'
 endian = 'little'
 
 [built-in options]
-c_args = ['-mno-ms-bitfields']
-cpp_args = ['-mno-ms-bitfields']
+# @WINE_INCLUDE@ carries the Linux ioctl encoding (sys/ioccom.h) and
+# linux/types.h for every UAPI header the PE build touches (asahi_drm.h is
+# pulled in by agx_chip.h, i.e. by the compiler library too), plus the
+# xf86drm.h shim that routes to the unixlib.
+c_args = ['-mno-ms-bitfields', '-I@WINE_INCLUDE@']
+cpp_args = ['-mno-ms-bitfields', '-I@WINE_INCLUDE@']
 c_link_args = []
 cpp_link_args = []
 

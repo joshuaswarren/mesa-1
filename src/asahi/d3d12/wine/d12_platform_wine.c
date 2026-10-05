@@ -29,6 +29,8 @@ struct d12_wine_device_entry {
 static simple_mtx_t d12_wine_devices_lock = SIMPLE_MTX_INITIALIZER;
 static struct d12_wine_device_entry d12_wine_devices[16];
 
+IDXGIAdapter *d12_wine_device_adapter(struct d12_device *device);
+
 IDXGIAdapter *
 d12_wine_device_adapter(struct d12_device *device)
 {
