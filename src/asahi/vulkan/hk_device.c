@@ -863,22 +863,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
    hk_g17p_bg_eot_dev_cache_init(dev);
 
-   dev->g17p_shader_perf.trace =
-      debug_get_bool_option("HK_SHADER_PERF_TRACE", false);
-   dev->g17p_shader_perf.aggregate =
-      debug_get_bool_option("HK_SHADER_PERF_AGGREGATE", false);
-   dev->g17p_shader_perf.fault_trace =
-      debug_get_bool_option("HK_SHADER_PERF_FAULT_TRACE", false);
-   dev->g17p_shader_perf.prefault_stack =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STACK", false);
-   dev->g17p_shader_perf.prefault_driver =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_DRIVER", false);
-   dev->g17p_shader_perf.prefault_main =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_MAIN", false);
-   dev->g17p_shader_perf.prefault_ioto =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_IOTO", false);
-   dev->g17p_shader_perf.prefault_streams =
-      debug_get_bool_option("HK_SHADER_PERF_PREFAULT_STREAMS", false);
    dev->g17p_diagnostics.launch_trace =
       debug_get_bool_option("HK_G17P_LAUNCH_TRACE", false);
 

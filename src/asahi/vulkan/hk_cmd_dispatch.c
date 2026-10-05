@@ -863,8 +863,6 @@ hk_g17p_build_compute_program_raw(
    struct hk_g17p_compute_program_ref *out)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   const bool perf_trace = dev->g17p_shader_perf.trace;
-   const uint64_t trace_start = perf_trace ? os_time_get_nano() : 0;
    if (!shader_va || !shader_binary_size || !nr_gprs || !compiler_d_valid ||
        !launch_sources || !program_va_out || !out ||
        (range_count && !ranges)) {
@@ -878,8 +876,6 @@ hk_g17p_build_compute_program_raw(
                                     "G17P compute Ioto program",
                                     &reservation))
       return false;
-
-   const uint64_t trace_reserved = perf_trace ? os_time_get_nano() : 0;
 
    void *program_map = reservation.map;
    const uint64_t program_va = reservation.va;
@@ -977,8 +973,6 @@ hk_g17p_build_compute_program_raw(
       }
    }
 
-   const uint64_t trace_built = perf_trace ? os_time_get_nano() : 0;
-
    const uint64_t published =
       hk_cmd_publish_ioto_program(cmd, &reservation, out->length);
    if (!published)
@@ -992,22 +986,6 @@ hk_g17p_build_compute_program_raw(
       return false;
    }
 
-   if (perf_trace) {
-      static uint32_t trace_calls;
-      const uint32_t call = p_atomic_inc_return(&trace_calls);
-      if (call <= 40) {
-         const uint64_t trace_done = os_time_get_nano();
-         fprintf(stderr,
-                 "HK_SHADER_PERF ioto-call=%u shader=%" PRIx64
-                 " binary=%u ranges=%zu kind=%u cacheable=%u hit=%u"
-                 " reserve_ns=%" PRIu64 " build_ns=%" PRIu64
-                 " publish_ns=%" PRIu64 " total_ns=%" PRIu64 "\n",
-                 call, shader_va, shader_binary_size, range_count,
-                 (unsigned)kind, cacheable, cache_hit,
-                 trace_reserved - trace_start, trace_built - trace_reserved,
-                 trace_done - trace_built, trace_done - trace_start);
-      }
-   }
 
    *program_va_out = published;
    if (trace && hk_g17p_launch_trace_enabled())

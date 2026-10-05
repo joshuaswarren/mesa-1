@@ -159,16 +159,6 @@ struct hk_device {
 
    /* Immutable diagnostic selection. Never rescan the process environment
     * from render-pass, draw, dispatch, or per-program publication paths. */
-   struct {
-      bool trace;
-      bool aggregate;
-      bool fault_trace;
-      bool prefault_stack;
-      bool prefault_driver;
-      bool prefault_main;
-      bool prefault_ioto;
-      bool prefault_streams;
-   } g17p_shader_perf;
 
    struct {
       bool launch_trace;

@@ -1357,13 +1357,8 @@ struct hk_cmd_buffer {
    struct util_dynarray g17p_precomp_programs;
    struct hash_table *g17p_precomp_index;
 
-   /* Opt-in shader performance diagnosis; inactive in production. */
    /* v57d HK_G17P_ORDINARY_VARIANT_TRACE=3 per-command-buffer draw index. */
    uint32_t g17p_trace_draws;
-   bool shader_perf_draw_active;
-   uint32_t shader_perf_draw_bo_allocs;
-   uint32_t shader_perf_draw_bo_creates;
-   uint64_t shader_perf_draw_bo_alloc_ns;
 
 };
 

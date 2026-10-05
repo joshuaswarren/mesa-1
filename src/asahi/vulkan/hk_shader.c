@@ -95,16 +95,6 @@ struct hk_fs_key {
    uint8_t pad;
 };
 
-static struct {
-   bool initialized;
-   bool enabled;
-   uint64_t total_ns;
-   uint64_t min_ns;
-   uint64_t max_ns;
-   uint64_t total_bytes;
-   uint32_t count;
-} hk_shader_perf_import_trace;
-
 struct hk_shader_binary_cache_entry {
    uint8_t *binary;
    size_t binary_size;
@@ -116,36 +106,6 @@ struct hk_shader_binary_cache_entry {
    uint32_t refcount;
 };
 
-static void
-hk_shader_perf_import_dump(void)
-{
-   if (!hk_shader_perf_import_trace.count)
-      return;
-   fprintf(stderr,
-           "HK_SHADER_PERF binary-import count=%u bytes=%" PRIu64
-           " total_ns=%" PRIu64 " min_ns=%" PRIu64 " max_ns=%" PRIu64
-           "\n",
-           hk_shader_perf_import_trace.count,
-           hk_shader_perf_import_trace.total_bytes,
-           hk_shader_perf_import_trace.total_ns,
-           hk_shader_perf_import_trace.min_ns,
-           hk_shader_perf_import_trace.max_ns);
-}
-
-static bool
-hk_shader_perf_import_enabled(void)
-{
-   if (!hk_shader_perf_import_trace.initialized) {
-      hk_shader_perf_import_trace.initialized = true;
-      hk_shader_perf_import_trace.enabled =
-         debug_get_bool_option("HK_SHADER_PERF_TRACE", false);
-      if (hk_shader_perf_import_trace.enabled) {
-         hk_shader_perf_import_trace.min_ns = UINT64_MAX;
-         atexit(hk_shader_perf_import_dump);
-      }
-   }
-   return hk_shader_perf_import_trace.enabled;
-}
 static_assert(sizeof(struct hk_fs_key) == 4, "packed");
 
 struct hk_vs_key {
@@ -5080,8 +5040,6 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
                           struct vk_shader **shader_out)
 {
    struct hk_device *dev = container_of(vk_dev, struct hk_device, vk);
-   const bool trace = hk_shader_perf_import_enabled();
-   const uint64_t start = trace ? os_time_get_nano() : 0;
    const size_t bytes = (size_t)(blob->end - blob->current);
    const void *binary = blob->current;
    const size_t binary_size = bytes;
@@ -5174,17 +5132,6 @@ hk_deserialize_api_shader(struct vk_device *vk_dev, struct blob_reader *blob,
          result = hk_deserialize_api_shader_impl(
             vk_dev, blob, binary_version, pAllocator, shader_out);
       }
-   }
-
-   if (trace) {
-      uint64_t elapsed = os_time_get_nano() - start;
-      hk_shader_perf_import_trace.count++;
-      hk_shader_perf_import_trace.total_bytes += bytes;
-      hk_shader_perf_import_trace.total_ns += elapsed;
-      hk_shader_perf_import_trace.min_ns =
-         MIN2(hk_shader_perf_import_trace.min_ns, elapsed);
-      hk_shader_perf_import_trace.max_ns =
-         MAX2(hk_shader_perf_import_trace.max_ns, elapsed);
    }
 
    return result;

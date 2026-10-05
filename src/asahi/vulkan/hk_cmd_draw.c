@@ -5,7 +5,6 @@
  * SPDX-License-Identifier: MIT
  */
 #include <assert.h>
-#include <sys/resource.h>
 #include "agx_abi.h"
 #include "agx_bg_eot.h"
 #include "agx_bo.h"
@@ -96,370 +95,6 @@
 #define IS_LINKED_DIRTY(bit)                                                   \
    (cmd->state.gfx.linked_dirty & BITFIELD_BIT(MESA_SHADER_##bit))
 
-enum hk_shader_perf_detail_phase {
-   HK_PERF_DETAIL_FLUSH,
-   HK_PERF_DETAIL_CCS,
-   HK_PERF_DETAIL_TESS,
-   HK_PERF_DETAIL_GEOM,
-   HK_PERF_DETAIL_TESS_SETUP,
-   HK_PERF_DETAIL_TESS_VS,
-   HK_PERF_DETAIL_TESS_TCS,
-   HK_PERF_DETAIL_TESS_FACTORS,
-   HK_PERF_DETAIL_STREAM,
-   HK_PERF_DETAIL_PREPROCESS,
-   HK_PERF_DETAIL_SHADERS,
-   HK_PERF_DETAIL_BOOKKEEPING,
-   HK_PERF_DETAIL_DYNAMIC,
-   HK_PERF_DETAIL_PRELINK_VS,
-   HK_PERF_DETAIL_PRELINK_FS,
-   HK_PERF_DETAIL_UPLOAD_PARAMS,
-   HK_PERF_DETAIL_UPLOAD_VARYINGS,
-   HK_PERF_DETAIL_UPLOAD_ROOT,
-   HK_PERF_DETAIL_PUBLISH_PROGRAM,
-   HK_PERF_DETAIL_PUBLISH_VDM,
-   HK_PERF_DETAIL_PUBLISH_TAIL,
-   HK_PERF_DETAIL_SW_TESS_SETUP,
-   HK_PERF_DETAIL_SW_TESS_RESERVE,
-   HK_PERF_DETAIL_SW_TESS_SHADERS,
-   HK_PERF_DETAIL_SW_TESS_COUNT,
-   HK_PERF_DETAIL_SW_TESS_PREFIX,
-   HK_PERF_DETAIL_SW_TESS_FINAL,
-   HK_PERF_DETAIL_COUNT,
-};
-
-static const char *const hk_shader_perf_detail_names[] = {
-   "flush",       "ccs",            "tess",        "geom",
-   "tess_setup",  "tess_vs",        "tess_tcs",    "tess_factors",
-   "stream",      "preprocess",     "shaders",     "bookkeeping",
-   "dynamic",     "prelink_vs",     "prelink_fs",  "upload_params",
-   "upload_vary", "upload_root",    "publish_prog", "publish_vdm",
-   "publish_tail", "sw_tess_setup", "sw_tess_reserve", "sw_tess_shaders",
-   "sw_tess_count", "sw_tess_prefix", "sw_tess_final",
-};
-
-static_assert(ARRAY_SIZE(hk_shader_perf_detail_names) ==
-                 HK_PERF_DETAIL_COUNT,
-              "shader performance phase names");
-
-static _Thread_local uint64_t
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_COUNT];
-
-struct hk_shader_perf_draw_group {
-   const void *shader;
-   uint64_t total_ns;
-   uint64_t min_ns;
-   uint64_t max_ns;
-   uint64_t first_ns;
-   uint64_t first_flush_ns;
-   uint64_t max_flush_ns;
-   uint64_t first_ccs_ns;
-   uint64_t first_tess_ns;
-   uint64_t first_geom_ns;
-   uint64_t first_tess_setup_ns;
-   uint64_t first_tess_vs_ns;
-   uint64_t first_tess_tcs_ns;
-   uint64_t first_tess_factors_ns;
-   uint64_t first_bo_alloc_ns;
-   uint64_t max_bo_alloc_ns;
-   uint32_t count;
-   uint32_t max_index;
-   uint32_t first_bo_allocs;
-   uint32_t first_bo_creates;
-   uint32_t max_bo_allocs;
-   uint32_t max_bo_creates;
-   long first_minor_faults;
-   long first_major_faults;
-   uint64_t first_detail[HK_PERF_DETAIL_COUNT];
-   uint64_t total_detail[HK_PERF_DETAIL_COUNT];
-   uint64_t max_detail[HK_PERF_DETAIL_COUNT];
-};
-
-static struct {
-   bool initialized;
-   bool enabled;
-   struct hk_shader_perf_draw_group groups[32];
-} hk_shader_perf_draw_trace;
-
-static void
-hk_shader_perf_draw_dump(void)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      const struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->count)
-         continue;
-      fprintf(stderr,
-              "HK_SHADER_PERF draw-group=%u shader=%p count=%u total_ns=%" PRIu64
-              " min_ns=%" PRIu64 " max_ns=%" PRIu64
-              " first_ns=%" PRIu64 " max_index=%u first_flush_ns=%" PRIu64
-              " max_flush_ns=%" PRIu64 " first_ccs_ns=%" PRIu64
-              " first_tess_ns=%" PRIu64 " first_geom_ns=%" PRIu64
-              " first_tess_setup_ns=%" PRIu64
-              " first_tess_vs_ns=%" PRIu64
-              " first_tess_tcs_ns=%" PRIu64
-              " first_tess_factors_ns=%" PRIu64 "\n",
-              i, g->shader, g->count, g->total_ns, g->min_ns, g->max_ns,
-              g->first_ns, g->max_index, g->first_flush_ns,
-              g->max_flush_ns, g->first_ccs_ns, g->first_tess_ns,
-              g->first_geom_ns, g->first_tess_setup_ns, g->first_tess_vs_ns,
-              g->first_tess_tcs_ns, g->first_tess_factors_ns);
-      fprintf(stderr,
-              "HK_SHADER_PERF draw-bo-group=%u first_allocs=%u first_creates=%u "
-              "first_alloc_ns=%" PRIu64 " max_allocs=%u max_creates=%u "
-              "max_alloc_ns=%" PRIu64 "\n",
-              i, g->first_bo_allocs, g->first_bo_creates,
-              g->first_bo_alloc_ns, g->max_bo_allocs, g->max_bo_creates,
-              g->max_bo_alloc_ns);
-      fprintf(stderr,
-              "HK_SHADER_PERF draw-fault-group=%u minor=%ld major=%ld\n", i,
-              g->first_minor_faults, g->first_major_faults);
-      for (unsigned p = 0; p < HK_PERF_DETAIL_COUNT; ++p) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF draw-phase-group=%u phase=%s first_ns=%" PRIu64
-                 " total_ns=%" PRIu64 " count=%u max_ns=%" PRIu64 "\n",
-                 i, hk_shader_perf_detail_names[p], g->first_detail[p],
-                 g->total_detail[p], g->count, g->max_detail[p]);
-      }
-   }
-}
-
-static inline bool
-hk_shader_perf_draw_enabled(const struct hk_device *dev)
-{
-   static bool dump_registered;
-   const bool enabled = dev->g17p_shader_perf.trace ||
-                        dev->g17p_shader_perf.aggregate;
-   if (unlikely(enabled && !dump_registered)) {
-      atexit(hk_shader_perf_draw_dump);
-      dump_registered = true;
-   }
-   return enabled;
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_stack(void)
-{
-   volatile uint8_t pages[64 * 1024];
-   for (size_t i = 0; i < sizeof(pages); i += 4096)
-      pages[i] = 0;
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_driver(void)
-{
-   FILE *maps = fopen("/proc/self/maps", "r");
-   if (!maps)
-      return;
-
-   char line[1024];
-   while (fgets(line, sizeof(line), maps)) {
-      unsigned long start, end;
-      char perms[5] = {0};
-      if (!strstr(line, "libvulkan_asahi.so") ||
-          sscanf(line, "%lx-%lx %4s", &start, &end, perms) != 3 ||
-          perms[0] != 'r')
-         continue;
-
-      for (unsigned long p = start; p < end; p += 4096)
-         (void)*(const volatile uint8_t *)p;
-   }
-   fclose(maps);
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_main_upload(struct hk_cmd_buffer *cmd)
-{
-   struct hk_uploader *uploader = &cmd->uploader.main;
-   if (!uploader->map)
-      return;
-
-   const size_t first = uploader->offset & ~(size_t)4095;
-   for (size_t off = first; off < HK_CMD_BO_SIZE; off += 4096) {
-      volatile uint8_t *p = uploader->map + off;
-      const uint8_t value = *p;
-      *p = value;
-   }
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_ioto(struct hk_cmd_buffer *cmd)
-{
-   struct hk_ioto_arena *arena = &cmd->ioto;
-   if (!arena->map)
-      return;
-
-   const size_t first = arena->cursor & ~(size_t)4095;
-   for (size_t off = first; off < arena->capacity; off += 4096) {
-      volatile uint8_t *p = arena->map + off;
-      const uint8_t value = *p;
-      *p = value;
-   }
-}
-
-static ATTRIBUTE_NOINLINE void
-hk_shader_perf_prefault_stream(struct hk_cs *cs)
-{
-   if (!cs || !cs->current || !cs->end)
-      return;
-
-   uintptr_t first = (uintptr_t)cs->current & ~(uintptr_t)4095;
-   for (uintptr_t addr = first; addr < (uintptr_t)cs->end; addr += 4096) {
-      volatile uint8_t *p = (volatile uint8_t *)addr;
-      const uint8_t value = *p;
-      *p = value;
-   }
-}
-
-/* The recorders below write a _Thread_local array. In a shared object its
- * address is a __tls_get_addr call, which the compiler may hoist into the
- * caller when inlined; keep every access out of line so the per-draw
- * functions that call them only under a trace flag never pay it. */
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_detail_reset(void)
-{
-   memset(hk_shader_perf_current_detail, 0,
-          sizeof(hk_shader_perf_current_detail));
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_draw_record(const void *shader, uint64_t elapsed_ns,
-                           uint32_t bo_allocs, uint32_t bo_creates,
-                           uint64_t bo_alloc_ns, long minor_faults,
-                           long major_faults)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->shader || g->shader == shader) {
-         if (!g->shader)
-            g->shader = shader;
-         if (!g->count) {
-            g->min_ns = UINT64_MAX;
-            g->first_ns = elapsed_ns;
-            g->first_bo_allocs = bo_allocs;
-            g->first_bo_creates = bo_creates;
-            g->first_bo_alloc_ns = bo_alloc_ns;
-            g->first_minor_faults = minor_faults;
-            g->first_major_faults = major_faults;
-            memcpy(g->first_detail, hk_shader_perf_current_detail,
-                   sizeof(g->first_detail));
-         }
-         g->count++;
-         g->total_ns += elapsed_ns;
-         for (unsigned p = 0; p < HK_PERF_DETAIL_COUNT; ++p)
-            g->total_detail[p] += hk_shader_perf_current_detail[p];
-         g->min_ns = MIN2(g->min_ns, elapsed_ns);
-         if (elapsed_ns > g->max_ns) {
-            g->max_ns = elapsed_ns;
-            g->max_index = g->count;
-            g->max_bo_allocs = bo_allocs;
-            g->max_bo_creates = bo_creates;
-            g->max_bo_alloc_ns = bo_alloc_ns;
-            memcpy(g->max_detail, hk_shader_perf_current_detail,
-                   sizeof(g->max_detail));
-         }
-         return;
-      }
-   }
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_flush_record(const void *shader, uint64_t elapsed_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_FLUSH] = elapsed_ns;
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->shader || g->shader == shader) {
-         if (!g->shader)
-            g->shader = shader;
-         if (!g->first_flush_ns)
-            g->first_flush_ns = elapsed_ns;
-         g->max_flush_ns = MAX2(g->max_flush_ns, elapsed_ns);
-         return;
-      }
-   }
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_phase_record(const void *shader, unsigned phase,
-                            uint64_t elapsed_ns)
-{
-   assert(phase <= HK_PERF_DETAIL_TESS_FACTORS - HK_PERF_DETAIL_CCS);
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_CCS + phase] = elapsed_ns;
-   for (unsigned i = 0; i < ARRAY_SIZE(hk_shader_perf_draw_trace.groups); ++i) {
-      struct hk_shader_perf_draw_group *g =
-         &hk_shader_perf_draw_trace.groups[i];
-      if (!g->shader || g->shader == shader) {
-         if (!g->shader)
-            g->shader = shader;
-         if (g->count == 0) {
-            if (phase == 0)
-               g->first_ccs_ns = elapsed_ns;
-            else if (phase == 1)
-               g->first_tess_ns = elapsed_ns;
-            else if (phase == 2)
-               g->first_geom_ns = elapsed_ns;
-            else if (phase == 3)
-               g->first_tess_setup_ns = elapsed_ns;
-            else if (phase == 4)
-               g->first_tess_vs_ns = elapsed_ns;
-            else if (phase == 5)
-               g->first_tess_tcs_ns = elapsed_ns;
-            else if (phase == 6)
-               g->first_tess_factors_ns = elapsed_ns;
-         }
-         return;
-      }
-   }
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_flush_detail_record(uint64_t stream_ns, uint64_t preprocess_ns,
-                                   uint64_t shaders_ns,
-                                   uint64_t bookkeeping_ns,
-                                   uint64_t dynamic_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_STREAM] = stream_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PREPROCESS] = preprocess_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SHADERS] = shaders_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_BOOKKEEPING] = bookkeeping_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_DYNAMIC] = dynamic_ns;
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_dynamic_detail_record(
-   uint64_t prelink_vs_ns, uint64_t prelink_fs_ns, uint64_t upload_params_ns,
-   uint64_t upload_varyings_ns, uint64_t upload_root_ns,
-   uint64_t publish_program_ns, uint64_t publish_vdm_ns,
-   uint64_t publish_tail_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PRELINK_VS] = prelink_vs_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PRELINK_FS] = prelink_fs_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_UPLOAD_PARAMS] =
-      upload_params_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_UPLOAD_VARYINGS] =
-      upload_varyings_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_UPLOAD_ROOT] = upload_root_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PUBLISH_PROGRAM] =
-      publish_program_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PUBLISH_VDM] = publish_vdm_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_PUBLISH_TAIL] = publish_tail_ns;
-}
-
-static ATTRIBUTE_NOINLINE ATTRIBUTE_COLD void
-hk_shader_perf_sw_tess_detail_record(
-   uint64_t setup_ns, uint64_t reserve_ns, uint64_t shaders_ns,
-   uint64_t count_ns, uint64_t prefix_ns, uint64_t final_ns)
-{
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_SETUP] = setup_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_RESERVE] = reserve_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_SHADERS] = shaders_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_COUNT] = count_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_PREFIX] = prefix_ns;
-   hk_shader_perf_current_detail[HK_PERF_DETAIL_SW_TESS_FINAL] = final_ns;
-}
-
 static void
 hk_prelink_graphics(struct hk_cmd_buffer *cmd, bool indexed,
                     enum agx_index_size index_size, bool restart,
@@ -498,44 +133,17 @@ static void hk_flush_dynamic_state(
    struct agx_draw draw, bool ordinary_draw_path,
    bool *g17p_native_bind_tail_emitted_out, bool prepare_only);
 
-/* v57d: HK_G17P_SLOW_DRAW_US=N prints every vkCmdDraw* and bind-time
- * preparation taking longer than N us on the CPU, with what it did. */
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_slow_draw_us, "HK_G17P_SLOW_DRAW_US", 0)
-
 static_assert(HK_ORDINARY_REASON_COUNT <=
                  ARRAY_SIZE(((struct hk_api_shader *)0)->g17p_trace_reason_draws),
               "per-reason draw counters");
 
-static __thread struct {
-   uint32_t prolog_epilog_compiles, fast_links, lazy_waits;
-   uint64_t prolog_epilog_ns, fast_link_ns, lazy_wait_ns;
-} hk_slow_tl;
-
-static inline bool
-hk_slow_draw_enabled(void)
-{
-   return debug_get_option_hk_g17p_slow_draw_us() != 0;
-}
-
 static void hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd);
-static void hk_slow_report(struct hk_cmd_buffer *cmd, const char *what,
-                           uint64_t start_ns);
 
 /* v57d: bind-time preparation runs with gfx->g17p_bind_prepare set, so the
  * ordinary selection predicts instead of proving stale descriptors. */
 void
 hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
 {
-   const bool slow = hk_slow_draw_enabled();
-   uint64_t start = 0;
-   if (slow) {
-      memset(&hk_slow_tl, 0, sizeof(hk_slow_tl));
-      start = os_time_get_nano();
-      cmd->shader_perf_draw_bo_allocs = 0;
-      cmd->shader_perf_draw_bo_creates = 0;
-      cmd->shader_perf_draw_bo_alloc_ns = 0;
-      cmd->shader_perf_draw_active = true;
-   }
    /* Bind-time preparation is speculative. It runs from cmd_bind_shaders(),
     * which vk_graphics_pipeline_cmd_bind() calls before the pipeline's static
     * dynamic state is applied, and the application may still change dynamic
@@ -567,10 +175,6 @@ hk_cmd_prepare_bound_graphics(struct hk_cmd_buffer *cmd)
    cmd->state.gfx.g17p_bind_prepare = false;
    if (prior_result == VK_SUCCESS)
       cmd->vk.record_result = VK_SUCCESS;
-   if (slow) {
-      hk_slow_report(cmd, "bind", start);
-      cmd->shader_perf_draw_active = false;
-   }
 }
 
 /* Bind-time preparation points the root's parameter-block fields at the
@@ -990,11 +594,6 @@ hk_cmd_prepare_bound_graphics_impl(struct hk_cmd_buffer *cmd)
 
    hk_g17p_prewarm_indirect_helpers(cmd);
 
-   if (dev->g17p_shader_perf.trace)
-      fprintf(stderr,
-              "HK_SHADER_PERF prepare-bound tess=%u gs=%u state=%" PRIx64 "\n",
-              gfx->shaders[MESA_SHADER_TESS_EVAL] != NULL, gs != NULL,
-              gfx->descriptors.root.draw.tess_params);
 
    /* Software tessellation's three libagx launches have immutable argument
     * bytes once rendering state is fixed. Publish those exact command-local
@@ -3113,10 +2712,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 {
    VK_FROM_HANDLE(hk_cmd_buffer, cmd, commandBuffer);
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   if (dev->g17p_shader_perf.prefault_stack)
-      hk_shader_perf_prefault_stack();
-   if (dev->g17p_shader_perf.prefault_driver)
-      hk_shader_perf_prefault_driver();
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    memset(render, 0, sizeof(*render));
@@ -3691,15 +3286,6 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
 
    hk_cmd_prepare_bound_graphics(cmd);
 
-   if (dev->g17p_shader_perf.prefault_main)
-      hk_shader_perf_prefault_main_upload(cmd);
-   if (dev->g17p_shader_perf.prefault_ioto)
-      hk_shader_perf_prefault_ioto(cmd);
-   if (dev->g17p_shader_perf.prefault_streams) {
-      hk_shader_perf_prefault_stream(cmd->current_cs.gfx);
-      hk_shader_perf_prefault_stream(cmd->current_cs.pre_gfx);
-      hk_shader_perf_prefault_stream(cmd->current_cs.post_gfx);
-   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -4322,8 +3908,6 @@ hk_bound_fs_select(struct hk_cmd_buffer *cmd, bool ensure)
          const uint64_t ns = os_time_get_nano() - t0;
          wait_us = ns / 1000.0;
          p_atomic_add(&obj->g17p_trace_wait_ns, ns);
-         hk_slow_tl.lazy_waits++;
-         hk_slow_tl.lazy_wait_ns += ns;
       }
    }
    if (changed)
@@ -5093,13 +4677,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    uint32_t input_patch_size = dyn->ts.patch_control_points;
    uint64_t state = gfx->descriptors.root.draw.tess_params;
    struct hk_tess_info info = gfx->tess.info;
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   static uint32_t perf_calls;
-   const uint32_t perf_call = dev->g17p_shader_perf.trace
-      ? p_atomic_inc_return(&perf_calls) : 0;
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t setup_ns = 0, reserve_ns = 0, shader_dispatch_ns = 0;
-   uint64_t count_ns = 0, prefix_ns = 0, final_ns = 0;
    bool prepared_vs = false, prepared_tcs = false;
 
    perf_debug(cmd, "Tessellation");
@@ -5159,15 +4736,7 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   if (perf_trace) {
-      setup_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
-   if (perf_trace) {
-      reserve_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    const enum libagx_program count_program =
       hk_sw_tess_program(info.mode, POLY_TESS_MODE_COUNT);
@@ -5208,10 +4777,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          agx_workgroup(tcs->info.tess.tcs_output_patch_size, 1, 1));
    }
 
-   if (perf_trace) {
-      shader_dispatch_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    /* First generate counts, then prefix sum them, and then tessellate. */
    if (!hk_dispatch_prepared_precomp_g17p(
@@ -5221,10 +4786,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         info.mode, POLY_TESS_MODE_COUNT, state);
    }
 
-   if (perf_trace) {
-      count_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
 
    const struct libagx_prefix_sum_tess_args prefix = {
@@ -5241,10 +4802,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              AGX_BARRIER_ALL | AGX_PREGFX, state, c_prims,
                              c_inv, c_prims || c_inv);
 
-   if (perf_trace) {
-      prefix_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    if (!hk_dispatch_prepared_precomp_g17p(
           cmd, grid_tess, AGX_BARRIER_ALL | AGX_PREGFX, final_program, &state,
@@ -5253,21 +4810,6 @@ hk_launch_tess(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                         info.mode, POLY_TESS_MODE_WITH_COUNTS, state);
    }
 
-   if (perf_trace) {
-      final_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_sw_tess_detail_record(setup_ns, reserve_ns,
-                                            shader_dispatch_ns, count_ns,
-                                            prefix_ns, final_ns);
-      if (dev->g17p_shader_perf.trace && perf_call <= 2) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF sw-tess-call=%u setup_ns=%" PRIu64
-                 " reserve_ns=%" PRIu64 " shader_dispatch_ns=%" PRIu64
-                 " count_ns=%" PRIu64 " prefix_ns=%" PRIu64
-                 " final_ns=%" PRIu64 " prepared_vs=%u prepared_tcs=%u\n",
-                 perf_call, setup_ns, reserve_ns, shader_dispatch_ns, count_ns,
-                 prefix_ns, final_ns, prepared_vs, prepared_tcs);
-      }
-   }
 
    return agx_draw_indexed_indirect(gfx->tess.out_draws, dev->heap->va->addr,
                                     dev->heap->size, AGX_INDEX_SIZE_U32, false);
@@ -5584,7 +5126,6 @@ hk_get_prolog_epilog_locked(struct hk_device *dev, struct hk_internal_key *key,
       return NULL;
    }
 
-   hk_slow_tl.prolog_epilog_compiles++;
 
    nir_builder b = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
    builder(&b, key->key);
@@ -5715,8 +5256,6 @@ hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
    if (data_size)
       memcpy(key->key, data, data_size);
 
-   const uint32_t compiles = hk_slow_tl.prolog_epilog_compiles;
-   const uint64_t t0 = os_time_get_nano();
    simple_mtx_lock(&dev->prolog_epilog.lock);
 
    struct agx_shader_part *part =
@@ -5724,8 +5263,6 @@ hk_get_prolog_epilog(struct hk_device *dev, void *data, size_t data_size,
                                   cf_base, g17p_tile_partitions, nr_samples);
 
    simple_mtx_unlock(&dev->prolog_epilog.lock);
-   if (hk_slow_tl.prolog_epilog_compiles != compiles)
-      hk_slow_tl.prolog_epilog_ns += os_time_get_nano() - t0;
    return part;
 }
 
@@ -6337,19 +5874,15 @@ hk_get_fast_linked(struct hk_device *dev, struct hk_shader *shader, void *key)
 
    struct hash_entry *ent = _mesa_hash_table_search(shader->linked.ht, key);
 
-   uint64_t t0 = 0;
    if (ent) {
       linked = ent->data;
    } else {
-      t0 = os_time_get_nano();
       if (shader->info.stage == MESA_SHADER_VERTEX)
          linked = hk_get_fast_linked_locked_vs(dev, shader, key);
       else if (shader->info.stage == MESA_SHADER_FRAGMENT)
          linked = hk_get_fast_linked_locked_fs(dev, shader, key);
       else
          UNREACHABLE("invalid stage");
-      hk_slow_tl.fast_links++;
-      hk_slow_tl.fast_link_ns += os_time_get_nano() - t0;
    }
 
    simple_mtx_unlock(&shader->linked.lock);
@@ -7669,80 +7202,6 @@ hk_g17p_prepared_bind_tail_matches(
           hk_g17p_bind_tail_state_matches(cmd, prepared);
 }
 
-static void __attribute__((cold, noinline))
-hk_g17p_trace_prepared_bind_tail_miss(
-   const struct hk_cmd_buffer *cmd,
-   const struct hk_g17p_prepared_bind_tail *prepared)
-{
-   static uint32_t reported;
-   const uint32_t report = p_atomic_inc_return(&reported);
-   if (report > 8)
-      return;
-
-   const struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const struct vk_dynamic_graphics_state *dyn =
-      &cmd->vk.dynamic_graphics_state;
-   const struct hk_rendering_state *render = &gfx->render;
-   uint32_t mismatch = 0;
-
-   mismatch |= !prepared->valid ? BITFIELD_BIT(0) : 0;
-   mismatch |= prepared->dynamic_generation != dyn->generation
-                  ? BITFIELD_BIT(1) : 0;
-   mismatch |= prepared->descriptor_generation != gfx->descriptors.generation
-                  ? BITFIELD_BIT(2) : 0;
-   mismatch |= prepared->root != gfx->root ? BITFIELD_BIT(3) : 0;
-   mismatch |= prepared->render_color0 !=
-                  (render->color_att_count == 1
-                      ? render->color_att[0].iview : NULL) ||
-               prepared->render_depth != render->depth_att.iview ||
-               prepared->render_stencil != render->stencil_att.iview ||
-               memcmp(&prepared->render_area, &render->area,
-                      sizeof(prepared->render_area)) != 0 ||
-               prepared->render_depth_format != render->depth_att.vk_format ||
-               prepared->render_width != render->cr.width ||
-               prepared->render_height != render->cr.height ||
-               prepared->render_layer_count != render->layer_count ||
-               prepared->render_view_mask != render->view_mask ||
-               prepared->render_color_count != render->color_att_count ||
-               prepared->render_samples != render->tilebuffer.nr_samples
-                  ? BITFIELD_BIT(4) : 0;
-   mismatch |= memcmp(prepared->shaders, gfx->shaders,
-                      sizeof(prepared->shaders)) != 0
-                  ? BITFIELD_BIT(5) : 0;
-   mismatch |= prepared->linked_vs != gfx->linked[MESA_SHADER_VERTEX] ||
-               prepared->linked_fs != gfx->linked[MESA_SHADER_FRAGMENT]
-                  ? BITFIELD_BIT(6) : 0;
-   mismatch |= prepared->varyings != gfx->varyings ? BITFIELD_BIT(7) : 0;
-   mismatch |= prepared->varying_counts_32 !=
-                  gfx->linked_varyings.counts_32.opaque[0] ||
-               prepared->varying_counts_16 !=
-                  gfx->linked_varyings.counts_16.opaque[0]
-                  ? BITFIELD_BIT(8) : 0;
-   mismatch |= prepared->occlusion_index != gfx->occlusion.index ||
-               prepared->occlusion_mode != gfx->occlusion.mode
-                  ? BITFIELD_BIT(9) : 0;
-   mismatch |= prepared->topology != gfx->topology ||
-               prepared->object_type != gfx->object_type ||
-               prepared->provoking != gfx->provoking
-                  ? BITFIELD_BIT(10) : 0;
-   mismatch |= prepared->generate_primitive_id !=
-                  gfx->generate_primitive_id ||
-               prepared->force_never_in_shader !=
-                  gfx->descriptors.root.draw.force_never_in_shader ||
-               prepared->in_meta != cmd->in_meta
-                  ? BITFIELD_BIT(11) : 0;
-
-   fprintf(stderr,
-           "HK_SHADER_PERF bind-tail-miss=%08x valid=%u dyn=%" PRIu64
-           "/%" PRIu64 " desc=%" PRIu64 "/%" PRIu64
-           " root=%" PRIx64 "/%" PRIx64 " varyings=%" PRIx64
-           "/%" PRIx64 "\n",
-           mismatch, prepared->valid, prepared->dynamic_generation,
-           dyn->generation, prepared->descriptor_generation,
-           gfx->descriptors.generation, prepared->root, gfx->root,
-           prepared->varyings, gfx->varyings);
-}
-
 static bool
 hk_g17p_publish_native_bind_tail(
    struct hk_cmd_buffer *cmd, struct hk_cs *cs, uint8_t **out,
@@ -8760,10 +8219,6 @@ hk_g17p_flush_prepared_dynamic_state(
        (sw_vs->b.info.uses_draw_id && !gfx->prepared_draw_id.gpu))
       return false;
 
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t upload_params_ns = 0, publish_program_ns = 0;
-   uint64_t publish_vdm_ns = 0, publish_tail_ns = 0;
 
    *g17p_native_bind_tail_emitted_out = false;
    cs->g17p_state_publications++;
@@ -8863,10 +8318,6 @@ hk_g17p_flush_prepared_dynamic_state(
       }
    }
 
-   if (perf_trace) {
-      upload_params_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    assert(!desc->root_dirty);
    hk_reserve_scratch(cmd, cs, hw_vs);
@@ -8915,20 +8366,12 @@ hk_g17p_flush_prepared_dynamic_state(
    gfx->prepared_vertex_usc = 0;
    gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 
-   if (perf_trace) {
-      publish_program_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    memcpy(out, gfx->prepared_vdm_state_update.bytes,
           gfx->prepared_vdm_state_update.length);
    out += gfx->prepared_vdm_state_update.length;
    gfx->prepared_vdm_state_update_valid = false;
 
-   if (perf_trace) {
-      publish_vdm_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    /* The exact predicate above already validated the full tail identity.
     * Publish it directly instead of walking the large snapshot a second time
@@ -8942,12 +8385,6 @@ hk_g17p_flush_prepared_dynamic_state(
    *g17p_native_bind_tail_emitted_out = true;
    cs->current = out;
 
-   if (perf_trace) {
-      publish_tail_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_dynamic_detail_record(
-         0, 0, upload_params_ns, 0, 0, publish_program_ns,
-         publish_vdm_ns, publish_tail_ns);
-   }
 
    vk_dynamic_graphics_state_clear_dirty(dyn);
    gfx->shaders_dirty = 0;
@@ -9056,9 +8493,7 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                              uint8_t **out_p, struct hk_shader *hw_vs,
                              uint64_t pipeline_program, struct agx_draw draw,
                              bool ordinary_draw_path, bool tail_known_match,
-                             bool *tail_emitted, bool perf_trace,
-                             uint64_t *phase_start, uint64_t *publish_vdm_ns,
-                             uint64_t *publish_tail_ns)
+                             bool *tail_emitted)
 {
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
@@ -9167,10 +8602,6 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       hk_g17p_trace_line("vdm-state-update", pipeline_program,
                          encoded.bytes, encoded.length);
 
-   if (perf_trace) {
-      *publish_vdm_ns = os_time_get_nano() - *phase_start;
-      *phase_start = os_time_get_nano();
-   }
 
 
    if (dev->dev.chip == AGX_CHIP_G17P) {
@@ -9185,10 +8616,6 @@ hk_agx3_publish_vertex_state(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
       *tail_emitted = true;
 
-      if (perf_trace) {
-         *publish_tail_ns = os_time_get_nano() - *phase_start;
-         *phase_start = os_time_get_nano();
-      }
    }
 
    *out_p = out;
@@ -9207,16 +8634,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
    struct vk_dynamic_graphics_state *dyn = &cmd->vk.dynamic_graphics_state;
 
    struct hk_graphics_state *gfx = &cmd->state.gfx;
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   static uint32_t perf_dynamic_calls;
-   const uint32_t perf_call = dev->g17p_shader_perf.trace
-      ? p_atomic_inc_return(&perf_dynamic_calls) : 0;
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t prelink_vs_ns = 0, prelink_fs_ns = 0, upload_ns = 0;
-   uint64_t publish_ns = 0;
-   uint64_t upload_params_ns = 0, upload_varyings_ns = 0;
-   uint64_t upload_root_ns = 0, publish_program_ns = 0;
-   uint64_t publish_vdm_ns = 0, publish_tail_ns = 0;
 
    struct hk_shader *hw_vs = hk_bound_hw_vs(gfx);
    struct hk_shader *sw_vs = hk_bound_sw_vs(gfx);
@@ -9360,10 +8777,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
 
    }
 
-   if (perf_trace) {
-      prelink_vs_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    if (IS_DIRTY(VI) || IS_DIRTY(VI_BINDINGS_VALID) ||
        IS_DIRTY(VI_BINDING_STRIDES) || vgt_dirty ||
@@ -9671,10 +9084,6 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   if (perf_trace) {
-      prelink_fs_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
 g17p_draw_parameters:
    /* If the vertex shader uses draw parameters, vertex uniforms are dirty every
@@ -9820,10 +9229,6 @@ g17p_draw_parameters:
       }
    }
 
-   if (perf_trace) {
-      upload_params_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    /* Link varyings before uploading tessellation state, becuase the
     * gfx->generate_primitive_id boolean needs to be plumbed.
@@ -9843,8 +9248,6 @@ g17p_draw_parameters:
     * false), so the emission reuses this answer while the root is unchanged
     * instead of comparing the whole snapshot again. */
    const uint64_t prepared_varyings_root = gfx->root;
-   if (unlikely(dev->g17p_shader_perf.trace && !prepared_varyings))
-      hk_g17p_trace_prepared_bind_tail_miss(cmd, &gfx->g17p_bind_tail);
 
    if (!prepared_varyings &&
        ((gfx->dirty & HK_DIRTY_PROVOKING) || vgt_dirty || linked_fs_dirty)) {
@@ -9874,10 +9277,6 @@ g17p_draw_parameters:
       gfx->dirty |= HK_DIRTY_VARYINGS;
    }
 
-   if (perf_trace) {
-      upload_varyings_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    if (!prepare_only &&
        (gfx->shaders[MESA_SHADER_TESS_EVAL] ||
@@ -9942,11 +9341,6 @@ g17p_draw_parameters:
       return;
    }
 
-   if (perf_trace) {
-      upload_root_ns = os_time_get_nano() - phase_start;
-      upload_ns = upload_params_ns + upload_varyings_ns + upload_root_ns;
-      phase_start = os_time_get_nano();
-   }
 
    /* Hardware dynamic state must be deferred until after the root and fast
     * linking, since it will use the root address and the linked shaders.
@@ -9994,10 +9388,6 @@ g17p_draw_parameters:
       gfx->prepared_vertex_usc = 0;
       gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 
-      if (perf_trace) {
-         publish_program_ns = os_time_get_nano() - phase_start;
-         phase_start = os_time_get_nano();
-      }
 
       switch (agx_chip_command_stream_generation(dev->dev.chip)) {
       case AGX_CS_GENERATION_AGX2:
@@ -10042,8 +9432,7 @@ g17p_draw_parameters:
                 cmd, cs, &out, hw_vs, pipeline_program, draw,
                 ordinary_draw_path,
                 prepared_varyings && gfx->root == prepared_varyings_root,
-                &tail_emitted, perf_trace, &phase_start, &publish_vdm_ns,
-                &publish_tail_ns))
+                &tail_emitted))
             return;
          if (tail_emitted) {
             g17p_native_bind_tail_emitted = true;
@@ -10150,28 +9539,6 @@ g17p_draw_parameters:
    gfx->dirty = 0;
    gfx->descriptors.root_dirty = false;
 
-   if (perf_trace) {
-      publish_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_dynamic_detail_record(
-         prelink_vs_ns, prelink_fs_ns, upload_params_ns, upload_varyings_ns,
-         upload_root_ns, publish_program_ns, publish_vdm_ns,
-         publish_tail_ns);
-      if (dev->g17p_shader_perf.trace && perf_call <= 3) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF dynamic-call=%u prelink_vs_ns=%" PRIu64
-                 " prelink_fs_ns=%" PRIu64 " upload_ns=%" PRIu64
-                 " publish_ns=%" PRIu64 " upload_params_ns=%" PRIu64
-                 " upload_varyings_ns=%" PRIu64
-                 " upload_root_ns=%" PRIu64
-                 " publish_program_ns=%" PRIu64
-                 " publish_vdm_ns=%" PRIu64
-                 " publish_tail_ns=%" PRIu64 "\n",
-                 perf_call, prelink_vs_ns, prelink_fs_ns, upload_ns,
-                 publish_ns, upload_params_ns, upload_varyings_ns,
-                 upload_root_ns, publish_program_ns, publish_vdm_ns,
-                 publish_tail_ns);
-      }
-   }
 }
 
 static __attribute__((hot)) void
@@ -10303,13 +9670,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_graphics_state *gfx = &cmd->state.gfx;
    struct hk_descriptor_state *desc = &gfx->descriptors;
-   const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-   static uint32_t perf_flush_calls;
-   const uint32_t perf_call = dev->g17p_shader_perf.trace
-      ? p_atomic_inc_return(&perf_flush_calls) : 0;
-   uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
-   uint64_t stream_ns = 0, preprocess_ns = 0, shaders_ns = 0;
-   uint64_t bookkeeping_ns = 0, dynamic_ns = 0;
 
    /* Every stage hk_flush_shaders() reads has to actually be bound.  Binding
     * VK_NULL_HANDLE for a stage is how CmdBindShadersEXT *unbinds* it, and it
@@ -10387,10 +9747,6 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (vk_command_buffer_has_error(&cmd->vk))
       return NULL;
 
-   if (perf_trace) {
-      stream_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
 #ifndef NDEBUG
    if (unlikely(dev->dev.debug & AGX_DBG_DIRTY)) {
@@ -10426,19 +9782,11 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
    if (vk_command_buffer_has_error(&cmd->vk))
       return NULL;
 
-   if (perf_trace) {
-      preprocess_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    hk_flush_shaders(cmd);
    if (unlikely(debug_get_option_hk_g17p_ordinary_variant_trace() >= 2))
       hk_ordinary_trace_draw(cmd);
 
-   if (perf_trace) {
-      shaders_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    const bool geom = gfx->shaders[MESA_SHADER_GEOMETRY];
    const bool tess = gfx->shaders[MESA_SHADER_TESS_EVAL];
@@ -10511,27 +9859,10 @@ hk_flush_gfx_state(struct hk_cmd_buffer *cmd, uint32_t draw_id,
       hk_ensure_cs_has_space(cmd, cs, HK_GFX_DRAW_RESERVATION);
    }
 
-   if (perf_trace) {
-      bookkeeping_ns = os_time_get_nano() - phase_start;
-      phase_start = os_time_get_nano();
-   }
 
    hk_flush_dynamic_state(cmd, cs, draw_id, *draw,
                           ordinary_draw_path || g17p_transformed_path,
                           g17p_native_bind_tail_emitted, false);
-   if (perf_trace) {
-      dynamic_ns = os_time_get_nano() - phase_start;
-      hk_shader_perf_flush_detail_record(stream_ns, preprocess_ns, shaders_ns,
-                                         bookkeeping_ns, dynamic_ns);
-      if (dev->g17p_shader_perf.trace && perf_call <= 3) {
-         fprintf(stderr,
-                 "HK_SHADER_PERF flush-call=%u stream_ns=%" PRIu64
-                 " preprocess_ns=%" PRIu64 " shaders_ns=%" PRIu64
-                 " bookkeeping_ns=%" PRIu64 " dynamic_ns=%" PRIu64 "\n",
-                 perf_call, stream_ns, preprocess_ns, shaders_ns,
-                 bookkeeping_ns, dynamic_ns);
-      }
-   }
    return cs;
 }
 
@@ -11085,17 +10416,10 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       struct agx_draw draw = draw_;
       bool needs_idx_robust = false;
       bool g17p_native_bind_tail_emitted = false;
-      const bool perf_trace = hk_shader_perf_draw_enabled(dev);
-      const uint64_t flush_start = perf_trace ? os_time_get_nano() : 0;
       struct hk_cs *cs =
          hk_flush_gfx_state(cmd, draw_id, &draw, &needs_idx_robust,
                             &g17p_native_bind_tail_emitted,
                             conditional_direct_indexed ? &api_draw : NULL);
-      if (perf_trace) {
-         hk_shader_perf_flush_record(
-            cmd->state.gfx.shaders[MESA_SHADER_VERTEX],
-            os_time_get_nano() - flush_start);
-      }
       /* If we failed to allocate a control stream, we've already lost the
        * device. Just drop the draw so we don't crash.
        */
@@ -11122,14 +10446,8 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       cs->stats.calls++;
 
       if (geom || tess) {
-         const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
          ccs =
             hk_cmd_buffer_get_cs_general(cmd, &cmd->current_cs.pre_gfx, true);
-         if (perf_trace) {
-            hk_shader_perf_phase_record(
-               cmd->state.gfx.shaders[MESA_SHADER_VERTEX], 0,
-               os_time_get_nano() - phase_start);
-         }
          if (!ccs)
             return;
       }
@@ -11148,14 +10466,8 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
          draw = prepared_tess_gs;
 
       if (tess && !prepared_tess_gs_emitted) {
-         const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
          draw = hk_launch_tess(cmd, ccs, draw, geom ? 0 : stat_c_prims,
                                geom ? 0 : stat_c_inv);
-         if (perf_trace) {
-            hk_shader_perf_phase_record(
-               cmd->state.gfx.shaders[MESA_SHADER_VERTEX], 1,
-               os_time_get_nano() - phase_start);
-         }
       }
 
       /* The prepared tessellation batch returns the tessellator's indexed
@@ -11167,13 +10479,7 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
        * rasterized the tessellator's index buffer through the GS rast
        * program, so only part of patch 0 was drawn. */
       if (geom) {
-         const uint64_t phase_start = perf_trace ? os_time_get_nano() : 0;
          draw = hk_launch_gs_prerast(cmd, ccs, draw);
-         if (perf_trace) {
-            hk_shader_perf_phase_record(
-               cmd->state.gfx.shaders[MESA_SHADER_VERTEX], 2,
-               os_time_get_nano() - phase_start);
-         }
       }
 
       if (adj) {
@@ -11393,93 +10699,10 @@ hk_draw_impl(struct hk_cmd_buffer *cmd, uint16_t draw_id,
    }
 }
 
-static void
-hk_slow_report(struct hk_cmd_buffer *cmd, const char *what, uint64_t start_ns)
-{
-   const uint64_t ns = os_time_get_nano() - start_ns;
-   if (ns / 1000 < (uint64_t)debug_get_option_hk_g17p_slow_draw_us())
-      return;
-   struct hk_graphics_state *gfx = &cmd->state.gfx;
-   struct hk_api_shader *fs = gfx->shaders[MESA_SHADER_FRAGMENT];
-   const bool bo = cmd->shader_perf_draw_active;
-   fprintf(stderr,
-           "G17P slow %s: us=%.1f fs=%08x variant=%s prolog_epilog_compiles=%u"
-           " prolog_epilog_us=%.1f fast_links=%u fast_link_us=%.1f"
-           " lazy_waits=%u lazy_wait_us=%.1f bo_allocs=%u bo_creates=%u"
-           " bo_alloc_us=%.1f\n",
-           what, ns / 1000.0,
-           fs && fs->g17p_ordinary_variants ? hk_ordinary_trace_id(fs) : 0,
-           fs && fs->g17p_ordinary_variants && gfx->ordinary_fs.valid
-              ? hk_ordinary_reason_name(gfx->ordinary_fs.reason) : "-",
-           hk_slow_tl.prolog_epilog_compiles, hk_slow_tl.prolog_epilog_ns / 1000.0,
-           hk_slow_tl.fast_links, hk_slow_tl.fast_link_ns / 1000.0,
-           hk_slow_tl.lazy_waits, hk_slow_tl.lazy_wait_ns / 1000.0,
-           bo ? cmd->shader_perf_draw_bo_allocs : 0,
-           bo ? cmd->shader_perf_draw_bo_creates : 0,
-           bo ? cmd->shader_perf_draw_bo_alloc_ns / 1000.0 : 0.0);
-}
-
 static __attribute__((hot)) void
 hk_draw(struct hk_cmd_buffer *cmd, uint16_t draw_id, struct agx_draw draw)
 {
-   static uint32_t trace_draws;
-   static bool trace_snapshot_dumped;
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
-   const bool trace = hk_shader_perf_draw_enabled(dev);
-   const bool detail = dev->g17p_shader_perf.trace;
-   const uint64_t start = trace ? os_time_get_nano() : 0;
-   const void *shader = cmd->state.gfx.shaders[MESA_SHADER_VERTEX];
-   struct rusage usage_start = {0}, usage_end = {0};
-
-   if (trace)
-      hk_shader_perf_detail_reset();
-
-   if (trace) {
-      cmd->shader_perf_draw_bo_allocs = 0;
-      cmd->shader_perf_draw_bo_creates = 0;
-      cmd->shader_perf_draw_bo_alloc_ns = 0;
-      cmd->shader_perf_draw_active = true;
-   }
-   if (detail) {
-      getrusage(RUSAGE_SELF, &usage_start);
-   }
-
-   const bool slow = hk_slow_draw_enabled();
-   uint64_t slow_start = 0;
-   if (slow) {
-      memset(&hk_slow_tl, 0, sizeof(hk_slow_tl));
-      slow_start = os_time_get_nano();
-      cmd->shader_perf_draw_bo_allocs = 0;
-      cmd->shader_perf_draw_bo_creates = 0;
-      cmd->shader_perf_draw_bo_alloc_ns = 0;
-      cmd->shader_perf_draw_active = true;
-   }
-
    hk_draw_impl(cmd, draw_id, draw);
-
-   if (slow) {
-      hk_slow_report(cmd, "draw", slow_start);
-      if (!trace)
-         cmd->shader_perf_draw_active = false;
-   }
-
-   if (trace) {
-      if (detail) {
-         getrusage(RUSAGE_SELF, &usage_end);
-      }
-      cmd->shader_perf_draw_active = false;
-      hk_shader_perf_draw_record(shader, os_time_get_nano() - start,
-                                 cmd->shader_perf_draw_bo_allocs,
-                                 cmd->shader_perf_draw_bo_creates,
-                                 cmd->shader_perf_draw_bo_alloc_ns,
-                                 detail ? usage_end.ru_minflt - usage_start.ru_minflt : 0,
-                                 detail ? usage_end.ru_majflt - usage_start.ru_majflt : 0);
-      if (detail && !trace_snapshot_dumped && ++trace_draws == 16384) {
-         trace_snapshot_dumped = true;
-         fprintf(stderr, "HK_SHADER_PERF snapshot_draws=%u\n", trace_draws);
-         hk_shader_perf_draw_dump();
-      }
-   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
@@ -11627,11 +10850,6 @@ hk_g17p_indirect_records_eligible(struct hk_cmd_buffer *cmd,
 
    assert(agx_is_indirect(draw->b));
 
-   if (dev->dev.chip != AGX_CHIP_G17P || !cmd->current_cs.gfx ||
-       vk_command_buffer_has_error(&cmd->vk) ||
-       hk_shader_perf_draw_enabled(dev) || dev->g17p_shader_perf.trace ||
-       (dev->dev.debug & AGX_DBG_DIRTY))
-      return false;
 
    /* Nothing dirty: every state-derivation block of the general path is
     * then a no-op, and hk_flush_shaders() returns before doing anything. */
@@ -11767,11 +10985,10 @@ hk_g17p_emit_indirect_record(struct hk_cmd_buffer *cmd, uint16_t draw_id,
       gfx->prepared_vertex_usc = 0;
       gfx->prepared_vertex_compact_root = (struct agx_ptr){0};
 
-      uint64_t unused_ns = 0;
       if (!hk_agx3_publish_vertex_state(
              cmd, cs, &out, hw_vs, pipeline_program, draw, true,
              prepared_varyings && gfx->root == prepared_varyings_root,
-             &tail_emitted, false, &unused_ns, &unused_ns, &unused_ns))
+             &tail_emitted))
          return;
 
       cs->current = out;

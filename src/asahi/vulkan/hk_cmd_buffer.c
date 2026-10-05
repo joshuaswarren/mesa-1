@@ -359,15 +359,7 @@ hk_cmd_buffer_alloc_bo(struct hk_cmd_buffer *cmd, enum hk_cmd_bo_type type,
                        struct hk_cmd_bo **bo_out)
 {
    struct hk_cmd_pool *pool = hk_cmd_buffer_pool(cmd);
-   const bool perf = cmd->shader_perf_draw_active;
-   const bool create = perf && list_is_empty(&pool->free_bos[type]);
-   const uint64_t start = perf ? os_time_get_nano() : 0;
    VkResult result = hk_cmd_pool_alloc_bo(pool, type, bo_out);
-   if (perf) {
-      cmd->shader_perf_draw_bo_allocs++;
-      cmd->shader_perf_draw_bo_creates += create;
-      cmd->shader_perf_draw_bo_alloc_ns += os_time_get_nano() - start;
-   }
    if (result != VK_SUCCESS)
       return result;
 

@@ -15,7 +15,6 @@
 
 #include <inttypes.h>
 #include <string.h>
-#include <sys/resource.h>
 
 void
 hk_ioto_arena_finish(struct hk_cmd_buffer *cmd)
@@ -114,12 +113,7 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
                             const struct hk_ioto_reservation *reservation,
                             size_t length)
 {
-   struct hk_device *dev = hk_cmd_buffer_device(cmd);
    struct hk_ioto_arena *arena = &cmd->ioto;
-   const bool fault_trace = dev->g17p_shader_perf.fault_trace;
-   struct rusage fault_start = {0}, fault_sync = {0};
-   if (fault_trace)
-      getrusage(RUSAGE_SELF, &fault_start);
 
    if (!reservation || !reservation->map || length == 0 ||
        length > UINT32_MAX) {
@@ -141,17 +135,6 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
       return 0;
    }
-   if (fault_trace)
-      getrusage(RUSAGE_SELF, &fault_sync);
-
-   if (fault_trace) {
-      const long sync_faults = fault_sync.ru_minflt - fault_start.ru_minflt;
-      if (sync_faults)
-         fprintf(stderr,
-                 "HK_SHADER_PERF publish-fault sync=%ld programs=%u\n",
-                 sync_faults, arena->programs);
-   }
-
    arena->program_bytes += length;
    return reservation->va;
 }
