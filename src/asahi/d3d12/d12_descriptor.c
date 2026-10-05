@@ -390,11 +390,11 @@ d12_descriptor_heap_write_sampler_locked(struct d12_descriptor_heap *heap,
    slot->sampler_native_index = native_index;
 }
 
-/* Mirror one slot into the heap's native tables. The caller orders the
- * writes with a fence once per batch. */
+/* Mirror one resource-heap slot into the heap's native tables. */
 static void
-d12_descriptor_heap_refresh_slot(struct d12_descriptor_heap *heap,
-                                 uint32_t index, struct d12_descriptor *slot)
+d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
+                                          uint32_t index,
+                                          struct d12_descriptor *slot)
 {
    struct d12_device *device = heap->device;
 
@@ -427,11 +427,6 @@ d12_descriptor_heap_refresh_slot(struct d12_descriptor_heap *heap,
       if (residency)
          residency[index] = d12_descriptor_sparse_residency_address(slot);
    }
-   if (heap->sampler_bo) {
-      simple_mtx_lock(&heap->sampler_lock);
-      d12_descriptor_heap_write_sampler_locked(heap, index);
-      simple_mtx_unlock(&heap->sampler_lock);
-   }
 }
 
 static inline bool
@@ -439,6 +434,31 @@ d12_descriptor_heap_has_native(const struct d12_descriptor_heap *heap)
 {
    return heap->texture_bo || heap->pbe_bo || heap->residency_bo ||
           heap->sampler_bo || heap->live_resource_words;
+}
+
+/* Mirror a run of slots that the application has just written. A sampler
+ * heap takes its table lock once for the run; every heap orders the native
+ * writes with one fence. */
+static void
+d12_descriptor_heap_refresh_slots(struct d12_descriptor_heap *heap,
+                                  uint32_t index, struct d12_descriptor *first,
+                                  uint32_t count)
+{
+   if (heap->sampler_bo) {
+      simple_mtx_lock(&heap->sampler_lock);
+      for (uint32_t i = 0; i < count; i++)
+         d12_descriptor_heap_write_sampler_locked(heap, index + i);
+      simple_mtx_unlock(&heap->sampler_lock);
+   } else {
+      for (uint32_t i = 0; i < count; i++)
+         d12_descriptor_heap_refresh_resource_slot(heap, index + i,
+                                                   &first[i]);
+   }
+
+   /* All native BOs are coherent. Order the native descriptor writes after
+    * the application's 40-byte slot writes before another thread records
+    * a dispatch that publishes these bases. */
+   __sync_synchronize();
 }
 
 void
@@ -454,12 +474,7 @@ d12_descriptor_heap_update_slot(struct d12_device *device,
    if (!heap || !d12_descriptor_heap_has_native(heap))
       return;
 
-   d12_descriptor_heap_refresh_slot(heap, index, slot);
-
-   /* All native BOs are coherent. Order the native descriptor write after
-    * the application's 40-byte slot write before another thread records
-    * a dispatch that publishes these bases. */
-   __sync_synchronize();
+   d12_descriptor_heap_refresh_slots(heap, index, slot, 1);
 }
 
 /* Refresh a contiguous run of slots that was written as one range, as
@@ -483,9 +498,7 @@ d12_descriptor_heap_update_range(struct d12_device *device,
    if (!d12_descriptor_heap_has_native(heap))
       return;
 
-   for (uint32_t i = 0; i < count; i++)
-      d12_descriptor_heap_refresh_slot(heap, index + i, &first[i]);
-   __sync_synchronize();
+   d12_descriptor_heap_refresh_slots(heap, index, first, count);
 }
 
 D12_DEFINE_PRIVATE_DATA_METHODS(d12_heap, ID3D12DescriptorHeap,

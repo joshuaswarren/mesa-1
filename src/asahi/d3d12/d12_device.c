@@ -4220,11 +4220,8 @@ d12_device_CopyDescriptorsSimple(
    /* D3D12 forbids overlap between source and destination ranges. */
    memcpy((void *)(uintptr_t)dest.ptr, (const void *)(uintptr_t)src.ptr,
           (size_t)count * stride);
-   for (UINT i = 0; i < count; i++) {
-      struct d12_descriptor *slot =
-         (struct d12_descriptor *)(uintptr_t)(dest.ptr + (SIZE_T)i * stride);
-      d12_descriptor_heap_update_slot(device, slot);
-   }
+   d12_descriptor_heap_update_range(
+      device, (struct d12_descriptor *)(uintptr_t)dest.ptr, count);
 }
 
 void
@@ -4284,11 +4281,8 @@ d12_device_CopyDescriptors(
          return;
 
       memcpy((void *)dest, (const void *)src, (size_t)count * stride);
-      for (UINT i = 0; i < count; i++) {
-         struct d12_descriptor *slot =
-            (struct d12_descriptor *)(dest + (uintptr_t)i * stride);
-         d12_descriptor_heap_update_slot(device, slot);
-      }
+      d12_descriptor_heap_update_range(device, (struct d12_descriptor *)dest,
+                                       count);
       dest_offset += count;
       src_offset += count;
    }

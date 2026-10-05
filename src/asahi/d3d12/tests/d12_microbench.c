@@ -651,6 +651,97 @@ main(int argc, char **argv)
           cbv_write_staging_ns, cbv_write_visible_ns, copy_bulk_ns,
           copy_single_ns);
 
+   /* --- Sampler heap writes ------------------------------------------ */
+   /* CreateSampler into shader-visible sampler heaps of 2,048 and 64 slots
+    * with mostly distinct states (432 combinations cycle through the
+    * writes), then a bulk copy from a staging sampler heap. The write cost
+    * must not depend on the heap size. */
+   D3D12_DESCRIPTOR_HEAP_DESC sampler_hd = {
+      .Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER,
+      .NumDescriptors = 2048,
+      .Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+   };
+   ID3D12DescriptorHeap *sampler_big = NULL, *sampler_small = NULL,
+                        *sampler_staging = NULL;
+   hr = ID3D12Device_CreateDescriptorHeap(b.dev, &sampler_hd,
+                                          &IID_ID3D12DescriptorHeap,
+                                          (void **)&sampler_big);
+   REQUIRE(hr == S_OK, "create 2048-slot shader-visible sampler heap");
+   sampler_hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
+   hr = ID3D12Device_CreateDescriptorHeap(b.dev, &sampler_hd,
+                                          &IID_ID3D12DescriptorHeap,
+                                          (void **)&sampler_staging);
+   REQUIRE(hr == S_OK, "create 2048-slot staging sampler heap");
+   sampler_hd.NumDescriptors = 64;
+   sampler_hd.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+   hr = ID3D12Device_CreateDescriptorHeap(b.dev, &sampler_hd,
+                                          &IID_ID3D12DescriptorHeap,
+                                          (void **)&sampler_small);
+   REQUIRE(hr == S_OK, "create 64-slot shader-visible sampler heap");
+
+   const UINT sinc = ID3D12Device_GetDescriptorHandleIncrementSize(
+      b.dev, D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+   D3D12_CPU_DESCRIPTOR_HANDLE sbig_cpu =
+      d12_test_descriptor_heap_get_cpu_start(sampler_big);
+   D3D12_CPU_DESCRIPTOR_HANDLE ssmall_cpu =
+      d12_test_descriptor_heap_get_cpu_start(sampler_small);
+   D3D12_CPU_DESCRIPTOR_HANDLE sstg_cpu =
+      d12_test_descriptor_heap_get_cpu_start(sampler_staging);
+   static const D3D12_FILTER sampler_filters[4] = {
+      D3D12_FILTER_MIN_MAG_MIP_POINT, D3D12_FILTER_MIN_MAG_MIP_LINEAR,
+      D3D12_FILTER_MIN_MAG_POINT_MIP_LINEAR, D3D12_FILTER_ANISOTROPIC};
+   static const float sampler_max_lods[4] = {4.0f, 8.0f, 16.0f, 1000.0f};
+#define SAMPLER_STATE(i, sd)                                                 \
+   do {                                                                      \
+      (sd) = (D3D12_SAMPLER_DESC){                                           \
+         .Filter = sampler_filters[(i) % 4],                                 \
+         .AddressU = D3D12_TEXTURE_ADDRESS_MODE_WRAP + ((i) / 4) % 3,        \
+         .AddressV = D3D12_TEXTURE_ADDRESS_MODE_WRAP + ((i) / 12) % 3,       \
+         .AddressW = D3D12_TEXTURE_ADDRESS_MODE_WRAP + ((i) / 36) % 3,       \
+         .MaxAnisotropy = 1 + ((i) % 4 == 3 ? 15 : 0),                       \
+         .ComparisonFunc = D3D12_COMPARISON_FUNC_NEVER,                      \
+         .MaxLOD = sampler_max_lods[((i) / 108) % 4],                        \
+      };                                                                     \
+   } while (0)
+
+   D3D12_SAMPLER_DESC sd;
+   double t5 = now_ns();
+   for (unsigned i = 0; i < 2048; i++) {
+      SAMPLER_STATE(i, sd);
+      D3D12_CPU_DESCRIPTOR_HANDLE h = {.ptr = sbig_cpu.ptr + i * sinc};
+      ID3D12Device_CreateSampler(b.dev, &sd, h);
+   }
+   double t6 = now_ns();
+   for (unsigned round = 0; round < 32; round++) {
+      for (unsigned i = 0; i < 64; i++) {
+         SAMPLER_STATE(i, sd);
+         D3D12_CPU_DESCRIPTOR_HANDLE h = {.ptr = ssmall_cpu.ptr + i * sinc};
+         ID3D12Device_CreateSampler(b.dev, &sd, h);
+      }
+   }
+   double t7 = now_ns();
+   for (unsigned i = 0; i < 2048; i++) {
+      SAMPLER_STATE(i + 1, sd);
+      D3D12_CPU_DESCRIPTOR_HANDLE h = {.ptr = sstg_cpu.ptr + i * sinc};
+      ID3D12Device_CreateSampler(b.dev, &sd, h);
+   }
+   double t8 = now_ns();
+   ID3D12Device_CopyDescriptorsSimple(b.dev, 2048, sbig_cpu, sstg_cpu,
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER);
+   double t9 = now_ns();
+#undef SAMPLER_STATE
+   double sampler_write_big_ns = (t6 - t5) / 2048;
+   double sampler_write_small_ns = (t7 - t6) / (32 * 64);
+   double sampler_write_staging_ns = (t8 - t7) / 2048;
+   double sampler_copy_bulk_ns = (t9 - t8) / 2048;
+   printf("desc   sampler write 2048-slot heap %.0f ns, 64-slot heap %.0f ns, "
+          "staging %.0f ns; copy bulk %.0f ns (per descriptor)\n",
+          sampler_write_big_ns, sampler_write_small_ns,
+          sampler_write_staging_ns, sampler_copy_bulk_ns);
+   ID3D12DescriptorHeap_Release(sampler_staging);
+   ID3D12DescriptorHeap_Release(sampler_small);
+   ID3D12DescriptorHeap_Release(sampler_big);
+
    /* --- Command lists ------------------------------------------------ */
    hr = ID3D12Device_CreateCommandAllocator(b.dev, D3D12_COMMAND_LIST_TYPE_DIRECT,
                                             &IID_ID3D12CommandAllocator,
@@ -973,6 +1064,9 @@ main(int argc, char **argv)
           "\"record_ns_per_dispatch_miss\": %.0f, "
           "\"descriptor_cbv_write_ns\": %.0f, \"descriptor_cbv_write_visible_ns\": %.0f, "
           "\"descriptor_copy_bulk_ns\": %.0f, \"descriptor_copy_single_ns\": %.0f, "
+          "\"descriptor_sampler_write_2048_ns\": %.0f, "
+          "\"descriptor_sampler_write_64_ns\": %.0f, "
+          "\"descriptor_sampler_copy_bulk_ns\": %.0f, "
           "\"empty_list_cycle_us\": %.2f, \"reset_after_submit_us\": %.2f, "
           "\"execute_call_us_20k_draws\": %.2f, \"gpu_wall_ms_20k_draws\": %.3f, "
           "\"execute_call_us_20k_dispatches\": %.2f, \"gpu_wall_ms_20k_dispatches\": %.3f, "
@@ -985,6 +1079,7 @@ main(int argc, char **argv)
           setup_ns_best[0] / 1e3, close_ns_best[0] / 1e3,
           dispatch_ns, dispatch_table_ns, dispatch_miss_ns,
           cbv_write_staging_ns, cbv_write_visible_ns, copy_bulk_ns, copy_single_ns,
+          sampler_write_big_ns, sampler_write_small_ns, sampler_copy_bulk_ns,
           empty_list_us, reset_after_submit_us,
           execute_call_us, gpu_wall_ms, execute_call_cs_us, gpu_wall_cs_ms,
           rt_min_us, rt_median_us, rt_p95_us,
