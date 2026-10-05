@@ -1908,6 +1908,14 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       /* Discards must be lowering before lowering MSAA to handle discards */
       NIR_PASS(_, nir, agx_nir_lower_discard_zs_emit);
 
+      /* G17P has no recovered samples-log2 special register, and the variant
+       * key already carries the raster sample count, so fold it into the
+       * shader as hk_shader.c does. gl_SampleMaskIn, gl_SampleID and
+       * interpolateAtSample() all read it. */
+      if (dev->chip == AGX_CHIP_G17P && agx_nir_needs_sample_count(nir))
+         NIR_PASS(_, nir, agx_nir_specialize_sample_count,
+                  MAX2(key->nr_samples, 1));
+
       /* At one rasterization sample, per-sample and per-pixel invocation are
        * the same thing, so collapsing sample shading to per-pixel is exact --
        * and it is what has to happen here, because G17P has no sample loop
