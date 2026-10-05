@@ -60,8 +60,51 @@ static bool d12_segment_ensure_viewport_arrays(struct d12_cmd_list *list,
 #define D12_USC_BO_SIZE    (32 * 1024 * 1024)
 #define D12_RECYCLED_STREAM_MIN (128 * 1024)
 #define D12_RECYCLED_USC_MIN    (64 * 1024)
-/* Worst-case control words per dispatch or render prologue, with slack. */
+/*
+ * Control-stream space accounting. Every emission into the stream checks
+ * for the worst case of what it is about to write, sized from the packet
+ * lengths it uses, plus room for the terminator the close paths emit
+ * without a check of their own. D12_DISPATCH_STREAM_MARGIN is the AGX3
+ * dispatch sink capacity and the largest single emission; the data
+ * uploads keep that much plus a terminator free between the data floor
+ * and the stream so a check made before an upload still holds after it.
+ */
 #define D12_DISPATCH_STREAM_MARGIN 0x300
+
+#define D12_STREAM_TERMINATE_BYTES                                          \
+   MAX2(AGX_VDM_STREAM_TERMINATE_LENGTH, AGX_CDM_STREAM_TERMINATE_LENGTH)
+#define D12_STREAM_RESERVE_BYTES                                            \
+   (D12_DISPATCH_STREAM_MARGIN + D12_STREAM_TERMINATE_BYTES)
+
+/* Legacy CDM dispatch: launch words, the G14X word, both grid forms (one
+ * is emitted, size for either), then the cache-flush barrier. */
+#define D12_CDM_DISPATCH_BYTES                                              \
+   (AGX_CDM_LAUNCH_WORD_0_LENGTH + AGX_CDM_LAUNCH_WORD_1_LENGTH +           \
+    AGX_CDM_UNK_G14X_LENGTH + AGX_CDM_INDIRECT_LENGTH +                     \
+    AGX_CDM_GLOBAL_SIZE_LENGTH + AGX_CDM_LOCAL_SIZE_LENGTH +                \
+    AGX_CDM_BARRIER_LENGTH)
+
+/* Initial VDM barrier of a render segment, either generation. */
+#define D12_VDM_BARRIER_BYTES                                               \
+   MAX2(AGX_VDM_BARRIER_LENGTH, D12_AGX3_VDM_BARRIER_LENGTH)
+
+/* One draw: restart state, vertex shader state (AGX2 words or the AGX3
+ * state update), then every Index List word agx_vdm_draw can emit. */
+#define D12_VDM_DRAW_BYTES                                                  \
+   (2 * AGX_VDM_STATE_LENGTH + AGX_VDM_STATE_RESTART_INDEX_LENGTH +         \
+    AGX_VDM_STATE_VERTEX_SHADER_WORD_1_LENGTH +                             \
+    AGX_VDM_STATE_VERTEX_UNKNOWN_LENGTH + 4 +                               \
+    D12_AGX3_VDM_STATE_UPDATE_LENGTH + AGX_INDEX_LIST_LENGTH +              \
+    AGX_INDEX_LIST_BUFFER_LO_LENGTH + AGX_INDEX_LIST_INDIRECT_BUFFER_LENGTH + \
+    AGX_INDEX_LIST_COUNT_LENGTH + AGX_INDEX_LIST_INSTANCES_LENGTH +         \
+    AGX_INDEX_LIST_START_LENGTH + AGX_INDEX_LIST_BUFFER_SIZE_LENGTH)
+
+static_assert(D12_CDM_DISPATCH_BYTES <= D12_DISPATCH_STREAM_MARGIN,
+              "the upload reserve must cover a CDM dispatch");
+static_assert(D12_VDM_DRAW_BYTES <= D12_DISPATCH_STREAM_MARGIN,
+              "the upload reserve must cover a VDM draw");
+static_assert(D12_VDM_BARRIER_BYTES <= D12_DISPATCH_STREAM_MARGIN,
+              "the upload reserve must cover a VDM barrier");
 /* Keep a single kernel command bounded even for command lists containing
  * hundreds of thousands of tiny meta dispatches. */
 #define D12_MAX_DISPATCHES_PER_SEGMENT 8192
@@ -1007,7 +1050,7 @@ d12_list_upload(struct d12_cmd_list *list, const void *data, size_t size,
    size_t floor = (list->data_floor - size) & ~(align - 1);
    size_t used = list->stream_cur - d12_list_stream_map(list);
 
-   if (floor <= used + D12_DISPATCH_STREAM_MARGIN) {
+   if (floor <= used + D12_STREAM_RESERVE_BYTES) {
       mesa_loge("command list out of stream/data space: control=%zu "
                 "data=%zu capacity=%zu request=%zu usc=%zu/%zu",
                 used, list->stream_bo->size - list->data_floor,
@@ -1037,7 +1080,7 @@ d12_list_upload_zero(struct d12_cmd_list *list, size_t size, size_t align)
    size_t floor = (list->data_floor - size) & ~(align - 1);
    size_t used = list->stream_cur - d12_list_stream_map(list);
 
-   if (floor <= used + D12_DISPATCH_STREAM_MARGIN) {
+   if (floor <= used + D12_STREAM_RESERVE_BYTES) {
       mesa_loge("command list out of stream/data space: control=%zu "
                 "data=%zu capacity=%zu request=%zu usc=%zu/%zu",
                 used, list->stream_bo->size - list->data_floor,
@@ -1127,12 +1170,34 @@ d12_list_alloc_usc(struct d12_cmd_list *list, size_t size, uint32_t *out_usc)
    return (uint8_t *)agx_bo_map(list->usc_bo) + off;
 }
 
+/*
+ * Room for `need` bytes of control stream plus the terminator the close
+ * path will append. `need` is the caller's worst case for what it emits
+ * next, never larger than the upload reserve (asserted) so that uploads
+ * made between this check and the emission cannot invalidate it.
+ */
 static bool
-d12_list_check_stream_space(struct d12_cmd_list *list)
+d12_list_check_stream_space(struct d12_cmd_list *list, size_t need)
 {
+   assert(need <= D12_DISPATCH_STREAM_MARGIN);
    size_t used = list->stream_cur - d12_list_stream_map(list);
-   if (used + D12_DISPATCH_STREAM_MARGIN > list->data_floor) {
-      mesa_loge("command list out of control-stream space");
+   if (used + need + D12_STREAM_TERMINATE_BYTES > list->data_floor) {
+      mesa_loge("command list out of control-stream space (%zu + %zu)",
+                used, need);
+      list->state = D12_LIST_ERROR;
+      return false;
+   }
+   return true;
+}
+
+/* The same for the pre-graphics stream, which is closed with a CDM
+ * terminator of its own. */
+static bool
+d12_list_check_pregfx_space(struct d12_cmd_list *list, size_t need)
+{
+   if (list->pregfx_cur + need + D12_STREAM_TERMINATE_BYTES >
+       list->pregfx_end) {
+      mesa_loge("pre-graphics stream full (%zu needed)", need);
       list->state = D12_LIST_ERROR;
       return false;
    }
@@ -1808,15 +1873,11 @@ d12_list_dispatch_precomp_to(struct d12_cmd_list *list,
 
    uint8_t **cur = pre_gfx ? &list->pregfx_cur : &list->stream_cur;
 
-   if (pre_gfx) {
-      if (list->pregfx_cur + 0x100 > list->pregfx_end) {
-         mesa_loge("pre-graphics stream full");
-         list->state = D12_LIST_ERROR;
-         return;
-      }
-   } else if (!d12_list_check_stream_space(list)) {
+   /* The native sink bounds its own emission by its capacity. */
+   size_t need = native ? D12_DISPATCH_STREAM_MARGIN : D12_CDM_DISPATCH_BYTES;
+   if (pre_gfx ? !d12_list_check_pregfx_space(list, need)
+               : !d12_list_check_stream_space(list, need))
       return;
-   }
 
    if (native) {
       if (!d12_list_append_g17p_precomp(list, prog, args, args_size, grid, cur))
@@ -3108,7 +3169,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
        !seg->partial_eot_usc)
       return NULL;
 
-   if (!d12_list_check_stream_space(list))
+   if (!d12_list_check_stream_space(list, D12_VDM_BARRIER_BYTES))
       return NULL;
 
    seg->stream_start = list->stream_cur - d12_list_stream_map(list);
@@ -6564,7 +6625,7 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
       .data = list->stream_cur,
       .capacity = D12_DISPATCH_STREAM_MARGIN,
    };
-   if (!d12_list_check_stream_space(list) ||
+   if (!d12_list_check_stream_space(list, sink.capacity) ||
        !agx3_g17p_native_compute_dispatch_append_with_barrier(
           &generated.launch, &grid, 0x5, &sink))
       goto fail;
@@ -6781,7 +6842,7 @@ d12_list_dispatch_pso(struct d12_cmd_list *list, unsigned x, unsigned y,
       grid = agx_3d(x * wg.x, y * wg.y, z * wg.z);
    }
 
-   if (!d12_list_check_stream_space(list))
+   if (!d12_list_check_stream_space(list, D12_CDM_DISPATCH_BYTES))
       return;
 
    if (!d12_list_emit_legacy_cdm_launch(list, &list->stream_cur, grid, wg,
@@ -7475,11 +7536,8 @@ d12_list_dispatch_gs_stage(struct d12_cmd_list *list,
    if (!usc)
       return false;
 
-   if (list->pregfx_cur + 0x100 > list->pregfx_end) {
-      mesa_loge("pre-graphics stream full");
-      list->state = D12_LIST_ERROR;
+   if (!d12_list_check_pregfx_space(list, D12_CDM_DISPATCH_BYTES))
       return false;
-   }
 
    struct agx_cdm_launch_word_0_packed launch =
       d12_compute_launch_word(info);
@@ -8365,11 +8423,8 @@ d12_list_tess_prerast(struct d12_cmd_list *list,
       if (!usc)
          return false;
 
-      if (list->pregfx_cur + 0x100 > list->pregfx_end) {
-         mesa_loge("pre-graphics stream full");
-         list->state = D12_LIST_ERROR;
+      if (!d12_list_check_pregfx_space(list, D12_CDM_DISPATCH_BYTES))
          return false;
-      }
 
       struct agx_cdm_launch_word_0_packed launch =
          d12_compute_launch_word(stages[i].info);
@@ -8651,11 +8706,8 @@ d12_list_mesh_prerast(struct d12_cmd_list *list,
       if (!usc)
          return false;
 
-      if (list->pregfx_cur + 0x100 > list->pregfx_end) {
-         mesa_loge("pre-graphics stream full");
-         list->state = D12_LIST_ERROR;
+      if (!d12_list_check_pregfx_space(list, D12_CDM_DISPATCH_BYTES))
          return false;
-      }
 
       struct agx_cdm_launch_word_0_packed launch =
          d12_compute_launch_word(stages[i].info);
@@ -9040,7 +9092,9 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
    struct agx_vdm_hal200_direct_draw draw;
    if (!d12_agx3_encode_vdm_state_update_draw(list->device->dev.chip, &info, &vertex) ||
        !agx_vdm_hal200_direct_draw_pack(list->device->dev.chip, &draw_fields, &draw) ||
-       !d12_list_check_stream_space(list))
+       !d12_list_check_stream_space(list, (size_t)vertex.length +
+                                             generated.upload.tail.length +
+                                             draw.length))
       goto fail;
    uint8_t *out = list->stream_cur;
    memcpy(out, vertex.bytes, vertex.length); out += vertex.length;
@@ -9585,7 +9639,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
       return;
    }
 
-   if (!d12_list_check_stream_space(list))
+   if (!d12_list_check_stream_space(list, D12_VDM_DRAW_BYTES))
       return;
 
    uint8_t *out = list->stream_cur;
@@ -12049,7 +12103,7 @@ d12_list_take_fresh_storage(struct d12_cmd_list *list)
       list->stream_cur - d12_list_stream_map(list);
    size_t data_used = list->stream_bo->size - list->data_floor;
    size_t stream_need = control_used + data_used +
-                        D12_DISPATCH_STREAM_MARGIN;
+                        D12_STREAM_RESERVE_BYTES;
    size_t stream_size = MAX3(D12_RECYCLED_STREAM_MIN,
                              ALIGN_POT(stream_need * 2, 16 * 1024),
                              list->stream_bo->size / 2);
