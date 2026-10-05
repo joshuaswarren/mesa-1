@@ -25,6 +25,11 @@ struct hk_image_view {
     * base level), computed once instead of on every descriptor write. */
    uint16_t sampled_min_lod_fp16;
    uint16_t sampled_min_lod_uint16;
+   /* G17P sampled-descriptor format state of the view's logical format,
+    * computed once: the integer conversion kind of a scaled format (0 when
+    * not scaled) and whether it is USCALED with a normalized filter form. */
+   uint16_t g17p_scaled_conversion;
+   bool g17p_uscaled_normalized;
    struct {
       uint8_t image_plane;
       uint32_t sampled_heap_index;

@@ -106,12 +106,100 @@ write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
    memcpy(dst, desc_data, desc_size);
 }
 
+/* The G17P descriptor of a single-plane view, optionally with a single-plane
+ * sampler without a custom border: exactly the bytes the general path below
+ * writes for that case, built directly instead of through its three-plane
+ * staging.  Returns false for every other case. */
+static inline bool
+write_sampled_image_view_desc_g17p_single(struct hk_descriptor_set *set,
+                                          const VkDescriptorImageInfo *info,
+                                          uint32_t binding, uint32_t elem,
+                                          VkDescriptorType descriptor_type)
+{
+   static_assert(sizeof(struct hk_sampled_image_descriptor) ==
+                    HK_TEXTURE_DESCRIPTOR_AGX3_SIZE +
+                       sizeof(struct hk_sampled_image_descriptor_sw),
+                 "G17P sampled descriptor is texture then software words");
+
+   if (set->layout->descriptor_generation != 9 || !info)
+      return false;
+
+   if (descriptor_type == VK_DESCRIPTOR_TYPE_SAMPLER) {
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         &set->layout->binding[binding];
+      const struct hk_sampler *sampler =
+         binding_layout->immutable_samplers
+            ? binding_layout->immutable_samplers[elem]
+            : hk_sampler_from_handle(info->sampler);
+      if (sampler->has_border || sampler->plane_count != 1)
+         return false;
+      assert(sampler->planes[0].hw->index < (1 << 12));
+
+      struct hk_sampled_image_descriptor desc = {
+         .sw = {
+            .sampler = sampler->planes[0].hw->key,
+            .sampler_index = sampler->planes[0].hw->index + 28,
+            .clamp_0_sampler_index_or_negative = -1,
+            .lod_bias_fp16 = sampler->lod_bias_fp16,
+         },
+      };
+      if (!hk_set_null_native_texture(9, &desc.tex))
+         return false;
+      write_desc(set, binding, elem, &desc, sizeof(desc));
+      return true;
+   }
+
+   if (info->imageView == VK_NULL_HANDLE)
+      return false;
+
+   VK_FROM_HANDLE(hk_image_view, view, info->imageView);
+   if (view->plane_count != 1 || view->g17p_uscaled_normalized)
+      return false;
+
+   const struct hk_sampler *sampler = NULL;
+   if (descriptor_type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) {
+      const struct hk_descriptor_set_binding_layout *binding_layout =
+         &set->layout->binding[binding];
+      sampler = binding_layout->immutable_samplers
+                   ? binding_layout->immutable_samplers[elem]
+                   : hk_sampler_from_handle(info->sampler);
+      if (sampler->has_border || sampler->plane_count != 1)
+         return false;
+      assert(sampler->planes[0].hw->index < (1 << 12));
+   }
+
+   const bool ia = descriptor_type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
+   struct hk_sampled_image_descriptor desc = {
+      .tex = ia ? view->planes[0].ia : view->planes[0].sampled,
+      .sw = {
+         .sampler_index = sampler ? sampler->planes[0].hw->index + 28
+                                  : HK_AGX3_G17P_BINDLESS_SAMPLER_BASE_INDEX,
+         .clamp_0_sampler_index_or_negative = -1,
+         .lod_bias_fp16 = sampler ? sampler->lod_bias_fp16 : 0,
+         .min_lod_fp16 = view->sampled_min_lod_fp16,
+         .min_lod_uint16 = view->sampled_min_lod_uint16,
+         .scaled_conversion = view->g17p_scaled_conversion,
+         .sampled_heap_index = ia ? view->planes[0].input_heap_index
+                                  : view->planes[0].sampled_heap_index,
+      },
+   };
+   if (sampler)
+      desc.sw.sampler = sampler->planes[0].hw->key;
+
+   write_desc(set, binding, elem, &desc, sizeof(desc));
+   return true;
+}
+
 static void
 write_sampled_image_view_desc(struct hk_descriptor_set *set,
                               const VkDescriptorImageInfo *const info,
                               uint32_t binding, uint32_t elem,
                               VkDescriptorType descriptor_type)
 {
+   if (write_sampled_image_view_desc_g17p_single(set, info, binding, elem,
+                                                 descriptor_type))
+      return;
+
    struct hk_sampled_image_descriptor desc[3] = {};
    const unsigned generation = set->layout->descriptor_generation;
    const struct hk_sampled_image_descriptor_layout native =

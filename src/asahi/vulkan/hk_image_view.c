@@ -669,6 +669,16 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
    view->sampled_min_lod_fp16 = _mesa_float_to_half(min_lod);
    view->sampled_min_lod_uint16 = min_lod;
 
+   {
+      const enum pipe_format logical = hk_format_to_pipe_format(view->vk.format);
+      const enum pipe_format integer = hk_scaled_texture_format(logical);
+      view->g17p_scaled_conversion =
+         integer == PIPE_FORMAT_NONE ? 0
+         : util_format_is_pure_sint(integer) ? 1 : 2;
+      view->g17p_uscaled_normalized =
+         hk_uscaled_normalized_format(logical) != PIPE_FORMAT_NONE;
+   }
+
    /* First, figure out which image planes we need. For depth/stencil, we only
     * have one aspect viewed at a time.
     */
