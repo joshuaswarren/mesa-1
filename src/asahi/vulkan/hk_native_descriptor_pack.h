@@ -5,6 +5,9 @@
 
 #pragma once
 
+#include "util/macros.h"
+#include "util/u_atomic.h"
+
 #include "agx_pack.h"
 #include "hk_native_descriptor.h"
 
@@ -36,8 +39,30 @@ bool hk_pack_native_pbe(unsigned generation,
                         struct hk_native_pbe_descriptor *out,
                         const struct AGX_PBE *legacy);
 
-bool hk_set_null_native_texture(unsigned generation,
-                                struct hk_native_texture_descriptor *out);
+/* The generation's robust null texture descriptor.  It is a pure function of
+ * the generation and every sampled-image descriptor write may start from it,
+ * so it is packed once per generation (hk_set_null_native_texture_slow())
+ * and copied inline afterwards. */
+#define HK_NULL_NATIVE_TEXTURE_GENERATIONS 16
+extern struct hk_native_texture_descriptor
+   hk_null_native_texture_packed[HK_NULL_NATIVE_TEXTURE_GENERATIONS];
+/* 0: not packed yet, 1: being published, 2: packed valid. */
+extern uint32_t hk_null_native_texture_state[HK_NULL_NATIVE_TEXTURE_GENERATIONS];
+
+bool hk_set_null_native_texture_slow(unsigned generation,
+                                     struct hk_native_texture_descriptor *out);
+
+static inline bool
+hk_set_null_native_texture(unsigned generation,
+                           struct hk_native_texture_descriptor *out)
+{
+   if (likely(out && generation < HK_NULL_NATIVE_TEXTURE_GENERATIONS &&
+              p_atomic_read(&hk_null_native_texture_state[generation]) == 2)) {
+      *out = hk_null_native_texture_packed[generation];
+      return true;
+   }
+   return hk_set_null_native_texture_slow(generation, out);
+}
 
 /* Construct the generation-native robust null PBE descriptor. */
 bool hk_set_null_native_pbe(unsigned generation,
