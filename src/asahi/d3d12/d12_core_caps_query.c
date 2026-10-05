@@ -628,13 +628,31 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
          break;
       }
 
-      /*
-       * Everything else is single-plane, INCLUDING formats this driver
-       * cannot allocate. Plane count is a property of the FORMAT, not of
-       * our support for it -- refusing the query for a format we happen not
-       * to implement was the wrong model, and the suite caught it by asking
-       * about formats we do not map and expecting 1.
-       */
+      /* Plane count is a public format property, even for formats this
+       * renderer cannot allocate. These values match DirectX-Headers'
+       * MIT property-format table, measured by public-plane-counts.cpp. */
+      switch (info->Format) {
+      case DXGI_FORMAT_NV12:
+      case DXGI_FORMAT_P010:
+      case DXGI_FORMAT_P016:
+      case DXGI_FORMAT_NV11:
+      case DXGI_FORMAT_P208:
+         info->PlaneCount = 2;
+         return S_OK;
+      case DXGI_FORMAT_V208:
+      case DXGI_FORMAT_V408:
+         info->PlaneCount = 3;
+         return S_OK;
+      default:
+         break;
+      }
+      if ((UINT)info->Format > (UINT)DXGI_FORMAT_A4B4G4R4_UNORM ||
+          (info->Format > DXGI_FORMAT_B4G4R4A4_UNORM &&
+           info->Format < DXGI_FORMAT_P208) ||
+          (info->Format > DXGI_FORMAT_V408 &&
+           info->Format < DXGI_FORMAT_A4B4G4R4_UNORM))
+         return E_INVALIDARG;
+
       if (d12_format_stencil_plane(info->Format) != PIPE_FORMAT_NONE)
          info->PlaneCount = 2;
       else

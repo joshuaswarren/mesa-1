@@ -16,6 +16,10 @@ node selection and queue priority. `d3d12agx_caps_probe LIBRARY` dumps all 50
 structures, SM/root/FL requests, formats, MSAA counts and device interfaces as
 JSON lines. Failed HRESULTs mean output fields are undefined.
 
+FORMAT_INFO also reports public two/three-plane video layouts accurately even
+when allocation is unsupported; the values were independently checked against
+Microsoft's MIT DirectX-Headers property-format table on Linux.
+
 ## Contracts and evidence
 
 | Policy | Implementation / qualification |

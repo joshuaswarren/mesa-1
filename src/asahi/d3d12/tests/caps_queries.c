@@ -76,6 +76,18 @@ int main(void)
    priority.Priority = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
    assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_COMMAND_QUEUE_PRIORITY, &priority, sizeof(priority)) == S_OK);
    assert(!priority.PriorityForTypeIsSupported);
+   const DXGI_FORMAT planar[] = {DXGI_FORMAT_NV12, DXGI_FORMAT_P010,
+      DXGI_FORMAT_P016, DXGI_FORMAT_NV11, DXGI_FORMAT_P208,
+      DXGI_FORMAT_V208, DXGI_FORMAT_V408};
+   for (unsigned i = 0; i < sizeof(planar) / sizeof(planar[0]); ++i) {
+      D3D12_FEATURE_DATA_FORMAT_INFO info = {planar[i], 0};
+      assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_FORMAT_INFO,
+                                              &info, sizeof(info)) == S_OK);
+      assert(info.PlaneCount == (i < 5 ? 2 : 3));
+   }
+   D3D12_FEATURE_DATA_FORMAT_INFO invalid_format = {(DXGI_FORMAT)0xdeadbeef, 0};
+   assert(ID3D12Device_CheckFeatureSupport(dev, D3D12_FEATURE_FORMAT_INFO,
+                                           &invalid_format, sizeof(invalid_format)) == E_INVALIDARG);
    unsigned sentinel = 0xdeadbeef;
    assert(ID3D12Device_CheckFeatureSupport(dev, (D3D12_FEATURE)0xdead, &sentinel, sizeof(sentinel)) == E_INVALIDARG);
    assert(sentinel == 0xdeadbeef);
