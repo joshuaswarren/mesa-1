@@ -371,6 +371,8 @@ on the M1 Pro and run under the Phase 2 kit environment.
 | 7f8f0eed552 | bench | `--only passes`: GPU wall of 16 frames of clear/bind/draw at 1080p in three shapes |
 | 89c05dd4c2e | A (correctness) | a split declared render pass resumes with PRESERVE and the split render stores; a declared CLEAR processes every tile |
 | 2d65607c6de | test | `render_pass_split` live test (fails against cc55230bb1e: the clear reaches a quarter of the target) |
+| 39bffe4c69b | A (correctness) | a UAV or aliasing barrier, or a transition out of UNORDERED_ACCESS, inside a render whose draws write memory ends the render (hk's split for a memory-scope barrier in a pass) |
+| 53e8807e597 | G17P | bind-state and draw-index records reused across identical draws (256 B of VDM slab per draw before) |
 
 ### How the G17P costs were found
 
