@@ -3435,19 +3435,31 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          cached->compact.blend == compact_blend &&
          cached->compact.spills == compact_spills;
 
-      /* A vertex program whose every range source is the root, a draw
-       * parameter pointer or a constant: hk_g17p_graphics_uniform_ranges()
-       * would return the recorded layout with each address re-derived from
-       * the current pointers (refusing only a missing root), so derive the
-       * root record directly.  This is every record of an indexed-indirect
-       * multi-draw and every draw after a descriptor push. */
+      /* A program whose every range source is the root, a draw parameter
+       * pointer or a constant: hk_g17p_graphics_uniform_ranges() would return
+       * the recorded layout with each address re-derived from the current
+       * pointers (refusing only a missing root), so derive the root record
+       * directly.  This is every record of an indexed-indirect multi-draw and
+       * every draw after a descriptor push, push-constant update or
+       * vertex-buffer bind.
+       *
+       * Fragment ranges never name draw parameters or the draw ID, and with
+       * no UPLOADED source (tile-buffer spill or combined-sampler pointers)
+       * the layout depends only on inputs compact_same_program and the
+       * admission above already compare: the blend-constant range on
+       * compact.blend, the uniform-DMA span on dma_set_base, the root range,
+       * indexed-sampler pointers and rodata on the shader.  Deriving those
+       * ranges allocates nothing, so publishing here consumes exactly the
+       * allocations of the general path's same-layout republication. */
       bool compact_attempted = false;
-      if (!one_level && compact_same_program && vertex &&
+      if (!one_level && compact_same_program && (vertex || fragment) &&
           cached->compact.patchable &&
           (!cached->compact.uses_root || cmd->state.gfx.root != 0) &&
-          cached->compact.has_draw_params ==
-             (cmd->state.gfx.draw_params != 0) &&
-          cached->compact.has_draw_id == (cmd->state.gfx.draw_id_ptr != 0)) {
+          (fragment ||
+           (cached->compact.has_draw_params ==
+               (cmd->state.gfx.draw_params != 0) &&
+            cached->compact.has_draw_id ==
+               (cmd->state.gfx.draw_id_ptr != 0)))) {
          const uint64_t base[4] = {
             [HK_G17P_RANGE_SOURCE_CONSTANT] = 0,
             [HK_G17P_RANGE_SOURCE_ROOT] = cmd->state.gfx.root,
