@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <stdio.h>
 #include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx_debug.h"
 #include "asahi/compiler/agx3_compute_program.h"
 #include "asahi/compiler/agx3_graphics_program.h"
 #include "asahi/compiler/agx_nir.h"
@@ -1799,10 +1800,12 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
        * without a rebuild.
        */
       compiled->failed = true;
+      const char *refusal = agx_last_compile_refusal();
       mesa_loge("asahi: the AGX backend cannot encode this %s shader for %s; "
-                "draws and dispatches using it will be skipped "
+                "draws and dispatches using it will be skipped: %s "
                 "(AGX_MESA_DEBUG=shaders names the instruction)",
-                _mesa_shader_stage_to_abbrev(stage), agx_chip_name(dev->chip));
+                _mesa_shader_stage_to_abbrev(stage), agx_chip_name(dev->chip),
+                refusal && refusal[0] ? refusal : "no reason recorded");
       return compiled;
    }
 
