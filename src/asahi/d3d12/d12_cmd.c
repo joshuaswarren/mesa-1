@@ -5194,6 +5194,14 @@ d12_native_texture_layers(const struct d12_descriptor *d)
    if (d->kind == D12_DESC_UAV)
       return MAX2(d->texture_layers, 1);
 
+   /* A 3D SRV exposes a volume, not a subset of array layers. Its view
+    * layer count is one; the descriptor depth must instead describe the
+    * base level so libagx_txs can minify it by first_level + queried LOD.
+    * This also matches the command-local descriptor packing path. */
+   if (d->resource &&
+       d->texture_srv_dimension == D3D12_SRV_DIMENSION_TEXTURE3D)
+      return d->resource->layout.depth_px;
+
    unsigned layers = MAX2(d->texture_srv_layers, 1);
    if (d->texture_srv_dimension == D3D12_SRV_DIMENSION_TEXTURECUBE ||
        d->texture_srv_dimension == D3D12_SRV_DIMENSION_TEXTURECUBEARRAY)
