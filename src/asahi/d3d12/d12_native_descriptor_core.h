@@ -24,6 +24,9 @@
 #define D12_NATIVE_TEXTURE_GEN9_SAMPLES_SHIFT 56u
 #define D12_NATIVE_TEXTURE_GEN9_SAMPLES_MASK  UINT64_C(0x3)
 
+/* Largest texture or PBE stride any proven layout below uses. */
+#define D12_NATIVE_DESCRIPTOR_MAX_B 32u
+
 struct d12_native_descriptor_layout {
    uint8_t texture_stride_B;
    uint8_t pbe_stride_B;

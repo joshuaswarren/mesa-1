@@ -768,6 +768,11 @@ struct d12_descriptor_heap {
    struct agx_bo *pbe_bo;
    uint8_t texture_stride_B;
    uint8_t pbe_stride_B;
+   /* The generation's null TEXTURE/PBE descriptors, packed once at heap
+    * creation. Every slot starts as a copy, and a slot without a resource
+    * (D12_DESC_NONE, CBV, null view) mirrors to exactly these bytes. */
+   uint8_t null_texture[D12_NATIVE_DESCRIPTOR_MAX_B];
+   uint8_t null_pbe[D12_NATIVE_DESCRIPTOR_MAX_B];
    /* One 64-bit sparse residency-map pointer per logical resource
     * descriptor. Zero keeps dense resources on the no-load fast path. */
    struct agx_bo *residency_bo;

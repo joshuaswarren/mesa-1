@@ -410,15 +410,26 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
       else
          __atomic_fetch_and(word, ~mask, __ATOMIC_RELAXED);
    }
+   /* A descriptor without a resource packs to the generation's null
+    * texture and PBE on every generation (the AGX2 builder emits null for
+    * it and the Gen9/10 repack of that null has nothing resource-specific
+    * to add), so copy the heap's null descriptors instead of packing. */
+   const bool null_native = !slot->resource;
    if (heap->texture_bo) {
       uint8_t *textures = agx_bo_map(heap->texture_bo);
-      if (textures)
+      if (textures && null_native)
+         memcpy(textures + index * heap->texture_stride_B,
+                heap->null_texture, heap->texture_stride_B);
+      else if (textures)
          d12_refresh_texture_descriptor(
             device, textures + index * heap->texture_stride_B, slot);
    }
    if (heap->pbe_bo) {
       uint8_t *pbes = agx_bo_map(heap->pbe_bo);
-      if (pbes)
+      if (pbes && null_native)
+         memcpy(pbes + index * heap->pbe_stride_B, heap->null_pbe,
+                heap->pbe_stride_B);
+      else if (pbes)
          d12_refresh_pbe_descriptor(
             device, pbes + index * heap->pbe_stride_B, slot);
    }
@@ -737,15 +748,21 @@ d12_descriptor_heap_create(struct d12_device *device,
    if (heap->texture_bo && heap->pbe_bo) {
       uint8_t *textures = agx_bo_map(heap->texture_bo);
       uint8_t *pbes = agx_bo_map(heap->pbe_bo);
-      if (textures && pbes) {
+      /* Pack the generation's null descriptors once; every slot starts as
+       * a copy and resource-less writes reuse them. */
+      if (textures && pbes &&
+          heap->texture_stride_B <= sizeof(heap->null_texture) &&
+          heap->pbe_stride_B <= sizeof(heap->null_pbe) &&
+          d12_set_null_texture_descriptor(device, heap->null_texture) &&
+          d12_set_null_pbe_descriptor(device, heap->null_pbe)) {
+         for (uint64_t i = 0; i < desc->NumDescriptors; i++) {
+            memcpy(textures + i * heap->texture_stride_B,
+                   heap->null_texture, heap->texture_stride_B);
+         }
+         /* ... plus the permanently-null PBE sink past the last slot. */
          for (uint64_t i = 0; i <= desc->NumDescriptors; i++) {
-            if (i < desc->NumDescriptors &&
-                !d12_set_null_texture_descriptor(
-                   device, textures + i * heap->texture_stride_B))
-               native_mapped = false;
-            if (!d12_set_null_pbe_descriptor(
-                   device, pbes + i * heap->pbe_stride_B))
-               native_mapped = false;
+            memcpy(pbes + i * heap->pbe_stride_B, heap->null_pbe,
+                   heap->pbe_stride_B);
          }
       } else {
          native_mapped = false;
