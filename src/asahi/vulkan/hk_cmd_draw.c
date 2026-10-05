@@ -3382,6 +3382,7 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    struct hk_rendering_state *render = &cmd->state.gfx.render;
 
    memset(render, 0, sizeof(*render));
+   cmd->state.gfx.g17p_index_prepared.valid = false;
 
    hk_sync_begin_rendering(
       cmd, pRenderingInfo->flags & VK_RENDERING_RESUMING_BIT);
@@ -5950,6 +5951,7 @@ hk_flush_shaders(struct hk_cmd_buffer *cmd)
    /* A new VS/FS pair or sample-count variant may change interpolation. This
     * assignment does not depend on the fast linked shaders.
     */
+   gfx->g17p_smooth_memo.valid = false;
    agx_assign_uvs(&gfx->linked_varyings, &hw_vs->info.uvs,
                   fs->info.fs.interp.flat,
                   fs->info.fs.interp.linear);
@@ -11358,9 +11360,28 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
     * bounded cache warm-up only when a render is active; it emits no GPU
     * state and never clears Vulkan dirtiness. */
    if (cmd->current_cs.gfx) {
-      hk_prelink_graphics(
-         cmd, true, cmd->state.gfx.index.size,
-         cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable, true);
+      struct hk_graphics_state *gfx = &cmd->state.gfx;
+      const bool restart =
+         cmd->vk.dynamic_graphics_state.ia.primitive_restart_enable;
+
+      /* D3D translation layers rebind the index buffer before nearly every
+       * draw, usually with the same width, and then rebind descriptors, which
+       * invalidates anything prepared here. When this render pass already
+       * prepared this exact index key and the bind tail still matches the
+       * current state, the prelink and tail below would recompute exactly
+       * what exists; skip them. The draw path still verifies and rebuilds
+       * whatever later binds invalidate. */
+      const bool same_index_key =
+         gfx->g17p_index_prepared.valid &&
+         gfx->g17p_index_prepared.size == gfx->index.size &&
+         gfx->g17p_index_prepared.restart == restart &&
+         hk_g17p_prepared_bind_tail_matches(cmd, &gfx->g17p_bind_tail);
+      gfx->g17p_index_prepared.valid = true;
+      gfx->g17p_index_prepared.size = gfx->index.size;
+      gfx->g17p_index_prepared.restart = restart;
+
+      if (!same_index_key)
+         hk_prelink_graphics(cmd, true, gfx->index.size, restart, true);
 
       /* Software tessellation/geometry runs the API vertex stage as compute
        * before rasterization.  The index width is part of that stage's exact
@@ -11370,7 +11391,6 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
        * already establishing indexed state, instead of falling back to the
        * general encoder inside the first indexed draw. */
       struct hk_device *dev = hk_cmd_buffer_device(cmd);
-      struct hk_graphics_state *gfx = &cmd->state.gfx;
       /* Index buffers may be bound before shaders (or after unbinding
        * them). Linked shader cache entries can still refer to the previous
        * draw, so they do not prove that warm-up has live API shaders. */
@@ -11391,19 +11411,21 @@ hk_CmdBindIndexBuffer2KHR(VkCommandBuffer commandBuffer, VkBuffer _buffer,
           * the draw resolves any incomplete binding before publishing it.
           * Do not compile a deferred fragment variant merely to test this.
           */
-         struct hk_shader *fs = hk_bound_fs_select(cmd, false);
-         struct hk_fast_link_key_fs fs_key;
-         const bool fragment_exact =
-            hk_shader_is_compiled(fs) && gfx->fast_link_fs.valid &&
-            gfx->fast_link_fs.shader == fs &&
-            gfx->linked[MESA_SHADER_FRAGMENT] &&
-            hk_fill_fast_link_key_fs(cmd, fs, hk_bound_hw_vs(gfx),
-                                     &fs_key, false) &&
-            memcmp(&gfx->fast_link_fs.key, &fs_key, sizeof(fs_key)) == 0;
-         if (fragment_exact)
-            hk_g17p_prepare_native_bind_tail(cmd);
-         else
-            gfx->g17p_bind_tail.valid = false;
+         if (!same_index_key) {
+            struct hk_shader *fs = hk_bound_fs_select(cmd, false);
+            struct hk_fast_link_key_fs fs_key;
+            const bool fragment_exact =
+               hk_shader_is_compiled(fs) && gfx->fast_link_fs.valid &&
+               gfx->fast_link_fs.shader == fs &&
+               gfx->linked[MESA_SHADER_FRAGMENT] &&
+               hk_fill_fast_link_key_fs(cmd, fs, hk_bound_hw_vs(gfx),
+                                        &fs_key, false) &&
+               memcmp(&gfx->fast_link_fs.key, &fs_key, sizeof(fs_key)) == 0;
+            if (fragment_exact)
+               hk_g17p_prepare_native_bind_tail(cmd);
+            else
+               gfx->g17p_bind_tail.valid = false;
+         }
 
          if (gfx->shaders[MESA_SHADER_TESS_EVAL]) {
             struct hk_shader *vs = hk_bound_sw_vs(gfx);
@@ -11432,6 +11454,12 @@ void
 hk_cmd_bind_vertex_buffer(struct hk_cmd_buffer *cmd, uint32_t vb_idx,
                           struct hk_addr_range addr_range)
 {
+   /* An identical rebind leaves every consumer's input unchanged. Dirtiness
+    * already pending (e.g. after state invalidation) is kept as it is. */
+   if (cmd->state.gfx.vb[vb_idx].addr == addr_range.addr &&
+       cmd->state.gfx.vb[vb_idx].range == addr_range.range)
+      return;
+
    cmd->state.gfx.vb[vb_idx] = addr_range;
    cmd->state.gfx.dirty |= HK_DIRTY_VB;
    cmd->state.gfx.vertex_buffer_generation++;

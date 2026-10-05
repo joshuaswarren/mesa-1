@@ -727,6 +727,13 @@ struct hk_graphics_state {
    struct hk_g17p_prepared_sw_tess_batch g17p_sw_tess_batch;
 
    struct hk_g17p_prepared_bind_tail g17p_bind_tail;
+   /* Index key (width, restart) whose vertex prelink and bind tail the last
+    * index-buffer bind of the current render pass prepared. */
+   struct {
+      bool valid;
+      bool restart;
+      uint8_t size;
+   } g17p_index_prepared;
 
    /* The last successfully built HAL200 bind tail's inputs and packed
     * records.  A rebuild whose only changed inputs are the root, descriptor
@@ -806,6 +813,17 @@ struct hk_graphics_state {
    /* Fast linked shader data structures */
    uint64_t varyings;
    struct agx_varyings_vs linked_varyings;
+   /* hk_g17p_smooth_varyings_supported() of the last (linked FS, hardware
+    * VS, topology, provoking) it evaluated against the linked_varyings
+    * above. Cleared whenever linked_varyings is reassigned. */
+   struct {
+      const void *linked;
+      const void *vs;
+      uint32_t topology;
+      uint32_t provoking;
+      bool valid;
+      bool result;
+   } g17p_smooth_memo;
 
    uint32_t linked_dirty;
    struct hk_linked_shader *linked[MESA_SHADER_STAGES];
@@ -1339,6 +1357,14 @@ struct hk_cmd_buffer {
    /* Direct-mapped temporal cache avoids rescanning large_bos for the linked
     * vertex/fragment shader, setup and rodata BOs repeated by every draw. */
    struct agx_bo *recent_retained_bos[16];
+   /* Open-addressed pointer set of the BOs hk_cmd_buffer_retain_bo() has
+    * appended to large_bos (capacity a power of two, or zero). A recording
+    * retains one BO per distinct shader/setup/program it publishes, so a
+    * linear scan of large_bos on every temporal-cache miss grew quadratically
+    * with the number of pipelines a command buffer uses. */
+   struct agx_bo **retained_set;
+   uint32_t retained_set_capacity;
+   uint32_t retained_set_count;
 
    /* Executable USC-window arena the G17P Ioto programs recorded by this
     * command buffer are bump-allocated from. Its chunks are owned by

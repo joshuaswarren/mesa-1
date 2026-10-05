@@ -5,6 +5,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "hk_image_view.h"
+#include "util/half_float.h"
 #include "util/format/u_format.h"
 #include "vulkan/vulkan_core.h"
 
@@ -663,6 +664,10 @@ hk_image_view_init(struct hk_device *dev, struct hk_image_view *view,
    memset(view, 0, sizeof(*view));
 
    vk_image_view_init(&dev->vk, &view->vk, pCreateInfo);
+
+   const float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
+   view->sampled_min_lod_fp16 = _mesa_float_to_half(min_lod);
+   view->sampled_min_lod_uint16 = min_lod;
 
    /* First, figure out which image planes we need. For depth/stencil, we only
     * have one aspect viewed at a time.

@@ -21,6 +21,10 @@ struct hk_image_view {
    struct vk_image_view vk;
 
    uint8_t plane_count;
+   /* Descriptor encodings of the view's fixed minimum LOD (relative to its
+    * base level), computed once instead of on every descriptor write. */
+   uint16_t sampled_min_lod_fp16;
+   uint16_t sampled_min_lod_uint16;
    struct {
       uint8_t image_plane;
       uint32_t sampled_heap_index;

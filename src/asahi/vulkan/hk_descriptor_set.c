@@ -150,10 +150,8 @@ write_sampled_image_view_desc(struct hk_descriptor_set *set,
             view->planes[plane].input_heap_index :
             view->planes[plane].sampled_heap_index;
 
-         float min_lod = MAX2(view->vk.min_lod - view->vk.base_mip_level, 0.0);
-
-         desc[plane].sw.min_lod_fp16 = _mesa_float_to_half(min_lod);
-         desc[plane].sw.min_lod_uint16 = min_lod;
+         desc[plane].sw.min_lod_fp16 = view->sampled_min_lod_fp16;
+         desc[plane].sw.min_lod_uint16 = view->sampled_min_lod_uint16;
          const enum pipe_format logical = hk_format_to_pipe_format(view->vk.format);
          const enum pipe_format integer = hk_scaled_texture_format(logical);
          if (generation == 9 && integer != PIPE_FORMAT_NONE)

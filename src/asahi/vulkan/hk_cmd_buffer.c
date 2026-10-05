@@ -75,8 +75,12 @@ hk_g17p_vdm_lookup(struct hk_cmd_buffer *cmd, uint64_t primary, bool bind)
          return compact;
    }
 
-   list_for_each_entry(struct hk_vdm_allocation, allocation,
-                       &cmd->vdm_allocations, link) {
+   /* Allocations never overlap, so the search order cannot change the
+    * answer. New control streams live in the most recent allocation: search
+    * from the tail so the lookup at each stream start stays constant time
+    * instead of growing with every render pass recorded. */
+   list_for_each_entry_rev(struct hk_vdm_allocation, allocation,
+                           &cmd->vdm_allocations, link) {
       if (primary < allocation->addr ||
           primary - allocation->addr >= allocation->size)
          continue;
@@ -217,6 +221,7 @@ hk_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
    _mesa_hash_table_destroy(cmd->g17p_precomp_index, NULL);
    util_dynarray_fini(&cmd->g17p_precomp_programs);
    util_dynarray_fini(&cmd->large_bos);
+   free(cmd->retained_set);
    util_dynarray_fini(&cmd->sync_pass_records);
    vk_command_buffer_finish(&cmd->vk);
    vk_free(&pool->vk.alloc, cmd);
@@ -1255,6 +1260,13 @@ hk_push_constants(UNUSED struct hk_cmd_buffer *cmd,
                   struct hk_descriptor_state *desc,
                   const VkPushConstantsInfoKHR *info)
 {
+   /* D3D translation layers re-push unchanged constants before most draws.
+    * While the root is clean the uploaded root holds exactly these bytes, so
+    * an identical push changes nothing; keep the root and every preparation
+    * keyed to the current descriptor generation. */
+   if (memcmp(desc->root.push + info->offset, info->pValues, info->size) == 0)
+      return;
+
    memcpy(desc->root.push + info->offset, info->pValues, info->size);
    desc->root_dirty = true;
    desc->generation++;
@@ -1682,9 +1694,9 @@ hk_g17p_basic_fragment_layout(struct hk_cmd_buffer *cmd)
  * dedicated selector and the fragment shader's draw-root B/C coefficient
  * choice. Position Z and reciprocal W use native coefficient sources.
  */
-bool
-hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
-                                 const struct hk_linked_shader *linked)
+static bool
+hk_g17p_smooth_varyings_supported_uncached(struct hk_cmd_buffer *cmd,
+                                          const struct hk_linked_shader *linked)
 {
    if (!linked)
       return false;
@@ -1820,6 +1832,32 @@ hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
    }
    return (user_bindings || has_rhw || has_z) &&
           has_z == cf->reads_z && next_cf == cf->nr_cf;
+}
+
+/* Evaluated for every draw that republishes its fragment program. The
+ * answer depends only on the linked fragment coefficients, the hardware
+ * vertex shader's outputs, the topology, the provoking vertex and the
+ * current linked_varyings slot table, so remember the last evaluation. */
+bool
+hk_g17p_smooth_varyings_supported(struct hk_cmd_buffer *cmd,
+                                 const struct hk_linked_shader *linked)
+{
+   struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const struct hk_shader *vs =
+      gfx->shaders[MESA_SHADER_VERTEX] ? hk_bound_hw_vs(gfx) : NULL;
+   __typeof__(gfx->g17p_smooth_memo) *memo = &gfx->g17p_smooth_memo;
+   if (linked && memo->valid && memo->linked == linked && memo->vs == vs &&
+       memo->topology == gfx->topology && memo->provoking == gfx->provoking)
+      return memo->result;
+
+   const bool result = hk_g17p_smooth_varyings_supported_uncached(cmd, linked);
+   if (linked) {
+      *memo = (__typeof__(*memo)){
+         .linked = linked, .vs = vs, .topology = gfx->topology,
+         .provoking = gfx->provoking, .valid = true, .result = result,
+      };
+   }
+   return result;
 }
 
 static bool

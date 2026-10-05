@@ -47,8 +47,21 @@ static_assert(sizeof(struct hk_sparse_buffer_map_header) ==
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_buffer, vk.base, VkBuffer,
                                VK_OBJECT_TYPE_BUFFER)
 
-uint64_t hk_buffer_address(const struct hk_buffer *buffer, uint64_t offset,
-                           bool read_only);
+uint64_t hk_buffer_address_sparse_ro(const struct hk_buffer *buffer,
+                                     uint64_t offset);
+
+/* Called for every vertex, index and descriptor buffer binding. Only sparse
+ * resident buffers (buffer->va != NULL) read through the read-only shadow
+ * mapping; keep the common case inline. */
+static inline uint64_t
+hk_buffer_address(const struct hk_buffer *buffer, uint64_t offset,
+                  bool read_only)
+{
+   if (read_only && buffer->va)
+      return hk_buffer_address_sparse_ro(buffer, offset);
+
+   return vk_buffer_address(&buffer->vk, offset);
+}
 
 static inline uint64_t
 hk_buffer_address_rw(const struct hk_buffer *buffer, uint64_t offset)
