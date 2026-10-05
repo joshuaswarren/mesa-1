@@ -1793,6 +1793,16 @@ struct d12_segment {
    struct agx_counts_packed bg_counts, eot_counts;
    struct agx_counts_packed partial_bg_counts, partial_eot_counts;
    bool has_draws;
+   /* The end-of-tile op chosen per colour attachment (enum agx_bg_eot_op),
+    * kept so a later full clear or discard of the attachment can retire a
+    * store nothing will read (d12_list_retire_attachment_store). */
+   uint8_t eot_ops[AGX_MAX_RENDER_TARGETS];
+   /* The depth/stencil write-back is dead: a full clear or a discard of the
+    * aspect follows this render with nothing in between. */
+   bool depth_store_dead, stencil_store_dead;
+   /* The aspect was discarded before this render, so its tiles are not
+    * seeded from memory. */
+   bool depth_load_none, stencil_load_none;
    bool process_empty_tiles;
 
    /* Depth/stencil attachment. Unlike colour, depth never passes through a
@@ -1860,6 +1870,8 @@ struct d12_segment {
 /* Per-render-pass array chunks. Recording rolls to a load-preserving pass
  * before either fills, which bounds storage without limiting command lists. */
 #define D12_SCISSORS_PER_SEGMENT 256
+/* Full clears a command list may hold back for the pass that consumes them. */
+#define D12_PENDING_CLEARS 8
 #define D12_DEPTH_BIASES_PER_SEGMENT 64
 
 /* A command list may legally contain a large sequence of independent render
@@ -2188,6 +2200,35 @@ struct d12_cmd_list {
    struct d12_descriptor bound_dsv;
    uint8_t bound_rtv_count;
    bool has_bound_dsv;
+
+   /* Full-view clears and discards recorded but not yet applied. The next
+    * render that binds and writes the view seeds its tiles from the value
+    * (or from nothing) instead of loading from memory; a command that could
+    * observe the view before that turns each clear into a render of its
+    * own (d12_list_flush_pending_clears) and drops the discard hints. */
+   struct d12_pending_rt_clear {
+      /* A clear names a view; a discard names a resource and a range of
+       * its subresources, matched against the views later bound. */
+      bool discard;
+      struct d12_descriptor view;
+      float color[4];
+      struct d12_resource *resource;
+      bool whole;
+      uint32_t first_subresource, subresource_count;
+   } pending_rt_clear[D12_PENDING_CLEARS];
+   unsigned pending_rt_clear_count;
+   struct d12_pending_ds_clear {
+      bool valid;
+      struct d12_descriptor view;
+      bool depth, stencil;
+      float depth_value;
+      uint8_t stencil_value;
+   } pending_ds_clear;
+   struct d12_pending_ds_discard {
+      struct d12_resource *resource; /* NULL: none pending */
+      bool whole;
+      uint32_t first_subresource, subresource_count;
+   } pending_ds_discard;
 
    /* Render-pass tile traffic for the attachments bound above. Carried on
     * the list because the pass is declared before the first draw opens a

@@ -416,8 +416,9 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
          seg->render_pass
             ? seg->depth_plan
             : (struct d12_render_pass_plan){
-                 .load = seg->depth_cleared ? D12_RP_LOAD_CLEAR
-                                            : D12_RP_LOAD_PRESERVE,
+                 .load = seg->depth_cleared     ? D12_RP_LOAD_CLEAR
+                         : seg->depth_load_none ? D12_RP_LOAD_NONE
+                                                : D12_RP_LOAD_PRESERVE,
                  .store = (seg->depth_cleared ||
                            !(seg->dsv_flags &
                              D3D12_DSV_FLAG_READ_ONLY_DEPTH))
@@ -425,9 +426,12 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
                              : D12_RP_STORE_NONE,
               };
 
+      /* A later full clear or discard in the list retired the write-back
+       * (d12_list_retire_attachment_store). */
       struct agx_zls zls = {
          .z_load = depth_plan.load == D12_RP_LOAD_PRESERVE,
-         .z_store = depth_plan.store == D12_RP_STORE_PRESERVE,
+         .z_store = depth_plan.store == D12_RP_STORE_PRESERVE &&
+                    !seg->depth_store_dead,
       };
 
       c->depth.base = seg->ds_address;
@@ -444,8 +448,9 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
             seg->render_pass
                ? seg->stencil_plan
                : (struct d12_render_pass_plan){
-                    .load = seg->stencil_cleared ? D12_RP_LOAD_CLEAR
-                                                 : D12_RP_LOAD_PRESERVE,
+                    .load = seg->stencil_cleared     ? D12_RP_LOAD_CLEAR
+                            : seg->stencil_load_none ? D12_RP_LOAD_NONE
+                                                     : D12_RP_LOAD_PRESERVE,
                     .store = (seg->stencil_cleared ||
                               !(seg->dsv_flags &
                                 D3D12_DSV_FLAG_READ_ONLY_STENCIL))
@@ -455,7 +460,8 @@ d12_fill_render_cmd(struct d12_device *device, struct d12_cmd_list *list,
 
          s = &seg->ds->stencil_layout;
          zls.s_load = stencil_plan.load == D12_RP_LOAD_PRESERVE;
-         zls.s_store = stencil_plan.store == D12_RP_STORE_PRESERVE;
+         zls.s_store = stencil_plan.store == D12_RP_STORE_PRESERVE &&
+                       !seg->stencil_store_dead;
 
          c->stencil.base = seg->stencil_address;
          unsigned s_pages = s->layer_stride_B / AIL_PAGESIZE;

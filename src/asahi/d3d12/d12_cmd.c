@@ -1013,6 +1013,9 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    list->render_open = false;
    list->pregfx_open = false;
    list->pregfx_cur = NULL;
+   list->pending_rt_clear_count = 0;
+   list->pending_ds_clear.valid = false;
+   list->pending_ds_discard.resource = NULL;
    d12_list_reset_api_state(list);
 
    list->uses_heap = false;
@@ -1595,12 +1598,18 @@ d12_list_get_pregfx(struct d12_cmd_list *list)
    return seg;
 }
 
+static bool d12_list_flush_pending_clears(struct d12_cmd_list *list);
+
 /* Get an open CDM segment to append dispatches to, starting one if needed. */
 static struct d12_segment *
 d12_list_get_cdm(struct d12_cmd_list *list)
 {
    if (list->cdm_open)
       return &list->segments[list->segment_count - 1];
+
+   /* Clears recorded before this compute work are ordered before it. */
+   if (!d12_list_flush_pending_clears(list))
+      return NULL;
 
    /* A render pass may still be open; compute work ends it. */
    if (list->render_open)
@@ -2334,9 +2343,7 @@ d12_build_g17p_bg_eot(struct d12_cmd_list *list, const struct d12_segment *seg,
          goto fail;
       if (op == AGX_BG_CLEAR) {
          failure_stage = "clear-argument";
-         const float *color = seg->render_pass ? seg->rt_clear[0] : legacy_color;
-         if (!color)
-            goto fail;
+         const float *color = seg->rt_clear[0];
          desc.clear_value_va = d12_list_upload(list, color, 16, 16);
          if (!desc.clear_value_va)
             goto fail;
@@ -2515,16 +2522,9 @@ d12_build_bg_eot_usc(struct d12_cmd_list *list, const struct d12_segment *seg,
             int32_t i[4];
          } cv;
 
-         /* A render pass clears each attachment to its own value; every
-          * other path clears one target at a time and carries one colour. */
-         const float *color = seg->render_pass ? seg->rt_clear[rt_index]
-                                               : legacy_color;
-         if (!color) {
-            mesa_loge("background clear requested for RT%u with no clear "
-                      "value", rt_index);
-            list->state = D12_LIST_ERROR;
-            return 0;
-         }
+         /* Each attachment clears to its own value, recorded on the
+          * segment by the render pass or by the pending clear it absorbed. */
+         const float *color = seg->rt_clear[rt_index];
 
          if (util_format_is_pure_uint(cf)) {
             for (unsigned c = 0; c < 4; c++)
@@ -2856,10 +2856,226 @@ d12_segment_matches_unused_rt_layout(const struct d12_segment *seg,
           memcmp(&seg->tib, &pso->tib, sizeof(seg->tib)) == 0;
 }
 
+/* Two RTV/DSV descriptors name the same subresource range the same way. */
+static bool
+d12_view_same_target(const struct d12_descriptor *a,
+                     const struct d12_descriptor *b)
+{
+   return a->resource == b->resource && a->address == b->address &&
+          a->counter_address == b->counter_address &&
+          a->size_B == b->size_B && a->stride_B == b->stride_B &&
+          a->format == b->format && a->kind == b->kind &&
+          a->dsv_flags == b->dsv_flags && a->texture_plane == b->texture_plane;
+}
+
+/* Whether a discard of `count` subresources from `first` (or of the whole
+ * resource) covers every subresource of a view's level and layer range on
+ * one plane. */
+static bool
+d12_discard_covers(const struct d12_resource *res, bool whole,
+                   uint32_t first_subresource, uint32_t subresource_count,
+                   unsigned level, uint64_t view_address, unsigned layers,
+                   unsigned plane)
+{
+   if (whole)
+      return true;
+
+   const unsigned levels = MAX2(res->layout.levels, 1);
+   const unsigned array = MAX2(res->desc.DepthOrArraySize, 1);
+   const uint64_t first = first_subresource;
+   const uint64_t end = first + subresource_count;
+
+   if (res->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D) {
+      const uint64_t sub = level + (uint64_t)plane * levels;
+      return sub >= first && sub < end;
+   }
+
+   if (!res->layout.layer_stride_B || view_address < res->addr ||
+       (view_address - res->addr) % res->layout.layer_stride_B)
+      return false;
+   const uint64_t first_layer =
+      (view_address - res->addr) / res->layout.layer_stride_B;
+   for (unsigned l = 0; l < layers; l++) {
+      const uint64_t sub = level + (first_layer + l) * levels +
+                           (uint64_t)plane * levels * array;
+      if (sub < first || sub >= end)
+         return false;
+   }
+   return true;
+}
+
+/* The pending clear of a view, or failing that a pending discard covering
+ * it: a clear recorded after a discard is the later, binding command. */
+static int
+d12_list_find_pending_rt_clear(const struct d12_cmd_list *list,
+                               const struct d12_descriptor *view)
+{
+   int discard = -1;
+   for (unsigned i = 0; i < list->pending_rt_clear_count; i++) {
+      const struct d12_pending_rt_clear *e = &list->pending_rt_clear[i];
+      if (!e->discard) {
+         if (d12_view_same_target(&e->view, view))
+            return (int)i;
+      } else if (e->resource == view->resource &&
+                 d12_discard_covers(view->resource, e->whole,
+                                    e->first_subresource,
+                                    e->subresource_count, view->texture_level,
+                                    view->address, MAX2(view->size_B, 1), 0)) {
+         discard = (int)i;
+      }
+   }
+   return discard;
+}
+
+static bool
+d12_list_pending_ds_discard_covers(const struct d12_cmd_list *list,
+                                   const struct d12_descriptor *dsv,
+                                   unsigned plane)
+{
+   const struct d12_pending_ds_discard *d = &list->pending_ds_discard;
+   return d->resource && d->resource == dsv->resource &&
+          d12_discard_covers(dsv->resource, d->whole, d->first_subresource,
+                             d->subresource_count, dsv->texture_plane,
+                             dsv->address, MAX2(dsv->size_B, 1), plane);
+}
+
+static void
+d12_list_drop_pending_rt_clear(struct d12_cmd_list *list, unsigned i)
+{
+   list->pending_rt_clear_count--;
+   memmove(&list->pending_rt_clear[i], &list->pending_rt_clear[i + 1],
+           (list->pending_rt_clear_count - i) *
+              sizeof(list->pending_rt_clear[0]));
+}
+
+static bool
+d12_list_pending_ds_clear_matches(const struct d12_cmd_list *list,
+                                  const struct d12_descriptor *dsv)
+{
+   return list->pending_ds_clear.valid &&
+          d12_view_same_target(&list->pending_ds_clear.view, dsv);
+}
+
+/* The extent a render binding these views would cover: their intersection,
+ * exactly as d12_list_begin_render computes it. */
+static void
+d12_views_extent(const struct d12_descriptor *rtvs, unsigned rtv_count,
+                 const struct d12_descriptor *dsv, unsigned *width,
+                 unsigned *height)
+{
+   unsigned w = 0, h = 0;
+   for (unsigned i = 0; i < rtv_count; i++) {
+      if (!rtvs[i].resource)
+         continue;
+      const unsigned vw =
+         u_minify(rtvs[i].resource->layout.width_px, rtvs[i].texture_level);
+      const unsigned vh =
+         u_minify(rtvs[i].resource->layout.height_px, rtvs[i].texture_level);
+      w = w ? MIN2(w, vw) : vw;
+      h = h ? MIN2(h, vh) : vh;
+   }
+   if (dsv && dsv->resource) {
+      const unsigned vw =
+         u_minify(dsv->resource->layout.width_px, dsv->texture_plane);
+      const unsigned vh =
+         u_minify(dsv->resource->layout.height_px, dsv->texture_plane);
+      w = w ? MIN2(w, vw) : vw;
+      h = h ? MIN2(h, vh) : vh;
+   }
+   *width = w;
+   *height = h;
+}
+
+/* Rebuild a closed render's end-of-tile programs from its recorded ops. */
+static void
+d12_segment_rebuild_eot(struct d12_cmd_list *list, struct d12_segment *seg)
+{
+   enum agx_bg_eot_op ops[AGX_MAX_RENDER_TARGETS];
+   for (unsigned i = 0; i < AGX_MAX_RENDER_TARGETS; i++)
+      ops[i] = (enum agx_bg_eot_op)seg->eot_ops[i];
+   seg->eot_usc = d12_build_bg_eot_usc(list, seg, NULL, ops, &seg->tib,
+                                       &seg->eot_counts,
+                                       &seg->g17p_eot_resources);
+   if (!seg->eot_usc)
+      list->state = D12_LIST_ERROR;
+}
+
+/*
+ * A full clear or a discard recorded for a view makes the previous render's
+ * write-back of that attachment dead when nothing could have observed it in
+ * between: the render is the list's last segment, no compute segment
+ * followed it, and the clear or discard covers the whole view. Drop the
+ * store from the render's end-of-tile programs (colour) or its ZLS control
+ * (depth/stencil). Partial renders keep their own store and reload pair; the
+ * memory they leave behind is overwritten by the clear like everything else.
+ */
+static void
+d12_list_retire_attachment_store(struct d12_cmd_list *list,
+                                 const struct d12_descriptor *view,
+                                 bool depth, bool stencil)
+{
+   if (list->render_open || list->cdm_open || !list->segment_count ||
+       list->state != D12_LIST_RECORDING)
+      return;
+
+   struct d12_segment *seg = &list->segments[list->segment_count - 1];
+   if (seg->type != D12_SEG_RENDER)
+      return;
+
+   const unsigned layers = MAX2(view->size_B, 1);
+   if (view->kind == D12_DESC_RTV) {
+      bool changed = false;
+      for (unsigned i = 0; i < seg->rt_count; i++) {
+         if (seg->rt[i] != view->resource ||
+             seg->rt_address[i] != view->address ||
+             seg->rt_level[i] != view->texture_level ||
+             seg->layers != layers || seg->eot_ops[i] != AGX_EOT_STORE)
+            continue;
+         seg->eot_ops[i] = AGX_BG_EOT_NONE;
+         changed = true;
+      }
+      if (changed)
+         d12_segment_rebuild_eot(list, seg);
+   } else if (seg->ds == view->resource && seg->ds_address == view->address &&
+              seg->ds_level == view->texture_plane && seg->layers == layers) {
+      if (depth)
+         seg->depth_store_dead = true;
+      if (stencil && seg->stencil_address == view->counter_address)
+         seg->stencil_store_dead = true;
+   }
+}
+
+/* End an open render that binds the view: a clear of a bound attachment
+ * sits between the render's draws and whatever follows. */
+static void
+d12_list_end_render_binding_view(struct d12_cmd_list *list,
+                                 const struct d12_descriptor *view)
+{
+   if (!list->render_open)
+      return;
+   const struct d12_segment *seg = &list->segments[list->segment_count - 1];
+   const unsigned layers = MAX2(view->size_B, 1);
+   bool bound = false;
+   if (view->kind == D12_DESC_RTV) {
+      for (unsigned i = 0; i < seg->rt_count && !bound; i++) {
+         bound = seg->rt[i] == view->resource &&
+                 seg->rt_address[i] == view->address &&
+                 seg->rt_level[i] == view->texture_level &&
+                 seg->layers == layers;
+      }
+   } else {
+      bound = seg->ds == view->resource && seg->ds_address == view->address &&
+              seg->ds_level == view->texture_plane && seg->layers == layers;
+   }
+   if (bound)
+      d12_list_close_cdm(list);
+}
+
 /*
  * Open a render segment from authoritative OM descriptors. D3D12 does not
  * require a clear before drawing, so AGX's main background program must LOAD
- * the target in that case. Partial renders always use their own LOAD/STORE
+ * the target in that case, unless a pending full clear or discard of the
+ * attachment says otherwise. Partial renders always use their own LOAD/STORE
  * pair: reusing a CLEAR program after a tiler spill destroys earlier draws.
  */
 static struct d12_segment *
@@ -2867,7 +3083,6 @@ d12_list_begin_render(struct d12_cmd_list *list,
                       const struct d12_descriptor *rtvs, unsigned rtv_count,
                       const struct d12_descriptor *dsv,
                       struct d12_pipeline_state *pso,
-                      enum agx_bg_eot_op bg_op, const float color[4],
                       bool process_empty_tiles)
 {
    d12_list_close_cdm(list);
@@ -3217,6 +3432,60 @@ d12_list_begin_render(struct d12_cmd_list *list,
                                              seg->layers > 1);
    }
 
+   /* Full clears and discards recorded for the attachments this render
+    * writes seed their tiles from the value, or from nothing, instead of
+    * memory: this is the one render ClearRenderTargetView or
+    * ClearDepthStencilView followed by draws asks for. Pending clears this
+    * render cannot absorb were already turned into renders of their own by
+    * the caller (d12_list_flush_pending_clears). A declared render pass
+    * states its own traffic and holds no pending clears. */
+   uint8_t legacy_clear_mask = 0, legacy_discard_mask = 0;
+   if (!seg->render_pass) {
+      for (unsigned i = 0; i < rtv_count; i++) {
+         if (!seg->rt[i] || !(seg->rt_write_mask & BITFIELD_BIT(i)))
+            continue;
+         int p = d12_list_find_pending_rt_clear(list, &rtvs[i]);
+         if (p < 0)
+            continue;
+         if (list->pending_rt_clear[p].discard) {
+            legacy_discard_mask |= BITFIELD_BIT(i);
+         } else {
+            memcpy(seg->rt_clear[i], list->pending_rt_clear[p].color,
+                   sizeof(seg->rt_clear[i]));
+            legacy_clear_mask |= BITFIELD_BIT(i);
+         }
+         d12_list_drop_pending_rt_clear(list, p);
+      }
+      if (dsv) {
+         if (d12_list_pending_ds_clear_matches(list, dsv)) {
+            const struct d12_pending_ds_clear *pc = &list->pending_ds_clear;
+            if (pc->depth) {
+               seg->isp_bgobjdepth =
+                  dsv->resource->layout.format == PIPE_FORMAT_Z16_UNORM
+                     ? _mesa_float_to_unorm(pc->depth_value, 16)
+                     : fui(pc->depth_value);
+               seg->depth_cleared = true;
+            }
+            if (pc->stencil && dsv->resource->stencil_bo) {
+               seg->stencil_clear = pc->stencil_value;
+               seg->stencil_cleared = true;
+            }
+            list->pending_ds_clear.valid = false;
+         }
+         if (!seg->depth_cleared &&
+             d12_list_pending_ds_discard_covers(list, dsv, 0))
+            seg->depth_load_none = true;
+         if (!seg->stencil_cleared && dsv->resource->stencil_bo &&
+             d12_list_pending_ds_discard_covers(list, dsv, 1))
+            seg->stencil_load_none = true;
+         if (seg->depth_load_none || seg->stencil_load_none)
+            list->pending_ds_discard.resource = NULL;
+      }
+      /* A clear reaches every tile, drawn into or not. */
+      if (legacy_clear_mask || seg->depth_cleared || seg->stencil_cleared)
+         seg->process_empty_tiles = true;
+   }
+
    enum agx_bg_eot_op main_bg[AGX_MAX_RENDER_TARGETS] = {0};
    enum agx_bg_eot_op main_eot[AGX_MAX_RENDER_TARGETS] = {0};
    enum agx_bg_eot_op partial_bg[AGX_MAX_RENDER_TARGETS] = {0};
@@ -3228,12 +3497,18 @@ d12_list_begin_render(struct d12_cmd_list *list,
          continue;
 
       /* A render pass states the tile traffic per attachment; outside one
-       * the caller's single bg_op applies to all of them and every
-       * attachment is written back. */
-      const struct d12_render_pass_plan plan =
-         seg->render_pass ? seg->rt_plan[i]
-                          : d12_render_pass_plan_legacy(bg_op ==
-                                                        AGX_BG_CLEAR);
+       * it is inferred from the pending clears and discards above, and
+       * every attachment is written back until a later clear or discard
+       * retires that store. */
+      struct d12_render_pass_plan plan;
+      if (seg->render_pass) {
+         plan = seg->rt_plan[i];
+      } else {
+         plan = d12_render_pass_plan_legacy(legacy_clear_mask &
+                                            BITFIELD_BIT(i));
+         if (legacy_discard_mask & BITFIELD_BIT(i))
+            plan.load = D12_RP_LOAD_NONE;
+      }
 
       switch (plan.load) {
       case D12_RP_LOAD_CLEAR:
@@ -3248,6 +3523,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
       }
       main_eot[i] = plan.store == D12_RP_STORE_PRESERVE ? AGX_EOT_STORE
                                                         : AGX_BG_EOT_NONE;
+      seg->eot_ops[i] = (uint8_t)main_eot[i];
 
       /* The partial pair is not the application's to choose. A tile that
        * spills mid-pass is stored and reloaded purely to free tile memory,
@@ -3258,7 +3534,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
    }
 
    seg->bg_usc = d12_build_bg_eot_usc(
-      list, seg, color, main_bg, &seg->tib, &seg->bg_counts, &seg->g17p_bg_resources);
+      list, seg, NULL, main_bg, &seg->tib, &seg->bg_counts, &seg->g17p_bg_resources);
    seg->eot_usc = d12_build_bg_eot_usc(
       list, seg, NULL, main_eot, &seg->tib, &seg->eot_counts, &seg->g17p_eot_resources);
    seg->partial_bg_usc = d12_build_bg_eot_usc(
@@ -9630,6 +9906,212 @@ fail:
    return false;
 }
 
+/*
+ * Turn every pending full clear into a render of its own, because the next
+ * command could observe the view and the clear is ordered before it.
+ * Clears of attachments with one geometry share a render; G17P's background
+ * programs cover one colour target, so there they go one at a time. Pending
+ * discards need no render: the hint is simply dropped.
+ */
+static bool
+d12_list_flush_pending_clears(struct d12_cmd_list *list)
+{
+   for (unsigned i = 0; i < list->pending_rt_clear_count;) {
+      if (list->pending_rt_clear[i].discard)
+         d12_list_drop_pending_rt_clear(list, i);
+      else
+         i++;
+   }
+   list->pending_ds_discard.resource = NULL;
+   if (list->pending_ds_clear.valid && !list->pending_ds_clear.depth &&
+       !list->pending_ds_clear.stencil)
+      list->pending_ds_clear.valid = false;
+
+   while (list->state == D12_LIST_RECORDING &&
+          (list->pending_rt_clear_count || list->pending_ds_clear.valid)) {
+      const unsigned before = list->pending_rt_clear_count +
+                              (list->pending_ds_clear.valid ? 1 : 0);
+      const bool one_at_a_time = list->device->dev.chip == AGX_CHIP_G17P;
+      struct d12_descriptor rtvs[AGX_MAX_RENDER_TARGETS];
+      unsigned rtv_count = 0;
+      unsigned width = 0, height = 0, samples = 0, layers = 0;
+
+      for (unsigned i = 0; i < list->pending_rt_clear_count &&
+                           rtv_count < AGX_MAX_RENDER_TARGETS; i++) {
+         const struct d12_descriptor *v = &list->pending_rt_clear[i].view;
+         const unsigned w = u_minify(v->resource->layout.width_px,
+                                     v->texture_level);
+         const unsigned h = u_minify(v->resource->layout.height_px,
+                                     v->texture_level);
+         const unsigned s = MAX2(v->resource->layout.sample_count_sa, 1);
+         const unsigned l = MAX2(v->size_B, 1);
+         if (rtv_count && (one_at_a_time || w != width || h != height ||
+                           s != samples || l != layers))
+            continue;
+         width = w;
+         height = h;
+         samples = s;
+         layers = l;
+         rtvs[rtv_count++] = *v;
+      }
+
+      struct d12_descriptor dsv;
+      const struct d12_descriptor *dsv_ptr = NULL;
+      if (list->pending_ds_clear.valid) {
+         const struct d12_descriptor *v = &list->pending_ds_clear.view;
+         const unsigned w = u_minify(v->resource->layout.width_px,
+                                     v->texture_plane);
+         const unsigned h = u_minify(v->resource->layout.height_px,
+                                     v->texture_plane);
+         const unsigned s = MAX2(v->resource->layout.sample_count_sa, 1);
+         const unsigned l = MAX2(v->size_B, 1);
+         if (!rtv_count || (w == width && h == height && s == samples &&
+                            l == layers)) {
+            dsv = *v;
+            dsv_ptr = &dsv;
+         }
+      }
+
+      if (!d12_list_begin_render(list, rtv_count ? rtvs : NULL, rtv_count,
+                                 dsv_ptr, NULL, true))
+         return false;
+      d12_list_close_cdm(list);
+
+      const unsigned after = list->pending_rt_clear_count +
+                             (list->pending_ds_clear.valid ? 1 : 0);
+      if (after >= before) {
+         mesa_loge("pending clear was not consumed by its own render");
+         list->state = D12_LIST_ERROR;
+         return false;
+      }
+   }
+   return list->state == D12_LIST_RECORDING;
+}
+
+/* Record a full-view colour clear to be applied by the next render that
+ * writes the view. */
+static void
+d12_list_record_rt_clear(struct d12_cmd_list *list,
+                         const struct d12_descriptor *rtv,
+                         const float color[4])
+{
+   d12_list_end_render_binding_view(list, rtv);
+   d12_list_retire_attachment_store(list, rtv, false, false);
+   if (list->state != D12_LIST_RECORDING)
+      return;
+
+   int p = d12_list_find_pending_rt_clear(list, rtv);
+   if (p < 0 || list->pending_rt_clear[p].discard) {
+      if (list->pending_rt_clear_count == D12_PENDING_CLEARS &&
+          !d12_list_flush_pending_clears(list))
+         return;
+      p = list->pending_rt_clear_count++;
+      list->pending_rt_clear[p] = (struct d12_pending_rt_clear){
+         .view = *rtv,
+      };
+   }
+   memcpy(list->pending_rt_clear[p].color, color,
+          sizeof(list->pending_rt_clear[p].color));
+}
+
+static void
+d12_list_record_ds_clear(struct d12_cmd_list *list,
+                         const struct d12_descriptor *dsv, bool depth,
+                         bool stencil, float depth_value,
+                         uint8_t stencil_value)
+{
+   if (!depth && !stencil)
+      return;
+
+   d12_list_end_render_binding_view(list, dsv);
+   d12_list_retire_attachment_store(list, dsv, depth, stencil);
+   if (list->state != D12_LIST_RECORDING)
+      return;
+
+   struct d12_pending_ds_clear *pc = &list->pending_ds_clear;
+   if (pc->valid && !d12_view_same_target(&pc->view, dsv)) {
+      if (!d12_list_flush_pending_clears(list))
+         return;
+   }
+   if (!pc->valid)
+      *pc = (struct d12_pending_ds_clear){.valid = true, .view = *dsv};
+   if (depth) {
+      pc->depth = true;
+      pc->depth_value = depth_value;
+   }
+   if (stencil) {
+      pc->stencil = true;
+      pc->stencil_value = stencil_value;
+   }
+}
+
+/*
+ * Before a draw: pending clears and discards of the attachments the draw
+ * binds and writes are absorbed by its render, when that render covers the
+ * whole view; every other pending clear is ordered before the draw as a
+ * render of its own. Returns whether a bound attachment has a pending clear,
+ * which ends an open render: the clear sits between its draws and this one.
+ */
+static bool
+d12_list_prepare_pending_clears_for_draw(struct d12_cmd_list *list,
+                                         const struct d12_pipeline_state *pso)
+{
+   if (!list->pending_rt_clear_count && !list->pending_ds_clear.valid)
+      return false;
+
+   const unsigned rtv_count = pso->has_pixel_shader ? list->bound_rtv_count : 0;
+   const struct d12_descriptor *dsv =
+      list->has_bound_dsv ? &list->bound_dsv : NULL;
+   unsigned width, height;
+   d12_views_extent(list->bound_rtv, rtv_count, dsv, &width, &height);
+
+   uint8_t keep = 0;
+   for (unsigned i = 0; i < rtv_count; i++) {
+      const struct d12_descriptor *v = &list->bound_rtv[i];
+      if (!v->resource ||
+          (pso->rt_write_mask && !(pso->rt_write_mask & BITFIELD_BIT(i))))
+         continue;
+      int p = d12_list_find_pending_rt_clear(list, v);
+      if (p < 0)
+         continue;
+      if (u_minify(v->resource->layout.width_px, v->texture_level) == width &&
+          u_minify(v->resource->layout.height_px, v->texture_level) == height)
+         keep |= BITFIELD_BIT(p);
+   }
+   bool keep_ds = false;
+   if (dsv && d12_list_pending_ds_clear_matches(list, dsv)) {
+      keep_ds =
+         u_minify(dsv->resource->layout.width_px, dsv->texture_plane) == width &&
+         u_minify(dsv->resource->layout.height_px, dsv->texture_plane) == height;
+   }
+
+   const uint8_t all = (uint8_t)BITFIELD_MASK(list->pending_rt_clear_count);
+   if (keep != all || (list->pending_ds_clear.valid && !keep_ds)) {
+      struct d12_pending_rt_clear kept[D12_PENDING_CLEARS];
+      unsigned kept_count = 0, w = 0;
+      for (unsigned i = 0; i < list->pending_rt_clear_count; i++) {
+         if (keep & BITFIELD_BIT(i))
+            kept[kept_count++] = list->pending_rt_clear[i];
+         else
+            list->pending_rt_clear[w++] = list->pending_rt_clear[i];
+      }
+      list->pending_rt_clear_count = w;
+      struct d12_pending_ds_clear kept_ds = list->pending_ds_clear;
+      if (keep_ds)
+         list->pending_ds_clear.valid = false;
+
+      if (!d12_list_flush_pending_clears(list))
+         return false;
+
+      memcpy(list->pending_rt_clear, kept, kept_count * sizeof(kept[0]));
+      list->pending_rt_clear_count = kept_count;
+      if (keep_ds)
+         list->pending_ds_clear = kept_ds;
+   }
+
+   return list->pending_rt_clear_count != 0 || list->pending_ds_clear.valid;
+}
+
 static void
 d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
               unsigned instance_count, unsigned first_vertex,
@@ -9780,6 +10262,10 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          list->pipeline_stats.PSInvocations++;
    }
 
+   const bool clear_bound = d12_list_prepare_pending_clears_for_draw(list, pso);
+   if (list->state != D12_LIST_RECORDING)
+      return;
+
    if (list->render_open) {
       struct d12_segment *open = &list->segments[list->segment_count - 1];
       const bool layout_matches =
@@ -9789,7 +10275,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
                  open->rt_write_mask == pso->rt_write_mask;
 
       if (!d12_segment_matches_bindings(list, open, pso->has_pixel_shader) ||
-          !layout_matches)
+          !layout_matches || clear_bound)
          d12_list_close_cdm(list);
    }
 
@@ -9800,8 +10286,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          rtv_count ? list->bound_rtv : NULL;
       const struct d12_descriptor *dsv =
          list->has_bound_dsv ? &list->bound_dsv : NULL;
-      if (!d12_list_begin_render(list, rtvs, rtv_count, dsv, pso,
-                                 AGX_BG_LOAD, NULL, false))
+      if (!d12_list_begin_render(list, rtvs, rtv_count, dsv, pso, false))
          return;
    }
 
@@ -9822,8 +10307,7 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          rtv_count ? list->bound_rtv : NULL;
       const struct d12_descriptor *dsv =
          list->has_bound_dsv ? &list->bound_dsv : NULL;
-      seg = d12_list_begin_render(list, rtvs, rtv_count, dsv, pso,
-                                  AGX_BG_LOAD, NULL, false);
+      seg = d12_list_begin_render(list, rtvs, rtv_count, dsv, pso, false);
       if (!seg)
          return;
    }
@@ -12683,6 +13167,11 @@ d12_list_Close(ID3D12GraphicsCommandList6 *iface)
       }
    }
 
+   if (!errored && !d12_list_flush_pending_clears(list)) {
+      errored = true;
+      list->had_error = true;
+   }
+
    if (!errored)
       d12_list_close_cdm(list);
 
@@ -14322,7 +14811,7 @@ d12_list_ClearRenderTargetView(ID3D12GraphicsCommandList6 *iface,
       return;
    }
 
-   d12_list_begin_render(list, rtv, 1, NULL, NULL, AGX_BG_CLEAR, color, true);
+   d12_list_record_rt_clear(list, rtv, color);
 }
 
 /* Raw element copies cover linear placed footprints and AIL tiled texture
@@ -14514,6 +15003,125 @@ d12_list_CopyTiles(ID3D12GraphicsCommandList6 *iface,
    free(tiles);
 }
 
+/*
+ * Apply a discard to the render traffic it makes redundant: pending clears
+ * of the discarded subresources are dropped, the last render's write-back of
+ * them is retired, and a discard is left pending for the next render that
+ * binds them, which then does not load. An open render binding the resource
+ * ends first: draws after the discard continue from nothing. A region with
+ * rectangles discards less than a subresource and is ignored here.
+ */
+static void
+d12_list_discard_attachments(struct d12_cmd_list *list,
+                             struct d12_resource *resource,
+                             const D3D12_DISCARD_REGION *region)
+{
+   if (list->state != D12_LIST_RECORDING)
+      return;
+   if (region && region->NumRects)
+      return;
+   if (!(resource->desc.Flags & (D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                                 D3D12_RESOURCE_FLAG_ALLOW_DEPTH_STENCIL)))
+      return;
+
+   const bool whole = !region;
+   const uint32_t first = region ? region->FirstSubresource : 0;
+   const uint32_t count = region ? region->NumSubresources : 0;
+
+   if (list->render_open) {
+      const struct d12_segment *seg = &list->segments[list->segment_count - 1];
+      bool bound = seg->ds == resource;
+      for (unsigned i = 0; i < seg->rt_count && !bound; i++)
+         bound = seg->rt[i] == resource;
+      if (bound)
+         d12_list_close_cdm(list);
+   }
+
+   /* Pending clears the discard covers are undefined now; an older discard
+    * of the same resource is replaced. */
+   for (unsigned i = 0; i < list->pending_rt_clear_count;) {
+      const struct d12_pending_rt_clear *e = &list->pending_rt_clear[i];
+      const bool drop =
+         e->resource == resource ||
+         (!e->discard && e->view.resource == resource &&
+          d12_discard_covers(resource, whole, first, count,
+                             e->view.texture_level, e->view.address,
+                             MAX2(e->view.size_B, 1), 0));
+      if (drop)
+         d12_list_drop_pending_rt_clear(list, i);
+      else
+         i++;
+   }
+   struct d12_pending_ds_clear *pc = &list->pending_ds_clear;
+   if (pc->valid && pc->view.resource == resource) {
+      const unsigned layers = MAX2(pc->view.size_B, 1);
+      if (d12_discard_covers(resource, whole, first, count,
+                             pc->view.texture_plane, pc->view.address, layers,
+                             0))
+         pc->depth = false;
+      if (resource->stencil_bo &&
+          d12_discard_covers(resource, whole, first, count,
+                             pc->view.texture_plane, pc->view.address, layers,
+                             1))
+         pc->stencil = false;
+      if (!pc->depth && !pc->stencil)
+         pc->valid = false;
+   }
+
+   if (!list->render_open && !list->cdm_open && list->segment_count) {
+      struct d12_segment *seg = &list->segments[list->segment_count - 1];
+      if (seg->type == D12_SEG_RENDER) {
+         bool changed = false;
+         for (unsigned i = 0; i < seg->rt_count; i++) {
+            if (seg->rt[i] != resource || seg->eot_ops[i] != AGX_EOT_STORE ||
+                !d12_discard_covers(resource, whole, first, count,
+                                    seg->rt_level[i], seg->rt_address[i],
+                                    seg->layers, 0))
+               continue;
+            seg->eot_ops[i] = AGX_BG_EOT_NONE;
+            changed = true;
+         }
+         if (changed)
+            d12_segment_rebuild_eot(list, seg);
+         if (seg->ds == resource) {
+            if (d12_discard_covers(resource, whole, first, count,
+                                   seg->ds_level, seg->ds_address,
+                                   seg->layers, 0))
+               seg->depth_store_dead = true;
+            if (resource->stencil_bo &&
+                d12_discard_covers(resource, whole, first, count,
+                                   seg->ds_level, seg->ds_address,
+                                   seg->layers, 1))
+               seg->stencil_store_dead = true;
+         }
+      }
+   }
+
+   if (list->state != D12_LIST_RECORDING)
+      return;
+
+   if (resource->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) {
+      if (list->pending_rt_clear_count == D12_PENDING_CLEARS &&
+          !d12_list_flush_pending_clears(list))
+         return;
+      list->pending_rt_clear[list->pending_rt_clear_count++] =
+         (struct d12_pending_rt_clear){
+            .discard = true,
+            .resource = resource,
+            .whole = whole,
+            .first_subresource = first,
+            .subresource_count = count,
+         };
+   } else {
+      list->pending_ds_discard = (struct d12_pending_ds_discard){
+         .resource = resource,
+         .whole = whole,
+         .first_subresource = first,
+         .subresource_count = count,
+      };
+   }
+}
+
 static void STDMETHODCALLTYPE
 d12_list_DiscardResource(ID3D12GraphicsCommandList6 *iface,
                          ID3D12Resource *resource_iface,
@@ -14598,15 +15206,15 @@ d12_list_DiscardResource(ID3D12GraphicsCommandList6 *iface,
    }
 
    /* Discard makes contents undefined; it does not require them to change.
-    * Keeping the allocation and its metadata is therefore the conservative
-    * implementation until AGX render-pass load elimination consumes this
-    * hint. No stream address is recorded, so retaining the resource here is
-    * unnecessary.
+    * The allocation and its metadata stay. What the hint buys a tiler is
+    * traffic: the previous render's write-back of a discarded attachment is
+    * dead, and the next render binding it need not load it.
     *
     * Direct3D also requires RT/DS/UAV resources to be in the corresponding
     * legacy resource state. This command core does not track legacy states;
     * that API precondition remains the application's responsibility and is
     * diagnosed by the D3D12 debug layer when enabled. */
+   d12_list_discard_attachments(list, resource, region);
 }
 
 static void STDMETHODCALLTYPE
@@ -15112,72 +15720,6 @@ d12_list_ClearUnorderedAccessViewFloat(
                       num_rects, rects);
 }
 
-/*
- * Attach a depth/stencil resource to the open render pass.
- *
- * Depth never goes through a background/end-of-tile USC program the way
- * colour does: the fixed-function ZLS unit loads and stores it, configured
- * from the render command. So attaching is bookkeeping here, and the actual
- * hardware setup happens in d12_fill_render_cmd.
- */
-static bool
-d12_list_attach_ds(struct d12_cmd_list *list,
-                   const struct d12_descriptor *dsv)
-{
-   if (list->device->dev.chip == AGX_CHIP_G17P &&
-       !d12_g17p_depth_enabled(&list->device->dev)) {
-      mesa_loge("native depth attach/clear producer remains closed");
-      list->state = D12_LIST_ERROR;
-      return false;
-   }
-
-   struct d12_resource *ds = dsv->resource;
-   if (!list->render_open) {
-      mesa_loge("depth/stencil needs an open render pass; clear the colour "
-                "target first (depth-only passes are not supported yet)");
-      list->state = D12_LIST_ERROR;
-      return false;
-   }
-
-   struct d12_segment *seg = &list->segments[list->segment_count - 1];
-
-   if (seg->ds && seg->ds != ds) {
-      mesa_loge("two different depth/stencil targets in one render pass");
-      list->state = D12_LIST_ERROR;
-      return false;
-   }
-
-   /* The ZLS unit addresses one buffer for the whole pass. Clamp a colour
-    * clear pass to the DSV intersection before any draw is emitted, so the
-    * uncovered region can never test outside the smaller allocation. */
-   const unsigned level = dsv->texture_plane;
-   const unsigned width = u_minify(ds->layout.width_px, level);
-   const unsigned height = u_minify(ds->layout.height_px, level);
-   seg->width_px = MIN2(seg->width_px, width);
-   seg->height_px = MIN2(seg->height_px, height);
-
-   seg->ds = ds;
-   d12_list_track_read_resource(list, ds);
-   seg->ds_address = dsv->address;
-   seg->stencil_address = dsv->counter_address;
-   seg->ds_level = level;
-   seg->dsv_flags = dsv->dsv_flags;
-   const unsigned ds_layers = MAX2(dsv->size_B, 1);
-   if (seg->layers != ds_layers) {
-      mesa_loge("render pass and depth/stencil have mismatched layer counts "
-                "%u and %u", seg->layers, ds_layers);
-      list->state = D12_LIST_ERROR;
-      return false;
-   }
-   if (list->device->dev.chip == AGX_CHIP_G17P &&
-       !d12_g17p_depth_segment_supported(seg)) {
-      mesa_loge("native D32 attachment rejected storage/view/extent metadata");
-      list->state = D12_LIST_ERROR;
-      return false;
-   }
-   return true;
-}
-
 static bool
 d12_list_clear_surface_rects(struct d12_cmd_list *list,
                              const struct d12_copy_surface *surface,
@@ -15327,50 +15869,14 @@ d12_list_ClearDepthStencilView(ID3D12GraphicsCommandList6 *iface,
       return;
    }
 
-   if (list->render_open) {
-      struct d12_segment *open =
-         &list->segments[list->segment_count - 1];
-      /* ZLS clear/load state is consumed at pass start. Mutating it after a
-       * draw would reorder Draw->Clear into Clear->Draw. A clear view is
-       * independent of current OM bindings, so a different slice/range (or
-       * an incompatible colour-pass layer count) also needs its own pass.
-       */
-      if (open->has_draws || open->layers != MAX2(dsv->size_B, 1) ||
-          (open->ds &&
-           (open->ds != ds || open->ds_address != dsv->address ||
-            open->stencil_address != dsv->counter_address ||
-            open->dsv_flags != dsv->dsv_flags)))
-         d12_list_close_cdm(list);
-   }
-
-   if (!list->render_open) {
-      if (!d12_list_begin_render(list, NULL, 0, dsv, NULL,
-                                 AGX_BG_EOT_NONE, NULL, true))
-         return;
-   } else if (!d12_list_attach_ds(list, dsv)) {
-      return;
-   }
-
-   struct d12_segment *seg = &list->segments[list->segment_count - 1];
-   seg->process_empty_tiles = true;
-
-   /* The clear is not a draw and not a program: the hardware seeds every
-    * tile's depth from ISP_BGOBJDEPTH, encoded in the depth plane's own
-    * format, and its stencil from the low byte of ISP_BGOBJVALS.
-    */
-   if (flags & D3D12_CLEAR_FLAG_DEPTH) {
-      if (ds->layout.format == PIPE_FORMAT_Z16_UNORM)
-         seg->isp_bgobjdepth = _mesa_float_to_unorm(depth, 16);
-      else
-         seg->isp_bgobjdepth = fui(depth);
-
-      seg->depth_cleared = true;
-   }
-
-   if ((flags & D3D12_CLEAR_FLAG_STENCIL) && ds->stencil_bo) {
-      seg->stencil_clear = stencil;
-      seg->stencil_cleared = true;
-   }
+   /* The clear is not a draw and not a program: the render that absorbs it
+    * seeds every tile's depth from ISP_BGOBJDEPTH, encoded in the depth
+    * plane's own format, and its stencil from the low byte of
+    * ISP_BGOBJVALS (d12_list_begin_render). */
+   d12_list_record_ds_clear(list, dsv, flags & D3D12_CLEAR_FLAG_DEPTH,
+                            (flags & D3D12_CLEAR_FLAG_STENCIL) &&
+                               ds->stencil_bo,
+                            depth, stencil);
 }
 
 static void STDMETHODCALLTYPE
@@ -15631,6 +16137,8 @@ d12_cmd_list_begin_render_pass(
    }
 
    /* Whatever was bound before is not part of this pass. */
+   if (!d12_list_flush_pending_clears(list))
+      return false;
    d12_list_close_cdm(list);
    memset(list->bound_rtv, 0, sizeof(list->bound_rtv));
    list->bound_rtv_count = 0;
@@ -15701,6 +16209,8 @@ d12_cmd_list_end_render_pass(struct d12_cmd_list *list)
    /* Close the hardware render here rather than at the next binding change:
     * the end-of-tile programs the pass asked for are only correct for the
     * work inside it. */
+   if (!d12_list_flush_pending_clears(list))
+      return false;
    d12_list_close_cdm(list);
    list->render_pass_active = false;
    memset(list->render_pass_rt_plan, 0, sizeof(list->render_pass_rt_plan));
