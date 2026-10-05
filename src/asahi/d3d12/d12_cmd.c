@@ -8443,18 +8443,20 @@ d12_cmd_certify_native_gs(struct d12_pipeline_state *pso,
    }
    FILE *f = fopen(path, "w");
    if (!f) { hr = E_FAIL; goto done; }
+   const struct drm_asahi_cmd_header render_header = agx_cmd_header(false, 0, 1);
    bool saved = fprintf(f,
       "{\"registered_recording\":true,\"physical_admission\":false,"
       "\"render_placeholder\":true,\"gpu_submitted\":false,"
       "\"draws\":2,\"dispatches\":%u,\"indirect_local\":%s,"
       "\"stream_base\":%llu,\"upload_offset\":%zu,\"usc_base\":%llu,"
       "\"vp_cells\":[%llu,%llu],\"gp_cells\":[%llu,%llu],"
-      "\"render_header\":{\"vdm_barrier\":0,\"cdm_barrier\":1}}\n",
+      "\"render_header\":{\"vdm_barrier\":%u,\"cdm_barrier\":%u}}\n",
       seg->dispatches, indirect ? "true" : "false",
       (unsigned long long)list->stream_bo->va->addr, list->data_floor,
       (unsigned long long)list->usc_bo->va->addr,
       (unsigned long long)vp_cells[0], (unsigned long long)vp_cells[1],
-      (unsigned long long)gp_cells[0], (unsigned long long)gp_cells[1]) > 0;
+      (unsigned long long)gp_cells[0], (unsigned long long)gp_cells[1],
+      render_header.vdm_barrier, render_header.cdm_barrier) > 0;
    if (fclose(f) || !saved) { hr = E_FAIL; goto done; }
    hr = S_OK;
 done:

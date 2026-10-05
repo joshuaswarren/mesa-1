@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "corpus": "g6-legal-v1",
+  "strict_frozen17": false,
+  "frozen_executable": "g6_geometry",
+  "change": "Replace the PS with an input-free green PS; keep VS, GS and all assertions unchanged.",
+  "upstream": "vkd3d-proton@31d1f89ca5b3f2fd3b6f025c8e6f73ed3eaa852b",
+  "upstream_header": "tests/shaders/mesh_shader/headers/ps_green.h",
+  "upstream_header_sha256": "169a628ad06b3f18b42235cd03c12745eaaccf3bc6ef4b0d8f7a6fa64b13486a",
+  "shader_license": "LGPL-2.1-or-later; public vkd3d-proton shader input retained privately",
+  "sha256": {
+    "ps-green.dxil": "89afa15e63354a9985a7e2a51c17b7d1196373300571fe0d15a86c04c03b1c94",
+    "gs_point.dxil": "18eb88819513516607b8c61e6ce0cb4c7d47d555ebf6c6c0d6907336b2494345",
+    "gs_input_vs.dxil": "246cfe07b4bcf4f35abc25898e3a09b2910e8f3562ff2a6b7e9f9c44b933a2aa"
+  }
+}
