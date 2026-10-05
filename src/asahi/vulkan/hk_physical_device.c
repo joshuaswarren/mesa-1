@@ -1720,9 +1720,6 @@ hk_create_drm_physical_device(struct vk_instance *_instance,
       goto fail_pdev_alloc;
    }
 
-   pdev->g17p_native_tess = pdev->dev.chip == AGX_CHIP_G17P &&
-                            debug_get_bool_option("HK_G17P_NATIVE_TESS", false);
-
    struct vk_physical_device_dispatch_table dispatch_table;
    vk_physical_device_dispatch_table_from_entrypoints(
       &dispatch_table, &hk_physical_device_entrypoints, true);

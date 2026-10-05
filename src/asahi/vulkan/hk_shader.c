@@ -251,11 +251,10 @@ hk_fs_structure_key_bits(void)
 uint64_t
 hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
 {
-   /* This could be optimized but it doesn't matter. The hardware tessellator
-    * compiles evaluation shaders differently, so key its binaries apart. */
+   /* This could be optimized but it doesn't matter. */
    const uint64_t debug = agx_get_compiler_debug();
    /* The native backend experiments change emitted code. Keep their cached
-    * binaries distinct; bits 0..31 are device flags, bit 32 is tessellation
+    * binaries distinct; bits 0..31 are device flags, bit 32 is unused
     * and bits 41..57 are the legacy G17P code generation flags. Extended
     * codegen bits are hashed separately into the cache identities. */
    static_assert(AGX_CODEGEN_G17P_EXIT_COMPARE < (1u << 17),
@@ -272,7 +271,7 @@ hk_physical_device_compiler_flags(const struct hk_physical_device *pdev)
                             ((uint64_t)!!(alu & BITFIELD_BIT(1)) << 59) |
                             ((uint64_t)!!(alu & BITFIELD_BIT(2)) << 62) |
                             ((uint64_t)!!(alu & BITFIELD_BIT(3)) << 63);
-   return alu_key | pdev->dev.debug | ((uint64_t)pdev->g17p_native_tess << 32) |
+   return alu_key | pdev->dev.debug |
           ((uint64_t)!!(debug & AGX_DBG_NATIVE_UNIFORMS) << 34) |
           /* v56c AGX_G17P_FS_CPROG: bit 25 (device debug flags end at 24). */
           ((uint64_t)(pdev->dev.chip == AGX_CHIP_G17P &&
@@ -3259,21 +3258,6 @@ hk_compile_nir(struct hk_device *dev, const VkAllocationCallbacks *pAllocator,
          shader->info.tess.tcs_nr_patch_outputs =
             util_last_bit(nir->info.patch_outputs_written);
          shader->info.tess.tcs_output_stride = poly_tcs_output_stride(nir);
-      } else if (dev->g17p_native_tess &&
-                 hk_g17p_tes_domain_is_native(&nir->info)) {
-         shader->info.tess.g17p_native_domain = true;
-         if (!hw) {
-            /* The software variant of a native-domain evaluation shader is
-             * never bound; compile it as usual so the pipeline still has one
-             * rather than refusing it. */
-            NIR_PASS(_, nir, poly_nir_lower_tes, hw);
-         } else {
-            /* G17P tessellates in hardware and runs the evaluation shader as
-             * the post-tessellation vertex program, which reads the patch and
-             * the coordinate from the tessellator. This destroys info so it
-             * needs to happen after the gather. */
-            NIR_PASS(_, nir, poly_nir_lower_tes_native);
-         }
       } else {
          /* This destroys info so it needs to happen after the gather */
          NIR_PASS(_, nir, poly_nir_lower_tes, hw);

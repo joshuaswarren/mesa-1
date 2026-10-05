@@ -791,7 +791,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
 
    dev->perftest = debug_get_flags_option("HK_PERFTEST", hk_perf_options, 0);
-   dev->g17p_native_tess = pdev->g17p_native_tess;
 
    if (instance->no_border) {
       dev->perftest |= HK_PERF_NOBORDER;

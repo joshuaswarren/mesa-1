@@ -890,15 +890,6 @@ struct hk_graphics_state {
       uint64_t grids;
       struct hk_tess_info info;
       enum mesa_prim prim;
-
-      /* G17P hardware tessellation: the factor buffer the tessellator reads,
-       * and either the unrolled patch count of a direct draw or the patch
-       * draw an indirect draw's setup kernel writes. */
-      const struct poly_tess_params *params;
-      uint64_t factor_buffer;
-      uint64_t patch_draw;
-      uint32_t factor_buffer_size_B;
-      uint32_t patches;
    } tess;
 
    /* Needed by vk_command_buffer::dynamic_graphics_state */

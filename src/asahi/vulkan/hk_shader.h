@@ -67,26 +67,6 @@ hk_tess_info_merge(struct hk_tess_info a, struct hk_tess_info b)
    return out;
 }
 
-/*
- * Whether an evaluation shader's own domain is one Apple's G17P tessellation
- * state record can express. The record carries a single patch-type bit for
- * triangles and quads (docs/G17P_TESSELLATION_ABI.md 8.2); there is no
- * isoline encoding and no point-mode encoding, so those domains keep the
- * software tessellator even when the native path is selected.
- *
- * Vulkan lets either tessellation stage carry the execution modes, so a
- * control shader can still introduce point mode for an evaluation shader
- * that did not declare it. That case is caught at draw time; this predicate
- * only decides which evaluation-shader lowering to compile.
- */
-static inline bool
-hk_g17p_tes_domain_is_native(const struct shader_info *info)
-{
-   return !info->tess.point_mode &&
-          (info->tess._primitive_mode == TESS_PRIMITIVE_TRIANGLES ||
-           info->tess._primitive_mode == TESS_PRIMITIVE_QUADS);
-}
-
 struct hk_shader_info {
    union {
       struct {
@@ -123,15 +103,6 @@ struct hk_shader_info {
          uint8_t tcs_nr_patch_outputs;
 
          struct hk_tess_info info;
-
-         /* Evaluation shaders only: this shader's own domain is one the G17P
-          * hardware tessellator can express (triangles or quads, no point
-          * mode) and the device is running the native path, so the hardware
-          * variant was lowered with poly_nir_lower_tes_native(). An isoline
-          * or point-mode evaluation shader keeps the software lowering even
-          * with HK_G17P_NATIVE_TESS=1, because Apple's tessellation state
-          * record has no encoding for either. */
-         bool g17p_native_domain;
       } tess;
 
       struct poly_gs_info gs;

@@ -280,9 +280,6 @@ struct hk_device {
 
    uint32_t perftest;
 
-   /* Copy of hk_physical_device::g17p_native_tess */
-   bool g17p_native_tess;
-
    struct {
       struct u_rwlock lock;
       struct util_dynarray list;
