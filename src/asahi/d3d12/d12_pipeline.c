@@ -524,6 +524,7 @@ d12_root_signature_create(struct d12_device *device, const void *blob,
 {
    if (!out)
       return E_POINTER;
+   *out = NULL;
    if (!blob || !blob_size)
       return E_INVALIDARG;
 

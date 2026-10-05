@@ -47,6 +47,40 @@ run(D3D12_COMMAND_LIST_TYPE type)
               (i == 0 ? D3D_ROOT_SIGNATURE_VERSION_1_0
                       : D3D_ROOT_SIGNATURE_VERSION_1_1));
    }
+   /* Both wire versions must reject ALL/VS aliases and preserve a legal
+    * PS/VS reuse of the same constant-buffer register. */
+   for (unsigned version = 1; version < 3; version++) {
+      D3D12_ROOT_PARAMETER1 parameters[2] = {
+         {.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+          .ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL,
+          .Constants = {.Num32BitValues = 4}},
+         {.ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS,
+          .ShaderVisibility = D3D12_SHADER_VISIBILITY_VERTEX,
+          .Constants = {.Num32BitValues = 4}},
+      };
+      for (unsigned valid = 0; valid < 2; valid++) {
+         parameters[0].ShaderVisibility = valid ? D3D12_SHADER_VISIBILITY_PIXEL
+                                                : D3D12_SHADER_VISIBILITY_ALL;
+         D3D12_VERSIONED_ROOT_SIGNATURE_DESC desc = {.Version = versions[version]};
+         if (version == 1) {
+            desc.Desc_1_1.NumParameters = 2;
+            desc.Desc_1_1.pParameters = parameters;
+         } else {
+            desc.Desc_1_2.NumParameters = 2;
+            desc.Desc_1_2.pParameters = parameters;
+         }
+         ID3DBlob *serialized = NULL;
+         ID3D12RootSignature *signature = NULL;
+         CALL(D3D12SerializeVersionedRootSignature(&desc, &serialized, NULL));
+         HRESULT hr = ID3D12Device_CreateRootSignature(
+            device, 0, ID3D10Blob_GetBufferPointer(serialized),
+            ID3D10Blob_GetBufferSize(serialized), &IID_ID3D12RootSignature,
+            (void **)&signature);
+         RELEASE(ID3D10Blob, serialized);
+         RELEASE(ID3D12RootSignature, signature);
+         REQUIRE(valid ? hr == S_OK : hr == E_INVALIDARG);
+      }
+   }
    const D3D12_COMMAND_QUEUE_DESC queue_desc = {.Type = type};
    CALL(ID3D12Device_CreateCommandQueue(device, &queue_desc,
           &IID_ID3D12CommandQueue, (void **)&queue));
