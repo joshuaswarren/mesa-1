@@ -224,6 +224,9 @@ struct agx_device {
    char name[64];
    struct drm_asahi_params_global params;
    bool is_virtio;
+   /* Native DRM 0.2 added the four render resource-specifier high dwords.
+    * Stock 0.0 kernels do not consume an oversized render packet's tail. */
+   bool render_rsrc_spec_hi;
    /* The current Aurora KMD treats attachment records as the authoritative
     * fragmented-allocation writeback set.  Other winsys backends retain the
     * upstream optional-hint semantics. */

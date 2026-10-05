@@ -8,6 +8,7 @@
 
 #include "d12_private.h"
 #include "d12_core_caps.h"
+#include "d12_heap_desc.h"
 #include "d12_sparse_residency_core.h"
 #include "util/os_misc.h"
 #include "util/cache_ops.h"
@@ -613,8 +614,12 @@ d12_resource_cpu_subresource(struct d12_resource *res, UINT subresource,
       return E_INVALIDARG;
 
    const bool tiled = res->layout.tiling != AIL_TILING_LINEAR;
+   const enum agx_chip chip = res->device->dev.chip;
+   const bool cpu_tiling_supported = chip == AGX_CHIP_G17P ||
+      chip == AGX_CHIP_G13G || chip == AGX_CHIP_G13X ||
+      chip == AGX_CHIP_G14G || chip == AGX_CHIP_G14X;
    if (tiled &&
-       (res->device->dev.chip != AGX_CHIP_G17P ||
+       (!cpu_tiling_supported ||
         (res->layout.tiling != AIL_TILING_GPU && res->layout.tiling != AIL_TILING_TWIDDLED) ||
         res->heap_props.CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_WRITE_BACK ||
         res->heap_props.MemoryPoolPreference != D3D12_MEMORY_POOL_L0 ||
@@ -2844,10 +2849,12 @@ d12_heap_create_internal(struct d12_device *device,
                          const D3D12_HEAP_DESC *desc,
                          struct agx_bo *imported_bo, REFIID riid, void **out)
 {
-   if (!out)
-      return E_POINTER;
-   if (!desc || !desc->SizeInBytes)
+   if (out)
+      *out = NULL;
+   if (!d12_heap_desc_valid(desc, d12_core_get_caps()->gpu_upload_heap))
       return E_INVALIDARG;
+   if (!out)
+      return S_FALSE;
 
    /* Apple UMA has no separate VRAM pool. Match Honeykrisp's Asahi policy:
     * expose at most half of physical RAM to one GPU heap so allocation
@@ -2857,31 +2864,6 @@ d12_heap_create_internal(struct d12_device *device,
    if (os_get_total_physical_memory(&system_memory) &&
        desc->SizeInBytes > system_memory / 2)
       return E_OUTOFMEMORY;
-
-   /*
-    * HEAP VALIDATION -- desc->Flags and desc->Properties were both being
-    * ignored, the same dropped-parameter shape as the resource path.
-    *
-    * Cross-adapter memory is shared with another device, so it cannot also
-    * be CPU-visible: a CUSTOM heap carrying SHARED_CROSS_ADAPTER must have
-    * CPUPageProperty NOT_AVAILABLE. test_map_texture_validation checks both
-    * halves -- WRITE_BACK is refused, NOT_AVAILABLE is accepted.
-    */
-   if (desc->Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) {
-      if (desc->Properties.Type == D3D12_HEAP_TYPE_CUSTOM) {
-         if (desc->Properties.CPUPageProperty !=
-             D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
-            return E_INVALIDARG;
-      } else if (desc->Properties.Type != D3D12_HEAP_TYPE_DEFAULT) {
-         return E_INVALIDARG;
-      }
-   }
-
-   /* GPU_UPLOAD heaps are accepted on UMA; see d12_resource_placement_valid
-    * for why they need no separate placement rules. */
-   if (desc->Properties.Type == D3D12_HEAP_TYPE_GPU_UPLOAD &&
-       !d12_core_get_caps()->gpu_upload_heap)
-      return E_INVALIDARG;
 
    D3D12_HEAP_DESC resolved = *desc;
 
@@ -2896,17 +2878,6 @@ d12_heap_create_internal(struct d12_device *device,
 
    if (!resolved.Alignment)
       resolved.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
-
-   if (resolved.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT &&
-       resolved.Alignment != D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT)
-      return E_INVALIDARG;
-
-   /* ALLOW_DISPLAY heaps have platform/display ownership requirements that
-    * this driver does not implement. Refuse the capability instead of
-    * returning an ordinary private BO under a display-capable descriptor.
-    */
-   if (resolved.Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY)
-      return E_INVALIDARG;
 
    struct d12_heap *heap = calloc(1, sizeof(*heap));
    if (!heap)

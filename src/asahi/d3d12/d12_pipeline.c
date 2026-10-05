@@ -4500,7 +4500,12 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
    const bool prolog_compiled =
       agx_compile_shader_nir(pb.shader, &prolog_backend_key, &prolog);
    ralloc_free(pb.shader);
-   if (!prolog_compiled || !prolog.binary || !prolog.info.binary_size) {
+   /* Static VI needs no fixup instructions on G13/G14. An empty successful
+    * compile is a valid no-op there; failed compiles and missing nonempty
+    * binaries remain errors. Keep G17P's nonempty-prolog requirement. */
+   const bool empty_prolog = !prolog.info.binary_size;
+   if (!prolog_compiled || (!empty_prolog && !prolog.binary) ||
+       (empty_prolog && device->dev.chip == AGX_CHIP_G17P)) {
       free(prolog.binary);
       free(fs_prolog.binary);
       free(fs_epilog.binary);
@@ -4512,7 +4517,8 @@ d12_pipeline_state_create_graphics(struct d12_device *device,
 
    /* Link: this uploads executable memory and bakes the USC/PPP words. */
    bool vs_linked = agx_fast_link(&pso->vs.linked, &device->dev, false,
-                                  &vs_part, &prolog, NULL, 0);
+                                  &vs_part, empty_prolog ? NULL : &prolog,
+                                  NULL, 0);
    free(prolog.binary);
    if (!vs_linked) {
       free(fs_epilog.binary);

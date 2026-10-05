@@ -965,6 +965,8 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
       if (!strcmp(version->name, "asahi")) {
          dev->is_virtio = false;
+         dev->render_rsrc_spec_hi = version->version_major > 0 ||
+                                   version->version_minor >= 2;
          dev->ops = agx_device_drm_ops;
       } else if (!strcmp(version->name, "virtio_gpu")) {
          dev->is_virtio = true;

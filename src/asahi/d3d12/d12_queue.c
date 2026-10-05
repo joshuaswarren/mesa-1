@@ -18,6 +18,7 @@
 #include "d12_agx3_cmdstream_core.h"
 #include "d12_native_render_resources_core.h"
 #include "d12_read_set_core.h"
+#include "d12_submit.h"
 #include "d12_write_set_core.h"
 
 #include "decode.h"
@@ -2461,6 +2462,10 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
 
          struct drm_asahi_cmd_header header =
             agx_cmd_header(compute, nr_vdm, nr_cdm);
+         if (!compute)
+            header.size = d12_render_cmd_size(device->dev.chip,
+                                              device->dev.render_rsrc_spec_hi,
+                                              device->dev.params.features);
          memcpy(payload + payload_size, &header, sizeof(header));
          payload_size += sizeof(header);
 
@@ -2494,8 +2499,8 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
                payload_valid = false;
                break;
             }
-            memcpy(payload + payload_size, &cmd, sizeof(cmd));
-            payload_size += sizeof(cmd);
+            memcpy(payload + payload_size, &cmd, header.size);
+            payload_size += header.size;
             nr_vdm++;
          }
       }

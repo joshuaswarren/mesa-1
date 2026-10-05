@@ -490,6 +490,28 @@ d3d12agx_dxil_compile = executable(
 )
 
 # CPU-only production lowering/ISA checks. Never creates a DRM device or queue.
+d3d12agx_heap_desc_tests = executable(
+  'd3d12agx_heap_desc_tests',
+  files('tests/d12_heap_desc_tests.c'),
+  dependencies : [dep_dxheaders_d12],
+  c_args : ['-UNDEBUG'],
+)
+d3d12agx_submit_tests = executable(
+  'd3d12agx_submit_tests',
+  files('tests/d12_submit_tests.c'),
+  include_directories : [inc_include, inc_src],
+  c_args : ['-UNDEBUG'],
+)
+test('d3d12agx_heap_desc', d3d12agx_heap_desc_tests, suite : ['asahi', 'd3d12'])
+test('d3d12agx_submit', d3d12agx_submit_tests, suite : ['asahi', 'd3d12'])
+
+# Supplemental live API validation; the frozen G1 suite remains unchanged.
+executable(
+  'd3d12agx_createheap_validation',
+  files('tests/createheap_validation.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : libd3d12agx,
+)
 d3d12agx_g17p_txf_lower_tests = executable(
   'd3d12agx_g17p_txf_lower_tests',
   files('d12_nir_g17p_txf.c', 'tests/d12_nir_g17p_txf_tests.c'),
