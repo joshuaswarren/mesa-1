@@ -331,9 +331,12 @@ struct d12_shader_cache {
    struct hash_table *stages; /* d12_stage_cache_key -> d12_cached_stage */
    struct list_head stage_lru; /* d12_cached_stage::lru_link, oldest first */
    unsigned nr_stages;
+   /* Compiled stages across processes (util/disk_cache, the mesa shader
+    * cache every Mesa driver shares); NULL when unavailable or disabled. */
+   struct disk_cache *disk;
 };
 
-void d12_shader_cache_init(struct d12_shader_cache *cache);
+void d12_shader_cache_init(struct d12_device *device);
 void d12_shader_cache_finish(struct d12_device *device);
 
 void d12_stage_cache_key_init(struct d12_stage_cache_key *key,
