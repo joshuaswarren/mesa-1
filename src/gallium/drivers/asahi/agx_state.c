@@ -7272,6 +7272,46 @@ agx_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
    if (!indirect && (!draws->count || !info->instance_count))
       return;
 
+   /* G17P's index fetch starts at a dword boundary even for U8/U16
+    * indices. Qt's image strips commonly start at the second U16 in an
+    * element buffer, which otherwise fetches the preceding restart index
+    * and loses one triangle. Realign before acquiring a batch: mapping with
+    * PIPE_MAP_READ must synchronize any GPU writer of the original indices.
+    * Aligned draws, indirect draws, and uploaded user indices keep their
+    * existing paths.
+    */
+   const uint64_t index_offset = indirect ? 0 :
+      (uint64_t)draws->start * info->index_size;
+   if (!indirect && info->index_size && !info->has_user_indices &&
+       agx_device(pctx->screen)->chip == AGX_CHIP_G17P &&
+       (index_offset & 3)) {
+      const uint64_t bytes = (uint64_t)draws->count * info->index_size;
+      struct pipe_resource *source = info->index.resource;
+      if (index_offset >= source->width0 ||
+          bytes > source->width0 - index_offset)
+         return;
+
+      struct pipe_transfer *transfer = NULL;
+      const void *indices = pipe_buffer_map_range(
+         pctx, source, index_offset, bytes, PIPE_MAP_READ, &transfer);
+      if (!indices)
+         return;
+
+      struct pipe_draw_info aligned = *info;
+      aligned.index.resource = NULL;
+      unsigned offset = 0;
+      u_upload_data_ref(pctx->stream_uploader, 0, bytes, 64, indices,
+                        &offset, &aligned.index.resource);
+      pipe_buffer_unmap(pctx, transfer);
+      if (aligned.index.resource) {
+         struct pipe_draw_start_count_bias draw = *draws;
+         draw.start = offset / info->index_size;
+         agx_draw_vbo(pctx, &aligned, drawid_offset, NULL, &draw, 1);
+         pipe_resource_reference(&aligned.index.resource, NULL);
+      }
+      return;
+   }
+
    /* TODO: stop cheating */
    if (indirect && indirect->indirect_draw_count) {
       perf_debug_ctx(ctx, "multi-draw indirect");
