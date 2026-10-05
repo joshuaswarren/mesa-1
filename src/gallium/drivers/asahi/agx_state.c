@@ -2698,8 +2698,14 @@ asahi_fast_link(struct agx_context *ctx, struct agx_uncompiled_shader *so,
              (so->type == MESA_SHADER_GEOMETRY &&
               key->main->b.info.stage == MESA_SHADER_VERTEX));
 
+      /* G17P device loads return packed raw lanes. Its vertex prolog must
+       * convert them rather than expect AGX2's formatted widening loads. */
       prolog = agx_build_meta_shader_internal(
-         ctx, agx_nir_vs_prolog, &key->prolog.vs, sizeof(key->prolog.vs), true,
+         ctx,
+         agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P
+            ? agx_nir_vs_prolog_raw
+            : agx_nir_vs_prolog,
+         &key->prolog.vs, sizeof(key->prolog.vs), true,
          false, 0, false);
    }
 
