@@ -148,9 +148,6 @@ struct hk_device {
     * The libagx programs and their executable BOs have the same lifetime. */
    struct {
       void *templates[LIBAGX_NUM_PROGRAMS];
-      bool report_stats;
-      uint64_t hits;
-      uint64_t misses;
    } g17p_compute_program_cache;
 
    /* v48: kernel-maintained copy of this VM's sticky status

@@ -82,96 +82,15 @@ struct hk_g17p_precomp_program {
    struct hk_g17p_compute_program_ref program;
 };
 
-DEBUG_GET_ONCE_BOOL_OPTION(hk_g17p_precomp_lookup_stats,
-                           "HK_G17P_PRECOMP_LOOKUP_STATS", false)
-DEBUG_GET_ONCE_NUM_OPTION(hk_g17p_precomp_lookup_stats_limit,
-                          "HK_G17P_PRECOMP_LOOKUP_STATS_LIMIT", 512)
-
-static void
-hk_g17p_note_precomp_lookup(struct hk_cmd_buffer *cmd, size_t probes,
-                              size_t comparisons, uint64_t start, bool hit)
-{
-   if (!start)
-      return;
-
-   if (!cmd->g17p_precomp_lookup_stats.first_lookup_ns)
-      cmd->g17p_precomp_lookup_stats.first_lookup_ns = start;
-   cmd->g17p_precomp_lookup_stats.lookup_ns += os_time_get_nano() - start;
-   cmd->g17p_precomp_lookup_stats.comparisons += comparisons;
-   cmd->g17p_precomp_lookup_stats.calls++;
-   cmd->g17p_precomp_lookup_stats.hits += hit;
-   cmd->g17p_precomp_lookup_stats.misses += !hit;
-   cmd->g17p_precomp_lookup_stats.probes += probes;
-   cmd->g17p_precomp_lookup_stats.max_entries = MAX2(
-      cmd->g17p_precomp_lookup_stats.max_entries,
-      util_dynarray_num_elements(&cmd->g17p_precomp_programs,
-                                 struct hk_g17p_precomp_program));
-}
-
-void
-hk_g17p_precomp_lookup_stats_finish(struct hk_cmd_buffer *cmd)
-{
-   static unsigned reports;
-   if (!cmd->g17p_precomp_lookup_stats.calls)
-      return;
-
-   const int limit = debug_get_option_hk_g17p_precomp_lookup_stats_limit();
-   if (limit > 0 && p_atomic_inc_return(&reports) <= (unsigned)limit) {
-      fprintf(stderr,
-              "G17P precomp lookup: cmd=%p calls=%" PRIu64
-              " hits=%" PRIu64 " misses=%" PRIu64 " probes=%" PRIu64
-              " comparisons=%" PRIu64 " max_entries=%" PRIu64
-              " final_entries=%zu lookup_wall_ns=%" PRIu64
-              " record_window_wall_ns=%" PRIu64 " programs=",
-              (void *)cmd, cmd->g17p_precomp_lookup_stats.calls,
-              cmd->g17p_precomp_lookup_stats.hits,
-              cmd->g17p_precomp_lookup_stats.misses,
-              cmd->g17p_precomp_lookup_stats.probes,
-              cmd->g17p_precomp_lookup_stats.comparisons,
-              cmd->g17p_precomp_lookup_stats.max_entries,
-              util_dynarray_num_elements(&cmd->g17p_precomp_programs,
-                                         struct hk_g17p_precomp_program),
-              cmd->g17p_precomp_lookup_stats.lookup_ns,
-              os_time_get_nano() -
-                 cmd->g17p_precomp_lookup_stats.first_lookup_ns);
-      /* At most eight distinct IDs, counted without hot-path histogram work. */
-      unsigned ids[8] = {0}, counts[8] = {0};
-      unsigned slots = 0, other = 0;
-      util_dynarray_foreach(&cmd->g17p_precomp_programs,
-                            struct hk_g17p_precomp_program, cached) {
-         unsigned slot = 0;
-         while (slot < slots && ids[slot] != cached->key.idx)
-            slot++;
-         if (slot == ARRAY_SIZE(ids)) {
-            other++;
-            continue;
-         }
-         if (slot == slots)
-            ids[slots++] = cached->key.idx;
-         counts[slot]++;
-      }
-      for (unsigned i = 0; i < slots; ++i)
-         fprintf(stderr, "%s%u:%u", i ? "," : "", ids[i], counts[i]);
-      fprintf(stderr, " other_entries=%u\n", other);
-   }
-   memset(&cmd->g17p_precomp_lookup_stats, 0,
-          sizeof(cmd->g17p_precomp_lookup_stats));
-}
-
 static __attribute__((hot)) struct hk_g17p_precomp_program *
 hk_g17p_find_precomp_program(struct hk_cmd_buffer *cmd,
                              enum libagx_program idx, const void *data,
                              size_t data_size)
 {
-   const bool trace = debug_get_option_hk_g17p_precomp_lookup_stats();
-   const uint64_t start = trace ? os_time_get_nano() : 0;
    const uint32_t hash = hk_g17p_precomp_cache_hash(idx, data, data_size);
-   size_t probes, comparisons;
    const uint32_t entry = hk_g17p_precomp_cache_search(
       cmd->g17p_precomp_index, util_dynarray_begin(&cmd->g17p_precomp_programs),
-      sizeof(struct hk_g17p_precomp_program), idx, data, data_size, hash,
-      &probes, &comparisons);
-   hk_g17p_note_precomp_lookup(cmd, probes, comparisons, start, entry != 0);
+      sizeof(struct hk_g17p_precomp_program), idx, data, data_size, hash);
    return entry ? util_dynarray_element(&cmd->g17p_precomp_programs,
                                         struct hk_g17p_precomp_program,
                                         entry - 1) : NULL;
@@ -237,19 +156,6 @@ hk_g17p_append_prepared_precomp_direct(
 void
 hk_g17p_compute_program_cache_finish(struct hk_device *dev)
 {
-   if (dev->g17p_compute_program_cache.report_stats &&
-       (dev->g17p_compute_program_cache.hits ||
-        dev->g17p_compute_program_cache.misses)) {
-      fprintf(stderr,
-              "G17P compute program cache: hits=%" PRIu64
-              " misses=%" PRIu64 " hit-rate=%.1f%%\n",
-              dev->g17p_compute_program_cache.hits,
-              dev->g17p_compute_program_cache.misses,
-              100.0 * dev->g17p_compute_program_cache.hits /
-                 (dev->g17p_compute_program_cache.hits +
-                  dev->g17p_compute_program_cache.misses));
-   }
-
    for (unsigned i = 0; i < LIBAGX_NUM_PROGRAMS; ++i) {
       struct hk_g17p_compute_program_cache_entry *entry =
          p_atomic_read(&dev->g17p_compute_program_cache.templates[i]);
@@ -332,8 +238,6 @@ hk_g17p_compute_program_cache_lookup(
              program_map, program_capacity, &program->length,
              &program->launch)) {
          program->bytes = program_map;
-         if (dev->g17p_compute_program_cache.report_stats)
-            p_atomic_inc(&dev->g17p_compute_program_cache.hits);
          return true;
       }
    }
@@ -388,24 +292,6 @@ hk_g17p_compute_program_cache_store(
    candidate->key = *key;
    candidate->range = desc->uniform_ranges[0];
    candidate->program = *program;
-
-   if (dev->g17p_compute_program_cache.report_stats)
-      p_atomic_inc(&dev->g17p_compute_program_cache.misses);
-   if (dev->g17p_compute_program_cache.report_stats) {
-      fprintf(stderr,
-              "G17P compute program cache miss: program=%u data=%u kind=%u "
-              "range=%u/%u address=%" PRIx64 " program_va=%" PRIx64
-              " shader=%" PRIx64 " binary=%u scratch=%u d=%u tg=%u gprs=%u"
-              " launch=%u/%" PRIu64 "/%u\n",
-              key->libagx_program, key->data_size, (unsigned)key->kind,
-              key->range_start_halfs, key->range_size_halfs,
-              desc->uniform_ranges[0].address, desc->program_va,
-              key->shader_va, key->shader_binary_size, key->scratch_size,
-              key->compiler_d, key->threadgroup_memory_size_B, key->nr_gprs,
-              key->launch_sources.max_total_threads_per_threadgroup,
-              key->launch_sources.extended_texture_write_mask_qword_1,
-              key->launch_sources.ray_traversal_depth_nonzero);
-   }
 
    while (true) {
       struct hk_g17p_compute_program_cache_entry *entry = p_atomic_read(head);

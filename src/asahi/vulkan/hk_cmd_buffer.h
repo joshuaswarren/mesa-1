@@ -1357,12 +1357,6 @@ struct hk_cmd_buffer {
    struct util_dynarray g17p_precomp_programs;
    struct hash_table *g17p_precomp_index;
 
-   /* Opt-in recording-time cache diagnosis; never touched during submission. */
-   struct {
-      uint64_t calls, hits, misses, probes, comparisons, max_entries;
-      uint64_t first_lookup_ns, lookup_ns;
-   } g17p_precomp_lookup_stats;
-
    /* Opt-in shader performance diagnosis; inactive in production. */
    /* v57d HK_G17P_ORDINARY_VARIANT_TRACE=3 per-command-buffer draw index. */
    uint32_t g17p_trace_draws;
@@ -2151,7 +2145,6 @@ void hk_dispatch_precomp_g17p(struct hk_cmd_buffer *cmd, struct agx_grid grid,
                               enum agx_barrier barrier,
                               enum libagx_program idx, const void *data,
                               size_t data_size);
-void hk_g17p_precomp_lookup_stats_finish(struct hk_cmd_buffer *cmd);
 void hk_g17p_prewarm_precomp(struct hk_cmd_buffer *cmd,
                              enum libagx_program idx, const void *data,
                              size_t data_size);

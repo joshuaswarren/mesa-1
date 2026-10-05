@@ -191,7 +191,6 @@ hk_free_resettable_cmd_buffer(struct hk_cmd_buffer *cmd)
 
    hk_ioto_arena_finish(cmd);
    util_dynarray_clear(&cmd->g17p_compute_programs);
-   hk_g17p_precomp_lookup_stats_finish(cmd);
    _mesa_hash_table_clear(cmd->g17p_precomp_index, NULL);
    util_dynarray_clear(&cmd->g17p_precomp_programs);
    hk_cmd_buffer_release_bos(cmd, &dev->dev);
@@ -862,7 +861,6 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
     * any address embedded in the command streams. */
    hk_cmd_buffer_publish_root_uploads(cmd);
 
-   hk_g17p_precomp_lookup_stats_finish(cmd);
 
    return vk_command_buffer_end(&cmd->vk);
 }

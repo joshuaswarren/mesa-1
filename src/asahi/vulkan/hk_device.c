@@ -863,8 +863,6 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
    }
    hk_g17p_bg_eot_dev_cache_init(dev);
 
-   dev->g17p_compute_program_cache.report_stats =
-      debug_get_bool_option("HK_G17P_PROGRAM_CACHE_STATS", false);
    dev->g17p_shader_perf.trace =
       debug_get_bool_option("HK_SHADER_PERF_TRACE", false);
    dev->g17p_shader_perf.aggregate =
