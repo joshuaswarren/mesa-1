@@ -564,6 +564,17 @@ struct agx_occupancy {
 struct agx_occupancy agx_occupancy_for_register_count(unsigned halfregs);
 unsigned agx_max_registers_for_occupancy(unsigned occupancy);
 
+/* Vertex attributes a vertex prolog can hand to the main shader on this
+ * device through the register ABI (AGX_ABI_VIN_ATTRIB): component i of the
+ * compacted attribute slots occupies half-registers 2 * (8 + i) and the one
+ * above it, and the allocator's export accounting needs one more half above
+ * the last one, so a register file of N halves holds (N - 17) / 8 vec4
+ * attributes -- 29 on the 256-half AGX2 file, 21 on G17P's 192 general
+ * halves. Never above AGX_MAX_ATTRIBS. This is the device's
+ * maxVertexInputAttributes.
+ */
+unsigned agx_max_vertex_attribs(const struct agx_device_key *dev);
+
 #ifdef __cplusplus
 }
 #endif

@@ -6,6 +6,7 @@
  */
 #include "hk_physical_device.h"
 
+#include "asahi/compiler/agx_compile.h"
 #include "asahi/compiler/agx_nir_texture.h"
 #include "asahi/compiler/agx_debug.h"
 #include "asahi/lib/agx_device.h"
@@ -971,6 +972,11 @@ hk_get_device_properties(const struct agx_device *dev,
    uint64_t os_page_size = 16384;
    os_get_page_size(&os_page_size);
 
+   const struct agx_device_key compiler_key = {
+      .chip = dev->chip,
+      .encoding = agx_chip_isa_encoding(dev->chip),
+   };
+
    /* The hardware limit is 128. However, we need to set a lower limit to
     * account for duplicated system values: clip/cull and viewport targets.
     * There are up to 8 combined clip/cull planes and only 1 viewport target,
@@ -1067,8 +1073,11 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxDescriptorSetSampledImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetStorageImages = HK_MAX_DESCRIPTORS,
       .maxDescriptorSetInputAttachments = HK_MAX_DESCRIPTORS,
-      .maxVertexInputAttributes = AGX_MAX_VBUFS,
-      .maxVertexInputBindings = AGX_MAX_ATTRIBS,
+      /* Bounded by the vertex prolog register ABI, not by the key tables:
+       * 21 on G17P, 29 on AGX2 (agx_max_vertex_attribs). DXVK's D3D9
+       * fixed-function vertex shader needs 18. */
+      .maxVertexInputAttributes = agx_max_vertex_attribs(&compiler_key),
+      .maxVertexInputBindings = AGX_MAX_VBUFS,
       .maxVertexInputAttributeOffset = 65535,
       .maxVertexInputBindingStride = 2048,
 

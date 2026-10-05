@@ -10,6 +10,7 @@
 #include "asahi/isa/disasm.h"
 #include "asahi/layout/layout.h"
 #include "asahi/lib/agx_abi.h"
+#include "asahi/lib/agx_nir_lower_vbo.h"
 #include "compiler/nir/nir_builder.h"
 #include "util/bitset.h"
 #include "util/glheader.h"
@@ -10178,6 +10179,25 @@ agx_g17p_discard_word(nir_shader *nir)
 {
    return nir_shader_intrinsics_pass(nir, agx_g17p_discard_word_instr,
                                      nir_metadata_control_flow, NULL);
+}
+
+unsigned
+agx_max_vertex_attribs(const struct agx_device_key *dev)
+{
+   const unsigned halfs = dev->encoding == AGX_ISA_ENCODING_AGX3B
+                             ? AGX3B_NUM_REGS
+                             : AGX_NUM_REGS;
+
+   /* The last component's 32-bit value must end inside the file, and the
+    * register allocator counts one half above the last exported half
+    * (agx_register_allocate.c: "We cannot use fewer registers than we
+    * export" takes the exclusive end as the highest register), so that half
+    * must be inside the file too. Each attribute is eight halves. */
+   unsigned attribs = (halfs - 1 - AGX_ABI_VIN_ATTRIB(0)) / 8;
+   assert(AGX_ABI_VIN_ATTRIB(attribs * 4 - 1) + 3 <= halfs);
+   assert(AGX_ABI_VIN_ATTRIB((attribs + 1) * 4 - 1) + 3 > halfs);
+
+   return MIN2(attribs, AGX_MAX_ATTRIBS);
 }
 
 bool

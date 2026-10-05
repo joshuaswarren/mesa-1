@@ -381,6 +381,8 @@ gather_inputs(nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_component_mask_t mask = nir_def_components_read(&intr->def);
 
    u_foreach_bit(c, mask) {
+      assert(base + c < AGX_MAX_ATTRIBS * 4 &&
+             "attribute slot beyond component mask capacity");
       BITSET_SET(comps_read, base + c);
    }
 

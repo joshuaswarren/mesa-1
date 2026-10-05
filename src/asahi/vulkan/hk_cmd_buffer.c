@@ -3241,6 +3241,17 @@ hk_g17p_publish_one_level_record(
    return published;
 }
 
+/* agx_usc_uniform() publishes at most 64 halves per record. */
+static void
+hk_usc_uniform_split(struct agx_usc_builder *b, unsigned start_halfs,
+                     unsigned size_halfs, uint64_t buffer)
+{
+   for (unsigned offset = 0; offset < size_halfs; offset += 64) {
+      agx_usc_uniform(b, start_halfs + offset, MIN2(64, size_halfs - offset),
+                      buffer + offset * 2);
+   }
+}
+
 static uint64_t
 hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
                              struct hk_linked_shader *linked,
@@ -4273,11 +4284,14 @@ hk_upload_usc_words_internal(struct hk_cmd_buffer *cmd, struct hk_shader *s,
          DIV_ROUND_UP(BITSET_LAST_BIT(s->info.vs.attrib_components_read), 4);
 
       if (count) {
-         agx_usc_uniform(
+         /* One USC uniform record covers at most 64 halves: 16 attribute
+          * bases or 32 clamps. Beyond 16 attributes, split like
+          * agx_usc_immediates() does for rodata. */
+         hk_usc_uniform_split(
             &b, AGX_ABI_VUNI_VBO_BASE(0), 4 * count,
             root_ptr + hk_root_descriptor_offset(draw.attrib_base));
 
-         agx_usc_uniform(
+         hk_usc_uniform_split(
             &b, AGX_ABI_VUNI_VBO_CLAMP(count, 0), 2 * count,
             root_ptr + hk_root_descriptor_offset(draw.attrib_clamps));
       }

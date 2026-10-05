@@ -9111,6 +9111,14 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                     uint64_t attribs_read, struct agx_velem_key *keys)
 {
    u_foreach_bit(a, vi->attributes_valid) {
+      /* An attribute the shader does not read has no slot. Its "slot" below
+       * would be the count of read attributes beneath it, which for an
+       * attribute above every read one is the total count -- one past the
+       * key when the shader reads the maximum.
+       */
+      if (!(attribs_read & BITFIELD64_BIT(a)))
+         continue;
+
       struct vk_vertex_attribute_state attr = vi->attributes[a];
 
       assert(vi->bindings_valid & BITFIELD_BIT(attr.binding));
@@ -9119,7 +9127,8 @@ agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
       /* nir_assign_io_var_locations compacts vertex inputs, eliminating
        * unused inputs. We need to do the same here to match the locations.
        */
-      unsigned slot = util_bitcount64(attribs_read & BITFIELD_MASK(a));
+      unsigned slot = util_bitcount64(attribs_read & BITFIELD64_MASK(a));
+      assert(slot < AGX_MAX_ATTRIBS);
 
       keys[slot] = (struct agx_velem_key){
          .format = hk_format_to_pipe_format(attr.format),
@@ -9183,8 +9192,11 @@ hk_fill_fast_link_key_vs(struct hk_cmd_buffer *cmd, struct hk_shader *sw_vs,
                           key->prolog.attribs);
 
       u_foreach_bit(a, dyn->vi->attributes_valid) {
-         unsigned slot =
-            util_bitcount64(sw_vs->info.vs.attribs_read & BITFIELD_MASK(a));
+         if (!(sw_vs->info.vs.attribs_read & BITFIELD64_BIT(a)))
+            continue;
+
+         unsigned slot = util_bitcount64(sw_vs->info.vs.attribs_read &
+                                         BITFIELD64_MASK(a));
          key->prolog.attribs[slot].stride =
             dyn->vi_binding_strides[dyn->vi->attributes[a].binding];
       }

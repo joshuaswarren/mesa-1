@@ -200,8 +200,12 @@ struct hk_root_descriptor_table {
          uint32_t view_index;
          uint32_t ppp_multisamplectl;
 
-         /* Vertex input state */
-         uint64_t attrib_base[AGX_MAX_VBUFS];
+         /* Vertex input state, indexed by compacted attribute slot. The
+          * bases live at the end of this arm (attrib_base below): the clamp
+          * and stride tables at 32 entries exactly fill the 256 bytes the
+          * three 16-entry tables used to, which keeps every later field --
+          * notably the pinned pipeline_stats offsets -- where it was.
+          */
          uint32_t attrib_clamps[AGX_MAX_VBUFS];
          uint32_t attrib_strides[AGX_MAX_VBUFS];
 
@@ -256,6 +260,9 @@ struct hk_root_descriptor_table {
           * bound vertex and fragment shaders, or zero if they have none. */
          uint64_t vs_constant_data_addr;
          uint64_t fs_constant_data_addr;
+
+         /* Vertex attribute base addresses, indexed by compacted slot. */
+         uint64_t attrib_base[AGX_MAX_VBUFS];
       } draw;
       struct {
          /* GPU address of the immutable NIR constant-data blob for the

@@ -53,7 +53,7 @@ vbo_group_words(enum pipe_format format, bool mixed_unorm8)
 
 static void
 agx_vbo_group_words(const struct agx_velem_key *attribs,
-                    const struct agx_vbo_binding *bindings, uint16_t valid,
+                    const struct agx_vbo_binding *bindings, uint32_t valid,
                     struct agx_vbo_group *groups, bool mixed_unorm8)
 {
    memset(groups, 0, sizeof(*groups) * AGX_MAX_ATTRIBS);
@@ -83,7 +83,7 @@ agx_vbo_group_words(const struct agx_velem_key *attribs,
 
 void
 agx_vbo_group_32bit(const struct agx_velem_key *attribs,
-                    const struct agx_vbo_binding *bindings, uint16_t valid,
+                    const struct agx_vbo_binding *bindings, uint32_t valid,
                     struct agx_vbo_group *groups)
 {
    agx_vbo_group_words(attribs, bindings, valid, groups, false);
@@ -91,7 +91,7 @@ agx_vbo_group_32bit(const struct agx_velem_key *attribs,
 
 void
 agx_vbo_group_mixed(const struct agx_velem_key *attribs,
-                    const struct agx_vbo_binding *bindings, uint16_t valid,
+                    const struct agx_vbo_binding *bindings, uint32_t valid,
                     struct agx_vbo_group *groups)
 {
    agx_vbo_group_words(attribs, bindings, valid, groups, true);
@@ -310,6 +310,14 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
    nir_src *offset_src = nir_get_io_offset_src(intr);
    assert(nir_src_is_const(*offset_src) && "no attribute indirects");
    unsigned index = nir_intrinsic_base(intr) + nir_src_as_uint(*offset_src);
+
+   /* Slots are compacted to the attributes the shader reads, so the caller
+    * must have refused any shader reading more than AGX_MAX_ATTRIBS of them
+    * (hk_compile_shader does). Reading attribs[] past that was the Fallout:
+    * New Vegas new-game crash: DXVK's 18-attribute fixed-function vertex
+    * shader fetched a garbage key from the stack here.
+    */
+   assert(index < AGX_MAX_ATTRIBS && "attribute slot beyond key capacity");
 
    struct agx_velem_key attrib = attribs[index];
    uint32_t stride = attrib.stride;

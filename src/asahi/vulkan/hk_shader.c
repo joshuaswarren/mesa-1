@@ -4238,6 +4238,28 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
             !(nir->info.inputs_read & BITFIELD64_MASK(VERT_ATTRIB_GENERIC0)) &&
             "Fixed-function attributes not used in Vulkan");
 
+         /* Attributes are compacted into slots indexing fixed-size keys,
+          * component masks and root tables, and the prolog ABI hands them
+          * over in registers. A shader reading more than the advertised
+          * maxVertexInputAttributes is invalid API usage; refuse it here
+          * instead of indexing past those tables (DXVK's 18-attribute D3D9
+          * fixed-function vertex shader did exactly that under the old
+          * 16-attribute limit and crashed in the vertex fetch lowering).
+          */
+         const unsigned nr_attribs_read =
+            util_bitcount64(nir->info.inputs_read >> VERT_ATTRIB_GENERIC0);
+         const struct agx_device_key device_key =
+            agx_gather_device_key(&dev->dev);
+         const unsigned max_attribs = agx_max_vertex_attribs(&device_key);
+         if (nr_attribs_read > max_attribs) {
+            hk_api_shader_destroy(&dev->vk, &obj->vk, pAllocator);
+            ralloc_free(nir);
+            return vk_errorf(dev, VK_ERROR_UNKNOWN,
+                             "vertex shader reads %u attributes, device "
+                             "supports %u",
+                             nr_attribs_read, max_attribs);
+         }
+
          NIR_PASS(_, nir, nir_recompute_io_bases, nir_var_shader_in);
       }
 
@@ -4301,7 +4323,7 @@ hk_compile_shader_impl(struct hk_device *dev, struct vk_shader_compile_info *inf
             } else {
                struct agx_velem_key attribs[AGX_MAX_ATTRIBS] = {0};
                struct agx_vbo_binding bindings[AGX_MAX_ATTRIBS] = {0};
-               uint16_t valid = 0;
+               uint32_t valid = 0;
                for (unsigned a = 0; a < AGX_MAX_ATTRIBS; ++a) {
                   if (key->vs.attribs[a].format &&
                       (shader->info.vs.attribs_read & BITFIELD_BIT(a))) {
