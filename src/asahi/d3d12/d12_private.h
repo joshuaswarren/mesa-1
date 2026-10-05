@@ -1268,7 +1268,20 @@ struct d12_cmd_allocator {
     */
    unsigned recording_lists;
 
+   /* Command-list storage this allocator owns. A list that is Reset after
+    * a submission parks its stream and USC BOs here (the GPU may still be
+    * reading them); ID3D12CommandAllocator::Reset, which the application
+    * may only call once that work completed, moves them to the free pool
+    * from which later recordings take their storage instead of allocating
+    * and faulting in fresh BOs. */
+   struct util_dynarray parked_stream_bos; /* struct agx_bo * */
+   struct util_dynarray parked_usc_bos;
+   struct util_dynarray free_stream_bos;
+   struct util_dynarray free_usc_bos;
 };
+
+/* Free BOs kept per allocator and kind; the rest return to the device cache. */
+#define D12_ALLOCATOR_POOL_MAX 8
 
 enum d12_list_state {
    D12_LIST_RECORDING,

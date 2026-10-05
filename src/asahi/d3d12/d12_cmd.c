@@ -204,6 +204,45 @@ d12_alloc_AddRef(ID3D12CommandAllocator *iface)
    return p_atomic_inc_return(&alloc->refcount);
 }
 
+/* Unreference every BO in a pool beyond `keep` entries. */
+static void
+d12_alloc_pool_drain(struct d12_cmd_allocator *alloc,
+                     struct util_dynarray *pool, unsigned keep)
+{
+   while (util_dynarray_num_elements(pool, struct agx_bo *) > keep) {
+      struct agx_bo *bo = util_dynarray_pop(pool, struct agx_bo *);
+      agx_bo_unreference(&alloc->device->dev, bo);
+   }
+}
+
+static void
+d12_alloc_pool_recycle(struct d12_cmd_allocator *alloc,
+                       struct util_dynarray *parked,
+                       struct util_dynarray *free_pool)
+{
+   util_dynarray_foreach(parked, struct agx_bo *, bo)
+      util_dynarray_append_typed(free_pool, struct agx_bo *, *bo);
+   util_dynarray_clear(parked);
+   d12_alloc_pool_drain(alloc, free_pool, D12_ALLOCATOR_POOL_MAX);
+}
+
+/* Take the first pooled BO large enough for `size`, or NULL. */
+static struct agx_bo *
+d12_alloc_pool_take(struct util_dynarray *pool, size_t size)
+{
+   struct agx_bo **bos = util_dynarray_begin(pool);
+   const unsigned count = util_dynarray_num_elements(pool, struct agx_bo *);
+   for (unsigned i = 0; i < count; i++) {
+      if (bos[i]->size < size)
+         continue;
+      struct agx_bo *bo = bos[i];
+      bos[i] = bos[count - 1];
+      (void)util_dynarray_pop(pool, struct agx_bo *);
+      return bo;
+   }
+   return NULL;
+}
+
 static ULONG STDMETHODCALLTYPE
 d12_alloc_Release(ID3D12CommandAllocator *iface)
 {
@@ -211,6 +250,14 @@ d12_alloc_Release(ID3D12CommandAllocator *iface)
    uint32_t refs = p_atomic_dec_return(&alloc->refcount);
 
    if (refs == 0) {
+      d12_alloc_pool_drain(alloc, &alloc->parked_stream_bos, 0);
+      d12_alloc_pool_drain(alloc, &alloc->parked_usc_bos, 0);
+      d12_alloc_pool_drain(alloc, &alloc->free_stream_bos, 0);
+      d12_alloc_pool_drain(alloc, &alloc->free_usc_bos, 0);
+      util_dynarray_fini(&alloc->parked_stream_bos);
+      util_dynarray_fini(&alloc->parked_usc_bos);
+      util_dynarray_fini(&alloc->free_stream_bos);
+      util_dynarray_fini(&alloc->free_usc_bos);
       d12_private_data_store_destroy(&alloc->private_data);
       d12_device_release(alloc->device);
       free(alloc);
@@ -244,6 +291,13 @@ d12_alloc_Reset(ID3D12CommandAllocator *iface)
       return E_FAIL;
    }
 
+   /* Every submission recorded from this allocator has completed (the
+    * application's contract for calling Reset), so parked storage may be
+    * recorded over again. */
+   d12_alloc_pool_recycle(alloc, &alloc->parked_stream_bos,
+                          &alloc->free_stream_bos);
+   d12_alloc_pool_recycle(alloc, &alloc->parked_usc_bos,
+                          &alloc->free_usc_bos);
    return S_OK;
 }
 
@@ -290,6 +344,10 @@ d12_cmd_allocator_create(struct d12_device *device,
    alloc->device = device;
    alloc->type = type;
    d12_private_data_store_init(&alloc->private_data, (IUnknown *)&alloc->iface);
+   util_dynarray_init(&alloc->parked_stream_bos, NULL);
+   util_dynarray_init(&alloc->parked_usc_bos, NULL);
+   util_dynarray_init(&alloc->free_stream_bos, NULL);
+   util_dynarray_init(&alloc->free_usc_bos, NULL);
    d12_device_add_ref(device);
 
    HRESULT hr = d12_alloc_QueryInterface(&alloc->iface, riid, out);
@@ -11981,6 +12039,8 @@ d12_list_Release(ID3D12GraphicsCommandList6 *iface)
       util_dynarray_fini(&list->indirect_constant_fixups);
       util_dynarray_fini(&list->indirect_argument_fixups);
       util_dynarray_fini(&list->bundle_draws);
+      if (list->allocator)
+         d12_alloc_Release(&list->allocator->iface);
       d12_device_release(list->device);
       free(list);
    }
@@ -12121,12 +12181,20 @@ d12_list_take_fresh_storage(struct d12_cmd_list *list)
                           list->usc_bo->size / 2);
    usc_size = MIN2(usc_size, (size_t)D12_USC_BO_SIZE);
 
+   struct d12_cmd_allocator *allocator = list->allocator;
    struct agx_bo *stream =
-      agx_bo_create(&device->dev, stream_size, 0, AGX_BO_WRITEBACK,
-                    "d3d12 cmdlist stream");
+      allocator ? d12_alloc_pool_take(&allocator->free_stream_bos, stream_size)
+                : NULL;
    struct agx_bo *usc =
-      agx_bo_create(&device->dev, usc_size, 0,
-                    AGX_BO_LOW_VA | AGX_BO_WRITEBACK, "d3d12 cmdlist usc");
+      allocator ? d12_alloc_pool_take(&allocator->free_usc_bos, usc_size)
+                : NULL;
+   if (!stream)
+      stream = agx_bo_create(&device->dev, stream_size, 0, AGX_BO_WRITEBACK,
+                             "d3d12 cmdlist stream");
+   if (!usc)
+      usc = agx_bo_create(&device->dev, usc_size, 0,
+                          AGX_BO_LOW_VA | AGX_BO_WRITEBACK,
+                          "d3d12 cmdlist usc");
 
    /* Same admission rule as creation: the recording path maps this storage
     * without a null check, so a refused Lock2 must fail Reset here rather
@@ -12140,10 +12208,18 @@ d12_list_take_fresh_storage(struct d12_cmd_list *list)
       return false;
    }
 
-   /* Queue operations now own references to the exact submitted BOs. */
+   /* Queue operations own references to the exact submitted BOs; the
+    * recording allocator keeps the storage for reuse after its Reset. */
    d12_list_release_segment_scratch(list);
-   agx_bo_unreference(&device->dev, list->stream_bo);
-   agx_bo_unreference(&device->dev, list->usc_bo);
+   if (allocator) {
+      util_dynarray_append_typed(&allocator->parked_stream_bos, struct agx_bo *,
+                           list->stream_bo);
+      util_dynarray_append_typed(&allocator->parked_usc_bos, struct agx_bo *,
+                           list->usc_bo);
+   } else {
+      agx_bo_unreference(&device->dev, list->stream_bo);
+      agx_bo_unreference(&device->dev, list->usc_bo);
+   }
    if (list->sparse_registry_bo)
       agx_bo_unreference(&device->dev, list->sparse_registry_bo);
 
@@ -12210,8 +12286,15 @@ d12_list_Reset(ID3D12GraphicsCommandList6 *iface,
    list->pso = initial_state ? d12_pipeline_state_from_iface(initial_state)
                              : NULL;
 
-   /* Re-entering the recording state re-registers with the allocator. */
+   /* Re-entering the recording state re-registers with the allocator. The
+    * list keeps a reference on it: parked storage is returned to it on a
+    * later Reset, which may come after the application dropped its own. */
    if (list->state != D12_LIST_RECORDING) {
+      if (new_allocator != list->allocator) {
+         d12_alloc_AddRef(&new_allocator->iface);
+         if (list->allocator)
+            d12_alloc_Release(&list->allocator->iface);
+      }
       list->allocator = new_allocator;
       list->allocator->recording_lists++;
    }
@@ -15347,6 +15430,8 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
    list->device = device;
    list->type = type;
    list->allocator = allocator;
+   if (allocator)
+      d12_alloc_AddRef(&allocator->iface);
    list->pso = initial_state;
    d12_private_data_store_init(&list->private_data, (IUnknown *)&list->iface);
    util_dynarray_init(&list->g17p_vdm_storage, NULL);
