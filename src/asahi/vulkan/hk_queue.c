@@ -2027,8 +2027,9 @@ queue_submit(struct hk_device *dev, struct hk_queue *queue,
             asahi_append_fragment_attachments(dev, &payload, cs);
             struct drm_asahi_cmd_render_with_prior cmd = {0};
             asahi_fill_vdm_command(dev, cs, &cmd.legacy, &faulttrace_extra);
+            header.size = hk_drm_render_command_size(
+               dev->dev.chip == AGX_CHIP_G17P, queue->sync.exact_prior);
             if (queue->sync.exact_prior) {
-               header.size = sizeof(cmd);
                cmd.prior_vdm = cs->sync.prior[HK_SYNC_VDM];
                cmd.prior_cdm = cs->sync.prior[HK_SYNC_CDM];
             }

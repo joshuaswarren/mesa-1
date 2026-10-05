@@ -91,6 +91,19 @@ hk_drm_submit_command_limit(bool batch_enabled, uint32_t kernel_limit)
    return userspace_limit < kernel_limit ? userspace_limit : kernel_limit;
 }
 
+uint16_t
+hk_drm_render_command_size(bool g17p, bool exact_prior)
+{
+   if (exact_prior)
+      return sizeof(struct drm_asahi_cmd_render_with_prior);
+
+   /* Legacy kernels consume only the fields they know, without skipping an
+    * appended tail. Even zero G17P resource-specifier high words would then
+    * be parsed as another command. Keep their original packet boundary. */
+   return g17p ? sizeof(struct drm_asahi_cmd_render)
+               : offsetof(struct drm_asahi_cmd_render, bg_eot_rsrc_spec_hi);
+}
+
 void
 hk_drm_attachment_set_init(struct hk_drm_attachment_set *set)
 {
