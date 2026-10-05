@@ -3775,10 +3775,17 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
             .align_mul = 8);
       }
 
+      if (h.valid)
+         counter_addr = nir_bcsel(b, h.valid, counter_addr,
+                                  root_plane(ctx, D12_ROOT_PLANE_DISCARD));
+
       nir_def *pre = nir_global_atomic(b, 32, counter_addr,
                                        nir_imm_int(b, dec ? -1 : 1),
                                        .atomic_op = nir_atomic_op_iadd);
-      def_result(ctx, inst, dec ? nir_iadd_imm(b, pre, -1) : pre);
+      nir_def *result = dec ? nir_iadd_imm(b, pre, -1) : pre;
+      if (h.valid)
+         result = nir_bcsel(b, h.valid, result, nir_imm_int(b, 0));
+      def_result(ctx, inst, result);
       return true;
    }
 
