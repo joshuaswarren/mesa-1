@@ -501,13 +501,30 @@ move_zs_source(nir_src *src, void *data)
    return true;
 }
 
+/* A block the function executes exactly once: directly in the function body,
+ * outside any if or loop. The unrolled per-sample copies of an epilog with
+ * per-sample control flow (spilled render targets) start in such blocks. */
+static bool
+agx_block_runs_once(nir_function_impl *impl, nir_block *block)
+{
+   return block->cf_node.parent == &impl->cf_node;
+}
+
 /*
- * An unrolled epilog writes each sample's depth or stencil in its own copy,
- * between the colour stores of the samples around it. Apple's per-sample
- * depth writes all share one class-1 transaction, which a colour transaction
- * cannot interrupt, so move every such write, with the constant and exported
- * values it reads, to the start of the epilog. Pure exported-mask kills can
- * move with them, but must all precede the depth transaction.
+ * An unrolled epilog writes each sample's depth or stencil, and applies each
+ * sample's share of the API sample mask, in its own copy, between the colour
+ * stores of the samples around it. Apple's fragments take class 1 once: one
+ * testing coverage update (MOVMSK), any depth writes with it, all before the
+ * first colour wait, and never again after releasing it. Move every such
+ * write and kill, with the constant and exported values it reads, to the
+ * start of the epilog, where the kills combine into one update that precedes
+ * the depth transaction.
+ *
+ * Re-acquiring class 1 per sample, after the pixel's colour classes are held,
+ * is a shape no native fragment has. On G17P it hangs the 3D pipeline once
+ * several processes' fragment passes share the hardware (4x, two spilled
+ * RGBA32 targets and a gl_SampleMask write: stamp-blamed recovery within a
+ * second at six processes).
  */
 bool
 agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
@@ -533,7 +550,7 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
              * epilogs may instead test their targeted samples here; admit
              * those only for provably disjoint target sets, checked below. */
             if (kill_count == ARRAY_SIZE(kills) ||
-                block != nir_start_block(impl) ||
+                !agx_block_runs_once(impl, block) ||
                 !movable_zs_source(intr->src[0].ssa) ||
                 !movable_zs_source(intr->src[1].ssa))
                return false;
@@ -556,7 +573,7 @@ agx_nir_hoist_g17p_zs_writes(nir_shader *shader)
             continue;
          }
 
-         if (count == ARRAY_SIZE(writes) || block != nir_start_block(impl))
+         if (count == ARRAY_SIZE(writes) || !agx_block_runs_once(impl, block))
             return false;
 
          for (unsigned i = 0; i < 3; ++i) {

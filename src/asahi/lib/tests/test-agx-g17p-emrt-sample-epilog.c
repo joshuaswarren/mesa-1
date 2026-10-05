@@ -50,7 +50,51 @@ struct probe_result {
    unsigned partitions;
    unsigned sample_size_B;
    unsigned tile_size;
+   /* Pixel protocol of the compiled epilog: class-1 PIXWAITs and PIXRELs,
+    * and class-1 waits issued after the first colour-class wait. */
+   unsigned class1_waits;
+   unsigned class1_releases;
+   unsigned class1_after_colour;
 };
+
+static unsigned
+count_intrinsic(nir_shader *s, nir_intrinsic_op op)
+{
+   unsigned count = 0;
+   nir_foreach_function_impl(impl, s) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type == nir_instr_type_intrinsic &&
+                nir_instr_as_intrinsic(instr)->intrinsic == op)
+               count++;
+         }
+      }
+   }
+   return count;
+}
+
+/* Scan the six-byte PIXWAIT/PIXREL forms: 87 02 54 <classes> <flags> 00 and
+ * 07 02 54 <classes> <flags> 00. Colour waits carry flags 0x08. */
+static void
+scan_pixel_protocol(const struct agx_shader_part *part,
+                    struct probe_result *r)
+{
+   const uint8_t *code = part->binary;
+   bool colour_seen = false;
+   for (size_t at = 0; code && at + 6 <= part->info.binary_size; at += 2) {
+      if (code[at + 1] != 0x02 || code[at + 2] != 0x54 || code[at + 5] != 0)
+         continue;
+      if (code[at] == 0x87 && code[at + 3] == 0x01 && code[at + 4] == 0x00) {
+         r->class1_waits++;
+         r->class1_after_colour += colour_seen;
+      } else if (code[at] == 0x87 && code[at + 4] == 0x08) {
+         colour_seen = true;
+      } else if (code[at] == 0x07 && code[at + 3] == 0x01 &&
+                 code[at + 4] == 0x00) {
+         r->class1_releases++;
+      }
+   }
+}
 
 /* build_g17p_fs_epilog(), hk_cmd_draw.c:3470. */
 static void
@@ -83,9 +127,9 @@ build_g17p_fs_epilog(nir_builder *b, const struct agx_fs_epilog_key *key)
 }
 
 static struct probe_result
-probe(unsigned nr_attachments, const enum pipe_format *formats,
-      unsigned nr_samples, bool sample_shading, uint8_t max_sample_size_B,
-      unsigned written_mask)
+probe_mask(unsigned nr_attachments, const enum pipe_format *formats,
+           unsigned nr_samples, bool sample_shading, uint8_t max_sample_size_B,
+           unsigned written_mask, bool api_sample_mask)
 {
    struct probe_result r = {0};
 
@@ -111,6 +155,9 @@ probe(unsigned nr_attachments, const enum pipe_format *formats,
             .size_32 = mask,
             .loc_written = mask,
             .sample_shading = sample_shading,
+            /* The main shader wrote gl_SampleMask (late tests): the G17P
+             * split exports it as FOUT_WRITE_SAMPLES. */
+            .sample_mask_after_force_early = api_sample_mask,
          },
       .nr_samples = nr_samples,
       .max_sample_size_B = max_sample_size_B,
@@ -155,6 +202,12 @@ probe(unsigned nr_attachments, const enum pipe_format *formats,
    nir_builder b = nir_builder_init_simple_shader(0, &agx_nir_options, NULL);
    build_g17p_fs_epilog(&b, &key);
    agx_preprocess_nir(b.shader);
+   /* hk_get_prolog_epilog_locked(): an unrolled pixel-shaded epilog with
+    * several Z/S writes or coverage updates takes class 1 once. */
+   if (!key.link.sample_shading &&
+       (count_intrinsic(b.shader, nir_intrinsic_store_zs_agx) > 1 ||
+        count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx) > 1))
+      NIR_PASS(_, b.shader, agx_nir_hoist_g17p_zs_writes);
 
    struct agx_shader_key backend_key = {
       .dev.chip = AGX_CHIP_G17P,
@@ -187,12 +240,59 @@ probe(unsigned nr_attachments, const enum pipe_format *formats,
 
    struct agx_shader_part part = {0};
    r.compiled = agx_compile_shader_nir(b.shader, &backend_key, &part);
+   if (r.compiled)
+      scan_pixel_protocol(&part, &r);
    free(part.binary);
    ralloc_free(b.shader);
    return r;
 }
 
+static struct probe_result
+probe(unsigned nr_attachments, const enum pipe_format *formats,
+      unsigned nr_samples, bool sample_shading, uint8_t max_sample_size_B,
+      unsigned written_mask)
+{
+   return probe_mask(nr_attachments, formats, nr_samples, sample_shading,
+                     max_sample_size_B, written_mask, false);
+}
+
 static unsigned failures;
+
+/* A pixel-shaded multisample epilog over spilled targets runs its colour
+ * stores per sample. An API sample mask must still update coverage once,
+ * with one class-1 PIXWAIT/PIXREL pair before the first colour wait, as
+ * every native G17P fragment does. Cloning the update per sample took class
+ * 1 again under the held colour classes: renderpass*.suballocation.
+ * multisample_resolve.r32g32b32a32_sint.samples_4 (four RGBA32 targets at 4x,
+ * two spilled, gl_SampleMask written) hung the 3D pipeline within a second
+ * at six concurrent processes. */
+static void
+expect_one_coverage_update(const char *label, unsigned nr_attachments,
+                           enum pipe_format format, unsigned nr_samples,
+                           uint8_t max_sample_size_B)
+{
+   enum pipe_format formats[8];
+   for (unsigned i = 0; i < ARRAY_SIZE(formats); ++i)
+      formats[i] = format;
+
+   printf("%-52s samples=%u mask budget=%3u ... ", label, nr_samples,
+          max_sample_size_B);
+   fflush(stdout);
+
+   const struct probe_result r = probe_mask(
+      nr_attachments, formats, nr_samples, false, max_sample_size_B, 0, true);
+   const bool ok = r.compiled && r.spilled > 0 && r.class1_waits == 1 &&
+                   r.class1_releases == 1 && r.class1_after_colour == 0;
+
+   printf("resident=%u spilled=%u class1 waits=%u releases=%u after-colour=%u "
+          "%s%s\n",
+          r.resident, r.spilled, r.class1_waits, r.class1_releases,
+          r.class1_after_colour, r.compiled ? "compiled" : "REFUSED",
+          ok ? "" : "  <-- UNEXPECTED");
+
+   if (!ok)
+      failures++;
+}
 
 static void
 expect_mixed(const char *label, unsigned nr_attachments,
@@ -349,6 +449,16 @@ main(void)
           wide, true);
    expect("wide rg32f x4 samples_2", 4, rg32f, 2, true, wide, true);
    expect("wide rg32f x8 samples_2", 8, rg32f, 2, true, wide, true);
+
+   printf("\n=== pixel-shaded eMRT multisample with an API sample mask ===\n");
+   expect_one_coverage_update("rgba32i x4 samples_4 (multisample_resolve)", 4,
+                              PIPE_FORMAT_R32G32B32A32_SINT, 4, wide);
+   expect_one_coverage_update("rgba32i x3 samples_4", 3,
+                              PIPE_FORMAT_R32G32B32A32_SINT, 4, wide);
+   expect_one_coverage_update("rgba32f x4 samples_2 (uncovered budget)", 4,
+                              PIPE_FORMAT_R32G32B32A32_FLOAT, 2, uncovered);
+   expect_one_coverage_update("rg32f x4 samples_4 (uncovered budget)", 4, rg32f,
+                              4, uncovered);
 
    printf("\n%u unexpected result(s)\n", failures);
    return failures ? 1 : 0;
