@@ -375,7 +375,7 @@ on the M1 Pro and run under the Phase 2 kit environment.
 | 53e8807e597 | G17P | bind-state and draw-index records reused across identical draws (256 B of VDM slab per draw before) |
 | fa3e5c0d645 | review fixes | a declared pass's entry traffic applied once per attachment (a split pass lost the CLEAR of targets the first render did not write); EndRenderPass applies clears no draw's render applied; depth/stencil stores retired only for renders without draws; a colour-less pipeline absorbs clears only with one bound format; bind descriptor padding; Clear* rejected in bundles |
 | 107ee4f204c | test | `render_pass_split` declares a second cleared target no draw writes |
-| 5758992ff6a | bench | the passes bench skips a shape the device cannot record (the Neo: linear 1080p RTV) |
+| 5758992ff6a, 030f0cafab3 | bench | the passes bench skips a shape the device cannot record (the Neo: linear 1080p RTV) and records each shape on its own list, since a failed Close poisons a list for every later Reset |
 
 ### How the G17P costs were found
 
@@ -407,11 +407,11 @@ it becomes the default).
 `d3d12agx_microbench --only passes`, 16 frames at 1920x1080 RGBA8 + D32, GPU
 wall, best of three, before = cc55230bb1e library with the same binary:
 
-| shape | M1 Pro before | M1 Pro after (ec8fed) | M1 Pro head (depth stores kept) | M2 before | M2 after (ec8fed) |
-|---|---|---|---|---|---|
-| ClearRTV, bind, 4 draws | 2.69 ms | 2.30 ms | 2.39 ms | 3.3-3.9 ms | 2.6-2.7 ms |
-| ClearDSV, ClearRTV, bind, 4 draws | 6.82 ms | 2.37 ms | 3.06 ms | 7.4 ms | 2.4-2.8 ms |
-| the same + DiscardResource(depth) | 6.81 ms | 2.30 ms | 3.06 ms | 6.5-7.2 ms | 2.3-2.8 ms |
+| shape | M1 Pro before | M1 Pro after (ec8fed) | M1 Pro head (depth stores kept, final bench, 3 runs) | M2 before | M2 after (ec8fed) | M2 head |
+|---|---|---|---|---|---|---|
+| ClearRTV, bind, 4 draws | 2.69 ms (2.8-3.2 final bench) | 2.30 ms | 1.8-2.5 ms | 3.3-3.9 ms | 2.6-2.7 ms | 2.6-2.7 ms |
+| ClearDSV, ClearRTV, bind, 4 draws | 6.82 ms (7.6-8.2) | 2.37 ms | 3.0-3.3 ms | 7.4 ms | 2.4-2.8 ms | 2.9-3.0 ms |
+| the same + DiscardResource(depth) | 6.81 ms (7.6-7.8) | 2.30 ms | 3.0-3.2 ms | 6.5-7.2 ms | 2.3-2.8 ms | 2.8-3.0 ms |
 
 The remaining 140 us per frame is the fixed cost of one 1080p render (tile
 walk with the clear background program); solid-colour stores compress well on
@@ -426,12 +426,12 @@ are the wrong default on a tiler for AGX2 too.
 
 ### Measured (debugoptimized; medians of 3 unless stated)
 
-| metric | M1 Pro a63e8 | M1 Pro 2d656 | M2 2d656 | Neo cc552 (before G17P fixes) | Neo 1b20e (G17P fixes, h-7241) | Neo 53e88 (+ bind cache) |
+| metric | M1 Pro a63e8 | M1 Pro 2d656 | M2 2d656 | Neo cc552 (before G17P fixes) | Neo 1b20e (G17P fixes, h-7241) | Neo 57589 head (h-7340) |
 |---|---|---|---|---|---|---|
-| record plain draw | 93 ns | 96 ns | 83 ns | 218 ns | 191 ns | 89 ns |
+| record plain draw | 93 ns | 96 ns | 83 ns | 218 ns | 191 ns | 86-90 ns |
 | record draw + root constant | 248 ns | 239 ns | 221 ns | 839 ns | 816 ns | 800 ns |
-| record dispatch | 67 ns | 65 ns | 62 ns | 710 ns | 39 ns | 42 ns |
-| record dispatch_texture | 137 ns | 132 ns | 110 ns | 9 864 ns | 5 133 ns | 4 862 ns |
+| record dispatch | 67 ns | 65 ns | 62 ns | 710 ns | 39 ns | 43-44 ns |
+| record dispatch_texture | 137 ns | 132 ns | 110 ns | 9 864 ns | 5 133 ns | 4.7-4.9 us |
 | ExecuteCommandLists 20k draws, call | 9 us | 33 us (includes the inline submit ioctl since B11) | 23 us | 2 188 us | 24 us | (bench aborted, see passes) |
 | 20k draws GPU wall | 7.9 ms | 7.4 ms | 6.3 ms | 31.4 ms | 21.0 ms | |
 | ExecuteCommandLists 20k dispatches, call | 13 us | 54 us (inline ioctl) | 16 us | 33 us | 22 us | |
@@ -446,9 +446,13 @@ word: the launch itself, not the flush, is the cost on G17P (A/B: strong
 record time is the per-dispatch prefix work (sampler cell upload, range
 building, syncs), the next thing to cache.
 
+The 20k-draw GPU wall on the M1 Pro moves between 4.5 and 7.5 ms from run to
+run with either library (GPU clock state), so only the record and call numbers
+are comparable there.
+
 Frozen 17 suites: M1 Pro 11/17 and M2 11/17 after every commit of this pass;
 Neo 9/17 at 9b1afcfb219 and cc55230bb1e (h-6529), at 1b20e71cef2 and
-53e8807e597 (h-7241). `device_interfaces`, `render_pass_split`,
+53e8807e597 (h-7241), at 5758992ff6a (h-7340). `device_interfaces`, `render_pass_split`,
 `pso_threads`, `pso_library_race`, `bundle_state`, `execute_indirect_count`
 and the queue/fence contract test pass on the M1 Pro at the head; meson host
 tests OK. Raw logs and JSON records: `reports/d3d12-stats/t-1082-*`.
