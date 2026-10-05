@@ -1473,6 +1473,9 @@ d12_list_emit_vdm_terminate(struct d12_cmd_list *list)
    return false;
 }
 
+static void d12_segment_rebuild_eot(struct d12_cmd_list *list,
+                                    struct d12_segment *seg);
+
 /* Close whichever segment is open, terminating its control stream. */
 static void
 d12_list_close_cdm(struct d12_cmd_list *list)
@@ -1492,6 +1495,26 @@ d12_list_close_cdm(struct d12_cmd_list *list)
       d12_list_close_pregfx(list);
 
       struct d12_segment *seg = &list->segments[list->segment_count - 1];
+
+      /* A declared pass still active here is being split: the render that
+       * resumes it reloads every attachment, so this one must store them
+       * whatever the pass declared for its end. */
+      if (list->render_pass_active && seg->render_pass) {
+         bool changed = false;
+         for (unsigned i = 0; i < seg->rt_count; i++) {
+            seg->rt_plan[i].store = D12_RP_STORE_PRESERVE;
+            if (seg->rt[i] && (seg->rt_write_mask & BITFIELD_BIT(i)) &&
+                seg->eot_ops[i] != AGX_EOT_STORE) {
+               seg->eot_ops[i] = AGX_EOT_STORE;
+               changed = true;
+            }
+         }
+         if (changed)
+            d12_segment_rebuild_eot(list, seg);
+         seg->depth_plan.store = D12_RP_STORE_PRESERVE;
+         seg->stencil_plan.store = D12_RP_STORE_PRESERVE;
+      }
+
       d12_list_emit_vdm_terminate(list);
       seg->stream_end = list->stream_cur - d12_list_stream_map(list);
       if (list->device->dev.chip == AGX_CHIP_G17P &&
@@ -3146,12 +3169,33 @@ d12_list_begin_render(struct d12_cmd_list *list,
              sizeof(seg->rt_clear));
       seg->depth_plan = list->render_pass_depth_plan;
       seg->stencil_plan = list->render_pass_stencil_plan;
-      if (seg->depth_plan.load == D12_RP_LOAD_CLEAR)
-         seg->depth_cleared = true;
-      if (seg->stencil_plan.load == D12_RP_LOAD_CLEAR) {
-         seg->stencil_cleared = true;
-         seg->stencil_clear = list->render_pass_stencil_clear;
+      if (list->render_pass_segments) {
+         /* This render resumes a pass the driver had to split (a tile
+          * layout change, a full scissor array, a query). The pass's
+          * entry traffic was applied by its first render; applying a
+          * CLEAR or DISCARD again here would throw that render away. */
+         for (unsigned i = 0; i < AGX_MAX_RENDER_TARGETS; i++)
+            seg->rt_plan[i].load = D12_RP_LOAD_PRESERVE;
+         seg->depth_plan.load = D12_RP_LOAD_PRESERVE;
+         seg->stencil_plan.load = D12_RP_LOAD_PRESERVE;
+      } else {
+         if (seg->depth_plan.load == D12_RP_LOAD_CLEAR)
+            seg->depth_cleared = true;
+         if (seg->stencil_plan.load == D12_RP_LOAD_CLEAR) {
+            seg->stencil_cleared = true;
+            seg->stencil_clear = list->render_pass_stencil_clear;
+         }
+         /* A declared clear reaches every tile, drawn into or not; a
+          * render opened by a draw would otherwise clear only the tiles
+          * its geometry touches. */
+         bool clears = seg->depth_cleared || seg->stencil_cleared;
+         for (unsigned i = 0; i < rtv_count; i++)
+            clears |= rtvs[i].resource &&
+                      seg->rt_plan[i].load == D12_RP_LOAD_CLEAR;
+         if (clears)
+            seg->process_empty_tiles = true;
       }
+      list->render_pass_segments++;
    }
 
    seg->rt_count = rtv_count;
@@ -16190,6 +16234,7 @@ d12_cmd_list_begin_render_pass(
    list->render_pass_depth_clear = depth_clear;
    list->render_pass_stencil_clear = stencil_clear;
    list->render_pass_active = true;
+   list->render_pass_segments = 0;
    return true;
 }
 
@@ -16211,8 +16256,10 @@ d12_cmd_list_end_render_pass(struct d12_cmd_list *list)
     * work inside it. */
    if (!d12_list_flush_pending_clears(list))
       return false;
-   d12_list_close_cdm(list);
+   /* The pass ends with this render, so it is not a split: clear the flag
+    * before closing, and the render keeps the end traffic it declared. */
    list->render_pass_active = false;
+   d12_list_close_cdm(list);
    memset(list->render_pass_rt_plan, 0, sizeof(list->render_pass_rt_plan));
    memset(list->render_pass_rt_clear, 0, sizeof(list->render_pass_rt_clear));
    list->render_pass_depth_plan = (struct d12_render_pass_plan){0};

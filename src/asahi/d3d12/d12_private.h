@@ -2239,6 +2239,11 @@ struct d12_cmd_list {
    uint32_t sample_positions;
 
    bool render_pass_active;
+   /* Hardware renders opened so far for the active declared pass. After the
+    * first, the pass has been split and a render resumes it: its loads are
+    * PRESERVE whatever the pass declared, and the render it continues
+    * stores (d12_list_close_cdm). */
+   unsigned render_pass_segments;
    struct d12_render_pass_plan render_pass_rt_plan[AGX_MAX_RENDER_TARGETS];
    float render_pass_rt_clear[AGX_MAX_RENDER_TARGETS][4];
    struct d12_render_pass_plan render_pass_depth_plan;
