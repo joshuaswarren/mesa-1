@@ -2325,6 +2325,9 @@ struct d12_queue {
     * Teardown broadcasts it after raising stop, so the worker never needs a
     * timed poll to notice cancellation. */
    struct d12_fence *worker_parked_fence;
+   /* The worker is blocked in a fence or placement wait that only another
+    * party can satisfy; teardown stops draining when it sees this. */
+   bool worker_blocked;
    /* Ownership of the queue's API order, both under queue->lock.
     * worker_busy: the submit worker holds an op it dequeued and has not
     * finished.  inline_busy: an API thread is processing an op in place.

@@ -2334,10 +2334,13 @@ d12_queue_worker(void *data)
           * registration, so a stop raised at any point is observed. */
          d12_sync_lock(&queue->lock);
          queue->worker_parked_fence = op->fence;
+         queue->worker_blocked = true;
+         cnd_broadcast(&queue->work_available);
          mtx_unlock(&queue->lock);
          d12_fence_ticket_wait(&op->ticket, &queue->stop);
          d12_sync_lock(&queue->lock);
          queue->worker_parked_fence = NULL;
+         queue->worker_blocked = false;
          mtx_unlock(&queue->lock);
          break;
       case D12_QUEUE_OP_SUBMIT:
@@ -2369,8 +2372,15 @@ d12_queue_worker(void *data)
             mesa_logi("SYNC DDI Wait worker: queue %p fence %p value %llu",
                       (void *)queue, (void *)op->placement_fence,
                       (unsigned long long)op->value);
+         d12_sync_lock(&queue->lock);
+         queue->worker_blocked = true;
+         cnd_broadcast(&queue->work_available);
+         mtx_unlock(&queue->lock);
          (void)d12_placement_fence_wait(op->placement_fence, op->value,
                                         &queue->stop);
+         d12_sync_lock(&queue->lock);
+         queue->worker_blocked = false;
+         mtx_unlock(&queue->lock);
          break;
       case D12_QUEUE_OP_SPARSE_BIND: {
          if (queue->ddi_immediate_submit)
@@ -2422,6 +2432,18 @@ d12_queue_stop_worker(struct d12_queue *queue)
       return;
 
    if (queue->worker_started) {
+      /* Let the worker finish every queued op that can make progress
+       * (submissions, Signals, satisfied Waits) before stopping it, so a
+       * Signal queued behind a submission still reaches its fence and a
+       * CPU waiter on it is not left waiting forever.  A worker parked on
+       * a Wait that nothing will satisfy ends the drain: that op and the
+       * ones behind it are discarded, as before. */
+      d12_sync_lock(&queue->lock);
+      while ((queue->op_head || queue->worker_busy) &&
+             !queue->worker_blocked)
+         d12_sync_wait(&queue->work_available, &queue->lock);
+      mtx_unlock(&queue->lock);
+
       p_atomic_set(&queue->stop, 1);
       d12_sync_lock(&queue->lock);
       cnd_broadcast(&queue->work_available);
