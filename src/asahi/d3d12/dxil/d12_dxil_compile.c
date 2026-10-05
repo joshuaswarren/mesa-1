@@ -193,24 +193,26 @@ main(int argc, char **argv)
    }
 
    /* 2. bitcode -> module */
-   struct d12_module mod;
-   if (!d12_dxil_module_parse(&mod, bc, bc_size)) {
+   struct d12_module *mod = d12_dxil_module_alloc();
+   if (!mod)
+      return 1;
+   if (!d12_dxil_module_parse(mod, bc, bc_size)) {
       fprintf(stderr, "module parse failed: %s\n",
-              mod.error ? mod.error : "unknown");
-      d12_dxil_module_finish(&mod);
+              mod->error ? mod->error : "unknown");
+      d12_dxil_module_free(mod);
       return 1;
    }
 
    printf("%s: %s shader, %u types, %u values, %u functions\n", path,
-          stage_name(stage), mod.num_types, mod.num_values,
-          mod.num_functions);
+          stage_name(stage), mod->num_types, mod->num_values,
+          mod->num_functions);
 
-   for (unsigned i = 0; print_nir && i < mod.num_functions; i++) {
+   for (unsigned i = 0; print_nir && i < mod->num_functions; i++) {
       printf("  fn %u: %-28s %s val=%u insts=%u%s\n", i,
-             mod.functions[i].name ? mod.functions[i].name : "(none)",
-             mod.functions[i].is_declaration ? "decl" : "DEF ",
-             mod.functions[i].value_index, mod.functions[i].num_insts,
-             (mod.has_patch_constant && i == mod.patch_constant_func)
+             mod->functions[i].name ? mod->functions[i].name : "(none)",
+             mod->functions[i].is_declaration ? "decl" : "DEF ",
+             mod->functions[i].value_index, mod->functions[i].num_insts,
+             (mod->has_patch_constant && i == mod->patch_constant_func)
                 ? "  <-- patch constant" : "");
    }
 
@@ -221,13 +223,13 @@ main(int argc, char **argv)
     * assignment stored on the root signature.
     */
    struct d12_binding_map map;
-   d12_binding_map_from_module(&mod, &map);
+   d12_binding_map_from_module(mod, &map);
 
    nir_shader *nir =
-      d12_dxil_to_nir(&mod, stage, &map, D12_NATIVE_DESCRIPTOR_GEN7, &error);
+      d12_dxil_to_nir(mod, stage, &map, D12_NATIVE_DESCRIPTOR_GEN7, &error);
    if (!nir) {
       fprintf(stderr, "DXIL->NIR failed: %s\n", error);
-      d12_dxil_module_finish(&mod);
+      d12_dxil_module_free(mod);
       return 1;
    }
 
@@ -486,7 +488,7 @@ main(int argc, char **argv)
 
    if (!part.binary || !part.info.binary_size) {
       fprintf(stderr, "AGX compile produced no code\n");
-      d12_dxil_module_finish(&mod);
+      d12_dxil_module_free(mod);
       return 1;
    }
 
@@ -512,7 +514,7 @@ main(int argc, char **argv)
                     part.info.binary_size - part.info.main_offset, stdout);
 
    free(part.binary);
-   d12_dxil_module_finish(&mod);
+   d12_dxil_module_free(mod);
    free(data);
    return 0;
 }

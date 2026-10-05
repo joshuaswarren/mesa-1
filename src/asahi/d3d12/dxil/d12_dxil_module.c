@@ -861,7 +861,9 @@ bool
 d12_dxil_module_parse(struct d12_module *mod, const uint8_t *bitcode,
                       size_t size_B)
 {
-   memset(mod, 0, sizeof(*mod));
+   /* The module is several MiB of fixed arrays; callers allocate it with
+    * d12_dxil_module_alloc() so only the pages a shader touches are ever
+    * zeroed, rather than memset()ing the whole struct per parse. */
 
    struct d12_bitstream bs;
    d12_bitstream_init(&bs, bitcode, size_B);
@@ -900,6 +902,25 @@ d12_dxil_module_parse(struct d12_module *mod, const uint8_t *bitcode,
    parse_resources(mod);
 
    return mod->error == NULL;
+}
+
+struct d12_module *
+d12_dxil_module_alloc(void)
+{
+   /* Several MiB of fixed arrays: never on the stack. calloc() hands back
+    * demand-zero pages for the first module and zeroed heap memory after
+    * glibc raises its mmap threshold; both are what the parser needs. */
+   return calloc(1, sizeof(struct d12_module));
+}
+
+/* Release the module's heap allocations and its storage. */
+void
+d12_dxil_module_free(struct d12_module *mod)
+{
+   if (!mod)
+      return;
+   d12_dxil_module_finish(mod);
+   free(mod);
 }
 
 void

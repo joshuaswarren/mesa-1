@@ -30,6 +30,9 @@
 #include "nir.h"
 #include "nir_builder.h"
 
+#include "util/simple_mtx.h"
+#define XXH_INLINE_ALL
+#include "util/xxhash.h"
 #include "util/log.h"
 
 /* dx.op opcodes (subset), from Mesa's enum dxil_intr */
@@ -6544,33 +6547,30 @@ d12_dxil_signature_type(uint32_t dxil_type, uint32_t *type,
    }
 }
 
-static unsigned
-d12_dxil_signature(const void *dxil, size_t size_B,
-                   struct d12_input_sig_elem *out, unsigned max,
-                   enum d12_signature_kind kind)
+/* Signature reads parse the whole module, and a graphics PSO asks for the
+ * input, output and patch signatures of each stage several times while it
+ * validates stage links, input layouts and flat transport. Parse once per
+ * bytecode blob, keyed on its content hash, and answer later reads from a
+ * small cache. */
+#define D12_SIG_CACHE_ENTRIES 16
+
+struct d12_sig_cache_entry {
+   uint64_t hash;
+   size_t size_B;
+   bool valid;
+   unsigned count[3];
+   struct d12_input_sig_elem elems[3][D12_MAX_SIG_ELEMENTS];
+};
+
+static simple_mtx_t d12_sig_cache_lock = SIMPLE_MTX_INITIALIZER;
+static struct d12_sig_cache_entry d12_sig_cache[D12_SIG_CACHE_ENTRIES];
+static unsigned d12_sig_cache_next;
+
+static void
+d12_dxil_copy_signature(const struct d12_sig_element *sig, unsigned count,
+                        struct d12_input_sig_elem *out)
 {
-   const uint8_t *bc;
-   size_t bc_size;
-   const char *why = NULL;
-
-   if (!d12_dxil_find_bitcode(dxil, size_B, &bc, &bc_size, &why))
-      return 0;
-
-   struct d12_module mod;
-   if (!d12_dxil_module_parse(&mod, bc, bc_size)) {
-      d12_dxil_module_finish(&mod);
-      return 0;
-   }
-
-   const struct d12_sig_element *sig =
-      kind == D12_SIGNATURE_INPUT  ? mod.input_sig
-      : kind == D12_SIGNATURE_OUTPUT ? mod.output_sig
-                                     : mod.patch_sig;
-   unsigned count = kind == D12_SIGNATURE_INPUT  ? mod.num_input_sig
-                    : kind == D12_SIGNATURE_OUTPUT ? mod.num_output_sig
-                                                   : mod.num_patch_sig;
-   unsigned n = MIN2(count, max);
-   for (unsigned i = 0; i < n; i++) {
+   for (unsigned i = 0; i < count; i++) {
       const struct d12_sig_element *se = &sig[i];
 
       out[i].id = se->id;
@@ -6588,8 +6588,67 @@ d12_dxil_signature(const void *dxil, size_t size_B,
          out[i].name[sizeof(out[i].name) - 1] = '\0';
       }
    }
+}
 
-   d12_dxil_module_finish(&mod);
+static unsigned
+d12_dxil_signature(const void *dxil, size_t size_B,
+                   struct d12_input_sig_elem *out, unsigned max,
+                   enum d12_signature_kind kind)
+{
+   const uint8_t *bc;
+   size_t bc_size;
+   const char *why = NULL;
+
+   if (!d12_dxil_find_bitcode(dxil, size_B, &bc, &bc_size, &why))
+      return 0;
+
+   const uint64_t hash = XXH64(dxil, size_B, 0);
+
+   simple_mtx_lock(&d12_sig_cache_lock);
+   for (unsigned i = 0; i < D12_SIG_CACHE_ENTRIES; i++) {
+      const struct d12_sig_cache_entry *e = &d12_sig_cache[i];
+      if (!e->valid || e->hash != hash || e->size_B != size_B)
+         continue;
+      unsigned n = MIN2(e->count[kind], max);
+      memcpy(out, e->elems[kind], n * sizeof(*out));
+      simple_mtx_unlock(&d12_sig_cache_lock);
+      return n;
+   }
+   simple_mtx_unlock(&d12_sig_cache_lock);
+
+   struct d12_module *mod = d12_dxil_module_alloc();
+   if (!mod)
+      return 0;
+   if (!d12_dxil_module_parse(mod, bc, bc_size)) {
+      d12_dxil_module_free(mod);
+      return 0;
+   }
+
+   struct d12_sig_cache_entry entry = {
+      .hash = hash,
+      .size_B = size_B,
+      .valid = true,
+      .count = {
+         MIN2(mod->num_input_sig, D12_MAX_SIG_ELEMENTS),
+         MIN2(mod->num_output_sig, D12_MAX_SIG_ELEMENTS),
+         MIN2(mod->num_patch_sig, D12_MAX_SIG_ELEMENTS),
+      },
+   };
+   d12_dxil_copy_signature(mod->input_sig, entry.count[D12_SIGNATURE_INPUT],
+                           entry.elems[D12_SIGNATURE_INPUT]);
+   d12_dxil_copy_signature(mod->output_sig, entry.count[D12_SIGNATURE_OUTPUT],
+                           entry.elems[D12_SIGNATURE_OUTPUT]);
+   d12_dxil_copy_signature(mod->patch_sig, entry.count[D12_SIGNATURE_PATCH],
+                           entry.elems[D12_SIGNATURE_PATCH]);
+   d12_dxil_module_free(mod);
+
+   unsigned n = MIN2(entry.count[kind], max);
+   memcpy(out, entry.elems[kind], n * sizeof(*out));
+
+   simple_mtx_lock(&d12_sig_cache_lock);
+   d12_sig_cache[d12_sig_cache_next] = entry;
+   d12_sig_cache_next = (d12_sig_cache_next + 1) % D12_SIG_CACHE_ENTRIES;
+   simple_mtx_unlock(&d12_sig_cache_lock);
    return n;
 }
 

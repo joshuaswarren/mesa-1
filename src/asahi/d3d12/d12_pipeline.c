@@ -1499,24 +1499,26 @@ d12_pipeline_state_create_compute(struct d12_device *device,
    const char *error = NULL;
 
    if (!nir) {
-      struct d12_module mod;
-      if (!d12_dxil_module_parse(&mod, bc, bc_size)) {
+      struct d12_module *mod = d12_dxil_module_alloc();
+      if (!mod)
+         return E_OUTOFMEMORY;
+      if (!d12_dxil_module_parse(mod, bc, bc_size)) {
          mesa_loge("CreateComputePipelineState: DXIL parse failed: %s",
-                   mod.error ? mod.error : "unknown");
-         d12_dxil_module_finish(&mod);
+                   mod->error ? mod->error : "unknown");
+         d12_dxil_module_free(mod);
          return E_INVALIDARG;
       }
 
-      if (!d12_dxil_collect_texture_shapes(&mod, map, texture_shapes)) {
+      if (!d12_dxil_collect_texture_shapes(mod, map, texture_shapes)) {
          mesa_loge("CreateComputePipelineState: one root slot has "
                    "conflicting texture declarations");
-         d12_dxil_module_finish(&mod);
+         d12_dxil_module_free(mod);
          return E_INVALIDARG;
       }
 
-      nir = d12_dxil_to_nir(&mod, MESA_SHADER_COMPUTE, map,
+      nir = d12_dxil_to_nir(mod, MESA_SHADER_COMPUTE, map,
                             descriptor_generation, &error);
-      d12_dxil_module_finish(&mod);
+      d12_dxil_module_free(mod);
    }
 
    if (!nir) {
@@ -1776,18 +1778,20 @@ dxil_to_nir_stage(const struct d12_binding_map *map,
       return NULL;
    }
 
-   struct d12_module mod;
-   if (!d12_dxil_module_parse(&mod, bc, bc_size)) {
+   struct d12_module *mod = d12_dxil_module_alloc();
+   if (!mod)
+      return NULL;
+   if (!d12_dxil_module_parse(mod, bc, bc_size)) {
       mesa_loge("graphics PSO: DXIL parse failed: %s",
-                mod.error ? mod.error : "unknown");
-      d12_dxil_module_finish(&mod);
+                mod->error ? mod->error : "unknown");
+      d12_dxil_module_free(mod);
       return NULL;
    }
 
    const char *error = NULL;
-   nir_shader *nir = d12_dxil_to_nir(&mod, stage, map,
+   nir_shader *nir = d12_dxil_to_nir(mod, stage, map,
                                      descriptor_generation, &error);
-   d12_dxil_module_finish(&mod);
+   d12_dxil_module_free(mod);
 
    if (!nir)
       mesa_loge("graphics PSO: DXIL->NIR failed: %s", error);

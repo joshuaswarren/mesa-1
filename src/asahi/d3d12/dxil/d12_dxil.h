@@ -678,6 +678,8 @@ const struct d12_sig_element *d12_dxil_find_sig(const struct d12_sig_element *si
  * Parse a complete module. Returns false with mod->error set on failure.
  * The module owns heap allocations; free with d12_dxil_module_finish.
  */
+struct d12_module *d12_dxil_module_alloc(void);
+void d12_dxil_module_free(struct d12_module *mod);
 bool d12_dxil_module_parse(struct d12_module *mod, const uint8_t *bitcode,
                            size_t size_B);
 void d12_dxil_module_finish(struct d12_module *mod);

@@ -340,6 +340,9 @@ main(int argc, char **argv)
    /* "--only submit" skips the recording loops and runs the submit, reset
     * and round-trip measurements alone. */
    const bool only_submit = only && !strcmp(only, "submit");
+   /* "--only pso" repeats PSO creation 64 times and stops. */
+   const bool only_pso = only && !strcmp(only, "pso");
+   const unsigned pso_repeats = only_pso ? 64 : PSO_REPEATS;
    size_t vs_size, ps_size, cs_size;
    void *vs = slurp(argv[1], &vs_size);
    void *ps = slurp(argv[2], &ps_size);
@@ -406,8 +409,8 @@ main(int argc, char **argv)
    pd.BlendState.RenderTarget[0].RenderTargetWriteMask =
       D3D12_COLOR_WRITE_ENABLE_ALL;
 
-   double pso_ms[PSO_REPEATS];
-   for (unsigned i = 0; i < PSO_REPEATS; i++) {
+   double pso_ms[64];
+   for (unsigned i = 0; i < pso_repeats; i++) {
       ID3D12PipelineState *pso = NULL;
       double t0 = now_ns();
       hr = ID3D12Device_CreateGraphicsPipelineState(
@@ -415,13 +418,13 @@ main(int argc, char **argv)
       double t1 = now_ns();
       REQUIRE(hr == S_OK && pso, "CreateGraphicsPipelineState");
       pso_ms[i] = (t1 - t0) / 1e6;
-      if (i + 1 == PSO_REPEATS)
+      if (i + 1 == pso_repeats)
          b.pso_tri = pso;
       else
          ID3D12PipelineState_Release(pso);
    }
    double pso_gfx_first_ms = pso_ms[0];
-   double pso_gfx_median_ms = percentile(pso_ms, PSO_REPEATS, 0.5);
+   double pso_gfx_median_ms = percentile(pso_ms, pso_repeats, 0.5);
 
    pd.pRootSignature = b.rs_consts;
    hr = ID3D12Device_CreateGraphicsPipelineState(
@@ -432,8 +435,8 @@ main(int argc, char **argv)
       .pRootSignature = b.rs_table,
       .CS = {.pShaderBytecode = cs, .BytecodeLength = cs_size},
    };
-   double cpso_ms[PSO_REPEATS];
-   for (unsigned i = 0; i < PSO_REPEATS; i++) {
+   double cpso_ms[64];
+   for (unsigned i = 0; i < pso_repeats; i++) {
       ID3D12PipelineState *pso = NULL;
       double t0 = now_ns();
       hr = ID3D12Device_CreateComputePipelineState(
@@ -441,17 +444,23 @@ main(int argc, char **argv)
       double t1 = now_ns();
       REQUIRE(hr == S_OK && pso, "CreateComputePipelineState");
       cpso_ms[i] = (t1 - t0) / 1e6;
-      if (i + 1 == PSO_REPEATS)
+      if (i + 1 == pso_repeats)
          b.pso_cs = pso;
       else
          ID3D12PipelineState_Release(pso);
    }
    double pso_cs_first_ms = cpso_ms[0];
-   double pso_cs_median_ms = percentile(cpso_ms, PSO_REPEATS, 0.5);
+   double pso_cs_median_ms = percentile(cpso_ms, pso_repeats, 0.5);
    printf("pso    graphics first %.2f ms, median %.2f ms; compute first %.2f ms, "
           "median %.2f ms\n",
           pso_gfx_first_ms, pso_gfx_median_ms, pso_cs_first_ms,
           pso_cs_median_ms);
+   if (only_pso) {
+      printf("MICROBENCH_JSON {\"only\": \"pso\", \"pso_gfx_create_ms_median\": %.3f, "
+             "\"pso_cs_create_ms_median\": %.3f}\n",
+             pso_gfx_median_ms, pso_cs_median_ms);
+      return 0;
+   }
 
    /* --- Resources ---------------------------------------------------- */
    D3D12_HEAP_PROPERTIES rt_heap = {
