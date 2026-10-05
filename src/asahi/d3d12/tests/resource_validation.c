@@ -166,6 +166,58 @@ main(void)
          ID3D12Resource_Release(resource);
       ID3D12Heap_Release(heap);
    }
+
+   const DXGI_FORMAT planar[] = {DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_P016};
+   for (unsigned i = 0; i < 3; i++) {
+      D3D12_FEATURE_DATA_FORMAT_SUPPORT support = {.Format = planar[i]};
+      hr = ID3D12Device15_CheckFeatureSupport(device, D3D12_FEATURE_FORMAT_SUPPORT,
+                                             &support, sizeof(support));
+      CHECK(hr == E_FAIL && !support.Support1 && !support.Support2,
+            "unimplemented planar formats report a failed capability query");
+   }
+
+   ID3D12CommandAllocator *allocator = NULL;
+   hr = ID3D12Device15_CreateCommandAllocator(device, D3D12_COMMAND_LIST_TYPE_DIRECT,
+      &IID_ID3D12CommandAllocator, (void **)&allocator);
+   CHECK(hr == S_OK && allocator, "barrier validation allocator");
+   if (allocator) {
+      for (unsigned invalid = 0; invalid < 4; invalid++) {
+         ID3D12GraphicsCommandList *list = NULL;
+         hr = ID3D12Device15_CreateCommandList(device, 0, D3D12_COMMAND_LIST_TYPE_DIRECT,
+            allocator, NULL, &IID_ID3D12GraphicsCommandList, (void **)&list);
+         CHECK(hr == S_OK && list, "allocator can create a list after a failed Close");
+         if (!list) break;
+         D3D12_RESOURCE_BARRIER barrier = {
+            .Type = D3D12_RESOURCE_BARRIER_TYPE_ALIASING,
+         };
+         if (invalid == 0)
+            ID3D12GraphicsCommandList_ResourceBarrier(list, 1, NULL);
+         else if (invalid == 1) {
+            barrier.Type = (D3D12_RESOURCE_BARRIER_TYPE)99;
+            ID3D12GraphicsCommandList_ResourceBarrier(list, 1, &barrier);
+         } else if (invalid == 2) {
+            barrier.Flags = D3D12_RESOURCE_BARRIER_FLAG_BEGIN_ONLY;
+            ID3D12GraphicsCommandList_ResourceBarrier(list, 1, &barrier);
+         } else {
+            ID3D12GraphicsCommandList_ResourceBarrier(list, 0, NULL);
+            ID3D12GraphicsCommandList_ResourceBarrier(list, 1, &barrier);
+         }
+         HRESULT expected = invalid < 3 ? E_INVALIDARG : S_OK;
+         CHECK(ID3D12GraphicsCommandList_Close(list) == expected,
+               "barrier recording reports its result through Close");
+         /* A failed Close permanently poisons this list by the D3D12
+          * contract. Its allocator and device must remain usable. */
+         CHECK(ID3D12GraphicsCommandList_Reset(list, allocator, NULL) == expected,
+               "Reset preserves a failed Close result");
+         if (invalid == 3)
+            CHECK(ID3D12GraphicsCommandList_Close(list) == S_OK,
+                  "valid list remains reusable");
+         ID3D12GraphicsCommandList_Release(list);
+         CHECK(ID3D12CommandAllocator_Reset(allocator) == S_OK,
+               "allocator remains usable after list errors");
+      }
+      ID3D12CommandAllocator_Release(allocator);
+   }
    CHECK(ID3D12Device15_Release(device) == 0, "device references released");
    printf("RESOURCE VALIDATION: %s\n", failures ? "FAILURES" : "ALL PASS");
    return failures ? 1 : 0;
