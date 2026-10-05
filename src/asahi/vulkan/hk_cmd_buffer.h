@@ -438,7 +438,8 @@ struct hk_rendering_state {
    struct agx_zls_control_packed zls_control_only, zls_control_last;
    const void *zls_first_cs;
 
-   /* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED (opt-in): the pass may drop its
+   /* Preserve untouched NONE/NONE attachments. The broader
+    * HK_G17P_ZLS_ELIDE_UNTOUCHED path remains opt-in. The pass may drop its
     * depth/stencil attachment from every control stream when no draw or
     * clear in it tests, writes, bounds-tests or clears depth/stencil and
     * neither aspect has a CLEAR load op or a resolve (see
