@@ -1384,10 +1384,18 @@ d12_list_close_pregfx(struct d12_cmd_list *list)
 }
 
 /*
- * Get the pre-graphics compute segment for the open render pass, creating
+ * Get the pre-graphics compute segment for the open render pass, opening
  * it on first use. Unlike d12_list_get_cdm this does NOT end the render
  * pass -- that is the entire point. See the comment on pregfx_cur in
  * d12_private.h.
+ *
+ * The segment's slot was reserved immediately before the render segment
+ * when the render pass began, so opening it here moves nothing: a
+ * `struct d12_segment *` taken earlier in the draw (the render segment
+ * with its sampler heap and scratch already bound) stays valid across
+ * this call. Inserting the slot here instead used to shift the render
+ * segment up by one and silently retarget every such pointer at the new
+ * compute segment.
  *
  * Returns NULL if there is no open render pass to precede, which is a
  * caller bug rather than a resource limit: without a render pass the
@@ -1399,14 +1407,8 @@ d12_list_get_pregfx(struct d12_cmd_list *list)
    if (list->pregfx_open)
       return &list->segments[list->pregfx_seg];
 
-   if (!list->render_open) {
+   if (!list->render_open || list->segment_count < 2) {
       mesa_loge("pre-graphics compute requested with no open render pass");
-      list->state = D12_LIST_ERROR;
-      return NULL;
-   }
-
-   if (list->segment_count >= D12_MAX_SEGMENTS) {
-      mesa_loge("command list segment limit reached");
       list->state = D12_LIST_ERROR;
       return NULL;
    }
@@ -1421,18 +1423,15 @@ d12_list_get_pregfx(struct d12_cmd_list *list)
 
    size_t offset = gpu - list->stream_bo->va->addr;
 
-   /* Insert BEFORE the open render segment, which is by definition the
-    * last one. Shifting it up by one keeps `render_open` meaning "the
-    * last segment is an unterminated RENDER", which the close path and
-    * every draw rely on.
-    */
-   unsigned at = list->segment_count - 1;
-   list->segments[at + 1] = list->segments[at];
-   list->segment_count++;
-
+   /* The reserved prelude: an empty CDM segment, which the submit path
+    * skips while it has no dispatches. */
+   unsigned at = list->segment_count - 2;
    struct d12_segment *seg = &list->segments[at];
-   memset(seg, 0, sizeof(*seg));
-   seg->type = D12_SEG_CDM;
+   if (seg->type != D12_SEG_CDM || seg->dispatches || seg->stream_end) {
+      mesa_loge("render pass has no reserved pre-graphics segment");
+      list->state = D12_LIST_ERROR;
+      return NULL;
+   }
    seg->stream_start = offset;
 
    list->pregfx_cur = d12_list_stream_map(list) + offset;
@@ -2712,7 +2711,8 @@ d12_list_begin_render(struct d12_cmd_list *list,
 {
    d12_list_close_cdm(list);
 
-   if (list->segment_count >= D12_MAX_SEGMENTS) {
+   /* Two slots: the pre-graphics prelude and the render segment itself. */
+   if (list->segment_count + 2 > D12_MAX_SEGMENTS) {
       mesa_loge("command list segment limit reached");
       list->state = D12_LIST_ERROR;
       return NULL;
@@ -2739,7 +2739,16 @@ d12_list_begin_render(struct d12_cmd_list *list,
       return NULL;
    }
 
-   struct d12_segment *seg = &list->segments[list->segment_count];
+   /* Reserve the pre-graphics prelude in the slot before the render
+    * segment, so that d12_list_get_pregfx can open it later without
+    * moving the render segment (see there). An unused prelude is an empty
+    * CDM segment, which submission skips. Neither slot is committed until
+    * the render segment is complete. */
+   struct d12_segment *prelude = &list->segments[list->segment_count];
+   memset(prelude, 0, sizeof(*prelude));
+   prelude->type = D12_SEG_CDM;
+
+   struct d12_segment *seg = &list->segments[list->segment_count + 1];
    memset(seg, 0, sizeof(*seg));
    seg->type = D12_SEG_RENDER;
    seg->process_empty_tiles = process_empty_tiles;
@@ -3217,7 +3226,7 @@ d12_list_begin_render(struct d12_cmd_list *list,
       }
    }
 
-   list->segment_count++;
+   list->segment_count += 2;
    list->render_open = true;
    return seg;
    }
@@ -9254,9 +9263,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
       *out_tables = tables_gpu;
    if (out_table_count)
       *out_table_count = table_count;
-   if (indirect_patch_count || indirect_constant_patch_count ||
-       indirect_root_patch_count)
-      seg = &list->segments[list->segment_count - 1];
 
    /* SM 6.8 draw parameters. agx_usc_uniform fills registers FROM memory.
     * The two D3D12 indirect structures both end in the exact pair this ABI
@@ -9340,8 +9346,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
       return;
    if (out_vb_params)
       *out_vb_params = vb_params_data_gpu;
-   if (indirect_vb_patch_count)
-      seg = &list->segments[list->segment_count - 1];
    poly_u.vb_params = vb_params_gpu;
 
    const struct d12_gfx_stage *vstage = &pso->vs;
@@ -9368,8 +9372,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
                                  pbes_gpu, draw_gpu, &draw, &poly_u))
          return;
 
-      seg = &list->segments[list->segment_count - 1];
-
       vstage = &pso->ms_rast;
       uvs = &pso->ms_uvs;
       varys = &pso->ms_varyings;
@@ -9381,8 +9383,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
                                  pbes_gpu, draw_gpu, &draw,
                                  &poly_u))
          return;
-
-      seg = &list->segments[list->segment_count - 1];
 
       vstage = &pso->tes;
       uvs = &pso->tes_uvs;
@@ -9450,14 +9450,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
                                &vertex_count, &instance_count, &draw,
                                &poly_u))
          return;
-
-      /* Inserting the pre-graphics segment shifted the render segment up
-       * one slot, so any pointer taken before the call now aims at the
-       * compute segment. Re-fetch it -- the symptom otherwise is "draw
-       * into a render pass with no scissor array", which reads like a
-       * missing scissor rather than a stale pointer.
-       */
-      seg = &list->segments[list->segment_count - 1];
 
       vstage = &pso->gs_rast;
       uvs = &pso->gs_uvs;
@@ -10084,12 +10076,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             list, indirect_args, indexed ? 5 : 4, true);
          if (!indirect_args)
             return;
-
-         /* d12_list_get_pregfx inserts a CDM segment before the render
-          * segment and shifts the latter up by one. Refresh the pointer so
-          * has_draws is recorded on the render command, not its new prelude.
-          */
-         seg = &list->segments[list->segment_count - 1];
       }
 
       if (indirect_args && indexed) {
@@ -10136,7 +10122,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          agx_1d(1), true);
       if (list->state != D12_LIST_RECORDING)
          return;
-      seg = &list->segments[list->segment_count - 1];
 
       /* Reserve the exact direct-indexed command width and initialize it to
        * a safe no-op. The pre-graphics kernel overwrites these words after
