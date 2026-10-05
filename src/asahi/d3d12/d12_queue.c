@@ -39,60 +39,29 @@
 #include <errno.h>
 
 /*
- * Aurora: forward progress must not depend on a native waiter wakeup.
+ * Queue synchronisation primitives.
  *
- * On this Windows-on-Apple-Silicon ARM64 target a lost wake was captured
- * directly while bringing up the D3D11 stack: a submission producer sat
- * indefinitely in NtWaitForAlertByThreadId acquiring the submission queue
- * lock, even though the live lock word was already zero, and other workers
- * in the same process showed the identical free-lock/waiter contradiction.
- * A lost wake here stops command submission before dxgkrnl or the KMD is
- * ever called, so it presents as a GPU hang with no submission to blame.
+ * On Linux these are the plain c11 mutex and an untimed condition wait: every
+ * wait below loops on a predicate that is only changed under queue->lock, and
+ * every change of such a predicate (including the stop flags at teardown)
+ * broadcasts the condition variable it guards, so a wakeup is never lost and
+ * an idle queue never polls.
  *
- * Mesa's Windows c11 threads map mtx_t to a CRITICAL_SECTION and cnd_t to a
- * CONDITION_VARIABLE, which are exactly the primitives observed dropping
- * wakes.  Acquire with a bounded try/yield loop, and make every condition
- * wait a legal spurious wakeup followed by a predicate recheck -- every call
- * site below already loops on its predicate, so a spurious wake costs
- * nothing.  A real cnd_signal still returns immediately, so this changes no
- * healthy-path latency; the timeout only bounds the damage of a lost wake.
- *
- * This is deliberately not #ifdef _WIN32.  The Linux build is where these
- * paths get exercised locally, and a concurrency primitive that differs
- * between the test build and the shipping one hides exactly the class of bug
- * it is here to contain.  The portable cost is one interlocked operation on
- * the uncontended path plus a bounded idle poll.
+ * Windows is different.  On the Windows-on-Apple-Silicon ARM64 target a lost
+ * wake was captured directly while bringing up the D3D11 stack: a submission
+ * producer sat indefinitely in NtWaitForAlertByThreadId acquiring the
+ * submission queue lock, even though the live lock word was already zero,
+ * and other workers in the same process showed the identical
+ * free-lock/waiter contradiction.  Mesa's Windows c11 threads map mtx_t to a
+ * CRITICAL_SECTION and cnd_t to a CONDITION_VARIABLE, which are exactly the
+ * primitives observed dropping wakes.  There the lock is acquired with a
+ * bounded try/yield loop and every condition wait is a legal spurious wakeup
+ * followed by a predicate recheck, so the timeout only bounds the damage of
+ * a lost wake and a real signal still returns immediately.
  */
+#ifdef _WIN32
 #define D12_SYNC_SPINS_BEFORE_SLEEP 64u
 #define D12_SYNC_FALLBACK_NS        1000000L
-
-static uint8_t *
-d12_queue_emit_cdm_cache_flush(struct agx_device *dev, uint8_t *cursor)
-{
-   switch (agx_chip_command_stream_generation(dev->chip)) {
-   case AGX_CS_GENERATION_AGX2:
-      return (uint8_t *)agx_cdm_barrier((uint32_t *)cursor, dev->chip);
-
-   case AGX_CS_GENERATION_G15:
-   case AGX_CS_GENERATION_HAL200:
-   case AGX_CS_GENERATION_HAL300: {
-      const struct agx3_cdm_barrier_info info = {
-         .chip = dev->chip,
-         .flags = 0x5,
-      };
-      struct d12_agx3_cdm_barrier_encoding encoded;
-      if (!d12_agx3_encode_cdm_barrier(&info, &encoded))
-         return NULL;
-
-      memcpy(cursor, encoded.bytes, encoded.length);
-      return cursor + encoded.length;
-   }
-
-   case AGX_CS_GENERATION_UNKNOWN:
-   default:
-      return NULL;
-   }
-}
 
 /* A waiter that is blocking a producer polls at the floor: it is only ever
  * waiting because work is already pending, so the poll is transient and the
@@ -164,6 +133,55 @@ d12_sync_wait_idle(cnd_t *cond, mtx_t *mutex, long *backoff_ns)
    if (*backoff_ns < D12_SYNC_IDLE_CEILING_NS)
       *backoff_ns *= 2;
 }
+#else
+static inline void
+d12_sync_lock(mtx_t *mutex)
+{
+   mtx_lock(mutex);
+}
+
+static inline void
+d12_sync_wait(cnd_t *cond, mtx_t *mutex)
+{
+   cnd_wait(cond, mutex);
+}
+
+static inline void
+d12_sync_wait_idle(cnd_t *cond, mtx_t *mutex, long *backoff_ns)
+{
+   (void)backoff_ns;
+   cnd_wait(cond, mutex);
+}
+#endif
+
+static uint8_t *
+d12_queue_emit_cdm_cache_flush(struct agx_device *dev, uint8_t *cursor)
+{
+   switch (agx_chip_command_stream_generation(dev->chip)) {
+   case AGX_CS_GENERATION_AGX2:
+      return (uint8_t *)agx_cdm_barrier((uint32_t *)cursor, dev->chip);
+
+   case AGX_CS_GENERATION_G15:
+   case AGX_CS_GENERATION_HAL200:
+   case AGX_CS_GENERATION_HAL300: {
+      const struct agx3_cdm_barrier_info info = {
+         .chip = dev->chip,
+         .flags = 0x5,
+      };
+      struct d12_agx3_cdm_barrier_encoding encoded;
+      if (!d12_agx3_encode_cdm_barrier(&info, &encoded))
+         return NULL;
+
+      memcpy(cursor, encoded.bytes, encoded.length);
+      return cursor + encoded.length;
+   }
+
+   case AGX_CS_GENERATION_UNKNOWN:
+   default:
+      return NULL;
+   }
+}
+
 
 enum d12_queue_op_type {
    D12_QUEUE_OP_WAIT,
@@ -2175,7 +2193,16 @@ d12_queue_worker(void *data)
             mesa_logi("SYNC Wait worker: queue %p fence %p value %llu",
                       (void *)queue, (void *)op->fence,
                       (unsigned long long)op->value);
+         /* Publish where this thread parks so d12_queue_stop_worker can
+          * wake it; the stop flag is re-read under the fence lock after
+          * registration, so a stop raised at any point is observed. */
+         d12_sync_lock(&queue->lock);
+         queue->worker_parked_fence = op->fence;
+         mtx_unlock(&queue->lock);
          d12_fence_ticket_wait(&op->ticket, &queue->stop);
+         d12_sync_lock(&queue->lock);
+         queue->worker_parked_fence = NULL;
+         mtx_unlock(&queue->lock);
          break;
       case D12_QUEUE_OP_SUBMIT:
          retire = d12_queue_wait_submit_capacity(queue) &&
@@ -2260,7 +2287,14 @@ d12_queue_stop_worker(struct d12_queue *queue)
       d12_sync_lock(&queue->lock);
       cnd_broadcast(&queue->work_available);
       cnd_broadcast(&queue->retire_available);
+      struct d12_fence *parked = queue->worker_parked_fence;
+      if (parked)
+         d12_fence_internal_ref(parked);
       mtx_unlock(&queue->lock);
+      if (parked) {
+         d12_fence_wake_waiters(parked);
+         d12_fence_internal_unref(parked);
+      }
       thrd_join(queue->worker, NULL);
       queue->worker_started = false;
    }

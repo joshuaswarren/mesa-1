@@ -10,7 +10,10 @@
 
 #include "d12_private.h"
 
+#include "util/os_time.h"
 #include "util/u_thread.h"
+
+#include <errno.h>
 
 struct d12_fence_event_waiter {
    struct d12_fence_event_waiter *next;
@@ -150,6 +153,39 @@ d12_placement_fence_wait(struct d12_placement_fence *fence, uint64_t value,
    }
    mtx_unlock(&fence->lock);
    return completed;
+}
+
+/*
+ * A wait that a command-queue worker may need to abandon at queue teardown.
+ * On Linux the teardown path raises the stop flag and then broadcasts the
+ * fence the worker is parked on (d12_fence_wake_waiters), so a plain
+ * condition wait is sufficient.  Windows keeps the bounded wait that the
+ * queue primitives also use, as insurance against the lost wakes observed
+ * on that platform's CONDITION_VARIABLE.
+ */
+static void
+d12_fence_cancelable_wait(struct d12_fence *fence)
+{
+#ifdef _WIN32
+   struct timespec deadline;
+   timespec_get(&deadline, TIME_UTC);
+   deadline.tv_nsec += 10 * 1000 * 1000;
+   if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
+      deadline.tv_sec++;
+      deadline.tv_nsec -= 1000 * 1000 * 1000;
+   }
+   cnd_timedwait(&fence->changed, &fence->lock, &deadline);
+#else
+   cnd_wait(&fence->changed, &fence->lock);
+#endif
+}
+
+void
+d12_fence_wake_waiters(struct d12_fence *fence)
+{
+   mtx_lock(&fence->lock);
+   cnd_broadcast(&fence->changed);
+   mtx_unlock(&fence->lock);
 }
 
 static void
@@ -354,17 +390,17 @@ d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
          if (cancel && p_atomic_read(cancel))
             return false;
 
-         if (!cancel) {
-            uint32_t handle = fence->shared_syncobj;
-            uint64_t point = value;
-            if (fence->device->sync->timeline_wait(
-                   fence->device->sync, &handle, &point, 1, INT64_MAX, 0,
-                   NULL))
-               return false;
-         } else {
-            const struct timespec pause = {.tv_nsec = 1000 * 1000};
-            thrd_sleep(&pause, NULL);
-         }
+         /* A cancelable wait is bounded so the stop flag is re-read; it
+          * still blocks in the kernel rather than sleeping and polling.
+          * Provider timeouts are absolute CLOCK_MONOTONIC deadlines. */
+         uint32_t handle = fence->shared_syncobj;
+         uint64_t point = value;
+         const int64_t timeout_ns =
+            cancel ? os_time_get_nano() + 10 * 1000 * 1000 : INT64_MAX;
+         int ret = fence->device->sync->timeline_wait(
+            fence->device->sync, &handle, &point, 1, timeout_ns, 0, NULL);
+         if (ret && !(cancel && (ret == -ETIME || errno == ETIME)))
+            return false;
       }
    }
 
@@ -383,17 +419,7 @@ d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
          break;
       }
 
-      /* Queue destruction must be able to cancel a worker which is parked
-       * on another object's condition variable.  A short timed wait keeps
-       * that path bounded without polling during normal operation. */
-      struct timespec deadline;
-      timespec_get(&deadline, TIME_UTC);
-      deadline.tv_nsec += 10 * 1000 * 1000;
-      if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
-         deadline.tv_sec++;
-         deadline.tv_nsec -= 1000 * 1000 * 1000;
-      }
-      cnd_timedwait(&fence->changed, &fence->lock, &deadline);
+      d12_fence_cancelable_wait(fence);
    }
    mtx_unlock(&fence->lock);
 
@@ -472,14 +498,7 @@ d12_fence_ticket_wait(struct d12_fence_ticket *ticket,
          continue;
       }
 
-      struct timespec deadline;
-      timespec_get(&deadline, TIME_UTC);
-      deadline.tv_nsec += 10 * 1000 * 1000;
-      if (deadline.tv_nsec >= 1000 * 1000 * 1000) {
-         deadline.tv_sec++;
-         deadline.tv_nsec -= 1000 * 1000 * 1000;
-      }
-      cnd_timedwait(&fence->changed, &fence->lock, &deadline);
+      d12_fence_cancelable_wait(fence);
    }
    mtx_unlock(&fence->lock);
    return completed;

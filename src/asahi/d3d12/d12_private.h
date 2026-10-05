@@ -2304,6 +2304,10 @@ struct d12_queue {
    uint64_t signal_slots;
    uint32_t stop;
    uint32_t retire_stop;
+   /* The fence the submit worker is parked on for a queue Wait, if any.
+    * Teardown broadcasts it after raising stop, so the worker never needs a
+    * timed poll to notice cancellation. */
+   struct d12_fence *worker_parked_fence;
    uint32_t pending_placement_wait_count;
    struct d12_queue_placement_wait
       pending_placement_waits[D12_QUEUE_MAX_PLACEMENT_DEPENDENCIES];
@@ -2368,6 +2372,7 @@ void d12_fence_internal_unref(struct d12_fence *fence);
 HRESULT d12_fence_signal_value(struct d12_fence *fence, uint64_t value);
 bool d12_fence_wait_value(struct d12_fence *fence, uint64_t value,
                           const uint32_t *cancel);
+void d12_fence_wake_waiters(struct d12_fence *fence);
 void d12_fence_ticket_init(struct d12_fence *fence,
                            struct d12_fence_ticket *ticket, uint64_t value);
 void d12_fence_ticket_fini(struct d12_fence_ticket *ticket);
