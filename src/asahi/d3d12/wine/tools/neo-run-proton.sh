@@ -46,15 +46,28 @@ fi
 # Xwayland display (it creates both); derive them from the runtime dir and
 # the Xwayland command line so Wine's x11 driver can open a window.
 rt=${have[XDG_RUNTIME_DIR]:-/run/user/$(id -u "$run_user")}
-if (( !headless )) && [[ -z ${have[WAYLAND_DISPLAY]:-} && -S $rt/wayland-0 ]]; then
-   sess_env+=("WAYLAND_DISPLAY=wayland-0")
-fi
-if (( !headless )) && [[ -z ${have[DISPLAY]:-} ]]; then
-   xw=$(pgrep -u "$run_user" -a -x Xwayland | head -1)
-   disp=$(sed -n 's/.*Xwayland \(:[0-9]*\).*/\1/p' <<< "$xw")
-   auth=$(sed -n 's/.*-auth \([^ ]*\).*/\1/p' <<< "$xw")
-   [[ -n $disp ]] && sess_env+=("DISPLAY=$disp")
-   [[ -n $auth && -z ${have[XAUTHORITY]:-} ]] && sess_env+=("XAUTHORITY=$auth")
+if (( !headless )); then
+   # The authoritative values are what gnome-shell exported into the user's
+   # systemd/D-Bus activation environment (DISPLAY=:0 and mutter's auth file;
+   # a stray on-demand Xwayland ":2" on the command line is NOT the session
+   # display, and without XAUTHORITY winex11 fails and explorer never starts).
+   bus=${have[DBUS_SESSION_BUS_ADDRESS]:-unix:path=$rt/bus}
+   while IFS= read -r line; do
+      v=${line%%=*}
+      [[ -n ${have[$v]:-} ]] && continue
+      sess_env+=("$line"); have[$v]=${line#*=}
+   done < <(runuser -u "$run_user" -- env XDG_RUNTIME_DIR="$rt" DBUS_SESSION_BUS_ADDRESS="$bus" \
+               systemctl --user show-environment 2>/dev/null | grep -E '^(DISPLAY|WAYLAND_DISPLAY|XAUTHORITY)=')
+   if [[ -z ${have[WAYLAND_DISPLAY]:-} && -S $rt/wayland-0 ]]; then
+      sess_env+=("WAYLAND_DISPLAY=wayland-0"); have[WAYLAND_DISPLAY]=wayland-0
+   fi
+   if [[ -z ${have[XAUTHORITY]:-} ]]; then
+      auth=$(ls -t "$rt"/.mutter-Xwaylandauth.* 2>/dev/null | head -1)
+      [[ -n $auth ]] && { sess_env+=("XAUTHORITY=$auth"); have[XAUTHORITY]=$auth; }
+   fi
+   if [[ -z ${have[DISPLAY]:-} ]]; then
+      [[ -S /tmp/.X11-unix/X0 ]] && { sess_env+=("DISPLAY=:0"); have[DISPLAY]=:0; }
+   fi
 fi
 
 exe_dir=$(dirname "$1")
