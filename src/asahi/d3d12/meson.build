@@ -515,6 +515,14 @@ d3d12agx_g11_indexed_instanced = executable(
   link_with : [libd3d12agx],
 )
 
+# Live: a declared render pass the driver splits keeps its first half.
+executable(
+  'd3d12agx_render_pass_split',
+  files('tests/render_pass_split.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 # Live: state recorded inside a bundle reaches its draws and its caller.
 executable(
   'd3d12agx_bundle_state',
