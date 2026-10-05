@@ -78,10 +78,22 @@ log=$logdir/run-$stamp.log
    echo "session env: ${sess_env[*]} headless=$headless"
 } > "$log"
 
+# A run killed by the timeout leaves the prefix's wineserver (and a failed
+# explorer) alive; the next run then joins that stale server and inherits
+# its broken desktop. Kill the per-prefix server before and after each run
+# (per prefix, so other tools' games are untouched), and kill the whole
+# process group on timeout.
+wineserver=$(ls "$tooldir"/files/bin-arm64/wineserver "$tooldir"/files/bin/wineserver 2>/dev/null | head -1)
+kill_prefix_server() {
+   [[ -n $wineserver && -d $prefix/pfx ]] || return 0
+   runuser -u "$run_user" -- env WINEPREFIX="$prefix/pfx" "$wineserver" -k 2>/dev/null
+   runuser -u "$run_user" -- env WINEPREFIX="$prefix/pfx" "$wineserver" -w 2>/dev/null
+}
+kill_prefix_server
+
 # Everything after the verb is the command line; the exe directory is only
 # the cwd (an extra leading path made wine open an Explorer window on it).
-timeout --signal=TERM --kill-after=10s "$timeout_s" \
-   runuser -u "$run_user" -- env -i HOME=/home/$run_user USER=$run_user LOGNAME=$run_user \
+setsid runuser -u "$run_user" -- env -i HOME=/home/$run_user USER=$run_user LOGNAME=$run_user \
       PATH=/usr/local/bin:/usr/bin:/bin \
       "${sess_env[@]}" \
       STEAM_COMPAT_CLIENT_INSTALL_PATH="$steam_root" \
@@ -92,8 +104,16 @@ timeout --signal=TERM --kill-after=10s "$timeout_s" \
       WINEDEBUG=${WINEDEBUG:-err+all,fixme-all,+loaddll} \
       ${EXTRA_ENV:-} \
       bash -c 'cd "$1" && shift && exec "$0" "$PROTON_VERB" "$@"' "$tooldir/aurora-proton" "$exe_dir" "$@" \
-      >> "$log" 2>&1
-rc=$?
+      >> "$log" 2>&1 &
+pid=$!
+if timeout "$timeout_s" tail --pid="$pid" -f /dev/null; then
+   wait "$pid"; rc=$?
+else
+   echo "timeout after ${timeout_s}s; killing process group $pid" >> "$log"
+   kill -TERM -- "-$pid" 2>/dev/null; sleep 5; kill -KILL -- "-$pid" 2>/dev/null
+   rc=124
+fi
+kill_prefix_server
 echo "exit=$rc" >> "$log"
 echo "$log"
 exit $rc
