@@ -5323,9 +5323,11 @@ D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
    const D3D_FEATURE_LEVEL max_fl =
       (D3D_FEATURE_LEVEL)device->caps.max_feature_level;
 
-#ifdef _WIN32
+#ifdef D12_PLATFORM_D3DKMT
    device->submit_read_set = true;
 #else
+   /* Linux DRM (native or through the Wine unixlib) never consumes the read
+    * set; only virtio needs it. */
    device->submit_read_set = device->dev.is_virtio;
 #endif
 
