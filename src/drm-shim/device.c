@@ -213,7 +213,12 @@ check_queue_progress_lifecycle(void)
     * The logical-device cases then add the queue timeline, plus the fence
     * and QueueWaitIdle's temporary syncobj where those objects are reached. */
    const unsigned expected_syncobjs = success ? 4 : init_failure ? 2 : 3;
-   const unsigned expected_transfers = success ? 1 : 0;
+   /* Since 43cacbc26d0 every API output signal of a submission is
+    * transferred from the cumulative queue timeline point, also after a
+    * failed submission ioctl (to forward a published error fence). So the
+    * submitting cases add one transfer for the submit's output signal:
+    * success also transfers QueueWaitIdle's point last. */
+   const unsigned expected_transfers = success ? 2 : submit_failure ? 1 : 0;
    const uint64_t expected_handles =
       (UINT64_C(1) << (expected_syncobjs + 1)) - 2;
    const bool exact =
@@ -232,6 +237,14 @@ check_queue_progress_lifecycle(void)
        (queue_progress_transfer_shape_valid &&
         queue_progress_transfer_src_handle == 2 &&
         queue_progress_transfer_dst_handle == 4 &&
+        queue_progress_transfer_src_point == 2 &&
+        queue_progress_transfer_dst_point == 0 &&
+        queue_progress_transfer_flags == 0)) &&
+      /* The failed submission forwards queue point 2 to its fence (3). */
+      (!submit_failure ||
+       (queue_progress_transfer_shape_valid &&
+        queue_progress_transfer_src_handle == 2 &&
+        queue_progress_transfer_dst_handle == 3 &&
         queue_progress_transfer_src_point == 2 &&
         queue_progress_transfer_dst_point == 0 &&
         queue_progress_transfer_flags == 0));
@@ -477,7 +490,9 @@ check_wsi_rollback_lifecycle(void)
       wsi_rollback_created_handles == UINT64_C(0x7fe) &&
       wsi_rollback_destroyed_handles == UINT64_C(0x7fe) &&
       wsi_rollback_sync_imports == 0 &&
-      wsi_rollback_transfers == 9 &&
+      /* 9 plus one cumulative-timeline signal transfer per present
+       * submission (five presents; see 43cacbc26d0). */
+      wsi_rollback_transfers == 14 &&
       wsi_rollback_dmabuf_exports == 0 &&
       wsi_rollback_dmabuf_imports == 0 &&
       !wsi_rollback_dmabuf_import_failed &&
