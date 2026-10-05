@@ -9720,7 +9720,14 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        IS_DIRTY(CB_BLEND_ENABLES) || IS_DIRTY(CB_BLEND_EQUATIONS) ||
        IS_DIRTY(CB_BLEND_CONSTANTS) || IS_DIRTY(CB_BLEND_ADVANCED) ||
        IS_DIRTY(COLOR_ATTACHMENT_MAP) ||
-       desc->root_dirty /* for pipeline stats */ ||
+       /* The only root-derived input of the fragment key is whether the
+        * fragment-invocation statistic is enabled. Other root changes (a
+        * descriptor bind, push constants, vertex buffers) leave the key and
+        * so the linked fragment program unchanged; rebuilding it for every
+        * such draw dominated root-only state changes. */
+       hk_stat_enabled(hk_pipeline_stat_addr(
+          cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT)) !=
+          gfx->fast_link_fs.key.prolog.statistics ||
        !gfx->fast_link_fs.valid) {
 
       unsigned tib_sample_mask = BITFIELD_MASK(dyn->ms.rasterization_samples);
