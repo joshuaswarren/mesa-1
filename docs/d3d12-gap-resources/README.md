@@ -1,54 +1,86 @@
-# Resource and descriptor validation follow-up (t-1109)
+# Resources, descriptors and copies (t-1109)
 
-The validation change builds on Fable's refactor at `1d2ee857bd4`. It shares
-AIL sizing between `GetResourceAllocationInfo` and methods 1/2/3, including
-individual size padding, final heap padding, empty queries and overflow
-refusals. Placed resources must fit the declared heap size as well as the BO;
-rounded BO storage does not enlarge an application's heap. Constructor error
-paths clear output pointers. Sampler descriptor heaps support validation-only
-calls and reject invalid flags, node masks and shader-visible counts above
-2,048. The existing native sampler-state limit remains 1,024 distinct states.
+The qualified build executes all 136 registrations in `d3d12_descriptors.c`,
+`d3d12_copy.c`, `d3d12_resource.c` and `d3d12_clear.c` without a crash, OOM kill,
+timeout or missing verdict on M1 Pro (G13S) and M2 (G14G). These are strict
+registration results from vkd3d-proton revision
+`31d1f89ca5b3f2fd3b6f025c8e6f73ed3eaa852b`, with one process per registration,
+a 5 GiB memory cgroup and a 120-second per-test timeout. TODO and known-bug
+failures remain failures. Skips are not passes.
 
-The arithmetic regression can run without a GPU:
+| Machine / build | Pass | Fail | Skip | Crash | OOM |
+|---|---:|---:|---:|---:|---:|
+| M1 Pro, exact refactor base `1d2ee857bd4` | 90 | 29 | 14 | 1 | 2 |
+| M2, exact refactor base `1d2ee857bd4` | 90 | 29 | 15 | 1 | 1 |
+| M1 Pro / M2, candidate `a363a58daff` | 92 | 30 | 14 | 0 | 0 |
+| M1 Pro / M2, vkd3d-proton | 99 | 24 | 9 | 0 | 4 |
 
-```sh
-clang -std=c11 -Wall -Wextra -Werror -fsanitize=address,undefined \
-  src/asahi/d3d12/tests/d12_allocation_math_tests.c -o <aurora-ctl>/scratch/t1109/allocation-math-tests
-<aurora-ctl>/scratch/t1109/allocation-math-tests
-```
+The candidate loses no previously passing registration. The planar-format
+crash becomes a capability skip. Allocations beyond the Linux memory budget
+return `E_OUTOFMEMORY`, preserving existing objects; the fallback-allocation
+stress test therefore completes with failures, and the 6 GiB heap test skips
+when its heap cannot fit. The two new strict passes are the extreme-value
+clear registrations: unavailable formats now return `E_FAIL` from the format
+query rather than a successful query with no usable layout. This changes
+capability-query accounting without claiming support for those formats.
 
-After a remote Mesa build, run `d3d12agx_resource_validation` against its matching
-`libd3d12agx.so`. It checks all four allocation-info methods, mixed buffer/small
-texture alignment, failure outputs, sampler heap capability queries and heap
-reuse after rejected placements. Also run `d3d12agx_device_interfaces`, all
-`tests/run-suites.sh` suites, and the sorted shader passset. Compare exact
-passsets with `comm -23 before.passset after.passset`; a count alone cannot
-establish absence of regressions. These hardware checks remain outstanding.
+Allocation-info methods 0/1/2/3 share AIL sizing and checked packing. Placed
+resources fit the declared heap size, constructor failures clear outputs,
+and sampler heaps support validation-only calls. These changes are in
+`1acccd0c1ad`; its strict corpus passset equals the exact refactor base.
 
-Use the t-1083 native corpus adapters without changing upstream test assertions.
-Select these inventory categories: `d3d12_descriptors`, `d3d12_copy`,
-`d3d12_resource`, `d3d12_clear` (136 registrations at Proton revision
-`31d1f89ca5b3f2fd3b6f025c8e6f73ed3eaa852b`). Each registration must run in its own
-process so one crash cannot suppress the rest of a file. The task-private
-runner is the t-1083 `run-v6.py`, with strict TODO/known-bug failures preserved.
-Use the same memory ceiling and timeouts for A and B. Keep cgroup OOM events,
-process crashes, timeouts, missing verdicts and unmeasured tests distinguishable.
+Resource allocation now observes available system memory and Linux cgroup-v2
+ancestor limits before allocating a BO. Resource threads serialize the check
+and allocation and reclaim the existing Asahi BO cache before refusing.
+The 128 MiB reserve leaves room for command streams and CPU bookkeeping.
+This is a conservative allocation policy, not a new capability limit.
 
-The report and request snapshots are under
-`<aurora-ctl>/reports/d3d12-t1109-20261006/`. The human report is
-`<aurora-ctl>/runs/r-t-1109-d3d12agx-gap-closing-b-resources-descriptors-cop-1/report.md`.
-At the initial checkpoint no candidate remote build or current before/after
-score is available: the controller rejects M1 Pro/M2 as unregistered and rejects
-`execute --device buildbox` as Neo-only. Do not bypass the hardware queue.
+`CopyResource` uses the existing AIL/libagx raw-copy path for 1D and 3D as well
+as 2D textures. A 3D mip is one subresource with minified Z slices. Transition,
+UAV and aliasing barriers end an open render pass so its tilebuffer writes
+reach memory. Compute launches already flush and execute in stream order;
+keeping their segment avoids exhaustion in the 4,096-alias placement test.
+Legacy state validation remains the application's/debug layer's responsibility.
 
-This change does not establish zero crashes in the four corpus files. Remaining
-work includes crash stack traces on a qualified runtime, block-compressed and
-hardware-compressed copy coverage, CopyResource dimensional coverage, aliasing
-barriers, descriptor-copy shader observations for every heap type, and the
-required two-machine reruns. Existing sampler heaps, CopyDescriptors and raw
-linear/twiddled copy paths were already present in the refactor base.
+Sampler heaps and `CopyDescriptors` were already implemented in the refactor.
+The unmodified corpus observes resource and sampler descriptor copies and RTV
+copies on the GPU. The added `resource_copies` probe covers both DSV copy APIs,
+explicit and global aliasing barriers, overlapping placed depth resources,
+linear-to-tiled copies, array mip tails, 1D, 3D, BC1 and BC3, comparing readback
+with independently generated bytes or exact depth values. Both GPUs pass it.
+A task-private adapter for Proton's explicit aggregate-return ABI also passes
+this probe against the reference driver on both GPUs. No assertion is adapted.
 
-Public references: [CreateDescriptorHeap capability queries](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createdescriptorheap),
-[allocation-info array packing](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device4-getresourceallocationinfo1%28uint_uint_constd3d12_resource_desc_d3d12_resource_allocation_info1%29).
-The new code uses Linux-side source and public API contracts, with no private
-macOS reverse-engineering material.
+`resource_validation` checks allocation methods, rejection outputs, sampler
+heap creation and heap usability after failed placements. It also checks
+barrier errors through `Close`: a failed list remains invalid on `Reset`, as
+D3D12 requires, while its allocator can create valid fresh command lists.
+`device_interfaces` and all three Meson CPU tests pass.
+
+All 17 acceptance suites run at each measured stage on each machine: 11 pass,
+with the same six previously documented fixture failures. The extracted DXIL
+corpus has 270 passing shader names at every stage. Both shader passset diffs
+and registration passset diffs have no regressions. Counts alone are not used
+as the regression check.
+
+Evidence and reproduction commands are in the task report:
+`<aurora-ctl>/runs/r-t-1109-d3d12agx-gap-closing-b-resources-descriptors-cop-2/report.md`.
+Raw logs, command JSON, identities, cgroup OOM accounting, manifests and the
+qualified runtime are under
+`<aurora-ctl>/reports/d3d12-t1109-r2/`; per-machine A/B stats
+are under `<aurora-ctl>/reports/d3d12-stats/`.
+
+Remaining conformance gaps are the 30 failed registrations, including depth
+substitution/copy conversions, clear formats, large descriptors and DXIL array
+reinterpretation. G17P has not been measured in this retry. BC storage is
+covered; hardware compression metadata remains explicitly refused by the raw
+copy path and is not claimed as implemented. Linux cgroup-v1 and private
+cgroup mount namespaces are not covered by the v2 budget reader. Barrier
+boundaries are conservative and have not been benchmarked independently.
+
+This change uses Linux-side source/observations, AIL and Honeykrisp conventions,
+and public API contracts, without private macOS reverse-engineering material.
+Public references:
+[CopyResource](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-copyresource),
+[placed resource aliasing](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12device-createplacedresource),
+[failed Close and Reset](https://learn.microsoft.com/en-us/windows/win32/api/d3d12/nf-d3d12-id3d12graphicscommandlist-reset).
