@@ -396,6 +396,11 @@ done
 "$out/d12_bundle_state_core_tests"
 
 "$cc" "$common[@]" -I"$d12_dir" \
+    "$d12_dir/tests/d12_pso_stream_core_tests.c" \
+    -o "$out/d12_pso_stream_core_tests"
+"$out/d12_pso_stream_core_tests"
+
+"$cc" "$common[@]" -I"$d12_dir" \
     "$d12_dir/tests/d12_sampler_reduction_core_tests.c" \
     -o "$out/d12_sampler_reduction_core_tests"
 "$out/d12_sampler_reduction_core_tests"

@@ -12,6 +12,7 @@
 #include "d12_buffer_view_core.h"
 #include "d12_core_caps.h"
 #include "d12_query_core.h"
+#include "d12_pso_stream_core.h"
 
 #include <math.h>
 #include <string.h>
@@ -1436,13 +1437,18 @@ d12_parse_pso_stream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc,
                      struct d12_pso_stream *out)
 {
    const uint8_t *p = (const uint8_t *)desc->pPipelineStateSubobjectStream;
-   const uint8_t *end = p + desc->SizeInBytes;
+   size_t remaining = desc->SizeInBytes;
    uint64_t seen = 0;
 
    memset(out, 0, sizeof(*out));
 
-   while (p + sizeof(D3D12_PIPELINE_STATE_SUBOBJECT_TYPE) <= end) {
+   if (!d12_pso_stream_span_valid((uintptr_t)p, remaining))
+      return false;
+
+   while (remaining) {
       D3D12_PIPELINE_STATE_SUBOBJECT_TYPE type;
+      if (remaining < sizeof(type))
+         return false;
       memcpy(&type, p, sizeof(type));
 
       if ((unsigned)type >= 64 || (seen & BITFIELD64_BIT((unsigned)type))) {
@@ -1454,15 +1460,15 @@ d12_parse_pso_stream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc,
 
       const uint8_t *body = NULL;
       size_t body_offset = 0;
-      size_t body_size;
+      size_t entry_size;
 
 #define BODY(ctype)                                                            \
    do {                                                                        \
-      body_offset = ALIGN_POT(sizeof(type), _Alignof(ctype));                  \
+      if (!d12_pso_stream_entry_size(remaining, sizeof(ctype),                 \
+                                      _Alignof(ctype), &body_offset,          \
+                                      &entry_size))                          \
+         return false;                                                       \
       body = p + body_offset;                                                  \
-      body_size = sizeof(ctype);                                               \
-      if (body > end || (size_t)(end - body) < body_size)                     \
-         return false;                                                         \
    } while (0)
 #define SUBOBJ(TY, field, ctype)                                                \
    case D3D12_PIPELINE_STATE_SUBOBJECT_TYPE_##TY:                              \
@@ -1557,7 +1563,8 @@ d12_parse_pso_stream(const D3D12_PIPELINE_STATE_STREAM_DESC *desc,
 #undef SUBOBJ
 #undef BODY
 
-      p += ALIGN_POT(body_offset + body_size, sizeof(void *));
+      p += entry_size;
+      remaining -= entry_size;
    }
 
    return true;
@@ -1585,10 +1592,13 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
 
    const struct d12_binding_map *map = d12_pso_binding_map(st.root_sig);
 
-   /* A compute stream may carry ignored graphics defaults, but a vertex
-    * shader selects the graphics pipeline class and cannot coexist with CS. */
-   if (st.cs && st.cs->pShaderBytecode &&
-       st.vs && st.vs->pShaderBytecode)
+   /* Graphics defaults can accompany CS, but VS, MS and CS select mutually
+    * exclusive pipeline classes. Empty bytecode does not select a class. */
+   const bool has_vs = st.vs && st.vs->pShaderBytecode && st.vs->BytecodeLength;
+   const bool has_ms = st.ms && st.ms->pShaderBytecode && st.ms->BytecodeLength;
+   const bool has_cs = st.cs && st.cs->pShaderBytecode && st.cs->BytecodeLength;
+   if (!d12_pso_stream_pipeline_class_valid(
+          has_vs, has_ms, has_cs))
       return E_INVALIDARG;
 
    enum pipe_format rt_format = PIPE_FORMAT_NONE;
@@ -1608,13 +1618,13 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
       return E_INVALIDARG;
 
    /* A compute pipeline expressed as a stream. */
-   if (st.cs && st.cs->pShaderBytecode) {
+   if (has_cs) {
       return d12_pipeline_state_create_compute(
          device, st.cs->pShaderBytecode, st.cs->BytecodeLength, map, riid,
          out);
    }
 
-   if (st.ms && st.ms->pShaderBytecode) {
+   if (has_ms) {
       if (!st.ps || !st.ps->pShaderBytecode) {
          mesa_loge("CreatePipelineState: a mesh pipeline needs a pixel "
                    "shader");
@@ -1632,7 +1642,7 @@ d12_device_CreatePipelineState(ID3D12Device2 *iface,
          st.blend, map, riid, out);
    }
 
-   if (st.vs && st.vs->pShaderBytecode) {
+   if (has_vs) {
       return d12_pipeline_state_create_graphics(
          device, st.vs->pShaderBytecode, st.vs->BytecodeLength,
          st.ps ? st.ps->pShaderBytecode : NULL,
