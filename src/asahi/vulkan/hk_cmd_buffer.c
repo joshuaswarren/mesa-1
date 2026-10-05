@@ -555,6 +555,22 @@ hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data, uint32_t size,
 }
 
 uint64_t
+hk_g17p_texture_state_pointer(struct hk_cmd_buffer *cmd, uint64_t texture_va,
+                              const void *descriptor, uint32_t available_B)
+{
+   if (!(texture_va & (HK_G17P_TEXTURE_STATE_ALIGN - 1)))
+      return texture_va;
+
+   if (!descriptor || available_B < HK_TEXTURE_DESCRIPTOR_AGX3_SIZE)
+      return 0;
+
+   return hk_pool_upload(
+      cmd, descriptor,
+      MIN2(available_B, (uint32_t)sizeof(struct hk_sampled_image_descriptor)),
+      HK_G17P_TEXTURE_STATE_ALIGN);
+}
+
+uint64_t
 hk_pool_usc_upload(struct hk_cmd_buffer *cmd, const void *data, uint32_t size,
                    uint32_t alignment)
 {
@@ -2261,9 +2277,21 @@ hk_g17p_graphics_uniform_ranges(
                                    sizeof(pointers))) {
          pointers_va = cached->address;
       } else {
-         pointers_va = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
+         /* The cache stays keyed on the set address; what is published is
+          * the 32-byte-aligned texture state (hk_g17p_texture_state_pointer). */
+         const uint64_t published[2] = {
+            hk_g17p_texture_state_pointer(
+               cmd, pointers[0],
+               (const uint8_t *)set_map + binding->texture_offset_B,
+               set_size - binding->texture_offset_B),
+            pointers[1],
+         };
+         pointers_va = published[0]
+            ? hk_pool_upload(cmd, published, sizeof(published), 8)
+            : 0;
          if (pointers_va) {
             memcpy(cached->pointers, pointers, sizeof(pointers));
+            memcpy(cached->published, published, sizeof(published));
             cached->address = pointers_va;
             cached->valid = true;
          }
@@ -2287,8 +2315,8 @@ hk_g17p_graphics_uniform_ranges(
             set_addr + binding->texture_offset_B,
             (const uint8_t *)set_map + binding->texture_offset_B,
             32);
-         hk_g17p_trace_line("combined-pointers", pointers_va, pointers,
-                            sizeof(pointers));
+         hk_g17p_trace_line("combined-pointers", pointers_va,
+                            cached->published, sizeof(cached->published));
       }
 
       sources[count] = HK_G17P_RANGE_SOURCE_UPLOADED;

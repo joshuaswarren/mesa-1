@@ -865,7 +865,11 @@ struct hk_graphics_state {
     * times; a fresh upload address would otherwise force a fresh Ioto program
     * even though the GPU-visible values are identical. */
    struct {
+      /* Key: descriptor-set texture word address and sampler state address. */
       uint64_t pointers[2];
+      /* The uploaded pair; its texture pointer is 32-byte aligned
+       * (hk_g17p_texture_state_pointer). */
+      uint64_t published[2];
       uint64_t address;
       bool valid;
    } g17p_combined_sampler_pointers[32];
@@ -1556,6 +1560,36 @@ uint64_t hk_g17p_vdm_alias(struct hk_cmd_buffer *cmd, uint64_t primary);
 
 uint64_t hk_pool_upload(struct hk_cmd_buffer *cmd, const void *data,
                         uint32_t size, uint32_t alignment);
+
+/*
+ * G17P does not honour the low five bits of the texture-table pointer that
+ * the combined-sampler ABIs publish in uniform halves 0..3: the 32-byte
+ * texture state is read as if the pointer were 32-byte aligned.  Sampled-image
+ * descriptors only have 8-byte alignment and a 72-byte stride in a descriptor
+ * set, so set address + binding offset is generally not a valid table
+ * pointer.  Measured on G17P with vkCmdBlitImage of D32_SFLOAT_S8_UINT, whose
+ * pushed set holds the depth and stencil texture words at offsets 72 and 144:
+ * every depth and stencil texel read back wrong, and when the qword before
+ * the stencil texture word (the depth descriptor's last qword) was nonzero the
+ * texture unit's read faulted (VM error at 0x40000000000, VK_ERROR_DEVICE_LOST
+ * in Pokemon Scarlet).  The same descriptor bytes published at a 32-byte
+ * aligned address -- including 32 mod 64 -- read back exactly and never
+ * faulted, while 8 and 16 mod 32 still read back wrong.
+ *
+ * Returns texture_va when it is already aligned, otherwise the address of a
+ * 32-byte-aligned command-buffer copy of the descriptor record (texture word
+ * plus the software fields after it, which descriptor crawls through the
+ * same pointer may read), or 0 on allocation failure.  The ABIs using this
+ * are not selected when sampled-image update-after-bind is enabled, and they
+ * already snapshot the descriptor's sampler index at record time, so the copy
+ * holds what the set holds when the commands execute.
+ */
+#define HK_G17P_TEXTURE_STATE_ALIGN 32
+
+uint64_t hk_g17p_texture_state_pointer(struct hk_cmd_buffer *cmd,
+                                       uint64_t texture_va,
+                                       const void *descriptor,
+                                       uint32_t available_B);
 uint64_t hk_pool_usc_upload(struct hk_cmd_buffer *cmd, const void *data,
                             uint32_t size, uint32_t alignment);
 

@@ -2480,6 +2480,19 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
                                         VK_ERROR_FEATURE_NOT_PRESENT);
             return;
          }
+         /* See hk_g17p_texture_state_pointer(). */
+         pointers[0] = hk_g17p_texture_state_pointer(
+            cmd, pointers[0],
+            (const uint8_t *)texture_set->mapped_ptr +
+               binding->texture_offset_B,
+            texture_set->size > binding->texture_offset_B
+               ? texture_set->size - binding->texture_offset_B
+               : 0);
+         if (!pointers[0]) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
+            return;
+         }
 
          texture_pointers = hk_pool_upload(cmd, pointers, sizeof(pointers), 8);
          if (!texture_pointers) {
@@ -2533,6 +2546,18 @@ hk_dispatch_g17p_native(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          };
          if (!hk_agx3_g17p_combined_sampler_pointers(&heap, pointers)) {
             vk_command_buffer_set_error(&cmd->vk, VK_ERROR_FEATURE_NOT_PRESENT);
+            return;
+         }
+         /* See hk_g17p_texture_state_pointer(). */
+         pointers[0] = hk_g17p_texture_state_pointer(
+            cmd, pointers[0],
+            (const uint8_t *)set->mapped_ptr + binding->texture_offset_B,
+            set->size > binding->texture_offset_B
+               ? set->size - binding->texture_offset_B
+               : 0);
+         if (!pointers[0]) {
+            vk_command_buffer_set_error(&cmd->vk,
+                                        VK_ERROR_OUT_OF_DEVICE_MEMORY);
             return;
          }
       } else if (s->info.agx3_storage_image_valid) {
