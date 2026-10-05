@@ -10,6 +10,7 @@
 #include "hk_private.h"
 #include "util/macros.h"
 #include "asahi/lib/agx_device.h"
+#include "util/cache_ops.h"
 
 #include "vk_command_pool.h"
 
@@ -50,6 +51,17 @@ struct hk_vdm_allocation {
 struct agx_device;
 struct agx_ptr;
 struct hk_device;
+
+/* G17P command-buffer memory (main/USC pools, VDM slabs, Ioto arenas) is
+ * CPU-cached; recording cleans what it wrote before submission
+ * (hk_cmd_buffer_publish_cached_uploads()). */
+static inline bool
+hk_g17p_cached_cmd_memory(const struct agx_device *dev)
+{
+   return dev->chip == AGX_CHIP_G17P && util_has_cache_ops();
+}
+
+void hk_cmd_pool_clean_vdm(const struct hk_vdm_allocation *allocation);
 
 /* A VDM record's pointer is 40 bits and hardware reads bit 39 as the UAT
  * root select, adding 0x1000000000 when it is clear.  G17P's main heap sits

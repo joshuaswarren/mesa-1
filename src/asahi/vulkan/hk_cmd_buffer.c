@@ -820,6 +820,40 @@ hk_cmd_buffer_publish_root_uploads(struct hk_cmd_buffer *cmd)
    }
 }
 
+/* Clean everything recording wrote to CPU-cached command memory (see
+ * hk_g17p_cached_cmd_memory()); hk_cmd_buffer_publish_root_uploads() and
+ * queue submission fence the cleans. */
+static void
+hk_cmd_buffer_publish_cached_uploads(struct hk_cmd_buffer *cmd)
+{
+   struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   if (!hk_g17p_cached_cmd_memory(&dev->dev))
+      return;
+
+   /* An uploader's current BO is written up to its offset; a BO it moved
+    * on from may have been written anywhere. */
+   const struct hk_uploader *current[] = {
+      &cmd->uploader.main, &cmd->uploader.streams, &cmd->uploader.usc,
+   };
+   for (unsigned l = 0; l < 2; ++l) {
+      struct list_head *bos =
+         l == 0 ? &cmd->uploader.main.bos : &cmd->uploader.usc.bos;
+      list_for_each_entry(struct hk_cmd_bo, bo, bos, link) {
+         size_t size = bo->bo->size;
+         for (unsigned u = 0; u < ARRAY_SIZE(current); ++u) {
+            if (current[u]->map == bo->map)
+               size = MIN2(size, current[u]->offset);
+         }
+         if (size)
+            util_flush_range_no_fence(bo->map, size);
+      }
+   }
+   list_for_each_entry(struct hk_vdm_allocation, allocation,
+                       &cmd->vdm_allocations, link)
+      hk_cmd_pool_clean_vdm(allocation);
+   util_post_flush_fence();
+}
+
 VKAPI_ATTR VkResult VKAPI_CALL
 hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
 {
@@ -851,6 +885,7 @@ hk_EndCommandBuffer(VkCommandBuffer commandBuffer)
    /* G17P roots use cached mappings. Publish the completed recording once,
     * after every root table is immutable and before submission can consume
     * any address embedded in the command streams. */
+   hk_cmd_buffer_publish_cached_uploads(cmd);
    hk_cmd_buffer_publish_root_uploads(cmd);
 
 

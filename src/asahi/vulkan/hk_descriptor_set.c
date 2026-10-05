@@ -26,6 +26,7 @@
 #include "hk_sampler.h"
 #include "asahi/compiler/agx_nir.h"
 
+#include "util/cache_ops.h"
 #include "util/u_debug.h"
 
 #include <inttypes.h>
@@ -96,6 +97,16 @@ write_accel_struct_desc(struct hk_descriptor_set *set,
    write_desc(set, binding, elem, &addr, sizeof(addr));
 }
 
+/* Make a CPU write to descriptor-set memory visible to the GPU (see
+ * hk_descriptor_pool::cpu_cached); the fence is queue submission's. */
+static inline void
+hk_descriptor_set_publish(const struct hk_descriptor_set *set, void *data,
+                          size_t size)
+{
+   if (set->cpu_cached)
+      util_flush_range_no_fence(data, size);
+}
+
 static void
 write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
            const void *desc_data, size_t desc_size)
@@ -104,6 +115,7 @@ write_desc(struct hk_descriptor_set *set, uint32_t binding, uint32_t elem,
    void *dst = desc_ubo_data(set, binding, elem, &dst_size);
    assert(desc_size <= dst_size);
    memcpy(dst, desc_data, desc_size);
+   hk_descriptor_set_publish(set, dst, desc_size);
 }
 
 /* The G17P descriptor of a single-plane view, optionally with a single-plane
@@ -693,6 +705,7 @@ hk_UpdateDescriptorSets(VkDevice device, uint32_t descriptorWriteCount,
                MIN2(dst_binding_layout->stride, src_binding_layout->stride);
             assert(copy_size <= dst_max_size && copy_size <= src_max_size);
             memcpy(dst_map, src_map, copy_size);
+            hk_descriptor_set_publish(dst, dst_map, copy_size);
          }
       }
 
@@ -886,8 +899,16 @@ hk_CreateDescriptorPool(VkDevice _device,
        * owner (a command slab, an upload pool, a geometry heap) left behind,
        * which is exactly the shape of a wild descriptor address.
        */
+      /* G17P: write descriptors through the CPU cache and clean what is
+       * written (hk_descriptor_set_publish()); write-combined stores of
+       * every descriptor and of the per-allocation zeroing above stalled
+       * the recording core. */
+      pool->cpu_cached = dev->dev.chip == AGX_CHIP_G17P && util_has_cache_ops();
       const enum agx_bo_flags pool_flags =
-         dev->dev.chip == AGX_CHIP_G17P ? AGX_BO_ZERO_ON_REUSE : 0;
+         dev->dev.chip == AGX_CHIP_G17P
+            ? AGX_BO_ZERO_ON_REUSE |
+                 (pool->cpu_cached ? AGX_BO_WRITEBACK : 0)
+            : 0;
       pool->bo =
          agx_bo_create(&dev->dev, bo_size, 0, pool_flags, "Descriptor pool");
       if (!pool->bo) {
@@ -988,8 +1009,11 @@ hk_descriptor_set_create(struct hk_device *dev, struct hk_descriptor_pool *pool,
        * object that has since been destroyed.  All-zero reads as the reserved
        * null texture / heap index 0, which is bound and safe.
        */
-      if (dev->dev.chip == AGX_CHIP_G17P)
+      set->cpu_cached = pool->cpu_cached;
+      if (dev->dev.chip == AGX_CHIP_G17P) {
          memset(set->mapped_ptr, 0, set->size);
+         hk_descriptor_set_publish(set, set->mapped_ptr, set->size);
+      }
    }
 
    vk_descriptor_set_layout_ref(&layout->vk);

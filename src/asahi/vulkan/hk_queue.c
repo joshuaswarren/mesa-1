@@ -36,6 +36,7 @@
 #include <unistd.h>
 #include <xf86drm.h>
 #include <errno.h>
+#include "util/cache_ops.h"
 #include "util/list.h"
 #include "util/macros.h"
 #include "util/os_time.h"
@@ -295,6 +296,8 @@ asahi_g17p_vdm_bisect(struct hk_device *dev, struct hk_cs *cs, size_t len)
 
    static const uint8_t terminate[4] = {0x00, 0x00, 0x00, 0xc0};
    memcpy((uint8_t *)cs->start + boundary, terminate, sizeof(terminate));
+   if (hk_g17p_cached_cmd_memory(&hk_cmd_buffer_device(cs->cmd)->dev))
+      util_flush_range((uint8_t *)cs->start + boundary, sizeof(terminate));
    fprintf(stderr, "G17P VDM bisect: stage=%d prefix=%zu total=%zu\n", stage,
            boundary, boundary + sizeof(terminate));
    return boundary + sizeof(terminate);
@@ -851,6 +854,11 @@ queue_submit_single(struct hk_device *dev, struct drm_asahi_submit *submit,
                     unsigned ring_idx)
 {
    struct agx_submit_virt virt = {.ring_idx = ring_idx};
+
+   /* Complete the cache cleans of CPU-cached descriptor writes
+    * (hk_descriptor_set_publish()) before the GPU can read them. */
+   if (dev->dev.chip == AGX_CHIP_G17P && util_has_cache_ops())
+      util_post_flush_fence();
 
    if (dev->dev.chip == AGX_CHIP_G17P && hk_g17p_abort_before_ioctl()) {
       fprintf(stderr,

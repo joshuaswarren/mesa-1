@@ -94,6 +94,10 @@ struct hk_descriptor_pool {
    struct agx_bo *bo;
    uint8_t *mapped_ptr;
    struct util_vma_heap heap;
+
+   /* The pool BO is CPU-cached: every CPU write is cleaned to the point of
+    * coherency as it is made, and queue submission fences those cleans. */
+   bool cpu_cached;
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(hk_descriptor_pool, base, VkDescriptorPool,
@@ -109,6 +113,8 @@ struct hk_descriptor_set {
    void *mapped_ptr;
    uint64_t addr;
    uint32_t size;
+   /* mapped_ptr is in a CPU-cached pool BO (hk_descriptor_pool::cpu_cached). */
+   bool cpu_cached;
 
    struct hk_buffer_address dynamic_buffers[];
 };

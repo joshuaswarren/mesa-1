@@ -21,6 +21,7 @@ struct hk_vdm_slab {
 };
 
 #include "hk_cmd_buffer.h"
+#include "util/cache_ops.h"
 #include "hk_device.h"
 #include "hk_entrypoints.h"
 #include "hk_physical_device.h"
@@ -95,9 +96,10 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_bo_type type,
       [HK_CMD_BO_ROOT] = "Root descriptor pool",
    };
    const enum agx_bo_flags flags =
-      type == HK_CMD_BO_USC    ? AGX_BO_LOW_VA
-      : type == HK_CMD_BO_ROOT ? AGX_BO_WRITEBACK
-                               : 0;
+      (type == HK_CMD_BO_USC    ? AGX_BO_LOW_VA
+       : type == HK_CMD_BO_ROOT ? AGX_BO_WRITEBACK
+                                : 0) |
+      (hk_g17p_cached_cmd_memory(&dev->dev) ? AGX_BO_WRITEBACK : 0);
 
    bo->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0, flags, labels[type]);
    if (bo->bo == NULL) {
@@ -116,8 +118,11 @@ hk_cmd_bo_create(struct hk_cmd_pool *pool, enum hk_cmd_bo_type type,
     * draw. These BOs are recycled by the command pool, so populate and
     * initialize their shared mappings once at creation; subsequent command
     * buffers reuse already-resident pages without adding per-draw work. */
-   if (dev->dev.chip == AGX_CHIP_G17P)
+   if (dev->dev.chip == AGX_CHIP_G17P) {
       memset(bo->map, 0, bo->bo->size);
+      if (hk_g17p_cached_cmd_memory(&dev->dev))
+         util_flush_range(bo->map, bo->bo->size);
+   }
 
    *bo_out = bo;
    return VK_SUCCESS;
@@ -145,7 +150,9 @@ hk_device_create_vdm_slab(struct hk_device *dev)
    if (!slab)
       return NULL;
 
-   slab->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0, 0,
+   slab->bo = agx_bo_create(&dev->dev, HK_CMD_BO_SIZE, 0,
+                            hk_g17p_cached_cmd_memory(&dev->dev)
+                               ? AGX_BO_WRITEBACK : 0,
                             "VDM command slab");
    if (!slab->bo) {
       vk_free(&dev->vk.alloc, slab);
@@ -366,4 +373,13 @@ hk_TrimCommandPool(VkDevice device, VkCommandPool commandPool,
 
    vk_command_pool_trim(&pool->vk, flags);
    hk_cmd_pool_destroy_bos(pool);
+}
+
+void
+hk_cmd_pool_clean_vdm(const struct hk_vdm_allocation *allocation)
+{
+   const struct hk_vdm_slab *slab = allocation->slab;
+   util_flush_range_no_fence(
+      (uint8_t *)slab->map + (allocation->addr - slab->bo->va->addr),
+      allocation->size);
 }

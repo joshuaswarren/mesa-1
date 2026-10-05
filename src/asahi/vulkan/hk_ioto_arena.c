@@ -10,6 +10,7 @@
 #include "asahi/lib/agx_device.h"
 #include "asahi/lib/agx_ioto_program_core.h"
 
+#include "util/cache_ops.h"
 #include "util/log.h"
 #include "util/u_dynarray.h"
 
@@ -42,7 +43,10 @@ hk_ioto_arena_grow(struct hk_cmd_buffer *cmd, size_t size, const char *label)
 
    struct agx_bo *bo =
       agx_bo_create(&dev->dev, chunk, AGX_IOTO_PROGRAM_ALIGNMENT,
-                    AGX_BO_EXEC | AGX_BO_LOW_VA, "G17P Ioto program arena");
+                    AGX_BO_EXEC | AGX_BO_LOW_VA |
+                       (hk_g17p_cached_cmd_memory(&dev->dev) ? AGX_BO_WRITEBACK
+                                                             : 0),
+                    "G17P Ioto program arena");
    if (!bo)
       return false;
 
@@ -131,6 +135,8 @@ hk_cmd_publish_ioto_program(struct hk_cmd_buffer *cmd,
     * composer's bound and compose something shorter. */
    arena->cursor = (uint32_t)offset + (uint32_t)length;
 
+   if (hk_g17p_cached_cmd_memory(&hk_cmd_buffer_device(cmd)->dev))
+      util_flush_range_no_fence(reservation->map, length);
    if (agx_bo_sync_for_device(arena->bo, offset, length)) {
       vk_command_buffer_set_error(&cmd->vk, VK_ERROR_DEVICE_LOST);
       return 0;
