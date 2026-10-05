@@ -9565,6 +9565,22 @@ agx_nir_lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *_)
        alu->def.bit_size != 32)
       return false;
 
+   /* The refinement makes frcp correctly rounded, which only integer
+    * division needs: nir_lower_idiv takes the reciprocal of an integer
+    * converted to float. An application float division keeps the 2.5 ULP
+    * that every Khronos API allows even when it is `precise`/NoContraction
+    * (which forbids contraction, not the hardware reciprocal), so do not
+    * spend two FMAs and a select on it; DXVK marks every operation precise.
+    * Driver-internal shaders keep the refinement unconditionally. */
+   if (!b->shader->info.internal) {
+      nir_scalar src = nir_scalar_resolved(alu->src[0].src.ssa,
+                                           alu->src[0].swizzle[0]);
+      if (!nir_scalar_is_alu(src) ||
+          (nir_scalar_alu_op(src) != nir_op_u2f32 &&
+           nir_scalar_alu_op(src) != nir_op_i2f32))
+         return false;
+   }
+
    b->cursor = nir_before_instr(&alu->instr);
    nir_def_replace(&alu->def, libagx_frcp(b, nir_ssa_for_alu_src(b, alu, 0)));
    return true;
