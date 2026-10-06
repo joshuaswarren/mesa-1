@@ -4043,6 +4043,47 @@ agx_lower_agx3_half_iadd_constants(agx_context *ctx)
    return progress;
 }
 
+/* A 32-bit add or multiply-add of halves -- 16-bit integer arithmetic the
+ * optimizer widened, as hk's int16 shaders and dynamically indexed uniform
+ * arrays produce -- has no mixed-width AGX3 form. Extend each half register
+ * explicitly: AGX IR plain half sources are signed and abs selects zero
+ * extension; negation and the add's shift stay on the widened operation. */
+static bool
+agx_lower_agx3_widening_int(agx_context *ctx)
+{
+   if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
+      return false;
+
+   bool progress = false;
+   agx_foreach_instr_global_safe(ctx, I) {
+      if (!((I->op == AGX_OPCODE_IMAD && I->nr_srcs == 3) ||
+            (I->op == AGX_OPCODE_IADD && I->nr_srcs == 2 && !I->saturate)) ||
+          I->nr_dests != 1 || I->dest[0].size != AGX_SIZE_32 ||
+          agx_channels(I->dest[0]) != 1)
+         continue;
+
+      agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
+      agx_foreach_src(I, s) {
+         agx_index src = I->src[s];
+         if (src.size != AGX_SIZE_16 || src.type == AGX_INDEX_IMMEDIATE ||
+             src.type == AGX_INDEX_NULL || agx_channels(src) != 1)
+            continue;
+         bool is_unsigned = src.abs;
+         bool negate = src.neg;
+         src.abs = false;
+         src.neg = false;
+         agx_index wide = agx_temp(ctx, AGX_SIZE_32);
+         if (is_unsigned)
+            agx_mov_to(&b, wide, src);
+         else
+            agx_signext_to(&b, wide, src);
+         I->src[s] = negate ? agx_neg(wide) : wide;
+         progress = true;
+      }
+   }
+   return progress;
+}
+
 /* The immediate native descriptor index has four bits. Materialize larger
  * indices as the existing zero-extended 64-bit indexed-fetch operand after
  * copy propagation, so constants do not get folded back into that field. */
@@ -8987,6 +9028,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    agx_lower_agx3_fma_sources(ctx);
    agx_lower_agx3_mixed_width_unary(ctx);
    agx_lower_agx3_shifted_iadd_dest(ctx);
+
+   /* Before materialization, which lowers the SIGNEXT this introduces. */
+   AGX_PASS(ctx, agx_lower_agx3_widening_int);
 
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)
       agx_materialize_agx3_alu_constants(ctx);
