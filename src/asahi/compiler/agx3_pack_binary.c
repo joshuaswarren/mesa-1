@@ -1384,7 +1384,11 @@ agx3_emit_texture_fetch(struct util_dynarray *emission,
     * Native read-only indexed images, like ordinary texture loads, use the
     * bank0 coordinate ABI. */
    const uint16_t staging_base =
-      (I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image && !ms_array) ||
+      /* Staged MS reads publish their sample through bank6 and consume
+       * coordinates at bank0. Keep image loads on that same native ABI;
+       * the bank allocator orders overlapping image writes. */
+      (I->op == AGX_OPCODE_IMAGE_LOAD && !bindless_image && !ms_array &&
+       !ms_2d) ||
             separate_write_coords ? 16 : 0;
    if (register_lod && slot != 1)
       return false;
