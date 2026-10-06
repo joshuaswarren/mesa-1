@@ -1894,6 +1894,13 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          outputs = nir->info.outputs_written;
       }
    } else if (nir->info.stage == MESA_SHADER_TESS_CTRL) {
+      /* The dispatch uses one workgroup per patch and one invocation per
+       * output vertex. In particular, nir_create_passthrough_tcs() inherits
+       * the builder's default 1x1x1 size; leaving that in place lets poly
+       * fold every invocation ID to zero, so only control point zero is
+       * copied. Declare the same shape that agx_draw_patches() launches. */
+      nir->info.workgroup_size[0] = nir->info.tess.tcs_vertices_out;
+      nir->info.workgroup_size[1] = nir->info.workgroup_size[2] = 1;
       NIR_PASS(_, nir, poly_nir_lower_tcs);
    } else if (nir->info.stage == MESA_SHADER_GEOMETRY) {
       NIR_PASS(_, nir, poly_nir_lower_gs, &gs_count, &gs_copy, &pre_gs,
