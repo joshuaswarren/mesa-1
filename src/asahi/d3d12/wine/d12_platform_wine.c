@@ -106,12 +106,13 @@ d12_platform_open_device(struct d12_device *device, IUnknown *adapter)
    device->dev.fd = fd;
    if (!agx_open_device(NULL, &device->dev)) {
       d12_wine_close_fd(fd);
+      device->dev.fd = -1;
       return false;
    }
 
    device->sync = util_sync_provider_drm(fd);
    if (!device->sync) {
-      agx_close_device(&device->dev);
+      d12_platform_close_device(device);
       return false;
    }
 
@@ -141,6 +142,7 @@ d12_platform_close_device(struct d12_device *device)
    agx_close_device(&device->dev);
    if (fd >= 0)
       d12_wine_close_fd(fd);
+   device->dev.fd = -1;
    d12_wine_device_unregister(device);
 }
 

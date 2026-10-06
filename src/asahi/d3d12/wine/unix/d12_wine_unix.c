@@ -238,6 +238,24 @@ call_clock(void *args)
    return STATUS_SUCCESS;
 }
 
+static NTSTATUS
+call_dupfd_cloexec(void *args)
+{
+   struct d12_wine_dupfd_args *a = args;
+   a->new_fd = fcntl(a->fd, F_DUPFD_CLOEXEC, 3);
+   a->err = a->new_fd < 0 ? errno : 0;
+   return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+call_dmabuf_size(void *args)
+{
+   struct d12_wine_dmabuf_size_args *a = args;
+   a->size = lseek(a->fd, 0, SEEK_END);
+   a->err = a->size < 0 ? errno : 0;
+   return STATUS_SUCCESS;
+}
+
 typedef NTSTATUS (*unixlib_entry_t)(void *args);
 
 __attribute__((visibility("default")))
@@ -250,6 +268,8 @@ const unixlib_entry_t __wine_unix_call_funcs[] = {
    [D12_WINE_CALL_SYNCOBJ_WAIT] = call_syncobj_wait,
    [D12_WINE_CALL_IS_RENDER_NODE] = call_is_render_node,
    [D12_WINE_CALL_CLOCK] = call_clock,
+   [D12_WINE_CALL_DUPFD_CLOEXEC] = call_dupfd_cloexec,
+   [D12_WINE_CALL_DMABUF_SIZE] = call_dmabuf_size,
 };
 
 _Static_assert(sizeof(__wine_unix_call_funcs) / sizeof(__wine_unix_call_funcs[0]) ==

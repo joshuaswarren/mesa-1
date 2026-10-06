@@ -147,6 +147,28 @@ d12_wine_close_fd(int fd)
    d12_wine_call(D12_WINE_CALL_CLOSE, &a);
 }
 
+int
+d12_wine_dupfd_cloexec(int fd)
+{
+   struct d12_wine_dupfd_args a = {.fd = fd};
+   if (d12_wine_call(D12_WINE_CALL_DUPFD_CLOEXEC, &a))
+      return -1;
+   if (a.new_fd < 0)
+      errno = a.err;
+   return a.new_fd;
+}
+
+int64_t
+d12_wine_dmabuf_size(int fd)
+{
+   struct d12_wine_dmabuf_size_args a = {.fd = fd};
+   if (d12_wine_call(D12_WINE_CALL_DMABUF_SIZE, &a))
+      return -1;
+   if (a.size < 0)
+      errno = a.err;
+   return a.size;
+}
+
 bool
 d12_wine_fd_is_asahi_render_node(int fd)
 {

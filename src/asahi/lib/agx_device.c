@@ -61,6 +61,39 @@
 #include "agx_device_d3dkmt.h"
 #endif
 
+/* DRM fds in a Wine PE are Unix descriptors, never CRT descriptors. */
+#ifdef HAVE_LIBDRM
+static void
+agx_close_fd(int fd)
+{
+#ifdef AGX_WINE_UNIXLIB
+   d12_wine_close_fd(fd);
+#else
+   close(fd);
+#endif
+}
+
+static int
+agx_dupfd_cloexec(int fd)
+{
+#ifdef AGX_WINE_UNIXLIB
+   return d12_wine_dupfd_cloexec(fd);
+#else
+   return os_dupfd_cloexec(fd);
+#endif
+}
+
+static int64_t
+agx_dmabuf_size(int fd)
+{
+#ifdef AGX_WINE_UNIXLIB
+   return d12_wine_dmabuf_size(fd);
+#else
+   return lseek(fd, 0, SEEK_END);
+#endif
+}
+#endif
+
 /*
  * honeykrisp-h1-execution.md SS1/SS2.1: promoted from `static inline` to a
  * plain external function so it can be installed as the `simple_ioctl` op
@@ -183,7 +216,7 @@ agx_bo_free(struct agx_device *dev, struct agx_bo *bo)
 #ifdef HAVE_LIBDRM
    /* prime_fd is always -1 on Windows (no dma-buf import path, SS2.1). */
    if (bo->prime_fd != -1)
-      close(bo->prime_fd);
+      agx_close_fd(bo->prime_fd);
 #endif
 
    /* Reset the handle. This has to happen before the GEM close to avoid a race.
@@ -561,7 +594,7 @@ agx_bo_import(struct agx_device *dev, int fd)
       bo->align = AIL_PAGESIZE;
       bo->handle = bo->uapi_handle = gem_handle;
       bo->prime_fd = -1;
-      bo->size = lseek(fd, 0, SEEK_END);
+      bo->size = agx_dmabuf_size(fd);
 
       /* Sometimes this can fail and return -1. size of -1 is not
        * a nice thing for mmap to try mmap. Be more robust also
@@ -579,7 +612,7 @@ agx_bo_import(struct agx_device *dev, int fd)
       }
 
       bo->flags = AGX_BO_SHARED | AGX_BO_SHAREABLE;
-      bo->prime_fd = os_dupfd_cloexec(fd);
+      bo->prime_fd = agx_dupfd_cloexec(fd);
       bo->label = "Imported BO";
       if (bo->prime_fd < 0)
          goto error;
@@ -706,12 +739,12 @@ agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
       if (ret || out_sync_fd < 0) {
          error = ret < -1 ? -ret : (errno ? errno : EIO);
          if (out_sync_fd >= 0)
-            close(out_sync_fd);
+            agx_close_fd(out_sync_fd);
          goto error;
       }
 
       ret = agx_import_sync_file(dev, bo, out_sync_fd);
-      close(out_sync_fd);
+      agx_close_fd(out_sync_fd);
       if (ret) {
          error = ret < -1 ? -ret : (errno ? errno : EIO);
          goto error;
@@ -723,7 +756,7 @@ agx_bo_make_shared(struct agx_device *dev, struct agx_bo *bo)
    goto out;
 
 error:
-   close(bo->prime_fd);
+   agx_close_fd(bo->prime_fd);
    bo->prime_fd = -1;
 
 out:
@@ -739,7 +772,7 @@ agx_bo_export(struct agx_device *dev, struct agx_bo *bo)
    if (!agx_bo_make_shared(dev, bo))
       return -1;
 
-   return os_dupfd_cloexec(bo->prime_fd);
+   return agx_dupfd_cloexec(bo->prime_fd);
 }
 
 static int
@@ -1669,13 +1702,15 @@ agx_close_device(struct agx_device *dev)
       util_vma_heap_finish(&dev->g17p_vdm_alias_heap);
    glsl_type_singleton_decref();
 
-   /* Non-DRM winsyses own their platform handles and tear them down after
-    * the common BO caches and VMA heaps have been finalized here. */
+   /* Wine's platform owns the Unix render fd and closes it through unixlib
+    * after common teardown. Native DRM transfers fd ownership on successful
+    * open. D3DKMT has an opaque handle, which its winsys closes here. */
 #if defined(_WIN32) && !defined(AGX_WINE_UNIXLIB)
    if (dev->ops.simple_ioctl == agx_device_d3dkmt_ops.simple_ioctl)
       agx_d3dkmt_close_device(dev);
-#else
+#elif !defined(AGX_WINE_UNIXLIB)
    close(dev->fd);
+   dev->fd = -1;
 #endif
 }
 
@@ -1774,7 +1809,7 @@ agx_export_sync_file(struct agx_device *dev, struct agx_bo *bo)
 
    if (ret || export_sync_file_ioctl.fd < 0) {
       if (export_sync_file_ioctl.fd >= 0)
-         close(export_sync_file_ioctl.fd);
+         agx_close_fd(export_sync_file_ioctl.fd);
       return -1;
    }
 

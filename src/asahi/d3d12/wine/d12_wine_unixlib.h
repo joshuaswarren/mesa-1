@@ -21,6 +21,8 @@ enum d12_wine_call {
    D12_WINE_CALL_SYNCOBJ_WAIT,
    D12_WINE_CALL_IS_RENDER_NODE,
    D12_WINE_CALL_CLOCK,
+   D12_WINE_CALL_DUPFD_CLOEXEC,
+   D12_WINE_CALL_DMABUF_SIZE,
    D12_WINE_CALL_COUNT
 };
 
@@ -87,6 +89,19 @@ struct d12_wine_is_render_node_args {
 
 struct d12_wine_clock_args {
    int64_t monotonic_ns; /* out */
+};
+
+struct d12_wine_dupfd_args {
+   int32_t fd;
+   int32_t new_fd;
+   int32_t err;
+   int32_t pad;
+};
+
+struct d12_wine_dmabuf_size_args {
+   int32_t fd;
+   int32_t err;
+   int64_t size;
 };
 
 #endif

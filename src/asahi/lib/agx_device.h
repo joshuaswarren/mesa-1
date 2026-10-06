@@ -494,6 +494,9 @@ agx_va_in_usc_window(const struct agx_device *dev, uint64_t addr)
           (addr - dev->shader_base) < AGX_USC_WINDOW_SIZE;
 }
 
+/* On failure the caller retains its fd/platform handle. On success native
+ * DRM transfers the fd to common close; Wine retains it in the platform so
+ * no Unix descriptor is passed to the Windows CRT. */
 bool agx_open_device(void *memctx, struct agx_device *dev);
 
 void agx_close_device(struct agx_device *dev);
