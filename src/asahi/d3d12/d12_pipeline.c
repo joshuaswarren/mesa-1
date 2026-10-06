@@ -2698,6 +2698,14 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
    NIR_PASS(_, nir, d12_nir_lower_sampler_reduction, &sampler_lowering);
    NIR_PASS(_, nir, d12_nir_lower_bindless_sampler_map);
 
+   /* The DXBC front end reads every pixel-shader input register as a vec4
+    * whatever its declared mask (HelloTexture's TEXCOORD is v1.xy), so the
+    * fragment would bind coefficients for components the vertex shader
+    * never wrote. G17P's native coefficient table refuses such a binding;
+    * load only what the shader reads, as the DXIL front end already does. */
+   if (device->dev.chip == AGX_CHIP_G17P && stage == MESA_SHADER_FRAGMENT)
+      NIR_PASS(_, nir, nir_opt_shrink_vectors, false);
+
    unsigned runtime_samplers = d12_nir_sampler_state_count(nir, map);
    if (runtime_samplers == UINT_MAX) {
       mesa_loge("graphics shader sampler state range exceeds the 16 API "
