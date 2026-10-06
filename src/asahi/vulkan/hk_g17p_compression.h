@@ -6,6 +6,7 @@
 #include "asahi/lib/agx_chip.h"
 #include "vulkan/vulkan_core.h"
 #include <stdbool.h>
+#include <string.h>
 
 /* G17P lossless compression policy.
  *
@@ -128,13 +129,18 @@ hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
    if (chip != AGX_CHIP_G17P || plane != 0 || !info)
       return false;
 
-   /* Shared images keep their plain layout contract. */
-   for (const VkBaseInStructure *ext = info->pNext; ext; ext = ext->pNext) {
-      if (ext->sType == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO &&
-          ((const VkExternalMemoryImageCreateInfo *)ext)->handleTypes)
+   /* Shared images keep their plain layout contract. Read each header by
+    * copy: the chain's structures have other types, and Mesa builds with
+    * strict aliasing (gcc -O2 dropped the stores of a stack chain). */
+   for (const void *next = info->pNext; next;) {
+      VkBaseInStructure ext;
+      memcpy(&ext, next, sizeof(ext));
+      if (ext.sType == VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO &&
+          ((const VkExternalMemoryImageCreateInfo *)next)->handleTypes)
          return false;
-      if (ext->sType == HK_G17P_WSI_IMAGE_CREATE_INFO_MESA)
+      if (ext.sType == HK_G17P_WSI_IMAGE_CREATE_INFO_MESA)
          return false;
+      next = ext.pNext;
    }
 
    const VkImageCreateFlags allowed_flags =
