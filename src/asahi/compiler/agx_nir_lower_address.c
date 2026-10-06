@@ -100,6 +100,46 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 
             break;
          }
+
+         /* A + zext(x): the 64-bit-base, 32-bit-offset address formats leave
+          * the byte offset zero-extended into the add (as a u2u64 or as a
+          * pack with a zero high word). Index the access by x scaled to
+          * the format instead of materializing the 64-bit sum: one shift
+          * replaces the pack moves and the 64-bit add, and the base stays a
+          * uniform. The access is format-aligned, so x is a multiple of the
+          * element size and the shift is exact.
+          */
+         for (unsigned i = 0; i < 2 && match.offset.def == NULL; ++i) {
+            nir_scalar src = nir_scalar_chase_alu_src(base, i);
+            if (!nir_scalar_is_alu(src))
+               continue;
+
+            nir_scalar x;
+            nir_op src_op = nir_scalar_alu_op(src);
+            if (src_op == nir_op_u2u64) {
+               x = nir_scalar_chase_alu_src(src, 0);
+            } else if (src_op == nir_op_pack_64_2x32_split) {
+               nir_scalar hi = nir_scalar_chase_alu_src(src, 1);
+               if (!nir_scalar_is_const(hi) || nir_scalar_as_uint(hi) != 0)
+                  continue;
+               x = nir_scalar_chase_alu_src(src, 0);
+            } else {
+               continue;
+            }
+            if (x.def->bit_size != 32)
+               continue;
+
+            nir_def *index = nir_channel(b, x.def, x.comp);
+            if (format_shift)
+               index = nir_ushr_imm(b, index, format_shift);
+
+            match = (struct match){
+               .base = nir_scalar_chase_alu_src(base, 1 - i),
+               .offset = nir_get_scalar(index, 0),
+               .shift = 0,
+               .sign_extend = false,
+            };
+         }
       }
    }
 
