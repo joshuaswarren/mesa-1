@@ -1020,6 +1020,8 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    /* These caches name storage of the previous recording. */
    list->vb_params_cache.pso = NULL;
    list->g17p_program_cache.valid = false;
+   list->g17p_program_cache.txf_sampler_cell = 0;
+   list->g17p_program_cache.txf_synced_table = 0;
    list->g17p_bind_cache.bind_valid = false;
    list->g17p_bind_cache.indices_valid = false;
    list->g17p_bind_cache.segment = ~0u;
@@ -6971,8 +6973,15 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
       if (texture_table != cache->texture_table)
          goto fail;
       const uint64_t sampler_table = sampler_bo->va->addr;
-      const uint64_t sampler_cell = d12_list_upload(
-         list, &sampler_table, sizeof(sampler_table), 8);
+      /* One cell per recording: a fresh cell per dispatch made every
+       * dispatch's uniform ranges differ, so the state-loader program was
+       * regenerated for each one (most of a 5 us Texture.Load dispatch on
+       * the Neo). */
+      struct d12_g17p_program_cache *pcache = &list->g17p_program_cache;
+      if (!pcache->txf_sampler_cell)
+         pcache->txf_sampler_cell = d12_list_upload(
+            list, &sampler_table, sizeof(sampler_table), 8);
+      const uint64_t sampler_cell = pcache->txf_sampler_cell;
       txf_cache = cache;
       txf_texture_table = texture_table;
       txf_sampler_cell = sampler_cell;
@@ -6991,11 +7000,18 @@ d12_list_append_g17p_pso(struct d12_cmd_list *list,
             .size_halfs = prefix[i].size_halfs,
             .address = prefix[i].address,
          };
-      if (agx_bo_sync_for_device(sampler_bo, 0, 32) ||
-          agx_bo_sync_for_device(list->stream_bo,
-             texture_table - list->stream_bo->va->addr,
-             cache->texture_table_size_B))
-         goto fail;
+      /* The table is immutable once uploaded and the sampler words are
+       * the device's constants: make each visible once per recording. */
+      if (pcache->txf_synced_table != texture_table ||
+          pcache->txf_synced_table_size_B != cache->texture_table_size_B) {
+         if (agx_bo_sync_for_device(sampler_bo, 0, 32) ||
+             agx_bo_sync_for_device(list->stream_bo,
+                texture_table - list->stream_bo->va->addr,
+                cache->texture_table_size_B))
+            goto fail;
+         pcache->txf_synced_table = texture_table;
+         pcache->txf_synced_table_size_B = cache->texture_table_size_B;
+      }
       d12_list_track_read_bo(list, sampler_bo);
       d12_list_track_read_range(list, texture_table,
                                 cache->texture_table_size_B);

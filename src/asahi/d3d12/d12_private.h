@@ -1970,6 +1970,13 @@ struct d12_g17p_program_cache {
    struct agx3_ioto_uniform_range ranges[10];
    struct agx3_cdm_direct_template_sources launch_sources;
    struct agx3_compute_program launch;
+   /* Native Texture.Load: the sampler-table cell uploaded for this
+    * recording (the table is the device's, so one cell serves every
+    * dispatch and the uniform ranges, hence the program, repeat), and the
+    * texture table last made visible to the device. */
+   uint64_t txf_sampler_cell;
+   uint64_t txf_synced_table;
+   size_t txf_synced_table_size_B;
 };
 
 /* The bind state and draw-index records of the previous native G17P draw
