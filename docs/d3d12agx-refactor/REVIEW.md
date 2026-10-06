@@ -687,3 +687,36 @@ Evidence and exact commands: assigned-worktree scratch/t-1242 scripts and
 <aurora-ctl>/runs/r-t-1242-d3d12agx-optimisation-train-round-5-close-the-tr-2/report.md.
 Neo qualification and memory findings are recorded there separately from these
 reference-machine measurements.
+
+G17P independent API dispatches now omit the weak per-launch ordering word by
+default. Strong flushes remain at ResourceBarrier calls, generated helpers and
+segment ends. Set D3D12AGX_G17P_DISPATCH_NO_BARRIER=0 to restore weak ordering for
+diagnostics; FLUSH_EACH_DISPATCH still forces strong ordering.
+
+Neo, quiet load 0.09 before timing, five alternating runs: 20k dispatches measure
+41.584 ms with weak ordering and 4.547 ms without it (9.15x). The CPU Execute call
+medians are 243.12 and 214.08 us. The 20k-draw submission shape is rejected by
+existing G17P admission; the compute result does not include a supported draw
+submission result. Declared 16-pass depth store/discard GPU medians are
+13.759/7.129 ms, about 414.4 us per extra store. Vertex-ID four-draw 720p frame
+medians are 373.6/208.6 us. This frame's vertex input differs from the reference
+Macs' vertex-buffer shape, so compare store/discard within each platform.
+
+The old opt-in matches all 580 safe tight classifications. Fair comparison
+covers 579 with no new classifications. The final default head covers 574 at
+both budgets: tight classifications and assertion summaries match exactly;
+fair has no new failures (one baseline CRASH becomes a feature SKIP). Seven
+Neo qualification limits remain explicit: the known copy/fence cleanup GPU
+hang, four allocation stresses, and two separately observed high-pin fixtures
+(fence ping-pong and REBAR suballocation). Never loop the hanging fixture or
+raise the 3G limit to complete these allocation workloads. Frozen Neo v1/v2
+remain 9/17 and 11/17. All final GPU sessions preserve free=100, quarantine=0
+and zero submit failures.
+
+Global memory sampling is necessary: REBAR raises unevictable memory by about
+1.5 GiB in 0.5s while sampled process RSS is only 14 MiB. The 574-case fair run's
+unevictable total rises about 1 MiB; most transient per-case pins release between
+tests. This does not rule out leaks in the excluded stress workloads. Detailed
+per-test samples, memory-guard stops, baseline comparisons and the filesystem
+staging workaround are in the report. The bounded RAM staging was used because
+Btrfs metadata allocation prevented writing test artifacts despite df free space.
