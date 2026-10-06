@@ -3349,7 +3349,11 @@ static unsigned
 sampler_count(struct agx_context *ctx, mesa_shader_stage stage)
 {
    /* We reserve sampler #0 for txf so add 1 to the API count */
-   return ctx->stage[stage].sampler_count + 1;
+   unsigned count = ctx->stage[stage].sampler_count + 1;
+   /* Native staged MS reads name sampler one. Even an image-only shader
+    * therefore needs that entry inside the declared sampler table. */
+   return agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P
+             ? MAX2(count, 2u) : count;
 }
 
 static inline enum agx_sampler_states
@@ -3710,6 +3714,12 @@ agx_upload_samplers(struct agx_batch *batch, struct agx_compiled_shader *cs,
        * placing API samplers after it. */
       if (!agx_gallium_pack_g17p_txf_sampler(dev->chip, T.cpu))
          agx_native_descriptor_rejected(dev, "texel-fetch sampler");
+
+      /* Keep API sampler zero at its existing handle one when present.
+       * Image-only MS reads still consume handle one, so populate it with
+       * the same texel-fetch state rather than an absent table entry. */
+      if (!ctx->stage[stage].sampler_count)
+         memcpy((uint8_t *)T.cpu + sampler_length, T.cpu, sampler_length);
 
       for (unsigned i = 0; i < ctx->stage[stage].sampler_count; ++i) {
          struct agx_sampler_state *sampler = ctx->stage[stage].samplers[i];
