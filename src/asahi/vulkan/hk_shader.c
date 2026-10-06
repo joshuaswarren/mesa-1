@@ -1833,6 +1833,70 @@ hk_lower_multiview_stage(mesa_shader_stage stage,
    }
 }
 
+static bool
+hk_g17p_reaches_derivative(nir_def *def, unsigned depth)
+{
+   if (depth >= 16)
+      return false;
+
+   nir_foreach_use(use, def) {
+      nir_instr *instr = nir_src_parent_instr(use);
+
+      if (instr->type == nir_instr_type_intrinsic) {
+         switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+         case nir_intrinsic_ddx:
+         case nir_intrinsic_ddx_fine:
+         case nir_intrinsic_ddx_coarse:
+         case nir_intrinsic_ddy:
+         case nir_intrinsic_ddy_fine:
+         case nir_intrinsic_ddy_coarse:
+            return true;
+         default:
+            continue;
+         }
+      }
+
+      nir_def *next = instr->type == nir_instr_type_alu
+                         ? &nir_instr_as_alu(instr)->def
+                      : instr->type == nir_instr_type_phi
+                         ? &nir_instr_as_phi(instr)->def
+                         : NULL;
+      if (next && hk_g17p_reaches_derivative(next, depth + 1))
+         return true;
+   }
+
+   return false;
+}
+
+/* G17P's driver-profile implicit sample returns zero in helper lanes even
+ * under the native helper-capable fragment protocol.  That is unobservable
+ * unless the sampled value itself feeds a later derivative.  For that exact
+ * shape, spell the implicit LOD as the equivalent explicit gradients: the
+ * witnessed gradient sampler executes in helper lanes and preserves the quad
+ * values required by fwidth(texture(...)). */
+static bool
+hk_g17p_explicit_helper_gradient(nir_builder *b, nir_tex_instr *tex,
+                                  UNUSED void *data)
+{
+   if (tex->op != nir_texop_tex ||
+       tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
+       tex->is_shadow || tex->is_sparse ||
+       !hk_g17p_reaches_derivative(&tex->def, 0))
+      return false;
+
+   const int coord_idx =
+      nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (coord_idx < 0)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *coord = tex->src[coord_idx].src.ssa;
+   nir_tex_instr_add_src(tex, nir_tex_src_ddx, nir_ddx(b, coord));
+   nir_tex_instr_add_src(tex, nir_tex_src_ddy, nir_ddy(b, coord));
+   tex->op = nir_texop_txd;
+   return true;
+}
+
 static void
 hk_lower_nir(struct hk_device *dev, nir_shader *nir,
              const struct vk_pipeline_robustness_state *rs, bool is_multiview,
@@ -1858,6 +1922,12 @@ hk_lower_nir(struct hk_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, nir_shader_tex_pass, lower_subpass_dim, nir_metadata_all,
                NULL);
       NIR_PASS(_, nir, nir_lower_wpos_center);
+
+      if (dev->dev.chip == AGX_CHIP_G17P) {
+         NIR_PASS(_, nir, nir_shader_tex_pass,
+                  hk_g17p_explicit_helper_gradient, nir_metadata_control_flow,
+                  NULL);
+      }
    }
 
    if (is_multiview &&
