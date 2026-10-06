@@ -10294,6 +10294,20 @@ fail:
  * programs cover one colour target, so there they go one at a time. Pending
  * discards need no render: the hint is simply dropped.
  */
+/* Whether a tile layout of these targets spills any of them to memory. */
+static bool
+d12_tilebuffer_spills(const enum pipe_format *formats, unsigned count,
+                      unsigned samples)
+{
+   const struct agx_tilebuffer_layout tib =
+      agx_build_tilebuffer_layout(formats, count, samples, false);
+   for (unsigned i = 0; i < count; i++) {
+      if (tib.spilled[i])
+         return true;
+   }
+   return false;
+}
+
 static bool
 d12_list_flush_pending_clears(struct d12_cmd_list *list)
 {
@@ -10314,6 +10328,7 @@ d12_list_flush_pending_clears(struct d12_cmd_list *list)
                               (list->pending_ds_clear.valid ? 1 : 0);
       const bool one_at_a_time = list->device->dev.chip == AGX_CHIP_G17P;
       struct d12_descriptor rtvs[AGX_MAX_RENDER_TARGETS];
+      enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
       unsigned rtv_count = 0;
       unsigned width = 0, height = 0, samples = 0, layers = 0;
 
@@ -10328,6 +10343,12 @@ d12_list_flush_pending_clears(struct d12_cmd_list *list)
          const unsigned l = MAX2(v->size_B, 1);
          if (rtv_count && (one_at_a_time || w != width || h != height ||
                            s != samples || l != layers))
+            continue;
+         /* A target the tile layout spills to memory takes no background
+          * clear, so leave it for a later render: six 4-sample RGBA8
+          * targets fit a 16x16 tile, a seventh would spill. */
+         formats[rtv_count] = v->resource->layout.format;
+         if (rtv_count && d12_tilebuffer_spills(formats, rtv_count + 1, s))
             continue;
          width = w;
          height = h;
@@ -10468,10 +10489,27 @@ d12_list_prepare_pending_clears_for_draw(struct d12_cmd_list *list,
          writes = (uint8_t)BITFIELD_MASK(rtv_count);
    }
 
+   /* The render's tile layout: the pipeline's, or the bindings' when the
+    * pipeline writes no colour. A clear of a target it spills to memory is
+    * not absorbed: no background program reaches that target. */
+   struct agx_tilebuffer_layout tib = pso->tib;
+   if (!pso->rt_write_mask && rtv_count) {
+      enum pipe_format formats[AGX_MAX_RENDER_TARGETS] = {0};
+      unsigned samples = 1;
+      for (unsigned i = 0; i < rtv_count; i++) {
+         if (!list->bound_rtv[i].resource)
+            continue;
+         formats[i] = list->bound_rtv[i].resource->layout.format;
+         samples =
+            MAX2(list->bound_rtv[i].resource->layout.sample_count_sa, 1);
+      }
+      tib = agx_build_tilebuffer_layout(formats, rtv_count, samples, false);
+   }
+
    uint8_t keep = 0;
    for (unsigned i = 0; i < rtv_count; i++) {
       const struct d12_descriptor *v = &list->bound_rtv[i];
-      if (!v->resource || !(writes & BITFIELD_BIT(i)))
+      if (!v->resource || !(writes & BITFIELD_BIT(i)) || tib.spilled[i])
          continue;
       int p = d12_list_find_pending_rt_clear(list, v);
       if (p < 0)
