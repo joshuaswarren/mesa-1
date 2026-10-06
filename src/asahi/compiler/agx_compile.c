@@ -4250,7 +4250,10 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       const bool half_fsel =
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          I->op == AGX_OPCODE_FCMPSEL && I->nr_srcs == 4 &&
-         I->dest[0].size == AGX_SIZE_16;
+         (I->dest[0].size == AGX_SIZE_16 ||
+          (I->dest[0].size == AGX_SIZE_32 &&
+           I->src[0].size == AGX_SIZE_16 &&
+           I->src[1].size == AGX_SIZE_16));
       const bool half_round =
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          (I->op == AGX_OPCODE_FLOOR || I->op == AGX_OPCODE_CEIL) &&
@@ -4296,8 +4299,32 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
          I->src[0].type != AGX_INDEX_IMMEDIATE &&
          I->src[1].type != AGX_INDEX_IMMEDIATE;
 
-      if (half_fsel || half_round || half_add) {
-         const unsigned source_count = half_fsel ? 4 : half_add ? 2 : 1;
+      /* A modified half multiplier beside a literal has no native form.
+       * Keep half multiplication and its rounding, but use two registers
+       * with the exact sign-bit operations shared by the half add/select. */
+      const bool half_mul =
+         ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
+         I->op == AGX_OPCODE_HMUL && I->nr_srcs == 2 && !I->saturate &&
+         I->dest[0].size == AGX_SIZE_16 &&
+         ((I->src[0].type == AGX_INDEX_IMMEDIATE &&
+           I->src[1].size == AGX_SIZE_16 &&
+           (I->src[1].abs || I->src[1].neg)) ||
+          (I->src[1].type == AGX_INDEX_IMMEDIATE &&
+           I->src[0].size == AGX_SIZE_16 &&
+           (I->src[0].abs || I->src[0].neg)));
+      if (half_mul) {
+         const unsigned imm = I->src[0].type == AGX_INDEX_IMMEDIATE ? 0 : 1;
+         float value = agx_minifloat_decode(I->src[imm].value);
+         if (I->src[imm].abs)
+            value = fabsf(value);
+         if (I->src[imm].neg)
+            value = -value;
+         I->src[imm] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
+      }
+
+      if (half_fsel || half_round || half_add || half_mul) {
+         const unsigned source_count = half_fsel ? 4
+                                       : half_add || half_mul ? 2 : 1;
          for (unsigned s = 0; s < source_count; ++s) {
             if (I->src[s].type == AGX_INDEX_IMMEDIATE ||
                 I->src[s].size != AGX_SIZE_16 ||
