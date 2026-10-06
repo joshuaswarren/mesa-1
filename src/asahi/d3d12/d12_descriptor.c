@@ -442,7 +442,9 @@ d12_staging_native_page(struct d12_descriptor_heap *heap, uint32_t index,
  * consecutive words. */
 static bool
 d12_heap_native_words(struct d12_descriptor_heap *heap, uint32_t index,
-                      bool alloc, uint8_t *texture[3], uint8_t *pbe[3])
+                      bool alloc,
+                      uint8_t *texture[D12_TYPED_BUFFER_WINDOWS],
+                      uint8_t *pbe[D12_TYPED_BUFFER_WINDOWS])
 {
    if (heap->staging_native_pages) {
       uint8_t *page = d12_staging_native_page(heap, index, alloc);
@@ -535,7 +537,8 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
 
    /* Gen7 mirrors retain both declaration shapes. A physical 2D descriptor
     * cannot accept an array coordinate/LOD ABI, even for a one-layer view. */
-   uint8_t *textures[3] = {NULL}, *pbes[3] = {NULL};
+   uint8_t *textures[D12_TYPED_BUFFER_WINDOWS] = {NULL};
+   uint8_t *pbes[D12_TYPED_BUFFER_WINDOWS] = {NULL};
    if (!d12_heap_native_words(heap, index, true, textures, pbes))
       return;
    const unsigned windows = heap->native_windows;
@@ -558,20 +561,23 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
       }
       return;
    }
-   struct d12_descriptor effective[3];
+   struct d12_descriptor effective[D12_TYPED_BUFFER_WINDOWS];
    for (unsigned window = 0; window < windows; ++window) {
-      if (window && slot->resource &&
-          slot->resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-         if (textures[0])
-            memcpy(textures[window], textures[0], heap->texture_stride_B);
-         if (pbes[0])
-            memcpy(pbes[window], pbes[0], heap->pbe_stride_B);
-         continue;
-      }
+      /* A typed buffer view takes one bounded element window per mirror;
+       * other buffer views live in window 0 only, and window 3 holds no
+       * texture shape. */
       effective[window] = *slot;
-      if (window)
+      if (slot->resource &&
+          slot->resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+         if (!d12_buffer_window_descriptor(slot, window, &effective[window]) &&
+             window)
+            effective[window].resource = NULL;
+      } else if (window == 3) {
+         effective[window].resource = NULL;
+      } else if (window) {
          d12_apply_texture_shape(&effective[window], window == 1
             ? D12_TEXTURE_SHAPE_2D : D12_TEXTURE_SHAPE_2D_ARRAY);
+      }
       /* A window whose shape the view already has packs to the same words
        * as an earlier window (a 2D view's 2D mirror, a 2D-array view's
        * array mirror): copy them instead of packing again. */
@@ -582,7 +588,7 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
       }
       if (textures[window]) {
          uint8_t *out = textures[window];
-         if (null_texture)
+         if (null_texture || !effective[window].resource)
             memcpy(out, heap->null_texture, heap->texture_stride_B);
          else if (same >= 0)
             memcpy(out, textures[same], heap->texture_stride_B);
@@ -591,7 +597,7 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
       }
       if (pbes[window]) {
          uint8_t *out = pbes[window];
-         if (null_pbe)
+         if (null_pbe || !effective[window].resource)
             memcpy(out, heap->null_pbe, heap->pbe_stride_B);
          else if (same >= 0)
             memcpy(out, pbes[same], heap->pbe_stride_B);
@@ -716,8 +722,10 @@ d12_descriptor_heap_copy_range(struct d12_device *device,
          n = MIN2(n, D12_STAGING_NATIVE_PAGE -
                         (dst_index + i) % D12_STAGING_NATIVE_PAGE);
 
-      uint8_t *src_texture[3] = {NULL}, *src_pbe[3] = {NULL};
-      uint8_t *dst_texture[3] = {NULL}, *dst_pbe[3] = {NULL};
+      uint8_t *src_texture[D12_TYPED_BUFFER_WINDOWS] = {NULL};
+      uint8_t *src_pbe[D12_TYPED_BUFFER_WINDOWS] = {NULL};
+      uint8_t *dst_texture[D12_TYPED_BUFFER_WINDOWS] = {NULL};
+      uint8_t *dst_pbe[D12_TYPED_BUFFER_WINDOWS] = {NULL};
       /* A source page nothing was written to holds null descriptors, which
        * packing the destination slots reproduces. */
       if (!d12_heap_native_words(src_heap, src_index + i, false, src_texture,
@@ -889,7 +897,7 @@ d12_descriptor_heap_create(struct d12_device *device,
       heap->texture_stride_B = layout.texture_stride_B;
       heap->pbe_stride_B = layout.pbe_stride_B;
       heap->native_windows = d12_native_descriptor_legacy_shapes(generation)
-                                ? 3 : 1;
+                                ? D12_TYPED_BUFFER_WINDOWS : 1;
    }
 
    /* A CPU resource heap packs its descriptors' native words as they are
@@ -908,7 +916,8 @@ d12_descriptor_heap_create(struct d12_device *device,
          heap->texture_stride_B = layout.texture_stride_B;
          heap->pbe_stride_B = layout.pbe_stride_B;
          heap->native_windows =
-            d12_native_descriptor_legacy_shapes(generation) ? 3 : 1;
+            d12_native_descriptor_legacy_shapes(generation)
+               ? D12_TYPED_BUFFER_WINDOWS : 1;
          heap->staging_native_page_count =
             DIV_ROUND_UP(desc->NumDescriptors, D12_STAGING_NATIVE_PAGE);
          heap->staging_native_pages =
@@ -961,15 +970,16 @@ d12_descriptor_heap_create(struct d12_device *device,
             return E_OUTOFMEMORY;
          }
          if (variants) {
-            if (texture_size > SIZE_MAX / 3 || pbe_size > SIZE_MAX / 3) {
+            if (texture_size > SIZE_MAX / D12_TYPED_BUFFER_WINDOWS ||
+                pbe_size > SIZE_MAX / D12_TYPED_BUFFER_WINDOWS) {
                if (heap->bo)
                   agx_bo_unreference(&device->dev, heap->bo);
                free(heap->live_resource_words);
                free(heap);
                return E_OUTOFMEMORY;
             }
-            texture_size *= 3;
-            pbe_size *= 3;
+            texture_size *= D12_TYPED_BUFFER_WINDOWS;
+            pbe_size *= D12_TYPED_BUFFER_WINDOWS;
          }
          heap->texture_bo =
             agx_bo_create(&device->dev, texture_size, 0, AGX_BO_WRITEBACK,
@@ -1041,9 +1051,10 @@ d12_descriptor_heap_create(struct d12_device *device,
           d12_set_null_pbe_descriptor(device, heap->null_pbe)) {
          const bool variants = d12_native_descriptor_legacy_shapes(
             agx_chip_descriptor_generation(device->dev.chip));
-         const uint64_t pbe_slots = variants
-            ? 3 * ((uint64_t)desc->NumDescriptors + 1)
-            : (uint64_t)desc->NumDescriptors + 1;
+         const uint64_t pbe_slots =
+            variants
+               ? D12_TYPED_BUFFER_WINDOWS * ((uint64_t)desc->NumDescriptors + 1)
+               : (uint64_t)desc->NumDescriptors + 1;
          const uint64_t texture_slots = variants ? pbe_slots : desc->NumDescriptors;
          for (uint64_t i = 0; i < texture_slots; i++) {
             memcpy(textures + i * heap->texture_stride_B,

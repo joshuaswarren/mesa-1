@@ -378,7 +378,8 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
       /* Heap limits are shared with the descriptor path. Sampling/rasterizer
        * promises stay off until their exact optional contracts pass. */
       memset(opts, 0, sizeof(*opts));
-      opts->PointSamplingAddressesNeverRoundUp = FALSE;
+      opts->PointSamplingAddressesNeverRoundUp =
+         caps->point_sampling_addresses_never_round_up;
       /* No-output multisampling has a separate contract from multisampled
        * attachments. Withhold it until a no-output coverage witness passes.
        * The public mask uses log2(sample_count) as the bit index. */

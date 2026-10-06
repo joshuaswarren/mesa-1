@@ -2,6 +2,7 @@
 """Static gate for D3D12 buffer-view limits and DXBC typed stores."""
 
 from pathlib import Path
+import re
 
 
 d12 = Path(__file__).resolve().parents[2]
@@ -11,11 +12,11 @@ device = (d12 / "d12_device.c").read_text()
 dxbc = (d12 / "dxil/d12_dxbc.c").read_text()
 
 
-assert "#define D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS (UINT32_C(1) << 27)" in core
+assert "#define D12_TYPED_BUFFER_WINDOW_LOG2 27" in core
 fill_start = device.index("d12_fill_buffer_descriptor(")
 fill_end = device.index("d12_device_CreateShaderResourceView(", fill_start)
 fill = device[fill_start:fill_end]
-assert "typed && num_elements > D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS" in fill
+assert "typed && num_elements > typed_limit" in fill
 assert "d12_buffer_view_range(" in fill
 assert "d12_buffer_view_element_count_valid" not in fill
 
@@ -24,7 +25,7 @@ store_end = dxbc.index("case D12_DXBC_OP_ATOMIC_AND:", store_start)
 store = dxbc[store_start:store_end]
 assert "nir_ugt_imm(b, count, AGX_TEXTURE_BUFFER_MAX_SIZE)" not in store
 assert "D12_UNIFORM_HEAP_PBES" in store
-assert "rooted_native_index(ctx, descriptor)" in store
+assert "buffer_native_slot(ctx,native_slot,element_or_byte,true)" in re.sub(r"\s+", "", store)
 assert "D12_UNIFORM_PBES" in store
 assert "uav_binding_slot(ctx, &o[0])" in store
 typed_store = store[store.index("nir_def *count = buffer_view_count_or_bytes") :]
@@ -34,17 +35,8 @@ assert typed_store.index("nir_ult(b, element_or_byte, count)") < typed_store.ind
 )
 assert "robust_store_typed_buffer(" not in store
 
-for dead_tail_token in (
-    "d12_buffer_tail_descriptor",
-    "2 * (size_t)last_texture",
-    "(uint64_t)last_texture << 48",
-    "last_texture + slot",
-):
-    assert dead_tail_token not in cmd
-
-assert "d12_dxbc_buffer_native_slot" not in dxbc
-assert "d12_dxbc_buffer_native_coord" not in dxbc
-assert "AGX_TEXTURE_BUFFER_MAX_SIZE" not in dxbc
+assert "buffer_native_coord(ctx, element_or_byte)" in store
+assert "D12_TYPED_BUFFER_WINDOWS" in cmd
 
 print(
     "dxbc-buffer-view-bounds: PASS "

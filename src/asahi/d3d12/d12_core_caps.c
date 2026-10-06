@@ -76,11 +76,14 @@ d12_core_caps_init(struct d12_core_caps *caps,
    /* G17P's bounded raster path is not the full AGX2 path. Do not derive its
     * sample, sparse, stencil, sampler or pre-raster promises from chip age.
     * A compiler accepting a mesh shader does not implement DispatchMesh. */
-   /* Sparse feedback/default-mapping witnesses fail, including a missing
-    * SM5 texture-feedback opcode. A BO bind hook alone is not a tiled tier. */
-   caps->tiled_resources_tier = 0;
+   /* Legacy buffer residency, remaps and CopyTiles are qualified on G13/G14.
+    * Texture residency feedback remains outside Tier 1. */
+   caps->tiled_resources_tier = legacy && info->isolated_mmu ? 1 : 0;
    caps->typed_uav_load_additional_formats = legacy;
    caps->full_texture_sampling = legacy;
+   /* G13/G14 point coordinates truncate at the texel boundary. This reports
+    * the measured rounding policy, rather than promising 8-bit rounding. */
+   caps->point_sampling_addresses_never_round_up = legacy;
    /* A register writer and encoder tests do not qualify per-device pixel
     * coverage/depth resolve behavior. The native reference also reports 0. */
    caps->programmable_sample_positions_tier = 0;

@@ -3048,7 +3048,12 @@ d12_fill_buffer_descriptor(struct d12_descriptor *slot,
       return false;
    }
 
-   if (typed && num_elements > D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS) {
+   const uint32_t typed_limit =
+      d12_native_descriptor_legacy_shapes(
+         agx_chip_descriptor_generation(res->device->dev.chip))
+         ? D12_LEGACY_TYPED_BUFFER_MAX_ELEMENTS
+         : D12_TYPED_BUFFER_VIEW_MAX_ELEMENTS;
+   if (typed && num_elements > typed_limit) {
       mesa_loge("%s: typed view exceeds the qualified native element extent", what);
       slot->kind = D12_DESC_NONE;
       slot->resource = NULL;

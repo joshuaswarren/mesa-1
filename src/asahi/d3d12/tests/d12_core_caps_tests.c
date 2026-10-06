@@ -35,9 +35,12 @@ int main(void)
    assert(a.node_count == 1 && a.uma && a.cache_coherent_uma);
    assert(a.isolated_mmu && a.resource_heap_tier == 2 && a.gpu_upload_heap);
    assert(a.sample_counts == 7 && c.sample_counts == 1);
-   assert(a.tiled_resources_tier == 0 && c.tiled_resources_tier == 0);
+   assert(a.tiled_resources_tier == 1 && c.tiled_resources_tier == 0);
    assert(!a.predication && !a.independent_front_and_back_stencil && a.dynamic_depth_bias);
    assert(a.full_texture_sampling && !c.full_texture_sampling);
+   assert(a.point_sampling_addresses_never_round_up &&
+          b.point_sampling_addresses_never_round_up &&
+          !c.point_sampling_addresses_never_round_up);
    assert(a.mesh_shader_tier == 0 && b.mesh_shader_tier == 0 && c.mesh_shader_tier == 0);
    assert(a.max_shader_model == D12_CORE_SHADER_MODEL_6_0);
    assert(c.max_shader_model == D12_CORE_SHADER_MODEL_5_1);
@@ -78,7 +81,8 @@ int main(void)
    assert(!unknown.tiled_resources_tier && !unknown.isolated_mmu);
    assert(unknown.gpu_virtual_address_bits == 36);
    /* Deriving another device cannot mutate existing caps. */
-   assert(a.wave_ops && a.tiled_resources_tier == 0 && a.gpu_virtual_address_bits == 39);
+   assert(a.wave_ops && a.tiled_resources_tier == 1 &&
+          a.gpu_virtual_address_bits == 39);
    g13.generation = 15;
    d12_core_caps_init(&unknown, &g13);
    assert(!unknown.max_feature_level && !unknown.node_count);

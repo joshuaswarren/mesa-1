@@ -18,10 +18,11 @@
 
 #define MESA_LOG_TAG "d3d12agx"
 
-#include "d12_debug.h"
-#include "d12_dxil.h"
+#include "../d12_buffer_view_core.h"
 #include "../d12_native_descriptor_core.h"
 #include "poly/nir/poly_nir.h"
+#include "d12_debug.h"
+#include "d12_dxil.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -1422,6 +1423,68 @@ native_image_handle(struct trans_ctx *ctx, const struct handle_ref *h,
                                      : D12_UNIFORM_TEXTURES;
    return nir_bindless_image_agx(b, nir_imul_imm(b, index, stride),
                                  .desc_set = desc_set);
+}
+
+static nir_def *
+typed_buffer_window(nir_builder *b, nir_def *coord)
+{
+   return nir_umin_imm(b, nir_ushr_imm(b, coord, D12_TYPED_BUFFER_WINDOW_LOG2),
+                       D12_TYPED_BUFFER_WINDOWS - 1);
+}
+
+static nir_def *
+typed_buffer_coord(struct trans_ctx *ctx, nir_def *coord)
+{
+   if (!d12_native_descriptor_legacy_shapes(ctx->descriptor_generation))
+      return coord;
+   nir_builder *b = ctx->b;
+   return nir_isub(b, coord,
+                   nir_ishl_imm(b, typed_buffer_window(b, coord),
+                                D12_TYPED_BUFFER_WINDOW_LOG2));
+}
+
+static nir_def *
+typed_buffer_handle(struct trans_ctx *ctx, const struct handle_ref *h,
+                    nir_def *coord, bool writable, nir_def *valid)
+{
+   if (!d12_native_descriptor_legacy_shapes(ctx->descriptor_generation))
+      return native_image_handle(ctx, h, writable);
+   nir_builder *b = ctx->b;
+   nir_def *index = h->heap ? native_heap_index(ctx, h) : h->slot;
+   nir_def *window_stride;
+   if (h->heap) {
+      window_stride = nir_iadd_imm(
+         b,
+         nir_u2u32(
+            b, nir_udiv_imm(b, root_plane(ctx, D12_ROOT_PLANE_HEAP_PBE_NULL),
+                            ctx->native_layout.pbe_stride_B)),
+         1);
+   } else {
+      nir_def *info =
+         nir_load_global(b, 2, 32,
+                         nir_iadd(b, root_plane(ctx, D12_ROOT_PLANE_BUFINFO),
+                                  nir_imul_imm(b, nir_u2u64(b, h->slot), 8)),
+                         .align_mul = 8);
+      window_stride = nir_ushr_imm(b, nir_channel(b, info, 1), 16);
+   }
+   index = nir_iadd(b, nir_u2u32(b, index),
+                    nir_imul(b, typed_buffer_window(b, coord), window_stride));
+   const unsigned stride = writable ? ctx->native_layout.pbe_stride_B
+                                    : ctx->native_layout.texture_stride_B;
+   nir_def *offset = nir_imul_imm(b, index, stride);
+   if (valid && writable) {
+      nir_def *null_offset =
+         h->heap
+            ? nir_u2u32(b, root_plane(ctx, D12_ROOT_PLANE_HEAP_PBE_NULL))
+            : nir_imul_imm(b, window_stride, D12_TYPED_BUFFER_WINDOWS * stride);
+      offset = nir_bcsel(b, valid, offset, null_offset);
+   }
+   return nir_bindless_image_agx(
+      b, offset,
+      .desc_set =
+         h->heap
+            ? (writable ? D12_UNIFORM_HEAP_PBES : D12_UNIFORM_HEAP_TEXTURES)
+            : (writable ? D12_UNIFORM_PBES : D12_UNIFORM_TEXTURES));
 }
 
 static nir_def *
@@ -5005,8 +5068,12 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
 
          nir_def *zero = nir_imm_int(b, 0);
          nir_bindless_image_store(
-            b, native_image_handle(ctx, &h, true),
-            nir_vec4(b, get_def(ctx, p[1]), zero, zero, zero),
+            b,
+            typed_buffer_handle(ctx, &h, get_def(ctx, p[1]), true,
+                                nir_ult(b, get_def(ctx, p[1]),
+                                        resource_view_count_or_bytes(ctx, &h))),
+            nir_vec4(b, typed_buffer_coord(ctx, get_def(ctx, p[1])), zero, zero,
+                     zero),
             nir_imm_int(b, 0), nir_vec(b, vals4, 4), nir_imm_int(b, 0),
             .image_dim = GLSL_SAMPLER_DIM_BUF, .image_array = false,
             .format = PIPE_FORMAT_NONE, .access = ACCESS_NON_READABLE);
@@ -5088,7 +5155,8 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
             b, nir_u2u64(b, get_def(ctx, p[1])),
             nir_u2u64(b, nir_umax_imm(b, stride, 1)));
          access_size_B = nir_umax_imm(b, stride, 1);
-         nir_def *tex_handle = native_image_handle(ctx, &h, false);
+         nir_def *tex_handle =
+            typed_buffer_handle(ctx, &h, get_def(ctx, p[1]), false, NULL);
 
          nir_tex_instr *tex = nir_tex_instr_create(b->shader, 2);
          tex->op = nir_texop_txf;
@@ -5098,8 +5166,8 @@ translate_dxop(struct trans_ctx *ctx, const struct d12_inst *inst,
          tex->coord_components = 1;
          tex->src[0] =
             nir_tex_src_for_ssa(nir_tex_src_texture_handle, tex_handle);
-         tex->src[1] =
-            nir_tex_src_for_ssa(nir_tex_src_coord, get_def(ctx, p[1]));
+         tex->src[1] = nir_tex_src_for_ssa(
+            nir_tex_src_coord, typed_buffer_coord(ctx, get_def(ctx, p[1])));
          nir_def_init(&tex->instr, &tex->def, 4, 32);
          nir_builder_instr_insert(b, &tex->instr);
          data = &tex->def;

@@ -1027,6 +1027,7 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    list->g17p_bind_cache.bind_valid = false;
    list->g17p_bind_cache.indices_valid = false;
    list->g17p_bind_cache.segment = ~0u;
+   list->render_pass_active = false;
    d12_list_reset_api_state(list);
 
    list->uses_heap = false;
@@ -3946,7 +3947,8 @@ d12_refresh_pbe_descriptor_agx2(struct agx_pbe_packed *out,
       if (tail_B % blocksize)
          return;
 
-      unsigned elements = d->buffer_count;
+      unsigned elements =
+         MIN2(d->buffer_count, D12_TYPED_BUFFER_WINDOW_ELEMENTS);
       agx_pack(out, PBE, cfg) {
          cfg.dimension = AGX_TEXTURE_DIMENSION_2D;
          cfg.layout = AGX_LAYOUT_LINEAR;
@@ -4401,6 +4403,12 @@ d12_list_reroot_bindings(struct d12_cmd_list *list,
       cache->compact[i] = addrs[D12_ROOT_RESOURCE_BASE + i];
       cache->compact[root_count + i] = addrs[D12_ROOT_COUNTER_BASE + i];
       cache->compact[2 * root_count + i] = addrs[D12_ROOT_BUFINFO_BASE + i];
+      if (raw_table[i].resource &&
+          raw_table[i].resource->desc.Dimension ==
+             D3D12_RESOURCE_DIMENSION_BUFFER &&
+          d12_native_descriptor_legacy_shapes(
+             agx_chip_descriptor_generation(list->device->dev.chip)))
+         cache->compact[2 * root_count + i] |= (uint64_t)root_count << 48;
       cache->compact[3 * root_count + i] = addrs[D12_ROOT_RESIDENCY_BASE + i];
    }
 
@@ -4709,7 +4717,11 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       }
    }
 
-   const size_t native_desc_count = last_texture;
+   const bool buffer_windows = d12_native_descriptor_legacy_shapes(
+      agx_chip_descriptor_generation(list->device->dev.chip));
+   const size_t native_desc_count =
+      (size_t)last_texture * (buffer_windows ? D12_TYPED_BUFFER_WINDOWS : 1) +
+      (buffer_windows ? 1 : 0);
 
    *out_heap = 0;
    *out_heap_textures = 0;
@@ -4741,6 +4753,14 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
       if (!d12_root_plane_slot(list, &table[i], sources[i], i, &null_buf,
                                &null_counters, addrs))
          return false;
+   }
+
+   if (buffer_windows) {
+      for (unsigned i = 0; i < root_count; ++i) {
+         if (table[i].resource && table[i].resource->desc.Dimension ==
+                                     D3D12_RESOURCE_DIMENSION_BUFFER)
+            addrs[D12_ROOT_BUFINFO_BASE + i] |= (uint64_t)last_texture << 48;
+      }
    }
 
    for (unsigned r = 0; r < dynamic_range_count; r++) {
@@ -5124,6 +5144,25 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
          for (unsigned b = 0; b < native_layout.pbe_stride_B; b++)
             fprintf(stderr, " %02x", raw[b]);
          fprintf(stderr, "\n");
+      }
+   }
+
+   if (buffer_windows) {
+      for (unsigned i = 0; i < last_texture; ++i) {
+         for (unsigned window = 1; window < D12_TYPED_BUFFER_WINDOWS;
+              ++window) {
+            struct d12_descriptor chunk;
+            if (!d12_buffer_window_descriptor(&table[i], window, &chunk))
+               continue;
+            const size_t index = (size_t)window * last_texture + i;
+            if (!d12_refresh_texture_descriptor(
+                   list->device, descs + index * native_layout.texture_stride_B,
+                   &chunk) ||
+                !d12_refresh_pbe_descriptor(
+                   list->device, pbes + index * native_layout.pbe_stride_B,
+                   &chunk))
+               return false;
+         }
       }
    }
 
@@ -5715,7 +5754,8 @@ d12_refresh_texture_descriptor_agx2(struct agx_texture_packed *out,
       const struct util_format_description *fdesc =
          util_format_description(pf);
       unsigned blocksize = util_format_get_blocksize(pf);
-      unsigned elements = d->buffer_count;
+      unsigned elements =
+         MIN2(d->buffer_count, D12_TYPED_BUFFER_WINDOW_ELEMENTS);
       uint64_t read_address = d->address;
       if (res->reserved &&
           !agx_addr_is_ro(&res->device->dev, read_address))
@@ -6020,8 +6060,18 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
          d->counter_address
             ? d->counter_address
             : list->null_counters + slot * sizeof(uint32_t);
+      const unsigned window_stride =
+         d12_native_descriptor_legacy_shapes(
+            agx_chip_descriptor_generation(list->device->dev.chip))
+            ? fixup->table_count
+            : 0;
+      const uint64_t window_layout =
+         d->resource &&
+               d->resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER
+            ? (uint64_t)window_stride << 48
+            : 0;
       tables[2 * fixup->table_count + slot] =
-         d12_descriptor_bufinfo(d);
+         d12_descriptor_bufinfo(d) | window_layout;
       tables[3 * fixup->table_count + slot] =
          d12_descriptor_sparse_residency_address(d);
 
@@ -6043,6 +6093,31 @@ d12_cmd_list_refresh_descriptors(struct d12_cmd_list *list)
             return false;
          if (!d12_refresh_pbe_descriptor(list->device, pbe, d))
             return false;
+      }
+
+      for (unsigned window = 1;
+           window_stride && window < D12_TYPED_BUFFER_WINDOWS; ++window) {
+         struct d12_descriptor chunk;
+         const bool live = d12_buffer_window_descriptor(d, window, &chunk);
+         const size_t index = (size_t)window * window_stride + slot;
+         if (fixup->textures_gpu) {
+            void *out = d12_list_data_cpu(
+               list,
+               fixup->textures_gpu + index * native_layout.texture_stride_B);
+            if (!out ||
+                !(live
+                     ? d12_refresh_texture_descriptor(list->device, out, &chunk)
+                     : d12_set_null_texture_descriptor(list->device, out)))
+               return false;
+         }
+         if (fixup->pbes_gpu) {
+            void *out = d12_list_data_cpu(
+               list, fixup->pbes_gpu + index * native_layout.pbe_stride_B);
+            if (!out ||
+                !(live ? d12_refresh_pbe_descriptor(list->device, out, &chunk)
+                       : d12_set_null_pbe_descriptor(list->device, out)))
+               return false;
+         }
       }
 
       if (d12_debug()->dump_descriptor_fixups)

@@ -55,6 +55,27 @@ main(void)
                                        UINT64_C(0x100000004), 8));
    assert(!d12_buffer_access_in_bounds(UINT64_MAX, UINT64_MAX - 3, 8));
 
+   /* Windows preserve the full logical count and a 64-bit byte offset,
+    * including a format whose fourth window begins beyond 4 GiB. */
+   for (unsigned window = 0; window < D12_TYPED_BUFFER_WINDOWS; ++window) {
+      uint32_t count;
+      assert(d12_typed_buffer_window(D12_LEGACY_TYPED_BUFFER_MAX_ELEMENTS, 16,
+                                     window, &offset, &count));
+      assert(offset ==
+             (uint64_t)window * D12_TYPED_BUFFER_WINDOW_ELEMENTS * 16);
+      assert(count == D12_TYPED_BUFFER_WINDOW_ELEMENTS);
+   }
+   uint32_t count;
+   assert(d12_typed_buffer_window(D12_TYPED_BUFFER_WINDOW_ELEMENTS + 1, 2, 1,
+                                  &offset, &count));
+   assert(offset == UINT64_C(0x10000000) && count == 1);
+   assert(!d12_typed_buffer_window(D12_TYPED_BUFFER_WINDOW_ELEMENTS, 2, 1,
+                                   &offset, &count));
+   assert(!d12_typed_buffer_window(UINT32_MAX, 4, D12_TYPED_BUFFER_WINDOWS,
+                                   &offset, &count));
+   assert(!d12_typed_buffer_window(1, 0, 0, &offset, &count));
+   assert(!d12_typed_buffer_window(0, 4, 0, &offset, &count));
+
    puts("d12_buffer_view_core_tests: PASS");
    return 0;
 }

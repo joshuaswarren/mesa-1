@@ -28,18 +28,19 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#include "d12_frontend.h"
 #include "d12_agx3_vdm_state_update_core.h"
+#include "d12_buffer_view_core.h"
 #include "d12_bundle_state_core.h"
 #include "d12_command_validation_core.h"
 #include "d12_device_removal_core.h"
-#include "d12_native_descriptor_core.h"
+#include "d12_frontend.h"
 #include "d12_native_compute.h"
+#include "d12_native_descriptor_core.h"
 #include "d12_queue_timeline_core.h"
-#include "d12_sparse_residency_core.h"
+#include "d12_raytracing_core.h"
 #include "d12_render_pass_core.h"
 #include "d12_sample_position_core.h"
-#include "d12_raytracing_core.h"
+#include "d12_sparse_residency_core.h"
 #include "d12_viewport_math.h"
 
 #include "agx3_compute_program_core.h"
@@ -2758,6 +2759,25 @@ void d12_pack_sampler_descriptor(struct d12_device *device,
 bool d12_set_null_texture_descriptor(struct d12_device *device, void *out);
 bool d12_set_null_pbe_descriptor(struct d12_device *device, void *out);
 void d12_apply_texture_shape(struct d12_descriptor *d, unsigned shape);
+/* Native windows share the view's original count in the logical metadata. */
+static inline bool
+d12_buffer_window_descriptor(const struct d12_descriptor *d, unsigned window,
+                             struct d12_descriptor *out)
+{
+   uint64_t offset;
+   uint32_t count;
+   if (!d->resource ||
+       d->resource->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER ||
+       d->buffer_kind != D12_BUFFER_VIEW_TYPED ||
+       !d12_typed_buffer_window(d->buffer_count, d->buffer_stride_B, window,
+                                &offset, &count))
+      return false;
+   *out = *d;
+   out->address += offset;
+   out->buffer_count = count;
+   return true;
+}
+
 bool d12_refresh_texture_descriptor(struct d12_device *device, void *out,
                                     const struct d12_descriptor *d);
 bool d12_refresh_pbe_descriptor(struct d12_device *device, void *out,

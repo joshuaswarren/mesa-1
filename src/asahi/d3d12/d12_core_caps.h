@@ -74,6 +74,7 @@ struct d12_core_caps {
    bool native_16bit_shader_ops;
    bool typed_uav_load_additional_formats;
    bool full_texture_sampling;
+   bool point_sampling_addresses_never_round_up;
    bool wave_ops;
    uint32_t wave_lane_count_min;
    uint32_t wave_lane_count_max;
