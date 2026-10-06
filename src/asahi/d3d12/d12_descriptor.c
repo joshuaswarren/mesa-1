@@ -414,6 +414,15 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
     * cannot accept an array coordinate/LOD ABI, even for a one-layer view. */
    const unsigned windows = d12_native_descriptor_legacy_shapes(
       agx_chip_descriptor_generation(device->dev.chip)) ? 3 : 1;
+   /* The builders emit the null descriptor for every kind but SRV and UAV
+    * (texture) and UAV (PBE), and for any slot without a resource, so copy
+    * the heap's null natives for those instead of packing: a CBV write
+    * packs nothing. On Gen9/10 each pack is an AGX2 pack, a genxml unpack
+    * and a generation repack, so this is most of a CBV write there. */
+   const bool null_texture =
+      !slot->resource ||
+      (slot->kind != D12_DESC_SRV && slot->kind != D12_DESC_UAV);
+   const bool null_pbe = !slot->resource || slot->kind != D12_DESC_UAV;
    uint8_t *textures = heap->texture_bo ? agx_bo_map(heap->texture_bo) : NULL;
    uint8_t *pbes = heap->pbe_bo ? agx_bo_map(heap->pbe_bo) : NULL;
    for (unsigned window = 0; window < windows; ++window) {
@@ -435,14 +444,14 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
             ? D12_TEXTURE_SHAPE_2D : D12_TEXTURE_SHAPE_2D_ARRAY);
       if (textures) {
          uint8_t *out = textures + native_index * heap->texture_stride_B;
-         if (!slot->resource)
+         if (null_texture)
             memcpy(out, heap->null_texture, heap->texture_stride_B);
          else
             d12_refresh_texture_descriptor(device, out, &effective);
       }
       if (pbes) {
          uint8_t *out = pbes + native_index * heap->pbe_stride_B;
-         if (!slot->resource)
+         if (null_pbe)
             memcpy(out, heap->null_pbe, heap->pbe_stride_B);
          else
             d12_refresh_pbe_descriptor(device, out, &effective);
