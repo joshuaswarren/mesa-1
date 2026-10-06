@@ -9400,9 +9400,13 @@ agx_nir_lower_g17p_f16_classify(nir_builder *b, nir_alu_instr *alu,
       for (unsigned constant = 0; constant < 2; ++constant) {
          const unsigned value = constant ^ 1;
          nir_alu_instr *candidate = nir_src_as_alu(alu->src[value].src);
-         const double compare = nir_src_is_const(alu->src[constant].src)
-                                   ? nir_src_as_float(alu->src[constant].src)
-                                   : 0.0;
+         /* The constant may be a vector read through a swizzle (isinf of a
+          * vec2 compares each lane with one splatted infinity), so read the
+          * lane this comparison uses rather than the whole source. */
+         const nir_scalar k = nir_scalar_chase_alu_src(
+            nir_get_scalar(&alu->def, 0), constant);
+         const double compare =
+            nir_scalar_is_const(k) ? nir_scalar_as_float(k) : 0.0;
 
          if (candidate && candidate->op == nir_op_fabs &&
              nir_src_bit_size(candidate->src[0].src) == 16 &&
