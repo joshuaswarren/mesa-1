@@ -110,6 +110,8 @@ agx3_slot_assign_with_entry(const struct agx3_slot_instr *instrs, unsigned n,
          return false;
       if (I->preferred_slot > nslots || (!I->is_async && I->preferred_slot))
          return false;
+      if (I->coalesce_src > I->nr_srcs || (!I->is_async && I->coalesce_src))
+         return false;
       const uint16_t valid_slots = (uint16_t)((1u << nslots) - 1u);
       if ((I->nr_srcs < 32 && (I->late_src_mask >> I->nr_srcs)) ||
           (!I->is_async && I->late_src_mask))
@@ -224,6 +226,13 @@ agx3_slot_assign_with_entry(const struct agx3_slot_instr *instrs, unsigned n,
           */
          uint8_t slot = I->preferred_slot;
          if (!slot) {
+            if (I->coalesce_src) {
+               const unsigned source = I->src[I->coalesce_src - 1];
+               const uint8_t producer_slot = reg_slot[source];
+               if (producer_slot && slot_waited[producer_slot] &&
+                   !(I->transient_slots & (1u << (producer_slot - 1))))
+                  slot = producer_slot;
+            }
             for (unsigned t = 0; t < nslots && !slot; ++t) {
                const uint8_t candidate = (uint8_t)((next + t) % nslots + 1);
                if (slot_waited[candidate] ||

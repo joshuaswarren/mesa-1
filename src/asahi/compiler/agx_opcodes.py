@@ -288,6 +288,12 @@ op("texture_sample",
       srcs = 6, imms = [DIM, LOD_MODE, MASK, SCOREBOARD, OFFSET, SHADOW,
                         QUERY_LOD, GATHER, SPARSE])
 
+# Post-RA native publication into the sampler-private file. IMM names an
+# immutable resource value; it is not a GPR destination. Sources are the
+# coordinate pair and optional comparison reference.
+op("publish_texture_agx3", None, dests = 0, srcs = 2, imms = [IMM],
+   can_eliminate = False, can_reorder = False)
+
 # Immutable constant-program input. IMM names the logical uniform half in
 # the frozen loader interface, not a GPR or an already assigned TPS offset.
 op("load_cprog_agx3", None, srcs = 0, imms = [IMM])

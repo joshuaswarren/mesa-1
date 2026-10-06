@@ -69,6 +69,8 @@ libasahi_agx_files = files(
   'agx3_zs_core.c',
   'agx3_rt_core.c',
   'agx3_slot_core.c',
+  'agx3_resource_ir.c',
+  'agx3_lower_texture_publications.c',
   'agx3_fixed_dependencies.c',
   'agx3_alu_core.c',
   'agx3_funop_core.c',
@@ -224,6 +226,16 @@ if with_tests
     executable(
       'agx3_staging_test',
       files('test/test-agx3-staging.c'),
+      include_directories : include_directories('.'),
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'agx3_resource_ir',
+    executable(
+      'agx3_resource_ir_test',
+      files('test/test-agx3-resource-ir.c', 'agx3_resource_ir.c', 'agx3_slot_core.c'),
       include_directories : include_directories('.'),
     ),
     suite : ['asahi'],

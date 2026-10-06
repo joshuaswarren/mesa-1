@@ -7013,6 +7013,108 @@ TEST_F(AGX3PackBinary, FragmentImplicit2DStagesNativeCoordinates)
    EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
 }
 
+TEST_F(AGX3PackBinary, ExplicitCoordinatePublicationHasIndependentEvent)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   for (uint32_t offset : {0u, 0x21u}) {
+      agx_builder *b = builder(enc);
+      key.dev.chip = AGX_CHIP_G17P;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index coord = agx_register(0, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      coord.discard = true;
+      agx_index dest = agx_register(8, AGX_SIZE_32);
+      dest.channels_m1 = 3;
+      agx_instr *sample = agx_texture_sample_to(
+         b, dest, coord, agx_immediate(0), agx_immediate(0), agx_immediate(0),
+         agx_immediate(0), offset ? agx_immediate(offset) : agx_null(),
+         AGX_DIM_2D, AGX_LOD_MODE_AUTO_LOD, 0, offset != 0, false, false,
+         AGX_GATHER_NONE, false);
+      sample->mask = 15;
+      sample->offset_xyz = offset;
+      agx_stop(b);
+      ASSERT_TRUE(agx3_lower_texture_publications(b->shader));
+      ASSERT_EQ(agx_texture_resource(sample), 1);
+      EXPECT_FALSE(agx3_lower_texture_publications(b->shader));
+
+      std::vector<uint8_t> want;
+      uint8_t bytes[AGX3_TEX_MAX_LENGTH], len = 0;
+      for (unsigned h = 0; h < 4; h += 2) {
+         ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, h, h, 1, 0, false, true,
+                                             bytes, &len));
+         append(want, bytes, len);
+      }
+      ASSERT_TRUE(agx3_pixel_colour_entry(enc, bytes, &len));
+      append(want, bytes, len);
+      struct agx3_tex_sample_desc desc = {
+         .dest = 8, .coord = 0, .width = AGX3_TEX_W32, .mask = 15,
+         /* Publication generation1 is waited, then sample generation2
+          * recycles the same physical slot. */
+         .lod = AGX3_TEX_LOD_AUTO, .slot = 1, .wait_mask = 1,
+         .coord_kill = true, .final = true,
+         .sample_abi = AGX3_TEX_SAMPLE_ABI_DRIVER,
+      };
+      desc.offset = offset != 0;
+      desc.offset_xyz = offset;
+      ASSERT_TRUE(agx3_tex_encode_sample(enc, &desc, bytes, &len));
+      append(want, bytes, len);
+      struct agx3_encoded_end end;
+      ASSERT_TRUE(agx3_pack_end(enc, &end));
+      append(want, end.bytes, end.length);
+      EXPECT_EQ(pack(b), want);
+      EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
+   }
+}
+
+TEST_F(AGX3PackBinary, PublicationReuseFollowsPhysicalValuesAndEffects)
+{
+   for (unsigned mutation = 0; mutation < 4; ++mutation) {
+      agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);
+      key.dev.chip = AGX_CHIP_G17P;
+      b->shader->stage = MESA_SHADER_FRAGMENT;
+      agx_index coord = agx_register(0, AGX_SIZE_32);
+      coord.channels_m1 = 1;
+      agx_instr *samples[4];
+      for (unsigned i = 0; i < 4; ++i) {
+         if (i == 2) {
+            if (mutation == 1)
+               agx_mov_imm_to(b, agx_register(1, AGX_SIZE_16), 0);
+            else if (mutation == 2)
+               agx_wait_pix(b, 1);
+            else
+               agx_mov_imm_to(b, agx_register(60, AGX_SIZE_32), 0);
+         }
+         agx_index dest = agx_register(8 + 8 * i, AGX_SIZE_32);
+         dest.channels_m1 = 3;
+         samples[i] = agx_texture_sample_to(
+            b, dest, coord, agx_immediate(0), agx_immediate(0),
+            agx_immediate(i), agx_immediate(0), agx_null(), AGX_DIM_2D,
+            AGX_LOD_MODE_AUTO_LOD, 0, false, false, false, AGX_GATHER_NONE, false);
+         samples[i]->mask = 15;
+         if (mutation == 3 && i == 1) {
+            /* A sample result can redefine the original coordinate GPRs. */
+            samples[i]->dest[0].value = 0;
+         }
+      }
+      agx_stop(b);
+      ASSERT_TRUE(agx3_lower_texture_publications(b->shader));
+      EXPECT_EQ(agx_texture_resource(samples[0]), agx_texture_resource(samples[1]));
+      EXPECT_EQ(agx_texture_resource(samples[2]), agx_texture_resource(samples[3]));
+      if (mutation)
+         EXPECT_NE(agx_texture_resource(samples[0]), agx_texture_resource(samples[2]));
+      else
+         EXPECT_EQ(agx_texture_resource(samples[0]), agx_texture_resource(samples[2]));
+      unsigned publications = 0;
+      agx_foreach_instr_global(b->shader, I)
+         publications += I->op == AGX_OPCODE_PUBLISH_TEXTURE_AGX3;
+      EXPECT_EQ(publications, mutation ? 2u : 1u);
+      if (!mutation) {
+         EXPECT_FALSE(pack(b).empty());
+         EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
+      }
+   }
+}
+
 TEST_F(AGX3PackBinary, ExportDoesNotConsumeRealReadWait)
 {
    for (int e = 0; e < 2; ++e) {
@@ -13823,7 +13925,8 @@ TEST_F(AGX3PackBinary, ComputeImmediateLodSample)
    ASSERT_TRUE(agx3_pack_end(enc, &end));
    append(want, end.bytes, end.length);
    EXPECT_EQ(pack(b), want);
-   EXPECT_EQ(b->shader->agx3_staging_halfs, 8);
+   /* Only the two f32 coordinate COPYs occupy staging. */
+   EXPECT_EQ(b->shader->agx3_staging_halfs, 4);
 }
 
 TEST_F(AGX3PackBinary, Texture3DImmediateLodStagesThirdCoordinate)
@@ -14169,9 +14272,13 @@ TEST_F(AGX3PackBinary, FetchAndSampleKeepIndependentStagingBanks)
       agx_stop(b);
       const auto binary = pack(b);
       uint8_t bytes[AGX3_TEX_MAX_LENGTH], len;
-      /* The second operation must use bank 8 while the first consumes bank
-       * 0. No full shader drain is needed when another bank is available. */
-      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, 8, 8, 2, 0, false, false,
+      /* The immediate sample publishes only its coordinate pair: LOD is
+       * encoded in SMP and occupies no staging halves. The sample allocator
+       * places its pair immediately after the fetch's four-half range; the
+       * existing fetch ABI searches in eight-half steps. Both keep the first
+       * consumer in flight, with no wait merely to reuse its storage. */
+      const unsigned second_base = fetch_first ? 4 : 8;
+      ASSERT_TRUE(agx3_tex_stage_copy_hints(enc, second_base, 8, 2, 0, false, false,
                                             bytes, &len));
       auto second = std::search(binary.begin(), binary.end(), bytes, bytes + len);
       ASSERT_NE(second, binary.end()) << "fetch_first=" << fetch_first;

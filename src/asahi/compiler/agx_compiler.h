@@ -43,6 +43,8 @@ enum agx_index_type {
    AGX_INDEX_UNIFORM = 3,
    AGX_INDEX_REGISTER = 4,
    AGX_INDEX_UNDEF = 5,
+   /* Post-RA value in the sampler-private file, independent of GPRs. */
+   AGX_INDEX_RESOURCE = 6,
 };
 
 enum agx_size { AGX_SIZE_16 = 0, AGX_SIZE_32 = 1, AGX_SIZE_64 = 2 };
@@ -470,7 +472,15 @@ typedef struct {
    bool agx3_tex_coord_component : 1;
    bool agx3_tex_coord_start : 1;
    bool agx3_tex_coords_staged : 1;
+
 } agx_instr;
+
+static inline uint32_t
+agx_texture_resource(const agx_instr *I)
+{
+   return I->op == AGX_OPCODE_TEXTURE_SAMPLE && I->nr_srcs &&
+          I->src[0].type == AGX_INDEX_RESOURCE ? I->src[0].value : 0;
+}
 
 static inline bool
 agx_is_vertex_store(const agx_instr *I)
@@ -1135,6 +1145,7 @@ void agx_lower_divergent_shuffle(agx_context *ctx);
 void agx_lower_pseudo(agx_context *ctx);
 void agx_lower_spill(agx_context *ctx);
 void agx3_split_vector_stack_access(agx_context *ctx);
+bool agx3_lower_texture_publications(agx_context *ctx);
 void agx_lower_uniform_sources(agx_context *ctx);
 void agx_opt_cse(agx_context *ctx);
 void agx_opt_compact_constants(agx_context *ctx);

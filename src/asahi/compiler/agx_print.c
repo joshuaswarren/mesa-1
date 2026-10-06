@@ -78,6 +78,10 @@ agx_print_index(agx_index index, bool is_float, FILE *fp)
       fprintf(fp, "undef");
       break;
 
+   case AGX_INDEX_RESOURCE:
+      fprintf(fp, "resource%u:%uh", index.value, agx_index_size_16(index));
+      return;
+
    case AGX_INDEX_UNIFORM:
       agx_print_sized('u', index.value, index.size, fp);
       break;

@@ -29,8 +29,9 @@ extern "C" {
 #endif
 
 /* Normal register dependencies occupy tokens 0..255. The next eight tokens
- * represent native sample staging groups (eight halves per group), distinct
- * from GPR allocation and from the older implicit-coordinate transaction.
+ * represent compound sample staging groups (eight halves per group), followed
+ * by the 256 physical aliases used by explicit native resource values. These
+ * are distinct from GPR allocation and the older implicit-coordinate token.
  * Static Mesa stack
  * offsets are 16-bit byte immediates; their 32768 addressable half-registers
  * occupy a separate token range so async copy/rld ordering is exact. The final
@@ -39,8 +40,11 @@ extern "C" {
 #define AGX3_SLOT_GPR_TOKENS 256u
 #define AGX3_SLOT_STAGING_TOKEN_BASE AGX3_SLOT_GPR_TOKENS
 #define AGX3_SLOT_STAGING_GROUPS 8u
-#define AGX3_SLOT_CPROG_INPUT_TOKEN \
+#define AGX3_SLOT_RESOURCE_TOKEN_BASE \
    (AGX3_SLOT_STAGING_TOKEN_BASE + AGX3_SLOT_STAGING_GROUPS)
+#define AGX3_SLOT_RESOURCE_HALVES 256u
+#define AGX3_SLOT_CPROG_INPUT_TOKEN \
+   (AGX3_SLOT_RESOURCE_TOKEN_BASE + AGX3_SLOT_RESOURCE_HALVES)
 #define AGX3_SLOT_TPS_TOKEN_BASE \
    (AGX3_SLOT_CPROG_INPUT_TOKEN + 1u)
 #define AGX3_SLOT_TPS_HALF_TOKENS 32768u
@@ -69,6 +73,12 @@ struct agx3_slot_instr {
     * its descriptor operands retain the existing issue-time contract. */
    uint32_t late_src_mask;
    uint8_t preferred_slot; /* 0=round-robin, otherwise required slot */
+   /* Optional source index plus one whose completed producer slot may be
+    * recycled for this event. This is a preference, never a new wait: the
+    * source's actual generation must already be synchronized by dataflow.
+    * Distinct events remain distinct even when they use the same slot.
+    */
+   uint8_t coalesce_src;
    /* The round-robin slot may be reissued while an earlier generation of the
     * same kind is still live there, since the instruction cannot wait for it:
     * Apple reissues fragment coefficient-load slots without any wait. */

@@ -8784,6 +8784,11 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
    /* Set last-use bits after lowering pseudo for best results. */
    agx_opt_register_cache(ctx);
 
+   /* Expose native publication events after physical GPR allocation. Keep
+    * the established source hints on the publication that really reads them.
+    */
+   AGX_PASS(ctx, agx3_lower_texture_publications);
+
    if (ctx->is_preamble &&
        ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
        !ctx->agx3_cprog_inputs_lowered &&
