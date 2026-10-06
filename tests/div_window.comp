@@ -1,0 +1,42 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer In { uint base; uint seed; } p;
+layout(std430, binding = 1) writeonly buffer Out { uint o[]; } outp;
+
+uint pcg(uint v)
+{
+  uint s = v * 747796405u + 2891336453u;
+  uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+
+uint with_exp(uint bits, uint e) { return (bits & 0x807fffffu) | (e << 23u); }
+
+/* Exponents at the zero/denormal (0), normal and 2^126..inf (252..255) edges,
+ * plus a 46..50 group that keeps the residual of the quotient near 2^-126. */
+const uint EA[16] = uint[](0u, 1u, 2u, 46u, 47u, 48u, 49u, 50u, 126u, 127u, 128u, 252u, 253u, 254u, 255u, 255u);
+const uint ED[16] = uint[](0u, 0u, 1u, 2u, 3u, 126u, 127u, 128u, 250u, 251u, 252u, 253u, 254u, 255u, 1u, 252u);
+
+void main()
+{
+  for (uint j = 0u; j < 32u; j++) {
+    uint i = gl_GlobalInvocationID.x * 32u + j;
+    uint x = p.base + i;
+    uint h0 = pcg(x ^ p.seed), h1 = pcg(h0 + 1u), h2 = pcg(h1 + 2u);
+    uint a = h0, d = h1, mode = h2 & 3u;
+    if (mode == 1u) {
+      a = with_exp(a, EA[(h2 >> 2u) & 15u]);
+      d = with_exp(d, ED[(h2 >> 6u) & 15u]);
+    } else if (mode == 2u) {
+      uint ed = 1u + (h2 >> 2u) % 254u;
+      int e = int((h2 >> 10u) % 14u) + ((h2 & 0x80000000u) != 0u ? 117 : -128);
+      a = with_exp(a, uint(clamp(int(ed) + e, 0, 255)));
+      d = with_exp(d, ed);
+    } else if (mode == 3u) {
+      a = with_exp(a, 1u + (h2 >> 2u) % 254u);
+      d = with_exp(d, 1u + (h2 >> 10u) % 254u);
+    }
+    outp.o[2u * i] = floatBitsToUint(uintBitsToFloat(a) / uintBitsToFloat(d));
+    outp.o[2u * i + 1u] = floatBitsToUint(1.0 / uintBitsToFloat(x));
+  }
+}
