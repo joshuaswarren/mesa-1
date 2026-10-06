@@ -1787,6 +1787,20 @@ struct d12_fragment_state_cache_entry {
    uint16_t size;
 };
 
+/* Fixed PPP groups, excluding culling and the fragment shader words.
+ * Kept by value so switching/releasing a PSO cannot leave a dangling key. */
+struct d12_fragment_static_state {
+   struct d12_depth_stencil_state ds;
+   struct agx_fragment_control_packed control;
+   struct agx_fragment_face_2_packed face;
+   struct agx_fragment_shader_word_0_packed fs_counts;
+   struct agx_output_select_packed vs_osel, fs_osel;
+   struct agx_varying_counts_packed counts_32, counts_16;
+   uint32_t output_size;
+   enum agx_polygon_mode polygon_mode;
+   bool smooth_line;
+};
+
 struct d12_segment {
    /* Firmware timestamp destination, bound through agx_bind_timestamps. */
    struct drm_asahi_timestamp timestamp_end;
@@ -1956,6 +1970,7 @@ struct d12_segment {
     * just the fragment shader group, Honeykrisp's root-dirty update, rather
     * than a whole fragment state. `valid` false: unknown. */
    struct d12_fragment_state_cache_entry fragment_loaded;
+   struct d12_fragment_static_state fragment_static;
    uint32_t vs_state_usc;
    uint32_t vs_state_restart;
    const struct d12_gfx_stage *vs_state_stage;
@@ -2268,6 +2283,9 @@ struct d12_cmd_list {
    uint8_t binding_cache_next[2];
    /* Round-robin victim selection for the bounded USC cache probes. */
    uint32_t usc_cache_tick;
+   const uint8_t *last_gfx_usc_cpu[2];
+   size_t last_gfx_usc_size[2];
+   uint32_t last_gfx_usc[2];
    uint64_t gfx_cache_generation;
    struct d12_gfx_upload_cache_entry
       gfx_upload_cache[2][D12_GFX_UPLOAD_CACHE_SIZE];

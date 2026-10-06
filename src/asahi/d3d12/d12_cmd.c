@@ -1018,6 +1018,7 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    list->stream_cur = d12_list_stream_map(list);
    list->data_floor = list->stream_bo->size;
    list->usc_offset = 0;
+   memset(list->last_gfx_usc_size, 0, sizeof(list->last_gfx_usc_size));
    list->segment_count = 0;
    list->cdm_open = false;
    list->render_open = false;
@@ -7900,6 +7901,19 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
 
    struct agx_usc_builder b = agx_usc_builder(cpu, agx_usc_size(18));
 
+   /* The ordinary AGX2 stages have a lowered-NIR root-use proof. A root
+    * pointer that the stage never reads need not be fetched by the USC.
+    * Poly stages retain their complete driver parameter ABI. */
+   const bool ordinary_agx2 =
+      agx_chip_command_stream_generation(device->dev.chip) ==
+         AGX_CS_GENERATION_AGX2 &&
+      !list->pso->has_gs && !list->pso->has_tess && !list->pso->has_mesh;
+   const bool root_needed = !ordinary_agx2 || st->reads_root;
+   /* The frontend's root/buffer-only proof excludes texture and image
+    * inputs. Spilled tilebuffers retain the complete descriptor ABI. */
+   const bool table_inputs_needed =
+      !ordinary_agx2 || !st->g17p_root_only || agx_tilebuffer_spills(tib);
+
    /* USC uniform records must be emitted in ascending register order.
     * Fragment registers 4..11 carry D3D12's four blend constants, followed
     * by the fragment root at 12 and the texture-heap base at 16. Keeping the
@@ -7907,12 +7921,13 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
     * constants whenever a shader sampled and blended in the same draw. */
    if (fragment) {
       agx_usc_uniform(&b, 4, 8, blend_gpu);
-      agx_usc_uniform(&b, D12_UNIFORM_FRAGMENT_ROOT, D12_UNIFORM_ROOT_REGS,
-                      root_gpu);
-   } else {
+      if (root_needed)
+         agx_usc_uniform(&b, D12_UNIFORM_FRAGMENT_ROOT, D12_UNIFORM_ROOT_REGS,
+                         root_gpu);
+   } else if (root_needed) {
       agx_usc_uniform(&b, D12_UNIFORM_ROOT, D12_UNIFORM_ROOT_REGS, root_gpu);
    }
-   if (textures_gpu)
+   if (textures_gpu && table_inputs_needed)
       agx_usc_uniform(&b, D12_UNIFORM_TEXTURES, D12_UNIFORM_TEXTURE_REGS,
                       textures_gpu);
 
@@ -7962,7 +7977,7 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
       agx_usc_uniform(&b, D12_UNIFORM_HEAP, D12_UNIFORM_HEAP_REGS,
                       heap_gpu);
    }
-   if (pbes_gpu) {
+   if (pbes_gpu && table_inputs_needed) {
       agx_usc_uniform(&b, D12_UNIFORM_PBES, D12_UNIFORM_PBE_REGS,
                       pbes_gpu);
    }
@@ -8052,6 +8067,17 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
                 usc_used, (size_t)agx_usc_size(18));
       list->state = D12_LIST_ERROR;
       return 0;
+   }
+
+   if (ordinary_agx2) {
+      /* Cull-only PSOs often link the same shader. Reuse identical USC
+       * words across them so a cull switch does not reload that shader. */
+      if (list->last_gfx_usc_size[fragment] == usc_used &&
+          memcmp(cpu, list->last_gfx_usc_cpu[fragment], usc_used) == 0)
+         return list->last_gfx_usc[fragment];
+      list->last_gfx_usc_cpu[fragment] = cpu;
+      list->last_gfx_usc_size[fragment] = usc_used;
+      list->last_gfx_usc[fragment] = usc;
    }
 
    return usc;
@@ -10278,6 +10304,8 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
                             uint64_t heap_pbes, uint64_t heap_samplers,
                             uint64_t draw, uint64_t blend, uint64_t vb_params)
 {
+   const bool agx2 = agx_chip_command_stream_generation(
+                        list->device->dev.chip) == AGX_CS_GENERATION_AGX2;
    uint64_t hash = ((uintptr_t)pso >> 4) ^ root ^ textures ^ pbes ^ draw ^
                    blend ^ heap ^ heap_textures ^ heap_pbes ^ heap_samplers ^
                    vb_params;
@@ -10303,7 +10331,9 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
           entry->heap_pbes == heap_pbes &&
           entry->heap_samplers == heap_samplers && entry->draw == draw &&
           entry->blend == blend && entry->vb_params == vb_params &&
-          memcmp(&entry->tib, tib, sizeof(*tib)) == 0)
+          (agx2 ? (!fragment ||
+                   memcmp(&entry->tib.usc, &tib->usc, sizeof(tib->usc)) == 0)
+                : memcmp(&entry->tib, tib, sizeof(*tib)) == 0))
          return entry;
    }
 
@@ -10314,6 +10344,24 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
                                         (D12_GFX_UPLOAD_CACHE_SIZE - 1)];
    victim->valid = false;
    return victim;
+}
+
+static struct d12_fragment_static_state
+d12_fragment_static_state(const struct d12_pipeline_state *pso)
+{
+   struct d12_fragment_static_state key = {0};
+   key.ds = pso->ds;
+   key.control = pso->fs.linked.fragment_control;
+   key.face = pso->fs.frag_face;
+   key.fs_counts = pso->fs.fs_counts;
+   key.vs_osel = pso->uvs.osel;
+   key.fs_osel = pso->fs.linked.osel;
+   key.counts_32 = pso->varyings.counts_32;
+   key.counts_16 = pso->varyings.counts_16;
+   key.output_size = pso->uvs.size;
+   key.polygon_mode = pso->raster.polygon_mode;
+   key.smooth_line = pso->raster.smooth_line;
+   return key;
 }
 
 static struct d12_fragment_state_cache_entry *
@@ -11902,8 +11950,22 @@ vs_state_emitted:
        * fragment shader words: load only those. */
       const struct d12_fragment_state_cache_entry *loaded =
          &seg->fragment_loaded;
+      const bool pso_changed = !loaded->valid || loaded->pso != pso;
+      struct d12_fragment_static_state static_state;
+      bool static_same = !pso_changed;
+      if (pso_changed) {
+         static_state = d12_fragment_static_state(pso);
+         static_same = cacheable_gfx_upload &&
+                       agx_chip_command_stream_generation(device->dev.chip) ==
+                          AGX_CS_GENERATION_AGX2 &&
+                       memcmp(&static_state, &seg->fragment_static,
+                              sizeof(static_state)) == 0;
+      }
+      /* A PSO switch with identical fixed groups only changes culling and
+       * the shader words. Do not reload depth/stencil, output routing and
+       * interpolation for those switches. */
       const bool only_fs_words_differ =
-         loaded->valid && loaded->pso == pso && loaded->topology == topology &&
+         loaded->valid && static_same && loaded->topology == topology &&
          loaded->dsv_flags == seg->dsv_flags &&
          loaded->stencil_ref_front == list->stencil_ref_front &&
          loaded->stencil_ref_back == list->stencil_ref_back &&
@@ -11914,9 +11976,12 @@ vs_state_emitted:
 
       if (only_fs_words_differ &&
           (!fragment_cache_hit || seg->fragment_ppp_gpu != fragment_cache->gpu)) {
-         if (loaded->fs_usc != fs_usc || loaded->varyings != varyings) {
+         if (pso_changed || loaded->fs_usc != fs_usc ||
+             loaded->varyings != varyings) {
             struct AGX_PPP_HEADER present = {
-               .fragment_shader = true,
+               .cull = pso_changed,
+               .fragment_shader =
+                  loaded->fs_usc != fs_usc || loaded->varyings != varyings,
                .viewport_count = 1,
             };
             size_t size = agx_ppp_update_size(&present);
@@ -11927,15 +11992,26 @@ vs_state_emitted:
                return;
             struct agx_ppp_update ppp = agx_new_ppp_update(
                (struct agx_ptr){.cpu = cpu, .gpu = gpu}, size, &present);
-            agx_ppp_push_packed(&ppp, &pso->fs.fs_counts,
-                                FRAGMENT_SHADER_WORD_0);
-            agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_1, cfg) {
-               cfg.pipeline = fs_usc;
+            if (pso_changed) {
+               agx_ppp_push(&ppp, CULL, cfg) {
+                  cfg.front_face_ccw = pso->raster.front_face_ccw;
+                  cfg.cull_front = pso->raster.cull_front;
+                  cfg.cull_back = pso->raster.cull_back;
+                  cfg.depth_clip = pso->raster.depth_clip;
+               }
             }
-            agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_2, cfg) {
-               cfg.cf_bindings = varyings;
+            if (present.fragment_shader) {
+               agx_ppp_push_packed(&ppp, &pso->fs.fs_counts,
+                                   FRAGMENT_SHADER_WORD_0);
+               agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_1, cfg) {
+                  cfg.pipeline = fs_usc;
+               }
+               agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_2, cfg) {
+                  cfg.cf_bindings = varyings;
+               }
+               agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_3, cfg)
+                  ;
             }
-            agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_3, cfg);
             if (!agx_ppp_legacy_payload_supported(list->device->dev.chip) ||
                 !agx_ppp_fini(list->device->dev.chip, &out, &ppp)) {
                mesa_loge("no grounded legacy PPP payload/finalizer for %s",
@@ -11946,6 +12022,7 @@ vs_state_emitted:
             seg->fragment_loaded.fs_usc = fs_usc;
             seg->fragment_loaded.varyings = varyings;
          }
+         seg->fragment_loaded.pso = pso;
          /* The PPP now holds the cached blob's state, if there is one. */
          seg->fragment_ppp_gpu = fragment_cache_hit ? fragment_cache->gpu : 0;
       } else if (fragment_cache_hit) {
@@ -12142,6 +12219,8 @@ vs_state_emitted:
             };
          }
       }
+      if (pso_changed)
+         seg->fragment_static = static_state;
    }
 
    /* The draw. Tessellation and mesh already built an indexed indirect
