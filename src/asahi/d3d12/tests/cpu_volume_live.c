@@ -68,6 +68,29 @@ main(void)
    assert(ID3D12Resource_WriteToSubresource(resource, 0, NULL, input,
                                            40, 80) == E_INVALIDARG);
    ID3D12Resource_Release(resource);
+   /* Opaque single-mip volumes permit Map(NULL); multi-mip volumes do
+    * not. MipLevels=0 is normalized to the full chain before Map. Rejected
+    * pointer maps must leave the application sentinel intact. */
+   for (unsigned dimension = 2; dimension <= 3; ++dimension) {
+      desc.Dimension = dimension == 3 ? D3D12_RESOURCE_DIMENSION_TEXTURE3D
+                                      : D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+      for (unsigned mips = 0; mips <= 2; ++mips) {
+         desc.MipLevels = mips;
+         assert(ID3D12Device_CreateCommittedResource(
+                   device, &heap, 0, &desc, D3D12_RESOURCE_STATE_COMMON, NULL,
+                   &IID_ID3D12Resource, (void **)&resource) == S_OK);
+         void *sentinel = (void *)(uintptr_t)0x1234;
+         assert(ID3D12Resource_Map(resource, 0, NULL, &sentinel) ==
+                E_INVALIDARG);
+         assert(sentinel == (void *)(uintptr_t)0x1234);
+         const HRESULT expected =
+            dimension == 3 && mips != 1 ? E_INVALIDARG : S_OK;
+         assert(ID3D12Resource_Map(resource, 0, NULL, NULL) == expected);
+         if (expected == S_OK)
+            ID3D12Resource_Unmap(resource, 0, NULL);
+         ID3D12Resource_Release(resource);
+      }
+   }
    assert(ID3D12Device_Release(device) == 0);
    puts("CPU VOLUME LIVE: ALL PASS");
    return 0;

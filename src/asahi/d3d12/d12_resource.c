@@ -557,11 +557,16 @@ d12_resource_Map(ID3D12Resource *iface, UINT subresource,
     * is still legal (it establishes the mapping without exposing the VA),
     * but returning a pointer would falsely describe the opaque layout as a
     * linear byte array.  Rejections must leave the caller's sentinel alone. */
+   /* Opaque multi-mip volumes cannot establish a CPU mapping, even when
+    * ppData is NULL. Use the normalized layout count for MipLevels=0. */
    /* GPU_UPLOAD is the one non-staging heap type the CPU may write: that is
     * the entire point of it. */
    if ((res->heap_props.Type == D3D12_HEAP_TYPE_DEFAULT) ||
        res->heap_props.CPUPageProperty ==
           D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE ||
+       (res->desc.Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE3D &&
+        res->desc.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN &&
+        res->layout.levels > 1) ||
        (data && res->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER &&
         res->desc.Layout == D3D12_TEXTURE_LAYOUT_UNKNOWN))
       return E_INVALIDARG;
@@ -2199,8 +2204,13 @@ d12_resource_create(struct d12_device *device,
        * handle methods remain E_NOTIMPL, while Windows must never silently
        * fall back to an unshareable BO after a real D3DKMT failure. */
       if (!shared || shared_hr == E_NOTIMPL)
-         res->bo = d12_resource_bo_create(device, size_B, 0, bo_flags,
-                                 "d3d12 resource");
+         res->bo = d12_resource_bo_create(
+            device, size_B,
+            desc->Alignment ? desc->Alignment
+            : desc->SampleDesc.Count > 1
+               ? D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT
+               : D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT,
+            bo_flags, "d3d12 resource");
       if (!res->bo) {
          free(res);
          return shared && shared_hr != E_NOTIMPL ? shared_hr
