@@ -72,9 +72,13 @@ implementation and qualification before changing these answers.
 2. Wine Unix fd teardown: fixed in the fd-ownership prerequisite.
 3. Traced placed-heap identity: fixed here, with native and x64 Wine allocation
    witnesses. The game advances to shader-library and graphics PSO creation.
-4. Graphics PSO creation returns E_INVALIDARG. A startup attempt also reaches
-   the 500 MB available-memory guard. That stopped attempt does not establish
-   rendering, a main menu, or a successful GPU session.
+4. Graphics PSO creation reaches the existing Asahi compiler. Its AGX3 binary
+   packer refuses an instruction and the D3D12 frontend returns E_INVALIDARG.
+   This is the next compiler blocker, not heap/resource validation. Startup
+   attempts also reach the 500 MB available-memory guard; those stopped
+   attempts do not establish rendering, a main menu, or successful GPU
+   execution. Fix the compiler encoding/lowering with a captured CPU replay
+   before retrying rendering, then qualify shader-model/wave capabilities.
 
 Keep game attempts bounded and retain complete kernel journals and queue-slot
 snapshots. Stop at the first new quarantine, poison, submit failure or memory
