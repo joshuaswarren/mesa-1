@@ -274,6 +274,13 @@ struct agx_device_key {
     * codegen defaults that are measured on G13 only.
     */
    bool g13;
+
+   /* Index global accesses whose lea shift is below the format shift (the
+    * cooperative-matrix loads) by the scaled offset instead of a 64-bit
+    * address. Measured per device: on for the single-cluster G13 (M1), off
+    * on the multi-cluster G13C, where it slows dense GEMM.
+    */
+   bool fold_subformat_address;
 };
 
 struct agx_shader_key {
