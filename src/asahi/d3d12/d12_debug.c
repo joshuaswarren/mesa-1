@@ -47,6 +47,7 @@ d12_debug_init(void)
    f->dump_read_set = d12_env_set("D3D12AGX_DUMP_READ_SET");
    f->dump_sync = d12_env_set("D3D12AGX_DUMP_SYNC");
    f->flush_each_dispatch = d12_env_set("D3D12AGX_FLUSH_EACH_DISPATCH");
+   f->submit_self_wait = d12_env_set("D3D12AGX_SUBMIT_SELF_WAIT");
    f->dump_segs = d12_env_set("D3D12AGX_DUMP_SEGS");
    f->dump_write_set = d12_env_set("D3D12AGX_DUMP_WRITE_SET");
    f->dump_scratch = d12_env_set("D3D12AGX_DUMP_SCRATCH");

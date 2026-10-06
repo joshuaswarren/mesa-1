@@ -41,6 +41,10 @@ struct d12_debug_flags {
    /* A/B control: flush the compute caches after every API dispatch as
     * the driver did before deferring the flush to the next barrier. */
    bool flush_each_dispatch;
+   /* D3D12AGX_SUBMIT_SELF_WAIT: every submission carries an input sync on
+    * the queue's own previous timeline point (the pre-t-1185 shape), for
+    * A/B against the firmware-ordered default. */
+   bool submit_self_wait;
 
    /* Qualification opt-ins consumed by the G17P admission gates in
     * d12_cmd.c. Each is true only when the variable is exactly "1". */

@@ -1901,6 +1901,22 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
    }
    uint64_t out = in + 1;
 
+   /* The submission waits on nothing of its own, Honeykrisp's shape. The
+    * first hardware command of every slice carries barrier 0 on both
+    * engines, "wait on all previous work on this subqueue", which the
+    * firmware resolves in place, so consecutive submissions stay in
+    * order and the next one's vertex work overlaps this one's fragment
+    * work. An input sync on the queue's previous point instead parks the
+    * job in the kernel scheduler until the completion interrupt, the
+    * syncobj signal and the scheduler wake-up have all run: the GPU
+    * idles for that round trip between every two ExecuteCommandLists,
+    * which pinned a one-triangle frame at 250 us on the M1 Pro however
+    * many frames the application kept in flight (vkd3d-proton: 109 us at
+    * eight). Queue Waits are CPU-side ticket waits ahead of the
+    * submission and placement waits travel in the virt payload, so
+    * neither needs an input sync here. D3D12AGX_SUBMIT_SELF_WAIT=1
+    * restores the old shape for A/B. */
+   const bool self_wait = d12_debug()->submit_self_wait;
    struct drm_asahi_sync syncs[2] = {
       {
          .sync_type = DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ,
@@ -1918,10 +1934,10 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
                   ? AGX_SUBMIT_WRITE_SET_COMPLETE
                   : 0,
       .queue_id = queue->agx_queue_id,
-      .in_sync_count = 1,
+      .in_sync_count = self_wait ? 1 : 0,
       .out_sync_count = 1,
       .cmdbuf_size = op->payload_size,
-      .syncs = (uint64_t)(uintptr_t)syncs,
+      .syncs = (uint64_t)(uintptr_t)(self_wait ? syncs : &syncs[1]),
       .cmdbuf = (uint64_t)(uintptr_t)op->payload,
    };
 
