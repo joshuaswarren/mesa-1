@@ -358,6 +358,18 @@ if with_tests
   )
 
   test(
+    'asahi-zs-emit-control-flow',
+    executable(
+      'asahi-zs-emit-control-flow',
+      files('tests/test-agx-zs-emit-control-flow.c'),
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'asahi-sample-count',
     executable(
       'asahi-sample-count',
