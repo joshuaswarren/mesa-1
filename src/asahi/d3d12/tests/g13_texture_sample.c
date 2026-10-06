@@ -20,6 +20,11 @@
  * never bound, a texture pointer at the wrong descriptor, or a swapped
  * row stride each produce a different, wrong colour pattern rather than
  * nothing. Coverage is graded against the CPU rasterisation g4/g10/g12 use.
+ *
+ * With a third argument "hello" the vertex layout is the sample's own
+ * (POSITION R32G32B32_FLOAT at 0, TEXCOORD R32G32_FLOAT at 12), so the
+ * shaders can be the sample's shaders.hlsl compiled to SM5 DXBC, which is
+ * what HelloTexture hands the driver under Wine's d3dcompiler_47.
  */
 
 #define COBJMACROS
@@ -63,6 +68,12 @@ static const uint8_t TEXELS[2][2][4] = {
 struct vertex {
    float x, y;   /* TEXCOORD0, R32G32_FLOAT, offset 0 */
    float u, v;   /* TEXCOORD1, R32G32_FLOAT, offset 8 */
+};
+
+/* HelloTexture's Vertex: float3 position, float2 uv. */
+struct hello_vertex {
+   float x, y, z; /* POSITION, R32G32B32_FLOAT, offset 0 */
+   float u, v;    /* TEXCOORD, R32G32_FLOAT, offset 12 */
 };
 
 static void
@@ -128,9 +139,10 @@ int
 main(int argc, char **argv)
 {
    if (argc < 3) {
-      printf("usage: %s tex_vs.dxil tex_ps.dxil\n", argv[0]);
+      printf("usage: %s tex_vs.dxil tex_ps.dxil [hello]\n", argv[0]);
       return 2;
    }
+   const bool hello = argc > 3 && !strcmp(argv[3], "hello");
    size_t vs_size = 0, ps_size = 0;
    void *vs = slurp(argv[1], &vs_size);
    void *ps = slurp(argv[2], &ps_size);
@@ -207,11 +219,25 @@ main(int argc, char **argv)
        .AlignedByteOffset = 8,
        .InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA},
    };
+   D3D12_INPUT_ELEMENT_DESC hello_elems[] = {
+      {.SemanticName = "POSITION",
+       .SemanticIndex = 0,
+       .Format = DXGI_FORMAT_R32G32B32_FLOAT,
+       .InputSlot = 0,
+       .AlignedByteOffset = 0,
+       .InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA},
+      {.SemanticName = "TEXCOORD",
+       .SemanticIndex = 0,
+       .Format = DXGI_FORMAT_R32G32_FLOAT,
+       .InputSlot = 0,
+       .AlignedByteOffset = 12,
+       .InputSlotClass = D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA},
+   };
    D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {
       .pRootSignature = root_sig,
       .VS = {.pShaderBytecode = vs, .BytecodeLength = vs_size},
       .PS = {.pShaderBytecode = ps, .BytecodeLength = ps_size},
-      .InputLayout = {elems, 2},
+      .InputLayout = {hello ? hello_elems : elems, 2},
       .NumRenderTargets = 1,
       .RTVFormats = {DXGI_FORMAT_R8G8B8A8_UNORM},
       .SampleDesc = {.Count = 1},
@@ -230,16 +256,25 @@ main(int argc, char **argv)
 
    /* uv = pixel-normalised position: (x * 0.5 + 0.5, 0.5 - y * 0.5). */
    struct vertex verts[3];
+   struct hello_vertex hello_verts[3];
    for (int i = 0; i < 3; i++) {
       verts[i] = (struct vertex){
          .x = TRI_NDC[i][0], .y = TRI_NDC[i][1],
          .u = TRI_NDC[i][0] * 0.5f + 0.5f, .v = 0.5f - TRI_NDC[i][1] * 0.5f,
       };
+      hello_verts[i] = (struct hello_vertex){
+         .x = verts[i].x, .y = verts[i].y, .z = 0.0f,
+         .u = verts[i].u, .v = verts[i].v,
+      };
    }
+   const void *vdata = hello ? (const void *)hello_verts : (const void *)verts;
+   const UINT vdata_size = hello ? sizeof(hello_verts) : sizeof(verts);
+   const UINT vstride =
+      hello ? sizeof(struct hello_vertex) : sizeof(struct vertex);
    D3D12_HEAP_PROPERTIES up = {.Type = D3D12_HEAP_TYPE_UPLOAD};
    D3D12_RESOURCE_DESC bd = {
       .Dimension = D3D12_RESOURCE_DIMENSION_BUFFER,
-      .Width = sizeof(verts),
+      .Width = vdata_size,
       .Height = 1,
       .DepthOrArraySize = 1,
       .MipLevels = 1,
@@ -255,12 +290,12 @@ main(int argc, char **argv)
                vb, "create the vertex buffer");
    void *vbmap = NULL;
    TEST_CALL(d12_test_map(vb, false, &vbmap), "map the vertex buffer");
-   memcpy(vbmap, verts, sizeof(verts));
+   memcpy(vbmap, vdata, vdata_size);
    ID3D12Resource_Unmap(vb, 0, NULL);
    D3D12_VERTEX_BUFFER_VIEW vbv = {
       .BufferLocation = ID3D12Resource_GetGPUVirtualAddress(vb),
-      .SizeInBytes = sizeof(verts),
-      .StrideInBytes = sizeof(struct vertex),
+      .SizeInBytes = vdata_size,
+      .StrideInBytes = vstride,
    };
 
    /* The 2x2 texture in a DEFAULT heap, filled through an UPLOAD buffer
