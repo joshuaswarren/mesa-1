@@ -1,7 +1,8 @@
 /* SPDX-License-Identifier: MIT
  * Copyright 2026 Aurora Silicon
- * Standalone GLX regression: a partial read spanning several deferred clears.
- * cc -O2 partial-clear-readback.c -o partial-clear-readback \
+ * Standalone GLX regression: a partial write must preserve deferred clears
+ * outside its rectangle.
+ * cc -O2 partial-clear-write.c -o partial-clear-write \
  *    $(pkg-config --cflags --libs gl x11)
  * Run on a visible X11/Xwayland display with zink selected. No input required.
  */
@@ -52,7 +53,7 @@ main(int argc, char **argv)
    Window win = XCreateWindow(dpy, RootWindow(dpy, visual->screen), 0, 0,
                               SIZE, SIZE, 0, visual->depth, InputOutput,
                               visual->visual, CWColormap | CWEventMask, &wa);
-   XStoreName(dpy, win, "zink partial-clear readback regression");
+   XStoreName(dpy, win, "zink partial-clear write regression");
    XMapWindow(dpy, win);
    XEvent event;
    do { XNextEvent(dpy, &event); } while (event.type != MapNotify);
@@ -60,11 +61,19 @@ main(int argc, char **argv)
    if (!ctx || !glXMakeCurrent(dpy, win, ctx))
       return 77;
    printf("renderer=%s frames=%d\n", glGetString(GL_RENDERER), frames);
-   GLuint tex, fb; glGenTextures(1,&tex);glBindTexture(GL_TEXTURE_2D,tex);
-   glTexImage2D(GL_TEXTURE_2D,0,GL_RGBA8,SIZE,SIZE,0,GL_RGBA,GL_UNSIGNED_BYTE,NULL);
-   glGenFramebuffers(1,&fb);glBindFramebuffer(GL_FRAMEBUFFER,fb);
-   glFramebufferTexture2D(GL_FRAMEBUFFER,GL_COLOR_ATTACHMENT0,GL_TEXTURE_2D,tex,0);
-   glClearColor(0,0,0,1);glClear(GL_COLOR_BUFFER_BIT);glFinish();
+   GLuint tex, fb;
+   glGenTextures(1, &tex);
+   glBindTexture(GL_TEXTURE_2D, tex);
+   glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, SIZE, SIZE, 0,
+                GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+   glGenFramebuffers(1, &fb);
+   glBindFramebuffer(GL_FRAMEBUFFER, fb);
+   glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                         GL_TEXTURE_2D, tex, 0);
+   /* Initialize once. Do not finish between deferred clears and the upload. */
+   glClearColor(0, 0, 0, 1);
+   glClear(GL_COLOR_BUFFER_BIT);
+   glFinish();
    glViewport(0, 0, SIZE, SIZE);
    glEnable(GL_SCISSOR_TEST);
    unsigned failed = 0;
@@ -79,8 +88,10 @@ main(int argc, char **argv)
                       expected(frame, tile, 2) / 255.0f, 1);
          glClear(GL_COLOR_BUFFER_BIT);
       }
-      static unsigned char upload[64*64*4]; memset(upload,211,sizeof(upload));
-      glTexSubImage2D(GL_TEXTURE_2D,0,0,0,64,64,GL_RGBA,GL_UNSIGNED_BYTE,upload);
+      static unsigned char upload[64 * 64 * 4];
+      memset(upload, 211, sizeof(upload));
+      glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 64, 64,
+                       GL_RGBA, GL_UNSIGNED_BYTE, upload);
       glReadPixels(0, 0, READ_SIZE, READ_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
       unsigned bad = 0;
       for (int y = 0; y < READ_SIZE; ++y) {
@@ -88,7 +99,7 @@ main(int argc, char **argv)
             int tile = (y / 32) * 4 + x / 32;
             for (int c = 0; c < 3; ++c)
                bad += abs(pixels[(y * READ_SIZE + x) * 4 + c] -
-                          (x<64 && y<64 ? 211 : expected(frame, tile, c))) > 1;
+                          (x < 64 && y < 64 ? 211 : expected(frame, tile, c))) > 1;
          }
       }
       GLenum error = glGetError();
