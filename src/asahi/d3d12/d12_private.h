@@ -960,7 +960,26 @@ struct d12_descriptor_heap {
     */
    uint64_t *live_resource_words;
    uint32_t live_resource_word_count;
+
+   /* Shape windows per slot in the native tables (3 on generations that
+    * keep the legacy 2D and 2D-array mirrors, else 1). */
+   uint8_t native_windows;
+   /* A CPU (non-shader-visible) CBV/SRV/UAV heap keeps the same TEXTURE
+    * and PBE words, packed when a descriptor is written, so that
+    * CopyDescriptors into a shader-visible heap copies them rather than
+    * packing every copied descriptor again: the D3D12 pattern is to write
+    * a descriptor once into a CPU heap and copy it every frame. Pages of
+    * D12_STAGING_NATIVE_PAGE slots are allocated on the first write into
+    * them and start as the null words; a slot's record is every window's
+    * TEXTURE word, then every window's PBE word. NULL when the heap keeps
+    * none, and copies from it pack as before. */
+   uint8_t **staging_native_pages;
+   uint32_t staging_native_page_count;
+   /* A page allocation failed: some written slot has no record. */
+   bool staging_native_incomplete;
 };
+
+#define D12_STAGING_NATIVE_PAGE 1024u
 
 /* A finite descriptor table is flattened into the command-list root and
  * texture heaps for AGX.  D3D12 nevertheless permits the application to
@@ -2658,6 +2677,13 @@ void d12_descriptor_heap_update_slot(struct d12_device *device,
 void d12_descriptor_heap_update_range(struct d12_device *device,
                                       struct d12_descriptor *first,
                                       uint32_t count);
+/* After `count` slots were copied from `src` to `dst` (CopyDescriptors):
+ * bring the destination heap's native words up to date, copying the
+ * source heap's where it keeps them. */
+void d12_descriptor_heap_copy_range(struct d12_device *device,
+                                    struct d12_descriptor *dst,
+                                    const struct d12_descriptor *src,
+                                    uint32_t count);
 void d12_descriptor_registry_destroy(struct d12_device *device);
 /* Walk every registered heap; the caller holds descriptor_heap_lock. */
 #define d12_descriptor_registry_foreach(device, heap, i)                    \

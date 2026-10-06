@@ -226,6 +226,10 @@ d12_heap_Release(ID3D12DescriptorHeap *iface)
          free(heap->slots);
       free(heap->live_resource_words);
       free(heap->sampler_hash);
+      for (uint32_t p = 0; heap->staging_native_pages &&
+                           p < heap->staging_native_page_count; p++)
+         free(heap->staging_native_pages[p]);
+      free(heap->staging_native_pages);
       simple_mtx_destroy(&heap->sampler_lock);
       d12_private_data_store_destroy(&heap->private_data);
       d12_device_release(heap->device);
@@ -390,6 +394,135 @@ d12_descriptor_heap_write_sampler_locked(struct d12_descriptor_heap *heap,
    slot->sampler_native_index = native_index;
 }
 
+/* The staging page holding `index` of a CPU heap, allocating it (as null
+ * words) when `alloc`. A page keeps the visible tables' layout for its
+ * D12_STAGING_NATIVE_PAGE slots: every window's TEXTURE words, then every
+ * window's PBE words, each window contiguous, so a run of slots copies with
+ * one memcpy per window. */
+static uint8_t *
+d12_staging_native_page(struct d12_descriptor_heap *heap, uint32_t index,
+                        bool alloc)
+{
+   const size_t page_B = (size_t)heap->native_windows *
+                         (heap->texture_stride_B + heap->pbe_stride_B) *
+                         D12_STAGING_NATIVE_PAGE;
+   uint8_t **slot = &heap->staging_native_pages[index / D12_STAGING_NATIVE_PAGE];
+   uint8_t *page = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+   if (page || !alloc)
+      return page;
+
+   page = malloc(page_B);
+   if (!page) {
+      heap->staging_native_incomplete = true;
+      return NULL;
+   }
+   const size_t textures_B = (size_t)heap->native_windows *
+                             heap->texture_stride_B * D12_STAGING_NATIVE_PAGE;
+   for (unsigned i = 0; i < heap->native_windows * D12_STAGING_NATIVE_PAGE;
+        i++) {
+      memcpy(page + i * heap->texture_stride_B, heap->null_texture,
+             heap->texture_stride_B);
+      memcpy(page + textures_B + i * heap->pbe_stride_B, heap->null_pbe,
+             heap->pbe_stride_B);
+   }
+   /* Two threads may write different slots of a fresh page. */
+   uint8_t *expected = NULL;
+   if (!__atomic_compare_exchange_n(slot, &expected, page, false,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+      free(page);
+      page = expected;
+   }
+   return page;
+}
+
+/* Where slot `index` keeps its TEXTURE and PBE word for each shape window:
+ * the shader-visible heap's tables, or the CPU heap's staging page
+ * (allocated when `alloc`). False when the heap keeps no words for it.
+ * Within one window, consecutive slots of one table or one page are
+ * consecutive words. */
+static bool
+d12_heap_native_words(struct d12_descriptor_heap *heap, uint32_t index,
+                      bool alloc, uint8_t *texture[3], uint8_t *pbe[3])
+{
+   if (heap->staging_native_pages) {
+      uint8_t *page = d12_staging_native_page(heap, index, alloc);
+      if (!page)
+         return false;
+      const size_t at = index % D12_STAGING_NATIVE_PAGE;
+      const size_t textures_B = (size_t)heap->native_windows *
+                                heap->texture_stride_B * D12_STAGING_NATIVE_PAGE;
+      for (unsigned w = 0; w < heap->native_windows; w++) {
+         texture[w] = page + ((size_t)w * D12_STAGING_NATIVE_PAGE + at) *
+                                heap->texture_stride_B;
+         pbe[w] = page + textures_B +
+                  ((size_t)w * D12_STAGING_NATIVE_PAGE + at) *
+                     heap->pbe_stride_B;
+      }
+      return true;
+   }
+
+   uint8_t *textures = heap->texture_bo ? agx_bo_map(heap->texture_bo) : NULL;
+   uint8_t *pbes = heap->pbe_bo ? agx_bo_map(heap->pbe_bo) : NULL;
+   if (!textures && !pbes)
+      return false;
+   for (unsigned w = 0; w < heap->native_windows; w++) {
+      const size_t native_index =
+         (size_t)w * ((size_t)heap->desc.NumDescriptors + 1) + index;
+      texture[w] = textures ? textures + native_index * heap->texture_stride_B
+                            : NULL;
+      pbe[w] = pbes ? pbes + native_index * heap->pbe_stride_B : NULL;
+   }
+   return true;
+}
+
+static inline bool
+d12_descriptor_slot_live(const struct d12_device *device,
+                         const struct d12_descriptor *slot)
+{
+   return slot->kind != D12_DESC_NONE && slot->kind != D12_DESC_SAMPLER &&
+          (slot->resource || slot->counter_address ||
+           (slot->address && slot->address != device->null_va));
+}
+
+/* The per-slot state of a shader-visible heap besides its native words,
+ * for `count` slots from `index`: one atomic pair per occupancy word. */
+static void
+d12_descriptor_heap_refresh_slot_meta(struct d12_descriptor_heap *heap,
+                                      uint32_t index,
+                                      const struct d12_descriptor *slots,
+                                      uint32_t count)
+{
+   struct d12_device *device = heap->device;
+
+   if (heap->live_resource_words) {
+      uint32_t i = 0;
+      while (i < count) {
+         const uint32_t bit = (index + i) & 63;
+         const uint32_t n = MIN2(64 - bit, count - i);
+         uint64_t set = 0, clear = 0;
+         for (uint32_t j = 0; j < n; j++) {
+            const uint64_t mask = UINT64_C(1) << (bit + j);
+            if (d12_descriptor_slot_live(device, &slots[i + j]))
+               set |= mask;
+            else
+               clear |= mask;
+         }
+         uint64_t *word = &heap->live_resource_words[(index + i) >> 6];
+         if (set)
+            __atomic_fetch_or(word, set, __ATOMIC_RELAXED);
+         if (clear)
+            __atomic_fetch_and(word, ~clear, __ATOMIC_RELAXED);
+         i += n;
+      }
+   }
+   if (heap->residency_bo) {
+      uint64_t *residency = agx_bo_map(heap->residency_bo);
+      for (uint32_t i = 0; residency && i < count; i++)
+         residency[index + i] =
+            d12_descriptor_sparse_residency_address(&slots[i]);
+   }
+}
+
 /* Mirror one resource-heap slot into the heap's native tables. */
 static void
 d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
@@ -398,22 +531,14 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
 {
    struct d12_device *device = heap->device;
 
-   if (heap->live_resource_words) {
-      const uint64_t mask = UINT64_C(1) << (index & 63);
-      uint64_t *word = &heap->live_resource_words[index >> 6];
-      const bool live =
-         slot->kind != D12_DESC_NONE && slot->kind != D12_DESC_SAMPLER &&
-         (slot->resource || slot->counter_address ||
-          (slot->address && slot->address != device->null_va));
-      if (live)
-         __atomic_fetch_or(word, mask, __ATOMIC_RELAXED);
-      else
-         __atomic_fetch_and(word, ~mask, __ATOMIC_RELAXED);
-   }
+   d12_descriptor_heap_refresh_slot_meta(heap, index, slot, 1);
+
    /* Gen7 mirrors retain both declaration shapes. A physical 2D descriptor
     * cannot accept an array coordinate/LOD ABI, even for a one-layer view. */
-   const unsigned windows = d12_native_descriptor_legacy_shapes(
-      agx_chip_descriptor_generation(device->dev.chip)) ? 3 : 1;
+   uint8_t *textures[3] = {NULL}, *pbes[3] = {NULL};
+   if (!d12_heap_native_words(heap, index, true, textures, pbes))
+      return;
+   const unsigned windows = heap->native_windows;
    /* The builders emit the null descriptor for every kind but SRV and UAV
     * (texture) and UAV (PBE), and for any slot without a resource, so copy
     * the heap's null natives for those instead of packing: a CBV write
@@ -423,44 +548,56 @@ d12_descriptor_heap_refresh_resource_slot(struct d12_descriptor_heap *heap,
       !slot->resource ||
       (slot->kind != D12_DESC_SRV && slot->kind != D12_DESC_UAV);
    const bool null_pbe = !slot->resource || slot->kind != D12_DESC_UAV;
-   uint8_t *textures = heap->texture_bo ? agx_bo_map(heap->texture_bo) : NULL;
-   uint8_t *pbes = heap->pbe_bo ? agx_bo_map(heap->pbe_bo) : NULL;
+   if (null_texture && null_pbe) {
+      for (unsigned window = 0; window < windows; ++window) {
+         if (textures[window])
+            memcpy(textures[window], heap->null_texture,
+                   heap->texture_stride_B);
+         if (pbes[window])
+            memcpy(pbes[window], heap->null_pbe, heap->pbe_stride_B);
+      }
+      return;
+   }
+   struct d12_descriptor effective[3];
    for (unsigned window = 0; window < windows; ++window) {
-      const size_t native_index =
-         (size_t)window * ((size_t)heap->desc.NumDescriptors + 1) + index;
-      struct d12_descriptor effective = *slot;
       if (window && slot->resource &&
           slot->resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
-         if (textures)
-            memcpy(textures + native_index * heap->texture_stride_B,
-                   textures + index * heap->texture_stride_B, heap->texture_stride_B);
-         if (pbes)
-            memcpy(pbes + native_index * heap->pbe_stride_B,
-                   pbes + index * heap->pbe_stride_B, heap->pbe_stride_B);
+         if (textures[0])
+            memcpy(textures[window], textures[0], heap->texture_stride_B);
+         if (pbes[0])
+            memcpy(pbes[window], pbes[0], heap->pbe_stride_B);
          continue;
       }
+      effective[window] = *slot;
       if (window)
-         d12_apply_texture_shape(&effective, window == 1
+         d12_apply_texture_shape(&effective[window], window == 1
             ? D12_TEXTURE_SHAPE_2D : D12_TEXTURE_SHAPE_2D_ARRAY);
-      if (textures) {
-         uint8_t *out = textures + native_index * heap->texture_stride_B;
+      /* A window whose shape the view already has packs to the same words
+       * as an earlier window (a 2D view's 2D mirror, a 2D-array view's
+       * array mirror): copy them instead of packing again. */
+      int same = -1;
+      for (unsigned w = 0; window && w < window && same < 0; ++w) {
+         if (!memcmp(&effective[w], &effective[window], sizeof(effective[w])))
+            same = (int)w;
+      }
+      if (textures[window]) {
+         uint8_t *out = textures[window];
          if (null_texture)
             memcpy(out, heap->null_texture, heap->texture_stride_B);
+         else if (same >= 0)
+            memcpy(out, textures[same], heap->texture_stride_B);
          else
-            d12_refresh_texture_descriptor(device, out, &effective);
+            d12_refresh_texture_descriptor(device, out, &effective[window]);
       }
-      if (pbes) {
-         uint8_t *out = pbes + native_index * heap->pbe_stride_B;
+      if (pbes[window]) {
+         uint8_t *out = pbes[window];
          if (null_pbe)
             memcpy(out, heap->null_pbe, heap->pbe_stride_B);
+         else if (same >= 0)
+            memcpy(out, pbes[same], heap->pbe_stride_B);
          else
-            d12_refresh_pbe_descriptor(device, out, &effective);
+            d12_refresh_pbe_descriptor(device, out, &effective[window]);
       }
-   }
-   if (heap->residency_bo) {
-      uint64_t *residency = agx_bo_map(heap->residency_bo);
-      if (residency)
-         residency[index] = d12_descriptor_sparse_residency_address(slot);
    }
 }
 
@@ -468,7 +605,8 @@ static inline bool
 d12_descriptor_heap_has_native(const struct d12_descriptor_heap *heap)
 {
    return heap->texture_bo || heap->pbe_bo || heap->residency_bo ||
-          heap->sampler_bo || heap->live_resource_words;
+          heap->sampler_bo || heap->live_resource_words ||
+          heap->staging_native_pages;
 }
 
 /* Mirror a run of slots that the application has just written. A sampler
@@ -534,6 +672,74 @@ d12_descriptor_heap_update_range(struct d12_device *device,
       return;
 
    d12_descriptor_heap_refresh_slots(heap, index, first, count);
+}
+
+void
+d12_descriptor_heap_copy_range(struct d12_device *device,
+                               struct d12_descriptor *dst,
+                               const struct d12_descriptor *src,
+                               uint32_t count)
+{
+   if (!device || !dst || !src || !count)
+      return;
+
+   uint32_t dst_index, src_index;
+   struct d12_descriptor_heap *dst_heap =
+      d12_descriptor_registry_lookup(device, dst, &dst_index);
+   struct d12_descriptor_heap *src_heap =
+      d12_descriptor_registry_lookup(device, src, &src_index);
+   if (!dst_heap || !src_heap ||
+       dst_heap->desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+       src_heap->desc.Type != D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV ||
+       count > dst_heap->desc.NumDescriptors - dst_index ||
+       count > src_heap->desc.NumDescriptors - src_index ||
+       src_heap->native_windows != dst_heap->native_windows ||
+       src_heap->texture_stride_B != dst_heap->texture_stride_B ||
+       src_heap->pbe_stride_B != dst_heap->pbe_stride_B ||
+       !dst_heap->native_windows || src_heap->staging_native_incomplete) {
+      d12_descriptor_heap_update_range(device, dst, count);
+      return;
+   }
+   if (!d12_descriptor_heap_has_native(dst_heap))
+      return;
+
+   const unsigned windows = dst_heap->native_windows;
+   d12_descriptor_heap_refresh_slot_meta(dst_heap, dst_index, dst, count);
+   uint32_t i = 0;
+   while (i < count) {
+      /* The longest run inside one staging page on either side. */
+      uint32_t n = count - i;
+      if (src_heap->staging_native_pages)
+         n = MIN2(n, D12_STAGING_NATIVE_PAGE -
+                        (src_index + i) % D12_STAGING_NATIVE_PAGE);
+      if (dst_heap->staging_native_pages)
+         n = MIN2(n, D12_STAGING_NATIVE_PAGE -
+                        (dst_index + i) % D12_STAGING_NATIVE_PAGE);
+
+      uint8_t *src_texture[3] = {NULL}, *src_pbe[3] = {NULL};
+      uint8_t *dst_texture[3] = {NULL}, *dst_pbe[3] = {NULL};
+      /* A source page nothing was written to holds null descriptors, which
+       * packing the destination slots reproduces. */
+      if (!d12_heap_native_words(src_heap, src_index + i, false, src_texture,
+                                 src_pbe) ||
+          !d12_heap_native_words(dst_heap, dst_index + i, true, dst_texture,
+                                 dst_pbe)) {
+         for (uint32_t j = 0; j < n; j++)
+            d12_descriptor_heap_refresh_resource_slot(
+               dst_heap, dst_index + i + j, &dst[i + j]);
+      } else {
+         for (unsigned w = 0; w < windows; w++) {
+            if (dst_texture[w] && src_texture[w])
+               memcpy(dst_texture[w], src_texture[w],
+                      (size_t)n * dst_heap->texture_stride_B);
+            if (dst_pbe[w] && src_pbe[w])
+               memcpy(dst_pbe[w], src_pbe[w],
+                      (size_t)n * dst_heap->pbe_stride_B);
+         }
+      }
+      i += n;
+   }
+   __sync_synchronize();
 }
 
 D12_DEFINE_PRIVATE_DATA_METHODS(d12_heap, ID3D12DescriptorHeap,
@@ -682,6 +888,34 @@ d12_descriptor_heap_create(struct d12_device *device,
       }
       heap->texture_stride_B = layout.texture_stride_B;
       heap->pbe_stride_B = layout.pbe_stride_B;
+      heap->native_windows = d12_native_descriptor_legacy_shapes(generation)
+                                ? 3 : 1;
+   }
+
+   /* A CPU resource heap packs its descriptors' native words as they are
+    * written (see staging_native_pages). Without a proven layout or the
+    * null words it keeps none, and copies from it pack. */
+   if (!shader_visible &&
+       desc->Type == D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) {
+      struct d12_native_descriptor_layout layout;
+      const enum agx_descriptor_generation generation =
+         agx_chip_descriptor_generation(device->dev.chip);
+      if (d12_native_descriptor_layout((uint32_t)generation, &layout) &&
+          layout.texture_stride_B <= sizeof(heap->null_texture) &&
+          layout.pbe_stride_B <= sizeof(heap->null_pbe) &&
+          d12_set_null_texture_descriptor(device, heap->null_texture) &&
+          d12_set_null_pbe_descriptor(device, heap->null_pbe)) {
+         heap->texture_stride_B = layout.texture_stride_B;
+         heap->pbe_stride_B = layout.pbe_stride_B;
+         heap->native_windows =
+            d12_native_descriptor_legacy_shapes(generation) ? 3 : 1;
+         heap->staging_native_page_count =
+            DIV_ROUND_UP(desc->NumDescriptors, D12_STAGING_NATIVE_PAGE);
+         heap->staging_native_pages =
+            calloc(heap->staging_native_page_count, sizeof(uint8_t *));
+         if (!heap->staging_native_pages)
+            heap->native_windows = 0;
+      }
    }
 
    if (shader_visible &&
@@ -870,6 +1104,7 @@ d12_descriptor_heap_create(struct d12_device *device,
          free(heap->slots);
       free(heap->live_resource_words);
       free(heap->sampler_hash);
+      free(heap->staging_native_pages);
       free(heap);
       return E_OUTOFMEMORY;
    }
