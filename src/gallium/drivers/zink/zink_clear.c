@@ -825,9 +825,13 @@ fb_clears_apply_or_discard_internal(struct zink_context *ctx, struct pipe_resour
           * contained in its region. A write only needs clears whose contents
           * it cannot discard.
           */
+         bool write_covers_clear = read_region.x0 <= scissor.x0 &&
+                                   read_region.x1 >= scissor.x1 &&
+                                   read_region.y0 <= scissor.y0 &&
+                                   read_region.y1 >= scissor.y1;
          if (!clear->has_scissor || !depth_fills ||
              (invert ? u_rect_test_intersection(&read_region, &scissor) :
-                       zink_blit_region_covers(region, scissor))) {
+                       !write_covers_clear)) {
             if (!discard_only)
                fb_clears_apply_internal(ctx, pres, i);
             return;
