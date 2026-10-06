@@ -2562,6 +2562,13 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
        */
       nir_builder b = nir_builder_init_simple_shader(
          MESA_SHADER_VERTEX, &agx_nir_options, "d12 empty vertex shader");
+      /* The native compiler requires a hardware VS to export position,
+       * even for this unused graphics-layout placeholder. */
+      if (device->dev.chip == AGX_CHIP_G17P) {
+         nir_store_output(&b, nir_imm_vec4(&b, 0, 0, 0, 1),
+                          nir_imm_int(&b, 0), .write_mask = 0xf,
+                          .io_semantics = {.location = VARYING_SLOT_POS});
+      }
       nir = b.shader;
    } else {
       nir = dxil_to_nir_stage(map, descriptor_generation, dxil, dxil_size,
@@ -2813,6 +2820,8 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
 
    memset(out, 0, sizeof(*out));
    const bool compiled = agx_compile_shader_nir(nir, &key, out);
+   if (!compiled)
+      mesa_loge("graphics shader compile refused: %s", agx_last_compile_refusal());
    out->info.uses_sampler_heap |= d12_binding_map_uses_sampler_heap(map);
    out->info.sampler_state_count =
       MAX2(out->info.sampler_state_count, runtime_samplers);
@@ -2967,7 +2976,7 @@ d12_upload_internal_compute(struct d12_device *device,
    *info = part->info;
    *abi = staged;
    mesa_logi("%s: native CODE/Ioto certified, main=%u gprs=%u cells=%#x; "
-             "higher-stage submission closed", name, info->main_size,
+             "native internal-stage ABI", name, info->main_size,
              info->nr_gprs, abi->required_cells);
    return S_OK;
 }
@@ -2983,6 +2992,17 @@ compile_poly_program(struct d12_device *device, nir_shader *nir,
                      struct agx_unlinked_uvs_layout *uvs,
                      struct agx_shader_part *out)
 {
+   if (device->dev.chip == AGX_CHIP_G17P)
+      NIR_PASS(_, nir, d12_dxil_lower_compute_quad_derivatives);
+   /* Keep small DXIL function-local payload temporaries in SSA. Native
+    * preraster submission has no scratch producer, and scalar allocas do
+    * not require one once their memory accesses have been promoted. */
+   if (device->dev.chip == AGX_CHIP_G17P && nir->scratch_size <= 256) {
+      NIR_PASS(_, nir, nir_lower_scratch_to_var);
+      NIR_PASS(_, nir, nir_lower_indirect_derefs_to_if_else_trees,
+               nir_var_function_temp, 256);
+      NIR_PASS(_, nir, nir_lower_vars_to_ssa);
+   }
    /* DXIL global stores/atomics need the same side-effect metadata as API
     * compute and graphics stages, including execution-mask lowering. */
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
@@ -4272,6 +4292,10 @@ d12_build_mesh_rast(const void *ms_dxil, size_t ms_size, const void *ps_dxil,
       &b, 1, 32,
       nir_iadd(&b, indices, nir_u2u64(&b, nir_imul_imm(&b, linear_vid, 4))),
       .align_mul = 4);
+   nir_def *provoking_vid = nir_load_global(
+      &b, 1, 32,
+      nir_iadd(&b, indices, nir_u2u64(&b, nir_imul_imm(&b, prim_id, 12))),
+      .align_mul = 4);
    nir_def *position = NULL;
 
    for (unsigned i = 0; i < nr_output; i++) {
@@ -4304,6 +4328,13 @@ d12_build_mesh_rast(const void *ms_dxil, size_t ms_size, const void *ps_dxil,
             b.shader->info.outputs_written |= BITFIELD64_BIT(location);
             b.shader->info.clip_distance_array_size += components;
          } else if (in) {
+            /* D3D12 flat vertex inputs select the first indexed vertex.
+             * Replicate that value across the expanded primitive, like the
+             * per-primitive records, so the coefficient setup transports a
+             * constant even when its integer bits encode a float subnormal. */
+            if (in->interpolation == 1)
+               value = d12_mesh_load_output(&b, verts, provoking_vid, slot,
+                                             vertex_slots);
             d12_mesh_store_linked_output(&b, value, out, in, row,
                                          lower_integer_transport);
          }
@@ -4393,6 +4424,13 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
                                const struct d12_binding_map *map, REFIID riid,
                                void **out)
 {
+   uint32_t ms_kind, as_kind;
+   if (!d12_dxil_container_kind(ms_dxil, ms_size, &ms_kind) || ms_kind != 13 ||
+       (as_dxil && (!d12_dxil_container_kind(as_dxil, as_size, &as_kind) ||
+                    as_kind != 14))) {
+      mesa_loge("CreatePipelineState: mesh/amplification bytecode kind mismatch");
+      return E_INVALIDARG;
+   }
    if (!d12_validate_mesh_ps_link(ms_dxil, ms_size, ps_dxil, ps_size)) {
       mesa_loge("CreatePipelineState: incompatible mesh/pixel signatures");
       return E_INVALIDARG;
@@ -4438,7 +4476,8 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    /* The mesh shader itself, as compute. */
    nir_shader *ms = dxil_to_nir_stage_vis(
       map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip), ms_dxil,
-      ms_size, MESA_SHADER_COMPUTE, NULL, D3D12_SHADER_VISIBILITY_MESH);
+      ms_size, MESA_SHADER_COMPUTE, pso->texture_shapes,
+      D3D12_SHADER_VISIBILITY_MESH);
    if (!ms) {
       hr = E_INVALIDARG;
       goto fail;
@@ -4498,11 +4537,9 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    }
 
    /* The rasterization vertex shader, linked like any other. */
-   if (!compile_poly_program(
-          device,
-          d12_build_mesh_rast(ms_dxil, ms_size, ps_dxil, ps_size,
-                              pso->ms_max_primitives),
-          &pso->ms_uvs, &rast_part)) {
+   nir_shader *rast = d12_build_mesh_rast(ms_dxil, ms_size, ps_dxil, ps_size,
+                                         pso->ms_max_primitives);
+   if (!compile_poly_program(device, rast, &pso->ms_uvs, &rast_part)) {
       hr = E_INVALIDARG;
       goto fail;
    }
@@ -4530,6 +4567,9 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
       goto fail;
    }
    pso->ms_rast.info = rast_part.info;
+   pso->ms_rast.g17p_root_only = true;
+   pso->ms_rast.g17p_writes_memory = false;
+
    agx_assign_uvs(&pso->ms_varyings, &pso->ms_uvs, 0, 0);
 
    /* Same preamble rule as every other linked graphics stage. */
@@ -4566,7 +4606,7 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
    if (as_dxil && as_size) {
       nir_shader *as = dxil_to_nir_stage_vis(
          map, (uint32_t)agx_chip_descriptor_generation(device->dev.chip),
-         as_dxil, as_size, MESA_SHADER_COMPUTE, NULL,
+         as_dxil, as_size, MESA_SHADER_COMPUTE, pso->texture_shapes,
          D3D12_SHADER_VISIBILITY_AMPLIFICATION);
       if (!as) {
          hr = E_INVALIDARG;
@@ -4637,6 +4677,28 @@ d12_pipeline_state_create_mesh(struct d12_device *device, const void *ms_dxil,
              pso->ms_workgroup[1], pso->ms_workgroup[2],
              (unsigned long long)pso->ms_outputs);
 
+   if (device->dev.chip == AGX_CHIP_G17P) {
+      const struct agx_g17p_vertex_compile_info compiler_info = {
+         .hardware_vertex = pso->ms_rast.info.stage == MESA_SHADER_VERTEX,
+         .has_preamble = pso->ms_rast.info.has_preamble,
+         .nr_preamble_gprs = pso->ms_rast.info.nr_preamble_gprs,
+         .preamble_scratch_size = pso->ms_rast.info.preamble_scratch_size,
+         .uvs_written = pso->ms_uvs.written,
+         .position_off = pso->ms_uvs.group_offs[UVS_POSITION],
+         .varyings_off = pso->ms_uvs.group_offs[UVS_VARYINGS],
+         .psiz_off = pso->ms_uvs.group_offs[UVS_PSIZ],
+         .layer_viewport_off = pso->ms_uvs.group_offs[UVS_LAYER_VIEWPORT],
+         .clip_off = pso->ms_uvs.group_offs[UVS_CLIP_DIST],
+         .uvs_size = pso->ms_uvs.size,
+         .user_size = pso->ms_uvs.user_size,
+      };
+      if (!d12_agx3_g17p_vertex_program_info(
+             device->dev.chip, &compiler_info,
+             &pso->ms_rast.agx3_vdm_state_update)) {
+         hr = E_NOTIMPL;
+         goto fail;
+      }
+   }
    pso->has_mesh = true;
    hr = S_OK;
 
@@ -4903,7 +4965,8 @@ d12_pipeline_state_create_graphics(
     * format.  Mixed-format cases retain the established compact layout.
     */
    enum pipe_format uniform_rt_format = PIPE_FORMAT_NONE;
-   bool uniform_rt_formats = blend_desc && blend_desc->IndependentBlendEnable;
+   bool uniform_rt_formats = blend_desc && blend_desc->IndependentBlendEnable &&
+                             !(vs_is_mesh && device->dev.chip == AGX_CHIP_G17P);
    for (unsigned i = 0; i < nr_rt; i++) {
       if (formats[i] == PIPE_FORMAT_NONE)
          continue;
@@ -5299,7 +5362,7 @@ d12_pipeline_state_create_graphics(
     * binaries remain errors. Keep G17P's nonempty-prolog requirement. */
    const bool empty_prolog = prolog && !prolog->info.binary_size;
    if (!prolog || (!empty_prolog && !prolog->binary) ||
-       (empty_prolog && device->dev.chip == AGX_CHIP_G17P)) {
+       (empty_prolog && device->dev.chip == AGX_CHIP_G17P && !vs_is_mesh)) {
       hr = E_INVALIDARG;
       goto fail;
    }

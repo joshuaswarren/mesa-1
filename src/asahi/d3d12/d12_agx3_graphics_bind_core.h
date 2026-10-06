@@ -10,6 +10,9 @@
  * The caller validates the coefficient layout and still owns
  * the compact VDM allocation, stage CODE/Ioto and render-context lifetime. */
 struct d12_agx3_triangle_bind_desc {
+   bool mesh;
+   unsigned conservative_depth;
+   bool early_fragment_tests;
    uint64_t compact_va;
    uint64_t fragment_program;
    uint32_t linked_fragment_control;

@@ -6116,6 +6116,9 @@ d12_dxil_to_nir(const struct d12_module *mod, mesa_shader_stage stage,
       if ((mod->mesh_topology || mod->mesh_payload_size) &&
           !(mod->num_threads[0] & 1) && !(mod->num_threads[1] & 1))
          b.shader->info.derivative_group = DERIVATIVE_GROUP_QUADS;
+      else if ((mod->mesh_topology || mod->mesh_payload_size) &&
+               !(mod->num_threads[0] & 3) && mod->num_threads[1] == 1)
+         b.shader->info.derivative_group = DERIVATIVE_GROUP_LINEAR;
    }
 
    /*
@@ -7499,4 +7502,51 @@ d12_dxil_lower_sw_vs(nir_shader *nir)
    NIR_PASS(progress, nir, nir_shader_intrinsics_pass, lower_sw_vs_zero_base,
             nir_metadata_control_flow, NULL);
    return progress;
+}
+
+/* G17P has native quad shuffles but no admitted legacy DFDX/DFDY opcode.
+ * The compute invocation layout is already lowered to HLSL's 2x2 quads.
+ * Express the derivative in that quad with the same subtraction ordering as
+ * the API: right minus left, or bottom minus top. */
+static bool
+lower_compute_quad_derivative(nir_builder *b, nir_intrinsic_instr *intr,
+                              void *data)
+{
+   bool y, coarse = false;
+   switch (intr->intrinsic) {
+   case nir_intrinsic_ddx_coarse: coarse = true; FALLTHROUGH;
+   case nir_intrinsic_ddx:
+   case nir_intrinsic_ddx_fine: y = false; break;
+   case nir_intrinsic_ddy_coarse: coarse = true; FALLTHROUGH;
+   case nir_intrinsic_ddy:
+   case nir_intrinsic_ddy_fine: y = true; break;
+   default: return false;
+   }
+   b->cursor = nir_before_instr(&intr->instr);
+   nir_def *value = intr->src[0].ssa;
+   nir_def *q0 = nir_quad_broadcast(b, value, nir_imm_int(b, 0));
+   nir_def *q1 = nir_quad_broadcast(b, value, nir_imm_int(b, y ? 2 : 1));
+   nir_def *low = nir_fsub(b, q1, q0);
+   nir_def *result = low;
+   if (!coarse) {
+      nir_def *q2 = nir_quad_broadcast(b, value, nir_imm_int(b, y ? 1 : 2));
+      nir_def *q3 = nir_quad_broadcast(b, value, nir_imm_int(b, 3));
+      nir_def *high = nir_fsub(b, q3, q2);
+      nir_def *lane = nir_load_subgroup_invocation(b);
+      nir_def *select = nir_ine_imm(b, nir_iand_imm(b, lane, y ? 1 : 2), 0);
+      result = nir_bcsel(b, select, high, low);
+   }
+   nir_def_replace(&intr->def, result);
+   return true;
+}
+
+bool
+d12_dxil_lower_compute_quad_derivatives(nir_shader *nir)
+{
+   if (nir->info.stage != MESA_SHADER_COMPUTE ||
+       (nir->info.derivative_group != DERIVATIVE_GROUP_QUADS &&
+        nir->info.derivative_group != DERIVATIVE_GROUP_LINEAR))
+      return false;
+   return nir_shader_intrinsics_pass(nir, lower_compute_quad_derivative,
+                                     nir_metadata_control_flow, NULL);
 }

@@ -874,6 +874,7 @@ struct nir_shader;
 #define D12_UNIFORM_MESH_PARAMS     40
 #define D12_UNIFORM_MESH_REGS       4
 
+
 #define D12_MESH_OFF_COUNTS         0
 #define D12_MESH_OFF_VERTICES       8
 #define D12_MESH_OFF_PRIMITIVES     16
@@ -1297,6 +1298,7 @@ d12_range_count(const struct d12_resource_binding *rb)
  * Returns NULL with *error set on failure. Caller owns the shader.
  */
 void d12_dxil_bound_mesh_workgroups(struct nir_shader *nir, bool task);
+bool d12_dxil_lower_compute_quad_derivatives(struct nir_shader *nir);
 
 struct nir_shader *d12_dxil_to_nir(const struct d12_module *mod,
                                    mesa_shader_stage stage,

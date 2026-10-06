@@ -107,6 +107,28 @@ int main(void)
          assert(!(primary.words[0] & (1u << 26)));
       }
    }
+   /* Mesh raster state carries the same varying/depth fields as Honeykrisp.
+    * Check a linked user varying and memory side effects, then a transactional
+    * rejection of an inconsistent binding count/table pair. */
+   d = good;
+   d.mesh = true;
+   d.uvs_size = 9;
+   d.user_size = 4;
+   d.coefficient_bindings = 1;
+   d.varying_table = d.fragment_program + 256;
+   d.varying_counts_32 = 4;
+   d.writes_memory = true;
+   assert(d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
+   assert(agx_ppp_hal200_graphics_core_unpack(
+      AGX_CHIP_G17P, AGX_PPP_HAL200_GRAPHICS_FS, out.bytes,
+      AGX_PPP_HAL200_FS_LENGTH, &fs));
+   assert((fs.words[0] >> 16) == 1);
+   assert(fs.words[1] == (uint32_t)d.varying_table);
+   d.varying_table = 0;
+   memset(&out, 0xa5, sizeof(out));
+   const struct d12_agx3_triangle_bind bad_mesh = out;
+   assert(!d12_agx3_triangle_bind_generate(AGX_CHIP_G17P, &d, &out));
+   assert(memcmp(&out, &bad_mesh, sizeof(out)) == 0);
    /* Closed native-depth byte producer: compare/write state is checked on
     * both faces, with no-DSV and disabled-test API semantics preserved. */
    unsigned depth_cases = 0;

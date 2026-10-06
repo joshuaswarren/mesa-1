@@ -9,24 +9,31 @@ d12_agx3_triangle_bind_generate(
    enum agx_chip chip, const struct d12_agx3_triangle_bind_desc *d,
    struct d12_agx3_triangle_bind *output)
 {
-   if (chip != AGX_CHIP_G17P || !d || !output ||
-       d->uvs_size < 4 || d->uvs_size > 127 ||
-       d->user_size > d->uvs_size - 4 ||
-       (d->raw_output_select & ~(1u << 18)) ||
-       d->coefficient_bindings > 127 ||
-       !!d->coefficient_bindings != !!d->varying_table ||
-       d->reads_z || d->writes_memory ||
-       d->writes_depth || d->has_preamble ||
-       (d->linked_fragment_control >> 29) > 3 ||
+   if (chip != AGX_CHIP_G17P || !d || !output || d->has_preamble ||
        d->viewport.viewport_count != 1 || d->raster.depth_bias_enable ||
        d->depth_compare > 7)
       return false;
+   if (d->mesh) {
+      /* Mesh raster state carries the Honeykrisp varying/depth fields. */
+      if (d->uvs_size < 4 || d->uvs_size > 127 ||
+          d->coefficient_bindings > 127 ||
+          !!d->coefficient_bindings != !!d->varying_table)
+         return false;
+   } else if (d->uvs_size < 4 || d->uvs_size > 127 ||
+              d->user_size > d->uvs_size - 4 ||
+              (d->raw_output_select & ~(1u << 18)) ||
+              d->coefficient_bindings > 127 ||
+              !!d->coefficient_bindings != !!d->varying_table ||
+              d->reads_z || d->writes_memory || d->writes_depth ||
+              (d->linked_fragment_control >> 29) > 3) {
+      return false;
+   }
    struct d12_agx3_triangle_bind staged = {0};
    uint32_t output_size, output_select;
    if (!agx_ppp_hal200_output_size_pack(d->uvs_size, 0, &output_size) ||
        !agx_ppp_hal200_output_select_pack(chip, d->raw_output_select,
                                          d->coefficient_bindings != 0,
-                                         false, &output_select) ||
+                                         d->reads_z, &output_select) ||
        !agx_ppp_hal200_raster_state_build(chip, &d->raster, &staged.raster))
       return false;
    struct agx_ppp_hal200_fragment_fields fs = {
@@ -78,6 +85,15 @@ d12_agx3_triangle_bind_generate(
        !agx_ppp_hal200_depth_face_pack(chip, d->has_depth && d->depth_test,
           d->depth_write, d->depth_compare, primary.words[3], &primary.words[3]))
       return false;
+   if (d->mesh) {
+      for (unsigned face = 1; face <= 2; ++face) {
+         if (!agx_ppp_hal200_fragment_face_depth_pack(
+                chip, d->conservative_depth, d->early_fragment_tests,
+                d->writes_memory, secondary.words[face],
+                &secondary.words[face]))
+            return false;
+      }
+   }
    outputs.words[5] = primary.words[0];
    struct agx_ppp_hal200_graphics_core f, o, p, s, c;
    struct agx_ppp_w_clamp_cull2_core wc;

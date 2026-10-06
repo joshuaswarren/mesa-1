@@ -11,6 +11,45 @@
 #include "nir.h"
 #include "nir_builder.h"
 #include "nir_to_dxil.h"
+#include "asahi/compiler/agx_compile.h"
+#include "asahi/compiler/agx_nir.h"
+
+static void
+check_native_derivatives(void)
+{
+   for (unsigned shape = 0; shape < 4; ++shape) {
+      const bool coarse = shape & 1;
+      const bool linear = shape & 2;
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "native mesh derivatives");
+      b.shader->info.workgroup_size[0] = 4;
+      b.shader->info.workgroup_size[1] = linear ? 1 : 2;
+      b.shader->info.workgroup_size[2] = 1;
+      b.shader->info.derivative_group = linear ? DERIVATIVE_GROUP_LINEAR
+                                                : DERIVATIVE_GROUP_QUADS;
+      nir_def *v = nir_u2f32(&b, nir_load_local_invocation_index(&b));
+      nir_def *x = coarse ? nir_ddx_coarse(&b, v) : nir_ddx_fine(&b, v);
+      nir_def *y = coarse ? nir_ddy_coarse(&b, v) : nir_ddy_fine(&b, v);
+      nir_store_global(&b, nir_vec2(&b, x, y),
+                       nir_load_preamble(&b, 1, 64, .base = D12_UNIFORM_ROOT),
+                       .align_mul = 4);
+      assert(d12_dxil_lower_compute_quad_derivatives(b.shader));
+      assert(!d12_dxil_lower_compute_quad_derivatives(b.shader));
+      nir_validate_shader(b.shader, "native mesh derivative lowering");
+      nir_shader_gather_info(b.shader, nir_shader_get_entrypoint(b.shader));
+      agx_preprocess_nir_g17p(b.shader);
+      struct agx_shader_key key = {
+         .dev = {.chip = AGX_CHIP_G17P, .encoding = AGX_ISA_ENCODING_AGX3B},
+         .no_preamble = true, .has_scratch = true,
+         .reserved_preamble = D12_UNIFORM_RESERVED,
+      };
+      struct agx_shader_part part = {0};
+      assert(agx_compile_shader_nir(b.shader, &key, &part));
+      assert(part.binary && part.info.main_size && !part.info.scratch_size);
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+}
 
 static void
 check_stage(bool task)
@@ -40,6 +79,9 @@ check_stage(bool task)
    struct blob blob;
    blob_init(&blob);
    assert(nir_to_dxil(b.shader, &opts, NULL, &blob));
+   uint32_t kind;
+   assert(d12_dxil_container_kind(blob.data, blob.size, &kind));
+   assert(kind == (task ? 14 : 13));
    const uint8_t *bc;
    size_t size;
    const char *error = NULL;
@@ -103,6 +145,7 @@ main(void)
    glsl_type_singleton_init_or_ref();
    check_stage(false);
    check_stage(true);
+   check_native_derivatives();
    glsl_type_singleton_decref();
    puts("mesh/task declarations, payload barrier and invalid bounds: PASS");
    return 0;

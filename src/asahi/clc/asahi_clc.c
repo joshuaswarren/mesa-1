@@ -307,6 +307,13 @@ target_supports_program(const char *target, const nir_function *func)
           !strcmp(func->name, "libagx_copy_query_gl") ||
           !strcmp(func->name, "libagx_increment_cs_invocations") ||
           !strcmp(func->name, "libagx_setup_indirect_dispatch") ||
+          /* D3D12 mesh command signatures use these existing argument
+           * publication kernels. Runtime native metadata and ownership
+           * checks remain required before any launch. */
+          !strcmp(func->name, "libagx_d3d12_indirect_patch") ||
+          !strcmp(func->name, "libagx_d3d12_indirect_constant") ||
+          !strcmp(func->name, "libagx_d3d12_indirect_root") ||
+          !strcmp(func->name, "libagx_d3d12_indirect_dispatch") ||
           !strcmp(func->name, "libagx_copy_timestamp") ||
           !strcmp(func->name, "libagx_increment_statistic") ||
           /* Software tessellation */

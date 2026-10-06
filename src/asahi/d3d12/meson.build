@@ -793,6 +793,21 @@ d3d12agx_g5_texture_native_metadata = executable(
   link_with : libd3d12agx,
 )
 
+# Cold native graphics state validation needs no GPU.
+d3d12agx_graphics_bind_core_tests = executable(
+  'd3d12agx_graphics_bind_core_tests',
+  files('d12_agx3_graphics_bind_core.c', 'tests/d12_agx3_graphics_bind_core_tests.c',
+        '../lib/agx_ppp_hal200_graphics_core.c',
+        '../lib/agx_ppp_hal200_raster_core.c',
+        '../lib/agx_ppp_w_clamp_cull2_core.c',
+        '../lib/agx_ppp_viewport_payload_core.c',
+        '../lib/agx_vdm_hal200_bind_tail_core.c', '../lib/agx_vdm_state_core.c'),
+  include_directories : [inc_include, inc_src],
+  c_args : ['-UNDEBUG'],
+)
+test('d3d12agx_graphics_bind_core', d3d12agx_graphics_bind_core_tests,
+     suite : ['asahi', 'd3d12'])
+
 # The derivation test has no COM or Mesa dependency and needs no GPU.
 d3d12agx_core_caps_tests = executable(
   'd3d12agx_core_caps_tests',
