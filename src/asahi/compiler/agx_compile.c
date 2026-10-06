@@ -4220,10 +4220,38 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
       /* Leave an immediate beside the modifier alone: #1.0 - x has its own
        * witnessed half form (agx3_alu_hadd_one_neg) and a plain x + #imm
        * does not. */
-      const bool half_add =
+      const bool half_add_candidate =
          ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
          I->op == AGX_OPCODE_FADD && I->nr_srcs == 2 && !I->saturate &&
-         I->dest[0].size == AGX_SIZE_16 &&
+         I->dest[0].size == AGX_SIZE_16;
+      const int add_imm = !half_add_candidate                       ? -1
+                          : I->src[0].type == AGX_INDEX_IMMEDIATE ? 0
+                          : I->src[1].type == AGX_INDEX_IMMEDIATE ? 1
+                                                                  : -1;
+      const bool one_minus =
+         add_imm >= 0 && I->src[add_imm].value == UINT8_C(0x30) &&
+         !I->src[add_imm].abs && !I->src[add_imm].neg &&
+         I->src[add_imm ^ 1].type != AGX_INDEX_IMMEDIATE &&
+         I->src[add_imm ^ 1].neg && !I->src[add_imm ^ 1].abs;
+      /* Apart from that and the signed-zero adds that implement
+       * conversions, a half add has no immediate form, with or without a
+       * modifier beside it -- mediump c - x and x - c, e.g. dEQP's trig range
+       * reduction. Make the immediate an exact half register; a modifier is
+       * made explicit below, and the add becomes a register HADD. */
+      const bool signed_zero =
+         add_imm >= 0 && (I->src[add_imm].value & 0x7f) == 0;
+      if (half_add_candidate && add_imm >= 0 && !one_minus && !signed_zero &&
+          I->src[add_imm ^ 1].type != AGX_INDEX_IMMEDIATE &&
+          I->src[add_imm ^ 1].size == AGX_SIZE_16) {
+         float value = agx_minifloat_decode(I->src[add_imm].value);
+         if (I->src[add_imm].abs)
+            value = fabsf(value);
+         if (I->src[add_imm].neg)
+            value = -value;
+         I->src[add_imm] = agx_mov_imm(&b, 16, _mesa_float_to_half(value));
+      }
+      const bool half_add =
+         half_add_candidate &&
          I->src[0].type != AGX_INDEX_IMMEDIATE &&
          I->src[1].type != AGX_INDEX_IMMEDIATE;
 
@@ -4257,6 +4285,13 @@ agx_materialize_agx3_alu_constants(agx_context *ctx)
 
             I->src[s] = value;
          }
+
+         /* Both sources are now plain halves. The register/register half add
+          * is encoded as HADD, the op NIR's own 16-bit fadd produces; a
+          * 16-bit FADD that reaches the packer has no form. */
+         if (half_add && I->src[0].size == AGX_SIZE_16 &&
+             I->src[1].size == AGX_SIZE_16)
+            I->op = AGX_OPCODE_HADD;
       }
 
       /* frexp's full-precision path compares zero against fabs(x) and
