@@ -22,8 +22,9 @@
  * default 200), --scene NAME (one scene), --width W --height H (default
  * 1280x720, HelloWindow's size), --inflight N (frames in flight, default 2,
  * the samples' FrameCount; up to 8), --draws N (draws per frame in the
- * draws scenes, default 1000), --nodepth (draws scenes without the depth
- * buffer).
+ * draws scenes, default 1000), --pso-vary MASK (what the draws_pso
+ * pipelines vary: 1 cull mode, 2 blending, default 3), --nodepth (draws
+ * scenes without the depth buffer).
  *
  * Scenes (every one clears the colour target first):
  *   triangle    HelloTriangle: one vertex-buffer draw
@@ -79,6 +80,8 @@ typedef HRESULT(WINAPI *pfn_serialize_rs_t)(const D3D12_ROOT_SIGNATURE_DESC *,
 
 static unsigned draw_scene_draws = DRAW_SCENE_DRAWS_DEFAULT;
 static bool draw_scene_depth = true;
+/* Which state the draws_pso pipelines vary: bit 0 cull mode, bit 1 blending. */
+static unsigned draw_pso_vary = 3;
 static pfn_create_device_t pfn_create_device;
 static pfn_serialize_rs_t pfn_serialize_rs;
 
@@ -528,8 +531,8 @@ setup_draws(struct fb *b, const struct shaders *s)
       /* Four distinct states an engine toggles between: cull mode and
        * blending. */
       pd.RasterizerState.CullMode =
-         (i & 1) ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
-      if (i & 2) {
+         (i & draw_pso_vary & 1) ? D3D12_CULL_MODE_BACK : D3D12_CULL_MODE_NONE;
+      if (i & draw_pso_vary & 2) {
          D3D12_RENDER_TARGET_BLEND_DESC *rt = &pd.BlendState.RenderTarget[0];
          rt->BlendEnable = TRUE;
          rt->SrcBlend = D3D12_BLEND_SRC_ALPHA;
@@ -990,6 +993,8 @@ main(int argc, char **argv)
          draw_scene_draws = (unsigned)atoi(argv[++i]);
       else if (!strcmp(argv[i], "--nodepth"))
          draw_scene_depth = false;
+      else if (!strcmp(argv[i], "--pso-vary") && i + 1 < argc)
+         draw_pso_vary = (unsigned)atoi(argv[++i]) & 3;
       else
          shader_dir = argv[i];
    }
@@ -997,7 +1002,7 @@ main(int argc, char **argv)
        inflight > FRAME_COUNT_MAX || !draw_scene_draws) {
       fprintf(stderr,
               "usage: %s SHADER_DIR [--frames N] [--scene NAME] "
-              "[--width W --height H] [--inflight N] [--draws N] [--nodepth]\n"
+              "[--width W --height H] [--inflight N] [--draws N] [--nodepth] [--pso-vary MASK]\n"
               "       D3D12_LIBRARY selects the implementation "
               "(default libd3d12agx.so)\n",
               argv[0]);
