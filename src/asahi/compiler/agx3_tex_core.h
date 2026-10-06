@@ -846,8 +846,9 @@ bool agx3_tex_encode_image_write_rgba8_2d(
  *   components 4 (f114 0): data X-8..X-2      2D, 2D array and 3D
  *
  * f5 names X, not G17G's bank. The write waits on its staging slot and
- * signals that same slot, as native run112 kick 19 does; the image is
- * f91's immediate index into the heap at uniform half 0. AGX3C only. */
+ * signals that same slot, as native run112 kick 19 does. Native459 also
+ * grounds an explicit uniform heap base and immediate/GPR/uniform indices.
+ * Zero image_kind retains the original immediate-index interface. AGX3C only. */
 #define AGX3_IMAGE_WRITE_G18G_MAX_SLOT  4u
 #define AGX3_IMAGE_WRITE_G18G_MAX_INDEX 15u
 
@@ -856,8 +857,11 @@ struct agx3_image_write_g18g_desc {
    uint8_t components;
    bool float_data;
    enum agx3_image_write_dim dim;
-   uint8_t image_index;
+   uint16_t image_index;
    uint8_t slot;
+   enum agx3_tex_operand_kind image_kind;
+   uint16_t uniform_base;
+   bool image_kill;
 };
 
 bool agx3_tex_encode_image_write_g18g(

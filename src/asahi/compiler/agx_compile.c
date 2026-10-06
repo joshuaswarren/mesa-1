@@ -3624,11 +3624,17 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
       return agx_get_sr_to(b, dst, AGX_SR_INPUT_SAMPLE_MASK);
 
    case nir_intrinsic_load_sample_mask:
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B) {
-         /* G17P's covered samples are bits 0..3 of native W16 SR39, the word
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+          (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+           b->shader->key->dev.emit_agx3d &&
+           (b->shader->key->fs.nr_samples == 2 ||
+            b->shader->key->fs.nr_samples == 4) && agx_g18_msaa4_enabled())) {
+         /* G17P/G18G covered samples are bits 0..3 of native W16 SR39, the word
           * Apple's multisample fragments AND with each sample's bit before
           * that sample's tile store. Unlike the API input mask, this changes
-          * after depth/stencil tests and cannot be CSE'd across them. */
+          * after depth/stencil tests and cannot be CSE'd across them. Generic
+          * MS image spills also consume it; AGX2's W32 SR60 is not their G18
+          * coverage register. Native454 grounds the G18 sample-word use. */
          agx_index native = agx_temp(b->shader, AGX_SIZE_16);
          agx_get_sr_coverage_to(b, native, AGX_SR_INPUT_SAMPLE_MASK);
          return agx_mov_to(b, dst, agx_and(b, native, agx_immediate(15)));
@@ -6211,7 +6217,7 @@ agx_g17p_ishl_imm(agx_builder *b, agx_index value, unsigned shift)
 }
 
 /* nir_op_interleave is the exact 16+16 -> 32 Morton permutation.
- * No G17P INTL encoding is established. Expand before RA using the same
+ * No G17P/G18G INTL encoding is established. Expand before RA using the same
  * grounded shifts and bitwise operations as the bit-reversal lowering.
  */
 static agx_index
@@ -6399,7 +6405,9 @@ agx_emit_alu(agx_builder *b, nir_alu_instr *instr)
       BINOP(ior, or);
       BINOP(ixor, xor);
    case nir_op_interleave:
-      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B)
+      if (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3B ||
+          (b->shader->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+           b->shader->key->dev.emit_agx3d))
          return agx_emit_g17p_interleave(b, dst, s0, s1);
       return agx_intl_to(b, dst, s0, s1);
 
@@ -8724,8 +8732,82 @@ agx3_sink_vertex_outputs(agx_context *ctx)
    } while (0)
 
 static bool
+agx3_order_g18_msaa_tile_ops(agx_context *ctx)
+{
+   /* Native454: RGBA32 MS reloads retain ascending loads and descending
+    * stores within each complete sample. Only move stores within their
+    * existing block, after every value definition in that group. */
+   BITSET_DECLARE(offsets, AGX_G17P_MAX_BYTES_PER_SAMPLE) = {0};
+   unsigned stores = 0;
+   agx_foreach_instr_global(ctx, I) {
+      if (I->op != AGX_OPCODE_ST_TILE && I->op != AGX_OPCODE_LD_TILE)
+         continue;
+      if (I->format != AGX_FORMAT_I32 || I->mask != 15 ||
+          I->explicit_coords || (I->pixel_offset % 16) ||
+          I->pixel_offset >= AGX_G17P_MAX_BYTES_PER_SAMPLE)
+         AGX3_ORDER_REFUSE();
+      if (I->op == AGX_OPCODE_ST_TILE) {
+         BITSET_SET(offsets, I->pixel_offset);
+         stores++;
+      }
+   }
+   const unsigned partitions = __bitset_count(offsets, ARRAY_SIZE(offsets));
+   if (!partitions || partitions > AGX_MAX_RTS ||
+       stores != partitions * ctx->key->fs.nr_samples)
+      AGX3_ORDER_REFUSE();
+   for (unsigned i = 0; i < partitions; ++i) {
+      if (!BITSET_TEST(offsets, 16 * i))
+         AGX3_ORDER_REFUSE();
+   }
+   agx_foreach_block(ctx, block) {
+      agx_instr *group[AGX_MAX_RTS * 4];
+      unsigned count = 0;
+      agx_foreach_instr_in_block(block, I) {
+         if (I->op != AGX_OPCODE_ST_TILE)
+            continue;
+         if (count == ARRAY_SIZE(group))
+            AGX3_ORDER_REFUSE();
+         group[count++] = I;
+      }
+      if (count % partitions)
+         AGX3_ORDER_REFUSE();
+      for (unsigned base = 0; base < count; base += partitions) {
+         struct list_head *anchor = group[base + partitions - 1]->link.next;
+         for (unsigned i = base; i < base + partitions; ++i) {
+            for (unsigned j = i + 1; j < base + partitions; ++j) {
+               if (group[j]->pixel_offset > group[i]->pixel_offset)
+                  SWAP(group[i], group[j]);
+            }
+         }
+         for (unsigned i = base; i < base + partitions; ++i) {
+            if (group[i]->pixel_offset != 16 * (partitions - 1 - (i - base)))
+               AGX3_ORDER_REFUSE();
+            list_del(&group[i]->link);
+            list_addtail(&group[i]->link, anchor);
+         }
+      }
+   }
+   /* The packer holds the combined resident classes across the complete
+    * sample group and releases after its final store. Generic per-store
+    * releases would close that lifetime early. Preserve depth signals. */
+   agx_foreach_block(ctx, block) {
+      agx_foreach_instr_in_block_safe(block, I) {
+         if (I->op == AGX_OPCODE_SIGNAL_PIX && I->writeout == 12)
+            agx_remove_instruction(I);
+      }
+   }
+   ctx->agx3_mrt_tile_ops_ordered = true;
+   return true;
+}
+
+static bool
 agx3_order_g17p_mrt_tile_ops(agx_context *ctx)
 {
+   if (ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
+       ctx->key->dev.emit_agx3d && ctx->stage == MESA_SHADER_FRAGMENT &&
+       ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies &&
+       (ctx->key->fs.nr_samples == 2 || ctx->key->fs.nr_samples == 4))
+      return agx3_order_g18_msaa_tile_ops(ctx);
    /* G18's native two-target fragment uses the same descending stores and
     * per-target class pairs. Keep its qualification to one-sample shaders. */
    const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&

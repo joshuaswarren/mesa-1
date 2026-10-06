@@ -159,8 +159,12 @@ agx3_tile_load(enum agx_isa_encoding enc, uint16_t dest,
    if (enc == AGX_ISA_ENCODING_AGX3D)
       return false;
 
-   /* The AGX3c register-form opt-in is a store witness only. */
-   if (sample.g17_register)
+   /* Native454's G17G/G18G RGBA32Float MS reloads use this register
+    * sample operand at every dense sixteen-byte tile partition. The G18
+    * long-form field is supplied by the transcode rule. */
+   if (sample.g17_register &&
+       (enc != AGX_ISA_ENCODING_AGX3C || !sample.reg ||
+        width != AGX3_TILE_W32 || chan_mask != 15 || (tile_off % 16)))
       return false;
 
    /* Full-component loads, plus the G17P scalar, pair, and RGB565 forms.

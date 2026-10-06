@@ -1643,13 +1643,20 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
    M5_FETCH_OUTSIDE(I->offset || I->shadow || I->query_lod ||
                        I->gather != AGX_GATHER_NONE || I->sparse,
                     "fetch modifier");
+   /* Native G18 runtime-indexed MS/MS-array reads retain the staged
+    * sample/layer ABI with either a register or uniform descriptor. Both
+    * image and texture loads use it; their zero-level AUTO_LOD shape has
+    * already been checked above, separately from ordinary texel fetches. */
    M5_FETCH_OUTSIDE(m5_indexed &&
-                       (I->op != AGX_OPCODE_TEXTURE_LOAD ||
-                        !stage_coordinates || !immediate_lod ||
-                        I->src[1].value || I->mask != 15 ||
+                       (!stage_coordinates || I->mask != 15 ||
                         I->dest[0].size != AGX_SIZE_32 ||
-                        (I->dim != AGX_DIM_2D &&
-                         I->dim != AGX_DIM_2D_ARRAY && !three_d)),
+                        (g18g_ms
+                           ? (I->op != AGX_OPCODE_TEXTURE_LOAD &&
+                              I->op != AGX_OPCODE_IMAGE_LOAD)
+                           : (I->op != AGX_OPCODE_TEXTURE_LOAD ||
+                              !immediate_lod || I->src[1].value ||
+                              (I->dim != AGX_DIM_2D &&
+                               I->dim != AGX_DIM_2D_ARRAY && !three_d)))),
                     "G17G register-indexed fetch shape");
    M5_FETCH_OUTSIDE(register_lod && enc == AGX_ISA_ENCODING_AGX3B && slot != 1,
                     "runtime level on a late slot");
@@ -1849,7 +1856,8 @@ agx3_emit_texture_fetch_g17g(struct util_dynarray *emission,
       .multisample = ms_2d || ms_array,
       .staged_sample = (ms_2d || ms_array) && stage_coordinates,
       .g18g_ms = g18g_ms,
-      .sampler_value = g18g_ms && ms_array ? 0
+      /* Indexed native G18 MS reads name sampler zero for both dimensions. */
+      .sampler_value = g18g_ms && (ms_array || m5_indexed) ? 0
          : (ms_2d || ms_array) && stage_coordinates ? 1 : 0,
       .three_d = three_d,
       .lod_x64 = immediate_lod ? I->src[1].value * 64 : 0,
@@ -2521,16 +2529,15 @@ fail:
  * naming X, Y and the data, f12/f60 the slots, f79 0, f91 0 and 1. A
  * fragment function's write sits inside the pixel transaction, ahead of its
  * late depth test (m6-image-write iw_frag_*: pixwait 1, depthf, pixrel 1
- * after the imgwci), a protocol this packer does not build for G18G.
+ * after the imgwci), supplied by the linked fragment program.
  *
- * The image is the immediate index agx_nir_lower_bindings() left in src[4]:
- * imgwci f91 into the heap at uniform half 0 (f79 0), which is Gallium's
- * texture table (PBEs interleaved with the texture descriptors, the compute
- * and vertex resource prefix) or, for the lowered state-0 write, the
- * resolved PBE itself (index 0).
+ * The image is src[4]'s descriptor index into src[3]'s uniform heap base.
+ * The legacy immediate-zero base selects Gallium's texture table or the
+ * lowered state-0 write's resolved PBE. Native459 grounds runtime GPR and
+ * uniform indices with explicit heap bases in compute and fragment writes.
  *
- * Refused, failing closed: every stage but compute and vertex, a bindless or
- * register image, a level other than zero, 16-bit data, 1D/cube/multisample
+ * Refused, failing closed: unsupported execution stages or descriptor shapes,
+ * a level other than zero, 16-bit data, 1D/cube/multisample
  * dims that were not lowered to 2D/2D array, and a data type
  * agx_emit_image_store() could not name. The format marker is
  * agx_emit_image_store()'s: AGX_FORMAT_I32 for kick 19's one-component R32
@@ -2562,6 +2569,24 @@ agx3_emit_storage_image_write_g18g(struct util_dynarray *emission,
    const unsigned components = one ? 1 : 4;
    const unsigned bank_span = 16;
 
+   const bool implicit_heap = agx3_tex_imm(I->src[3], 0);
+   const bool uniform_heap = agx3_tex_plain_uniform64(I->src[3]) &&
+                             !(I->src[3].value & 3);
+   const agx_index index = I->src[4];
+   const bool immediate_index =
+      index.type == AGX_INDEX_IMMEDIATE && !index.memory &&
+      !index.abs && !index.neg && !index.kill && !index.cache &&
+      !index.discard && index.value <= AGX3_IMAGE_WRITE_G18G_MAX_INDEX;
+   const bool register_index =
+      agx3_tex_plain_reg(index) && index.size == AGX_SIZE_32 &&
+      agx_channels(index) == 1 && !(index.value & 1) && index.value <= 126 &&
+      !(index.cache && (index.discard || index.kill));
+   const bool uniform_index =
+      index.type == AGX_INDEX_UNIFORM && index.size == AGX_SIZE_32 &&
+      agx_channels(index) == 1 && !(index.value & 1) && index.value <= 252 &&
+      !index.memory && !index.abs && !index.neg && !index.kill &&
+      !index.cache && !index.discard;
+
    if (enc != AGX_ISA_ENCODING_AGX3C || !admitted_stage || !banks ||
        bank_floor + bank_span > bank_limit ||
        bank_limit > AGX3_STAGED_WRITE_LIMIT ||
@@ -2572,10 +2597,8 @@ agx3_emit_storage_image_write_g18g(struct util_dynarray *emission,
        agx_channels(I->src[0]) != 4 || (I->src[0].value & 1) ||
        !agx3_tex_plain_reg(I->src[1]) || I->src[1].size != AGX_SIZE_32 ||
        agx_channels(I->src[1]) != coords || (I->src[1].value & 1) ||
-       !agx3_tex_imm(I->src[2], 0) || !agx3_tex_imm(I->src[3], 0) ||
-       I->src[4].type != AGX_INDEX_IMMEDIATE || I->src[4].memory ||
-       I->src[4].abs || I->src[4].neg ||
-       I->src[4].value > AGX3_IMAGE_WRITE_G18G_MAX_INDEX) {
+       !agx3_tex_imm(I->src[2], 0) || (!implicit_heap && !uniform_heap) ||
+       (!immediate_index && !register_index && !uniform_index)) {
       if (agx_compiler_debug & (AGX_DBG_SHADERS | AGX_DBG_REFUSE))
          fprintf(stderr, "G18G imgwci shape refusal: stage=%u wait=0x%x "
                  "data=%u/%u/%u coord=%u/%u/%u dim=%u format=%u "
@@ -2631,8 +2654,13 @@ agx3_emit_storage_image_write_g18g(struct util_dynarray *emission,
       .dim = array     ? AGX3_IMAGE_WRITE_2D_ARRAY
              : three_d ? AGX3_IMAGE_WRITE_3D
                        : AGX3_IMAGE_WRITE_2D,
-      .image_index = (uint8_t)I->src[4].value,
+      .image_index = index.value,
       .slot = slot,
+      .image_kind = immediate_index ? AGX3_TEX_OPERAND_IMMEDIATE :
+                    register_index ? AGX3_TEX_OPERAND_REGISTER :
+                                     AGX3_TEX_OPERAND_UNIFORM,
+      .uniform_base = uniform_heap ? I->src[3].value : 0,
+      .image_kill = register_index && (index.discard || index.kill),
    };
 
    /* Validation happens before the first append, so a refusal leaves the
@@ -4518,9 +4546,12 @@ agx3_emit_tile(struct util_dynarray *emission, enum agx_isa_encoding enc,
    /* msaa163: at four samples the 0xFF immediate would be encoded as the 1x
     * whole-pixel immediate and write sample 0 only; refuse it rather than
     * resolve a quarter of the colour. Stores take the witnessed AGX3c/AGX3d
-    * register form; loads (MS reload/blend) stay unwitnessed and refused. */
+    * register form. Native454 additionally grounds raw RGBA32 reloads at
+    * dense sixteen-byte partitions with the same register-sample operand. */
    if (g18_msaa4) {
-      if (!sample_op.reg || load)
+      if (!sample_op.reg ||
+          (load && (I->format != AGX_FORMAT_I32 || I->mask != 15 ||
+                    (I->pixel_offset % 16))))
          return false;
       sample_op.g17_register = true;
    }
@@ -8943,13 +8974,19 @@ static struct agx3_g17p_mrt_protocol
 agx3_g17p_mrt_protocol(agx_context *ctx)
 {
    struct agx3_g17p_mrt_protocol p = {0};
+   const bool g18_ms = agx3_g18_msaa4_tile_shader(ctx) && ctx->key->secondary;
    const bool g18 = ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3C &&
-                    ctx->key->dev.emit_agx3d && ctx->key->fs.nr_samples <= 1;
+                    ctx->key->dev.emit_agx3d &&
+                    (ctx->key->fs.nr_samples <= 1 || g18_ms);
+   /* Generic G18 image spills retain conditional memory accesses between
+    * the fixed, unrolled resident sample groups. They do not use the G17P
+    * native-spill descriptor ABI. */
+   const bool multi_block = ctx->key->g17p_emrt || g18_ms;
    if ((ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B && !g18) ||
        ctx->stage != MESA_SHADER_FRAGMENT || ctx->is_preamble ||
        !ctx->agx3_mrt_tile_ops_ordered ||
        (!g18 && !ctx->key->secondary && !ctx->key->fs.ignore_tib_dependencies) ||
-       (!ctx->key->g17p_emrt && list_length(&ctx->blocks) != 1)) {
+       (!multi_block && list_length(&ctx->blocks) != 1)) {
       /* Not a refusal by itself -- a single-target shader legitimately has no
        * MRT protocol -- so report only when the key names two or more tile
        * partitions, which is when the protocol is the thing a later tile op
@@ -8991,15 +9028,16 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       /* A depth export may finish its own class-1 transaction first. */
       if (I->op == AGX_OPCODE_ZS_EMIT_AGX3 && !tile_ops)
          depth_written = true;
-      if ((!ctx->key->g17p_emrt && agx3_is_cf_op(I)) ||
+      if ((!multi_block && agx3_is_cf_op(I)) ||
           (I->op == AGX_OPCODE_SIGNAL_PIX &&
            (!depth_written || I->writeout != 1 ||
-            (tile_ops && !ctx->key->g17p_emrt))))
+            (tile_ops && !multi_block))))
          return agx3_g17p_mrt_refused(__LINE__);
       if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE)
          continue;
-      if (g18 && !((I->format == AGX_FORMAT_U8NORM && I->mask == 15) ||
-                   (I->format == AGX_FORMAT_I32 && I->mask == 1)))
+      if (g18 && !(g18_ms ? (I->format == AGX_FORMAT_I32 && I->mask == 15)
+                         : ((I->format == AGX_FORMAT_U8NORM && I->mask == 15) ||
+                            (I->format == AGX_FORMAT_I32 && I->mask == 1))))
          return agx3_g17p_mrt_refused(__LINE__);
       if (I->explicit_coords || I->pixel_offset > UINT8_MAX)
          return agx3_g17p_mrt_refused(__LINE__);
@@ -9027,7 +9065,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
     * target's unrolled sample loads/stores, acquiring read class 8 once
     * and write class 4 once. Keep the ordinary one-store path unchanged. */
    const bool single_target_blend =
-      ctx->key->fs.nr_samples > 1 && tile_loads && !ctx->key->g17p_emrt;
+      ctx->key->fs.nr_samples > 1 && tile_loads && !multi_block;
 
    /* A multisample eMRT epilog may have one resident partition and no other:
     * hk spills a reloaded multisample attachment wider than
@@ -9056,7 +9094,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
     * attachment of a multisample eMRT layout with a load/store pair -- and
     * that combined acquire covers the read class too. */
    const bool single_target_emrt =
-      ctx->key->fs.nr_samples > 1 && ctx->key->g17p_emrt;
+      ctx->key->fs.nr_samples > 1 && multi_block;
 
    if (!p.count || (p.count == 1 && p.targets[0] == 0 &&
                     !single_target_blend && !single_target_emrt))
@@ -9094,7 +9132,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       for (unsigned i = 0; i < p.count; ++i) {
          /* Absent framebuffer slots compact the tile offsets, while native
           * sparse-layout fragments retain their logical target's class. */
-         if (p.offsets[i] != 4 * i || p.targets[i] >= AGX_MAX_RTS ||
+         if (p.offsets[i] != (g18_ms ? 16 : 4) * i ||
+             (g18_ms && p.targets[i] != i) || p.targets[i] >= AGX_MAX_RTS ||
              (i && p.targets[i] <= p.targets[i - 1]))
             return agx3_g17p_mrt_refused(__LINE__);
       }
@@ -9119,7 +9158,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
       }
 
       if (I->op != AGX_OPCODE_LD_TILE && I->op != AGX_OPCODE_ST_TILE) {
-         if (stores_started && !ctx->key->g17p_emrt &&
+         if (stores_started && !multi_block &&
              (!p.multisample || !agx_opcodes_info[I->op].can_eliminate))
             return agx3_g17p_mrt_refused(__LINE__);
          continue;
@@ -9180,6 +9219,7 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    }
 
    if (!stored_partitions ||
+       (g18_ms && stores_per_partition != ctx->key->fs.nr_samples) ||
        (stores_per_partition != 1 &&
         !(p.multisample &&
           stores_per_partition == ctx->key->fs.nr_samples)) ||
@@ -9199,7 +9239,8 @@ agx3_g17p_mrt_protocol(agx_context *ctx)
    if (p.multisample) {
       for (unsigned sample = 0; sample < stores_per_partition; ++sample) {
          unsigned at = sample * loaded_partitions;
-         for (int partition = p.count - 1; partition >= 0; --partition) {
+         for (unsigned index = 0; index < p.count; ++index) {
+            const unsigned partition = g18_ms ? index : p.count - 1 - index;
             if (p.loads[partition] && load_order[at++] != partition)
                return agx3_g17p_mrt_refused(__LINE__);
          }

@@ -3346,6 +3346,28 @@ build_g18_msaa4_fs_epilog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, agx_nir_hoist_g17p_zs_writes);
    } else {
       agx_nir_fs_epilog(b, key);
+      /* The generated MSAA loop has exactly nr_samples iterations. Keep the
+       * resident attachment transaction explicit across every sample even
+       * when image-memory spills make the epilog too large for the general
+       * unroll heuristic. This preserves the pixel-shaded export ABI. */
+      nir_function_impl *impl = nir_shader_get_entrypoint(b->shader);
+      foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+         if (node->type == nir_cf_node_loop)
+            nir_cf_node_as_loop(node)->control = nir_loop_control_unroll;
+      }
+      /* Expose the one-hot constants before tile-sample lowering. Deferring
+       * unrolling to the compiler would leave those new constants unmasked
+       * by live coverage. This is the same ordering as G18 BG reloads. */
+      bool progress;
+      do {
+         progress = false;
+         NIR_PASS(progress, b->shader, nir_lower_vars_to_ssa);
+         NIR_PASS(progress, b->shader, nir_opt_copy_prop);
+         NIR_PASS(progress, b->shader, nir_opt_constant_folding);
+         NIR_PASS(progress, b->shader, nir_opt_loop_unroll);
+         NIR_PASS(progress, b->shader, nir_opt_dead_cf);
+         NIR_PASS(progress, b->shader, nir_opt_dce);
+      } while (progress);
    }
 
    NIR_PASS(_, b->shader, agx_nir_lower_g18_tile_samples, key->nr_samples);

@@ -122,6 +122,10 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
 
    const unsigned tk = d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
    const unsigned sk = d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
+   /* Native G18 indexed 2D-MS and MS-array reads both name sampler zero.
+    * The descriptor kind changes only the texture operand profile. */
+   const bool indexed_g18g_ms = d->g18g_ms &&
+      tk != AGX3_TEX_OPERAND_IMMEDIATE;
    if (tk > AGX3_TEX_OPERAND_UNIFORM || sk > AGX3_TEX_OPERAND_UNIFORM ||
        (tk != AGX3_TEX_OPERAND_IMMEDIATE &&
         ((d->texture_value & 1) || d->texture_value > 252)) ||
@@ -130,7 +134,8 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER) ||
        (d->multisample &&
         (sk != AGX3_TEX_OPERAND_IMMEDIATE ||
-         d->sampler_value != (d->g18g_ms && d->array ? 0 : d->staged_sample ? 1 : 0))))
+         d->sampler_value != ((d->g18g_ms && d->array) || indexed_g18g_ms
+                                ? 0 : d->staged_sample ? 1 : 0))))
       return false;
    if (d->three_d &&
        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0))
@@ -1325,6 +1330,11 @@ agx3_tex_encode_image_write_g18g(enum agx_isa_encoding enc,
    if (d == NULL)
       return false;
 
+   const unsigned kind = d->image_kind ?: AGX3_TEX_OPERAND_IMMEDIATE;
+   const bool immediate = kind == AGX3_TEX_OPERAND_IMMEDIATE;
+   const bool reg = kind == AGX3_TEX_OPERAND_REGISTER;
+   const bool uniform = kind == AGX3_TEX_OPERAND_UNIFORM;
+
    /* The data sits just below X, Y just above it and a layer or z just above
     * Y, all inside the seven-bit f116/f118 fields agx3_transcode_agx3d()
     * derives from f5. The one-component form is the 2D integer write alone,
@@ -1338,7 +1348,12 @@ agx3_tex_encode_image_write_g18g(enum agx_isa_encoding enc,
         (d->float_data || d->dim != AGX3_IMAGE_WRITE_2D)) ||
        d->dim > AGX3_IMAGE_WRITE_3D || (d->x_half & 1) ||
        d->x_half < data_halves || d->x_half + (third ? 4 : 2) > 126 ||
-       d->image_index > AGX3_IMAGE_WRITE_G18G_MAX_INDEX ||
+       (!immediate && !reg && !uniform) ||
+       (d->uniform_base & 3) || d->uniform_base > 252 ||
+       (immediate && d->image_index > AGX3_IMAGE_WRITE_G18G_MAX_INDEX) ||
+       (!immediate && ((d->image_index & 1) ||
+                       d->image_index > (reg ? 126 : 252))) ||
+       (d->image_kill && !reg) ||
        d->slot < 1 || d->slot > AGX3_IMAGE_WRITE_G18G_MAX_SLOT)
       return false;
 
@@ -1375,23 +1390,29 @@ agx3_tex_encode_image_write_g18g(enum agx_isa_encoding enc,
     *    in-flight sample still reads (iw3_two, iw4_two_apart, iw3_read2_write),
     *    which this packer never shares.
     *
-    * Mesa's heap is always the one at uniform half 0 (f79 0): Gallium's
-    * texture table, or the lowered state-0 write's resolved PBE. */
-   struct agx3_field_kv fields[24] = {
+    * Native459's paired G17G/G18G typed 2D/array writes ground explicit
+    * heap bases (f79) and descriptor indices: f91/f99=1/f100=1 immediate,
+    * f92/f99=2/f100=2 GPR, f93/f99=3/f100=2 uniform. A dead GPR sets f103.
+    * The operand form is independent of the stored data type in f70. */
+   struct agx3_field_kv fields[28] = {
       KV(5, d->x_half), KV(9, 5),   KV(10, 2),  KV(12, d->slot), KV(13, 1),
       KV(24, 1),        KV(38, 1),  KV(51, 1),  KV(52, 1),       KV(56, 2),
       KV(58, 0x57),     KV(58 + d->slot, 1),    KV(71, 2),
       KV(72, d->dim == AGX3_IMAGE_WRITE_3D ? 3 : 1),             KV(74, 1),
-      KV(85, 3),        KV(86, 3),  KV(99, 1),  KV(100, 1),      KV(113, 1),
+      KV(85, 3),        KV(86, 3),  KV(99, kind),
+      KV(100, immediate ? 1 : 2), KV(113, 1),
       KV(114, d->components == 1 ? 4 : 0),
    };
    unsigned n = 21;
+   fields[n++] = (struct agx3_field_kv)KV(79, d->uniform_base);
    if (d->float_data)
       fields[n++] = (struct agx3_field_kv)KV(70, 1);
    if (d->dim == AGX3_IMAGE_WRITE_2D_ARRAY)
       fields[n++] = (struct agx3_field_kv)KV(73, 2);
    if (d->image_index)
-      fields[n++] = (struct agx3_field_kv)KV(91, d->image_index);
+      fields[n++] = (struct agx3_field_kv)KV(90 + kind, d->image_index);
+   if (d->image_kill)
+      fields[n++] = (struct agx3_field_kv)KV(103, 1);
    if (!agx3_bind_compose(enc, "imgwci", 0, fields, n, NULL, 0, out, len)) {
       memset(out, 0, AGX3_TEX_MAX_LENGTH);
       *len = 0;

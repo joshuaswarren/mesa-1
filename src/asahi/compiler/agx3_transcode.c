@@ -210,8 +210,7 @@ static const struct {
    uint8_t field, value;
 } g18g_imgwci_fields[] = {
    {9, 5},   {10, 2},  {13, 1},  {24, 1},  {38, 1},  {51, 1},  {52, 1},
-   {56, 2},  {58, 0x57}, {71, 2}, {74, 1}, {85, 3},  {86, 3},  {99, 1},
-   {100, 1}, {113, 1},
+   {56, 2},  {58, 0x57}, {71, 2}, {74, 1}, {85, 3},  {86, 3}, {113, 1},
 };
 
 /* The last staging slot an imgwci waits on and the last it signals in
@@ -231,7 +230,7 @@ apply_imgwci_rule(uint64_t fields[AGX3_MAX_FIELDS], const char **why)
 
    /* The operand fields the G18G witnesses vary, each within the values
     * they show: one staging wait, the result slot, the data type, the
-    * texture type (2D, 2D array, 3D), the heap index at heap half 0, and
+    * texture type (2D, 2D array, 3D), the heap base and index form, and
     * one or four staged components (f114 4 only for the 2D integer write of
     * kick 19). */
    unsigned wait = 0, waits = 0;
@@ -246,20 +245,33 @@ apply_imgwci_rule(uint64_t fields[AGX3_MAX_FIELDS], const char **why)
    const bool three_d = fields[72] == 3;
    const bool one = fields[114] == 4;
    const uint64_t data_halves = one ? 2 : 8;
+   /* Native459 keeps descriptor selection independent of the data type:
+    * f91 immediate, f92 GPR, f93 uniform. Only the GPR form may kill its
+    * index. Unselected index fields and all unknown fields remain zero. */
+   const bool immediate = fields[99] == 1 && fields[100] == 1 &&
+      fields[91] <= G18G_IMGWCI_MAX_INDEX && !fields[92] && !fields[93] &&
+      !fields[103];
+   const bool reg = fields[99] == 2 && fields[100] == 2 &&
+      !fields[91] && !(fields[92] & 1) && fields[92] <= 126 &&
+      !fields[93] && fields[103] <= 1;
+   const bool uniform = fields[99] == 3 && fields[100] == 2 &&
+      !fields[91] && !fields[92] && !(fields[93] & 1) &&
+      fields[93] <= 252 && !fields[103];
    bool witnessed =
       waits == 1 && fields[58 + wait] == 1 &&
       wait <= G18G_IMGWCI_MAX_WAIT_SLOT && fields[12] >= 1 &&
       fields[12] <= G18G_IMGWCI_MAX_RESULT_SLOT && fields[70] <= 1 &&
       (fields[72] == 1 || three_d) && (fields[73] == 0 || array) &&
-      !(three_d && array) && fields[79] == 0 &&
-      fields[91] <= G18G_IMGWCI_MAX_INDEX &&
+      !(three_d && array) && !(fields[79] & 3) && fields[79] <= 252 &&
+      (immediate || reg || uniform) &&
       (fields[114] == 0 ||
        (one && fields[72] == 1 && !array && fields[70] == 0)) &&
       !(x & 1) && x >= data_halves &&
       x + (array || three_d ? 4 : 2) <= 126;
    for (unsigned i = 0; i < AGX3_MAX_FIELDS && witnessed; ++i) {
       witnessed = i == 5 || i == 12 || i == 58 + wait || i == 70 ||
-                  i == 72 || i == 73 || i == 91 || i == 114 ||
+                  i == 72 || i == 73 || i == 79 || i == 91 || i == 92 ||
+                  i == 93 || i == 99 || i == 100 || i == 103 || i == 114 ||
                   fields[i] == expected[i];
    }
    if (!witnessed) {
@@ -412,6 +424,12 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
       return false;
    if (!strcmp(mnemonic, "lddev"))
       fields[87] = fields[75] ? 2 : 0;
+   /* Native454's register-sample RGBA32 tile reloads use the G18 long
+    * LLDCol form with f79=2. All sample, slot and payload fields retain
+    * their G17G meaning; immediate-sample forms stay on the existing path. */
+   if (!strcmp(mnemonic, "lldcol") && fields[51] == 2 &&
+       fields[10] == 2 && fields[26] == 15)
+      fields[79] = 2;
    if (!strcmp(mnemonic, "ldcfr")) {
       /* Native G18 no-perspective interpolate_at_offset keeps the raw
        * three-coefficient selector f38=7 and adds f49=2. The flat-input
