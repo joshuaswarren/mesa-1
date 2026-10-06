@@ -101,12 +101,14 @@ check_shape(VkFormat format, bool is_depth)
    CHECK(!hk_g17p_compression_eligible(AGX_CHIP_G17P, 0, NULL));
 
    /* Usage: only texture/PBE/ZLS usages are admitted. */
-   const VkImageUsageFlags allowed =
+   VkImageUsageFlags allowed =
       VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT |
       VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+   if (is_depth)
+      allowed |= VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
    for (unsigned bit = 0; bit < 32; ++bit) {
       VkImageCreateInfo i = base;
       i.usage |= 1u << bit;
@@ -128,16 +130,19 @@ check_shape(VkFormat format, bool is_depth)
    for (unsigned r = 0; r < sizeof(refused) / sizeof(refused[0]); ++r) {
       VkImageCreateInfo i = base;
       i.usage |= refused[r];
-      CHECK(!ELIGIBLE(i));
+      CHECK(ELIGIBLE(i) == (is_depth && refused[r] ==
+                           VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT));
    }
 
-   /* Create flags: only mutable format and extended usage are admitted. */
+   /* Sample-location tracking is also admitted for single-sample depth. */
    for (unsigned bit = 0; bit < 32; ++bit) {
       VkImageCreateInfo i = base;
       i.flags = 1u << bit;
       CHECK(ELIGIBLE(i) ==
             ((1u << bit) == VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT ||
-             (1u << bit) == VK_IMAGE_CREATE_EXTENDED_USAGE_BIT));
+             (1u << bit) == VK_IMAGE_CREATE_EXTENDED_USAGE_BIT ||
+             (is_depth && (1u << bit) ==
+                          VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT)));
    }
 
    /* Geometry. */
@@ -272,10 +277,20 @@ check_zink(void)
    };
    color.pNext = &list;
    CHECK(!ELIGIBLE(color));
-   const VkImageCreateInfo depth =
+   VkImageCreateInfo depth =
       image(VK_FORMAT_D32_SFLOAT_S8_UINT, 2408, 1506, 1, ds);
+   depth.flags = VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
    CHECK(ELIGIBLE(depth));
    CHECK(!hk_g17p_compression_eligible(AGX_CHIP_G17P, 1, &depth));
+   /* This is Portal's actual shape. A device-copy performance query must
+    * find its compressed layout when host transfer is removed; otherwise
+    * zink retains HOST_TRANSFER and never uses depth compression. */
+   depth.usage |= VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+   CHECK(!ELIGIBLE(depth));
+   depth.usage &= ~VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT;
+   CHECK(ELIGIBLE(depth));
+   depth.samples = VK_SAMPLE_COUNT_4_BIT;
+   CHECK(!ELIGIBLE(depth));
    const VkImageCreateInfo d32 = image(VK_FORMAT_D32_SFLOAT, 2408, 1506, 1, ds);
    CHECK(ELIGIBLE(d32));
    /* A host-transfer image keeps the plain layout host copies require. */

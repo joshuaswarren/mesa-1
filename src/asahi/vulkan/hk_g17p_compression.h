@@ -143,8 +143,16 @@ hk_g17p_compression_eligible(enum agx_chip chip, unsigned plane,
       next = ext.pNext;
    }
 
-   const VkImageCreateFlags allowed_flags =
+   VkImageCreateFlags allowed_flags =
       VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT;
+   /* Zink marks every depth attachment sample-location compatible, including
+    * single-sample images. This changes sample-location tracking, not the
+    * depth plane's storage class. The one-sample restriction below remains.
+    * Refusing the flag also makes the host-copy performance query advertise
+    * a plain device layout, so zink adds HOST_TRANSFER and keeps depth plain.
+    */
+   if (hk_g17p_compression_depth_format(info->format))
+      allowed_flags |= VK_IMAGE_CREATE_SAMPLE_LOCATIONS_COMPATIBLE_DEPTH_BIT_EXT;
    /* Only usages whose every access goes through the texture unit, a PBE or
     * ZLS. Storage and host-transfer access is raw; feedback loops read what
     * is being written; video, shading-rate and density-map units have their
