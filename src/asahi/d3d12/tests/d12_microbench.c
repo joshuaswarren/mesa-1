@@ -750,10 +750,68 @@ main(int argc, char **argv)
           "median %.2f ms\n",
           pso_gfx_first_ms, pso_gfx_median_ms, pso_cs_first_ms,
           pso_cs_median_ms);
+
+   /* ID3D12PipelineLibrary: store the graphics PSO, serialise the library,
+    * open the blob as a new library and load the PSO back by name, which
+    * is how an engine warms its pipelines at start-up. */
+   double library_store_us = 0, library_serialize_us = 0,
+          library_load_us = 0;
+   pd.pRootSignature = b.rs_empty; /* pso_tri's description */
+   {
+      ID3D12Device1 *dev1 = NULL;
+      ID3D12PipelineLibrary *lib = NULL, *lib2 = NULL;
+      if (ID3D12Device_QueryInterface(b.dev, &IID_ID3D12Device1,
+                                      (void **)&dev1) == S_OK &&
+          ID3D12Device1_CreatePipelineLibrary(dev1, NULL, 0,
+                                              &IID_ID3D12PipelineLibrary,
+                                              (void **)&lib) == S_OK) {
+         double t0 = now_ns();
+         HRESULT shr = ID3D12PipelineLibrary_StorePipeline(lib, L"tri",
+                                                           b.pso_tri);
+         double t1 = now_ns();
+         SIZE_T size = shr == S_OK
+            ? ID3D12PipelineLibrary_GetSerializedSize(lib) : 0;
+         void *blob = size ? malloc(size) : NULL;
+         if (blob && ID3D12PipelineLibrary_Serialize(lib, blob, size) == S_OK) {
+            double t2 = now_ns();
+            if (ID3D12Device1_CreatePipelineLibrary(
+                   dev1, blob, size, &IID_ID3D12PipelineLibrary,
+                   (void **)&lib2) == S_OK) {
+               ID3D12PipelineState *loaded = NULL;
+               double t3 = now_ns();
+               HRESULT lhr = ID3D12PipelineLibrary_LoadGraphicsPipeline(
+                  lib2, L"tri", &pd, &IID_ID3D12PipelineState,
+                  (void **)&loaded);
+               double t4 = now_ns();
+               if (lhr == S_OK && loaded) {
+                  library_store_us = (t1 - t0) / 1e3;
+                  library_serialize_us = (t2 - t1) / 1e3;
+                  library_load_us = (t4 - t3) / 1e3;
+                  ID3D12PipelineState_Release(loaded);
+               } else {
+                  printf("       LoadGraphicsPipeline failed: 0x%08x\n",
+                         (unsigned)lhr);
+               }
+               ID3D12PipelineLibrary_Release(lib2);
+            }
+         }
+         free(blob);
+      }
+      if (lib)
+         ID3D12PipelineLibrary_Release(lib);
+      if (dev1)
+         ID3D12Device1_Release(dev1);
+   }
+   printf("pso    library store %.1f us, serialize %.1f us, load from blob "
+          "%.1f us\n",
+          library_store_us, library_serialize_us, library_load_us);
    if (only_pso) {
       printf("MICROBENCH_JSON {\"only\": \"pso\", \"pso_gfx_create_ms_median\": %.3f, "
-             "\"pso_cs_create_ms_median\": %.3f}\n",
-             pso_gfx_median_ms, pso_cs_median_ms);
+             "\"pso_cs_create_ms_median\": %.3f, \"pso_gfx_first_ms\": %.3f, "
+             "\"pso_cs_first_ms\": %.3f, \"pso_library_load_us\": %.1f, "
+             "\"device_create_ms\": %.2f}\n",
+             pso_gfx_median_ms, pso_cs_median_ms, pso_gfx_first_ms,
+             pso_cs_first_ms, library_load_us, device_create_ms);
       /* Release everything so a leak checker sees only the driver. */
       ID3D12PipelineState_Release(b.pso_tri);
       ID3D12PipelineState_Release(b.pso_tri_consts);
@@ -899,6 +957,38 @@ main(int argc, char **argv)
           "single %.0f ns (per descriptor)\n",
           cbv_write_staging_ns, cbv_write_visible_ns, copy_bulk_ns,
           copy_single_ns);
+
+   /* Texture SRVs are the descriptors with a native texture word to pack:
+    * the same four measurements over a 2D render target's default view. */
+   double ts0 = now_ns();
+   for (unsigned i = 0; i < DESCRIPTOR_COUNT; i++) {
+      D3D12_CPU_DESCRIPTOR_HANDLE h = {.ptr = stg_cpu.ptr + i * inc};
+      ID3D12Device_CreateShaderResourceView(b.dev, b.rt, NULL, h);
+   }
+   double ts1 = now_ns();
+   for (unsigned i = 0; i < DESCRIPTOR_COUNT; i++) {
+      D3D12_CPU_DESCRIPTOR_HANDLE h = {.ptr = vis_cpu.ptr + i * inc};
+      ID3D12Device_CreateShaderResourceView(b.dev, b.rt, NULL, h);
+   }
+   double ts2 = now_ns();
+   ID3D12Device_CopyDescriptorsSimple(b.dev, DESCRIPTOR_COUNT, vis_cpu, stg_cpu,
+                                      D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+   double ts3 = now_ns();
+   for (unsigned i = 0; i < DESCRIPTOR_COUNT; i++) {
+      D3D12_CPU_DESCRIPTOR_HANDLE d = {.ptr = vis_cpu.ptr + i * inc};
+      D3D12_CPU_DESCRIPTOR_HANDLE s = {.ptr = stg_cpu.ptr + i * inc};
+      ID3D12Device_CopyDescriptorsSimple(b.dev, 1, d, s,
+                                         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+   }
+   double ts4 = now_ns();
+   double srv_write_staging_ns = (ts1 - ts0) / DESCRIPTOR_COUNT;
+   double srv_write_visible_ns = (ts2 - ts1) / DESCRIPTOR_COUNT;
+   double srv_copy_bulk_ns = (ts3 - ts2) / DESCRIPTOR_COUNT;
+   double srv_copy_single_ns = (ts4 - ts3) / DESCRIPTOR_COUNT;
+   printf("desc   texture SRV write staging %.0f ns, visible %.0f ns; copy bulk "
+          "%.0f ns, single %.0f ns (per descriptor)\n",
+          srv_write_staging_ns, srv_write_visible_ns, srv_copy_bulk_ns,
+          srv_copy_single_ns);
 
    /* --- Sampler heap writes ------------------------------------------ */
    /* CreateSampler into shader-visible sampler heaps of 2,048 and 64 slots
@@ -1340,6 +1430,8 @@ main(int argc, char **argv)
           "\"record_ns_per_dispatch_miss\": %.0f, "
           "\"descriptor_cbv_write_ns\": %.0f, \"descriptor_cbv_write_visible_ns\": %.0f, "
           "\"descriptor_copy_bulk_ns\": %.0f, \"descriptor_copy_single_ns\": %.0f, "
+          "\"descriptor_srv_write_ns\": %.0f, \"descriptor_srv_write_visible_ns\": %.0f, "
+          "\"descriptor_srv_copy_bulk_ns\": %.0f, \"descriptor_srv_copy_single_ns\": %.0f, "
           "\"descriptor_sampler_write_2048_ns\": %.0f, "
           "\"descriptor_sampler_write_64_ns\": %.0f, "
           "\"descriptor_sampler_copy_bulk_ns\": %.0f, "
@@ -1357,6 +1449,8 @@ main(int argc, char **argv)
           setup_ns_best[0] / 1e3, close_ns_best[0] / 1e3,
           dispatch_ns, dispatch_table_ns, dispatch_miss_ns,
           cbv_write_staging_ns, cbv_write_visible_ns, copy_bulk_ns, copy_single_ns,
+          srv_write_staging_ns, srv_write_visible_ns, srv_copy_bulk_ns,
+          srv_copy_single_ns,
           sampler_write_big_ns, sampler_write_small_ns, sampler_copy_bulk_ns,
           empty_list_us, reset_after_submit_us,
           execute_call_us, gpu_wall_ms, execute_call_cs_us, gpu_wall_cs_ms,
