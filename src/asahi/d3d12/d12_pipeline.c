@@ -550,6 +550,10 @@ d12_root_signature_create(struct d12_device *device, const void *blob,
       free(rs);
       return E_INVALIDARG;
    }
+   rs->may_write_uavs = (rs->layout.flags &
+                         D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED) != 0;
+   for (unsigned i = 0; i < rs->map.count; i++)
+      rs->may_write_uavs |= rs->map.entries[i].klass == D12_RES_UAV;
 
    if (rs->layout.num_static_samplers) {
       rs->static_samplers = calloc(rs->layout.num_static_samplers,

@@ -993,9 +993,11 @@ d12_list_reset_api_state(struct d12_cmd_list *list)
    memset(list->scissors, 0, sizeof(list->scissors));
    list->viewport_count = 0;
    list->scissor_count = 0;
+   list->vp_hw_cache.valid = false;
    memset(list->bound_rtv, 0, sizeof(list->bound_rtv));
    memset(&list->bound_dsv, 0, sizeof(list->bound_dsv));
    list->bound_rtv_count = 0;
+   list->om_gen++;
    list->has_bound_dsv = false;
    d12_list_set_dynamic_state(list, &dynamic);
 }
@@ -5366,7 +5368,7 @@ d12_segment_track_bound_uavs(struct d12_cmd_list *list,
    const struct d12_descriptor_heap *heap =
       list->resource_descriptor_heap;
 
-   if (!rs)
+   if (!rs || !rs->may_write_uavs)
       return;
 
    /* Shader Model 6.6 ResourceDescriptorHeap indexing does not name a root
@@ -9873,6 +9875,29 @@ d12_emit_ppp_state(struct d12_cmd_list *list, uint8_t **out, uint64_t gpu,
    return false;
 }
 
+/* The hardware viewport state of the bound viewports and scissors for a
+ * render of `seg`'s size, or 0 when the API state is invalid. */
+static unsigned
+d12_list_viewport_hw_state(struct d12_cmd_list *list,
+                           const struct d12_segment *seg,
+                           const struct d12_viewport_hw_state **states)
+{
+   if (!list->vp_hw_cache.valid ||
+       list->vp_hw_cache.width_px != seg->width_px ||
+       list->vp_hw_cache.height_px != seg->height_px) {
+      list->vp_hw_cache.count = d12_viewport_build_hw_state(
+         list->viewport_count, list->viewports, list->scissor_count,
+         list->scissors, seg->width_px, seg->height_px,
+         list->vp_hw_cache.states);
+      list->vp_hw_cache.width_px = seg->width_px;
+      list->vp_hw_cache.height_px = seg->height_px;
+      list->vp_hw_cache.valid = true;
+      list->vp_hw_cache.gen++;
+   }
+   *states = list->vp_hw_cache.states;
+   return list->vp_hw_cache.count;
+}
+
 static bool
 d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
                         struct d12_pipeline_state *pso, uint32_t vs_usc,
@@ -9899,10 +9924,8 @@ d12_emit_g17p_triangle(struct d12_cmd_list *list, struct d12_segment *seg,
       goto fail;
    if (!d12_segment_ensure_viewport_arrays(list, seg))
       goto fail;
-   struct d12_viewport_hw_state states[D12_VIEWPORT_STATE_MAX];
-   if (d12_viewport_build_hw_state(list->viewport_count, list->viewports,
-          list->scissor_count, list->scissors, seg->width_px, seg->height_px,
-          states) != 1)
+   const struct d12_viewport_hw_state *states;
+   if (d12_list_viewport_hw_state(list, seg, &states) != 1)
       goto fail;
    /* The bind state is a function of the PSO, the viewport and the
     * scissor; the cache compares the whole descriptor, so it starts
@@ -10459,8 +10482,18 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             : memcmp(&open->tib, &pso->tib, sizeof(open->tib)) == 0 &&
                  open->rt_write_mask == pso->rt_write_mask;
 
-      if (!d12_segment_matches_bindings(list, open, pso->has_pixel_shader) ||
-          !layout_matches || clear_bound)
+      /* The bindings were last compared against this render under the
+       * same OMSetRenderTargets/BeginRenderPass: they still match. */
+      const bool use_rtv = pso->has_pixel_shader;
+      bool bindings_match = list->om_gen && open->om_gen == list->om_gen &&
+                            open->om_gen_use_rtv == use_rtv;
+      if (!bindings_match &&
+          d12_segment_matches_bindings(list, open, use_rtv)) {
+         bindings_match = true;
+         open->om_gen = list->om_gen;
+         open->om_gen_use_rtv = use_rtv;
+      }
+      if (!bindings_match || !layout_matches || clear_bound)
          d12_list_close_cdm(list);
    }
 
@@ -11000,10 +11033,9 @@ vs_state_emitted:
        * hardware scissor with the viewport, truncating each edge to the
        * integer pixel boundary before applying the API scissor.
        */
-      struct d12_viewport_hw_state states[D12_VIEWPORT_STATE_MAX];
-      const unsigned viewport_count = d12_viewport_build_hw_state(
-         list->viewport_count, list->viewports, list->scissor_count,
-         list->scissors, seg->width_px, seg->height_px, states);
+      const struct d12_viewport_hw_state *states;
+      const unsigned viewport_count =
+         d12_list_viewport_hw_state(list, seg, &states);
       if (!viewport_count) {
          list->state = D12_LIST_ERROR;
          return;
@@ -11012,10 +11044,17 @@ vs_state_emitted:
       /* REGION_CLIP below is a coarse tile bound. The hardware scissor array
        * carries exact bounds and depth clipping for every viewport.
        */
-      unsigned scissor_index =
-         d12_list_push_scissors(list, seg, viewport_count, states);
-      if (scissor_index == ~0u)
-         return;
+      unsigned scissor_index;
+      if (seg->viewport_ppp_valid &&
+          seg->viewport_hw_gen == list->vp_hw_cache.gen &&
+          seg->viewport_count == viewport_count) {
+         scissor_index = seg->viewport_scissor_index;
+      } else {
+         scissor_index =
+            d12_list_push_scissors(list, seg, viewport_count, states);
+         if (scissor_index == ~0u)
+            return;
+      }
 
       unsigned depth_bias_index = d12_list_push_depth_bias(list, seg, pso);
       if (depth_bias_index == ~0u)
@@ -11107,6 +11146,7 @@ vs_state_emitted:
 
       viewport_ppp_emitted:
          seg->viewport_ppp_valid = true;
+         seg->viewport_hw_gen = list->vp_hw_cache.gen;
          seg->viewport_count = (uint8_t)viewport_count;
          seg->viewport_scissor_index = (uint16_t)scissor_index;
          seg->viewport_depth_bias_index = (uint16_t)depth_bias_index;
@@ -12296,6 +12336,7 @@ d12_list_RSSetViewports(ID3D12GraphicsCommandList6 *iface, UINT count,
       };
    }
    list->viewport_count = (uint8_t)count;
+   list->vp_hw_cache.valid = false;
 }
 
 static void STDMETHODCALLTYPE
@@ -12318,6 +12359,7 @@ d12_list_RSSetScissorRects(ID3D12GraphicsCommandList6 *iface, UINT count,
       };
    }
    list->scissor_count = (uint8_t)count;
+   list->vp_hw_cache.valid = false;
 }
 
 static void STDMETHODCALLTYPE
@@ -16238,6 +16280,7 @@ d12_list_OMSetRenderTargets(ID3D12GraphicsCommandList6 *iface, UINT num_rtvs,
 
    memset(list->bound_rtv, 0, sizeof(list->bound_rtv));
    list->bound_rtv_count = 0;
+   list->om_gen++;
    if (num_rtvs > AGX_MAX_RENDER_TARGETS || (num_rtvs && !rtvs)) {
       mesa_loge("OMSetRenderTargets: invalid RTV count %u", num_rtvs);
       list->state = D12_LIST_ERROR;
@@ -16383,6 +16426,7 @@ d12_cmd_list_begin_render_pass(
    d12_list_close_cdm(list);
    memset(list->bound_rtv, 0, sizeof(list->bound_rtv));
    list->bound_rtv_count = 0;
+   list->om_gen++;
    memset(&list->bound_dsv, 0, sizeof(list->bound_dsv));
    list->has_bound_dsv = false;
    memset(list->render_pass_rt_plan, 0, sizeof(list->render_pass_rt_plan));

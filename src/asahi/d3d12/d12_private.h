@@ -1230,6 +1230,9 @@ struct d12_root_signature {
     * against it and the command list fills the root table through it.
     */
    struct d12_binding_map map;
+   /* The map names a UAV, or the heap is directly indexed: only then can a
+    * draw or dispatch under this signature write through a binding. */
+   bool may_write_uavs;
 };
 
 /* Root signature blobs (d12_root_sig.c) */
@@ -1862,6 +1865,13 @@ struct d12_segment {
     * state is persistent, so repeating an identical update on every draw is
     * pure command/data growth. */
    bool viewport_ppp_valid;
+   /* The list's vp_hw_cache generation viewport_scissor_index was pushed
+    * for: while it holds, the draw's scissor records are already there. */
+   uint32_t viewport_hw_gen;
+   /* The list's om_gen under which the bound attachments last matched
+    * this render (0: never), and for which kind of pipeline. */
+   uint32_t om_gen;
+   bool om_gen_use_rtv;
    /* The vertex VDM state last emitted in this render (AGX2): a draw with
     * the same vertex program words and restart index re-emits nothing. */
    bool vs_state_valid;
@@ -2236,6 +2246,21 @@ struct d12_cmd_list {
    uint8_t viewport_count;
    struct d12_scissor_desc scissors[D12_VIEWPORT_STATE_MAX];
    uint8_t scissor_count;
+   /* Bumped by every write of bound_rtv/bound_dsv (never 0 after the
+    * first, never reset), so a draw can skip comparing them with the open
+    * render while they are unchanged. */
+   uint32_t om_gen;
+   /* The hardware viewport and clip state built from the above for one
+    * render size, kept until RSSetViewports/RSSetScissorRects or a render
+    * of another size: every draw needs it, and rebuilding it (float math
+    * and a 16-entry clear) was an eighth of a plain draw's recording. */
+   struct {
+      bool valid;
+      uint16_t width_px, height_px;
+      unsigned count;
+      uint32_t gen; /* bumped on every rebuild, never reset */
+      struct d12_viewport_hw_state states[D12_VIEWPORT_STATE_MAX];
+   } vp_hw_cache;
 
    /* OM bindings are descriptor snapshots, not just resource pointers: RTV
     * array slices share a resource but have different addresses, and typeless
