@@ -6786,7 +6786,7 @@ main(void)
    const uint64_t checksum =
       fnv1a64(readback_map + READBACK_GUARD_BYTES, READBACK_PAYLOAD_BYTES);
 #if G17P_TEXTURE_MIN_LOD
-   printf(PROBE_NAME ": PASS op=%u minLod=%.0f; every pixel and guard exact, "
+   printf(PROBE_NAME ": PASS op=%u minLod=%g; every pixel and guard exact, "
                      "checksum %016" PRIx64 "\n",
           G17P_TEXTURE_MIN_LOD, view_min_lod, checksum);
 #elif G17P_MULTI_VIEWPORT
