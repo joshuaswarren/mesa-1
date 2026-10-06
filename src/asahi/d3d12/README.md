@@ -4,10 +4,12 @@ A native D3D12 user-mode driver on the Mesa/Asahi substrate: DXIL is
 translated straight to NIR and compiled to AGX machine code. **No Vulkan
 layer, no SPIR-V, no `dxc` at run time.**
 
-Status (2026-10-06, frozen ba4c reference suites, stock Fedora Asahi
-kernels): **11 of 17 on G13 (M1 Pro) and G14 (M2), 9 of 17 on G17P (J700)
-under the Phase 2 kit environment.** The six that do not pass on the Macs
-are fixture contradictions, not driver failures: `g1_smoke` (three
+Status (2026-10-06, frozen ba4c reference suites): **11 of 17 on G13
+(M1 Pro) and G14 (M2), 10 of 17 on G17P (J700) through d3d12agx Proton
+under the Phase 2 kit environment.** The Macs use stock Fedora Asahi
+kernels; the Neo uses the Aurora kernel. Its Windows x64 rerun has zero
+kernel submit failures before and after both batches (7/9 + 3/8).
+The six that do not pass on the Macs are fixture contradictions, not driver failures: `g1_smoke` (three
 capability expectations the driver cannot honour), `g5_depth` (three cull
 expectations that vkd3d-proton contradicts too) and `g6`-`g9`, whose
 2026-10-05 pipeline descriptions are refused at creation with
