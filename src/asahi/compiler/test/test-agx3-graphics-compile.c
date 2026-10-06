@@ -469,6 +469,20 @@ build_vs_g17p_float2_position(void)
    return b.shader;
 }
 
+/* A separate tessellation-stage vertex variant may only export point size.
+ * Sparse terminal exports still have an exact component and retirement map. */
+static nir_shader *
+build_vs_g17p_point_size_only(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_VERTEX, &agx_nir_options, "G17P point-size-only VS");
+   nir_store_uvs_agx(&b, nir_load_preamble(&b, 1, 32, .base = 4),
+                     nir_imm_intN_t(&b, 4, 16));
+   b.shader->info.outputs_written = VARYING_BIT_PSIZ;
+   agx_preprocess_nir(b.shader);
+   return b.shader;
+}
+
 static nir_shader *
 build_vs_g17p_single_instanced_varying(void)
 {
@@ -8249,6 +8263,8 @@ static const struct agx3_graphics_case cases[] = {
    {"fs-zink-minifloat-abs-fma", build_fs_zink_minifloat_abs_fma,
     true, .g17p_only = true},
    {"vs-flat-triangle", build_vs_flat, true, .expected_leading_sr = 0xdd},
+   {"vs-point-size-only", build_vs_g17p_point_size_only, true,
+    .g17p_only = true, .reserved_preamble = 64},
    {"vs-g17p-div3-mul-high", build_vs_g17p_div3_mul_high, true,
     .expected_leading_sr = 0xdd, .g17p_only = true},
    {"vs-glmark2-ideas", build_vs_glmark2_ideas, true,

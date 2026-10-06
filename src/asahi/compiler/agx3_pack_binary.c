@@ -5751,7 +5751,14 @@ agx3_g17p_vertex_output_count(agx_context *ctx, enum agx_isa_encoding enc)
       maximum_output + 1 - minimum_output == output_count;
    const bool sparse_high = ctx->key->g17p_sparse_vertex_outputs &&
       output_count > 0 && maximum_output >= 4;
-   return stopped && (dense_wide || sparse_high) ? output_count : 0;
+   /* A separate vertex variant may only export point size, after the
+    * reserved four-entry position group. Terminal-output validation below
+    * proves its lifetime before using the existing component staging. */
+   const bool point_size_only = output_count == 1 &&
+      minimum_output == AGX3_UVS_POSITION_ENTRIES &&
+      maximum_output == AGX3_UVS_POSITION_ENTRIES;
+   return stopped && (dense_wide || sparse_high || point_size_only)
+             ? output_count : 0;
 }
 
 /* The sources of a dense terminal store bundle cannot be overwritten before
