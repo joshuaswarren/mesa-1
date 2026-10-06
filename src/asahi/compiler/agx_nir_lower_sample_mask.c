@@ -527,6 +527,25 @@ demoted_lanes_reach_sensitive_work(nir_shader *shader)
    return false;
 }
 
+/* Whether a sampling shader runs a loop in or after its first demoting
+ * top-level node. A coverage kill ahead of that loop is the shape that drops
+ * fragment groups on G17P (see demoted_lanes_reach_sensitive_work), even a
+ * kill-only update for quads with no live lane left. */
+static bool
+demote_precedes_sampled_loop(nir_function_impl *impl)
+{
+   if (!cf_list_has(&impl->body, is_texture))
+      return false;
+
+   bool seen = false;
+   foreach_list_typed(nir_cf_node, node, node, &impl->body) {
+      seen |= cf_node_has(node, is_demote);
+      if (seen && cf_node_has_loop(node))
+         return true;
+   }
+   return false;
+}
+
 /* Non-quad subgroup operations, whose active set must not lose demoted
  * lanes earlier than the deferred lowering would. */
 static bool
@@ -600,6 +619,7 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
    nir_function_impl *impl = nir_shader_get_entrypoint(shader);
    const bool lanes_reach_sensitive_work =
       demoted_lanes_reach_sensitive_work(shader);
+   const bool sampled_loop_after_demote = demote_precedes_sampled_loop(impl);
 
    /* Only shaders whose derivatives, quad operations or sampled loops need
     * every lane defer their kills. Depth-writing (z_export) and forced-early
@@ -642,8 +662,10 @@ agx_nir_lower_sample_mask_deferred(nir_shader *shader)
                               nir_metadata_none, &ctx);
 
    /* Unconditional top-level demotes are handled where they occur: their
-    * block continues in uniform control flow. */
-   if (!cf_list_has(&impl->body, subgroup_instr)) {
+    * block continues in uniform control flow. No dead-quad kill may precede
+    * a sampled loop: every coverage update has to stay after it. */
+   if (!cf_list_has(&impl->body, subgroup_instr) &&
+       !sampled_loop_after_demote) {
       nir_foreach_block(block, impl) {
          if (block->cf_node.parent != &impl->cf_node)
             continue;

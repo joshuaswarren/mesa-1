@@ -260,6 +260,18 @@ TEST_F(DemoteEarlyKill, FullyDemotedQuadsAreKilledEarly)
    }
 }
 
+/* A kill-only coverage update ahead of a sampled loop is still a kill ahead
+ * of that loop, so a shader with one keeps every update at the end. */
+TEST_F(DemoteEarlyKill, NoDeadQuadKillBeforeSampledLoop)
+{
+   nir_shader *nir = build(GUARDED_LOOP_AFTER);
+   agx_nir_lower_discard_zs_emit(nir);
+   agx_nir_lower_sample_mask_deferred(nir);
+   nir_validate_shader(nir, "sampled loop");
+   EXPECT_EQ(count_quad_ballots(nir), 0u);
+   ralloc_free(nir);
+}
+
 TEST_F(DemoteEarlyKill, EarlierDemoteReachesQuadBeforeLaterDemote)
 {
    EXPECT_FALSE(lower(QUAD_BEFORE_SECOND_DEMOTE));
