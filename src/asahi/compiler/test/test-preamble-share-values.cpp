@@ -40,7 +40,7 @@ run_share(bool uniform_if, unsigned arms_sharing)
    nir_push_if(&b, cond);
    {
       nir_def *x = nir_load_global_constant(&b, 1, 32, nir_iadd_imm(&b, addr, 16),
-                                            .align_mul = 4, .access = SPEC);
+                                            .access = SPEC, .align_mul = 4);
       values[0] = nir_fmul_imm(&b, nir_fsqrt(&b, x), 3.0);
    }
    nir_push_else(&b, NULL);
@@ -48,14 +48,14 @@ run_share(bool uniform_if, unsigned arms_sharing)
       /* arms_sharing == 2: the same expression; otherwise a different load */
       nir_def *x = nir_load_global_constant(
          &b, 1, 32, nir_iadd_imm(&b, addr, arms_sharing == 2 ? 16 : 32),
-         .align_mul = 4, .access = SPEC);
+         .access = SPEC, .align_mul = 4);
       values[1] = nir_fmul_imm(&b, nir_fsqrt(&b, x), 3.0);
    }
    nir_pop_if(&b, NULL);
    nir_def *phi = nir_if_phi(&b, values[0], values[1]);
    nir_store_output(&b, nir_vec4(&b, phi, phi, phi, phi), nir_imm_int(&b, 0),
-                    .io_semantics.location = FRAG_RESULT_DATA0,
-                    .src_type = nir_type_float32);
+                    .src_type = nir_type_float32,
+                    .io_semantics = {.location = FRAG_RESULT_DATA0});
 
    nir_validate_shader(b.shader, "before preamble");
    unsigned sizes[] = {4, 0, 0};
