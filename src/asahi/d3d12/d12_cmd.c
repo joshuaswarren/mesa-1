@@ -1059,6 +1059,7 @@ d12_list_begin_recording(struct d12_cmd_list *list)
    }
    for (unsigned i = 0; i < D12_GFX_UPLOAD_CACHE_SIZE; i++)
       list->gfx_upload_cache[i].valid = false;
+   list->varyings_link_pso = NULL;
    for (unsigned i = 0; i < D12_FRAGMENT_STATE_CACHE_SIZE; i++)
       list->fragment_state_cache[i].valid = false;
    list->direct_draw_params_valid = false;
@@ -10840,7 +10841,10 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
 
       /* Coefficient-register bindings linking VS outputs to FS inputs. */
       unsigned bindings = pso->fs.linked.cf.nr_bindings;
-      if (bindings) {
+      if (bindings && cacheable_gfx_upload &&
+          list->varyings_link_pso == pso) {
+         varyings = list->varyings_link_usc;
+      } else if (bindings) {
          size_t size =
             AGX_CF_BINDING_HEADER_LENGTH + bindings * AGX_CF_BINDING_LENGTH;
          uint32_t link_usc;
@@ -10852,6 +10856,10 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          agx_link_varyings_vs_fs(cpu, varys, uvs->user_size, &pso->fs.linked.cf,
                                  0, 0, &generate_prim_id);
          varyings = link_usc;
+         if (cacheable_gfx_upload) {
+            list->varyings_link_pso = pso;
+            list->varyings_link_usc = link_usc;
+         }
       }
 
       if (gfx_cache) {

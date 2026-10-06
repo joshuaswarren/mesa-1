@@ -2202,6 +2202,11 @@ struct d12_cmd_list {
    /* Round-robin victim selection for the bounded USC cache probes. */
    uint32_t usc_cache_tick;
    struct d12_gfx_upload_cache_entry gfx_upload_cache[D12_GFX_UPLOAD_CACHE_SIZE];
+   /* The VS-to-FS coefficient link of the last pipeline whose words were
+    * built: a function of the pipeline alone, kept while a root constant
+    * or binding change rebuilds the stage words around it. */
+   const struct d12_pipeline_state *varyings_link_pso;
+   uint32_t varyings_link_usc;
    struct d12_fragment_state_cache_entry
       fragment_state_cache[D12_FRAGMENT_STATE_CACHE_SIZE];
    bool direct_draw_params_valid;
