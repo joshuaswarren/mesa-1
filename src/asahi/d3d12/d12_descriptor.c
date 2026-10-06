@@ -1120,7 +1120,8 @@ d12_descriptor_heap_create(struct d12_device *device,
       return E_OUTOFMEMORY;
    }
 
-   heap->iface.lpVtbl = (ID3D12DescriptorHeapVtbl *)&d12_heap_vtbl;
+   heap->iface.lpVtbl = (ID3D12DescriptorHeapVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_DESCRIPTOR_HEAP, &d12_heap_vtbl);
    heap->refcount = 1;
    heap->device = device;
    heap->desc = *desc;

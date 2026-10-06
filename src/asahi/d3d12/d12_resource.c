@@ -2273,7 +2273,8 @@ d12_resource_create(struct d12_device *device,
          res->stencil_bo ? res->stencil_bo->va->addr + stencil_offset_B : 0;
    }
 
-   res->iface.lpVtbl = (ID3D12ResourceVtbl *)&d12_resource_vtbl;
+   res->iface.lpVtbl = (ID3D12ResourceVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_RESOURCE, &d12_resource_vtbl);
    res->refcount = 1;
    d12_private_data_store_init(&res->private_data, (IUnknown *)&res->iface);
    res->device = device;
@@ -3099,7 +3100,8 @@ d12_heap_create_internal(struct d12_device *device,
       return E_OUTOFMEMORY;
    }
 
-   heap->iface.lpVtbl = (ID3D12HeapVtbl *)&d12_heap_vtbl;
+   heap->iface.lpVtbl = (ID3D12HeapVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_HEAP, &d12_heap_vtbl);
    heap->refcount = 1;
    heap->device = device;
    heap->desc = resolved;

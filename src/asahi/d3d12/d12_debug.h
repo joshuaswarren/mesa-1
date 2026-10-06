@@ -59,6 +59,15 @@ struct d12_debug_flags {
    bool physical_d32;
    bool shim_depth_metadata;
    bool shim_texture_metadata;
+
+   /* D3D12AGX_DEBUG is a comma-separated list of named options:
+    *   api       log every COM method call on the driver's objects with its
+    *             scalar/pointer arguments, and every HRESULT result
+    *   api-fail  log only the calls whose HRESULT failed
+    * The trace is installed per object at creation (d12_api_trace.c), so
+    * the variable has to be set before D3D12CreateDevice. */
+   bool api_trace;
+   bool api_trace_fail;
 };
 
 /* Filled once by d12_debug_slow(), which publishes d12_debug_ready last.
@@ -76,3 +85,49 @@ d12_debug(void)
       return &d12_debug_flags_storage;
    return d12_debug_slow();
 }
+
+/* D3D12AGX_DEBUG=api support (d12_api_trace.c). Objects pass their real
+ * vtable through d12_api_trace_vtbl() when they are created and install
+ * whatever it returns: the real table when tracing is off, otherwise the
+ * generated forwarding table for that interface. */
+enum d12_api_trace_iface {
+   D12_API_TRACE_DEVICE,
+   D12_API_TRACE_LIST,
+   D12_API_TRACE_QUEUE,
+   D12_API_TRACE_RESOURCE,
+   D12_API_TRACE_FENCE,
+   D12_API_TRACE_DESCRIPTOR_HEAP,
+   D12_API_TRACE_PIPELINE_STATE,
+   D12_API_TRACE_ROOT_SIGNATURE,
+   D12_API_TRACE_COMMAND_ALLOCATOR,
+   D12_API_TRACE_HEAP,
+   D12_API_TRACE_QUERY_HEAP,
+   D12_API_TRACE_IFACE_COUNT,
+};
+
+const void *d12_api_trace_vtbl(enum d12_api_trace_iface iface,
+                               const void *real_vtbl);
+
+static inline bool
+d12_api_trace_enabled(void)
+{
+   return d12_debug()->api_trace;
+}
+
+static inline bool
+d12_api_trace_fail_enabled(void)
+{
+   return d12_debug()->api_trace_fail;
+}
+
+/* Logging helpers used by the generated wrappers and by the exported entry
+ * points (D3D12CreateDevice and friends), which have no vtable. */
+void d12_api_trace_call(const char *method, const void *self,
+                        const char *fmt, ...);
+void d12_api_trace_hresult(const char *method, const void *self,
+                           long hr, const char *fmt, ...);
+
+#define D12_API_TRACE_GUID_LEN 40
+struct _GUID;
+const char *d12_api_trace_guid(const struct _GUID *guid,
+                               char buf[D12_API_TRACE_GUID_LEN]);

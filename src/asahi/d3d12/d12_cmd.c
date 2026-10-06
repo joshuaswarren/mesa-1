@@ -443,7 +443,8 @@ d12_cmd_allocator_create(struct d12_device *device,
    if (!alloc)
       return E_OUTOFMEMORY;
 
-   alloc->iface.lpVtbl = (ID3D12CommandAllocatorVtbl *)&d12_alloc_vtbl;
+   alloc->iface.lpVtbl = (ID3D12CommandAllocatorVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_COMMAND_ALLOCATOR, &d12_alloc_vtbl);
    alloc->refcount = 1;
    alloc->lifetime_refcount = 1;
    alloc->device = device;
@@ -17694,8 +17695,8 @@ d12_cmd_list_create(struct d12_device *device, D3D12_COMMAND_LIST_TYPE type,
       return E_OUTOFMEMORY;
    }
 
-   list->iface.lpVtbl =
-      (ID3D12GraphicsCommandListVtbl *)&d12_list_vtbl.v6;
+   list->iface.lpVtbl = (ID3D12GraphicsCommandListVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_LIST, &d12_list_vtbl.v6);
    list->refcount = 1;
    list->device = device;
    list->type = type;

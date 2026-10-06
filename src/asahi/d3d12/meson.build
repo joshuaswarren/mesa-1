@@ -36,6 +36,7 @@ libd3d12agx_files = files(
   'd12_core_caps.c',
   'd12_core_caps_query.c',
   'd12_dxbc_wrap.c',
+  'd12_api_trace.c',
   'd12_cmd.c',
   'd12_debug.c',
   'd12_descriptor.c',

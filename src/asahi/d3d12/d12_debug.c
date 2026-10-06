@@ -9,6 +9,7 @@
 #include "util/macros.h"
 #include "util/u_atomic.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -73,6 +74,25 @@ d12_debug_init(void)
    f->shim_depth_metadata = d12_env_is_one("AURORA_D3D12_SHIM_DEPTH_METADATA");
    f->shim_texture_metadata =
       d12_env_is_one("AURORA_D3D12_SHIM_TEXTURE_METADATA");
+
+   /* Named options, comma separated. Unknown names are reported once so a
+    * typo does not silently run without the trace it asked for. */
+   const char *debug = getenv("D3D12AGX_DEBUG");
+   while (debug && *debug) {
+      const char *end = strchr(debug, ',');
+      const size_t len = end ? (size_t)(end - debug) : strlen(debug);
+      if (len == 3 && !strncmp(debug, "api", len)) {
+         f->api_trace = true;
+      } else if ((len == 8 && !strncmp(debug, "api-fail", len)) ||
+                 (len == 7 && !strncmp(debug, "apifail", len))) {
+         f->api_trace_fail = true;
+      } else if (len) {
+         fprintf(stderr, "d3d12agx: D3D12AGX_DEBUG: unknown option '%.*s' "
+                 "(known: api, api-fail)\n", (int)len, debug);
+      }
+      debug = end ? end + 1 : NULL;
+   }
+
    __atomic_store_n(&d12_debug_ready, true, __ATOMIC_RELEASE);
 }
 

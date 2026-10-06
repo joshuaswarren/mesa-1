@@ -3567,7 +3567,8 @@ d12_queue_create_internal(struct d12_device *device,
       return E_FAIL;
    }
 
-   queue->iface.lpVtbl = (ID3D12CommandQueueVtbl *)&d12_queue_vtbl;
+   queue->iface.lpVtbl = (ID3D12CommandQueueVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_QUEUE, &d12_queue_vtbl);
    queue->refcount = 1;
    queue->device = device;
    queue->desc = *desc;

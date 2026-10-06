@@ -1106,7 +1106,8 @@ d12_fence_create_internal(struct d12_device *device, UINT64 initial_value,
       return E_FAIL;
    }
 
-   fence->iface.lpVtbl = (ID3D12FenceVtbl *)&d12_fence_vtbl;
+   fence->iface.lpVtbl = (ID3D12FenceVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_FENCE, &d12_fence_vtbl);
    fence->refcount = 1;
    fence->lifetime_refcount = 1;
    fence->device = device;

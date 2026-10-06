@@ -580,7 +580,8 @@ d12_root_signature_create(struct d12_device *device, const void *blob,
       }
    }
 
-   rs->iface.lpVtbl = (ID3D12RootSignatureVtbl *)&d12_root_sig_vtbl;
+   rs->iface.lpVtbl = (ID3D12RootSignatureVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_ROOT_SIGNATURE, &d12_root_sig_vtbl);
    rs->refcount = 1;
    rs->device = device;
    d12_private_data_store_init(&rs->private_data, (IUnknown *)&rs->iface);
@@ -1664,7 +1665,8 @@ d12_pipeline_state_create_compute(struct d12_device *device,
       }
    }
 
-   pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
+   pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_PIPELINE_STATE, &d12_pso_vtbl);
    pso->refcount = 1;
    pso->lifetime = 1;
    pso->device = device;
@@ -5814,7 +5816,8 @@ d12_pipeline_state_create_graphics(
    }
 
 
-   pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)&d12_pso_vtbl;
+   pso->iface.lpVtbl = (ID3D12PipelineStateVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_PIPELINE_STATE, &d12_pso_vtbl);
    pso->refcount = 1;
    pso->lifetime = 1;
    pso->device = device;

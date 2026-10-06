@@ -5271,7 +5271,8 @@ d12_device_backend_init(struct d12_device *device,
    agx_scratch_init(&device->dev, &device->scratch_fs);
    agx_scratch_init(&device->dev, &device->scratch_cs);
 
-   device->iface.lpVtbl = (ID3D12DeviceVtbl *)&d12_device_vtbl;
+   device->iface.lpVtbl = (ID3D12DeviceVtbl *)d12_api_trace_vtbl(
+      D12_API_TRACE_DEVICE, &d12_device_vtbl);
    device->iface_config1.lpVtbl =
       (ID3D12DeviceConfiguration1Vtbl *)&d12_device_config1_vtbl;
    device->refcount = 1;
@@ -5311,8 +5312,8 @@ d12_device_backend_cleanup(struct d12_device *device)
    agx_bg_eot_cleanup(&device->bg_eot);
 }
 
-PUBLIC HRESULT WINAPI
-D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
+static HRESULT
+d12_export_D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level,
                   REFIID riid, void **out)
 {
    if (out)
@@ -5385,8 +5386,8 @@ D3D12GetDebugInterface(REFIID riid, void **out)
  * corresponding feature exists.
  */
 
-PUBLIC HRESULT WINAPI
-D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc,
+static HRESULT
+d12_export_D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc,
                             D3D_ROOT_SIGNATURE_VERSION version,
                             ID3DBlob **blob, ID3DBlob **error_blob)
 {
@@ -5419,8 +5420,8 @@ D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc,
    return *blob ? S_OK : E_OUTOFMEMORY;
 }
 
-PUBLIC HRESULT WINAPI
-D3D12SerializeVersionedRootSignature(
+static HRESULT
+d12_export_D3D12SerializeVersionedRootSignature(
    const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob,
    ID3DBlob **error_blob)
 {
@@ -5444,15 +5445,15 @@ D3D12SerializeVersionedRootSignature(
    return *blob ? S_OK : E_OUTOFMEMORY;
 }
 
-PUBLIC HRESULT WINAPI
-D3D12CreateRootSignatureDeserializer(const void *src, SIZE_T size,
+static HRESULT
+d12_export_D3D12CreateRootSignatureDeserializer(const void *src, SIZE_T size,
                                      REFIID riid, void **out)
 {
    return d12_root_signature_deserializer_create(src, size, riid, out);
 }
 
-PUBLIC HRESULT WINAPI
-D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T size,
+static HRESULT
+d12_export_D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T size,
                                               REFIID riid, void **out)
 {
    return d12_versioned_root_signature_deserializer_create(src, size, riid,
@@ -5478,4 +5479,80 @@ D3D12EnableExperimentalFeatures(UINT num_features, const IID *iids,
       return S_OK;
    d12_stub_report("D3D12EnableExperimentalFeatures");
    return E_NOINTERFACE;
+}
+
+/*
+ * Exported entry points. The real bodies are the static d12_export_*
+ * functions above; these thin wrappers add the D3D12AGX_DEBUG=api trace,
+ * which the vtable-based trace cannot see because there is no object yet.
+ */
+
+PUBLIC HRESULT WINAPI
+D3D12CreateDevice(IUnknown *adapter, D3D_FEATURE_LEVEL minimum_feature_level, REFIID riid, void **out)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12CreateDevice", NULL, "adapter=%p, minimum_feature_level=0x%x, riid=%s, out=%p", (const void *)adapter, (unsigned)minimum_feature_level, d12_api_trace_guid(riid, g0), (const void *)out);
+   HRESULT hr = d12_export_D3D12CreateDevice(adapter, minimum_feature_level, riid, out);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12CreateDevice", NULL, hr, trace ? NULL : "adapter=%p, minimum_feature_level=0x%x, riid=%s, out=%p", (const void *)adapter, (unsigned)minimum_feature_level, d12_api_trace_guid(riid, g0), (const void *)out);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12SerializeRootSignature(const D3D12_ROOT_SIGNATURE_DESC *desc, D3D_ROOT_SIGNATURE_VERSION version, ID3DBlob **blob, ID3DBlob **error_blob)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12SerializeRootSignature", NULL, "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, (unsigned)version, (const void *)blob, (const void *)error_blob);
+   HRESULT hr = d12_export_D3D12SerializeRootSignature(desc, version, blob, error_blob);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12SerializeRootSignature", NULL, hr, trace ? NULL : "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, (unsigned)version, (const void *)blob, (const void *)error_blob);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12SerializeVersionedRootSignature(const D3D12_VERSIONED_ROOT_SIGNATURE_DESC *desc, ID3DBlob **blob, ID3DBlob **error_blob)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12SerializeVersionedRootSignature", NULL, "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, desc ? (unsigned)desc->Version : 0u, (const void *)blob, (const void *)error_blob);
+   HRESULT hr = d12_export_D3D12SerializeVersionedRootSignature(desc, blob, error_blob);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12SerializeVersionedRootSignature", NULL, hr, trace ? NULL : "desc=%p, version=%u, blob=%p, error_blob=%p", (const void *)desc, desc ? (unsigned)desc->Version : 0u, (const void *)blob, (const void *)error_blob);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12CreateRootSignatureDeserializer(const void *src, SIZE_T size, REFIID riid, void **out)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12CreateRootSignatureDeserializer", NULL, "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   HRESULT hr = d12_export_D3D12CreateRootSignatureDeserializer(src, size, riid, out);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12CreateRootSignatureDeserializer", NULL, hr, trace ? NULL : "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   return hr;
+}
+
+PUBLIC HRESULT WINAPI
+D3D12CreateVersionedRootSignatureDeserializer(const void *src, SIZE_T size, REFIID riid, void **out)
+{
+   char g0[D12_API_TRACE_GUID_LEN];
+   (void)g0;
+   const bool trace = d12_api_trace_enabled();
+   if (trace)
+      d12_api_trace_call("D3D12CreateVersionedRootSignatureDeserializer", NULL, "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   HRESULT hr = d12_export_D3D12CreateVersionedRootSignatureDeserializer(src, size, riid, out);
+   if (trace || (FAILED(hr) && d12_api_trace_fail_enabled()))
+      d12_api_trace_hresult("D3D12CreateVersionedRootSignatureDeserializer", NULL, hr, trace ? NULL : "src=%p, size=%llu, riid=%s, out=%p", src, (unsigned long long)size, d12_api_trace_guid(riid, g0), (const void *)out);
+   return hr;
 }
