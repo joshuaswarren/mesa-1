@@ -19,6 +19,9 @@ struct d12_queue_timeline_state {
 };
 
 #define D12_QUEUE_MAX_INFLIGHT_SUBMITS 64u
+/* A submission whose renders recorded at least this many draws makes the
+ * next one wait for it instead of overlapping (d12_queue_process_submit). */
+#define D12_QUEUE_OVERLAP_MAX_DRAWS 512u
 #define D12_QUEUE_SIGNAL_SLOT_COUNT 64u
 #define D12_QUEUE_SIGNAL_STREAM_STRIDE 256u
 #define D12_QUEUE_SIGNAL_DATA_OFFSET 192u

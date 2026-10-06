@@ -10534,6 +10534,8 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          return;
    }
 
+   seg->draws++;
+
    /* Root table, exactly as the dispatch path builds it -- from the
     * GRAPHICS bindings, which D3D12 keeps separate from the compute ones.
     */

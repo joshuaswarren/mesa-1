@@ -233,6 +233,8 @@ struct d12_queue_op {
    size_t payload_size;
    unsigned nr_vdm;
    unsigned nr_cdm;
+   /* Draws recorded into the renders of this submission. */
+   uint32_t draws;
    bool write_set_complete;
    bool read_set_complete;
    uint32_t exact_read_range_count;
@@ -1915,8 +1917,20 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
     * eight). Queue Waits are CPU-side ticket waits ahead of the
     * submission and placement waits travel in the virt payload, so
     * neither needs an input sync here. D3D12AGX_SUBMIT_SELF_WAIT=1
-    * restores the old shape for A/B. */
-   const bool self_wait = d12_debug()->submit_self_wait;
+    * restores the old shape for A/B.
+    *
+    * Overlap pays only for light frames, though. Behind a submission
+    * whose renders recorded many draws, the next one's vertex work
+    * overlapping that fragment work costs more GPU time than the round
+    * trip it saves: on the M2, a 1000-draw frame ran 489-572 us per frame
+    * overlapped against 380-397 us serialised, a 4000-draw frame 1122-1296
+    * against 782 us (vkd3d-proton: 444 and 955 us), while a 250-draw frame
+    * still gained from overlap (276 against 288-344 us). Such a submission
+    * waits on the previous one, as before; the wait is free when that one
+    * has already completed. */
+   const bool self_wait =
+      d12_debug()->submit_self_wait ||
+      p_atomic_read(&queue->prev_submit_draws) >= D12_QUEUE_OVERLAP_MAX_DRAWS;
    struct drm_asahi_sync syncs[2] = {
       {
          .sync_type = DRM_ASAHI_SYNC_TIMELINE_SYNCOBJ,
@@ -2117,6 +2131,7 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
       return false;
    }
    op->retire_value = out;
+   p_atomic_set(&queue->prev_submit_draws, op->draws);
    if (d12_debug()->dump_sync) {
       uint64_t stream_address = 0;
       if (op->bos_initialized && util_dynarray_num_elements(
@@ -2681,6 +2696,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
 
       size_t payload_size = 0;
       unsigned nr_vdm = 0, nr_cdm = 0;
+      uint32_t draws = 0;
       bool write_set_complete = true;
       bool payload_valid = true;
 
@@ -2775,6 +2791,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
             memcpy(payload + payload_size, &cmd, header.size);
             payload_size += header.size;
             nr_vdm++;
+            draws += seg->draws;
          }
       }
 
@@ -2806,6 +2823,7 @@ d12_queue_ExecuteCommandLists(ID3D12CommandQueue *iface, UINT count,
       op->payload_size = payload_size;
       op->nr_vdm = nr_vdm;
       op->nr_cdm = nr_cdm;
+      op->draws = draws;
       op->write_set_complete = write_set_complete;
       if (!write_set_complete && d12_debug()->dump_write_set) {
          mesa_logw("ExecuteCommandLists: submitting conservative attachment "

@@ -1900,6 +1900,8 @@ struct d12_segment {
    /* The list's vp_hw_cache generation viewport_scissor_index was pushed
     * for: while it holds, the draw's scissor records are already there. */
    uint32_t viewport_hw_gen;
+   /* Draws recorded into this render. */
+   uint32_t draws;
    /* The list's om_gen under which the bound attachments last matched
     * this render (0: never), and for which kind of pipeline. */
    uint32_t om_gen;
@@ -2493,6 +2495,9 @@ struct d12_queue {
     * syncobjs cannot natively represent wait-before-signal. */
    uint32_t syncobj;
    struct d12_queue_timeline_state timeline;
+   /* Draws in the renders of the last real submission: a submission behind
+    * a heavy one waits on its timeline point (see d12_queue_process_submit). */
+   uint32_t prev_submit_draws;
 
    mtx_t lock;
    /* DDI callbacks submit on the entering runtime thread. This lock keeps
