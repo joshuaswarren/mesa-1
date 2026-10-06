@@ -4849,7 +4849,17 @@ d12_list_upload_bindings(struct d12_cmd_list *list, bool compute,
     * returning zero, and writes as discarded. Faulting was always the wrong
     * answer.
     */
-   uint64_t null_buf = 0, null_counters = 0;
+   /* A root signature with no resource slots cannot dereference the dummy
+    * resource plane (root_count is still at least one for the header ABI).
+    * Keep its null address valid without allocating and zeroing a 64 KiB
+    * emulated CBV in every one-draw recording. Real null descriptors retain
+    * the full per-recording buffer and its zero-read contract. */
+   const bool empty_resources =
+      rs && !rs->map.resource_count && !bound_heap &&
+      !(rs->layout.flags &
+        D3D12_ROOT_SIGNATURE_FLAG_CBV_SRV_UAV_HEAP_DIRECTLY_INDEXED);
+   uint64_t null_buf = empty_resources ? list->device->null_va : 0;
+   uint64_t null_counters = 0;
    uint64_t addrs[D12_ROOT_TABLE_ENTRIES];
    for (unsigned i = 0; i < root_count; i++) {
       if (!d12_root_plane_slot(list, &table[i], sources[i], i, &null_buf,
