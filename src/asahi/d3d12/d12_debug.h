@@ -50,7 +50,8 @@ struct d12_debug_flags {
    bool submit_inline_always;
    /* D3D12AGX_G17P_DISPATCH_NO_BARRIER: native G17P API dispatches drop
     * the trailing weak barrier word; the strong flush still follows at the
-    * next barrier and at the segment end. Experimental, Neo only. */
+    * next barrier and at the segment end. Enabled by default; set to 0
+    * to retain per-launch weak ordering for diagnostics. Neo only. */
    bool g17p_dispatch_no_barrier;
 
    /* Qualification opt-ins consumed by the G17P admission gates in

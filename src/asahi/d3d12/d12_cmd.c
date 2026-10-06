@@ -1369,7 +1369,7 @@ d12_list_emit_cdm_cache_flush(struct d12_cmd_list *list, uint8_t **cursor)
  * indirect patching, which the application never barriers against), and
  * the segment's terminator, so a hardware command always ends flushed and
  * the next command's barrier field covers the rest. The native G17P
- * dispatch record carries its own barrier and is unchanged.
+ * dispatch records may retain a weak barrier for diagnostic comparisons.
  */
 static bool
 d12_list_flush_cdm_pending(struct d12_cmd_list *list)
@@ -1381,7 +1381,7 @@ d12_list_flush_cdm_pending(struct d12_cmd_list *list)
       return true;
    /* A native G17P launch ends in its own barrier word. When nothing has
     * been appended since, the strong flush replaces that word rather than
-    * following it: Apple never emits two barrier words back to back. */
+    * following it, so the stream has just the required strong flush. */
    if (seg->g17p_weak_barrier_end &&
        seg->g17p_weak_barrier_end ==
           (size_t)(list->stream_cur - d12_list_stream_map(list))) {
@@ -7096,10 +7096,10 @@ d12_g17p_txf_physical_enabled(const struct agx_device *dev)
 /* Bookkeeping after a native G17P API launch was appended with its
  * trailing barrier word. A weak word is owed the strong flush at the next
  * barrier, which rewrites it in place while it is still the last thing in
- * the stream. D3D12AGX_G17P_DISPATCH_NO_BARRIER drops the weak word instead,
- * so consecutive launches are not ordered against each other (D3D12 orders
- * dispatches only across barriers) and the flush appends a strong word of
- * its own: the experiment for the G17P per-launch GPU cost. */
+ * the stream. By default the weak word is dropped, allowing independent
+ * dispatches to overlap. Applications must order UAV dependencies with
+ * ResourceBarrier; that path and helper launches still emit a strong flush.
+ * D3D12AGX_G17P_DISPATCH_NO_BARRIER=0 retains the weak word for diagnostics. */
 static void
 d12_g17p_api_dispatch_appended(struct d12_cmd_list *list,
                                uint8_t barrier_flags)

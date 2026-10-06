@@ -50,8 +50,10 @@ d12_debug_init(void)
    f->flush_each_dispatch = d12_env_set("D3D12AGX_FLUSH_EACH_DISPATCH");
    f->submit_self_wait = d12_env_set("D3D12AGX_SUBMIT_SELF_WAIT");
    f->submit_inline_always = d12_env_set("D3D12AGX_SUBMIT_INLINE_ALWAYS");
+   const char *dispatch_no_barrier =
+      getenv("D3D12AGX_G17P_DISPATCH_NO_BARRIER");
    f->g17p_dispatch_no_barrier =
-      d12_env_set("D3D12AGX_G17P_DISPATCH_NO_BARRIER");
+      !dispatch_no_barrier || strcmp(dispatch_no_barrier, "0") != 0;
    f->dump_segs = d12_env_set("D3D12AGX_DUMP_SEGS");
    f->dump_write_set = d12_env_set("D3D12AGX_DUMP_WRITE_SET");
    f->dump_scratch = d12_env_set("D3D12AGX_DUMP_SCRATCH");
