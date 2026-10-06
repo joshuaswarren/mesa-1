@@ -813,12 +813,21 @@ fb_clears_apply_or_discard_internal(struct zink_context *ctx, struct pipe_resour
             zink_fb_clears_discard(ctx, pres);
          return;
       }
+      struct u_rect read_region = {
+         MIN2(region.x0, region.x1), MAX2(region.x0, region.x1),
+         MIN2(region.y0, region.y1), MAX2(region.y0, region.y1),
+      };
       for (int j = 0; j < zink_fb_clear_count(fb_clear); j++) {
          struct zink_framebuffer_clear_data *clear = zink_fb_clear_element(fb_clear, j);
          struct u_rect scissor = {clear->scissor.minx, clear->scissor.maxx,
                                   clear->scissor.miny, clear->scissor.maxy};
-         if (!clear->has_scissor || zink_blit_region_covers(region, scissor) || !depth_fills) {
-            /* this is a clear that isn't fully covered by our pending write */
+         /* A read needs every intersecting clear, including smaller clears
+          * contained in its region. A write only needs clears whose contents
+          * it cannot discard.
+          */
+         if (!clear->has_scissor || !depth_fills ||
+             (invert ? u_rect_test_intersection(&read_region, &scissor) :
+                       zink_blit_region_covers(region, scissor))) {
             if (!discard_only)
                fb_clears_apply_internal(ctx, pres, i);
             return;
