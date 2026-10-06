@@ -953,7 +953,8 @@ hk_get_device_properties(const struct agx_device *dev,
    const unsigned descriptor_generation =
       agx_chip_descriptor_generation(dev->chip);
    const bool texel_buffer_single_texel_alignment =
-      hk_descriptor_generation_is_agx2(descriptor_generation);
+      hk_descriptor_generation_is_agx2(descriptor_generation) ||
+      dev->chip == AGX_CHIP_G17P;
 
    /* Note: update nir_shader_compiler_options.max_samples when changing this. */
    const VkSampleCountFlagBits sample_counts =
@@ -1002,7 +1003,12 @@ hk_get_device_properties(const struct agx_device *dev,
       .maxImageDimension3D = 16384,
       .maxImageDimensionCube = 16384,
       .maxImageArrayLayers = 2048,
-      .maxTexelBufferElements = AGX_TEXTURE_BUFFER_MAX_SIZE,
+      /* The G17P texture/PBE includes the software alignment tail in its
+       * height. Reserve the worst-case 15 R8 texels so a maximally sized
+       * view at a single-texel offset still fits the native 2D descriptor.
+       */
+      .maxTexelBufferElements = AGX_TEXTURE_BUFFER_MAX_SIZE -
+                               (dev->chip == AGX_CHIP_G17P ? 15 : 0),
       .maxUniformBufferRange = 65536,
 
       /* From a hardware perspective, storage buffers are lowered to global
