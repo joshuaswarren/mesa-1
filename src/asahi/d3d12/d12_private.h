@@ -1736,6 +1736,19 @@ struct d12_read_tracker {
    bool incomplete;
 };
 
+struct d12_fragment_state_cache_entry {
+   bool valid;
+   const struct d12_pipeline_state *pso;
+   uint32_t fs_usc, varyings;
+   enum mesa_prim topology;
+   uint8_t dsv_flags;
+   uint8_t stencil_ref_front, stencil_ref_back;
+   bool has_ds, has_stencil, depth_bias_enable;
+   bool occlusion_counting;
+   uint64_t gpu;
+   uint16_t size;
+};
+
 struct d12_segment {
    /* Firmware timestamp destination, bound through agx_bind_timestamps. */
    struct drm_asahi_timestamp timestamp_end;
@@ -1897,6 +1910,12 @@ struct d12_segment {
    /* The fragment PPP blob the render's last draw pointed the PPP at: a
     * draw with the same blob emits no PPP_STATE packet. */
    uint64_t fragment_ppp_gpu;
+   /* The inputs of the fragment state the PPP holds in this render, with
+    * the fragment shader words it was last given. A draw that differs only
+    * in those words (a root constant or binding change rebuilds them) loads
+    * just the fragment shader group, Honeykrisp's root-dirty update, rather
+    * than a whole fragment state. `valid` false: unknown. */
+   struct d12_fragment_state_cache_entry fragment_loaded;
    uint32_t vs_state_usc;
    uint32_t vs_state_restart;
    const struct d12_gfx_stage *vs_state_stage;
@@ -1967,18 +1986,6 @@ struct d12_gfx_upload_cache_entry {
 
 #define D12_FRAGMENT_STATE_CACHE_SIZE 2048
 
-struct d12_fragment_state_cache_entry {
-   bool valid;
-   const struct d12_pipeline_state *pso;
-   uint32_t fs_usc, varyings;
-   enum mesa_prim topology;
-   uint8_t dsv_flags;
-   uint8_t stencil_ref_front, stencil_ref_back;
-   bool has_ds, has_stencil, depth_bias_enable;
-   bool occlusion_counting;
-   uint64_t gpu;
-   uint16_t size;
-};
 
 /* Native PPP uploads keep their low VDM alias until the last submitted
  * operation retires, independently of command-list Reset/release. */

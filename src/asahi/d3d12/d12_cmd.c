@@ -11203,7 +11203,57 @@ vs_state_emitted:
                  has_stencil, depth_bias_enable, occlusion_counting)
             : NULL;
 
-      if (fragment_cache && fragment_cache->valid) {
+      /* The PPP already holds this draw's fragment state but for the
+       * fragment shader words: load only those. */
+      const struct d12_fragment_state_cache_entry *loaded =
+         &seg->fragment_loaded;
+      const bool only_fs_words_differ =
+         loaded->valid && loaded->pso == pso && loaded->topology == topology &&
+         loaded->dsv_flags == seg->dsv_flags &&
+         loaded->stencil_ref_front == list->stencil_ref_front &&
+         loaded->stencil_ref_back == list->stencil_ref_back &&
+         loaded->has_ds == has_ds && loaded->has_stencil == has_stencil &&
+         loaded->depth_bias_enable == depth_bias_enable &&
+         loaded->occlusion_counting == occlusion_counting;
+      const bool fragment_cache_hit = fragment_cache && fragment_cache->valid;
+
+      if (only_fs_words_differ &&
+          (!fragment_cache_hit || seg->fragment_ppp_gpu != fragment_cache->gpu)) {
+         if (loaded->fs_usc != fs_usc || loaded->varyings != varyings) {
+            struct AGX_PPP_HEADER present = {
+               .fragment_shader = true,
+               .viewport_count = 1,
+            };
+            size_t size = agx_ppp_update_size(&present);
+            uint64_t gpu =
+               d12_list_upload_zero(list, size, AGX_PPP_HEADER_ALIGN);
+            uint8_t *cpu = d12_list_data_cpu(list, gpu);
+            if (!cpu)
+               return;
+            struct agx_ppp_update ppp = agx_new_ppp_update(
+               (struct agx_ptr){.cpu = cpu, .gpu = gpu}, size, &present);
+            agx_ppp_push_packed(&ppp, &pso->fs.fs_counts,
+                                FRAGMENT_SHADER_WORD_0);
+            agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_1, cfg) {
+               cfg.pipeline = fs_usc;
+            }
+            agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_2, cfg) {
+               cfg.cf_bindings = varyings;
+            }
+            agx_ppp_push(&ppp, FRAGMENT_SHADER_WORD_3, cfg);
+            if (!agx_ppp_legacy_payload_supported(list->device->dev.chip) ||
+                !agx_ppp_fini(list->device->dev.chip, &out, &ppp)) {
+               mesa_loge("no grounded legacy PPP payload/finalizer for %s",
+                         agx_chip_name(list->device->dev.chip));
+               list->state = D12_LIST_ERROR;
+               return;
+            }
+            seg->fragment_loaded.fs_usc = fs_usc;
+            seg->fragment_loaded.varyings = varyings;
+         }
+         /* The PPP now holds the cached blob's state, if there is one. */
+         seg->fragment_ppp_gpu = fragment_cache_hit ? fragment_cache->gpu : 0;
+      } else if (fragment_cache_hit) {
          /* The PPP keeps the state it last loaded for the rest of the
           * render; re-pointing it at the same blob every draw made the
           * hardware reload the whole fragment pipeline per draw. */
@@ -11212,6 +11262,7 @@ vs_state_emitted:
                                     fragment_cache->size))
                return;
             seg->fragment_ppp_gpu = fragment_cache->gpu;
+            seg->fragment_loaded = *fragment_cache;
          }
       } else {
 
@@ -11360,6 +11411,22 @@ vs_state_emitted:
             return;
          }
          seg->fragment_ppp_gpu = gpu;
+         seg->fragment_loaded = (struct d12_fragment_state_cache_entry){
+            .valid = true,
+            .pso = pso,
+            .fs_usc = fs_usc,
+            .varyings = varyings,
+            .topology = topology,
+            .dsv_flags = seg->dsv_flags,
+            .stencil_ref_front = list->stencil_ref_front,
+            .stencil_ref_back = list->stencil_ref_back,
+            .has_ds = has_ds,
+            .has_stencil = has_stencil,
+            .depth_bias_enable = depth_bias_enable,
+            .occlusion_counting = occlusion_counting,
+            .gpu = gpu,
+            .size = size,
+         };
          if (fragment_cache) {
             *fragment_cache = (struct d12_fragment_state_cache_entry){
                .valid = true,
