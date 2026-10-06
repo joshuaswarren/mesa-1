@@ -56,6 +56,8 @@ agx_bo_cache_remove_locked(struct agx_device *dev, struct agx_bo *bo)
    list_del(&bo->bucket_link);
    list_del(&bo->lru_link);
    dev->bo_cache.size -= bo->size;
+   if (dev->bo_cache.size_counter)
+      p_atomic_add(dev->bo_cache.size_counter, -(int64_t)bo->size);
 }
 
 /* Tries to fetch a BO of sufficient size with the appropriate flags from the
@@ -212,6 +214,8 @@ agx_bo_cache_put_locked(struct agx_device *dev, struct agx_bo *bo)
 
    /* Update statistics */
    dev->bo_cache.size += bo->size;
+   if (dev->bo_cache.size_counter)
+      p_atomic_add(dev->bo_cache.size_counter, bo->size);
 
    if (0) {
       printf("BO cache: %zu KiB (+%zu KiB from %s, hit/miss %" PRIu64

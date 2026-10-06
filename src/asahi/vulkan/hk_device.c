@@ -802,6 +802,10 @@ hk_CreateDevice(VkPhysicalDevice physicalDevice,
       dev->vk.enabled_features.pipelineRobustness = false;
    }
 
+   /* All BOs use the single UMA heap. Cached BOs remain pinned after
+    * vkFreeMemory, so include their bytes across every logical device. */
+   assert(pdev->mem_heap_count == 1);
+   dev->dev.bo_cache.size_counter = &pdev->mem_heaps[0].cached;
    bool succ = agx_open_device(NULL, &dev->dev);
    drmFreeDevice(&drm_device);
    if (!succ) {
