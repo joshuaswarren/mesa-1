@@ -519,6 +519,16 @@ lower_regular_texture(nir_builder *b, nir_instr *instr, void *data)
    if (nir_tex_instr_src_index(tex, nir_tex_src_backend1) >= 0)
       return false;
 
+   /* An implicit clamp uses the hardware bias + minimum form. Frontends
+    * keeping sampler bias in the descriptor need a zero shader bias here.
+    * Do this after constant folding, which turns txb(0) back into tex, and
+    * immediately pack both sources below. */
+   if (tex->op == nir_texop_tex &&
+       nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0) {
+      tex->op = nir_texop_txb;
+      nir_tex_instr_add_src(tex, nir_tex_src_bias, nir_imm_float16(b, 0.0));
+   }
+
    /* Get the coordinates */
    nir_def *coord = nir_steal_tex_src(tex, nir_tex_src_coord);
    nir_def *ms_idx = nir_steal_tex_src(tex, nir_tex_src_ms_index);
@@ -1533,6 +1543,31 @@ agx_nir_lower_texture_early_with_2d_robustness(nir_shader *s,
 }
 
 static bool
+lower_lod_clamp(nir_builder *b, nir_tex_instr *tex, UNUSED void *data)
+{
+   int min_idx = nir_tex_instr_src_index(tex, nir_tex_src_min_lod);
+   if (min_idx < 0)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+
+   if (tex->op == nir_texop_txl) {
+      /* Explicit LOD has no separate hardware minimum operand. Clamp before
+       * legalizing to fp16, at the precision of the requested LOD. */
+      nir_def *min_lod = nir_steal_tex_src(tex, nir_tex_src_min_lod);
+      int lod_idx = nir_tex_instr_src_index(tex, nir_tex_src_lod);
+      assert(lod_idx >= 0);
+      nir_def *lod = tex->src[lod_idx].src.ssa;
+      nir_src_rewrite(&tex->src[lod_idx].src,
+                      nir_fmax(b, lod, nir_f2fN(b, min_lod, lod->bit_size)));
+      return true;
+   }
+
+   /* txb is packed below; txd keeps its gradient + minimum operand. */
+   return false;
+}
+
+static bool
 lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
               bool robust_formatless_images, uint64_t sparse_ro_offset,
               bool sparse_buffer_residency)
@@ -1565,6 +1600,8 @@ lower_texture(nir_shader *s, unsigned generation, bool buffer_metadata,
             nir_metadata_control_flow, NULL);
    NIR_PASS(progress, s, nir_shader_intrinsics_pass, lower_images,
             nir_metadata_control_flow, (void *)&options);
+   NIR_PASS(progress, s, nir_shader_tex_pass, lower_lod_clamp,
+            nir_metadata_control_flow, NULL);
    NIR_PASS(progress, s, nir_legalize_16bit_sampler_srcs, tex_constraints);
 
    /* Fold constants after nir_legalize_16bit_sampler_srcs so we can detect 0 in

@@ -151,6 +151,19 @@ libasahi_compiler = static_library(
 
 if with_tests
   test(
+    'agx_texture_min_lod',
+    executable(
+      'agx_texture_min_lod_test',
+      files('test/test-texture-min-lod.c'),
+      c_args : [c_msvc_compat_args, no_override_init_args],
+      gnu_symbol_visibility : 'hidden',
+      dependencies : [idep_nir, idep_mesautil, idep_libpoly],
+      link_with : [libasahi_compiler, libpoly_nir],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_subgroup_core',
     executable(
       'agx3_subgroup_core_test',
