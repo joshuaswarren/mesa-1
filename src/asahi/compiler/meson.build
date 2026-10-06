@@ -220,6 +220,16 @@ if with_tests
   )
 
   test(
+    'agx3_staging',
+    executable(
+      'agx3_staging_test',
+      files('test/test-agx3-staging.c'),
+      include_directories : include_directories('.'),
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
     'agx3_local_tps_core',
     executable(
       'agx3_local_tps_core_test',

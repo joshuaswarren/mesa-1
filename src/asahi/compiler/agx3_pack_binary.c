@@ -41,6 +41,7 @@
 #include "agx3_local_tps_core.h"
 #include "agx3_mem_core.h"
 #include "agx3_pack.h"
+#include "agx3_staging.h"
 #include "agx3_pixel_core.h"
 #include "agx3_scs_core.h"
 #include "agx3_select_core.h"
@@ -1284,74 +1285,6 @@ agx3_tex_plain_uniform64(agx_index index)
  * staged half within the COPY destination field. */
 #define AGX3_STAGED_WRITE_LIMIT 128u
 
-/* Staging banks held by asynchronous consumers still in flight: staged reads
- * and image writes. A bank stays held until the slot its consumer signals is
- * synchronised. */
-struct agx3_staging_banks {
-   struct {
-      uint16_t coord, span;
-      uint8_t slot;
-   } live[8];
-   uint16_t end;
-   uint8_t next_write_slot;
-};
-
-static void
-agx3_staging_release(struct agx3_staging_banks *banks, uint16_t outstanding)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (banks->live[i].slot &&
-          !(outstanding & (1u << (banks->live[i].slot - 1))))
-         banks->live[i].slot = 0;
-   }
-}
-
-/* The slots of held banks overlapping [start, start + span). */
-static uint16_t
-agx3_staging_conflicts(const struct agx3_staging_banks *banks, unsigned start,
-                       unsigned span)
-{
-   uint16_t conflict = 0;
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (banks->live[i].slot && banks->live[i].coord < start + span &&
-          start < banks->live[i].coord + banks->live[i].span)
-         conflict |= (uint16_t)(1u << (banks->live[i].slot - 1));
-   }
-   return conflict;
-}
-
-/* Every slot holding a bank. */
-static uint16_t
-agx3_staging_held(const struct agx3_staging_banks *banks)
-{
-   return agx3_staging_conflicts(banks, 0, UINT16_MAX);
-}
-
-static void
-agx3_staging_forget(struct agx3_staging_banks *banks, uint16_t slots)
-{
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (banks->live[i].slot && (slots & (1u << (banks->live[i].slot - 1))))
-         banks->live[i].slot = 0;
-   }
-}
-
-static bool
-agx3_staging_hold(struct agx3_staging_banks *banks, uint16_t coord,
-                  uint16_t span, uint8_t slot)
-{
-   banks->end = MAX2(banks->end, coord + span);
-   for (unsigned i = 0; i < ARRAY_SIZE(banks->live); ++i) {
-      if (!banks->live[i].slot) {
-         banks->live[i].coord = coord;
-         banks->live[i].span = span;
-         banks->live[i].slot = slot;
-         return true;
-      }
-   }
-   return false;
-}
-
 static bool
 agx3_emit_texture_fetch(struct util_dynarray *emission,
                         enum agx_isa_encoding enc, const agx_instr *I,
@@ -2263,28 +2196,18 @@ agx3_emit_texture_sample(struct util_dynarray *emission,
                                  ? native_coord_slot
                                  : (array || cube) && register_operands ? 6
                                                                         : slot;
-   /* Every native G17P witness using AGX3B names coordinate bank 0 in SMP,
-    * including ordinary implicit 2D samples whose materialized coordinates
-    * live in unrelated GPRs.  For example, the attachment-only f_retain_coords
-    * witness copies r4/r5 to staging[0]/[2], reports ShaderInfo D=8, and
-    * samples bank 0.  The staging address is an ABI location, not the source
-    * GPR number.  AGX3c retains its independently decoded coordinate field. */
-   /* Sampler-private staging groups. SMP consumes its staged coordinates
-    * and comparison reference asynchronously, after issue: a later sample
-    * that restages the same bank before the earlier one retires replays the
-    * newest operands into every older sample. Apple's own three-reference
-    * depth2d fragment (native-quick-textures/2d-three-references) therefore
-    * copies consecutive samples' coordinates into banks 0, 8 and 16 and
-    * names that bank in each SMP's f19; the comparison reference follows at
-    * bank + 4. The stream packer chooses the group from the in-flight
-    * samples; only the plain 2D coordinate ABI relocates, every other shape
-    * keeps its witnessed fixed banks (gradients 8..18, PACK_SMPIR bank 6,
-    * CEM scratch). */
+   /* Coordinates occupy a sampler-private range, independently of the
+    * source GPRs. Apple's linked pipelines use four-half groups at 4/8/12/16
+    * and at 84/128/132/140/152. The native witnesses are reproduced by
+    * test_linked_staging_witnesses. Additional operands retain the existing
+    * mode-specific ABI; only the relocatable profile can choose a new base.
+    */
    if (bank_base != 0 &&
        (enc != AGX_ISA_ENCODING_AGX3B || native_staged_coords || array ||
         three_d || cube || gradient_lod || bias_min || gradient_min ||
         query_lod || (explicit_lod && !immediate_lod) || register_bias ||
-        register_offset || (bank_base & 7) || bank_base > 16))
+        register_offset || (bank_base & 3) ||
+        bank_base > AGX3_STAGING_HALFS - 4))
       return agx3_tex_decline(I, __LINE__);
    const uint16_t coord = (enc == AGX_ISA_ENCODING_AGX3B ||
                            native_staged_coords || explicit_lod ||
@@ -5235,38 +5158,28 @@ agx3_fuse_compact_minifloat_wait(struct util_dynarray *emission,
    return true;
 }
 
-/* Sampler-private staging groups 0/8/16 (see the note in
- * agx3_emit_texture_sample). Take the lowest group whose previous user has
- * retired; when all three still hold in-flight operations, retire group 0's
- * user first. `slot` is the result slot of the operation about to stage into
- * the chosen group, and `outstanding` is updated for any retirement. */
+/* Allocate the actual operand footprint from the sampler-private register
+ * file. Lifetimes follow the consuming operations' scoreboard slots, shared
+ * with texel fetches and image writes, rather than three fixed sample groups.
+ */
 static bool
-agx3_take_staging_group(struct util_dynarray *emission,
-                        enum agx_isa_encoding enc, uint8_t stage_group_slot[3],
-                        struct agx3_staging_banks *banks,
-                        uint16_t *outstanding, uint16_t outstanding_here,
-                        uint8_t slot, uint16_t *bank_base)
+agx3_allocate_staging(struct util_dynarray *emission,
+                      enum agx_isa_encoding enc,
+                      struct agx3_staging_banks *banks,
+                      uint16_t *outstanding, uint8_t slot,
+                      unsigned span, uint16_t *base)
 {
-   uint16_t busy[3];
-   for (unsigned g = 0; g < 3; ++g)
-      busy[g] = (stage_group_slot[g]
-                   ? (uint16_t)(1u << (stage_group_slot[g] - 1))
-                   : 0) | agx3_staging_conflicts(banks, g * 8, 8);
+   uint16_t waits;
+   if (!agx3_staging_plan(banks, span, 4, AGX3_STAGING_HALFS, base, &waits))
+      return false;
 
-   int chosen = -1;
-   for (unsigned g = 0; g < 3 && chosen < 0; ++g)
-      if (!(outstanding_here & busy[g]))
-         chosen = (int)g;
-   if (chosen < 0) {
-      if (!agx3_retire_slots_noop(emission, enc, busy[0]))
+   if (waits) {
+      if (!agx3_retire_slots_noop(emission, enc, waits))
          return false;
-      *outstanding &= (uint16_t)~busy[0];
+      *outstanding &= (uint16_t)~waits;
       *outstanding |= (uint16_t)(1u << (slot - 1));
-      agx3_staging_forget(banks, busy[0]);
-      chosen = 0;
+      agx3_staging_forget(banks, waits);
    }
-   *bank_base = (uint16_t)(chosen * 8);
-   stage_group_slot[chosen] = slot;
    return true;
 }
 
@@ -8276,10 +8189,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
 
    struct util_dynarray fixups;
    uint16_t outstanding = 0;
-   /* Result slot of the sample currently occupying each sampler-private
-    * staging group (half-registers 0, 8 and 16). A group is free once a
-    * wait has retired that slot; see agx3_emit_texture_sample. */
-   uint8_t stage_group_slot[3] = {0, 0, 0};
    uint8_t next_uvs_slot = 1;
    unsigned texture_ops_left = 0;
    unsigned tile_loads_left = 0;
@@ -9818,13 +9727,10 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 ctx->stage == MESA_SHADER_TESS_EVAL) &&
                (I->lod_mode == AGX_LOD_MODE_LOD_MIN ||
                 I->lod_mode == AGX_LOD_MODE_LOD_GRAD);
-            /* Sampler-private staging groups 0/8/16 (see the note in
-             * agx3_emit_texture_sample). A plain 2D sample takes the lowest
-             * group whose previous sample has retired; when all three still
-             * hold in-flight samples, group 0's is retired first. Every other
-             * G17P sample shape keeps its witnessed fixed banks, so it drains
-             * the in-flight staged samples and then owns every group. */
-            const bool rotatable_staging =
+            /* Relocation is an operand-ABI property. Other forms retain
+             * their fixed operand locations and wait only for overlapping
+             * live ranges before publishing into those locations. */
+            const bool relocatable_coordinates =
                enc == AGX_ISA_ENCODING_AGX3B && slot != 0 &&
                !native_staged_coords && I->dim == AGX_DIM_2D &&
                !I->query_lod && !(I->offset && !I->offset_xyz) &&
@@ -9863,24 +9769,14 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * sampler-private file. A sample must not overwrite a bank
                 * still consumed by a fetch (and vice versa). */
                agx3_staging_release(&staging_banks, outstanding_here);
-               uint16_t busy[3];
-               for (unsigned g = 0; g < 3; ++g)
-                  busy[g] = stage_group_slot[g]
-                               ? (uint16_t)(1u << (stage_group_slot[g] - 1))
-                               : 0;
-               if (rotatable_staging) {
-                  if (!agx3_take_staging_group(emission, enc,
-                                               stage_group_slot, &staging_banks,
-                                               &outstanding,
-                                               outstanding_here, slot,
-                                               &bank_base))
+               if (relocatable_coordinates) {
+                  if (!agx3_allocate_staging(emission, enc, &staging_banks,
+                                             &outstanding, slot, sample_span,
+                                             &bank_base))
                      AGX3_REFUSE(I);
                } else {
-                  uint16_t retire = 0;
-                  for (unsigned g = 0; g < 3; ++g)
-                     retire |= (uint16_t)(outstanding_here & busy[g]);
-                  retire |= agx3_staging_conflicts(&staging_banks, 0,
-                                                    sample_span);
+                  const uint16_t retire = agx3_staging_conflicts(
+                     &staging_banks, 0, sample_span);
                   if (retire) {
                      if (!agx3_retire_slots_noop(emission, enc, retire))
                         AGX3_REFUSE(I);
@@ -9889,8 +9785,6 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                         outstanding |= (uint16_t)(1u << (slot - 1));
                      agx3_staging_forget(&staging_banks, retire);
                   }
-                  for (unsigned g = 0; g < 3; ++g)
-                     stage_group_slot[g] = slot;
                }
             }
             uint16_t sample_wait = wait;
@@ -9977,7 +9871,7 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
             if (enc == AGX_ISA_ENCODING_AGX3B && slot) {
                agx3_staging_release(&staging_banks, outstanding);
                if (!agx3_staging_hold(&staging_banks, bank_base,
-                                      rotatable_staging ? 8 : sample_span,
+                                      sample_span,
                                       slot))
                   AGX3_REFUSE(I);
             }

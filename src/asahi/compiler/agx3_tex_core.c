@@ -306,7 +306,9 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
 
    if ((d->width != AGX3_TEX_W16 && d->width != AGX3_TEX_W32) ||
        d->dest >= 128 || (d->width == AGX3_TEX_W32 && (d->dest & 1)) ||
-       (d->coord & 3) || d->coord > 60 || !mask_witnessed(d->mask) ||
+       (d->coord & 3) ||
+       d->coord > (enc == AGX_ISA_ENCODING_AGX3B ? 252 : 60) ||
+       !mask_witnessed(d->mask) ||
        d->texture > 15 || d->sampler > 15)
       return false;
 
