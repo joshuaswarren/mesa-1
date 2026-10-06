@@ -61,4 +61,18 @@ struct d12_debug_flags {
    bool shim_texture_metadata;
 };
 
-const struct d12_debug_flags *d12_debug(void);
+/* Filled once by d12_debug_slow(), which publishes d12_debug_ready last.
+ * The accessor is inline so the hot paths (several calls per draw and
+ * dispatch) pay a load and a branch, not a call into another unit. */
+extern struct d12_debug_flags d12_debug_flags_storage;
+extern bool d12_debug_ready;
+const struct d12_debug_flags *d12_debug_slow(void);
+
+static inline const struct d12_debug_flags *
+d12_debug(void)
+{
+   if (__builtin_expect(__atomic_load_n(&d12_debug_ready, __ATOMIC_ACQUIRE),
+                        1))
+      return &d12_debug_flags_storage;
+   return d12_debug_slow();
+}
