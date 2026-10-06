@@ -7125,19 +7125,6 @@ agx_draw_patches(struct agx_context *ctx, const struct pipe_draw_info *info,
    struct agx_device *dev = agx_device(ctx->base.screen);
    perf_debug(dev, "Tessellation");
 
-   /* The G17P tessellation pipeline -- the VS and TCS as compute, the libagx
-    * count, prefix-sum and tessellate kernels, then the indirect TES draw --
-    * has never completed on this GPU: its first draw times out the compute
-    * queue and the kernel quarantines the client, after which every later
-    * submission fails (KHR-GL46.draw_elements_base_vertex_tests.
-    * AEP_shader_stages). Until it is qualified, drop the draw and say so;
-    * this used to abort at the compute dispatch instead. */
-   if (dev->chip == AGX_CHIP_G17P) {
-      mesa_loge_once("asahi: G17P tessellation is not qualified; dropping "
-                     "tessellated draws");
-      return;
-   }
-
    struct agx_uncompiled_shader *tcs = ctx->stage[MESA_SHADER_TESS_CTRL].shader;
    struct agx_uncompiled_shader *tes = ctx->stage[MESA_SHADER_TESS_EVAL].shader;
 
