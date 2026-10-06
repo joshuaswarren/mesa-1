@@ -8827,8 +8827,10 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
 
    /* Expose native publication events after physical GPR allocation. Keep
     * the established source hints on the publication that really reads them.
+    * Like the other passes after agx_lower_pseudo(), this one is not
+    * followed by agx_validate(): lowered loops no longer have SSA block form.
     */
-   AGX_PASS(ctx, agx3_lower_texture_publications);
+   agx3_lower_texture_publications(ctx);
 
    if (ctx->is_preamble &&
        ctx->key->dev.encoding == AGX_ISA_ENCODING_AGX3B &&
