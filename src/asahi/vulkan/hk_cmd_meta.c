@@ -2562,6 +2562,8 @@ hk_g17p_copy_buffer_to_image_supported(
        * R32_UINT/R16_UINT color view, not a depth fragment output. Query the
        * format the graphics copy actually renders, preserving every bit. */
       if (region->imageSubresource.aspectMask == VK_IMAGE_ASPECT_DEPTH_BIT) {
+         /* The depth plane of a split depth/stencil image. */
+         plane_vk_format = hk_depth_stencil_plane_format(plane_vk_format, 0);
          if (plane_vk_format == VK_FORMAT_D32_SFLOAT)
             plane_vk_format = VK_FORMAT_R32_UINT;
          else if (plane_vk_format == VK_FORMAT_D16_UNORM)
@@ -3617,6 +3619,20 @@ hk_xfer_copybuffertoimage2(VkCommandBuffer commandBuffer,
          hk_g17p_copy_uncompressed_buffer_to_image(
             cmd, src_buffer, dst_image, pCopyBufferToImageInfo);
          hk_meta_end(cmd, &save, VK_PIPELINE_BIND_POINT_COMPUTE);
+         return;
+      }
+      /* The raw path takes all regions or none. A depth/stencil upload
+       * whose depth plane is compressed mixes a graphics-only region with a
+       * raw stencil region, so route each region on its own. */
+      if (pCopyBufferToImageInfo->regionCount > 1) {
+         for (uint32_t r = 0; r < pCopyBufferToImageInfo->regionCount; ++r) {
+            VkCopyBufferToImageInfo2 one = *pCopyBufferToImageInfo;
+            one.regionCount = 1;
+            one.pRegions = &pCopyBufferToImageInfo->pRegions[r];
+            hk_xfer_copybuffertoimage2(commandBuffer, &one);
+            if (vk_command_buffer_has_error(&cmd->vk))
+               return;
+         }
          return;
       }
       if (!hk_g17p_copy_buffer_to_image_supported(

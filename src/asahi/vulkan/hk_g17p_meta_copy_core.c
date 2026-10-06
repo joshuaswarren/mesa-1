@@ -581,18 +581,27 @@ hk_g17p_buffer_to_image_copy_supported(
           copy->image_extent.height % height_scale)
          return false;
    } else if ((copy->format == VK_FORMAT_D32_SFLOAT ||
-               copy->format == VK_FORMAT_D16_UNORM) &&
+               copy->format == VK_FORMAT_D16_UNORM ||
+               copy->format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+               copy->format == VK_FORMAT_D16_UNORM_S8_UINT) &&
               copy->aspect == VK_IMAGE_ASPECT_DEPTH_BIT) {
       /* Compressed D32/D16 cannot use the raw AIL upload kernel. The graphics
        * copy writes its bit-compatible R32_UINT/R16_UINT view through the
        * PBE, which also updates compression metadata. Keep this fallback
        * bounded to the single-level 2D shape G17P depth compression admits
-       * (hk_g17p_compression.h). */
-      if (copy->plane_count != 1 || copy->image_type != VK_IMAGE_TYPE_2D ||
-          copy->mip_levels != 1 || copy->array_layers != 1)
+       * (hk_g17p_compression.h). A combined depth/stencil image is split
+       * into a depth plane and a stencil plane; only the depth plane is
+       * compressed, so only its aspect comes here. */
+      const bool split = copy->format == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                         copy->format == VK_FORMAT_D16_UNORM_S8_UINT;
+      if (copy->plane_count != (split ? 2 : 1) ||
+          copy->image_type != VK_IMAGE_TYPE_2D || copy->mip_levels != 1 ||
+          copy->array_layers != 1)
          return false;
-      plane_format = copy->format == VK_FORMAT_D32_SFLOAT ? VK_FORMAT_R32_UINT
-                                                          : VK_FORMAT_R16_UINT;
+      plane_format = (copy->format == VK_FORMAT_D32_SFLOAT ||
+                      copy->format == VK_FORMAT_D32_SFLOAT_S8_UINT)
+                        ? VK_FORMAT_R32_UINT
+                        : VK_FORMAT_R16_UINT;
    } else if (copy->plane_count != 1 ||
               copy->aspect != VK_IMAGE_ASPECT_COLOR_BIT) {
       return false;
