@@ -634,3 +634,56 @@ Neo: a G17P recording limit that predates this series.
    replace it.
 5. G17P native Texture.Load: key the state-loader program cache on more than
    the last program (two-table alternation misses).
+
+## 11. Fifth pass (t-1242, 2026-10-07): light frames and PSO reuse
+
+The recording profile put about 30% of triangle's sampled CPU cycles in Reset's
+cache invalidation. Cache generations replace those bulk clears, separate VS/FS
+keys keep unrelated state changes from invalidating both stages, and empty
+resource planes reuse the device null mapping instead of zeroing a 64 KiB CBV.
+Lowered NIR identifies stages that read the root pointer. Ordinary AGX2 stages
+load only proven-used root/texture/PBE inputs; Poly and G17P keep their complete
+ABI. Identical USC words can be reused within a recording, and compatible
+AGX2 PSO switches preserve unchanged fixed PPP groups. The PPP comparison is by
+value and does not dereference a previously bound, potentially released PSO.
+
+M2, five interleaved base/A/B runs, 1000 frames, two frames in flight, normal
+CPU governor, load checked before timing (microseconds/frame):
+
+| scene | t-1185 base | A | vkd3d-proton B |
+|---|---:|---:|---:|
+| triangle | 190.9 | 195.1 | 202.3 |
+| bundles | 209.5 | 202.0 | 217.0 |
+| texload | 262.6 | 258.8 | 261.1 |
+| draws | 360.3 | 349.4 | 432.8 |
+| draws_rc | 399.9 | 362.4 | 430.7 |
+| draws_pso | 437.9 | 399.3 | 414.0 |
+| fill | 379.3 | 378.1 | 400.7 |
+| dispatches | 374.0 | 365.0 | 636.9 |
+
+All eight medians are below B in this cohort. Earlier light-frame cohorts have
+sign changes, so the small triangle/texload margins remain sensitive to machine
+variance. Recording time improves for triangle (4.3 to 1.8 us), bundles (8.3 to
+2.4 us), and draws_pso (334.7 to 271.8 us). Plain draws' recording time rises
+184.7 to 203.5 us even though its pipelined frame median improves; retain this
+tradeoff rather than claiming every CPU path became faster.
+
+The depth benchmark declares matching render passes and varies only depth's
+ending access, PRESERVE versus DISCARD. For 16 1080p passes the store/discard
+GPU medians are 4.356/2.832 ms on M2 and 4.617/3.322 ms on M1 Pro: about 95.3
+and 80.9 us per extra depth store. Four-draw 720p frames measure 207.4/182.8 us
+on M2 and 264.9/210.4 us on M1 Pro. The installed Honeykrisp library has no
+precise-depth-store toggle, so environment-only B0/B1 runs do not qualify that
+mode. No driver depth-store default is changed by this measurement.
+
+Both reference Macs retain frozen17 v1 11/17 and legal v2 15/17. Unit tests are
+11/11; live API results match base. Full 581 tight/fair classifications and
+focused controls are recorded in the report: fair M1 Pro matches 360 PASS;
+M2's initial 359 PASS includes a cgroup OOM killed allocation-stress test which
+passes with both libraries in a controlled repeat. Existing fence timing and
+capability-profile variations are preserved in raw results.
+
+Evidence and exact commands: assigned-worktree scratch/t-1242 scripts and
+<aurora-ctl>/runs/r-t-1242-d3d12agx-optimisation-train-round-5-close-the-tr-2/report.md.
+Neo qualification and memory findings are recorded there separately from these
+reference-machine measurements.
