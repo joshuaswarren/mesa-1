@@ -840,8 +840,9 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
 
       /* Negotiate against the complete shader-model contract, independent
        * of whether an individual f16 instruction can be compiled. */
-      if (sm->HighestShaderModel < D3D_SHADER_MODEL_5_1 ||
-          sm->HighestShaderModel > D3D_SHADER_MODEL_6_8)
+      if (sm->HighestShaderModel != D3D_SHADER_MODEL_5_1 &&
+          (sm->HighestShaderModel < D3D_SHADER_MODEL_6_0 ||
+           sm->HighestShaderModel > D3D_SHADER_MODEL_6_8))
          return E_INVALIDARG;
       const D3D_SHADER_MODEL maximum =
          (D3D_SHADER_MODEL)caps->max_shader_model;
@@ -875,4 +876,3 @@ d12_core_caps_query(const struct d12_core_caps *caps, D3D12_FEATURE feature,
       return E_INVALIDARG;
    }
 }
-

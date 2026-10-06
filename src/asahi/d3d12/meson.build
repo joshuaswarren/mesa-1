@@ -700,6 +700,38 @@ test('d3d12agx_dxil_mesh', d3d12agx_dxil_mesh_tests,
      suite : ['asahi', 'd3d12'])
 
 # CPU-only production lowering/ISA checks. Never creates a DRM device or queue.
+d3d12agx_core_caps_query_tests = executable(
+  'd3d12agx_core_caps_query_tests',
+  files('tests/d12_core_caps_query_tests.c'),
+  dependencies : [dep_dxheaders_d12, idep_mesautil],
+  link_with : [libd3d12agx_core],
+  c_args : ['-UNDEBUG'],
+)
+test('d3d12agx_core_caps_query', d3d12agx_core_caps_query_tests,
+     suite : ['asahi', 'd3d12'])
+
+d3d12agx_api_trace_tests = executable(
+  'd3d12agx_api_trace_tests',
+  files('tests/d12_api_trace_tests.c'),
+  dependencies : [dep_dxheaders_d12, idep_mesautil],
+  link_with : [libd3d12agx_core],
+  c_args : ['-UNDEBUG'],
+)
+foreach trace_mode : ['', 'api', 'api-fail']
+  test('d3d12agx_api_trace_' + (trace_mode == '' ? 'off' : trace_mode),
+       d3d12agx_api_trace_tests,
+       env : ['D3D12AGX_DEBUG=' + trace_mode], suite : ['asahi', 'd3d12'])
+endforeach
+
+# Manual integration target: uses a real render device, never auto-run by
+# the CPU-only suite. Run in fresh processes with tracing off/api/api-fail.
+executable(
+  'd3d12agx_placed_resource_probe',
+  files('tests/d12_placed_resource_probe.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_heap_desc_tests = executable(
   'd3d12agx_heap_desc_tests',
   files('tests/d12_heap_desc_tests.c'),

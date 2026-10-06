@@ -1636,7 +1636,8 @@ d12_sparse_copy_tile_mappings(
 bool
 d12_resource_iface_is_ours(ID3D12Resource *iface)
 {
-   return iface && iface->lpVtbl == &d12_resource_vtbl;
+   return iface && d12_api_trace_vtbl_matches(
+      D12_API_TRACE_RESOURCE, iface->lpVtbl, &d12_resource_vtbl);
 }
 
 bool
@@ -2428,6 +2429,10 @@ d12_validate_resource_desc(const D3D12_HEAP_PROPERTIES *heap_props,
     * ignore. Both are checked directly by the suite.
     */
    if (is_buffer) {
+      if (desc->Alignment &&
+          desc->Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+         return E_INVALIDARG;
+
       if (desc->MipLevels != 1)
          return E_INVALIDARG;
 
@@ -3022,7 +3027,8 @@ static const ID3D12HeapVtbl d12_heap_vtbl = {
 bool
 d12_heap_iface_is_ours(ID3D12Heap *iface)
 {
-   return iface && iface->lpVtbl == &d12_heap_vtbl;
+   return iface && d12_api_trace_vtbl_matches(
+      D12_API_TRACE_HEAP, iface->lpVtbl, &d12_heap_vtbl);
 }
 
 static HRESULT

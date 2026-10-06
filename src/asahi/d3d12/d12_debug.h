@@ -108,6 +108,8 @@ enum d12_api_trace_iface {
 
 const void *d12_api_trace_vtbl(enum d12_api_trace_iface iface,
                                const void *real_vtbl);
+bool d12_api_trace_vtbl_matches(enum d12_api_trace_iface iface,
+                                 const void *vtbl, const void *real_vtbl);
 
 static inline bool
 d12_api_trace_enabled(void)

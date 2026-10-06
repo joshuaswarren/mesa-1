@@ -128,3 +128,22 @@ d12_api_trace_vtbl(enum d12_api_trace_iface iface, const void *real_vtbl)
    }
    return d12_api_trace_table[iface].trace_vtbl;
 }
+
+bool
+d12_api_trace_vtbl_matches(enum d12_api_trace_iface iface,
+                            const void *vtbl, const void *real_vtbl)
+{
+   if (!vtbl || !real_vtbl)
+      return false;
+   if (vtbl == real_vtbl)
+      return true;
+   if ((unsigned)iface >= D12_API_TRACE_IFACE_COUNT)
+      return false;
+
+   /* Tracing forwards on the original object, without changing its layout
+    * or ownership. Recognize only the wrapper registered for this exact
+    * implementation; foreign objects must still fail before a downcast.
+    * Do not install a wrapper or consult current debug flags here. */
+   return vtbl == d12_api_trace_table[iface].trace_vtbl &&
+          p_atomic_read(d12_api_trace_table[iface].real) == real_vtbl;
+}

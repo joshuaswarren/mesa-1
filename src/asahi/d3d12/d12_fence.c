@@ -1168,7 +1168,8 @@ d12_fence_create_shared_handle(
    if (FAILED(hr))
       return E_NOTIMPL;
 
-   if (fence_iface->lpVtbl != &d12_fence_vtbl) {
+   if (!d12_api_trace_vtbl_matches(D12_API_TRACE_FENCE, fence_iface->lpVtbl,
+                                  &d12_fence_vtbl)) {
       ID3D12Fence_Release(fence_iface);
       return DXGI_ERROR_INVALID_CALL;
    }
