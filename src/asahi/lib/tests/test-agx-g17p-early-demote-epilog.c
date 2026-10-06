@@ -78,6 +78,49 @@ test_epilog_discard_policy(void)
    return agx_fs_epilog_may_discard(&link, false, false);
 }
 
+static bool
+test_all_live_early_test_prolog(void)
+{
+   struct agx_fs_prolog_key key = {
+      .api_sample_mask = 0xff,
+      .run_zs_tests = true,
+      .nr_samples = 1,
+   };
+   nir_builder b = nir_builder_init_simple_shader(
+      0, &agx_nir_options, "G17P all-live early-test FS prolog");
+   agx_nir_fs_prolog(&b, &key);
+
+   bool ok = count_intrinsic(b.shader, nir_intrinsic_sample_mask_agx) == 1;
+   nir_foreach_block(block, b.impl) {
+      nir_foreach_instr(instr, block) {
+         if (instr->type != nir_instr_type_intrinsic)
+            continue;
+         nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+         if (intr->intrinsic != nir_intrinsic_sample_mask_agx)
+            continue;
+         ok &= nir_src_is_const(intr->src[0]) &&
+               nir_src_as_uint(intr->src[0]) == 0xff &&
+               nir_src_is_const(intr->src[1]) &&
+               nir_src_as_uint(intr->src[1]) == 0xff;
+      }
+   }
+   nir_validate_shader(b.shader, "after constructing all-live early test");
+   agx_preprocess_nir(b.shader);
+
+   struct agx_shader_key backend_key = {
+      .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+      .secondary = true,
+      .no_preamble = true,
+      .fs.nr_samples = 1,
+   };
+   struct agx_shader_part part = {0};
+   ok &= agx_compile_shader_nir(b.shader, &backend_key, &part) &&
+         part.info.writes_sample_mask;
+   free(part.binary);
+   ralloc_free(b.shader);
+   return ok;
+}
+
 static nir_shader *
 build_early_demote_fs(void)
 {
@@ -612,6 +655,10 @@ main(void)
    }
    if (!test_epilog_discard_policy()) {
       fprintf(stderr, "fragment epilog discard policy lost a tested axis\n");
+      return 1;
+   }
+   if (!test_all_live_early_test_prolog()) {
+      fprintf(stderr, "G17P all-live early-test prolog was not preserved\n");
       return 1;
    }
 

@@ -5273,7 +5273,7 @@ hk_get_fast_linked_locked_fs(struct hk_device *dev, struct hk_shader *shader,
                              struct hk_fast_link_key_fs *key)
 {
    /* TODO: prolog without fs needs to work too... */
-   bool needs_prolog = key->prolog.statistics ||
+   bool needs_prolog = key->prolog.statistics || key->prolog.run_zs_tests ||
                        key->prolog.cull_distance_size ||
                        key->prolog.api_sample_mask != 0xff;
 
@@ -7369,6 +7369,33 @@ hk_g17p_relocated_blend_constant_base(const struct hk_shader *fs,
    return true;
 }
 
+static bool
+hk_g17p_read_only_early_reject(struct hk_cmd_buffer *cmd,
+                               const struct hk_shader *fs, unsigned samples,
+                               bool prolog_discards, bool statistics)
+{
+   const struct hk_device *dev = hk_cmd_buffer_device(cmd);
+   const struct hk_graphics_state *gfx = &cmd->state.gfx;
+   const struct hk_rendering_state *render = &gfx->render;
+   const struct vk_dynamic_graphics_state *dyn =
+      &cmd->vk.dynamic_graphics_state;
+
+   /* Keep this first recovery deliberately narrow.  Moving a test ahead of a
+    * discard is unobservable only when neither the test nor the skipped
+    * fragment has a side effect.  The all-live prolog also must not inherit an
+    * API-mask or cull-distance kill: that would recreate the pre-loop coverage
+    * transition this path exists to avoid. */
+   return dev->dev.chip == AGX_CHIP_G17P && fs->b.info.writes_sample_mask &&
+          !fs->b.info.early_fragment_tests && !fs->info.fs.writes_memory &&
+          !fs->info.fs.epilog_key.write_z && !fs->info.fs.epilog_key.write_s &&
+          samples == 1 && render->depth_att.vk_format != VK_FORMAT_UNDEFINED &&
+          dyn->ds.depth.test_enable && !dyn->ds.depth.write_enable &&
+          dyn->ds.depth.compare_op != VK_COMPARE_OP_ALWAYS &&
+          !dyn->ds.depth.bounds_test.enable && !hk_stencil_test_enabled(cmd) &&
+          gfx->occlusion.mode == AGX_VISIBILITY_MODE_NONE && !statistics &&
+          !prolog_discards;
+}
+
 void
 agx_fill_velem_keys(const struct vk_vertex_input_state *vi,
                     uint64_t attribs_read, struct agx_velem_key *keys)
@@ -7555,6 +7582,11 @@ hk_fill_fast_link_key_fs(struct hk_cmd_buffer *cmd, struct hk_shader *fs,
       .defer_api_sample_mask = defer_api_sample_mask,
       .api_sample_mask = api_sample_mask,
    };
+   if (hk_g17p_read_only_early_reject(
+          cmd, fs, samples, prolog_discards, key->prolog.statistics)) {
+      key->prolog.run_zs_tests = true;
+      key->epilog.link.already_ran_zs = true;
+   }
    agx_fs_epilog_apply_device_policy(dev->dev.chip, &key->epilog);
 
    key->epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&
@@ -8286,7 +8318,7 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       }
    }
 
-   /* The main shader must not run tests if the epilog will. */
+   /* The main shader must not run tests if another linked part will. */
    bool nontrivial_force_early =
       fs && (fs->b.info.early_fragment_tests &&
              (fs->b.info.writes_sample_mask || fs->info.fs.writes_memory));
@@ -8295,8 +8327,34 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
       fs ? &fs->info.fs.epilog_key : NULL,
       dyn->ms.alpha_to_coverage_enable, nontrivial_force_early);
 
-   if (fs_dirty || IS_DIRTY(MS_ALPHA_TO_COVERAGE_ENABLE)) {
-      const uint16_t no_epilog_discard = !epilog_discards ? UINT16_MAX : 0;
+   const unsigned early_reject_samples =
+      MAX2(dyn->ms.rasterization_samples, 1);
+   const unsigned early_reject_full_mask =
+      BITFIELD_MASK(dyn->ms.rasterization_samples);
+   const bool early_reject_has_api_mask =
+      (dyn->ms.sample_mask & early_reject_full_mask) != early_reject_full_mask;
+   const bool early_reject_defer_api_mask =
+      dev->dev.chip == AGX_CHIP_G17P && early_reject_has_api_mask &&
+      !nontrivial_force_early;
+   const bool early_reject_prolog_discards =
+      (early_reject_has_api_mask && !early_reject_defer_api_mask) ||
+      hw_vs->info.cull_distance_array_size;
+   const bool early_reject_statistics = hk_stat_enabled(hk_pipeline_stat_addr(
+      cmd, VK_QUERY_PIPELINE_STATISTIC_FRAGMENT_SHADER_INVOCATIONS_BIT));
+   const bool read_only_early_reject =
+      fs && hk_g17p_read_only_early_reject(
+               cmd, fs, early_reject_samples, early_reject_prolog_discards,
+               early_reject_statistics);
+
+   if (fs_dirty || IS_DIRTY(MS_ALPHA_TO_COVERAGE_ENABLE) ||
+       IS_DIRTY(MS_RASTERIZATION_SAMPLES) || IS_DIRTY(MS_SAMPLE_MASK) ||
+       IS_DIRTY(DS_DEPTH_TEST_ENABLE) || IS_DIRTY(DS_DEPTH_WRITE_ENABLE) ||
+       IS_DIRTY(DS_DEPTH_COMPARE_OP) ||
+       IS_DIRTY(DS_DEPTH_BOUNDS_TEST_ENABLE) ||
+       IS_DIRTY(DS_STENCIL_TEST_ENABLE) ||
+       (gfx->dirty & HK_DIRTY_OCCLUSION) || desc->root_dirty) {
+      const uint16_t no_epilog_discard =
+         !epilog_discards && !read_only_early_reject ? UINT16_MAX : 0;
       const uint16_t alpha_to_coverage = dyn->ms.alpha_to_coverage_enable;
       if (desc->root.draw.no_epilog_discard != no_epilog_discard ||
           desc->root.draw.alpha_to_coverage != alpha_to_coverage) {
@@ -8379,6 +8437,11 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        IS_DIRTY(CB_COLOR_WRITE_ENABLES) || IS_DIRTY(CB_ATTACHMENT_COUNT) ||
        IS_DIRTY(CB_BLEND_ENABLES) || IS_DIRTY(CB_BLEND_EQUATIONS) ||
        IS_DIRTY(CB_BLEND_CONSTANTS) || IS_DIRTY(CB_BLEND_ADVANCED) ||
+       IS_DIRTY(DS_DEPTH_TEST_ENABLE) || IS_DIRTY(DS_DEPTH_WRITE_ENABLE) ||
+       IS_DIRTY(DS_DEPTH_COMPARE_OP) ||
+       IS_DIRTY(DS_DEPTH_BOUNDS_TEST_ENABLE) ||
+       IS_DIRTY(DS_STENCIL_TEST_ENABLE) ||
+       (gfx->dirty & HK_DIRTY_OCCLUSION) ||
        IS_DIRTY(COLOR_ATTACHMENT_MAP) ||
        /* The only root-derived input of the fragment key is whether the
         * fragment-invocation statistic is enabled. Other root changes (a
@@ -8502,6 +8565,12 @@ hk_flush_dynamic_state_slow(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
          .defer_api_sample_mask = defer_api_sample_mask,
          .api_sample_mask = api_sample_mask,
       };
+      if (hk_g17p_read_only_early_reject(
+             cmd, fs, MAX2(dyn->ms.rasterization_samples, 1),
+             prolog_discards, key.prolog.statistics)) {
+         key.prolog.run_zs_tests = true;
+         key.epilog.link.already_ran_zs = true;
+      }
       agx_fs_epilog_apply_device_policy(dev->dev.chip, &key.epilog);
 
       key.epilog.native_spills = dev->dev.chip == AGX_CHIP_G17P &&

@@ -1731,6 +1731,16 @@ agx_nir_fs_prolog(nir_builder *b, const void *key_)
       NIR_PASS(_, b->shader, agx_nir_lower_poly_stipple);
    }
 
+   /* A read-only early-reject prolog has no coverage to change: it only asks
+    * the depth/stencil unit to test the complete incoming mask.  Ordinarily a
+    * prolog runs tests while lowering its API-mask or cull-distance demotes;
+    * make the all-live form explicit so a later shader-part discard can stay
+    * deferred without also deferring rejection. */
+   if (key->run_zs_tests && !b->shader->info.fs.uses_discard) {
+      nir_def *all = nir_imm_intN_t(b, 0xff, 16);
+      nir_sample_mask_agx(b, all, all);
+   }
+
    /* Then, lower the prolog */
    NIR_PASS(_, b->shader, agx_nir_lower_discard_zs_emit);
    NIR_PASS(_, b->shader, agx_nir_lower_sample_mask);
