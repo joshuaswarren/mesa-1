@@ -3646,11 +3646,14 @@ agx_lower_agx3_shifted_iadd_dest(agx_context *ctx)
  * KHR-GL33.texture_swizzle's eight remaining smoke cases hit.
  *
  * Widen the source. Half to float is exact, so no value changes; it is the
- * same move agx_lower_agx3_fma_sources() makes for a mixed FFMA. Only the
+ * same move agx_lower_agx3_fma_sources() makes for a mixed FFMA. ROUNDEVEN
+ * also has separate half and word forms. Widening its half input exactly
+ * before rounding preserves the rounded value and signed zero, while using
+ * the existing word encoder for the word result. Only the
  * mismatched shape is touched, and that shape did not encode at all before.
  */
-static void
-agx_lower_agx3_mixed_width_transcendental(agx_context *ctx)
+void
+agx_lower_agx3_mixed_width_unary(agx_context *ctx)
 {
    if (ctx->key->dev.encoding != AGX_ISA_ENCODING_AGX3B)
       return;
@@ -3681,15 +3684,19 @@ agx_lower_agx3_mixed_width_transcendental(agx_context *ctx)
       if (I->dest[0].size != AGX_SIZE_32 && !half_gradient)
          continue;
 
-      /* Widen the plain value and keep any |x| or -x on the 32-bit funop
-       * source, which encodes them directly. */
       agx_builder b = agx_init_builder(ctx, agx_before_instr(I));
-      agx_index plain = I->src[0];
-      plain.abs = plain.neg = false;
       agx_index widened = agx_temp(ctx, AGX_SIZE_32);
-      agx_fmov_to(&b, widened, plain);
-      widened.abs = I->src[0].abs;
-      widened.neg = I->src[0].neg;
+      if (I->op == AGX_OPCODE_ROUNDEVEN) {
+         /* Preserve source signs on the exact half-to-word conversion. */
+         agx_fmov_to(&b, widened, I->src[0]);
+      } else {
+         /* Retain the base's direct funop modifiers for the other forms. */
+         agx_index plain = I->src[0];
+         plain.abs = plain.neg = false;
+         agx_fmov_to(&b, widened, plain);
+         widened.abs = I->src[0].abs;
+         widened.neg = I->src[0].neg;
+      }
       I->src[0] = widened;
 
       if (half_gradient) {
@@ -8634,9 +8641,9 @@ agx_compile_function_nir(nir_shader *nir, nir_function_impl *impl,
       }
    }
 
-   agx_lower_agx3_mixed_width_transcendental(ctx);
    agx_lower_agx3_half_converts(ctx);
    agx_lower_agx3_fma_sources(ctx);
+   agx_lower_agx3_mixed_width_unary(ctx);
    agx_lower_agx3_shifted_iadd_dest(ctx);
 
    if (key->dev.encoding != AGX_ISA_ENCODING_AGX2)

@@ -4,8 +4,10 @@
  */
 
 #include "agx_compile.h"
+#include "agx_nir.h"
 #include "agx3_cf_core.h"
 #include "agx_compiler.h"
+#include "agx_nir_texture.h"
 #include "nir_builder.h"
 #include "util/half_float.h"
 
@@ -1942,6 +1944,54 @@ check_half_rsqrt_compute(void)
 }
 
 static bool
+check_cube_register_lod_pressure(void)
+{
+   nir_builder b = nir_builder_init_simple_shader(
+      MESA_SHADER_COMPUTE, &agx_nir_options, "G17P cube register LOD pressure");
+   b.shader->info.workgroup_size[0] = 1;
+   b.shader->info.workgroup_size[1] = 1;
+   b.shader->info.workgroup_size[2] = 1;
+   nir_def *live[20];
+   for (unsigned i = 0; i < ARRAY_SIZE(live); ++i)
+      live[i] = nir_load_global(&b, 4, 32,
+         nir_imm_int64(&b, 0x1000 + i * 16), .align_mul = 16);
+   nir_def *coord = nir_load_global(&b, 3, 32,
+      nir_imm_int64(&b, 0x2000), .align_mul = 16);
+   nir_def *lod = nir_load_global(&b, 1, 32,
+      nir_imm_int64(&b, 0x2010), .align_mul = 4);
+   nir_tex_instr *tex = nir_tex_instr_create(b.shader, 2);
+   tex->op = nir_texop_txl;
+   tex->sampler_dim = GLSL_SAMPLER_DIM_CUBE;
+   tex->dest_type = nir_type_float32;
+   tex->coord_components = 3;
+   tex->backend_flags = AGX_TEXTURE_FLAG_NO_CLAMP;
+   tex->src[0] = nir_tex_src_for_ssa(nir_tex_src_coord, coord);
+   tex->src[1] = nir_tex_src_for_ssa(nir_tex_src_lod, lod);
+   nir_def_init(&tex->instr, &tex->def, 4, 32);
+   nir_builder_instr_insert(&b, &tex->instr);
+   nir_store_global(&b, &tex->def, nir_imm_int64(&b, 0x3000), .align_mul = 16);
+   for (unsigned i = 0; i < ARRAY_SIZE(live); ++i)
+      nir_store_global(&b, live[i], nir_imm_int64(&b, 0x4000 + i * 16),
+                       .align_mul = 16);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_early, false);
+   NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation,
+            AGX_DESCRIPTOR_GENERATION_9);
+   agx_preprocess_nir(b.shader);
+   struct agx_shader_key key = {0};
+   key.dev.encoding = AGX_ISA_ENCODING_AGX3B;
+   key.no_preamble = true;
+   key.has_scratch = true;
+   struct agx_shader_part part = {0};
+   const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+   const bool valid = compiled && part.binary && part.info.scratch_size > 0;
+   if (!valid)
+      fprintf(stderr, "G17P cube LOD pressure compile/spill failed\n");
+   free(part.binary);
+   ralloc_free(b.shader);
+   return valid;
+}
+
+static bool
 check_half_exp2_compute(void)
 {
    nir_builder b = nir_builder_init_simple_shader(
@@ -1970,6 +2020,7 @@ check_half_exp2_compute(void)
    ralloc_free(b.shader);
    return valid;
 }
+
 
 static bool
 check_half_log2_compute(void)
@@ -2334,6 +2385,9 @@ main(int argc, char **argv)
               valid ? "PASS" : "FAIL");
       return valid ? 0 : 1;
    }
+   if (argc == 2 && !strcmp(argv[1], "--cube-lod-pressure-only"))
+      return check_cube_register_lod_pressure() ? 0 : 1;
+
    if (argc == 2 && !strcmp(argv[1], "--half-exp2-only")) {
       const bool valid = check_half_exp2_compute();
       fprintf(stderr, "G17P shaderFloat16 exp2: %s\n",
@@ -2417,6 +2471,8 @@ main(int argc, char **argv)
    if (!check_half_sqrt_compute())
       return 1;
    if (!check_half_rsqrt_compute())
+      return 1;
+   if (!check_cube_register_lod_pressure())
       return 1;
    if (!check_half_exp2_compute())
       return 1;

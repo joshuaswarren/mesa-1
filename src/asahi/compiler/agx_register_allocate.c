@@ -1941,7 +1941,8 @@ agx3_tile_store_bank(agx_context *ctx)
 
 /* The packer places dynamic cube CEM scratch above every allocated operand.
  * Reserve that storage before spilling/RA, including the extra packed layer
- * word used by bias+minimum. Cube-array face staging has a seven-bit limit.
+ * word used by bias+minimum. Cube-array face staging and the register LOD
+ * operand of a plain cube sample both have seven-bit source fields.
  * Keep the allocation budget aligned to the largest SSA vector, so rounding
  * demand for live-range splitting cannot exceed the reduced file. */
 static unsigned
@@ -1966,8 +1967,9 @@ agx3_cube_register_budget(agx_context *ctx)
           I->src[4].type == AGX_INDEX_IMMEDIATE)
          continue;
 
-      budget = MIN2(budget, I->dim == AGX_DIM_CUBE_ARRAY ? 112 :
-                    AGX3B_NUM_REGS - 8 - (bias_min ? 2 : 0));
+      budget = MIN2(budget,
+                    (I->dim == AGX_DIM_CUBE_ARRAY || register_lod) ? 112 :
+                    AGX3B_NUM_REGS - 8);
    }
    return ROUND_DOWN_TO(budget, alignment);
 }

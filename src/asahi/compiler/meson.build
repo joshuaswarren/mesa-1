@@ -750,6 +750,7 @@ if with_tests
          'test/test-agx3-uniform-alu.cpp',
          'test/test-agx3-integer-fusion.cpp',
          'test/test-agx3-integer-lowering.cpp',
+         'test/test-agx3-unary-lowering.cpp',
       ),
       c_args : [c_msvc_compat_args, no_override_init_args],
       gnu_symbol_visibility : 'hidden',
@@ -782,6 +783,18 @@ if with_tests
       link_with : [libasahi_compiler],
     ),
     suite : ['asahi'],
+  )
+
+  test(
+    'agx3_unary_lowering',
+    executable(
+      'agx3_unary_lowering_test',
+      files('test/test-agx3-unary-lowering.cpp'),
+      dependencies : [idep_gtest, idep_nir, idep_agx_opcodes_h, idep_agx_builder_h, idep_mesautil],
+      link_with : [libasahi_compiler],
+    ),
+    suite : ['asahi'],
+    protocol : 'gtest',
   )
 
   test(
