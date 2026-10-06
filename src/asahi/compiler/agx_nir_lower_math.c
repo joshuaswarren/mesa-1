@@ -44,16 +44,6 @@ div_rn(nir_builder *b, nir_def *a, nir_def *d)
    nir_def *q = nir_fmul(b, ma, y);
    nir_def *r = nir_ffma(b, nir_fneg(b, md), q, ma);
    q = nir_ffma(b, r, y, q);
-   r = nir_ffma(b, nir_fneg(b, md), q, ma);
-   nir_def *half = nir_ishl_imm(b, nir_iadd_imm(b, nir_ushr_imm(b, q, 23), -24), 23);
-   nir_def *up = nir_fmul(b, md, half);
-   nir_def *down = nir_bcsel(b, nir_ieq_imm(b, nir_iand_imm(b, q, 0x7fffff), 0),
-                              nir_fmul_imm(b, up, 0.5), up);
-   nir_def *odd = nir_ine_imm(b, nir_iand_imm(b, q, 1), 0);
-   nir_def *inc = nir_ior(b, nir_flt(b, up, r), nir_iand(b, nir_feq(b, up, r), odd));
-   nir_def *nr = nir_fneg(b, r);
-   nir_def *dec = nir_ior(b, nir_flt(b, down, nr), nir_iand(b, nir_feq(b, down, nr), odd));
-   q = nir_isub(b, nir_iadd(b, q, nir_b2i32(b, inc)), nir_b2i32(b, dec));
    nir_def *e = nir_isub(b, ea, ed);
    nir_def *out = nir_iadd(b, q, nir_ishl_imm(b, e, 23));
    nir_def *under = nir_ior(b, nir_ilt_imm(b, e, -126),
