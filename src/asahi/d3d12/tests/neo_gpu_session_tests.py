@@ -20,7 +20,8 @@ spec.loader.exec_module(session)
 
 
 class SessionTests(unittest.TestCase):
-    def run_session(self, before='', updates='', free=100, command=None):
+    def run_session(self, before='', updates='', free=100, command=None,
+                    timeout=180):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             queue, boot = root / 'queue', root / 'boot'
@@ -37,7 +38,8 @@ class SessionTests(unittest.TestCase):
             with patch.object(session, 'QUEUE', queue), \
                     patch.object(session, 'BOOT', boot), \
                     patch.object(session, 'journal', journal), \
-                    patch.object(sys, 'argv', ['session', str(evidence), '--', *command]), \
+                    patch.object(sys, 'argv', ['session', '--timeout', str(timeout),
+                                              str(evidence), '--', *command]), \
                     contextlib.redirect_stdout(io.StringIO()):
                 rc = session.main()
             return rc, json.loads((evidence / 'result.json').read_text()), marker.exists()
@@ -73,6 +75,15 @@ class SessionTests(unittest.TestCase):
                 self.assertFalse(result['valid'])
                 self.assertLess(result['test_rc'], 0)
                 self.assertLess(result['elapsed_s'], 10)
+
+    def test_deadline_stops_child_without_kernel_error(self):
+        rc, result, _ = self.run_session(
+            timeout=0.1, command=[sys.executable, '-c',
+                                 'import time; time.sleep(60)'])
+        self.assertEqual(rc, 125)
+        self.assertIn('timed out', result['error'])
+        self.assertLess(result['test_rc'], 0)
+        self.assertLess(result['elapsed_s'], 10)
 
 
 if __name__ == '__main__':

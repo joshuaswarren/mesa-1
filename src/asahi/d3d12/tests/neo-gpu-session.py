@@ -80,7 +80,7 @@ def stop(child, groups):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('evidence', type=Path)
-    parser.add_argument('--timeout', type=float, default=540)
+    parser.add_argument('--timeout', type=float, default=180)
     parser.add_argument('command', nargs=argparse.REMAINDER)
     args = parser.parse_args()
     command = args.command

@@ -167,6 +167,10 @@ failure or fewer than 40 free QIDs, and stops the command at the first new
 quarantine, poison or submit failure. A failed guard returns 125. A valid
 kernel session preserves the test's exit code, including ordinary test
 failures. This wrapper provides no hardware access or approval by itself.
+The default test deadline is 180 seconds; `--timeout SECONDS` before the
+evidence-directory argument may extend it to at most 540 seconds. Set the
+outer hardware-request timeout longer than this deadline so the wrapper can
+stop and reap its children before the exclusive request ends.
 
 ## Layout
 
