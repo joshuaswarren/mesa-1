@@ -11,6 +11,8 @@
 #endif
 #include "drm-uapi/asahi_drm.h"
 #include "util/ralloc.h"
+#include "util/cnd_monotonic.h"
+#include "util/u_thread.h"
 #include "util/simple_mtx.h"
 #include "util/sparse_array.h"
 #include "util/timespec.h"
@@ -334,6 +336,13 @@ struct agx_device {
 
       /* Number of hits/misses for the BO cache */
       uint64_t hits, misses;
+
+      /* DRM shmem pages remain pinned while a BO is cached. Wake only while
+       * the cache has entries, so an idle client can release stale BOs. */
+      mtx_t idle_lock;
+      struct u_cnd_monotonic idle_cond;
+      thrd_t idle_thread;
+      bool idle_started, idle_stop, idle_pending;
    } bo_cache;
 
    struct agxdecode_ctx *agxdecode;

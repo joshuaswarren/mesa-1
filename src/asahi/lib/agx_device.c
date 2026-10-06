@@ -1670,6 +1670,7 @@ agx_open_device(void *memctx, struct agx_device *dev)
 
    }
 
+   agx_bo_cache_start_idle_trim(dev);
    return true;
 
 fail:
@@ -1680,6 +1681,7 @@ fail:
 void
 agx_close_device(struct agx_device *dev)
 {
+   agx_bo_cache_stop_idle_trim(dev);
    agx_bo_unreference(dev, dev->printf.bo);
    agx_bo_unreference(dev, dev->usc_base_bo);
    if (dev->g17p_render_context_bo) {
