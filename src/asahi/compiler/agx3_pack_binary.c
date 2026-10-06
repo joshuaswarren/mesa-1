@@ -10362,7 +10362,24 @@ agx3_pack_binary(agx_context *ctx, struct util_dynarray *emission)
                 * program does: its four uniform writes land on halves 20, 22,
                 * 24 and 26 -- consecutive 32-bit slots two halves apart.
                 */
-               bool ok = wait == 0 || agx3_retire_slots_noop(emission, enc, wait);
+               bool ok = true;
+               if (wait && enc != AGX_ISA_ENCODING_AGX3B) {
+                  ok = agx3_retire_slots_noop(emission, enc, wait);
+               } else if (wait) {
+                  /* This is a partial wait. r0 may still be the destination
+                   * of an unrelated load (for example a UBO sample index).
+                   * Carry the wait on the value being published, whose
+                   * producer is covered by the mask, so retiring another
+                   * uniform cannot overwrite that pending r0 generation. */
+                  uint8_t carrier[AGX3_ALU_MAX_LENGTH], carrier_len = 0;
+                  const bool retired = scalar16
+                     ? agx3_alu_bit_imm(enc, AGX3_ALU_BOR, true, value.value,
+                                        value.value, 0, AGX3_ALU_HINT_NONE, wait,
+                                        carrier, &carrier_len)
+                     : agx3_alu_band_identity_wait(enc, value.value, wait,
+                                                   carrier, &carrier_len);
+                  ok = retired && agx3_append(emission, carrier, carrier_len);
+               }
 
                for (unsigned i = 0; ok && i < copies; ++i) {
                   uint8_t bytes[AGX3_COPY_MAX_LENGTH];

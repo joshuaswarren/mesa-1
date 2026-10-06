@@ -11512,6 +11512,65 @@ TEST_F(AGX3PackBinary, G17PUniformWordMoveReachesHighDestinations)
    }
 }
 
+TEST_F(AGX3PackBinary, UniformStoreWaitPreservesUnrelatedPendingR0)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   b->shader->is_preamble = true;
+   key.dev.chip = AGX_CHIP_G17P;
+
+   /* The sample-index load stays in flight while another preamble result
+    * is published. Its partial wait must not read or write r0. */
+   const agx_index base = agx_uniform(16, AGX_SIZE_64);
+   agx_device_load_to(b, agx_register(0, AGX_SIZE_32), base,
+                      agx_immediate(0), AGX_FORMAT_I32, 1, 0, false);
+   agx_device_load_to(b, agx_register(8, AGX_SIZE_32), base,
+                      agx_immediate(4), AGX_FORMAT_I32, 1, 0, false);
+   agx_uniform_store(b, agx_register(8, AGX_SIZE_32), agx_immediate(24), 1);
+   agx_uniform_store(b, agx_register(0, AGX_SIZE_32), agx_immediate(22), 1);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> publication;
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 8, 2, bytes, &len));
+   append(publication, bytes, len);
+   ASSERT_TRUE(agx3_copy_encode_reg_to_uniform(enc, 24, 8, false, bytes, &len));
+   append(publication, bytes, len);
+   const auto code = pack(b);
+   EXPECT_NE(std::search(code.begin(), code.end(), publication.begin(),
+                         publication.end()), code.end());
+   ASSERT_TRUE(agx3_alu_band_identity_wait(enc, 0, 2, bytes, &len));
+   EXPECT_EQ(std::search(code.begin(), code.end(), bytes, bytes + len), code.end());
+}
+
+TEST_F(AGX3PackBinary, UniformHalfStoreWaitPreservesPendingUpperHalf)
+{
+   const auto enc = AGX_ISA_ENCODING_AGX3B;
+   agx_builder *b = builder(enc);
+   b->shader->stage = MESA_SHADER_FRAGMENT;
+   b->shader->is_preamble = true;
+   key.dev.chip = AGX_CHIP_G17P;
+   const agx_index base = agx_uniform(16, AGX_SIZE_64);
+   agx_device_load_to(b, agx_register(8, AGX_SIZE_16), base,
+                      agx_immediate(0), AGX_FORMAT_I16, 1, 0, false);
+   agx_device_load_to(b, agx_register(9, AGX_SIZE_16), base,
+                      agx_immediate(2), AGX_FORMAT_I16, 1, 0, false);
+   agx_uniform_store(b, agx_register(8, AGX_SIZE_16), agx_immediate(24), 1);
+   agx_stop(b);
+
+   uint8_t bytes[AGX3_ALU_MAX_LENGTH], len = 0;
+   std::vector<uint8_t> publication;
+   ASSERT_TRUE(agx3_alu_bit_imm(enc, AGX3_ALU_BOR, true, 8, 8, 0,
+                               AGX3_ALU_HINT_NONE, 1, bytes, &len));
+   append(publication, bytes, len);
+   ASSERT_TRUE(agx3_copy_encode_reg_to_uniform(enc, 24, 8, false, bytes, &len));
+   append(publication, bytes, len);
+   const auto code = pack(b);
+   EXPECT_NE(std::search(code.begin(), code.end(), publication.begin(),
+                         publication.end()), code.end());
+}
+
 TEST_F(AGX3PackBinary, G17PPaddedUniformHalfStoreUsesNativeDwordCopy)
 {
    agx_builder *b = builder(AGX_ISA_ENCODING_AGX3B);

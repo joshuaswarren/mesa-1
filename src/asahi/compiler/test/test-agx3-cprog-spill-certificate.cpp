@@ -159,7 +159,7 @@ TEST_F(CProgCertificate, PackBoundaryDependencyChain) {
     * uniform export. Match the complete carrier with that exact wait mask;
     * this is an encoder-backed byte check, not a generic ALU decoder. */
    uint8_t carrier[AGX3_ALU_MAX_LENGTH],length=0;
-   ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B,0,
+   ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B,6,
       1u<<(loads[2].slot-1),carrier,&length));
    ASSERT_GE(binary.size,44u+length);
    EXPECT_EQ(memcmp(code+44,carrier,length),0);
@@ -284,7 +284,7 @@ TEST_F(FragmentCProgCertificate, Pack192ByteBoundary) {
    EXPECT_NE(store.wait_mask&(1u<<(imports.slot-1)),0u);
    EXPECT_NE(reload.wait_mask&(1u<<(store.slot-1)),0u);
    uint8_t carrier[AGX3_ALU_MAX_LENGTH],length=0;
-   ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B,0,
+   ASSERT_TRUE(agx3_alu_band_identity_wait(AGX_ISA_ENCODING_AGX3B,4,
       1u<<(reload.slot-1),carrier,&length));
    ASSERT_GE(binary.size,26u+length);EXPECT_EQ(memcmp(code+26,carrier,length),0);
    util_dynarray_fini(&binary);
