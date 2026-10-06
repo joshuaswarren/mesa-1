@@ -441,15 +441,16 @@ struct hk_rendering_state {
    struct agx_tilebuffer_layout tilebuffer;
    struct hk_render_registers cr;
 
-   /* The ZLS words for the stream that ends the pass, when it is also the
-    * first stream (only) or a later one (last). Depth honours storeOp there;
-    * stencil keeps the forced store. zls_first_cs is the stream
-    * BeginRendering created. */
+   /* HK_ZLS_PRECISE_DEPTH_STORE (v50, default on for G17P): the ZLS words for the
+    * stream that ends the pass, when it is also the first stream (only) or
+    * a later one (last). Depth honours storeOp there; stencil keeps the
+    * forced store. zls_first_cs is the stream BeginRendering created. */
    bool zls_precise;
    struct agx_zls_control_packed zls_control_only, zls_control_last;
    const void *zls_first_cs;
 
-   /* Preserve untouched NONE/NONE attachments: the pass drops its
+   /* Preserve untouched NONE/NONE attachments, and (HK_G17P_ZLS_ELIDE_
+    * UNTOUCHED, default on) LOAD/STORE ones. The pass may drop its
     * depth/stencil attachment from every control stream when no draw or
     * clear in it tests, writes, bounds-tests or clears depth/stencil (see
     * hk_g17p_zls_elide()). */

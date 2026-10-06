@@ -2547,17 +2547,16 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
    agx_pack_zls_control(packed, z_layout, s_layout, &zls);
 }
 
-/* Precise depth store for the stream that ends a pass.
+/* HK_ZLS_PRECISE_DEPTH_STORE (v50; default on for G17P, off elsewhere).
  *
  * hk_pack_zls_control() forces the depth store on ("|| true") because a pass
  * split across several of Honeykrisp's own control streams needs every stream
- * but the last to store depth for the next one to reload. Applied to the
- * stream that ends the pass, that costs one full depth write per tile even
- * for storeOp DONT_CARE or NONE: DXVK opens read-only depth passes as
- * LOAD/NONE, and Subnautica's frame 1787 paid three full 1080p D32 stores for
- * them (0.10-0.15 ms each on Neo). Only the stream that ends the pass may
- * drop it: the first stream keeps the forced word, middle streams keep the
- * partial word, and EndRendering installs one of these two:
+ * but the last to store depth for the next one to reload. That costs one
+ * full depth write per tile even for storeOp DONT_CARE: up to 4 B/px of
+ * DRAM writes per pass for D32 (less where G17P compresses the depth plane,
+ * hk_g17p_compression.h). Only the stream that ends the pass may drop it:
+ * the first stream keeps the forced word, middle streams keep the partial
+ * word, and EndRendering installs one of these two:
  *
  *  - only: the pass has a single stream: loads per loadOp, depth stores per
  *    storeOp/resolve;
@@ -2569,6 +2568,40 @@ hk_pack_zls_control(struct agx_zls_control_packed *packed,
  * derives their ZLS word with both load and store forced
  * (g17_uapi.rs partial_depth_flags). Stencil keeps its forced store: the
  * existing TODO documents a CTS failure without it. */
+DEBUG_GET_ONCE_OPTION(hk_zls_precise_depth_store,
+                      "HK_ZLS_PRECISE_DEPTH_STORE", NULL)
+
+/* v56g/v57e HK_G17P_ZLS_ELIDE_UNTOUCHED (default on; =0 disables).
+ *
+ * Minecraft opens every full-screen pass with loadOp LOAD / storeOp STORE on
+ * its D32 attachment, including passes whose pipelines neither test nor
+ * write depth (GUI). Such a pass leaves the attachment's contents exactly as
+ * they were, so loading and storing them (up to 2 x 14.9 MB at 2408x1506;
+ * less when agx3 compresses the D32 image) is pure traffic. When the pass
+ * ends with nothing
+ * having touched depth/stencil, drop the attachment from every control
+ * stream of the pass: no ZLS load/store, and no depth base for the kernel,
+ * whose partial-render word forces Z/S load+store whenever a base is present
+ * (g17_uapi.rs partial_depth_flags), which would otherwise store tile depth
+ * that was never loaded. Not eligible: CLEAR load ops (the clear itself
+ * changes the attachment), resolves, suspended/resumed passes and passes
+ * recorded in secondaries. Depth/stencil input-attachment reads inside the
+ * pass cannot see the dropped tile contents, but G17P does not expose
+ * dynamicRenderingLocalReadDepthStencilAttachments, and a separate subpass
+ * reads the (unchanged) image from memory. */
+DEBUG_GET_ONCE_OPTION(hk_g17p_zls_elide_untouched,
+                      "HK_G17P_ZLS_ELIDE_UNTOUCHED", NULL)
+
+/* Both ZLS knobs are on by default on G17P: the ZLS slice of the Vulkan CTS
+ * (renderpasses.dynamic_rendering, renderpasses.renderpass2 and
+ * pipeline.monolithic.depth) and the D32S8 slices give the same results
+ * with and without them (t-1199). Either variable still forces its path on
+ * (1) or off (0). */
+static bool
+hk_zls_knob(const char *value, bool default_on)
+{
+   return value ? debug_parse_bool_option(value, default_on) : default_on;
+}
 
 static bool
 hk_g17p_zls_attachment_elidable(const VkRenderingAttachmentInfo *att)
@@ -3008,12 +3041,18 @@ hk_CmdBeginRendering(VkCommandBuffer commandBuffer,
    hk_pack_zls_control(&render->cr.zls_control_partial, z_layout, s_layout,
                        attach_z, attach_s, incomplete_render_area, true);
 
-   render->zls_precise = z_layout != NULL;
+   render->zls_precise =
+      hk_zls_knob(debug_get_option_hk_zls_precise_depth_store(),
+                  dev->dev.chip == AGX_CHIP_G17P) &&
+      z_layout != NULL;
    render->g17p_depth_touched = false;
    const bool preserve_none = hk_g17p_zls_attachment_none(attach_z) &&
                               hk_g17p_zls_attachment_none(attach_s);
    render->g17p_zls_elide_ok =
-      dev->dev.chip == AGX_CHIP_G17P && preserve_none &&
+      dev->dev.chip == AGX_CHIP_G17P &&
+      (preserve_none ||
+       (hk_zls_knob(debug_get_option_hk_g17p_zls_elide_untouched(), true) &&
+        !(render->flags & VK_RENDERING_CONTENTS_SECONDARY_COMMAND_BUFFERS_BIT))) &&
       (z_layout != NULL || s_layout != NULL) &&
       !(render->flags & (VK_RENDERING_SUSPENDING_BIT |
                          VK_RENDERING_RESUMING_BIT)) &&
