@@ -1937,9 +1937,17 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
     * against 782 us (vkd3d-proton: 444 and 955 us), while a 250-draw frame
     * still gained from overlap (276 against 288-344 us). Such a submission
     * waits on the previous one, as before; the wait is free when that one
-    * has already completed. */
+    * has already completed.
+    *
+    * The same holds behind compute work. Without the wait, a fence signal
+    * queued behind a heavy dispatch could be lost to a CPU rewind of the
+    * fence while that dispatch ran (vkd3d-proton
+    * test_fence_pending_signal_cpu_rewind_plain failed 5/5 on the M1 Pro,
+    * with waits on the next queue timing out); with it, 5/5 pass. The
+    * render-only frames the overlap was measured on keep it. */
    const bool self_wait =
       d12_debug()->submit_self_wait ||
+      p_atomic_read(&queue->prev_submit_compute) ||
       p_atomic_read(&queue->prev_submit_draws) >= D12_QUEUE_OVERLAP_MAX_DRAWS;
    struct drm_asahi_sync syncs[2] = {
       {
@@ -2142,6 +2150,7 @@ d12_queue_process_submit(struct d12_queue *queue, struct d12_queue_op *op)
    }
    op->retire_value = out;
    p_atomic_set(&queue->prev_submit_draws, op->draws);
+   p_atomic_set(&queue->prev_submit_compute, op->nr_cdm != 0);
    if (d12_debug()->dump_sync) {
       uint64_t stream_address = 0;
       if (op->bos_initialized && util_dynarray_num_elements(

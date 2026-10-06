@@ -2513,6 +2513,9 @@ struct d12_queue {
    /* Draws in the renders of the last real submission: a submission behind
     * a heavy one waits on its timeline point (see d12_queue_process_submit). */
    uint32_t prev_submit_draws;
+   /* The last real submission ran compute (CDM) commands; the next one
+    * waits on its timeline point too. */
+   bool prev_submit_compute;
 
    mtx_t lock;
    /* DDI callbacks submit on the entering runtime thread. This lock keeps
