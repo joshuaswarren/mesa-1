@@ -19,7 +19,8 @@
  * texture state registers. The following layout is used:
  *
  *    1. Textures
- *    2. Images (read/write interleaved)
+ *    2. Images (read/write interleaved; on G17P each image is followed by a
+ *       software tail record, so images are options->image_records apart)
  */
 
 static mesa_shader_stage
@@ -192,6 +193,7 @@ lower(nir_builder *b, nir_instr *instr, void *data)
          return false;
       }
 
+
       nir_def *index = intr->src[0].ssa;
       nir_scalar index_scalar = nir_scalar_resolved(index, 0);
 
@@ -206,11 +208,26 @@ lower(nir_builder *b, nir_instr *instr, void *data)
           intr->intrinsic != nir_intrinsic_image_samples)
          offset++;
 
+      /* G17P has no texture state registers to name a PBE with: imgwci reads
+       * its PBE from a heap -- a 64-bit uniform -- at a record index held in
+       * a register. Bind stores and atomics through the stage texture table
+       * so they carry that pair; agx_nir_lower_g17p_storage_records() turns
+       * the byte offset into the record index once the table's uniform is
+       * known.
+       */
+      if (options->g17p_bindless_storage &&
+          intr->intrinsic != nir_intrinsic_image_load &&
+          intr->intrinsic != nir_intrinsic_image_size &&
+          intr->intrinsic != nir_intrinsic_image_samples)
+         force_bindless = true;
+
       /* If we can determine statically that the image fits in texture state
        * registers, avoid lowering to bindless access.
        */
       if (nir_scalar_is_const(index_scalar) && !force_bindless) {
-         unsigned idx = (nir_scalar_as_uint(index_scalar) * 2) + offset;
+         unsigned idx =
+            (nir_scalar_as_uint(index_scalar) * options->image_records) +
+            offset;
 
          if (idx < AGX_NUM_TEXTURE_STATE_REGS) {
             nir_src_rewrite(&intr->src[0], nir_imm_intN_t(b, idx, 16));
@@ -231,7 +248,8 @@ lower(nir_builder *b, nir_instr *instr, void *data)
          b, index,
          nir_imm_intN_t(b, b->shader->info.num_images - 1, index->bit_size));
 
-      index = nir_iadd_imm(b, nir_imul_imm(b, index, 2), offset);
+      index = nir_iadd_imm(b, nir_imul_imm(b, index, options->image_records),
+                           offset);
 
       nir_rewrite_image_intrinsic(intr, nir_load_texture_handle_agx(b, index),
                                   nir_image_intrinsic_type_bindless);
@@ -496,6 +514,73 @@ agx_nir_rebind_g17p_texture_crawls(nir_shader *shader)
 
    if (progress)
       NIR_PASS(_, shader, nir_opt_dce);
+
+   return progress;
+}
+
+/*
+ * G17P's imgwci names its destination as a PBE heap -- a 64-bit uniform --
+ * plus the index of a record in that heap, held in a register, and a bindless
+ * image read names its texture the same way with a 64-bit index. Gallium's
+ * bindless image handle is the stage texture table (the uniform) plus a byte
+ * offset into it, and every descriptor in that table, texture or PBE, is one
+ * record wide. Divide the offset by the record size for the stores that reach
+ * the backend. This is the Gallium side of hk_g17p_lower_storage_records().
+ *
+ * It must run after the sysval layout has assigned the table's uniform to the
+ * handle, and after texture lowering: atomics and multisampled stores are
+ * rewritten there into texel addressing that reads the descriptor through the
+ * byte-offset handle, so only genuine hardware accesses remain. Each access
+ * gets its own handle rather than rewriting a shared one, so any remaining
+ * descriptor reader keeps the byte offset.
+ */
+bool
+agx_nir_lower_g17p_storage_records(nir_shader *shader, unsigned record_size_B)
+{
+   assert(util_is_power_of_two_nonzero(record_size_B));
+   bool progress = false;
+
+   nir_foreach_function_impl(impl, shader) {
+      nir_builder b = nir_builder_create(impl);
+      bool impl_progress = false;
+
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            const bool load =
+               intr->intrinsic == nir_intrinsic_bindless_image_load ||
+               intr->intrinsic == nir_intrinsic_bindless_image_sparse_load;
+            if (intr->intrinsic != nir_intrinsic_bindless_image_store && !load)
+               continue;
+
+            nir_intrinsic_instr *handle = nir_src_as_intrinsic(intr->src[0]);
+            if (!handle || handle->intrinsic != nir_intrinsic_bindless_image_agx)
+               continue;
+
+            b.cursor = nir_before_instr(instr);
+            nir_def *record = nir_ushr_imm(&b, handle->src[0].ssa,
+                                           util_logbase2(record_size_B));
+            /* A read names its texture descriptor the way a G17P texture
+             * fetch does (agx_nir_rebind_g17p_texture_crawls()): a native
+             * table index, zero-extended to the 64-bit register operand. */
+            if (load)
+               record = nir_u2u64(&b, record);
+            nir_src_rewrite(&intr->src[0],
+                            nir_bindless_image_agx(
+                               &b, record,
+                               .desc_set = nir_intrinsic_desc_set(handle)));
+            impl_progress = true;
+         }
+      }
+
+      if (impl_progress) {
+         nir_progress(true, impl, nir_metadata_control_flow);
+         progress = true;
+      }
+   }
 
    return progress;
 }

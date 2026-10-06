@@ -4962,6 +4962,44 @@ build_cs_storage_image(unsigned mode)
 }
 
 static bool
+test_g17p_buffer_ms_image_atomics(void)
+{
+   bool ok = true;
+   for (unsigned mode = 0; mode < 3; ++mode) {
+      nir_builder b = nir_builder_init_simple_shader(
+         MESA_SHADER_COMPUTE, &agx_nir_options, "G17P buffer/MS image atomic");
+      /* This is the post-layout uniform pointer, not a Vulkan set number. */
+      nir_def *handle = nir_bindless_image_agx(
+         &b, nir_imm_int(&b, 32), .desc_set = 12);
+      nir_def *coord = nir_pad_vector(&b, nir_load_workgroup_id(&b), 4);
+      nir_def *value = nir_bindless_image_atomic(
+         &b, 32, handle, coord, nir_load_preamble(&b, 1, 32, .base = 4),
+         nir_imm_int(&b, 1), .atomic_op = nir_atomic_op_iadd,
+         .format = PIPE_FORMAT_R32_UINT,
+         .image_dim = mode ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_BUF,
+         .image_array = mode == 2);
+      nir_store_global(&b, value, nir_load_preamble(&b, 1, 64, .base = 0),
+                        .write_mask = 1);
+      NIR_PASS(_, b.shader, agx_nir_lower_texture_for_generation, 9);
+      NIR_PASS(_, b.shader, nir_shader_intrinsics_pass,
+               lower_test_descriptor_set, nir_metadata_control_flow, NULL);
+      agx_preprocess_nir(b.shader);
+      struct agx_shader_key key = {
+         .dev.encoding = AGX_ISA_ENCODING_AGX3B,
+         .no_preamble = true, .reserved_preamble = 64,
+      };
+      struct agx_shader_part part = {0};
+      const bool compiled = agx_compile_shader_nir(b.shader, &key, &part);
+      ok &= compiled && part.info.agx3_spectpr_scratch_size == 16;
+      if (!compiled)
+         fprintf(stderr, "G17P buffer/MS atomic mode %u refused\n", mode);
+      free(part.binary);
+      ralloc_free(b.shader);
+   }
+   return ok;
+}
+
+static bool
 test_storage_image_lowering(void)
 {
    for (unsigned mode = 0; mode < 8; ++mode) {
@@ -8672,6 +8710,12 @@ test_g17p_gallium_vertex_param_abi(void)
 int
 main(int argc, char **argv)
 {
+   if (argc == 2 && !strcmp(argv[1], "--buffer-ms-atomics-only")) {
+      const bool ok = test_g17p_buffer_ms_image_atomics();
+      fprintf(stderr, "G17P buffer/MS atomic compilation and return frame: %s\n",
+              ok ? "PASS" : "FAIL");
+      return ok ? 0 : 1;
+   }
    if (argc == 2 && !strcmp(argv[1], "--vertex-texture-lod-only")) {
       const struct agx3_graphics_case c = {
          "vs-texture-register-lod", build_vs_texture_register_lod, true,
@@ -9121,6 +9165,7 @@ main(int argc, char **argv)
    RUN(test_g17p_blended_payloads_beyond_bank);
    RUN(test_g17p_pipeline_statistics_fs_prolog);
    RUN(test_g17p_pbe_to_texture_fence);
+   RUN(test_g17p_buffer_ms_image_atomics);
    RUN(test_g17p_clustered_minmax_width);
    RUN(test_frag_sidefx_late_test_once);
    RUN(test_g17p_frag_sidefx_late_depth_once);

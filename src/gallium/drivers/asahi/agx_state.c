@@ -1498,7 +1498,6 @@ agx_batch_upload_pbe(struct agx_batch *batch,
        * ABI is recovered.
        */
       const bool sideband_has_no_reader =
-         block_access &&
          agx_gallium_descriptor_generation_is_agx3(descriptor_generation);
 
       if (!cfg.extended && (tex->layout.writeable_image || emrt) &&
@@ -1782,6 +1781,9 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
       NIR_PASS(_, nir, agx_nir_layout_uniforms, compiled,
                &key.reserved_preamble, uniform_base,
                dev->chip == AGX_CHIP_G17P);
+      if (dev->chip == AGX_CHIP_G17P)
+         NIR_PASS(_, nir, agx_nir_lower_g17p_storage_records,
+                  texture_descriptor_size);
    }
 
    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
@@ -2004,7 +2006,10 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
       NIR_PASS(_, nir, agx_nir_lower_fs_active_samples_to_register);
    }
 
-   NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
+   /* The Gen9 form addresses through the storage tail record that
+    * agx_g17p_fill_storage_tail() writes. */
+   NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store_for_generation,
+            agx_gallium_descriptor_generation(dev->chip));
 
    struct agx_compiled_shader *compiled = agx_compile_nir(
       dev, nir, &pctx->debug, so->type, false, so->type != MESA_SHADER_FRAGMENT,
@@ -2013,8 +2018,9 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
 
    if (so->type == MESA_SHADER_FRAGMENT) {
       /* XXX: don't replicate this all over the driver */
-      epilog_key.rt_spill_base = BITSET_LAST_BIT(nir->info.textures_used) +
-                                 (2 * BITSET_LAST_BIT(nir->info.images_used));
+      epilog_key.rt_spill_base =
+         BITSET_LAST_BIT(nir->info.textures_used) +
+         (so->info.image_records * BITSET_LAST_BIT(nir->info.images_used));
 
       compiled->epilog_key = epilog_key;
       compiled->b.info.reads_tib |= translucent;
@@ -2223,12 +2229,15 @@ agx_shader_initialize(struct agx_device *dev, struct agx_uncompiled_shader *so,
       .uses_bindless_samplers = &so->uses_bindless_samplers,
       .g17p_plain_txf_crawl = dev->chip == AGX_CHIP_G17P,
       .g17p_native_sampler_handles = dev->chip == AGX_CHIP_G17P,
+      .g17p_bindless_storage = dev->chip == AGX_CHIP_G17P,
+      .image_records = dev->chip == AGX_CHIP_G17P ? 3 : 2,
       .bindful_sampler_count =
          dev->chip == AGX_CHIP_G17P
             ? AGX_GALLIUM_G17P_IMMEDIATE_API_SAMPLERS
             : 16,
    };
    NIR_PASS(_, nir, agx_nir_lower_bindings, &binding_options);
+   so->info.image_records = binding_options.image_records;
 
    /* We need to do some I/O lowering before lowering textures */
    so->info.nr_bindful_textures = BITSET_LAST_BIT(nir->info.textures_used);
@@ -3360,9 +3369,9 @@ agx_nr_tex_descriptors_without_spilled_rts(const struct agx_compiled_shader *cs)
    if (!cs || !cs->so)
       return 0;
 
-   /* 2 descriptors per image, 1 descriptor per texture */
+   /* image_records descriptors per image, 1 descriptor per texture */
    return cs->so->info.nr_bindful_textures +
-          (2 * cs->so->info.nr_bindful_images);
+          (cs->so->info.image_records * cs->so->info.nr_bindful_images);
 }
 
 static uint32_t
@@ -3444,6 +3453,76 @@ agx_upload_spilled_rt_descriptors(void *out, struct agx_batch *batch,
    }
 }
 
+/*
+ * The record after a G17P storage image's texture/PBE pair carries the
+ * software words Honeykrisp's Gen9 storage descriptor keeps there, at the same
+ * offsets from the texture descriptor: the native texture-table index of the
+ * image's texture, the packed addressing word image atomics read through
+ * libagx_image_texel_address_gen9(), and for multisampled images the aligned
+ * width libagx_emrt_ms_index_gen9() needs. Gen9's PBE has no free bits to
+ * carry these, which is why AGX2's in-descriptor sideband is left out of AGX3
+ * PBEs. A view whose addressing does not fit the packed word keeps it zero.
+ */
+static void
+agx_g17p_fill_storage_tail(uint8_t *tail, unsigned record_size_B,
+                           const struct pipe_image_view *view,
+                           unsigned texture_index)
+{
+   STATIC_ASSERT(AGX_G17P_IMAGE_ATOMIC_SW_OFFSET + sizeof(uint64_t) <=
+                 3 * AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE);
+   STATIC_ASSERT(AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET + sizeof(uint32_t) <=
+                 3 * AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE);
+   assert(record_size_B == AGX_GALLIUM_DESCRIPTOR_AGX3_SIZE);
+   const unsigned base = 2 * record_size_B;
+
+   uint32_t heap_index = texture_index;
+   memcpy(tail + AGX_G17P_STORAGE_HEAP_INDEX_OFFSET - base, &heap_index,
+          sizeof(heap_index));
+
+   struct agx_resource *rsrc = agx_resource(view->resource);
+   if (rsrc->base.target == PIPE_BUFFER) {
+      /* Same software texel-buffer metadata as Honeykrisp. The native
+       * descriptors already include the view byte offset, so the extra
+       * coordinate offset is zero; atomics use the exact bound byte address. */
+      const uint32_t size =
+         agx_texture_buffer_size_el(view->format, view->u.buf.size);
+      const uint32_t offset = 0;
+      const uint64_t address = agx_map_gpu(rsrc) + view->u.buf.offset;
+      memcpy(tail + AGX_G17P_BUFFER_TEXTURE_SIZE_OFFSET - base, &size,
+             sizeof(size));
+      memcpy(tail + AGX_G17P_BUFFER_TEXTURE_TAIL_OFFSET - base, &offset,
+             sizeof(offset));
+      memcpy(tail + AGX_G17P_BUFFER_TEXTURE_ADDRESS_OFFSET - base, &address,
+             sizeof(address));
+      return;
+   }
+   if (!rsrc->layout.writeable_image)
+      return;
+
+   const struct ail_layout *layout = &rsrc->layout;
+   const unsigned samples = util_res_sample_count(&rsrc->base);
+   const bool linear = layout->tiling == AIL_TILING_LINEAR;
+   /* Multisampled storage is bound as a linear buffer starting at its level,
+    * so its level offset is zero, as in hk's pack_pbe(). */
+   const unsigned level = samples > 1 ? 0 : view->u.tex.level;
+
+   if (samples > 1) {
+      const uint32_t aligned_width =
+         align(u_minify(rsrc->base.width0, view->u.tex.level),
+               layout->tilesize_el[view->u.tex.level].width_el);
+      memcpy(tail + AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET - base, &aligned_width,
+             sizeof(aligned_width));
+   }
+
+   uint64_t sw = 0;
+   if (agx_g17p_pack_image_atomic_sw(
+          ail_get_level_offset_B(layout, level),
+          linear ? 1 : layout->tilesize_el[view->u.tex.level].width_el,
+          linear ? 1 : layout->tilesize_el[view->u.tex.level].height_el,
+          layout->layer_stride_B, samples, &sw))
+      memcpy(tail + AGX_G17P_IMAGE_ATOMIC_SW_OFFSET - base, &sw, sizeof(sw));
+}
+
 static void
 agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
                     mesa_shader_stage stage)
@@ -3506,13 +3585,21 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
          agx_native_descriptor_rejected(dev, "null texture");
    }
 
+   const unsigned image_records = cs->so->info.image_records;
    for (unsigned i = 0; i < nr_images; ++i) {
-      /* Image descriptors come in pairs after the textures */
-      const unsigned image = nr_textures + (2 * i);
+      /* Image descriptors come in pairs after the textures, each followed on
+       * G17P by its software tail record. */
+      const unsigned image = nr_textures + (image_records * i);
       struct agx_gallium_texture_descriptor *texture =
          agx_texture_descriptor_at(T_tex.cpu, descriptor_size, image);
       struct agx_gallium_pbe_descriptor *pbe =
          agx_pbe_descriptor_at(T_tex.cpu, descriptor_size, image + 1);
+      uint8_t *tail = image_records > 2
+                         ? (uint8_t *)agx_texture_descriptor_at(
+                              T_tex.cpu, descriptor_size, image + 2)
+                         : NULL;
+      if (tail)
+         memset(tail, 0, descriptor_size);
 
       if (!(ctx->stage[stage].image_mask & BITFIELD_BIT(i))) {
          if (!agx_gallium_set_null_native_texture(descriptor_generation,
@@ -3545,6 +3632,9 @@ agx_upload_textures(struct agx_batch *batch, struct agx_compiled_shader *cs,
 
       if (!agx_batch_upload_pbe(batch, pbe, view, false, false, false, false))
          agx_native_descriptor_rejected(dev, "storage PBE");
+
+      if (tail)
+         agx_g17p_fill_storage_tail(tail, descriptor_size, view, image);
    }
 
    if (stage == MESA_SHADER_FRAGMENT &&
@@ -3999,7 +4089,8 @@ agx_build_g17p_graphics_program(struct agx_batch *batch,
       .uniform_ranges = ranges,
       .uniform_range_count = count,
       .shader_binary_size = linked->size,
-      .scratch_size = linked->scratch_size,
+      .scratch_size =
+         MAX2(linked->scratch_size, linked->agx3_spectpr_scratch_size),
       .nr_gprs = linked->nr_gprs,
       .compiler_d_valid = linked->g17p_compiler_d_valid,
       .compiler_d = linked->g17p_compiler_d,

@@ -80,6 +80,43 @@ bool agx_nir_lower_g17p_bindless_storage(struct nir_shader *s);
  * handle seen by agx_nir_lower_texture_for_generation(). */
 #define AGX_G17P_IMAGE_ATOMIC_SW_OFFSET 72
 #define AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE 40
+
+/* Pack that word: level offset [0:26] and layer stride [35:61] in 128-byte
+ * units, log2 tile width [27:30] and height [31:34] in pixels, log2 sample
+ * count [62:63]. libagx_image_texel_address_gen9() decodes it. Returns false
+ * when the addressing does not fit. Honeykrisp packs the same word with
+ * hk_pack_g17p_image_atomic_sw(), which stays in its dependency-free header. */
+static inline bool
+agx_g17p_pack_image_atomic_sw(uint64_t level_offset_B, unsigned tile_width_px,
+                              unsigned tile_height_px, uint64_t layer_stride_B,
+                              unsigned samples, uint64_t *out)
+{
+   if (!out || (level_offset_B & 0x7f) || (layer_stride_B & 0x7f) ||
+       tile_width_px == 0 || (tile_width_px & (tile_width_px - 1)) ||
+       tile_height_px == 0 || (tile_height_px & (tile_height_px - 1)) ||
+       (samples != 1 && samples != 2 && samples != 4 && samples != 8))
+      return false;
+
+   unsigned tile_width_log2 = 0, tile_height_log2 = 0, samples_log2 = 0;
+   for (unsigned x = tile_width_px; x > 1; x >>= 1)
+      ++tile_width_log2;
+   for (unsigned x = tile_height_px; x > 1; x >>= 1)
+      ++tile_height_log2;
+   for (unsigned x = samples; x > 1; x >>= 1)
+      ++samples_log2;
+
+   const uint64_t level_offset = level_offset_B >> 7;
+   const uint64_t layer_stride = layer_stride_B >> 7;
+   if (level_offset >= (UINT64_C(1) << 27) ||
+       layer_stride >= (UINT64_C(1) << 27) || tile_width_log2 >= 16 ||
+       tile_height_log2 >= 16 || samples_log2 >= 4)
+      return false;
+
+   *out = level_offset | ((uint64_t)tile_width_log2 << 27) |
+          ((uint64_t)tile_height_log2 << 31) | (layer_stride << 35) |
+          ((uint64_t)samples_log2 << 62);
+   return true;
+}
 /* Native texture/PBE pair, heap indices, address sideband, then padding. */
 #define AGX_G17P_EMRT_DESCRIPTOR_SIZE 96
 #define AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET 80

@@ -319,6 +319,13 @@ struct agx_uncompiled_shader {
 
       /* Number of bindful textures, images used */
       unsigned nr_bindful_textures, nr_bindful_images;
+
+      /* Texture-table records per image: a texture and a PBE descriptor,
+       * plus on G17P the software tail Honeykrisp's storage descriptor
+       * carries (see AGX_G17P_IMAGE_ATOMIC_SW_OFFSET).
+       */
+      uint8_t image_records;
+
    } info;
 
    struct hash_table *variants;
@@ -1092,6 +1099,8 @@ struct agx_lower_bindings_options {
    bool *uses_bindless_samplers;
    bool g17p_plain_txf_crawl;
    bool g17p_native_sampler_handles;
+   bool g17p_bindless_storage;
+   unsigned image_records;
    unsigned bindful_sampler_count;
 };
 
@@ -1099,6 +1108,8 @@ bool agx_nir_lower_bindings(nir_shader *shader,
                        struct agx_lower_bindings_options *options);
 bool agx_nir_lower_custom_border_g17p(nir_shader *shader);
 bool agx_nir_rebind_g17p_texture_crawls(nir_shader *shader);
+bool agx_nir_lower_g17p_storage_records(nir_shader *shader,
+                                        unsigned record_size_B);
 
 bool agx_batch_is_active(struct agx_batch *batch);
 bool agx_batch_is_submitted(struct agx_batch *batch);

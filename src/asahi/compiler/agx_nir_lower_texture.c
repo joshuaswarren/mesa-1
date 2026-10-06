@@ -968,7 +968,7 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
 
    if (dim == GLSL_SAMPLER_DIM_BUF && return_index) {
       return nir_channel(b, coord, 0);
-   } else if (dim == GLSL_SAMPLER_DIM_BUF && buffer_metadata) {
+   } else if (dim == GLSL_SAMPLER_DIM_BUF && (buffer_metadata || gen9)) {
       /* Buffer atomics receive the PBE handle, but Gen9 has no AGX2
        * software address/offset fields. Use the same sideband as buffer
        * loads and stores, relative to the start of the descriptor.
@@ -988,6 +988,28 @@ image_texel_address(nir_builder *b, nir_intrinsic_instr *intr,
    } else if (gen9) {
       nir_def *sw_address =
          nir_iadd_imm(b, desc_address, AGX_G17P_IMAGE_ATOMIC_SW_FROM_PBE);
+      if (dim == GLSL_SAMPLER_DIM_MS) {
+         /* MS storage uses a linear PBE over the tiled allocation. Its
+          * native width is the buffer window, not the source image width.
+          * Reuse the eMRT store index and original aligned-width sideband. */
+         nir_def *width_address = nir_iadd_imm(
+            b, desc_address, AGX_G17P_EMRT_ALIGNED_WIDTH_OFFSET -
+                                AGX_G17P_BUFFER_TEXTURE_PBE_OFFSET);
+         nir_def *index = libagx_emrt_ms_index_gen9(
+            b, sw_address, width_address, coord,
+            nir_u2u32(b, intr->src[2].ssa), blocksize_B);
+         if (return_index)
+            return nir_u2u64(b, index);
+
+         /* The linear Gen9 PBE stores address>>4 in the low 40 bits of
+          * native words 2..3; the remaining bits are its row pitch. */
+         nir_def *native23 = load_buffer_metadata(b, desc_address, 8, 64);
+         nir_def *base = nir_ishl_imm(
+            b, nir_iand_imm(b, native23, UINT64_C(0xffffffffff)), 4);
+         return nir_iadd(
+            b, base, nir_imul_imm(b, nir_u2u64(b, index),
+                                  util_format_get_blocksize(format)));
+      }
       return libagx_image_texel_address_gen9(
          b, desc_address, sw_address, coord, nir_u2u32(b, intr->src[2].ssa),
          blocksize_B, nir_imm_bool(b, dim == GLSL_SAMPLER_DIM_1D),
@@ -1224,7 +1246,8 @@ lower_images(nir_builder *b, nir_intrinsic_instr *intr, void *data)
          return true;
 
       case GLSL_SAMPLER_DIM_BUF:
-         lower_buffer_image(b, intr, options && options->buffer_metadata,
+         lower_buffer_image(b, intr,
+                            gen9 || (options && options->buffer_metadata),
                             options);
          return true;
 
