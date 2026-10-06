@@ -1807,6 +1807,7 @@ hk_dispatch_prepared_precomp_g17p(
       cs->weak_barrier_end = cs->current;
    }
    cs->stats.cmds++;
+   hk_prof_dispatch(cmd, cs, idx);
    return true;
 }
 
@@ -1998,8 +1999,8 @@ hk_g17p_append_prepared_graphics_direct(
                                           local_size);
 }
 
-__attribute__((hot)) bool
-hk_dispatch_prepared_g17p_native(
+static __attribute__((hot)) bool
+hk_dispatch_prepared_g17p_native_impl(
    struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
    struct hk_g17p_prepared_dispatch *prepared, struct agx_grid grid,
    struct agx_workgroup local_size)
@@ -2080,6 +2081,19 @@ hk_dispatch_prepared_g17p_native(
       cs->weak_barrier_end = cs->current;
    }
    cs->stats.cmds++;
+   return true;
+}
+
+__attribute__((hot)) bool
+hk_dispatch_prepared_g17p_native(
+   struct hk_cmd_buffer *cmd, struct hk_cs *cs, struct hk_shader *s,
+   struct hk_g17p_prepared_dispatch *prepared, struct agx_grid grid,
+   struct agx_workgroup local_size)
+{
+   if (!hk_dispatch_prepared_g17p_native_impl(cmd, cs, s, prepared, grid,
+                                              local_size))
+      return false;
+   hk_prof_dispatch(cmd, cs, HK_PROF_STAGE + s->info.stage);
    return true;
 }
 

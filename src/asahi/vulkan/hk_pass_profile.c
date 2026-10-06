@@ -270,6 +270,39 @@ hk_pass_profile_render(struct hk_device *dev, const struct hk_cs *cs,
 }
 
 void
+hk_pass_profile_note_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                              int code)
+{
+   if (!cs)
+      return;
+
+   /* Inside a meta operation, the function that began it; outside, the
+    * dispatches of draws and of the application itself. */
+   const char *site = cmd->prof_site ? cmd->prof_site : "cmd";
+   struct hk_prof_origin *o = cs->prof_origin;
+   const unsigned n = ARRAY_SIZE(cs->prof_origin);
+   unsigned i;
+   for (i = 0; i < n && o[i].count; ++i) {
+      if (o[i].site == site && o[i].code == code)
+         break;
+   }
+   if (i == n)
+      return;
+   if (!o[i].count)
+      o[i] = (struct hk_prof_origin){.site = site, .code = code};
+   if (o[i].count < UINT16_MAX)
+      o[i].count++;
+
+   /* Keep the most frequent first. */
+   while (i > 0 && o[i].count > o[i - 1].count) {
+      struct hk_prof_origin t = o[i - 1];
+      o[i - 1] = o[i];
+      o[i] = t;
+      --i;
+   }
+}
+
+void
 hk_pass_profile_compute(struct hk_device *dev, const struct hk_cs *cs,
                         struct drm_asahi_cmd_compute *c)
 {
@@ -277,11 +310,25 @@ hk_pass_profile_compute(struct hk_device *dev, const struct hk_cs *cs,
    if (!p || c->ts.start.handle || c->ts.end.handle)
       return;
 
-   char key[64];
+   /* origins: site/pc<libagx program> or site/<shader stage>, most frequent
+    * first. Program numbers index enum libagx_program (libagx_shaders.h). */
+   char key[256];
    const unsigned n = cs->stats.cmds;
-   snprintf(key, sizeof(key), "CDM dispatches=%s flushes=%s",
-            n <= 1 ? "<=1" : n <= 4 ? "2-4" : n <= 16 ? "5-16" : ">16",
-            cs->stats.flushes ? "y" : "n");
+   int len = snprintf(key, sizeof(key), "CDM dispatches=%s flushes=%s |",
+                      n <= 1 ? "<=1" : n <= 4 ? "2-4" : n <= 16 ? "5-16" : ">16",
+                      cs->stats.flushes ? "y" : "n");
+   for (unsigned i = 0; i < ARRAY_SIZE(cs->prof_origin) &&
+                        cs->prof_origin[i].count && len < (int)sizeof(key); ++i) {
+      const struct hk_prof_origin *o = &cs->prof_origin[i];
+      if (o->code >= HK_PROF_STAGE)
+         len += snprintf(key + len, sizeof(key) - len, " %s/%s", o->site,
+                         _mesa_shader_stage_to_abbrev(o->code - HK_PROF_STAGE));
+      else if (o->code >= 0)
+         len += snprintf(key + len, sizeof(key) - len, " %s/pc%d", o->site,
+                         o->code);
+      else
+         len += snprintf(key + len, sizeof(key) - len, " %s/?", o->site);
+   }
 
    simple_mtx_lock(&p->lock);
    int i = alloc_slot(p, key, n);

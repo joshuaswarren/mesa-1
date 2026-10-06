@@ -97,11 +97,14 @@ hk_device_finish_meta(struct hk_device *dev)
 }
 
 void
-hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
-              VkPipelineBindPoint bind_point)
+hk_meta_begin_site(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+                   VkPipelineBindPoint bind_point, const char *site)
 {
    struct hk_descriptor_state *desc = hk_get_descriptors_state(cmd, bind_point);
    save->in_meta = cmd->in_meta;
+   save->prof_site = cmd->prof_site;
+   if (!cmd->in_meta)
+      cmd->prof_site = site;
 
    if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS) {
       save->dynamic = cmd->vk.dynamic_graphics_state;
@@ -222,6 +225,7 @@ hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
 
    memcpy(desc->root.push, save->push, sizeof(save->push));
    cmd->in_meta = save->in_meta;
+   cmd->prof_site = save->prof_site;
 }
 
 void

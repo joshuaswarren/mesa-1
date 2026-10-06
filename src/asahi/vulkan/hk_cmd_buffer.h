@@ -1029,6 +1029,14 @@ struct hk_cs {
       uint32_t calls, cmds, flushes, merged;
    } stats;
 
+   /* HK_PASS_PROFILE: where this compute command's dispatches came from,
+    * the most frequent first (hk_pass_profile_note_dispatch). */
+   struct hk_prof_origin {
+      const char *site;
+      int16_t code;
+      uint16_t count;
+   } prof_origin[4];
+
    /* Timestamp writes: the start of the command (compute start, render
     * vertex start) and its end (compute end, render fragment end). The
     * kernel writes both from the firmware's native pass record.
@@ -1197,6 +1205,22 @@ hk_cs_merge_cdm(struct hk_cs *a, const struct hk_cs *b)
    a->stats.cmds += b->stats.cmds;
    a->stats.flushes += b->stats.flushes;
    a->stats.merged++;
+
+   for (unsigned i = 0; i < ARRAY_SIZE(b->prof_origin) &&
+                        b->prof_origin[i].count; ++i) {
+      const struct hk_prof_origin *o = &b->prof_origin[i];
+      for (unsigned j = 0; j < ARRAY_SIZE(a->prof_origin); ++j) {
+         struct hk_prof_origin *t = &a->prof_origin[j];
+         if (!t->count) {
+            *t = *o;
+            break;
+         }
+         if (t->site == o->site && t->code == o->code) {
+            t->count += o->count;
+            break;
+         }
+      }
+   }
 }
 
 static inline uint64_t
@@ -1303,6 +1327,9 @@ struct hk_cmd_buffer {
     * behaviour.
     */
    bool in_meta;
+
+   /* HK_PASS_PROFILE: the function that began the current meta operation. */
+   const char *prof_site;
 
    /* CmdClearAttachments is the sole vk_meta operation affected by
     * conditional rendering. */
@@ -2072,6 +2099,7 @@ struct hk_meta_save {
    struct hk_descriptor_set *desc0;
    /* Nested meta must retain the outer query/conditional-rendering scope. */
    bool in_meta;
+   const char *prof_site;
    bool has_push_desc0;
    bool push_active0;
    enum agx_visibility_mode occlusion;
@@ -2080,10 +2108,24 @@ struct hk_meta_save {
    uint8_t push[HK_MAX_PUSH_SIZE];
 };
 
-void hk_meta_begin(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
-                   VkPipelineBindPoint bind_point);
+void hk_meta_begin_site(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
+                        VkPipelineBindPoint bind_point, const char *site);
+#define hk_meta_begin(cmd, save, bind_point)                                   \
+   hk_meta_begin_site(cmd, save, bind_point, __func__)
 void hk_meta_end(struct hk_cmd_buffer *cmd, struct hk_meta_save *save,
                  VkPipelineBindPoint bind_point);
+
+/* HK_PASS_PROFILE: note one dispatch appended to `cs`. `code` is the libagx
+ * program for precompiled kernels, HK_PROF_STAGE + the stage for compiled
+ * shaders, or -1. */
+#define HK_PROF_STAGE 1000
+void hk_pass_profile_note_dispatch(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
+                                   int code);
+#define hk_prof_dispatch(cmd, cs, code)                                        \
+   do {                                                                        \
+      if (unlikely(hk_cmd_buffer_device(cmd)->pass_profile))                   \
+         hk_pass_profile_note_dispatch(cmd, cs, code);                         \
+   } while (0)
 
 void hk_cmd_dispatch_rays(struct hk_cmd_buffer *cmd,
                           struct hk_api_shader *shader, uint64_t record_addr,
@@ -2106,6 +2148,7 @@ hk_dispatch_with_local_size(struct hk_cmd_buffer *cmd, struct hk_cs *cs,
        AGX_CS_GENERATION_HAL200) {
       hk_reserve_scratch(cmd, cs, s);
       hk_dispatch_g17p_native(cmd, cs, s, grid, local_size);
+      hk_prof_dispatch(cmd, cs, HK_PROF_STAGE + s->info.stage);
       return;
    }
 
