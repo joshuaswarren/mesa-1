@@ -62,10 +62,40 @@ div_rn(nir_builder *b, nir_def *a, nir_def *d)
    return nir_bcsel(b, invalid, nir_imm_int(b, 0x7fc00000), out);
 }
 
+/*
+ * 1/x, bit for bit div_rn(1, x). For x in [2^-126, 2^126) the refinement on
+ * x itself is the normalized one scaled by a power of two, which
+ * tests/div_window.py checks over every input. The other exponents have fixed
+ * results: zero and denormals give +-inf, exactly 2^126 gives +-2^-126, the
+ * rest of [2^126, inf] gives +-0 and NaN gives the canonical NaN.
+ */
 static nir_def *
 rcp_rn(nir_builder *b, nir_def *x)
 {
-   return div_rn(b, nir_imm_float(b, 1.0), x);
+   nir_def *u = nir_frcp(b, x);
+   nir_def *q = nir_ffma(b, nir_ffma(b, nir_fneg(b, x), u,
+                                     nir_imm_float(b, 1.0)), u, u);
+
+   nir_def *ex = nir_ubfe_imm(b, x, 23, 8);
+   nir_def *mag = nir_iand_imm(b, x, 0x7fffffff);
+   nir_def *special =
+      nir_bcsel(b, nir_ieq_imm(b, mag, 0x7e800000), nir_imm_int(b, 0x00800000),
+                nir_imm_int(b, 0));
+   special = nir_bcsel(b, nir_ieq_imm(b, ex, 0), nir_imm_int(b, 0x7f800000),
+                       special);
+   special = nir_ior(b, special, nir_iand_imm(b, x, 0x80000000));
+   special = nir_bcsel(b, nir_ugt_imm(b, mag, 0x7f800000),
+                       nir_imm_int(b, 0x7fc00000), special);
+
+   nir_def *inside = nir_ult(b, nir_iadd_imm(b, ex, -1), nir_imm_int(b, 252));
+   return nir_bcsel(b, inside, q, special);
+}
+
+static bool
+is_one(const nir_alu_instr *alu, unsigned i)
+{
+   nir_scalar s = nir_scalar_chase_alu_src(nir_get_scalar(&alu->def, 0), i);
+   return nir_scalar_is_const(s) && nir_scalar_as_uint(s) == 0x3f800000;
 }
 
 static bool
@@ -92,7 +122,10 @@ lower_fdiv(nir_builder *b, nir_alu_instr *alu, void *data)
       nir_def *a = nir_ssa_for_alu_src(b, alu, 0);
       nir_def *d = nir_ssa_for_alu_src(b, alu, 1);
 
-      if (alu->def.bit_size == 32)
+      if (alu->def.bit_size == 32 && alu->def.num_components == 1 &&
+          is_one(alu, 0))
+         res = rcp_rn(b, d);
+      else if (alu->def.bit_size == 32)
          res = div_rn(b, a, d);
       else
          res = nir_fmul(b, a, nir_frcp(b, d));
