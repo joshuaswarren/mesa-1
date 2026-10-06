@@ -779,7 +779,7 @@ executable(
 )
 d3d12agx_g17p_txf_lower_tests = executable(
   'd3d12agx_g17p_txf_lower_tests',
-  files('d12_nir_g17p_txf.c', 'tests/d12_nir_g17p_txf_tests.c'),
+  files('d12_nir_g17p_txf.c', 'd12_debug.c', 'tests/d12_nir_g17p_txf_tests.c'),
   include_directories : [inc_include, inc_src, inc_asahi],
   dependencies : [idep_nir, idep_mesautil, idep_agx_pack, idep_libagx],
   link_with : [libasahi_compiler, libasahi_lib, libasahi_layout],

@@ -198,7 +198,8 @@ d12_shader_cache_init(struct d12_device *device)
  * The build id in the cache name already separates layouts; the sizes are
  * a cheap guard against a truncated or foreign item. */
 #define D12_DISK_STAGE_MAGIC   0x53323144u /* "D12S" */
-#define D12_DISK_STAGE_VERSION 1u
+/* 2: d12_stage_outputs gained the G17P fragment-sample binding. */
+#define D12_DISK_STAGE_VERSION 2u
 
 struct d12_disk_stage_header {
    uint32_t magic;
@@ -401,6 +402,8 @@ d12_stage_cache_key_init(struct d12_stage_cache_key *key,
                       sizeof(map->resource_count));
          XXH64_update(&state, &map->sampler_count,
                       sizeof(map->sampler_count));
+         XXH64_update(&state, &map->plain_static_samplers,
+                      sizeof(map->plain_static_samplers));
          XXH64_update(&state, &map->overflow, sizeof(map->overflow));
          XXH64_update(&state, &map->visibility_filter,
                       sizeof(map->visibility_filter));

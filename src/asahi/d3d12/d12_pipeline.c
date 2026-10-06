@@ -577,6 +577,26 @@ d12_root_signature_create(struct d12_device *device, const void *blob,
             return E_INVALIDARG;
          }
          d12_pack_static_sampler(device, &rs->static_samplers[i], s);
+
+         /* G17P has no USC sampler words and no shader-side sampler state:
+          * its bounded native fragment sample publishes the packed HAL200
+          * word itself. Record which static samplers that word describes
+          * completely, so the compile can leave their side-table emulation
+          * out. The HAL200 word carries the LOD bias and every static border
+          * colour natively; only MINIMUM/MAXIMUM reduction still needs the
+          * shader. */
+         const unsigned slot = d12_binding_map_find_root_range(
+            &rs->map, d12_static_sampler_root_range(&rs->layout, i),
+            s->ShaderRegister);
+         if (device->dev.chip == AGX_CHIP_G17P && slot < 16 &&
+             agx_chip_sampler_generation(device->dev.chip) ==
+                AGX_SAMPLER_GENERATION_GEN4_HAL200 &&
+             d12_sampler_reduction_for_filter((uint32_t)s->Filter)
+                   .reduction == D12_SAMPLER_REDUCE_NONE &&
+             !(rs->static_samplers[i].sampler_reserved &
+               (D12_CUSTOM_BORDER_ENABLE | D12_SAMPLER_REDUCTION_MIN |
+                D12_SAMPLER_REDUCTION_MAX)))
+            rs->map.plain_static_samplers |= BITFIELD_BIT(slot);
       }
    }
 
@@ -955,15 +975,40 @@ d12_sampler_sideband_entry(nir_builder *b, nir_tex_instr *tex, bool *bindless,
    return true;
 }
 
+/* Shared context of the sampler side-table lowerings below. */
+struct d12_sampler_lowering {
+   const struct d12_native_descriptor_layout *native_layout;
+   /* Logical API sampler slots whose native word is complete (see
+    * d12_binding_map::plain_static_samplers); a plain tex/txb through one of
+    * them keeps its hardware sample and reads no side table. */
+   uint16_t plain_static_samplers;
+};
+
+static bool
+d12_tex_uses_plain_static_sampler(const nir_tex_instr *tex,
+                                  const struct d12_sampler_lowering *ctx)
+{
+   if (!ctx || !ctx->plain_static_samplers ||
+       (tex->op != nir_texop_tex && tex->op != nir_texop_txb) ||
+       nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0 ||
+       nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset) >= 0 ||
+       tex->sampler_index >= 16)
+      return false;
+   return ctx->plain_static_samplers & BITFIELD_BIT(tex->sampler_index);
+}
+
 static bool
 d12_lower_custom_point_border(nir_builder *b, nir_tex_instr *tex,
                               void *data)
 {
-   const struct d12_native_descriptor_layout *native_layout = data;
+   const struct d12_sampler_lowering *ctx = data;
+   const struct d12_native_descriptor_layout *native_layout =
+      ctx->native_layout;
 
    if (!nir_tex_instr_need_sampler(tex) || tex->is_shadow ||
        nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0 ||
-       tex->op == nir_texop_tg4)
+       tex->op == nir_texop_tg4 ||
+       d12_tex_uses_plain_static_sampler(tex, ctx))
       return false;
 
    unsigned spatial;
@@ -1038,11 +1083,11 @@ d12_lower_custom_point_border(nir_builder *b, nir_tex_instr *tex,
 }
 
 static bool
-d12_nir_lower_custom_point_borders(
-   nir_shader *nir, const struct d12_native_descriptor_layout *native_layout)
+d12_nir_lower_custom_point_borders(nir_shader *nir,
+                                   const struct d12_sampler_lowering *ctx)
 {
    return nir_shader_tex_pass(nir, d12_lower_custom_point_border,
-                              nir_metadata_none, (void *)native_layout);
+                              nir_metadata_none, (void *)ctx);
 }
 
 /* AGX2 and G15's Gen4 sampler keep LOD bias outside the packed word. D3D12
@@ -1051,12 +1096,12 @@ d12_nir_lower_custom_point_borders(
  * colours before lowering texture ops. HAL200/Gen5 pack the bias natively and
  * publish zero in this side-table field, making the shared lowering a no-op. */
 static bool
-d12_lower_sampler_lod_bias(nir_builder *b, nir_tex_instr *tex,
-                           UNUSED void *data)
+d12_lower_sampler_lod_bias(nir_builder *b, nir_tex_instr *tex, void *data)
 {
    if (!nir_tex_instr_need_sampler(tex) ||
        (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
-        tex->op != nir_texop_txl && tex->op != nir_texop_txd))
+        tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
+       d12_tex_uses_plain_static_sampler(tex, data))
       return false;
 
    b->cursor = nir_before_instr(&tex->instr);
@@ -1131,10 +1176,11 @@ d12_lower_sampler_lod_bias(nir_builder *b, nir_tex_instr *tex,
 }
 
 static bool
-d12_nir_lower_sampler_lod_bias(nir_shader *nir)
+d12_nir_lower_sampler_lod_bias(nir_shader *nir,
+                               const struct d12_sampler_lowering *ctx)
 {
    return nir_shader_tex_pass(nir, d12_lower_sampler_lod_bias,
-                              nir_metadata_none, NULL);
+                              nir_metadata_none, (void *)ctx);
 }
 
 /*
@@ -1232,13 +1278,13 @@ d12_reduction_gather(nir_builder *b, const nir_tex_instr *tex,
 }
 
 static bool
-d12_lower_sampler_reduction(nir_builder *b, nir_tex_instr *tex,
-                            UNUSED void *data)
+d12_lower_sampler_reduction(nir_builder *b, nir_tex_instr *tex, void *data)
 {
    if (!nir_tex_instr_need_sampler(tex) || nir_tex_instr_is_query(tex) ||
        tex->is_shadow || tex->op == nir_texop_tg4 ||
        tex->op == nir_texop_txf || tex->op == nir_texop_txf_ms ||
-       !d12_reduction_gatherable(tex))
+       !d12_reduction_gatherable(tex) ||
+       d12_tex_uses_plain_static_sampler(tex, data))
       return false;
 
    /* Reduction is defined over filterable, i.e. floating-point, texels. */
@@ -1316,10 +1362,11 @@ d12_lower_sampler_reduction(nir_builder *b, nir_tex_instr *tex,
 }
 
 static bool
-d12_nir_lower_sampler_reduction(nir_shader *nir)
+d12_nir_lower_sampler_reduction(nir_shader *nir,
+                                const struct d12_sampler_lowering *ctx)
 {
    return nir_shader_tex_pass(nir, d12_lower_sampler_reduction,
-                              nir_metadata_none, NULL);
+                              nir_metadata_none, (void *)ctx);
 }
 
 static bool
@@ -1446,9 +1493,12 @@ compile_compute_stage(struct d12_device *device, const void *dxil,
       return E_INVALIDARG;
    }
 
-   NIR_PASS(_, nir, d12_nir_lower_sampler_lod_bias);
-   NIR_PASS(_, nir, d12_nir_lower_custom_point_borders, native_layout);
-   NIR_PASS(_, nir, d12_nir_lower_sampler_reduction);
+   const struct d12_sampler_lowering sampler_lowering = {
+      .native_layout = native_layout,
+   };
+   NIR_PASS(_, nir, d12_nir_lower_sampler_lod_bias, &sampler_lowering);
+   NIR_PASS(_, nir, d12_nir_lower_custom_point_borders, &sampler_lowering);
+   NIR_PASS(_, nir, d12_nir_lower_sampler_reduction, &sampler_lowering);
    NIR_PASS(_, nir, d12_nir_lower_bindless_sampler_map);
 
    unsigned runtime_samplers = d12_nir_sampler_state_count(nir, map);
@@ -2632,9 +2682,17 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
                &o->flat_transport);
    }
 
-   NIR_PASS(_, nir, d12_nir_lower_sampler_lod_bias);
-   NIR_PASS(_, nir, d12_nir_lower_custom_point_borders, &native_layout);
-   NIR_PASS(_, nir, d12_nir_lower_sampler_reduction);
+   /* Only the native G17P fragment sample consumes the packed sampler word
+    * directly; every other stage keeps the side-table emulation. */
+   const struct d12_sampler_lowering sampler_lowering = {
+      .native_layout = &native_layout,
+      .plain_static_samplers =
+         (device->dev.chip == AGX_CHIP_G17P && map &&
+          stage == MESA_SHADER_FRAGMENT) ? map->plain_static_samplers : 0,
+   };
+   NIR_PASS(_, nir, d12_nir_lower_sampler_lod_bias, &sampler_lowering);
+   NIR_PASS(_, nir, d12_nir_lower_custom_point_borders, &sampler_lowering);
+   NIR_PASS(_, nir, d12_nir_lower_sampler_reduction, &sampler_lowering);
    NIR_PASS(_, nir, d12_nir_lower_bindless_sampler_map);
 
    unsigned runtime_samplers = d12_nir_sampler_state_count(nir, map);
@@ -2730,6 +2788,25 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
       NIR_PASS(_, nir, d12_dxil_lower_root_mask, api_sample_mask);
       NIR_PASS(_, nir, agx_nir_lower_multisampled_image_store);
       NIR_PASS(_, nir, agx_nir_lower_texture);
+
+      /* G17P has no USC texture/sampler words: a fragment sample goes
+       * through the native two-pointer ABI or not at all. Rewrite the one
+       * admitted shape here, after agx_nir_lower_texture assigned the
+       * sampler handle; the draw publishes the pointers. Anything else
+       * keeps the ordinary bindless form and is refused at the draw. */
+      if (device->dev.chip == AGX_CHIP_G17P) {
+         /* The handle offset (slot * stride) and the +1 sampler index are
+          * still ALU chains here; the pass needs them as constants. */
+         NIR_PASS(_, nir, nir_opt_constant_folding);
+         NIR_PASS(_, nir, nir_opt_dce);
+         struct d12_nir_g17p_fragment_sample binding;
+         if (d12_nir_lower_g17p_fragment_sample(nir, descriptor_generation,
+                                                &binding)) {
+            o->g17p_fragment_sample = true;
+            o->g17p_sample_slot = binding.sampler_slot;
+            o->g17p_texture_offset_B = binding.texture_offset_B;
+         }
+      }
    } else {
       /* Real vertex attributes arrive through the prolog ABI: the main
        * shader reads registers the prolog exported, so load_input must
@@ -2825,8 +2902,12 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
    if (!compiled)
       mesa_loge("graphics shader compile refused: %s", agx_last_compile_refusal());
    out->info.uses_sampler_heap |= d12_binding_map_uses_sampler_heap(map);
+   /* The native two-pointer sample consumes no USC sampler state: the
+    * sampler is a pointer the Ioto program loads, not a state-file entry. */
    out->info.sampler_state_count =
-      MAX2(out->info.sampler_state_count, runtime_samplers);
+      o->g17p_fragment_sample
+         ? 0
+         : MAX2(out->info.sampler_state_count, runtime_samplers);
    d12_report_scratch("shader", &out->info);
 
    if (d12_debug()->dump_shaders && out->binary) {
@@ -5019,6 +5100,20 @@ d12_pipeline_state_create_graphics(
             : &default_rt_blend;
       rt_blends[i] = rt_blend;
 
+      if (rt_blend->BlendEnable) {
+         const D3D12_BLEND factors[4] = {
+            rt_blend->SrcBlend, rt_blend->DestBlend,
+            rt_blend->SrcBlendAlpha, rt_blend->DestBlendAlpha,
+         };
+         for (unsigned f = 0; f < 4; f++) {
+            if (factors[f] == D3D12_BLEND_BLEND_FACTOR ||
+                factors[f] == D3D12_BLEND_INV_BLEND_FACTOR ||
+                factors[f] == D3D12_BLEND_ALPHA_FACTOR ||
+                factors[f] == D3D12_BLEND_INV_ALPHA_FACTOR)
+               pso->blend_constants_used = true;
+         }
+      }
+
       if (rt_blend->BlendEnable && rt_blend->LogicOpEnable) {
          free(pso);
          return E_INVALIDARG;
@@ -5196,6 +5291,9 @@ d12_pipeline_state_create_graphics(
    const struct d12_flat_transport flat_transport =
       fs_entry->out.flat_transport;
    pso->fs.g17p_root_only = fs_entry->out.root_only;
+   pso->fs.g17p_sample.valid = fs_entry->out.g17p_fragment_sample;
+   pso->fs.g17p_sample.sampler_slot = fs_entry->out.g17p_sample_slot;
+   pso->fs.g17p_sample.texture_offset_B = fs_entry->out.g17p_texture_offset_B;
    pso->fs.g17p_writes_memory = fs_entry->out.writes_memory;
 
    for (unsigned i = 0; i < nr_rt; i++) {

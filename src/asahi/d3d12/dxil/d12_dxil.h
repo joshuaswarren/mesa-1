@@ -1041,6 +1041,13 @@ struct d12_binding_map {
    /* Set when a binding could not be assigned a dense slot.  The map is then
     * incomplete and must not be used to compile or bind a pipeline. */
    bool overflow;
+   /* Logical sampler slots bound by a root-signature static sampler whose
+    * properties the device's native sampler word carries completely (no
+    * MINIMUM/MAXIMUM reduction, native border colour, native LOD bias), so
+    * a shader using only that slot needs none of the side-table emulation.
+    * Set by the device at root-signature creation; part of the stage cache
+    * key through the map hash. */
+   uint16_t plain_static_samplers;
    /* UINT32_MAX for bind-time/root-range lookup, otherwise the stage whose
     * shader is being translated. */
    uint32_t visibility_filter;

@@ -7620,12 +7620,14 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
                   bool fragment, const struct agx_tilebuffer_layout *tib,
                   uint64_t root_gpu, uint64_t draw_gpu, uint64_t blend_gpu,
                   const struct d12_dispatch_uniforms *poly,
-                  uint64_t heap_gpu)
+                  uint64_t heap_gpu, uint64_t textures_gpu,
+                  bool blend_constants_used)
 {
    const char *failure = "stage-metadata";
    struct agx_device *dev = &list->device->dev;
    const struct agx_shader_info *info = &st->info;
    const struct agx_linked_shader *linked = &st->linked;
+   const bool native_sample = fragment && st->g17p_sample.valid;
    if (dev->chip != AGX_CHIP_G17P || !linked->bo || !linked->bo->va ||
        !linked->entry_offset || !linked->size || linked->size > UINT32_MAX ||
        linked->bo->va->addr > UINT64_MAX - linked->entry_offset ||
@@ -7633,7 +7635,8 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        linked->size > linked->bo->size - linked->entry_offset ||
        !linked->nr_gprs || !linked->g17p_compiler_d_valid ||
        info->stage != (fragment ? MESA_SHADER_FRAGMENT : MESA_SHADER_VERTEX) ||
-       !st->g17p_root_only || info->scratch_size || linked->scratch_size ||
+       !(st->g17p_root_only || native_sample) || info->scratch_size ||
+       linked->scratch_size ||
        info->has_preamble || info->nr_preamble_gprs ||
        info->preamble_scratch_size || info->rodata.size_16 ||
        info->agx3_uniform_dma_valid || info->texture_state_count ||
@@ -7644,10 +7647,75 @@ d12_gfx_stage_g17p(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
    failure = "uniform-ownership";
    struct agx3_ioto_uniform_range ranges[5];
    size_t count = 0;
-   if (fragment && blend_gpu)
+   if (native_sample) {
+      /* The bounded texture0/sampler0 fragment ABI (Honeykrisp's combined
+       * sampler): uniform halves 0..3 point at the one 32-byte texture
+       * descriptor, 4..7 at the one 32-byte HAL200 sampler word, and the
+       * shader samples both at immediate index zero. The texture lives in
+       * this list's root texture table; the sampler is the root signature's
+       * static (or the bound dynamic) descriptor for the API slot, uploaded
+       * here so the pointer names command-owned, immutable memory. The
+       * blend constants' home at halves 4..11 is under the pointers, so a
+       * pipeline that reads them cannot take this form. */
+      if (blend_constants_used || !textures_gpu ||
+          !d12_list_stream_contains(list, textures_gpu, sizeof(uint64_t)))
+         goto fail;
+      const uint8_t *stream_cpu = d12_list_stream_map(list);
+      if (!stream_cpu)
+         goto fail;
+      uint64_t table;
+      memcpy(&table, stream_cpu + (textures_gpu - list->stream_bo->va->addr),
+             sizeof(table));
+      const uint64_t texture_va = table + st->g17p_sample.texture_offset_B;
+      if (!table || (table & 31) || texture_va < table ||
+          !d12_list_stream_contains(list, texture_va, 32))
+         goto fail;
+
+      bool visible_slot;
+      const struct d12_descriptor *sampler = d12_list_bound_sampler(
+         list, false, D3D12_SHADER_VISIBILITY_PIXEL,
+         st->g17p_sample.sampler_slot, &visible_slot);
+      /* The shader was compiled without the side-table emulation, so the
+       * descriptor's word must be complete: no custom border colour and no
+       * MINIMUM/MAXIMUM reduction. The point-mip flag only feeds the
+       * explicit-LOD tie-break, which this form does not take. */
+      if (!sampler ||
+          (sampler->sampler_reserved &
+           (D12_CUSTOM_BORDER_ENABLE | D12_SAMPLER_REDUCTION_MIN |
+            D12_SAMPLER_REDUCTION_MAX))) {
+         mesa_loge("native fragment sample: sampler s%u has no plain static "
+                   "or dynamic descriptor for the pixel stage",
+                   st->g17p_sample.sampler_slot);
+         goto fail;
+      }
+      /* One native sampler-heap element: the 8-byte HAL200 word at the
+       * start of a 32-byte, 32-aligned slot, the rest zero, exactly as the
+       * device's texel-fetch sampler is laid out in rodata. */
+      uint8_t element[32] = {0};
+      STATIC_ASSERT(sizeof(sampler->sampler) <= sizeof(element));
+      memcpy(element, &sampler->sampler, sizeof(sampler->sampler));
+      const uint64_t sampler_va =
+         d12_list_upload(list, element, sizeof(element), 32);
+      if (!sampler_va)
+         goto fail;
+      const uint64_t pointers[2] = {texture_va, sampler_va};
+      const uint64_t pointers_va =
+         d12_list_upload(list, pointers, sizeof(pointers), 8);
+      if (!pointers_va)
+         goto fail;
+      ranges[count++] = (struct agx3_ioto_uniform_range){
+         .start_halfs = 0, .size_halfs = 8, .address = pointers_va,
+      };
+      if (agx_bo_sync_for_device(list->stream_bo,
+                                 texture_va - list->stream_bo->va->addr, 32) ||
+          agx_bo_sync_for_device(list->stream_bo,
+                                 sampler_va - list->stream_bo->va->addr, 32))
+         goto fail;
+   } else if (fragment && blend_gpu) {
       ranges[count++] = (struct agx3_ioto_uniform_range){
          .start_halfs = 4, .size_halfs = 8, .address = blend_gpu,
       };
+   }
    ranges[count++] = (struct agx3_ioto_uniform_range){
       .start_halfs = fragment ? D12_UNIFORM_FRAGMENT_ROOT : D12_UNIFORM_ROOT,
       .size_halfs = D12_UNIFORM_ROOT_REGS, .address = root_gpu,
@@ -7772,7 +7840,8 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
                   uint64_t heap_pbes_gpu, uint64_t heap_samplers_gpu,
                   uint64_t draw_gpu, uint64_t blend_gpu,
                   D3D12_SHADER_VISIBILITY visibility,
-                  const struct d12_dispatch_uniforms *poly)
+                  const struct d12_dispatch_uniforms *poly,
+                  bool blend_constants_used)
 {
    struct d12_device *device = list->device;
 
@@ -7784,7 +7853,7 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
        * bound, its parallel native texture/PBE/sampler arrays; a root-only
        * stage cannot read any of those, so their presence is not a
        * refusal. */
-      if (!st->g17p_root_only) {
+      if (!st->g17p_root_only && !(fragment && st->g17p_sample.valid)) {
          mesa_loge("native graphics texture stage producer unavailable");
          list->state = D12_LIST_ERROR;
          return 0;
@@ -7807,7 +7876,8 @@ d12_gfx_stage_usc(struct d12_cmd_list *list, const struct d12_gfx_stage *st,
          return 0;
       }
       return d12_gfx_stage_g17p(list, st, fragment, tib, root_gpu, draw_gpu,
-                                blend_gpu, poly, heap_gpu);
+                                blend_gpu, poly, heap_gpu, textures_gpu,
+                                blend_constants_used);
    }
 
    uint32_t usc;
@@ -10368,7 +10438,8 @@ d12_emit_g17p_raster(struct d12_cmd_list *list, struct d12_segment *seg,
    if (!d12_g17p_baseline_graphics_enabled(&list->device->dev) ||
        !seg->agx3_active_context_selector_valid || !vs->g17p_root_only ||
        (!mesh_draw && !d12_g17p_smooth_varyings_supported(pso)) ||
-       !pso->fs.g17p_root_only || vs->g17p_writes_memory ||
+       !(pso->fs.g17p_root_only || pso->fs.g17p_sample.valid) ||
+       vs->g17p_writes_memory ||
        (!mesh_draw && pso->fs.g17p_writes_memory) || pso->has_gs ||
        pso->has_tess || (!mesh_draw && pso->has_mesh) ||
        (mesh_draw && (!pso->has_mesh || pso->nr_vb_attribs ||
@@ -11397,11 +11468,13 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          draw_gpu, 0, vertex_visibility,
          (pso->has_gs || pso->has_tess || pso->has_mesh || pso->nr_vb_attribs)
             ? &poly_u
-            : NULL);
+            : NULL,
+         false);
       fs_usc = d12_gfx_stage_usc(
          list, &pso->fs, true, &seg->tib, root_gpu, textures_gpu, pbes_gpu,
          heap_gpu, heap_textures_gpu, heap_pbes_gpu, heap_samplers_gpu,
-         draw_gpu, blend_gpu, D3D12_SHADER_VISIBILITY_PIXEL, NULL);
+         draw_gpu, blend_gpu, D3D12_SHADER_VISIBILITY_PIXEL, NULL,
+         pso->blend_constants_used);
       if (!vs_usc || !fs_usc)
          return;
 

@@ -309,6 +309,13 @@ struct d12_stage_outputs {
    bool root_only;
    bool writes_memory;
    bool native_txf; /* compute, G17P */
+   /* Fragment, G17P: the one sample was rewritten to the bounded native
+    * texture0/sampler0 ABI (d12_nir_lower_g17p_fragment_sample). The draw
+    * publishes the texture descriptor and the static sampler as the two
+    * pointers in uniform halves 0..7. */
+   bool g17p_fragment_sample;
+   uint8_t g17p_sample_slot;           /* API sampler s<N> */
+   uint32_t g17p_texture_offset_B;     /* byte offset in the root texture table */
    uint8_t texture_shapes[D12_MAX_RESOURCE_BINDINGS];
 };
 
@@ -1297,6 +1304,15 @@ struct d12_gfx_stage {
    /* Frontend scan before texture lowering: only root/buffer resources. */
    bool g17p_root_only;
    bool g17p_writes_memory;
+   /* Fragment stage compiled to the bounded native texture0/sampler0 ABI:
+    * one 2D sample through the root texture table and a static sampler,
+    * both published as pointers in uniform halves 0..7 (see
+    * d12_stage_outputs). Admitted by the G17P producer like root-only. */
+   struct {
+      bool valid;
+      uint8_t sampler_slot;
+      uint32_t texture_offset_B;
+   } g17p_sample;
    struct agx_shader_info info;
    struct agx_linked_shader linked;
 
@@ -1403,6 +1419,10 @@ struct d12_pipeline_state {
     * depth/stencil rasterization, but it has no colour attachments or stores.
     */
    bool has_pixel_shader;
+   /* Some enabled render target blends with a BLEND_FACTOR / ALPHA_FACTOR
+    * operand, so the fragment stage reads OMSetBlendFactor's constants from
+    * uniform halves 4..11. */
+   bool blend_constants_used;
    /* False only for a stream-output PSO whose RasterizedStream is explicitly
     * D3D12_SO_NO_RASTERIZED_STREAM. */
    bool rasterization_enabled;
