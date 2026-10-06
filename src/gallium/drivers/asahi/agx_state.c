@@ -4201,12 +4201,21 @@ agx_g17p_append_compute(struct agx_batch *batch,
       !(info->main_offset % 0x80) &&
       info->rodata.offset + (uint64_t)info->rodata.size_16 * 2 <=
          info->main_offset;
+   /* The thread-private frame SPECTPR declares: register spills, and the
+    * 16-byte word a device atomic returns its old value through. Declaring
+    * less than the code uses is not refused by anything; the dispatch just
+    * never completes. Same frame hk_cmd_dispatch.c declares. */
+   const uint32_t tps_size =
+      !info ? 0
+      : linked ? MAX2(linked->scratch_size, linked->agx3_spectpr_scratch_size)
+               : MAX2(info->scratch_size, info->agx3_spectpr_scratch_size);
    if (dev->chip != AGX_CHIP_G17P || !info || !binary ||
        (grid.mode != AGX_CDM_MODE_DIRECT && !indirect_local) ||
        (indirect_local &&
         (!grid.ptr || grid.ptr >= (UINT64_C(1) << 48) || (grid.ptr & 3))) ||
        !info->main_size || !info->nr_gprs ||
-       info->has_preamble || info->preamble_scratch_size || info->scratch_size ||
+       info->has_preamble || info->preamble_scratch_size ||
+       tps_size > AGX3_G17P_MAX_SPILL_B || (tps_size & 3) ||
        !info->agx3_staging_known ||
        (info->main_offset != 0 && !rodata_prefix &&
         info->main_offset != AGX3_CONTAINER_CONSTANT_PROGRAM_SIZE) ||
@@ -4215,8 +4224,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
        (range_count && !ranges) ||
        (!indirect_local && (!wg.x || !wg.y || !wg.z)) ||
        (linked && (!linked->bo || !linked->bo->va || !linked->size ||
-                   !linked->nr_gprs || !linked->g17p_compiler_d_valid ||
-                   linked->scratch_size))) {
+                   !linked->nr_gprs || !linked->g17p_compiler_d_valid))) {
       if (info) {
          mesa_loge("asahi: rejected G17P compute metadata: grid=%u "
                    "preamble=%u scratch=%u/%u main=%u+%u/%u "
@@ -4298,7 +4306,7 @@ agx_g17p_append_compute(struct agx_batch *batch,
       .uniform_ranges = ranges,
       .uniform_range_count = range_count,
       .shader_binary_size = shader_binary_size,
-      .scratch_size = info->scratch_size,
+      .scratch_size = tps_size,
       .nr_gprs = nr_gprs,
       .compiler_d_valid = true,
       .compiler_d = compiler_d,
@@ -4457,6 +4465,12 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
          .uniform_ranges = ranges,
          .uniform_range_count = range_count,
          .shader_binary_size = cs->info.main_size,
+         /* The kernel's thread-private spill frame, as hk declares it. The
+          * software tessellator's emitting pass spills (68 bytes for
+          * triangles); launched with no frame it never completes, which is
+          * how every tessellated draw with a level above one used to time
+          * out the compute queue. */
+         .scratch_size = cs->info.agx3_tps_size,
          .nr_gprs = cs->info.nr_gprs,
          .compiler_d_valid = cs->info.agx3_staging_known,
          .compiler_d = (uint32_t)cs->info.agx3_staging_halfs * 2,
