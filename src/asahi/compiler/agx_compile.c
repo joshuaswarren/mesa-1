@@ -3009,8 +3009,8 @@ set_speculate(nir_builder *b, nir_instr *instr, UNUSED void *_)
 }
 
 static void
-agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
-                 uint8_t *ts_count, uint8_t *ss_count)
+agx_optimize_nir(nir_shader *nir, bool soft_fault, bool fold_subformat_address,
+                 uint16_t *preamble_size, uint8_t *ts_count, uint8_t *ss_count)
 {
    /* This runs only once up front since other optimizations don't affect it */
    NIR_PASS(_, nir, nir_opt_shrink_stores, true);
@@ -3062,7 +3062,7 @@ agx_optimize_nir(nir_shader *nir, bool soft_fault, uint16_t *preamble_size,
     * want to vectorize first since nir_opt_load_store_vectorize doesn't know
     * how to handle our loads. Likewise for uniform atomic optimization.
     */
-   NIR_PASS(_, nir, agx_nir_lower_address);
+   NIR_PASS(_, nir, agx_nir_lower_address, fold_subformat_address);
 
    NIR_PASS(progress, nir, nir_opt_uniform_subgroup, &subgroups_options);
    if (progress) {
@@ -3890,7 +3890,8 @@ agx_compile_shader_nir(nir_shader *nir, struct agx_shader_key *key,
 
    info->push_count = key->reserved_preamble;
    agx_optimize_nir(
-      nir, key->dev.soft_fault, key->secondary ? NULL : &info->push_count,
+      nir, key->dev.soft_fault, key->dev.fold_subformat_address,
+      key->secondary ? NULL : &info->push_count,
       (key->secondary || !key->promote_textures) ? NULL
                                                  : &info->texture_state_count,
       (key->secondary || !key->promote_textures) ? NULL

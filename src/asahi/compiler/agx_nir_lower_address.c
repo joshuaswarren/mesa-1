@@ -61,12 +61,34 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
       nir_op op = nir_scalar_alu_op(base);
       if (op == nir_op_ulea_agx || op == nir_op_ilea_agx) {
          unsigned shift = nir_scalar_as_uint(nir_scalar_chase_alu_src(base, 2));
+         bool sign_extend = (op == nir_op_ilea_agx);
          if (shift >= format_shift && shift <= max_shift) {
             match = (struct match){
                .base = nir_scalar_chase_alu_src(base, 0),
                .offset = nir_scalar_chase_alu_src(base, 1),
                .shift = shift - format_shift,
-               .sign_extend = (op == nir_op_ilea_agx),
+               .sign_extend = sign_extend,
+            };
+         } else if (shift < format_shift && *(const bool *)data) {
+            /* A byte (or half-element) offset, as the cooperative matrix
+             * loads produce. The access is format-aligned and so is the base,
+             * so the offset is a multiple of the element size: index by the
+             * offset scaled down instead of materializing the 64-bit sum (a
+             * 64-bit add plus the moves that build its operands). Per device
+             * (agx_device_key::fold_subformat_address): measured +15 % on
+             * dense f16 GEMM on the single-cluster M1, -13..17 % on the M1
+             * Max, bit-identical on both.
+             */
+            nir_scalar off = nir_scalar_chase_alu_src(base, 1);
+            nir_def *index = nir_channel(b, off.def, off.comp);
+            unsigned down = format_shift - shift;
+            index = sign_extend ? nir_ishr_imm(b, index, down)
+                                : nir_ushr_imm(b, index, down);
+            match = (struct match){
+               .base = nir_scalar_chase_alu_src(base, 0),
+               .offset = nir_get_scalar(index, 0),
+               .shift = 0,
+               .sign_extend = sign_extend,
             };
          }
       } else if (op == nir_op_iadd) {
@@ -151,7 +173,7 @@ pass(struct nir_builder *b, nir_intrinsic_instr *intr, void *data)
 }
 
 bool
-agx_nir_lower_address(nir_shader *nir)
+agx_nir_lower_address(nir_shader *nir, bool fold_subformat_address)
 {
    bool progress = false;
 
@@ -169,7 +191,7 @@ agx_nir_lower_address(nir_shader *nir)
 
    /* Next, lower load/store using the lea's */
    NIR_PASS(progress, nir, nir_shader_intrinsics_pass, pass,
-            nir_metadata_control_flow, NULL);
+            nir_metadata_control_flow, &fold_subformat_address);
 
    /* Finally, lower any leftover lea instructions back to ALU to let
     * nir_opt_algebraic simplify them from here.
