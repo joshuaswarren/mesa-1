@@ -29,36 +29,43 @@ rcp_normal(nir_builder *b, nir_def *x)
                               nir_imm_float(b, 1.0)), u, u);
 }
 
-/* Normalize before refinement; exponent restoration must flush the exact
- * quotient before rounding, including values just below the normal boundary. */
+/*
+ * Normalize before refinement; exponent restoration must flush the exact
+ * quotient before rounding, including values just below the normal boundary.
+ * The exact quotient is below 2^-126 when e < -126, or e == -126 with the
+ * mantissa quotient below one. Restored bits at or above 0x7f800000 overflow;
+ * they also wrap there when e < -126, so zero takes precedence over inf.
+ */
 static nir_def *
 div_rn(nir_builder *b, nir_def *a, nir_def *d)
 {
-   nir_def *aa = nir_iand_imm(b, a, 0x7fffffff);
-   nir_def *dd = nir_iand_imm(b, d, 0x7fffffff);
-   nir_def *ea = nir_ushr_imm(b, aa, 23);
-   nir_def *ed = nir_ushr_imm(b, dd, 23);
-   nir_def *ma = nir_ior_imm(b, nir_iand_imm(b, aa, 0x7fffff), 0x3f800000);
-   nir_def *md = nir_ior_imm(b, nir_iand_imm(b, dd, 0x7fffff), 0x3f800000);
+   nir_def *ea = nir_ubfe_imm(b, a, 23, 8);
+   nir_def *ed = nir_ubfe_imm(b, d, 23, 8);
+   nir_def *ma = nir_ior_imm(b, nir_iand_imm(b, a, 0x7fffff), 0x3f800000);
+   nir_def *md = nir_ior_imm(b, nir_iand_imm(b, d, 0x7fffff), 0x3f800000);
    nir_def *y = nir_frcp(b, md);
    nir_def *q = nir_fmul(b, ma, y);
    nir_def *r = nir_ffma(b, nir_fneg(b, md), q, ma);
    q = nir_ffma(b, r, y, q);
    nir_def *e = nir_isub(b, ea, ed);
    nir_def *out = nir_iadd(b, q, nir_ishl_imm(b, e, 23));
-   nir_def *under = nir_ior(b, nir_ilt_imm(b, e, -126),
-      nir_iand(b, nir_ieq_imm(b, e, -126), nir_ult(b, ma, md)));
-   out = nir_bcsel(b, under, nir_imm_int(b, 0), out);
-   nir_def *over = nir_ige_imm(b, nir_iadd(b, e, nir_ushr_imm(b, q, 23)), 255);
-   out = nir_bcsel(b, over, nir_imm_int(b, 0x7f800000), out);
+
+   nir_def *under =
+      nir_ilt(b, e, nir_bcsel(b, nir_ult(b, ma, md), nir_imm_int(b, -125),
+                              nir_imm_int(b, -126)));
+   nir_def *over = nir_uge(b, out, nir_imm_int(b, 0x7f800000));
    nir_def *az = nir_ieq_imm(b, ea, 0), *dz = nir_ieq_imm(b, ed, 0);
    nir_def *ai = nir_ieq_imm(b, ea, 255), *di = nir_ieq_imm(b, ed, 255);
-   out = nir_bcsel(b, nir_ior(b, az, di), nir_imm_int(b, 0), out);
-   out = nir_bcsel(b, nir_ior(b, dz, ai), nir_imm_int(b, 0x7f800000), out);
+   nir_def *zero = nir_ior(b, nir_ior(b, az, di), under);
+   nir_def *inf = nir_ior(b, nir_ior(b, dz, ai), over);
+   out = nir_bcsel(b, zero, nir_imm_int(b, 0),
+                   nir_bcsel(b, inf, nir_imm_int(b, 0x7f800000), out));
    out = nir_ior(b, out, nir_iand_imm(b, nir_ixor(b, a, d), 0x80000000));
-   nir_def *invalid = nir_ior(b, nir_ugt_imm(b, aa, 0x7f800000),
-                                nir_ugt_imm(b, dd, 0x7f800000));
-   invalid = nir_ior(b, invalid, nir_ior(b, nir_iand(b, az, dz), nir_iand(b, ai, di)));
+
+   /* NaN operands, 0/0 and inf/inf */
+   nir_def *invalid =
+      nir_ior(b, nir_ior(b, nir_fisnan(b, a), nir_fisnan(b, d)),
+              nir_iand(b, nir_ieq(b, ea, ed), nir_ior(b, az, ai)));
    return nir_bcsel(b, invalid, nir_imm_int(b, 0x7fc00000), out);
 }
 
