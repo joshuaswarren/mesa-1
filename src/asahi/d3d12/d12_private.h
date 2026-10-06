@@ -307,6 +307,7 @@ struct d12_stage_outputs {
    uint8_t cull_distance_size;                     /* vertex */
    bool use_fs_epilog;                             /* fragment, resolved */
    bool root_only;
+   bool reads_root;
    bool writes_memory;
    bool native_txf; /* compute, G17P */
    /* Fragment, G17P: the one sample was rewritten to the bounded native
@@ -1303,6 +1304,7 @@ ID3DBlob *d12_blob_create(const void *data, size_t size);
 struct d12_gfx_stage {
    /* Frontend scan before texture lowering: only root/buffer resources. */
    bool g17p_root_only;
+   bool reads_root;
    bool g17p_writes_memory;
    /* Fragment stage compiled to the bounded native texture0/sampler0 ABI:
     * one 2D sample through the root texture table and a static sampler,
@@ -1772,6 +1774,7 @@ struct d12_read_tracker {
 };
 
 struct d12_fragment_state_cache_entry {
+   uint64_t generation;
    bool valid;
    const struct d12_pipeline_state *pso;
    uint32_t fs_usc, varyings;
@@ -2012,6 +2015,7 @@ struct d12_binding_upload_cache {
 #define D12_USC_CACHE_PROBES 8
 
 struct d12_gfx_upload_cache_entry {
+   uint64_t generation;
    bool valid;
    const struct d12_pipeline_state *pso;
    struct agx_tilebuffer_layout tib;
@@ -2264,7 +2268,9 @@ struct d12_cmd_list {
    uint8_t binding_cache_next[2];
    /* Round-robin victim selection for the bounded USC cache probes. */
    uint32_t usc_cache_tick;
-   struct d12_gfx_upload_cache_entry gfx_upload_cache[D12_GFX_UPLOAD_CACHE_SIZE];
+   uint64_t gfx_cache_generation;
+   struct d12_gfx_upload_cache_entry
+      gfx_upload_cache[2][D12_GFX_UPLOAD_CACHE_SIZE];
    /* The VS-to-FS coefficient link of the last pipeline whose words were
     * built: a function of the pipeline alone, kept while a root constant
     * or binding change rebuilds the stage words around it. */

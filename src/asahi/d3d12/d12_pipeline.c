@@ -2908,6 +2908,29 @@ compile_gfx_stage(struct d12_device *device, const struct d12_binding_map *map,
       .no_stop = stage == MESA_SHADER_FRAGMENT && split_fs,
    };
 
+   /* Root uploads only invalidate a stage that consumes the root pointer.
+    * Inspect lowered NIR, including driver-generated shader code, rather
+    * than assuming the root signature's visibility describes actual use. */
+   const unsigned root_base = stage == MESA_SHADER_FRAGMENT
+                                 ? D12_UNIFORM_FRAGMENT_ROOT
+                                 : D12_UNIFORM_ROOT;
+   nir_foreach_function_impl(impl, nir) {
+      nir_foreach_block(block, impl) {
+         nir_foreach_instr(instr, block) {
+            if (instr->type != nir_instr_type_intrinsic)
+               continue;
+            nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+            if (intr->intrinsic == nir_intrinsic_load_preamble) {
+               unsigned base = nir_intrinsic_base(intr);
+               unsigned end =
+                  base + intr->def.num_components * intr->def.bit_size / 16;
+               o->reads_root |=
+                  base < root_base + D12_UNIFORM_ROOT_REGS && end > root_base;
+            }
+         }
+      }
+   }
+
    memset(out, 0, sizeof(*out));
    const bool compiled = agx_compile_shader_nir(nir, &key, out);
    if (!compiled)
@@ -5232,6 +5255,7 @@ d12_pipeline_state_create_graphics(
    }
    pso->uvs = vs_entry->out.uvs;
    pso->vs.g17p_root_only = vs_entry->out.root_only;
+   pso->vs.reads_root = vs_entry->out.reads_root;
    pso->vs.g17p_writes_memory = vs_entry->out.writes_memory;
    const uint8_t cull_distance_size = vs_entry->out.cull_distance_size;
 
@@ -5305,6 +5329,7 @@ d12_pipeline_state_create_graphics(
    pso->fs.g17p_sample.valid = fs_entry->out.g17p_fragment_sample;
    pso->fs.g17p_sample.sampler_slot = fs_entry->out.g17p_sample_slot;
    pso->fs.g17p_sample.texture_offset_B = fs_entry->out.g17p_texture_offset_B;
+   pso->fs.reads_root = fs_entry->out.reads_root;
    pso->fs.g17p_writes_memory = fs_entry->out.writes_memory;
 
    for (unsigned i = 0; i < nr_rt; i++) {

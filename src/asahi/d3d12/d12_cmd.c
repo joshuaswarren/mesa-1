@@ -1069,11 +1069,14 @@ d12_list_begin_recording(struct d12_cmd_list *list)
          list->binding_upload_cache[t][w].valid = false;
       list->binding_cache_next[t] = 0;
    }
-   for (unsigned i = 0; i < D12_GFX_UPLOAD_CACHE_SIZE; i++)
-      list->gfx_upload_cache[i].valid = false;
+   /* These uploads belong to one recording. Invalidating by generation
+    * avoids touching hundreds of KiB of cache lines for a one-draw list. */
+   if (++list->gfx_cache_generation == 0) {
+      memset(list->gfx_upload_cache, 0, sizeof(list->gfx_upload_cache));
+      memset(list->fragment_state_cache, 0, sizeof(list->fragment_state_cache));
+      list->gfx_cache_generation = 1;
+   }
    list->varyings_link_pso = NULL;
-   for (unsigned i = 0; i < D12_FRAGMENT_STATE_CACHE_SIZE; i++)
-      list->fragment_state_cache[i].valid = false;
    list->direct_draw_params_valid = false;
    list->direct_draw_params_gpu = 0;
    list->blend_upload_valid = false;
@@ -10258,7 +10261,7 @@ d12_list_unroll_gs_restart(struct d12_cmd_list *list,
 
 static struct d12_gfx_upload_cache_entry *
 d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
-                            const struct d12_pipeline_state *pso,
+                            const struct d12_pipeline_state *pso, bool fragment,
                             const struct agx_tilebuffer_layout *tib,
                             uint64_t root, uint64_t textures, uint64_t pbes,
                             uint64_t heap, uint64_t heap_textures,
@@ -10276,11 +10279,13 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
 
    for (unsigned probe = 0; probe < D12_USC_CACHE_PROBES; probe++) {
       struct d12_gfx_upload_cache_entry *entry =
-         &list->gfx_upload_cache[(start + probe) &
-                                 (D12_GFX_UPLOAD_CACHE_SIZE - 1)];
+         &list->gfx_upload_cache[fragment][(start + probe) &
+                                           (D12_GFX_UPLOAD_CACHE_SIZE - 1)];
 
-      if (!entry->valid)
+      if (entry->generation != list->gfx_cache_generation || !entry->valid) {
+         entry->valid = false;
          return entry;
+      }
 
       if (entry->pso == pso && entry->root == root &&
           entry->textures == textures && entry->pbes == pbes &&
@@ -10294,9 +10299,9 @@ d12_gfx_upload_cache_lookup(struct d12_cmd_list *list,
 
    /* Evict within the window; the caller rebuilds into the returned slot. */
    struct d12_gfx_upload_cache_entry *victim =
-      &list->gfx_upload_cache[(start + (list->usc_cache_tick++ %
-                                        D12_USC_CACHE_PROBES)) &
-                              (D12_GFX_UPLOAD_CACHE_SIZE - 1)];
+      &list->gfx_upload_cache[fragment][(start + (list->usc_cache_tick++ %
+                                                  D12_USC_CACHE_PROBES)) &
+                                        (D12_GFX_UPLOAD_CACHE_SIZE - 1)];
    victim->valid = false;
    return victim;
 }
@@ -10329,8 +10334,10 @@ d12_fragment_state_cache_lookup(struct d12_cmd_list *list,
          &list->fragment_state_cache[(start + probe) &
                                      (D12_FRAGMENT_STATE_CACHE_SIZE - 1)];
 
-      if (!entry->valid)
+      if (entry->generation != list->gfx_cache_generation || !entry->valid) {
+         entry->valid = false;
          return entry;
+      }
 
       if (entry->pso == pso && entry->fs_usc == fs_usc &&
           entry->varyings == varyings && entry->topology == topology &&
@@ -11447,34 +11454,56 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
     * reason to rebuild both stages' words on every draw. */
    const bool cacheable_gfx_upload = vstage == &pso->vs && !pso->has_gs &&
                                      !pso->has_tess && !pso->has_mesh;
-   struct d12_gfx_upload_cache_entry *gfx_cache =
+   /* Keep vertex and fragment USC uploads independently. A pixel-only
+    * root change must not rebuild the vertex program on every draw. */
+   const bool agx2_upload = agx_chip_command_stream_generation(
+                               device->dev.chip) == AGX_CS_GENERATION_AGX2;
+   const uint64_t vs_root = agx2_upload && !vstage->reads_root &&
+                                  !vstage->info.sampler_state_count &&
+                                  !vstage->info.uses_txf
+                               ? 0
+                               : root_gpu;
+   const uint64_t fs_root = agx2_upload && !pso->fs.reads_root &&
+                                  !pso->fs.info.sampler_state_count &&
+                                  !pso->fs.info.uses_txf
+                               ? 0
+                               : root_gpu;
+   struct d12_gfx_upload_cache_entry *vs_cache =
       cacheable_gfx_upload
-         ? d12_gfx_upload_cache_lookup(list, pso, &seg->tib, root_gpu,
-                                       textures_gpu, pbes_gpu, heap_gpu,
-                                       heap_textures_gpu, heap_pbes_gpu,
-                                       heap_samplers_gpu, draw_gpu, blend_gpu,
-                                       pso->nr_vb_attribs ? poly_u.vb_params
-                                                          : 0)
+         ? d12_gfx_upload_cache_lookup(
+              list, pso, false, &seg->tib, vs_root, textures_gpu, pbes_gpu,
+              heap_gpu, heap_textures_gpu, heap_pbes_gpu, heap_samplers_gpu,
+              draw_gpu, 0, pso->nr_vb_attribs ? poly_u.vb_params : 0)
          : NULL;
-   const bool gfx_cache_hit = gfx_cache && gfx_cache->valid;
-   uint32_t vs_usc = gfx_cache_hit ? gfx_cache->vs_usc : 0;
-   uint32_t fs_usc = gfx_cache_hit ? gfx_cache->fs_usc : 0;
-   uint32_t varyings = gfx_cache_hit ? gfx_cache->varyings : 0;
+   struct d12_gfx_upload_cache_entry *fs_cache =
+      cacheable_gfx_upload
+         ? d12_gfx_upload_cache_lookup(
+              list, pso, true, &seg->tib, fs_root, textures_gpu, pbes_gpu,
+              heap_gpu, heap_textures_gpu, heap_pbes_gpu, heap_samplers_gpu,
+              draw_gpu, blend_gpu, 0)
+         : NULL;
+   const bool vs_cache_hit = vs_cache && vs_cache->valid;
+   const bool fs_cache_hit = fs_cache && fs_cache->valid;
+   uint32_t vs_usc = vs_cache_hit ? vs_cache->vs_usc : 0;
+   uint32_t fs_usc = fs_cache_hit ? fs_cache->fs_usc : 0;
+   uint32_t varyings = fs_cache_hit ? fs_cache->varyings : 0;
 
-   if (!gfx_cache_hit) {
-      vs_usc = d12_gfx_stage_usc(
-         list, vstage, false, &seg->tib, root_gpu, textures_gpu, pbes_gpu,
-         heap_gpu, heap_textures_gpu, heap_pbes_gpu, heap_samplers_gpu,
-         draw_gpu, 0, vertex_visibility,
-         (pso->has_gs || pso->has_tess || pso->has_mesh || pso->nr_vb_attribs)
-            ? &poly_u
-            : NULL,
-         false);
-      fs_usc = d12_gfx_stage_usc(
-         list, &pso->fs, true, &seg->tib, root_gpu, textures_gpu, pbes_gpu,
-         heap_gpu, heap_textures_gpu, heap_pbes_gpu, heap_samplers_gpu,
-         draw_gpu, blend_gpu, D3D12_SHADER_VISIBILITY_PIXEL, NULL,
-         pso->blend_constants_used);
+   if (!vs_cache_hit || !fs_cache_hit) {
+      if (!vs_cache_hit)
+         vs_usc = d12_gfx_stage_usc(
+            list, vstage, false, &seg->tib, root_gpu, textures_gpu, pbes_gpu,
+            heap_gpu, heap_textures_gpu, heap_pbes_gpu, heap_samplers_gpu,
+            draw_gpu, 0, vertex_visibility,
+            (pso->has_gs || pso->has_tess || pso->has_mesh ||
+             pso->nr_vb_attribs)
+               ? &poly_u
+               : NULL, false);
+      if (!fs_cache_hit)
+         fs_usc = d12_gfx_stage_usc(
+            list, &pso->fs, true, &seg->tib, root_gpu, textures_gpu, pbes_gpu,
+            heap_gpu, heap_textures_gpu, heap_pbes_gpu, heap_samplers_gpu,
+            draw_gpu, blend_gpu, D3D12_SHADER_VISIBILITY_PIXEL, NULL,
+            pso->blend_constants_used);
       if (!vs_usc || !fs_usc)
          return;
 
@@ -11501,12 +11530,31 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
          }
       }
 
-      if (gfx_cache) {
-         *gfx_cache = (struct d12_gfx_upload_cache_entry){
+      if (vs_cache && !vs_cache_hit) {
+         *vs_cache = (struct d12_gfx_upload_cache_entry){
+            .generation = list->gfx_cache_generation,
             .valid = true,
             .pso = pso,
             .tib = seg->tib,
-            .root = root_gpu,
+            .root = vs_root,
+            .textures = textures_gpu,
+            .pbes = pbes_gpu,
+            .heap = heap_gpu,
+            .heap_textures = heap_textures_gpu,
+            .heap_pbes = heap_pbes_gpu,
+            .heap_samplers = heap_samplers_gpu,
+            .draw = draw_gpu,
+            .vb_params = pso->nr_vb_attribs ? poly_u.vb_params : 0,
+            .vs_usc = vs_usc,
+         };
+      }
+      if (fs_cache && !fs_cache_hit) {
+         *fs_cache = (struct d12_gfx_upload_cache_entry){
+            .generation = list->gfx_cache_generation,
+            .valid = true,
+            .pso = pso,
+            .tib = seg->tib,
+            .root = fs_root,
             .textures = textures_gpu,
             .pbes = pbes_gpu,
             .heap = heap_gpu,
@@ -11515,8 +11563,6 @@ d12_list_draw(struct d12_cmd_list *list, unsigned vertex_count,
             .heap_samplers = heap_samplers_gpu,
             .draw = draw_gpu,
             .blend = blend_gpu,
-            .vb_params = pso->nr_vb_attribs ? poly_u.vb_params : 0,
-            .vs_usc = vs_usc,
             .fs_usc = fs_usc,
             .varyings = varyings,
          };
@@ -12068,6 +12114,7 @@ vs_state_emitted:
          };
          if (fragment_cache) {
             *fragment_cache = (struct d12_fragment_state_cache_entry){
+               .generation = list->gfx_cache_generation,
                .valid = true,
                .pso = pso,
                .fs_usc = fs_usc,
