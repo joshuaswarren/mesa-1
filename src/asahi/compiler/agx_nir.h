@@ -40,6 +40,7 @@ bool agx_nir_lower_shared_element_index(struct nir_shader *s);
 bool agx_nir_lower_fminmax(struct nir_shader *s);
 
 bool agx_nir_lower_texture_early(struct nir_shader *s, bool support_lod_bias);
+bool agx_nir_lower_g17p_helper_samples(struct nir_shader *s);
 bool agx_nir_lower_g17p_texture_early(struct nir_shader *s,
                                      bool support_lod_bias);
 bool agx_nir_lower_texture_early_with_2d_robustness(struct nir_shader *s,

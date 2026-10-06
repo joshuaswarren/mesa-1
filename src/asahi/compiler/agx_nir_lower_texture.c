@@ -1790,3 +1790,86 @@ agx_nir_needs_texture_crawl(nir_instr *instr)
 
    return false;
 }
+
+/* Walk uses once, including loop-carried phis. A depth limit can miss a
+ * sampled value after a long ALU chain; recursive traversal can also revisit
+ * the same phi indefinitely. */
+static bool
+agx_g17p_reaches_derivative(nir_def *def)
+{
+   struct set *visited = _mesa_pointer_set_create(NULL);
+   struct util_dynarray pending;
+   util_dynarray_init(&pending, NULL);
+   util_dynarray_append(&pending, def);
+   bool found = false;
+
+   while (util_dynarray_num_elements(&pending, nir_def *) && !found) {
+      nir_def *current = util_dynarray_pop(&pending, nir_def *);
+      if (_mesa_set_search(visited, current))
+         continue;
+      _mesa_set_add(visited, current);
+
+      nir_foreach_use(use, current) {
+         nir_instr *instr = nir_src_parent_instr(use);
+         if (instr->type == nir_instr_type_intrinsic) {
+            switch (nir_instr_as_intrinsic(instr)->intrinsic) {
+            case nir_intrinsic_ddx:
+            case nir_intrinsic_ddx_fine:
+            case nir_intrinsic_ddx_coarse:
+            case nir_intrinsic_ddy:
+            case nir_intrinsic_ddy_fine:
+            case nir_intrinsic_ddy_coarse:
+               found = true;
+               break;
+            default:
+               break;
+            }
+         } else if (instr->type == nir_instr_type_alu) {
+            util_dynarray_append(&pending, &nir_instr_as_alu(instr)->def);
+         } else if (instr->type == nir_instr_type_phi) {
+            util_dynarray_append(&pending, &nir_instr_as_phi(instr)->def);
+         }
+      }
+   }
+
+   util_dynarray_fini(&pending);
+   _mesa_set_destroy(visited, NULL);
+   return found;
+}
+
+/* G17P's driver-profile implicit sample returns zero in helper lanes even
+ * under the native helper-capable fragment protocol.  That is unobservable
+ * unless the sampled value itself feeds a later derivative.  For that exact
+ * shape, spell the implicit LOD as the equivalent explicit gradients: the
+ * witnessed gradient sampler executes in helper lanes and preserves the quad
+ * values required by fwidth(texture(...)). */
+static bool
+agx_g17p_explicit_helper_gradient(nir_builder *b, nir_tex_instr *tex,
+                                  UNUSED void *data)
+{
+   if (tex->op != nir_texop_tex ||
+       tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
+       tex->is_shadow || tex->is_sparse ||
+       !agx_g17p_reaches_derivative(&tex->def))
+      return false;
+
+   const int coord_idx =
+      nir_tex_instr_src_index(tex, nir_tex_src_coord);
+   if (coord_idx < 0)
+      return false;
+
+   b->cursor = nir_before_instr(&tex->instr);
+   nir_def *coord = tex->src[coord_idx].src.ssa;
+   nir_tex_instr_add_src(tex, nir_tex_src_ddx, nir_ddx(b, coord));
+   nir_tex_instr_add_src(tex, nir_tex_src_ddy, nir_ddy(b, coord));
+   tex->op = nir_texop_txd;
+   return true;
+}
+
+bool
+agx_nir_lower_g17p_helper_samples(nir_shader *shader)
+{
+   assert(shader->info.stage == MESA_SHADER_FRAGMENT);
+   return nir_shader_tex_pass(shader, agx_g17p_explicit_helper_gradient,
+                              nir_metadata_control_flow, NULL);
+}

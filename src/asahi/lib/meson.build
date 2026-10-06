@@ -362,6 +362,19 @@ if with_tests
     executable(
       'asahi-zs-emit-control-flow',
       files('tests/test-agx-zs-emit-control-flow.c'),
+
+      include_directories : [inc_include, inc_src, inc_asahi],
+      dependencies : [idep_nir, idep_mesautil],
+      link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
+    ),
+    suite : ['asahi'],
+  )
+
+  test(
+    'asahi-g17p-helper-samples',
+    executable(
+      'asahi-g17p-helper-samples',
+      files('tests/test-agx-g17p-helper-samples.c'),
       include_directories : [inc_include, inc_src, inc_asahi],
       dependencies : [idep_nir, idep_mesautil],
       link_with : [libasahi_lib, libasahi_compiler, libasahi_layout],
