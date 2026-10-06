@@ -149,11 +149,11 @@ enum hk_g17p_block_format_family {
    HK_G17P_BLOCK_FORMAT_BC,
    HK_G17P_BLOCK_FORMAT_ETC2_EAC,
    HK_G17P_BLOCK_FORMAT_ASTC_LDR,
+   HK_G17P_BLOCK_FORMAT_ASTC_HDR,
 };
 
-/* Classify every Vulkan 1.0 LDR block-compressed family carried by the
- * native G17P texture descriptors. ASTC HDR/SFLOAT is deliberately separate
- * from textureCompressionASTC_LDR and is not admitted here. */
+/* Opaque block copies support both ASTC format classes. Keep HDR separate
+ * from LDR: copy eligibility does not establish sampling/feature support. */
 enum hk_g17p_block_format_family
 hk_g17p_block_format_family(VkFormat format);
 

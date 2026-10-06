@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define CHECK(c)                                                              \
    do {                                                                       \
@@ -299,6 +300,12 @@ main(void)
             HK_G17P_BLOCK_FORMAT_ASTC_LDR);
       CHECK(!hk_g17p_bc_format_supported(format));
    }
+   for (VkFormat format = VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK;
+        format <= VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK; ++format) {
+      CHECK(hk_g17p_block_format_family(format) ==
+            HK_G17P_BLOCK_FORMAT_ASTC_HDR);
+      CHECK(!hk_g17p_bc_format_supported(format));
+   }
    CHECK(!hk_g17p_bc_format_supported(VK_FORMAT_R8G8B8A8_UNORM));
    CHECK(hk_g17p_block_format_family(VK_FORMAT_R8G8B8A8_UNORM) ==
          HK_G17P_BLOCK_FORMAT_NONE);
@@ -401,6 +408,20 @@ main(void)
    CHECK(plan.first_slice == 1 && plan.slice_count == 2 &&
          plan.buffer_row_stride_B == 48 &&
          plan.buffer_slice_stride_B == 144 && plan.buffer_span_B == 224);
+
+   /* SFLOAT and UNORM carry the same opaque 16-byte blocks, including
+    * partial edge blocks, padded buffer rows and nonzero 3D Z offsets. */
+   const struct hk_g17p_compressed_copy_plan ldr_plan = plan;
+   astc.format = VK_FORMAT_ASTC_5x4_SFLOAT_BLOCK;
+   CHECK(hk_g17p_compressed_buffer_to_image_copy_plan(
+      &astc, 32, 256, &plan));
+   CHECK(memcmp(&plan, &ldr_plan, sizeof(plan)) == 0);
+   CHECK(!hk_g17p_compressed_image_to_buffer_copy_plan(
+      &astc, 32, 256, &plan)); /* destination-only layout */
+   astc.layout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+   CHECK(hk_g17p_compressed_image_to_buffer_copy_plan(
+      &astc, 32, 256, &plan));
+   CHECK(memcmp(&plan, &ldr_plan, sizeof(plan)) == 0);
 
    struct hk_g17p_buffer_to_image_copy line = volume;
    line.image_type = VK_IMAGE_TYPE_1D;

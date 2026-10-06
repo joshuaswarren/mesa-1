@@ -207,6 +207,10 @@ hk_g17p_block_format_family(VkFormat format)
        format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK)
       return HK_G17P_BLOCK_FORMAT_ASTC_LDR;
 
+   if (format >= VK_FORMAT_ASTC_4x4_SFLOAT_BLOCK &&
+       format <= VK_FORMAT_ASTC_12x12_SFLOAT_BLOCK)
+      return HK_G17P_BLOCK_FORMAT_ASTC_HDR;
+
    return HK_G17P_BLOCK_FORMAT_NONE;
 }
 

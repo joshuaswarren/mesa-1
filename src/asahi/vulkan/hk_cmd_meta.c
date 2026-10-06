@@ -2614,6 +2614,7 @@ hk_g17p_block_copy_format(struct hk_device *dev, VkFormat format)
    case HK_G17P_BLOCK_FORMAT_BC:
    case HK_G17P_BLOCK_FORMAT_ETC2_EAC:
    case HK_G17P_BLOCK_FORMAT_ASTC_LDR:
+   case HK_G17P_BLOCK_FORMAT_ASTC_HDR:
       return true;
    default:
       return false;
