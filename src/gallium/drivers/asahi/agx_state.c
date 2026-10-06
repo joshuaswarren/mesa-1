@@ -1423,10 +1423,16 @@ agx_gallium_tilebuffer_layout(const struct agx_device *dev,
                               const enum pipe_format *formats,
                               uint8_t nr_cbufs, uint8_t nr_samples, bool layered)
 {
-   const bool g18_single = dev->chip == AGX_CHIP_G18G && nr_samples == 1;
+   /* Native331 retains 32x32 at 2x and 32x16 at 4x for sixteen-byte
+    * samples. Both need the complete 32-KiB imageblock and 2048 raster
+    * samples; retain the existing 1024-sample limit at 1x. */
+   const bool g18_native = dev->chip == AGX_CHIP_G18G &&
+      (nr_samples == 1 || (agx_g18_msaa4_enabled() &&
+                          (nr_samples == 2 || nr_samples == 4)));
    return agx_build_tilebuffer_layout_with_limits(
       formats, nr_cbufs, nr_samples, layered, 0,
-      g18_single ? 32768 : 0, g18_single ? 1024 : 0);
+      g18_native ? 32768 : 0,
+      g18_native ? (nr_samples == 1 ? 1024 : 2048) : 0);
 }
 
 static bool
@@ -1461,9 +1467,61 @@ agx_g18_msaa4_color_format(enum pipe_format format)
    case PIPE_FORMAT_A1B5G5R5_UNORM:
    case PIPE_FORMAT_R16_FLOAT:
    case PIPE_FORMAT_R16G16_FLOAT:
+   /* Native334 verifies the complete four-half-lane F16 store and native330
+    * supplies both 2x/4x fragment reload/sample-ID pipelines (mask 0xf). */
+   case PIPE_FORMAT_R16G16B16A16_FLOAT:
    case PIPE_FORMAT_R10G10B10A2_UNORM:
    case PIPE_FORMAT_B10G10R10A2_UNORM:
    case PIPE_FORMAT_R11G11B10_FLOAT:
+      return true;
+   /* Native G18 2x/4x typed clear, sample-ID and reload programs retain the
+    * class-12 transaction for these formats. The storage and tile predicates
+    * below still require uncompressed, non-layered supported sample storage. */
+   case PIPE_FORMAT_B5G5R5X1_UNORM:
+   case PIPE_FORMAT_B5G6R5_UNORM:
+   case PIPE_FORMAT_R10G10B10A2_UINT:
+   case PIPE_FORMAT_R10G10B10X2_UNORM:
+   case PIPE_FORMAT_R16G16B16A16_SINT:
+   case PIPE_FORMAT_R16G16B16A16_SNORM:
+   case PIPE_FORMAT_R16G16B16A16_UINT:
+   case PIPE_FORMAT_R16G16B16A16_UNORM:
+   case PIPE_FORMAT_R16G16B16X16_FLOAT:
+   case PIPE_FORMAT_R16G16B16X16_SINT:
+   case PIPE_FORMAT_R16G16B16X16_UINT:
+   case PIPE_FORMAT_R16G16_SINT:
+   case PIPE_FORMAT_R16G16_SNORM:
+   case PIPE_FORMAT_R16G16_UINT:
+   case PIPE_FORMAT_R16G16_UNORM:
+   case PIPE_FORMAT_R16_SINT:
+   case PIPE_FORMAT_R16_SNORM:
+   case PIPE_FORMAT_R16_UINT:
+   case PIPE_FORMAT_R16_UNORM:
+   case PIPE_FORMAT_R32G32_FLOAT:
+   case PIPE_FORMAT_R32G32_SINT:
+   case PIPE_FORMAT_R32G32_UINT:
+   case PIPE_FORMAT_R32_FLOAT:
+   case PIPE_FORMAT_R32_SINT:
+   case PIPE_FORMAT_R32_UINT:
+   /* Native331 binds all four raw 32-bit lanes at 2x/4x, including signed
+    * and high-bit integer values. RGB uses the same RGBX storage family. */
+   case PIPE_FORMAT_R32G32B32A32_FLOAT:
+   case PIPE_FORMAT_R32G32B32X32_FLOAT:
+   case PIPE_FORMAT_R32G32B32A32_SINT:
+   case PIPE_FORMAT_R32G32B32X32_SINT:
+   case PIPE_FORMAT_R32G32B32A32_UINT:
+   case PIPE_FORMAT_R32G32B32X32_UINT:
+   case PIPE_FORMAT_R8G8B8A8_SINT:
+   case PIPE_FORMAT_R8G8B8A8_SNORM:
+   case PIPE_FORMAT_R8G8B8A8_UINT:
+   case PIPE_FORMAT_R8G8B8X8_SINT:
+   case PIPE_FORMAT_R8G8B8X8_SNORM:
+   case PIPE_FORMAT_R8G8B8X8_UINT:
+   case PIPE_FORMAT_R8G8_SINT:
+   case PIPE_FORMAT_R8G8_SNORM:
+   case PIPE_FORMAT_R8G8_UINT:
+   case PIPE_FORMAT_R8_SINT:
+   case PIPE_FORMAT_R8_SNORM:
+   case PIPE_FORMAT_R8_UINT:
       return true;
    default:
       return false;
@@ -1492,9 +1550,19 @@ agx_g18_msaa4_storage(const struct agx_device *dev,
                   format == PIPE_FORMAT_R8_UINT;
    }
 
-   return agx_g18_msaa4(dev) && rsrc->base.nr_samples == 4 &&
-          rsrc->base.target == PIPE_TEXTURE_2D &&
-          rsrc->base.last_level == 0 && rsrc->base.array_size == 1 &&
+   /* A non-layered attachment to an array selects one layer through the
+    * existing 2D load/store views. Both descriptors use the selected layer's
+    * base address; the tile program does not consume an array-layer register.
+    * Native AIL comparison312 covers the allocation and layer stride, while
+    * layered draws remain excluded by the tile-layout and draw predicates.
+    */
+   const bool target_ok =
+      (rsrc->base.target == PIPE_TEXTURE_2D && rsrc->base.array_size == 1) ||
+      (rsrc->base.target == PIPE_TEXTURE_2D_ARRAY && rsrc->base.array_size >= 1);
+
+   return agx_g18_msaa4(dev) &&
+          (rsrc->base.nr_samples == 2 || rsrc->base.nr_samples == 4) &&
+          target_ok && rsrc->base.last_level == 0 &&
           rsrc->base.depth0 == 1 && !rsrc->layout.compressed &&
           rsrc->layout.tiling == AIL_TILING_GPU &&
           format_ok;
@@ -1521,15 +1589,19 @@ agx_g18_msaa4_zs_surface(const struct agx_device *dev,
             agx_g18_msaa4_storage(dev, stencil, PIPE_FORMAT_S8_UINT)));
 }
 
-/* The G18 four-sample tile uses eight-byte samples and a 32x16 tile.
+/* Native326's two-sample tile is 32x32; four samples use 32x16.
+ * Native331 adds sixteen-byte samples with the same geometry and bounded
+ * single-target protocol, occupying the full 32-KiB imageblock.
  * Native315 also binds D32/S8 planes; colour-free renders retain this tile
  * geometry with empty colour programs. Layers and spills remain separate. */
 static bool
 agx_g18_msaa4_tile_layout(const struct agx_device *dev,
-                          struct agx_tilebuffer_layout *tib)
+                          const struct agx_tilebuffer_layout *tib)
 {
-   if (!agx_g18_msaa4(dev) || tib->nr_samples != 4 ||
-       tib->sample_size_B != 8 || tib->tile_size != 32 * 16 ||
+   if (!agx_g18_msaa4(dev) ||
+       (tib->nr_samples != 2 && tib->nr_samples != 4) ||
+       (tib->sample_size_B != 8 && tib->sample_size_B != 16) ||
+       tib->tile_size != (tib->nr_samples == 2 ? 32 * 32 : 32 * 16) ||
        tib->layered || agx_tilebuffer_spills(tib) ||
        agx_tilebuffer_offset_B(tib, 0) != 0)
       return false;
@@ -1789,6 +1861,7 @@ agx_batch_upload_pbe(struct agx_batch *batch,
           * other levels. Describe exactly that write. Other levels, arrays and
           * compressed layouts keep waiting for their witnessed forms. */
          if (descriptor_generation == AGX_DESCRIPTOR_GENERATION_10 &&
+             dev->chip != AGX_CHIP_G18G &&
              level == 0 && cfg.levels > 1 && layers == 1 &&
              cfg.dimension == AGX_TEXTURE_DIMENSION_2D &&
              tex->layout.tiling != AIL_TILING_LINEAR &&
@@ -1850,8 +1923,9 @@ agx_batch_upload_pbe(struct agx_batch *batch,
       }
    }
 
-   const bool packed =
-      agx_gallium_pack_native_pbe(descriptor_generation, out, &cfg);
+   const bool packed = dev->chip == AGX_CHIP_G18G
+      ? agx_gallium_pack_g18_native_pbe(out, &cfg)
+      : agx_gallium_pack_native_pbe(descriptor_generation, out, &cfg);
    if (!packed && (dev->debug & AGX_DBG_FAULTTRACE)) {
       fprintf(stderr,
               "PBE_REFUSED format=%s target=%u dim=%u layout=%u level=%u "
@@ -2155,9 +2229,14 @@ agx_compile_nir(struct agx_device *dev, nir_shader *nir,
 
       NIR_PASS(_, nir, agx_nir_lower_sysvals, stage, true,
                texture_descriptor_size);
+      /* Lowered geometry/tessellation programs retain their API stage for
+       * descriptor and sysval ownership. Their native vertex/compute programs
+       * still require the same resource prefix as ordinary VS/CS sampling. */
       compiled->g17p_texture_resources =
          (dev->chip == AGX_CHIP_G17P || agx_chip_m5_paths(dev->chip)) &&
-         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_COMPUTE) &&
+         (stage == MESA_SHADER_VERTEX || stage == MESA_SHADER_COMPUTE ||
+          stage == MESA_SHADER_GEOMETRY || stage == MESA_SHADER_TESS_CTRL ||
+          stage == MESA_SHADER_TESS_EVAL) &&
          (BITSET_LAST_BIT(nir->info.textures_used) != 0 ||
           BITSET_LAST_BIT(nir->info.images_used) != 0);
       const unsigned uniform_base =
@@ -2351,8 +2430,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
        * -- would run once for a body that ran per sample. So keep the whole
        * fragment in one program. Only the shape with nothing but depth and
        * stencil to keep is taken here, which is what a multisample depth blit
-       * needs; a per-sample colour shader would also need its tilebuffer and
-       * blending built into the main, and keeps its existing named refusal.
+       * needs. G18 colour shaders instead expand both linked parts with the
+       * same per-sample export layout below.
        */
       /* See the sample-count key in agx_update_fs(). A draw always keys
        * the count; the zero key is the link-time variant that only checks
@@ -2367,7 +2446,8 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
                                   BITFIELD64_BIT(FRAG_RESULT_STENCIL);
       const bool unrolled_samples =
          ((dev->chip == AGX_CHIP_G17P && key->nr_samples > 1) ||
-          (dev->chip == AGX_CHIP_G18G && key->nr_samples == 4 &&
+          (dev->chip == AGX_CHIP_G18G &&
+           (key->nr_samples == 2 || key->nr_samples == 4) &&
            agx_g18_msaa4_enabled())) &&
          nir->info.fs.uses_sample_shading &&
          !(nir->info.outputs_written & ~zs_outputs);
@@ -2408,6 +2488,42 @@ agx_compile_variant(struct agx_device *dev, struct pipe_context *pctx,
          /* Nothing is left for the linker to wrap. */
          nir->info.fs.uses_sample_shading = false;
          epilog_key.sample_shading = false;
+      } else if (dev->chip == AGX_CHIP_G18G && agx_g18_msaa4_enabled() &&
+                 (key->nr_samples == 2 || key->nr_samples == 4) &&
+                 nir->info.fs.uses_sample_shading && !nir->info.writes_memory) {
+         /* Each invocation exports its own colours. The epilog repeats the
+          * same layout and count, so no AGX2 machine-code loop is needed.
+          * Shader memory side effects still require coverage predication. */
+         struct agx_g17p_colour_layout layout;
+         agx_g17p_colour_layout_init(&layout, epilog_key.loc_written,
+                                    epilog_key.size_32, epilog_key.colour_comps,
+                                    false);
+         /* G18 has 252 usable register halves. The allocator rounds its
+          * available file down to a whole eight-half colour slot. */
+         const unsigned limit = 248;
+         if (agx_g17p_sample_exports_end(&layout, key->nr_samples) > limit) {
+            NIR_PASS(_, nir, agx_nir_pack_g17p_colour_exports, &epilog_key);
+            agx_g17p_colour_layout_init(&layout, epilog_key.loc_written,
+                                       epilog_key.size_32,
+                                       epilog_key.colour_comps, true);
+         }
+         if (agx_g17p_sample_exports_end(&layout, key->nr_samples) > limit) {
+            mesa_loge("asahi: G18 per-sample colour exports exceed %u halves",
+                      limit);
+            ralloc_free(nir);
+            struct agx_compiled_shader *failed =
+               CALLOC_STRUCT(agx_compiled_shader);
+            failed->stage = so->type;
+            failed->so = so;
+            failed->failed = true;
+            return failed;
+         }
+
+         NIR_PASS(_, nir, agx_nir_lower_sample_mask);
+         NIR_PASS(_, nir, agx_nir_lower_to_per_sample);
+         NIR_PASS(_, nir, agx_nir_unroll_g17p_samples_layout,
+                  key->nr_samples, &layout);
+         nir->info.fs.uses_sample_shading = false;
       } else if (nir->info.fs.uses_sample_shading) {
          /* Ensure the sample ID is preserved in register */
          nir_builder b =
@@ -3208,7 +3324,29 @@ static void
 build_g18_msaa4_fs_epilog(nir_builder *b, const void *key_)
 {
    const struct agx_fs_epilog_key *key = key_;
-   agx_nir_fs_epilog(b, key);
+   if (key->link.sample_shading) {
+      struct agx_fs_epilog_key pixel = *key;
+      pixel.link.sample_shading = false;
+      pixel.defer_monolithic_msaa = true;
+      agx_nir_fs_epilog(b, &pixel);
+
+      struct agx_g17p_colour_layout layout;
+      agx_g17p_colour_layout_init(&layout, key->link.loc_written,
+                                 key->link.size_32, key->link.colour_comps,
+                                 key->link.packed_colour);
+      NIR_PASS(_, b->shader, agx_nir_lower_to_per_sample);
+      NIR_PASS(_, b->shader, agx_nir_unroll_g17p_samples_layout,
+               key->nr_samples, &layout);
+      bool progress;
+      do {
+         progress = false;
+         NIR_PASS(progress, b->shader, nir_opt_constant_folding);
+         NIR_PASS(progress, b->shader, nir_opt_algebraic);
+      } while (progress);
+      NIR_PASS(_, b->shader, agx_nir_hoist_g17p_zs_writes);
+   } else {
+      agx_nir_fs_epilog(b, key);
+   }
 
    NIR_PASS(_, b->shader, agx_nir_lower_g18_tile_samples, key->nr_samples);
 }
@@ -3236,14 +3374,17 @@ asahi_fast_link(struct agx_context *ctx, struct agx_uncompiled_shader *so,
    if (so->type == MESA_SHADER_FRAGMENT) {
       prolog = agx_build_meta_shader_internal(
          ctx, build_fs_prolog, &key->prolog.fs, sizeof(key->prolog.fs), true,
-         false, key->prolog.fs.cf_base, 0, false);
+         false, key->prolog.fs.cf_base,
+         agx_g18_msaa4(agx_device(ctx->base.screen))
+            ? key->epilog.fs.nr_samples : 0,
+         false);
 
       epilog = agx_build_meta_shader_internal(
          ctx,
          agx_device(ctx->base.screen)->chip == AGX_CHIP_G17P
             ? build_g17p_fs_epilog
          : agx_g18_msaa4(agx_device(ctx->base.screen)) &&
-               key->epilog.fs.nr_samples == 4
+               (key->epilog.fs.nr_samples == 2 || key->epilog.fs.nr_samples == 4)
             ? build_g18_msaa4_fs_epilog
             : agx_nir_fs_epilog,
          &key->epilog.fs, sizeof(key->epilog.fs), false, true, 0,
@@ -3608,10 +3749,17 @@ agx_update_fs(struct agx_batch *batch)
    };
    agx_fs_epilog_apply_device_policy(dev->chip, &link_key.epilog.fs);
 
+   /* Both colour parts have already been expanded over these samples. A
+    * shader with memory writes retains the external-loop refusal until its
+    * side effects can be predicated on each sample's live coverage. */
+   if (agx_g18_msaa4(dev) && (nr_samples == 2 || nr_samples == 4) &&
+       ctx->fs->so && !ctx->fs->so->info.writes_memory)
+      link_key.nr_samples_shaded = 0;
+
    /* A depth-only sample-shaded G18 main already contains its statically
     * unrolled depth stores. Keep write_z in the compiled shader's state
     * metadata for PPP, but do not link another store from unused exports. */
-   if (agx_g18_msaa4(dev) && nr_samples == 4 && ctx->fs->so &&
+   if (agx_g18_msaa4(dev) && (nr_samples == 2 || nr_samples == 4) && ctx->fs->so &&
        ctx->fs->so->info.uses_sample_shading &&
        !ctx->fs->epilog_key.sample_shading &&
        ctx->fs->b.info.writes_sample_mask && ctx->fs->epilog_key.write_z) {
@@ -3824,6 +3972,7 @@ agx_delete_shader_state(struct pipe_context *ctx, void *cso)
 struct agx_generic_meta_key {
    meta_shader_builder_t builder;
    size_t key_size;
+   size_t nr_samples;
    uint8_t key[];
 };
 
@@ -3843,6 +3992,7 @@ meta_key_equal(const void *a_, const void *b_)
    const struct agx_generic_meta_key *b = b_;
 
    return a->builder == b->builder && a->key_size == b->key_size &&
+          a->nr_samples == b->nr_samples &&
           memcmp(a->key, b->key, a->key_size) == 0;
 }
 
@@ -3892,6 +4042,7 @@ agx_build_meta_shader_internal(struct agx_context *ctx,
    *key = (struct agx_generic_meta_key){
       .builder = builder,
       .key_size = data_size,
+      .nr_samples = nr_samples,
    };
 
    if (data_size)
@@ -4647,11 +4798,13 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
       ranges[AGX3_G17P_GRAPHICS_MAX_RANGES];
    size_t count = 0;
    const mesa_shader_stage stage = cs->stage;
+   /* Geometry's raster/copy program owns geometry-stage resources but runs
+    * as a native vertex program, with a matching resource-aware prolog. */
+   const bool vertex_program = cs->b.info.stage == MESA_SHADER_VERTEX;
    const bool resource_pair =
       batch->texture_count[stage] != 0 &&
       (stage == MESA_SHADER_FRAGMENT ||
-       (stage == MESA_SHADER_VERTEX &&
-        cs->g17p_texture_resources));
+       (vertex_program && cs->g17p_texture_resources));
 
    /* G17G fragments reserve the same eight-half prefix for their texture
     * and sampler table pointers: Apple's own applegpu_g17g fragment with one
@@ -4700,7 +4853,7 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
       /* Fragment uniform zero is deliberately replaced by the resource pair.
        * A textured VS instead shifts its complete fixed ABI; trimming a VBO
        * or draw-parameter range here would corrupt vertex fetches. */
-      if (resource_pair && stage == MESA_SHADER_VERTEX &&
+      if (resource_pair && vertex_program &&
           push->uniform < AGX_ABI_G17P_TEXTURE_POINTER_HALFS)
          AGX3_PROGRAM_REFUSE("a textured vertex program pushes a uniform range "
                      "below the texture/sampler pointer pair");
@@ -4844,7 +4997,7 @@ agx_build_agx3_graphics_program(struct agx_batch *batch,
    } else {
       struct agx3_g17p_graphics_program program;
       const bool generated = agx_chip_m5_paths(dev->chip)
-         ? agx3_g17g_graphics_program_generate(agx_ioto_chip(dev), &desc,
+         ? agx3_g17g_graphics_program_generate(dev->chip, &desc,
                                                &program) &&
               agx_g18g_reencode_program(dev, &program, true, linked->nr_gprs)
          : agx3_g17p_graphics_program_generate(dev->chip, &desc, &program);
@@ -5999,7 +6152,8 @@ agx_g18g_wide_sample_tile(const struct agx_device *dev,
                           const struct agx_tilebuffer_layout *tib)
 {
    return dev->chip == AGX_CHIP_G18G && tib->sample_size_B == 16 &&
-          tib->nr_samples == 1 && tib->tile_size == 32 * 32;
+          ((tib->nr_samples == 1 && tib->tile_size == 32 * 32) ||
+           agx_g18_msaa4_tile_layout(dev, tib));
 }
 
 static struct asahi_bg_eot
@@ -6017,9 +6171,9 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
     * logs/m5-state-matrix-c-native-hv-20260914-055541).
     */
    const bool no_color = batch->key.nr_cbufs == 0;
-   const unsigned rgba8_mask = dev->chip == AGX_CHIP_G18G
-                                 ? agx_g18g_rgba8_mrt_mask(&key->tib) : 0;
-   const unsigned target_mask = no_color ? 0 : rgba8_mask ? rgba8_mask : 1;
+   const unsigned word_mask = dev->chip == AGX_CHIP_G18G
+                                ? agx_g18g_word_mrt_mask(&key->tib) : 0;
+   const unsigned target_mask = no_color ? 0 : word_mask ? word_mask : 1;
    const unsigned targets = util_bitcount(target_mask);
    const unsigned slot_count = util_last_bit(target_mask);
    const unsigned first_rt = target_mask ? ffs(target_mask) - 1 : 0;
@@ -6067,12 +6221,12 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
    if ((no_color ? surf->texture || op != AGX_BG_EOT_NONE ||
                       key->tib.sample_size_B != (msaa4 ? 8 : 0)
                  : !surf->texture ||
-                      (key->tib.sample_size_B != 8 && !rgba8_mask &&
+                      (key->tib.sample_size_B != 8 && !word_mask &&
                        !agx_g18g_wide_sample_tile(dev, &key->tib)) ||
                       (store ? op != AGX_EOT_STORE
                              : (op != AGX_BG_CLEAR && op != AGX_BG_LOAD))) ||
        key->tib.layered || (key->tib.nr_samples != 1 && !msaa4) ||
-       key->tib.tile_size != (msaa4 ? 32 * 16 : 32 * 32) ||
+       key->tib.tile_size != (msaa4 && key->tib.nr_samples == 4 ? 32 * 16 : 32 * 32) ||
        agx_tilebuffer_spills(&key->tib) ||
        agx_tilebuffer_offset_B(&key->tib, first_rt) ||
        (batch->key.resolve && !msaa4)) {
@@ -6095,7 +6249,7 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       key->reserved_preamble = clear_base + 8 * slot_count;
 
    struct agx_bg_eot_key shader_key = *key;
-   if (store && rgba8_mask) {
+   if (store && word_mask) {
       /* The native specialized EOT addresses dense PBEs. Compact its key
        * and the table below together, retaining each logical tile offset. */
       if (agx_tilebuffer_compact(&key->tib, &shader_key.tib, NULL) != targets)
@@ -6281,7 +6435,7 @@ agx_build_g17g_bg_eot(struct agx_batch *batch, struct agx_bg_eot_key *key,
       .uniform_range_count = range_count,
    };
    struct agx3_g17p_graphics_program program;
-   if (!agx3_g17g_tile_program_generate(agx_ioto_chip(dev), &desc, store,
+   if (!agx3_g17g_tile_program_generate(dev->chip, &desc, store,
                                         &program) ||
        !agx_g18g_reencode_program(dev, &program, false,
                                   shader->info.nr_gprs) ||
@@ -7621,7 +7775,8 @@ agx_g17g_viewport_scissor_records(struct agx_batch *batch,
 
 /* Four-sample colour and D32/S8 attachments share the native tile geometry.
  * Depth-only sample shading is statically unrolled into SR39/DEPTHF writes.
- * Other sample-shaded outputs and coverage updates still need integration. */
+ * Colour sample shading expands both shader parts over distinct exports;
+ * the linked prolog applies the API mask before the masked colour stores. */
 static bool
 agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
                             unsigned fragment_pass)
@@ -7632,6 +7787,10 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
    const bool unrolled_depth =
       no_color && fs && fs->so && fs->so->info.uses_sample_shading &&
       fs->epilog_key.write_z && !fs->epilog_key.sample_shading;
+   const bool unrolled_colour =
+      !no_color && fs && fs->so && fs->so->info.uses_sample_shading &&
+      fs->epilog_key.sample_shading && !fs->epilog_key.write_z &&
+      !fs->epilog_key.write_s && !fs->so->info.writes_memory;
    return agx_g18_msaa4_tile_layout(dev, &batch->tilebuffer_layout) &&
           (no_color ? batch->key.zsbuf.texture != NULL
                     : batch->key.nr_cbufs == 1 && batch->key.cbufs[0].texture &&
@@ -7639,16 +7798,20 @@ agx_g18_msaa4_draw_admitted(struct agx_context *ctx, struct agx_batch *batch,
                             dev, agx_resource(batch->key.cbufs[0].texture),
                             batch->key.cbufs[0].format)) &&
           agx_g18_msaa4_zs_surface(dev, &batch->key.zsbuf) &&
-          batch->reduced_prim == MESA_PRIM_TRIANGLES &&
+          (batch->reduced_prim == MESA_PRIM_TRIANGLES ||
+           batch->reduced_prim == MESA_PRIM_LINES) &&
           (fragment_pass == AGX_PASS_TYPE_OPAQUE ||
            fragment_pass == AGX_PASS_TYPE_PUNCH_THROUGH) &&
           ctx->rast->base.multisample &&
-          (ctx->sample_mask & BITFIELD_MASK(4)) == BITFIELD_MASK(4) &&
+          (unrolled_colour ||
+           (ctx->sample_mask & BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) ==
+              BITFIELD_MASK(batch->tilebuffer_layout.nr_samples)) &&
           !ctx->blend->key.alpha_to_coverage &&
           fs && fs->so && !fs->so->info.uses_fbfetch &&
           !fs->so->info.writes_memory &&
-          (!fs->so->info.uses_sample_shading || unrolled_depth) &&
-          !fs->epilog_key.sample_shading && !fs->epilog_key.write_s &&
+          (!fs->so->info.uses_sample_shading || unrolled_depth || unrolled_colour) &&
+          (!fs->epilog_key.sample_shading || unrolled_colour) &&
+          !fs->epilog_key.write_s &&
           (!fs->b.info.writes_sample_mask || unrolled_depth) &&
           !fs->b.info.reads_tib;
 }
@@ -7753,7 +7916,7 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       batch->key.nr_cbufs == 0 ||
       (batch->key.nr_cbufs == 1 && batch->key.cbufs[0].texture) ||
        (dev->chip == AGX_CHIP_G18G &&
-        agx_g18g_rgba8_mrt_mask(&batch->tilebuffer_layout));
+        agx_g18g_word_mrt_mask(&batch->tilebuffer_layout));
    const struct pipe_surface *zsbuf = &batch->key.zsbuf;
    /* With the comparison disabled the depth unit performs no test and, per
     * the API, no write either, and a disabled stencil unit does nothing at
@@ -7858,7 +8021,35 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
                            fragment_pass ==
                               AGX_PASS_TYPE_TRANSLUCENT_PUNCH_THROUGH),
                       "fragment pass type");
-      M5_DRAW_OUTSIDE(ctx->fs->so && ctx->fs->so->info.writes_memory,
+      /* Retain complete linked memory-shader diagnostics for both admitted
+       * draws and the separately guarded early/depth-NEVER/multisample paths. */
+      if (dev->chip == AGX_CHIP_G18G && ctx->fs->so &&
+          ctx->fs->so->info.writes_memory && fs && fs->bo &&
+          getenv("NEO_AGX_BINARY_DIAGNOSTICS") && fs->size <= 65536 &&
+          fs->entry_offset <= fs->bo->size &&
+          fs->size <= fs->bo->size - fs->entry_offset) {
+         const uint8_t *mapping = agx_bo_map(fs->bo);
+         if (mapping) {
+            fprintf(stderr, "NEO_FRAGMENT_MEMORY_BINARY size=%zu entry=%zu "
+                    "gprs=%u samples=%u data=", (size_t)fs->size,
+                    (size_t)fs->entry_offset, fs->nr_gprs,
+                    batch->tilebuffer_layout.nr_samples);
+            for (size_t i = 0; i < fs->size; ++i)
+               fprintf(stderr, "%02x", mapping[fs->entry_offset + i]);
+            fputc('\n', stderr);
+         }
+      }
+      const bool g18_late_memory =
+         dev->chip == AGX_CHIP_G18G &&
+         batch->tilebuffer_layout.nr_samples == 1 &&
+         !ctx->fs->b.info.early_fragment_tests &&
+         !(ctx->zs->base.depth_enabled &&
+           ctx->zs->base.depth_func == PIPE_FUNC_NEVER);
+      /* The main acquires the pixel transaction before helper-predicated
+       * writes and supplies late depth feedback. Explicit early tests,
+       * depth-NEVER emulation and per-sample side effects remain separate. */
+      M5_DRAW_OUTSIDE(ctx->fs->so && ctx->fs->so->info.writes_memory &&
+                         !g18_late_memory,
                       "fragment writes memory");
    }
    /* Points join triangles: the object type is witnessed end to end (see
@@ -7867,16 +8058,13 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
     * require to agree with the output selector. */
    /* G18G draws lines too: the J873 "lines" render moves exactly the words
     * points do, with the early-test words' 0x10000000 and no point size
-    * (agx_ppp_hal300_graphics_fields::object_type). One-pixel lines only;
-    * that is the captured width. */
+    * (agx_ppp_hal300_graphics_fields::object_type). Line width is carried
+    * separately in the native-grounded front/back face records. */
    M5_DRAW_OUTSIDE(batch->reduced_prim != MESA_PRIM_TRIANGLES &&
                       batch->reduced_prim != MESA_PRIM_POINTS &&
                       !(dev->chip == AGX_CHIP_G18G &&
                         batch->reduced_prim == MESA_PRIM_LINES),
                    "primitive is neither triangles nor points");
-   M5_DRAW_OUTSIDE(batch->reduced_prim == MESA_PRIM_LINES &&
-                      rast->base.line_width != 1.0f,
-                   "line wider than one pixel");
    M5_DRAW_OUTSIDE(batch->reduced_prim == MESA_PRIM_POINTS && !psiz,
                    "point draw without a point size");
    M5_DRAW_OUTSIDE(!color_attachment_ok, "colour attachment shape");
@@ -8044,6 +8232,9 @@ agx_encode_g17g_state(struct agx_batch *batch, uint8_t *out)
       .cull_mode = rast->base.cull_face,
       .front_face_ccw = agx_front_face_ccw(ctx), .point_size_output = psiz,
       .clip_distance_words = clip_dist_words,
+      .line_width_valid = dev->chip == AGX_CHIP_G18G &&
+                          batch->reduced_prim == MESA_PRIM_LINES,
+      .line_width = rast->line_width,
       .object_type = batch->reduced_prim == MESA_PRIM_POINTS
                         ? AGX_PPP_HAL300_POINTS
                         : batch->reduced_prim == MESA_PRIM_LINES

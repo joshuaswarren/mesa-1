@@ -121,7 +121,8 @@ struct agx3_tex_fetch_desc {
     */
    bool staged_array;
    bool multisample;    /* 2D MS read; sample/layer may be staged separately */
-   bool staged_sample;  /* MS sample and optional array layer in staging half4 */
+   bool staged_sample;  /* MS sample and optional array layer in staging */
+   bool g18g_ms;        /* G18 X/Y = 4/0, packed sample/layer at 2 */
    bool three_d;        /* G17P 3D read: third contiguous integer coordinate */
    uint8_t sample;      /* immediate non-array sample index, values 0..3 */
    bool texture_kill;   /* Last use of an indirect texture index */
@@ -294,6 +295,9 @@ enum agx3_tex_lod {
 #define AGX3_TEX_GRADIENT_BANK_DDY_X 10u
 #define AGX3_TEX_GRADIENT_BANK_DDX_Y 12u
 #define AGX3_TEX_GRADIENT_BANK_DDY_Y 14u
+/* G18 native 2D gradients use X/Y=16/0, derivatives=4/6/8/10 and, for
+ * arrays, the existing layer word at 2. G17 staging stays unchanged. */
+#define AGX3_TEX_G18G_GRADIENT_X 16u
 /* A gradient3d continues the same interleave into two more banks. Read off
  * two literal-gradient kernels, where each staged value is the constant
  * itself: gradient3d((1,2,4),(8,16,32)) puts 1/8/2/16/4/32 into banks
@@ -474,6 +478,12 @@ bool agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
                                    uint8_t slot, bool cache, bool discard,
                                    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+bool agx3_tex_stage_gather_offset_at(enum agx_isa_encoding enc, uint16_t dest,
+                                   uint16_t src, bool array,
+                                   uint16_t packed_layer, uint8_t slot,
+                                   bool cache, bool discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 /* PACK_IMGWIR publishes an image write's layer register to staging half
  * `dest` (6 in bank 0), with the same operand fields as PACK_SMPIR's array
  * layer. AGX3C adds its f56/f57 selectors and takes the source from the low
@@ -590,6 +600,15 @@ bool agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc,
                                       uint8_t out[AGX3_TEX_MAX_LENGTH],
                                       uint8_t *len);
 
+bool agx3_tex_stage_cube_array_g18g(enum agx_isa_encoding enc,
+                                   uint16_t face, uint16_t layer, uint16_t lod,
+                                   bool register_lod, uint8_t slot,
+                                   uint16_t wait_mask, bool layer_cache,
+                                   bool layer_discard, bool lod_cache,
+                                   bool lod_discard,
+                                   uint8_t out[AGX3_TEX_MAX_LENGTH],
+                                   uint8_t *len);
+
 bool agx3_tex_normalize_cube_array_layer(enum agx_isa_encoding enc,
                                          uint16_t dest, uint16_t layer,
                                          bool layer_cache, bool layer_discard,
@@ -602,6 +621,13 @@ bool agx3_tex_stage_cube_z_lod_g17g(enum agx_isa_encoding enc, bool cube_array,
                                bool z_discard, bool lod_cache,
                                bool lod_discard,
                                uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_stage_cube_z_lod_g18g(enum agx_isa_encoding enc, bool cube_array,
+                                  uint16_t z, uint16_t lod, uint8_t slot,
+                                  uint16_t wait_mask, bool z_cache,
+                                  bool z_discard, bool lod_cache,
+                                  bool lod_discard,
+                                  uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Publish a 2D-array bias sample's minimum LOD at half 4, beside the layer and
  * bias staged in bank 6. */
@@ -662,6 +688,11 @@ bool agx3_tex_cube_cem_finalize_to(
    uint16_t axis_value, uint8_t slot,
    uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
+bool agx3_tex_cube_cem_finalize_g18g(
+   enum agx_isa_encoding enc, uint8_t component, bool cube_array,
+   uint16_t reciprocal, uint16_t axis_value, uint8_t slot,
+   uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 /* Build the G17G per-lane level/bias word in a 32-bit register rather than
  * in staging bank 6, for a COPY into a rotated staging block. */
 bool agx3_tex_pack_lod_word(enum agx_isa_encoding enc, uint16_t dest,
@@ -673,6 +704,11 @@ bool agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
                            uint8_t slot, uint16_t wait_mask,
                            bool src_cache, bool src_discard,
                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
+bool agx3_tex_stage_cube_z_g18g(enum agx_isa_encoding enc, uint16_t src,
+                              uint8_t slot, uint16_t wait_mask,
+                              bool src_cache, bool src_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
 
 /* Publish CEM's face at half `face` together with the 16-bit cube-array
  * layer at half `layer`. */
@@ -704,6 +740,11 @@ bool agx3_tex_stage_cube_array_lod(enum agx_isa_encoding enc, uint16_t face,
 /* Publish a register-valued integer 2D-MS sample index into the sampler
  * operand bank. The following MS fetch uses the sample-0 instruction form;
  * the staged value selects the sample. */
+bool agx3_tex_stage_ms_g18g(enum agx_isa_encoding enc, uint16_t sample,
+                            uint16_t packed_layer, bool array, uint8_t slot,
+                            bool cache, bool discard,
+                            uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len);
+
 bool agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                               uint16_t wait_mask, bool src_cache,
                               bool src_discard,

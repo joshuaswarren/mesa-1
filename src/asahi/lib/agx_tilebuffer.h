@@ -281,6 +281,9 @@ bool agx_g17p_rt0_tile_layout_supported(
 unsigned agx_g17p_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib);
 unsigned agx_g18g_rgba8_mrt_mask(const struct agx_tilebuffer_layout *tib);
 
+/* Compact G18 four-byte slots: RGBA8 or a scalar R32 integer/float word. */
+unsigned agx_g18g_word_mrt_mask(const struct agx_tilebuffer_layout *tib);
+
 /* Dense, unspilled single-sample RGBA8 layouts with three to eight targets. */
 unsigned
 agx_g17p_wide_rgba8_mrt_count(const struct agx_tilebuffer_layout *tib);

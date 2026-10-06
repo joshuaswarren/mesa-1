@@ -1739,11 +1739,26 @@ bool
 agx3_alu_form_ends_source(enum agx_isa_encoding enc, enum agx3_alu_op op,
                           unsigned i)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || op >= AGX3_ALU_NUM || i >= 3)
+   if (op >= AGX3_ALU_NUM || i >= 3)
       return false;
 
+   unsigned column;
+   if (enc == AGX_ISA_ENCODING_AGX3B) {
+      column = 0;
+   } else if (enc == AGX_ISA_ENCODING_AGX3C &&
+              (op == AGX3_ALU_RCP || op == AGX3_ALU_I2F ||
+               op == AGX3_ALU_U2F || op == AGX3_ALU_F2I)) {
+      /* G17G/G18G native live-input references establish the same unary
+       * source-discard fields. A wait-carrying specimen must not bypass
+       * the live-preserving compact path in agx3_select_core.c.
+       */
+      column = 1;
+   } else {
+      return false;
+   }
+
    const uint8_t field = agx3_alu_source_last_use[op][i];
-   const struct agx3_alu_form *F = &agx3_alu_forms[op][0];
+   const struct agx3_alu_form *F = &agx3_alu_forms[op][column];
    for (unsigned b = 0; field != 0 && b < F->nbase; ++b) {
       if (F->base[b].f == field && F->base[b].v != 0)
          return true;
@@ -3463,20 +3478,24 @@ agx3_alu_extract_imm32(enum agx_isa_encoding enc, uint16_t dest,
 }
 
 /* Native arithmetic right shift keeps signed fill without a second operation. */
-bool
-agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
+static bool
+agx3_alu_asr_imm32_source(enum agx_isa_encoding enc, uint16_t dest,
+                   uint16_t source, bool source_half,
                    unsigned shift, enum agx3_alu_hint hint, bool dest_cache,
                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                    uint8_t *length)
 {
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || !out || !length ||
-       dest >= 192 || source >= 192 || ((dest | source) & 1) ||
-       shift < 1 || shift > 31 || (unsigned)hint > AGX3_ALU_HINT_CACHE ||
+       dest >= 192 || (dest & 1) ||
+       source >= (source_half ? 256 : 192) || (!source_half && (source & 1)) ||
+       (source_half && !gpu1) ||
+       shift < 1 || shift > (source_half ? 15 : 31) ||
+       (unsigned)hint > AGX3_ALU_HINT_CACHE ||
        (wait_mask & ~0x3fu))
       return false;
    const struct agx3_field_kv base[] = {
-      {9,2},{10,2},{23,2},{24,2},{38,1},{39,2},
+      {9,2},{10,2},{23,2},{24,source_half ? 1 : 2},{38,1},{39,2},
       /* M5's native sra table requires the register-result selector and
        * GPU1 operation tag; reusing AGX3b's zero defaults is invalid. */
       {43,3},{44,167},
@@ -3489,6 +3508,28 @@ agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
    for (unsigned i=0;i<6;i++)
       fields[7+i]=(struct agx3_field_kv){45+i,!!(wait_mask & (1u<<i))};
    return agx3_bind_compose(enc,"sra",0,base,gpu1 ? 8 : 6,fields,13,out,length);
+}
+
+bool
+agx3_alu_asr_imm32(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
+                   unsigned shift, enum agx3_alu_hint hint, bool dest_cache,
+                   uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
+                   uint8_t *length)
+{
+   return agx3_alu_asr_imm32_source(enc, dest, source, false, shift, hint,
+                                   dest_cache, wait_mask, out, length);
+}
+
+/* Native G17G/G18G short-to-int shifts (block46-native-447): f24=1 reads
+ * only the named half while f10=2 writes the sign-extended word result. */
+bool
+agx3_alu_asr_imm16_to32(enum agx_isa_encoding enc, uint16_t dest,
+                       uint16_t source, unsigned shift, enum agx3_alu_hint hint,
+                       bool dest_cache, uint16_t wait_mask,
+                       uint8_t out[AGX3_ALU_MAX_LENGTH], uint8_t *length)
+{
+   return agx3_alu_asr_imm32_source(enc, dest, source, true, shift, hint,
+                                   dest_cache, wait_mask, out, length);
 }
 
 bool
@@ -3744,16 +3785,19 @@ agx3_alu_fcmp_select16_gpu1(const struct agx3_fsel32_gpu1_desc *d,
     *   uint(float(h) >= b)       fseli16 h2 = ^r1 <= h4 ? #1 : #0; clr h3
     *   ... with h reused         f42 = 1, h's cache hint
     *
-    * Every witnessed half sits in the low half of a register (Apple loads
-    * each lane into its own), so an odd half stays refused, as for the
-    * narrow integer comparands of agx3_isel_encode().
+    * Native float/half selects with a live half comparand also use odd
+    * halves (f33 = 5, f41 = 1, f42 = 1). Only full-width comparands need
+    * even half-register indices; selected values may likewise use either
+    * half independently.
     */
-   if (d->cmp1_16 && (d->cmp1_immediate || (d->cmp1 & 1)))
+   if (d->cmp1_16 && d->cmp1_immediate)
       return false;
    for (unsigned i = 0; i < 4; ++i) {
       /* The comparands are 32-bit registers (even halves); the selected
        * values are 16-bit halves. */
-      if (src[i] >= 256 || (!imm[i] && i < 2 && (src[i] & 1)) ||
+      if (src[i] >= 256 ||
+          (!imm[i] && (i == 0 || (i == 1 && !d->cmp1_16)) &&
+           (src[i] & 1)) ||
           (unsigned)hints[i] > AGX3_ALU_HINT_CACHE ||
           (imm[i] && hints[i] != AGX3_ALU_HINT_NONE))
          return false;
@@ -3797,12 +3841,14 @@ agx3_alu_asr_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
                    uint16_t wait_mask, uint8_t out[AGX3_ALU_MAX_LENGTH],
                    uint8_t *length)
 {
-   if (enc != AGX_ISA_ENCODING_AGX3B || !out || !length ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || !out || !length ||
        dest >= 256 || source >= 256 || shift < 1 || shift > 15 ||
        (unsigned)hint > AGX3_ALU_HINT_CACHE || (wait_mask & ~0x3fu))
       return false;
    const struct agx3_field_kv base[] = {
       {9,2},{10,1},{23,2},{24,1},{38,1},{39,2},
+      {43,3},{44,167},
    };
    struct agx3_field_kv fields[13] = {
       {2,dest},{11,dest_cache},{16,source},{30,shift},
@@ -3811,7 +3857,7 @@ agx3_alu_asr_imm16(enum agx_isa_encoding enc, uint16_t dest, uint16_t source,
    };
    for (unsigned i=0;i<6;i++)
       fields[7+i]=(struct agx3_field_kv){45+i,!!(wait_mask & (1u<<i))};
-   return agx3_bind_compose(enc,"sra",0,base,6,fields,13,out,length);
+   return agx3_bind_compose(enc,"sra",0,base,gpu1 ? 8 : 6,fields,13,out,length);
 }
 
 bool agx3_alu_fcmp_select_reg_imm(enum agx_isa_encoding enc, uint16_t dest,

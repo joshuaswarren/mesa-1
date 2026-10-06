@@ -1362,18 +1362,25 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
 
       unsigned level = zsbuf->level;
       unsigned first_layer = zsbuf->first_layer;
+      const bool single_layer =
+         MAX2(util_framebuffer_get_num_layers(framebuffer), 1) == 1;
 
       if (zres) {
          c->depth.base = agx_map_texture_gpu(zres, first_layer) +
                          ail_get_level_offset_B(&zres->layout, level);
 
-         /* Main stride in pages */
-         assert((zres->layout.depth_px == 1 ||
-                 util_is_aligned(zres->layout.layer_stride_B, AIL_PAGESIZE)) &&
-                "Page aligned Z layers");
-
-         unsigned stride_pages = zres->layout.layer_stride_B / AIL_PAGESIZE;
-         c->depth.stride = ((stride_pages - 1) << 14) | 1;
+         /* Native M5-layout ZLS uses no array stride for a single selected
+          * layer. Small array layers need not be page-aligned; the base above
+          * already selects the layer. Layered commands retain the page ABI. */
+         if (zres->layout.policy == AIL_LAYOUT_POLICY_M5 && single_layer) {
+            c->depth.stride = 0;
+         } else {
+            assert((zres->layout.depth_px == 1 ||
+                    util_is_aligned(zres->layout.layer_stride_B, AIL_PAGESIZE)) &&
+                   "Page aligned Z layers");
+            unsigned stride_pages = zres->layout.layer_stride_B / AIL_PAGESIZE;
+            c->depth.stride = ((stride_pages - 1) << 14) | 1;
+         }
 
          if (zres->layout.compressed) {
             c->depth.comp_base =
@@ -1405,12 +1412,15 @@ agx_cmdbuf(struct agx_device *dev, struct drm_asahi_cmd_render *c,
          c->stencil.base = agx_map_texture_gpu(sres, first_layer) +
                            ail_get_level_offset_B(&sres->layout, level);
 
-         /* Main stride in pages */
-         assert((sres->layout.depth_px == 1 ||
-                 util_is_aligned(sres->layout.layer_stride_B, AIL_PAGESIZE)) &&
-                "Page aligned S layers");
-         unsigned stride_pages = sres->layout.layer_stride_B / AIL_PAGESIZE;
-         c->stencil.stride = ((stride_pages - 1) << 14) | 1;
+         if (sres->layout.policy == AIL_LAYOUT_POLICY_M5 && single_layer) {
+            c->stencil.stride = 0;
+         } else {
+            assert((sres->layout.depth_px == 1 ||
+                    util_is_aligned(sres->layout.layer_stride_B, AIL_PAGESIZE)) &&
+                   "Page aligned S layers");
+            unsigned stride_pages = sres->layout.layer_stride_B / AIL_PAGESIZE;
+            c->stencil.stride = ((stride_pages - 1) << 14) | 1;
+         }
 
          if (sres->layout.compressed) {
             c->stencil.comp_base =

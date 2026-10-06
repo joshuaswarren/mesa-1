@@ -1662,8 +1662,8 @@ agx_nir_lower_g17p_tile_samples(nir_shader *s, unsigned nr_samples)
 bool
 agx_nir_lower_g18_tile_samples(nir_shader *s, unsigned nr_samples)
 {
-   /* The one G18G multisample witness is four samples (MSAA notes s2.5). */
-   if (nr_samples != 4)
+   /* Native326 adds two samples to the existing four-sample SR39 protocol. */
+   if (nr_samples != 2 && nr_samples != 4)
       return false;
 
    struct g17p_tile_sample_state state = {.samples = nr_samples, .g18 = true};
@@ -1746,7 +1746,7 @@ agx_nir_fs_prolog(nir_builder *b, const void *key_)
 
    if (key->cull_distance_size) {
       NIR_PASS(_, b->shader, agx_nir_lower_cull_distance_fs,
-               key->cull_distance_size);
+               key->cull_distance_size, key->native_cull_constant_planes);
    }
 
    if (key->polygon_stipple) {

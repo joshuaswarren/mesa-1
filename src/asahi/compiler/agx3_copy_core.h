@@ -40,8 +40,9 @@ extern "C" {
 
 /* The compact COPY's destination field (f2) is seven bits wide at EVERY
  * width, so no four-byte copy can name a destination at or above this half
- * index -- the 16-bit forms refuse there, and the 32-bit uniform form moves
- * to the ten-byte ep1.  Register allocation needs the same number to know
+ * index. AGX3B's 16-bit encoder refuses there; AGX3C's native extended
+ * form covers all 256 halves. The 32-bit uniform form also uses ep1.
+ * AGX3B register allocation needs this compact limit to know
  * when a half victim could become unencodable.  The SOURCE fields are not
  * narrow this way: Apple's own ep0 copies carry sources well past it. */
 #define AGX3_COPY_REG16_DEST_HALVES 128u

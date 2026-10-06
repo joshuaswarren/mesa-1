@@ -124,8 +124,8 @@ bool agx3_vary_uvsw(enum agx_isa_encoding enc, uint16_t value,
                     uint8_t *len);
 
 /* The same write with the unified-vertex-store index read from the 16-bit
- * register half `index`, as an unlinked vertex shader computes it. AGX3b
- * only. */
+ * register half `index`, as an unlinked vertex shader computes it. Apple's
+ * AGX3b/c/d tables define this operand form; AGX3d accepts at most one wait. */
 bool agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
                                    uint16_t index, uint8_t slot,
                                    bool value_kill, uint16_t wait_mask,

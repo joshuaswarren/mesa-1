@@ -24,6 +24,19 @@ dest_is_reg32(const struct agx3_sel_instr *I)
    return I->has_dest && I->dest_size == AGX3_SEL_SIZE_32;
 }
 
+/* The compact conversion/reciprocal specimens end their source's lifetime.
+ * Native G17G and G18G live-input references clear f27 for flt2int and f29
+ * for int2flt/f32rcp. In these ten-byte forms both occupy byte 8, bit 5;
+ * register deposits, rounding modes and waits occupy different bits.
+ * Keep a live source available to later instructions, including stores.
+ */
+static void
+preserve_unary_source(enum agx_isa_encoding encoding, bool live, uint8_t *bytes)
+{
+   if (encoding == AGX_ISA_ENCODING_AGX3C && live)
+      bytes[8] &= ~0x20;
+}
+
 bool
 agx3_select_op_supported(enum agx3_sel_op op)
 {
@@ -313,6 +326,7 @@ agx3_select_encode(enum agx_isa_encoding encoding,
       if (!agx3_pack_f32_to_int_rtz_reg(encoding, mode, I->dest, I->src[0].reg,
                                         &e))
          return false;
+      preserve_unary_source(encoding, I->src[0].live, e.bytes);
       memcpy(out, e.bytes, e.length);
       *len = e.length;
       return true;
@@ -325,6 +339,7 @@ agx3_select_encode(enum agx_isa_encoding encoding,
          return false;
       if (!agx3_pack_i32_to_f32_reg(encoding, I->dest, I->src[0].reg, &e))
          return false;
+      preserve_unary_source(encoding, I->src[0].live, e.bytes);
       memcpy(out, e.bytes, e.length);
       *len = e.length;
       return true;
@@ -337,6 +352,7 @@ agx3_select_encode(enum agx_isa_encoding encoding,
          return false;
       if (!agx3_pack_u32_to_f32_reg(encoding, I->dest, I->src[0].reg, &e))
          return false;
+      preserve_unary_source(encoding, I->src[0].live, e.bytes);
       memcpy(out, e.bytes, e.length);
       *len = e.length;
       return true;
@@ -375,6 +391,7 @@ agx3_select_encode(enum agx_isa_encoding encoding,
          return false;
       if (!agx3_pack_f32_rcp_reg(encoding, I->dest, I->src[0].reg, &e))
          return false;
+      preserve_unary_source(encoding, I->src[0].live, e.bytes);
       memcpy(out, e.bytes, e.length);
       *len = e.length;
       return true;

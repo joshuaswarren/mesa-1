@@ -352,11 +352,11 @@ agx_gallium_pbe_agx3_generation(enum agx_descriptor_generation generation)
    }
 }
 
-bool
-agx_gallium_pack_native_pbe(
+static bool
+agx_gallium_pack_native_pbe_impl(
    enum agx_descriptor_generation generation,
    struct agx_gallium_pbe_descriptor *out,
-   const struct AGX_PBE *legacy)
+   const struct AGX_PBE *legacy, bool g18_mips)
 {
    const unsigned descriptor_size =
       agx_gallium_pbe_descriptor_size(generation);
@@ -421,7 +421,7 @@ agx_gallium_pack_native_pbe(
        (multisample && (legacy->layout == AGX_LAYOUT_LINEAR ||
                         legacy->level != 0 || legacy->levels != 1 ||
                         legacy->unk_mipmapped)) ||
-       (agx3_generation != AGX_PBE_AGX3_GENERATION_9 &&
+       (agx3_generation != AGX_PBE_AGX3_GENERATION_9 && !g18_mips &&
         (legacy->level != 0 || legacy->levels != 1 ||
          legacy->unk_mipmapped)) ||
        legacy->srgb || legacy->extended != legacy->compressed ||
@@ -471,6 +471,8 @@ agx_gallium_pack_native_pbe(
       : agx3_generation == AGX_PBE_AGX3_GENERATION_9
          ? agx_pbe_agx3_2d_mip_pack(agx3_generation, &fields, legacy->level,
                                     legacy->levels, &packed)
+         : g18_mips
+         ? agx_pbe_g18_2d_mip_pack(&fields, legacy->level, legacy->levels, &packed)
          : agx_pbe_agx3_2d_pack(agx3_generation, &fields, &packed);
    if (!valid)
       return false;
@@ -479,6 +481,22 @@ agx_gallium_pack_native_pbe(
                  "the AGX3 PBE descriptor is the AGX3 descriptor stride");
    memcpy(out->opaque, packed.bytes, sizeof(packed.bytes));
    return true;
+}
+
+bool
+agx_gallium_pack_native_pbe(
+   enum agx_descriptor_generation generation,
+   struct agx_gallium_pbe_descriptor *out, const struct AGX_PBE *legacy)
+{
+   return agx_gallium_pack_native_pbe_impl(generation, out, legacy, false);
+}
+
+bool
+agx_gallium_pack_g18_native_pbe(
+   struct agx_gallium_pbe_descriptor *out, const struct AGX_PBE *legacy)
+{
+   return agx_gallium_pack_native_pbe_impl(
+      AGX_DESCRIPTOR_GENERATION_10, out, legacy, true);
 }
 
 bool

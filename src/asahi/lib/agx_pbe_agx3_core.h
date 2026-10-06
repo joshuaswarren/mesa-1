@@ -128,6 +128,13 @@ bool agx_pbe_agx3_2d_mip_pack(
    uint32_t generation, const struct agx_pbe_agx3_2d_fields *fields,
    uint32_t level, uint32_t levels, struct agx_pbe_agx3_descriptor *out);
 
+/* G18 StateFields (26A428) ordinary tiled 2D mip chain. G17G is not
+ * admitted by this entry point's evidence. Width/height/buffer describe
+ * the base allocation, not the selected level. */
+bool agx_pbe_g18_2d_mip_pack(
+   const struct agx_pbe_agx3_2d_fields *fields, uint32_t level,
+   uint32_t levels, struct agx_pbe_agx3_descriptor *out);
+
 bool agx_pbe_agx3_2d_unpack(
    uint32_t generation, const void *bytes, size_t size,
    struct agx_pbe_agx3_2d_fields *fields);

@@ -253,6 +253,10 @@ bool agx_gallium_pack_native_pbe(
    struct agx_gallium_pbe_descriptor *out,
    const struct AGX_PBE *semantic);
 
+/* G18-only mip-chain extension; retains all semantic sideband checks. */
+bool agx_gallium_pack_g18_native_pbe(
+   struct agx_gallium_pbe_descriptor *out, const struct AGX_PBE *semantic);
+
 bool agx_gallium_set_null_native_pbe(
    enum agx_descriptor_generation generation,
    struct agx_gallium_pbe_descriptor *out);

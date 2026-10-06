@@ -31,7 +31,8 @@ static bool
 agx_g18_msaa4_tib(const struct agx_device *dev,
                   const struct agx_tilebuffer_layout *tib)
 {
-   return dev->chip == AGX_CHIP_G18G && tib->nr_samples == 4 &&
+   return dev->chip == AGX_CHIP_G18G &&
+          (tib->nr_samples == 2 || tib->nr_samples == 4) &&
           agx_g18_msaa4_enabled();
 }
 
@@ -477,7 +478,7 @@ agx_build_end_of_tile_shader(struct agx_bg_eot_cache *cache,
 {
    const bool g17g = agx_chip_m5_paths(cache->dev->chip);
    const unsigned g18_mrt = cache->dev->chip == AGX_CHIP_G18G
-                              ? agx_g18g_rgba8_mrt_mask(&key->tib) : 0;
+                              ? agx_g18g_word_mrt_mask(&key->tib) : 0;
    /* msaa163: G18G's four-sample tile is resolved at end of tile into the
     * single-sample PBE target, the shape Apple's G18 4x render uses: its
     * end-of-tile code is the same program at 1x and 4x (byte-identical over

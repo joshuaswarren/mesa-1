@@ -427,6 +427,31 @@ agx_pbe_agx3_2d_mip_pack(
 }
 
 bool
+agx_pbe_g18_2d_mip_pack(
+   const struct agx_pbe_agx3_2d_fields *fields, uint32_t level,
+   uint32_t levels, struct agx_pbe_agx3_descriptor *out)
+{
+   if (out)
+      memset(out, 0, sizeof(*out));
+   if (!fields || !levels || levels > 16 || level >= levels ||
+       (fields->layout == AGX_PBE_LAYOUT_LINEAR && (level || levels != 1)) ||
+       !agx_pbe_agx3_2d_pack(AGX_PBE_AGX3_GENERATION_10, fields, out))
+      return false;
+
+   /* AGXMetalG18G 26A428 StateFields, native375: unlike Gen9's bit58,
+    * G18 marks the chain at word0 bit60. The level and levels-minus-one
+    * nibbles are word2[47:44] and [51:48]. Preserve the base address and
+    * dimensions so the hardware performs native mip-tail addressing. */
+   if (level || levels != 1) {
+      store_le64(&out->bytes[0], load_le64(&out->bytes[0]) | (UINT64_C(1) << 60));
+      store_le64(&out->bytes[8], load_le64(&out->bytes[8]) | (UINT64_C(1) << 63));
+      store_le64(&out->bytes[16],
+                 ((uint64_t)level | ((uint64_t)(levels - 1) << 4)) << 44);
+   }
+   return true;
+}
+
+bool
 agx_pbe_agx3_2d_unpack(uint32_t generation, const void *bytes, size_t size,
                        struct agx_pbe_agx3_2d_fields *fields)
 {

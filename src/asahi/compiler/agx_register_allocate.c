@@ -2229,20 +2229,29 @@ agx_ra(agx_context *ctx)
 
       agx_spill(ctx, max_possible_regs, remat);
 
-      if (remat && ctx->remat_fallback_spilled) {
-         /* The wave-saving remat-only pass could not meet its estimated
-          * budget and spilled to scratch; finish under the full budget. */
-         max_possible_regs = full_budget;
-         remat = false;
-         spilling = true;
-         agx_compute_liveness(ctx);
-         if (agx_calc_register_demand(ctx, false) > max_possible_regs)
-            agx_spill(ctx, max_possible_regs, false);
-      }
-
-      /* After spilling, recalculate liveness and demand */
+      /* Rematerialization changes instruction lifetimes. Measure the actual
+       * result before deciding whether the optional wave-saving budget held.
+       */
       agx_compute_liveness(ctx);
       effective_demand = agx_calc_register_demand(ctx, false);
+
+      if (remat && (ctx->remat_fallback_spilled ||
+                    effective_demand > max_possible_regs)) {
+         /* The reduced budget is only an occupancy optimization. Constants
+          * reintroduced at their uses can exceed that estimate even without
+          * a scratch spill. Retain the rematerialized program and allocate
+          * under the original hardware budget, spilling only if needed.
+          */
+         max_possible_regs = full_budget;
+         remat = false;
+         spilling = ctx->remat_fallback_spilled ||
+                    effective_demand > max_possible_regs;
+         if (effective_demand > max_possible_regs) {
+            agx_spill(ctx, max_possible_regs, false);
+            agx_compute_liveness(ctx);
+            effective_demand = agx_calc_register_demand(ctx, false);
+         }
+      }
 
       /* The resulting program can now be assigned registers */
       assert(effective_demand <= max_possible_regs && "spiller post-condition");

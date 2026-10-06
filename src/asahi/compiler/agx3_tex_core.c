@@ -93,7 +93,9 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
     * ordinary array fetch has, so it stays closed. */
    if ((d->sample && !d->multisample) ||
        (d->staged_sample && (!d->multisample || d->sample)) ||
-       (d->multisample &&
+       (d->g18g_ms && (enc != AGX_ISA_ENCODING_AGX3C ||
+                       !d->multisample || !d->staged_sample || d->coord != 4)) ||
+       (d->multisample && !d->g18g_ms &&
         ((enc != AGX_ISA_ENCODING_AGX3B &&
           !(enc == AGX_ISA_ENCODING_AGX3C && d->staged_sample && !d->array)) ||
          d->sample > 3 ||
@@ -128,7 +130,7 @@ fetch_ok(enum agx_isa_encoding enc, const struct agx3_tex_fetch_desc *d)
        (d->texture_kill && tk != AGX3_TEX_OPERAND_REGISTER) ||
        (d->multisample &&
         (sk != AGX3_TEX_OPERAND_IMMEDIATE ||
-         d->sampler_value != (d->staged_sample ? 1 : 0))))
+         d->sampler_value != (d->g18g_ms && d->array ? 0 : d->staged_sample ? 1 : 0))))
       return false;
    if (d->three_d &&
        (sk != AGX3_TEX_OPERAND_IMMEDIATE || d->sampler_value != 0))
@@ -390,17 +392,38 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * The array, cube, 3D, gather, LOD-query, minimum-LOD, vertex-stage,
     * runtime-descriptor and gradient shapes have no G17G witness yet and
     * stay refused on AGX3C. */
-   /* The only vertex-stage G17G witnesses are explicit register levels
-    * (gpu/m5-shadow-array-cube-reference.metal sections 08-10); a bias or
-    * implicit level has no meaning without derivatives and stays closed. */
+   /* Vertex-stage witnesses cover explicit register levels and the new
+    * explicit gradients. Bias and implicit levels remain fragment-only. */
    const bool gpu1_plain_2d =
       enc == AGX_ISA_ENCODING_AGX3C && !d->cube &&
       !d->three_d && d->gather == AGX3_TEX_GATHER_NONE && !d->query_lod &&
       !d->min_lod &&
-      (!d->vertex_stage || d->lod == AGX3_TEX_LOD_REGISTER) &&
+      (!d->vertex_stage || d->lod == AGX3_TEX_LOD_REGISTER ||
+       d->lod == AGX3_TEX_LOD_GRADIENT) &&
       d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
       (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
       (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
+
+   /* Native371/403/408/413 cover ordinary, runtime-offset, constant-offset
+    * and cube gathers, including their distinct array/face publications. */
+   const bool gpu1_gather = enc == AGX_ISA_ENCODING_AGX3C &&
+      d->gather != AGX3_TEX_GATHER_NONE &&
+      d->width == AGX3_TEX_W32 && d->mask == 15 &&
+      (!d->cube || (!d->offset && !d->offset_register)) && !d->three_d &&
+      !d->offset_staged &&
+      !d->query_lod && !d->min_lod &&
+      d->lod == AGX3_TEX_LOD_AUTO &&
+      d->sample_abi == AGX3_TEX_SAMPLE_ABI_DRIVER &&
+      (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE &&
+      (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) == AGX3_TEX_OPERAND_IMMEDIATE;
+
+   /* g18-gradient-reference, compiled independently for G17G and G18G:
+    * ordinary 2D/array gradients carry f139=5 in both stages, with an
+    * optional signed immediate offset and no fragment group marker. The
+    * stream packer must supply the architecture-specific staging banks. */
+   const bool gpu1_gradient = gpu1_plain_2d && !d->shadow &&
+      !d->compute_stage && !d->offset_register && !d->offset_staged &&
+      d->lod == AGX3_TEX_LOD_GRADIENT;
 
    /* G17G's own cube witnesses, `gpu/m5-shadow-array-cube-reference.metal`
     * compiled with `metal-nt -arch applegpu_g17g`: depthcube and
@@ -412,8 +435,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * form takes, and the fragment ones carry the group terminator f156.
     * Every witness compares, so a cube sample without a comparison stays
     * refused rather than extrapolated. */
-   const bool gpu1_cube =
-      enc == AGX_ISA_ENCODING_AGX3C && d->cube && d->shadow && !d->three_d &&
+   const bool gpu1_cube = (gpu1_gather && d->cube) ||
+      (enc == AGX_ISA_ENCODING_AGX3C && d->cube && d->shadow && !d->three_d &&
       d->coord == 0 && !d->offset && !d->offset_register &&
       d->gather == AGX3_TEX_GATHER_NONE && !d->query_lod && !d->min_lod &&
       (d->lod == AGX3_TEX_LOD_AUTO || d->lod == AGX3_TEX_LOD_REGISTER ||
@@ -422,7 +445,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
       (d->texture_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
          AGX3_TEX_OPERAND_IMMEDIATE &&
       (d->sampler_kind ?: AGX3_TEX_OPERAND_IMMEDIATE) ==
-         AGX3_TEX_OPERAND_IMMEDIATE;
+         AGX3_TEX_OPERAND_IMMEDIATE);
 
    /* The native clamp corpus covers non-array fragment 2D/3D samples,
     * including 2D comparison/offset and indexed descriptor operands. */
@@ -506,13 +529,12 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    } else if (d->lod == AGX3_TEX_LOD_REGISTER ||
               d->lod == AGX3_TEX_LOD_BIAS_REGISTER ||
               d->lod == AGX3_TEX_LOD_GRADIENT) {
-      /* The per-lane level, the per-lane bias and the four gradient scalars
-       * are witnessed on AGX3b; the plain 2D per-lane level and bias also on
-       * G17G (f139 = 4 / 3 with the PACK_SMPIR above). None of them carries
-       * the immediate operand. The G17G gradient staging is not grounded. */
+      /* These modes have no immediate LOD operand. The ordinary G17G level
+       * and bias are grounded above; gradients require the narrower profile
+       * established by the independent 2D/array reference. */
       if ((enc != AGX_ISA_ENCODING_AGX3B &&
-           !((gpu1_plain_2d || gpu1_cube) &&
-             d->lod != AGX3_TEX_LOD_GRADIENT)) ||
+           !(((gpu1_plain_2d || gpu1_cube) &&
+              d->lod != AGX3_TEX_LOD_GRADIENT) || gpu1_gradient)) ||
           d->lod_x64 != 0)
          return false;
    } else if (d->lod != AGX3_TEX_LOD_AUTO || d->lod_x64 != 0) {
@@ -668,7 +690,7 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    const bool any_staged_offset = d->offset_staged || d->offset_register;
    if (d->offset &&
        ((enc != AGX_ISA_ENCODING_AGX3B &&
-         !(gpu1_plain_2d && !d->offset_register)) ||
+         !((gpu1_plain_2d && !d->offset_register) || gpu1_gather)) ||
         (any_staged_offset
             ? d->offset_xyz != 0 || (d->three_d && !staged_3d_bias_min)
             : d->offset_xyz == 0 ||
@@ -709,7 +731,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
     * 3D gathers remain unsupported.
     */
    if (d->gather != AGX3_TEX_GATHER_NONE &&
-       (d->gather > AGX3_TEX_GATHER_A || enc != AGX_ISA_ENCODING_AGX3B ||
+       (d->gather > AGX3_TEX_GATHER_A ||
+        (enc != AGX_ISA_ENCODING_AGX3B && !gpu1_gather) ||
         d->lod != AGX3_TEX_LOD_AUTO || d->three_d))
       return false;
 
@@ -763,7 +786,8 @@ sample_ok(enum agx_isa_encoding enc, const struct agx3_tex_sample_desc *d)
    const bool staged_register_lod = d->lod == AGX3_TEX_LOD_REGISTER ||
                                     d->lod == AGX3_TEX_LOD_BIAS_REGISTER;
    if (d->shadow &&
-       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_plain_2d && !gpu1_cube) ||
+       ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1_plain_2d &&
+         !gpu1_cube && !gpu1_gather) ||
         d->three_d ||
         d->mask != (d->gather != AGX3_TEX_GATHER_NONE ? 15u : 1u) ||
         (((d->cube && !staged_register_lod && !gpu1_array_register_lod) ||
@@ -1049,7 +1073,9 @@ agx3_tex_encode_sample(enum agx_isa_encoding enc,
     * depthcube); every other G17G sample, including the offset comparison,
     * is the 22-byte ep3 form. */
    const int ep = enc == AGX_ISA_ENCODING_AGX3C
-                     ? (d->shadow && !d->offset
+                     ? (d->gather != AGX3_TEX_GATHER_NONE
+                           ? (d->offset && !d->offset_register ? 3 : 2) :
+                        d->shadow && !d->offset
                            ? ((d->cube ||
                                (d->array && (d->lod == AGX3_TEX_LOD_REGISTER ||
                                              d->lod == AGX3_TEX_LOD_BIAS_REGISTER))) ? 2
@@ -1809,7 +1835,8 @@ agx3_tex_stage_bias_min(enum agx_isa_encoding enc, uint16_t bias,
  *   x=16, y=17, layer=8: 1705540600204440f0e60300
  */
 bool
-agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
+agx3_tex_stage_gather_offset_at(enum agx_isa_encoding enc, uint16_t dest,
+                             uint16_t src,
                              bool array, uint16_t packed_layer,
                              uint8_t slot, bool cache, bool discard,
                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
@@ -1818,22 +1845,35 @@ agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || (src & 1) || src > 126 ||
-       slot < 1 || slot > 6 || (cache && discard) ||
-       (array && ((packed_layer & 1) || packed_layer > 190)))
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) ||
+       (dest != 6 && !(gpu1 && dest == 2)) || (src & 1) || src > 126 ||
+       slot < 1 || slot > (gpu1 ? 8 : 6) || (cache && discard) ||
+       (array && ((packed_layer & 1) || packed_layer > (gpu1 ? 126 : 190))))
       return false;
 
    const struct agx3_field_kv fields[] = {
-      KV(5, 6), KV(9, 5), KV(10, 2), KV(12, slot),
+      KV(5, dest), KV(9, 5), KV(10, 2), KV(12, slot),
       KV(16, src), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
       KV(30, src + 1), KV(37, 2), KV(38, 1), KV(39, cache), KV(41, discard),
       KV(44, array ? packed_layer : 0), KV(51, array ? 2 : 1),
       KV(52, 2), KV(55, array),
       KV(74, 5), KV(75, 12), KV(76, 5), KV(77, 28),
+      KV(56, 1), KV(57, 119),
    };
    return agx3_bind_compose(enc, "pack_smpir", 0, fields,
-                            sizeof(fields) / sizeof(fields[0]), NULL, 0,
+                            sizeof(fields) / sizeof(fields[0]) - (gpu1 ? 0 : 2), NULL, 0,
                             out, len);
+}
+
+bool
+agx3_tex_stage_gather_offset(enum agx_isa_encoding enc, uint16_t src,
+                           bool array, uint16_t packed_layer,
+                           uint8_t slot, bool cache, bool discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_gather_offset_at(enc, 6, src, array, packed_layer,
+                                        slot, cache, discard, out, len);
 }
 
 /* The dynamic array-layer witness uses PACK_SMPIR like register LOD, but its
@@ -2141,8 +2181,9 @@ agx3_tex_stage_array_typed_lod(enum agx_isa_encoding enc, uint16_t bank,
  * leaving the sample unserved) makes the sampler read level zero for every
  * lane, whatever level was asked for.
  */
-bool
-agx3_tex_stage_cube_z_lod_g17g(enum agx_isa_encoding enc, bool cube_array,
+static bool
+agx3_tex_stage_cube_z_lod_at(enum agx_isa_encoding enc, bool cube_array,
+                          uint8_t bank,
                           uint16_t z, uint16_t lod, uint8_t slot,
                           uint16_t wait_mask, bool z_cache, bool z_discard,
                           bool lod_cache, bool lod_discard,
@@ -2152,7 +2193,8 @@ agx3_tex_stage_cube_z_lod_g17g(enum agx_isa_encoding enc, bool cube_array,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3C || lod >= 128 || slot < 1 || slot > 8 ||
+   if (enc != AGX_ISA_ENCODING_AGX3C || (bank != 2 && bank != 6) ||
+       lod >= 128 || slot < 1 || slot > 8 ||
        (wait_mask & ~0xffu) || (z_cache && z_discard) ||
        (lod_cache && lod_discard) ||
        (cube_array ? (z >= 256 || (z & 1)) : z >= 128))
@@ -2164,7 +2206,7 @@ agx3_tex_stage_cube_z_lod_g17g(enum agx_isa_encoding enc, bool cube_array,
     * Apple's depthcube_array sample_compare with level(reg),
     * 3702004a2500aa0ac00261402900. */
    const struct agx3_field_kv base[] = {
-      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(5, bank), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(37, 2), KV(38, 1), KV(51, cube_array ? 2 : 1), KV(52, 2),
       KV(74, 10), KV(76, 2), KV(77, 16), KV(56, 1), KV(57, 119),
       KV(44, 8), KV(55, 1), KV(75, 12),
@@ -2184,6 +2226,30 @@ agx3_tex_stage_cube_z_lod_g17g(enum agx_isa_encoding enc, bool cube_array,
 
    return agx3_bind_compose(enc, "pack_smpir", 0, base, cube_array ? 17 : 14,
                             ov, n, out, len);
+}
+
+bool
+agx3_tex_stage_cube_z_lod_g17g(enum agx_isa_encoding enc, bool cube_array,
+                          uint16_t z, uint16_t lod, uint8_t slot,
+                          uint16_t wait_mask, bool z_cache, bool z_discard,
+                          bool lod_cache, bool lod_discard,
+                          uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_cube_z_lod_at(enc, cube_array, 6, z, lod, slot,
+      wait_mask, z_cache, z_discard, lod_cache, lod_discard, out, len);
+}
+
+/* Native G18 cube and cube-array level/bias references differ from the
+ * G17 publication only in its destination half: Y + 2, with Y at zero. */
+bool
+agx3_tex_stage_cube_z_lod_g18g(enum agx_isa_encoding enc, bool cube_array,
+                          uint16_t z, uint16_t lod, uint8_t slot,
+                          uint16_t wait_mask, bool z_cache, bool z_discard,
+                          bool lod_cache, bool lod_discard,
+                          uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_cube_z_lod_at(enc, cube_array, 2, z, lod, slot,
+      wait_mask, z_cache, z_discard, lod_cache, lod_discard, out, len);
 }
 
 /* A G17G cube-array comparison normalizes its integer array layer into a
@@ -2445,8 +2511,9 @@ agx3_tex_cube_cem_rcp(enum agx_isa_encoding enc,
  * native cube shaders finish them with this special FMA form: f35 names the
  * reciprocal major axis, f18 names the selected axis value and f12 groups the
  * result with the face PACK_SMPIR transaction. */
-bool
-agx3_tex_cube_cem_finalize_to(enum agx_isa_encoding enc, uint8_t component,
+static bool
+agx3_tex_cube_cem_finalize_at(enum agx_isa_encoding enc, uint8_t component,
+                              uint8_t bank,
                               uint16_t reciprocal, uint16_t axis_value,
                               uint8_t slot,
                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
@@ -2464,6 +2531,7 @@ agx3_tex_cube_cem_finalize_to(enum agx_isa_encoding enc, uint8_t component,
     * landing on slot 8 has no finalizer and refuses. */
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || component > 1 ||
+       bank > 6 || (bank & 1) ||
        (reciprocal & 1) || reciprocal > 190 || (axis_value & 1) ||
        axis_value > 190 || slot < 1 || slot > (gpu1 ? 7 : 6))
       return false;
@@ -2481,13 +2549,38 @@ agx3_tex_cube_cem_finalize_to(enum agx_isa_encoding enc, uint8_t component,
       KV(91, 2), KV(95, 1),  KV(96, 55),
    };
    const struct agx3_field_kv ov[] = {
-      KV(12, slot), KV(18, axis_value), KV(35, reciprocal),
+      KV(5, bank), KV(12, slot), KV(18, axis_value), KV(35, reciprocal),
    };
    /* The Gen10 pair is the last two entries of each base; AGX3B stops
     * before it. */
    return agx3_bind_compose(enc, "f32fma", 5, component ? base1 : base0,
                             component ? (gpu1 ? 18 : 16) : (gpu1 ? 17 : 15),
                             ov, sizeof(ov) / sizeof(ov[0]), out, len);
+}
+
+bool
+agx3_tex_cube_cem_finalize_to(enum agx_isa_encoding enc, uint8_t component,
+                              uint16_t reciprocal, uint16_t axis_value,
+                              uint8_t slot,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_cube_cem_finalize_at(enc, component, component * 2,
+                                       reciprocal, axis_value, slot, out, len);
+}
+
+bool
+agx3_tex_cube_cem_finalize_g18g(enum agx_isa_encoding enc, uint8_t component,
+                               bool cube_array, uint16_t reciprocal,
+                               uint16_t axis_value, uint8_t slot,
+                               uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3C)
+      return false;
+   /* Native G18: cube X/reference 6/4, cube-array X/reference 4/6;
+    * both put Y at zero and face/layer/level at half 2. */
+   return agx3_tex_cube_cem_finalize_at(enc, component,
+      component ? 0 : cube_array ? 4 : 6,
+      reciprocal, axis_value, slot, out, len);
 }
 
 bool
@@ -2509,8 +2602,8 @@ agx3_tex_cube_cem_finalize(enum agx_isa_encoding enc, uint8_t component,
 /* CEM publishes the selected face through the FLOAT cube form of PACK_SMPIR.
  * For discarded special r1 on slot 1 Apple emits exactly
  * 1705540600040004f0c00000; only f74 differs from the array-layer form. */
-bool
-agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
+static bool
+agx3_tex_stage_cube_z_at(enum agx_isa_encoding enc, uint8_t bank, uint16_t src,
                       uint8_t slot, uint16_t wait_mask, bool src_cache,
                       bool src_discard,
                       uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
@@ -2522,13 +2615,14 @@ agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    const unsigned slots = gpu1 ? 8 : 6;
    if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) ||
+       (bank != 6 && !(gpu1 && bank == 2)) ||
        src >= (gpu1 ? 128 : 256) || (src & 1) ||
        slot < 1 || slot > slots || (wait_mask & ~((1u << slots) - 1)) ||
        !one_or_zero(wait_mask) || (src_cache && src_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(5, 6), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(5, bank), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 10), KV(56, 1), KV(57, 119),
    };
    struct agx3_field_kv ov[12];
@@ -2547,6 +2641,28 @@ agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
    if (!gpu1)
       out[6] |= (src >> 7) & 1;
    return true;
+}
+
+bool
+agx3_tex_stage_cube_z(enum agx_isa_encoding enc, uint16_t src,
+                      uint8_t slot, uint16_t wait_mask, bool src_cache,
+                      bool src_discard,
+                      uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_cube_z_at(enc, 6, src, slot, wait_mask,
+                                  src_cache, src_discard, out, len);
+}
+
+bool
+agx3_tex_stage_cube_z_g18g(enum agx_isa_encoding enc, uint16_t src,
+                           uint8_t slot, uint16_t wait_mask, bool src_cache,
+                           bool src_discard,
+                           uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (enc != AGX_ISA_ENCODING_AGX3C)
+      return false;
+   return agx3_tex_stage_cube_z_at(enc, 2, src, slot, wait_mask,
+                                  src_cache, src_discard, out, len);
 }
 
 /* A cube-array sample with a GPR layer publishes the integer layer and CEM's
@@ -2838,16 +2954,20 @@ agx3_tex_pack_ms_array_layer(enum agx_isa_encoding enc, uint16_t src,
       return false;
    memset(out, 0, AGX3_TEX_MAX_LENGTH);
    *len = 0;
-   if (enc != AGX_ISA_ENCODING_AGX3B || src >= 128 || dest > 190 ||
+   const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || src >= 128 ||
+       dest > (gpu1 ? 126 : 190) ||
        (dest & 1) || (cache && discard))
       return false;
    const struct agx3_field_kv fields[] = {
       KV(2, dest), KV(9, 2), KV(10, 2), KV(11, 1),
       KV(16, src), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
       KV(38, 1), KV(51, 1), KV(52, 2), KV(74, 4),
+      KV(56, 3), KV(57, 119),
    };
    return agx3_bind_compose(enc, "pack_smpir", 0, fields,
-                           sizeof(fields) / sizeof(fields[0]), NULL, 0, out, len);
+                           sizeof(fields) / sizeof(fields[0]) - (gpu1 ? 0 : 2),
+                           NULL, 0, out, len);
 }
 
 bool
@@ -2876,6 +2996,36 @@ agx3_tex_stage_ms_array_sample(enum agx_isa_encoding enc, uint16_t sample,
  * Field24=1 reads the low16 of the sample producer. Field16 uses the same
  * half-register address as the producer, without converting it to words.
  * The native discarded-half2 witness is 1705540400040000d0c00800. */
+/* G18 native multisample reads take a 32-bit sample index and optionally
+ * OR a separately normalized layer word into staging half 2. The packed
+ * NIR sample/layer source must be zero-extended before this publication. */
+bool
+agx3_tex_stage_ms_g18g(enum agx_isa_encoding enc, uint16_t sample,
+                       uint16_t packed_layer, bool array, uint8_t slot,
+                       bool cache, bool discard,
+                       uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3C || sample >= 128 || (sample & 1) ||
+       (array && (packed_layer >= 128 || (packed_layer & 1))) ||
+       slot < 1 || slot > 8 || (cache && discard))
+      return false;
+   const struct agx3_field_kv fields[] = {
+      KV(5, 2), KV(9, 5), KV(10, 2), KV(12, slot),
+      /* The G17 intermediate accepts a half source; G18 transcoding widens
+       * this operand after the caller has zero-extended the sample. */
+      KV(16, sample), KV(23, 2), KV(24, 1), KV(25, cache), KV(27, discard),
+      KV(37, 1), KV(38, 1), KV(44, array ? packed_layer : 0),
+      KV(51, array ? 2 : 1), KV(52, 2), KV(55, array), KV(56, 1), KV(57, 119),
+      KV(74, 9), KV(75, 12), KV(76, 1), KV(77, 16),
+   };
+   return agx3_bind_compose(enc, "pack_smpir", 0, fields,
+      sizeof(fields) / sizeof(fields[0]), NULL, 0, out, len);
+}
+
 bool
 agx3_tex_stage_ms_sample(enum agx_isa_encoding enc, uint16_t src,
                          uint16_t wait_mask, bool src_cache,
@@ -3111,8 +3261,9 @@ agx3_tex_stage_typed_lod_bank(enum agx_isa_encoding enc, uint16_t bank,
  * not a half-register. The five additional selectors below are the exact
  * delta which selects the combined face/layer operand in Apple's table.
  */
-bool
-agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
+static bool
+agx3_tex_stage_cube_array_shadow_at(enum agx_isa_encoding enc, uint8_t bank,
+                                 uint16_t layer,
                                  uint8_t slot, uint16_t wait_mask,
                                  bool layer_cache, bool layer_discard,
                                  uint8_t out[AGX3_TEX_MAX_LENGTH],
@@ -3125,13 +3276,14 @@ agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
    const bool gpu1 = enc == AGX_ISA_ENCODING_AGX3C;
    const unsigned slots = gpu1 ? 8 : 6;
    if ((enc != AGX_ISA_ENCODING_AGX3B && !gpu1) || layer >= 256 ||
+       (bank != 6 && !(gpu1 && bank == 2)) ||
        (layer & 1) || slot < 1 || slot > slots ||
        (wait_mask & ~((1u << slots) - 1)) ||
        !one_or_zero(wait_mask) || (layer_cache && layer_discard))
       return false;
 
    const struct agx3_field_kv base[] = {
-      KV(5, 6),  KV(9, 5),  KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(5, bank), KV(9, 5),  KV(10, 2), KV(23, 2), KV(24, 1),
       KV(30, 2), KV(37, 2), KV(38, 1), KV(41, 1), KV(51, 1),
       KV(52, 2), KV(74, 4), KV(76, 10), KV(77, 12), KV(56, 1), KV(57, 119),
    };
@@ -3147,4 +3299,67 @@ agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
 
    return agx3_bind_compose(enc, "pack_smpir", 0, base, gpu1 ? 16 : 14,
                             ov, n, out, len);
+}
+
+bool
+agx3_tex_stage_cube_array_shadow(enum agx_isa_encoding enc, uint16_t layer,
+                                 uint8_t slot, uint16_t wait_mask,
+                                 bool layer_cache, bool layer_discard,
+                                 uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   return agx3_tex_stage_cube_array_shadow_at(enc, 6, layer, slot, wait_mask,
+                                             layer_cache, layer_discard, out, len);
+}
+
+/* G18 cube-array PACK_SMPIR names independent half-registers. Implicit
+ * sampling packs raw layer/face; register LOD packs face/LOD/normalized
+ * layer. Native vertex and fragment references use face/layer pairs 10/8
+ * and 2/0 respectively. None of these register numbers is an ABI constant. */
+bool
+agx3_tex_stage_cube_array_g18g(enum agx_isa_encoding enc,
+                              uint16_t face, uint16_t layer, uint16_t lod,
+                              bool register_lod, uint8_t slot,
+                              uint16_t wait_mask, bool layer_cache,
+                              bool layer_discard, bool lod_cache,
+                              bool lod_discard,
+                              uint8_t out[AGX3_TEX_MAX_LENGTH], uint8_t *len)
+{
+   if (!out || !len)
+      return false;
+   memset(out, 0, AGX3_TEX_MAX_LENGTH);
+   *len = 0;
+   if (enc != AGX_ISA_ENCODING_AGX3C || face >= 128 || (face & 1) ||
+       layer >= 128 || (register_lod && ((layer & 1) || lod >= 128)) ||
+       slot < 1 || slot > 8 || (wait_mask & ~0xffu) ||
+       !one_or_zero(wait_mask) || (layer_cache && layer_discard) ||
+       (lod_cache && lod_discard))
+      return false;
+
+   const struct agx3_field_kv base[] = {
+      KV(5, 2), KV(9, 5), KV(10, 2), KV(23, 2), KV(24, 1),
+      KV(37, 2), KV(38, 1), KV(52, 2), KV(56, 1), KV(57, 119),
+   };
+   struct agx3_field_kv ov[24];
+   unsigned n = 0;
+   ov[n++] = (struct agx3_field_kv)KV(12, slot);
+   ov[n++] = (struct agx3_field_kv)KV(16, register_lod ? face : layer);
+   ov[n++] = (struct agx3_field_kv)KV(25, register_lod ? false : layer_cache);
+   ov[n++] = (struct agx3_field_kv)KV(27, register_lod ? true : layer_discard);
+   ov[n++] = (struct agx3_field_kv)KV(30, register_lod ? lod : face);
+   ov[n++] = (struct agx3_field_kv)KV(39, register_lod ? lod_cache : false);
+   ov[n++] = (struct agx3_field_kv)KV(41, register_lod ? lod_discard : true);
+   ov[n++] = (struct agx3_field_kv)KV(44, register_lod ? layer : 0);
+   ov[n++] = (struct agx3_field_kv)KV(51, register_lod ? 2 : 1);
+   ov[n++] = (struct agx3_field_kv)KV(53, register_lod && layer_cache);
+   ov[n++] = (struct agx3_field_kv)KV(55, register_lod && layer_discard);
+   ov[n++] = (struct agx3_field_kv)KV(74, register_lod ? 10 : 4);
+   ov[n++] = (struct agx3_field_kv)KV(75, register_lod ? 12 : 0);
+   ov[n++] = (struct agx3_field_kv)KV(76, register_lod ? 2 : 10);
+   ov[n++] = (struct agx3_field_kv)KV(77, register_lod ? 16 : 12);
+   for (unsigned i = 0; i < 8; ++i)
+      if (wait_mask & (1u << i))
+         ov[n++] = (struct agx3_field_kv)KV(58 + i, 1);
+
+   return agx3_bind_compose(enc, "pack_smpir", 0, base,
+      sizeof(base) / sizeof(base[0]), ov, n, out, len);
 }

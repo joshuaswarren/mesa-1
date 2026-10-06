@@ -228,7 +228,10 @@ clr_common(enum agx_isa_encoding enc, const struct agx3_field_kv *ov,
       KV(10, 2), KV(14, 3), KV(15, 25),
    };
    const bool agx3c = enc == AGX_ISA_ENCODING_AGX3C;
-   if (agx3_bind_compose(enc, "clr", 0, agx3c ? base_c : base,
+   /* Native G17G pressure loops clear high registers with ep1. G18G
+    * carries the same destination and selectors in its own CLR form. */
+   if (agx3_bind_compose(enc, "clr", agx3c ? AGX3_BIND_APPLE_ORDER : 0,
+                         agx3c ? base_c : base,
                          agx3c ? 3 : 1, ov, n, out, len))
       return true;
    memset(out, 0, AGX3_STAGE_MAX_LENGTH);

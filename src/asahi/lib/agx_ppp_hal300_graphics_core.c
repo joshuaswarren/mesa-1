@@ -80,6 +80,11 @@ agx_ppp_hal300_graphics_core_pack(
         (chip != AGX_CHIP_G18G || psiz)))
       return false;
 
+   if (fields->line_width_valid &&
+       (chip != AGX_CHIP_G18G ||
+        fields->object_type != AGX_PPP_HAL300_LINES || fields->line_width > 0xff))
+      return false;
+
    /* Rasterizer discard is read from AGXMetalG18G; G17G has no witness. */
    if (fields->rasterizer_discard && chip != AGX_CHIP_G18G)
       return false;
@@ -123,8 +128,9 @@ agx_ppp_hal300_graphics_core_pack(
                                 ? (chip == AGX_CHIP_G18G ? 0x000c0000
                                                         : 0x00080000)
                                 : 0);
+   const uint32_t line_width = fields->line_width_valid ? fields->line_width : 0xf;
    const uint32_t face = ((uint32_t)compare << 24) |
-                         (write ? 0 : 0x00200000) | 0xf00;
+                         (write ? 0 : 0x00200000) | (line_width << 8);
 
    /* The ISP may resolve depth before the shader runs only while the shader
     * cannot change it; a fragment that writes gl_FragDepth drops both of

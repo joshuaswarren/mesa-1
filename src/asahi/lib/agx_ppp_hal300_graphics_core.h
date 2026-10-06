@@ -118,6 +118,14 @@ struct agx_ppp_hal300_graphics_fields {
       AGX_PPP_HAL300_POINTS = 1,
       AGX_PPP_HAL300_LINES = 2,
    } object_type;
+   /* G18 native setLineWidth (26A428, 0x21965eab4) feeds the PPP writer
+    * at 0x219634f98..0x219635018. Both face words carry (width * 16) - 1
+    * in bits 8..17, clamped to 0xff for lines. Gallium already packs the
+    * advertised 1..16 range this way. An absent field preserves width 1
+    * for existing callers. Explicit width is admitted only for G18 lines.
+    */
+   bool line_width_valid;
+   unsigned line_width;
    /* Vertex exports and fragment interpolation are independent. A fragment
     * shader may leave the vertex shader's output unused. Counts are scalar
     * 32-bit UVS slots, not source-language vectors or CF bindings. The

@@ -43,6 +43,7 @@ int main(void){
        * immediate in f15. */
       static const uint8_t immediate[] = {0x57,0x16,0x54,0x04,0x00,0x41,0x48,0x00};
       static const uint8_t reg[] = {0x57,0x16,0x54,0x04,0x00,0x01,0x58,0x00};
+      static const uint8_t reg_c[] = {0x35,0x04,0x13,0x10,0x20,0x00,0xa0,0x12};
       uint8_t out[AGX3_VARY_MAX_LENGTH]; uint8_t len=0;
       if(!agx3_vary_uvsw(AGX_ISA_ENCODING_AGX3B,4,8,1,true,1,out,&len) ||
          len!=sizeof(immediate) || memcmp(out,immediate,sizeof(immediate))) fail++;
@@ -50,7 +51,9 @@ int main(void){
       if(!agx3_vary_uvsw_register_index(AGX_ISA_ENCODING_AGX3B,4,8,1,true,1,out,&len) ||
          len!=sizeof(reg) || memcmp(out,reg,sizeof(reg))) fail++;
       else pass++;
-      if(agx3_vary_uvsw_register_index(AGX_ISA_ENCODING_AGX3C,4,8,1,true,1,out,&len)) fail++; else pass++;
+      if(!agx3_vary_uvsw_register_index(AGX_ISA_ENCODING_AGX3C,4,8,1,true,1,out,&len) ||
+         len!=sizeof(reg_c) || memcmp(out,reg_c,sizeof(reg_c))) fail++;
+      else pass++;
       if(agx3_vary_uvsw_register_index(AGX_ISA_ENCODING_AGX3B,4,8,7,true,1,out,&len)) fail++; else pass++;
    }
    {

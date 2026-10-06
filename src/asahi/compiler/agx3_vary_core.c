@@ -294,24 +294,32 @@ agx3_vary_uvsw_register_index(enum agx_isa_encoding enc, uint16_t value,
                               uint16_t wait_mask,
                               uint8_t out[AGX3_VARY_MAX_LENGTH], uint8_t *len)
 {
-   /* uvsw's index operand has three kinds in Apple's AGX3b encoder table:
+   /* uvsw's index operand has three kinds in Apple's AGX3 tables:
     * f23 = 1 immediate (f15), 2 register (f16) and 3 uniform (f17), each a
     * half wide. Metal never computes a vertex output's index, so only the
     * immediate kind is witnessed in compiled programs; the register kind is
     * the table's own form for the same field. */
-   if (enc != AGX_ISA_ENCODING_AGX3B || (value & 1) != 0 || value >= 256 ||
-       index >= 256 || slot < 1 || slot > 6 || (wait_mask & ~0x3fu) != 0)
+   const unsigned nwait = is_b(enc) ? 6 : 8;
+   if ((enc != AGX_ISA_ENCODING_AGX3B && !agx_encoding_is_g17_class(enc)) ||
+       (is_d(enc) && !single_wait(wait_mask)) ||
+       (value & 1) != 0 || value >= 256 || index >= 256 ||
+       slot < 1 || slot > nwait ||
+       (wait_mask & ~((1u << nwait) - 1)) != 0)
       return false;
-   const struct agx3_field_kv base[] = {KV(9, 5), KV(23, 2), KV(24, 1)};
-   struct agx3_field_kv ov[10];
+   const struct agx3_field_kv base_b[] = {KV(9, 5), KV(23, 2), KV(24, 1)};
+   const struct agx3_field_kv base_c[] = {KV(9, 5), KV(10, 2), KV(23, 2),
+                                        KV(24, 1), KV(28, 2), KV(29, 196)};
+   struct agx3_field_kv ov[12];
    unsigned n = 0;
    ov[n++] = (struct agx3_field_kv)KV(5, value);
    ov[n++] = (struct agx3_field_kv)KV(16, index);
    ov[n++] = (struct agx3_field_kv)KV(12, slot);
    ov[n++] = (struct agx3_field_kv)KV(13, value_kill ? 1 : 0);
-   for (unsigned i = 0; i < 6; ++i)
+   for (unsigned i = 0; i < nwait; ++i)
       if (wait_mask & (1u << i))
          ov[n++] = (struct agx3_field_kv)KV(30 + i, 1);
 
-   return agx3_bind_compose(enc, "uvsw", 0, base, 3, ov, n, out, len);
+   return agx3_bind_compose(enc, "uvsw", agx3_bind_ep(enc, 0),
+                            is_b(enc) ? base_b : base_c, is_b(enc) ? 3 : 6,
+                            ov, n, out, len);
 }

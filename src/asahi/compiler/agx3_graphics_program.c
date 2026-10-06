@@ -988,6 +988,12 @@ g17g_graphics_program_generate(
    enum agx_ioto_g17g_program_stage stage,
    bool g18_compute_tps, struct agx3_g17p_graphics_program *program)
 {
+   /* G18 consumes this canonical GPU1 form through the caller's agx3d
+    * re-encoder. Retain the target for imageblock admission before selecting
+    * the intermediate encoding; G17G must not inherit G18-only layouts. */
+   const enum agx_chip target_chip = chip;
+   if (chip == AGX_CHIP_G18G)
+      chip = AGX_CHIP_G17G;
    size_t bound;
    if (chip != AGX_CHIP_G17G || !desc || !program ||
        !desc->shader_binary_size ||
@@ -1015,9 +1021,12 @@ g17g_graphics_program_generate(
         * for one RGBA8 target (MSAA notes s2.4). The caller admits it only
         * under AGX_G18_MSAA4. */
        (desc->fragment &&
-        !(desc->imageblock.sample_size_B == 8 &&
-          desc->imageblock.nr_samples == 4 &&
-          desc->imageblock.tile_size_px == 32 * 16) &&
+        !((desc->imageblock.sample_size_B == 8 ||
+           (target_chip == AGX_CHIP_G18G && desc->imageblock.sample_size_B == 16)) &&
+          ((desc->imageblock.nr_samples == 2 &&
+            desc->imageblock.tile_size_px == 32 * 32) ||
+           (desc->imageblock.nr_samples == 4 &&
+            desc->imageblock.tile_size_px == 32 * 16))) &&
          ((desc->imageblock.sample_size_B != 8 &&
            desc->imageblock.sample_size_B != 16 &&
            desc->imageblock.sample_size_B != 24 &&
@@ -1088,7 +1097,8 @@ g17g_graphics_program_generate(
        * publishes the same record as a single-attachment render. */
       tail.bytes[7] = (uint8_t)desc->imageblock.sample_size_B;
    }
-   if (desc->fragment && desc->imageblock.nr_samples == 4) {
+   if (desc->fragment && (desc->imageblock.nr_samples == 2 ||
+                         desc->imageblock.nr_samples == 4)) {
       /* msaa163: the 4x/32x16 spelling. Apple's M5 msaa4 render publishes
        * 1700001c00009808 against 1700002c00001808 at 1x (and
        * 1700002c00005808 at 2x): byte 3 is the tile height class (0x2c for
@@ -1097,8 +1107,10 @@ g17g_graphics_program_generate(
        * agx3d re-encoding of this vector is G18's own 4x SPECLM,
        * 00d60000082031000000, identical in all four native 4x tile programs
        * and the fragment program (MSAA notes s2.4). */
-      tail.bytes[3] = 0x1c;
-      tail.bytes[6] = 0x18 | (2u << 6);
+      /* Native326 binds the 2x/32x32 record to all six real draws. */
+      const bool samples4 = desc->imageblock.nr_samples == 4;
+      tail.bytes[3] = samples4 ? 0x1c : 0x2c;
+      tail.bytes[6] = 0x18 | ((samples4 ? 2u : 1u) << 6);
    }
    if (!agx_ioto_state_pack_ldshdr(
           chip, &ldshdr, tail.bytes + AGX_IOTO_SPECLM_SIZE,

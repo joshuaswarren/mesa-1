@@ -123,6 +123,7 @@
  * known, so it is not emitted; hardware will say whether it matters.
  */
 #include "agx3_transcode.h"
+#include "agx3_tex_core.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -279,7 +280,8 @@ apply_imgwci_rule(uint64_t fields[AGX3_MAX_FIELDS], const char **why)
 
 static bool
 apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
-                 const struct agx3_transcode_ioto *ioto, const char **why)
+                 const struct agx3_transcode_ioto *ioto,
+                 const bool *fragment_stage, const char **why)
 {
    const bool ioto_only = !strcmp(mnemonic, "ldshdr") ||
                           !strcmp(mnemonic, "specTPR") ||
@@ -296,6 +298,14 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
       *why = "control flow (branch relocation is not grounded for G18G)";
       return false;
    }
+   /* Native G18 PACK_SMPIR takes a 32-bit multisample index. The G17
+    * intermediate only represents this typed source at 16 bits. Bank 2
+    * identifies the G18 publisher, whose caller zero-extends packed NIR
+    * samples into a separate full word before reaching this translation. */
+   if (!strcmp(mnemonic, "pack_smpir") && fields[9] == 5 && fields[5] == 2 &&
+       fields[74] == 9 && fields[75] == 12 && fields[76] == 1 &&
+       fields[23] == 2 && fields[24] == 1)
+      fields[24] = 2;
    if (!strcmp(mnemonic, "smp")) {
       if (fields[77] != 0 && fields[77] != 2) {
          *why = "texture sample whose f77 no G18G witness shows";
@@ -303,6 +313,10 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
       }
       fields[57] = 1;
       fields[158] = 4;
+      /* Native371: every G18 gather adds f155=4, independently of its
+       * component and stage; ordinary sample controls leave it clear. */
+      if (fields[144])
+         fields[155] = 4;
       if (fields[77] == 0) {
          /* G18 names the second coordinate explicitly. The original
           * fullscreen texture witness stages X/Y at 0/2 (f19/f56=0/2),
@@ -328,6 +342,69 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
                       (fields[139] == 3 || fields[139] == 4 ? 6 : 4);
          fields[59] = 1;
       }
+      /* Native G18 depth2d_array samples use X/Y = 4/0 and the packed
+       * layer/LOD word at 2. Name the separately staged reference at 6,
+       * including immediate texel offsets and per-lane bias/level. */
+      if (fields[143] && fields[77] == 2 && fields[76] == 1) {
+         fields[56] = 0;
+         fields[58] = 6;
+         fields[59] = 1;
+      }
+      /* Native403 runtime gathers share X/Y=4/0, offset/layer=2 and
+       * comparison=6 across 2D/arrays and vertex/fragment/compute. */
+      if (fields[144] && fields[141] == 2 && fields[76] == 1) {
+         fields[19] = 4;
+         fields[56] = 0;
+         if (fields[143]) {
+            fields[58] = 6;
+            fields[59] = 1;
+         }
+      }
+      /* Native408's plain/constant-offset array gathers retain Y and the
+       * comparison reference through nonterminal samples. Their final SMP
+       * carries f150=2 and discards those operands. Runtime offset/layer
+       * publications retain their independently witnessed lifetime above. */
+      if (fields[144] && fields[77] == 2 && fields[76] == 1 &&
+          fields[141] <= 1) {
+         fields[57] = fields[150] == 2;
+         if (fields[143])
+            fields[59] = fields[150] == 2;
+      }
+      /* Native G18 cube comparisons consume CEM X/Y at 6/0 and reference
+       * 4; cube arrays use X/Y 4/0 and reference 6. Both publications put
+       * face/layer/LOD at half 2. The G18-specific stagers use those banks. */
+      if (fields[143] && fields[76] == 4) {
+         fields[19] = fields[77] == 2 ? 4 : 6;
+         fields[56] = 0;
+         fields[58] = fields[77] == 2 ? 6 : 4;
+         fields[59] = 1;
+      }
+      /* Native413: cube-gather banks depend on the actual stage, not the
+       * final-fragment marker, which may be absent on earlier samples. */
+      if (fields[144] && fields[76] == 4) {
+         if (!fragment_stage) {
+            *why = "cube gather requires shader-stage context";
+            return false;
+         }
+         const bool depth_fragment = fields[143] && *fragment_stage;
+         fields[19] = depth_fragment ? 6 : 4;
+         fields[56] = 0;
+         if (fields[143]) {
+            fields[58] = depth_fragment ? 4 : 6;
+            fields[59] = 1;
+         }
+      }
+      /* G18 multisample read: native X/Y = 4/0, packed sample/layer = 2. */
+      if (fields[76] == 2 && fields[78] == 1) {
+         fields[19] = 4;
+         fields[56] = 0;
+      }
+      /* G18 2D/array explicit gradients: X/Y 16/0, derivatives 4/6/8/10.
+       * Both stages and immediate offsets use this same native layout. */
+      if (fields[76] == 1 && fields[139] == 5 && !fields[143]) {
+         fields[19] = AGX3_TEX_G18G_GRADIENT_X;
+         fields[56] = 0;
+      }
       fields[62] |= fields[69];
       fields[69] = 0;
    }
@@ -335,6 +412,15 @@ apply_g18g_rules(const char *mnemonic, uint64_t fields[AGX3_MAX_FIELDS],
       return false;
    if (!strcmp(mnemonic, "lddev"))
       fields[87] = fields[75] ? 2 : 0;
+   if (!strcmp(mnemonic, "ldcfr")) {
+      /* Native G18 no-perspective interpolate_at_offset keeps the raw
+       * three-coefficient selector f38=7 and adds f49=2. The flat-input
+       * witness also has f49=2, but uses f38=5: that flat-only selector
+       * must not replace Mesa's raw <A,B,C> load (used by cull distance).
+       * Keep all operand, result-slot and scheduling fields unchanged.
+       */
+      fields[49] = 2;
+   }
    return true;
 }
 
@@ -475,7 +561,9 @@ relocate_branches(struct util_dynarray *out, const struct util_dynarray *map,
 
 static bool
 transcode(struct util_dynarray *binary, unsigned start,
-          const struct agx3_transcode_ioto *ioto, const char **why,
+          const struct agx3_transcode_ioto *ioto,
+          unsigned *offsets, unsigned offset_count,
+          const bool *fragment_stage, const char **why,
           unsigned *fail_offset)
 {
    const char *unused_why;
@@ -539,7 +627,7 @@ transcode(struct util_dynarray *binary, unsigned start,
          fields[14] *= 2;
       }
       helper_base_next = ioto && !strcmp(name, "rld") && fields[21] == 14;
-      if (!apply_g18g_rules(name, fields, ioto, why) ||
+      if (!apply_g18g_rules(name, fields, ioto, fragment_stage, why) ||
           !apply_flag_slot_rule(name, fields, &flags, why))
          goto fail;
 
@@ -594,6 +682,28 @@ transcode(struct util_dynarray *binary, unsigned start,
    if (!relocate_branches(&out, &map, &branches, why, fail_offset))
       goto fail;
 
+   /* Validate every marker before changing any caller-owned offsets. The
+    * packer's colour entry is used to remove duplicate linked entries and
+    * must refer to the re-encoded instruction, not its old AGX3C address. */
+   for (unsigned j = 0; j < offset_count; ++j) {
+      bool found = false;
+      util_dynarray_foreach(&map, struct offset_pair, pair)
+         found |= pair->in == offsets[j];
+      if (!found) {
+         *why = "shader-part marker is not an instruction boundary";
+         *fail_offset = offsets[j];
+         goto fail;
+      }
+   }
+   for (unsigned j = 0; j < offset_count; ++j) {
+      util_dynarray_foreach(&map, struct offset_pair, pair) {
+         if (pair->in == offsets[j]) {
+            offsets[j] = pair->out;
+            break;
+         }
+      }
+   }
+
    binary->size = start;
    memcpy(util_dynarray_grow_bytes(binary, 1, out.size), out.data, out.size);
    util_dynarray_fini(&out);
@@ -612,7 +722,17 @@ bool
 agx3_transcode_agx3d(struct util_dynarray *binary, unsigned start,
                      const char **why, unsigned *fail_offset)
 {
-   return transcode(binary, start, NULL, why, fail_offset);
+   return transcode(binary, start, NULL, NULL, 0, NULL, why, fail_offset);
+}
+
+bool
+agx3_transcode_agx3d_with_offsets(struct util_dynarray *binary, unsigned start,
+                                  unsigned *offsets, unsigned count,
+                                  bool fragment_stage,
+                                  const char **why, unsigned *fail_offset)
+{
+   return transcode(binary, start, NULL, offsets, count, &fragment_stage,
+                    why, fail_offset);
 }
 
 bool
@@ -620,5 +740,5 @@ agx3_transcode_agx3d_ioto(struct util_dynarray *binary, unsigned start,
                           const struct agx3_transcode_ioto *ioto,
                           const char **why, unsigned *fail_offset)
 {
-   return ioto && transcode(binary, start, ioto, why, fail_offset);
+   return ioto && transcode(binary, start, ioto, NULL, 0, NULL, why, fail_offset);
 }

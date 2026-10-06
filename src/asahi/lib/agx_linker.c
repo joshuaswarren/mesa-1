@@ -55,11 +55,13 @@ agx_fs_epilog_apply_device_policy(enum agx_chip chip,
     * packed into one raw tile word, with a matching R32_UINT store PBE. */
    key->lower_srgb = g17p || agx_chip_m5_paths(chip);
    key->lower_r11g11b10 = g17p || chip == AGX_CHIP_G18G;
-   if (chip == AGX_CHIP_G18G && key->nr_samples == 1) {
-      /* Match the single-sample render-pass layout. Native G18 eight-target
-       * renders use the complete 32-KiB imageblock with 1024 raster samples. */
+   if (chip == AGX_CHIP_G18G &&
+       (key->nr_samples == 1 || key->nr_samples == 2 || key->nr_samples == 4)) {
+      /* Match the render-pass layout. Native331's sixteen-byte samples
+       * retain 32x32 at 2x and 32x16 at 4x: 32 KiB and 2048 raster samples.
+       * The single-sample MRT layout keeps its 1024-raster-sample limit. */
       key->max_bytes_per_tile = 32768;
-      key->max_samples_per_tile = 1024;
+      key->max_samples_per_tile = key->nr_samples == 1 ? 1024 : 2048;
    }
 }
 
@@ -286,7 +288,8 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
    struct agx_shader_part *parts[] = {prolog, main, epilog};
    bool drop_entry[ARRAY_SIZE(parts)] = {false};
    bool entry_seen = false;
-   if (dev->chip == AGX_CHIP_G17P && fragment && !nr_samples_shaded &&
+   if ((dev->chip == AGX_CHIP_G17P || dev->chip == AGX_CHIP_G18G) &&
+       fragment && !nr_samples_shaded &&
        !colour_fused) {
       int first_entry = -1;
       for (unsigned i = 0; i < ARRAY_SIZE(parts); ++i) {
@@ -330,10 +333,18 @@ agx_fast_link(struct agx_linked_shader *linked, struct agx_device *dev,
          struct agx_shader_part *part = parts[i];
          const uint32_t off = part->info.agx3_colour_link.entry_offset;
          uint8_t gate[AGX3_PIXEL_MAX_LENGTH], gate_size;
+         if (dev->chip == AGX_CHIP_G18G) {
+            /* Native G18 pixwait512 (native330). The compiler relocated
+             * entry_offset with the instruction-boundary transcode map. */
+            static const uint8_t g18_gate[] = {0x07,0x30,0x00,0x05,0x00,0x00};
+            memcpy(gate, g18_gate, sizeof(g18_gate));
+            gate_size = sizeof(g18_gate);
+         } else if (!agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3B, gate,
+                                             &gate_size)) {
+            return false;
+         }
          if ((off & 1) || off > part->info.main_size ||
              part->info.main_size - off < AGX3_PIXEL_MAX_LENGTH ||
-             !agx3_pixel_colour_entry(AGX_ISA_ENCODING_AGX3B, gate,
-                                      &gate_size) ||
              gate_size != AGX3_PIXEL_MAX_LENGTH ||
              memcmp((const uint8_t *)part->binary + part->info.main_offset +
                        off,
