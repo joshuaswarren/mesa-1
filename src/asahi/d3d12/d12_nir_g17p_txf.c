@@ -131,7 +131,7 @@ static bool
 g17p_fragment_sample_shape(const nir_tex_instr *tex)
 {
    if ((tex->op != nir_texop_tex && tex->op != nir_texop_txl &&
-        tex->op != nir_texop_txb) ||
+        tex->op != nir_texop_txb && tex->op != nir_texop_txd) ||
        tex->sampler_dim != GLSL_SAMPLER_DIM_2D || tex->is_array ||
        tex->is_shadow || tex->is_sparse || tex->coord_components != 2 ||
        tex->def.bit_size != 32 || tex->def.num_components != 4 ||
@@ -139,10 +139,11 @@ g17p_fragment_sample_shape(const nir_tex_instr *tex)
       return false;
    /* agx_nir_lower_texture packs offsets into backend2 and a bias+min_lod
     * pair into lod_bias_min; neither has a witnessed immediate-descriptor
-    * fragment form in this driver yet. */
+    * fragment form in this driver yet. A gradient with a minimum LOD does
+    * (the packer's gradient_lod + min_lod row): it is how the DXBC front end
+    * applies an SRV's ResourceMinLODClamp to an implicit-LOD Sample. */
    if (nir_tex_instr_src_index(tex, nir_tex_src_backend2) >= 0 ||
        nir_tex_instr_src_index(tex, nir_tex_src_lod_bias_min_agx) >= 0 ||
-       nir_tex_instr_src_index(tex, nir_tex_src_min_lod) >= 0 ||
        nir_tex_instr_src_index(tex, nir_tex_src_offset) >= 0 ||
        nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset) >= 0)
       return false;
@@ -177,9 +178,12 @@ d12_nir_lower_g17p_fragment_sample(nir_shader *nir, uint32_t generation,
             }
             if (instr->type != nir_instr_type_tex)
                continue;
-            if (sample)
+            if (sample) {
+               if (d12_debug()->dump_tex)
+                  nir_print_shader(nir, stderr);
                return g17p_fragment_decline("second texture instruction",
                                             sample);
+            }
             sample = nir_instr_as_tex(instr);
          }
       }

@@ -979,8 +979,10 @@ d12_sampler_sideband_entry(nir_builder *b, nir_tex_instr *tex, bool *bindless,
 struct d12_sampler_lowering {
    const struct d12_native_descriptor_layout *native_layout;
    /* Logical API sampler slots whose native word is complete (see
-    * d12_binding_map::plain_static_samplers); a plain tex/txb through one of
-    * them keeps its hardware sample and reads no side table. */
+    * d12_binding_map::plain_static_samplers); a tex/txb/txl/txd through one
+    * of them keeps its hardware sample and reads no side table. HAL200 packs
+    * the LOD bias into the word for every LOD form, so the gradient sample
+    * the DXBC front end builds for a per-view minimum LOD is just as plain. */
    uint16_t plain_static_samplers;
 };
 
@@ -989,7 +991,8 @@ d12_tex_uses_plain_static_sampler(const nir_tex_instr *tex,
                                   const struct d12_sampler_lowering *ctx)
 {
    if (!ctx || !ctx->plain_static_samplers ||
-       (tex->op != nir_texop_tex && tex->op != nir_texop_txb) ||
+       (tex->op != nir_texop_tex && tex->op != nir_texop_txb &&
+        tex->op != nir_texop_txl && tex->op != nir_texop_txd) ||
        nir_tex_instr_src_index(tex, nir_tex_src_sampler_handle) >= 0 ||
        nir_tex_instr_src_index(tex, nir_tex_src_sampler_offset) >= 0 ||
        tex->sampler_index >= 16)
