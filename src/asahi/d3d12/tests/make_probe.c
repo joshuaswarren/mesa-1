@@ -463,6 +463,110 @@ build_vb_ps(const nir_shader_compiler_options *opts)
 }
 
 /*
+ * tex_vs / tex_ps: the G13 pair, the HelloTexture sample's shape.
+ *
+ *   tex_vs  TEXCOORD0 float2 position, TEXCOORD1 float2 uv -> VAR0 = uv
+ *   tex_ps  SV_Target = t0.Sample(s0, VAR0.xy)
+ *
+ * One 2D texture in register t0 and one sampler in s0, both in space 0,
+ * which is what the sample's root signature declares (an SRV descriptor
+ * table plus a static sampler). The pixel shader has exactly one sample and
+ * nothing else that touches a descriptor, so it is the smallest shader the
+ * G17P native texture0/sampler0 fragment ABI must carry.
+ */
+static nir_shader *
+build_tex_vs(const nir_shader_compiler_options *opts)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_VERTEX, opts,
+                                                  "tex_vs");
+
+   nir_variable *in_pos = nir_variable_create(
+      b.shader, nir_var_shader_in, glsl_vec_type(2), "pos");
+   in_pos->data.location = VERT_ATTRIB_GENERIC0;
+   in_pos->data.driver_location = 0;
+
+   nir_variable *in_uv = nir_variable_create(
+      b.shader, nir_var_shader_in, glsl_vec_type(2), "uv");
+   in_uv->data.location = VERT_ATTRIB_GENERIC0 + 1;
+   in_uv->data.driver_location = 1;
+
+   nir_def *xy = nir_load_var(&b, in_pos);
+   nir_def *uv = nir_load_var(&b, in_uv);
+   nir_def *pos = nir_vec4(&b, nir_channel(&b, xy, 0), nir_channel(&b, xy, 1),
+                           nir_imm_float(&b, 0.0f), nir_imm_float(&b, 1.0f));
+   nir_def *var0 = nir_vec4(&b, nir_channel(&b, uv, 0), nir_channel(&b, uv, 1),
+                            nir_imm_float(&b, 0.0f), nir_imm_float(&b, 1.0f));
+
+   nir_variable *out_uv = nir_variable_create(
+      b.shader, nir_var_shader_out, glsl_vec4_type(), "var0");
+   out_uv->data.location = VARYING_SLOT_VAR0;
+   out_uv->data.driver_location = 0;
+   nir_store_var(&b, out_uv, var0, 0xf);
+
+   nir_variable *out_pos = nir_variable_create(
+      b.shader, nir_var_shader_out, glsl_vec4_type(), "gl_Position");
+   out_pos->data.location = VARYING_SLOT_POS;
+   out_pos->data.driver_location = 1;
+   nir_store_var(&b, out_pos, pos, 0xf);
+
+   b.shader->info.inputs_read =
+      BITFIELD64_BIT(VERT_ATTRIB_GENERIC0) | BITFIELD64_BIT(VERT_ATTRIB_GENERIC0 + 1);
+   b.shader->info.outputs_written =
+      BITFIELD64_BIT(VARYING_SLOT_VAR0) | BITFIELD64_BIT(VARYING_SLOT_POS);
+   return b.shader;
+}
+
+static nir_shader *
+build_tex_ps(const nir_shader_compiler_options *opts)
+{
+   nir_builder b = nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, opts,
+                                                  "tex_ps");
+
+   nir_variable *in_uv = nir_variable_create(
+      b.shader, nir_var_shader_in, glsl_vec4_type(), "var0");
+   in_uv->data.location = VARYING_SLOT_VAR0;
+   in_uv->data.driver_location = 0;
+
+   /* Vulkan-environment DXIL: descriptor set = register space, binding =
+    * register. Separate texture and sampler objects, t0 and s0. */
+   nir_variable *tex = nir_variable_create(
+      b.shader, nir_var_uniform,
+      glsl_texture_type(GLSL_SAMPLER_DIM_2D, false, GLSL_TYPE_FLOAT), "t0");
+   tex->data.descriptor_set = 0;
+   tex->data.binding = 0;
+   nir_variable *samp = nir_variable_create(
+      b.shader, nir_var_uniform, glsl_bare_sampler_type(), "s0");
+   samp->data.descriptor_set = 0;
+   samp->data.binding = 0;
+
+   nir_def *uv = nir_trim_vector(&b, nir_load_var(&b, in_uv), 2);
+   nir_deref_instr *tex_deref = nir_build_deref_var(&b, tex);
+   nir_deref_instr *samp_deref = nir_build_deref_var(&b, samp);
+
+   nir_tex_instr *t = nir_tex_instr_create(b.shader, 3);
+   t->op = nir_texop_tex;
+   t->sampler_dim = GLSL_SAMPLER_DIM_2D;
+   t->dest_type = nir_type_float32;
+   t->coord_components = 2;
+   t->src[0] = nir_tex_src_for_ssa(nir_tex_src_texture_deref, &tex_deref->def);
+   t->src[1] = nir_tex_src_for_ssa(nir_tex_src_sampler_deref, &samp_deref->def);
+   t->src[2] = nir_tex_src_for_ssa(nir_tex_src_coord, uv);
+   nir_def_init(&t->instr, &t->def, 4, 32);
+   nir_builder_instr_insert(&b, &t->instr);
+
+   nir_variable *out = nir_variable_create(
+      b.shader, nir_var_shader_out, glsl_vec4_type(), "SV_Target");
+   out->data.location = FRAG_RESULT_DATA0;
+   out->data.driver_location = 0;
+   nir_store_var(&b, out, &t->def, 0xf);
+
+   b.shader->info.inputs_read = BITFIELD64_BIT(VARYING_SLOT_VAR0);
+   b.shader->info.outputs_written = BITFIELD64_BIT(FRAG_RESULT_DATA0);
+   b.shader->info.num_textures = 1;
+   return b.shader;
+}
+
+/*
  * vb_inst_vs: three attributes, one of them PER-INSTANCE.
  *
  *   TEXCOORD0  float2  per-vertex    position
@@ -528,7 +632,7 @@ main(int argc, char **argv)
    if (argc < 3) {
       fprintf(stderr,
               "usage: %s <gs_input_vs|gs_point|tess_hs|tess_ds|mesh_quad|"
-              "as_dispatch|vb_vs|vb_ps|vb_inst_vs> out.dxil\n",
+              "as_dispatch|vb_vs|vb_ps|vb_inst_vs|tex_vs|tex_ps> out.dxil\n",
               argv[0]);
       return 2;
    }
@@ -543,6 +647,8 @@ main(int argc, char **argv)
    bool want_vbvs = !strcmp(argv[1], "vb_vs");
    bool want_vbps = !strcmp(argv[1], "vb_ps");
    bool want_vbinst = !strcmp(argv[1], "vb_inst_vs");
+   bool want_texvs = !strcmp(argv[1], "tex_vs");
+   bool want_texps = !strcmp(argv[1], "tex_ps");
 
    /* Mesh shaders do not exist below shader model 6.5; everything else
     * here is expressible in 6.2, which is what the corpus mostly uses. */
@@ -559,6 +665,8 @@ main(int argc, char **argv)
                      : want_vbvs ? build_vb_vs(&options)
                      : want_vbps ? build_vb_ps(&options)
                      : want_vbinst ? build_vb_inst_vs(&options)
+                     : want_texvs ? build_tex_vs(&options)
+                     : want_texps ? build_tex_ps(&options)
                                : build_gs_input_vs(&options);
 
    NIR_PASS(_, nir, nir_lower_variable_initializers, nir_var_all);
@@ -571,7 +679,7 @@ main(int argc, char **argv)
    NIR_PASS(_, nir, nir_lower_io,
             nir_var_shader_out |
                ((want_gs || want_hs || want_ds || want_vbvs || want_vbps ||
-                 want_vbinst)
+                 want_vbinst || want_texvs || want_texps)
                    ? nir_var_shader_in
                    : 0),
             probe_type_size, 0);

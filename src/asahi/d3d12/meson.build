@@ -580,6 +580,13 @@ d3d12agx_g12_sample_shapes = executable(
   link_with : [libd3d12agx],
 )
 
+d3d12agx_g13_texture_sample = executable(
+  'd3d12agx_g13_texture_sample',
+  files('tests/g13_texture_sample.c'),
+  dependencies : [dep_dxheaders_d12],
+  link_with : [libd3d12agx],
+)
+
 d3d12agx_g9_amplification = executable(
   'd3d12agx_g9_amplification',
   files('tests/g9_amplification.c'),
