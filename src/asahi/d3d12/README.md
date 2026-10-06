@@ -129,6 +129,43 @@ python3 src/asahi/d3d12/gen_api_trace.py \
    src/asahi/d3d12/d12_api_trace.h
 ```
 
+## Checking the HelloWorld samples on the Neo
+
+`g12_sample_shapes` checks the vertex-buffer, bound-CBV-heap and bundle
+declarations that distinguish HelloWorld from the root-only frozen triangle.
+`g13_texture_sample hello_tex_vs.dxbc hello_tex_ps.dxbc hello` additionally
+checks HelloTexture's SM5 input masks and gradient/minimum-LOD sampling form.
+The DXBC fixtures use the sample's MIT-licensed HLSL, compiled by the same
+D3DCompile implementation used by Wine's d3dcompiler_47.
+
+For Proton samples built with `aurora_sample_main --selftest --dump`, compare
+the dumped RGB PPM against the sample geometry, interpolated colour or
+point-sampled checkerboard and clear colour:
+
+```bash
+python3 src/asahi/d3d12/tests/sample-reference.py HelloTexture frame.ppm 600
+```
+
+For HelloConstBuffers, the final argument must match the frame count: its
+constant-buffer offset moves on each update. A mismatch returns nonzero and
+reports the first wrong pixels; the default channel tolerance is two UNORM8
+steps. The PPM check grades the final frame, not every intermediate frame.
+
+Run Neo tests only inside an approved `aurora-ctl hw request execute`.
+Upload `tests/neo-gpu-session.py` with `aurora-ctl hw request upload`, then wrap
+each short session with:
+
+```bash
+python3 /var/tmp/neo-gpu-session.py /var/tmp/test-evidence -- TEST ARGS
+```
+
+The wrapper saves the full kernel journal, firmware QID counts before and
+after, command output and `result.json`. It refuses a boot with any submit
+failure or fewer than 40 free QIDs, and stops the command at the first new
+quarantine, poison or submit failure. A failed guard returns 125. A valid
+kernel session preserves the test's exit code, including ordinary test
+failures. This wrapper provides no hardware access or approval by itself.
+
 ## Layout
 
 ```

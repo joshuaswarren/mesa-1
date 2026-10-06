@@ -703,6 +703,9 @@ d3d12agx_submit_tests = executable(
 )
 test('d3d12agx_heap_desc', d3d12agx_heap_desc_tests, suite : ['asahi', 'd3d12'])
 test('d3d12agx_submit', d3d12agx_submit_tests, suite : ['asahi', 'd3d12'])
+test('d3d12agx_neo_gpu_session', prog_python,
+     args : files('tests/neo_gpu_session_tests.py'),
+     suite : ['asahi', 'd3d12'])
 
 d3d12agx_native_direct_draw_tests = executable(
   'd3d12agx_native_direct_draw_tests',
