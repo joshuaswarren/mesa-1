@@ -4409,11 +4409,28 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
           arg_size > UINT16_MAX * 2u ||
           cs->entry_offset > UINT64_MAX - cs->ptr ||
           !cs->b.workgroup.x || !cs->b.workgroup.y || !cs->b.workgroup.z ||
-          agx_is_indirect(grid)) {
+          (agx_is_indirect(grid) &&
+           (grid.mode != AGX_CDM_MODE_INDIRECT_LOCAL || !grid.ptr ||
+            grid.ptr >= (UINT64_C(1) << 48) || (grid.ptr & 3)))) {
+         mesa_loge("asahi: refusing precompiled program %u on G17P: "
+                   "grid=%u preamble_gprs=%u rodata=%u/%u printf=%u "
+                   "staging_known=%u args=%zu",
+                   (unsigned)program, (unsigned)grid.mode,
+                   cs ? cs->info.nr_preamble_gprs : 0,
+                   cs ? cs->info.rodata.size_16 : 0,
+                   cs ? (unsigned)cs->rodata_offset : 0,
+                   cs ? cs->info.printf_uniform : 0,
+                   cs ? (unsigned)cs->info.agx3_staging_known : 0, arg_size);
          agx_native_descriptor_rejected(dev, "precompiled compute program");
       }
 
-      if (!grid.count[0] || !grid.count[1] || !grid.count[2])
+      /* Mode 2 reads the whole grid -- three global thread counts, then
+       * three local sizes -- from six u32 in GPU memory, as
+       * libagx_tess_setup_indirect() writes them for the tessellation
+       * kernels. */
+      const bool indirect_local = grid.mode == AGX_CDM_MODE_INDIRECT_LOCAL;
+      if (!indirect_local &&
+          (!grid.count[0] || !grid.count[1] || !grid.count[2]))
          return;
 
       /* Match the precompiler's rebased arguments and optional runtime printf
@@ -4491,7 +4508,11 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
             cs->info.local_size
                ? MAX2(256u, ALIGN_POT(cs->info.local_size, 64u))
                : 0,
-         .ldshdr_f1 = AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
+         /* The program announces how it is launched, as the API compute
+          * path's does (agx_g17p_append_compute()). */
+         .ldshdr_f1 = indirect_local
+                         ? AGX3_G17P_INDIRECT_MAIN_LDSHDR_F1
+                         : AGX_IOTO_G17P_COMPUTE_LDSHDR_F1_DIRECT_ADD3,
       };
       struct agx3_g17p_compute_program native;
       if (!native_program.cpu || !program_bo ||
@@ -4524,8 +4545,11 @@ agx_launch_precomp(struct agx_batch *batch, struct agx_grid grid,
        * existing minimal flags-0 barrier. */
       const uint8_t barrier_flags =
          (barrier & AGX_BARRIER_ALL) ? 0x5 : 0;
-      if (!agx3_g17p_native_compute_dispatch_append_with_barrier(
-             &native.launch, &direct, barrier_flags, &sink))
+      if (indirect_local
+             ? !agx3_g17p_native_indirect_compute_launch_append(
+                  &native.launch, grid.ptr, barrier_flags, &sink)
+             : !agx3_g17p_native_compute_dispatch_append_with_barrier(
+                  &native.launch, &direct, barrier_flags, &sink))
          agx_native_descriptor_rejected(dev, "precompiled compute launch");
       batch->cdm.current += sink.length;
       agx_batch_add_bo(batch, cs->bo);
